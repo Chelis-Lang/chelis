@@ -13221,6 +13221,287 @@ fn top_level_fn_is_nullary_generic_constructor_wrapper(
         .is_some_and(|definition| !definition.parameters.is_empty() && definition.is_nullary())
 }
 
+/// Every name this expression REFERENCES, as a `(var {} name)` node
+/// (chelis#2163).
+///
+/// A deliberate over-approximation of the free names: a name bound inside the
+/// expression is collected too. Capture avoidance only ever renames a binder,
+/// which preserves meaning, so an extra rename is harmless while a missed one
+/// is a miscompile.
+fn collect_referenced_names(expr: &Expr, out: &mut UnordSet<String>) {
+    if let Some((DeepTag::Var, _, kids)) = stamped_parts(expr)
+        && let Some(name) = kids.first().and_then(symbol_name)
+    {
+        out.insert(name.to_string());
+    }
+    match expr {
+        Expr::MetaExpr(meta, _) => collect_referenced_names(&meta.expr, out),
+        Expr::List(list, _) => {
+            for child in &list.elements {
+                collect_referenced_names(child, out);
+            }
+        }
+        Expr::BareList(items, _) => {
+            for child in items {
+                collect_referenced_names(child, out);
+            }
+        }
+        Expr::Node(node, _) => {
+            for child in node.children_slice() {
+                collect_referenced_names(child, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// EVERY name occurring anywhere in `expr`, bound as well as referenced
+/// (chelis#2163).
+///
+/// This is the avoid-set feeder, and it is deliberately the widest possible
+/// collection: a fresh binder name must collide with nothing, and a name is
+/// dangerous whether it is referenced or merely bound. Collecting only `var`
+/// references misses a binder that is never read, and a fresh name landing on
+/// one of those captures it - the defect that shipped in the first revision of
+/// this fix. Over-approximating what to AVOID only makes a fresh name more
+/// exotic; under-approximating it miscompiles.
+fn collect_occurring_names(expr: &Expr, out: &mut UnordSet<String>) {
+    if let Expr::Atom(Atom::Name(name), _) = expr {
+        out.insert(name.clone());
+    }
+    match expr {
+        Expr::MetaExpr(meta, _) => {
+            collect_occurring_names(&meta.expr, out);
+            // Annotation expressions carry names too, and `substitute_expr`
+            // rewrites them, so they are in scope for collisions.
+            let _ = meta.metadata.map_expressions(&mut |value, _| {
+                collect_occurring_names(value, out);
+                value.clone()
+            });
+        }
+        Expr::List(list, _) => {
+            for child in &list.elements {
+                collect_occurring_names(child, out);
+            }
+        }
+        Expr::BareList(items, _) => {
+            for child in items {
+                collect_occurring_names(child, out);
+            }
+        }
+        Expr::Node(node, _) => {
+            for child in node.children_slice() {
+                collect_occurring_names(child, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The names referenced by the replacements that can still reach this scope
+/// (chelis#2163).
+///
+/// A replacement whose parameter is shadowed here is never inserted below, so
+/// it cannot be captured and its binder needs no rename. The narrowing is not
+/// cosmetic: a rename is only meaning-preserving when the fresh name is truly
+/// fresh, so every rename that fires is a risk, and one that cannot prevent a
+/// capture is pure risk. Removing this narrowing is what made
+/// `a_shadowed_parameter_does_not_trigger_a_rename` miscompile.
+fn live_replacement_names(
+    substitutions: &UnordMap<String, Expr>,
+    shadowed: &UnordSet<String>,
+) -> UnordSet<String> {
+    let mut out = UnordSet::default();
+    for (name, replacement) in substitutions.to_sorted() {
+        if shadowed.contains(name) {
+            continue;
+        }
+        collect_referenced_names(replacement, &mut out);
+    }
+    out
+}
+
+/// A binder name that collides with nothing in `avoid` (chelis#2163).
+///
+/// Deterministic: the first free `<name>__inl<k>`, never a global counter, so
+/// the emitted source of an unchanged program does not move between builds.
+/// `avoid` must be fed by [`collect_occurring_names`], not by the referenced
+/// names alone: an existing `x__inl1` binder that nothing reads is still a
+/// collision.
+fn fresh_binder_name(name: &str, avoid: &UnordSet<String>) -> String {
+    (1..)
+        .map(|index| format!("{name}__inl{index}"))
+        .find(|candidate| !avoid.contains(candidate))
+        .expect("an unused binder name exists")
+}
+
+/// Rename bound occurrences of `renames` inside `expr` (chelis#2163).
+///
+/// A rename, not a substitution: it rewrites the NAME inside each `(var {}
+/// name)` node and keeps that node's metadata, because the checker's recorded
+/// type travels in it and host lowering rejects a `var` without one.
+///
+/// It mirrors [`substitute_expr`]'s shadowing, so an inner binder that spells
+/// a renamed name stops the rename exactly where it would stop a
+/// substitution.
+fn rename_bound_names(
+    expr: &Expr,
+    renames: &[(String, String)],
+    shadowed: &UnordSet<String>,
+) -> Expr {
+    if renames.is_empty() {
+        return expr.clone();
+    }
+    let renamed_var = |kids: &[Expr]| -> Option<String> {
+        kids.first()
+            .and_then(symbol_name)
+            .filter(|name| !shadowed.contains(*name))
+            .and_then(|name| {
+                renames
+                    .iter()
+                    .find(|(from, _)| from == name)
+                    .map(|(_, to)| to.clone())
+            })
+    };
+    match expr {
+        Expr::MetaExpr(meta, span) => Expr::MetaExpr(
+            chelis_deep::ast::MetaExpr {
+                metadata: meta.metadata.clone(),
+                expr: Box::new(rename_bound_names(&meta.expr, renames, shadowed)),
+            },
+            *span,
+        ),
+        Expr::Node(node, span) if node.tag() == DeepTag::Var => {
+            match renamed_var(node.children_slice()) {
+                Some(to) => Expr::Node(
+                    Box::new(chelis_deep::node::Node::new(
+                        DeepTag::Var,
+                        node.meta().clone(),
+                        vec![Expr::Atom(Atom::Name(to), *span)],
+                    )),
+                    *span,
+                ),
+                None => expr.clone(),
+            }
+        }
+        Expr::List(list, span) if tag(list) == Some(DeepTag::Var) => {
+            match renamed_var(children(list)) {
+                Some(to) => {
+                    let mut elements = list.elements.clone();
+                    if let Some(slot) = elements.get_mut(2) {
+                        *slot = Expr::Atom(Atom::Name(to), *span);
+                    }
+                    Expr::List(List { elements }, *span)
+                }
+                None => expr.clone(),
+            }
+        }
+        Expr::List(list, span) if tag(list) == Some(DeepTag::Fn) => {
+            let kids = children(list);
+            let mut inner = shadowed.clone();
+            if let Some(params) = kids.first().and_then(as_list) {
+                for param in children(params) {
+                    if let Some(name) = param_name(param) {
+                        inner.insert(name);
+                    }
+                }
+            }
+            let elements = list
+                .elements
+                .iter()
+                .enumerate()
+                .map(|(index, child)| {
+                    if index == 3 {
+                        rename_bound_names(child, renames, &inner)
+                    } else {
+                        child.clone()
+                    }
+                })
+                .collect();
+            Expr::List(List { elements }, *span)
+        }
+        Expr::List(list, span) if tag(list) == Some(DeepTag::Let) => {
+            let kids = children(list);
+            let mut inner = shadowed.clone();
+            if let Some(bind_list) = kids.first().and_then(as_list)
+                && tag(bind_list) == Some(DeepTag::Bind)
+            {
+                let bind_kids = children(bind_list);
+                for index in (0..bind_kids.len()).step_by(2) {
+                    if let Some(name) = bind_kids.get(index).and_then(symbol_name) {
+                        inner.insert(name.to_string());
+                    }
+                }
+            }
+            let elements = list
+                .elements
+                .iter()
+                .enumerate()
+                .map(|(index, child)| match index {
+                    2 => rename_bound_names(child, renames, shadowed),
+                    3 => rename_bound_names(child, renames, &inner),
+                    _ => child.clone(),
+                })
+                .collect();
+            Expr::List(List { elements }, *span)
+        }
+        Expr::List(list, span) => Expr::List(
+            List {
+                elements: list
+                    .elements
+                    .iter()
+                    .map(|child| rename_bound_names(child, renames, shadowed))
+                    .collect(),
+            },
+            *span,
+        ),
+        Expr::Node(node, span) => Expr::Node(
+            Box::new(chelis_deep::node::Node::new(
+                node.tag(),
+                node.meta().clone(),
+                node.children_slice()
+                    .iter()
+                    .map(|child| rename_bound_names(child, renames, shadowed))
+                    .collect(),
+            )),
+            *span,
+        ),
+        Expr::BareList(items, span) => Expr::BareList(
+            items
+                .iter()
+                .map(|child| rename_bound_names(child, renames, shadowed))
+                .collect(),
+            *span,
+        ),
+        other => other.clone(),
+    }
+}
+
+/// Rewrite the name a binder-position child spells, keeping its shape and any
+/// metadata (chelis#2163).
+fn rename_binder_child(expr: &Expr, to: &str) -> Expr {
+    match expr {
+        Expr::Atom(Atom::Name(_), span) => Expr::Atom(Atom::Name(to.to_string()), *span),
+        Expr::MetaExpr(meta, span) => Expr::MetaExpr(
+            chelis_deep::ast::MetaExpr {
+                metadata: meta.metadata.clone(),
+                expr: Box::new(rename_binder_child(&meta.expr, to)),
+            },
+            *span,
+        ),
+        Expr::List(list, span) => {
+            let mut elements = list.elements.clone();
+            if let Some(first) = elements.first_mut()
+                && symbol_name(first).is_some()
+            {
+                *first = Expr::Atom(Atom::Name(to.to_string()), *span);
+            }
+            Expr::List(List { elements }, *span)
+        }
+        other => other.clone(),
+    }
+}
+
 fn substitute_expr(
     expr: &Expr,
     substitutions: &UnordMap<String, Expr>,
@@ -13270,37 +13551,127 @@ fn substitute_expr(
         }
         Expr::List(list, span) if tag(list) == Some(DeepTag::Fn) => {
             let kids = children(list);
-            let mut next_shadowed = shadowed.clone();
-            if let Some(params) = kids.first().and_then(as_list) {
-                for param in children(params) {
-                    if let Some(name) = param_name(param) {
-                        next_shadowed.insert(name);
-                    }
+            let params_list = kids.first().and_then(as_list);
+            // A `fn` with no params list contributes no binder names. Spelled
+            // out rather than defaulted: an empty list is the stated outcome
+            // here, not a fallback (loud_unsupported.md B2.5).
+            let param_names: Vec<Option<String>> = match params_list {
+                Some(params) => children(params).iter().map(param_name).collect(),
+                None => Vec::new(),
+            };
+            // chelis#2163: the arguments being substituted in carry the
+            // CALLER's names. A binder here that spells one of them would
+            // capture it, so rename the binder first. Renaming a binder
+            // preserves meaning ONLY when the fresh name is genuinely unused,
+            // so `live` stays narrow (rename no more than necessary) while
+            // `avoid` stays wide (collide with nothing).
+            let mut bound = shadowed.clone();
+            for name in param_names.iter().flatten() {
+                bound.insert(name.clone());
+            }
+            let live = live_replacement_names(substitutions, &bound);
+            let mut avoid = UnordSet::default();
+            for (_, replacement) in substitutions.to_sorted() {
+                collect_occurring_names(replacement, &mut avoid);
+            }
+            collect_occurring_names(expr, &mut avoid);
+            for name in param_names.iter().flatten() {
+                avoid.insert(name.clone());
+            }
+            let mut renames: Vec<(String, String)> = Vec::new();
+            for name in param_names.iter().flatten() {
+                if live.contains(name) {
+                    let fresh = fresh_binder_name(name, &avoid);
+                    avoid.insert(fresh.clone());
+                    renames.push((name.clone(), fresh));
                 }
+            }
+            let mut next_shadowed = shadowed.clone();
+            for name in param_names.iter().flatten() {
+                match renames.iter().find(|(from, _)| from == name) {
+                    Some((_, fresh)) => next_shadowed.insert(fresh.clone()),
+                    None => next_shadowed.insert(name.clone()),
+                };
             }
             let mut elements = Vec::with_capacity(list.elements.len());
             elements.push(list.elements[0].clone());
             elements.push(list.elements[1].clone());
             if let Some(params) = kids.first() {
-                elements.push(params.clone());
+                elements.push(match (as_list(params), renames.is_empty()) {
+                    (Some(params_list), false) => Expr::List(
+                        List {
+                            elements: params_list
+                                .elements
+                                .iter()
+                                .map(|param| {
+                                    match param_name(param).and_then(|name| {
+                                        renames.iter().find(|(from, _)| *from == name).cloned()
+                                    }) {
+                                        Some((_, fresh)) => rename_binder_child(param, &fresh),
+                                        None => param.clone(),
+                                    }
+                                })
+                                .collect(),
+                        },
+                        *span,
+                    ),
+                    _ => params.clone(),
+                });
             }
             if let Some(body) = kids.get(1) {
-                elements.push(substitute_expr(body, substitutions, &next_shadowed));
+                let body = rename_bound_names(body, &renames, &UnordSet::new());
+                elements.push(substitute_expr(&body, substitutions, &next_shadowed));
             }
             Expr::List(List { elements }, *span)
         }
         Expr::List(list, span) if tag(list) == Some(DeepTag::Let) => {
             let kids = children(list);
-            let mut next_shadowed = shadowed.clone();
-            if let Some(bind_list) = kids.first().and_then(as_list)
-                && tag(bind_list) == Some(DeepTag::Bind)
-            {
-                let bind_kids = children(bind_list);
-                for index in (0..bind_kids.len()).step_by(2) {
-                    if let Some(name) = bind_kids.get(index).and_then(symbol_name) {
-                        next_shadowed.insert(name.to_string());
-                    }
+            let bind_list = kids
+                .first()
+                .and_then(as_list)
+                .filter(|bind_list| tag(bind_list) == Some(DeepTag::Bind));
+            // As above: a `let` with no `bind` list binds nothing here.
+            let bound_names: Vec<Option<String>> = match bind_list {
+                Some(bind_list) => {
+                    let bind_kids = children(bind_list);
+                    (0..bind_kids.len())
+                        .step_by(2)
+                        .map(|index| {
+                            bind_kids
+                                .get(index)
+                                .and_then(symbol_name)
+                                .map(str::to_string)
+                        })
+                        .collect()
                 }
+                None => Vec::new(),
+            };
+            // chelis#2163: same capture rule as the `fn` arm above, for a
+            // `let` binder, with the same narrow-`live`/wide-`avoid` split.
+            let mut bound = shadowed.clone();
+            for name in bound_names.iter().flatten() {
+                bound.insert(name.clone());
+            }
+            let live = live_replacement_names(substitutions, &bound);
+            let mut avoid = UnordSet::default();
+            for (_, replacement) in substitutions.to_sorted() {
+                collect_occurring_names(replacement, &mut avoid);
+            }
+            collect_occurring_names(expr, &mut avoid);
+            let mut renames: Vec<(String, String)> = Vec::new();
+            for name in bound_names.iter().flatten() {
+                if live.contains(name) {
+                    let fresh = fresh_binder_name(name, &avoid);
+                    avoid.insert(fresh.clone());
+                    renames.push((name.clone(), fresh));
+                }
+            }
+            let mut next_shadowed = shadowed.clone();
+            for name in bound_names.iter().flatten() {
+                match renames.iter().find(|(from, _)| from == name) {
+                    Some((_, fresh)) => next_shadowed.insert(fresh.clone()),
+                    None => next_shadowed.insert(name.clone()),
+                };
             }
             let elements = list
                 .elements
@@ -13309,8 +13680,55 @@ fn substitute_expr(
                 .collect();
             if kids.len() >= 2 {
                 let mut rebuilt = list.elements.clone();
-                rebuilt[2] = substitute_expr(&list.elements[2], substitutions, shadowed);
-                rebuilt[3] = substitute_expr(&list.elements[3], substitutions, &next_shadowed);
+                // A binding's value is evaluated before that name is in
+                // scope, so a rename applies only to the values that FOLLOW
+                // it and to the body. Renaming an earlier value would rewrite
+                // a reference to an outer binding of the same name.
+                rebuilt[2] = match (as_list(&list.elements[2]), renames.is_empty()) {
+                    (Some(bind_list), false) => {
+                        // `bind_list.elements` is [tag, metadata, name, value,
+                        // name, value, ...]: the names start at index 2.
+                        let mut applied: Vec<(String, String)> = Vec::new();
+                        let mut rebuilt_binds = bind_list.elements.clone();
+                        // A binding's own value is evaluated BEFORE its name is
+                        // in scope, so this binding's rename must not reach it:
+                        // `x = add(x, m)` refers to an outer `x`, and rewriting
+                        // it to `x__inl1 = add(x__inl1, m)` is a self-reference
+                        // that fails ownership lowering. The rename is recorded
+                        // only after its own value slot has been rewritten, so
+                        // it applies to LATER values and to the body.
+                        let mut pending: Option<(String, String)> = None;
+                        for (index, slot) in rebuilt_binds.iter_mut().enumerate().skip(2) {
+                            if index % 2 == 0 {
+                                let renamed = symbol_name(slot).and_then(|name| {
+                                    renames.iter().find(|(from, _)| from == name).cloned()
+                                });
+                                if let Some((from, fresh)) = renamed {
+                                    *slot = Expr::Atom(Atom::Name(fresh.clone()), *span);
+                                    pending = Some((from, fresh));
+                                }
+                            } else {
+                                *slot = rename_bound_names(slot, &applied, &UnordSet::new());
+                                if let Some(entry) = pending.take() {
+                                    applied.push(entry);
+                                }
+                            }
+                        }
+                        substitute_expr(
+                            &Expr::List(
+                                List {
+                                    elements: rebuilt_binds,
+                                },
+                                *span,
+                            ),
+                            substitutions,
+                            shadowed,
+                        )
+                    }
+                    _ => substitute_expr(&list.elements[2], substitutions, shadowed),
+                };
+                let body = rename_bound_names(&list.elements[3], &renames, &UnordSet::new());
+                rebuilt[3] = substitute_expr(&body, substitutions, &next_shadowed);
                 Expr::List(List { elements: rebuilt }, *span)
             } else {
                 Expr::List(List { elements }, *span)
