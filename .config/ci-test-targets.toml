@@ -85,6 +85,18 @@ tracking_issue = "chelis#1854"
 package = "chelis-cli"
 name = "issue_1582_vmap_std_scalar"
 
+# The diagnostic-kind producer-seal script has a dedicated pull-request job,
+# while its mutation helpers and command contracts are covered by script-unit.
+# Keep this exact so unrelated scripts receive no implied owner.
+[[path_rule]]
+prefix = "scripts/diagnostic_kind_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "diagnostic-kind-oracle"
+cadence = "pull_request and workflow_dispatch"
+reason = "the dedicated diagnostic-kind job executes every controlled mutation, with its helper contracts covered by script-unit"
+tracking_issue = "chelis#1824"
+
 # The completion runner consumes these exact runtime-extent corpus inputs.
 [[path_rule]]
 prefix = "scripts/runtime_extent_oracle.py"
