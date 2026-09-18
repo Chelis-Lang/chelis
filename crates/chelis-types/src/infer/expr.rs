@@ -482,14 +482,18 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
         deep::Expr::MetaExpr(meta, _) => {
             infer_expr(&meta.expr, env, vg, subst, adt_reg, errors, product)
         }
-        // Bridge: reconstruct List so tag-dispatch functions work unchanged (#908)
-        // `Node` is a stamped vocabulary node — dispatch like `List` using its tag.
         deep::Expr::Node(node, span) => {
-            // Transitional bridge (chelis#998 → consumer migration):
-            // reconstruct the List representation so the existing tag-dispatch
-            // functions (`infer_var`, `infer_app`, etc.) work unchanged. Once
-            // those functions are migrated to accept Node directly, this
-            // `to_list` call becomes dead code.
+            // PP7/E5e audited symmetric root adapter, not an independent
+            // child reader: this arm and the `Expr::List` arm above have the
+            // same exhaustive `DeepTag` dispositions, and the bridge copies
+            // metadata and children without recursively changing their
+            // carriers. E5e migrated the dispatched helpers' bare child
+            // reads to `Expr::carrier`, so no nested decision relies on this
+            // shallow conversion. Removing this last root adapter requires
+            // changing every tag-specific `infer_*(&List, ...)` signature;
+            // that is the #1029 carrier-deletion refactor, not a leaf-reader
+            // repair. Keep this exception visible rather than presenting the
+            // inference audit as a universal no-bridge claim.
             let list = node.to_list(*span);
             product.register_bridge_children(node.children_slice(), children(&list));
             match node.tag() {
@@ -612,7 +616,7 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
                 DeepTag::HandleEffect => {
                     infer_handle_effect(&list, env, vg, subst, adt_reg, errors, product)
                 }
-                DeepTag::Variant
+                undispatched @ (DeepTag::Variant
                 | DeepTag::Field
                 | DeepTag::Arm
                 | DeepTag::PatVar
@@ -641,8 +645,8 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
                 | DeepTag::Bind
                 | DeepTag::Kv
                 | DeepTag::Effects
-                | DeepTag::Resource => {
-                    let named = node.tag().as_str();
+                | DeepTag::Resource) => {
+                    let named = undispatched.as_str();
                     report(
                         errors,
                         CheckError::new(

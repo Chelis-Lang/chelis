@@ -1247,6 +1247,11 @@ impl InferenceProduct {
         while let Some((stamped, bridged)) = pending.pop() {
             let stamped_key = epoch.canonical_key(expr_key(stamped));
             epoch.bridge_aliases.insert(expr_key(bridged), stamped_key);
+            // PP7/E5e justified symmetric site: this walk compares the two
+            // already-paired representations created by the root adapter.
+            // Every arm requires the same carrier on both sides; a mismatch
+            // takes the explicit no-recursion arm rather than masquerading
+            // as a successful semantic read.
             match (stamped, bridged) {
                 (deep::Expr::Node(left, _), deep::Expr::Node(right, _)) => {
                     pending.extend(left.children_slice().iter().zip(right.children_slice()));
@@ -1409,16 +1414,21 @@ impl InferenceProduct {
                 Some(owner.ty.clone())
             }
             None => {
-                let construct = match expr {
-                    deep::Expr::List(list, _) => get_tag(list)
-                        .map(DeepTag::as_str)
-                        .unwrap_or("<untagged-list>"),
-                    deep::Expr::Atom(_, _) => "<atom>",
-                    deep::Expr::Map(_, _) => "<map>",
-                    deep::Expr::MetaExpr(_, _) => "<meta-expr>",
-                    deep::Expr::Node(node, _) => node.tag().as_str(),
-                    deep::Expr::BareList(_, _) => "<bare-list>",
-                    deep::Expr::UnknownForm(data) => &data.head,
+                let construct = match expr.carrier() {
+                    deep::ExprCarrier::DecodedNode(tag, _, _) => tag.as_str(),
+                    deep::ExprCarrier::UndecodableHead(head, _, _) => match expr {
+                        // The old diagnostic named an UnknownForm's preserved
+                        // head, but described every undecoded raw List as an
+                        // untagged transitional list.
+                        deep::Expr::UnknownForm(_) => head,
+                        deep::Expr::List(_, _) => "<untagged-list>",
+                        _ => unreachable!("only List and UnknownForm have undecodable heads"),
+                    },
+                    deep::ExprCarrier::StructuralList(_) => "<bare-list>",
+                    deep::ExprCarrier::Atom(_) => "<atom>",
+                    deep::ExprCarrier::MetadataMap(_) => "<map>",
+                    deep::ExprCarrier::MetadataExpression(_) => "<meta-expr>",
+                    deep::ExprCarrier::MalformedLegacyList(_) => "<untagged-list>",
                 };
                 errors.push(internal_owner_stamp_error(format!(
                     "missing authoritative type stamp for {role} `{construct}`"
@@ -1585,26 +1595,26 @@ pub(super) fn internal_owner_stamp_error(message: String) -> CheckError {
 // takes a `DiagnosticSink`.
 pub(super) fn register_annotation_owners(expr: &deep::Expr, epoch: &mut TypeStampEpoch) {
     stack_guard!("register_annotation_owners", expr);
-    let (tag, kids) = match expr {
-        deep::Expr::Node(node, _) => (Some(node.tag()), node.children_slice()),
-        deep::Expr::List(list, _) => (get_tag(list), children(list)),
-        deep::Expr::MetaExpr(meta, _) => {
+    let (tag, kids) = match expr.carrier() {
+        deep::ExprCarrier::DecodedNode(tag, _, children) => (Some(tag), children),
+        deep::ExprCarrier::MetadataExpression(meta) => {
             register_annotation_owners(&meta.expr, epoch);
             return;
         }
-        deep::Expr::BareList(elements, _) => {
-            for child in elements {
+        deep::ExprCarrier::StructuralList(children)
+        | deep::ExprCarrier::UndecodableHead(_, _, children) => {
+            for child in children {
                 register_annotation_owners(child, epoch);
             }
             return;
         }
-        deep::Expr::UnknownForm(data) => {
-            for child in &data.children {
+        deep::ExprCarrier::MalformedLegacyList(list) => {
+            for child in &list.elements {
                 register_annotation_owners(child, epoch);
             }
             return;
         }
-        deep::Expr::Atom(_, _) | deep::Expr::Map(_, _) => return,
+        deep::ExprCarrier::Atom(_) | deep::ExprCarrier::MetadataMap(_) => return,
     };
     if let Some(tag) = tag {
         let (role, stamp_required) = if tag == DeepTag::Fn {
@@ -2523,6 +2533,10 @@ pub(super) fn effects_only_rewrite_matches(
 
 pub(super) fn effects_only_expr_matches(before: &deep::Expr, after: &deep::Expr) -> bool {
     stack_guard!("effects_only_expr_matches", before, false);
+    // PP7/E5e justified symmetric site: this is strict representation
+    // equality modulo derived effects. List is compared only with List,
+    // beside the corresponding Node/BareList/UnknownForm arms; `_ => false`
+    // explicitly rejects a carrier mismatch.
     match (before, after) {
         (deep::Expr::Atom(before_atom, before_span), deep::Expr::Atom(after_atom, after_span)) => {
             before_atom == after_atom && before_span == after_span
@@ -2647,6 +2661,8 @@ fn expression_without_derived_effects(
         expr,
         Err(EffectComparisonError)
     );
+    // PP7/E5e producer exception: the exhaustive transformer rebuilds every
+    // expression as the same carrier while removing only derived effects.
     Ok(match expr {
         deep::Expr::Atom(..) => expr.clone(),
         deep::Expr::Map(meta, span) => {

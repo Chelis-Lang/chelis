@@ -74,8 +74,15 @@ pub(super) fn infer_match(
                 );
 
                 let guard = &arm_kids[1];
-                let empty_guard = matches!(guard, deep::Expr::List(guard_list, _) if guard_list.elements.is_empty())
-                    || matches!(guard, deep::Expr::BareList(elements, _) if elements.is_empty());
+                let empty_guard = match guard.carrier() {
+                    deep::ExprCarrier::StructuralList(elements) => elements.is_empty(),
+                    deep::ExprCarrier::MalformedLegacyList(list) => list.elements.is_empty(),
+                    deep::ExprCarrier::DecodedNode(_, _, _)
+                    | deep::ExprCarrier::UndecodableHead(_, _, _)
+                    | deep::ExprCarrier::Atom(_)
+                    | deep::ExprCarrier::MetadataMap(_)
+                    | deep::ExprCarrier::MetadataExpression(_) => false,
+                };
                 if !empty_guard {
                     let guard_ty =
                         infer_expr(guard, &mut arm_env, vg, subst, adt_reg, errors, product);
