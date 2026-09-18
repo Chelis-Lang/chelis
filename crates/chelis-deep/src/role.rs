@@ -562,7 +562,7 @@ pub fn arity_contract(tag: DeepTag) -> AritySpec {
         DeepTag::DLit => Fixed(1),  // value
         DeepTag::DRank => Fixed(1), // rank-expr
 
-        DeepTag::Grad => AtLeast(1),  // expr [+ selectors]
+        DeepTag::Grad => Range(1, 2), // expr [+ selector]
         DeepTag::Vmap => AtLeast(1),  // expr [+ selectors]
         DeepTag::Jit => Fixed(1),     // expr
         DeepTag::Realize => Fixed(1), // expr

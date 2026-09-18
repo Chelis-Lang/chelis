@@ -6,6 +6,7 @@
 //! silent-dispatch class that Phase 3 closed.
 
 use chelis_deep::node::{Node, NodeError};
+use chelis_deep::role::AritySpec;
 use chelis_deep::span::Span;
 use chelis_deep::tag::DeepTag;
 use chelis_deep::validate::{WarningKind, find_raw_vocabulary_tag, validate};
@@ -335,6 +336,41 @@ fn node_children_replacement_revalidates_arity_before_commit() {
     assert!(matches!(
         node.children_iter().next(),
         Some(chelis_deep::node::ChildRef::Syntax(child)) if child == &original
+    ));
+}
+
+#[test]
+fn grad_admission_accepts_one_optional_selector_and_rejects_extra_children() {
+    let target = Expr::node(
+        DeepTag::Lit,
+        Metadata::default(),
+        vec![Expr::Atom(Atom::Int(1), sp())],
+        sp(),
+    );
+    let selector = Expr::Atom(Atom::Int(0), sp());
+
+    assert!(Node::try_new(DeepTag::Grad, Metadata::default(), vec![target.clone()]).is_ok());
+    assert!(
+        Node::try_new(
+            DeepTag::Grad,
+            Metadata::default(),
+            vec![target.clone(), selector.clone()],
+        )
+        .is_ok()
+    );
+
+    let rejected = Node::try_new(
+        DeepTag::Grad,
+        Metadata::default(),
+        vec![target, selector, Expr::Atom(Atom::Int(1), sp())],
+    );
+    assert!(matches!(
+        rejected,
+        Err(NodeError::ArityViolation {
+            tag: DeepTag::Grad,
+            expected: AritySpec::Range(1, 2),
+            actual: 3,
+        })
     ));
 }
 
