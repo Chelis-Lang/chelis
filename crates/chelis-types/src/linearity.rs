@@ -759,8 +759,11 @@ impl Checker {
                     }
                 }
             }
-            ExprCarrier::DecodedNode(_, _, _)
-            | ExprCarrier::StructuralList(_)
+            ExprCarrier::DecodedNode(tag, _, _) if is_runtime_expression_tag(tag) => {
+                self.check_expr(expr, scope);
+            }
+            ExprCarrier::DecodedNode(_, _, _) => self.check_structural_payload(expr, scope),
+            ExprCarrier::StructuralList(_)
             | ExprCarrier::UndecodableHead(_, _, _)
             | ExprCarrier::Atom(_)
             | ExprCarrier::MetadataMap(_)
@@ -772,6 +775,24 @@ impl Checker {
     fn check_expr(&mut self, expr: &Expr, scope: &mut LinearScope) {
         match expr.carrier() {
             ExprCarrier::DecodedNode(tag, _, children) => {
+                if !is_runtime_expression_tag(tag) {
+                    self.push_diagnostic(CheckError::new(
+                        CheckErrorKind::MalformedForm,
+                        format!(
+                            "non-runtime `{}` reached linearity runtime position {}; expected a \
+                             runtime expression ([04-TOT-3]; chelis#1125)",
+                            tag.as_str(),
+                            diag_site(expr)
+                        ),
+                        vec![],
+                    ));
+                    // A structural owner in a runtime slot has no authority
+                    // to classify any physical child as syntax-only.
+                    for child in children {
+                        self.check_untrusted_runtime_descendants(child, scope);
+                    }
+                    return;
+                }
                 if !decoded_shape_is_valid(tag, children.len()) {
                     self.push_diagnostic(CheckError::new(
                         CheckErrorKind::MalformedForm,
@@ -791,7 +812,7 @@ impl Checker {
                     // possible runtime expression so an unexpected nested
                     // consume cannot disappear behind a syntax/type role.
                     for child in children {
-                        self.check_expr(child, scope);
+                        self.check_untrusted_runtime_descendants(child, scope);
                     }
                     return;
                 }
@@ -931,7 +952,14 @@ impl Checker {
 
     fn check_structural_payload(&mut self, expr: &Expr, scope: &mut LinearScope) {
         match expr.carrier() {
-            ExprCarrier::DecodedNode(_, _, _) => self.check_expr(expr, scope),
+            ExprCarrier::DecodedNode(tag, _, _) if is_runtime_expression_tag(tag) => {
+                self.check_expr(expr, scope);
+            }
+            ExprCarrier::DecodedNode(_, _, children) => {
+                for child in children {
+                    self.check_structural_payload(child, scope);
+                }
+            }
             ExprCarrier::StructuralList(elements) => {
                 for element in elements {
                     self.check_structural_payload(element, scope);
@@ -1354,13 +1382,19 @@ impl Checker {
         let visible_ids = scope.all_visible_ids();
         let mut arm_scopes = Vec::new();
         for arm in children.iter().skip(1) {
+            let mut arm_scope = scope.clone();
+            // An arm, including one whose decoded shape is malformed, is a
+            // distinct declaration region. Preserve every nested ownership
+            // event in that branch before joining it back into the match.
+            arm_scope.clear_destructured_marks();
             let Some(arm_kids) = tagged_children(arm, DeepTag::Arm) else {
+                self.check_malformed_match_arm(arm, &mut arm_scope);
+                arm_scopes.push(arm_scope);
                 continue;
             };
             if arm_kids.len() < 3 {
                 continue;
             }
-            let mut arm_scope = scope.clone();
             // chelis#1200 Q1: an arm body is a new declaration region, so
             // the destructured-component mark does not cross into it. The
             // arm's own pattern binders were already covered by `declare`
@@ -1388,6 +1422,56 @@ impl Checker {
             arm_scopes.push(arm_scope);
         }
         self.join_branch_states(scope, &visible_ids, &arm_scopes);
+    }
+
+    fn check_malformed_match_arm(&mut self, arm: &Expr, scope: &mut LinearScope) {
+        self.push_diagnostic(CheckError::new(
+            CheckErrorKind::MalformedForm,
+            format!(
+                "malformed match arm reached linearity {}; expected a decoded `arm` with exactly \
+                 pattern, guard, and body children ([04-TOT-3]; chelis#1125)",
+                diag_site(arm)
+            ),
+            vec![],
+        ));
+
+        // The enclosing Match position, not the malformed owner's own tag,
+        // determines the safe fallback. Once `arm` authority is absent, no
+        // nested structural owner's role table can prove that its physical
+        // descendants are non-runtime.
+        self.check_untrusted_runtime_descendants(arm, scope);
+    }
+
+    fn check_untrusted_runtime_descendants(&mut self, expr: &Expr, scope: &mut LinearScope) {
+        match expr.carrier() {
+            ExprCarrier::DecodedNode(tag, _, children)
+                if is_runtime_expression_tag(tag)
+                    && decoded_shape_is_valid(tag, children.len()) =>
+            {
+                self.check_expr(expr, scope);
+            }
+            ExprCarrier::DecodedNode(_, _, children)
+            | ExprCarrier::StructuralList(children)
+            | ExprCarrier::UndecodableHead(_, _, children) => {
+                for child in children {
+                    self.check_untrusted_runtime_descendants(child, scope);
+                }
+            }
+            ExprCarrier::Atom(_) => {}
+            ExprCarrier::MetadataMap(map) => {
+                map.visit_syntax(&mut |_, value| {
+                    self.check_untrusted_runtime_descendants(value, scope);
+                });
+            }
+            ExprCarrier::MetadataExpression(meta) => {
+                self.check_untrusted_runtime_descendants(&meta.expr, scope);
+            }
+            ExprCarrier::MalformedLegacyList(list) => {
+                for element in &list.elements {
+                    self.check_untrusted_runtime_descendants(element, scope);
+                }
+            }
+        }
     }
 
     fn join_branch_states(
@@ -1837,6 +1921,38 @@ fn decoded_shape_is_valid(tag: DeepTag, child_count: usize) -> bool {
     }
 }
 
+fn is_runtime_expression_tag(tag: DeepTag) -> bool {
+    matches!(
+        tag,
+        DeepTag::Fn
+            | DeepTag::App
+            | DeepTag::Let
+            | DeepTag::Match
+            | DeepTag::If
+            | DeepTag::Var
+            | DeepTag::Lit
+            | DeepTag::Record
+            | DeepTag::Access
+            | DeepTag::Pipe
+            | DeepTag::Block
+            | DeepTag::Tuple
+            | DeepTag::TupleGet
+            | DeepTag::RecordUpdate
+            | DeepTag::Par
+            | DeepTag::HandleEffect
+            | DeepTag::Borrow
+            | DeepTag::Grad
+            | DeepTag::Vmap
+            | DeepTag::Jit
+            | DeepTag::Realize
+            | DeepTag::Cast
+            | DeepTag::Copy
+            | DeepTag::Quote
+            | DeepTag::Unquote
+            | DeepTag::Splice
+    )
+}
+
 fn malformed_list_has_semantic_head(list: &List) -> bool {
     matches!(
         list.elements.first(),
@@ -2045,64 +2161,73 @@ pub fn free_runtime_variables(expr: &Expr) -> Vec<String> {
 
 fn collect_free_vars(expr: &Expr, bound: &mut Vec<UnordSet<String>>, free: &mut UnordSet<String>) {
     match expr.carrier() {
-        ExprCarrier::DecodedNode(tag, _, children) => match tag {
-            DeepTag::Var => {
-                if let Some(name) = children.first().and_then(symbol_name)
-                    && !bound.iter().rev().any(|scope| scope.contains(name))
-                {
-                    free.insert(name.to_string());
+        ExprCarrier::DecodedNode(tag, _, children) => {
+            if !is_runtime_expression_tag(tag) || !decoded_shape_is_valid(tag, children.len()) {
+                for child in children {
+                    collect_untrusted_free_vars(child, bound, free);
                 }
+                return;
             }
-            DeepTag::Fn => {
-                if children.len() >= 2 {
-                    bound.push(param_names(&children[0]).into_iter().collect());
+            match tag {
+                DeepTag::Var => {
+                    if let Some(name) = children.first().and_then(symbol_name)
+                        && !bound.iter().rev().any(|scope| scope.contains(name))
+                    {
+                        free.insert(name.to_string());
+                    }
+                }
+                DeepTag::Fn => {
+                    if children.len() >= 2 {
+                        bound.push(param_names(&children[0]).into_iter().collect());
+                        collect_free_vars(&children[1], bound, free);
+                        bound.pop();
+                    }
+                }
+                DeepTag::Let => {
+                    if children.len() < 2 {
+                        return;
+                    }
+                    let mut let_scope = UnordSet::new();
+                    if let Some(bind_kids) = tagged_children(&children[0], DeepTag::Bind) {
+                        let mut index = 0;
+                        while index + 1 < bind_kids.len() {
+                            collect_free_vars(&bind_kids[index + 1], bound, free);
+                            if let Some(name) = symbol_name(&bind_kids[index]) {
+                                let_scope.insert(name.to_string());
+                            }
+                            index += 2;
+                        }
+                    }
+                    bound.push(let_scope);
                     collect_free_vars(&children[1], bound, free);
                     bound.pop();
                 }
-            }
-            DeepTag::Let => {
-                if children.len() < 2 {
-                    return;
-                }
-                let mut let_scope = UnordSet::new();
-                if let Some(bind_kids) = tagged_children(&children[0], DeepTag::Bind) {
-                    let mut index = 0;
-                    while index + 1 < bind_kids.len() {
-                        collect_free_vars(&bind_kids[index + 1], bound, free);
-                        if let Some(name) = symbol_name(&bind_kids[index]) {
-                            let_scope.insert(name.to_string());
+                DeepTag::Match => {
+                    if children.is_empty() {
+                        return;
+                    }
+                    collect_free_vars(&children[0], bound, free);
+                    for arm in children.iter().skip(1) {
+                        let Some(arm_kids) = tagged_children(arm, DeepTag::Arm) else {
+                            collect_untrusted_free_vars(arm, bound, free);
+                            continue;
+                        };
+                        if arm_kids.len() < 3 {
+                            continue;
                         }
-                        index += 2;
+                        bound.push(pattern_names(&arm_kids[0]).into_iter().collect());
+                        collect_free_vars(&arm_kids[1], bound, free);
+                        collect_free_vars(&arm_kids[2], bound, free);
+                        bound.pop();
                     }
                 }
-                bound.push(let_scope);
-                collect_free_vars(&children[1], bound, free);
-                bound.pop();
-            }
-            DeepTag::Match => {
-                if children.is_empty() {
-                    return;
-                }
-                collect_free_vars(&children[0], bound, free);
-                for arm in children.iter().skip(1) {
-                    let Some(arm_kids) = tagged_children(arm, DeepTag::Arm) else {
-                        continue;
-                    };
-                    if arm_kids.len() < 3 {
-                        continue;
+                _ => {
+                    for child in children {
+                        collect_free_vars(child, bound, free);
                     }
-                    bound.push(pattern_names(&arm_kids[0]).into_iter().collect());
-                    collect_free_vars(&arm_kids[1], bound, free);
-                    collect_free_vars(&arm_kids[2], bound, free);
-                    bound.pop();
                 }
             }
-            _ => {
-                for child in children {
-                    collect_free_vars(child, bound, free);
-                }
-            }
-        },
+        }
         ExprCarrier::StructuralList(elements) => {
             for element in elements {
                 collect_free_vars(element, bound, free);
@@ -2121,6 +2246,41 @@ fn collect_free_vars(expr: &Expr, bound: &mut Vec<UnordSet<String>>, free: &mut 
             // conservatively so a nested free use cannot disappear.
             for element in &list.elements {
                 collect_free_vars(element, bound, free);
+            }
+        }
+    }
+}
+
+fn collect_untrusted_free_vars(
+    expr: &Expr,
+    bound: &mut Vec<UnordSet<String>>,
+    free: &mut UnordSet<String>,
+) {
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(tag, _, children)
+            if is_runtime_expression_tag(tag) && decoded_shape_is_valid(tag, children.len()) =>
+        {
+            collect_free_vars(expr, bound, free);
+        }
+        ExprCarrier::DecodedNode(_, _, children)
+        | ExprCarrier::StructuralList(children)
+        | ExprCarrier::UndecodableHead(_, _, children) => {
+            for child in children {
+                collect_untrusted_free_vars(child, bound, free);
+            }
+        }
+        ExprCarrier::Atom(_) => {}
+        ExprCarrier::MetadataMap(map) => {
+            map.visit_syntax(&mut |_, value| {
+                collect_untrusted_free_vars(value, bound, free);
+            });
+        }
+        ExprCarrier::MetadataExpression(meta) => {
+            collect_untrusted_free_vars(&meta.expr, bound, free);
+        }
+        ExprCarrier::MalformedLegacyList(list) => {
+            for element in &list.elements {
+                collect_untrusted_free_vars(element, bound, free);
             }
         }
     }
@@ -3357,6 +3517,205 @@ mod tests {
             }),
             "the nested realize must remain visible to the later borrow: {errors:?}"
         );
+    }
+
+    #[test]
+    fn redteam_malformed_match_arm_cannot_hide_nested_consume() {
+        let malformed_arms = [
+            node(
+                "arm",
+                vec![],
+                vec![
+                    node("pat-wild", vec![], vec![]),
+                    Expr::BareList(Vec::new(), span()),
+                    node("realize", vec![], vec![node("var", vec![], vec![sym("x")])]),
+                    sym("unexpected"),
+                ],
+            ),
+            node(
+                "params",
+                vec![],
+                vec![node(
+                    "realize",
+                    vec![],
+                    vec![node("var", vec![], vec![sym("x")])],
+                )],
+            ),
+            node(
+                "params",
+                vec![],
+                vec![node(
+                    "params",
+                    vec![],
+                    vec![node(
+                        "realize",
+                        vec![],
+                        vec![node("var", vec![], vec![sym("x")])],
+                    )],
+                )],
+            ),
+            node(
+                "params",
+                vec![],
+                vec![node(
+                    "realize",
+                    vec![],
+                    vec![
+                        node(
+                            "params",
+                            vec![],
+                            vec![node(
+                                "params",
+                                vec![],
+                                vec![node(
+                                    "realize",
+                                    vec![],
+                                    vec![node("var", vec![], vec![sym("x")])],
+                                )],
+                            )],
+                        ),
+                        sym("unexpected"),
+                    ],
+                )],
+            ),
+            node(
+                "params",
+                vec![],
+                vec![node(
+                    "var",
+                    vec![],
+                    vec![
+                        Expr::Atom(Atom::Int(0), span()),
+                        node("var", vec![], vec![sym("x")]),
+                    ],
+                )],
+            ),
+            node(
+                "params",
+                vec![],
+                vec![node(
+                    "block",
+                    vec![],
+                    vec![node(
+                        "realize",
+                        vec![],
+                        vec![
+                            node(
+                                "params",
+                                vec![],
+                                vec![node(
+                                    "params",
+                                    vec![],
+                                    vec![node(
+                                        "realize",
+                                        vec![],
+                                        vec![node("var", vec![], vec![sym("x")])],
+                                    )],
+                                )],
+                            ),
+                            sym("unexpected"),
+                        ],
+                    )],
+                )],
+            ),
+            node(
+                "params",
+                vec![],
+                vec![node(
+                    "block",
+                    vec![],
+                    vec![node(
+                        "var",
+                        vec![],
+                        vec![
+                            Expr::Atom(Atom::Int(0), span()),
+                            node("var", vec![], vec![sym("x")]),
+                        ],
+                    )],
+                )],
+            ),
+            node(
+                "params",
+                vec![],
+                vec![node(
+                    "realize",
+                    vec![],
+                    vec![node(
+                        "params",
+                        vec![],
+                        vec![node(
+                            "params",
+                            vec![],
+                            vec![node(
+                                "realize",
+                                vec![],
+                                vec![node("var", vec![], vec![sym("x")])],
+                            )],
+                        )],
+                    )],
+                )],
+            ),
+        ];
+
+        for malformed_arm in malformed_arms {
+            let malformed_match = node(
+                "match",
+                vec![],
+                vec![
+                    node(
+                        "lit",
+                        vec![("type", node("t-prim", vec![], vec![sym("i32")]))],
+                        vec![Expr::Atom(Atom::Int(0), span())],
+                    ),
+                    malformed_arm,
+                ],
+            );
+            assert_eq!(
+                free_runtime_variables(&malformed_match),
+                vec!["x".to_string()],
+                "a malformed arm must not hide a closure capture"
+            );
+            let body = node(
+                "block",
+                vec![],
+                vec![
+                    malformed_match,
+                    node(
+                        "app",
+                        vec![],
+                        vec![
+                            node("var", vec![], vec![sym("add")]),
+                            node("borrow", vec![], vec![node("var", vec![], vec![sym("x")])]),
+                            node("borrow", vec![], vec![node("var", vec![], vec![sym("x")])]),
+                        ],
+                    ),
+                ],
+            );
+            let program = CheckedProgram::unchecked_for_linearity_diagnostic_test(
+                vec![
+                    node(
+                        "def",
+                        vec![],
+                        vec![
+                            sym("x"),
+                            node("lit", vec![], vec![Expr::Atom(Atom::Int(1), span())]),
+                        ],
+                    ),
+                    node("def", vec![], vec![sym("bad"), body]),
+                ],
+                BTreeMap::from([("x".to_string(), tensor_4_f32())]),
+            );
+
+            let errors = check_linearity(&program)
+                .expect_err("a malformed arm must diagnose and retain nested ownership traversal");
+            assert!(
+                errors.iter().any(|error| {
+                    matches!(error.kind, CheckErrorKind::UseAfterConsume)
+                        && error.message.contains("variable `x`")
+                }),
+                "the malformed arm's nested realize must remain visible: {errors:?}"
+            );
+        }
     }
 
     #[test]
