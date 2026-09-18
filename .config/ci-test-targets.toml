@@ -3,6 +3,12 @@
 # are consumed by scripts/ci_change_owned.py and fail closed when stale.
 version = 2
 
+# chelis#1582: package-resolved scalar callables stay lexical under vmap, with
+# exact evaluator/native-C agreement and unimported-name rejection controls.
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_1582_vmap_std_scalar"
+
 # The completion runner consumes these exact runtime-extent corpus inputs.
 [[path_rule]]
 prefix = "scripts/runtime_extent_oracle.py"
