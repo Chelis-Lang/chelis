@@ -791,6 +791,14 @@ prefix = "examples/nested_tuple_projection.ch"
 disposition = "packages"
 packages = ["chelis-cli", "chelis-e2e"]
 
+# Exact executable-corpus source exercised by both
+# chelis-cli::parity::parity_unicode_string_foundation and
+# chelis-e2e::spec_all_executable_examples_parse_and_check.
+[[path_rule]]
+prefix = "examples/unicode_string_foundation.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e"]
+
 # Exact executable-corpus sources exercised by
 # chelis-e2e::spec_all_executable_examples_parse_and_check. Keep these exact:
 # unrelated future example files must acquire their own evidence-backed owner.
@@ -934,6 +942,15 @@ job = "script-unit"
 cadence = "pull_request and push"
 reason = "test_builtin_atom_registry imports and mutation-tests the semantic contract table in the PR script-unit selection"
 tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "spec/registry/builtin_semantic_identities.md"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "test_builtin_atom_registry parses and validates every checked-in builtin identity against its exact numbered-spec authority"
+tracking_issue = "chelis#1294"
 
 [[path_rule]]
 prefix = "scripts/capacity_census_wire_materialization.py"
