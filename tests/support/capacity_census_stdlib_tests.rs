@@ -211,7 +211,7 @@ fn unresolved_nominals_and_wrong_nominal_arguments_fail_closed() {
 fn nested_alias_fields_and_precision_variables_are_capacity() {
     let rows = sources(&[(
         "nested",
-        "module Std.Nested\nexport (read, generic, ordinary, bounded)\ntype Hidden = (&tensor[3, f64], Dict[string, Result[List[i64], bool]])\ndef read(x: Hidden) -> Hidden = x\nsig generic: tensor[n, p] -> p\ndef generic(x) = x\nsig ordinary: p -> p\ndef ordinary(x) = x\nsig bounded[p: Float]: p -> p\ndef bounded(x) = x",
+        "module Std.Nested\nexport (read, generic, ordinary, bounded)\ntype Hidden = (&tensor[3, f64], Dict[string, Result[List[i64], bool]])\ndef read(x: Hidden) -> Hidden = x\nsig generic[n, p]: tensor[n, p] -> p\ndef generic(x) = x\nsig ordinary[p]: p -> p\ndef ordinary(x) = x\nsig bounded[p: Float]: p -> p\ndef bounded(x) = x",
     )]);
     for name in ["read", "generic", "bounded"] {
         assert!(
@@ -350,7 +350,7 @@ fn transparent_aliases_and_nominal_fields_have_distinct_carrier_flags() {
 fn declared_surface_does_not_infer_expression_bodies_or_capture_type_binders() {
     let rows = sources(&[(
         "binders",
-        "module Std.Binders\nexport (p, ordinary, bounded)\ndef p(x: f64) -> f64 = absent_body_symbol(x)\nsig ordinary: p -> p\ndef ordinary(x) = x\nsig bounded[p: Float]: p -> p\ndef bounded(x) = x",
+        "module Std.Binders\nexport (p, ordinary, bounded)\ndef p(x: f64) -> f64 = absent_body_symbol(x)\nsig ordinary[p]: p -> p\ndef ordinary(x) = x\nsig bounded[p: Float]: p -> p\ndef bounded(x) = x",
     )]);
     assert!(numeric(&rows, "binders::p"));
     assert!(!numeric(&rows, "binders::ordinary"));
@@ -432,8 +432,9 @@ fn tensor_alias_precision_is_substituted_before_numeric_classification() {
         ("p", true),
         ("Identity[p]", true),
     ] {
+        let binders = if argument.contains('p') { "[p]" } else { "" };
         let source = format!(
-            "module Std.Precision\nexport (read)\ntype Identity[a] = a\ntype Vector[a] = tensor[3, a]\nsig read: Vector[{argument}] -> Vector[{argument}]\ndef read(x) = x"
+            "module Std.Precision\nexport (read)\ntype Identity[a] = a\ntype Vector[a] = tensor[3, a]\nsig read{binders}: Vector[{argument}] -> Vector[{argument}]\ndef read(x) = x"
         );
         assert_eq!(
             numeric(&sources(&[("precision", &source)]), "precision::read"),

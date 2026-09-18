@@ -59,9 +59,8 @@ pub enum Decl {
     },
     Sig {
         name: String,
-        /// `[..]` binder list. Partial for a sig: it declares bounds for the
-        /// names it lists, and every other free name in `ty` stays implicitly
-        /// quantified (`spec/02-surf-syntax.md` §P4c).
+        /// Complete `[..]` binder list for every type, dimension, or rank
+        /// variable used by the signature (`spec/02-surf-syntax.md` §P4b).
         type_binders: Vec<TypeBinder>,
         ty: TypeExpr,
         effects: Option<Vec<EffectExpr>>,
@@ -90,7 +89,8 @@ pub enum Decl {
     },
     FunDef {
         name: String,
-        /// `[a, b]` binder list; unkinded, optionally dtype-family bounded.
+        /// Complete `[a, b]` binder list; unkinded, optionally
+        /// dtype-family bounded.
         type_binders: Vec<TypeBinder>,
         params: Vec<Param>,
         ret_ty: Option<TypeExpr>,
@@ -100,6 +100,9 @@ pub enum Decl {
     },
     Property {
         name: String,
+        /// Complete `[..]` binder list for every type, dimension, or rank
+        /// variable used by this property declaration.
+        type_binders: Vec<TypeBinder>,
         params: Vec<Param>,
         preconditions: Vec<Expr>,
         body: Expr,

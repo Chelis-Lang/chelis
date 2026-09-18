@@ -65,7 +65,7 @@ use tempfile::tempdir;
 /// so by the use site the operand is `[Lit(3), Lit(2)]` and the recorded index 1
 /// is stale. Scalar-returning so it doubles as the finite-difference target.
 const REPRO1_FWD_PRELUDE: &str = "\
-def bridge(x: &tensor[a, seq, f32]) -> tensor[a, f32] = sum(permute(x, 1, 0), seq)\n\
+def bridge[a](x: &tensor[a, seq, f32]) -> tensor[a, f32] = sum(permute(x, 1, 0), seq)\n\
 def loss(x: tensor[2, 3, f32]) -> f32 = {\n\
   r = bridge(&x)\n\
   sq = r * r\n\
@@ -76,8 +76,8 @@ def loss(x: tensor[2, 3, f32]) -> f32 = {\n\
 /// permuted operand flows into a Tier-3 `sum_seq[..pre, seq, ..post]` callee, so
 /// the by-position fallback in `extract_rank_var_bindings` is exercised.
 const REPRO2_FWD_PRELUDE: &str = "\
-def sum_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)\n\
-def bridge(x: &tensor[a, seq, f32]) -> tensor[a, f32] = sum_seq(permute(x, 1, 0))\n\
+def sum_seq[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)\n\
+def bridge[a](x: &tensor[a, seq, f32]) -> tensor[a, f32] = sum_seq(permute(x, 1, 0))\n\
 def loss(x: tensor[2, 3, f32]) -> f32 = {\n\
   r = bridge(&x)\n\
   sq = r * r\n\
@@ -88,7 +88,7 @@ def loss(x: tensor[2, 3, f32]) -> f32 = {\n\
 /// resolve `seq` (an anti-over-rejection guard: the #549 re-validation must not
 /// break the legitimate #388/#373 by-position path).
 const CONTROL_FWD_PRELUDE: &str = "\
-def bridge(x: &tensor[a, seq, f32]) -> tensor[a, f32] = sum(x, seq)\n\
+def bridge[a](x: &tensor[a, seq, f32]) -> tensor[a, f32] = sum(x, seq)\n\
 def loss(x: tensor[2, 3, f32]) -> f32 = {\n\
   r = bridge(&x)\n\
   sq = r * r\n\
@@ -114,7 +114,7 @@ const WRONG_COLUMN_GRAD: [f64; 6] = [10.0, 14.0, 18.0, 10.0, 14.0, 18.0];
 /// recorded index 2 holds `b` (3). The anchor cannot be located by value — must
 /// fail loud rather than reduce a possibly-wrong axis.
 const NEG_REDUCE: &str = "\
-def bridge(x: &tensor[a, b, seq, f32]) -> tensor[a, b, f32] = sum(permute(x, 2, 0, 1), seq)\n\
+def bridge[a, b](x: &tensor[a, b, seq, f32]) -> tensor[a, b, f32] = sum(permute(x, 2, 0, 1), seq)\n\
 def loss(x: tensor[2, 3, 2, f32]) -> f32 = {\n\
   r = bridge(&x)\n\
   sq = r * r\n\
@@ -126,8 +126,8 @@ out = grad(loss)(to_tensor([[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], [[7.0, 8.0], [
 /// `sum_seq[..pre, seq, ..post]` callee, exercising the `extract_rank_var_bindings`
 /// by-position fallback.
 const NEG_SPREAD: &str = "\
-def sum_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)\n\
-def bridge(x: &tensor[a, b, seq, f32]) -> tensor[a, b, f32] = sum_seq(permute(x, 2, 0, 1))\n\
+def sum_seq[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)\n\
+def bridge[a, b](x: &tensor[a, b, seq, f32]) -> tensor[a, b, f32] = sum_seq(permute(x, 2, 0, 1))\n\
 def loss(x: tensor[2, 3, 2, f32]) -> f32 = {\n\
   r = bridge(&x)\n\
   sq = r * r\n\
@@ -141,7 +141,7 @@ out = grad(loss)(to_tensor([[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], [[7.0, 8.0], [
 /// relocated correctly (recovery, not rejection). Same `2*r` gradient shape as
 /// Repro 1.
 const POS_RANK3_PRELUDE: &str = "\
-def bridge(x: &tensor[a, b, seq, f32]) -> tensor[a, b, f32] = sum(permute(x, 2, 0, 1), seq)\n\
+def bridge[a, b](x: &tensor[a, b, seq, f32]) -> tensor[a, b, f32] = sum(permute(x, 2, 0, 1), seq)\n\
 def loss(x: tensor[2, 1, 3, f32]) -> f32 = {\n\
   r = bridge(&x)\n\
   sq = r * r\n\
@@ -157,7 +157,7 @@ const POS_RANK3_INPUT: &str = "to_tensor([[[1.0, 2.0, 3.0]], [[4.0, 5.0, 6.0]]])
 /// silently returned the column-sum `[[24,30,36]x3]` (correct row-sum is
 /// `[[12,12,12],[30,30,30],[48,48,48]]`). Must fail LOUD instead.
 const SQUARE_PERMUTE_PRELUDE: &str = "\
-def bridge(x: &tensor[a, seq, f32]) -> tensor[a, f32] = sum(permute(x, 1, 0), seq)\n\
+def bridge[a](x: &tensor[a, seq, f32]) -> tensor[a, f32] = sum(permute(x, 1, 0), seq)\n\
 def loss(x: tensor[3, 3, f32]) -> f32 = {\n\
   r = bridge(&x)\n\
   sq = r * r\n\
@@ -171,7 +171,7 @@ def loss(x: tensor[3, 3, f32]) -> f32 = {\n\
 /// (tracking the anchor through the reorder during lowering) is what recovers
 /// these instead of rejecting.
 const SQUARE_NOPERMUTE_PRELUDE: &str = "\
-def bridge(x: &tensor[a, seq, f32]) -> tensor[a, f32] = sum(x, seq)\n\
+def bridge[a](x: &tensor[a, seq, f32]) -> tensor[a, f32] = sum(x, seq)\n\
 def loss(x: tensor[3, 3, f32]) -> f32 = {\n\
   r = bridge(&x)\n\
   sq = r * r\n\
@@ -646,7 +646,7 @@ fn square_non_permuted_named_reduce_overrejected_pending_deeper_fix() {
 #[test]
 fn correct_and_wrong_axis_gradients_are_distinct() {
     let column_prelude = "\
-def bridge(x: &tensor[seq, a, f32]) -> tensor[a, f32] = sum(x, seq)\n\
+def bridge[a](x: &tensor[seq, a, f32]) -> tensor[a, f32] = sum(x, seq)\n\
 def loss(x: tensor[2, 3, f32]) -> f32 = {\n\
   r = bridge(&x)\n\
   sq = r * r\n\

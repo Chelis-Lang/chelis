@@ -15,10 +15,10 @@
 use chelis_unord::{UnordMap, UnordSet};
 use std::cell::RefCell;
 
-use crate::env::Env;
+use crate::env::{DeclarationBinderIdentities, Env, InstantiatedScheme};
 use crate::errors::{CheckError, CheckErrorKind};
 use crate::session::DiagnosticSink;
-use crate::types::{DimVar, NominalArg, Prim, Scheme, Type, TypeVar, TypeVarRestriction, VarGen};
+use crate::types::{NominalArg, Prim, Scheme, Type, TypeVar, TypeVarRestriction, VarGen};
 use crate::unify::Subst;
 
 thread_local! {
@@ -31,15 +31,13 @@ pub(super) enum RecursiveExpected<'a> {
     Published(&'a Scheme),
 }
 
-type SchemeInstantiation = (Type, Vec<(TypeVar, Type)>, Vec<(DimVar, DimVar)>);
-
 /// Compiler-owned expected type for one recursive member inference. A
 /// published expectation is instantiated through the ordinary Env/Subst path
 /// so its checked contracts receive fresh identities; a provisional first-pass
 /// type remains borrowed and carries no scheme payload.
 pub(super) struct PreparedRecursiveExpected<'a> {
     provisional: Option<&'a Type>,
-    published: Option<SchemeInstantiation>,
+    published: Option<InstantiatedScheme>,
 }
 
 pub(super) struct DeclaredMemberRequest<'a> {
@@ -91,7 +89,7 @@ impl<'a> PreparedRecursiveExpected<'a> {
     pub(super) fn expected_type(&self) -> Option<&Type> {
         self.published
             .as_ref()
-            .map(|(ty, _, _)| ty)
+            .map(|instantiated| &instantiated.ty)
             .or(self.provisional)
     }
 
@@ -107,7 +105,7 @@ impl<'a> PreparedRecursiveExpected<'a> {
         let mapping = self
             .published
             .as_ref()
-            .map_or(&[][..], |(_, mapping, _)| mapping.as_slice());
+            .map_or(&[][..], |instantiated| instantiated.tvars.as_slice());
         begin_caller(name, binder_names, mapping)
     }
 
@@ -130,7 +128,18 @@ impl<'a> PreparedRecursiveExpected<'a> {
         } else {
             None
         };
-        let Some((ty, mapping, dvar_mapping)) = instantiation else {
+        let binder_identities =
+            request
+                .binder_names
+                .map_or_else(DeclarationBinderIdentities::default, |binders| {
+                    env.declared_binder_identities_for_body(
+                        request.name,
+                        binders,
+                        instantiation.as_ref(),
+                        var_gen,
+                    )
+                });
+        let Some(instantiation) = instantiation else {
             let caller_guard = if group_member(request.name) {
                 self.begin_caller(request.name, None)
             } else {
@@ -138,20 +147,18 @@ impl<'a> PreparedRecursiveExpected<'a> {
             };
             return DeclaredMemberSetup {
                 ty: None,
-                dim_names: UnordMap::new(),
-                type_names: UnordMap::new(),
+                binder_identities,
                 caller_guard,
             };
         };
         let caller_guard = if group_member(request.name) {
-            begin_caller(request.name, request.binder_names, &mapping)
+            begin_caller(request.name, request.binder_names, &instantiation.tvars)
         } else {
             CallerGuard::inactive()
         };
         DeclaredMemberSetup {
-            ty: Some(ty),
-            dim_names: env.declared_dim_names_for(request.name, &dvar_mapping),
-            type_names: env.declared_type_names_for(request.name, &mapping),
+            ty: Some(instantiation.ty),
+            binder_identities,
             caller_guard,
         }
     }
@@ -159,8 +166,7 @@ impl<'a> PreparedRecursiveExpected<'a> {
 
 pub(super) struct DeclaredMemberSetup {
     pub(super) ty: Option<Type>,
-    pub(super) dim_names: UnordMap<DimVar, String>,
-    pub(super) type_names: UnordMap<TypeVar, String>,
+    pub(super) binder_identities: DeclarationBinderIdentities,
     pub(super) caller_guard: CallerGuard,
 }
 

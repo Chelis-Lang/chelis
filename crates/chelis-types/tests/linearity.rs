@@ -190,7 +190,7 @@ fn closure_capture_consumes_outer_tensor_carrying_adt() {
 type Params[n] =
   | Params { weight: tensor[n, f32] }
 
-sig use_params: Params[n] -> bool
+sig use_params[n]: Params[n] -> bool
 def use_params(p) = true
 
 def bad[n](p: Params[n]) -> bool =
@@ -335,7 +335,7 @@ fn len_does_not_consume_list_argument() {
     // regression for the School `_step_list` read-then-reuse shape.
     check_surf(
         r#"
-def ok(params: List[tensor[k, f32]]) -> List[tensor[k, f32]] =
+def ok[k](params: List[tensor[k, f32]]) -> List[tensor[k, f32]] =
   {
     n: i64 = len(params)
     params
@@ -351,7 +351,7 @@ fn index_does_not_consume_list_argument() {
     // list via a `const *` (`chelis_list_index`), never freeing it.
     check_surf(
         r#"
-def ok(params: List[tensor[k, f32]]) -> List[tensor[k, f32]] =
+def ok[k](params: List[tensor[k, f32]]) -> List[tensor[k, f32]] =
   {
     first: tensor[k, f32] = index(params, 0i64)
     _ = drop(first)
@@ -371,7 +371,7 @@ fn list_len_then_index_then_reuse_compiles() {
     // clean at 0.10.0, regressed at 0.10.1 (chelis#527).
     check_surf(
         r#"
-def step(params: List[tensor[k, f32]]) -> List[tensor[k, f32]] =
+def step[k](params: List[tensor[k, f32]]) -> List[tensor[k, f32]] =
   {
     n: i64 = len(params)
     first: tensor[k, f32] = index(params, 0i64)
@@ -390,7 +390,7 @@ fn len_still_flags_use_after_genuine_consume() {
     // the later `len(params)` borrow-read is a use-after-consume.
     let errors = check_surf(
         r#"
-def bad(params: List[tensor[k, f32]]) -> i64 =
+def bad[k](params: List[tensor[k, f32]]) -> i64 =
   {
     _ = drop(params)
     n: i64 = len(params)
@@ -411,7 +411,7 @@ fn index_still_flags_use_after_genuine_consume() {
     // Negative parity for `index`, mirroring the `len` case above.
     let errors = check_surf(
         r#"
-def bad(params: List[tensor[k, f32]]) -> tensor[k, f32] =
+def bad[k](params: List[tensor[k, f32]]) -> tensor[k, f32] =
   {
     _ = drop(params)
     first: tensor[k, f32] = index(params, 0i64)
@@ -440,7 +440,7 @@ fn len_explicit_container_borrow_is_a_type_error() {
     // `len(&xs)`.
     let errors = typecheck_surf(
         r#"
-def bad(params: List[tensor[k, f32]]) -> i64 =
+def bad[k](params: List[tensor[k, f32]]) -> i64 =
   {
     n: i64 = len(&params)
     n
@@ -467,7 +467,7 @@ fn index_explicit_container_borrow_is_a_type_error() {
     // `index(&xs, i)` is rejected at check time (chelis#527).
     let errors = typecheck_surf(
         r#"
-def bad(params: List[tensor[k, f32]]) -> tensor[k, f32] =
+def bad[k](params: List[tensor[k, f32]]) -> tensor[k, f32] =
   {
     first: tensor[k, f32] = index(&params, 0i64)
     first

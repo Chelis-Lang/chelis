@@ -1,7 +1,7 @@
 // Regression for chelis#143: `sig` dim variables were not unified
 // across parameter positions at type-check.
 //
-// A function with `sig f: &tensor[n, f32] -> &tensor[n, f32] -> ...`
+// A function with `sig f[n]: &tensor[n, f32] -> &tensor[n, f32] -> ...`
 // should reject any call that passes tensors with different concrete
 // values for `n`. At 0.7.10 the check silently passed because the
 // `Wildcard ↔ Var` case in `unify_dim` bound the dim variable to
@@ -55,7 +55,7 @@ fn sig_dim_unification_mismatched_concrete_args_is_caught() {
     write_file(
         &fixture,
         "module DimUnify\n\
-         sig pair_id: &tensor[n, f32] -> &tensor[n, f32] -> tensor[n, f32]\n\
+         sig pair_id[n]: &tensor[n, f32] -> &tensor[n, f32] -> tensor[n, f32]\n\
          def pair_id(x, y) = x\n\
          def call_it(a: &tensor[2, f32], b: &tensor[3, f32]) -> tensor[2, f32] = pair_id(a, b)\n",
     );
@@ -83,7 +83,7 @@ fn sig_dim_unification_matched_concrete_args_passes_dim_check() {
     write_file(
         &fixture,
         "module DimUnify\n\
-         sig pair_id: &tensor[n, f32] -> &tensor[n, f32] -> tensor[n, f32]\n\
+         sig pair_id[n]: &tensor[n, f32] -> &tensor[n, f32] -> tensor[n, f32]\n\
          def pair_id(x, y) = x\n\
          def call_it(a: &tensor[4, f32], b: &tensor[4, f32]) -> tensor[4, f32] = pair_id(a, b)\n",
     );
@@ -110,7 +110,7 @@ fn sig_dim_unification_wildcard_arg_does_not_mask_downstream_mismatch() {
     write_file(
         &fixture,
         "module DimUnify\n\
-         sig pair_id: &tensor[n, f32] -> &tensor[n, f32] -> tensor[n, f32]\n\
+         sig pair_id[n]: &tensor[n, f32] -> &tensor[n, f32] -> tensor[n, f32]\n\
          def pair_id(x, y) = x\n\
          sig expect_three: &tensor[3, f32] -> f32\n\
          def expect_three(t) = cast(0.0, f32)\n\

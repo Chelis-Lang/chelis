@@ -1,7 +1,7 @@
 //! chelis#1593: an unsigned dtype spelling in a SCALAR type position must
 //! desugar to `(t-prim {} <name>)` so the type checker's
 //! `spec/04-type-system.md` §1.1.1 / §1.1.2 rejection fires, never to an
-//! implicitly quantified `(t-var {} <name>)`.
+//! an invented `(t-var {} <name>)`.
 //!
 //! `spec/04-type-system.md` §5.8.1 states the rule: the §1.1.2 unsigned
 //! spellings "are explicitly excluded so they reach the type-checker's §1.1.2
@@ -72,6 +72,16 @@ fn assert_reaches_rejection(deep: &str, name: &str, position: &str) {
     );
 }
 
+fn assert_forbidden_binder(source: &str, name: &str, position: &str) {
+    let error = parse_str(source).expect_err("reserved dtype cannot enter binder list");
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains(&format!("`{name}`"))
+            && rendered.contains("cannot be a declaration binder"),
+        "wrong forbidden-binder diagnostic for `{name}` in {position}: {rendered}"
+    );
+}
+
 /// REGRESSION test. The named instance of chelis#1593: a scalar parameter and
 /// return annotation.
 #[test]
@@ -84,8 +94,8 @@ fn every_unsigned_name_in_a_scalar_parameter_and_return_reaches_the_rejection() 
     }
 }
 
-/// REGRESSION test. A standalone `sig` is the implicit-quantifier context
-/// §5.8.1's sentence names directly.
+/// REGRESSION test. A standalone `sig` must preserve the reserved spelling as
+/// a primitive-shaped use rather than inventing a binder.
 #[test]
 fn every_unsigned_name_in_a_sig_reaches_the_rejection() {
     for name in UNSIGNED {
@@ -146,7 +156,7 @@ fn every_unsigned_name_in_a_lambda_annotation_reaches_the_rejection() {
 fn the_tensor_precision_slot_still_emits_t_prim() {
     for name in UNSIGNED {
         let deep = deep_of(&format!(
-            "module P.M\nexport (f)\nsig f: tensor[d, {name}] -> tensor[d, {name}]\n\
+            "module P.M\nexport (f)\nsig f[d]: tensor[d, {name}] -> tensor[d, {name}]\n\
              def f(x) = x\n"
         ));
         assert_reaches_rejection(&deep, name, "a tensor precision slot");
@@ -165,14 +175,12 @@ fn a_cast_target_still_emits_t_prim() {
     }
 }
 
-/// DISPOSITION LOCK. Green in both states, and the neighbour this change must
-/// not disturb: a lowercase name that is NOT a reserved dtype spelling is still
-/// an implicitly quantified type variable per §5.8.1.
+/// DISPOSITION LOCK. The ordinary explicit-binder neighbour remains legal.
 #[test]
-fn a_genuine_lowercase_name_still_quantifies() {
+fn a_genuine_explicit_lowercase_binder_still_quantifies() {
     for source in [
-        "module P.M\nexport (f)\ndef f(x: a) -> a = x\n",
-        "module P.M\nexport (f)\nsig f: a -> a\ndef f(x) = x\n",
+        "module P.M\nexport (f)\ndef f[a](x: a) -> a = x\n",
+        "module P.M\nexport (f)\nsig f[a]: a -> a\ndef f(x) = x\n",
     ] {
         let deep = deep_of(source);
         assert!(
@@ -205,29 +213,30 @@ fn the_formatter_leaves_an_unsigned_spelling_unchanged() {
 }
 
 /// REGRESSION test. §5.8.1's rule is stated on the category, so an explicit
-/// `[..]` quantifier list does not rebind a reserved spelling. Below the
-/// quantifier check this still produced `(t-var {} u8)`.
+/// `[..]` quantifier list rejects a reserved spelling before it can be rebound.
 #[test]
 fn an_explicit_binder_does_not_rebind_a_reserved_scalar_name() {
     for name in UNSIGNED.iter().chain(DEFERRED.iter()) {
-        let deep = deep_of(&format!(
-            "module P.M\nexport (f)\ndef f[{name}](x: {name}) -> {name} = x\n"
-        ));
-        assert_reaches_rejection(&deep, name, "an explicit binder in a scalar position");
+        assert_forbidden_binder(
+            &format!("module P.M\nexport (f)\ndef f[{name}](x: {name}) -> {name} = x\n"),
+            name,
+            "an explicit binder in a scalar position",
+        );
     }
 }
 
-/// REGRESSION test. The tensor form of the same hole. The precision slot's
-/// quantifier check sat above its reserved-name row, so an explicit binder
-/// defeated the very fall-through the scalar arm was copying.
+/// REGRESSION test. The tensor form of the same reserved-binder rejection.
 #[test]
 fn an_explicit_binder_does_not_rebind_a_reserved_tensor_precision() {
     for name in UNSIGNED.iter().chain(DEFERRED.iter()) {
-        let deep = deep_of(&format!(
-            "module P.M\nexport (f)\n\
-             def f[{name}](x: tensor[3, {name}]) -> tensor[3, {name}] = x\n"
-        ));
-        assert_reaches_rejection(&deep, name, "an explicit binder in a tensor precision slot");
+        assert_forbidden_binder(
+            &format!(
+                "module P.M\nexport (f)\n\
+                 def f[{name}](x: tensor[3, {name}]) -> tensor[3, {name}] = x\n"
+            ),
+            name,
+            "an explicit binder in a tensor precision slot",
+        );
     }
 }
 
@@ -278,13 +287,13 @@ fn deep_of_source(source: &str) -> Vec<chelis_deep::Expr> {
 const RESERVED_TVAR_SCALAR: &str = "(module {surf_path: \"P.M\"}\n\
      p.m\n\
      (export {} f)\n\
-     (defsig {} f (t-fn {} (t-var {} NAME) (t-var {} NAME)))\n\
+     (defsig {} f (NAME) (t-fn {} (t-var {} NAME) (t-var {} NAME)))\n\
      (def {} f (fn {} (params {} (x {type: (t-var {} NAME)})) (var {} x))))";
 
 const RESERVED_TVAR_TENSOR: &str = "(module {surf_path: \"P.M\"}\n\
      p.m\n\
      (export {} f)\n\
-     (defsig {} f (t-fn {} (t-tensor {} (d-lit {} 3) (t-var {} NAME)) \
+     (defsig {} f (NAME) (t-fn {} (t-tensor {} (d-lit {} 3) (t-var {} NAME)) \
      (t-tensor {} (d-lit {} 3) (t-var {} NAME))))\n\
      (def {} f (fn {} (params {} x) (var {} x))))";
 

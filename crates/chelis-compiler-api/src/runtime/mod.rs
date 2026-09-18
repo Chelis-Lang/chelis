@@ -772,7 +772,7 @@ fn register_declared_signatures(exprs: &[Expr], signatures: &mut UnordMap<String
         let Some((DeepTag::Defsig, kids)) = tagged_expr_children(expr) else {
             continue;
         };
-        let (Some(name), Some(signature)) = (kids.first().and_then(symbol_name), kids.get(1))
+        let (Some(name), Some(signature)) = (kids.first().and_then(symbol_name), kids.last())
         else {
             continue;
         };

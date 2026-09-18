@@ -9,33 +9,14 @@
 //! means dim names in the ascription correctly share with the enclosing
 //! function signature's dim vars, or get fresh vars.
 //!
-//! What the codebase actually does
-//! -------------------------------
-//! The `&mut UnordMap` passed to `deep_type_to_resolved_type` is a
-//! `UnordMap<String, TypeVar>` (`infer.rs:5404-5412`). It maps named
-//! type variables (`'a`, `T`, etc.) to internal `TypeVar` IDs. It is
-//! NOT a dim-variable map.
-//!
-//! Dim names in Chelis types parse to `Dim::Name(String)` — string
-//! labels, not capturing variables (`infer.rs:12007-12013`,
-//! `crates/chelis-types/src/types.rs`). At unification time
-//! (`unify_dim` in `unify.rs`):
-//!
-//! - `Dim::Name(n1) <-> Dim::Name(n2)` succeeds iff `n1 == n2` (line 442).
-//! - `Dim::Name(n) <-> Dim::Var(v)` binds `v := Name(n)` (line 446-447).
-//!
-//! So the user's `n` in a let-ascription is a string label. It does
-//! NOT capture the enclosing sig's `n` directly; it unifies with
-//! whatever the RHS expression's dim happens to be, by name equality
-//! for `Name <-> Name` and by binding for `Var <-> Name`.
-//!
-//! In practice this means: when the body's RHS type already carries
-//! the sig's instantiated dim var (because the sig param was seeded
-//! into the body's env), the user's `Name("n")` binds that var to
-//! `Name("n")` and any further reference to the var resolves to the
-//! same name. Cross-position sig contracts (`&tensor[n, f32] -> &tensor[n, f32]`)
-//! are enforced via the sig's instantiation step, not via let-ascription
-//! "capture."
+//! Current explicit-binder contract
+//! --------------------------------
+//! [04-INF-6] now makes every listed declaration binder rigid throughout the
+//! body. An ordinary annotation spelling a listed dimension name therefore
+//! reuses that declaration-owned `DimVar`; an unlisted name remains outside
+//! the declaration binder scope. The third probe below was intentionally
+//! inverted when that normative contract replaced the historical label-only
+//! behavior.
 //!
 //! The probes below pin the observed behavior so the design is
 //! discoverable and so future refactors don't silently change it.
@@ -81,7 +62,7 @@ fn let_ascription_with_sig_dim_name_typechecks_when_dim_matches() {
     // consistent with that. No error expected.
     let errors = typecheck_surf(
         r#"
-sig pair_id: &tensor[n, f32] -> &tensor[n, f32] -> tensor[n, f32]
+sig pair_id[n]: &tensor[n, f32] -> &tensor[n, f32] -> tensor[n, f32]
 def pair_id(a: &tensor[n, f32], b: &tensor[n, f32]) -> tensor[n, f32] =
   {
     x: &tensor[n, f32] = a
@@ -129,26 +110,13 @@ def caller(t: &tensor[2, f32]) -> &tensor[2, f32] =
 }
 
 #[test]
-fn dim_name_is_a_label_not_a_capture() {
-    // OBSERVATIONAL: in Chelis today, dim names like `n` are
-    // `Dim::Name(String)` labels. A let-ascription `x: tensor[n, f32]`
-    // does NOT "capture" the enclosing sig's `n` per-binding; instead,
-    // the user's `Name("n")` unifies by string equality with whatever
-    // dim the RHS expression carries, and binds any free dim var to
-    // `Name("n")`.
-    //
-    // For a sig like `&tensor[n, f32] -> &tensor[m, f32] -> ...` (two
-    // DISTINCT dim names), writing both let-ascriptions as `n` does
-    // NOT produce a cross-position contract violation: it just binds
-    // both fresh sig vars (d_n, d_m) to `Name("n")` independently.
-    //
-    // This is the existing behavior, not a bug introduced by the
-    // chelis#159 patch. It is pinned here so a future refactor that
-    // tries to "make let-ascription dim names capture" doesn't silently
-    // change the semantics without trip-wiring this test.
+fn declared_dim_name_captures_the_declaration_identity() {
+    // `n` and `m` are distinct authored binders. Reusing `n` on the
+    // ascription backed by the `m` parameter identifies those declarations,
+    // which [04-INF-6] rejects.
     let errors = typecheck_surf(
         r#"
-def caller(a: &tensor[n, f32], b: &tensor[m, f32]) -> &tensor[n, f32] =
+def caller[n, m](a: &tensor[n, f32], b: &tensor[m, f32]) -> &tensor[n, f32] =
   {
     x: &tensor[n, f32] = a
     y: &tensor[n, f32] = b
@@ -157,12 +125,14 @@ def caller(a: &tensor[n, f32], b: &tensor[m, f32]) -> &tensor[n, f32] =
 "#,
     );
     assert!(
-        !has_dimension_mismatch(&errors),
-        "today, naming both let-ascriptions `n` against sig params \
-         with distinct dim names `n` and `m` does not produce a \
-         DimensionMismatch (dim names are labels, not captures). If \
-         this test starts failing, the design has shifted - update \
-         the diagnosis doc accordingly. Got errors:\n{}",
+        errors.iter().any(|error| {
+            matches!(error.kind, CheckErrorKind::DimensionMismatch)
+                && error.message.contains("`n`")
+                && error.message.contains("`m`")
+                && error.message.contains("[04-INF-6]")
+        }),
+        "an ordinary body annotation must reuse the declaration-owned dim \
+         identity and reject collapsing `n` with `m`; got errors:\n{}",
         errors_summary(&errors)
     );
 }

@@ -5,7 +5,8 @@ The planner classifies every changed path, compares exact base/candidate Cargo
 metadata, and emits two disjoint four-shard selections:
 
 * ``change-owned`` is required and contains added/directly modified eligible
-  integration targets.
+  integration targets plus every eligible target in packages selected by a
+  reviewed required-package migration rule.
 * ``package-expansion`` is informational and contains the remaining eligible
   targets in directly changed or explicitly selected packages.
 
@@ -43,7 +44,7 @@ else:
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 PLAN_VERSION = 3
 RECEIPT_VERSION = 1
 STANDING_COVERAGE_VERSION = 1
@@ -175,12 +176,26 @@ class PathRule:
 
 
 @dataclass(frozen=True)
+class RequiredPackageRule:
+    prefix: str
+    packages: tuple[str, ...]
+    reason: str
+    tracking_issue: str
+
+    def matches(self, path: str) -> bool:
+        if self.prefix.endswith("/"):
+            return path.startswith(self.prefix)
+        return path == self.prefix
+
+
+@dataclass(frozen=True)
 class Config:
     version: int
     standing_targets: tuple[Identity, ...]
     manual_only_targets: Mapping[Identity, Owner]
     target_exclusions: Mapping[Identity, Owner]
     test_exclusions: Mapping[TestIdentity, Owner]
+    required_package_rules: tuple[RequiredPackageRule, ...]
     path_rules: tuple[PathRule, ...]
 
 
@@ -258,7 +273,7 @@ def _rules_overlap(left: str, right: str) -> bool:
 
 
 def read_config(path: Path) -> Config:
-    """Read the strict version-2 five-row-kind configuration."""
+    """Read the strict version-3 six-row-kind configuration."""
     data = tomllib.loads(path.read_text())
     allowed = {
         "version",
@@ -266,6 +281,7 @@ def read_config(path: Path) -> Config:
         "manual_only_target",
         "target_exclusion",
         "test_exclusion",
+        "required_package_rule",
         "path_rule",
     }
     if set(data) - allowed:
@@ -353,6 +369,59 @@ def read_config(path: Path) -> Config:
             f"test exclusions are forbidden: {manual_test_exclusions}"
         )
 
+    required_package_rules: list[RequiredPackageRule] = []
+    for row in _rows(data, "required_package_rule"):
+        if set(row) != {
+            "prefix",
+            "packages",
+            "reason",
+            "tracking_issue",
+        }:
+            raise ValueError(
+                "required_package_rule requires prefix, packages, reason, "
+                "and tracking_issue"
+            )
+        prefix = _nonempty_string(row, "prefix")
+        if not _valid_prefix(prefix):
+            raise ValueError(
+                f"invalid required_package_rule prefix: {prefix!r}"
+            )
+        raw_packages = row["packages"]
+        if (
+            not isinstance(raw_packages, list)
+            or not raw_packages
+            or any(
+                not isinstance(package, str)
+                or not IDENTIFIER.fullmatch(package)
+                for package in raw_packages
+            )
+            or len(set(raw_packages)) != len(raw_packages)
+        ):
+            raise ValueError(
+                "required_package_rule packages must be unique exact package names"
+            )
+        reason = _nonempty_string(row, "reason")
+        tracking_issue = _nonempty_string(row, "tracking_issue")
+        if not ISSUE.fullmatch(tracking_issue):
+            raise ValueError(
+                "required_package_rule tracking_issue must be chelis#N: "
+                f"{tracking_issue!r}"
+            )
+        for existing in required_package_rules:
+            if _rules_overlap(existing.prefix, prefix):
+                raise ValueError(
+                    "ambiguous required package rules overlap: "
+                    f"{existing.prefix!r}, {prefix!r}"
+                )
+        required_package_rules.append(
+            RequiredPackageRule(
+                prefix,
+                tuple(raw_packages),
+                reason,
+                tracking_issue,
+            )
+        )
+
     path_rules: list[PathRule] = []
     for row in _rows(data, "path_rule"):
         disposition = row.get("disposition")
@@ -402,6 +471,7 @@ def read_config(path: Path) -> Config:
         manual_only_targets,
         target_exclusions,
         test_exclusions,
+        tuple(required_package_rules),
         tuple(path_rules),
     )
 
@@ -693,6 +763,18 @@ def validate_config(
             )
         if not any(rule.matches(path) for path in tracked_paths):
             raise ValueError(f"stale path rule matches no tracked path: {rule.prefix}")
+    for rule in config.required_package_rules:
+        stale_packages = sorted(set(rule.packages) - packages)
+        if stale_packages:
+            raise ValueError(
+                f"required package rule {rule.prefix!r} names stale packages: "
+                f"{stale_packages}"
+            )
+        if not any(rule.matches(path) for path in tracked_paths):
+            raise ValueError(
+                "stale required package rule matches no tracked path: "
+                f"{rule.prefix}"
+            )
 
 
 def parse_name_status_z(raw: bytes) -> list[ChangeRecord]:
@@ -711,8 +793,13 @@ def parse_name_status_z(raw: bytes) -> list[ChangeRecord]:
         kind = status[:1]
         if kind == "C":
             raise ValueError("copy status is not supported; planner expects --find-renames")
-        valid_rename = re.fullmatch(r"R(?:100|[0-9]{1,2})", status)
-        if status not in {"A", "D", "M", "T"} and valid_rename is None:
+        rename_score = status[1:]
+        valid_rename = (
+            kind == "R"
+            and re.fullmatch(r"[0-9]{1,3}", rename_score) is not None
+            and int(rename_score) <= 100
+        )
+        if status not in {"A", "D", "M", "T"} and not valid_rename:
             raise ValueError(f"unsupported git diff status: {status!r}")
         if index >= len(fields):
             raise ValueError(f"missing path after git diff status {status}")
@@ -881,6 +968,18 @@ def config_digest(config: Config) -> str:
             {"identity": identity.canonical, "owner": _owner_dict(owner)}
             for identity, owner in sorted(config.test_exclusions.items())
         ],
+        "required_package_rules": [
+            {
+                "prefix": rule.prefix,
+                "packages": sorted(rule.packages),
+                "reason": rule.reason,
+                "tracking_issue": rule.tracking_issue,
+            }
+            for rule in sorted(
+                config.required_package_rules,
+                key=lambda row: row.prefix,
+            )
+        ],
         "path_rules": path_rules,
     }
     return sha256_bytes(canonical_json(payload))
@@ -943,10 +1042,12 @@ def make_plan(
         )
 
     selected_packages: set[str] = set(trusted_targeted_packages)
+    required_packages: set[str] = set()
     change_owned: set[Identity] = set()
     dispositions: list[dict[str, Any]] = []
     target_dispositions: list[dict[str, Any]] = []
     seen_paths: set[str] = set()
+    required_rows_by_path: dict[str, list[dict[str, object]]] = {}
 
     for identity in sorted(set(candidate_all) - set(base_all)):
         info = candidate_all[identity]
@@ -980,6 +1081,22 @@ def make_plan(
         if path in seen_paths:
             continue
         seen_paths.add(path)
+        required_rows = []
+        for rule in config.required_package_rules:
+            if not rule.matches(path):
+                continue
+            required_packages.update(rule.packages)
+            selected_packages.update(rule.packages)
+            required_rows.append(
+                {
+                    "rule": rule.prefix,
+                    "packages": list(rule.packages),
+                    "reason": rule.reason,
+                    "tracking_issue": rule.tracking_issue,
+                }
+            )
+        if required_rows:
+            required_rows_by_path[path] = required_rows
         target_space = base_all if side == "base" else candidate_all
         targets = _target_at_path(path, target_space)
         if len(targets) > 1:
@@ -1105,6 +1222,17 @@ def make_plan(
             disposition["owner"] = _owner_dict(rule.owner)
         dispositions.append(disposition)
 
+    for disposition in dispositions:
+        required_rows = required_rows_by_path.get(disposition["path"])
+        if required_rows:
+            disposition["required_package_rules"] = required_rows
+
+    change_owned.update(
+        identity
+        for identity in candidate_eligible
+        if identity.package in required_packages
+        and identity not in config.target_exclusions
+    )
     expansion = {
         identity
         for identity in candidate_eligible
@@ -1553,6 +1681,80 @@ def _validate_plan_shape(plan: Mapping[str, Any]) -> None:
         or len(packages) != len(set(packages))
     ):
         raise ValueError("plan selected_packages must be unique package names")
+    required_packages: set[str] = set()
+    seen_required_rules: set[tuple[str, str]] = set()
+    for disposition in plan["path_dispositions"]:
+        if not isinstance(disposition, dict):
+            raise ValueError("plan path_dispositions rows must be objects")
+        rows = disposition.get("required_package_rules", [])
+        if not isinstance(rows, list):
+            raise ValueError("plan required_package_rules must be a list")
+        path = disposition.get("path")
+        if rows and not isinstance(path, str):
+            raise ValueError(
+                "plan required_package_rules require a disposition path"
+            )
+        for row in rows:
+            if not isinstance(row, dict) or set(row) != {
+                "rule",
+                "packages",
+                "reason",
+                "tracking_issue",
+            }:
+                raise ValueError(
+                    "plan required_package_rules row has the wrong shape"
+                )
+            rule = row["rule"]
+            row_packages = row["packages"]
+            reason = row["reason"]
+            tracking_issue = row["tracking_issue"]
+            if not isinstance(rule, str) or not _valid_prefix(rule):
+                raise ValueError(
+                    "plan required_package_rules requires a valid rule prefix"
+                )
+            if (
+                rule.endswith("/")
+                and not path.startswith(rule)
+                or not rule.endswith("/")
+                and path != rule
+            ):
+                raise ValueError(
+                    "plan required_package_rules rule does not match its path"
+                )
+            if (
+                not isinstance(row_packages, list)
+                or not row_packages
+                or any(
+                    not isinstance(package, str)
+                    or not IDENTIFIER.fullmatch(package)
+                    for package in row_packages
+                )
+                or len(row_packages) != len(set(row_packages))
+            ):
+                raise ValueError(
+                    "plan required_package_rules packages must be unique "
+                    "package names"
+                )
+            if not isinstance(reason, str) or not reason.strip():
+                raise ValueError(
+                    "plan required_package_rules requires a reason"
+                )
+            if (
+                not isinstance(tracking_issue, str)
+                or not ISSUE.fullmatch(tracking_issue)
+            ):
+                raise ValueError(
+                    "plan required_package_rules requires chelis#N tracking"
+                )
+            identity = (path, rule)
+            if identity in seen_required_rules:
+                raise ValueError(
+                    "plan required_package_rules contains a duplicate rule"
+                )
+            seen_required_rules.add(identity)
+            required_packages.update(row_packages)
+    if not required_packages <= set(packages):
+        raise ValueError("plan required packages must be selected packages")
     eligible = set(_identity_list(plan, "eligible_targets"))
     change_owned = set(_identity_list(plan, "change_owned"))
     expansion = set(_identity_list(plan, "package_expansion"))
@@ -1597,6 +1799,16 @@ def _validate_plan_shape(plan: Mapping[str, Any]) -> None:
     target_exclusions = {
         row["identity"] for row in plan["target_exclusions"]
     }
+    required_targets = {
+        identity
+        for identity in eligible
+        if Identity.parse(identity).package in required_packages
+        and identity not in target_exclusions
+    }
+    if not required_targets <= change_owned:
+        raise ValueError(
+            "plan required package targets must be change-owned"
+        )
     if manual_only & (standing | target_exclusions):
         raise ValueError(
             "plan manual-only targets conflict with standing or excluded targets"

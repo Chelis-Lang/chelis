@@ -4121,24 +4121,34 @@ class ContractValidationTests(unittest.TestCase):
         )
         self.assert_contract_fails("Surf dtype-family bound production")
 
-    def test_a_bound_cannot_be_written_in_two_binder_lists(self) -> None:
+    def test_declaration_binder_list_cannot_be_incomplete(self) -> None:
         self.replace(
             Path("spec/02-surf-syntax.md"),
-            "A bound belongs to one binder\nlist per declaration",
-            "A bound may be repeated in both binder\nlists when they agree",
+            "A `sig`'s `[..]` clause is complete: every `t-var`, `d-var`, and\n"
+            "`d-rank` name in the signature appears exactly once.",
+            "A `sig`'s `[..]` clause is advisory: variables may be omitted.",
         )
-        self.assert_contract_fails("Surf single bound binder list")
+        self.assert_contract_fails("Surf complete declaration binder list")
 
     def test_the_occurrence_rule_cannot_widen_past_bounded_binders(self) -> None:
         # [04-DTYPE-2] makes only a BOUNDED binder owe an occurrence, and the
-        # checker agrees: `sig f[zz]: p -> p` checks clean. Asserting it for
-        # every listed name is normative prose broader than the decided rule.
+        # checker agrees: `sig f[zz]: i32 -> i32` checks clean. Asserting it
+        # for every listed name is normative prose broader than the decision.
         self.replace(
             Path("spec/02-surf-syntax.md"),
-            "A listed name **that declares a\nbound** must occur in the declared type.",
+            "A listed name **that declares\na bound** must occur in the declared type.",
             "A listed name must occur in the declared type.",
         )
         self.assert_contract_fails("Surf occurrence rule is bounded-binder only")
+
+    def test_one_declaration_cannot_have_two_binder_lists(self) -> None:
+        self.replace(
+            Path("spec/02-surf-syntax.md"),
+            "One binder list owns each\ndeclaration: a standalone `sig` carries it, "
+            "and a matching `def` must\nnot carry a second list.",
+            "Both a standalone `sig` and its matching `def` may carry binder lists.",
+        )
+        self.assert_contract_fails("Surf single declaration binder-list owner")
 
     def test_the_two_bound_failures_cannot_claim_one_diagnostic_shape(
         self,

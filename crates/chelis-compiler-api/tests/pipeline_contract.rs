@@ -49,7 +49,7 @@ fn type_analysis_goal_returns_fitness_and_one_checked_product() {
 #[test]
 fn full_check_goal_returns_a_fully_checked_state() {
     let outcome = run_source(request(
-        "def identity(x: tensor[n, f32]) -> tensor[n, f32] = x\n",
+        "def identity[n](x: tensor[n, f32]) -> tensor[n, f32] = x\n",
         PipelineGoal::FullCheck,
     ))
     .expect("valid source must pass all semantic stages");
@@ -66,7 +66,8 @@ fn full_check_goal_returns_a_fully_checked_state() {
 
 #[test]
 fn lower_goal_returns_checked_state_dag_and_canonical_tuple_roots() {
-    let source = "def pair(x: tensor[n, f32]) -> (tensor[n, f32], tensor[n, f32]) = (copy(x), x)\n";
+    let source =
+        "def pair[n](x: tensor[n, f32]) -> (tensor[n, f32], tensor[n, f32]) = (copy(x), x)\n";
     let outcome = run_source(request(source, PipelineGoal::Lower(LoweringMode::Strict)))
         .expect("valid tuple source must lower");
 
@@ -90,7 +91,7 @@ fn lower_goal_returns_checked_state_dag_and_canonical_tuple_roots() {
 #[test]
 fn declared_roots_and_forward_load_aliases_have_distinct_lookups() {
     let outcome = run_source(request(
-        "def out(input: tensor[n, f32]) -> tensor[n, f32] = relu(input)\n",
+        "def out[n](input: tensor[n, f32]) -> tensor[n, f32] = relu(input)\n",
         PipelineGoal::Lower(LoweringMode::Strict),
     ))
     .expect("valid source must lower");
@@ -149,7 +150,7 @@ fn pre_cancelled_pipeline_rejects_structurally_before_parsing() {
 #[test]
 fn direct_lower_functions_keep_the_lower_cancellation_stage() {
     let checked = complete_checks(
-        accepted_analysis("def identity(x: tensor[n, f32]) -> tensor[n, f32] = x\n"),
+        accepted_analysis("def identity[n](x: tensor[n, f32]) -> tensor[n, f32] = x\n"),
         SemanticContext::Isolated,
     )
     .expect("the fixture must pass semantic checks");
@@ -222,7 +223,7 @@ fn type_rejection_has_no_checked_or_lowered_product() {
 #[test]
 fn complete_checks_returns_a_clean_checked_product() {
     let checked = complete_checks(
-        accepted_analysis("def identity(x: tensor[n, f32]) -> tensor[n, f32] = x\n"),
+        accepted_analysis("def identity[n](x: tensor[n, f32]) -> tensor[n, f32] = x\n"),
         SemanticContext::Isolated,
     )
     .expect("clean semantics must return the checked product");

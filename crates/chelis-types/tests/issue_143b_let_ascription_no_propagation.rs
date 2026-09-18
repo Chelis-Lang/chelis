@@ -93,7 +93,7 @@ fn let_binding_ascription_propagates_to_to_tensor_rhs() {
     // to one), and the sig var `n` stays free.
     let errors = typecheck_surf(
         r#"
-sig pair_id: &tensor[n, f32] -> &tensor[n, f32] -> tensor[n, f32]
+sig pair_id[n]: &tensor[n, f32] -> &tensor[n, f32] -> tensor[n, f32]
 def pair_id(x, y) = x
 def caller() -> tensor[3, f32] =
   {
@@ -119,7 +119,7 @@ fn parameter_ascription_path_works_today() {
     // and isolates the bug above to the let-binding path specifically.
     let errors = typecheck_surf(
         r#"
-sig pair_id: &tensor[n, f32] -> &tensor[n, f32] -> tensor[n, f32]
+sig pair_id[n]: &tensor[n, f32] -> &tensor[n, f32] -> tensor[n, f32]
 def pair_id(x, y) = x
 def caller(a: &tensor[3, f32], b: &tensor[5, f32]) -> tensor[3, f32] =
   pair_id(a, b)
@@ -140,7 +140,7 @@ fn let_binding_ascription_with_matched_shapes_does_not_spuriously_fail() {
     // and introduce false positives for the matched-shape case.
     let errors = typecheck_surf(
         r#"
-sig pair_id: &tensor[n, f32] -> &tensor[n, f32] -> tensor[n, f32]
+sig pair_id[n]: &tensor[n, f32] -> &tensor[n, f32] -> tensor[n, f32]
 def pair_id(x, y) = x
 def caller() -> tensor[3, f32] =
   {

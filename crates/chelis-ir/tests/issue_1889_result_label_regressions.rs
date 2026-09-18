@@ -188,7 +188,7 @@ fn authored_repeated_binder_still_enforces_one_runtime_witness() {
 #[test]
 fn authored_repeated_rank_spread_enforces_each_positional_runtime_witness() {
     let dag = named_entry(
-        "def same_rank(x: &tensor[..rest, f32], y: &tensor[..rest, f32]) -> tensor[..rest, f32] = copy(x)\n\
+        "def same_rank[rest](x: &tensor[..rest, f32], y: &tensor[..rest, f32]) -> tensor[..rest, f32] = copy(x)\n\
          def bridge(x: tensor[*, *, f32], y: tensor[*, *, f32]) -> tensor[*, *, f32] = \
            same_rank(x, y)\n",
         "bridge",
@@ -220,7 +220,7 @@ fn authored_repeated_rank_spread_enforces_each_positional_runtime_witness() {
 #[test]
 fn rank_polymorphic_result_label_does_not_merge_distinct_argument_axes() {
     let dag = named_entry(
-        "def add_axis(x: &tensor[..rest, f32]) -> tensor[..rest, one, f32] = \
+        "def add_axis[rest](x: &tensor[..rest, f32]) -> tensor[..rest, one, f32] = \
            insert(x, one, 1i64)\n\
          def a2(x: &tensor[batch, seq, f32]) -> tensor[batch, seq, one, f32] = add_axis(x)\n",
         "a2",
@@ -258,7 +258,7 @@ fn rank_polymorphic_result_label_does_not_merge_distinct_argument_axes() {
 #[test]
 fn merged_root_does_not_join_a_checked_label_to_the_helpers_sibling_binder() {
     let dags = compiled_dags(
-        "def pkg__mylib__Mylib__Axes__keep_rank(x: tensor[..rest, f32], gain: tensor[fixed, f32]) -> tensor[..rest, f32] = copy(x)\n\
+        "def pkg__mylib__Mylib__Axes__keep_rank[rest](x: tensor[..rest, f32], gain: tensor[fixed, f32]) -> tensor[..rest, f32] = copy(x)\n\
          def bridge(x: tensor[fixed, f32]) -> tensor[fixed, f32] = \
            pkg__mylib__Mylib__Axes__keep_rank(x, to_tensor([1.0f32, 2.0f32, 3.0f32]))\n\
          out = bridge(to_tensor([4.0f32, 5.0f32]))\n",
@@ -310,14 +310,14 @@ fn merged_root_does_not_join_a_checked_label_to_the_helpers_sibling_binder() {
 #[test]
 fn merged_rank_polymorphic_root_keeps_batch_and_seq_in_distinct_classes() {
     let dags = compiled_dags(
-        "def add_axis(x: &tensor[..rest, f32]) -> tensor[..rest, one, f32] = \
+        "def add_axis[rest](x: &tensor[..rest, f32]) -> tensor[..rest, one, f32] = \
            insert(x, one, 1i64)\n\
-         def widen(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, c, seq, ..post, f32] = \
+         def widen[pre, post, c](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, c, seq, ..post, f32] = \
            insert(x, c, 3i64, seq)\n\
          def a1(x: &tensor[seq, f32]) -> tensor[seq, one, f32] = add_axis(x)\n\
          def a2(x: &tensor[batch, seq, f32]) -> tensor[batch, seq, one, f32] = add_axis(x)\n\
-         def w_lead(x: &tensor[seq, hidden, f32]) -> tensor[c, seq, hidden, f32] = widen(x)\n\
-         def w_mid(x: &tensor[batch, seq, f32]) -> tensor[batch, c, seq, f32] = widen(x)\n\
+         def w_lead[c](x: &tensor[seq, hidden, f32]) -> tensor[c, seq, hidden, f32] = widen(x)\n\
+         def w_mid[c](x: &tensor[batch, seq, f32]) -> tensor[batch, c, seq, f32] = widen(x)\n\
          out1 = a1(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n\
          out2 = a2(to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]))\n\
          outl = w_lead(to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32]]))\n\

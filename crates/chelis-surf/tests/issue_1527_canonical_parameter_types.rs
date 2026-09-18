@@ -59,8 +59,8 @@ fn explicit_holes_and_omitted_annotations_remain_distinct() {
 }
 
 #[test]
-fn a_no_clause_inline_parameter_uses_the_synthesized_signatures_implicit_scope() {
-    let text = print_canonical_flat(&lower("def inspect(x: tensor[3, p]) -> i32 = 0i32"));
+fn an_explicit_inline_binder_reaches_the_synthesized_signature() {
+    let text = print_canonical_flat(&lower("def inspect[p](x: tensor[3, p]) -> i32 = 0i32"));
     assert!(
         text.contains("(t-tensor {} (d-lit {} 3) (t-var {} p))"),
         "{text}"
@@ -83,22 +83,27 @@ fn a_no_clause_inline_parameter_uses_the_synthesized_signatures_implicit_scope()
 }
 
 #[test]
-fn implicit_or_explicit_clauses_never_rebind_reserved_precisions() {
+fn binder_clauses_never_rebind_reserved_precisions() {
     for name in ["f8e4m3", "f8e5m2"] {
-        for binders in ["", name] {
-            let binder_clause = (!binders.is_empty()).then(|| format!("[{binders}]"));
-            let text = print_canonical_flat(&lower(&format!(
-                "def inspect{}(x: tensor[3, {name}]) -> i32 = 0i32",
-                binder_clause.as_deref().unwrap_or_default()
-            )));
-            assert!(
-                text.contains(&format!(
-                    "(t-tensor {{}} (d-lit {{}} 3) (t-prim {{}} {name}))"
-                )),
-                "{text}"
-            );
-            assert!(!text.contains(&format!("(t-var {{}} {name})")), "{text}");
-        }
+        let text = print_canonical_flat(&lower(&format!(
+            "def inspect(x: tensor[3, {name}]) -> i32 = 0i32"
+        )));
+        assert!(
+            text.contains(&format!(
+                "(t-tensor {{}} (d-lit {{}} 3) (t-prim {{}} {name}))"
+            )),
+            "{text}"
+        );
+        assert!(!text.contains(&format!("(t-var {{}} {name})")), "{text}");
+
+        let source = format!("def inspect[{name}](x: tensor[3, {name}]) -> i32 = 0i32");
+        let error = parse_str(&source).expect_err("reserved dtype cannot enter binder list");
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains(&format!("`{name}`"))
+                && rendered.contains("cannot be a declaration binder"),
+            "wrong forbidden-binder diagnostic for `{name}`: {rendered}"
+        );
     }
 }
 

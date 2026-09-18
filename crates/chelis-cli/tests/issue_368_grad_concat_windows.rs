@@ -385,7 +385,7 @@ fn issue_368_runtime_symbolic_window_grad_is_half_everywhere() {
     // The exact #368 reproducer: avgpool1d with a RUNTIME-derived window
     // count `m` AND runtime `shrink`/`stride` bounds, behind a symbolic-rank
     // callee sig + `if/fail` guard + a `[n]`-quantified `window_row` helper.
-    let avgpool = "sig avgpool1d: tensor[n, f32] -> tensor[m, f32]\n\
+    let avgpool = "sig avgpool1d[n, m]: tensor[n, f32] -> tensor[m, f32]\n\
 def avgpool1d(x) = {\n\
   n = cast(shape(x, cast(0, i32)), i64)\n\
   if gt(cast(2, i64), n) then fail(\"kernel exceeds input length\") else {\n\
@@ -394,7 +394,7 @@ def avgpool1d(x) = {\n\
     mean(concat(rows, cast(0, i32)), cast(0, i32))\n\
   }\n\
 }\n\
-def window_row[n](x: &tensor[n, f32], m: i64, k: i64) -> tensor[u, m, f32] = {\n\
+def window_row[n, u, m](x: &tensor[n, f32], m: i64, k: i64) -> tensor[u, m, f32] = {\n\
   start = cast(k, i64)\n\
   extent = cast(add(add(k, mul(sub(m, cast(1, i64)), cast(2, i64))), cast(1, i64)), i64)\n\
   reshape(stride(shrink(x, [[start, extent]]), cast(2, i64)), [cast(1, i64), m])\n\

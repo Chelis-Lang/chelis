@@ -598,157 +598,81 @@ pub(super) fn render_declared_dim(dim_names: &UnordMap<DimVar, String>, dv: DimV
 
 /// Post-body rigidity check for a def's declared dimension parameters.
 ///
-/// `declared_dvars` are the dim variables introduced by the declared
-/// parameter signatures, snapshotted before body inference. After the
-/// body is inferred, each declared dim parameter is universally
-/// quantified and must stay distinct: the body must type-check for
-/// *all* instantiations of those dims.
+/// Classify and check every dimension identity owned by one declaration.
 ///
-/// Two failure modes are flagged here, both `DimensionMismatch`:
+/// The structural binder list owns the complete identity set. Signature
+/// parameter occurrences are rigid, result-only occurrences are
+/// output-inferred under §4.4.1, and identities absent from the outer
+/// signature but used by body annotations are rigid under [04-INF-6].
 ///
-/// - `Dim::Var -> Dim::Lit`: the body forced a polymorphic dim
-///   parameter to a concrete literal (Nautilus Bug 2). The signature's
-///   polymorphism claim is self-contradictory.
-/// - `Dim::Var -> Dim::Var` (or any shared resolution) collapse: two
-///   *distinct* declared dim parameters resolved to the *same*
-///   dimension after body inference. The body unified two
-///   universally-quantified dim parameters that must stay distinct.
-///   This is Path B of `TypeCheck-FreeDimVarUnification-F1` (SR-LEAK-A):
-///   `def g[n, m](x: tensor[n, f32], y: tensor[m, f32]) ->
-///   tensor[n, f32] = y` collapses `n` and `m` via free `unify_dim`
-///   and never routes through the Shape A relaxed-retry guard.
-///
-/// A single declared dim parameter appearing in multiple param
-/// positions (`def h[n](x: tensor[n], y: tensor[n])`) is one dvar and
-/// never trips the collapse check.
-pub(super) fn check_declared_dvars_rigid(
-    declared_dvars: &[DimVar],
-    dim_names: &UnordMap<DimVar, String>,
-    subst: &Subst,
-    errors: &mut DiagnosticSink<'_>,
-) {
-    let render = |dv: DimVar| render_declared_dim(dim_names, dv);
-    // First resolved dim seen -> the declared dvar that produced it.
-    // A second declared dvar resolving to the same dim is a collapse.
-    let mut seen: Vec<(Dim, DimVar)> = Vec::new();
-    for dv in declared_dvars {
-        let constraint = subst.constraint_dim(&Dim::Var(*dv));
-        let resolved = if matches!(constraint, Dim::Lit(_)) {
-            constraint
-        } else {
-            subst.semantic_dim(&Dim::Var(*dv))
-        };
-        if let Dim::Lit(n) = resolved {
-            errors.push(CheckError::new(
-                CheckErrorKind::DimensionMismatch,
-                format!(
-                    "polymorphic dim parameter {} forced to concrete Lit({n}) by function \
-                     body: declared dim parameters must remain polymorphic",
-                    render(*dv)
-                ),
-                vec![
-                    "Replace the polymorphic dim with the concrete literal in the signature, or \
-                     ensure the body does not pin the dim to a specific size"
-                        .to_string(),
-                ],
-            ));
-            continue;
-        }
-        // A declared dim parameter that resolves to itself (still
-        // unbound) is the legitimate polymorphic case; it cannot
-        // collide with another declared dvar's distinct identity.
-        if let Some((_, prev)) = seen.iter().find(|(candidate, _)| candidate == &resolved) {
-            if *prev != *dv {
-                errors.push(CheckError::new(
-                    CheckErrorKind::DimensionMismatch,
-                    format!(
-                        "distinct declared dim parameters {} and {} were unified by the \
-                         function body: declared dim parameters are rigid and must remain \
-                         distinct",
-                        render(*prev),
-                        render(*dv)
-                    ),
-                    vec![
-                        "The body returns or constrains a value whose dimension differs from \
-                         the declared one. Use the same dim parameter on both sides if they \
-                         are meant to be equal, or fix the body so each declared dim stays \
-                         independent"
-                            .to_string(),
-                    ],
-                ));
-            }
-        } else {
-            seen.push((resolved, *dv));
-        }
-    }
-}
-
-/// chelis#273 return-position rigidity guard.
-///
-/// `check_declared_dvars_rigid` collects declared dim parameters from
-/// the signature's *parameter* positions only, so a dim parameter
-/// appearing **only in the return type** was never checked and the body
-/// could silently pin it (`def f[k](a: tensor[2, f32]) ->
-/// tensor[k, f32] = a` pinned `k := 2`).
-///
-/// A return-only dim parameter is not fully rigid, though: the body is
-/// the only place the output dimension can come from (Chelis has no
-/// explicit dim application; callers instantiate dims by unification
-/// against *arguments*, which never mention a return-only dim). The
-/// legitimate **output-inferred** uses must stay green
-/// (spec/04-type-system.md §4.4.1):
-///
-/// - the body leaves the dim var unbound (a clean, generalizable dim,
-///   e.g. variable-fed `to_tensor`), or
-/// - the body resolves it to a **body-internal** concrete dim
-///   (`examples/hello_tensor.ch`: `def main() -> tensor[n, f32]` whose
-///   body builds a `tensor[3, f32]`); the registered scheme then
-///   resolves to the produced dim.
-///
-/// What is rejected is **input coupling** — the body deriving the
-/// promised-independent output dim from the caller-visible parameter
-/// world:
-///
-/// - `Dim::Var -> Dim::Lit` pin where the literal equals the
-///   post-unification resolution of a dimension occurring in a declared
-///   parameter position, or
-/// - collapse with a distinct *param-position* declared dim parameter
-///   (either binding orientation).
-///
-/// Two return-only dim parameters collapsing with each other are
-/// tolerated (both are output-inferred; no caller-visible coupling).
-/// Known residual: coupling through a named symbolic dim
-/// (`def f(x: tensor[batch, f32]) -> tensor[m, f32] = x` binds
-/// `m := Name("batch")`) is not flagged — `Dim::Name` unifies
-/// permissively by design (chelis#219) and no declared dim parameter
-/// participates.
-pub(super) fn check_return_only_dvars_rigid(
+/// A collapse is accepted only when both identities are return-only. If
+/// either identity is parameter-position or body-only, the authored
+/// universal contract has been narrowed and the declaration is rejected.
+pub(super) fn check_authored_dvars_rigid(
+    declaration: &str,
     decl_ty: &Type,
-    param_dvars: &[DimVar],
     dim_names: &UnordMap<DimVar, String>,
     subst: &Subst,
     errors: &mut DiagnosticSink<'_>,
 ) {
-    let render = |dv: DimVar| render_declared_dim(dim_names, dv);
     let Type::Fn(decl_params, decl_ret) = decl_ty else {
+        // A non-function declaration has no parameter/result role split:
+        // every authored dimension in its declared value type is rigid under
+        // [04-INF-6]. In particular, §4.4.1's return-only output-inference
+        // exception applies only to a function result.
+        let mut rigid_dvars = dim_names
+            .to_sorted()
+            .into_iter()
+            .map(|(dv, _)| *dv)
+            .collect::<Vec<_>>();
+        rigid_dvars.sort_by_key(|dv| dv.0);
+        check_declared_dvars_rigid(Some(declaration), &rigid_dvars, dim_names, subst, errors);
         return;
     };
-    let ret_only: Vec<DimVar> = crate::env::free_dvars(decl_ret)
+
+    let mut param_dvars = Vec::new();
+    for ty in decl_params {
+        for dv in crate::env::free_dvars(ty) {
+            if !param_dvars.contains(&dv) {
+                param_dvars.push(dv);
+            }
+        }
+    }
+    let mut return_only_dvars = Vec::new();
+    for dv in crate::env::free_dvars(decl_ret) {
+        if dim_names.contains_key(&dv)
+            && !param_dvars.contains(&dv)
+            && !return_only_dvars.contains(&dv)
+        {
+            return_only_dvars.push(dv);
+        }
+    }
+    let rigid_dvars = dim_names
+        .to_sorted()
         .into_iter()
-        .filter(|dv| !param_dvars.contains(dv))
-        .collect();
-    if ret_only.is_empty() {
-        return;
+        .map(|(dv, _)| *dv)
+        .filter(|dv| !return_only_dvars.contains(dv))
+        .collect::<Vec<_>>();
+
+    check_declared_dvars_rigid(Some(declaration), &rigid_dvars, dim_names, subst, errors);
+
+    // chelis#273 return-position rigidity guard. A return-only identity may
+    // remain unbound, resolve to a body-internal concrete output, or collapse
+    // with another return-only identity. It may not derive from a declared
+    // parameter dimension or collapse with any rigid authored identity.
+    //
+    // Known §4.4.1 boundary: coupling through a named symbolic dim is not
+    // flagged unless another authored dimension identity participates.
+    let render = |dv: DimVar| render_declared_dim(dim_names, dv);
+    let mut param_dims = Vec::new();
+    for ty in decl_params {
+        crate::env::collect_dims(ty, &mut param_dims);
     }
-    // Every dimension occurring in a declared parameter position,
-    // resolved through the post-body substitution.
-    let mut param_dims: Vec<Dim> = Vec::new();
-    for t in decl_params {
-        crate::env::collect_dims(t, &mut param_dims);
-    }
-    let resolved_param_dims: Vec<Dim> =
-        param_dims.iter().map(|d| subst.constraint_dim(d)).collect();
-    for dv in &ret_only {
+    let resolved_param_dims = param_dims
+        .iter()
+        .map(|dim| subst.constraint_dim(dim))
+        .collect::<Vec<_>>();
+    for dv in &return_only_dvars {
         let constraint = subst.constraint_dim(&Dim::Var(*dv));
         let resolved = if matches!(constraint, Dim::Lit(_)) {
             constraint
@@ -776,27 +700,135 @@ pub(super) fn check_return_only_dvars_rigid(
                     ],
                 ));
             }
-        } else if let Some(pdv) = param_dvars
+        } else if let Some(rigid_dv) = rigid_dvars
             .iter()
-            .find(|pdv| subst.semantic_dim(&Dim::Var(**pdv)) == resolved)
+            .find(|rigid_dv| subst.semantic_dim(&Dim::Var(**rigid_dv)) == resolved)
         {
+            if param_dvars.contains(rigid_dv) {
+                errors.push(CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    format!(
+                        "return-position dim parameter {} was unified with the distinct \
+                         declared dim parameter {} from a parameter position: declared \
+                         dim parameters are rigid and must remain distinct \
+                         (spec/04-type-system.md \u{00a7}4.4.1)",
+                        render(*dv),
+                        render(*rigid_dv)
+                    ),
+                    vec![
+                        "Use the same dim parameter in both positions if the return \
+                         dimension is meant to equal the input's, or fix the body so the \
+                         declared dims stay independent"
+                            .to_string(),
+                    ],
+                ));
+            } else {
+                errors.push(CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    format!(
+                        "return-position dim parameter {} and rigid body-only dim parameter {} \
+                         of `{declaration}` were unified by the function body: a collapse \
+                         involving an authored rigid dimension binder is a type error \
+                         (spec/04-type-system.md §3.1.3 [04-INF-6])",
+                        render(*dv),
+                        render(*rigid_dv)
+                    ),
+                    vec![
+                        "Use the same binder if the dimensions are meant to be equal, or fix the \
+                         body so the body-only binder remains independent. Only two return-only \
+                         binders may share one body-inferred output dimension."
+                            .to_string(),
+                    ],
+                ));
+            }
+        }
+    }
+}
+
+/// `declared_dvars` are the rigid dim variables introduced by a declaration
+/// or function contract, snapshotted before body inference. After the body is
+/// inferred, each must stay distinct: the body must type-check for *all*
+/// instantiations of those dims.
+///
+/// Two failure modes are flagged here, both `DimensionMismatch`:
+///
+/// - `Dim::Var -> Dim::Lit`: the body forced a polymorphic dim
+///   parameter to a concrete literal (Nautilus Bug 2). The signature's
+///   polymorphism claim is self-contradictory.
+/// - `Dim::Var -> Dim::Var` (or any shared resolution) collapse: two
+///   *distinct* declared dim parameters resolved to the *same*
+///   dimension after body inference. The body unified two
+///   universally-quantified dim parameters that must stay distinct.
+///   This is Path B of `TypeCheck-FreeDimVarUnification-F1` (SR-LEAK-A):
+///   `def g[n, m](x: tensor[n, f32], y: tensor[m, f32]) ->
+///   tensor[n, f32] = y` collapses `n` and `m` via free `unify_dim`
+///   and never routes through the Shape A relaxed-retry guard.
+///
+/// A single declared dim parameter appearing in multiple param
+/// positions (`def h[n](x: tensor[n], y: tensor[n])`) is one dvar and
+/// never trips the collapse check.
+pub(super) fn check_declared_dvars_rigid(
+    declaration: Option<&str>,
+    declared_dvars: &[DimVar],
+    dim_names: &UnordMap<DimVar, String>,
+    subst: &Subst,
+    errors: &mut DiagnosticSink<'_>,
+) {
+    let render = |dv: DimVar| render_declared_dim(dim_names, dv);
+    let owner = declaration.map_or_else(String::new, |name| format!(" in declaration `{name}`"));
+    // First resolved dim seen -> the declared dvar that produced it.
+    // A second declared dvar resolving to the same dim is a collapse.
+    let mut seen: Vec<(Dim, DimVar)> = Vec::new();
+    for dv in declared_dvars {
+        let constraint = subst.constraint_dim(&Dim::Var(*dv));
+        let resolved = if matches!(constraint, Dim::Lit(_)) {
+            constraint
+        } else {
+            subst.semantic_dim(&Dim::Var(*dv))
+        };
+        if let Dim::Lit(n) = resolved {
             errors.push(CheckError::new(
                 CheckErrorKind::DimensionMismatch,
                 format!(
-                    "return-position dim parameter {} was unified with the distinct \
-                     declared dim parameter {} from a parameter position: declared \
-                     dim parameters are rigid and must remain distinct \
-                     (spec/04-type-system.md \u{00a7}4.4.1)",
+                    "polymorphic dim parameter {} forced to concrete Lit({n}) by function \
+                     body{owner}: an authored dimension binder is rigid and the body must \
+                     type-check for every dimension \
+                     (spec/04-type-system.md §3.1.3 [04-INF-6])",
                     render(*dv),
-                    render(*pdv)
                 ),
                 vec![
-                    "Use the same dim parameter in both positions if the return \
-                     dimension is meant to equal the input's, or fix the body so the \
-                     declared dims stay independent"
+                    "Replace the polymorphic dim with the concrete literal in the signature, or \
+                     ensure the body does not pin the dim to a specific size"
                         .to_string(),
                 ],
             ));
+            continue;
+        }
+        // A declared dim parameter that resolves to itself (still
+        // unbound) is the legitimate polymorphic case; it cannot
+        // collide with another declared dvar's distinct identity.
+        if let Some((_, prev)) = seen.iter().find(|(candidate, _)| candidate == &resolved) {
+            if *prev != *dv {
+                errors.push(CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    format!(
+                        "distinct declared dim parameters {} and {} were unified by the function \
+                         body{owner}: authored dimension binders are rigid and must remain \
+                         distinct (spec/04-type-system.md §3.1.3 [04-INF-6])",
+                        render(*prev),
+                        render(*dv)
+                    ),
+                    vec![
+                        "The body returns or constrains a value whose dimension differs from \
+                         the declared one. Use the same dim parameter on both sides if they \
+                         are meant to be equal, or fix the body so each declared dim stays \
+                         independent"
+                            .to_string(),
+                    ],
+                ));
+            }
+        } else {
+            seen.push((resolved, *dv));
         }
     }
 }

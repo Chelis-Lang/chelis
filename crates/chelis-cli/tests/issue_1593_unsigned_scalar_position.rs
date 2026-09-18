@@ -119,16 +119,15 @@ fn the_desugared_deep_carries_t_prim_and_is_rejected_at_both_deep_entry_points()
     }
 }
 
-/// DISPOSITION LOCK. Green in both states, and the neighbour this change must
-/// not disturb: a genuine lowercase type variable still quantifies, still
-/// scores 1.0, and still round-trips through the Deep ingress.
+/// DISPOSITION LOCK. An ordinary explicit lowercase binder still scores 1.0
+/// and round-trips through the Deep ingress.
 #[test]
-fn a_genuine_lowercase_name_still_scores_one_at_both_ingresses() {
+fn a_genuine_explicit_lowercase_binder_still_scores_one_at_both_ingresses() {
     let dir = tempdir().expect("tempdir");
     let root = dir.path();
     fs::write(
         root.join("poly.ch"),
-        "module P.M\nexport (f)\ndef f(x: a) -> a = x\n",
+        "module P.M\nexport (f)\ndef f[a](x: a) -> a = x\n",
     )
     .expect("write");
 
@@ -175,10 +174,9 @@ fn the_short_signed_aliases_are_untouched() {
     }
 }
 
-/// REGRESSION test. Both binder forms at both ingresses: an explicit `[..]`
-/// clause does not rebind a reserved spelling, in the scalar position or in
-/// the tensor precision slot, through `chelis check` on Surf and through the
-/// Deep that `chelis deep` prints.
+/// REGRESSION test. An explicit `[..]` clause rejects a dtype spelling at the
+/// binder declaration, before the scalar or tensor-precision use can rebind
+/// it. The hand-authored Deep test below owns the corresponding Deep ingress.
 #[test]
 fn an_explicit_binder_does_not_rebind_a_reserved_name_at_either_ingress() {
     let dir = tempdir().expect("tempdir");
@@ -199,33 +197,30 @@ fn an_explicit_binder_does_not_rebind_a_reserved_name_at_either_ingress() {
         ] {
             fs::write(root.join("binder.ch"), &source).expect("write");
 
-            let checked = text(&run(root, &["check", "binder.ch"]));
+            let check_output = run(root, &["check", "binder.ch"]);
+            let checked = text(&check_output);
             assert!(
-                !checked.contains("\"score\": 1,"),
+                !check_output.status.success() && !checked.contains("\"score\": 1,"),
                 "an explicit binder must not rebind `{name}` in a {label} \
                  position: {checked}"
             );
             assert!(
-                checked.contains("unsigned integer types are deferred"),
-                "the {label} binder form must carry the §1.1.1 diagnostic for \
+                checked.contains(&format!(
+                    "dtype spelling `{name}` cannot be a declaration binder"
+                )),
+                "the {label} binder form must carry the explicit-binder rejection for \
                  `{name}`: {checked}"
             );
 
-            let printed =
-                String::from_utf8_lossy(&run(root, &["deep", "binder.ch"]).stdout).to_string();
+            let deep = run(root, &["deep", "binder.ch"]);
+            let rendered = text(&deep);
             assert!(
-                printed.contains(&format!("(t-prim {{}} {name})"))
-                    && !printed.contains(&format!("(t-var {{}} {name})")),
-                "the desugared Deep must not quantify `{name}` in a {label} \
-                 position: {printed}"
-            );
-            fs::write(root.join("binder.dp"), &printed).expect("write dp");
-            let deep_checked = text(&run(root, &["check", "binder.dp"]));
-            assert!(
-                !deep_checked.contains("\"score\": 1,")
-                    && deep_checked.contains("unsigned integer types are deferred"),
-                "the Deep ingress must reject the {label} binder form for \
-                 `{name}`: {deep_checked}"
+                !deep.status.success()
+                    && rendered.contains(&format!(
+                        "dtype spelling `{name}` cannot be a declaration binder"
+                    )),
+                "`chelis deep` must reject the {label} binder declaration for \
+                 `{name}` before emitting Deep: {rendered}"
             );
         }
     }
@@ -268,7 +263,7 @@ const DEFERRED: [&str; 2] = ["complex64", "int4"];
 fn scalar_tvar_deep(name: &str) -> String {
     format!(
         "(module {{surf_path: \"P.M\"}}\n  p.m\n  (export {{}} f)\n  \
-         (defsig {{}} f (t-fn {{}} (t-var {{}} {name}) (t-var {{}} {name})))\n  \
+         (defsig {{}} f ({name}) (t-fn {{}} (t-var {{}} {name}) (t-var {{}} {name})))\n  \
          (def {{}} f (fn {{}} (params {{}} (x {{type: (t-var {{}} {name})}})) (var {{}} x))))\n"
     )
 }
@@ -276,15 +271,15 @@ fn scalar_tvar_deep(name: &str) -> String {
 fn tensor_tvar_deep(name: &str) -> String {
     format!(
         "(module {{surf_path: \"P.M\"}}\n  p.m\n  (export {{}} f)\n  \
-         (defsig {{}} f (t-fn {{}} (t-tensor {{}} (d-lit {{}} 3) (t-var {{}} {name})) \
+         (defsig {{}} f ({name}) (t-fn {{}} (t-tensor {{}} (d-lit {{}} 3) (t-var {{}} {name})) \
          (t-tensor {{}} (d-lit {{}} 3) (t-var {{}} {name}))))\n  \
          (def {{}} f (fn {{}} (params {{}} x) (var {{}} x))))\n"
     )
 }
 
-/// REGRESSION test. A hand-written `.dp` naming a rejected dtype spelling as a
-/// type variable is rejected by `chelis check`, in a scalar position and in a
-/// tensor precision slot, for the unsigned and the deferred family alike.
+/// REGRESSION test. A hand-written `.dp` listing a rejected dtype spelling as
+/// a `defsig` binder is rejected before that name can bind a scalar or tensor
+/// precision use, for the unsigned and deferred families alike.
 #[test]
 fn a_hand_written_deep_type_variable_is_rejected_at_the_deep_ingress() {
     let dir = tempdir().expect("tempdir");
@@ -302,8 +297,11 @@ fn a_hand_written_deep_type_variable_is_rejected_at_the_deep_ingress() {
                  1.0 in a {label} position: {checked}"
             );
             assert!(
-                checked.contains(&format!("`{name}`")) && checked.contains("§1.1.1"),
-                "the {label} Deep ingress must cite §1.1.1 for `{name}`: {checked}"
+                checked.contains(&format!(
+                    "dtype spelling `{name}` cannot be a `defsig` binder"
+                )) && checked.contains("dtype vocabulary is not rebindable"),
+                "the {label} Deep ingress must reject `{name}` at the structural \
+                 binder boundary: {checked}"
             );
         }
     }

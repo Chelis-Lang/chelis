@@ -195,6 +195,7 @@ fn sweep_recursive_collection_contracts(
     errors: &mut DiagnosticSink<'_>,
     user_def_names: &UnordSet<String>,
     declared_signatures: &UnordMap<String, DeclaredSigMetadata>,
+    declaration_diagnostic_owners: &[Option<DeclarationDiagnosticOwner>],
 ) {
     let members = recursive_function_indices
         .iter()
@@ -269,6 +270,9 @@ fn sweep_recursive_collection_contracts(
                 crate::opacity::module_key_for_item(module.as_deref(), Some(name)),
                 Some(name.clone()),
             );
+            let declaration_diagnostic_owner = declaration_diagnostic_owners
+                .get(*declaration_index)
+                .and_then(Option::as_ref);
             env.set_current_declaration_ordinal(Some(*declaration_index));
             let expected = prior_schemes
                 .get(name)
@@ -286,6 +290,7 @@ fn sweep_recursive_collection_contracts(
                 true,
                 user_def_names,
                 declared_signatures,
+                declaration_diagnostic_owner,
             ) {
                 deferred_bindings.push(binding);
             }
@@ -447,7 +452,16 @@ pub(super) fn infer_program_with_product_in_session(
     // `(module {} name ...)` wrappers so declarations in every idiomatic
     // Surf source (every .ch starts with `module X`) get collected.
     let items = top_level_decl_items_with_modules(exprs);
-    collect_all_declarations(&items, &mut env, &mut vg, &mut subst, &mut adt_reg, errors);
+    let declaration_diagnostic_owners = declaration_diagnostic_owner_plan(exprs);
+    collect_all_declarations(
+        &items,
+        &declaration_diagnostic_owners,
+        &mut env,
+        &mut vg,
+        &mut subst,
+        &mut adt_reg,
+        errors,
+    );
     product.type_headers = adt_reg.resolution_env().clone();
     product.adt_registry = adt_reg.clone();
 
@@ -470,6 +484,7 @@ pub(super) fn infer_program_with_product_in_session(
         prebind_defsig_less_function_body_types(
             &items,
             &declared_signatures,
+            &declaration_diagnostic_owners,
             &mut env,
             &mut vg,
             &mut subst,
@@ -564,12 +579,16 @@ pub(super) fn infer_program_with_product_in_session(
                 crate::opacity::module_key_for_item(module.as_deref(), decl_name),
                 decl_name.map(str::to_string),
             );
+            let declaration_diagnostic_owner = declaration_diagnostic_owners
+                .get(declaration_index)
+                .and_then(Option::as_ref);
             env.set_current_declaration_ordinal(Some(declaration_index));
             let external_input_failure = prebind_literal_external_input_for_declaration(
                 declaration_index,
                 expr,
                 &external_input_types,
                 &declared_signatures,
+                declaration_diagnostic_owner,
                 &mut env,
                 &mut vg,
                 &mut subst,
@@ -594,6 +613,7 @@ pub(super) fn infer_program_with_product_in_session(
                 cyclic,
                 &user_def_names,
                 &declared_signatures,
+                declaration_diagnostic_owner,
             ) {
                 deferred_bindings.push(binding);
             }
@@ -664,6 +684,7 @@ pub(super) fn infer_program_with_product_in_session(
                     errors,
                     &user_def_names,
                     &declared_signatures,
+                    &declaration_diagnostic_owners,
                 );
             }
         }
@@ -1474,8 +1495,10 @@ pub(super) fn infer_ir_program_with_state(
     // Surf source wraps its declarations in `module X`, and without
     // flattening none of the walkers below see any def/defsig/deftype.
     let items = top_level_decl_items_with_modules(exprs);
+    let declaration_diagnostic_owners = declaration_diagnostic_owner_plan(exprs);
     collect_all_declarations(
         &items,
+        &declaration_diagnostic_owners,
         &mut state.env,
         &mut state.var_gen,
         &mut state.subst,
@@ -1514,6 +1537,7 @@ pub(super) fn infer_ir_program_with_state(
         prebind_defsig_less_function_body_types(
             &items,
             &declared_signatures,
+            &declaration_diagnostic_owners,
             &mut state.env,
             &mut state.var_gen,
             &mut state.subst,
@@ -1612,6 +1636,9 @@ pub(super) fn infer_ir_program_with_state(
                 crate::opacity::module_key_for_item(module.as_deref(), decl_name),
                 decl_name.map(str::to_string),
             );
+            let declaration_diagnostic_owner = declaration_diagnostic_owners
+                .get(declaration_index)
+                .and_then(Option::as_ref);
             state
                 .env
                 .set_current_declaration_ordinal(Some(declaration_index));
@@ -1620,6 +1647,7 @@ pub(super) fn infer_ir_program_with_state(
                 expr,
                 &external_input_types,
                 &declared_signatures,
+                declaration_diagnostic_owner,
                 &mut state.env,
                 &mut state.var_gen,
                 &mut state.subst,
@@ -1644,6 +1672,7 @@ pub(super) fn infer_ir_program_with_state(
                 cyclic,
                 &user_def_names,
                 &declared_signatures,
+                declaration_diagnostic_owner,
             ) {
                 deferred_bindings.push(binding);
             }
@@ -1727,6 +1756,7 @@ pub(super) fn infer_ir_program_with_state(
                     errors,
                     &user_def_names,
                     &declared_signatures,
+                    &declaration_diagnostic_owners,
                 );
             }
         }
@@ -1861,7 +1891,7 @@ fn scan_declared_signatures(items: &[(Option<String>, &deep::Expr)]) -> Declared
             continue;
         };
         signed.insert(name.to_string());
-        if kids.get(1).is_some_and(deep_type_contains_hole) {
+        if defsig_parts(kids).is_some_and(|(_, _, type_expr)| deep_type_contains_hole(type_expr)) {
             holed.insert(name.to_string());
         }
     }
@@ -2274,6 +2304,7 @@ fn collect_literal_external_input_types(
 fn prebind_defsig_less_function_body_types(
     items: &[(Option<String>, &deep::Expr)],
     declared_signatures: &UnordMap<String, DeclaredSigMetadata>,
+    declaration_diagnostic_owners: &[Option<DeclarationDiagnosticOwner>],
     env: &mut Env,
     vg: &mut VarGen,
     subst: &mut Subst,
@@ -2297,12 +2328,15 @@ fn prebind_defsig_less_function_body_types(
         }
         prebound_names.insert(name.clone());
         let metadata_level = subst.enter_level(vg);
-        let resolved = resolve_deep_type(
+        let resolved = resolve_deep_type_with_diagnostic_owner(
             &ty_expr,
             vg,
             adt_reg,
             TypeUseSite::CompilerMetadata,
             BinderMode::TrustedCompilerMetadata,
+            declaration_diagnostic_owners
+                .get(declaration_index)
+                .and_then(Option::as_ref),
             errors,
         );
         subst.leave_level(metadata_level, vg);
@@ -2330,6 +2364,7 @@ fn prebind_literal_external_input_for_declaration(
     expr: &deep::Expr,
     external_input_types: &UnordMap<usize, deep::Expr>,
     declared_signatures: &UnordMap<String, DeclaredSigMetadata>,
+    declaration_diagnostic_owner: Option<&DeclarationDiagnosticOwner>,
     env: &mut Env,
     vg: &mut VarGen,
     subst: &mut Subst,
@@ -2342,12 +2377,13 @@ fn prebind_literal_external_input_for_declaration(
         return None;
     }
     let metadata_level = subst.enter_level(vg);
-    let resolved = resolve_deep_type(
+    let resolved = resolve_deep_type_with_diagnostic_owner(
         ty_expr,
         vg,
         adt_reg,
         TypeUseSite::CompilerMetadata,
         BinderMode::TrustedCompilerMetadata,
+        declaration_diagnostic_owner,
         errors,
     );
     subst.leave_level(metadata_level, vg);

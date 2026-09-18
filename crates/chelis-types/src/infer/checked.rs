@@ -1828,88 +1828,18 @@ pub(crate) fn run_finalization_mutation_case(
 pub(super) fn collect_declared_sig_metadata<'a>(
     exprs: impl IntoIterator<Item = &'a deep::Expr>,
 ) -> UnordMap<String, DeclaredSigMetadata> {
-    let exprs = exprs.into_iter().collect::<Vec<_>>();
     let mut map: UnordMap<String, DeclaredSigMetadata> = UnordMap::new();
-    for expr in &exprs {
-        collect_defsig_param_types(expr, &mut map);
-    }
     for expr in exprs {
-        extend_declared_sig_binders_from_def_params(expr, &mut map);
+        collect_defsig_param_types(expr, &mut map);
     }
     map
 }
 
-/// Merge declaration-owned binders preserved by an explicit generic `def`
-/// into the matching standalone signature's scope. Surf suppresses the
-/// synthesized `defsig` when a same-name explicit `sig` exists; in that case
-/// the `def f[piece](x: tensor[piece, ...])` parameter syntax is the only Deep
-/// node that still distinguishes the bound `d-var piece` from an ordinary
-/// closed annotation. Restricting this merge to names that already own a
-/// `defsig` keeps an unrelated direct-Deep `(d-var ...)` annotation closed.
-pub(super) fn extend_declared_sig_binders_from_def_params(
-    expr: &deep::Expr,
-    map: &mut UnordMap<String, DeclaredSigMetadata>,
-) {
-    stack_guard!("extend_declared_sig_binders_from_def_params", expr);
-    let Some((tag, _, kids)) = stamped_parts(expr) else {
-        return;
-    };
-    if tag == DeepTag::Module {
-        for child in kids.iter().skip(1) {
-            extend_declared_sig_binders_from_def_params(child, map);
-        }
-        return;
-    }
-    if tag != DeepTag::Def {
-        return;
-    }
-    let (Some(name), Some(fn_expr)) = (kids.first().and_then(symbol_name), kids.get(1)) else {
-        return;
-    };
-    let Some((DeepTag::Fn, _, fn_kids)) = stamped_parts(fn_expr) else {
-        return;
-    };
-    let Some(params) = fn_kids.first() else {
-        return;
-    };
-    let Some(metadata) = map.get_mut(name) else {
-        return;
-    };
-    let params = match params {
-        deep::Expr::Node(node, _) if node.tag() == DeepTag::Params => node.children_slice(),
-        deep::Expr::List(params_list, _) if get_tag(params_list) == Some(DeepTag::Params) => {
-            children(params_list)
-        }
-        deep::Expr::BareList(elements, _) => elements.as_slice(),
-        _ => return,
-    };
-    for param in params {
-        let type_expr = match param {
-            deep::Expr::MetaExpr(meta, _) => meta.metadata.ty().map(|v| v.expression()),
-            deep::Expr::List(param_list, _) => param_list.elements.get(1).and_then(|meta| {
-                let deep::Expr::Map(meta, _) = meta else {
-                    return None;
-                };
-                meta.ty().map(|v| v.expression())
-            }),
-            deep::Expr::BareList(elements, _) => elements.get(1).and_then(|meta| {
-                let deep::Expr::Map(meta, _) = meta else {
-                    return None;
-                };
-                meta.ty().map(|v| v.expression())
-            }),
-            _ => None,
-        };
-        if let Some(type_expr) = type_expr {
-            metadata.binders.merge(deep_type_binder_names(type_expr));
-        }
-    }
-}
-
-/// Recursively collect `(defsig name (t-fn arg-exprs... ret))` entries,
-/// descending through `(module ...)` wrappers. Only the leading
-/// argument type expressions are stored (the trailing return type is
-/// dropped). A re-declared name keeps the first sig seen.
+/// Recursively collect every valid `(defsig name [(binders...)] type-expr)`
+/// entry, descending through `(module ...)` wrappers. Function signatures
+/// additionally retain their leading argument type expressions (the trailing
+/// return type is dropped); non-function signatures retain an empty parameter
+/// list. A re-declared name keeps the first sig seen.
 pub(super) fn collect_defsig_param_types(
     expr: &deep::Expr,
     map: &mut UnordMap<String, DeclaredSigMetadata>,
@@ -1932,47 +1862,34 @@ pub(super) fn collect_defsig_param_types(
             }
         }
         DeepTag::Defsig => {
-            let Some(name) = kids.first().and_then(symbol_name) else {
+            let Some((name_expr, binder_list, type_expr)) = defsig_parts(kids) else {
                 return;
             };
-            let Some(fn_expr) = kids.get(1) else {
+            let Some(name) = symbol_name(name_expr) else {
                 return;
             };
-            let Some((DeepTag::TFn, _, fn_kids)) = stamped_parts(fn_expr) else {
+            let Some(binders) = valid_defsig_binder_names(binder_list) else {
                 return;
             };
-            if fn_kids.is_empty() {
-                return;
-            }
-            // All but the trailing return type are parameter types.
-            let param_type_exprs: Vec<deep::Expr> = fn_kids[..fn_kids.len() - 1].to_vec();
+            let param_type_exprs = match stamped_parts(type_expr) {
+                Some((DeepTag::TFn, _, fn_kids)) => {
+                    if fn_kids.is_empty() {
+                        return;
+                    }
+                    // All but the trailing return type are parameter types.
+                    fn_kids[..fn_kids.len() - 1].to_vec()
+                }
+                _ => Vec::new(),
+            };
             map.entry(name.to_string())
                 .or_insert_with(|| DeclaredSigMetadata {
                     param_types: param_type_exprs,
-                    binders: deep_type_binder_names(&kids[1]),
+                    binders,
                     dtype_bounds: chelis_deep::decode_dtype_bounds(meta).into_iter().collect(),
                 });
         }
         _ => {}
     }
-}
-
-pub(super) fn deep_type_binder_names(type_expr: &deep::Expr) -> UnordSet<String> {
-    let mut names = UnordSet::new();
-    let mut pending = vec![type_expr];
-    while let Some(current) = pending.pop() {
-        let Some((tag, _, children)) = stamped_parts(current) else {
-            continue;
-        };
-        if matches!(tag, DeepTag::TVar | DeepTag::DVar | DeepTag::DRank)
-            && let Some(variable) = children.first().and_then(symbol_name)
-            && variable != "_"
-        {
-            names.insert(variable.to_string());
-        }
-        pending.extend(children);
-    }
-    names
 }
 
 /// Artifact-local identity of one explicit local tensor ascription.
@@ -2157,7 +2074,6 @@ fn outstanding_local_ascription_claims(
     }
     Some(claims)
 }
-
 /// Result of running type inference on a program.
 #[derive(Debug)]
 pub struct InferResult {

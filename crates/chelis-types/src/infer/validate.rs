@@ -830,10 +830,11 @@ fn validate_core_transform_target(
 /// whose precision P is not supported by the Phase 0f tensor backend
 /// (currently: f16, bf16, f64, f8e4m3, string).
 ///
-/// This runs after HM inference so it catches user-written tensor type
-/// ascriptions, defsig tensor types, parameter type annotations, literal
-/// type metadata, and any cast target that produces a tensor with an
-/// unsupported element precision.
+/// This runs after HM inference so it catches value-position tensor type
+/// ascriptions, parameter type annotations, literal type metadata, and any
+/// cast target that produces a tensor with an unsupported element precision.
+/// `defsig` types are excluded because the shared Deep type resolver owns
+/// their primitive and binder diagnostics.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 enum TensorPrecisionOwnerKind {
     Value,
@@ -853,6 +854,23 @@ struct TensorPrecisionOwner {
     kind: TensorPrecisionOwnerKind,
     name: Option<String>,
     occurrence: usize,
+}
+
+impl TensorPrecisionOwner {
+    fn declaration_diagnostic_owner(&self) -> Option<DeclarationDiagnosticOwner> {
+        (self.kind == TensorPrecisionOwnerKind::Value)
+            .then(|| {
+                self.name.as_deref().map(|name| {
+                    DeclarationDiagnosticOwner::new(
+                        self.scope.path.as_deref(),
+                        self.scope.occurrence,
+                        name,
+                        self.occurrence,
+                    )
+                })
+            })
+            .flatten()
+    }
 }
 
 struct TensorPrecisionItem<'a> {
@@ -985,6 +1003,16 @@ fn tensor_precision_owner_plan(items: &[TensorPrecisionItem<'_>]) -> Vec<TensorP
     owners
 }
 
+pub(super) fn declaration_diagnostic_owner_plan(
+    exprs: &[deep::Expr],
+) -> Vec<Option<DeclarationDiagnosticOwner>> {
+    let items = tensor_precision_items(exprs);
+    tensor_precision_owner_plan(&items)
+        .iter()
+        .map(TensorPrecisionOwner::declaration_diagnostic_owner)
+        .collect()
+}
+
 pub(super) fn validate_tensor_precisions_in_program(
     exprs: &[deep::Expr],
     errors: &mut impl DiagnosticOutput,
@@ -1015,6 +1043,14 @@ fn walk_for_tensor_precision(
     );
     match expr.carrier() {
         deep::ExprCarrier::DecodedNode(tag, metadata, kids) => {
+            // The shared Deep resolver is the sole owner for declaration
+            // signatures. Traversing one here would add the legacy
+            // value-position UnsupportedTensorPrecision diagnostic beside
+            // the resolver's unknown-primitive or undeclared-binder error.
+            if tag == DeepTag::Defsig {
+                return;
+            }
+
             // Check t-tensor nodes at this level.
             if tag == DeepTag::TTensor {
                 // chelis#1125 PP7 / [04-TOT-5]: read the trailing `t-prim`
@@ -1032,23 +1068,30 @@ fn walk_for_tensor_precision(
                     // rejecting an otherwise unknown `t-prim` precision from
                     // value-position metadata. The reserved-name exclusions
                     // keep those spellings from acquiring a second owner.
-                    if Prim::parse_name(name).is_none()
+                    let resolved_by_type_boundary =
+                        TypeDiagnosticLocation::from_expr(last).is_some_and(|location| {
+                            errors.resolved_unknown_primitive_at(&location, name)
+                        }) || owner
+                            .declaration_diagnostic_owner()
+                            .is_some_and(|declaration| {
+                                errors.declaration_owns_unknown_primitive(&declaration, name)
+                            });
+                    if !resolved_by_type_boundary
+                        && Prim::parse_name(name).is_none()
                         && !crate::deep_type::is_retired_integer_dtype_name(name)
                         && !is_unsigned_dtype_name(name)
                         && !is_deferred_dtype_name(name)
                         && seen.insert((owner.clone(), name.to_string()))
                     {
                         let active_set = "f32, f64, bf16, f16, bool, i8, i16, i32, i64";
-                        // WS-A5 RT-3a F3: an identifier in a `t-prim`
+                        // F3: an identifier in a value-position `t-prim`
                         // precision slot that is neither a known active
-                        // primitive nor a §1.1.1 deferred dtype name
-                        // (unsigned alias or reserved name) is an
-                        // unbound name. Inside a sig the desugarer emits
-                        // such an identifier as `t-var`, so reaching this
-                        // arm with `t-prim` proves the name appears in a
-                        // value-position annotation (let binding, def
-                        // param without a surrounding sig that quantified
-                        // it) where the closed primitive set must apply.
+                        // primitive nor a §1.1.1 deferred dtype name is an
+                        // unbound name. Declaration signatures returned
+                        // above, and declaration body annotations consult the
+                        // session's shared resolver witness before this arm,
+                        // so this legacy fallback cannot duplicate their
+                        // located unknown-primitive diagnostic.
                         // Without this guard the name silently collapses
                         // to a witnessed resolution failure at the centralized
                         // Deep type boundary's
@@ -1058,15 +1101,15 @@ fn walk_for_tensor_precision(
                             CheckErrorKind::UnsupportedTensorPrecision,
                             format!(
                                 "tensor element precision `{name}` is not a recognized \
-                                 primitive (active set: {active_set}); inside a sig an \
-                                 unbound lowercase name introduces a precision tvar per \
-                                 spec/04-type-system.md §5.8, but in this position the \
-                                 closed primitive set applies",
+                                 primitive in this value-position annotation \
+                                 (active set: {active_set}); generic declaration \
+                                 variables require an explicit binder list under \
+                                 spec/04-type-system.md §5.8.1",
                             ),
                             vec![format!(
-                                "Use one of {active_set}, or move the annotation into a \
-                                 `sig` declaration that quantifies `{name}` as a precision \
-                                 type variable",
+                                "Use one of {active_set}, or declare `{name}` explicitly \
+                                 on the enclosing `sig` or `def` and use it in that \
+                                 declaration's type",
                             )],
                         ));
                     }
@@ -2754,9 +2797,14 @@ mod core_transform_fragment_tests {
         assert!(
             result.errors.iter().any(|error| {
                 matches!(error.kind, CheckErrorKind::TypeMismatch)
-                    && error.message.contains("undeclared type variable `a`")
+                    && error
+                        .message
+                        .contains("unknown primitive type `a` in type annotation")
+                    && error.suggestions.iter().any(|suggestion| {
+                        suggestion.contains("declare `a` in the signature binder list")
+                    })
             }),
-            "Surf bare type variables remain owned by type resolution: {:?}",
+            "Surf bare type names remain owned by explicit-binder type resolution: {:?}",
             result.errors
         );
         assert!(

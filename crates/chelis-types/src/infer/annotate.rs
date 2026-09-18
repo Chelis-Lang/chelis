@@ -82,13 +82,11 @@ pub(super) fn child_stamp_role(tag: DeepTag, index: usize, _arity: usize) -> Chi
                 RuntimeExpr
             }
         }
-        DeepTag::Defsig => {
-            if index == 0 {
-                Binder
-            } else {
-                Type
-            }
-        }
+        DeepTag::Defsig => match (index, _arity) {
+            (0, _) => Binder,
+            (1, 3..) => Syntax,
+            _ => Type,
+        },
         DeepTag::Deftype | DeepTag::Typealias => {
             if index == 0 {
                 Binder

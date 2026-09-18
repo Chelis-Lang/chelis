@@ -4,7 +4,7 @@
 use chelis_types::{TypeEnv, build_type_env_from_library, check_ir_program, check_ir_with_context};
 
 const LEGAL: &str = r#"
-(defsig {} legal
+(defsig {} legal (n)
   (t-fn {}
     (t-tensor {} (d-var {} n) (t-prim {} f32))
     (t-tensor {} (d-var {} n) (t-prim {} f32))))
@@ -111,8 +111,8 @@ fn malformed_parameter_type_is_rejected_once_at_annotation_admission() {
 fn explicit_signature_binders_reach_generated_annotation_finalization() {
     let exprs = surf(
         r#"
-sig row_argmax: &tensor[piece, classes, p] -> i64
-def row_argmax[piece, classes, p](row: &tensor[piece, classes, p]) -> i64 = {
+sig row_argmax[piece, classes, p]: &tensor[piece, classes, p] -> i64
+def row_argmax(row: &tensor[piece, classes, p]) -> i64 = {
   pair = sort(row, cast(1, i32))
   cast(0, i64)
 }

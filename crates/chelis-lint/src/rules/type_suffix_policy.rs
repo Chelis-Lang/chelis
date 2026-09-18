@@ -271,7 +271,7 @@ mod tests {
     #[test]
     fn flags_coral_is_nan_int_dispatch_form() {
         // The exact snapshot §8 #8 case: Frame + _int suffix.
-        let src = "def is_nan_int(f: Frame, name: string) -> tensor[n, bool] = todo\n";
+        let src = "def is_nan_int[n](f: Frame, name: string) -> tensor[n, bool] = todo\n";
         let v = run(src);
         assert_eq!(v.len(), 1);
         assert!(v[0].message.contains("is_nan_int"));
@@ -332,7 +332,7 @@ mod tests {
     fn still_flags_dispatch_form_even_without_parser_prefix() {
         // is_nan_int has no parser-verb prefix (`is_` alone is not in
         // the list — only `is_some_`); first arg is Frame, so still fires.
-        let src = "def is_nan_int(f: Frame, name: string) -> tensor[n, bool] = todo\n";
+        let src = "def is_nan_int[n](f: Frame, name: string) -> tensor[n, bool] = todo\n";
         let v = run(src);
         assert_eq!(v.len(), 1);
         assert!(v[0].message.contains("dispatch form"));
@@ -350,7 +350,7 @@ mod tests {
     fn accepts_renamed_col_form() {
         // The corrected form drops _int, uses _col. Rule does not fire on
         // `_col` because `_col` is not on the SUFFIXES list.
-        let src = "def is_nan_col(f: Frame, name: string) -> tensor[n, bool] = todo\n";
+        let src = "def is_nan_col[n](f: Frame, name: string) -> tensor[n, bool] = todo\n";
         let v = run(src);
         assert!(v.is_empty());
     }
@@ -401,7 +401,7 @@ mod tests {
     #[test]
     fn accepts_generic_function_no_suffix() {
         // Unsuffixed function name: no rule fires.
-        let src = "def is_nan(t: tensor[n, f32]) -> tensor[n, bool] = todo\n";
+        let src = "def is_nan[n](t: tensor[n, f32]) -> tensor[n, bool] = todo\n";
         let v = run(src);
         assert!(v.is_empty());
     }
@@ -416,7 +416,7 @@ mod tests {
 
     #[test]
     fn flags_bool_suffix_on_non_bool() {
-        let src = "def is_set_bool(f: Frame, name: string) -> tensor[n, f32] = todo\n";
+        let src = "def is_set_bool[n](f: Frame, name: string) -> tensor[n, f32] = todo\n";
         let v = run(src);
         assert_eq!(v.len(), 1);
     }

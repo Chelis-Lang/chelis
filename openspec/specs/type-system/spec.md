@@ -165,6 +165,95 @@ receive a flat multi-argument function type.
 - **WHEN** the two branches of an `if` have different types
 - **THEN** unification fails with a type error
 
+### Requirement: Authored declaration binders are rigid
+
+An authored type, dimension, or rank variable listed in a declaration's binder list has one
+scope throughout that declaration's body. Every type-position occurrence of that name within
+the body SHALL resolve to the same binder, including a tensor precision slot in a lambda
+parameter, expression ascription, block binding, nested ADT argument, property quantifier
+type, precondition, predicate body, or expression-valued option. A name not declared by an
+enclosing explicit binder remains subject to §5.8.1's closed primitive and undeclared-name
+rules; no occurrence introduces a binder.
+
+A name-resolution rejection in those declaration-owned type positions SHALL have one
+diagnostic owner per lexical module, declaration, offending spelling, and diagnostic class.
+A standalone signature and its matching definition's inline annotations and body type
+positions SHALL share that owner. Repeating the same rejected primitive or undeclared type,
+dimension, or rank spelling within that owner SHALL reuse the first diagnostic witness.
+Different declarations, lexical modules, spellings, or diagnostic classes SHALL retain
+different diagnostics in deterministic declaration order. An independent expression or
+runtime/type-use failure SHALL NOT be absorbed merely because it names the same spelling.
+
+Except for the sole role-sensitive exception below, each such binder is universally
+quantified and rigid: the body SHALL type-check for every admissible instantiation. A body
+constraint that identifies an authored binder with a concrete type or shape, with another
+authored binder of the same signature, or with a type or shape containing either SHALL be a
+type error reported at the declaration, and the declaration's scheme is its declared
+signature, never a narrowing of it. A wildcard slot that the body resolves to an authored
+binder takes that binder's type. A dtype-family bound ([04-DTYPE-2]) restricts the admissible
+instantiations without making the binder concrete.
+
+The sole role-sensitive exception is §4.4.1: a dimension binder appearing only in a function
+result remains output-inferred. The body may leave it unbound or resolve it to a body-internal
+output, but SHALL NOT pin it to a dimension from a declared input or collapse it with an
+input-position dimension binder. A non-function declaration has no function-result position
+and receives no such exception.
+
+#### Scenario: Concrete type narrowing is rejected
+
+- **WHEN** a non-function declaration binds `p`, declares type `p`, and its body has concrete type `f32`
+- **THEN** the checker reports a declaration type error and does not install `f32` as the declaration's scheme
+
+#### Scenario: Concrete dimension and rank narrowing are rejected
+
+- **WHEN** a non-function declaration binds `n` or `r`, declares `tensor[n, f32]` or `tensor[..r, f32]`, and its body produces a concrete shape
+- **THEN** the checker reports a `DimensionMismatch` for the narrowed authored binder
+
+#### Scenario: Distinct authored binders remain distinct
+
+- **WHEN** a declaration body identifies two distinct authored type, dimension, or rank binders from the same signature
+- **THEN** the checker rejects the declaration rather than installing the collapsed scheme
+
+#### Scenario: Unconstrained polymorphic value is preserved
+
+- **WHEN** `empty[p]` is declared as `List[p]` and its body is an empty list
+- **THEN** the declaration is accepted with its unconstrained polymorphic `List[p]` scheme
+
+#### Scenario: Polymorphic property is checked under its declaration binders
+
+- **WHEN** `@property accepts[p] forall(x: p): true` is checked
+- **THEN** `p` remains rigid and universally quantified through the property `defsig`
+
+#### Scenario: Body tensor precision uses the enclosing declaration binder
+
+- **WHEN** a declaration explicitly binds `p` and uses `p` in a tensor precision slot in a lambda parameter, expression ascription, block binding, nested ADT argument, property body, or expression-valued option
+- **THEN** every occurrence resolves to that declaration's same binder `p`
+
+#### Scenario: Undeclared body tensor precision remains rejected
+
+- **WHEN** a body tensor precision slot names `q` and no enclosing explicit binder declares `q`
+- **THEN** `q` does not become a binder and is rejected under the closed primitive rule
+
+#### Scenario: Declaration-owned name failures report once
+
+- **WHEN** one declaration repeats the same rejected primitive or undeclared type, dimension, or rank spelling across its standalone signature, inline annotations, or body type positions
+- **THEN** the checker emits one diagnostic for that lexical-module, declaration, spelling, and diagnostic-class owner at both checker ingresses
+
+#### Scenario: Distinct diagnostic owners remain distinct
+
+- **WHEN** rejected names differ by declaration, lexical module, spelling, or diagnostic class, or an independent use-site failure names the same spelling
+- **THEN** the checker retains the distinct diagnostics in deterministic declaration order
+
+#### Scenario: Wildcard filled by an authored binder preserves that binder
+
+- **WHEN** a wildcard signature slot is resolved by the body to an authored binder
+- **THEN** that slot takes the binder's type without converting the binder into an inference hole or a concrete type
+
+#### Scenario: Return-only dimension remains output-inferred
+
+- **WHEN** a function has no dimension-bearing input, declares a return-only `n`, and its body creates a body-internal `tensor[3, f32]`
+- **THEN** the declaration is accepted with the produced output dimension because no input dimension participates
+
 ### Requirement: Named dimension matching and no broadcasting
 
 Tensor operations SHALL require strict dimension matching: two `d-name` unify only when equal,
@@ -225,7 +314,7 @@ name-trackable operations, rejecting positional shape-rewriters.
 
 #### Scenario: Named-axis reduction at any rank
 
-- **WHEN** `def reduce_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)`
+- **WHEN** `def reduce_seq[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)`
 - **THEN** it reduces the named `seq` axis at any rank, computing the output shape symbolically
 
 #### Scenario: Positional rewriter in a rank-poly body is rejected

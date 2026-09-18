@@ -104,7 +104,7 @@ pub(crate) fn copy_result_from_source(resolved: &Type) -> Option<Type> {
 /// exposes an explicit binder set.
 pub(super) fn annotation_binder_mode(env: &Env) -> BinderMode<'_> {
     env.type_resolution_binders()
-        .map(|names| BinderMode::Lexical(names, env.type_resolution_variables()))
+        .map(BinderMode::Lexical)
         .unwrap_or(BinderMode::ClosedInput)
 }
 
@@ -119,7 +119,32 @@ pub(super) fn infer_expr(
     product: &mut InferenceProduct,
 ) -> Type {
     infer_expr_with_type_metadata_ownership(
-        expr, env, vg, subst, adt_reg, errors, product, None, None,
+        expr, env, vg, subst, adt_reg, errors, product, None, None, None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn infer_expr_with_declaration_diagnostic_owner(
+    expr: &deep::Expr,
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
+    declaration_diagnostic_owner: Option<&DeclarationDiagnosticOwner>,
+) -> Type {
+    infer_expr_with_type_metadata_ownership(
+        expr,
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        product,
+        None,
+        None,
+        declaration_diagnostic_owner,
     )
 }
 
@@ -144,6 +169,7 @@ pub(super) fn infer_expr_with_expected(
         product,
         Some(expected),
         None,
+        None,
     )
 }
 
@@ -158,6 +184,7 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
     product: &mut InferenceProduct,
     expected_result: Option<&Type>,
     type_metadata_resolution: Option<&mut Option<OwnedTypeMetadataResolution>>,
+    declaration_diagnostic_owner: Option<&DeclarationDiagnosticOwner>,
 ) -> Type {
     // Bail before a deeply-nested `app` tree exhausts the native stack and
     // aborts the process (this is the gdb-pinned real-pricer crash site):
@@ -173,6 +200,7 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
     stack_guard!("infer_expr", expr, vg.fresh_type());
 
     product.total_nodes += 1;
+    let type_metadata_owned_by_caller = type_metadata_resolution.is_some();
 
     let result = match expr {
         deep::Expr::Atom(atom, _) => infer_atom(atom, errors),
@@ -198,7 +226,16 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
                     product,
                     expected_result,
                 ),
-                Some(DeepTag::Fn) => infer_fn(list, env, vg, subst, adt_reg, errors, product),
+                Some(DeepTag::Fn) => infer_fn(
+                    list,
+                    env,
+                    vg,
+                    subst,
+                    adt_reg,
+                    errors,
+                    product,
+                    declaration_diagnostic_owner,
+                ),
                 Some(DeepTag::Let) => infer_let(list, env, vg, subst, adt_reg, errors, product),
                 Some(DeepTag::If) => infer_if(list, env, vg, subst, adt_reg, errors, product),
                 Some(DeepTag::Match) => infer_match(list, env, vg, subst, adt_reg, errors, product),
@@ -470,7 +507,16 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
                     product,
                     expected_result,
                 ),
-                DeepTag::Fn => infer_fn(&list, env, vg, subst, adt_reg, errors, product),
+                DeepTag::Fn => infer_fn(
+                    &list,
+                    env,
+                    vg,
+                    subst,
+                    adt_reg,
+                    errors,
+                    product,
+                    declaration_diagnostic_owner,
+                ),
                 DeepTag::Let => infer_let(&list, env, vg, subst, adt_reg, errors, product),
                 DeepTag::If => infer_if(&list, env, vg, subst, adt_reg, errors, product),
                 DeepTag::Match => infer_match(&list, env, vg, subst, adt_reg, errors, product),
@@ -677,6 +723,46 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
                 vec![],
             ),
         ),
+    };
+
+    let result = if !type_metadata_owned_by_caller
+        && !matches!(stamped_parts(expr), Some((DeepTag::Lit, _, _)))
+        && let Some((_, meta, _)) = stamped_parts(expr)
+        && let Some(authored_type) = meta.ty()
+    {
+        let declared = match resolve_deep_type_with_diagnostic_owner(
+            authored_type.expression(),
+            vg,
+            adt_reg,
+            TypeUseSite::Annotation,
+            annotation_binder_mode(env),
+            env.type_resolution_diagnostic_owner(),
+            errors,
+        ) {
+            Ok(declared) => declared,
+            Err(witness) => propagate(&witness),
+        };
+        if let Err(error) = unify(&result, &declared, subst) {
+            let mut diagnostic = CheckError::new(
+                check_error_kind_from_type_error_kind(&error.kind),
+                format!(
+                    "expression ascription does not match value: {}",
+                    error.message
+                ),
+                vec![format!(
+                    "Declared expression type is {declared}; inferred value type is {result}"
+                )],
+            );
+            if let Some(location) = TypeDiagnosticLocation::from_expr(authored_type.expression())
+                .or_else(|| TypeDiagnosticLocation::from_expr(expr))
+            {
+                diagnostic = location.attach(diagnostic);
+            }
+            errors.push(diagnostic);
+        }
+        declared
+    } else {
+        result
     };
 
     if !matches!(result, Type::Error(_)) {
@@ -994,18 +1080,18 @@ pub(super) fn infer_var(
             TopLevelValueVisibility::NotYetDeclared { shadowed } => shadowed.cloned(),
         };
         if let Some(scheme) = resolved_scheme {
-            // One instantiation, both renamings. chelis#1801 needs the
-            // dimension pairing on EVERY reference, not only an in-group
-            // one, so the reference instantiates through the single
-            // mechanism and takes what it needs from the result;
+            // One instantiation, all quantifier renamings. chelis#1801 needs
+            // the dimension pairing on EVERY reference, not only an in-group
+            // one, so the reference instantiates through the single mechanism
+            // and takes what it needs from the result;
             // `env::tests::dvar_mapping_instantiation_matches_plain_instantiation`
             // pins that this is the same instantiation the two projections
             // used to perform.
-            let (ty, tvar_mapping, dvar_mapping) = env.instantiate_scheme(&scheme, vg, subst);
+            let instantiated = env.instantiate_scheme(&scheme, vg, subst);
             // chelis#1801: the application rule reads these back to decide
             // which of THIS call's fresh dimension variables denote a
             // runtime extent they met (spec/04-type-system.md section 3.2).
-            product.record_instantiation_dvars(dvar_mapping.iter().map(|(_, fresh)| *fresh));
+            product.record_instantiation_dvars(instantiated.dvars.iter().map(|(_, fresh)| *fresh));
             if super::recursion::should_record_occurrence(name, &scheme) {
                 // spec/04 section 3.1.1: inside a recursive binding group,
                 // record the instantiation minted for an in-group reference
@@ -1013,9 +1099,14 @@ pub(super) fn infer_var(
                 // instantiation.
                 let span_id = list_span_id(list).map(str::to_string);
                 let span_offset = span_id.as_deref().and_then(parse_span_offset);
-                super::recursion::record_occurrence(name, &tvar_mapping, span_id, span_offset);
+                super::recursion::record_occurrence(
+                    name,
+                    &instantiated.tvars,
+                    span_id,
+                    span_offset,
+                );
             }
-            let resolved = subst.apply(&ty);
+            let resolved = subst.apply(&instantiated.ty);
             // RFC D-CHECK: a bare reference to an out-of-module
             // opaque constructor is hidden, and an out-of-module
             // reference to an unexported binding whose signature
@@ -1161,12 +1252,13 @@ pub(super) fn infer_lit(
     // Check metadata for type annotation
     if let Some(ty) = meta.and_then(|m| m.ty()) {
         let val = ty.expression();
-        let resolved = match resolve_deep_type(
+        let resolved = match resolve_deep_type_with_diagnostic_owner(
             val,
             vg,
             adt_reg,
             TypeUseSite::Annotation,
             annotation_binder_mode(env),
+            env.type_resolution_diagnostic_owner(),
             errors,
         ) {
             Ok(ty) => ty,

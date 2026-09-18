@@ -1124,165 +1124,6 @@ pub(super) fn resolve_type_aliases(ty: &Type, adt_reg: &AdtRegistry, vg: &mut Va
     AliasExpansionSession::new(adt_reg, vg).resolve(ty)
 }
 
-/// A declaration's resolved type together with the three binder facts the
-/// declaration carries: the dtype-family bounds its metadata declared
-/// (chelis#1474), the source spelling of every dimension parameter it
-/// introduced (chelis#260), and the source spelling of every authored TYPE
-/// binder it introduced (chelis#260 Site 2 and chelis#1486, [04-INF-6]).
-///
-/// A struct rather than a tuple because this has now grown twice: chelis#1474
-/// added the dtype-family bounds and chelis#260 added the dimension names,
-/// each time making an unnamed tuple harder to read at the call sites.
-///
-/// `dim_names` and `type_names` are the same fact on the two binder kinds,
-/// and both exist for the same reason: the names are in scope only while the
-/// declaration's signature is being resolved, and the diagnostics that need
-/// them, the borrow report and the [04-INF-6] rigidity check, both run after
-/// instantiation, where only the internal ids survive.
-pub(super) struct ResolvedDeclaredType {
-    pub(super) ty: Type,
-    pub(super) bounds: Vec<(TypeVar, TypeVarRestriction)>,
-    pub(super) dim_names: UnordMap<DimVar, String>,
-    pub(super) type_names: UnordMap<TypeVar, String>,
-}
-
-pub(super) struct RejectedDeclaredType {
-    recovery: crate::deep_type::RejectedSignatureType,
-    bounds: Vec<(TypeVar, TypeVarRestriction)>,
-    dim_names: UnordMap<DimVar, String>,
-    type_names: UnordMap<TypeVar, String>,
-}
-
-pub(super) fn resolve_deep_type(
-    expr: &deep::Expr,
-    vg: &mut VarGen,
-    adt_reg: &AdtRegistry,
-    use_site: TypeUseSite,
-    binder_mode: BinderMode<'_>,
-    errors: &mut DiagnosticSink<'_>,
-) -> Result<Type, ErrorWitness> {
-    let resolved = resolve_deep_type_with_bounds_and_dim_names(
-        expr,
-        vg,
-        adt_reg,
-        use_site,
-        binder_mode,
-        UnordMap::new(),
-        errors,
-    )
-    .map_err(|rejected| rejected.recovery.witness)?;
-    Ok(resolved.ty)
-}
-
-/// Resolve a declaration's type expression under declared dtype-family bounds
-/// (`spec/04-type-system.md` §5.9), additionally returning the source name
-/// bound to each dimension variable (chelis#260) and to each authored type
-/// binder (chelis#1486) the resolution minted.
-///
-/// The bounds arrive from the declaration node's `dtype_bounds` metadata and
-/// leave as `(variable, family)` pairs the caller installs on the
-/// substitution, so generalization re-quantifies them onto the scheme. The
-/// resolver holds `name -> DimVar` only for its own lifetime; every other
-/// caller drops it, which is why a declared-dim collapse could report `d44`
-/// and `d45` but never `n` and `m`.
-///
-/// One call returns both because one call site needs both: the `Defsig` arm
-/// installs the bounds and records the names for the same declaration. Two
-/// entry points that each ran the resolver would resolve the declaration
-/// twice and leave two mechanisms to keep in step.
-pub(super) fn resolve_deep_type_with_bounds_and_dim_names(
-    expr: &deep::Expr,
-    vg: &mut VarGen,
-    adt_reg: &AdtRegistry,
-    use_site: TypeUseSite,
-    binder_mode: BinderMode<'_>,
-    dtype_bounds: UnordMap<String, TypeVarRestriction>,
-    errors: &mut DiagnosticSink<'_>,
-) -> Result<ResolvedDeclaredType, Box<RejectedDeclaredType>> {
-    let (resolution, bound_result, bounds, dim_names, type_names) = {
-        let mut resolver =
-            DeepTypeResolver::new(use_site, binder_mode, adt_reg.resolution_env(), vg, errors)
-                .with_dtype_bounds(dtype_bounds);
-        let resolution = resolver.resolve_signature(expr);
-        let dim_names = resolver.dim_var_names();
-        let type_names = resolver.type_var_names();
-        let bounds = resolver.resolved_dtype_bounds();
-        let bound_result = resolver.finish_dtype_bounds();
-        (resolution, bound_result, bounds, dim_names, type_names)
-    };
-    let recovery = match (resolution, bound_result) {
-        (Ok(resolved), Ok(bounds)) => {
-            return Ok(ResolvedDeclaredType {
-                ty: resolve_type_aliases(&resolved.into_type(), adt_reg, vg),
-                bounds,
-                dim_names,
-                type_names,
-            });
-        }
-        (Ok(resolved), Err(witness)) => {
-            crate::deep_type::RejectedSignatureType::from_resolved(resolved.into_type(), witness)
-        }
-        // Both boundaries already reported their independent failures. The
-        // first witness marks the rejected declaration without another report.
-        (Err(recovery), _) => recovery,
-    };
-    let mut recovery = recovery;
-    recovery.ty = resolve_type_aliases(&recovery.ty, adt_reg, vg);
-    Err(Box::new(RejectedDeclaredType {
-        recovery,
-        bounds,
-        dim_names,
-        type_names,
-    }))
-}
-
-/// Decode a declaration node's `dtype_bounds` metadata into checker
-/// restrictions, reporting a malformed bound rather than dropping it.
-pub(super) fn declaration_dtype_bounds(
-    meta: &deep::Metadata,
-) -> UnordMap<String, TypeVarRestriction> {
-    chelis_deep::decode_dtype_bounds(meta)
-        .into_iter()
-        .map(|(binder, family)| (binder, restriction_for_family(family)))
-        .collect()
-}
-
-/// Attach a declaration's resolved bounds to the substitution so
-/// generalization re-quantifies them onto the scheme.
-pub(super) fn install_declared_bounds(
-    bounds: &[(TypeVar, TypeVarRestriction)],
-    subst: &mut Subst,
-    declaration: &str,
-    errors: &mut DiagnosticSink<'_>,
-) -> Result<(), ErrorWitness> {
-    for (variable, restriction) in bounds {
-        if let Err(error) = subst.narrow_tvar_restriction(*variable, *restriction) {
-            return Err(report_witness(
-                errors,
-                CheckError::new(
-                    CheckErrorKind::TypeMismatch,
-                    format!(
-                        "`{declaration}` declares conflicting dtype bounds: {}",
-                        error.message
-                    ),
-                    vec![],
-                ),
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// The checker restriction for a surface dtype family. Total over the closed
-/// `spec/04-type-system.md` §5.9 family set.
-pub(super) fn restriction_for_family(family: chelis_deep::DtypeFamily) -> TypeVarRestriction {
-    match family {
-        chelis_deep::DtypeFamily::Float => TypeVarRestriction::ActiveFloat,
-        chelis_deep::DtypeFamily::Int => TypeVarRestriction::ActiveInt,
-        chelis_deep::DtypeFamily::Numeric => TypeVarRestriction::ActiveNumeric,
-    }
-}
-
 // ── Declaration collection (first pass) ──────────────────────────
 
 /// Which declaration kinds a `collect_declarations` sub-pass should process.
@@ -1352,12 +1193,14 @@ fn note_eager_value_ordinals(items: &[(Option<String>, &deep::Expr)], env: &mut 
 /// function bodies, so a binding timeline cannot express source order.
 pub(super) fn collect_all_declarations(
     items: &[(Option<String>, &deep::Expr)],
+    declaration_diagnostic_owners: &[Option<DeclarationDiagnosticOwner>],
     env: &mut Env,
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &mut AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
 ) {
+    debug_assert_eq!(items.len(), declaration_diagnostic_owners.len());
     // chelis#258 (main): duplicate-def / builtin-shadowing rejection runs
     // over the bare item list. Our `items` is paired with module keys, so
     // project to the `&deep::Expr` slice the reporters expect.
@@ -1379,10 +1222,13 @@ pub(super) fn collect_all_declarations(
     // declarations unbound; the check entry's `cancellation_gate` rejects the
     // unit before anything reads it.
     let cancel = crate::cancel::current_cancel_token();
-    for (module, expr) in items {
+    for (index, (module, expr)) in items.iter().enumerate() {
         if cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
             return;
         }
+        let diagnostic_owner = declaration_diagnostic_owners
+            .get(index)
+            .and_then(Option::as_ref);
         collect_declarations(
             expr,
             module.as_deref(),
@@ -1393,12 +1239,16 @@ pub(super) fn collect_all_declarations(
             &resolution_env,
             errors,
             DeclPhase::Aliases,
+            diagnostic_owner,
         );
     }
-    for (module, expr) in items {
+    for (index, (module, expr)) in items.iter().enumerate() {
         if cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
             return;
         }
+        let diagnostic_owner = declaration_diagnostic_owners
+            .get(index)
+            .and_then(Option::as_ref);
         collect_declarations(
             expr,
             module.as_deref(),
@@ -1409,6 +1259,7 @@ pub(super) fn collect_all_declarations(
             &resolution_env,
             errors,
             DeclPhase::Rest,
+            diagnostic_owner,
         );
     }
 }
@@ -1983,6 +1834,7 @@ pub(super) fn collect_declarations(
     headers: &TypeResolutionEnv,
     errors: &mut DiagnosticSink<'_>,
     phase: DeclPhase,
+    declaration_diagnostic_owner: Option<&DeclarationDiagnosticOwner>,
 ) {
     let Some((tag, meta, kids)) = stamped_parts(expr) else {
         return;
@@ -2056,19 +1908,21 @@ pub(super) fn collect_declarations(
             }
         }
         DeepTag::Defsig => {
-            // (defsig {dtype_bounds?} name type_expr)
-            if kids.len() >= 2
-                && let Some(name) = symbol_name(&kids[0])
+            // (defsig {dtype_bounds?} name [(binders...)] type_expr)
+            if let Some((name_expr, binder_list, type_expr)) = defsig_parts(kids)
+                && let Some(name) = symbol_name(name_expr)
+                && let Some(binder_names) = defsig_binder_names(binder_list, errors)
             {
                 let dtype_bounds = declaration_dtype_bounds(meta);
                 let signature_level = subst.enter_level(vg);
-                let resolved = resolve_deep_type_with_bounds_and_dim_names(
-                    &kids[1],
+                let resolved = resolve_deep_type_with_binder_identities(
+                    type_expr,
                     vg,
                     adt_reg,
                     TypeUseSite::Defsig,
-                    BinderMode::ImplicitGeneric,
+                    BinderMode::ExplicitGeneric(&binder_names),
                     dtype_bounds,
+                    declaration_diagnostic_owner,
                     errors,
                 );
                 let bounds = match &resolved {
@@ -2081,17 +1935,7 @@ pub(super) fn collect_declarations(
                     (Ok(resolved), Ok(())) => {
                         let scheme = env.generalize(&resolved.ty, subst);
                         env.bind(name.to_string(), scheme);
-                        // chelis#260: keep the source names of the declared dim
-                        // and type parameters. This is the only point where `n`,
-                        // `m` and `t` are still associated with their variables.
-                        env.record_declared_dim_names(name, resolved.dim_names);
-                        // chelis#1486 / [04-INF-6]: the type-name recording has a
-                        // second consumer. It covers authored binders, explicit
-                        // (`def f[a](..)`) and implicit (`def f(x: a) -> a`)
-                        // alike, so the post-body rigidity check can name `a`
-                        // rather than `t44`. An inference hole never reaches this
-                        // map ([04-INF-5]).
-                        env.record_declared_type_names(name, resolved.type_names);
+                        env.record_declared_binder_identities(name, resolved.binder_identities);
                     }
                     (Ok(resolved), Err(witness)) => {
                         let recovery = crate::deep_type::RejectedSignatureType::from_resolved(
@@ -2099,13 +1943,11 @@ pub(super) fn collect_declarations(
                             witness,
                         );
                         env.bind_rejected_signature(name.to_string(), recovery, subst);
-                        env.record_declared_dim_names(name, resolved.dim_names);
-                        env.record_declared_type_names(name, resolved.type_names);
+                        env.record_declared_binder_identities(name, resolved.binder_identities);
                     }
                     (Err(rejected), _) => {
                         env.bind_rejected_signature(name.to_string(), rejected.recovery, subst);
-                        env.record_declared_dim_names(name, rejected.dim_names);
-                        env.record_declared_type_names(name, rejected.type_names);
+                        env.record_declared_binder_identities(name, rejected.binder_identities);
                     }
                 }
             }
@@ -2515,6 +2357,7 @@ pub(super) fn infer_top_level(
     defer_recursive_binding: bool,
     user_def_names: &UnordSet<String>,
     declared_signatures: &UnordMap<String, DeclaredSigMetadata>,
+    declaration_diagnostic_owner: Option<&DeclarationDiagnosticOwner>,
 ) -> Option<(String, Type, Vec<crate::unify::CollectionContractId>)> {
     let Some((tag, declaration_meta, kids)) = stamped_parts(expr) else {
         // chelis#858 / [04-TOT-1]: a top-level list with no decoded tag
@@ -2566,13 +2409,12 @@ pub(super) fn infer_top_level(
         // keyed by the FRESH variables the instantiation below mints. Empty
         // when the signature was never recorded, in which case the collapse
         // diagnostic falls back to the internal id.
-        // chelis#260 Site 2 and chelis#1486 / [04-INF-6]: the names of this
-        // signature's AUTHORED type binders, keyed by the fresh variables the
-        // instantiation below mints. Empty when the signature authored none,
-        // in which case nothing in the declaration is rigid; an inference hole
-        // is never a member. The deferred-borrow drain reports on these fresh
-        // variables long after this instantiation, so the composed map is
-        // parked on `Env` below.
+        // [04-INF-6]: compose this declaration's authored type, dimension, and
+        // rank identities. Outer-signature occurrences come from one scheme
+        // instantiation; roles absent there are completed from the structural
+        // binder list. An inference hole is never a member. The deferred-borrow
+        // drain reports on the type projection long after this setup, so that
+        // projection is parked on `Env` below.
         let binder_names = declared_signatures
             .get(&name)
             .map(|metadata| &metadata.binders);
@@ -2588,8 +2430,7 @@ pub(super) fn infer_top_level(
         };
         let recursion::DeclaredMemberSetup {
             ty: declared_ty,
-            dim_names: declared_dim_names,
-            type_names: declared_type_names,
+            binder_identities: declared_binder_identities,
             caller_guard: _recursion_caller_guard,
         } = recursive_expected.prepare_declared_member(
             recursion::DeclaredMemberRequest::new(
@@ -2602,6 +2443,9 @@ pub(super) fn infer_top_level(
             vg,
             subst,
         );
+        let declared_dim_names = declared_binder_identities.dim_names();
+        let declared_type_names = declared_binder_identities.type_names();
+        let declared_rank_names = declared_binder_identities.rank_names();
         // A declaration's signature owns the only named binders legal in its
         // nested source annotations. Infer against a lexical clone so the
         // scope follows nested env clones but cannot leak to the next `def`
@@ -2622,11 +2466,9 @@ pub(super) fn infer_top_level(
                 .map(|(variable, _)| (*variable, subst.tvar_restriction(*variable)))
                 .collect();
         let mut body_env = env.clone();
-        body_env.set_type_resolution_binders(
-            declared_signatures
-                .get(&name)
-                .map(|metadata| &metadata.binders),
-            &declared_type_names,
+        body_env.set_type_resolution_scope(
+            binder_names.map(|_| &declared_binder_identities),
+            declaration_diagnostic_owner,
         );
         install_exact_op35_dependency_contracts(&name, declared_ty.as_ref(), &mut body_env, vg);
 
@@ -2666,9 +2508,19 @@ pub(super) fn infer_top_level(
                 adt_reg,
                 errors,
                 product,
+                declaration_diagnostic_owner,
             )
         } else {
-            infer_expr(&kids[1], &mut body_env, vg, subst, adt_reg, errors, product)
+            infer_expr_with_declaration_diagnostic_owner(
+                &kids[1],
+                &mut body_env,
+                vg,
+                subst,
+                adt_reg,
+                errors,
+                product,
+                declaration_diagnostic_owner,
+            )
         };
         // Did the body's inference report any UnboundVariable diagnostic?
         // We use this to discriminate WS-A5 RT-3a F1's masked-by-Error
@@ -2748,35 +2600,18 @@ pub(super) fn infer_top_level(
             // y: tensor[m, f32]) -> tensor[n, f32] = y`), and the
             // structural relaxed-retry guard does not see it because the
             // initial unify already succeeded by collapsing `n` and `m`.
-            let mut declared_dvars: Vec<DimVar> = Vec::new();
-            if let Type::Fn(decl_params, _) = &decl_ty {
-                for t in decl_params {
-                    for dv in crate::env::free_dvars(t) {
-                        if !declared_dvars.contains(&dv) {
-                            declared_dvars.push(dv);
-                        }
-                    }
-                }
-            }
-            check_declared_dvars_rigid(&declared_dvars, &declared_dim_names, subst, errors);
-            // chelis#1486 / [04-INF-6]: the type-binder twin of the check
-            // above. `declared_type_names`' key set is exactly this
-            // declaration's authored binders, explicit and implicit alike, so
-            // the check needs no separate walk of the declared type and an
-            // inference hole ([04-INF-5]) is excluded by construction.
+            // Classify every authored dimension identity together. Parameter
+            // and body-only roles are rigid under [04-INF-6]; result-only
+            // roles retain §4.4.1 output inference and may collapse only with
+            // another result-only identity. This declaration-level path is
+            // shared by ordinary and recursive members.
+            check_authored_dvars_rigid(&name, &decl_ty, &declared_dim_names, subst, errors);
+            // [04-INF-6]: the type/rank twins of the dimension check above.
+            // Their key sets come from the same declaration-owned identity
+            // object, and inference holes ([04-INF-5]) are excluded by
+            // construction.
             check_declared_tvars_rigid(&name, &declared_type_names, subst, errors);
-            // chelis#273: the param-position guard above never sees a dim
-            // parameter that occurs only in the return type, so a body
-            // could silently pin a return-only rigid dim. Reject the
-            // input-coupled pins/collapses while keeping the legitimate
-            // output-inferred uses (hello_tensor-style) green.
-            check_return_only_dvars_rigid(
-                &decl_ty,
-                &declared_dvars,
-                &declared_dim_names,
-                subst,
-                errors,
-            );
+            check_declared_rvars_rigid(&name, &declared_rank_names, subst, errors);
             // Tier-2 rank-polymorphism Body Discipline
             // (spec/design/rank_polymorphism.md §Soundness Boundary, spec §4.2):
             // a def whose signature mentions a rank variable `..r` may call only

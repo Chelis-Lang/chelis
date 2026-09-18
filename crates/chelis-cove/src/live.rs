@@ -301,7 +301,7 @@ mod tests {
 
     #[test]
     fn valid_program_reports_fitness_and_deep() {
-        let analysis = analyze("def f(x: tensor[n, f32]) -> tensor[n, f32] = x\n");
+        let analysis = analyze("def f[n](x: tensor[n, f32]) -> tensor[n, f32] = x\n");
         assert_eq!(analysis.stage, LiveStage::Ready);
         assert_eq!(analysis.fitness, Some(1.0));
         assert!(

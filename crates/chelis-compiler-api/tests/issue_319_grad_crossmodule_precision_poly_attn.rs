@@ -186,7 +186,7 @@ fn build_pkg(library_src: &str, main_src: &str) -> (TempDir, PathBuf) {
 
 fn inline_f32_grad_result() -> TensorValue {
     let inline = format!(
-        "def sdpa(q: tensor[s, d, f32], k: tensor[s, d, f32], v: tensor[s, d, f32], scale: tensor[s, s, f32]) -> tensor[s, d, f32] = {SDPA_BODY}\n{}",
+        "def sdpa[s, d](q: tensor[s, d, f32], k: tensor[s, d, f32], v: tensor[s, d, f32], scale: tensor[s, s, f32]) -> tensor[s, d, f32] = {SDPA_BODY}\n{}",
         grad_driver("sdpa"),
     );
     let result = try_eval(&inline).unwrap_or_else(|err| {
@@ -217,7 +217,7 @@ fn issue_319_control_inline_f32_sdpa_grad_lowers() {
 #[test]
 fn issue_319_separate_sig_precision_poly_sdpa_grad_matches_inline() {
     let separate_sig = format!(
-        "sig sdpa[p: Float]: tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, s, p] -> tensor[s, d, p]\n\
+        "sig sdpa[s, d, p: Float]: tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, s, p] -> tensor[s, d, p]\n\
          def sdpa(q, k, v, scale) = {SDPA_BODY}\n{}",
         grad_driver("sdpa"),
     );
@@ -247,7 +247,7 @@ fn issue_319_separate_sig_precision_poly_sdpa_grad_matches_inline() {
 #[test]
 fn issue_319_imported_precision_poly_sdpa_grad_lowers_and_matches_inline() {
     let library = "module Mylib.Attn\nexport (sdpa)\n\n\
-                   sig sdpa[p: Float]: tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, s, p] -> tensor[s, d, p]\n\
+                   sig sdpa[s, d, p: Float]: tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, s, p] -> tensor[s, d, p]\n\
                    def sdpa(q, k, v, scale) = {\n  \
                      kt = permute(k, 1, 0)\n  \
                      scores = matmul(q, kt)\n  \
@@ -336,7 +336,7 @@ fn assert_separate_sig_grad_matches_inline(
     call: &str,
 ) {
     let inline_src = format!(
-        "def verb({inline_params}) = {body}\n\
+        "def verb[s, d]({inline_params}) = {body}\n\
          def loss({loss_params}) -> f32 =\n  \
            tensor_to_scalar(sum(sum(verb({call_args}), cast(0, i32)), cast(0, i32)))\n\
          out = grad(loss, wrt=q)({call})\n",
@@ -370,7 +370,7 @@ fn issue_319_masked_causal_body_grad_matches_inline() {
     assert_separate_sig_grad_matches_inline(
         "masked",
         "q: tensor[s, d, f32], k: tensor[s, d, f32], v: tensor[s, d, f32], scale: tensor[s, s, f32], mask: tensor[s, s, f32]",
-        "sig verb[p: Float]: tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, s, p] -> tensor[s, s, p] -> tensor[s, d, p]",
+        "sig verb[s, d, p: Float]: tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, s, p] -> tensor[s, s, p] -> tensor[s, d, p]",
         "q, k, v, scale, mask",
         "{\n  kt = permute(k, 1, 0)\n  scores = matmul(q, kt)\n  weights = softmax(add(mul(scores, scale), mask), -1)\n  matmul(weights, v)\n}",
         "q: tensor[2, 3, f32], k: tensor[2, 3, f32], v: tensor[2, 3, f32], scale: tensor[2, 2, f32], mask: tensor[2, 2, f32]",
@@ -386,7 +386,7 @@ fn issue_319_output_transpose_body_grad_matches_inline() {
     assert_separate_sig_grad_matches_inline(
         "out-transpose",
         "q: tensor[s, d, f32], k: tensor[s, d, f32], v: tensor[s, d, f32], scale: tensor[s, s, f32]",
-        "sig verb[p: Float]: tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, s, p] -> tensor[d, s, p]",
+        "sig verb[s, d, p: Float]: tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, s, p] -> tensor[d, s, p]",
         "q, k, v, scale",
         "{\n  kt = permute(k, 1, 0)\n  scores = matmul(q, kt)\n  weights = softmax(mul(scores, scale), -1)\n  o = matmul(weights, v)\n  permute(o, 1, 0)\n}",
         "q: tensor[2, 3, f32], k: tensor[2, 3, f32], v: tensor[2, 3, f32], scale: tensor[2, 2, f32]",
@@ -408,7 +408,7 @@ fn issue_319_output_transpose_body_grad_matches_inline() {
 
 #[test]
 fn issue_319_reshape_precision_poly_verb_lowers() {
-    let src = "sig flat2d: tensor[s, d, p] -> tensor[six, p]\n\
+    let src = "sig flat2d[s, d, p]: tensor[s, d, p] -> tensor[six, p]\n\
                def flat2d(x) = reshape(permute(x, 1, 0), [cast(6, i64)])\n\
                out = flat2d(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n";
     let result = try_eval(src).unwrap_or_else(|err| {
@@ -433,7 +433,7 @@ fn issue_319_reshape_precision_poly_verb_lowers() {
 
 #[test]
 fn issue_319_expand_precision_poly_verb_lowers() {
-    let src = "sig broadcast: tensor[s, p] -> tensor[s, c, p]\n\
+    let src = "sig broadcast[s, c, p]: tensor[s, p] -> tensor[s, c, p]\n\
                def broadcast(b) = insert(b, cast(1, i32), cast(2, i64))\n\
                out = broadcast(to_tensor([1.0, 2.0]))\n";
     let result = try_eval(src).unwrap_or_else(|err| {
@@ -463,7 +463,7 @@ fn issue_319_expand_precision_poly_verb_lowers() {
 
 /// chelis#1486 / [04-INF-6] INVERSION of chelis#319's two-precision-var row.
 ///
-/// The original asserted that `sig f: tensor[s,d,p] -> tensor[s,d,w] ->
+/// The original asserted that `sig f[s,d,p,w]: tensor[s,d,p] -> tensor[s,d,w] ->
 /// tensor[s,d,w]`, whose body's `add` unifies `p` and `w`, GRADS when both
 /// actuals are f32. That was a statement about a program the checker accepted.
 /// Under [04-INF-6] it is no longer one: the header promises the body works for
@@ -475,7 +475,7 @@ fn issue_319_expand_precision_poly_verb_lowers() {
 /// Deep must reject this exact chelis#319 program before gradient evaluation.
 #[test]
 fn issue_319_two_precision_vars_unified_by_the_body_are_rejected() {
-    let twovar = "sig f[p: Numeric, w: Numeric]: tensor[s, d, p] -> tensor[s, d, w] -> tensor[s, d, w]\n\
+    let twovar = "sig f[s, d, p: Numeric, w: Numeric]: tensor[s, d, p] -> tensor[s, d, w] -> tensor[s, d, w]\n\
                   def f(q, b) = {\n  qt = permute(q, 1, 0)\n  qb = permute(qt, 1, 0)\n  add(qb, b)\n}\n\
                   def loss(q: tensor[2, 3, f32], b: tensor[2, 3, f32]) -> f32 =\n  \
                     tensor_to_scalar(sum(sum(f(q, b), cast(0, i32)), cast(0, i32)))\n\
@@ -527,7 +527,7 @@ fn issue_319_two_precision_vars_unified_by_the_body_are_rejected() {
 /// because the property it states was never the thing [04-INF-6] changed.
 #[test]
 fn issue_319_one_precision_var_still_grads_at_a_monomorphic_call_site() {
-    let onevar = "sig f[p: Numeric]: tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, d, p]\n\
+    let onevar = "sig f[s, d, p: Numeric]: tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, d, p]\n\
                   def f(q, b) = {\n  qt = permute(q, 1, 0)\n  qb = permute(qt, 1, 0)\n  add(qb, b)\n}\n\
                   def loss(q: tensor[2, 3, f32], b: tensor[2, 3, f32]) -> f32 =\n  \
                     tensor_to_scalar(sum(sum(f(q, b), cast(0, i32)), cast(0, i32)))\n\
@@ -555,7 +555,7 @@ fn issue_319_heterogeneous_precision_call_is_rejected_not_promoted() {
     // no-implicit-precision-promotion invariant requires this be REJECTED
     // (the sig forces both to `p`), never silently forced to one
     // precision. The rejection must name the precision mismatch.
-    let hetero = "sig f[p: Numeric]: tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, d, p]\n\
+    let hetero = "sig f[s, d, p: Numeric]: tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, d, p]\n\
                   def f(a, b) = {\n  at = permute(a, 1, 0)\n  ar = permute(at, 1, 0)\n  add(ar, b)\n}\n\
                   def use_f(a: tensor[2, 3, f32], b: tensor[2, 3, f64]) -> f32 =\n  \
                     tensor_to_scalar(sum(sum(f(a, b), cast(0, i32)), cast(0, i32)))\n\
@@ -582,7 +582,7 @@ fn issue_319_distinct_precisions_not_force_merged() {
     // preserved (or the tripwire fires) — but f64 is never silently
     // promoted to f32. Here the f64 input threads through a permute chain
     // and is dropped; the f32 result must be exact.
-    let distinct = "sig f: tensor[s, d, p] -> tensor[s, d, w] -> tensor[s, d, p]\n\
+    let distinct = "sig f[s, d, p, w]: tensor[s, d, p] -> tensor[s, d, w] -> tensor[s, d, p]\n\
                     def f(a, b) = {\n  bt = permute(b, 1, 0)\n  bp = permute(bt, 1, 0)\n  a\n}\n\
                     def use_f(a: tensor[2, 3, f32], b: tensor[2, 3, f64]) -> f32 =\n  \
                       tensor_to_scalar(sum(sum(f(a, b), cast(0, i32)), cast(0, i32)))\n\

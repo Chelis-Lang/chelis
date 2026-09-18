@@ -286,7 +286,7 @@ fn in_module_opaque_construction_checks_clean_on_both_ingresses() {
 
 fn poly_mean_program(call_precision: &str) -> String {
     format!(
-        "(defsig {{dtype_bounds: {{p: float}}}} my_mean (t-fn {{}} (t-tensor {{}} (d-lit {{}} 4) (t-var {{}} p)) \
+        "(defsig {{dtype_bounds: {{p: float}}}} my_mean (p) (t-fn {{}} (t-tensor {{}} (d-lit {{}} 4) (t-var {{}} p)) \
            (t-tensor {{}} (t-var {{}} p))))\n\
          (def {{}} my_mean (fn {{}} (params {{}} x) \
            (app {{}} (var {{}} mean) (var {{}} x) (lit {{type: (t-prim {{}} i32)}} 0))))\n\
@@ -375,7 +375,7 @@ fn reshape_shape_mismatch_is_rejected_on_both_ingresses() {
     // unified with the declared rank-1 result; the IR ingress rejected it.
     assert_agree_and_reject(
         &format!(
-            "(defsig {{}} g (t-fn {{}} (t-tensor {{}} (d-lit {{}} 6) (t-prim {{}} f32)) \
+            "(defsig {{}} g (n) (t-fn {{}} (t-tensor {{}} (d-lit {{}} 6) (t-prim {{}} f32)) \
                (t-tensor {{}} (d-var {{}} n) (t-prim {{}} f32))))\n\
              (def {{}} g (fn {{}} (params {{}} x) \
                (app {{}} (var {{}} reshape) (var {{}} x) {SHAPE_LIST_2_3})))"
@@ -716,7 +716,7 @@ fn negative_tuple_get_index_is_rejected_alike_on_both_ingresses() {
 /// takes its inline-annotation fallback only in exactly this shape.
 fn inline_param_poly_program(call_precision: &str) -> String {
     format!(
-        "(defsig {{dtype_bounds: {{p: float}}}} my_mean (t-fn {{}} (t-tensor {{}} (d-lit {{}} 4) (t-var {{}} p)) \
+        "(defsig {{dtype_bounds: {{p: float}}}} my_mean (p) (t-fn {{}} (t-tensor {{}} (d-lit {{}} 4) (t-var {{}} p)) \
            (t-tensor {{}} (t-var {{}} p))))\n\
          (def {{}} my_mean (fn {{}} (params {{}} x) \
            (app {{}} (var {{}} mean) (var {{}} x) (lit {{type: (t-prim {{}} i32)}} 0))))\n\

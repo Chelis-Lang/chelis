@@ -115,9 +115,9 @@ class TargetSelectionTests(unittest.TestCase):
 
     def test_manifest_requires_nonempty_exact_package_target_rows(self):
         for content in ("", "version = 1", "version = 2\nstanding_target = []",
-                        'version = 2\n[[standing_target]]\npackage = "p"\nname = "smoke"\nextra = true',
-                        'version = 2\n[[standing_target]]\npackage = ""\nname = "smoke"',
-                        'version = 2\n[[standing_target]]\npackage = "p"\nname = "smoke"\n'
+                        'version = 3\n[[standing_target]]\npackage = "p"\nname = "smoke"\nextra = true',
+                        'version = 3\n[[standing_target]]\npackage = ""\nname = "smoke"',
+                        'version = 3\n[[standing_target]]\npackage = "p"\nname = "smoke"\n'
                         '[[target_exclusion]]\npackage = "p"\nname = "heavy"\n',
                         "invalid [["):
             with self.subTest(content=content), tempfile.TemporaryDirectory() as tmp:
@@ -127,7 +127,7 @@ class TargetSelectionTests(unittest.TestCase):
                     targets.read_targets(path)
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "selection.toml"
-            path.write_text('version = 2\n[[standing_target]]\npackage = "p"\nname = "smoke"\n')
+            path.write_text('version = 3\n[[standing_target]]\npackage = "p"\nname = "smoke"\n')
             self.assertEqual(targets.read_targets(path), [("p", "smoke")])
 
     def test_receipts_reject_missing_units_extra_binaries_and_filtered_tests(self):
@@ -173,7 +173,7 @@ class TargetSelectionTests(unittest.TestCase):
                 (root / ".config").mkdir()
                 name = "absent" if failure == "missing-target" else "smoke"
                 (root / ".config/ci-test-targets.toml").write_text(
-                    f'version = 2\n[[standing_target]]\npackage = "p"\nname = "{name}"\n')
+                    f'version = 3\n[[standing_target]]\npackage = "p"\nname = "{name}"\n')
                 calls = []
                 def run(command, **kwargs):
                     calls.append(command)
@@ -222,7 +222,7 @@ class TargetSelectionTests(unittest.TestCase):
             root = Path(tmp)
             (root / ".config").mkdir()
             (root / ".config/ci-test-targets.toml").write_text(
-                'version = 2\n[[standing_target]]\npackage = "p"\nname = "smoke"\n')
+                'version = 3\n[[standing_target]]\npackage = "p"\nname = "smoke"\n')
             calls = []
             def run(command, **kwargs):
                 calls.append(command)
@@ -263,7 +263,7 @@ class TargetSelectionTests(unittest.TestCase):
             root = Path(tmp)
             (root / ".config").mkdir()
             (root / ".config/ci-test-targets.toml").write_text(
-                'version = 2\n[[standing_target]]\n'
+                'version = 3\n[[standing_target]]\n'
                 'package = "p"\nname = "smoke"\n'
             )
 
@@ -311,7 +311,7 @@ class TargetSelectionTests(unittest.TestCase):
                 root = Path(tmp)
                 (root / ".config").mkdir()
                 (root / ".config/ci-test-targets.toml").write_text(
-                    'version = 2\n[[standing_target]]\npackage = "p"\nname = "smoke"\n'
+                    'version = 3\n[[standing_target]]\npackage = "p"\nname = "smoke"\n'
                     '[[standing_target]]\npackage = "q"\nname = "smoke"\n')
                 calls = []
                 def run(command, **kwargs):

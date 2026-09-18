@@ -1835,7 +1835,7 @@ mod tests {
     #[test]
     fn compute_root_manifest_keeps_a_runtime_extent_nullary_root() {
         let checked = check_program_from_source(
-            "def g(x: tensor[n, f32]) -> tensor[m, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\
+            "def g[n, m](x: tensor[n, f32]) -> tensor[m, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\
              def main() = g(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n",
         );
         let realizability = infer_realizability(&checked, C_PRIMS);

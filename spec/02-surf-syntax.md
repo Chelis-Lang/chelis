@@ -297,12 +297,16 @@ def transpose[a, b](x: tensor[a, b, f32]) -> tensor[b, a, f32] =
 ```
 (defdim {} batch)
 (defdim {} vocab_size)
-(defsig {} transpose (t-fn {} (t-tensor {} (d-var {} a) (d-var {} b) (t-prim {} f32))
+(defsig {} transpose (a b) (t-fn {} (t-tensor {} (d-var {} a) (d-var {} b) (t-prim {} f32))
                               (t-tensor {} (d-var {} b) (d-var {} a) (t-prim {} f32))))
 (def {} transpose (fn {} (params x) ...))
 ```
 
-**Disambiguation:** A name in a `dim` declaration or imported → concrete `d-name`. A name in a function's `[...]` → variable `d-var`. A lowercase name in a tensor type that is neither declared nor in brackets → parse error.
+**Disambiguation:** A name in a `dim` declaration or imported → concrete
+`d-name`. A name in a function's `[...]` → variable `d-var`. A lowercase
+single-letter name in a tensor type that is neither declared nor in brackets
+remains a `d-var` use and is rejected as undeclared by the checker; a
+multi-letter name remains a concrete `d-name`.
 
 ### P3b: Rank Variables (`..r`)
 
@@ -316,7 +320,7 @@ design and soundness boundary, including §4.5.3 (named-axis reduction).
 **Tier-2 (identity):** `..r` as the sole shape element — one def, every rank:
 
 ```
-def relu_forward(x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)
+def relu_forward[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)
 ```
 
 **Tier-3 (name-preserving rank arithmetic, §4.5.3):** `..r` may be interleaved
@@ -325,18 +329,18 @@ named-axis reduction drops the named anchor and carries the surrounding spreads
 through — one def reduces a named axis at any rank:
 
 ```
-def reduce_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)
+def reduce_seq[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)
 ```
 
 **⟹**
 ```
-(defsig {} reduce_seq
+(defsig {} reduce_seq (pre post)
   (t-fn {} (t-ref {} (t-tensor {} (d-rank {} pre) (d-name {} seq) (d-rank {} post) (t-prim {} f32)))
            (t-tensor {} (d-rank {} pre) (d-rank {} post) (t-prim {} f32))))
 ```
 
-`..r` is introduced contextually (like a sig dim variable — no `[..r]`
-quantifier needed). A spread name may not repeat within one tensor shape (a
+`..r` is a variable use whose name must appear in the declaration's complete
+`[...]` binder list. A spread name may not repeat within one tensor shape (a
 **parse error**). A reduction names the axis it removes by the anchor's name
 (`sum(x, seq)`). Multiple named axes use the variadic form
 (`sum(x, head, seq)` or `count(mask, head, seq)`). Value reductions
@@ -356,7 +360,7 @@ Both inline and standalone forms. All types are optional — inference fills the
 
 **Inline:**
 ```
-def add_vecs(x: tensor[d, f32], y: tensor[d, f32]) -> tensor[d, f32] = add(x, y)
+def add_vecs[d](x: tensor[d, f32], y: tensor[d, f32]) -> tensor[d, f32] = add(x, y)
 ```
 
 When a `def` has inline type annotations and no standalone `sig`, its generated `defsig` owns each parameter type. The corresponding `fn` parameter carries `type: (t-var {} _)`, not a second copy of that type. This inference hole adds no constraint and receives the declared slot's type before the body is checked. A parameter without an annotation remains bare. The presence of the hole preserves the source annotation's presence for signature reports.
@@ -381,17 +385,30 @@ A `sig` may carry the same bracketed binder list a `def` carries, in the
 same position — immediately after the declared name:
 
 ```text
-sig arange[p: Int]: p -> p -> tensor[n, p]
+sig arange[n, p: Int]: p -> p -> tensor[n, p]
 def arange(start, stop) = ...
 ```
 
-`sig` must precede its corresponding `def`. Arrow chain reads as: arg₁ -> arg₂ -> ... -> return. Always flat in Deep (`t-fn` with last child as return type). The arrow is right-associative, so `a -> b -> c` is the curried 3-ary `a -> (b -> c)`. A function-typed argument must be parenthesized: `(a -> b) -> c` is a distinct, 1-ary type whose single argument is itself a function, and the formatter and decompiler preserve those grouping parentheses (a bare arrow in return position keeps no redundant parens).
+`sig` must precede its corresponding definition: either a function `def` or a
+bare top-level value binding. Only a function `def` has an inline binder list.
+A binder-bearing signature for a non-function value therefore stays standalone
+in canonical Surf and is followed by an untyped value binding:
+
+```text
+sig empty[p]: List[p]
+empty = Nil
+```
+
+Writing `empty: List[p] = Nil` instead would lose the quantifier because a typed
+value binding has no binder list or declaration-binder scope.
+
+Arrow chain reads as: arg₁ -> arg₂ -> ... -> return. Always flat in Deep (`t-fn` with last child as return type). The arrow is right-associative, so `a -> b -> c` is the curried 3-ary `a -> (b -> c)`. A function-typed argument must be parenthesized: `(a -> b) -> c` is a distinct, 1-ary type whose single argument is itself a function, and the formatter and decompiler preserve those grouping parentheses (a bare arrow in return position keeps no redundant parens).
 
 Effect annotations are optional suffixes on either `sig` or `def`:
 
 ```text
-sig predict: tensor[n, f32] -> tensor[n, f32] ! { Random }
-def train(x: tensor[n, f32]) -> tensor[n, f32] ! { Random, Resource("gpu:0") } = ...
+sig predict[n]: tensor[n, f32] -> tensor[n, f32] ! { Random }
+def train[n](x: tensor[n, f32]) -> tensor[n, f32] ! { Random, Resource("gpu:0") } = ...
 ```
 
 Surf accepts the built-in names `Diff`, `Random`, `Accum`, `IO`, `Test`, and
@@ -403,44 +420,54 @@ internal-only.
 
 Omitting all types is valid: `def f(x, y) = add(x, y)`. The compiler emits a note recommending a `sig` for module-level definitions.
 
-#### P4b: Contextual Precision Polymorphism (WS-A5, WS-A6)
+#### P4b: Explicit Declaration Binders
 
-In a sig OR def with quantified type variables, names appearing in
-the precision slot of a `tensor[...]` type that match the
-quantifier list become `(t-var {} <name>)`, not `(t-prim {} <name>)`.
+Every type, dimension, and rank variable in a `sig`, annotated `def`, or
+`@property` declaration is declared in that declaration's `[..]` binder list.
+For a property the list follows the property name:
+
+```text
+@property accepts[p] forall(x: p): true
+```
+
+Names appearing
+in the precision slot of a `tensor[...]` type that match the binder
+list become `(t-var {} <name>)`, not `(t-prim {} <name>)`.
 Names matching a primitive (`f32`, `f64`, `bf16`, `f16`, `i8`, `i16`,
 `i32`, `i64`, `bool`) stay as `(t-prim {} <name>)`. Outside a sig
-or def quantifier scope (e.g., in a let-typed binding), no
-quantifier exists, so the existing rule applies.
+or def quantifier scope (e.g., in a top-level typed value binding with no
+standalone `sig`), no quantifier exists, so the existing rule applies.
+Within a quantified def or property body, the declaration's type binders
+remain in scope for every annotation type position, including property
+quantifier types, lambda parameters, expression ascriptions, block bindings,
+nested ADT arguments, and tensor precision slots. One explicit declaration
+binder scope applies throughout the declaration body; a listed name therefore
+lowers according to its position even inside a body-local tensor type.
 The retired v0.18 integer spellings `int8`, `int16`, `int32`, and `int64`
-never become implicit or explicit type variables. They are rejected with the
-versioned-migration diagnostic even though they are not future primitive names.
+never become type variables. They are rejected with the
+versioned-migration diagnostic even when listed.
 
-Quantifiers in a sig are **implicit**: any lowercase identifier that
-appears in the sig's type expression and is not a primitive name is
-treated as an implicitly `forall`-quantified type variable.
-Quantifiers in a def, by contrast, are **explicit**: a def's
-`[..]` clause is the authoritative source. A precision name in a
-def parameter annotation must appear in the def's `[..]` clause to
-be promoted to a `t-var`; an unbound precision name surfaces an
-`UnsupportedTensorPrecision` diagnostic per
-`spec/04-type-system.md` §5.8.
+The binder list is complete, not a hint. An unlisted lowercase name in
+a scalar type or tensor precision position stays `(t-prim {} <name>)`
+and is rejected as an unknown dtype with a nearest-active-dtype
+suggestion. A single-letter symbolic dimension still lowers to `d-var`,
+and `..r` still lowers to `d-rank`, but either is undeclared and rejected
+unless its name appears in the list. An unlisted multi-letter tensor axis
+keeps its existing concrete `d-name` meaning. There is no typo-shape or
+alias heuristic and no implicit collection fallback.
 
-A def with no `[..]` clause falls back to WS-A5 implicit collection
-on its synthesized sig so that a bare
-`def f(x: tensor[3, p])` continues to behave as if the user had
-written the equivalent `sig f: tensor[3, p] -> ...` plus an
-untyped def.
+An unbounded listed name may be unused; it denotes a vacuous universal
+quantifier and is preserved by canonical Surf/Deep round-tripping. A listed
+name with a dtype-family bound must occur in the declared type as §P4c
+requires.
 
 The `spec/04-type-system.md` §1.1.2 unsigned aliases (`u8`, `u16`,
 `u32`, `u64`, `uint8`, `uint16`, `uint32`, `uint64`) are explicitly
-excluded from implicit collection so they reach the type-checker's
-§1.1.2 rejection path with a precise diagnostic, rather than being
-silently absorbed as quantifiers. The exclusion is not confined to
-implicit collection: a dtype spelling that `spec/04-type-system.md`
-[04-DTYPE-1] rejects names no type variable in any type position, so a
-`[..]` clause does not rebind one. The clause overrides the case-split
-of §3.1, not the rejected and primitive spellings.
+excluded from binding so they reach the type-checker's §1.1.2 rejection
+path with a precise diagnostic. A dtype spelling that
+`spec/04-type-system.md` [04-DTYPE-1] rejects names no type variable in
+any type position, so a `[..]` clause does not rebind one. The clause
+overrides the case-split of §3.1, not rejected or primitive spellings.
 
 The same identifier in a def's `[..]` clause may act as either a
 dim-var or a precision tvar depending on its position inside a
@@ -483,16 +510,16 @@ clause is a type variable, and a bound single-letter uppercase name in
 a value position is a value. The override is single-letter only;
 multi-letter PascalCase remains a type or constructor everywhere.
 
-Examples:
+Example:
 
 ```text
-sig poly_id: tensor[d, p] -> tensor[d, p]
+sig poly_id[d, p]: tensor[d, p] -> tensor[d, p]
 def poly_id(x) = x
 def use_f32(x: tensor[3, f32]) -> tensor[3, f32] = poly_id(x)
 def use_int32(x: tensor[3, i32]) -> tensor[3, i32] = poly_id(x)
 ```
 
-The sig has implicit quantifiers `d` (a `DimVar`) and `p` (a precision
+The sig explicitly declares `d` (a `DimVar`) and `p` (a precision
 `TypeVar`). Each call site instantiates `p` with a fresh precision
 variable that unifies with the call's actual precision; calling
 `poly_id` with mismatched precisions across a single call (e.g.,
@@ -518,7 +545,7 @@ A binder in a `[..]` clause may declare a **dtype-family bound**,
 written after the binder name:
 
 ```text
-sig linspace[p: Float]: p -> p -> i64 -> tensor[n, p]
+sig linspace[n, p: Float]: p -> p -> i64 -> tensor[n, p]
 def linspace(start, stop, count) = ...
 
 def arange_values[p: Int](current: p, stop: p, out: List[p]) -> List[p] = ...
@@ -532,16 +559,13 @@ silent bound and a user type named `Float` is unaffected outside this
 position. A binder with no bound keeps its existing meaning: an
 unconstrained type variable, not a dtype.
 
-A `sig`'s `[..]` clause is **partial**: every name it does not list
-stays implicitly quantified exactly as above, so dimension names and
-`..r` rank spreads need no entry. A name it does list is an
-authoritative binder, as in a `def`, so listing a multi-letter
-dimension name makes it a dimension *variable* where an unlisted one
-would be a concrete symbolic axis. A listed name **that declares a
-bound** must occur in the declared type. A bound belongs to one binder
-list per declaration: when a standalone `sig` declares the name, the
-bound goes on the `sig`, and a bound in that `def`'s `[..]` clause is
-an error.
+A `sig`'s `[..]` clause is complete: every `t-var`, `d-var`, and
+`d-rank` name in the signature appears exactly once. Listing a
+multi-letter dimension name makes it a dimension *variable* where an
+unlisted one is a concrete symbolic axis. A listed name **that declares
+a bound** must occur in the declared type. One binder list owns each
+declaration: a standalone `sig` carries it, and a matching `def` must
+not carry a second list.
 
 A bounded binder is a type binder only. Using one in a dimension slot
 or as a rank spread is an error, since a dtype family cannot name an
@@ -948,8 +972,8 @@ primitive spellings in type positions and canonical output. Canonical Deep
 uses the same names. The v0.18 spellings `int8`, `int16`, `int32`, and `int64`
 are migration input only: `chelis migrate surf --from 0.18` rewrites them
 without making them valid at normal compiler ingress. Neither the canonical
-names nor the retired names may be read as implicitly quantified type
-variables under `spec/04-type-system.md` §5.8.1.
+names nor the retired names may be rebound as type variables under
+`spec/04-type-system.md` §5.8.1.
 
 ### P10b: Contextual Tensor-Literal Inference
 
@@ -1065,7 +1089,7 @@ to its position: `p` in the precision slot becomes `(t-var {} p)`, while
 identifier is a concrete symbolic dimension and becomes `d-name`, even when it
 is a single lowercase letter: `type Weights = tensor[n, f32]` therefore emits
 `(d-name {} n)`, not an implicit dimension binder. Signatures retain their
-separate implicit-quantification rule from P4/§5.8.
+separate explicit binder-list rule from P4/§5.8.
 
 Parser disambiguation: after `type Name =`, if next non-whitespace is `|`, it's an ADT. Otherwise alias.
 
@@ -1192,7 +1216,7 @@ SigDecl       <- 'sig' S Ident TypeBinders? S ':' S TypeExpr EffectClause?
 #  PROPERTY DECLARATIONS
 # ═══════════════════════════════════════════════════
 
-PropertyDecl  <- '@property' S Ident S 'forall' S Params
+PropertyDecl  <- '@property' S Ident TypeBinders? S 'forall' S Params
                  (S 'where' S Expr (S ',' S Expr)* (S ',')?)?
                  S ':' S Expr PropertyOption*
 PropertyOption <- S 'with' S ('tolerance' / 'seed' / 'samples') S '=' S Expr
@@ -1202,6 +1226,14 @@ The canonical property-option order is `tolerance`, `seed`, `samples`, then
 every `contract`. Repeatable contracts retain their authored relative order.
 The normal parser accepts another option order as a syntax-safe alias, and the
 formatter rewrites it to this one order.
+
+A property's optional `TypeBinders` is the declaration's complete explicit
+binder list under §P4b/§P4c. It scopes every quantifier type, `where`
+precondition, predicate body, and expression-valued property option. Duplicate
+or forbidden binder names and undeclared type, dimension, or rank variables
+reject exactly as they do for `def`; dtype-family bounds use the same
+representation and validity rules. Omitting the list preserves the existing
+monomorphic property spelling.
 
 The comma and colon delimiters bound each property precondition. A binary
 precondition therefore omits the redundant outer grouping pair used by the
@@ -1515,6 +1547,11 @@ dim batch, seq                   ⟹  (defdim {} batch) (defdim {} seq)
 ```
 sig f: f32 -> f32 -> f32
 ⟹  (defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32) (t-prim {} f32)))
+
+sig empty[p]: List[p]
+empty = Nil
+⟹  (defsig {} empty (p) (t-adt {} List (t-var {} p)))
+    (def {} empty (var {} Nil))
 
 def f(x: f32, y: f32) -> f32 = add(x, y)
 ⟹  (defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32) (t-prim {} f32)))

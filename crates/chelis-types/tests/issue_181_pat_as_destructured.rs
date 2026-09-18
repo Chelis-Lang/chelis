@@ -123,7 +123,7 @@ fn pat_as_wrapping_pat_record_stamps_both_outer_and_inner_types() {
 (module {} Issue181PatAs
   (deftype {} FooState (a)
     (variant {} FooState (field {} x (t-var {} a)) (field {} y (t-var {} a))))
-  (defsig {} use_foo
+  (defsig {} use_foo (n)
     (t-fn {}
       (t-adt {} FooState (t-tensor {} (d-var {} n) (t-prim {} f32)))
       (t-prim {} i32)))

@@ -132,7 +132,7 @@ fn stub_sig_min_shape_accepts_all_arithmetic_dtypes() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("min.ch");
         let src = format!(
-            r#"sig min: &tensor[a, b, p] -> i32 -> tensor[b, p]
+            r#"sig min[a, b, p]: &tensor[a, b, p] -> i32 -> tensor[b, p]
 def min(xs, axis) = fail("stub")
 def call_min(xs: &tensor[2, 3, {dtype}]) -> tensor[3, {dtype}] =
   min(xs, cast(0, i32))
@@ -152,7 +152,7 @@ fn stub_sig_prod_shape_accepts_all_arithmetic_dtypes() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("prod.ch");
         let src = format!(
-            r#"sig prod: &tensor[a, b, p] -> i32 -> tensor[b, p]
+            r#"sig prod[a, b, p]: &tensor[a, b, p] -> i32 -> tensor[b, p]
 def prod(xs, axis) = fail("stub")
 def call_prod(xs: &tensor[2, 3, {dtype}]) -> tensor[3, {dtype}] =
   prod(xs, cast(0, i32))
@@ -178,7 +178,7 @@ fn stub_sig_argmax_argmin_shape_returns_int64_indices_at_all_arithmetic_input_dt
             let dir = tempdir().expect("tempdir");
             let path = dir.path().join("argreduce.ch");
             let src = format!(
-                "sig {op}: &tensor[a, b, p] -> i32 -> tensor[b, i64]\n\
+                "sig {op}[a, b, p]: &tensor[a, b, p] -> i32 -> tensor[b, i64]\n\
                  def {op}(xs, axis) = fail(\"stub\")\n\
                  def call_{op}(xs: &tensor[2, 3, {dtype}]) -> tensor[3, i64] =\n  \
                  {op}(xs, cast(0, i32))\n"
@@ -204,13 +204,13 @@ fn stub_sig_conv_shapes_accept_all_dtypes_at_sig_level() {
     let fixtures: &[(&str, &str)] = &[
         (
             "conv1d",
-            "sig conv1d: &tensor[1, 4, 1, 16, p] -> &tensor[8, 4, 1, 3, p] -> tensor[1, 8, 1, 14, p]\n\
+            "sig conv1d[p]: &tensor[1, 4, 1, 16, p] -> &tensor[8, 4, 1, 3, p] -> tensor[1, 8, 1, 14, p]\n\
              def conv1d(x, w) = fail(\"stub\")\n\
              def call_conv1d(x: &tensor[1, 4, 1, 16, {dtype}], w: &tensor[8, 4, 1, 3, {dtype}]) -> tensor[1, 8, 1, 14, {dtype}] = conv1d(x, w)\n",
         ),
         (
             "conv2d_small",
-            "sig conv2d_small: &tensor[1, 3, 8, 8, p] -> &tensor[8, 3, 3, 3, p] -> tensor[1, 8, 6, 6, p]\n\
+            "sig conv2d_small[p]: &tensor[1, 3, 8, 8, p] -> &tensor[8, 3, 3, 3, p] -> tensor[1, 8, 6, 6, p]\n\
              def conv2d_small(x, w) = fail(\"stub\")\n\
              def call_conv2d(x: &tensor[1, 3, 8, 8, {dtype}], w: &tensor[8, 3, 3, 3, {dtype}]) -> tensor[1, 8, 6, 6, {dtype}] = conv2d_small(x, w)\n",
         ),
@@ -235,7 +235,7 @@ fn stub_sig_xavier_sample_shape_accepts_all_dtypes_at_sig_level() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("xavier.ch");
         let src = format!(
-            r#"sig sample: tensor[32, 128, p] -> p -> tensor[32, 128, p] ! {{ Random }}
+            r#"sig sample[p]: tensor[32, 128, p] -> p -> tensor[32, 128, p] ! {{ Random }}
 def sample(template, gain) = fail("stub")
 def call_xavier(t: tensor[32, 128, {dtype}], gain: {dtype}) -> tensor[32, 128, {dtype}] ! {{ Random }} = sample(t, gain)
 "#
@@ -265,7 +265,7 @@ fn neg_reduce_rejects_mismatched_input_output_precision() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("neg_reduce.ch");
         let src = format!(
-            "sig {op}: &tensor[a, b, p] -> i32 -> tensor[b, p]\n\
+            "sig {op}[a, b, p]: &tensor[a, b, p] -> i32 -> tensor[b, p]\n\
              def {op}(xs, axis) = fail(\"stub\")\n\
              def bad(xs: &tensor[2, 3, {input_dtype}]) -> tensor[3, f32] =\n  \
              {op}(xs, cast(0, i32))\n"
@@ -284,7 +284,7 @@ fn neg_conv1d_rejects_mismatched_input_weight_precision() {
     let path = dir.path().join("neg_conv1d.ch");
     write_file(
         &path,
-        r#"sig conv1d: &tensor[1, 4, 1, 16, p] -> &tensor[8, 4, 1, 3, p] -> tensor[1, 8, 1, 14, p]
+        r#"sig conv1d[p]: &tensor[1, 4, 1, 16, p] -> &tensor[8, 4, 1, 3, p] -> tensor[1, 8, 1, 14, p]
 def conv1d(x, w) = fail("stub")
 def bad(x: &tensor[1, 4, 1, 16, f32], w: &tensor[8, 4, 1, 3, bf16]) -> tensor[1, 8, 1, 14, f32] = conv1d(x, w)
 "#,
@@ -301,7 +301,7 @@ fn neg_argmax_return_must_be_int64_not_input_precision() {
     let path = dir.path().join("neg_argmax.ch");
     write_file(
         &path,
-        r#"sig argmax: &tensor[a, b, p] -> i32 -> tensor[b, i64]
+        r#"sig argmax[a, b, p]: &tensor[a, b, p] -> i32 -> tensor[b, i64]
 def argmax(xs, axis) = fail("stub")
 def bad(xs: &tensor[2, 3, f32]) -> tensor[3, f32] =
   argmax(xs, cast(0, i32))
@@ -319,7 +319,7 @@ fn neg_xavier_sample_rejects_mismatched_gain_precision() {
     let path = dir.path().join("neg_xavier.ch");
     write_file(
         &path,
-        r#"sig sample: tensor[32, 128, p] -> p -> tensor[32, 128, p] ! { Random }
+        r#"sig sample[p]: tensor[32, 128, p] -> p -> tensor[32, 128, p] ! { Random }
 def sample(template, gain) = fail("stub")
 def bad(t: tensor[32, 128, f32], gain: f64) -> tensor[32, 128, f32] ! { Random } = sample(t, gain)
 "#,
@@ -375,14 +375,14 @@ fn polymorphic_stub_used_at_two_distinct_dtypes_in_same_module() {
     let fixtures: &[(&str, &str)] = &[
         (
             "min used at f32 and i64 in same module",
-            "sig min: &tensor[a, b, p] -> i32 -> tensor[b, p]\n\
+            "sig min[a, b, p]: &tensor[a, b, p] -> i32 -> tensor[b, p]\n\
              def min(xs, axis) = fail(\"stub\")\n\
              def call_f32(xs: &tensor[2, 3, f32]) -> tensor[3, f32] = min(xs, cast(0, i32))\n\
              def call_int64(xs: &tensor[2, 3, i64]) -> tensor[3, i64] = min(xs, cast(0, i32))\n",
         ),
         (
             "argmax at f32 and i8 in same module",
-            "sig argmax: &tensor[a, b, p] -> i32 -> tensor[b, i64]\n\
+            "sig argmax[a, b, p]: &tensor[a, b, p] -> i32 -> tensor[b, i64]\n\
              def argmax(xs, axis) = fail(\"stub\")\n\
              def call_f32(xs: &tensor[2, 3, f32]) -> tensor[3, i64] = argmax(xs, cast(0, i32))\n\
              def call_int8(xs: &tensor[2, 3, i8]) -> tensor[3, i64] = argmax(xs, cast(0, i32))\n",

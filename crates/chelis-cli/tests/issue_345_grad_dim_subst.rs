@@ -61,7 +61,7 @@ const RELU_GRAD: [f64; 2] = [1.0, 0.0];
 fn row_a_sig_form() -> String {
     format!(
         "module Repro.Issue345RowA\n\
-         sig relu_fwd: tensor[a, f32] -> tensor[a, f32]\n\
+         sig relu_fwd[a]: tensor[a, f32] -> tensor[a, f32]\n\
          def relu_fwd(x) = relu(x)\n\
          def f(x: tensor[2, f32]) -> f32 = sum(relu_fwd(x), cast(0, i32)) |> tensor_to_scalar\n\
          out = grad(f)({RELU_INPUT})\n"
@@ -74,7 +74,7 @@ fn row_a_sig_form() -> String {
 fn row_b_inline_form() -> String {
     format!(
         "module Repro.Issue345RowB\n\
-         def relu_fwd(x: tensor[a, f32]) -> tensor[a, f32] = relu(x)\n\
+         def relu_fwd[a](x: tensor[a, f32]) -> tensor[a, f32] = relu(x)\n\
          def f(x: tensor[2, f32]) -> f32 = sum(relu_fwd(x), 0) |> tensor_to_scalar\n\
          out = grad(f)({RELU_INPUT})\n"
     )
@@ -95,7 +95,7 @@ fn row_c_quantifier_form() -> String {
 fn row_d_shim_form() -> String {
     format!(
         "module Repro.Issue345RowD\n\
-         sig relu_sig: tensor[a, f32] -> tensor[a, f32]\n\
+         sig relu_sig[a]: tensor[a, f32] -> tensor[a, f32]\n\
          def relu_sig(x) = relu(x)\n\
          def shim[n](x: tensor[n, f32]) -> tensor[n, f32] = relu_sig(x)\n\
          def f(x: tensor[2, f32]) -> f32 = sum(shim(x), 0) |> tensor_to_scalar\n\
@@ -109,7 +109,7 @@ fn row_d_shim_form() -> String {
 fn row_e_rank_poly_form() -> String {
     format!(
         "module Repro.Issue345RowE\n\
-         def relu_rp(x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)\n\
+         def relu_rp[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)\n\
          def f(x: tensor[2, f32]) -> f32 = sum(relu_rp(x), 0) |> tensor_to_scalar\n\
          out = grad(f)({RELU_INPUT})\n"
     )
@@ -121,7 +121,7 @@ fn row_e_rank_poly_form() -> String {
 fn gelu_sig_form() -> String {
     format!(
         "module Repro.Issue345Gelu\n\
-         sig gelu_fwd: tensor[a, f32] -> tensor[a, f32]\n\
+         sig gelu_fwd[a]: tensor[a, f32] -> tensor[a, f32]\n\
          def gelu_fwd(x) = gelu(x)\n\
          def f(x: tensor[2, f32]) -> f32 = sum(gelu_fwd(x), 0) |> tensor_to_scalar\n\
          out = grad(f)({RELU_INPUT})\n"
@@ -137,7 +137,7 @@ const GELU_GRAD: [f64; 2] = [1.0860992566236183, -0.08296408384578256];
 /// `tests/grad/act.ch` rank-2 failure shape).
 fn rank2_sig_form() -> String {
     "module Repro.Issue345Rank2\n\
-     sig relu_fwd2: tensor[a, b, f32] -> tensor[a, b, f32]\n\
+     sig relu_fwd2[a, b]: tensor[a, b, f32] -> tensor[a, b, f32]\n\
      def relu_fwd2(x) = relu(x)\n\
      def f(x: tensor[2, 3, f32]) -> f32 = sum(sum(relu_fwd2(x), 1), 0) |> tensor_to_scalar\n\
      out = grad(f)(to_tensor([[cast(2.0, f32), cast(-1.0, f32), cast(0.5, f32)], [cast(-3.0, f32), cast(4.0, f32), cast(-0.5, f32)]]))\n"
@@ -314,7 +314,7 @@ fn issue_345_rank2_sig_form_grad_is_step_mask() {
 #[test]
 fn issue_345_negative_sig_dim_mismatch_is_type_error_not_ice() {
     let source = "module Repro.Issue345Neg\n\
-         sig relu_fwd: tensor[a, f32] -> tensor[a, f32]\n\
+         sig relu_fwd[a]: tensor[a, f32] -> tensor[a, f32]\n\
          def relu_fwd(x) = relu(x)\n\
          def f(x: tensor[2, f32]) -> tensor[3, f32] = relu_fwd(x)\n";
     let dir = tempdir().expect("tempdir");
@@ -361,7 +361,7 @@ fn issue_345_negative_sig_dim_mismatch_via_eval_lane_is_type_error_not_ice() {
     // behind the check-stage pin. The root would exercise lowering if
     // the checker ever stopped rejecting.
     let source = "module Repro.Issue345NegEval\n\
-         sig relu_fwd: tensor[a, f32] -> tensor[a, f32]\n\
+         sig relu_fwd[a]: tensor[a, f32] -> tensor[a, f32]\n\
          def relu_fwd(x) = relu(x)\n\
          def f(x: tensor[2, f32]) -> tensor[3, f32] = relu_fwd(x)\n\
          out = f(to_tensor([1.0, 2.0]))\n";

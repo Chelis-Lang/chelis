@@ -94,9 +94,9 @@ fn link_and_run(artifacts: &CArtifacts, name: &str) -> std::process::Output {
 /// the argument unchanged.
 #[test]
 fn returned_function_application_rejects_before_c_artifact_emission() {
-    let program = "def g(x: tensor[n, f32]) -> tensor[k, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\
-                   def h(y: tensor[k, f32]) -> tensor[k, f32] = add(y, y)\n\
-                   def pick(f: (tensor[p, f32]) -> tensor[p, f32]) -> (tensor[p, f32]) -> tensor[p, f32] = f\n\
+    let program = "def g[n, k](x: tensor[n, f32]) -> tensor[k, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\
+                   def h[k](y: tensor[k, f32]) -> tensor[k, f32] = add(y, y)\n\
+                   def pick[p](f: (tensor[p, f32]) -> tensor[p, f32]) -> (tensor[p, f32]) -> tensor[p, f32] = f\n\
                    def main() = (pick(h))(g(to_tensor([1.0f32, 2.0f32, 3.0f32])))\n\
                    out = print(main())\n";
     let eval_output = eval(program, "returned_function_eval");

@@ -1033,7 +1033,12 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                 if binding.is_empty()
                     || claim.is_empty()
                     || *claimed_axis < 0
-                    || claimed_axis != axis
+                    // A literal claim observes its owner's output axis
+                    // directly. A named claim may instead source that extent
+                    // from a different tensor axis (for example, insert
+                    // output axis 1 from `shape(x, 2)`); each coordinate is
+                    // validated against its own tensor below.
+                    || (literal && claimed_axis != axis)
                     || !claims.is_empty()
                     || owners.len() != 1
                     || (!literal && !named)
@@ -1045,7 +1050,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                     || node.output_type.precision != Prim::Int64
                 {
                     errors.push(format!(
-                        "local ascription claim at node {} requires exact nonempty provenance, one literal or declaring witness, one initializer owner, normalized axis, and scalar int64 output",
+                        "local ascription claim at node {} requires exact nonempty provenance, one literal or declaring witness, one initializer owner, a normalized claimed axis, and scalar int64 output",
                         node.id.0
                     ));
                 }

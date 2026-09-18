@@ -574,7 +574,7 @@ def helper(x: i64) -> tensor[*, i64] = tensor_scan(
   fn (prev: i64, _i: i64) -> add(prev, cast(1, i64)),
   cast(3, i64)
 )
-def main(x: tensor[n, f32]) -> tensor[n, f32] = relu(x)
+def main[n](x: tensor[n, f32]) -> tensor[n, f32] = relu(x)
 "#;
     let result = compile(CompileRequest {
         source_kind: SourceKind::Surf,

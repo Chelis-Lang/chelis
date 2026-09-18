@@ -6245,6 +6245,7 @@ fn wire_decl(decl: &Decl) -> SourceWireResult<WireSurfDecl> {
         },
         Decl::Property {
             name,
+            type_binders,
             params,
             preconditions,
             body,
@@ -6252,6 +6253,13 @@ fn wire_decl(decl: &Decl) -> SourceWireResult<WireSurfDecl> {
             span: s,
         } => WireSurfDecl::Property {
             name: name.clone(),
+            type_binders: type_binders
+                .iter()
+                .map(|binder| crate::schema::WireTypeBinder {
+                    name: binder.name.clone(),
+                    bound: binder.bound.map(|family| family.surf_name().to_string()),
+                })
+                .collect(),
             params: params.iter().map(wire_param).collect(),
             preconditions: preconditions
                 .iter()
@@ -7166,12 +7174,12 @@ mod tests {
                 "-> &tensor[f32] -> tensor[s, d, f32]",
             )
             .replace("scalar_to_tensor(sink)", "copy(sink)");
-        source.push_str("def entry(q: &tensor[s, d, f32], k: &tensor[s, d, f32], v: &tensor[s, d, f32], scale: &tensor[s, s, f32], mask: &tensor[s, s, f32], sink: &tensor[f32]) -> tensor[s, d, f32] = { _ = print(\"entry\")\n bad(q, k, v, scale, mask, sink) }\ndef good() -> i32 = 7i32\n");
+        source.push_str("def entry[s, d](q: &tensor[s, d, f32], k: &tensor[s, d, f32], v: &tensor[s, d, f32], scale: &tensor[s, s, f32], mask: &tensor[s, s, f32], sink: &tensor[f32]) -> tensor[s, d, f32] = { _ = print(\"entry\")\n bad(q, k, v, scale, mask, sink) }\ndef good() -> i32 = 7i32\n");
         let compiled = compile_source(SourceKind::Surf, &source).unwrap();
         let parameters = ["q", "k", "v", "scale", "mask", "sink"]
             .map(str::to_owned)
             .into();
-        let lowering_message = "tensor concat cannot be represented by the static tensor DAG; use its host execution path (chelis#1906) at source span `surf:934..940`";
+        let lowering_message = "tensor concat cannot be represented by the static tensor DAG; use its host execution path (chelis#1906) at source span `surf:940..946`";
         assert_eq!(
             selected_host_input_demand(&compiled, "bad", &parameters)
                 .unwrap_err()

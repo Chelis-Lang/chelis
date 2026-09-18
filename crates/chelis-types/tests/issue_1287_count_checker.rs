@@ -123,36 +123,36 @@ def later_cast(x: tensor[2, 3, bool]) -> tensor[i64] = count(&x, 0, cast(1, i32)
 fn rank_polymorphic_count_uses_only_named_axes() {
     assert_clean(
         r#"
-def good(x: &tensor[..pre, seq, ..post, bool]) -> tensor[..pre, ..post, i64] = count(&x, seq)
+def good[pre, post](x: &tensor[..pre, seq, ..post, bool]) -> tensor[..pre, ..post, i64] = count(&x, seq)
 "#,
     );
     assert_rejects(
         r#"
-def bad(x: &tensor[..pre, seq, ..post, bool]) -> tensor[..pre, ..post, i64] = count(&x, 0)
+def bad[pre, post](x: &tensor[..pre, seq, ..post, bool]) -> tensor[..pre, ..post, i64] = count(&x, 0)
 "#,
         "rank-spread",
     );
     assert_rejects(
         r#"
-def bad(x: &tensor[..pre, seq, ..post, bool]) -> tensor[..pre, ..post, i64] = count(&x, seq, seq)
+def bad[pre, post](x: &tensor[..pre, seq, ..post, bool]) -> tensor[..pre, ..post, i64] = count(&x, seq, seq)
 "#,
         "duplicate",
     );
     assert_rejects(
         r#"
-def bad(x: &tensor[..pre, seq, ..post, bool]) -> tensor[..pre, ..post, i64] = count(&x, missing)
+def bad[pre, post](x: &tensor[..pre, seq, ..post, bool]) -> tensor[..pre, ..post, i64] = count(&x, missing)
 "#,
         "no named `missing` axis",
     );
     assert_rejects(
         r#"
-def bad(x: &tensor[..pre, seq, seq, ..post, bool]) -> tensor[..pre, ..post, i64] = count(&x, seq)
+def bad[pre, post](x: &tensor[..pre, seq, seq, ..post, bool]) -> tensor[..pre, ..post, i64] = count(&x, seq)
 "#,
         "ambiguous",
     );
     assert_rejects(
         r#"
-def bad(x: &tensor[..pre, seq, ..post, bool]) -> tensor[..pre, ..post, i64] = count(&x, seq, 0)
+def bad[pre, post](x: &tensor[..pre, seq, ..post, bool]) -> tensor[..pre, ..post, i64] = count(&x, seq, 0)
 "#,
         "positional and named axes cannot be mixed",
     );

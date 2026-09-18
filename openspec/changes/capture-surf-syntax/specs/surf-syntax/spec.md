@@ -207,14 +207,15 @@ error.
 
 ### Requirement: Rank variables
 
-A rank variable `..r` SHALL stand for a name-preserving run of dimensions, introduced
-contextually without an `[..r]` quantifier. A spread name SHALL NOT repeat within one tensor
-shape, and a `def` mentioning `..r` SHALL be restricted to name-trackable operations
+A rank variable `..r` SHALL stand for a name-preserving run of dimensions. Its plain name
+`r` SHALL appear in the function's complete `[...]` binder clause; `[..r]` is not a binder
+spelling. A spread name SHALL NOT repeat within one tensor shape, and a `def` mentioning
+`..r` SHALL be restricted to name-trackable operations
 (elementwise and named-axis reductions), never positional shape-rewriters.
 
 #### Scenario: Rank-generic identity function
 
-- **WHEN** a function is `def relu_forward(x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)`
+- **WHEN** a function is `def relu_forward[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)`
 - **THEN** it type-checks at every rank because `relu` is shape-identity
 
 #### Scenario: Repeated spread name is a parse error
@@ -225,14 +226,23 @@ shape, and a `def` mentioning `..r` SHALL be restricted to name-trackable operat
 ### Requirement: Type signatures and arrow associativity
 
 Surf SHALL support inline (`def`) and standalone (`sig`) signatures; a `sig` SHALL precede
-its `def`. The `->` arrow SHALL be right-associative and flat in Deep (`t-fn` with last child
-the return type), and a function-typed argument SHALL require parentheses, preserved by the
-formatter and decompiler.
+its function `def` or bare top-level value binding. Only a function `def` SHALL carry an
+inline binder list. A binder-bearing signature for a non-function value SHALL therefore
+remain a standalone `sig` followed by an untyped value binding; a typed value binding has no
+quantifier scope. The `->` arrow SHALL be right-associative and flat in Deep (`t-fn` with
+last child the return type), and a function-typed argument SHALL require parentheses,
+preserved by the formatter and decompiler.
 
 #### Scenario: Inline annotations synthesize a defsig
 
-- **WHEN** a function is `def add_vecs(x: tensor[d, f32], y: tensor[d, f32]) -> tensor[d, f32] = add(x, y)`
+- **WHEN** a function is `def add_vecs[d](x: tensor[d, f32], y: tensor[d, f32]) -> tensor[d, f32] = add(x, y)`
 - **THEN** the desugarer emits a `defsig` in addition to the `def`
+
+#### Scenario: Polymorphic value signature remains standalone
+
+- **WHEN** Deep contains `(defsig {} empty (p) (t-adt {} List (t-var {} p)))` followed by `(def {} empty (var {} Nil))`
+- **THEN** canonical Surf emits `sig empty[p]: List[p]` followed by `empty = Nil`
+- **AND** desugaring that Surf recovers the binder-bearing `defsig` rather than freeing `p`
 
 #### Scenario: Parenthesized function argument is distinct from curried arrows
 
@@ -248,7 +258,7 @@ names `Diff`, `Random`, `Accum`, `IO`, and `Resource("device")`. `Random`, `IO`,
 
 #### Scenario: Random effect annotation is accepted
 
-- **WHEN** a sig is `sig predict: tensor[n, f32] -> tensor[n, f32] ! { Random }`
+- **WHEN** a sig is `sig predict[n]: tensor[n, f32] -> tensor[n, f32] ! { Random }`
 - **THEN** the parser accepts the effect suffix
 
 #### Scenario: Unknown effect name is rejected
@@ -256,23 +266,51 @@ names `Diff`, `Random`, `Accum`, `IO`, and `Resource("device")`. `Random`, `IO`,
 - **WHEN** an effect suffix names an effect outside the built-in set, e.g. `! { Bogus }`
 - **THEN** the parser/checker rejects it
 
-### Requirement: Contextual precision polymorphism
+### Requirement: Explicit declaration binders
 
-In a `sig`, any non-primitive lowercase name in a tensor precision slot SHALL be an implicit
-`forall`-quantified type variable (`t-var`); in a `def`, a precision name SHALL be promoted
-to `t-var` only if it appears in the def's `[..]` clause, otherwise it SHALL surface an
-`UnsupportedTensorPrecision` diagnostic. The `[..]` clause SHALL override the case-split so a
-quantified PascalCase name is a type variable.
+Every type, dimension, and rank variable in a `sig`, annotated `def`, or `@property`
+declaration SHALL appear exactly once in that declaration's complete `[..]` binder list.
+For a property the list SHALL follow the property name and scope its quantifier types,
+preconditions, predicate body, and expression-valued options. A non-primitive name in a tensor precision slot
+SHALL become `t-var` only when listed; an unlisted spelling remains a primitive request and
+SHALL be rejected by the closed primitive resolver. The `[..]` clause SHALL override the
+case-split so a listed PascalCase name is a type variable. A matching `def` SHALL NOT carry
+a second binder list. A declaration binder SHALL remain in scope for ordinary type
+positions in body-local lambda parameters, expression ascriptions, block bindings, and
+nested ADT arguments, including tensor precision slots. One explicit declaration binder
+scope SHALL apply to every type position throughout the declaration body.
 
-#### Scenario: Sig precision name is an implicit type variable
+#### Scenario: Property binders remain structural
 
-- **WHEN** a sig is `sig poly_id: tensor[d, p] -> tensor[d, p]`
-- **THEN** `p` is an implicitly quantified precision variable instantiated fresh per call site
+- **WHEN** a property is `@property accepts[p] forall(x: p): true`
+- **THEN** `p` is the property's explicit rigid declaration binder
+- **AND** canonical Deep carries `(p)` on the matching `defsig`
+
+#### Scenario: Monomorphic property spelling is unchanged
+
+- **WHEN** a property has no declaration binders
+- **THEN** canonical Surf omits `[]`
+
+#### Scenario: Sig precision name is an explicit type variable
+
+- **WHEN** a sig is `sig poly_id[d, p]: tensor[d, p] -> tensor[d, p]`
+- **THEN** `d` and `p` are explicitly quantified variables instantiated fresh per call site
 
 #### Scenario: Unbound def precision name is rejected
 
 - **WHEN** a def is `def f[a, b](x: tensor[3, p]) = ...` with `p` absent from `[a, b]`
-- **THEN** the checker reports `UnsupportedTensorPrecision`
+- **THEN** the shared primitive resolver rejects `p` as unknown and suggests the nearest active dtype
+
+#### Scenario: Body annotation keeps ordinary binder scope
+
+- **WHEN** `def identity[p](x: p) -> p = (x: p)` uses `p` in an expression ascription
+- **THEN** that `p` desugars to the declaration's `t-var`
+
+#### Scenario: Body tensor precision uses the declaration scope
+
+- **WHEN** `def f[n, p](a: tensor[n, p]) -> tensor[n, p]` binds `b: tensor[n, p] = a`, returns `b`, and is called with a concrete tensor
+- **THEN** the body-local `p` desugars to the declaration's `t-var`
+- **AND** the Surf and canonical Deep programs type-check
 
 ### Requirement: Blocks and sequencing
 
@@ -412,7 +450,7 @@ spellings in type positions and literal suffixes. Normal ingress SHALL reject
 the retired v0.18 spellings `int8`, `int16`, `int32`, and `int64`; the explicit
 v0.18 migration SHALL rewrite those spellings only where they denote dtypes or
 cast targets and SHALL preserve unrelated identifiers and string contents.
-Retired spellings SHALL NOT become implicit type variables.
+Retired spellings SHALL NOT be rebound as explicit type variables.
 
 #### Scenario: Canonical source uses i64
 

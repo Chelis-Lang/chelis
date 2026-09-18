@@ -19,7 +19,7 @@ fn multi_target_source(width: usize) -> String {
         "[1.0f32, 2.0f32, 3.0f32]"
     };
     format!(
-        "def f(x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = insert(scalar_to_tensor(7.0f32), 0i32, shape(y, 0i32))\n\
+        "def f[n, m](x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = insert(scalar_to_tensor(7.0f32), 0i32, shape(y, 0i32))\n\
          def h(x: tensor[{width}, f32], z: tensor[2, f32]) -> tensor[f32] = sum(f(x, to_tensor([1.0f32, 2.0f32, 3.0f32])), 0i32)\n\
          def main() = grad(h, wrt=(x, z))(to_tensor({actual}), to_tensor([4.0f32, 5.0f32]))\n"
     )
@@ -68,7 +68,7 @@ fn multi_target_gradient_rejects_the_same_activation_as_the_forward_call() {
     assert_extent_failure(multi_target_source(2));
 }
 
-const CLAIM_FUNCTION: &str = "def f(x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = insert(scalar_to_tensor(7.0f32), 0i32, shape(y, 0i32))\n";
+const CLAIM_FUNCTION: &str = "def f[n, m](x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = insert(scalar_to_tensor(7.0f32), 0i32, shape(y, 0i32))\n";
 
 fn independent_activation_source(
     distinct_function: bool,
@@ -95,7 +95,7 @@ fn independent_activation_source(
         (
             "g",
             format!(
-                "def g(x: tensor[{input}, f32], y: tensor[{output}, f32]) -> tensor[{input}, f32] = insert(scalar_to_tensor(11.0f32), 0i32, shape(y, 0i32))\n"
+                "def g[{input}, {output}](x: tensor[{input}, f32], y: tensor[{output}, f32]) -> tensor[{input}, f32] = insert(scalar_to_tensor(11.0f32), 0i32, shape(y, 0i32))\n"
             ),
         )
     } else {

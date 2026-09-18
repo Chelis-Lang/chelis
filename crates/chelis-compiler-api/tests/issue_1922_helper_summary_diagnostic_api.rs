@@ -38,7 +38,7 @@ fn fatal_summary_diagnostic_returns_and_later_eval_recovers() {
         // the diagnostic text; this repair does not change the wire schema.
         assert_eq!(
             error.errors[0].message,
-            format!("{MESSAGE} at source span `surf:465..503`")
+            format!("{MESSAGE} at source span `surf:471..509`")
         );
         let valid = eval(request(
             "def sink_output(x: f32) -> f32 = add(x, 2.0)\noutput = sink_output(3.0)\n",

@@ -4405,7 +4405,7 @@ fn fmt_check_accepts_trailing_newline_terminated_canonical_surf() {
     let path = dir.path().join("program.ch");
     write_file(
         &path,
-        "def f(x: tensor[n, f32]) -> tensor[n, f32] = relu(x)\n",
+        "def f[n](x: tensor[n, f32]) -> tensor[n, f32] = relu(x)\n",
     );
 
     Command::cargo_bin("chelis")
@@ -4425,7 +4425,10 @@ fn fmt_check_accepts_trailing_newline_terminated_canonical_surf() {
 fn fmt_inplace_preserves_hof_argument_parens() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("hof.ch");
-    write_file(&path, "module T\nsig f: (a -> b) -> c\ndef f(g, x) = x\n");
+    write_file(
+        &path,
+        "module T\nsig f[a, b, c]: (a -> b) -> c\ndef f(g, x) = x\n",
+    );
 
     Command::cargo_bin("chelis")
         .expect("binary")
@@ -4436,11 +4439,11 @@ fn fmt_inplace_preserves_hof_argument_parens() {
 
     let after = fs::read_to_string(&path).expect("read formatted file");
     assert!(
-        after.contains("sig f: (a -> b) -> c"),
+        after.contains("sig f[a, b, c]: (a -> b) -> c"),
         "fmt stripped the function-typed argument's grouping parens; got:\n{after}"
     );
     assert!(
-        !after.contains("sig f: a -> b -> c"),
+        !after.contains("sig f[a, b, c]: a -> b -> c"),
         "fmt flattened the HOF sig to the curried form; got:\n{after}"
     );
 
@@ -4462,7 +4465,7 @@ fn fmt_inplace_leaves_curried_sig_unparenthesized() {
     let path = dir.path().join("curried.ch");
     write_file(
         &path,
-        "module T\nsig f: a -> (b -> c)\ndef f(x, y, z) = x\n",
+        "module T\nsig f[a, b, c]: a -> (b -> c)\ndef f(x, y, z) = x\n",
     );
 
     Command::cargo_bin("chelis")
@@ -4474,7 +4477,7 @@ fn fmt_inplace_leaves_curried_sig_unparenthesized() {
 
     let after = fs::read_to_string(&path).expect("read formatted file");
     assert!(
-        after.contains("sig f: a -> b -> c"),
+        after.contains("sig f[a, b, c]: a -> b -> c"),
         "redundant right-position arrow parens were not canonicalized away; got:\n{after}"
     );
     assert!(
@@ -4609,7 +4612,7 @@ fn surf_roundtrip_preserves_canonical_def_return_types() {
     let path = dir.path().join("typed.ch");
     write_file(
         &path,
-        "def f(x: tensor[n, f32]) -> tensor[n, f32] = relu(x)\n",
+        "def f[n](x: tensor[n, f32]) -> tensor[n, f32] = relu(x)\n",
     );
 
     Command::cargo_bin("chelis")
@@ -9898,7 +9901,7 @@ fn build_c_polymorphic_top_level_tensor_dims_are_declared() {
     write_file(
         &path,
         "def quadratic[n](theta: tensor[n, f32]) -> tensor[f32] = sum(mul(copy(theta), theta), 0)\n\
-         g: tensor[n, f32] = grad(quadratic, wrt=theta)(to_tensor([1.0, 2.0, 3.0]))\n",
+         g = grad(quadratic, wrt=theta)(to_tensor([1.0, 2.0, 3.0]))\n",
     );
 
     Command::cargo_bin("chelis")
@@ -9931,6 +9934,10 @@ fn build_c_polymorphic_top_level_tensor_dims_are_declared() {
             }
         }
     }
+    assert!(
+        !used.is_empty(),
+        "the fixture must retain a symbolic generated-C extent; generated source:\n{source}"
+    );
     let mut declared: chelis_unord::UnordSet<String> = chelis_unord::UnordSet::new();
     for line in source.lines() {
         if let Some(idx) = line.find("int64_t ")

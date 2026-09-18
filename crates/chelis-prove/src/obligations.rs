@@ -168,7 +168,8 @@ fn collect_exports_in(exprs: &[Expr], out: &mut BTreeSet<String>) {
 }
 
 /// Names of defs that have a body (`(def {} name (fn ...))` or
-/// `(def {} name <value>)`), vs sig-only `(defsig {} name <type>)`.
+/// `(def {} name <value>)`), vs sig-only
+/// `(defsig {} name [<binders>] <type>)`.
 fn collect_def_bodies(exprs: &[Expr], with_body: &mut BTreeSet<String>) {
     for expr in exprs {
         if tag(expr) == Some(DeepTag::Def)
@@ -203,7 +204,7 @@ fn proof_declarations(exprs: &[Expr]) -> ProofDeclarations<'_> {
                     }
                 }
                 Some(DeepTag::Defsig) => {
-                    if let Some(ty) = kids.get(1) {
+                    if let Some(ty) = kids.last() {
                         result.signatures.insert(name, ty);
                     }
                 }

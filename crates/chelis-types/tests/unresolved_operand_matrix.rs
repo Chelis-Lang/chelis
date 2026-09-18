@@ -1927,7 +1927,7 @@ fn a_record_field_sum_operand_is_tied_to_the_bound_target() {
 fn a_gated_copy_result_ties_its_sum_consumer_to_the_bound_operand() {
     let program = |declared: &str| {
         format!(
-            "def apply_n[b](f: tensor[n, 3, f32] -> b, x: tensor[n, 3, f32]) -> b = f(x)\n\
+            "def apply_n[b, n](f: tensor[n, 3, f32] -> b, x: tensor[n, 3, f32]) -> b = f(x)\n\
              def probe(t: tensor[4, 3, f32]) -> {declared} = apply_n(fn (v) -> sum(copy(v), 0), t)\n"
         )
     };

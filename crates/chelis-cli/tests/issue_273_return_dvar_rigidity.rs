@@ -15,7 +15,7 @@
 //!   * **output-inferred** — the body *produces* the dimension, either
 //!     leaving the dim var unbound (generalize) or resolving it to a
 //!     body-internal concrete dim (`examples/hello_tensor.ch`'s
-//!     `def main() -> tensor[n, f32]` whose body builds a
+//!     `def main[n]() -> tensor[n, f32]` whose body builds a
 //!     `tensor[3, f32]`). Accepted; the registered scheme resolves to
 //!     the produced dim.
 //!   * **input-coupled** — the body derives the return dim from the
@@ -181,7 +181,7 @@ fn issue_273_hello_tensor_style_output_inferred_dim_type_checks() {
     let path = dir.path().join("output_inferred.ch");
     write_file(
         &path,
-        "def make() -> tensor[n, f32] = to_tensor([1.0, 2.0, 3.0])\n",
+        "def make[n]() -> tensor[n, f32] = to_tensor([1.0, 2.0, 3.0])\n",
     );
     let json = run_check(&path);
     let errs = error_messages(&json);
@@ -195,7 +195,7 @@ fn issue_273_hello_tensor_style_output_inferred_dim_type_checks() {
 #[test]
 fn issue_273_examples_hello_tensor_still_type_checks() {
     // The shipped example named by the issue as the regression risk for
-    // the naive fix. Its `def main() -> tensor[n, f32]` body produces a
+    // the naive fix. Its `def main[n]() -> tensor[n, f32]` body produces a
     // concrete tensor[3, f32]; the return-only `n` must stay accepted.
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/hello_tensor.ch");
     let json = run_check(&path);
@@ -215,7 +215,7 @@ fn issue_273_unbound_return_dvar_generalizes_type_checks() {
     let path = dir.path().join("generalize.ch");
     write_file(
         &path,
-        "def f(items: List[f32]) -> tensor[n, f32] = to_tensor(items)\n",
+        "def f[n](items: List[f32]) -> tensor[n, f32] = to_tensor(items)\n",
     );
     let json = run_check(&path);
     let errs = error_messages(&json);
@@ -261,7 +261,7 @@ fn issue_273_body_internal_pin_not_coinciding_with_params_type_checks() {
     let path = dir.path().join("body_internal.ch");
     write_file(
         &path,
-        "def f(x: tensor[2, f32]) -> tensor[k, f32] = to_tensor([1.0, 2.0, 3.0])\n",
+        "def f[k](x: tensor[2, f32]) -> tensor[k, f32] = to_tensor([1.0, 2.0, 3.0])\n",
     );
     let json = run_check(&path);
     let errs = error_messages(&json);

@@ -104,8 +104,9 @@ fn parse_with_mode(tokens: &[Token], mode: ParseMode) -> Result<Vec<Decl>, Parse
     Ok(decls)
 }
 
-/// A standalone signature owns its bounds (spec/03 §2.2). Reject the
-/// conflicting source before desugaring could construct forbidden metadata.
+/// A standalone signature owns the declaration's complete binder list
+/// (spec/02 §P4b, spec/03 §2.2). Reject a second list on the matching `def`
+/// before desugaring could create two authorities for one declaration.
 pub(crate) fn validate_bound_ownership(decls: &[Decl]) -> Result<(), ParseError> {
     let signatures: UnordSet<_> = decls
         .iter()
@@ -120,14 +121,29 @@ pub(crate) fn validate_bound_ownership(decls: &[Decl]) -> Result<(), ParseError>
         }
         | Decl::Sig {
             type_binders, span, ..
+        }
+        | Decl::Property {
+            type_binders, span, ..
         } = decl
         {
-            let mut bounded = UnordSet::new();
-            for binder in type_binders.iter().filter(|b| b.bound.is_some()) {
-                if !bounded.insert(binder.name.as_str()) {
+            let mut declared = UnordSet::new();
+            for binder in type_binders {
+                if crate::dtype_name::is_forbidden_binder_name(&binder.name) {
                     return Err(ParseError::Expected {
-                        expected: "one dtype-family bound per binder".into(),
-                        found: format!("duplicate bound for `{}`", binder.name),
+                        expected:
+                            "a declaration binder outside the primitive and reserved dtype vocabulary"
+                                .into(),
+                        found: format!(
+                            "dtype spelling `{}` cannot be a declaration binder",
+                            binder.name
+                        ),
+                        offset: span.offset,
+                    });
+                }
+                if !declared.insert(binder.name.as_str()) {
+                    return Err(ParseError::Expected {
+                        expected: "one declaration per binder".into(),
+                        found: format!("duplicate binder `{}`", binder.name),
                         offset: span.offset,
                     });
                 }
@@ -139,13 +155,12 @@ pub(crate) fn validate_bound_ownership(decls: &[Decl]) -> Result<(), ParseError>
                 type_binders,
                 span,
                 ..
-            } if signatures.contains(name.as_str())
-                && type_binders.iter().any(|b| b.bound.is_some()) =>
-            {
+            } if signatures.contains(name.as_str()) && !type_binders.is_empty() => {
                 return Err(ParseError::Expected {
-                    expected: "bounds on the signature: a declaration's `defsig` owns its binders"
-                        .into(),
-                    found: format!("bounded def `{name}`"),
+                    expected:
+                        "binders on the signature: a declaration's `defsig` owns its binder list"
+                            .into(),
+                    found: format!("second binder list on def `{name}`"),
                     offset: span.offset,
                 });
             }
@@ -1075,6 +1090,11 @@ impl Parser {
 
     fn parse_property_decl_after_at(&mut self, start: Span) -> Result<Decl, ParseError> {
         let (name, _) = self.expect_ident()?;
+        let type_binders = if *self.peek() == TokenKind::LBracket {
+            self.parse_type_binder_list()?
+        } else {
+            Vec::new()
+        };
         let (forall, _) = self.expect_ident()?;
         if forall != "forall" {
             return Err(ParseError::Expected {
@@ -1117,6 +1137,7 @@ impl Parser {
             .unwrap_or_else(|| expr_span(&body));
         Ok(Decl::Property {
             name,
+            type_binders,
             params,
             preconditions,
             body,
@@ -5158,7 +5179,7 @@ mod tests {
 
     #[test]
     fn rank_spread_parses_as_sole_dim() {
-        let decls = p("def f(x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)");
+        let decls = p("def f[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)");
         let Decl::FunDef {
             ret_ty: Some(ret), ..
         } = &decls[0]
@@ -5183,8 +5204,9 @@ mod tests {
     fn rank_spread_adjacent_to_concrete_dim_parses() {
         // Tier-3: `..r` interleaved with concrete anchors is now valid syntax
         // (`tensor[..pre, seq, ..post, f32]`); the boundary moved to unification.
-        let decls =
-            p("def f(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = x");
+        let decls = p(
+            "def f[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = x",
+        );
         let Decl::FunDef {
             ret_ty: Some(ret), ..
         } = &decls[0]
@@ -5220,7 +5242,7 @@ mod tests {
         // The erasure *tier* is deferred (no all-reduce primitive), so a body
         // like `sum(x, 0)` is rejected at check time by Body Discipline — this
         // test only pins that the surface shape is parseable.
-        let decls = p("def sum_all(x: &tensor[..r, f32]) -> tensor[f32] = sum(x, 0)");
+        let decls = p("def sum_all[r](x: &tensor[..r, f32]) -> tensor[f32] = sum(x, 0)");
         assert!(matches!(&decls[0], Decl::FunDef { .. }));
     }
 

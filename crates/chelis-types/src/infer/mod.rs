@@ -28,15 +28,31 @@ use crate::deep_type::{
     TypeUseSite, deferred_family_diagnostic, is_deferred_dtype_name, is_unsigned_dtype_name,
     unsigned_family_diagnostic,
 };
-use crate::env::{Env, TopLevelValueVisibility};
+use crate::env::{DeclarationBinderIdentities, Env, TopLevelValueVisibility};
 use crate::errors::*;
 use crate::linearity::LinearityInfo;
-use crate::session::DiagnosticSink;
+use crate::session::{DeclarationDiagnosticOwner, DeclarationTypeDiagnosticClass, DiagnosticSink};
 use crate::types::*;
 use crate::unify::*;
 
 trait DiagnosticOutput {
     fn push(&mut self, error: CheckError);
+
+    fn declaration_owns_unknown_primitive(
+        &self,
+        _owner: &DeclarationDiagnosticOwner,
+        _primitive_name: &str,
+    ) -> bool {
+        false
+    }
+
+    fn resolved_unknown_primitive_at(
+        &self,
+        _location: &TypeDiagnosticLocation,
+        _primitive_name: &str,
+    ) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]
@@ -49,6 +65,29 @@ impl DiagnosticOutput for Vec<CheckError> {
 impl DiagnosticOutput for DiagnosticSink<'_> {
     fn push(&mut self, error: CheckError) {
         DiagnosticSink::push(self, error);
+    }
+
+    fn declaration_owns_unknown_primitive(
+        &self,
+        owner: &DeclarationDiagnosticOwner,
+        primitive_name: &str,
+    ) -> bool {
+        self.declaration_type_witness(
+            owner,
+            primitive_name,
+            DeclarationTypeDiagnosticClass::UnknownPrimitive,
+        )
+        .is_some()
+    }
+
+    fn resolved_unknown_primitive_at(
+        &self,
+        location: &TypeDiagnosticLocation,
+        primitive_name: &str,
+    ) -> bool {
+        let (span_offset, span_id) = location.stable_key();
+        self.unknown_primitive_site_witness(span_offset, span_id, primitive_name)
+            .is_some()
     }
 }
 
@@ -73,6 +112,7 @@ mod checked;
 mod common;
 mod declarations;
 mod declared_surface;
+mod declared_type;
 pub(crate) use declared_surface::resolve_declared_surface_in_session;
 pub use declared_surface::{DeclaredSignature, DeclaredTypeSurface, resolve_declared_surface};
 mod deferred_operands;
@@ -110,6 +150,7 @@ use binder_literal::*;
 use checked::*;
 use common::*;
 pub(crate) use common::{decide_shape_route, shape_route_result};
+use declared_type::*;
 // chelis#1654: the settled decision for transported checked collection
 // contracts. Direct syntactic calls keep the better-informed eager routes.
 pub(crate) use app_collection::{TensorConcatCallEvidence, decide_collection_constraint};

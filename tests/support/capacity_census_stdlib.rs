@@ -1,6 +1,7 @@
 //! C6 stdlib discovery: compiler-linked names and resolved declared types.
 
 use super::*;
+use chelis_deep::role::{ChildStampRole, child_stamp_role};
 use chelis_types::types::{NominalArg, TensorPrec, Type, TypeVar};
 use chelis_types::{DeclaredSignature, DeclaredTypeSurface};
 use std::collections::VecDeque;
@@ -345,6 +346,22 @@ fn symbol(expr: &Expr) -> Option<&str> {
     }
 }
 
+fn declared_surface_type(declaration: &List) -> &Expr {
+    let children = &declaration.elements[2..];
+    let mut types = children.iter().enumerate().filter_map(|(index, child)| {
+        (child_stamp_role(DeepTag::Defsig, index, children.len()) == ChildStampRole::Type)
+            .then_some(child)
+    });
+    let ty = types
+        .next()
+        .expect("validated defsig has one declared type child");
+    assert!(
+        types.next().is_none(),
+        "validated defsig has exactly one declared type child"
+    );
+    ty
+}
+
 fn declarations(exprs: &[Expr]) -> Vec<List> {
     let mut result = Vec::new();
     for expr in exprs {
@@ -458,7 +475,7 @@ fn rows_for_source(
             kind: "std-def-numeric".to_string(),
             id: format!(
                 "{label}::{name}: {prefix}{}",
-                chelis_deep::printer::print_expr_flat(&declaration.elements[3])
+                chelis_deep::printer::print_expr_flat(declared_surface_type(declaration))
             ),
             flags: numeric_carrier_flags(&closure.signature(signature, true).prims),
             citation: String::new(),

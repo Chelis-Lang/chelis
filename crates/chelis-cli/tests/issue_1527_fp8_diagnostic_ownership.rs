@@ -1,4 +1,5 @@
-//! chelis#1527 / chelis#1606: one diagnostic belongs to each rejected source site.
+//! chelis#1527 / chelis#1606: declaration-owned type positions share one
+//! diagnostic per rejected spelling, while independent use sites remain distinct.
 
 use assert_cmd::Command;
 use serde::Deserialize;
@@ -92,15 +93,18 @@ fn assert_rejected_sites(source: &str, names: &[&str]) {
         report.score < 1.0,
         "a rejected program cannot score 1: {report:?}"
     );
-    let mut expected: Vec<_> = names
+    let mut search_start = 0;
+    let expected = names
         .iter()
-        .flat_map(|name| {
-            canonical
-                .match_indices(name)
-                .map(move |(offset, _)| (*name, offset))
+        .map(|name| {
+            let relative = canonical[search_start..].find(name).unwrap_or_else(|| {
+                panic!("expected `{name}` after byte {search_start}: {canonical}")
+            });
+            let offset = search_start + relative;
+            search_start = offset + name.len();
+            (*name, offset)
         })
-        .collect();
-    expected.sort_by_key(|(_, offset)| *offset);
+        .collect::<Vec<_>>();
     assert_eq!(report.errors.len(), expected.len(), "{report:?}");
     for (error, (name, offset)) in report.errors.iter().zip(expected) {
         let PointLocation::Point { offset: reported } =
@@ -268,7 +272,7 @@ fn one_reserved_parameter_site_produces_one_cli_error() {
 #[test]
 fn no_clause_inline_precision_accepts_and_explicit_clauses_remain_authoritative() {
     for source in [
-        "def inspect(x: tensor[3, p]) -> tensor[3, p] = x\n",
+        "def inspect[p](x: tensor[3, p]) -> tensor[3, p] = x\n",
         "def inspect[p](x: tensor[3, p]) -> tensor[3, p] = x\n",
     ] {
         let (success, report, _) = check(source);
@@ -444,7 +448,7 @@ fn property_copy_cli_ownership_uses_spanless_semantic_type_syntax() {
 }
 
 #[test]
-fn property_copy_cli_ownership_preserves_semantic_metadata_differences() {
+fn property_copy_cli_ownership_ignores_nonsemantic_metadata_differences() {
     for name in ["f8e4m3", "f8e5m2"] {
         for (signature, parameter) in [
             (
@@ -462,7 +466,7 @@ fn property_copy_cli_ownership_preserves_semantic_metadata_differences() {
                 ),
             ),
         ] {
-            assert_deep_property_has_reserved_owner(&signature, &parameter, name, 2);
+            assert_deep_property_has_reserved_owner(&signature, &parameter, name, 1);
         }
     }
 }
@@ -516,7 +520,7 @@ fn property_copy_cli_ownership_handles_multiple_and_arity_disagreements() {
                     tensor.clone(),
                     "(t-prim {} bool)".to_string(),
                 ],
-                2,
+                1,
                 "multiple matching and disagreeing slots",
             ),
             (
@@ -648,8 +652,8 @@ fn nominal_arity_cli_recovery_keeps_nested_rejections_and_the_arity_witness() {
                        (t-ref {{}} (t-prim {{}} {name})) \
                        (t-prim {{}} f32))"
                 ),
-                3,
-                "nested composites",
+                2,
+                "nested composites preserve one rejection per spelling",
             ),
             (
                 "(t-adt {} Pair (t-prim {} f32))".to_string(),
@@ -726,10 +730,10 @@ fn separate_declarations_keep_their_own_cli_errors() {
 }
 
 #[test]
-fn repeated_reserved_spelling_keeps_distinct_cli_locations() {
+fn repeated_reserved_spelling_keeps_distinct_declaration_locations() {
     assert_rejected_sites(
         "def left(x: f8e4m3) -> i32 = 0i32\ndef right(x: f8e4m3) -> i32 = 0i32\n",
-        &["f8e4m3"],
+        &["f8e4m3", "f8e4m3"],
     );
 }
 
@@ -742,7 +746,7 @@ fn a_call_does_not_report_its_failed_signature_again() {
 }
 
 #[test]
-fn distinct_parameter_sites_in_one_signature_keep_separate_cli_errors() {
+fn one_signature_keys_reserved_cli_errors_by_spelling() {
     assert_rejected_sites(
         "def classify(x: f8e4m3, y: f8e5m2) -> i32 = 0i32\n",
         &["f8e4m3", "f8e5m2"],
@@ -779,6 +783,32 @@ fn a_failed_signature_does_not_hide_a_cli_body_error() {
     assert_eq!(report.errors.len(), 2, "{report:?}");
     assert!(report.errors[0].message.contains("f8e4m3"), "{report:?}");
     assert!(report.errors[1].message.contains("f8e5m2"), "{report:?}");
+    assert_eq!(report.errors[0].span_id.as_deref(), Some("source:16..22"));
+    let start = source.find("cast(").expect("cast site");
+    let PointLocation::Point { offset } = report.errors[1]
+        .span
+        .as_ref()
+        .expect("cast diagnostic location");
+    assert_eq!(*offset, start);
+    let expected_span = format!("surf:{start}..{}", source.trim_end().len());
+    assert_eq!(
+        report.errors[1].span_id.as_deref(),
+        Some(expected_span.as_str())
+    );
+}
+
+#[test]
+fn declaration_ownership_does_not_absorb_a_same_spelling_cli_cast_error() {
+    let (success, report, source) = check("def classify(x: f8e4m3) -> i32 = cast(0i32, f8e4m3)\n");
+    assert!(!success, "{report:?}");
+    assert_eq!(report.errors.len(), 2, "{report:?}");
+    assert!(
+        report
+            .errors
+            .iter()
+            .all(|error| error.message.contains("f8e4m3")),
+        "{report:?}"
+    );
     assert_eq!(report.errors[0].span_id.as_deref(), Some("source:16..22"));
     let start = source.find("cast(").expect("cast site");
     let PointLocation::Point { offset } = report.errors[1]

@@ -25,11 +25,11 @@ use chelis_types::types::Lane;
 
 /// chelis#1376's callee: the declared result claims `m` on axis 1 while the
 /// `insert` reads `n` for it.
-const CALLEE_1376: &str = "def f(x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, m, f32] = \
+const CALLEE_1376: &str = "def f[n, m](x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, m, f32] = \
                            insert(x, 1, shape(x, 0))\n";
 
 /// The CLI form: a nullary `main` applying `f` to two literals.
-const HOST_APPLIED_1376: &str = "def f(x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, m, f32] = \
+const HOST_APPLIED_1376: &str = "def f[n, m](x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, m, f32] = \
                                  insert(x, 1, shape(x, 0))\n\
                                  def main() = f(to_tensor([1.0f32, 2.0f32]), \
                                  to_tensor([3.0f32, 4.0f32, 5.0f32]))\n";
@@ -184,7 +184,8 @@ fn required_shape_only_parameter_rejects_invalid_wire_extent() {
 #[test]
 fn host_shape_demand_preserves_dead_parameter_slots_and_input_filtering() {
     for dead_y in [false, true] {
-        let mut source = CALLEE_1376.replace("def f(", "def f(dead: tensor[p, f32], ");
+        let mut source =
+            CALLEE_1376.replace("def f[n, m](", "def f[p, n, m](dead: tensor[p, f32], ");
         if dead_y {
             source = source.replace("-> tensor[n, m, f32]", "-> tensor[n, n, f32]");
         }

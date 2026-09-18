@@ -369,3 +369,20 @@ fn typed_deep_wire_bridge_preserves_complete_node_shape() {
         "value"
     );
 }
+
+#[test]
+fn polymorphic_property_binders_cross_the_public_surf_wire() {
+    let parsed = compiler::parse(ParseRequest {
+        source_kind: SourceKind::Surf,
+        source: "@property accepts[p: Float] forall(x: p): true".into(),
+    })
+    .expect("polymorphic property must parse");
+    let json = roundtrip(&parsed);
+    let property = &json["surf_ast"][0];
+    assert_eq!(property["kind"], "property");
+    assert_eq!(
+        property["type_binders"],
+        serde_json::json!([{"name": "p", "bound": "Float"}]),
+        "the wire declaration must preserve the complete property binder list"
+    );
+}

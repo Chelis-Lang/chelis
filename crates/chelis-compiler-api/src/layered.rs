@@ -392,7 +392,7 @@ mod artifact_outcome_tests {
 
     #[test]
     fn layered_outcomes_are_exclusive_for_each_semantic_stage() {
-        let clean = check("def identity(x: tensor[n, f32]) -> tensor[n, f32] = x\n");
+        let clean = check("def identity[n](x: tensor[n, f32]) -> tensor[n, f32] = x\n");
         assert!(matches!(clean, LayeredCheck::Clean { .. }));
 
         let effect =

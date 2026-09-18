@@ -86,7 +86,7 @@ fn handwritten_deep_uses_the_same_declared_binder_at_both_ingresses() {
             ("(cast {} (lit {} 1) (t-var {} p))", "(var {} xs)"),
         ] {
             let source = format!(
-                "(defsig {{dtype_bounds: {{p: int}}}} f (t-fn {{}} (t-tensor {{}} (d-lit {{}} 3) (t-var {{}} p)) (t-tensor {{}} (d-lit {{}} 3) {result}))) (def {{}} f (fn {{}} (params {{}} xs) (app {{}} (var {{}} {op}) {lhs} {rhs})))"
+                "(defsig {{dtype_bounds: {{p: int}}}} f (p) (t-fn {{}} (t-tensor {{}} (d-lit {{}} 3) (t-var {{}} p)) (t-tensor {{}} (d-lit {{}} 3) {result}))) (def {{}} f (fn {{}} (params {{}} xs) (app {{}} (var {{}} {op}) {lhs} {rhs})))"
             );
             let deep = chelis_deep::parser::parse_str(&source).expect("Deep parse");
             assert_mixed(&deep_diagnostics(&deep), comparison, &source);

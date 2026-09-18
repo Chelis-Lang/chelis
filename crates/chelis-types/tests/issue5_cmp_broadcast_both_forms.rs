@@ -183,7 +183,7 @@ fn scalar_pairs_and_matching_tensor_pairs_are_still_accepted() {
 #[test]
 fn the_replacement_spelling_the_diagnostic_names_type_checks() {
     assert_accepted(
-        "sig f: tensor[n, f32] -> tensor[n, bool]\n\
+        "sig f[n]: tensor[n, f32] -> tensor[n, bool]\n\
          def f(xs) = gt(xs, expand(to_tensor([1.5f32]), 0i32, shape(xs, 0i32)))\n",
         "symbolic-extent replacement",
     );

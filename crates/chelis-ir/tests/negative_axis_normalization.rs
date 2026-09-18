@@ -290,7 +290,7 @@ fn lowering_rejects_out_of_range_axis_without_panicking() {
 #[test]
 fn standalone_def_with_separate_sig_lowers_shape_sensitive_param() {
     let src = r#"
-sig run: &tensor[a, b, f32] -> tensor[a, b, f32]
+sig run[a, b]: &tensor[a, b, f32] -> tensor[a, b, f32]
 def run(logits) = softmax(logits, 1)
 "#;
     let dag =
@@ -306,7 +306,7 @@ def run(logits) = softmax(logits, 1)
 #[test]
 fn standalone_def_with_separate_sig_lowers_negative_axis_param() {
     let src = r#"
-sig run: &tensor[a, b, f32] -> tensor[a, b, f32]
+sig run[a, b]: &tensor[a, b, f32] -> tensor[a, b, f32]
 def run(logits) = softmax(logits, -1)
 "#;
     let dag =

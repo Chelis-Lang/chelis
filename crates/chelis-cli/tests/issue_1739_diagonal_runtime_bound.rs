@@ -2,7 +2,7 @@
 //! carries a literal extent traps when the produced tensor disagrees.
 //!
 //! chelis#1739's check-time half bounds a `diagonal` result by its literal
-//! selected axis, so `def d(x: tensor[n, 4, f32]) -> tensor[3, f32]` is
+//! selected axis, so `def d[n](x: tensor[n, 4, f32]) -> tensor[3, f32]` is
 //! ACCEPTED: `min(n, 4) = 3` whenever `n = 3`. Which side of the minimum wins
 //! is a runtime fact, so the declaration is a claim the runtime owes a verdict
 //! on. Before this change both lanes silently returned a two-element tensor
@@ -120,7 +120,7 @@ const FIVE_BY_FOUR: &str = "[[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], \
 /// Root form: the exported `def` is applied from a top-level value binding.
 fn binding_root(declared: usize, operand: &str) -> String {
     format!(
-        "def d(x: tensor[n, 4, f32]) -> tensor[{declared}, f32] = diagonal(x, 0, 1)\n\
+        "def d[n](x: tensor[n, 4, f32]) -> tensor[{declared}, f32] = diagonal(x, 0, 1)\n\
          m = to_tensor({operand})\n\
          out = d(m)\n"
     )
@@ -130,7 +130,7 @@ fn binding_root(declared: usize, operand: &str) -> String {
 /// declared result carries the same literal extent.
 fn inlined_main_root(declared: usize, operand: &str) -> String {
     format!(
-        "def d(x: tensor[n, 4, f32]) -> tensor[{declared}, f32] = diagonal(x, 0, 1)\n\
+        "def d[n](x: tensor[n, 4, f32]) -> tensor[{declared}, f32] = diagonal(x, 0, 1)\n\
          def main() -> tensor[{declared}, f32] = d(to_tensor({operand}))\n"
     )
 }
@@ -142,7 +142,7 @@ fn inlined_main_root(declared: usize, operand: &str) -> String {
 fn alias_root(declared: usize, operand: &str) -> String {
     format!(
         "type Row = tensor[{declared}, f32]\n\
-         def d(x: tensor[n, 4, f32]) -> Row = diagonal(x, 0, 1)\n\
+         def d[n](x: tensor[n, 4, f32]) -> Row = diagonal(x, 0, 1)\n\
          m = to_tensor({operand})\n\
          out = d(m)\n"
     )
@@ -152,7 +152,7 @@ fn alias_root(declared: usize, operand: &str) -> String {
 /// BLOCK rather than a direct builtin application. chelis#1771's first witness.
 fn block_bodied_root(declared: usize, operand: &str) -> String {
     format!(
-        "def d(x: tensor[n, 4, f32]) -> tensor[{declared}, f32] = {{\n  \
+        "def d[n](x: tensor[n, 4, f32]) -> tensor[{declared}, f32] = {{\n  \
          y = diagonal(x, 0, 1)\n  y\n}}\n\
          m = to_tensor({operand})\n\
          out = d(m)\n"
@@ -165,8 +165,8 @@ fn block_bodied_root(declared: usize, operand: &str) -> String {
 /// carries no claim of its own and the only verdict owed is `d`'s.
 fn call_bodied_root(declared: usize, operand: &str) -> String {
     format!(
-        "def inner(x: tensor[n, 4, f32]) -> tensor[k, f32] = diagonal(x, 0, 1)\n\
-         def d(x: tensor[n, 4, f32]) -> tensor[{declared}, f32] = inner(x)\n\
+        "def inner[n, k](x: tensor[n, 4, f32]) -> tensor[k, f32] = diagonal(x, 0, 1)\n\
+         def d[n](x: tensor[n, 4, f32]) -> tensor[{declared}, f32] = inner(x)\n\
          m = to_tensor({operand})\n\
          out = d(m)\n"
     )
@@ -177,7 +177,7 @@ fn call_bodied_root(declared: usize, operand: &str) -> String {
 /// `after` must not reach stdout on either lane.
 fn effect_order_root(declared: usize, operand: &str) -> String {
     format!(
-        "def d(x: tensor[n, 4, f32]) -> tensor[{declared}, f32] ! {{ IO }} = {{\n  \
+        "def d[n](x: tensor[n, 4, f32]) -> tensor[{declared}, f32] ! {{ IO }} = {{\n  \
          y = diagonal(x, 0, 1)\n  _ = print(\"after\")\n  y\n}}\n\
          m = to_tensor({operand})\n\
          out = d(m)\n"
@@ -190,9 +190,9 @@ fn effect_order_root(declared: usize, operand: &str) -> String {
 /// chelis#1945's witness.
 fn callee_effect_root(declared: usize, operand: &str) -> String {
     format!(
-        "def inner(x: tensor[n, 4, f32]) -> tensor[k, f32] ! {{ IO }} = {{\n  \
+        "def inner[n, k](x: tensor[n, 4, f32]) -> tensor[k, f32] ! {{ IO }} = {{\n  \
          z = diagonal(x, 0, 1)\n  _ = print(\"inside-after\")\n  z\n}}\n\
-         def d(x: tensor[n, 4, f32]) -> tensor[{declared}, f32] ! {{ IO }} = inner(x)\n\
+         def d[n](x: tensor[n, 4, f32]) -> tensor[{declared}, f32] ! {{ IO }} = inner(x)\n\
          m = to_tensor({operand})\n\
          out = d(m)\n"
     )
@@ -201,7 +201,7 @@ fn callee_effect_root(declared: usize, operand: &str) -> String {
 /// Root form: an if selects one producing application at runtime.
 fn branchy_root(declared: usize, operand: &str) -> String {
     format!(
-        "def d(x: tensor[n, 4, f32], flag: bool) -> tensor[{declared}, f32] = \
+        "def d[n](x: tensor[n, 4, f32], flag: bool) -> tensor[{declared}, f32] = \
          if flag then diagonal(x, 0, 1) else diagonal(x, 0, 1)\n\
          m = to_tensor({operand})\n\
          out = d(m, true)\n"
@@ -580,7 +580,7 @@ fn value_aliases_keep_the_guard_at_the_original_producer() {
         for (operand, agrees) in [(TWO_BY_FOUR, false), (THREE_BY_FOUR, true)] {
             let dir = tempdir().expect("tempdir");
             let source = format!(
-                "def d(x: tensor[n, 4, f32]) -> tensor[3, f32] ! {{ IO }} = {{\n \
+                "def d[n](x: tensor[n, 4, f32]) -> tensor[3, f32] ! {{ IO }} = {{\n \
                  _ = print(\"before\")\n y = diagonal(x, 0, 1)\n {aliases}\n}}\n\
                  out = d(to_tensor({operand}))\n"
             );
@@ -728,7 +728,7 @@ fn selected_branch_root(form: &str, second: bool, agrees: bool) -> String {
         (selected, TWO_BY_FOUR)
     };
     format!(
-        "{preamble}def d(x: tensor[n, 4, f32], y: tensor[m, 4, f32], {param}) -> tensor[3, f32] ! {{ IO }} = {{\n result = {selection}\n alias = result\n _ = print(\"outer-after\")\n alias\n}}\nout = d(to_tensor({x}), to_tensor({y}), {actual})\n"
+        "{preamble}def d[n, m](x: tensor[n, 4, f32], y: tensor[m, 4, f32], {param}) -> tensor[3, f32] ! {{ IO }} = {{\n result = {selection}\n alias = result\n _ = print(\"outer-after\")\n alias\n}}\nout = d(to_tensor({x}), to_tensor({y}), {actual})\n"
     )
 }
 
@@ -831,7 +831,7 @@ fn assert_shared_callee_claims(c_lane: bool) {
         let dir = tempdir().expect("tempdir");
         let last = if agrees { THREE_BY_FOUR } else { TWO_BY_FOUR };
         let source = format!(
-            "def inner(x: tensor[n, 4, f32]) -> tensor[k, f32] ! {{ IO }} = {{\n _ = print(\"inside-before\")\n z = diagonal(x, 0, 1)\n _ = print(\"inside-after\")\n z\n}}\ndef middle(x: tensor[n, 4, f32]) -> tensor[k, f32] ! {{ IO }} = {{\n y = inner(x)\n _ = print(\"middle-after\")\n y\n}}\ndef two(x: tensor[n, 4, f32]) -> tensor[2, f32] ! {{ IO }} = middle(x)\ndef three(x: tensor[n, 4, f32]) -> tensor[3, f32] ! {{ IO }} = middle(x)\na = two(to_tensor({TWO_BY_FOUR}))\nb = three(to_tensor({THREE_BY_FOUR}))\nc = three(to_tensor({last}))\n"
+            "def inner[n, k](x: tensor[n, 4, f32]) -> tensor[k, f32] ! {{ IO }} = {{\n _ = print(\"inside-before\")\n z = diagonal(x, 0, 1)\n _ = print(\"inside-after\")\n z\n}}\ndef middle[n, k](x: tensor[n, 4, f32]) -> tensor[k, f32] ! {{ IO }} = {{\n y = inner(x)\n _ = print(\"middle-after\")\n y\n}}\ndef two[n](x: tensor[n, 4, f32]) -> tensor[2, f32] ! {{ IO }} = middle(x)\ndef three[n](x: tensor[n, 4, f32]) -> tensor[3, f32] ! {{ IO }} = middle(x)\na = two(to_tensor({TWO_BY_FOUR}))\nb = three(to_tensor({THREE_BY_FOUR}))\nc = three(to_tensor({last}))\n"
         );
         let source = canonical_fixture(&dir, &source);
         check_scores_one(&dir, "shared", &source);
@@ -979,7 +979,7 @@ fn the_c_lane_executes_exactly_when_the_literal_axis_wins_the_minimum() {
 #[test]
 fn a_symbolic_declared_result_is_not_guarded() {
     let dir = tempdir().expect("tempdir");
-    let source = "def d(x: tensor[n, 4, f32]) -> tensor[k, f32] = diagonal(x, 0, 1)\n\
+    let source = "def d[n, k](x: tensor[n, 4, f32]) -> tensor[k, f32] = diagonal(x, 0, 1)\n\
                   m = to_tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]])\n\
                   out = d(m)\n";
     let (ok, stdout, stderr) = eval_source(&dir, "symbolic", source);
@@ -1393,7 +1393,7 @@ fn the_census_reader_separates_mixed_entry_and_result_guards() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("mixed_guard_witness.ch");
     let source = format!(
-        "def d(x: tensor[n, 4, f32], y: tensor[n, f32]) -> tensor[3, f32] = diagonal(x, 0, 1)\n\
+        "def d[n](x: tensor[n, 4, f32], y: tensor[n, f32]) -> tensor[3, f32] = diagonal(x, 0, 1)\n\
          out = d(to_tensor({TWO_BY_FOUR}), to_tensor([1.0, 2.0]))\n"
     );
     fs::write(&path, source).expect("write fixture");
@@ -1448,8 +1448,8 @@ chelis_tensor *d__chelis_owned_body(chelis_tensor *x, chelis_tensor *y) {
 fn the_census_signature_oracle_preserves_aliases_and_independent_scopes() {
     let source = "type Row = tensor[2, f32]\n\
         def d(x: Row, y: tensor[seq, f32], z: tensor[seq, f32]) -> (Row, tensor[seq, f32], tensor[seq, f32]) = (x, y, z)\n\
-        def partial(x: Row, y: tensor[n, f32], z: tensor[n, f32]) = (x, y, z)\n\
-        def independent(x: tensor[n, f32], y: tensor[k, f32]) = (x, y)\n\
+        def partial[n](x: Row, y: tensor[n, f32], z: tensor[n, f32]) = (x, y, z)\n\
+        def independent[n, k](x: tensor[n, f32], y: tensor[k, f32]) = (x, y)\n\
         def inferred(x) = x\n";
     let checked = census_checked_program(source);
     let functions = &checked.signature_inference().functions;
@@ -1499,7 +1499,7 @@ fn the_census_signature_oracle_preserves_aliases_and_independent_scopes() {
 
 #[test]
 fn the_census_signature_oracle_rejects_missing_duplicate_reordered_and_wrong_axis_guards() {
-    let source = "def d(x: tensor[2, n, f32], y: tensor[n, f32]) = (x, y)\n";
+    let source = "def d[n](x: tensor[2, n, f32], y: tensor[n, f32]) = (x, y)\n";
     let checked = census_checked_program(source);
     let expected = signature_entry_inventory(
         &checked,

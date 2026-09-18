@@ -20,7 +20,7 @@ fn surf_to_deep(source: &str) -> Vec<Expr> {
 #[test]
 fn symbolic_conv_chain_is_accepted_without_cascade_state() {
     let source = r#"
-def f(
+def f[h, out_h, out_w](
   x: tensor[1, 3, h, 16, f32],
   k1: tensor[8, 3, 3, 3, f32],
   k2: tensor[16, 8, 3, 3, f32],

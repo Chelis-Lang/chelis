@@ -153,7 +153,7 @@ fn fused_zero_keeps_nested_named_extent_claim() {
             "[2.0f32, 7.0f32, 11.0f32]"
         };
         let source = format!(
-            "def claim(x: tensor[n, f32]) -> tensor[2, f32] = shrink(x, [[0i64, shape(x, 0)]])\ndef loss(x: tensor[{extent}, f32]) -> f32 = cast(shape(claim(x), 0), f32)\nout = vmap(grad(loss))(to_tensor([{row}, {row}]))\n"
+            "def claim[n](x: tensor[n, f32]) -> tensor[2, f32] = shrink(x, [[0i64, shape(x, 0)]])\ndef loss(x: tensor[{extent}, f32]) -> f32 = cast(shape(claim(x), 0), f32)\nout = vmap(grad(loss))(to_tensor([{row}, {row}]))\n"
         );
         if extent == 2 {
             roots(&source, "f32", &[2, 2], &[vec![0.0; 4]]);

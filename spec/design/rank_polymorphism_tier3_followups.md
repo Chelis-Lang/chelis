@@ -6,7 +6,7 @@ in PR #337 (squash-merged to `main` as `c581cb8`). A single `def` reduces a
 axes through; it builds and runs on the **C backend**:
 
 ```chelis
-def reduce_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)
+def reduce_seq[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)
 ;; tensor[batch, seq, hidden] -> tensor[batch, hidden]   (one def, any rank)
 ```
 

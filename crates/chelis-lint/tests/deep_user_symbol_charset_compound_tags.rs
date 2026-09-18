@@ -68,7 +68,7 @@ fn accepts_all_emitted_compound_tags() {
     // on the allowlist.
     let src = r#"(module {} demo
   (import-all {} other_mod)
-  (defsig {} f
+  (defsig {} f (k r a)
     (t-fn {}
       (t-ref {} (t-tensor {} (d-name {} batch) (d-var {} k) (d-lit {} 16) (d-rank {} r) (t-prim {} f32)))
       (t-adt {} Box (t-var {} a))

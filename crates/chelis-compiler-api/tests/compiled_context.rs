@@ -265,7 +265,7 @@ fn helper_result_checked_named_axis_survives_decoded_context_paths() {
          def aligned_matrix[d, rows](x: tensor[d, rows, f32], gain: tensor[fixed, rows, f32]) -> tensor[d, rows, f32] = mul(x, gain)\n\
          def scale[d](x: tensor[d, f32], gain: tensor[fixed, f32]) -> tensor[d, f32] = mul(x, insert(sum(gain, fixed), 0i32, shape(x, 0i32)))\n\
          def keep[d](x: tensor[d, f32], gain: tensor[fixed, f32]) -> tensor[d, f32] = copy(x)\n\
-         def keep_rank(x: tensor[..rest, f32], gain: tensor[fixed, f32]) -> tensor[..rest, f32] = copy(x)\n",
+         def keep_rank[rest](x: tensor[..rest, f32], gain: tensor[fixed, f32]) -> tensor[..rest, f32] = copy(x)\n",
     )
     .expect("write axes.ch");
     fs::write(root.join("reef.lock"), app_reef_lock()).expect("write reef.lock");
@@ -621,7 +621,7 @@ fn stored_nonzero_vmap_spreads_survive_decoded_context() {
     fs::write(
         root.join("mylib/src/axes.ch"),
         "module Mylib.Axes\nexport (mapped)\n\n\
-         def identity(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, seq, ..post, f32] = copy(x)\n\
+         def identity[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, seq, ..post, f32] = copy(x)\n\
          mapped = vmap(identity, axis=1)\n",
     )
     .expect("write axes.ch");

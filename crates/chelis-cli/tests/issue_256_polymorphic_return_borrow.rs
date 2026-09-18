@@ -130,7 +130,7 @@ fn polymorphic_return_borrow_chain_is_accepted_post_fix() {
            five = reshape(perm, [cast(2, i64), cast(4, i64), cast(2, i64), cast(2, i64), cast(4, i64)])\n\
            mean(five, cast(4, i32))\n\
          }\n\
-         def consume_t(t: &tensor[a, c, h, w, f32]) -> bool = true\n\
+         def consume_t[a, c, h, w](t: &tensor[a, c, h, w, f32]) -> bool = true\n\
          def forward(x: tensor[2, 4, 4, 4, f32]) -> bool = {\n\
            p = pool_no_sig(x)\n\
            r = relu(p)\n\
@@ -167,7 +167,7 @@ fn id4_roundtrip_workaround_still_works() {
            five = reshape(perm, [cast(2, i64), cast(4, i64), cast(2, i64), cast(2, i64), cast(4, i64)])\n\
            mean(five, cast(4, i32))\n\
          }\n\
-         def consume_t(t: &tensor[a, c, h, w, f32]) -> bool = true\n\
+         def consume_t[a, c, h, w](t: &tensor[a, c, h, w, f32]) -> bool = true\n\
          def id4[a, c, h, w](x: tensor[a, c, h, w, f32]) -> tensor[a, c, h, w, f32] = x\n\
          def forward(x: tensor[2, 4, 4, 4, f32]) -> bool = {\n\
            p = pool_no_sig(x)\n\
@@ -202,7 +202,7 @@ fn borrow_of_non_tensor_is_still_rejected() {
     write_file(
         &fixture,
         "module Issue256NonTensor\n\
-         def consume_t(t: &tensor[a, c, h, w, f32]) -> bool = true\n\
+         def consume_t[a, c, h, w](t: &tensor[a, c, h, w, f32]) -> bool = true\n\
          def forward(x: i32) -> bool = consume_t(&x)\n",
     );
     fmt_inplace(&fixture);
@@ -243,7 +243,7 @@ fn direct_relu_borrow_chain_keeps_working() {
     write_file(
         &fixture,
         "module Issue256DirectRelu\n\
-         def consume_t(t: &tensor[a, c, h, w, f32]) -> bool = true\n\
+         def consume_t[a, c, h, w](t: &tensor[a, c, h, w, f32]) -> bool = true\n\
          def forward[a, c, h, w](x: tensor[a, c, h, w, f32]) -> bool = {\n\
            r = relu(x)\n\
            consume_t(&r)\n\
@@ -273,7 +273,7 @@ fn issue_154_tensor_carrying_record_adt_still_borrows() {
         "module Issue256Issue154Regression\n\
          type BatchNormParams[n] =\n\
            | BatchNormParams { gamma: tensor[n, f32], beta: tensor[n, f32] }\n\
-         sig borrow_params: &BatchNormParams[n] -> bool\n\
+         sig borrow_params[n]: &BatchNormParams[n] -> bool\n\
          def borrow_params(p) = true\n\
          def consume_params[n](p: BatchNormParams[n]) -> bool = borrow_params(&p)\n",
     );
@@ -342,7 +342,7 @@ fn borrow_of_scalar_tuple_is_rejected() {
     write_file(
         &fixture,
         "module Issue256ScalarTupleBorrowRejected\n\
-         def consume_t(t: &tensor[a, c, h, w, f32]) -> bool = true\n\
+         def consume_t[a, c, h, w](t: &tensor[a, c, h, w, f32]) -> bool = true\n\
          def forward() -> bool = {\n\
            pair = (cast(1, i32), cast(2, i32))\n\
            consume_t(&pair)\n\
@@ -376,7 +376,7 @@ fn borrow_of_unit_is_rejected_at_inference() {
     write_file(
         &fixture,
         "module Issue256UnitBorrowRejected\n\
-         def consume_t(t: &tensor[a, c, h, w, f32]) -> bool = true\n\
+         def consume_t[a, c, h, w](t: &tensor[a, c, h, w, f32]) -> bool = true\n\
          def forward() -> bool = {\n\
            u = ()\n\
            consume_t(&u)\n\
@@ -499,7 +499,7 @@ fn borrow_of_poly_param_pinned_to_tensor_is_accepted() {
     write_file(
         &fixture,
         "module Issue256PolyParamPinned\n\
-         def consume_t(t: &tensor[a, c, h, w, f32]) -> bool = true\n\
+         def consume_t[a, c, h, w](t: &tensor[a, c, h, w, f32]) -> bool = true\n\
          def use_it[a, c, h, w](seed: tensor[a, c, h, w, f32]) -> bool = {\n\
            v = relu(seed)\n\
            consume_t(&v)\n\
@@ -616,7 +616,7 @@ fn borrow_of_concrete_carrier_adt_is_accepted() {
         "module Issue256DeferredCarrierAdt\n\
          type BatchNormParams[n] =\n\
            | BatchNormParams { gamma: tensor[n, f32], beta: tensor[n, f32] }\n\
-         sig consume_bnp: &BatchNormParams[n] -> bool\n\
+         sig consume_bnp[n]: &BatchNormParams[n] -> bool\n\
          def consume_bnp(p) = true\n\
          def use_it[n](seed: BatchNormParams[n]) -> bool = {\n\
            v = seed\n\
@@ -670,7 +670,7 @@ fn borrow_of_concrete_transitive_carrier_is_accepted() {
         "module Issue256DeferredTransitiveCarrier\n\
          type Inner[n] = | Inner { w: tensor[n, f32] }\n\
          type Outer[n] = | Outer { inner: Inner[n] }\n\
-         sig consume_outer: &Outer[n] -> bool\n\
+         sig consume_outer[n]: &Outer[n] -> bool\n\
          def consume_outer(o) = true\n\
          def use_it[n](seed: Outer[n]) -> bool = {\n\
            v = seed\n\
@@ -714,7 +714,7 @@ fn borrow_of_concrete_transitive_carrier_is_accepted() {
 /// and a consumer whose parameter is `&BatchNormParams[n]`.
 const BNP_PRELUDE: &str = "type BatchNormParams[n] =\n  \
      | BatchNormParams { gamma: tensor[n, f32], beta: tensor[n, f32] }\n\
-     sig consume_bnp: &BatchNormParams[n] -> bool\n\
+     sig consume_bnp[n]: &BatchNormParams[n] -> bool\n\
      def consume_bnp(p) = true\n";
 
 /// Write a `.ch` fixture with the `BNP_PRELUDE`, canonicalize it, and check it.
@@ -995,7 +995,7 @@ fn borrow_of_relu_result_with_unresolved_dims_is_accepted() {
     write_file(
         &fixture,
         "module Issue1589UnresolvedDims\n\
-         sig consume_t: &tensor[a, c, h, w, f32] -> bool\n\
+         sig consume_t[a, c, h, w]: &tensor[a, c, h, w, f32] -> bool\n\
          def consume_t(t) = true\n\
          def use_it[a, c, h, w](seed: tensor[a, c, h, w, f32]) -> bool = {\n\
            v = relu(seed)\n\

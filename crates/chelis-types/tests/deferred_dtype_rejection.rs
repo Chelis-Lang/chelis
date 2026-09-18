@@ -97,26 +97,25 @@ fn tensor_element_deferred_name_rejected_with_spec_1_1_1_diagnostic() {
 }
 
 /// Sig surface: a reserved name in a sig's tensor precision slot must
-/// reach the §1.1.1 rejection path, not be silently absorbed as an
-/// implicit quantified type variable (the trap the unsigned family's
-/// desugar exclusion already guards against).
+/// reach the §1.1.1 rejection path, not be admitted as a type variable
+/// (the trap the unsigned family's desugar exclusion already guards against).
 #[test]
 fn sig_precision_deferred_name_rejected_not_quantified() {
     for name in DEFERRED_NAMES {
         let src = format!(
-            "sig f: tensor[d, {name}] -> tensor[d, {name}]\n\
+            "sig f[d]: tensor[d, {name}] -> tensor[d, {name}]\n\
              def f(x) = x"
         );
         assert_deferred_rejection(&src, name);
     }
 }
 
-/// Negative-parity twin: an ordinary lowercase name in a sig precision
-/// slot is still absorbed as an implicit quantifier (WS-A5), so the
-/// desugar exclusion is exactly the reserved list and nothing wider.
+/// Negative-parity twin: an ordinary lowercase name explicitly listed in a
+/// sig remains a type variable, so the desugar exclusion is exactly the
+/// reserved list and nothing wider.
 #[test]
-fn sig_precision_ordinary_tvar_still_quantifies() {
-    let src = "sig f: tensor[d, p] -> tensor[d, p]\n\
+fn sig_precision_explicit_ordinary_tvar_still_quantifies() {
+    let src = "sig f[d, p]: tensor[d, p] -> tensor[d, p]\n\
                def f(x) = x";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);

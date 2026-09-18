@@ -303,7 +303,7 @@ fn layout_source(module: Option<&str>, declarations: &[&str]) -> String {
 /// A partial or generic header must not be instantiated before its body
 /// narrows it (chelis#1486). `def f(n: i32) = ...` synthesizes a `defsig`
 /// with a wildcard result, which [04-INF-5] makes an inference hole whose type
-/// is whatever the body determines; `def f(x: a) -> a` declares an authored
+/// is whatever the body determines; `def f[a](x: a) -> a` declares an authored
 /// binder, which [04-INF-6] makes rigid. The two atoms close the defect at
 /// opposite ends: the hole edge defers the READER past the body, and the rigid
 /// check rejects the DECLARATION.
@@ -324,7 +324,7 @@ fn a_partial_or_generic_header_is_not_instantiated_before_its_body_narrows_it() 
     let generic_reader = "r: f32 = f(1.5)";
     // [04-INF-6]: the body pins the authored `a` to `i32`, so `f` itself is
     // the rejection and the reader never gets to matter.
-    let generic_fn = "def f(x: a) -> a = add(x, v)";
+    let generic_fn = "def f[a](x: a) -> a = add(x, v)";
     let anchor = "def anchor() -> i32 = 1";
     let carried = "v: i32 = 1";
 
@@ -361,9 +361,9 @@ fn a_partial_or_generic_header_is_not_instantiated_before_its_body_narrows_it() 
 /// the rejection is a property of the declaration alone, which is what
 /// separates this atom from the scheduling half of chelis#1486.
 ///
-/// Both spellings of an authored binder are covered: the explicit binder list
-/// (`def f[a](..)`) and §5.8.1's implicit quantification (`def f(x: a) -> a`),
-/// which the resolver records identically.
+/// Both declaration spellings of an authored binder are covered: an inline
+/// `def f[a](..)` list and a standalone `sig f[a]: ...` list, which the
+/// resolver records identically.
 ///
 /// Regression test. Every row was ACCEPTED before this change, and the first
 /// two compiled a body typed at `i32` behind a signature promising `forall
@@ -377,9 +377,10 @@ fn a_body_that_narrows_an_authored_type_binder_rejects_at_the_declaration() {
              def f[a](x: a) -> a = add(x, 1)\n",
         ),
         (
-            "implicit binder pinned to i32",
-            "module ImplicitRigid\n\n\
-             def f(x: a) -> a = add(x, 1)\n",
+            "standalone sig binder pinned to i32",
+            "module StandaloneSigRigid\n\n\
+             sig f[a]: a -> a\n\
+             def f(x) = add(x, 1)\n",
         ),
         (
             "two binders collapsed onto each other",
@@ -413,12 +414,12 @@ fn a_body_that_keeps_its_authored_type_binders_polymorphic_stays_accepted() {
         (
             "identity with an explicit result",
             "module PolyIdentity\n\n\
-             def id(x: a) -> a = x\n",
+             def id[a](x: a) -> a = x\n",
         ),
         (
             "identity whose result slot is a hole",
             "module PolyHoleResult\n\n\
-             def k(x: a) = x\n",
+             def k[a](x: a) = x\n",
         ),
         (
             "bounded binder written with the cast override",

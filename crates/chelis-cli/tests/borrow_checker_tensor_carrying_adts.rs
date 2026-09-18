@@ -79,7 +79,7 @@ fn borrow_tensor_carrying_record_adt_is_accepted() {
         "module BatchNormShape\n\
          type BatchNormParams[n] =\n\
            | BatchNormParams { gamma: tensor[n, f32], beta: tensor[n, f32] }\n\
-         sig borrow_params: &BatchNormParams[n] -> bool\n\
+         sig borrow_params[n]: &BatchNormParams[n] -> bool\n\
          def borrow_params(p) = true\n\
          def consume_params[n](p: BatchNormParams[n]) -> bool = borrow_params(&p)\n",
     );
@@ -212,7 +212,7 @@ fn destructured_generic_adt_field_borrow_with_nested_adt() {
            | Inner { value: a }\n\
          type Outer[a] =\n\
            | Outer { inner: Inner[a] }\n\
-         sig borrow_inner: &Inner[tensor[n, f32]] -> bool\n\
+         sig borrow_inner[n]: &Inner[tensor[n, f32]] -> bool\n\
          def borrow_inner(i) = true\n\
          def use_outer[n](o: Outer[tensor[n, f32]]) -> bool = match o with {\n\
            | Outer { inner } => borrow_inner(&inner)\n\
@@ -292,7 +292,7 @@ fn borrow_nested_tensor_carrying_adt_is_accepted() {
            | Inner { values: tensor[n, f32] }\n\
          type Outer[n] =\n\
            | Outer { inner: Inner[n] }\n\
-         sig borrow_outer: &Outer[n] -> bool\n\
+         sig borrow_outer[n]: &Outer[n] -> bool\n\
          def borrow_outer(o) = true\n\
          def consume_outer[n](o: Outer[n]) -> bool = borrow_outer(&o)\n",
     );

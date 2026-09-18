@@ -10,13 +10,13 @@
 //! Reproducer (Surf, the form the helper emits):
 //! ```chelis
 //! module Repro.GradExpandShape
-//! def f(x: tensor[n, f32]) -> f32 = {
+//! def f[n](x: tensor[n, f32]) -> f32 = {
 //!   k = expand(scalar_to_tensor(cast(3.0, f32)),
 //!              cast(0, i32),
 //!              cast(shape(&x, cast(0, i32)), i32))
 //!   tensor_to_scalar(sum(mul(x, k), cast(0, i32)))
 //! }
-//! def df(x: tensor[n, f32]) -> tensor[n, f32] = grad(f)(x)
+//! def df[n](x: tensor[n, f32]) -> tensor[n, f32] = grad(f)(x)
 //! ```
 //!
 //! Before the fix the forward `chelis check`ed clean (the type checker

@@ -314,7 +314,7 @@ def probe[r](x: r) -> r = only_ints(only_floats(x))
 fn a_bound_reaches_a_tensor_precision_slot() {
     assert_family_rejection(
         r#"
-sig scale[p: Float]: tensor[n, p] -> tensor[n, p]
+sig scale[n, p: Float]: tensor[n, p] -> tensor[n, p]
 def scale(x) = x
 def probe(x: tensor[4, i32]) -> tensor[4, i32] = scale(x)
 "#,
@@ -328,7 +328,7 @@ def probe(x: tensor[4, i32]) -> tensor[4, i32] = scale(x)
 fn a_precision_slot_bound_accepts_its_own_family() {
     assert_accepted(
         r#"
-sig scale[p: Float]: tensor[n, p] -> tensor[n, p]
+sig scale[n, p: Float]: tensor[n, p] -> tensor[n, p]
 def scale(x) = x
 def probe(x: tensor[4, f32]) -> tensor[4, f32] = scale(x)
 "#,
@@ -394,7 +394,7 @@ def f[p: Float](x: p) -> p = x
     assert!(
         error
             .to_string()
-            .contains("a declaration's `defsig` owns its binders"),
+            .contains("a declaration's `defsig` owns its binder list"),
         "a bound belongs to one binder list; got: {error}"
     );
 }

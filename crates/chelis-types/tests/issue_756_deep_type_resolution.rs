@@ -180,23 +180,23 @@ fn documented_zero_parameter_symbolic_dimension_alias_is_accepted() {
 }
 
 #[test]
-fn implicit_defsig_binders_and_legal_metadata_hole_are_accepted() {
+fn explicit_defsig_binders_and_legal_metadata_hole_are_accepted() {
     assert_accepts(
-        "(defsig {} polymorphic
+        "(defsig {} polymorphic (n r p)
            (t-fn {}
              (t-tensor {} (d-var {} n) (d-rank {} r) (t-var {} p))
              (t-tensor {} (d-var {} n) (d-rank {} r) (t-var {} p))))
          (def {} polymorphic
            (fn {} (params {} value) (var {} value)))
          (def {} inferred (lit {type: (t-var {} _)} 1))",
-        "implicit signature binders and metadata inference hole",
+        "explicit signature binders and metadata inference hole",
     );
 }
 
 #[test]
 fn enclosing_defsig_binder_is_legal_in_nested_ascription_metadata() {
     assert_accepts(
-        "(defsig {} keep
+        "(defsig {} keep (n)
            (t-fn {}
              (t-tensor {} (d-var {} n) (t-prim {} f32))
              (t-tensor {} (d-var {} n) (t-prim {} f32))))
@@ -212,7 +212,7 @@ fn enclosing_defsig_binder_is_legal_in_nested_ascription_metadata() {
 #[test]
 fn annotation_pass_preserves_nested_defsig_binder_result_type() {
     let exprs = parse(
-        "(defsig {} keep
+        "(defsig {} keep (n)
            (t-fn {}
              (t-tensor {} (d-var {} n) (t-prim {} f32))
              (t-tensor {} (d-var {} n) (t-prim {} f32))))

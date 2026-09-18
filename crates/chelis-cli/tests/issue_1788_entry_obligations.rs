@@ -109,7 +109,7 @@ fn mixed_helpers_accept_independent_binders() {
 
 #[test]
 fn direct_vmap_two_spread_entry_enforces_shared_witnesses() {
-    let source = "def combine(x: &tensor[..pre, seq, ..post, f32], y: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, seq, ..post, f32] = add(x, y)\n\
+    let source = "def combine[pre, post](x: &tensor[..pre, seq, ..post, f32], y: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, seq, ..post, f32] = add(x, y)\n\
          def apply(x: &tensor[batch, *, seq, *, f32], y: &tensor[batch, *, seq, *, f32]) -> tensor[batch, *, seq, *, f32] = vmap(combine)(x, y)\n\
          out = apply(to_tensor([[[[1.0f32], [2.0f32], [3.0f32]], [[4.0f32], [5.0f32], [6.0f32]]], [[[7.0f32], [8.0f32], [9.0f32]], [[10.0f32], [11.0f32], [12.0f32]]]]), to_tensor([[[[1.0f32], [2.0f32], [3.0f32]], [[4.0f32], [5.0f32], [6.0f32]], [[7.0f32], [8.0f32], [9.0f32]], [[10.0f32], [11.0f32], [12.0f32]]], [[[13.0f32], [14.0f32], [15.0f32]], [[16.0f32], [17.0f32], [18.0f32]], [[19.0f32], [20.0f32], [21.0f32]], [[22.0f32], [23.0f32], [24.0f32]]]]))\n";
     check_both(source, "extent `pre[0]`: x axis 1 = 2, y axis 1 = 4", false);
@@ -117,7 +117,7 @@ fn direct_vmap_two_spread_entry_enforces_shared_witnesses() {
 
 #[test]
 fn nonzero_axis_vmap_two_spread_entry_enforces_shared_witnesses() {
-    let source = "def combine(x: &tensor[..pre, seq, ..post, f32], y: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, seq, ..post, f32] = add(x, y)\n\
+    let source = "def combine[pre, post](x: &tensor[..pre, seq, ..post, f32], y: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, seq, ..post, f32] = add(x, y)\n\
          def apply(x: &tensor[*, batch, *, seq, *, f32], y: &tensor[*, batch, *, seq, *, f32]) -> tensor[*, batch, *, seq, *, f32] = vmap(combine, axis=1)(x, y)\n\
          x: tensor[2, 2, 1, 3, 1, f32] = reshape(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32, 7.0f32, 8.0f32, 9.0f32, 10.0f32, 11.0f32, 12.0f32]), [2i64, 2i64, 1i64, 3i64, 1i64])\n\
          y: tensor[4, 2, 1, 3, 1, f32] = reshape(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32, 7.0f32, 8.0f32, 9.0f32, 10.0f32, 11.0f32, 12.0f32, 13.0f32, 14.0f32, 15.0f32, 16.0f32, 17.0f32, 18.0f32, 19.0f32, 20.0f32, 21.0f32, 22.0f32, 23.0f32, 24.0f32]), [4i64, 2i64, 1i64, 3i64, 1i64])\n\
@@ -127,7 +127,7 @@ fn nonzero_axis_vmap_two_spread_entry_enforces_shared_witnesses() {
 
 fn higher_order_source(second_skip: usize) -> String {
     format!(
-        "def g(x: tensor[n, f32]) -> tensor[k, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\ndef h(y: tensor[k, f32]) -> tensor[k, f32] = add(y, y)\ndef h2(z: tensor[k, f32]) -> tensor[k, f32] = add(z, z)\ndef g2(x: tensor[n, f32]) -> tensor[k, f32] = shrink(x, [[{second_skip}i64, shape(x, 0i32)]])\ndef apply4(f: tensor[p, f32] -> tensor[p, f32], v: tensor[p, f32], q2: tensor[p, f32] -> tensor[p, f32], w: tensor[p, f32]) -> tensor[p, f32] = add(f(v), q2(w))\ndef main() = apply4(h, g(to_tensor([1.0f32, 2.0f32, 3.0f32])), h2, g2(to_tensor([7.0f32, 8.0f32, 9.0f32])))\n"
+        "def g[n, k](x: tensor[n, f32]) -> tensor[k, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\ndef h[k](y: tensor[k, f32]) -> tensor[k, f32] = add(y, y)\ndef h2[k](z: tensor[k, f32]) -> tensor[k, f32] = add(z, z)\ndef g2[n, k](x: tensor[n, f32]) -> tensor[k, f32] = shrink(x, [[{second_skip}i64, shape(x, 0i32)]])\ndef apply4[p](f: tensor[p, f32] -> tensor[p, f32], v: tensor[p, f32], q2: tensor[p, f32] -> tensor[p, f32], w: tensor[p, f32]) -> tensor[p, f32] = add(f(v), q2(w))\ndef main() = apply4(h, g(to_tensor([1.0f32, 2.0f32, 3.0f32])), h2, g2(to_tensor([7.0f32, 8.0f32, 9.0f32])))\n"
     )
 }
 
@@ -146,12 +146,12 @@ fn higher_order_entry_does_not_depend_on_shared_result_labels() {
     // interaction: the two producers and callbacks have different labels.
     let source = higher_order_source(2)
         .replace(
-            "def h2(z: tensor[k, f32]) -> tensor[k, f32]",
+            "def h2[k](z: tensor[k, f32]) -> tensor[k, f32]",
             "def h2(z: tensor[other, f32]) -> tensor[other, f32]",
         )
         .replace(
-            "def g2(x: tensor[n, f32]) -> tensor[k, f32]",
-            "def g2(x: tensor[n, f32]) -> tensor[other, f32]",
+            "def g2[n, k](x: tensor[n, f32]) -> tensor[k, f32]",
+            "def g2[n](x: tensor[n, f32]) -> tensor[other, f32]",
         );
     check_both(&source, "extent `p`: v axis 0 = 2, w axis 0 = 1", false);
 }
@@ -175,7 +175,7 @@ fn app_and_pipe_entry_source(pipe: bool, invalid_first: bool, second_skip: usize
         format!("apply({first}, twice, {second})")
     };
     format!(
-        "def cut(x: tensor[n, f32], lo: i64, extra: i64) -> tensor[*, f32] ! {{ IO }} = {{\n _ = print(\"argument-ran\")\n shrink(x, [[lo, add(shape(x, 0i32), extra)]])\n}}\ndef twice(x: tensor[q, f32]) -> tensor[q, f32] = add(x, x)\ndef apply(v: tensor[p, f32], f: tensor[p, f32] -> tensor[p, f32], w: tensor[p, f32]) -> tensor[p, f32] = add(f(v), w)\nout = {{\n result = {call}\n _ = print(\"following-ran\")\n result\n}}\n"
+        "def cut[n](x: tensor[n, f32], lo: i64, extra: i64) -> tensor[*, f32] ! {{ IO }} = {{\n _ = print(\"argument-ran\")\n shrink(x, [[lo, add(shape(x, 0i32), extra)]])\n}}\ndef twice[q](x: tensor[q, f32]) -> tensor[q, f32] = add(x, x)\ndef apply[p](v: tensor[p, f32], f: tensor[p, f32] -> tensor[p, f32], w: tensor[p, f32]) -> tensor[p, f32] = add(f(v), w)\nout = {{\n result = {call}\n _ = print(\"following-ran\")\n result\n}}\n"
     )
 }
 
@@ -240,7 +240,7 @@ fn higher_order_app_and_pipe_accept_agreeing_entry_claim() {
     }
 }
 
-const BETA_OPAQUE: &str = "def opaque(x: tensor[n, f32]) -> tensor[*, f32] ! { IO } = { _ = print(\"argument-ran\")\n shrink(x, [[0i64, shape(x, 0i32)]]) }\n";
+const BETA_OPAQUE: &str = "def opaque[n](x: tensor[n, f32]) -> tensor[*, f32] ! { IO } = { _ = print(\"argument-ran\")\n shrink(x, [[0i64, shape(x, 0i32)]]) }\n";
 
 fn beta_actual(extent: usize) -> String {
     let values = vec!["1.0f32"; extent].join(", ");
@@ -442,7 +442,7 @@ fn beta_reduced_callbacks_keep_literal_entry_and_eager_actuals() {
             );
         }
         let source = format!(
-            "{BETA_OPAQUE}def invoke(f: tensor[p, f32] -> i64, a: tensor[p, f32], b: tensor[p, f32]) -> i64 = f(a)\nout = invoke(fn (x: tensor[2, f32]) -> 7i64, {actual}, {actual})\n"
+            "{BETA_OPAQUE}def invoke[p](f: tensor[p, f32] -> i64, a: tensor[p, f32], b: tensor[p, f32]) -> i64 = f(a)\nout = invoke(fn (x: tensor[2, f32]) -> 7i64, {actual}, {actual})\n"
         );
         check_beta_entry(&source, claims, 2, 0);
     }
@@ -491,7 +491,7 @@ fn beta_reduced_callbacks_preserve_signature_order() {
 fn beta_reduced_callbacks_keep_outer_and_inner_claims_independent() {
     for (first, second) in [(3, 2), (3, 3), (2, 2)] {
         let source = format!(
-            "{BETA_OPAQUE}def invoke(f: tensor[p, f32] -> i64, a: tensor[p, f32], b: tensor[p, f32]) -> i64 = f(a)\nout = invoke(fn (x: tensor[2, f32]) -> 7i64, {}, {})\n",
+            "{BETA_OPAQUE}def invoke[p](f: tensor[p, f32] -> i64, a: tensor[p, f32], b: tensor[p, f32]) -> i64 = f(a)\nout = invoke(fn (x: tensor[2, f32]) -> 7i64, {}, {})\n",
             beta_actual(first),
             beta_actual(second)
         );
@@ -527,7 +527,7 @@ fn beta_reduced_callbacks_keep_outer_and_inner_claims_independent() {
 #[test]
 fn beta_reduced_callbacks_run_failing_actual_before_entry() {
     let source = format!(
-        "{BETA_OPAQUE}def bad(x: tensor[n, f32]) -> tensor[*, f32] ! {{ IO }} = {{ _ = print(\"argument-ran\")\n shrink(x, [[1i64, add(shape(x, 0i32), 1i64)]]) }}\nout = (fn (x: tensor[2, f32], y: tensor[3, f32]) -> {{ _ = print(\"body-ran\")\n 7i64 }})({}, bad(to_tensor([1.0f32, 2.0f32, 3.0f32])))\n",
+        "{BETA_OPAQUE}def bad[n](x: tensor[n, f32]) -> tensor[*, f32] ! {{ IO }} = {{ _ = print(\"argument-ran\")\n shrink(x, [[1i64, add(shape(x, 0i32), 1i64)]]) }}\nout = (fn (x: tensor[2, f32], y: tensor[3, f32]) -> {{ _ = print(\"body-ran\")\n 7i64 }})({}, bad(to_tensor([1.0f32, 2.0f32, 3.0f32])))\n",
         beta_actual(3)
     );
     for c in [false, true] {
@@ -585,7 +585,7 @@ fn mixed_literal_source(literal_first: bool, repeated_bad: bool, literal_bad: bo
         format!("{pair_args}, {fixed_arg}")
     };
     format!(
-        "def opaque(z: tensor[n, f32]) -> tensor[*, f32] = shrink(z, [[0i64, shape(z, 0i32)]])\ndef mixed({params}, x: tensor[width, f32], y: tensor[height, width, f32]) -> (tensor[seq, f32], tensor[width, f32]) ! {{ IO }} = {{\n _ = print(\"body-ran\")\n (neg(a), add(x, sum(y, 0i32)))\n}}\nout = mixed({args}, to_tensor([1.0f32, 2.0f32]), to_tensor([[3.0f32, 4.0f32]]))\n"
+        "def opaque[n](z: tensor[n, f32]) -> tensor[*, f32] = shrink(z, [[0i64, shape(z, 0i32)]])\ndef mixed({params}, x: tensor[width, f32], y: tensor[height, width, f32]) -> (tensor[seq, f32], tensor[width, f32]) ! {{ IO }} = {{\n _ = print(\"body-ran\")\n (neg(a), add(x, sum(y, 0i32)))\n}}\nout = mixed({args}, to_tensor([1.0f32, 2.0f32]), to_tensor([[3.0f32, 4.0f32]]))\n"
     )
 }
 
@@ -648,7 +648,7 @@ fn every_unused_repeated_witness_is_checked() {
 fn higher_order_entry_is_after_arguments_and_before_following_effects() {
     for (skip, succeeds) in [(1, true), (2, false)] {
         let source = higher_order_source(skip)
-            .replace("def g2(x: tensor[n, f32]) -> tensor[k, f32] = shrink", "def g2(x: tensor[n, f32]) -> tensor[k, f32] ! { IO } = { _ = print(\"argument-ran\")\n shrink")
+            .replace("def g2[n, k](x: tensor[n, f32]) -> tensor[k, f32] = shrink", "def g2[n, k](x: tensor[n, f32]) -> tensor[k, f32] ! { IO } = { _ = print(\"argument-ran\")\n shrink")
             .replace("def apply4", "}\ndef apply4")
             .replace("def main() = ", "def main() = {\n result = ")
             + " _ = print(\"body-ran\")\n result\n}\nout = main()\n";

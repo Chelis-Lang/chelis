@@ -214,7 +214,7 @@ fn spec_deep_3tuple_format() {
 #[test]
 fn spec_correct_program_fitness_1() {
     // Use the Surf pipeline: a well-typed Surf program should get fitness 1.0.
-    let surf_src = "def f(x: tensor[n, f32]) -> tensor[n, f32] = relu(x)";
+    let surf_src = "def f[n](x: tensor[n, f32]) -> tensor[n, f32] = relu(x)";
     let decls = chelis_surf::parser::parse_str(surf_src).expect("Surf parse failed");
     let deep_exprs = chelis_surf::desugar::desugar_program(&decls);
     let report = chelis_types::check_program(&deep_exprs);
@@ -235,7 +235,7 @@ fn spec_correct_program_fitness_1() {
 fn spec_precision_mismatch_is_error() {
     // add(tensor[n, f32], tensor[n, bf16]) should produce PrecisionMismatch.
     let surf_src = r#"
-def bad(a: tensor[n, f32], b: tensor[n, bf16]) -> tensor[n, f32] = add(a, b)
+def bad[n](a: tensor[n, f32], b: tensor[n, bf16]) -> tensor[n, f32] = add(a, b)
     "#;
     let decls = chelis_surf::parser::parse_str(surf_src).expect("Surf parse failed");
     let deep_exprs = chelis_surf::desugar::desugar_program(&decls);

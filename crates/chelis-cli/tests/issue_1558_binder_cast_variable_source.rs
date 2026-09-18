@@ -73,7 +73,7 @@ const REJECTED_FORMS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "SigBinder",
-        "sig recast: p -> p\ndef recast(value) = cast(value, p)\nout = recast(cast(7, i32))\n",
+        "sig recast[p]: p -> p\ndef recast(value) = cast(value, p)\nout = recast(cast(7, i32))\n",
         "p",
         "recast",
     ),

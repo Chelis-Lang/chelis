@@ -9,7 +9,7 @@
 //! Reproducer:
 //!
 //! ```chelis
-//! sig tadd[p: Numeric]: &tensor[n, p] -> &tensor[n, p] -> tensor[n, p]
+//! sig tadd[n, p: Numeric]: &tensor[n, p] -> &tensor[n, p] -> tensor[n, p]
 //! def tadd(lhs, rhs) = add(lhs, rhs)
 //! ```
 //!
@@ -81,7 +81,7 @@ fn bare_arg_add_with_borrow_sig_polymorphic_precision_type_checks() {
     let path = dir.path().join("wsa7_repro_poly.ch");
     write_file(
         &path,
-        "sig tadd[p: Numeric]: &tensor[n, p] -> &tensor[n, p] -> tensor[n, p]\n\
+        "sig tadd[n, p: Numeric]: &tensor[n, p] -> &tensor[n, p] -> tensor[n, p]\n\
          def tadd(lhs, rhs) = add(lhs, rhs)\n",
     );
     let json = run_json_check(&path);
@@ -96,7 +96,7 @@ fn bare_arg_add_with_borrow_sig_concrete_precision_type_checks() {
     let path = dir.path().join("wsa7_repro_concrete.ch");
     write_file(
         &path,
-        "sig tadd: &tensor[n, f32] -> &tensor[n, f32] -> tensor[n, f32]\n\
+        "sig tadd[n]: &tensor[n, f32] -> &tensor[n, f32] -> tensor[n, f32]\n\
          def tadd(lhs, rhs) = add(lhs, rhs)\n",
     );
     let json = run_json_check(&path);
@@ -117,7 +117,7 @@ fn bare_arg_add_with_borrow_sig_typechecks_at_every_arithmetic_dtype() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("wsa7_dtype_matrix.ch");
         let src = format!(
-            "sig add_bare[p: Numeric]: &tensor[n, p] -> &tensor[n, p] -> tensor[n, p]\n\
+            "sig add_bare[n, p: Numeric]: &tensor[n, p] -> &tensor[n, p] -> tensor[n, p]\n\
              def add_bare(lhs, rhs) = add(lhs, rhs)\n\
              def use_at_dtype(xs: &tensor[3, {dtype}]) -> tensor[3, {dtype}] = add_bare(xs, xs)\n"
         );
@@ -137,7 +137,7 @@ fn baseline_bare_arg_matmul_with_borrow_sig_still_type_checks() {
     let path = dir.path().join("wsa7_baseline_matmul.ch");
     write_file(
         &path,
-        "sig tmatmul[p: Float]: &tensor[m, k, p] -> &tensor[k, n, p] -> tensor[m, n, p]\n\
+        "sig tmatmul[m, k, n, p: Float]: &tensor[m, k, p] -> &tensor[k, n, p] -> tensor[m, n, p]\n\
          def tmatmul(lhs, rhs) = matmul(lhs, rhs)\n",
     );
     let json = run_json_check(&path);
@@ -158,7 +158,7 @@ fn baseline_annotated_args_with_borrow_sig_still_type_checks() {
     let path = dir.path().join("wsa7_baseline_annotated.ch");
     write_file(
         &path,
-        "sig tadd: &tensor[n, f32] -> &tensor[n, f32] -> tensor[n, f32]\n\
+        "sig tadd[n]: &tensor[n, f32] -> &tensor[n, f32] -> tensor[n, f32]\n\
          def tadd(lhs: &tensor[n, f32], rhs: &tensor[n, f32]) = add(lhs, rhs)\n",
     );
     let json = run_json_check(&path);
@@ -178,7 +178,7 @@ fn bare_arg_owned_body_with_borrow_return_sig_errors() {
     let path = dir.path().join("wsa7_neg_owned_to_borrow.ch");
     write_file(
         &path,
-        "sig owned_to_borrow: &tensor[n, f32] -> &tensor[n, f32]\n\
+        "sig owned_to_borrow[n]: &tensor[n, f32] -> &tensor[n, f32]\n\
          def owned_to_borrow(x) = add(x, x)\n",
     );
     let json = run_json_check(&path);
@@ -210,7 +210,7 @@ fn bare_arg_borrow_body_with_owned_return_sig_errors() {
     let path = dir.path().join("wsa7_neg_borrow_to_owned.ch");
     write_file(
         &path,
-        "sig borrow_to_owned: tensor[n, f32] -> tensor[n, f32]\n\
+        "sig borrow_to_owned[n]: tensor[n, f32] -> tensor[n, f32]\n\
          def borrow_to_owned(x) = &x\n",
     );
     let json = run_json_check(&path);

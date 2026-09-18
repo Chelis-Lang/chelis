@@ -274,7 +274,7 @@ fn splitmix64(mut value: u64) -> u64 {
 #[test]
 fn staged_claim_failure_commits_the_preceding_draw_and_reuse_keeps_live_ordinals() {
     use chelis_ir::host::staged::HostStage;
-    let source = "def sample(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = {\n dead = dropout(source, 0.0f32)\n dropout(reshape(x, [numel(dead), 2i64]), 0.5f32)\n}";
+    let source = "def sample[m, n](source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = {\n dead = dropout(source, 0.0f32)\n dropout(reshape(x, [numel(dead), 2i64]), 0.5f32)\n}";
     let declarations = chelis_surf::parser::parse_str(source).unwrap();
     let checked =
         chelis_types::check_ir_program(&chelis_surf::desugar::desugar_program(&declarations))
@@ -599,7 +599,7 @@ fn valid_uniform_like_occupies_one_shared_ordinal_between_dropout_calls() {
 
 #[test]
 fn local_movement_failure_occurs_after_the_earlier_entered_draw() {
-    let declarations = chelis_surf::parser::parse_str("def sample(x: tensor[n, f32]) -> tensor[3, f32] = {\n dead = dropout(x, 0.0f32)\n shrink(x, [[0i64, 3i64]])\n}\n").unwrap();
+    let declarations = chelis_surf::parser::parse_str("def sample[n](x: tensor[n, f32]) -> tensor[3, f32] = {\n dead = dropout(x, 0.0f32)\n shrink(x, [[0i64, 3i64]])\n}\n").unwrap();
     let expressions = chelis_surf::desugar::desugar_program(&declarations);
     let checked = chelis_types::check_ir_program(&expressions).unwrap();
     let mut context = RandomExecutionContext::new(RandomLoweringState {

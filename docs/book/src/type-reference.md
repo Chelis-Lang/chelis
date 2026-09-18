@@ -65,6 +65,7 @@ In a Deep signature this reads:
 ```chelis-deep-fragment
 (defsig {}
   transpose
+  (a b)
   (t-fn {}
     (t-tensor {} (d-var {} a) (d-var {} b) (t-prim {} f32))
     (t-tensor {} (d-var {} b) (d-var {} a) (t-prim {} f32))))
@@ -86,8 +87,8 @@ active signed integers), and `Numeric` (their union). `bool` and `string` belong
 family.
 
 ```chelis-surf-fragment
-sig arange[p: Int]: p -> p -> tensor[n, p]
-sig linspace[p: Float]: p -> p -> i64 -> tensor[n, p]
+sig arange[n, p: Int]: p -> p -> tensor[n, p]
+sig linspace[n, p: Float]: p -> p -> i64 -> tensor[n, p]
 ```
 
 Calling `arange` at `f32`, or `linspace` at `i32`, is a `PrecisionMismatch` naming the
@@ -103,18 +104,18 @@ dtype. A bound goes on the declaration's `sig` when it has one, and on its `def`
 ### Rank polymorphism
 
 A rank variable `..r` is a name-preserving spread over a run of dimensions, so one
-definition covers tensors of every rank. It is introduced contextually; a spread name may
-not repeat in a single shape.
+definition covers tensors of every rank. Its name is listed in the declaration's complete
+binder list; a spread name may not repeat in a single shape.
 
 ```chelis-surf
-def relu_any_rank(x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)
+def relu_any_rank[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)
 ```
 
 Spreads can interleave with named anchors, which lets a definition reduce or insert one
 named axis while preserving the rest. Reducing over a named axis:
 
 ```chelis-surf-fragment
-def reduce_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] =
+def reduce_seq[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] =
   sum(x, seq)
 ```
 
@@ -206,13 +207,13 @@ A function type can carry an effect set in `eff` metadata. In Surf the effect se
 `! { ... }` suffix on a signature or `def`.
 
 ```chelis-surf-fragment
-sig predict: tensor[n, f32] -> tensor[n, f32] ! { Random }
+sig predict[n]: tensor[n, f32] -> tensor[n, f32] ! { Random }
 ```
 
 ```chelis-deep-fragment
 (t-fn {eff: (effects {} random)}
-  (t-tensor {} (d-name {} n) (t-prim {} f32))
-  (t-tensor {} (d-name {} n) (t-prim {} f32)))
+  (t-tensor {} (d-var {} n) (t-prim {} f32))
+  (t-tensor {} (d-var {} n) (t-prim {} f32)))
 ```
 
 Effect inference runs after type inference. A function's effect set is the union of the
@@ -234,11 +235,11 @@ A borrow leaves the owned binding live and is the idiomatic way to pass a tensor
 read-only operation.
 
 ```chelis-surf-fragment
-def relu_forward(x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)
+def relu_forward[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)
 ```
 
 ```chelis-deep-fragment
-(t-ref {} (t-tensor {} (d-name {} batch) (t-prim {} f32)))
+(t-ref {} (t-tensor {} (d-rank {} r) (t-prim {} f32)))
 ```
 
 Passing an owned value where a borrow is expected auto-borrows. Passing a borrow where an

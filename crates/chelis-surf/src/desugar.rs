@@ -21,6 +21,9 @@ use chelis_deep::ast as deep;
 use chelis_vocab::EffectKind;
 
 use crate::ast::*;
+pub(crate) use crate::dtype_name::{
+    canonical_primitive_name, is_reserved_dtype_name, migrated_integer_dtype_name,
+};
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -181,6 +184,17 @@ impl DesugarCtx {
         self.current_type_binders.borrow().get(name).copied()
     }
 
+    fn desugar_body_annotation_type(&self, ty: &TypeExpr) -> deep::Expr {
+        let tvar_set: UnordSet<String> = self
+            .current_type_binders
+            .borrow()
+            .to_sorted()
+            .into_iter()
+            .map(|(name, _)| name.clone())
+            .collect();
+        desugar_type_with_scope_mode(ty, &UnordSet::new(), &tvar_set, true)
+    }
+
     fn new(decls: &[Decl]) -> Self {
         let mut top_level_fn_params = UnordMap::new();
         let mut top_level_fn_tensor_param_prec = UnordMap::new();
@@ -210,7 +224,7 @@ impl DesugarCtx {
 
 #[cfg(test)]
 fn desugar_decl(decl: &Decl) -> Vec<deep::Expr> {
-    DesugarCtx::default().desugar_decl(decl)
+    DesugarCtx::new(std::slice::from_ref(decl)).desugar_decl(decl)
 }
 
 #[cfg(test)]
@@ -465,23 +479,11 @@ fn lower_module_path(path: &str) -> String {
     path.to_ascii_lowercase()
 }
 
-fn desugar_param(param: &Param) -> deep::Expr {
-    desugar_param_with_dims(param, &UnordSet::new())
-}
-
-fn desugar_param_with_dims(param: &Param, dim_vars: &UnordSet<String>) -> deep::Expr {
-    desugar_param_with_scope(param, dim_vars, &UnordSet::new())
-}
-
-/// Desugar a parameter with both a declared dim-vars scope and a
-/// quantified type-variable scope. The tvar scope is non-empty for
-/// `def f[..](...)` parameters where the def's quantifier list (`[..]`)
-/// participates in the contextual precision rule of
-/// `spec/02-surf-syntax.md` §P4b: a name in the precision slot of a
-/// `tensor[..., <name>]` annotation that matches the def's quantifier
-/// list desugars to `(t-var {} <name>)` rather than
-/// `(t-prim {} <name>)`. This is the WS-A6 extension of the WS-A5 rule
-/// from sigs to def parameter annotations.
+/// Desugar a parameter with both a declared dim-variable scope and a
+/// declared type-variable scope. For `def f[..](...)` parameters, a name in
+/// the precision slot of a `tensor[..., <name>]` annotation becomes
+/// `(t-var {} <name>)` only when the declaration's complete `[..]` list
+/// contains it (`spec/02-surf-syntax.md` §P4b).
 fn desugar_param_with_scope(
     param: &Param,
     dim_vars: &UnordSet<String>,
@@ -817,91 +819,6 @@ fn type_mentions_name(ty: &TypeExpr, name: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Primitive type names
-// ---------------------------------------------------------------------------
-
-// `f8e4m3` is reserved, not active. DEFERRED_DTYPE_NAMES below keeps it
-// out of implicit quantification so the checker reports [04-DTYPE-1].
-const PRIMITIVES: &[&str] = &[
-    "f32", "f64", "f16", "bf16", "i8", "i16", "i32", "i64", "bool", "string", "unit",
-];
-
-/// The canonical primitive spelling for a type-position name, or `None` when
-/// the name is not a primitive at all.
-///
-/// chelis#1592 makes the literal-suffix spellings (`i8`..`i64`) the sole
-/// canonical signed-integer names in Surf and Deep. Retired `int*` source is
-/// handled only by the versioned migration command below.
-pub(crate) fn canonical_primitive_name(name: &str) -> Option<&'static str> {
-    PRIMITIVES
-        .iter()
-        .copied()
-        .find(|primitive| *primitive == name)
-}
-
-const RETIRED_INTEGER_DTYPE_NAMES: &[&str] = &["int8", "int16", "int32", "int64"];
-
-pub(crate) fn is_retired_integer_dtype_name(name: &str) -> bool {
-    RETIRED_INTEGER_DTYPE_NAMES.contains(&name)
-}
-
-pub(crate) fn migrated_integer_dtype_name(name: &str) -> Option<&'static str> {
-    match name {
-        "int8" => Some("i8"),
-        "int16" => Some("i16"),
-        "int32" => Some("i32"),
-        "int64" => Some("i64"),
-        _ => None,
-    }
-}
-
-/// Unsigned dtype names, deferred per `spec/04-type-system.md` §1.1.1
-/// (§1.1.2 names the `uint*` spellings canonical; the short `u*`
-/// spellings are not reserved). These are not in the active numeric
-/// primitive set, but they are well-known dtype identifiers that users
-/// (especially LLMs translating from numpy/PyTorch) reach for. Treat
-/// them as "intended-precision" identifiers in desugar so they reach
-/// the type-checker's §1.1.1 rejection path with a precise diagnostic,
-/// NOT as candidate quantified type variables.
-///
-/// Mirrors `chelis_types::deep_type::is_unsigned_dtype_name`. Kept as a
-/// parallel const here because chelis-surf does not depend on
-/// chelis-types and pulling in the dependency just for this list
-/// would invert the desugar / typecheck layering.
-const UNSIGNED_DTYPE_NAMES: &[&str] = &[
-    "u8", "u16", "u32", "u64", "uint8", "uint16", "uint32", "uint64",
-];
-
-/// Reserved dtype names must reach the checker as `t-prim`, not `t-var`.
-/// The internal `Prim::F8e4m3` variant does not authorize a Surf binder.
-const DEFERRED_DTYPE_NAMES: &[&str] = &[
-    "f8e4m3",
-    "f8e5m2",
-    "int4",
-    "uint4",
-    "complex64",
-    "complex128",
-    "decimal128",
-    "decimal256",
-];
-
-/// True if `name` is reserved under `spec/04-type-system.md` §1.1.1 and
-/// therefore names no type at all: the §1.1.2 unsigned spellings or one of the
-/// other reserved-but-deferred names.
-///
-/// A reserved spelling is not a candidate type variable and is not rebindable
-/// by an explicit quantifier list. §5.8.1 states the rule on the category, so
-/// this predicate is the category and every type-name decision below consults
-/// exactly it. Splitting the two lists across two decisions is what let
-/// `def f[u8](x: u8) -> u8 = x` keep scoring 1.0 after the first repair
-/// (chelis#1593).
-pub(crate) fn is_reserved_dtype_name(name: &str) -> bool {
-    UNSIGNED_DTYPE_NAMES.contains(&name)
-        || DEFERRED_DTYPE_NAMES.contains(&name)
-        || is_retired_integer_dtype_name(name)
-}
-
-// ---------------------------------------------------------------------------
 // Declarations
 // ---------------------------------------------------------------------------
 
@@ -934,16 +851,16 @@ fn collect_declared_type_binders(
     decl: &Decl,
     out: &mut UnordMap<String, UnordMap<String, Option<DtypeFamily>>>,
 ) {
-    let (name, type_binders, signature_type) = match decl {
+    let (name, type_binders) = match decl {
         Decl::FunDef {
             name, type_binders, ..
-        } => (name, type_binders, None),
+        } => (name, type_binders),
         Decl::Sig {
-            name,
-            type_binders,
-            ty,
-            ..
-        } => (name, type_binders, Some(ty)),
+            name, type_binders, ..
+        } => (name, type_binders),
+        Decl::Property {
+            name, type_binders, ..
+        } => (name, type_binders),
         _ => return,
     };
     let entry = out.entry(name.clone()).or_default();
@@ -953,16 +870,26 @@ fn collect_declared_type_binders(
             *slot = binder.bound;
         }
     }
-    if let Some(signature_type) = signature_type {
-        let mut implicit = UnordSet::new();
-        collect_sig_type_vars(signature_type, &mut implicit);
-        for name in implicit.to_sorted() {
-            entry.entry(name.clone()).or_insert(None);
-        }
-    }
     if entry.is_empty() {
         out.remove(name);
     }
+}
+
+/// Build canonical Deep `defsig` children. A declaration with no binders
+/// keeps the compact `(defsig {} name type)` form; a polymorphic declaration
+/// carries its complete explicit list as `(defsig {} name (binders...) type)`.
+fn defsig_node(name: &str, type_binders: &[TypeBinder], ty: deep::Expr) -> deep::Expr {
+    let mut children = vec![sym(name)];
+    if !type_binders.is_empty() {
+        children.push(bare_list(
+            type_binders
+                .iter()
+                .map(|binder| sym(&binder.name))
+                .collect(),
+        ));
+    }
+    children.push(ty);
+    node(DeepTag::Defsig, children)
 }
 
 /// Collect names with a standalone `sig`, suppressing a synthesized duplicate
@@ -1082,12 +1009,13 @@ impl DesugarCtx {
 
             Decl::Property {
                 name,
+                type_binders,
                 params,
                 preconditions,
                 body,
                 options,
                 ..
-            } => self.desugar_property(name, params, preconditions, body, options),
+            } => self.desugar_property(name, type_binders, params, preconditions, body, options),
 
             Decl::LetDef {
                 name,
@@ -1122,7 +1050,7 @@ impl DesugarCtx {
                 // does for the `def f(...) = ...` spelling — as `(t-var {}
                 // <name>)`, not `(t-prim {} <name>)`. Without installing this
                 // scope, `current_type_binder` never sees the sig's binders
-                // here, so `cast(v, p)` under `sig f: p -> p` silently kept
+                // here, so `cast(v, p)` under `sig f[p]: p -> p` silently kept
                 // the `t-prim` default and slipped past the [04-DTYPE-1]
                 // classifier in `chelis_deep::literal_source`, which only
                 // recognizes a `t-var` cast target.
@@ -1192,25 +1120,18 @@ impl DesugarCtx {
                 let effects = effects
                     .clone()
                     .or_else(|| self.def_effects.get(name).cloned());
-                // §P4c: the sig's `[..]` list is partial. Its names are
-                // authoritative, unkinded binders exactly as a def's are, and
-                // every other free name in the type stays implicitly
-                // quantified by WS-A5's contextual rule.
+                // §P4b: the sig's `[..]` list is the complete, authoritative,
+                // unkinded binder set. No type, dimension, or rank variable
+                // is introduced by occurrence alone.
                 let declared: UnordSet<String> = type_binders
                     .iter()
                     .map(|binder| binder.name.clone())
                     .collect();
                 vec![with_dtype_bounds(
-                    node(
-                        DeepTag::Defsig,
-                        vec![
-                            sym(name),
-                            // WS-A5: standalone sigs use the contextual rule so a
-                            // lowercase non-primitive name in the precision slot
-                            // becomes a quantified type variable per
-                            // spec/04-type-system.md §5.8.
-                            apply_effect_metadata(desugar_sig_type(ty, &declared), &effects),
-                        ],
+                    defsig_node(
+                        name,
+                        type_binders,
+                        apply_effect_metadata(desugar_sig_type(ty, &declared), &effects),
                     ),
                     type_binders,
                 )]
@@ -1290,25 +1211,30 @@ impl DesugarCtx {
         effects: &Option<Vec<EffectExpr>>,
         body: &Expr,
     ) -> Vec<deep::Expr> {
-        // Function-level binders are polymorphic d-vars, NOT module-level defdim.
-        // Build a set so desugar_type_with_scope treats them as d-var.
-        let dim_set: UnordSet<String> = type_binders
-            .iter()
-            .map(|binder| binder.name.clone())
-            .collect();
+        // One declaration has one binder owner. For an inline-only def this
+        // map contains the def's list; for a standalone sig plus matching def
+        // it contains the sig's list. Matching-def annotations and the body
+        // must resolve in that same scope even though the def cannot repeat it.
+        let dim_set: UnordSet<String> = self
+            .declared_type_binders
+            .get(name)
+            .map(|binders| {
+                binders
+                    .to_sorted()
+                    .into_iter()
+                    .map(|(binder, _)| binder.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
         let declares_bound = type_binders.iter().any(|binder| binder.bound.is_some());
 
-        // WS-A6 (spec/02-surf-syntax.md §P4b): when a def declares an
-        // explicit quantifier list `def f[..](...)`, names in that list
-        // that appear in the precision slot of a `tensor[..., <name>]`
-        // parameter annotation desugar to `(t-var {} <name>)` rather
-        // than `(t-prim {} <name>)`. The same identifier may also act
-        // as a dim-var when it appears in a dim slot — the
-        // dim/precision distinction is determined by position inside
-        // the tensor type, not by per-name kind tracking.
+        // P4b: names in the declaration's sole binder list become `t-var`,
+        // `d-var`, or `d-rank` according to the annotation position. The
+        // scope may come from this def or its standalone sig.
         let param_ann_tvar_set: UnordSet<String> = dim_set.clone();
 
-        let synthesize_signature = (params.iter().any(|param| param.ty.is_some())
+        let synthesize_signature = (!type_binders.is_empty()
+            || params.iter().any(|param| param.ty.is_some())
             || ret_ty.is_some()
             || effects.is_some()
             || declares_bound)
@@ -1360,29 +1286,16 @@ impl DesugarCtx {
         // defsig binding) would overwrite the concrete explicit sig, dropping
         // the body-vs-signature contract on those positions. Suppress it and
         // let the explicit sig drive body validation.
-        // A declared bound forces the synthesized signature even when nothing
-        // else would: the bound has no other carrier, and a `defsig` whose
-        // positions are all wildcards still reports a bound naming a binder
-        // the declaration never uses.
+        // An explicit binder list forces the synthesized signature even when
+        // every outer type slot is omitted: `defsig` is the declaration's
+        // structural binder carrier, and P4b keeps those names in scope for
+        // ordinary body annotations. A declared bound additionally requires
+        // an occurrence in the declared type, so its existing validation
+        // remains stricter than the unbounded body-only case.
         if synthesize_signature {
-            // An explicit clause is authoritative. With no clause, P4b applies
-            // WS-A5 implicit collection to the entire synthesized signature,
-            // including its parameter positions. Reserved dtype spellings are
-            // already excluded by `collect_sig_type_vars`.
-            let tvar_set: UnordSet<String> = if !type_binders.is_empty() {
-                dim_set.clone()
-            } else {
-                let mut acc: UnordSet<String> = UnordSet::new();
-                for p in params {
-                    if let Some(ty) = &p.ty {
-                        collect_sig_type_vars(ty, &mut acc);
-                    }
-                }
-                if let Some(ty) = ret_ty {
-                    collect_sig_type_vars(ty, &mut acc);
-                }
-                acc
-            };
+            // The explicit clause is the only binder source. Variable-shaped
+            // uses not present in it remain undeclared at Deep resolution.
+            let tvar_set: UnordSet<String> = dim_set.clone();
             let mut type_parts: Vec<deep::Expr> = params
                 .iter()
                 .map(|p| match &p.ty {
@@ -1395,12 +1308,10 @@ impl DesugarCtx {
                 None => node(DeepTag::TVar, vec![sym("_")]),
             });
             let sig = with_dtype_bounds(
-                node(
-                    DeepTag::Defsig,
-                    vec![
-                        sym(name),
-                        apply_effect_metadata(node(DeepTag::TFn, type_parts), effects),
-                    ],
+                defsig_node(
+                    name,
+                    type_binders,
+                    apply_effect_metadata(node(DeepTag::TFn, type_parts), effects),
                 ),
                 type_binders,
             );
@@ -1413,17 +1324,32 @@ impl DesugarCtx {
     fn desugar_property(
         &self,
         name: &str,
+        type_binders: &[TypeBinder],
         params: &[Param],
         preconditions: &[Expr],
         body: &Expr,
         options: &[PropertyOption],
     ) -> Vec<deep::Expr> {
+        let declared_binders = self
+            .declared_type_binders
+            .get(name)
+            .cloned()
+            .unwrap_or_default();
+        let binder_names: UnordSet<String> = declared_binders
+            .to_sorted()
+            .into_iter()
+            .map(|(binder, _)| binder.clone())
+            .collect();
         let param_scope = params
             .iter()
             .map(|param| param.name.clone())
             .collect::<Vec<_>>();
-        let param_nodes = params.iter().map(desugar_param).collect::<Vec<_>>();
+        let param_nodes = params
+            .iter()
+            .map(|param| desugar_param_with_scope(param, &binder_names, &binder_names))
+            .collect::<Vec<_>>();
         let params_node = node(DeepTag::Params, param_nodes.clone());
+        let restore_binders = self.current_type_binders.replace(declared_binders);
         let preconditions = PropertyPreconditions::new(
             deep::Metadata::default(),
             preconditions
@@ -1484,6 +1410,7 @@ impl DesugarCtx {
                 self.desugar_expr_with_scope(body, &param_scope),
             ],
         );
+        self.current_type_binders.replace(restore_binders);
         let def_node = node_meta(
             DeepTag::Def,
             meta_with_entries(meta_entries),
@@ -1491,12 +1418,18 @@ impl DesugarCtx {
         );
         let mut type_parts = params
             .iter()
-            .map(|param| desugar_type(param.ty.as_ref().expect("property params are typed")))
+            .map(|param| {
+                desugar_type_with_scope(
+                    param.ty.as_ref().expect("property params are typed"),
+                    &binder_names,
+                    &binder_names,
+                )
+            })
             .collect::<Vec<_>>();
         type_parts.push(node(DeepTag::TPrim, vec![sym("bool")]));
-        let sig_node = node(
-            DeepTag::Defsig,
-            vec![sym(name), node(DeepTag::TFn, type_parts)],
+        let sig_node = with_dtype_bounds(
+            defsig_node(name, type_binders, node(DeepTag::TFn, type_parts)),
+            type_binders,
         );
         vec![sig_node, def_node]
     }
@@ -1806,7 +1739,16 @@ impl DesugarCtx {
             }
 
             Expr::Lambda(params, body, _) => {
-                let param_names: Vec<deep::Expr> = params.iter().map(desugar_param).collect();
+                let param_names: Vec<deep::Expr> = params
+                    .iter()
+                    .map(|param| {
+                        let annotation = param
+                            .ty
+                            .as_ref()
+                            .map(|ty| self.desugar_body_annotation_type(ty));
+                        desugar_param_with_annotation(param, annotation)
+                    })
+                    .collect();
                 let params_node = node(DeepTag::Params, param_names);
                 let lambda_params = params
                     .iter()
@@ -2003,7 +1945,7 @@ impl DesugarCtx {
             Expr::Annotate(e, ty, _) => {
                 // Type annotation pushed into metadata of the desugared expression
                 let desugared = self.desugar_expr_with_scope(e, local_fn_params);
-                inject_type_metadata(desugared, desugar_type(ty))
+                inject_type_metadata(desugared, self.desugar_body_annotation_type(ty))
             }
 
             Expr::Block(bindings, final_expr, _) => {
@@ -2150,7 +2092,7 @@ impl DesugarCtx {
                     };
                     if let Some(ty) = &binding.ty {
                         let value = with_metadata_value(
-                            inject_type_metadata(value, desugar_type(ty)),
+                            inject_type_metadata(value, self.desugar_body_annotation_type(ty)),
                             M::SurfBindingType(Spanned::new(
                                 BindingTypeOrigin::Explicit,
                                 type_expr_span(ty),
@@ -2612,121 +2554,29 @@ fn desugar_type(ty: &TypeExpr) -> deep::Expr {
 }
 
 /// Desugar a `deftype` field or `typealias` body against that declaration's
-/// exact explicit parameter list. Unlike a signature, a declaration does not
-/// implicitly quantify a single-letter dimension name: an unlisted name is a
-/// concrete symbolic axis (`d-name`), matching spec/02 §P15's zero-parameter
-/// alias examples. Listed names remain unkinded declaration binders and are
-/// emitted according to their position (`t-var`, `d-var`, or precision
-/// `t-var`).
+/// exact explicit parameter list. Unlike a function signature's single-letter
+/// variable-use encoding, an unlisted name is a concrete symbolic axis
+/// (`d-name`), matching spec/02 §P15's zero-parameter alias examples. Listed
+/// names remain unkinded declaration binders and are emitted according to
+/// their position (`t-var`, `d-var`, or precision `t-var`).
 fn desugar_declaration_type(ty: &TypeExpr, explicit_params: &UnordSet<String>) -> deep::Expr {
     desugar_type_with_scope_mode(ty, explicit_params, explicit_params, false)
 }
 
-/// True if `name` is a candidate quantified type variable per
-/// `spec/04-type-system.md` §5.8: lowercase, not a known active
-/// primitive, and not a §1.1.1 deferred dtype name (unsigned alias or
-/// reserved name - those should reach the type-checker's rejection path
-/// as `(t-prim {} <name>)`, not be quietly absorbed as a quantifier).
-fn is_candidate_tvar_name(name: &str) -> bool {
-    name.starts_with(|c: char| c.is_lowercase())
-        && canonical_primitive_name(name).is_none()
-        && !is_reserved_dtype_name(name)
-}
-
-/// Compute the set of free, lowercase, non-primitive identifiers used
-/// as type names anywhere inside `ty` and its sub-types. These are the
-/// candidate quantified type variables for a sig per `spec/04-type-system.md`
-/// §5.8: an unbound lowercase name in a `sig` is treated as a `forall`-
-/// quantified type variable.
-///
-/// The set INCLUDES the precision slot of `tensor[..., <ident>]`
-/// because WS-A5 (`spec/04-type-system.md` §5.8 / `spec/02-surf-syntax.md`)
-/// pins the contextual rule: a lowercase non-primitive name in the
-/// precision slot of a tensor type, when it appears in a sig, becomes
-/// a quantified type variable. That is the load-bearing change WS-A5
-/// makes possible.
-///
-/// Names listed in `UNSIGNED_DTYPE_NAMES` and `DEFERRED_DTYPE_NAMES`
-/// are EXCLUDED so the type checker still surfaces a
-/// `spec/04-type-system.md §1.1.1`-citing diagnostic for them via the
-/// `(t-prim {} u8)` path.
-fn collect_sig_type_vars(ty: &TypeExpr, out: &mut UnordSet<String>) {
-    match ty {
-        TypeExpr::Named(name, _) => {
-            if is_candidate_tvar_name(name) {
-                out.insert(name.clone());
-            }
-        }
-        TypeExpr::DimensionLiteral(_, _) => {}
-        // `..r` is a rank variable, not a type variable — it is collected
-        // separately (the checker treats `(d-rank {} r)` as a bound rank var).
-        TypeExpr::RankSpread(_, _) => {}
-        TypeExpr::Tensor(dims, precision, _) => {
-            for d in dims {
-                collect_sig_type_vars(d, out);
-            }
-            // Precision slot: a lowercase non-primitive name here is a
-            // candidate quantified type variable per WS-A5. The dim
-            // names themselves are handled by the d-name / d-var
-            // contextual rules elsewhere and are not type variables.
-            if is_candidate_tvar_name(precision) {
-                out.insert(precision.to_string());
-            }
-        }
-        TypeExpr::Arrow(params, ret, _) => {
-            for p in params {
-                collect_sig_type_vars(p, out);
-            }
-            collect_sig_type_vars(ret, out);
-        }
-        TypeExpr::Ref(inner, _) => collect_sig_type_vars(inner, out),
-        TypeExpr::App(_, args, _) => {
-            for a in args {
-                collect_sig_type_vars(a, out);
-            }
-        }
-        TypeExpr::Tuple(elems, _) => {
-            for e in elems {
-                collect_sig_type_vars(e, out);
-            }
-        }
-        TypeExpr::Infer(_) => {}
-    }
-}
-
-/// Desugar a sig's type, computing the implicit quantifier set for the
-/// sig and applying the WS-A5 contextual precision rule.
-///
-/// Per `spec/04-type-system.md` §5.8 and `spec/02-surf-syntax.md`:
-/// inside a sig, an identifier in the precision slot of a `tensor[...]`
-/// type is desugared to `(t-var {} <name>)` when it is one of the sig's
-/// implicitly quantified type variables, and to `(t-prim {} <name>)`
-/// when it is a primitive. Outside a sig the same desugar is invoked
-/// with an empty quantifier set, so only primitive names are accepted.
+/// Desugar a sig against its complete explicit binder list.
 fn desugar_sig_type(ty: &TypeExpr, declared: &UnordSet<String>) -> deep::Expr {
-    let mut tvars = UnordSet::new();
-    collect_sig_type_vars(ty, &mut tvars);
-    // §P4c: a name the sig explicitly lists is a binder whatever its case, so
-    // a listed `P` is a type variable rather than a rigid ADT — the same
-    // override a def's `[..]` clause already applies.
-    for name in declared.to_sorted() {
-        tvars.insert(name.clone());
-    }
-    desugar_type_with_scope(ty, declared, &tvars)
+    desugar_type_with_scope(ty, declared, declared)
 }
 
 /// Desugar a type with declared dimension parameters and a set of
-/// in-scope quantified type variable names. `tvar_set` is non-empty
-/// only when desugaring inside a sig that declared (or implicitly
-/// introduced) quantified type variables. The contextual rule for the
+/// in-scope quantified type variable names. The contextual rule for the
 /// tensor precision slot lives here:
 ///
 /// - A primitive name (`f32`, `i32`, ...) becomes `(t-prim {} <name>)`.
 /// - A name found in `tvar_set` becomes `(t-var {} <name>)`.
 /// - Any other name in the precision slot is encoded as `(t-prim {} <name>)`
-///   so the type checker can surface a precise diagnostic
-///   (`unbound type variable in precision slot`) via the existing
-///   `Prim::parse_name` rejection path.
+///   so the type checker reports the unknown primitive spelling through the
+///   shared `Prim::parse_name` rejection path.
 fn desugar_type_with_scope(
     ty: &TypeExpr,
     dim_vars: &UnordSet<String>,
@@ -2739,7 +2589,7 @@ fn desugar_type_with_scope_mode(
     ty: &TypeExpr,
     dim_vars: &UnordSet<String>,
     tvar_set: &UnordSet<String>,
-    implicit_single_letter_dims: bool,
+    single_letter_dim_vars: bool,
 ) -> deep::Expr {
     let desugared = match ty {
         TypeExpr::DimensionLiteral(value, _) => node(DeepTag::DLit, vec![int(value.value())]),
@@ -2748,8 +2598,8 @@ fn desugar_type_with_scope_mode(
             //
             // - A primitive name (`f32`, `i32`, ...) is a `t-prim`.
             // - A name that appears in the enclosing quantifier set
-            //   (`tvar_set` — a def's explicit `[..]` clause or a sig's
-            //   implicit quantifiers) is a quantified type variable and
+            //   (`tvar_set` — the declaration's explicit `[..]` clause) is a
+            //   quantified type variable and
             //   becomes `(t-var {} <name>)` REGARDLESS of case. The
             //   `[..]` clause is the authoritative, unkinded source per
             //   `spec/02-surf-syntax.md` §P4b, so a name the user
@@ -2764,21 +2614,14 @@ fn desugar_type_with_scope_mode(
             //   stays `(t-prim {} <name>)` so the checker's rejection
             //   fires. It outranks the quantifier set, exactly as the
             //   primitive arm does (chelis#1593).
-            // - Otherwise the lexical case-split applies: a PascalCase
-            //   name is an ADT; a lowercase name is a free `t-var`
-            //   whose binding the type checker resolves downstream.
+            // - Otherwise a PascalCase name is an ADT and every other spelling
+            //   stays `t-prim`, so the closed primitive resolver reports an
+            //   unknown dtype rather than inventing a binder.
             if name == "unit" {
                 node(DeepTag::TUnit, vec![])
             } else if let Some(canonical) = canonical_primitive_name(name) {
                 node(DeepTag::TPrim, vec![sym(canonical)])
             } else if is_reserved_dtype_name(name) {
-                // chelis#1593. `is_candidate_tvar_name` already keeps these
-                // names out of the IMPLICIT quantifier set, which is only half
-                // of what `spec/04-type-system.md` §5.8.1 asks for: excluding a
-                // name from the set does nothing while a later arm quantifies
-                // it anyway. `def f(x: u8) -> u8 = x` therefore typed as
-                // `forall u8. u8 -> u8` and scored 1.0.
-                //
                 // Above `tvar_set` rather than below it, because §5.8.1 states
                 // the rule on the category: a reserved spelling names no type
                 // variable in any type position, and an explicit `[..]` clause
@@ -2799,7 +2642,7 @@ fn desugar_type_with_scope_mode(
             } else if name.starts_with(|c: char| c.is_uppercase()) {
                 node(DeepTag::TAdt, vec![sym(name)])
             } else {
-                node(DeepTag::TVar, vec![sym(name)])
+                node(DeepTag::TPrim, vec![sym(name)])
             }
         }
 
@@ -2824,7 +2667,7 @@ fn desugar_type_with_scope_mode(
                     }
                     // Single lowercase letter → d-var (heuristic fallback)
                     TypeExpr::Named(n, _)
-                        if implicit_single_letter_dims
+                        if single_letter_dim_vars
                             && n.len() == 1
                             && n.starts_with(|c: char| c.is_lowercase()) =>
                     {
@@ -2843,16 +2686,16 @@ fn desugar_type_with_scope_mode(
                             d,
                             dim_vars,
                             tvar_set,
-                            implicit_single_letter_dims,
+                            single_letter_dim_vars,
                         )],
                     ),
                 })
                 .collect();
-            // WS-A5 contextual precision rule (spec/04-type-system.md §5.8,
-            // spec/02-surf-syntax.md): the precision slot is a t-var when
-            // its name is in `tvar_set` (a sig-quantified type variable),
-            // otherwise it stays as t-prim and the type checker validates
-            // it against the closed primitive set via Prim::parse_name.
+            // Explicit precision-binder rule (spec/02-surf-syntax.md P4b):
+            // the declaration's one explicit binder scope applies to every
+            // type position, so a listed precision name is a t-var in both
+            // the signature and body. An unlisted name stays t-prim and the
+            // type checker validates it against the closed primitive set.
             let prec_node = match canonical_primitive_name(precision) {
                 Some(canonical) => node(DeepTag::TPrim, vec![sym(canonical)]),
                 // A §1.1.1 reserved spelling outranks the quantifier set here
@@ -2878,14 +2721,14 @@ fn desugar_type_with_scope_mode(
             let mut children: Vec<deep::Expr> = params
                 .iter()
                 .map(|p| {
-                    desugar_type_with_scope_mode(p, dim_vars, tvar_set, implicit_single_letter_dims)
+                    desugar_type_with_scope_mode(p, dim_vars, tvar_set, single_letter_dim_vars)
                 })
                 .collect();
             children.push(desugar_type_with_scope_mode(
                 ret,
                 dim_vars,
                 tvar_set,
-                implicit_single_letter_dims,
+                single_letter_dim_vars,
             ));
             node(DeepTag::TFn, children)
         }
@@ -2896,14 +2739,14 @@ fn desugar_type_with_scope_mode(
                 inner,
                 dim_vars,
                 tvar_set,
-                implicit_single_letter_dims,
+                single_letter_dim_vars,
             )],
         ),
 
         TypeExpr::App(name, args, _) => {
             let mut children = vec![sym(name)];
             children.extend(args.iter().map(|a| {
-                desugar_type_with_scope_mode(a, dim_vars, tvar_set, implicit_single_letter_dims)
+                desugar_type_with_scope_mode(a, dim_vars, tvar_set, single_letter_dim_vars)
             }));
             node(DeepTag::TAdt, children)
         }
@@ -2914,7 +2757,7 @@ fn desugar_type_with_scope_mode(
             elems
                 .iter()
                 .map(|e| {
-                    desugar_type_with_scope_mode(e, dim_vars, tvar_set, implicit_single_letter_dims)
+                    desugar_type_with_scope_mode(e, dim_vars, tvar_set, single_letter_dim_vars)
                 })
                 .collect(),
         ),
@@ -3750,8 +3593,9 @@ mod tests {
 
     #[test]
     fn test_type_var() {
-        // Lowercase non-primitive → t-var
-        assert_eq!(print_expr(&desugar_type(&named_ty("a"))), "(t-var {} a)");
+        // Outside an explicit declaration binder list, a lowercase unknown
+        // spelling remains a primitive candidate for checker-owned rejection.
+        assert_eq!(print_expr(&desugar_type(&named_ty("a"))), "(t-prim {} a)");
     }
 
     #[test]

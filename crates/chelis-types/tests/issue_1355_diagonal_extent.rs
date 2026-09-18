@@ -203,11 +203,11 @@ fn square_operand_keeps_its_exact_extent() {
 #[test]
 fn symbolic_selected_extent_stays_wildcard_compatible() {
     accepts(
-        "def f(x: tensor[n, 4, f32]) -> tensor[n, f32] = diagonal(x, 0, 1)\n",
+        "def f[n](x: tensor[n, 4, f32]) -> tensor[n, f32] = diagonal(x, 0, 1)\n",
         "diagonal on tensor[n, 4] declared as tensor[n]",
     );
     accepts(
-        "def f(x: tensor[n, 4, f32]) -> tensor[4, f32] = diagonal(x, 0, 1)\n",
+        "def f[n](x: tensor[n, 4, f32]) -> tensor[4, f32] = diagonal(x, 0, 1)\n",
         "diagonal on tensor[n, 4] declared as tensor[4]",
     );
 }
@@ -354,7 +354,7 @@ fn assert_bound_rejection(
 #[test]
 fn a_declared_literal_wider_than_the_literal_axis_is_rejected() {
     assert_bound_rejection(
-        "def f(x: tensor[n, 4, f32]) -> tensor[9, f32] = diagonal(x, 0, 1)\n",
+        "def f[n](x: tensor[n, 4, f32]) -> tensor[9, f32] = diagonal(x, 0, 1)\n",
         "diagonal on tensor[n, 4] declared as tensor[9]",
         1,
         4,
@@ -369,7 +369,7 @@ fn a_declared_literal_wider_than_the_literal_axis_is_rejected() {
 #[test]
 fn the_mirrored_literal_axis_bounds_the_declared_extent_too() {
     assert_bound_rejection(
-        "def f(x: tensor[4, n, f32]) -> tensor[9, f32] = diagonal(x, 0, 1)\n",
+        "def f[n](x: tensor[4, n, f32]) -> tensor[9, f32] = diagonal(x, 0, 1)\n",
         "diagonal on tensor[4, n] declared as tensor[9]",
         0,
         4,
@@ -401,7 +401,7 @@ fn a_rigid_named_extent_beside_a_literal_is_bounded_the_same_way() {
 #[test]
 fn a_rank_three_retained_axis_is_bounded_at_its_result_index() {
     assert_bound_rejection(
-        "def f(x: tensor[2, n, 5, f32]) -> tensor[2, 9, f32] = diagonal(x, 1, 2)\n",
+        "def f[n](x: tensor[2, n, 5, f32]) -> tensor[2, 9, f32] = diagonal(x, 1, 2)\n",
         "diagonal on tensor[2, n, 5] over axes (1, 2) declared as tensor[2, 9]",
         2,
         5,
@@ -417,7 +417,7 @@ fn a_rank_three_retained_axis_is_bounded_at_its_result_index() {
 #[test]
 fn the_block_ascription_ingress_is_bounded_too() {
     assert_bound_rejection(
-        "def f(x: tensor[n, 4, f32]) -> tensor[9, f32] = {\n  \
+        "def f[n](x: tensor[n, 4, f32]) -> tensor[9, f32] = {\n  \
          y: tensor[9, f32] = diagonal(x, 0, 1)\n  y\n}\n",
         "a block ascription of tensor[9] over tensor[n, 4]",
         1,
@@ -433,7 +433,7 @@ fn the_block_ascription_ingress_is_bounded_too() {
 #[test]
 fn a_declared_literal_at_the_literal_axis_is_accepted() {
     accepts(
-        "def f(x: tensor[n, 4, f32]) -> tensor[4, f32] = diagonal(x, 0, 1)\n",
+        "def f[n](x: tensor[n, 4, f32]) -> tensor[4, f32] = diagonal(x, 0, 1)\n",
         "diagonal on tensor[n, 4] declared as tensor[4]",
     );
 }
@@ -443,7 +443,7 @@ fn a_declared_literal_at_the_literal_axis_is_accepted() {
 #[test]
 fn a_declared_literal_below_the_literal_axis_is_accepted() {
     accepts(
-        "def f(x: tensor[n, 4, f32]) -> tensor[3, f32] = diagonal(x, 0, 1)\n",
+        "def f[n](x: tensor[n, 4, f32]) -> tensor[3, f32] = diagonal(x, 0, 1)\n",
         "diagonal on tensor[n, 4] declared as tensor[3]",
     );
 }
@@ -458,7 +458,7 @@ fn a_declared_literal_below_the_literal_axis_is_accepted() {
 #[test]
 fn the_two_dimension_variable_pair_stays_unclaimed() {
     accepts(
-        "def f(x: tensor[n, n, f32]) -> tensor[9, f32] = diagonal(x, 0, 1)\n",
+        "def f[n](x: tensor[n, n, f32]) -> tensor[9, f32] = diagonal(x, 0, 1)\n",
         "diagonal on tensor[n, n] declared as tensor[9] (unclaimed disposition)",
     );
 }
@@ -469,7 +469,7 @@ fn the_two_dimension_variable_pair_stays_unclaimed() {
 #[test]
 fn trace_over_a_symbolic_literal_pair_is_unaffected_by_the_bound() {
     accepts(
-        "def f(x: tensor[n, 4, f32]) -> tensor[f32] = trace(x, 0, 1)\n",
+        "def f[n](x: tensor[n, 4, f32]) -> tensor[f32] = trace(x, 0, 1)\n",
         "trace on tensor[n, 4]",
     );
 }
@@ -481,7 +481,7 @@ fn trace_over_a_symbolic_literal_pair_is_unaffected_by_the_bound() {
 #[test]
 fn trace_over_a_symbolic_literal_pair_rejects_for_rank_not_for_the_bound() {
     let message = sole_dimension_mismatch(
-        "def f(x: tensor[n, 4, f32]) -> tensor[9, f32] = trace(x, 0, 1)\n",
+        "def f[n](x: tensor[n, 4, f32]) -> tensor[9, f32] = trace(x, 0, 1)\n",
         "trace on tensor[n, 4] declared as tensor[9]",
     );
     assert!(
@@ -502,7 +502,7 @@ fn trace_over_a_symbolic_literal_pair_rejects_for_rank_not_for_the_bound() {
 fn a_type_alias_carries_the_same_bound_verdict() {
     assert_bound_rejection(
         "type Row = tensor[9, f32]\n\
-         def f(x: tensor[n, 4, f32]) -> Row = diagonal(x, 0, 1)\n",
+         def f[n](x: tensor[n, 4, f32]) -> Row = diagonal(x, 0, 1)\n",
         "diagonal on tensor[n, 4] declared as the alias Row",
         1,
         4,
@@ -510,7 +510,7 @@ fn a_type_alias_carries_the_same_bound_verdict() {
     );
     assert_bound_rejection(
         "type Row = tensor[9, f32]\n\
-         def f(x: tensor[n, 4, f32]) -> Row = {\n  y: Row = diagonal(x, 0, 1)\n  y\n}\n",
+         def f[n](x: tensor[n, 4, f32]) -> Row = {\n  y: Row = diagonal(x, 0, 1)\n  y\n}\n",
         "a block ascription of the alias Row over tensor[n, 4]",
         1,
         4,
@@ -524,7 +524,7 @@ fn a_type_alias_carries_the_same_bound_verdict() {
 fn a_type_alias_at_the_bound_is_accepted() {
     accepts(
         "type Row = tensor[4, f32]\n\
-         def f(x: tensor[n, 4, f32]) -> Row = diagonal(x, 0, 1)\n",
+         def f[n](x: tensor[n, 4, f32]) -> Row = diagonal(x, 0, 1)\n",
         "diagonal on tensor[n, 4] declared as the alias Row = tensor[4, f32]",
     );
 }
@@ -538,7 +538,7 @@ fn a_type_alias_at_the_bound_is_accepted() {
 #[test]
 fn a_rank_disagreement_reports_the_signature_mismatch_not_the_bound() {
     let message = sole_dimension_mismatch(
-        "def f(x: tensor[n, 4, 5, f32]) -> tensor[7, f32] = diagonal(x, 0, 1)\n",
+        "def f[n](x: tensor[n, 4, 5, f32]) -> tensor[7, f32] = diagonal(x, 0, 1)\n",
         "diagonal on tensor[n, 4, 5] over axes (0, 1) declared as the rank-1 tensor[7]",
     );
     assert!(
@@ -560,7 +560,7 @@ fn a_rank_disagreement_reports_the_signature_mismatch_not_the_bound() {
 #[test]
 fn a_rank_agreeing_declaration_still_carries_the_bound() {
     assert_bound_rejection(
-        "def f(x: tensor[n, 4, 5, f32]) -> tensor[9, 5, f32] = diagonal(x, 0, 1)\n",
+        "def f[n](x: tensor[n, 4, 5, f32]) -> tensor[9, 5, f32] = diagonal(x, 0, 1)\n",
         "diagonal on tensor[n, 4, 5] over axes (0, 1) declared as tensor[9, 5]",
         1,
         4,

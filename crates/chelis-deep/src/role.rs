@@ -322,13 +322,11 @@ pub fn child_stamp_role(tag: DeepTag, index: usize, _arity: usize) -> ChildStamp
                 RuntimeExpr
             }
         }
-        DeepTag::Defsig => {
-            if index == 0 {
-                Binder
-            } else {
-                Type
-            }
-        }
+        DeepTag::Defsig => match (index, _arity) {
+            (0, _) => Binder,
+            (1, 3..) => Syntax,
+            _ => Type,
+        },
         DeepTag::Deftype | DeepTag::Typealias => {
             if index == 0 {
                 Binder
@@ -516,7 +514,7 @@ pub fn arity_contract(tag: DeepTag) -> AritySpec {
         DeepTag::Export => AtLeast(1),  // names
 
         DeepTag::Def => Fixed(2),       // name, body
-        DeepTag::Defsig => Fixed(2),    // name, type
+        DeepTag::Defsig => Range(2, 3), // name, [binders], type
         DeepTag::Deftype => AtLeast(2), // name, params [+ variants]
         DeepTag::Typealias => Fixed(3), // name, params, type
         DeepTag::Variant => AtLeast(1), // name [+ fields]
@@ -828,6 +826,22 @@ mod tests {
                 AritySpec::Range(lo, hi) => assert!(lo <= hi, "{:?}", tag),
             }
         }
+    }
+
+    #[test]
+    fn defsig_binder_role_preserves_the_arity_owner_for_overlong_forms() {
+        assert_eq!(
+            child_stamp_role(DeepTag::Defsig, 1, 2),
+            ChildStampRole::Type
+        );
+        assert_eq!(
+            child_stamp_role(DeepTag::Defsig, 1, 3),
+            ChildStampRole::Syntax
+        );
+        assert_eq!(
+            child_stamp_role(DeepTag::Defsig, 1, 4),
+            ChildStampRole::Syntax
+        );
     }
 
     #[test]

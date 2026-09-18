@@ -51,7 +51,7 @@ use tempfile::tempdir;
 /// batchnorm1d-style single shape-sourced broadcast: rank-1 `g` scaled over
 /// the batch axis of rank-2 `x`. The #579 discriminator case (passed even at
 /// 0.12.0); pinned so the working baseline is explicit.
-const BN1D_SOURCE: &str = "def bn1d_scale(x: &tensor[a, n, f32], g: &tensor[n, f32]) -> tensor[a, n, f32] = {\n\
+const BN1D_SOURCE: &str = "def bn1d_scale[a, n](x: &tensor[a, n, f32], g: &tensor[n, f32]) -> tensor[a, n, f32] = {\n\
     \x20 gb: tensor[a, n, f32] = insert(g, 0, shape(x, cast(0, i32)))\n\
     \x20 mul(x, gb)\n\
     }\n\
@@ -66,7 +66,7 @@ const BN1D_SOURCE: &str = "def bn1d_scale(x: &tensor[a, n, f32], g: &tensor[n, f
 /// sourceless (the §4.7.2 check-accept/build-reject asymmetry #596 closed
 /// by following let-bound `shape` reads to their source tensor). The
 /// let-bound tests below fail on a pre-#596 compiler.
-const BN1D_LET_BOUND_SOURCE: &str = "def bn1d_scale(x: &tensor[a, n, f32], g: &tensor[n, f32]) -> tensor[a, n, f32] = {\n\
+const BN1D_LET_BOUND_SOURCE: &str = "def bn1d_scale[a, n](x: &tensor[a, n, f32], g: &tensor[n, f32]) -> tensor[a, n, f32] = {\n\
     \x20 a_dim = cast(shape(x, cast(0, i32)), i64)\n\
     \x20 gb: tensor[a, n, f32] = insert(g, 0, a_dim)\n\
     \x20 mul(x, gb)\n\
@@ -115,14 +115,14 @@ fn chained_achw_source(shape: &[usize; 4], spelling: ExtentSpelling) -> String {
         ),
     };
     format!(
-        "def broadcast_to_achw(g: &tensor[c, f32], x: &tensor[a, c, h, w, f32]) -> tensor[a, c, h, w, f32] = {{\n\
+        "def broadcast_to_achw[c, a, h, w](g: &tensor[c, f32], x: &tensor[a, c, h, w, f32]) -> tensor[a, c, h, w, f32] = {{\n\
         {lets}\
         \x20 step1: tensor[c, h, f32] = insert(g, 1, {h_size})\n\
         \x20 step2: tensor[c, h, w, f32] = insert(step1, 2, {w_size})\n\
         \x20 step3: tensor[a, c, h, w, f32] = insert(step2, 0, {a_size})\n\
         \x20 step3\n\
         }}\n\
-        def bn2d_affine(x: &tensor[a, c, h, w, f32], g: &tensor[c, f32], b: &tensor[c, f32]) -> tensor[a, c, h, w, f32] = {{\n\
+        def bn2d_affine[a, c, h, w](x: &tensor[a, c, h, w, f32], g: &tensor[c, f32], b: &tensor[c, f32]) -> tensor[a, c, h, w, f32] = {{\n\
         \x20 gb = broadcast_to_achw(g, x)\n\
         \x20 bb = broadcast_to_achw(b, x)\n\
         \x20 add(mul(x, gb), bb)\n\

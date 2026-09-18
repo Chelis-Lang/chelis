@@ -25,6 +25,9 @@ fn structural_child_stamp_roles_match_owner_positions() {
         (DeepTag::Module, 1, 2, ExplicitInferenceBypass),
         (DeepTag::Def, 0, 2, Binder),
         (DeepTag::Def, 1, 2, RuntimeExpr),
+        (DeepTag::Defsig, 1, 2, Type),
+        (DeepTag::Defsig, 1, 3, Syntax),
+        (DeepTag::Defsig, 1, 4, Syntax),
         (DeepTag::Deftype, 0, 3, Binder),
         (DeepTag::Deftype, 1, 3, Syntax),
         (DeepTag::Deftype, 2, 3, Type),
@@ -1638,7 +1641,7 @@ fn sig_plus_def_same_name_is_not_a_duplicate() {
     // shape (and an inline-annotated def desugars to exactly that pair),
     // so it must not be flagged. Only two `def`s for one name collide.
     check_ok(
-        "(defsig {} f (t-fn {} (t-var {} a) (t-var {} a)))
+        "(defsig {} f (a) (t-fn {} (t-var {} a) (t-var {} a)))
          (def {} f (fn {} (params {} x) (var {} x)))",
     );
 }

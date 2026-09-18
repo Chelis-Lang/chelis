@@ -642,7 +642,7 @@ fn type_ingress_rejects_every_non_type_carrier_and_role_swap() {
 #[test]
 fn file_ingress_rejects_rank_spreads_in_nominal_argument_slots() {
     for source in [
-        "(defsig {} bad (t-fn {} (t-adt {} Rows (d-rank {} r)) (t-unit {})))",
+        "(defsig {} bad (r) (t-fn {} (t-adt {} Rows (d-rank {} r)) (t-unit {})))",
         "(def {} bad (fn {} (params {} (x {type: (t-adt {} Rows (d-rank {} r))})) (var {} x)))",
     ] {
         let error = chelis_deep::parse_and_stamp_file(source)
@@ -676,7 +676,7 @@ fn file_ingress_rejects_rank_spreads_in_nominal_argument_slots() {
 fn file_ingress_keeps_nominal_dimensions_and_tensor_rank_spreads_legal() {
     for source in [
         "(defsig {} sized (t-fn {} (t-adt {} Rows (d-lit {} 3)) (t-unit {})))",
-        "(defsig {} ranked (t-fn {} (t-tensor {} (d-rank {} r) (t-prim {} f32)) (t-unit {})))",
+        "(defsig {} ranked (r) (t-fn {} (t-tensor {} (d-rank {} r) (t-prim {} f32)) (t-unit {})))",
     ] {
         chelis_deep::parse_and_stamp_file(source)
             .unwrap_or_else(|error| panic!("spec-valid file ingress was rejected: {error}"));

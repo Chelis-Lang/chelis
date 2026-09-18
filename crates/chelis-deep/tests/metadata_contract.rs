@@ -16,7 +16,7 @@ const CASES: &[(&str, &str)] = &[
     ("eff", "(t-fn {eff: (effects {})} (t-unit {}))"),
     (
         "dtype_bounds",
-        "(defsig {dtype_bounds: {p: float}} f (t-var {} p))",
+        "(defsig {dtype_bounds: {p: float}} f (p) (t-var {} p))",
     ),
     (
         "effects",
@@ -185,7 +185,7 @@ fn metadata_expression_roles_reject_bare_names_with_remediation() {
 #[test]
 fn data_and_provenance_are_not_metadata_or_expression_roles() {
     parse_str(
-        "(defsig {dtype_bounds: {type: float, span: int, surf_future: numeric}} f (t-var {} type))",
+        "(defsig {dtype_bounds: {type: float, span: int, surf_future: numeric}} f (type span surf_future) (t-var {} type))",
     )
     .unwrap();
     let source = "(var {source: (macro_name {surf_future: 1, span: 2} bare_name), custom: {nested: (lit {span: \"id\"} 1)}, span_future: (a b)} x)";
@@ -326,8 +326,8 @@ fn structured_shapes_reject_wrong_members_and_closed_enum_values() {
         "(deftype {opaque: true, invariant_amenability: \"linear\"} T () (variant {} T))",
         "(var {loc: (loc \"a.dp\" 1.0 2)} x)",
         "(var {type: (t-prim {} (lit {} 1))} x)",
-        "(defsig {dtype_bounds: {p: int, p: float}} f (t-var {} p))",
-        "(defsig {dtype_bounds: {p: {nested: float}}} f (t-var {} p))",
+        "(defsig {dtype_bounds: {p: int, p: float}} f (p) (t-var {} p))",
+        "(defsig {dtype_bounds: {p: {nested: float}}} f (p) (t-var {} p))",
     ] {
         assert!(parse_str(source).is_err(), "{source}");
     }

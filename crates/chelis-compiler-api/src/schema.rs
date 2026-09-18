@@ -1604,6 +1604,8 @@ pub enum WireSurfDecl {
     },
     Property {
         name: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        type_binders: Vec<WireTypeBinder>,
         params: Vec<WireParam>,
         preconditions: Vec<WireSurfExpr>,
         body: WireSurfExpr,

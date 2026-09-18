@@ -224,7 +224,7 @@ fn user_dimension_name_cannot_capture_runtime_shrink_extent() {
     // different one. Otherwise C incorrectly guards the three-element slice
     // against the four-element input dimension.
     let source = "module Repro.ShrinkGeneratedDimCollision\n\
-sig crop: tensor[_rt_shrink_dim_8_0, f32] -> tensor[u, f32]\n\
+sig crop[u]: tensor[_rt_shrink_dim_8_0, f32] -> tensor[u, f32]\n\
 def crop(x) = {\n\
   k = shape(x, cast(0, i32))\n\
   z = cast(k - k, i64)\n\

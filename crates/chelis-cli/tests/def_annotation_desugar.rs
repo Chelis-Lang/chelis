@@ -16,8 +16,8 @@
 //!    can be instantiated independently at call sites.
 //! 3. A precision name in a def parameter annotation that is NOT in
 //!    an explicit def quantifier list still errors.
-//! 4. A def without an explicit quantifier list synthesizes one shared
-//!    precision binder across its signature and checked metadata.
+//! 4. An explicitly quantified unusual name stays one shared precision
+//!    binder across its signature and checked metadata.
 //! 5. Sig-only WS-A5 generalization still works (regression guard).
 
 use assert_cmd::Command;
@@ -111,10 +111,10 @@ fn def_two_independent_precision_tvars_accepted() {
     );
 }
 
-/// Negative case: a precision name that is NOT in the def's quantifier
-/// list still errors. The def declares `[a, b]` but uses `p` in a
-/// precision slot. `p` is not in `{a, b}`, so the contextual rule
-/// does not fire and the validator surfaces the unbound-name diagnostic.
+/// Negative case: a precision name that is NOT in the def's binder list
+/// still errors. The def declares `[a, b]` but uses `p` in a precision slot.
+/// `p` is not in `{a, b}`, so it remains a primitive request and the shared
+/// resolver rejects it.
 #[test]
 fn def_precision_name_not_in_quantifier_list_errors() {
     let dir = tempdir().expect("tempdir");
@@ -126,37 +126,57 @@ fn def_precision_name_not_in_quantifier_list_errors() {
 
     let json = run_json_check(&path);
     let errors = json["errors"].as_array().cloned().unwrap_or_default();
-    let has_unsupported_prec = errors.iter().any(|e| {
+    let all_are_unknown_primitive = errors.iter().all(|e| {
         let kind = e.get("kind").and_then(|k| k.as_str()).unwrap_or("");
         let msg = e.get("message").and_then(|m| m.as_str()).unwrap_or("");
-        kind == "UnsupportedTensorPrecision" && msg.contains("`p`")
+        kind == "TypeMismatch"
+            && msg.contains("unknown primitive type `p`")
+            && e.get("suggestions")
+                .and_then(|suggestions| suggestions.as_array())
+                .is_some_and(|suggestions| {
+                    suggestions.iter().any(|suggestion| {
+                        suggestion.as_str().is_some_and(|text| {
+                            text.contains("declare `p` in the signature binder list")
+                        })
+                    })
+                })
     });
+    assert_eq!(
+        errors.len(),
+        1,
+        "the repeated undeclared primitive spelling must have one declaration-owned diagnostic: {errors:?}"
+    );
+    assert_eq!(
+        errors[0].get("span_id").and_then(|span| span.as_str()),
+        Some("source:26..27"),
+        "the declaration owner must retain the first useful source location: {errors:?}"
+    );
     assert!(
-        has_unsupported_prec,
-        "precision name `p` not in def quantifier list `[a, b]` must \
-         be rejected per spec/02-surf-syntax.md §P4b. Got {errors:?}"
+        all_are_unknown_primitive,
+        "precision name `p` not in def binder list `[a, b]` must be rejected \
+         by the shared primitive resolver per spec/02-surf-syntax.md §P4b. \
+         Got {errors:?}"
     );
 }
 
-/// Surf P4b applies implicit binder collection to the synthesized
-/// signature when a def has no explicit quantifier list. The parameter
-/// and result annotations share one `weirdname` binder, and the checked
-/// parameter metadata retains that binder rather than degrading it to an
-/// unsupported primitive.
+/// Surf P4b applies the explicit binder list to the synthesized signature.
+/// The parameter and result annotations share one `weirdname` binder, and
+/// the checked parameter metadata retains that binder rather than degrading
+/// it to an unsupported primitive.
 #[test]
-fn def_with_no_quantifier_list_synthesizes_shared_precision_binder() {
+fn def_with_explicit_unusual_name_keeps_shared_precision_binder() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("no_quantifier.ch");
     write_file(
         &path,
-        "def f(x: &tensor[3, weirdname]) -> &tensor[3, weirdname] = x\n",
+        "def f[weirdname](x: &tensor[3, weirdname]) -> &tensor[3, weirdname] = x\n",
     );
 
     let json = run_json_check(&path);
     let errors = json["errors"].as_array().cloned().unwrap_or_default();
     assert!(
         errors.is_empty(),
-        "implicit synthesized precision binder should type-check, got {errors:?}"
+        "explicit unusual precision binder should type-check, got {errors:?}"
     );
     assert_eq!(json["score"].as_f64(), Some(1.0), "{json:#?}");
 
@@ -164,7 +184,7 @@ fn def_with_no_quantifier_list_synthesizes_shared_precision_binder() {
     assert_eq!(
         deep.matches("(t-var {} weirdname)").count(),
         3,
-        "the synthesized defsig input/result and parameter metadata must share \
+        "the defsig input/result and parameter metadata must share \
          the authored precision binder:\n{deep}"
     );
     assert!(
@@ -176,7 +196,7 @@ fn def_with_no_quantifier_list_synthesizes_shared_precision_binder() {
     );
     assert!(
         !deep.contains("(t-prim {} weirdname)"),
-        "the synthesized binder must never become an unsupported primitive:\n{deep}"
+        "the explicit binder must never become an unsupported primitive:\n{deep}"
     );
 }
 
@@ -238,17 +258,16 @@ fn def_quantifier_precision_tvar_typechecks_at_every_arithmetic_dtype() {
     }
 }
 
-/// Regression guard: WS-A5 sig-only generalization is unchanged. A bare
-/// `sig poly_id: tensor[d, p] -> tensor[d, p]` still implicitly
-/// quantifies `d` and `p` and `poly_id` remains a polymorphic
-/// reference.
+/// Regression guard: sig-only generalization remains available through the
+/// explicit `sig poly_id[d, p]: tensor[d, p] -> tensor[d, p]` spelling, and
+/// `poly_id` remains a polymorphic reference.
 #[test]
 fn wsa5_sig_only_generalization_still_works() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("wsa5_regression.ch");
     write_file(
         &path,
-        "sig poly_id: tensor[d, p] -> tensor[d, p]\n\
+        "sig poly_id[d, p]: tensor[d, p] -> tensor[d, p]\n\
          def poly_id(x) = x\n\
          def use_f32(x: tensor[3, f32]) -> tensor[3, f32] = poly_id(x)\n",
     );

@@ -269,7 +269,7 @@ const ROWS: &[Row] = &[
     Row {
         name: "vmap rejects an element-derived movement extent",
         source: Source::Surf(
-            "def g(x: tensor[n, f32]) -> tensor[m, f32] = {\n\
+            "def g[n, m](x: tensor[n, f32]) -> tensor[m, f32] = {\n\
              \x20 end = cast(tensor_to_scalar(sum(x, 0i32)), i64)\n\
              \x20 shrink(x, [[0i64, end]])\n\
              }\n\
@@ -279,7 +279,9 @@ const ROWS: &[Row] = &[
     },
     Row {
         name: "mean admits a symbolic selected extent",
-        source: Source::Surf("def f(x: tensor[32, n, f32]) -> tensor[32, f32] = mean(x, 1i32)\n"),
+        source: Source::Surf(
+            "def f[n](x: tensor[32, n, f32]) -> tensor[32, f32] = mean(x, 1i32)\n",
+        ),
         expected: Expected::Accept,
     },
     Row {
@@ -344,7 +346,7 @@ const ROWS: &[Row] = &[
     },
     Row {
         name: "ordinary tensor control",
-        source: Source::Surf("def f(x: tensor[n, f32]) -> tensor[n, f32] = relu(x)\n"),
+        source: Source::Surf("def f[n](x: tensor[n, f32]) -> tensor[n, f32] = relu(x)\n"),
         expected: Expected::Accept,
     },
 ];

@@ -239,7 +239,7 @@ fn issue530_cast_literal_size_still_accepted() {
 
 /// The issue's reproducer B, whose size `a_dim` is a cast over a bare `i32`
 /// parameter and therefore has no tensor shape source.
-const SOURCELESS_IN_PIPE_POSITION: &str = "sig f: tensor[a, f32] -> i32 -> tensor[a, f32]\n\
+const SOURCELESS_IN_PIPE_POSITION: &str = "sig f[a]: tensor[a, f32] -> i32 -> tensor[a, f32]\n\
 def f(x: tensor[a, f32], k: i32) = {\n  \
 a_dim = k |> cast(i64)\n  \
 [0.25f32] |> to_tensor |> expand(0i32, a_dim)\n\
@@ -247,14 +247,14 @@ a_dim = k |> cast(i64)\n  \
 
 /// The same program with the `expand` written directly, which is the spelling
 /// that already rejected.
-const SOURCELESS_IN_DIRECT_POSITION: &str = "sig f: tensor[a, f32] -> i32 -> tensor[a, f32]\n\
+const SOURCELESS_IN_DIRECT_POSITION: &str = "sig f[a]: tensor[a, f32] -> i32 -> tensor[a, f32]\n\
 def f(x: tensor[a, f32], k: i32) = {\n  \
 a_dim = k |> cast(i64)\n  \
 expand(to_tensor([0.25f32]), 0i32, a_dim)\n\
 }\n";
 
 /// The same pipe chain whose size IS shape-sourced, so nothing should reject.
-const SHAPE_SOURCED_IN_PIPE_POSITION: &str = "sig f: tensor[a, f32] -> tensor[a, f32]\n\
+const SHAPE_SOURCED_IN_PIPE_POSITION: &str = "sig f[a]: tensor[a, f32] -> tensor[a, f32]\n\
 def f(x: tensor[a, f32]) = {\n  \
 a_dim = cast(shape(x, cast(0, i32)), i64)\n  \
 [0.25f32] |> to_tensor |> expand(0i32, a_dim)\n\
@@ -366,7 +366,7 @@ fn issue1791_the_named_axis_form_keeps_its_own_literal_size_diagnostic() {
 
     // Direct position, four-argument anchored form: the lock.
     let anchored = check_ir_program(&surf_to_deep(
-        "def g(b: tensor[n, f32], k: i32) -> tensor[m, n, f32] = \
+        "def g[n, m](b: tensor[n, f32], k: i32) -> tensor[m, n, f32] = \
          insert(b, m, cast(k, i64), n)\n",
     ))
     .expect_err("the named-axis form requires a literal size");
@@ -378,7 +378,7 @@ fn issue1791_the_named_axis_form_keeps_its_own_literal_size_diagnostic() {
 
     // Pipe position, three-argument named form: the regression.
     let named_in_pipe = check_ir_program(&surf_to_deep(
-        "sig f: i32 -> tensor[m, 1, f32]\n\
+        "sig f[m]: i32 -> tensor[m, 1, f32]\n\
          def f(k: i32) = {\n  \
          a_dim = k |> cast(i64)\n  \
          [0.25f32] |> to_tensor |> insert(m, a_dim)\n\
@@ -394,7 +394,7 @@ fn issue1791_the_named_axis_form_keeps_its_own_literal_size_diagnostic() {
     // Pipe position, four-argument anchored form: the spelling that checked
     // clean on the base.
     let anchored_in_pipe = check_ir_program(&surf_to_deep(
-        "sig f: i32 -> tensor[m, 1, f32]\n\
+        "sig f[m]: i32 -> tensor[m, 1, f32]\n\
          def f(k: i32) = {\n  \
          a_dim = k |> cast(i64)\n  \
          [0.25f32] |> to_tensor |> insert(m, a_dim, n)\n\

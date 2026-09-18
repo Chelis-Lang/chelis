@@ -117,7 +117,7 @@ fn issue186_deep_conv_concrete_tensors_typechecks() {
 #[test]
 fn issue186_surf_conv_nonconcrete_input_dim_is_checker_legal() {
     let src = r#"
-def call_conv(x: tensor[1, 3, h, 8, f32], k: tensor[8, 3, 3, 3, f32]) =
+def call_conv[h](x: tensor[1, 3, h, 8, f32], k: tensor[8, 3, 3, 3, f32]) =
   conv(x, k, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
 "#;
     let deep = surf_to_deep(src);
@@ -128,7 +128,7 @@ def call_conv(x: tensor[1, 3, h, 8, f32], k: tensor[8, 3, 3, 3, f32]) =
 #[test]
 fn issue186_surf_mean_borrowed_nonconcrete_axis_is_checker_legal() {
     let src = r#"
-def call_mean(x: tensor[32, n, f32]) -> tensor[32, f32] = mean(&x, 1)
+def call_mean[n](x: tensor[32, n, f32]) -> tensor[32, f32] = mean(&x, 1)
 "#;
     let deep = surf_to_deep(src);
     check_ir_program(&deep).expect("symbolic mean extent is not a type error");
@@ -138,7 +138,7 @@ def call_mean(x: tensor[32, n, f32]) -> tensor[32, f32] = mean(&x, 1)
 #[test]
 fn issue186_surf_layer_norm_borrowed_nonconcrete_axis_is_checker_legal() {
     let src = r#"
-def call_ln(x: tensor[32, n, f32], g: tensor[n, f32], b: tensor[n, f32]) -> tensor[32, n, f32] =
+def call_ln[n](x: tensor[32, n, f32], g: tensor[n, f32], b: tensor[n, f32]) -> tensor[32, n, f32] =
   layer_norm(&x, &g, &b, 0.00001f32)
 "#;
     let deep = surf_to_deep(src);
@@ -710,7 +710,7 @@ def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8,
 #[test]
 fn red_team_205_round2_f3_symbolic_chain_is_checker_legal() {
     let src = r#"
-def f(x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32]) -> tensor[1, 16, 4, 4, f32] = {
+def f[h](x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32]) -> tensor[1, 16, 4, 4, f32] = {
   y = conv(&x, &k1, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
   conv(&y, &k2, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
 }
@@ -723,7 +723,7 @@ def f(x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8
 #[test]
 fn red_team_205_round2_f3_independent_symbolic_calls_are_checker_legal() {
     let src = r#"
-def f(x1: tensor[1, 3, h, 16, f32], x2: tensor[1, 3, h, 16, f32], k: tensor[8, 3, 3, 3, f32]) -> (tensor[1, 8, 6, 6, f32], tensor[1, 8, 6, 6, f32]) = {
+def f[h](x1: tensor[1, 3, h, 16, f32], x2: tensor[1, 3, h, 16, f32], k: tensor[8, 3, 3, 3, f32]) -> (tensor[1, 8, 6, 6, f32], tensor[1, 8, 6, 6, f32]) = {
   y1 = conv(&x1, &k, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
   y2 = conv(&x2, &k, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
   (y1, y2)
@@ -793,7 +793,7 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, 2, f32]) -> tensor[1, 8,
 #[test]
 fn red_team_205_round3_f_a_symbolic_conv_through_relu_is_checker_legal() {
     let src = r#"
-def f(x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32]) -> tensor[1, 16, 4, 4, f32] = {
+def f[h](x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32]) -> tensor[1, 16, 4, 4, f32] = {
   y = relu(conv(&x, &k1, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)]))
   conv(&y, &k2, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
 }
@@ -807,7 +807,7 @@ def f(x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8
 #[test]
 fn red_team_205_round3_f_a_symbolic_conv_through_add_is_checker_legal() {
     let src = r#"
-def f(x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32], b: tensor[1, 8, 6, 6, f32]) -> tensor[1, 16, 4, 4, f32] = {
+def f[h](x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32], b: tensor[1, 8, 6, 6, f32]) -> tensor[1, 16, 4, 4, f32] = {
   y = add(conv(&x, &k1, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)]), &b)
   conv(&y, &k2, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
 }
@@ -984,7 +984,7 @@ fn red_team_205_round3_f_b_binary_compare_does_not_restore_metadata_rejection() 
         // backend capability diagnostic.
         let src = format!(
             r#"
-def f(x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32], b: tensor[1, 8, 6, 6, f32]) -> tensor[1, 16, 4, 4, f32] = {{
+def f[h](x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32], b: tensor[1, 8, 6, 6, f32]) -> tensor[1, 16, 4, 4, f32] = {{
   y = {op}(conv(&x, &k1, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)]), &b)
   conv(&y, &k2, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
 }}
@@ -1060,7 +1060,7 @@ def f(x: tensor[batch, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16
 #[test]
 fn red_team_205_round3_f_c_nonconcrete_spatial_is_checker_legal() {
     let src = r#"
-def f(x: tensor[1, 3, h, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
+def f[h](x: tensor[1, 3, h, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
   conv(&x, &k, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
 "#;
     let deep = surf_to_deep(src);

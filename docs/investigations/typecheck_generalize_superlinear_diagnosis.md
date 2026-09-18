@@ -3,7 +3,7 @@
 **Issue:** [chelis#1207](https://github.com/Chelis-Lang/chelis/issues/1207)
 
 **Implementation plan:**
-[`spec/design/typecheck_levels_generalization_plan.md`](../../spec/design/typecheck_levels_generalization_plan.md)
+[`spec/design/archive/typecheck_levels_generalization_plan.md`](../../spec/design/archive/typecheck_levels_generalization_plan.md)
 
 **Measured:** 2026-08-06 through 2026-08-10; implementation validated 2026-08-25
 

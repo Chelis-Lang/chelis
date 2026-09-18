@@ -156,7 +156,7 @@ fn assert_accepts(source: &str, label: &str) {
 fn insert_built(rhs: &str) -> String {
     format!(
         "module Repro.RankAgreement\n\
-         sig f: tensor[n, f32] -> tensor[u, f32]\n\
+         sig f[n, u]: tensor[n, f32] -> tensor[u, f32]\n\
          def f(x) = {{\n\
            s = stride(x, 2i64)\n\
            e = insert(x, 0i32, 2i64)\n\
@@ -170,7 +170,7 @@ fn insert_built(rhs: &str) -> String {
 fn expand_built(rhs: &str) -> String {
     format!(
         "module Repro.ExpandControl\n\
-         sig f: tensor[n, f32] -> tensor[u, f32]\n\
+         sig f[n, u]: tensor[n, f32] -> tensor[u, f32]\n\
          def f(x) = {{\n\
            s = stride(x, 2i64)\n\
            e = expand(x, 0i32, 2i64)\n\
@@ -293,8 +293,8 @@ fn a_declared_rank_two_user_def_result_is_refused_in_both_orders() {
     let program = |rhs: &str| {
         format!(
             "module Repro.UserDef\n\
-             def g(y: tensor[a, b, f32]) -> tensor[a, b, f32] = y\n\
-             sig f: tensor[n, f32] -> tensor[u, f32]\n\
+             def g[a, b](y: tensor[a, b, f32]) -> tensor[a, b, f32] = y\n\
+             sig f[n, u]: tensor[n, f32] -> tensor[u, f32]\n\
              def f(x) = {{\n\
                s = stride(x, 2i64)\n\
                e = insert(x, 0i32, 2i64)\n\
@@ -320,12 +320,12 @@ fn a_declared_rank_two_user_def_result_is_refused_in_both_orders() {
 #[test]
 fn a_rank_zero_reduction_result_is_refused_beside_its_rank_one_input() {
     assert_rejects_with(
-        "module Repro.ReduceA\ndef f(x: tensor[n, f32]) = add(sum(x, 0i32), x)\n",
+        "module Repro.ReduceA\ndef f[n](x: tensor[n, f32]) = add(sum(x, 0i32), x)\n",
         "tensor rank mismatch: 0 dims vs 1 dims",
         "add(sum(x, 0), x)",
     );
     assert_rejects_with(
-        "module Repro.ReduceB\ndef f(x: tensor[n, f32]) = add(x, sum(x, 0i32))\n",
+        "module Repro.ReduceB\ndef f[n](x: tensor[n, f32]) = add(x, sum(x, 0i32))\n",
         "tensor rank mismatch: 1 dims vs 0 dims",
         "add(x, sum(x, 0))",
     );
@@ -392,7 +392,7 @@ fn a_rank_two_where_branch_is_reported_once_by_wheres_own_rule() {
     // and destroy the count this row asserts. The subject is unchanged: one
     // mismatched `where` call, one diagnostic.
     let source = "module Repro.Where\n\
-                  def f(c: tensor[n, bool], x: tensor[n, f32], y: tensor[a, b, f32]) = \
+                  def f[n, a, b](c: tensor[n, bool], x: tensor[n, f32], y: tensor[a, b, f32]) = \
                   where(c, x, y)\n";
     let diagnostics = agreed_diagnostics(source, "where with a rank-2 alternative");
     assert_eq!(
@@ -415,7 +415,7 @@ fn a_rank_two_where_branch_is_reported_once_by_wheres_own_rule() {
 fn a_rebinding_to_a_divergent_rank_is_still_refused() {
     assert_rejects_with(
         "module Repro.RebindNegative\n\
-         def f(x: tensor[n, f32]) = {\n\
+         def f[n](x: tensor[n, f32]) = {\n\
            a = insert(x, 0i32, 2i64)\n\
            a = stride(x, 2i64)\n\
            b = insert(x, 0i32, 2i64)\n\
@@ -510,8 +510,8 @@ fn the_expand_reproducer_stamps_rank_one_at_both_ingresses() {
 fn a_lexically_shadowed_builtin_name_keeps_its_parameter_type() {
     assert_accepts(
         "module Repro.ShadowedIdentity\n\
-         def lift(x: tensor[n, f32]) -> tensor[2, n, f32] = insert(x, 0i32, 2i64)\n\
-         def apply(\n\
+         def lift[n](x: tensor[n, f32]) -> tensor[2, n, f32] = insert(x, 0i32, 2i64)\n\
+         def apply[n](\n\
            floor_div: (tensor[n, f32] -> tensor[2, n, f32]),\n\
            x: tensor[n, f32],\n\
          ) -> tensor[2, n, f32] = {\n\
@@ -536,7 +536,7 @@ fn a_lexically_shadowed_builtin_name_keeps_its_parameter_type() {
 fn a_rebinding_does_not_inherit_the_previous_bindings_shape() {
     assert_accepts(
         "module Repro.Rebind\n\
-         def f(x: tensor[n, f32]) = {\n\
+         def f[n](x: tensor[n, f32]) = {\n\
            a = stride(x, 2i64)\n\
            a = relu(insert(x, 0i32, 2i64))\n\
            b = insert(x, 0i32, 2i64)\n\

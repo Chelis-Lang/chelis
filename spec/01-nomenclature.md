@@ -666,7 +666,7 @@ argument. `_scalar` is rank-0; `_vec` is rank-1. Not used when the
 function works generically over rank.
 
 ```chelis
-def softmax_vec(x: tensor[n, f32]) -> tensor[n, f32] = ...
+def softmax_vec[n](x: tensor[n, f32]) -> tensor[n, f32] = ...
 def relu_scalar(x: f32) -> f32 = ...
 ```
 
@@ -686,12 +686,12 @@ column rather than a raw tensor), use a distinct mechanism:
 
 ```chelis
 // Correct
-def is_nan(t: tensor[n, f32]) -> tensor[n, bool] = ...     // tensor variant
-def is_nan_col(f: Frame, name: string) -> tensor[n, bool] = ... // column variant
+def is_nan[n](t: tensor[n, f32]) -> tensor[n, bool] = ...     // tensor variant
+def is_nan_col[n](f: Frame, name: string) -> tensor[n, bool] = ... // column variant
 
 // Incorrect: `_int` here means "Frame variant taking int column",
 // which conflates element type with dispatch form.
-def is_nan_int(f: Frame, name: string) -> tensor[n, bool] = ...
+def is_nan_int[n](f: Frame, name: string) -> tensor[n, bool] = ...
 ```
 
 The historical Coral `*_int` family (`is_nan_int`, `any_nan_int`,

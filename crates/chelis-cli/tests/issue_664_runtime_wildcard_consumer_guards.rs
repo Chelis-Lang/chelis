@@ -187,7 +187,7 @@ fn assert_value_parity(source: &str, stem: &str, want: &[f64]) {
 #[test]
 fn issue_664_elementwise_stride_operand_mismatch_errs_in_both_lanes() {
     let source = format!(
-        "module Repro.ElemStride\nsig f: tensor[n, f32] -> tensor[n, f32]\ndef f(x) = {{\n  s = stride(x, cast(2, i64))\n  add(s, x)\n}}\nout = f(to_tensor([{}]))\n",
+        "module Repro.ElemStride\nsig f[n]: tensor[n, f32] -> tensor[n, f32]\ndef f(x) = {{\n  s = stride(x, cast(2, i64))\n  add(s, x)\n}}\nout = f(to_tensor([{}]))\n",
         six()
     );
     assert_error_parity(
@@ -201,38 +201,25 @@ fn issue_664_elementwise_stride_operand_mismatch_errs_in_both_lanes() {
 /// Pad variant: `[4]` vs `[3]` — pre-fix the C binary's last element was
 /// an out-of-bounds read of `x`.
 ///
-/// The DIAGNOSTIC moved with chelis#1837's `pad` admission, and the property
-/// this row owns did not. These programs carry two real defects: the declared
-/// result claims `n` while the movement produces something else, and the `add`
-/// then mixes two extents. `spec/04-type-system.md` section 4.7 decides which
-/// is reported, in terms: a local guard "takes the source position of the
-/// operation that introduces the guarded extent: an independent effect or trap
-/// that precedes that operation in source order is observed first, and one
-/// that follows it is observed only if the guard passes". The `pad` binding
-/// precedes the `add`, so the claim is reported and the operand mismatch is
-/// reached only if the claim holds.
-///
-/// chelis#664's property is loud rejection on both lanes, never exit 0 over
-/// mismatched shapes, and `assert_error_parity` still enforces exactly that.
-/// `issue_664_elementwise_pad_operand_check_survives_an_agreeing_claim` and
-/// its shrink twin below are the controls that the operand check itself is intact, on this same pad
-/// path: give the claim a value the pad actually produces and the guard passes,
-/// so the `add` is reached and reports the operand mismatch with this row's
-/// former needles.
+/// Under the explicit declaration-binder contract, `n` remains the authored
+/// input/output binder rather than being narrowed by the body. The `add`
+/// therefore owns the first executable failure: it observes `[4]` versus
+/// `[3]`. chelis#664's property remains loud rejection on both lanes, never
+/// exit 0 over mismatched shapes.
 ///
 /// Measured on both lanes at this head: eval and the linked binary print the
 /// same two lines, the binary exiting 134.
 #[test]
 fn issue_664_elementwise_pad_operand_mismatch_errs_in_both_lanes() {
     let source = format!(
-        "module Repro.ElemPad\nsig f: tensor[n, f32] -> tensor[n, f32]\ndef f(x) = {{\n  p = pad(x, [[cast(1, i64), cast(0, i64)]], cast(0.0, f32))\n  add(p, x)\n}}\nout = f(to_tensor([{}]))\n",
+        "module Repro.ElemPad\nsig f[n]: tensor[n, f32] -> tensor[n, f32]\ndef f(x) = {{\n  p = pad(x, [[cast(1, i64), cast(0, i64)]], cast(0.0, f32))\n  add(p, x)\n}}\nout = f(to_tensor([{}]))\n",
         f32_literal(&[1.0, 2.0, 3.0])
     );
     assert_error_parity(
         &source,
         "elempad",
-        "extent `n`: claimed = 3, pad axis 0 = 4",
-        "extent `n`: claimed = 3, pad axis 0 = 4",
+        "tensor shapes must match for elementwise op, got [4] vs [3]",
+        "elementwise operand shape mismatch",
     );
 }
 
@@ -242,22 +229,19 @@ fn issue_664_elementwise_pad_operand_mismatch_errs_in_both_lanes() {
 /// literal bound would pin the sig's `n` at check time; the runtime
 /// bound `n - 3` keeps the wildcard route: `[3]` vs `[6]` at run time.)
 ///
-/// Its diagnostic moved for the reason the pad row above records, and to the
-/// same rule: the `shrink` binding precedes the `add`, so the declared result's
-/// claim over the shrink is reported first. Both lanes agree, and both still
-/// reject. The agreeing-claim control below covers the second clause of that
-/// rule for this family.
+/// As in the pad row, the explicit declaration binder stays rigid, so the
+/// elementwise consumer reports `[3]` versus `[6]` directly on both lanes.
 #[test]
 fn issue_664_elementwise_shrink_control_errs_in_both_lanes() {
     let source = format!(
-        "module Repro.ElemShrink\nsig f: tensor[n, f32] -> tensor[n, f32]\ndef f(x) = {{\n  k = cast(sub(cast(shape(x, cast(0, i32)), i64), cast(3, i64)), i64)\n  s = shrink(x, [[cast(0, i64), k]])\n  add(s, x)\n}}\nout = f(to_tensor([{}]))\n",
+        "module Repro.ElemShrink\nsig f[n]: tensor[n, f32] -> tensor[n, f32]\ndef f(x) = {{\n  k = cast(sub(cast(shape(x, cast(0, i32)), i64), cast(3, i64)), i64)\n  s = shrink(x, [[cast(0, i64), k]])\n  add(s, x)\n}}\nout = f(to_tensor([{}]))\n",
         six()
     );
     assert_error_parity(
         &source,
         "elemshrink",
-        "extent `n`: claimed = 6, shrink axis 0 = 3",
-        "extent `n`: claimed = 6, shrink axis 0 = 3",
+        "tensor shapes must match for elementwise op, got [3] vs [6]",
+        "elementwise operand shape mismatch",
     );
 }
 
@@ -268,7 +252,7 @@ fn issue_664_elementwise_shrink_control_errs_in_both_lanes() {
 #[test]
 fn issue_664_reshape_sym_target_numel_mismatch_errs_in_both_lanes() {
     let source = format!(
-        "module Repro.ReshapeSym\nsig f: tensor[n, f32] -> tensor[u, f32]\ndef f(x) = {{\n  s = stride(x, cast(2, i64))\n  reshape(s, [cast(shape(x, cast(0, i32)), i64)])\n}}\nout = f(to_tensor([{}]))\n",
+        "module Repro.ReshapeSym\nsig f[n, u]: tensor[n, f32] -> tensor[u, f32]\ndef f(x) = {{\n  s = stride(x, cast(2, i64))\n  reshape(s, [cast(shape(x, cast(0, i32)), i64)])\n}}\nout = f(to_tensor([{}]))\n",
         six()
     );
     assert_error_parity(
@@ -285,7 +269,7 @@ fn issue_664_reshape_sym_target_numel_mismatch_errs_in_both_lanes() {
 #[test]
 fn issue_664_reshape_static_target_over_runtime_input_errs_in_both_lanes() {
     let source = format!(
-        "module Repro.ReshapeStatic\nsig f: tensor[n, f32] -> tensor[u, f32]\ndef f(x) = {{\n  s = stride(x, cast(2, i64))\n  reshape(s, [cast(6, i64)])\n}}\nout = f(to_tensor([{}]))\n",
+        "module Repro.ReshapeStatic\nsig f[n, u]: tensor[n, f32] -> tensor[u, f32]\ndef f(x) = {{\n  s = stride(x, cast(2, i64))\n  reshape(s, [cast(6, i64)])\n}}\nout = f(to_tensor([{}]))\n",
         six()
     );
     assert_error_parity(
@@ -301,7 +285,7 @@ fn issue_664_reshape_static_target_over_runtime_input_errs_in_both_lanes() {
 #[test]
 fn issue_664_matching_runtime_operands_still_run() {
     let source = format!(
-        "module Repro.ElemMatch\nsig f: tensor[n, f32] -> tensor[u, f32]\ndef f(x) = {{\n  a = stride(x, cast(2, i64))\n  b = stride(x, cast(2, i64))\n  add(a, b)\n}}\nout = f(to_tensor([{}]))\n",
+        "module Repro.ElemMatch\nsig f[n, u]: tensor[n, f32] -> tensor[u, f32]\ndef f(x) = {{\n  a = stride(x, cast(2, i64))\n  b = stride(x, cast(2, i64))\n  add(a, b)\n}}\nout = f(to_tensor([{}]))\n",
         six()
     );
     assert_value_parity(&source, "elemmatch", &[2.0, 6.0, 10.0]);
@@ -314,7 +298,7 @@ fn issue_664_matching_runtime_operands_still_run() {
 #[test]
 fn issue_664_identity_reshape_sym_target_still_runs() {
     let source = format!(
-        "module Repro.ReshapeIdent\nsig f: tensor[n, f32] -> tensor[n, f32]\ndef f(x) = reshape(x, [cast(shape(x, cast(0, i32)), i64)])\nout = f(to_tensor([{}]))\n",
+        "module Repro.ReshapeIdent\nsig f[n]: tensor[n, f32] -> tensor[n, f32]\ndef f(x) = reshape(x, [cast(shape(x, cast(0, i32)), i64)])\nout = f(to_tensor([{}]))\n",
         six()
     );
     assert_value_parity(&source, "reshapeident", &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
@@ -353,7 +337,7 @@ fn issue_664_identity_reshape_sym_target_still_runs() {
 #[test]
 fn issue_664_elementwise_pad_operand_check_survives_an_agreeing_claim() {
     let source = format!(
-        "module Repro.ElemPadOk\nsig f: tensor[n, f32] -> tensor[4, f32]\ndef f(x) = {{\n  p = pad(x, [[cast(1, i64), cast(0, i64)]], cast(0.0, f32))\n  add(p, x)\n}}\nout = f(to_tensor([{}]))\n",
+        "module Repro.ElemPadOk\nsig f[n]: tensor[n, f32] -> tensor[4, f32]\ndef f(x) = {{\n  p = pad(x, [[cast(1, i64), cast(0, i64)]], cast(0.0, f32))\n  add(p, x)\n}}\nout = f(to_tensor([{}]))\n",
         f32_literal(&[1.0, 2.0, 3.0])
     );
     assert_error_parity(
@@ -376,7 +360,7 @@ fn issue_664_elementwise_pad_operand_check_survives_an_agreeing_claim() {
 #[test]
 fn issue_664_elementwise_shrink_operand_check_survives_an_agreeing_claim() {
     let source = format!(
-        "module Repro.ElemShrinkOk\nsig f: tensor[n, f32] -> tensor[3, f32]\ndef f(x) = {{\n  k = cast(sub(cast(shape(x, cast(0, i32)), i64), cast(3, i64)), i64)\n  s = shrink(x, [[cast(0, i64), k]])\n  add(s, x)\n}}\nout = f(to_tensor([{}]))\n",
+        "module Repro.ElemShrinkOk\nsig f[n]: tensor[n, f32] -> tensor[3, f32]\ndef f(x) = {{\n  k = cast(sub(cast(shape(x, cast(0, i32)), i64), cast(3, i64)), i64)\n  s = shrink(x, [[cast(0, i64), k]])\n  add(s, x)\n}}\nout = f(to_tensor([{}]))\n",
         six()
     );
     assert_error_parity(

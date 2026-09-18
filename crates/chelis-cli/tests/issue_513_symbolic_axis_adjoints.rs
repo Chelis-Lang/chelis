@@ -753,7 +753,7 @@ fn expect_grad_failure(source: &str, stem: &str, needle: &str, context: &str) {
 #[test]
 fn issue_513_stride_on_symbolic_axis_grad_is_upsample_mask() {
     let source = "module Repro.StrideSymAxis\n\
-sig f: tensor[n, f32] -> f32\n\
+sig f[n]: tensor[n, f32] -> f32\n\
 def f(x) = {\n\
   s = stride(&x, cast(2, i64))\n\
   sum(s, cast(0, i32)) |> tensor_to_scalar\n\
@@ -775,7 +775,7 @@ out = grad(f)(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.
 #[test]
 fn issue_513_prod_reduce_on_symbolic_axis_stays_fail_closed() {
     let source = "module Repro.ProdSymAxis\n\
-sig f: tensor[n, 3, f32] -> f32\n\
+sig f[n]: tensor[n, 3, f32] -> f32\n\
 def f(x) = {\n\
   p = prod_reduce(&x, cast(0, i32))\n\
   sum(p, cast(0, i32)) |> tensor_to_scalar\n\
@@ -823,7 +823,7 @@ out = grad(f)(to_tensor([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4
 #[test]
 fn issue_513_symbolic_sig_reshape_arith_target_grad_is_ones() {
     let source = "module Repro.ReshapeArithSym\n\
-sig f: tensor[a, b, f32] -> f32\n\
+sig f[a, b]: tensor[a, b, f32] -> f32\n\
 def f(x) = {\n\
   a_d = cast(shape(x, cast(0, i32)), i64)\n\
   b_d = cast(shape(x, cast(1, i32)), i64)\n\

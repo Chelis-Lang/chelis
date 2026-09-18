@@ -11,13 +11,13 @@ mod common;
 use common::write_file;
 
 const INVALID_NOMINAL_RANK: &str =
-    "(defsig {} bad (t-fn {} (t-adt {} Rows (d-rank {} r)) (t-unit {})))\n";
+    "(defsig {} bad (r) (t-fn {} (t-adt {} Rows (d-rank {} r)) (t-unit {})))\n";
 const INVALID_METADATA_NOMINAL_RANK: &str =
     "(def {} bad (fn {} (params {} (x {type: (t-adt {} Rows (d-rank {} r))})) (var {} x)))\n";
 const VALID_NOMINAL_DIMENSION: &str =
     "(defsig {} sized (t-fn {} (t-adt {} Rows (d-lit {} 3)) (t-unit {})))\n";
 const VALID_TENSOR_RANK: &str =
-    "(defsig {} ranked (t-fn {} (t-tensor {} (d-rank {} r) (t-prim {} f32)) (t-unit {})))\n";
+    "(defsig {} ranked (r) (t-fn {} (t-tensor {} (d-rank {} r) (t-prim {} f32)) (t-unit {})))\n";
 
 fn write_deep(name: &str, source: &str) -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempdir().expect("tempdir");

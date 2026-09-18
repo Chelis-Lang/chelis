@@ -1655,11 +1655,27 @@ pub(super) fn collect_authored_signature_types(
         let Some((DeepTag::Defsig, _, kids)) = stamped_parts(expr) else {
             continue;
         };
-        let (Some(name), Some(signature_expr)) = (kids.first().and_then(symbol_name), kids.get(1))
-        else {
+        let Some((name_expr, binder_list, signature_expr)) = defsig_parts(kids) else {
             continue;
         };
-        if let Some(signature) = type_from_deep_expr(signature_expr, type_headers, errors) {
+        let Some(name) = symbol_name(name_expr) else {
+            continue;
+        };
+        let Some(binders) = defsig_binder_names(binder_list, errors) else {
+            continue;
+        };
+        let mut vg = VarGen::default();
+        let signature = DeepTypeResolver::new(
+            TypeUseSite::Defsig,
+            BinderMode::ExplicitGeneric(&binders),
+            type_headers,
+            &mut vg,
+            errors,
+        )
+        .resolve(signature_expr)
+        .ok()
+        .map(|resolved| resolved.into_type());
+        if let Some(signature) = signature {
             signatures.insert(name.to_string(), signature);
         }
     }

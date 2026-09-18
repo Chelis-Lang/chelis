@@ -93,7 +93,7 @@ fn baseline_wsc_blocker_reproducer_errors_without_unbound_wrapping() {
     let path = dir.path().join("wsc_blocker.ch");
     write_file(
         &path,
-        "sig poly_id: tensor[d, p] -> tensor[d, p]\n\
+        "sig poly_id[d, p]: tensor[d, p] -> tensor[d, p]\n\
          def poly_id(x) = x\n\
          def use_mismatch(x: tensor[3, i32]) -> tensor[3, f32] = poly_id(x)\n",
     );
@@ -171,7 +171,7 @@ fn unbound_wrapper_into_polymorphic_downstream_reports_only_unbound() {
     let baseline_path = dir.path().join("baseline.ch");
     write_file(
         &baseline_path,
-        "sig poly_id: tensor[d, p] -> tensor[d, p]\n\
+        "sig poly_id[d, p]: tensor[d, p] -> tensor[d, p]\n\
          def poly_id(x) = x\n\
          def use_mix(x: tensor[3, i32]) -> tensor[3, f32] = poly_id(x)\n",
     );
@@ -204,7 +204,7 @@ fn unbound_wrapper_into_polymorphic_downstream_reports_only_unbound() {
     let attack_path = dir.path().join("attack.ch");
     write_file(
         &attack_path,
-        "sig poly_id: tensor[d, p] -> tensor[d, p]\n\
+        "sig poly_id[d, p]: tensor[d, p] -> tensor[d, p]\n\
          def poly_id(x) = x\n\
          def use_mix(x: tensor[3, i32]) -> tensor[3, f32] = \
          poly_id(nonexistent_function(x))\n",
@@ -260,7 +260,7 @@ fn unbound_wrapper_into_concrete_downstream_still_surfaces_real_mismatch() {
     let path = dir.path().join("concrete_attack.ch");
     write_file(
         &path,
-        "sig poly_id: tensor[d, p] -> tensor[d, p]\n\
+        "sig poly_id[d, p]: tensor[d, p] -> tensor[d, p]\n\
          def poly_id(x) = x\n\
          def force_f64(y: tensor[3, f64]) -> tensor[3, f64] = y\n\
          def use_mix(x: tensor[3, i32]) -> tensor[3, f32] = \
@@ -306,7 +306,7 @@ fn unbound_function_in_polymorphic_body_no_longer_masks_return_mismatch() {
     let path = dir.path().join("body_error.ch");
     write_file(
         &path,
-        "sig f: tensor[d, p] -> tensor[d, f32]\n\
+        "sig f[d, p]: tensor[d, p] -> tensor[d, f32]\n\
          def f(x) = nonexistent_function(x)\n",
     );
     let errors = run_json_check(&path)["errors"]
@@ -336,30 +336,21 @@ fn unbound_function_in_polymorphic_body_no_longer_masks_return_mismatch() {
 // C. Unbound type-variable in a value-position annotation is now rejected.
 //
 // Spec P4b says outside a sig the existing rule applies, and the
-// existing rule must reject `(t-prim {} weirdname)` (cf. the f8e4m3
-// rejection contract in spec 1.1.1). The F3 fix adds a fall-through
-// arm in `validate_tensor_precisions_in_program` that emits an
-// `UnsupportedTensorPrecision` error for any name in a `t-prim`
-// precision slot that is neither a known active primitive nor a
-// section 1.1.2 unsigned alias. Inside a sig the desugarer would emit
-// `t-var`, so reaching this arm with `t-prim` proves the name appears
-// in a value-position annotation where the closed primitive set
-// applies.
+// existing rule must reject `(t-prim {} weirdname)`. The shared type
+// resolver owns that closed-primitive rejection as a `TypeMismatch`;
+// the legacy tensor-precision validator remains only as a fallback for
+// type metadata no semantic resolver reached.
 // ---------------------------------------------------------------------------
 
-/// F3 fix: an unbound precision name in a let-binding precision slot
-/// must be rejected with an `UnsupportedTensorPrecision` diagnostic
-/// naming the offending identifier, and the score must drop below 1.0.
+/// An unbound precision name in a let-binding precision slot must be rejected
+/// once by the shared type resolver, and the score must drop below 1.0.
 ///
 /// This fixture also exercises the cross-cutting WS-A5 + WS-B2
 /// (contextual tensor literal inference) path: the `[1.0, 2.0, 3.0]`
 /// literal in `xs: tensor[3, p] = [1.0, 2.0, 3.0]` outside a sig had
-/// its element type driven by the annotation's unbound `p`, which
-/// pre-F3 collapsed to `Type::Error` and slipped through silently. The
-/// F3 validator fall-through flags this case explicitly. A separate
-/// section-E test that wrote the identical fixture with a strict
-/// subset of these assertions was merged into this one in the e2e
-/// parsimony pass.
+/// its element type driven by the annotation's unbound `p`. The declaration
+/// owns one located unknown-primitive witness; the generated literal copies
+/// must reuse it rather than emit one diagnostic per element.
 #[test]
 fn unbound_precision_name_in_let_now_rejected() {
     let dir = tempdir().expect("tempdir");
@@ -373,54 +364,68 @@ fn unbound_precision_name_in_let_now_rejected() {
     );
     let json = run_json_check(&path);
     let errors = json["errors"].as_array().cloned().unwrap_or_default();
-    let has_unsupported_prec = errors.iter().any(|e| {
-        let kind = e.get("kind").and_then(|k| k.as_str()).unwrap_or("");
-        let msg = e.get("message").and_then(|m| m.as_str()).unwrap_or("");
-        kind == "UnsupportedTensorPrecision" && msg.contains("`p`")
-    });
+    assert_eq!(
+        errors.len(),
+        1,
+        "the declaration must own one diagnostic regardless of contextual literal length: \
+         {errors:?}"
+    );
+    let error = &errors[0];
+    assert_eq!(error["kind"], "TypeMismatch", "{errors:?}");
     assert!(
-        has_unsupported_prec,
-        "F3 fix: an unbound precision name in a let-binding must be \
-         rejected with an UnsupportedTensorPrecision diagnostic naming \
-         the offending identifier, even in the WS-B2 contextual literal \
-         inference path. Got {errors:?}"
+        error["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("unknown primitive type `p`")),
+        "{errors:?}"
+    );
+    assert_eq!(error["span"]["offset"], 49, "{errors:?}");
+    assert_eq!(error["span_id"], "source:49..50", "{errors:?}");
+    assert!(
+        error["suggestions"].as_array().is_some_and(|suggestions| {
+            suggestions.iter().any(|suggestion| {
+                suggestion.as_str().is_some_and(|suggestion| {
+                    suggestion.contains("nearest active dtype")
+                        && suggestion.contains("declare `p`")
+                })
+            })
+        }),
+        "{errors:?}"
     );
     let score = json["score"].as_f64().unwrap_or(-1.0);
     assert!(
         score < 1.0,
-        "F3 fix: score must drop below 1.0 once the unbound precision \
-         name surfaces a real error. Got {score}"
+        "score must drop below 1.0 once the unbound precision name surfaces a real error. \
+         Got {score}"
     );
 }
 
 #[test]
-fn no_clause_precision_in_def_param_is_implicitly_bound() {
-    // Surf P4b applies WS-A5 implicit collection to the complete
-    // synthesized signature, including inline parameter types. The
-    // parameter and result therefore share one implicit `weirdname`
-    // binder. F3 still rejects unbound precision names in value-local
-    // annotations, where no synthesized signature owns them.
+fn explicit_unusual_precision_in_def_param_is_bound() {
+    // Surf P4b applies the complete explicit list to the synthesized
+    // signature, including inline parameter types. The parameter and result
+    // therefore share one `weirdname` binder. F3 still rejects unbound
+    // precision names in value-local annotations.
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("implicit_p_in_def.ch");
     write_file(
         &path,
-        "def f(x: tensor[3, weirdname]) -> tensor[3, weirdname] = x\n",
+        "def f[weirdname](x: tensor[3, weirdname]) -> tensor[3, weirdname] = x\n",
     );
     let json = run_json_check(&path);
     let errors = json["errors"].as_array().cloned().unwrap_or_default();
-    assert!(errors.is_empty(), "implicit binder must check: {json:#?}");
+    assert!(errors.is_empty(), "explicit binder must check: {json:#?}");
     assert_eq!(json["score"].as_f64(), Some(1.0), "{json:#?}");
 }
 
 #[test]
 fn baseline_two_independent_precision_tvars_accepted() {
-    // Two distinct precision variables in a sig: this is well-formed
-    // per spec (each is implicitly quantified independently).
+    // Two distinct precision variables in a sig are explicitly quantified
+    // independently.
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("two_tvars.ch");
     write_file(
         &path,
-        "sig f: tensor[d, p] -> tensor[d, q] -> tensor[d, p]\n\
+        "sig f[d, p, q]: tensor[d, p] -> tensor[d, q] -> tensor[d, p]\n\
          def f(a, b) = a\n\
          def use_it(x: tensor[3, f32], y: tensor[3, i32]) \
          -> tensor[3, f32] = f(x, y)\n",
@@ -442,7 +447,7 @@ fn baseline_same_precision_tvar_reused_rejects_mismatch() {
     let path = dir.path().join("same_tvar.ch");
     write_file(
         &path,
-        "sig f: tensor[d, p] -> tensor[d, p] -> tensor[d, p]\n\
+        "sig f[d, p]: tensor[d, p] -> tensor[d, p] -> tensor[d, p]\n\
          def f(a, b) = a\n\
          def break_it(x: tensor[3, f32], y: tensor[3, i32]) \
          -> tensor[3, f32] = f(x, y)\n",
@@ -469,7 +474,7 @@ fn baseline_concrete_primitive_in_sig_stays_concrete() {
     let path = dir.path().join("concrete_in_sig.ch");
     write_file(
         &path,
-        "sig f: tensor[d, f32] -> tensor[d, f32]\n\
+        "sig f[d]: tensor[d, f32] -> tensor[d, f32]\n\
          def f(x) = x\n\
          def break_it(x: tensor[3, i32]) -> tensor[3, i32] = f(x)\n",
     );
@@ -490,13 +495,13 @@ fn baseline_concrete_primitive_in_sig_stays_concrete() {
 #[test]
 fn baseline_unsigned_alias_in_precision_rejected_with_diagnostic() {
     // Spec 1.1.2 unsigned aliases are explicitly excluded from the
-    // implicit quantifier collection so they reach the type-checker
-    // 1.1.2 rejection path, not get silently absorbed as a quantifier.
+    // binder admission so they reach the type-checker 1.1.2 rejection path,
+    // not get silently absorbed as a quantifier.
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("unsigned_alias.ch");
     write_file(
         &path,
-        "sig f: tensor[d, u8] -> tensor[d, u8]\n\
+        "sig f[d]: tensor[d, u8] -> tensor[d, u8]\n\
          def f(x) = x\n",
     );
     let errors = run_json_check(&path)["errors"]
@@ -538,7 +543,7 @@ fn polymorphic_sig_no_call_now_skips_emit_silently(target: &str, dir_name: &str)
     fs::create_dir_all(&out).unwrap();
     write_file(
         &src,
-        "sig poly_id: tensor[d, p] -> tensor[d, p]\n\
+        "sig poly_id[d, p]: tensor[d, p] -> tensor[d, p]\n\
          def poly_id(x) = x\n",
     );
     let result = run_build(&src, target, &out);
@@ -581,7 +586,7 @@ fn polymorphic_sig_with_concrete_call_now_builds(target: &str, dir_name: &str) {
     fs::create_dir_all(&out).unwrap();
     write_file(
         &src,
-        "sig poly_id: tensor[n, p] -> tensor[n, p]\n\
+        "sig poly_id[n, p]: tensor[n, p] -> tensor[n, p]\n\
          def poly_id(x) = x\n\
          def call(x: tensor[3, f32]) -> tensor[3, f32] = poly_id(x)\n",
     );

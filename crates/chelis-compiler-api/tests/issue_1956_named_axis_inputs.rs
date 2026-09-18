@@ -33,7 +33,7 @@ fn prepare(library: &str) -> chelis_compiler_api::compiler::PreparedEvalInContex
 #[test]
 fn spread_rank_library_formal_does_not_initialize_same_named_declaration() {
     let prepared = prepare(
-        "weights = with seed(17i64) { _ = print(\"initialize\")\n to_tensor([3.0f32, 5.0f32]) }\ndef total(weights: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(weights, seq)\n",
+        "weights = with seed(17i64) { _ = print(\"initialize\")\n to_tensor([3.0f32, 5.0f32]) }\ndef total[pre, post](weights: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(weights, seq)\n",
     );
     let results = (0..2)
         .map(|_| {
@@ -89,7 +89,7 @@ fn spread_rank_library_formal_does_not_initialize_same_named_declaration() {
 
 fn capture_library(initializer: &str, body: &str) -> String {
     format!(
-        "baseline = to_tensor([7.0f32, 11.0f32])\nweights = with seed(17i64) {{ _ = print(\"initialize\")\n {initializer} }}\ndef total(x: &tensor[..pre, seq, ..post, f32]) -> (tensor[..pre, ..post, f32], tensor[f32]) = {body}\n"
+        "baseline = to_tensor([7.0f32, 11.0f32])\nweights = with seed(17i64) {{ _ = print(\"initialize\")\n {initializer} }}\ndef total[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> (tensor[..pre, ..post, f32], tensor[f32]) = {body}\n"
     )
 }
 
@@ -159,7 +159,7 @@ fn spread_rank_library_capture_preserves_initializer_error() {
 
 #[test]
 fn spread_rank_call_without_a_named_axis_remains_a_check_error() {
-    let error = eval(request("def total(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)\nout = total(to_tensor([7.0f32, 11.0f32]))\n")).unwrap_err();
+    let error = eval(request("def total[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)\nout = total(to_tensor([7.0f32, 11.0f32]))\n")).unwrap_err();
     assert_eq!(error.stage, "check");
     assert!(error.transcript.is_empty());
     assert!(error.errors.iter().any(|error| error.kind() == chelis_vocab::DiagnosticKind::DimensionMismatch && error.message == "rank-spread operand carries no named `seq` axis; a fully-literal or differently-named operand cannot locate the axis (spec/04-type-system.md §4.5.3)"));

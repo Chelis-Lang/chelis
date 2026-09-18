@@ -1,7 +1,7 @@
 module Std.Init.Kaiming
 import Std.Init.Random (normal_like)
 export (kaiming_uniform, kaiming_normal)
-sig kaiming_uniform[p: Float]: &tensor[..r, p] -> p -> tensor[..r, p] ! { Random }
+sig kaiming_uniform[r, p: Float]: &tensor[..r, p] -> p -> tensor[..r, p] ! { Random }
 def kaiming_uniform(template, fan_in) = {
   _ = validate_fan_in(fan_in)
   bound = sqrt(div(6.0, fan_in))
@@ -11,8 +11,8 @@ def kaiming_uniform(template, fan_in) = {
   _ = drop(raw)
   reshape(to_tensor(values), tensor_shape(template, cast(0, i32), cast(rank(template), i32), drop([cast(0, i64)], cast(1, i64))))
 }
-def tensor_shape[p](template: &tensor[..r, p], axis: i32, limit: i32, out: List[i64]) -> List[i64] = if gte(axis, limit) then out else tensor_shape(template, add(axis, cast(1, i32)), limit, append(out, shape(template, axis)))
-sig kaiming_normal[p: Float]: &tensor[..r, p] -> p -> tensor[..r, p] ! { Random }
+def tensor_shape[r, p](template: &tensor[..r, p], axis: i32, limit: i32, out: List[i64]) -> List[i64] = if gte(axis, limit) then out else tensor_shape(template, add(axis, cast(1, i32)), limit, append(out, shape(template, axis)))
+sig kaiming_normal[r, p: Float]: &tensor[..r, p] -> p -> tensor[..r, p] ! { Random }
 def kaiming_normal(template, fan_in) = {
   _ = validate_fan_in(fan_in)
   std = sqrt(div(2.0, fan_in))

@@ -46,7 +46,7 @@ fn ws_c_blocker_polymorphic_precision_does_not_silently_accept_mismatch() {
     let path = dir.path().join("ws_c_blocker.ch");
     write_file(
         &path,
-        r#"sig poly_id: tensor[d, p] -> tensor[d, p]
+        r#"sig poly_id[d, p]: tensor[d, p] -> tensor[d, p]
 def poly_id(x) = x
 def use_mismatch(x: tensor[3, i32]) -> tensor[3, f32] = poly_id(x)
 "#,
@@ -95,7 +95,7 @@ fn polymorphic_precision_accepts_distinct_consistent_instantiations() {
     let path = dir.path().join("poly_distinct.ch");
     write_file(
         &path,
-        r#"sig poly_id: tensor[d, p] -> tensor[d, p]
+        r#"sig poly_id[d, p]: tensor[d, p] -> tensor[d, p]
 def poly_id(x) = x
 def use_f32(x: tensor[3, f32]) -> tensor[3, f32] = poly_id(x)
 def use_int32(x: tensor[3, i32]) -> tensor[3, i32] = poly_id(x)
@@ -125,7 +125,7 @@ fn polymorphic_precision_only_with_concrete_dims() {
     let path = dir.path().join("poly_prec_only.ch");
     write_file(
         &path,
-        r#"sig same_prec: tensor[3, p] -> tensor[3, p]
+        r#"sig same_prec[p]: tensor[3, p] -> tensor[3, p]
 def same_prec(x) = x
 def use_bf16(x: tensor[3, bf16]) -> tensor[3, bf16] = same_prec(x)
 "#,
@@ -155,7 +155,7 @@ fn polymorphic_precision_rejects_inconsistent_within_call() {
     let path = dir.path().join("poly_inconsistent.ch");
     write_file(
         &path,
-        r#"sig poly_id: tensor[d, p] -> tensor[d, p]
+        r#"sig poly_id[d, p]: tensor[d, p] -> tensor[d, p]
 def poly_id(x) = x
 def break_it(x: tensor[3, i32]) -> tensor[3, f32] = poly_id(x)
 "#,
@@ -180,7 +180,7 @@ fn concrete_precision_still_rejects_mismatch_baseline() {
     let path = dir.path().join("concrete_baseline.ch");
     write_file(
         &path,
-        r#"sig f32_id: tensor[d, f32] -> tensor[d, f32]
+        r#"sig f32_id[d]: tensor[d, f32] -> tensor[d, f32]
 def f32_id(x) = x
 def break_it(x: tensor[3, i32]) -> tensor[3, f32] = f32_id(x)
 "#,

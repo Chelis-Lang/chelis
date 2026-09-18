@@ -87,10 +87,10 @@ def empty(schema: Dict[String, ColumnType]) -> Frame
 
 ```chelis
 -- Type-safe column extraction
-def get_float_col(df: Frame, name: String) -> tensor[n, f32]
-def get_int_col(df: Frame, name: String) -> tensor[n, i64]
+def get_float_col[n](df: Frame, name: String) -> tensor[n, f32]
+def get_int_col[n](df: Frame, name: String) -> tensor[n, i64]
 def get_string_col(df: Frame, name: String) -> List[String]
-def get_bool_col(df: Frame, name: String) -> tensor[n, bool]
+def get_bool_col[n](df: Frame, name: String) -> tensor[n, bool]
 
 -- Column names and types
 def columns(df: Frame) -> List[String]
@@ -104,7 +104,7 @@ def ncols(df: Frame) -> i64
 ```chelis
 -- Boolean mask filtering: df[mask]
 -- Under the hood: gather on every column using the indices where mask is true
-def filter(df: Frame, mask: tensor[n, bool]) -> Frame
+def filter[n](df: Frame, mask: tensor[n, bool]) -> Frame
 
 -- Convenience: filter with a predicate on a float column
 def filter_float(df: Frame, col_name: String, pred: f32 -> bool) -> Frame
@@ -158,11 +158,11 @@ def drop_column(df: Frame, name: String) -> Frame
 
 ```chelis
 -- Per-column NaN operations on float columns
-def is_nan(col: tensor[n, f32]) -> tensor[n, bool]
-def fill_nan(col: tensor[n, f32], value: f32) -> tensor[n, f32]
+def is_nan[n](col: tensor[n, f32]) -> tensor[n, bool]
+def fill_nan[n](col: tensor[n, f32], value: f32) -> tensor[n, f32]
 def drop_nan(df: Frame, col_name: String) -> Frame     -- drops rows where col is NaN
-def any_nan(col: tensor[n, f32]) -> bool
-def count_nan(col: tensor[n, f32]) -> i64
+def any_nan[n](col: tensor[n, f32]) -> bool
+def count_nan[n](col: tensor[n, f32]) -> i64
 ```
 
 **Concatenation:**
@@ -263,14 +263,14 @@ These are structural transformations that rearrange data without computation. Im
 
 ```chelis
 -- Rolling window operations on float columns
-def rolling_mean(col: tensor[n, f32], window: i64) -> tensor[n, f32]
-def rolling_sum(col: tensor[n, f32], window: i64) -> tensor[n, f32]
-def rolling_std(col: tensor[n, f32], window: i64) -> tensor[n, f32]
-def rolling_min(col: tensor[n, f32], window: i64) -> tensor[n, f32]
-def rolling_max(col: tensor[n, f32], window: i64) -> tensor[n, f32]
+def rolling_mean[n](col: tensor[n, f32], window: i64) -> tensor[n, f32]
+def rolling_sum[n](col: tensor[n, f32], window: i64) -> tensor[n, f32]
+def rolling_std[n](col: tensor[n, f32], window: i64) -> tensor[n, f32]
+def rolling_min[n](col: tensor[n, f32], window: i64) -> tensor[n, f32]
+def rolling_max[n](col: tensor[n, f32], window: i64) -> tensor[n, f32]
 
 -- Exponentially weighted moving average
-def ewm(col: tensor[n, f32], alpha: f32) -> tensor[n, f32]
+def ewm[n](col: tensor[n, f32], alpha: f32) -> tensor[n, f32]
 ```
 
 **Implementation:**
@@ -474,7 +474,7 @@ Check whether v0.1.7 supports `type Column = IntCol(tensor[n, i64]) | FloatCol(t
 ### Filter Implementation
 
 ```chelis
-def filter(df: Frame, mask: tensor[n, bool]) -> Frame = {
+def filter[n](df: Frame, mask: tensor[n, bool]) -> Frame = {
   -- Convert boolean mask to indices
   indices = where_indices(mask)    -- tensor[k, i64] where k = count(mask == true)
 
@@ -526,7 +526,7 @@ def agg_sum(gf: GroupedFrame, col: String) -> Frame = {
 ### Rolling Window Implementation
 
 ```chelis
-def rolling_sum(col: tensor[n, f32], window: i64) -> tensor[n, f32] = {
+def rolling_sum[n](col: tensor[n, f32], window: i64) -> tensor[n, f32] = {
   cs = cumsum(col, 0)
   -- result[i] = cs[i] - cs[i - window]  for i >= window
   -- result[i] = NaN                       for i < window
@@ -537,7 +537,7 @@ def rolling_sum(col: tensor[n, f32], window: i64) -> tensor[n, f32] = {
   where(mask, result, nan_tensor(n))
 }
 
-def rolling_mean(col: tensor[n, f32], window: i64) -> tensor[n, f32] =
+def rolling_mean[n](col: tensor[n, f32], window: i64) -> tensor[n, f32] =
   div(rolling_sum(col, window), cast(window, f32))
 ```
 
