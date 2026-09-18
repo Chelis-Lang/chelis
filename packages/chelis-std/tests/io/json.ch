@@ -57,6 +57,20 @@ def test_parse_string_returns_json_string() -> unit ! { Test } = {
     | None => fail("parse_json(\"\\\"hello\\\"\") did not yield JsonString")
   }
 }
+def test_parse_unicode_escapes_and_surrogate_pairs() -> unit ! { Test } = {
+  parsed = parse_json("\"\\u00e9\\ud83d\\ude00\"")
+  match json_string(Some(parsed)) with {
+    | Some(text) => assert_eq(text, "é😀", "BMP and surrogate-pair escapes decode to Unicode scalars")
+    | None => fail("unicode escape input did not yield JsonString")
+  }
+}
+def test_try_parse_json_rejects_malformed_unicode_escapes_and_raw_controls() -> unit ! { Test } = {
+  invalid = ["\"\\u12x4\"", "\"\\ud83d\"", "\"\\ude00\"", "\"\\ud83d\\u0041\"", "\"a\u{b}b\""]
+  fold(fn (acc: unit, text: string) -> match try_parse_json(text) with {
+    | Some(_) => fail(string_concat("try_parse_json must reject malformed Unicode/control input: ", text))
+    | None => assert_true(true, "malformed Unicode/control input rejected")
+  }, (), invalid)
+}
 def test_parse_array_three_ints() -> unit ! { Test } = {
   parsed = parse_json("[1, 2, 3]")
   match json_array(Some(parsed)) with {
@@ -129,6 +143,7 @@ def test_try_to_json_rejects_noncanonical_or_in_range_bigint_storage() -> unit !
 }
 def test_to_json_float_is_shortest_round_trip() -> unit ! { Test } = assert_eq(to_json(JsonFloat(0.15110743269565682f64)), "0.15110743269565682", "17-significant-digit f64 survives to_json byte-exactly")
 def test_to_json_string_escapes_specials() -> unit ! { Test } = assert_eq(to_json(JsonString("a\"b\\c\nd\te\rf")), "\"a\\\"b\\\\c\\nd\\te\\rf\"", "quote, backslash, and control whitespace are escaped")
+def test_to_json_string_escapes_every_c0_control() -> unit ! { Test } = assert_eq(to_json(JsonString("\0\u{8}\u{b}\u{c}\u{1f}")), "\"\\u0000\\b\\u000b\\f\\u001f\"", "every C0 control is emitted as RFC-valid JSON")
 def test_to_json_array_and_empty_containers() -> unit ! { Test } = {
   _ = assert_eq(to_json(JsonArray([JsonFloat(1.5f64), JsonNull])), "[1.5,null]", "array renders compact with null")
   _ = assert_eq(to_json(JsonArray([])), "[]", "empty array renders []")

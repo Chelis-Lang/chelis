@@ -10490,7 +10490,7 @@ static void chelis_manifest_print_tensor_elem(const chelis_tensor *tensor, int64
     memcpy(&bits, (const uint8_t *)view.data + index * width, (size_t)width);
     chelis_scalar scalar = chelis_scalar_from_bits(view.dtype, bits);
     chelis_string text = chelis_string_from_scalar(scalar);
-    fputs(chelis_string_data(text), stdout);
+    chelis_print_string(text);
     chelis_string_release(text);
 }
 

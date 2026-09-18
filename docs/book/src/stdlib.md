@@ -212,16 +212,15 @@ image is non-finite are rejected:
 - `to_json(value)` renders a `Json` value compactly (object keys recursively
   sorted by increasing Unicode scalar-value sequence before escaping, f64 via
   `to_string`'s shortest-round-trip form — a claim made for **f64
-  specifically**, the dtype `JsonFloat` carries — escapes for `\" \\ \n \t
-  \r`). Equal object mappings therefore produce the same bytes regardless of
-  insertion history. Non-finite numbers have no JSON representation: `to_json`
+  specifically**, the dtype `JsonFloat` carries — and RFC 8259 escaping for
+  quotes, backslashes, and every control character). Equal object mappings
+  therefore produce the same bytes regardless of insertion history.
+  Non-finite numbers have no JSON representation: `to_json`
   fails on them and `try_to_json` returns `None`. `write_json(path, value)`
   writes the rendered text and names the path on failure; `try_write_json` is
-  its `Option` twin. Control characters outside the escaped set pass through
-  unescaped — RFC 8259-invalid output for such input — because chelis has no
-  `char_code` primitive to emit `\u00XX`; the parser's `decode_escape` likewise
-  rejects `\uXXXX` input. Both halves of that asymmetry need a character-level
-  primitive and are tracked as chelis#953.
+  its `Option` twin. The parser decodes all four-hex-digit `\uXXXX` escapes,
+  combines valid UTF-16 surrogate pairs into one Unicode scalar, and rejects
+  malformed or unpaired surrogate sequences.
 
 These IO modules carry the `IO` effect and run in **both lanes**: under
 `chelis eval`/`chelis test` and inside compiled `chelis build` programs alike.

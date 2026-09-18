@@ -88,6 +88,8 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "test_assert_eq",
     "test_assert_close_tensor",
     "test_assert_eq_tensor",
+    "char_code",
+    "char_from_code",
     "string_len",
     "string_concat",
     "string_slice",
@@ -237,6 +239,8 @@ pub enum BuiltinSiblingCaseId {
     CsvF64,
     CsvInt,
     CsvStr,
+    CharCode,
+    CharFromCode,
     StringLen,
     StringConcat,
     StringSlice,
@@ -509,6 +513,8 @@ const SPECIALIZED_INFERENCE_BUILTINS: &[&str] = &[
     "fail",
     "debug",
     "test_assert_close_tensor",
+    "char_code",
+    "char_from_code",
     "string_len",
     "string_concat",
     "string_slice",
@@ -1505,6 +1511,22 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     // ─── String ops (HostOnly) ───────────────────────────────────────
+    BuiltinDecl {
+        name: "char_code",
+        capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, CharCode),
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "char_from_code",
+        capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, CharFromCode),
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
     BuiltinDecl {
         name: "string_len",
         capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, StringLen),
@@ -2840,6 +2862,34 @@ pub fn builtin_env() -> (Env, VarGen) {
             },
         );
     }
+    env.bind(
+        "char_code".to_string(),
+        Scheme {
+            constraints: vec![],
+            tvars: vec![],
+            tvar_restrictions: vec![],
+            dvars: vec![],
+            rvars: vec![],
+            body: Type::Fn(
+                vec![Type::Prim(Prim::String)],
+                Box::new(Type::Prim(Prim::Int64)),
+            ),
+        },
+    );
+    env.bind(
+        "char_from_code".to_string(),
+        Scheme {
+            constraints: vec![],
+            tvars: vec![],
+            tvar_restrictions: vec![],
+            dvars: vec![],
+            rvars: vec![],
+            body: Type::Fn(
+                vec![Type::Prim(Prim::Int64)],
+                Box::new(Type::Prim(Prim::String)),
+            ),
+        },
+    );
     generic_unop("string_len", &mut env, &mut vg);
     generic_binop("string_concat", &mut env, &mut vg);
     generic_unop("string_trim", &mut env, &mut vg);

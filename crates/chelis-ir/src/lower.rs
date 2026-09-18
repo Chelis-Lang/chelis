@@ -4648,6 +4648,8 @@ fn expr_requires_host_runtime_with_ctx(expr: &Expr, exempt_to_tensor_literal: bo
                     name,
                     "print"
                         | "debug"
+                        | "char_code"
+                        | "char_from_code"
                         | "string_len"
                         | "string_concat"
                         | "string_slice"
