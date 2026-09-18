@@ -1,6 +1,6 @@
 use chelis_unord::UnordMap;
 
-use chelis_deep::ast::{Atom, Expr};
+use chelis_deep::ast::{Atom, Expr, ExprCarrier};
 use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue as IrTensorValue, eval_tensor_roots_with};
 use chelis_ir::tier2;
@@ -22,20 +22,26 @@ pub(super) fn pattern_matches(
     bindings: &mut UnordMap<String, RuntimeValue>,
     adt_fields: &UnordMap<String, Vec<String>>,
 ) -> Result<bool, String> {
-    let Some(list) = as_list(pattern) else {
-        return Ok(false);
+    let (tag, kids) = match pattern.carrier() {
+        ExprCarrier::DecodedNode(tag, _, children) => (tag, children),
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => return Ok(false),
     };
-    match tag(list) {
-        Some(DeepTag::PatVar) => {
-            if let Some(name) = children(list).first().and_then(symbol_name) {
+    match tag {
+        DeepTag::PatVar => {
+            if let Some(name) = kids.first().and_then(symbol_name) {
                 bindings.insert(name.to_string(), value.clone());
                 return Ok(true);
             }
             Ok(false)
         }
-        Some(DeepTag::PatWild) => Ok(true),
-        Some(DeepTag::PatLit) => {
-            let lit = children(list)
+        DeepTag::PatWild => Ok(true),
+        DeepTag::PatLit => {
+            let lit = kids
                 .first()
                 .ok_or_else(|| "pat-lit missing value".to_string())?;
             Ok(match (value, lit) {
@@ -54,8 +60,7 @@ pub(super) fn pattern_matches(
                 _ => false,
             })
         }
-        Some(DeepTag::PatCtor) => {
-            let kids = children(list);
+        DeepTag::PatCtor => {
             let Some(ctor) = kids.first().and_then(symbol_name) else {
                 return Ok(false);
             };
@@ -75,8 +80,7 @@ pub(super) fn pattern_matches(
             }
             Ok(true)
         }
-        Some(DeepTag::PatRecord) => {
-            let kids = children(list);
+        DeepTag::PatRecord => {
             let Some(ctor) = kids.first().and_then(symbol_name) else {
                 return Ok(false);
             };
@@ -96,13 +100,9 @@ pub(super) fn pattern_matches(
                 return Ok(false);
             };
             for kv_expr in kids.iter().skip(1) {
-                let Some(kv_list) = as_list(kv_expr) else {
+                let ExprCarrier::DecodedNode(DeepTag::Kv, _, kv_kids) = kv_expr.carrier() else {
                     continue;
                 };
-                if tag(kv_list) != Some(DeepTag::Kv) {
-                    continue;
-                }
-                let kv_kids = children(kv_list);
                 let Some(field_name) = kv_kids.first().and_then(symbol_name) else {
                     continue;
                 };
@@ -124,14 +124,14 @@ pub(super) fn pattern_matches(
             }
             Ok(true)
         }
-        Some(DeepTag::PatTuple) => {
+        DeepTag::PatTuple => {
             let RuntimeValue::Tuple(items) = value else {
                 return Ok(false);
             };
-            if items.len() != children(list).len() {
+            if items.len() != kids.len() {
                 return Ok(false);
             }
-            for (subpat, item) in children(list).iter().zip(items) {
+            for (subpat, item) in kids.iter().zip(items) {
                 if !pattern_matches(item, subpat, bindings, adt_fields)? {
                     return Ok(false);
                 }
