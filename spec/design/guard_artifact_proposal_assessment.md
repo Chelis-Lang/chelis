@@ -65,11 +65,11 @@ standing lane.
 |---|---|
 | Developer `gate.py --fast` | Unchanged: tier-0 regeneration, formatting, lint, changed-crate Clippy, and 13 fixed integration tripwire identities. It remains the pre-push gate and does not become a broad integration run. |
 | Hosted `gate.py ci-fast` | Preserve the standing baseline of every default-feature library/binary unit target plus the reviewed integration manifest under its existing 20-minute job limit. The base manifest has 73 package/target identities at `b38efcfbe`; this implementation adds `chelis-types::expand_insert_dispatch_family` and `chelis-types::issue_1294_standard_lowerings`, bringing the candidate standing set to 75. |
-| New hosted change-owned lane | On every non-doc pull request and trusted exact-candidate dispatch, run every default-enabled integration target added or directly modified by the candidate. An exclusion is valid only when it names an exact alternative owner and reason. |
+| New hosted change-owned lane | On every non-doc pull request and trusted exact-candidate dispatch, run every integration target added or directly modified by the candidate, activating its Cargo-declared required features. An exclusion is valid only when it names an exact alternative owner and reason. |
 | Fixed default-branch lane | On every push to `main`, run the same standing `ci-fast` suite and do not derive integration ownership from the just-merged diff. Nightly remains the owner for known residual and full-workspace work. |
-| Explicit hosted package expansion | After reviews and repairs fix the intended content, agents dispatch separate workers alongside the final required implementation checks. They run every other default-enabled integration target in each directly changed package or package selected by a reviewed shared-path rule, except exact reviewed target/test exclusions. The workflow accepts a PR number and expected head SHA and rejects stale dispatches. Do not create a new synthetic candidate merely to refresh a ready branch after `main` advances; preserve the exact reviewed head when its prospective merge is safe. |
+| Explicit hosted package expansion | After reviews and repairs fix the intended content, agents dispatch separate workers alongside the final required implementation checks. They run every other integration target in each directly changed package or package selected by a reviewed shared-path rule, activating Cargo-declared required features and retaining exact reviewed target/test exclusions. The workflow accepts a PR number and expected head SHA and rejects stale dispatches. Do not create a new synthetic candidate merely to refresh a ready branch after `main` advances; preserve the exact reviewed head when its prospective merge is safe. |
 | Linux nightly | Unchanged full backstop: all non-ignored default-feature workspace tests across four shards, with the two capacity censuses still deduplicated into their dtype owner and the existing explicitly invoked ignored/manual suites retained. |
-| macOS and feature/nightly owners | Unchanged. The new Linux lanes make no cross-platform, non-default-feature, hardware, ignored-test, or phase-acceptance claim. |
+| macOS and feature/nightly owners | Existing owners remain unchanged. The Linux PR lanes now cover Cargo-declared feature-gated integration targets selected by ownership, but make no cross-platform, hardware, all-feature, ignored-test, or phase-acceptance claim. |
 
 The standing lane remains useful even when no package maps from a documentation
 or workflow-only change. On `main` it is deliberately the complete integration
@@ -121,12 +121,12 @@ row kinds:
   existing owner.
 
 Each exclusion must name its workflow, job, cadence, reason, and tracking issue.
-The three whole-target and six exact-test heavy exclusions currently expressed
-by the default nextest profile need such rows before package expansion runs
-with `--ignore-default-filter`. A newly added or modified excluded target still
-must resolve to that exact alternative owner. Cost alone is not an admission
-rule and no slow test is promoted to nightly merely because it crosses a
-timing threshold.
+The three whole-target heavy exclusions, six exact heavy tests, and eight
+feature-gated failing-on-main observer rows need such entries before package
+expansion runs with `--ignore-default-filter`. A newly added or modified
+excluded target still must resolve to that exact alternative owner. Cost alone
+is not an admission rule and no slow test is promoted to nightly merely because
+it crosses a timing threshold.
 
 For pull requests, the checked-out synthetic merge commit is the execution
 candidate. The planner must require exactly two parents, use `HEAD^1` as the
@@ -144,15 +144,15 @@ test helpers, package implementation, examples, scripts, specifications, or
 workspace files are not mislabelled as direct target changes; they enter
 package expansion or an explicit shared-path disposition.
 
-A target whose `required-features` are all enabled by that package's
-default-feature closure is eligible; a target requiring a non-default feature
-is not. Package qualification is mandatory: `main` at `b38efcfbe` has 779
-default-eligible integration targets in a 34-package workspace; 24 packages
-currently own at least one. Thirty-six target names, covering 78 identities,
-are shared by more than one package, so execution must preserve package
-qualification. The standing runner groups
-globally unique names with units and runs shared names under exact package
-selectors, merging their listing and execution receipts.
+Every Cargo integration target is eligible. A target's declared
+`required-features` are part of its exact execution identity: the planner seals
+them into the candidate plan, and the runner activates their deterministic
+union for each package-scoped list and run command. A crate-level `cfg` without
+the matching Cargo target declaration therefore cannot silently turn a
+change-owned target into an empty suite. The standing runner remains limited
+to the package default-feature closure. Package qualification is mandatory
+because target names are shared across workspace packages; execution must
+preserve the exact `package::target` identity.
 
 ### Execution and receipts
 
@@ -160,16 +160,16 @@ The planner writes one machine-readable plan containing the candidate and base
 SHAs, a normalized ownership-configuration digest, raw changed-path records,
 path dispositions, selected packages, eligible targets, the exact change-owned
 subset, the standing-coverage reuse subset, the disjoint package-expansion
-subset, target/test exclusions, exclusion owners, and a plan digest. Planning
-is required: malformed or incomplete classification blocks both execution
-surfaces.
+subset, each eligible target's declared feature set, target/test exclusions,
+exclusion owners, and a plan digest. Planning is required: malformed or
+incomplete classification blocks both execution surfaces.
 
 Required change-owned execution and manually dispatched package expansion must
 not share worker budgets or aggregate status. Exact `package::target` identities in
 each subset are independently assigned to four deterministic shards by
 `sha256(package + "::" + target) mod 4`. Runners execute package-scoped Cargo
-selectors so equal target names in different packages cannot create a cross
-product or ambiguity.
+selectors with the plan-sealed required features so equal target names in
+different packages cannot create a cross product or ambiguity.
 
 Each required change-owned shard has a 20-minute hard timeout and uploads its
 command, selected and executed test lists, timings, JUnit, and plan digest. Its

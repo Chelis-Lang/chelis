@@ -45,7 +45,7 @@ else:
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_VERSION = 3
-PLAN_VERSION = 3
+PLAN_VERSION = 4
 RECEIPT_VERSION = 1
 STANDING_COVERAGE_VERSION = 1
 DURATION_BASELINE_VERSION = 1
@@ -719,20 +719,11 @@ def validate_config(
             raise ValueError(f"stale manual-only package: {identity.package}")
         if identity not in all_targets:
             raise ValueError(f"stale manual-only target: {identity.canonical}")
-        if identity not in eligible:
-            raise ValueError(
-                "manual-only target is not default-feature eligible: "
-                f"{identity.canonical}"
-            )
     for identity in config.target_exclusions:
         if identity.package not in packages:
             raise ValueError(f"stale exclusion package: {identity.package}")
         if identity not in all_targets:
             raise ValueError(f"stale target exclusion: {identity.canonical}")
-        if identity not in eligible:
-            raise ValueError(
-                f"target exclusion is not default-feature eligible: {identity.canonical}"
-            )
     for identity in config.test_exclusions:
         target = all_targets.get(identity.target_identity)
         if identity.package not in packages:
@@ -740,11 +731,6 @@ def validate_config(
         if target is None:
             raise ValueError(
                 f"stale test-exclusion target: {identity.target_identity.canonical}"
-            )
-        if identity.target_identity not in eligible:
-            raise ValueError(
-                f"test-exclusion target is not default-feature eligible: "
-                f"{identity.target_identity.canonical}"
             )
         try:
             source = source_reader(target.src_path)
@@ -1018,7 +1004,7 @@ def make_plan(
 
     base_all = all_integration_targets(base_metadata)
     candidate_all = all_integration_targets(candidate_metadata)
-    candidate_eligible = integration_targets(candidate_metadata)
+    candidate_eligible = candidate_all
     base_packages = package_infos(base_metadata)
     candidate_packages = package_infos(candidate_metadata)
     candidate_package_names = {package.name for package in candidate_packages}
@@ -1059,9 +1045,6 @@ def make_plan(
         if identity in config.target_exclusions:
             row["kind"] = "integration_target_added_excluded"
             row["owner"] = _owner_dict(config.target_exclusions[identity])
-        elif identity not in candidate_eligible:
-            row["kind"] = "integration_target_added_ineligible"
-            row["required_features"] = list(info.required_features)
         else:
             change_owned.add(identity)
             selected_packages.add(identity.package)
@@ -1134,19 +1117,6 @@ def make_plan(
                         "kind": "integration_target_excluded",
                         "identity": identity.canonical,
                         "owner": _owner_dict(config.target_exclusions[identity]),
-                    }
-                )
-                continue
-            if identity not in candidate_eligible:
-                dispositions.append(
-                    {
-                        "path": path,
-                        "status": status,
-                        "kind": "integration_target_ineligible",
-                        "identity": identity.canonical,
-                        "required_features": list(
-                            candidate_all[identity].required_features
-                        ),
                     }
                 )
                 continue
@@ -1295,6 +1265,10 @@ def make_plan(
         "target_dispositions": target_dispositions,
         "selected_packages": sorted(selected_packages),
         "eligible_targets": sorted(identity.canonical for identity in candidate_eligible),
+        "target_features": {
+            identity.canonical: sorted(info.required_features)
+            for identity, info in sorted(candidate_eligible.items())
+        },
         "change_owned": sorted(identity.canonical for identity in change_owned),
         "package_expansion": sorted(identity.canonical for identity in expansion),
         "standing_targets": sorted(
@@ -1628,6 +1602,7 @@ def _validate_plan_shape(plan: Mapping[str, Any]) -> None:
         "target_dispositions",
         "selected_packages",
         "eligible_targets",
+        "target_features",
         "change_owned",
         "package_expansion",
         "standing_targets",
@@ -1756,6 +1731,28 @@ def _validate_plan_shape(plan: Mapping[str, Any]) -> None:
     if not required_packages <= set(packages):
         raise ValueError("plan required packages must be selected packages")
     eligible = set(_identity_list(plan, "eligible_targets"))
+    raw_target_features = plan.get("target_features")
+    if not isinstance(raw_target_features, dict):
+        raise ValueError("plan target_features must be an identity mapping")
+    if set(raw_target_features) != eligible:
+        raise ValueError(
+            "plan target_features must exactly cover eligible targets"
+        )
+    for canonical, features in raw_target_features.items():
+        Identity.parse(canonical)
+        if (
+            not isinstance(features, list)
+            or any(
+                not isinstance(feature, str)
+                or not IDENTIFIER.fullmatch(feature)
+                for feature in features
+            )
+            or features != sorted(set(features))
+        ):
+            raise ValueError(
+                f"plan target_features for {canonical} must be sorted unique "
+                "feature names"
+            )
     change_owned = set(_identity_list(plan, "change_owned"))
     expansion = set(_identity_list(plan, "package_expansion"))
     standing = set(_identity_list(plan, "standing_targets"))
@@ -2504,6 +2501,7 @@ def target_command(
     *,
     list_only: bool,
     manual_only: bool = False,
+    required_features: Sequence[str] = (),
 ) -> list[str]:
     action = "list" if list_only else "run"
     command = [
@@ -2514,11 +2512,18 @@ def target_command(
         identity.package,
         "--test",
         identity.target,
-        "--locked",
-        "--profile",
-        "ci-full",
-        "--ignore-default-filter",
     ]
+    features = sorted(set(required_features))
+    if features:
+        command.extend(["--features", ",".join(features)])
+    command.extend(
+        [
+            "--locked",
+            "--profile",
+            "ci-full",
+            "--ignore-default-filter",
+        ]
+    )
     if manual_only:
         command.extend(["--run-ignored", "all"])
     relevant = sorted(
@@ -2598,6 +2603,7 @@ def target_group_command(
     *,
     list_only: bool,
     manual_only: bool = False,
+    required_features: Sequence[str] = (),
 ) -> list[str]:
     if not identities:
         raise ValueError("target command group must not be empty")
@@ -2607,6 +2613,7 @@ def target_group_command(
             exclusions,
             list_only=list_only,
             manual_only=manual_only,
+            required_features=required_features,
         )
     packages = {identity.package for identity in identities}
     if len(packages) != 1:
@@ -2629,6 +2636,9 @@ def target_group_command(
     ]
     for identity in identities:
         command.extend(["--test", identity.target])
+    features = sorted(set(required_features))
+    if features:
+        command.extend(["--features", ",".join(features)])
     command.extend(
         [
             "--locked",
@@ -2921,6 +2931,10 @@ def execute_shard(
 
     suite_documents: list[Path] = []
     exclusions = _test_exclusions_from_plan(plan)
+    target_features = {
+        Identity.parse(canonical): tuple(features)
+        for canonical, features in plan["target_features"].items()
+    }
     manual_only_targets = {
         row["identity"] for row in plan["manual_only_targets"]
     }
@@ -2997,11 +3011,19 @@ def execute_shard(
                 len(identities) == 1
                 and identities[0].canonical in manual_only_targets
             )
+            required_features = sorted(
+                {
+                    feature
+                    for identity in identities
+                    for feature in target_features[identity]
+                }
+            )
             list_command = target_group_command(
                 identities,
                 exclusions,
                 list_only=True,
                 manual_only=manual_only,
+                required_features=required_features,
             )
             list_started_at = _utc_timestamp()
             started = time.monotonic()
@@ -3103,6 +3125,7 @@ def execute_shard(
                 exclusions,
                 list_only=False,
                 manual_only=manual_only,
+                required_features=required_features,
             )
             produced_junit.unlink(missing_ok=True)
             run_started_at = _utc_timestamp()
