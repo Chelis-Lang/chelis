@@ -470,6 +470,15 @@ fn infer_malformed_tagged_effects(
         locals,
     );
     if let Some(placeholder_children) = metadata_less_children.get(1..) {
+        if tag == DeepTag::Var {
+            effects.extend(&infer_children_effects(
+                placeholder_children,
+                top_level_effects,
+                top_level_callables,
+                locals,
+            ));
+            return effects;
+        }
         effects.extend(&infer_tagged_effects(
             tag,
             placeholder_children,
@@ -2251,6 +2260,43 @@ mod tests {
         assert!(
             !infer(&pure).contains(&Effect::Random),
             "[03-ROLE-1]: a trailing malformed child must not mint the Var's identity"
+        );
+
+        let random_effects = BTreeMap::from([(
+            "random_user".to_string(),
+            EffectSet::from_iter([Effect::Random]),
+        )]);
+        let random_callables = BTreeSet::from(["random_user".to_string()]);
+        let infer_with_random_user = |expr: &Expr| {
+            infer_expr_effects(expr, &random_effects, &random_callables, &BTreeMap::new())
+        };
+
+        let trailing_name = app(malformed_var(
+            "identity",
+            Expr::Atom(Atom::Name("random_user".into()), span),
+        ));
+        assert!(
+            !infer_with_random_user(&trailing_name).contains(&Effect::Random),
+            "a trailing name must not become an alternative parent Var identity"
+        );
+
+        let trailing_call = app(malformed_var(
+            "identity",
+            Expr::node(
+                DeepTag::App,
+                Metadata::default(),
+                vec![Expr::node(
+                    DeepTag::Var,
+                    Metadata::default(),
+                    vec![Expr::Atom(Atom::Name("random_user".into()), span)],
+                    span,
+                )],
+                span,
+            ),
+        ));
+        assert!(
+            infer_with_random_user(&trailing_call).contains(&Effect::Random),
+            "trailing malformed descendants remain recursively effectful"
         );
     }
 
