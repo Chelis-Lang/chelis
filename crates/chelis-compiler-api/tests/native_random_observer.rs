@@ -131,6 +131,14 @@ static int source_sink(void *context, const __chelis_random_observer_event *even
 "#;
 
 fn source_rows(c: &str, repeat: bool) -> Vec<(Value, Value)> {
+    source_rows_with_entry(c, "__chelis_observed_run", repeat)
+}
+
+fn source_rows_with_entry(c: &str, observed_entry: &str, repeat: bool) -> Vec<(Value, Value)> {
+    assert!(
+        c.contains(&format!("static chelis_tuple* {observed_entry}(")),
+        "missing selected observed entry {observed_entry}"
+    );
     let driver = format!(
         r#"
 {JSON_SINK}
@@ -138,7 +146,7 @@ fn source_rows(c: &str, repeat: bool) -> Vec<(Value, Value)> {
 int main(void) {{
     chelis_tensor *x = input(4);
     for (int i = 0; i < {}; ++i) {{
-        chelis_tuple *result = __chelis_observed_run(x, source_sink, stdout, 17ULL + (uint64_t)i);
+        chelis_tuple *result = {observed_entry}(x, source_sink, stdout, 17ULL + (uint64_t)i);
         chelis_tuple_release(result);
     }}
     chelis_tensor_release(x);
@@ -160,6 +168,24 @@ int main(void) {{
         .iter()
         .map(|v| (v[0].clone(), v[1].clone()))
         .collect()
+}
+
+fn selected_observed_entry(c: &str, entry: &str) -> String {
+    let candidates = [
+        format!("__chelis_observed_{entry}"),
+        format!(
+            "__chelis_observed_{}",
+            ownership_support::authored_c_symbol(entry)
+        ),
+    ];
+    let observed_entries = candidates
+        .into_iter()
+        .filter(|symbol| c.contains(&format!("static chelis_tuple* {symbol}(")))
+        .collect::<Vec<_>>();
+    let [observed_entry] = observed_entries.as_slice() else {
+        panic!("expected one selected `{entry}` observer entry, got {observed_entries:?}");
+    };
+    observed_entry.clone()
 }
 
 fn associations_match(rows: &[(Value, Value)], metadata: &Value) -> bool {
@@ -250,13 +276,11 @@ fn associations_match(rows: &[(Value, Value)], metadata: &Value) -> bool {
 #[test]
 fn retained_full_source_ids_survive_resource_offsets_and_reject_association_mutants() {
     let input = OBSERVED_SOURCE
-        .replace(
-            "with seed(7i64)",
-            "with device(\"cpu:identity-fixture\") { with seed(7i64)",
-        )
+        .replace("with seed(7i64)", "with device(\"cpu\") { with seed(7i64)")
         .replace("\n}\n\ndef run", "\n}}\n\ndef run");
     let (c, metadata) = with_source_metadata(&input);
-    let rows = source_rows(&c, true);
+    let observed_entry = selected_observed_entry(&c, "run");
+    let rows = source_rows_with_entry(&c, &observed_entry, true);
     assert_eq!(rows.len(), 22);
     assert!(metadata.as_object().unwrap().values().any(|site| {
         site["full"]
@@ -329,7 +353,8 @@ fn retained_full_source_ids_survive_resource_offsets_and_reject_association_muta
     );
     ownership_support::run_expect_failure(
         &mutant,
-        &driver(
+        &driver_for(
+            &observed_entry,
             17,
             "assert(event->kind == __CHELIS_RANDOM_OBSERVER_INVOCATION_INIT || event->source_certified); return json_sink(context, event);",
         ),
@@ -530,6 +555,10 @@ static int json_sink(void *context, const __chelis_random_observer_event *event)
 "#;
 
 fn driver(invocation: u64, sink: &str) -> String {
+    driver_for("__chelis_observed_run", invocation, sink)
+}
+
+fn driver_for(observed_entry: &str, invocation: u64, sink: &str) -> String {
     format!(
         r#"
 {JSON_SINK}
@@ -538,7 +567,7 @@ static int selected_sink(void *context, const __chelis_random_observer_event *ev
 }}
 int main(void) {{
     chelis_tensor *x = input(4);
-    chelis_tuple *result = __chelis_observed_run(x, selected_sink, stdout, {invocation}ULL);
+    chelis_tuple *result = {observed_entry}(x, selected_sink, stdout, {invocation}ULL);
     chelis_tuple_release(result);
     chelis_tensor_release(x);
     return 0;
