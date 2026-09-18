@@ -8,7 +8,6 @@ use super::*;
 use chelis_deep::Span;
 use chelis_deep::ast::{List, Metadata, UnknownFormData};
 use chelis_deep::parser::parse_str;
-use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use syn::visit::Visit;
@@ -401,48 +400,22 @@ fn predicate_reader_has_no_node_to_list_bridge() {
         "production audit must include the crate root"
     );
 
-    let parsed = sources
+    let calls = sources
         .into_iter()
-        .map(|path| {
-            let module = production_module_path(&source_root, &path);
+        .flat_map(|path| {
             let source = fs::read_to_string(&path)
                 .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
             let syntax = syn::parse_file(&source)
                 .unwrap_or_else(|error| panic!("failed to parse {}: {error}", path.display()));
-            AuditSource {
-                label: path.display().to_string(),
-                module,
-                syntax,
-            }
+            audit_syntax(&path.display().to_string(), &syntax)
         })
         .collect::<Vec<_>>();
-    let calls = audit_sources(&parsed);
     assert!(
         calls.is_empty(),
-        "predicate grammar must consume ExprCarrier directly; found {:?}",
+        "predicate grammar reserves method, qualified, imported, and macro `to_list` spellings \
+         so it cannot reconstruct a Node list; found {:?}",
         calls
     );
-}
-
-fn production_module_path(root: &Path, path: &Path) -> Vec<String> {
-    let relative = path.strip_prefix(root).unwrap_or_else(|error| {
-        panic!("{} is outside {}: {error}", path.display(), root.display())
-    });
-    let mut components = relative
-        .components()
-        .map(|component| component.as_os_str().to_string_lossy().into_owned())
-        .collect::<Vec<_>>();
-    let file = components
-        .pop()
-        .expect("production Rust source has a file name");
-    if !matches!(file.as_str(), "lib.rs" | "main.rs" | "mod.rs") {
-        components.push(
-            file.strip_suffix(".rs")
-                .expect("production Rust source has .rs suffix")
-                .to_string(),
-        );
-    }
-    components
 }
 
 fn production_rust_sources(root: &Path) -> Vec<PathBuf> {
@@ -467,493 +440,83 @@ fn production_rust_sources(root: &Path) -> Vec<PathBuf> {
     sources
 }
 
-struct AuditSource {
-    label: String,
-    module: Vec<String>,
-    syntax: syn::File,
-}
-
-#[derive(Default)]
-struct ModuleSymbols {
-    imports: BTreeMap<String, Vec<String>>,
-    aliases: BTreeMap<String, syn::Type>,
-    globs: Vec<Vec<String>>,
-}
-
-fn collect_use_bindings(
-    tree: &syn::UseTree,
-    prefix: &mut Vec<String>,
-    imports: &mut BTreeMap<String, Vec<String>>,
-    globs: &mut Vec<Vec<String>>,
-) {
+fn use_tree_mentions_to_list(tree: &syn::UseTree) -> bool {
     match tree {
         syn::UseTree::Path(path) => {
-            prefix.push(path.ident.to_string());
-            collect_use_bindings(&path.tree, prefix, imports, globs);
-            prefix.pop();
+            path.ident == "to_list" || use_tree_mentions_to_list(&path.tree)
         }
-        syn::UseTree::Name(name) if name.ident == "self" => {
-            let local = prefix
-                .last()
-                .expect("a self import has a path prefix")
-                .clone();
-            imports.insert(local, prefix.clone());
-        }
-        syn::UseTree::Name(name) => {
-            let mut target = prefix.clone();
-            target.push(name.ident.to_string());
-            imports.insert(name.ident.to_string(), target);
-        }
-        syn::UseTree::Rename(rename) => {
-            let mut target = prefix.clone();
-            if rename.ident != "self" {
-                target.push(rename.ident.to_string());
-            }
-            imports.insert(rename.rename.to_string(), target);
-        }
-        syn::UseTree::Group(group) => {
-            for item in &group.items {
-                collect_use_bindings(item, prefix, imports, globs);
-            }
-        }
-        syn::UseTree::Glob(_) => globs.push(prefix.clone()),
+        syn::UseTree::Name(name) => name.ident == "to_list",
+        syn::UseTree::Rename(rename) => rename.ident == "to_list",
+        syn::UseTree::Group(group) => group.items.iter().any(use_tree_mentions_to_list),
+        syn::UseTree::Glob(_) => false,
     }
 }
 
-fn collect_module_symbols(
-    module: &[String],
-    items: &[syn::Item],
-    modules: &mut BTreeMap<Vec<String>, ModuleSymbols>,
-) {
-    modules.entry(module.to_vec()).or_default();
-    for item in items {
-        collect_item_symbols(
-            item,
-            modules
-                .get_mut(module)
-                .expect("current module was enrolled"),
-        );
-        if let syn::Item::Mod(item) = item
-            && let Some((_, items)) = &item.content
-        {
-            let mut child = module.to_vec();
-            child.push(item.ident.to_string());
-            collect_module_symbols(&child, items, modules);
-        }
-    }
-}
-
-fn collect_item_symbols(item: &syn::Item, symbols: &mut ModuleSymbols) {
-    match item {
-        syn::Item::Use(item) => collect_use_bindings(
-            &item.tree,
-            &mut Vec::new(),
-            &mut symbols.imports,
-            &mut symbols.globs,
-        ),
-        syn::Item::Type(item) => {
-            symbols
-                .aliases
-                .insert(item.ident.to_string(), (*item.ty).clone());
-        }
-        syn::Item::ExternCrate(item) => {
-            let local = item
-                .rename
-                .as_ref()
-                .map_or_else(|| item.ident.to_string(), |(_, rename)| rename.to_string());
-            symbols.imports.insert(local, vec![item.ident.to_string()]);
-        }
-        _ => {}
-    }
-}
-
-fn audit_sources(sources: &[AuditSource]) -> Vec<String> {
-    let mut modules = BTreeMap::new();
-    for source in sources {
-        collect_module_symbols(&source.module, &source.syntax.items, &mut modules);
-    }
-
-    let mut calls = Vec::new();
-    for source in sources {
-        let mut audit = CrateNodeToListAudit::new(&modules, source.module.clone(), &source.label);
-        audit.visit_file(&source.syntax);
-        calls.extend(audit.calls);
-    }
-    calls
-}
-
-fn audit_virtual_sources(sources: &[(&str, &str)]) -> Vec<String> {
-    let parsed = sources
-        .iter()
-        .map(|(module, source)| AuditSource {
-            label: if module.is_empty() {
-                "crate".to_string()
-            } else {
-                module.to_string()
-            },
-            module: module
-                .split("::")
-                .filter(|segment| !segment.is_empty())
-                .map(str::to_string)
-                .collect(),
-            syntax: syn::parse_file(source).expect("audit fixture parses"),
-        })
-        .collect::<Vec<_>>();
-    audit_sources(&parsed)
+fn macro_mentions_to_list(mac: &syn::Macro) -> bool {
+    mac.tokens
+        .to_string()
+        .split(|character: char| !(character.is_alphanumeric() || character == '_'))
+        .any(|token| token == "to_list")
 }
 
 fn audit_source(source: &str) -> Vec<String> {
-    audit_virtual_sources(&[("", source)])
+    let syntax = syn::parse_file(source).expect("audit fixture parses");
+    audit_syntax("fixture", &syntax)
 }
 
-struct CrateNodeToListAudit<'a> {
-    modules: &'a BTreeMap<Vec<String>, ModuleSymbols>,
-    current_module: Vec<String>,
+fn audit_syntax(label: &str, syntax: &syn::File) -> Vec<String> {
+    let mut audit = NodeToListSpellingAudit {
+        label,
+        findings: Vec::new(),
+    };
+    audit.visit_file(syntax);
+    audit.findings
+}
+
+struct NodeToListSpellingAudit<'a> {
     label: &'a str,
-    calls: Vec<String>,
-    lexical_symbols: Vec<ModuleSymbols>,
-    value_scopes: Vec<BTreeMap<String, bool>>,
+    findings: Vec<String>,
 }
 
-impl<'a> CrateNodeToListAudit<'a> {
-    fn new(
-        modules: &'a BTreeMap<Vec<String>, ModuleSymbols>,
-        current_module: Vec<String>,
-        label: &'a str,
-    ) -> Self {
-        Self {
-            modules,
-            current_module,
-            label,
-            calls: Vec::new(),
-            lexical_symbols: Vec::new(),
-            value_scopes: Vec::new(),
-        }
-    }
-
+impl NodeToListSpellingAudit<'_> {
     fn record(&mut self, kind: &str) {
-        self.calls.push(format!("{}: {kind}", self.label));
-    }
-
-    fn path_targets_node_to_list(&self, path: &syn::ExprPath) -> bool {
-        if !path
-            .path
-            .segments
-            .last()
-            .is_some_and(|segment| segment.ident == "to_list")
-        {
-            return false;
-        }
-        if path
-            .qself
-            .as_ref()
-            .is_some_and(|qself| self.type_is_node(&qself.ty))
-        {
-            return true;
-        }
-        let mut owner = path.path.clone();
-        owner.segments.pop();
-        self.path_is_node_type(&owner)
-    }
-
-    fn path_is_node_type(&self, path: &syn::Path) -> bool {
-        let segments = path
-            .segments
-            .iter()
-            .map(|segment| segment.ident.to_string())
-            .collect::<Vec<_>>();
-        self.resolve_path(&self.current_module, &segments, &mut BTreeSet::new())
-    }
-
-    fn type_is_node(&self, ty: &syn::Type) -> bool {
-        self.type_is_node_from(&self.current_module, ty, &mut BTreeSet::new())
-    }
-
-    fn type_is_node_from(
-        &self,
-        module: &[String],
-        ty: &syn::Type,
-        seen: &mut BTreeSet<String>,
-    ) -> bool {
-        match ty {
-            syn::Type::Path(path) if path.qself.is_none() => {
-                let segments = path
-                    .path
-                    .segments
-                    .iter()
-                    .map(|segment| segment.ident.to_string())
-                    .collect::<Vec<_>>();
-                self.resolve_path(module, &segments, seen)
-            }
-            syn::Type::Reference(reference) => {
-                self.type_is_node_from(module, &reference.elem, seen)
-            }
-            syn::Type::Paren(paren) => self.type_is_node_from(module, &paren.elem, seen),
-            syn::Type::Group(group) => self.type_is_node_from(module, &group.elem, seen),
-            _ => false,
-        }
-    }
-
-    fn resolve_path(
-        &self,
-        module: &[String],
-        segments: &[String],
-        seen: &mut BTreeSet<String>,
-    ) -> bool {
-        const CANONICAL_NODE: [&str; 3] = ["chelis_deep", "node", "Node"];
-        if segments.iter().map(String::as_str).eq(CANONICAL_NODE) {
-            return true;
-        }
-        let Some(first) = segments.first().map(String::as_str) else {
-            return false;
-        };
-        match first {
-            "crate" => self.resolve_absolute(&segments[1..], seen),
-            "self" => self.resolve_in_module(module, &segments[1..], seen),
-            "super" => {
-                let mut owner = module.to_vec();
-                let mut offset = 0;
-                while segments
-                    .get(offset)
-                    .is_some_and(|segment| segment == "super")
-                {
-                    if owner.pop().is_none() {
-                        return false;
-                    }
-                    offset += 1;
-                }
-                self.resolve_in_module(&owner, &segments[offset..], seen)
-            }
-            _ => self.resolve_in_module(module, segments, seen),
-        }
-    }
-
-    fn resolve_absolute(&self, segments: &[String], seen: &mut BTreeSet<String>) -> bool {
-        for split in (0..=segments.len()).rev() {
-            let module = segments[..split].to_vec();
-            if self.modules.contains_key(&module)
-                && self.resolve_in_module(&module, &segments[split..], seen)
-            {
-                return true;
-            }
-        }
-        false
-    }
-
-    fn resolve_in_module(
-        &self,
-        module: &[String],
-        segments: &[String],
-        seen: &mut BTreeSet<String>,
-    ) -> bool {
-        const CANONICAL_NODE: [&str; 3] = ["chelis_deep", "node", "Node"];
-        if segments.iter().map(String::as_str).eq(CANONICAL_NODE) {
-            return true;
-        }
-        let Some(first) = segments.first() else {
-            return false;
-        };
-        let key = format!("{}|{}", module.join("::"), segments.join("::"));
-        if !seen.insert(key) {
-            return false;
-        }
-
-        if module == self.current_module {
-            for symbols in self.lexical_symbols.iter().rev() {
-                if let Some(result) = self.resolve_from_symbols(module, segments, symbols, seen) {
-                    return result;
-                }
-            }
-        }
-        if let Some(symbols) = self.modules.get(module)
-            && let Some(result) = self.resolve_from_symbols(module, segments, symbols, seen)
-        {
-            return result;
-        }
-        if segments.len() > 1 {
-            let mut child = module.to_vec();
-            child.push(first.clone());
-            if self.modules.contains_key(&child)
-                && self.resolve_in_module(&child, &segments[1..], seen)
-            {
-                return true;
-            }
-        }
-        false
-    }
-
-    fn resolve_from_symbols(
-        &self,
-        module: &[String],
-        segments: &[String],
-        symbols: &ModuleSymbols,
-        seen: &mut BTreeSet<String>,
-    ) -> Option<bool> {
-        let first = segments.first()?;
-        if let Some(target) = symbols.imports.get(first) {
-            let mut expanded = target.clone();
-            expanded.extend_from_slice(&segments[1..]);
-            return Some(self.resolve_path(module, &expanded, seen));
-        }
-        if segments.len() == 1
-            && let Some(alias) = symbols.aliases.get(first)
-        {
-            return Some(self.type_is_node_from(module, alias, seen));
-        }
-        for glob in &symbols.globs {
-            let mut expanded = glob.clone();
-            expanded.extend_from_slice(segments);
-            if self.resolve_path(module, &expanded, seen) {
-                return Some(true);
-            }
-        }
-        None
-    }
-
-    fn value_is_node(&self, expr: &syn::Expr) -> bool {
-        match expr {
-            syn::Expr::Path(path) if path.qself.is_none() && path.path.segments.len() == 1 => {
-                let name = path.path.segments[0].ident.to_string();
-                self.value_scopes
-                    .iter()
-                    .rev()
-                    .find_map(|scope| scope.get(&name))
-                    .copied()
-                    .unwrap_or(false)
-            }
-            syn::Expr::Reference(reference) => self.value_is_node(&reference.expr),
-            syn::Expr::Paren(paren) => self.value_is_node(&paren.expr),
-            syn::Expr::Group(group) => self.value_is_node(&group.expr),
-            syn::Expr::Call(call) => match call.func.as_ref() {
-                syn::Expr::Path(path) => {
-                    let mut owner = path.path.clone();
-                    owner.segments.pop();
-                    self.path_is_node_type(&owner)
-                }
-                _ => false,
-            },
-            syn::Expr::Struct(struct_expr) => self.path_is_node_type(&struct_expr.path),
-            _ => false,
-        }
-    }
-
-    fn bind_value(&mut self, pat: &syn::Pat, is_node: bool) {
-        let name = match pat {
-            syn::Pat::Ident(ident) => Some(ident.ident.to_string()),
-            syn::Pat::Type(typed) => {
-                self.bind_value(&typed.pat, is_node);
-                None
-            }
-            syn::Pat::Reference(reference) => {
-                self.bind_value(&reference.pat, is_node);
-                None
-            }
-            syn::Pat::Paren(paren) => {
-                self.bind_value(&paren.pat, is_node);
-                None
-            }
-            _ => None,
-        };
-        if let Some(name) = name
-            && let Some(scope) = self.value_scopes.last_mut()
-        {
-            scope.insert(name, is_node);
-        }
-    }
-
-    fn bind_signature(&mut self, signature: &syn::Signature) {
-        for input in &signature.inputs {
-            if let syn::FnArg::Typed(typed) = input {
-                self.bind_value(&typed.pat, self.type_is_node(&typed.ty));
-            }
-        }
+        self.findings.push(format!("{}: {kind}", self.label));
     }
 }
 
-impl<'ast> Visit<'ast> for CrateNodeToListAudit<'_> {
-    fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
-        let Some((_, items)) = &item.content else {
-            return;
-        };
-        let parent_lexical_symbols = std::mem::take(&mut self.lexical_symbols);
-        self.current_module.push(item.ident.to_string());
-        for item in items {
-            self.visit_item(item);
-        }
-        self.current_module.pop();
-        self.lexical_symbols = parent_lexical_symbols;
-    }
-
-    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
-        self.value_scopes.push(BTreeMap::new());
-        self.bind_signature(&item.sig);
-        syn::visit::visit_item_fn(self, item);
-        self.value_scopes.pop();
-    }
-
-    fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
-        self.value_scopes.push(BTreeMap::new());
-        self.bind_signature(&item.sig);
-        syn::visit::visit_impl_item_fn(self, item);
-        self.value_scopes.pop();
-    }
-
-    fn visit_trait_item_fn(&mut self, item: &'ast syn::TraitItemFn) {
-        self.value_scopes.push(BTreeMap::new());
-        self.bind_signature(&item.sig);
-        syn::visit::visit_trait_item_fn(self, item);
-        self.value_scopes.pop();
-    }
-
-    fn visit_expr_closure(&mut self, closure: &'ast syn::ExprClosure) {
-        self.value_scopes.push(BTreeMap::new());
-        for input in &closure.inputs {
-            if let syn::Pat::Type(typed) = input {
-                self.bind_value(&typed.pat, self.type_is_node(&typed.ty));
-            }
-        }
-        syn::visit::visit_expr_closure(self, closure);
-        self.value_scopes.pop();
-    }
-
-    fn visit_block(&mut self, block: &'ast syn::Block) {
-        let mut symbols = ModuleSymbols::default();
-        for statement in &block.stmts {
-            if let syn::Stmt::Item(item) = statement {
-                collect_item_symbols(item, &mut symbols);
-            }
-        }
-        self.lexical_symbols.push(symbols);
-        self.value_scopes.push(BTreeMap::new());
-        syn::visit::visit_block(self, block);
-        self.value_scopes.pop();
-        self.lexical_symbols.pop();
-    }
-
-    fn visit_local(&mut self, local: &'ast syn::Local) {
-        syn::visit::visit_local(self, local);
-        let is_node = match &local.pat {
-            syn::Pat::Type(typed) => self.type_is_node(&typed.ty),
-            _ => local
-                .init
-                .as_ref()
-                .is_some_and(|init| self.value_is_node(&init.expr)),
-        };
-        self.bind_value(&local.pat, is_node);
-    }
-
+impl<'ast> Visit<'ast> for NodeToListSpellingAudit<'_> {
     fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
-        if call.method == "to_list" && self.value_is_node(&call.receiver) {
-            self.record("method call");
+        if call.method == "to_list" {
+            self.record("reserved method spelling");
         }
         syn::visit::visit_expr_method_call(self, call);
     }
 
     fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
-        if self.path_targets_node_to_list(path) {
-            self.record("path reference");
+        if path
+            .path
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == "to_list")
+            && (path.qself.is_some() || path.path.segments.len() > 1)
+        {
+            self.record("reserved qualified path spelling");
         }
         syn::visit::visit_expr_path(self, path);
+    }
+
+    fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+        if use_tree_mentions_to_list(&item.tree) {
+            self.record("reserved imported path spelling");
+        }
+        syn::visit::visit_item_use(self, item);
+    }
+
+    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+        if macro_mentions_to_list(mac) {
+            self.record("reserved macro token");
+        }
+        syn::visit::visit_macro(self, mac);
     }
 }
 
@@ -985,13 +548,14 @@ fn node_to_list_audit_allows_unrelated_same_named_functions() {
     let calls = audit_source(source);
     assert!(
         calls.is_empty(),
-        "the Node bridge ratchet must not ban unrelated symbols named to_list: {:?}",
+        "the structural ratchet reserves receiver and qualified spellings, not an unqualified \
+         free function: {:?}",
         calls
     );
 }
 
 #[test]
-fn node_to_list_audit_resolves_module_imports_and_typed_closures() {
+fn node_to_list_audit_reserves_all_receiver_spellings_without_type_inference() {
     for source in [
         "use chelis_deep::node; fn bridge() { let _ = node::Node::to_list(value, span); }",
         "use chelis_deep::node as deep_node; fn bridge() { let _ = deep_node::Node::to_list(value, span); }",
@@ -1000,52 +564,18 @@ fn node_to_list_audit_resolves_module_imports_and_typed_closures() {
         "fn bridge() { use chelis_deep::node::Node as LocalNode; let _ = LocalNode::to_list(value, span); }",
         "fn bridge() { type LocalNode = chelis_deep::node::Node; let _ = LocalNode::to_list(value, span); }",
         "use chelis_deep::node::Node; fn bridge() { let f = |node: &Node| node.to_list(span); }",
+        "fn make_node() -> chelis_deep::node::Node { todo!() } fn bridge() { let node = make_node(); node.to_list(span); }",
+        "fn bridge(node: Box<chelis_deep::node::Node>) { node.to_list(span); }",
+        "fn bridge(node: chelis_deep::node::Node) { let f = |node: Unrelated| node.to_list(span); let _ = node; }",
+        "use chelis_deep::node::Node::to_list as bridge; fn call() { bridge(node, span); }",
+        "fn bridge() { quote::quote! { node.to_list(span) }; }",
     ] {
         let calls = audit_source(source);
         assert!(
             !calls.is_empty(),
-            "module or closure spelling escaped the predicate source audit: {source}"
+            "reserved bridge spelling escaped the predicate source audit: {source}"
         );
     }
-}
-
-#[test]
-fn node_to_list_audit_keeps_sibling_module_types_separate() {
-    let source = "
-        mod chelis_owner {
-            use chelis_deep::node::Node as Shared;
-            fn bridge(value: Shared) { let _ = value.to_list(span); }
-        }
-        mod unrelated_owner {
-            struct Shared;
-            impl Shared { fn to_list(&self, _: u32) {} }
-            fn convert(value: Shared) { value.to_list(0); }
-        }
-    ";
-    let calls = audit_source(source);
-    assert_eq!(
-        calls.len(),
-        1,
-        "only the Chelis Node alias in its own module is in scope"
-    );
-}
-
-#[test]
-fn node_to_list_audit_resolves_root_aliases_across_source_files() {
-    let calls = audit_virtual_sources(&[
-        (
-            "",
-            "type RedteamDeepNode = chelis_deep::node::Node; mod child;",
-        ),
-        (
-            "child",
-            "fn bridge() { let _ = crate::RedteamDeepNode::to_list(value, span); }",
-        ),
-    ]);
-    assert!(
-        !calls.is_empty(),
-        "a crate-root Node alias used by a child source file must be rejected"
-    );
 }
 
 #[test]
