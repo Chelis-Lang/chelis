@@ -1,0 +1,1 @@
+Local tensor-ascription planning now preserves decoded carrier parity, follows executable Deep wrappers, and ignores metadata-only or opaque legacy payloads. See [#1125](https://github.com/Chelis-Lang/chelis/issues/1125).
