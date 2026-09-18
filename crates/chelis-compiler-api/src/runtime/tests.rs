@@ -609,6 +609,80 @@ fn runtime_eval_rejects_each_nonruntime_carrier_explicitly() {
 }
 
 #[test]
+fn runtime_nested_owner_readers_reject_malformed_children() {
+    use chelis_deep::Span;
+    use chelis_deep::ast::UnknownFormData;
+
+    let span = Span::new(12, 18);
+    let name = |value: &str| Expr::Atom(Atom::Name(value.to_string()), span);
+    let unknown = || {
+        Expr::UnknownForm(Box::new(UnknownFormData {
+            head: "future-field".to_string(),
+            meta: Metadata::default(),
+            children: vec![],
+            span,
+        }))
+    };
+
+    let mut adt_fields = UnordMap::new();
+    adt_fields.insert("Point".to_string(), vec!["x".to_string()]);
+    let mut bindings = UnordMap::new();
+    let malformed_pattern = Expr::node(
+        DeepTag::PatRecord,
+        Metadata::default(),
+        vec![name("Point"), unknown()],
+        span,
+    );
+    assert_eq!(
+        pattern_matches(
+            &RuntimeValue::Adt {
+                ctor: "Point".to_string(),
+                fields: vec![RuntimeValue::Bool(true)],
+                field_names: Some(vec!["x".to_string()]),
+            },
+            &malformed_pattern,
+            &mut bindings,
+            &adt_fields,
+        )
+        .expect_err("a malformed pat-record child must not disappear"),
+        "pat-record field must be a decoded `kv` node"
+    );
+    assert!(bindings.is_empty());
+
+    let malformed_record = Expr::node(
+        DeepTag::Record,
+        Metadata::default(),
+        vec![name("Point"), unknown()],
+        span,
+    );
+    assert_eq!(
+        issue_1125_eval_raw_expr(&malformed_record)
+            .expect_err("a malformed record child must not disappear"),
+        "record field must be a decoded `kv` node"
+    );
+
+    let malformed_match = Expr::node(
+        DeepTag::Match,
+        Metadata::default(),
+        vec![
+            Expr::node(
+                DeepTag::Lit,
+                Metadata::default(),
+                vec![Expr::Atom(Atom::Bool(true), span)],
+                span,
+            ),
+            unknown(),
+        ],
+        span,
+    );
+    assert_eq!(
+        issue_1125_eval_raw_expr(&malformed_match)
+            .expect_err("a malformed match arm must not disappear"),
+        "match arm must be a decoded `arm` node"
+    );
+}
+
+#[test]
 fn runtime_eval_reader_has_no_node_to_list_bridge() {
     let source = include_str!("eval.rs");
     let forbidden = [".to_", "list("].concat();

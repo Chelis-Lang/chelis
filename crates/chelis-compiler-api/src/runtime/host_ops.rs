@@ -100,15 +100,28 @@ pub(super) fn pattern_matches(
                 return Ok(false);
             };
             for kv_expr in kids.iter().skip(1) {
-                let ExprCarrier::DecodedNode(DeepTag::Kv, _, kv_kids) = kv_expr.carrier() else {
-                    continue;
+                let kv_kids = match kv_expr.carrier() {
+                    ExprCarrier::DecodedNode(DeepTag::Kv, _, children) => children,
+                    ExprCarrier::DecodedNode(_, _, _)
+                    | ExprCarrier::StructuralList(_)
+                    | ExprCarrier::UndecodableHead(_, _, _)
+                    | ExprCarrier::Atom(_)
+                    | ExprCarrier::MetadataMap(_)
+                    | ExprCarrier::MetadataExpression(_)
+                    | ExprCarrier::MalformedLegacyList(_) => {
+                        return Err("pat-record field must be a decoded `kv` node".to_string());
+                    }
                 };
-                let Some(field_name) = kv_kids.first().and_then(symbol_name) else {
-                    continue;
-                };
-                let Some(pattern_expr) = kv_kids.get(1) else {
-                    continue;
-                };
+                if kv_kids.len() != 2 {
+                    return Err("pat-record `kv` field must contain a name and pattern".to_string());
+                }
+                let field_name = kv_kids
+                    .first()
+                    .and_then(symbol_name)
+                    .ok_or_else(|| "pat-record field name must be a symbol".to_string())?;
+                let pattern_expr = kv_kids
+                    .get(1)
+                    .ok_or_else(|| "pat-record field missing pattern".to_string())?;
                 let Some(index) = declared_fields
                     .iter()
                     .position(|declared| declared == field_name)

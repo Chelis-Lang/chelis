@@ -1333,11 +1333,17 @@ impl<'a> EvalContext<'a> {
                 | ExprCarrier::Atom(_)
                 | ExprCarrier::MetadataMap(_)
                 | ExprCarrier::MetadataExpression(_)
-                | ExprCarrier::MalformedLegacyList(_) => continue,
+                | ExprCarrier::MalformedLegacyList(_) => {
+                    return Err("record field must be a decoded `kv` node".to_string());
+                }
             };
-            let Some(name) = field_kids.first().and_then(symbol_name) else {
-                continue;
-            };
+            if field_kids.len() != 2 {
+                return Err("record `kv` field must contain a name and value".to_string());
+            }
+            let name = field_kids
+                .first()
+                .and_then(symbol_name)
+                .ok_or_else(|| "record field name must be a symbol".to_string())?;
             let value = self.eval_expr(
                 field_kids
                     .get(1)
@@ -2210,10 +2216,14 @@ impl<'a> EvalContext<'a> {
                 | ExprCarrier::Atom(_)
                 | ExprCarrier::MetadataMap(_)
                 | ExprCarrier::MetadataExpression(_)
-                | ExprCarrier::MalformedLegacyList(_) => continue,
+                | ExprCarrier::MalformedLegacyList(_) => {
+                    return Err("match arm must be a decoded `arm` node".to_string());
+                }
             };
-            if arm_kids.len() < 3 {
-                continue;
+            if arm_kids.len() != 3 {
+                return Err(
+                    "match `arm` must contain exactly a pattern, guard, and body".to_string(),
+                );
             }
             let saved = self.bindings.clone();
             let saved_types = self.binding_types.clone();
