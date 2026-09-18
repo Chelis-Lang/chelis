@@ -2,7 +2,7 @@ mod signature_entry;
 pub mod staged;
 pub use signature_entry::SignatureEntryPlan;
 
-use chelis_deep::DeepTag;
+use chelis_deep::{DeepTag, ExprCarrier};
 use chelis_unord::{UnordMap, UnordSet};
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
@@ -2520,15 +2520,19 @@ pub fn named_entry_uses_grad_like(program: &CheckedProgram, name: &str) -> bool 
 /// function definition, not a value binding.
 pub fn program_has_top_level_value_bindings(program: &CheckedProgram) -> bool {
     top_level_items(program.exprs()).iter().any(|expr| {
-        let Expr::List(list, _) = expr else {
-            return false;
+        let children = match expr.carrier() {
+            ExprCarrier::DecodedNode(DeepTag::Def, _, children) => children,
+            ExprCarrier::DecodedNode(_, _, _)
+            | ExprCarrier::StructuralList(_)
+            | ExprCarrier::UndecodableHead(_, _, _)
+            | ExprCarrier::Atom(_)
+            | ExprCarrier::MetadataMap(_)
+            | ExprCarrier::MetadataExpression(_)
+            | ExprCarrier::MalformedLegacyList(_) => return false,
         };
-        if tag(list) != Some(DeepTag::Def) {
-            return false;
-        }
         !matches!(
-            children(list).get(1),
-            Some(Expr::List(body_list, _)) if tag(body_list) == Some(DeepTag::Fn)
+            children.get(1).map(Expr::carrier),
+            Some(ExprCarrier::DecodedNode(DeepTag::Fn, _, _))
         )
     })
 }
@@ -3168,29 +3172,33 @@ pub fn host_program_uses_builtin<T>(program: &HostProgram<T>, builtin: &str) -> 
 /// otherwise-unreachable function bodies.
 pub fn find_direct_builtin_call(program: &CheckedProgram, builtins: &[&str]) -> Option<String> {
     fn find(expr: &Expr, builtins: &[&str]) -> Option<String> {
-        match expr {
-            Expr::List(list, _) => {
-                if tag(list) == Some(DeepTag::App)
-                    && let Some(callee) = children(list).first().and_then(as_list)
-                    && tag(callee) == Some(DeepTag::Var)
-                    && let Some(name) = children(callee).first().and_then(symbol_name)
+        match expr.carrier() {
+            ExprCarrier::DecodedNode(tag, metadata, children) => {
+                if tag == DeepTag::App
+                    && let Some(ExprCarrier::DecodedNode(DeepTag::Var, _, callee_children)) =
+                        children.first().map(Expr::carrier)
+                    && let Some(name) = callee_children.first().and_then(symbol_name)
                     && builtins.contains(&name)
                 {
                     return Some(name.to_string());
                 }
+                metadata
+                    .find_expression(|value| find(value, builtins))
+                    .or_else(|| children.iter().find_map(|expr| find(expr, builtins)))
+            }
+            ExprCarrier::StructuralList(elements) => {
+                elements.iter().find_map(|expr| find(expr, builtins))
+            }
+            ExprCarrier::UndecodableHead(_, metadata, children) => metadata
+                .find_expression(|value| find(value, builtins))
+                .or_else(|| children.iter().find_map(|expr| find(expr, builtins))),
+            ExprCarrier::MetadataMap(map) => map.find_expression(|value| find(value, builtins)),
+            ExprCarrier::MetadataExpression(meta) => find(&meta.expr, builtins)
+                .or_else(|| meta.metadata.find_expression(|value| find(value, builtins))),
+            ExprCarrier::MalformedLegacyList(list) => {
                 list.elements.iter().find_map(|expr| find(expr, builtins))
             }
-            Expr::Map(map, _) => map.find_expression(|value| find(value, builtins)),
-            Expr::MetaExpr(meta, _) => find(&meta.expr, builtins)
-                .or_else(|| meta.metadata.find_expression(|value| find(value, builtins))),
-            Expr::Atom(_, _) => None,
-            // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
-            Expr::Node(node, span) => {
-                let bridged = Expr::List(node.to_list(*span), *span);
-                find(&bridged, builtins)
-            }
-            Expr::BareList(elems, _) => elems.iter().find_map(|elem| find(elem, builtins)),
-            Expr::UnknownForm(data) => data.children.iter().find_map(|child| find(child, builtins)),
+            ExprCarrier::Atom(_) => None,
         }
     }
 
@@ -16070,11 +16078,8 @@ fn top_level_items(exprs: &[Expr]) -> Vec<&Expr> {
 }
 
 fn collect_top_level_items<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
-    let Expr::List(list, _) = expr else {
-        return;
-    };
-    if tag(list) == Some(DeepTag::Module) {
-        for child in list.elements.iter().skip(3) {
+    if let ExprCarrier::DecodedNode(DeepTag::Module, _, children) = expr.carrier() {
+        for child in children.iter().skip(1) {
             collect_top_level_items(child, out);
         }
         return;
