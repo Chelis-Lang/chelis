@@ -107,6 +107,37 @@ out = {
 }
 "#;
 
+const DIRECT_LOCAL_CALLABLE_SHADOW_CONTROL: &str = r#"
+def model(
+  theta: &tensor[2, f32],
+  x_data: &tensor[6, f32]
+) -> tensor[6, f32] = insert(sum(copy(theta), 0i32), 0i32, 6i64)
+
+out = {
+  model = fn (
+    theta: &tensor[2, f32],
+    x_data: &tensor[6, f32]
+  ) -> insert(
+    sum(mul(copy(theta), to_tensor([2.0f32, 3.0f32])), 0i32),
+    0i32,
+    6i64
+  )
+  target = fn (
+    theta_local: tensor[2, f32],
+    x_local: tensor[6, f32],
+    seed_local: tensor[6, f32]
+  ) -> {
+    prediction = model(theta_local, x_local)
+    tensor_to_scalar(sum(mul(prediction, seed_local), 0i32))
+  }
+  grad(target, wrt=theta_local)(
+    to_tensor([1.0f32, 2.0f32]),
+    to_tensor([0.0f32, 1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32]),
+    to_tensor([1.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32])
+  )
+}
+"#;
+
 fn eval_tensor(source: &str, stem: &str) -> Vec<f64> {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join(format!("{stem}.ch"));
@@ -168,6 +199,29 @@ fn local_callable_shadow_is_not_rebound_to_same_named_top_level_def() {
         native,
         [2.0, 3.0],
         "native C rebound the lexical model shadow"
+    );
+}
+
+#[test]
+fn directly_captured_local_callable_shadow_is_not_rebound_to_top_level() {
+    let eval = eval_tensor(
+        DIRECT_LOCAL_CALLABLE_SHADOW_CONTROL,
+        "issue676_direct_local_callable_shadow_eval",
+    );
+    let native_stdout = build_and_run(
+        DIRECT_LOCAL_CALLABLE_SHADOW_CONTROL,
+        "issue676_direct_local_callable_shadow_c",
+    );
+    let native = parse_tensor_data(&native_stdout, "out");
+    assert_eq!(eval, [2.0, 3.0], "eval rebound the directly captured model");
+    assert_eq!(
+        native,
+        [2.0, 3.0],
+        "native C rebound the directly captured model"
+    );
+    assert_eq!(
+        eval, native,
+        "direct capture disagreed across execution lanes"
     );
 }
 

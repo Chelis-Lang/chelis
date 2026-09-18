@@ -349,8 +349,10 @@ impl<'a> EvalContext<'a> {
             .collect();
 
         // Build a fresh `program_defs` that includes both top-level defs from
-        // the host runtime AND any captured local closures. The closure owns
-        // the exact checked function expression: reconstructing one from only
+        // the host runtime AND any captured local closures. The captured
+        // binding wins when its name shadows a top-level def, matching the
+        // evaluator's lexical environment and [04-LIN-1]. The closure owns the
+        // exact checked function expression: reconstructing one from only
         // parameter names and the body erases parameter types and the checked
         // function signature. A nested function-valued capture then reaches
         // lowering as rank zero and corrupts the backward DAG (chelis#676).
@@ -360,9 +362,7 @@ impl<'a> EvalContext<'a> {
                 checked_function, ..
             } = value
             {
-                program_defs
-                    .entry(name.clone())
-                    .or_insert_with(|| checked_function.as_ref().clone());
+                program_defs.insert(name.clone(), checked_function.as_ref().clone());
             }
         }
 
