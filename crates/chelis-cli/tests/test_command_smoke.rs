@@ -1687,3 +1687,77 @@ fn chelis_test_legit_opaque_package_test_still_passes() {
         .stdout(predicate::str::contains("test_round_trip"))
         .stdout(predicate::str::contains("1 passed, 0 failed"));
 }
+
+fn assert_batched_opaque_diagnostic_is_source_facing(json: bool) {
+    let (_dir, pkg) = make_opaque_reef_package(if json {
+        "batch-diag-json"
+    } else {
+        "batch-diag-plain"
+    });
+    write_file(
+        &pkg.join("tests/forge.ch"),
+        "module Smoke.Tests.Forge\n\
+         import Smoke.Types (prob_value)\n\
+         def bad__forge(x: f32) -> f32 = {\n\
+         \x20 p = Probability { value: x }\n\
+         \x20 prob_value(p)\n\
+         }\n\
+         def test_forge() -> unit = \
+         test_assert(bad__forge(0.5) >= 0.0, \"forge\")\n",
+    );
+
+    let mut command = Command::cargo_bin("chelis").expect("binary");
+    command
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&pkg)
+        .args(["test", "--batch-mode", "auto"]);
+    if json {
+        command.arg("--json");
+    }
+    let output = command.arg("tests/").output().expect("run");
+    let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
+    let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
+    let combined = format!("{stdout}\n{stderr}");
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "the opaque construction must fail; stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        combined.contains("in def `bad__forge`"),
+        "the diagnostic lost the authored source name; stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        !combined.contains("__ChelisTestBatch"),
+        "the diagnostic leaked a synthetic batch module; stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        !combined.contains("__Eval"),
+        "the diagnostic leaked a synthetic eval module; stdout={stdout}\nstderr={stderr}"
+    );
+
+    if json {
+        let rows = stdout
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("NDJSON row"))
+            .collect::<Vec<_>>();
+        assert!(!rows.is_empty(), "JSON failure emitted no rows");
+        assert!(
+            rows.iter()
+                .any(|row| row.to_string().contains("bad__forge")),
+            "machine-facing rows omitted the source diagnostic: {rows:#?}"
+        );
+    }
+}
+
+#[test]
+fn chelis_test_auto_batch_plain_diagnostic_demangles_synthetic_module() {
+    assert_batched_opaque_diagnostic_is_source_facing(false);
+}
+
+#[test]
+fn chelis_test_auto_batch_json_diagnostic_demangles_synthetic_module() {
+    assert_batched_opaque_diagnostic_is_source_facing(true);
+}
