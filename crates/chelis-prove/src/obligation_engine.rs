@@ -11,8 +11,8 @@
 //! through tide is identical to the CLI on the same module (the parity
 //! the cross-surface test locks).
 
-use chelis_deep::DeepTag;
 use chelis_deep::annotations::{MetadataKey as K, MetadataValue as M, TypeSyntax};
+use chelis_deep::{DeepTag, ExprCarrier};
 use std::collections::BTreeMap;
 
 use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind};
@@ -1555,9 +1555,7 @@ fn module_zero_arg_scalar_defs(exprs: &[Expr]) -> Vec<String> {
                     out.push(name.to_string());
                 }
             }
-            if let Expr::List(l, _) = expr {
-                walk(&l.elements[2.min(l.elements.len())..], out);
-            }
+            walk(node_children(expr), out);
         }
     }
     let mut out = Vec::new();
@@ -1655,9 +1653,7 @@ fn literal_const_value(exprs: &[Expr], name: &str) -> Option<f64> {
                     }
                 }
             }
-            if let Expr::List(l, _) = expr
-                && let Some(v) = find(&l.elements[2.min(l.elements.len())..], name)
-            {
+            if let Some(v) = find(node_children(expr), name) {
                 return Some(v);
             }
         }
@@ -1722,10 +1718,34 @@ fn inject_into_defining_module(exprs: &[Expr], type_name: &str, new_defs: Vec<Ex
         {
             return true;
         }
-        if let Expr::List(l, _) = expr {
-            return l.elements.iter().any(|c| module_defines(c, type_name));
+        match expr.carrier() {
+            ExprCarrier::DecodedNode(_, _, children) => match expr {
+                Expr::List(list, _) => list
+                    .elements
+                    .iter()
+                    .any(|child| module_defines(child, type_name)),
+                Expr::Node(_, _) => children
+                    .iter()
+                    .any(|child| module_defines(child, type_name)),
+                _ => unreachable!(),
+            },
+            ExprCarrier::UndecodableHead(_, _, _) => match expr {
+                Expr::List(list, _) => list
+                    .elements
+                    .iter()
+                    .any(|child| module_defines(child, type_name)),
+                Expr::UnknownForm(_) => false,
+                _ => unreachable!(),
+            },
+            ExprCarrier::MalformedLegacyList(list) => list
+                .elements
+                .iter()
+                .any(|child| module_defines(child, type_name)),
+            ExprCarrier::StructuralList(_)
+            | ExprCarrier::Atom(_)
+            | ExprCarrier::MetadataMap(_)
+            | ExprCarrier::MetadataExpression(_) => false,
         }
-        false
     }
     let mut out = Vec::with_capacity(exprs.len());
     let mut injected = false;
@@ -2203,17 +2223,29 @@ fn deep_bool_lit(v: bool) -> Expr {
     deep_typed_lit("bool", Expr::Atom(Atom::Bool(v), Span::new(0, 0)))
 }
 fn list_tag(expr: &Expr) -> Option<DeepTag> {
-    match expr {
-        Expr::Node(node, _) => Some(node.tag()),
-        Expr::List(list, _) => list.tag(),
-        _ => None,
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(tag, _, _) => Some(tag),
+        ExprCarrier::MalformedLegacyList(list) => list.tag(),
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => None,
     }
 }
 fn node_children(expr: &Expr) -> &[Expr] {
-    match expr {
-        Expr::Node(node, _) => node.children_slice(),
-        Expr::List(l, _) if l.elements.len() >= 2 => &l.elements[2..],
-        _ => &[],
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(_, _, children) => children,
+        ExprCarrier::UndecodableHead(_, _, children) if matches!(expr, Expr::List(_, _)) => {
+            children
+        }
+        ExprCarrier::MalformedLegacyList(list) if list.elements.len() >= 2 => &list.elements[2..],
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => &[],
     }
 }
 fn sym_text(expr: &Expr) -> Option<&str> {
@@ -2224,13 +2256,16 @@ fn sym_text(expr: &Expr) -> Option<&str> {
 }
 
 fn binder_name(expr: &Expr) -> Option<&str> {
-    match expr {
-        Expr::Atom(Atom::Name(name), _) => Some(name.as_str()),
-        Expr::MetaExpr(meta, _) => sym_text(&meta.expr),
-        Expr::BareList(elements, _) | Expr::List(List { elements }, _) => {
-            elements.first().and_then(sym_text)
+    match expr.carrier() {
+        ExprCarrier::Atom(Atom::Name(name)) => Some(name.as_str()),
+        ExprCarrier::MetadataExpression(meta) => sym_text(&meta.expr),
+        ExprCarrier::StructuralList(elements) => elements.first().and_then(sym_text),
+        ExprCarrier::UndecodableHead(head, _, _) if matches!(expr, Expr::List(_, _)) => Some(head),
+        ExprCarrier::UndecodableHead(_, _, _) => None,
+        ExprCarrier::MalformedLegacyList(list) => list.elements.first().and_then(sym_text),
+        ExprCarrier::DecodedNode(_, _, _) | ExprCarrier::Atom(_) | ExprCarrier::MetadataMap(_) => {
+            None
         }
-        _ => None,
     }
 }
 

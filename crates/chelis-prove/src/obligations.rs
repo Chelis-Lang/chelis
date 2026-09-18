@@ -17,7 +17,7 @@
 //! parameter), is an ERROR naming the producer and channel — never a
 //! silent skip, since one uncovered producer collapses D-SOUND.
 
-use chelis_deep::DeepTag;
+use chelis_deep::{DeepTag, ExprCarrier};
 use std::collections::{BTreeMap, BTreeSet};
 
 use chelis_deep::ast::{Atom, Expr};
@@ -121,18 +121,30 @@ pub struct ObligationCollection {
 // ===========================================================================
 
 fn tag(expr: &Expr) -> Option<DeepTag> {
-    match expr {
-        Expr::Node(node, _) => Some(node.tag()),
-        Expr::List(list, _) => list.tag(),
-        _ => None,
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(tag, _, _) => Some(tag),
+        ExprCarrier::MalformedLegacyList(list) => list.tag(),
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => None,
     }
 }
 
 fn children(expr: &Expr) -> &[Expr] {
-    match expr {
-        Expr::Node(node, _) => node.children_slice(),
-        Expr::List(list, _) if list.elements.len() >= 2 => &list.elements[2..],
-        _ => &[],
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(_, _, children) => children,
+        ExprCarrier::UndecodableHead(_, _, children) if matches!(expr, Expr::List(_, _)) => {
+            children
+        }
+        ExprCarrier::MalformedLegacyList(list) if list.elements.len() >= 2 => &list.elements[2..],
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => &[],
     }
 }
 
@@ -259,13 +271,20 @@ pub fn decompose_return(
 }
 
 fn is_opaque(expr: &Expr) -> bool {
-    let meta = match expr {
-        Expr::Node(node, _) => node.meta(),
-        Expr::List(list, _) => match list.elements.get(1) {
-            Some(Expr::Map(map, _)) => map,
+    let meta = match expr.carrier() {
+        ExprCarrier::DecodedNode(_, metadata, _) => metadata,
+        ExprCarrier::UndecodableHead(_, metadata, _) if matches!(expr, Expr::List(_, _)) => {
+            metadata
+        }
+        ExprCarrier::MalformedLegacyList(list) => match list.elements.get(1) {
+            Some(Expr::Map(metadata, _)) => metadata,
             _ => return false,
         },
-        _ => return false,
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => return false,
     };
     meta.opaque().is_some()
 }

@@ -11,7 +11,7 @@
 //! It lives in chelis-prove so both the CLI prove path and the tide MCP
 //! tool reach one Surf->SMT lowering through the shared property runner.
 
-use chelis_deep::DeepTag;
+use chelis_deep::{DeepTag, ExprCarrier};
 use chelis_unord::{UnordMap, UnordSet};
 use std::cell::RefCell;
 
@@ -823,15 +823,7 @@ fn deep_fn_param_names(expr: &DeepExpr) -> Option<Vec<String>> {
     }
     params
         .iter()
-        .map(|param| {
-            deep_symbol_text(param)
-                .or_else(|| {
-                    deep_structural_elements(param)?
-                        .first()
-                        .and_then(deep_symbol_text)
-                })
-                .map(str::to_string)
-        })
+        .map(|param| deep_param_name(param).map(str::to_string))
         .collect()
 }
 
@@ -917,18 +909,32 @@ fn deep_tag(expr: &DeepExpr) -> Option<DeepTag> {
 }
 
 fn deep_node_parts(expr: &DeepExpr) -> Option<(DeepTag, &[DeepExpr])> {
-    match expr {
-        DeepExpr::Node(node, _) => Some((node.tag(), node.children_slice())),
-        DeepExpr::List(list, _) => Some((list.tag()?, list.elements.get(2..)?)),
-        _ => None,
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(tag, _, children) => Some((tag, children)),
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => None,
     }
 }
 
-fn deep_structural_elements(expr: &DeepExpr) -> Option<&[DeepExpr]> {
-    match expr {
-        DeepExpr::BareList(elements, _) => Some(elements),
-        DeepExpr::List(list, _) => Some(&list.elements),
-        _ => None,
+fn deep_param_name(expr: &DeepExpr) -> Option<&str> {
+    if let Some(name) = deep_symbol_text(expr) {
+        return Some(name);
+    }
+    match expr.carrier() {
+        ExprCarrier::StructuralList(elements) => elements.first().and_then(deep_symbol_text),
+        ExprCarrier::UndecodableHead(head, _, _) if matches!(expr, DeepExpr::List(_, _)) => {
+            Some(head)
+        }
+        ExprCarrier::UndecodableHead(_, _, _) => None,
+        ExprCarrier::MalformedLegacyList(list) => list.elements.first().and_then(deep_symbol_text),
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => None,
     }
 }
 
@@ -1870,6 +1876,39 @@ mod tests {
             contracts: None,
             grad_diagnostic: None,
         }
+    }
+
+    #[test]
+    fn deep_param_name_rejects_unknown_form_but_keeps_legacy_name_head() {
+        let span = sp();
+        let legacy = DeepExpr::List(
+            chelis_deep::List {
+                elements: vec![
+                    DeepExpr::Atom(DeepAtom::Name("x".into()), span),
+                    DeepExpr::Map(chelis_deep::Metadata::default(), span),
+                ],
+            },
+            span,
+        );
+        let unknown = DeepExpr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
+            head: "x".into(),
+            meta: chelis_deep::Metadata::default(),
+            children: Vec::new(),
+            span,
+        }));
+        let malformed = DeepExpr::List(
+            chelis_deep::List {
+                elements: vec![
+                    DeepExpr::Atom(DeepAtom::Name("x".into()), span),
+                    DeepExpr::Atom(DeepAtom::Int(0), span),
+                ],
+            },
+            span,
+        );
+
+        assert_eq!(deep_param_name(&legacy), Some("x"));
+        assert_eq!(deep_param_name(&unknown), None);
+        assert_eq!(deep_param_name(&malformed), Some("x"));
     }
 
     #[test]
