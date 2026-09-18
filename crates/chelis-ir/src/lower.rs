@@ -158,8 +158,26 @@ fn match_static_pattern(
     field_names: Option<&[String]>,
     fields: &[LoweredValue],
 ) -> StaticPatternMatch {
-    let Some((pat_tag, _, pat_kids)) = stamped_parts(pattern) else {
-        return StaticPatternMatch::Unsupported("a non-list pattern form".to_string());
+    let (pat_tag, pat_kids) = match pattern.carrier() {
+        ExprCarrier::DecodedNode(tag, _, children) => (tag, children),
+        ExprCarrier::StructuralList(_) => {
+            return StaticPatternMatch::Unsupported("a structural-list pattern".to_string());
+        }
+        ExprCarrier::UndecodableHead(head, _, _) => {
+            return StaticPatternMatch::Unsupported(format!("an undecodable `{head}` pattern"));
+        }
+        ExprCarrier::Atom(_) => {
+            return StaticPatternMatch::Unsupported("an atomic pattern".to_string());
+        }
+        ExprCarrier::MetadataMap(_) => {
+            return StaticPatternMatch::Unsupported("a metadata-map pattern".to_string());
+        }
+        ExprCarrier::MetadataExpression(_) => {
+            return StaticPatternMatch::Unsupported("a metadata-expression pattern".to_string());
+        }
+        ExprCarrier::MalformedLegacyList(_) => {
+            return StaticPatternMatch::Unsupported("a malformed legacy-list pattern".to_string());
+        }
     };
     match pat_tag {
         DeepTag::PatWild => StaticPatternMatch::Match(Vec::new()),
@@ -237,8 +255,23 @@ fn match_static_pattern(
             };
             let mut binds = Vec::new();
             for kv in &pat_kids[1..] {
-                let Some((DeepTag::Kv, _, kv_kids)) = stamped_parts(kv) else {
-                    continue;
+                let kv_kids = match kv.carrier() {
+                    ExprCarrier::DecodedNode(DeepTag::Kv, _, children) => children,
+                    ExprCarrier::DecodedNode(_, _, _) => {
+                        return StaticPatternMatch::Unsupported(
+                            "a non-`kv` `pat-record` field entry".to_string(),
+                        );
+                    }
+                    ExprCarrier::StructuralList(_)
+                    | ExprCarrier::UndecodableHead(_, _, _)
+                    | ExprCarrier::Atom(_)
+                    | ExprCarrier::MetadataMap(_)
+                    | ExprCarrier::MetadataExpression(_)
+                    | ExprCarrier::MalformedLegacyList(_) => {
+                        return StaticPatternMatch::Unsupported(
+                            "an unreadable `pat-record` field entry".to_string(),
+                        );
+                    }
                 };
                 let (Some(field), Some(sub_pat)) =
                     (kv_kids.first().and_then(symbol_name), kv_kids.get(1))
@@ -279,8 +312,22 @@ fn bind_leaf_pattern(
     pattern: &Expr,
     value: &LoweredValue,
 ) -> Result<Option<(String, LoweredValue)>, String> {
-    let Some((pat_tag, _, pat_kids)) = stamped_parts(pattern) else {
-        return Err("a non-list sub-pattern form".to_string());
+    let (pat_tag, pat_kids) = match pattern.carrier() {
+        ExprCarrier::DecodedNode(tag, _, children) => (tag, children),
+        ExprCarrier::StructuralList(_) => {
+            return Err("a structural-list sub-pattern".to_string());
+        }
+        ExprCarrier::UndecodableHead(head, _, _) => {
+            return Err(format!("an undecodable `{head}` sub-pattern"));
+        }
+        ExprCarrier::Atom(_) => return Err("an atomic sub-pattern".to_string()),
+        ExprCarrier::MetadataMap(_) => return Err("a metadata-map sub-pattern".to_string()),
+        ExprCarrier::MetadataExpression(_) => {
+            return Err("a metadata-expression sub-pattern".to_string());
+        }
+        ExprCarrier::MalformedLegacyList(_) => {
+            return Err("a malformed legacy-list sub-pattern".to_string());
+        }
     };
     match pat_tag {
         DeepTag::PatWild => Ok(None),
@@ -298,7 +345,15 @@ fn bind_leaf_pattern(
 
 /// An absent match-arm guard desugars to a bare empty list `()`.
 fn guard_is_absent(guard: &Expr) -> bool {
-    matches!(guard, Expr::BareList(elements, _) | Expr::List(List { elements }, _) if elements.is_empty())
+    match guard.carrier() {
+        ExprCarrier::StructuralList(elements) => elements.is_empty(),
+        ExprCarrier::MalformedLegacyList(list) => list.elements.is_empty(),
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => false,
+    }
 }
 
 fn unsupported_lowering_message(tag: &str) -> String {
@@ -317,8 +372,15 @@ fn unsupported_lowering_message(tag: &str) -> String {
 /// unary applications (Item 2c — see
 /// `docs/investigations/c_backend_grad_piped_body_diagnosis.md`).
 fn bare_var_name(expr: &Expr) -> Option<String> {
-    let (DeepTag::Var, _, kids) = stamped_parts(expr)? else {
-        return None;
+    let kids = match expr.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::Var, _, children) => children,
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => return None,
     };
     let Some(Expr::Atom(Atom::Name(name), _)) = kids.first() else {
         return None;
@@ -537,7 +599,7 @@ pub fn install_chelis_panic_hook() {
     });
 }
 
-use chelis_deep::ast::{Atom, Expr, List, Metadata};
+use chelis_deep::ast::{Atom, Expr, ExprCarrier, List, Metadata};
 use chelis_deep::{
     DeepTag, Span, decode_dtype_bounds, decode_effect_kind, exact_type_variable_name,
 };
@@ -3085,13 +3147,25 @@ fn extent_binder_label(binder: &str) -> String {
 /// wrapper is irrelevant to rank/anchor analysis, mirroring
 /// [`extract_precision_var_name`].
 fn tensor_formal_dim_slots(expr: &Expr) -> Option<Vec<DimSlot>> {
-    let stripped = if let Some((DeepTag::TRef, _, kids)) = stamped_parts(expr) {
-        kids.first()?
-    } else {
-        expr
+    let stripped = match expr.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::TRef, _, children) => children.first()?,
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => expr,
     };
-    let (DeepTag::TTensor, _, children) = stamped_parts(stripped)? else {
-        return None;
+    let children = match stripped.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::TTensor, _, children) => children,
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => return None,
     };
     if children.len() < 2 {
         return None;
@@ -3101,8 +3175,14 @@ fn tensor_formal_dim_slots(expr: &Expr) -> Option<Vec<DimSlot>> {
         dim_nodes
             .iter()
             .map(|d| {
-                let Some((dtag, _, kids)) = stamped_parts(d) else {
-                    return DimSlot::Other;
+                let (dtag, kids) = match d.carrier() {
+                    ExprCarrier::DecodedNode(tag, _, children) => (tag, children),
+                    ExprCarrier::StructuralList(_)
+                    | ExprCarrier::UndecodableHead(_, _, _)
+                    | ExprCarrier::Atom(_)
+                    | ExprCarrier::MetadataMap(_)
+                    | ExprCarrier::MetadataExpression(_)
+                    | ExprCarrier::MalformedLegacyList(_) => return DimSlot::Other,
                 };
                 let payload = match kids.first() {
                     Some(Expr::Atom(Atom::Name(s), _)) => Some(s.clone()),
@@ -3472,17 +3552,36 @@ fn tensor_prec_substitutions(
 /// parameter is treated the same as `tensor[..., p]` for substitution
 /// purposes — the borrow is irrelevant to precision monomorphization.
 fn extract_precision_var_name(expr: &Expr) -> Option<String> {
-    let stripped = if let Some((DeepTag::TRef, _, kids)) = stamped_parts(expr) {
-        kids.first()?
-    } else {
-        expr
+    let stripped = match expr.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::TRef, _, children) => children.first()?,
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => expr,
     };
-    let (DeepTag::TTensor, _, kids) = stamped_parts(stripped)? else {
-        return None;
+    let kids = match stripped.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::TTensor, _, children) => children,
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => return None,
     };
     let last = kids.last()?;
-    let (DeepTag::TVar, _, prec_kids) = stamped_parts(last)? else {
-        return None;
+    let prec_kids = match last.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::TVar, _, children) => children,
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => return None,
     };
     if let Some(Expr::Atom(Atom::Name(name), _)) = prec_kids.first() {
         Some(name.clone())
@@ -3493,10 +3592,15 @@ fn extract_precision_var_name(expr: &Expr) -> Option<String> {
 
 /// Binder name from a bare scalar `(t-var {} p)` type (#1544).
 fn extract_scalar_precision_var_name(expr: &Expr) -> Option<String> {
-    let stripped = if let Some((DeepTag::TRef, _, kids)) = stamped_parts(expr) {
-        kids.first()?
-    } else {
-        expr
+    let stripped = match expr.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::TRef, _, children) => children.first()?,
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => expr,
     };
     exact_type_variable_name(stripped).map(str::to_string)
 }
@@ -3522,14 +3626,29 @@ fn extract_scalar_precision_var_name(expr: &Expr) -> Option<String> {
 /// precision.
 fn formal_param_type_var_name(expr: &Expr) -> Option<String> {
     // Strip a leading `(t-ref {} ...)` borrow wrapper.
-    let stripped = if let Some((DeepTag::TRef, _, kids)) = stamped_parts(expr) {
-        kids.first()?
-    } else {
-        expr
+    let stripped = match expr.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::TRef, _, children) => children.first()?,
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => expr,
     };
     // Bare `(t-var tN)`: the whole param type is one inference var.
-    if let Some((DeepTag::TVar, _, kids)) = stamped_parts(stripped)
-        && let Some(Expr::Atom(Atom::Name(name), _)) = kids.first()
+    let bare_var_children = match stripped.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::TVar, _, children) => Some(children),
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => None,
+    };
+    if let Some(children) = bare_var_children
+        && let Some(Expr::Atom(Atom::Name(name), _)) = children.first()
     {
         return Some(name.clone());
     }
@@ -3550,12 +3669,26 @@ fn formal_param_type_var_name(expr: &Expr) -> Option<String> {
 /// dropped), so the caller can recover each parameter's renamed precision
 /// variable. Returns `None` when the node has no `t-fn` type metadata.
 fn fn_type_arg_exprs(fn_expr: &Expr) -> Option<Vec<&Expr>> {
-    let (DeepTag::Fn, meta, _) = stamped_parts(fn_expr)? else {
-        return None;
+    let meta = match fn_expr.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::Fn, metadata, _) => metadata,
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => return None,
     };
     let ty_expr = meta.ty()?.expression();
-    let (DeepTag::TFn, _, args) = stamped_parts(ty_expr)? else {
-        return None;
+    let args = match ty_expr.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::TFn, _, children) => children,
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => return None,
     };
     // Drop the trailing return type; keep only the parameter positions.
     args.split_last()
@@ -4211,8 +4344,14 @@ fn top_level_expr_is_lowered_with_names(
     lowered_names: &BTreeMap<String, bool>,
 ) -> bool {
     let top_level_sigs = BTreeMap::new();
-    let Some((tag, _, kids)) = stamped_parts(expr) else {
-        return true;
+    let (tag, kids) = match expr.carrier() {
+        ExprCarrier::DecodedNode(tag, _, children) => (tag, children),
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => return true,
     };
     if tag == DeepTag::Module {
         return kids
@@ -4233,8 +4372,15 @@ fn top_level_expr_is_lowered_with_names(
 }
 
 fn fn_type_has_bounded_scalar_var(expr: &Expr, bounded: Option<&UnordSet<String>>) -> bool {
-    let Some((DeepTag::TFn, _, types)) = stamped_parts(expr) else {
-        return false;
+    let types = match expr.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::TFn, _, children) => children,
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => return false,
     };
     types.iter().any(|ty| {
         extract_scalar_precision_var_name(ty)
@@ -4243,8 +4389,14 @@ fn fn_type_has_bounded_scalar_var(expr: &Expr, bounded: Option<&UnordSet<String>
 }
 
 fn type_is_never_lowerable(expr: &Expr, bounded_dtype_names: Option<&UnordSet<String>>) -> bool {
-    let Some((tag, _, kids)) = stamped_parts(expr) else {
-        return true;
+    let (tag, kids) = match expr.carrier() {
+        ExprCarrier::DecodedNode(tag, _, children) => (tag, children),
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => return true,
     };
     match tag {
         // WS-A8: a t-fn whose return type or any parameter type carries
@@ -4286,8 +4438,14 @@ fn type_is_never_lowerable(expr: &Expr, bounded_dtype_names: Option<&UnordSet<St
 /// `type_expr_has_precision_var`: such a signature is rank-polymorphic, has no
 /// standalone monomorphization, and is reached only through call-site inlining.
 pub fn type_expr_has_rank_var(expr: &Expr) -> bool {
-    let Some((tag, _, kids)) = stamped_parts(expr) else {
-        return false;
+    let (tag, kids) = match expr.carrier() {
+        ExprCarrier::DecodedNode(tag, _, children) => (tag, children),
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => return false,
     };
     match tag {
         DeepTag::TTensor => kids.iter().any(|child| child.tag() == Some(DeepTag::DRank)),
@@ -4304,8 +4462,14 @@ pub fn type_expr_has_rank_var(expr: &Expr) -> bool {
 /// monomorphization and must be reached through call-site inlining
 /// only (per spec/04-type-system.md §5.8.1).
 pub fn type_expr_has_precision_var(expr: &Expr) -> bool {
-    let Some((tag, _, kids)) = stamped_parts(expr) else {
-        return false;
+    let (tag, kids) = match expr.carrier() {
+        ExprCarrier::DecodedNode(tag, _, children) => (tag, children),
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => return false,
     };
     match tag {
         DeepTag::TTensor => extract_precision_var_name(expr).is_some(),
@@ -4321,8 +4485,15 @@ fn type_is_scalar_primitive(expr: &Expr) -> bool {
 }
 
 fn callable_ref_name(expr: &Expr) -> Option<String> {
-    let (DeepTag::Var, _, kids) = stamped_parts(expr)? else {
-        return None;
+    let kids = match expr.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::Var, _, children) => children,
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => return None,
     };
     kids.first()
         .and_then(symbol_name)
@@ -4337,8 +4508,15 @@ fn symbol_name(expr: &Expr) -> Option<&str> {
 }
 
 fn top_level_expr_name(expr: &Expr) -> Option<&str> {
-    let (DeepTag::Def, _, kids) = stamped_parts(expr)? else {
-        return None;
+    let kids = match expr.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::Def, _, children) => children,
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => return None,
     };
     kids.first().and_then(symbol_name)
 }
@@ -4355,8 +4533,15 @@ fn conv_literal_parameters(strides: &Expr, padding: &Expr) -> Option<ConvLiteral
     let padding = collect_cons_chain(padding)?
         .into_iter()
         .map(|x| {
-            let (DeepTag::Tuple, _, kids) = stamped_parts(x)? else {
-                return None;
+            let kids = match x.carrier() {
+                ExprCarrier::DecodedNode(DeepTag::Tuple, _, children) => children,
+                ExprCarrier::DecodedNode(_, _, _)
+                | ExprCarrier::StructuralList(_)
+                | ExprCarrier::UndecodableHead(_, _, _)
+                | ExprCarrier::Atom(_)
+                | ExprCarrier::MetadataMap(_)
+                | ExprCarrier::MetadataExpression(_)
+                | ExprCarrier::MalformedLegacyList(_) => return None,
             };
             let [low, high] = kids else {
                 return None;
@@ -4388,47 +4573,45 @@ fn expr_requires_host_runtime(expr: &Expr) -> bool {
 /// emit-main path for top-level non-fn value bindings like
 /// `out = compute_grad(to_tensor([...]))`.
 fn expr_requires_host_runtime_with_ctx(expr: &Expr, exempt_to_tensor_literal: bool) -> bool {
-    match expr {
-        Expr::Atom(Atom::Str(_), _) => true,
-        Expr::Atom(_, _) => false,
-        Expr::Map(map, _) => map.any_expression(|value| {
+    match expr.carrier() {
+        ExprCarrier::Atom(Atom::Str(_)) => true,
+        ExprCarrier::Atom(_) => false,
+        ExprCarrier::MetadataMap(map) => map.any_expression(|value| {
             expr_requires_host_runtime_with_ctx(value, exempt_to_tensor_literal)
         }),
-        Expr::MetaExpr(meta, _) => {
+        ExprCarrier::MetadataExpression(meta) => {
             expr_requires_host_runtime_with_ctx(&meta.expr, exempt_to_tensor_literal)
                 || meta.metadata.any_expression(|value| {
                     expr_requires_host_runtime_with_ctx(value, exempt_to_tensor_literal)
                 })
         }
-        Expr::List(list, _) => {
+        ExprCarrier::DecodedNode(tag, _, kids) => {
             if exempt_to_tensor_literal && static_to_tensor_literal(expr).is_some() {
                 return false;
             }
-            if get_tag(list) == Some(DeepTag::If) {
+            if tag == DeepTag::If {
                 if !if_expr_is_dag_lowerable(expr) {
                     return true;
                 }
             } else if matches!(
-                get_tag(list),
-                Some(DeepTag::Match | DeepTag::Record | DeepTag::Access | DeepTag::TupleGet)
+                tag,
+                DeepTag::Match | DeepTag::Record | DeepTag::Access | DeepTag::TupleGet
             ) {
                 return true;
             }
-            if get_tag(list) == Some(DeepTag::Var)
-                && let Some(name) = children(list).first().and_then(symbol_name)
+            if tag == DeepTag::Var
+                && let Some(name) = kids.first().and_then(symbol_name)
                 && name.chars().next().is_some_and(|ch| ch.is_uppercase())
             {
                 return true;
             }
-            if get_tag(list) == Some(DeepTag::App)
-                && let Some(Expr::List(callee, _)) = children(list).first()
-                && get_tag(callee) == Some(DeepTag::Var)
-                && let Some(name) = children(callee).first().and_then(symbol_name)
+            if tag == DeepTag::App
+                && let Some(name) = kids.first().and_then(callable_ref_name)
                 && name.chars().next().is_some_and(|ch| ch.is_uppercase())
             {
                 return true;
             }
-            if let Some(name) = builtin_name(list) {
+            if let Some(name) = builtin_name(expr) {
                 // [05-OP-29]: Count axes are checked compile-time selectors,
                 // not scalar runtime computations. In particular Surf spells
                 // `-1` as an integer `neg` application, which the generic
@@ -4437,29 +4620,22 @@ fn expr_requires_host_runtime_with_ctx(expr: &Expr, exempt_to_tensor_literal: bo
                 // The type checker has already proved that every selector is
                 // either a static i32 axis or a named operand dimension, so
                 // only the tensor operand contributes runtime requirements.
-                if name == "conv" {
-                    let kids = children(list);
-                    if let [_, input, kernel, strides, padding] = kids
-                        && conv_literal_parameters(strides, padding).is_some()
-                    {
-                        return [input, kernel].into_iter().any(|operand| {
-                            expr_requires_host_runtime_with_ctx(operand, exempt_to_tensor_literal)
-                        });
-                    }
+                if name == "conv"
+                    && let [_, input, kernel, strides, padding] = kids
+                    && conv_literal_parameters(strides, padding).is_some()
+                {
+                    return [input, kernel].into_iter().any(|operand| {
+                        expr_requires_host_runtime_with_ctx(operand, exempt_to_tensor_literal)
+                    });
                 }
-                if name == "count" {
-                    let app_children = children(list);
-                    if let (Some(input), Some(axes)) = (app_children.get(1), app_children.get(2..))
-                        && !axes.is_empty()
-                        && axes.iter().all(|axis| {
-                            extract_int_axis(axis).is_some() || callable_ref_name(axis).is_some()
-                        })
-                    {
-                        return expr_requires_host_runtime_with_ctx(
-                            input,
-                            exempt_to_tensor_literal,
-                        );
-                    }
+                if name == "count"
+                    && let (Some(input), Some(axes)) = (kids.get(1), kids.get(2..))
+                    && !axes.is_empty()
+                    && axes.iter().all(|axis| {
+                        extract_int_axis(axis).is_some() || callable_ref_name(axis).is_some()
+                    })
+                {
+                    return expr_requires_host_runtime_with_ctx(input, exempt_to_tensor_literal);
                 }
                 if matches!(
                     name,
@@ -4550,7 +4726,7 @@ fn expr_requires_host_runtime_with_ctx(expr: &Expr, exempt_to_tensor_literal: bo
                     return true;
                 }
                 if name == "drop" {
-                    return children(list).len() != 2;
+                    return kids.len() != 2;
                 }
                 if matches!(
                     name,
@@ -4594,48 +4770,29 @@ fn expr_requires_host_runtime_with_ctx(expr: &Expr, exempt_to_tensor_literal: bo
                     return true;
                 }
             }
-            // Walk children, but SKIP the metadata map at element 1 (when
-            // present) — meta values like the `span` key carry string
-            // atoms that are not runtime values. Without this skip, any
-            // list whose meta map includes a string-valued key (e.g.
-            // `{span: "n_001"}`) would be misclassified as host-runtime
-            // and silently dropped from lowering, breaking the S2 audit
-            // invariant.
-            //
-            // NOTE: This skip is load-bearing for span propagation. The
-            // N→1 collapse rule's reachability silently depends on it:
-            // if a Map at element index 1 is not skipped here,
-            // span-bearing nodes (Octant emits `{span: "..."}` at
-            // element 1) get classified as host-runtime and silently
-            // dropped before lowering, so the §2.3 audit invariant
-            // never gets the chance to fire. The greppable invariant
-            // catches a regression only indirectly via downstream test
-            // failures; keep this skip in place.
-            let meta_idx = if matches!(list.elements.get(1), Some(Expr::Map(_, _))) {
-                Some(1usize)
-            } else {
-                None
-            };
+            // `Expr::carrier` has already separated the node's metadata from
+            // its runtime children. Metadata strings such as external span
+            // identifiers must not route an otherwise-lowerable expression
+            // to the host lane.
+            kids.iter()
+                .any(|child| expr_requires_host_runtime_with_ctx(child, exempt_to_tensor_literal))
+        }
+        ExprCarrier::StructuralList(elements) => elements
+            .iter()
+            .any(|child| expr_requires_host_runtime_with_ctx(child, exempt_to_tensor_literal)),
+        ExprCarrier::UndecodableHead(_, _, children) => children
+            .iter()
+            .any(|child| expr_requires_host_runtime_with_ctx(child, exempt_to_tensor_literal)),
+        ExprCarrier::MalformedLegacyList(list) => {
+            let metadata_index = matches!(list.elements.get(1), Some(Expr::Map(_, _))).then_some(1);
             list.elements
                 .iter()
                 .enumerate()
-                .filter(|(idx, _)| Some(*idx) != meta_idx)
+                .filter(|(index, _)| Some(*index) != metadata_index)
                 .any(|(_, child)| {
                     expr_requires_host_runtime_with_ctx(child, exempt_to_tensor_literal)
                 })
         }
-        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
-        Expr::Node(node, span) => {
-            let bridged = Expr::List(node.to_list(*span), *span);
-            expr_requires_host_runtime_with_ctx(&bridged, exempt_to_tensor_literal)
-        }
-        Expr::BareList(elems, _) => elems
-            .iter()
-            .any(|elem| expr_requires_host_runtime_with_ctx(elem, exempt_to_tensor_literal)),
-        Expr::UnknownForm(data) => data
-            .children
-            .iter()
-            .any(|child| expr_requires_host_runtime_with_ctx(child, exempt_to_tensor_literal)),
     }
 }
 
@@ -4666,13 +4823,18 @@ fn def_body_requires_host_runtime(body: &Expr) -> bool {
 /// to_tensor([3, 4]))`) keep the legacy host classification so the
 /// generated C ABI `chelis_tuple* eig_pair(...)` is preserved.
 fn fn_body_qualifies_for_to_tensor_exemption(body: &Expr) -> bool {
-    let Some((DeepTag::Fn, _, kids)) = stamped_parts(body) else {
-        return false;
+    let kids = match body.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::Fn, _, children) => children,
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => return false,
     };
-    // `(fn (params ...) fn_body)` — child index 1 (after the tag +
-    // optional meta map) is `(params ...)`, child index 2 is the
-    // body. `children(list)` already skips the tag + meta map, so
-    // body is at index 1.
+    // The total carrier view has already separated the tag and metadata,
+    // so the function body is child index 1 after the params child.
     let Some(fn_body) = kids.get(1) else {
         return false;
     };
@@ -4715,9 +4877,17 @@ pub(crate) fn collect_top_level_sigs(exprs: &[Expr]) -> BTreeMap<String, Expr> {
 fn collect_top_level_dtype_bound_names(exprs: &[Expr]) -> BTreeMap<String, UnordSet<String>> {
     let mut bounds = BTreeMap::new();
     for_each_top_level_item(exprs, &mut |expr| {
-        if let Some((DeepTag::Defsig, meta, kids)) = stamped_parts(expr)
-            && let Some(name) = kids.first().and_then(symbol_name)
-        {
+        let (meta, kids) = match expr.carrier() {
+            ExprCarrier::DecodedNode(DeepTag::Defsig, metadata, children) => (metadata, children),
+            ExprCarrier::DecodedNode(_, _, _)
+            | ExprCarrier::StructuralList(_)
+            | ExprCarrier::UndecodableHead(_, _, _)
+            | ExprCarrier::Atom(_)
+            | ExprCarrier::MetadataMap(_)
+            | ExprCarrier::MetadataExpression(_)
+            | ExprCarrier::MalformedLegacyList(_) => return,
+        };
+        if let Some(name) = kids.first().and_then(symbol_name) {
             let names = decode_dtype_bounds(meta)
                 .into_iter()
                 .map(|(binder, _)| binder)
@@ -4735,8 +4905,14 @@ fn for_each_top_level_item(exprs: &[Expr], f: &mut impl FnMut(&Expr)) {
 }
 
 fn for_each_top_level_item_from_expr(expr: &Expr, f: &mut impl FnMut(&Expr)) {
-    let Some((tag, _, kids)) = stamped_parts(expr) else {
-        return;
+    let (tag, kids) = match expr.carrier() {
+        ExprCarrier::DecodedNode(tag, _, children) => (tag, children),
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => return,
     };
     match tag {
         DeepTag::Module => {
@@ -4749,8 +4925,14 @@ fn for_each_top_level_item_from_expr(expr: &Expr, f: &mut impl FnMut(&Expr)) {
 }
 
 fn collect_top_level_defs_from_expr(expr: &Expr, defs: &mut BTreeMap<String, Expr>) {
-    let Some((tag, _, kids)) = stamped_parts(expr) else {
-        return;
+    let (tag, kids) = match expr.carrier() {
+        ExprCarrier::DecodedNode(tag, _, children) => (tag, children),
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => return,
     };
     match tag {
         DeepTag::Module => {
@@ -4770,8 +4952,14 @@ fn collect_top_level_defs_from_expr(expr: &Expr, defs: &mut BTreeMap<String, Exp
 }
 
 fn collect_top_level_sigs_from_expr(expr: &Expr, sigs: &mut BTreeMap<String, Expr>) {
-    let Some((tag, _, kids)) = stamped_parts(expr) else {
-        return;
+    let (tag, kids) = match expr.carrier() {
+        ExprCarrier::DecodedNode(tag, _, children) => (tag, children),
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => return,
     };
     match tag {
         DeepTag::Module => {
@@ -4822,7 +5010,18 @@ fn def_is_lowered(
         // for checked calls, not a standalone DAG. Keep its checked body in
         // the library so a caller can supply a source-static actual (#1764).
         !(lookup_declared_type_expr(types.signatures, type_env, name).is_some_and(|ty| {
-            stamped_parts(ty).is_some_and(|(tag, _, kids)| {
+            (match ty.carrier() {
+                ExprCarrier::DecodedNode(tag, metadata, children) => {
+                    Some((tag, metadata, children))
+                }
+                ExprCarrier::StructuralList(_)
+                | ExprCarrier::UndecodableHead(_, _, _)
+                | ExprCarrier::Atom(_)
+                | ExprCarrier::MetadataMap(_)
+                | ExprCarrier::MetadataExpression(_)
+                | ExprCarrier::MalformedLegacyList(_) => None,
+            })
+            .is_some_and(|(tag, _, kids)| {
                 tag == DeepTag::TFn
                     && kids
                         .last()
@@ -4897,7 +5096,15 @@ fn expr_depends_on_nonlowerable_name(
     visiting: &mut UnordSet<String>,
     bound_names: &UnordSet<String>,
 ) -> bool {
-    if let Some((tag, meta, kids)) = stamped_parts(expr) {
+    if let Some((tag, meta, kids)) = match expr.carrier() {
+        ExprCarrier::DecodedNode(tag, metadata, children) => Some((tag, metadata, children)),
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => None,
+    } {
         // A precision/rank-polymorphic def has no standalone DAG, but a
         // checked call can bind it. Inspect the body and actual arguments
         // instead of inheriting the declaration's standalone exclusion.
@@ -4954,9 +5161,17 @@ fn expr_depends_on_nonlowerable_name(
         }
         if tag == DeepTag::Fn {
             let mut scoped = bound_names.clone();
-            if let Some(params) = kids.first()
-                && let Some((DeepTag::Params, _, params_kids)) = stamped_parts(params)
-            {
+            if let Some(params) = kids.first() {
+                let params_kids = match params.carrier() {
+                    ExprCarrier::DecodedNode(DeepTag::Params, _, children) => children,
+                    ExprCarrier::DecodedNode(_, _, _)
+                    | ExprCarrier::StructuralList(_)
+                    | ExprCarrier::UndecodableHead(_, _, _)
+                    | ExprCarrier::Atom(_)
+                    | ExprCarrier::MetadataMap(_)
+                    | ExprCarrier::MetadataExpression(_)
+                    | ExprCarrier::MalformedLegacyList(_) => return true,
+                };
                 for param in params_kids {
                     collect_param_bound_names(param, &mut scoped);
                 }
@@ -4975,9 +5190,17 @@ fn expr_depends_on_nonlowerable_name(
         }
         if tag == DeepTag::Let {
             let mut scoped = bound_names.clone();
-            if let Some(bindings) = kids.first()
-                && let Some((DeepTag::Bind, _, binding_kids)) = stamped_parts(bindings)
-            {
+            if let Some(bindings) = kids.first() {
+                let binding_kids = match bindings.carrier() {
+                    ExprCarrier::DecodedNode(DeepTag::Bind, _, children) => children,
+                    ExprCarrier::DecodedNode(_, _, _)
+                    | ExprCarrier::StructuralList(_)
+                    | ExprCarrier::UndecodableHead(_, _, _)
+                    | ExprCarrier::Atom(_)
+                    | ExprCarrier::MetadataMap(_)
+                    | ExprCarrier::MetadataExpression(_)
+                    | ExprCarrier::MalformedLegacyList(_) => return true,
+                };
                 let mut index = 0;
                 while index + 1 < binding_kids.len() {
                     if expr_depends_on_nonlowerable_name(
@@ -5024,8 +5247,15 @@ fn expr_depends_on_nonlowerable_name(
                 return true;
             }
             for arm in kids.iter().skip(1) {
-                let Some((DeepTag::Arm, _, arm_kids)) = stamped_parts(arm) else {
-                    continue;
+                let arm_kids = match arm.carrier() {
+                    ExprCarrier::DecodedNode(DeepTag::Arm, _, children) => children,
+                    ExprCarrier::DecodedNode(_, _, _)
+                    | ExprCarrier::StructuralList(_)
+                    | ExprCarrier::UndecodableHead(_, _, _)
+                    | ExprCarrier::Atom(_)
+                    | ExprCarrier::MetadataMap(_)
+                    | ExprCarrier::MetadataExpression(_)
+                    | ExprCarrier::MalformedLegacyList(_) => return true,
                 };
                 let mut scoped = bound_names.clone();
                 if let Some(pattern) = arm_kids.first() {
@@ -5080,9 +5310,12 @@ fn expr_depends_on_nonlowerable_name(
         });
     }
 
-    match expr {
-        Expr::Atom(_, _) => false,
-        Expr::Map(map, _) => map.any_expression(|value| {
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(_, _, _) => {
+            unreachable!("decoded nodes are handled before fallback traversal")
+        }
+        ExprCarrier::Atom(_) => false,
+        ExprCarrier::MetadataMap(map) => map.any_expression(|value| {
             expr_depends_on_nonlowerable_name(
                 value,
                 top_level_defs,
@@ -5093,7 +5326,7 @@ fn expr_depends_on_nonlowerable_name(
                 bound_names,
             )
         }),
-        Expr::MetaExpr(meta, _) => {
+        ExprCarrier::MetadataExpression(meta) => {
             expr_depends_on_nonlowerable_name(
                 &meta.expr,
                 top_level_defs,
@@ -5114,11 +5347,7 @@ fn expr_depends_on_nonlowerable_name(
                 )
             })
         }
-        // A `List` can also be an untagged data/binder carrier. Tagged
-        // vocabulary forms were handled through `stamped_parts` above;
-        // recurse through any remaining raw carrier instead of assuming it
-        // was stamped. A `Node` is vocabulary by construction.
-        Expr::List(list, _) => list.elements.iter().any(|child| {
+        ExprCarrier::StructuralList(elements) => elements.iter().any(|child| {
             expr_depends_on_nonlowerable_name(
                 child,
                 top_level_defs,
@@ -5129,18 +5358,31 @@ fn expr_depends_on_nonlowerable_name(
                 bound_names,
             )
         }),
-        Expr::Node(node, _) => {
-            node.meta().any_expression(|value| {
-                expr_depends_on_nonlowerable_name(
-                    value,
-                    top_level_defs,
-                    types,
-                    type_env,
-                    cache,
-                    visiting,
-                    bound_names,
-                )
-            }) || node.children_slice().iter().any(|child| {
+        ExprCarrier::UndecodableHead(_, metadata, children) => match expr {
+            Expr::List(_, _) => {
+                metadata.any_expression(|value| {
+                    expr_depends_on_nonlowerable_name(
+                        value,
+                        top_level_defs,
+                        types,
+                        type_env,
+                        cache,
+                        visiting,
+                        bound_names,
+                    )
+                }) || children.iter().any(|child| {
+                    expr_depends_on_nonlowerable_name(
+                        child,
+                        top_level_defs,
+                        types,
+                        type_env,
+                        cache,
+                        visiting,
+                        bound_names,
+                    )
+                })
+            }
+            Expr::UnknownForm(_) => children.iter().any(|child| {
                 expr_depends_on_nonlowerable_name(
                     child,
                     top_level_defs,
@@ -5150,20 +5392,10 @@ fn expr_depends_on_nonlowerable_name(
                     visiting,
                     bound_names,
                 )
-            })
-        }
-        Expr::BareList(elems, _) => elems.iter().any(|child| {
-            expr_depends_on_nonlowerable_name(
-                child,
-                top_level_defs,
-                types,
-                type_env,
-                cache,
-                visiting,
-                bound_names,
-            )
-        }),
-        Expr::UnknownForm(data) => data.children.iter().any(|child| {
+            }),
+            _ => unreachable!("only List and UnknownForm have undecodable heads"),
+        },
+        ExprCarrier::MalformedLegacyList(list) => list.elements.iter().any(|child| {
             expr_depends_on_nonlowerable_name(
                 child,
                 top_level_defs,
@@ -5178,53 +5410,58 @@ fn expr_depends_on_nonlowerable_name(
 }
 
 fn collect_param_bound_names(param: &Expr, out: &mut UnordSet<String>) {
-    match param {
-        Expr::Atom(Atom::Name(name), _) => {
+    match param.carrier() {
+        ExprCarrier::Atom(Atom::Name(name)) => {
             out.insert(name.clone());
         }
-        Expr::List(list, _) => {
-            if let Some(name) = list.elements.first().and_then(symbol_name) {
+        ExprCarrier::DecodedNode(_, _, children) => {
+            if let Some(name) = children.first().and_then(symbol_name) {
                 out.insert(name.to_string());
             }
         }
-        Expr::Map(_, _) | Expr::MetaExpr(_, _) | Expr::Atom(_, _) => {}
-        Expr::Node(_, _) => {
-            if let Some((_, _, kids)) = stamped_parts(param)
-                && let Some(name) = kids.first().and_then(symbol_name)
+        ExprCarrier::StructuralList(children) => {
+            if children.len() != 2
+                || !matches!(children.first(), Some(Expr::Atom(Atom::Name(_), _)))
+                || !matches!(children.get(1), Some(Expr::Map(_, _)))
             {
+                raise_malformed_parameter(param);
+            }
+            if let Some(name) = children.first().and_then(symbol_name) {
                 out.insert(name.to_string());
             }
         }
-        Expr::BareList(elements, _) => {
-            if let Some(name) = elements.first().and_then(symbol_name) {
+        ExprCarrier::UndecodableHead(name, _, children) => match param {
+            // The legacy `.ch` carrier spells an inline-annotated parameter
+            // as `(name {type: ...})`; its raw head owns the binder identity.
+            Expr::List(_, _) if children.is_empty() => {
                 out.insert(name.to_string());
             }
-        }
-        Expr::UnknownForm(_) => {
-            // Unreachable by role construction (chelis#1087): a param slot
-            // is a Binder position, where the stamp pass produces atoms,
-            // Nodes, or BareLists and never an UnknownForm
-            // (`chelis_deep::role`'s Binder disposition, spec/03
-            // [03-ROLE-3]); the `.ch` path delivers `Expr::List`. Release
-            // builds keep the skip; debug builds fail loudly so a new
-            // producer cannot silently drop parameter names.
-            debug_assert!(
-                false,
-                "collect_param_bound_names reached an UnknownForm at a param \
-                 slot; unreachable by role construction (chelis#1087)"
-            );
+            Expr::List(_, _) => raise_malformed_parameter(param),
+            Expr::UnknownForm(_) => {
+                // Unreachable by role construction (chelis#1087): a param
+                // slot is a Binder position, where the stamp pass produces
+                // atoms, Nodes, or BareLists and never an UnknownForm
+                // (`chelis_deep::role`'s Binder disposition, spec/03
+                // [03-ROLE-3]). Release builds keep the prior skip; debug
+                // builds fail loudly so a new producer cannot silently drop
+                // parameter names.
+                debug_assert!(
+                    false,
+                    "collect_param_bound_names reached an UnknownForm at a param \
+                     slot; unreachable by role construction (chelis#1087)"
+                );
+            }
+            _ => unreachable!("only List and UnknownForm have undecodable heads"),
+        },
+        ExprCarrier::MalformedLegacyList(_) => raise_malformed_parameter(param),
+        ExprCarrier::Atom(_) | ExprCarrier::MetadataMap(_) | ExprCarrier::MetadataExpression(_) => {
         }
     }
 }
 
 fn collect_pattern_bound_names(pattern: &Expr, out: &mut UnordSet<String>) {
-    match pattern {
-        Expr::Atom(_, _) | Expr::Map(_, _) => {}
-        Expr::MetaExpr(meta, _) => collect_pattern_bound_names(&meta.expr, out),
-        Expr::List(_, _) | Expr::Node(_, _) => {
-            let Some((tag, _, kids)) = stamped_parts(pattern) else {
-                return;
-            };
+    match pattern.carrier() {
+        ExprCarrier::DecodedNode(tag, _, kids) => {
             if tag == DeepTag::PatVar
                 && let Some(name) = kids.first().and_then(symbol_name)
             {
@@ -5235,39 +5472,59 @@ fn collect_pattern_bound_names(pattern: &Expr, out: &mut UnordSet<String>) {
                 collect_pattern_bound_names(child, out);
             }
         }
-        Expr::BareList(elems, _) => {
+        ExprCarrier::StructuralList(elems) => {
             for elem in elems {
                 collect_pattern_bound_names(elem, out);
             }
         }
-        Expr::UnknownForm(data) => {
-            for child in &data.children {
-                collect_pattern_bound_names(child, out);
+        ExprCarrier::UndecodableHead(_, _, children) => match pattern {
+            // A raw legacy List reached this arm only when the old decoded
+            // node reader declined it, then returned without traversing.
+            Expr::List(_, _) => {}
+            Expr::UnknownForm(_) => {
+                for child in children {
+                    collect_pattern_bound_names(child, out);
+                }
             }
-        }
+            _ => unreachable!("only List and UnknownForm have undecodable heads"),
+        },
+        // A legacy metadata wrapper does not move its payload into pattern
+        // scope. Only the wrapped pattern expression can own binders.
+        ExprCarrier::MetadataExpression(meta) => collect_pattern_bound_names(&meta.expr, out),
+        // The old decoded-list reader returned immediately when the legacy
+        // list shape was malformed. Its elements therefore cannot mint
+        // binders that hide a real top-level dependency.
+        ExprCarrier::MalformedLegacyList(_) => {}
+        ExprCarrier::Atom(_) | ExprCarrier::MetadataMap(_) => {}
     }
 }
 
-fn builtin_name(list: &List) -> Option<&str> {
-    if get_tag(list) != Some(DeepTag::App) {
-        return None;
-    }
-    list.elements.get(2).and_then(|expr| match expr {
-        Expr::List(var_list, _) if get_tag(var_list) == Some(DeepTag::Var) => {
-            children(var_list).first().and_then(symbol_name)
-        }
-        _ => None,
-    })
+fn builtin_name(expr: &Expr) -> Option<&str> {
+    app_var_name_and_args(expr).map(|(name, _)| name)
 }
 
 fn expr_type_metadata(expr: &Expr) -> Option<&Expr> {
-    let (_, meta, _) = stamped_parts(expr)?;
-    meta.ty().map(|value| value.expression())
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(_, metadata, _) => metadata.ty().map(|value| value.expression()),
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => None,
+    }
 }
 
 fn if_expr_is_dag_lowerable(expr: &Expr) -> bool {
-    let Some((DeepTag::If, meta, kids)) = stamped_parts(expr) else {
-        return false;
+    let (meta, kids) = match expr.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::If, metadata, children) => (metadata, children),
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => return false,
     };
 
     // chelis#1541: an unresolved precision binder means this `if` cannot
@@ -5299,124 +5556,160 @@ fn if_expr_is_dag_lowerable(expr: &Expr) -> bool {
 }
 
 fn assert_ir_lowerable(expr: &Expr) {
-    if let Some((tag, meta, kids)) = stamped_parts(expr) {
-        // Declaration nodes carry no runtime IR. Their meta map holds
-        // spec artifacts (e.g. a `deftype`'s declared `invariant`
-        // predicate, consumed only by `chelis prove`) and their
-        // children are type-level expressions, never runtime app nodes.
-        if matches!(tag, DeepTag::Deftype | DeepTag::Defsig | DeepTag::Typealias) {
-            return;
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(tag, meta, kids) => {
+            // Declaration nodes carry no runtime IR. Their meta map holds
+            // spec artifacts (e.g. a `deftype`'s declared `invariant`
+            // predicate, consumed only by `chelis prove`) and their
+            // children are type-level expressions, never runtime app nodes.
+            if matches!(tag, DeepTag::Deftype | DeepTag::Defsig | DeepTag::Typealias) {
+                return;
+            }
+            if (tag == DeepTag::If && !if_expr_is_dag_lowerable(expr)) || tag == DeepTag::Match {
+                raise_lowering_diagnostic(lower_diagnostic_for_expr(
+                    unsupported_lowering_message(tag.as_str()),
+                    expr,
+                ));
+            }
+            meta.visit_expressions(&mut |value, _| assert_ir_lowerable(value));
+            for child in kids {
+                assert_ir_lowerable(child);
+            }
         }
-        if (tag == DeepTag::If && !if_expr_is_dag_lowerable(expr)) || tag == DeepTag::Match {
-            raise_lowering_diagnostic(lower_diagnostic_for_expr(
-                unsupported_lowering_message(tag.as_str()),
-                expr,
-            ));
-        }
-        meta.visit_expressions(&mut |value, _| assert_ir_lowerable(value));
-        for child in kids {
-            assert_ir_lowerable(child);
-        }
-        return;
-    }
-    match expr {
-        Expr::List(list, _) => {
-            for elem in &list.elements {
+        ExprCarrier::StructuralList(elements) => {
+            for elem in elements {
                 assert_ir_lowerable(elem);
             }
         }
-        Expr::Node(_, _) => unreachable!("typed nodes are handled by stamped_parts"),
-        Expr::Map(map, _) => {
+        ExprCarrier::UndecodableHead(_, metadata, children) => match expr {
+            Expr::List(_, _) => {
+                metadata.visit_expressions(&mut |value, _| assert_ir_lowerable(value));
+                for child in children {
+                    assert_ir_lowerable(child);
+                }
+            }
+            Expr::UnknownForm(_) => {
+                for child in children {
+                    assert_ir_lowerable(child);
+                }
+            }
+            _ => unreachable!("only List and UnknownForm have undecodable heads"),
+        },
+        ExprCarrier::MetadataMap(map) => {
             map.visit_expressions(&mut |value, _| assert_ir_lowerable(value));
         }
-        Expr::MetaExpr(inner, _) => {
+        ExprCarrier::MetadataExpression(inner) => {
             inner
                 .metadata
                 .visit_expressions(&mut |value, _| assert_ir_lowerable(value));
             assert_ir_lowerable(&inner.expr);
         }
-        Expr::Atom(_, _) => {}
-        Expr::BareList(elems, _) => {
-            for elem in elems {
-                assert_ir_lowerable(elem);
-            }
-        }
-        Expr::UnknownForm(data) => {
-            for child in &data.children {
+        ExprCarrier::MalformedLegacyList(list) => {
+            for child in &list.elements {
                 assert_ir_lowerable(child);
             }
         }
+        ExprCarrier::Atom(_) => {}
     }
 }
 
 fn assert_ir_typed(expr: &Expr) {
-    if let Some((tag, meta, kids)) = stamped_parts(expr) {
-        // Declaration metadata is specification input, not runtime IR.
-        if matches!(tag, DeepTag::Deftype | DeepTag::Defsig | DeepTag::Typealias) {
-            return;
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(tag, meta, kids) => {
+            // Declaration metadata is specification input, not runtime IR.
+            if matches!(tag, DeepTag::Deftype | DeepTag::Defsig | DeepTag::Typealias) {
+                return;
+            }
+            if tag == DeepTag::App
+                && is_shape_sensitive_builtin_app(expr)
+                && !has_type_metadata(expr)
+            {
+                let rendered = chelis_deep::printer::print_canonical(std::slice::from_ref(expr))
+                    .replace('\n', " ");
+                raise_lowering_diagnostic(lower_diagnostic_for_expr(
+                    format!(
+                        "shape-sensitive IR app nodes must carry explicit type metadata before lowering: {rendered}"
+                    ),
+                    expr,
+                ));
+            }
+            meta.visit_expressions(&mut |value, _| assert_ir_typed(value));
+            for child in kids {
+                assert_ir_typed(child);
+            }
         }
-        if tag == DeepTag::App && is_shape_sensitive_builtin_app(expr) && !has_type_metadata(expr) {
-            let rendered = chelis_deep::printer::print_canonical(std::slice::from_ref(expr))
-                .replace('\n', " ");
-            raise_lowering_diagnostic(lower_diagnostic_for_expr(
-                format!(
-                    "shape-sensitive IR app nodes must carry explicit type metadata before lowering: {rendered}"
-                ),
-                expr,
-            ));
-        }
-        meta.visit_expressions(&mut |value, _| assert_ir_typed(value));
-        for child in kids {
-            assert_ir_typed(child);
-        }
-        return;
-    }
-    match expr {
-        Expr::List(list, _) => {
-            for elem in &list.elements {
+        ExprCarrier::StructuralList(elements) => {
+            for elem in elements {
                 assert_ir_typed(elem);
             }
         }
-        Expr::Node(_, _) => unreachable!("typed nodes are handled by stamped_parts"),
-        Expr::Map(map, _) => {
+        ExprCarrier::UndecodableHead(_, metadata, children) => match expr {
+            Expr::List(_, _) => {
+                metadata.visit_expressions(&mut |value, _| assert_ir_typed(value));
+                for child in children {
+                    assert_ir_typed(child);
+                }
+            }
+            Expr::UnknownForm(_) => {
+                for child in children {
+                    assert_ir_typed(child);
+                }
+            }
+            _ => unreachable!("only List and UnknownForm have undecodable heads"),
+        },
+        ExprCarrier::MetadataMap(map) => {
             map.visit_expressions(&mut |value, _| assert_ir_typed(value));
         }
-        Expr::MetaExpr(inner, _) => {
+        ExprCarrier::MetadataExpression(inner) => {
             inner
                 .metadata
                 .visit_expressions(&mut |value, _| assert_ir_typed(value));
             assert_ir_typed(&inner.expr);
         }
-        Expr::Atom(_, _) => {}
-        Expr::BareList(elems, _) => {
-            for elem in elems {
-                assert_ir_typed(elem);
-            }
-        }
-        Expr::UnknownForm(data) => {
-            for child in &data.children {
+        ExprCarrier::MalformedLegacyList(list) => {
+            for child in &list.elements {
                 assert_ir_typed(child);
             }
         }
+        ExprCarrier::Atom(_) => {}
     }
 }
 
 fn has_type_metadata(expr: &Expr) -> bool {
-    stamped_parts(expr).is_some_and(|(_, meta, _)| meta.ty().is_some())
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(_, metadata, _) => metadata.ty().is_some(),
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => false,
+    }
 }
 
 fn is_shape_sensitive_builtin_app(expr: &Expr) -> bool {
-    let Some((DeepTag::App, _, kids)) = stamped_parts(expr) else {
-        return false;
+    let kids = match expr.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::App, _, children) => children,
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => return false,
     };
-    let func_name = kids
-        .first()
-        .and_then(stamped_parts)
-        .and_then(|(tag, _, func_kids)| {
-            (tag == DeepTag::Var)
-                .then(|| func_kids.first().and_then(symbol_name))
-                .flatten()
-        });
+    let func_name = kids.first().and_then(|callee| match callee.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::Var, _, children) => {
+            children.first().and_then(symbol_name)
+        }
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => None,
+    });
 
     matches!(
         func_name,
@@ -5477,12 +5770,26 @@ fn stamped_parts(expr: &Expr) -> Option<(DeepTag, &Metadata, &[Expr])> {
 }
 
 fn app_var_name_and_args(expr: &Expr) -> Option<(&str, &[Expr])> {
-    let (DeepTag::App, _, kids) = stamped_parts(expr)? else {
-        return None;
+    let kids = match expr.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::App, _, children) => children,
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => return None,
     };
     let func = kids.first()?;
-    let (DeepTag::Var, _, func_kids) = stamped_parts(func)? else {
-        return None;
+    let func_kids = match func.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::Var, _, children) => children,
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => return None,
     };
     let name = func_kids.first().and_then(|expr| match expr {
         Expr::Atom(Atom::Name(name), _) => Some(name.as_str()),
@@ -5492,17 +5799,19 @@ fn app_var_name_and_args(expr: &Expr) -> Option<(&str, &[Expr])> {
 }
 
 fn string_literal(expr: &Expr) -> Option<&str> {
-    match expr {
-        Expr::Atom(Atom::Str(value), _) => Some(value),
-        _ => {
-            let (DeepTag::Lit, _, kids) = stamped_parts(expr)? else {
-                return None;
-            };
-            match kids.first()? {
-                Expr::Atom(Atom::Str(value), _) => Some(value),
-                _ => None,
-            }
-        }
+    match expr.carrier() {
+        ExprCarrier::Atom(Atom::Str(value)) => Some(value),
+        ExprCarrier::DecodedNode(DeepTag::Lit, _, kids) => match kids.first()? {
+            Expr::Atom(Atom::Str(value), _) => Some(value),
+            _ => None,
+        },
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => None,
     }
 }
 
@@ -5580,8 +5889,15 @@ pub(crate) fn concrete_dim_len(dim: &DimInfo) -> Option<usize> {
 
 /// Helper: is `expr` an `app` of a `var` whose name equals `expected`?
 fn is_app_of_builtin(expr: &Expr, expected: &str) -> bool {
-    let Some((DeepTag::Var, _, kids)) = stamped_parts(expr) else {
-        return false;
+    let kids = match expr.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::Var, _, children) => children,
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => return false,
     };
     matches!(
         kids.first(),
@@ -5609,8 +5925,15 @@ fn cons_pair_extract_int(expr: &Expr) -> Option<i64> {
 /// Walk `Cons(start, Cons(end, Nil))` and return `(start, end)` as
 /// `usize`. Returns `None` if any structural assumption fails.
 fn cons_two_int_pair(expr: &Expr) -> Option<(usize, usize)> {
-    let (DeepTag::App, _, outer_children) = stamped_parts(expr)? else {
-        return None;
+    let outer_children = match expr.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::App, _, children) => children,
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => return None,
     };
     let func = outer_children.first()?;
     if !is_app_of_builtin(func, "Cons") {
@@ -5618,8 +5941,15 @@ fn cons_two_int_pair(expr: &Expr) -> Option<(usize, usize)> {
     }
     let start = cons_pair_extract_int(outer_children.get(1)?)?;
     let tail = outer_children.get(2)?;
-    let (DeepTag::App, _, tail_children) = stamped_parts(tail)? else {
-        return None;
+    let tail_children = match tail.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::App, _, children) => children,
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => return None,
     };
     let tail_func = tail_children.first()?;
     if !is_app_of_builtin(tail_func, "Cons") {
@@ -5627,8 +5957,15 @@ fn cons_two_int_pair(expr: &Expr) -> Option<(usize, usize)> {
     }
     let end = cons_pair_extract_int(tail_children.get(1)?)?;
     let nil_expr = tail_children.get(2)?;
-    let (DeepTag::Var, _, nil_children) = stamped_parts(nil_expr)? else {
-        return None;
+    let nil_children = match nil_expr.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::Var, _, children) => children,
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => return None,
     };
     let nil_name = match nil_children.first() {
         Some(Expr::Atom(Atom::Name(s), _)) => s.as_str(),
@@ -5650,7 +5987,15 @@ fn cons_chain_pair_list(expr: &Expr) -> Option<Vec<(usize, usize)>> {
     let mut pairs = Vec::new();
     let mut cursor = expr;
     loop {
-        let (tag, _, kids) = stamped_parts(cursor)?;
+        let (tag, kids) = match cursor.carrier() {
+            ExprCarrier::DecodedNode(tag, _, children) => (tag, children),
+            ExprCarrier::StructuralList(_)
+            | ExprCarrier::UndecodableHead(_, _, _)
+            | ExprCarrier::Atom(_)
+            | ExprCarrier::MetadataMap(_)
+            | ExprCarrier::MetadataExpression(_)
+            | ExprCarrier::MalformedLegacyList(_) => return None,
+        };
         match tag {
             DeepTag::Var => {
                 let name = match kids.first() {
@@ -5685,7 +6030,15 @@ pub(crate) fn collect_cons_chain(expr: &Expr) -> Option<Vec<&Expr>> {
     let mut out = Vec::new();
     let mut cursor = expr;
     loop {
-        let (tag, _, kids) = stamped_parts(cursor)?;
+        let (tag, kids) = match cursor.carrier() {
+            ExprCarrier::DecodedNode(tag, _, children) => (tag, children),
+            ExprCarrier::StructuralList(_)
+            | ExprCarrier::UndecodableHead(_, _, _)
+            | ExprCarrier::Atom(_)
+            | ExprCarrier::MetadataMap(_)
+            | ExprCarrier::MetadataExpression(_)
+            | ExprCarrier::MalformedLegacyList(_) => return None,
+        };
         match tag {
             DeepTag::Var => {
                 let name = match kids.first() {
@@ -5880,17 +6233,22 @@ fn rebuild_cons_chain(items: Vec<LoweredValue>) -> LoweredValue {
 /// [`LowerCtx::extract_dim_list`] to interpret reshape shape-list
 /// entries (issue Chelis-Lang/chelis#220).
 pub(crate) fn extract_int_for_dim(expr: &Expr) -> Option<i64> {
-    match expr {
-        Expr::Atom(Atom::Int(n), _) => Some(*n),
-        Expr::List(_, _) | Expr::Node(_, _) => match stamped_parts(expr)?.0 {
-            DeepTag::Lit => match stamped_parts(expr)?.2.first()? {
+    match expr.carrier() {
+        ExprCarrier::Atom(Atom::Int(n)) => Some(*n),
+        ExprCarrier::DecodedNode(tag, _, kids) => match tag {
+            DeepTag::Lit => match kids.first()? {
                 Expr::Atom(Atom::Int(n), _) => Some(*n),
                 _ => None,
             },
-            DeepTag::Cast => extract_int_for_dim(stamped_parts(expr)?.2.first()?),
+            DeepTag::Cast => extract_int_for_dim(kids.first()?),
             _ => None,
         },
-        _ => None,
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => None,
     }
 }
 
@@ -5910,8 +6268,16 @@ pub(crate) fn extract_int_axis(expr: &Expr) -> Option<i64> {
         return Some(n);
     }
     // Negative-axis literal: `-k` desugars to `(app (var neg) <inner>)`.
-    if let Some((DeepTag::App, _, kids)) = stamped_parts(expr)
-        && let Some(callee) = kids.first()
+    if let Some(kids) = (match expr.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::App, _, children) => Some(children),
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => None,
+    }) && let Some(callee) = kids.first()
         && expr_is_var_named(callee, "neg")
         && let Some(inner) = kids.get(1)
         && let Some(n) = extract_int_axis(inner)
@@ -5940,9 +6306,20 @@ pub(crate) fn extract_int_axis(expr: &Expr) -> Option<i64> {
 /// cast reaches the bare `var len` so [`bare_var_name`] /
 /// [`shape_app_operand_axis`] can match it (chelis#369, mirroring the
 /// `cast`-strip already in [`shape_app_operand_axis`]).
+#[allow(clippy::while_let_loop)] // Keep the total carrier disposition explicit.
 fn strip_cast_wrappers(expr: &Expr) -> &Expr {
     let mut current = expr;
-    while let Some((DeepTag::Cast, _, kids)) = stamped_parts(current) {
+    loop {
+        let kids = match current.carrier() {
+            ExprCarrier::DecodedNode(DeepTag::Cast, _, children) => children,
+            ExprCarrier::DecodedNode(_, _, _)
+            | ExprCarrier::StructuralList(_)
+            | ExprCarrier::UndecodableHead(_, _, _)
+            | ExprCarrier::Atom(_)
+            | ExprCarrier::MetadataMap(_)
+            | ExprCarrier::MetadataExpression(_)
+            | ExprCarrier::MalformedLegacyList(_) => break,
+        };
         if let Some(inner) = kids.first() {
             current = inner;
         } else {
@@ -5953,7 +6330,15 @@ fn strip_cast_wrappers(expr: &Expr) -> &Expr {
 }
 
 fn shape_app_operand_axis(expr: &Expr) -> Option<(&Expr, usize)> {
-    let (tag, _, kids) = stamped_parts(expr)?;
+    let (tag, kids) = match expr.carrier() {
+        ExprCarrier::DecodedNode(tag, _, children) => (tag, children),
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => return None,
+    };
     // Strip outer `cast(..., i32)` wrappers to reach the `shape` app.
     if tag == DeepTag::Cast {
         return kids.first().and_then(shape_app_operand_axis);
@@ -6013,11 +6398,25 @@ fn pipe_shape_read(kids: &[Expr]) -> Option<(&Expr, usize)> {
 /// The parameter name and body of a synthesized unary pipe-stage lambda,
 /// the `(fn {} (params {} p) body)` shape `parse_pipe_stage` produces.
 fn pipe_stage_lambda(stage: &Expr) -> Option<(String, &Expr)> {
-    let (DeepTag::Fn, _, kids) = stamped_parts(stage)? else {
-        return None;
+    let kids = match stage.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::Fn, _, children) => children,
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => return None,
     };
-    let (DeepTag::Params, _, param_kids) = stamped_parts(kids.first()?)? else {
-        return None;
+    let param_kids = match kids.first()?.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::Params, _, children) => children,
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => return None,
     };
     if param_kids.len() != 1 {
         return None;
@@ -6033,8 +6432,15 @@ fn pipe_stage_lambda(stage: &Expr) -> Option<(String, &Expr)> {
 /// recognize symbolic dim entries inside a reshape shape list (issue
 /// Chelis-Lang/chelis#220).
 fn symbolic_dim_var_name(expr: &Expr) -> Option<String> {
-    let (DeepTag::Var, _, kids) = stamped_parts(expr)? else {
-        return None;
+    let kids = match expr.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::Var, _, children) => children,
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => return None,
     };
     kids.first()
         .and_then(symbol_name)
@@ -6117,8 +6523,15 @@ fn prim_ordinal(prim: Prim) -> u8 {
 /// doesn't fit the literal-Cons-chain shape (e.g. a `to_tensor(items)`
 /// where `items` is a host-side List variable).
 fn static_to_tensor_literal(expr: &Expr) -> Option<LiteralToTensor> {
-    let (DeepTag::App, _, app_kids) = stamped_parts(expr)? else {
-        return None;
+    let app_kids = match expr.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::App, _, children) => children,
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => return None,
     };
     let callee = app_kids.first()?;
     if !expr_is_var_named(callee, "to_tensor") {
@@ -6143,8 +6556,15 @@ pub(crate) fn is_static_to_tensor_literal(expr: &Expr) -> bool {
 /// Return true iff `expr` is `(var {} <expected_name>)`. Helper for
 /// recognizing builtin-name references in app callee position.
 fn expr_is_var_named(expr: &Expr, expected_name: &str) -> bool {
-    let Some((DeepTag::Var, _, kids)) = stamped_parts(expr) else {
-        return false;
+    let kids = match expr.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::Var, _, children) => children,
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => return false,
     };
     kids.first().and_then(symbol_name) == Some(expected_name)
 }
@@ -6220,107 +6640,109 @@ const MAX_TOTAL_INLINE_DEPTH: usize = 1024;
 ///     recursive call.
 fn extract_numeric_leaf(expr: &Expr) -> Option<StagedScalar> {
     use chelis_types::RawScalar;
-    match expr {
-        Expr::Atom(Atom::Int(n), _) => Some(StagedScalar::Raw(RawScalar::Int(*n))),
-        Expr::Atom(Atom::Float(f), _) => Some(StagedScalar::Raw(RawScalar::Float(*f))),
-        Expr::Atom(Atom::Bool(b), _) => Some(StagedScalar::Raw(RawScalar::Int(i64::from(*b)))),
-        Expr::List(_, _) | Expr::Node(_, _) => {
-            let (tag, _, kids) = stamped_parts(expr)?;
-            match tag {
-                DeepTag::Lit => {
-                    let raw = match kids.first()? {
-                        Expr::Atom(Atom::Int(n), _) => RawScalar::Int(*n),
-                        Expr::Atom(Atom::Float(f), _) => RawScalar::Float(*f),
-                        Expr::Atom(Atom::Bool(b), _) => RawScalar::Int(i64::from(*b)),
-                        _ => return None,
-                    };
-                    // chelis#864: a float literal carries its checked width
-                    // in its OWN type metadata (`0.1f32`), with no Cast node
-                    // following to apply it. Finalize at that width here or
-                    // an enclosing f64 tensor widens the LEXICAL f64 `0.1`
-                    // instead of the stored f32 value, and the DAG root
-                    // disagrees with `print` before rendering begins. The
-                    // finalized value stays TYPED (chelis#1116,
-                    // [04-NUM-11]: the dtype travels with the value); the
-                    // cast ladder is total into a float target, so this
-                    // finalize cannot trap. Integer leaves and absent
-                    // metadata stay raw and defer to the tensor's dtype.
-                    let declared = expr_type_metadata(expr).and_then(LowerCtx::try_extract_prim);
-                    match (raw, declared) {
-                        (RawScalar::Float(_), Some(prim)) if prim.is_float() => {
-                            let finalized = chelis_types::cast_raw("lit", raw, prim).ok()?;
-                            Some(StagedScalar::Typed(finalized))
-                        }
-                        _ => Some(StagedScalar::Raw(raw)),
+    match expr.carrier() {
+        ExprCarrier::Atom(Atom::Int(n)) => Some(StagedScalar::Raw(RawScalar::Int(*n))),
+        ExprCarrier::Atom(Atom::Float(f)) => Some(StagedScalar::Raw(RawScalar::Float(*f))),
+        ExprCarrier::Atom(Atom::Bool(b)) => Some(StagedScalar::Raw(RawScalar::Int(i64::from(*b)))),
+        ExprCarrier::DecodedNode(tag, _, kids) => match tag {
+            DeepTag::Lit => {
+                let raw = match kids.first()? {
+                    Expr::Atom(Atom::Int(n), _) => RawScalar::Int(*n),
+                    Expr::Atom(Atom::Float(f), _) => RawScalar::Float(*f),
+                    Expr::Atom(Atom::Bool(b), _) => RawScalar::Int(i64::from(*b)),
+                    _ => return None,
+                };
+                // chelis#864: a float literal carries its checked width
+                // in its OWN type metadata (`0.1f32`), with no Cast node
+                // following to apply it. Finalize at that width here or
+                // an enclosing f64 tensor widens the LEXICAL f64 `0.1`
+                // instead of the stored f32 value, and the DAG root
+                // disagrees with `print` before rendering begins. The
+                // finalized value stays TYPED (chelis#1116,
+                // [04-NUM-11]: the dtype travels with the value); the
+                // cast ladder is total into a float target, so this
+                // finalize cannot trap. Integer leaves and absent
+                // metadata stay raw and defer to the tensor's dtype.
+                let declared = expr_type_metadata(expr).and_then(LowerCtx::try_extract_prim);
+                match (raw, declared) {
+                    (RawScalar::Float(_), Some(prim)) if prim.is_float() => {
+                        let finalized = chelis_types::cast_raw("lit", raw, prim).ok()?;
+                        Some(StagedScalar::Typed(finalized))
                     }
+                    _ => Some(StagedScalar::Raw(raw)),
                 }
-                DeepTag::Cast => {
-                    // A cast leaf APPLIES the checked default ladder
-                    // (spec/04 section 5.2) at recognition time, so
-                    // `cast(3.0, i32)` contributes 3 exactly and
-                    // `cast(9007199254740993, i64)` stays exact. A
-                    // trapping cast DECLINES static recognition (the
-                    // section C2 decline discipline): the dynamic lowering
-                    // evaluates the same cast and traps with its full
-                    // runtime diagnostic.
-                    let inner = kids.first()?;
-                    let target = LowerCtx::try_extract_prim(kids.get(1)?)?;
-                    // The [05-OP-6] rung folds through its OWN kernel, so
-                    // a statically-recognized `cast_trunc(1.9, i32)`
-                    // contributes 1 rather than declining as the checked
-                    // ladder would. An unrecognized selector declines.
-                    let cast = match chelis_deep::cast_mode_of(kids).ok()? {
-                        chelis_deep::CastMode::Checked => match extract_numeric_leaf(inner)? {
-                            StagedScalar::Raw(raw) => {
-                                chelis_types::cast_raw("cast", raw, target).ok()?
-                            }
-                            StagedScalar::Typed(value) => {
-                                chelis_types::cast_scalar("cast", value, target).ok()?
-                            }
-                        },
-                        chelis_deep::CastMode::Trunc => match extract_numeric_leaf(inner)? {
-                            StagedScalar::Raw(raw) => {
-                                chelis_types::cast_trunc_raw("cast_trunc", raw, target).ok()?
-                            }
-                            StagedScalar::Typed(value) => {
-                                chelis_types::cast_trunc_scalar("cast_trunc", value, target).ok()?
-                            }
-                        },
-                    };
-                    Some(StagedScalar::Typed(cast))
-                }
-                DeepTag::App => {
-                    // Negative literal: `-x` desugars to
-                    // `(app (var neg) <inner>)`. The recognizer returns
-                    // `-extract(inner)` so the literal recognizer sees
-                    // through the desugared unary minus. Any other app
-                    // shape is not a static literal.
-                    let callee = kids.first()?;
-                    if !expr_is_var_named(callee, "neg") {
-                        return None;
-                    }
-                    let inner = kids.get(1)?;
-                    Some(match extract_numeric_leaf(inner)? {
-                        StagedScalar::Raw(RawScalar::Int(i)) => {
-                            StagedScalar::Raw(RawScalar::Int(i.checked_neg()?))
-                        }
-                        StagedScalar::Raw(RawScalar::Float(f)) => {
-                            StagedScalar::Raw(RawScalar::Float(-f))
+            }
+            DeepTag::Cast => {
+                // A cast leaf APPLIES the checked default ladder
+                // (spec/04 section 5.2) at recognition time, so
+                // `cast(3.0, i32)` contributes 3 exactly and
+                // `cast(9007199254740993, i64)` stays exact. A
+                // trapping cast DECLINES static recognition (the
+                // section C2 decline discipline): the dynamic lowering
+                // evaluates the same cast and traps with its full
+                // runtime diagnostic.
+                let inner = kids.first()?;
+                let target = LowerCtx::try_extract_prim(kids.get(1)?)?;
+                // The [05-OP-6] rung folds through its OWN kernel, so
+                // a statically-recognized `cast_trunc(1.9, i32)`
+                // contributes 1 rather than declining as the checked
+                // ladder would. An unrecognized selector declines.
+                let cast = match chelis_deep::cast_mode_of(kids).ok()? {
+                    chelis_deep::CastMode::Checked => match extract_numeric_leaf(inner)? {
+                        StagedScalar::Raw(raw) => {
+                            chelis_types::cast_raw("cast", raw, target).ok()?
                         }
                         StagedScalar::Typed(value) => {
-                            let negated = if value.prim().is_float() {
-                                chelis_types::float_unop(chelis_types::FloatUnOp::Neg, value)
-                            } else {
-                                chelis_types::int_unop(chelis_types::IntUnOp::Neg, value)
-                            };
-                            StagedScalar::Typed(negated.ok()?)
+                            chelis_types::cast_scalar("cast", value, target).ok()?
                         }
-                    })
-                }
-                _ => None,
+                    },
+                    chelis_deep::CastMode::Trunc => match extract_numeric_leaf(inner)? {
+                        StagedScalar::Raw(raw) => {
+                            chelis_types::cast_trunc_raw("cast_trunc", raw, target).ok()?
+                        }
+                        StagedScalar::Typed(value) => {
+                            chelis_types::cast_trunc_scalar("cast_trunc", value, target).ok()?
+                        }
+                    },
+                };
+                Some(StagedScalar::Typed(cast))
             }
-        }
-        _ => None,
+            DeepTag::App => {
+                // Negative literal: `-x` desugars to
+                // `(app (var neg) <inner>)`. The recognizer returns
+                // `-extract(inner)` so the literal recognizer sees
+                // through the desugared unary minus. Any other app
+                // shape is not a static literal.
+                let callee = kids.first()?;
+                if !expr_is_var_named(callee, "neg") {
+                    return None;
+                }
+                let inner = kids.get(1)?;
+                Some(match extract_numeric_leaf(inner)? {
+                    StagedScalar::Raw(RawScalar::Int(i)) => {
+                        StagedScalar::Raw(RawScalar::Int(i.checked_neg()?))
+                    }
+                    StagedScalar::Raw(RawScalar::Float(f)) => {
+                        StagedScalar::Raw(RawScalar::Float(-f))
+                    }
+                    StagedScalar::Typed(value) => {
+                        let negated = if value.prim().is_float() {
+                            chelis_types::float_unop(chelis_types::FloatUnOp::Neg, value)
+                        } else {
+                            chelis_types::int_unop(chelis_types::IntUnOp::Neg, value)
+                        };
+                        StagedScalar::Typed(negated.ok()?)
+                    }
+                })
+            }
+            _ => None,
+        },
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => None,
     }
 }
 
@@ -6462,7 +6884,17 @@ impl ResolvedFunction {
     fn parameter_type(&self, index: usize) -> Option<&Expr> {
         self.signature
             .as_deref()
-            .and_then(stamped_parts)
+            .and_then(|expr| match expr.carrier() {
+                ExprCarrier::DecodedNode(tag, metadata, children) => {
+                    Some((tag, metadata, children))
+                }
+                ExprCarrier::StructuralList(_)
+                | ExprCarrier::UndecodableHead(_, _, _)
+                | ExprCarrier::Atom(_)
+                | ExprCarrier::MetadataMap(_)
+                | ExprCarrier::MetadataExpression(_)
+                | ExprCarrier::MalformedLegacyList(_) => None,
+            })
             .and_then(|(tag, _, kids)| (tag == DeepTag::TFn).then(|| kids.get(index)).flatten())
             .or_else(|| extract_param_type(&self.expression, index))
     }
@@ -6470,7 +6902,17 @@ impl ResolvedFunction {
     fn result_type(&self) -> Option<&Expr> {
         self.signature
             .as_deref()
-            .and_then(stamped_parts)
+            .and_then(|expr| match expr.carrier() {
+                ExprCarrier::DecodedNode(tag, metadata, children) => {
+                    Some((tag, metadata, children))
+                }
+                ExprCarrier::StructuralList(_)
+                | ExprCarrier::UndecodableHead(_, _, _)
+                | ExprCarrier::Atom(_)
+                | ExprCarrier::MetadataMap(_)
+                | ExprCarrier::MetadataExpression(_)
+                | ExprCarrier::MalformedLegacyList(_) => None,
+            })
             .and_then(|(tag, _, kids)| (tag == DeepTag::TFn).then(|| kids.last()).flatten())
             .or_else(|| extract_fn_return_type(&self.expression))
     }
@@ -6766,80 +7208,113 @@ impl CallableDependencyState {
 }
 
 fn extract_param_type(expr: &Expr, index: usize) -> Option<&Expr> {
-    let (DeepTag::Fn, _, fn_kids) = stamped_parts(expr)? else {
-        return None;
+    let fn_kids = match expr.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::Fn, _, children) => children,
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => return None,
     };
     let params = fn_kids.first()?;
-    let (DeepTag::Params, _, params_kids) = stamped_parts(params)? else {
-        return None;
+    let params_kids = match params.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::Params, _, children) => children,
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => return None,
     };
     let param = params_kids.get(index)?;
-    let authored = match param {
-        Expr::MetaExpr(meta, _) => meta.metadata.ty().map(|value| value.expression()),
-        Expr::List(param_list, _) => {
-            if let Some(Expr::Map(meta, _)) = param_list.elements.get(1) {
-                meta.ty().map(|value| value.expression())
-            } else {
-                None
+    let authored = match param.carrier() {
+        ExprCarrier::DecodedNode(_, metadata, _) => metadata.ty().map(|value| value.expression()),
+        ExprCarrier::UndecodableHead(_, metadata, children) => match param {
+            Expr::List(_, _) if children.is_empty() => {
+                metadata.ty().map(|value| value.expression())
             }
-        }
-        Expr::Node(_, _) => {
-            stamped_parts(param).and_then(|(_, meta, _)| meta.ty().map(|value| value.expression()))
-        }
-        Expr::BareList(elements, _) => {
-            let Expr::Map(meta, _) = elements.get(1)? else {
-                return None;
+            Expr::List(_, _) => raise_malformed_parameter(param),
+            Expr::UnknownForm(_) => None,
+            _ => unreachable!("only List and UnknownForm have undecodable heads"),
+        },
+        ExprCarrier::MetadataExpression(meta) => meta.metadata.ty().map(|value| value.expression()),
+        ExprCarrier::StructuralList(elements) => {
+            let [Expr::Atom(Atom::Name(_), _), Expr::Map(meta, _)] = elements else {
+                raise_malformed_parameter(param);
             };
             meta.ty().map(|value| value.expression())
         }
-        _ => None,
+        ExprCarrier::MalformedLegacyList(_) => raise_malformed_parameter(param),
+        ExprCarrier::Atom(_) | ExprCarrier::MetadataMap(_) => None,
     };
     authored.or_else(|| fn_type_arg_exprs(expr)?.get(index).copied())
 }
 
+fn raise_malformed_parameter(param: &Expr) -> ! {
+    raise_malformed_deep(
+        "a raw parameter form that does not contain exactly a name and metadata map",
+        Some(param.span()),
+        param.span_id().map(str::to_string),
+    )
+}
+
 fn param_name_and_type_expr(param: &Expr) -> Option<(String, Option<&Expr>)> {
-    match param {
-        Expr::Atom(Atom::Name(name), _) => Some((name.clone(), None)),
-        Expr::MetaExpr(meta, _) => {
+    match param.carrier() {
+        ExprCarrier::Atom(Atom::Name(name)) => Some((name.clone(), None)),
+        ExprCarrier::MetadataExpression(meta) => {
             let Expr::Atom(Atom::Name(name), _) = meta.expr.as_ref() else {
                 return None;
             };
             let ty_expr = meta.metadata.ty().map(|value| value.expression());
             Some((name.clone(), ty_expr))
         }
-        Expr::List(param_list, _) => {
-            let Expr::Atom(Atom::Name(name), _) = param_list.elements.first()? else {
-                return None;
+        ExprCarrier::StructuralList(elements) => {
+            let [Expr::Atom(Atom::Name(name), _), Expr::Map(meta, _)] = elements else {
+                raise_malformed_parameter(param);
             };
-            let ty_expr = if let Some(Expr::Map(meta, _)) = param_list.elements.get(1) {
-                meta.ty().map(|value| value.expression())
-            } else {
-                None
-            };
+            let ty_expr = meta.ty().map(|value| value.expression());
             Some((name.clone(), ty_expr))
         }
-        Expr::BareList(elements, _) => {
-            let Expr::Atom(Atom::Name(name), _) = elements.first()? else {
-                return None;
-            };
-            let ty_expr = if let Some(Expr::Map(meta, _)) = elements.get(1) {
-                meta.ty().map(|value| value.expression())
-            } else {
-                None
-            };
-            Some((name.clone(), ty_expr))
+        ExprCarrier::UndecodableHead(name, metadata, children) => match param {
+            Expr::List(_, _) if children.is_empty() => Some((
+                name.to_string(),
+                metadata.ty().map(|value| value.expression()),
+            )),
+            Expr::List(_, _) => raise_malformed_parameter(param),
+            Expr::UnknownForm(_) => None,
+            _ => unreachable!("only List and UnknownForm have undecodable heads"),
+        },
+        ExprCarrier::MalformedLegacyList(_) => raise_malformed_parameter(param),
+        ExprCarrier::DecodedNode(_, _, _) | ExprCarrier::Atom(_) | ExprCarrier::MetadataMap(_) => {
+            None
         }
-        _ => None,
     }
 }
 
 fn extract_fn_return_type(expr: &Expr) -> Option<&Expr> {
-    let (DeepTag::Fn, meta, _) = stamped_parts(expr)? else {
-        return None;
+    let meta = match expr.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::Fn, metadata, _) => metadata,
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => return None,
     };
     let ty_expr = meta.ty()?.expression();
-    let (DeepTag::TFn, _, fn_kids) = stamped_parts(ty_expr)? else {
-        return None;
+    let fn_kids = match ty_expr.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::TFn, _, children) => children,
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => return None,
     };
     fn_kids.last()
 }
@@ -19728,6 +20203,62 @@ mod tests {
     }
 
     #[test]
+    fn static_pattern_reader_matches_successor_and_legacy_carriers() {
+        let span = Span::new(0, 0);
+        let value = LoweredValue::Tuple(Vec::new());
+        let successor = Expr::node(DeepTag::PatWild, Metadata::default(), Vec::new(), span);
+        let legacy = Expr::List(
+            List {
+                elements: vec![
+                    Expr::Atom(Atom::Tag(DeepTag::PatWild), span),
+                    Expr::Map(Metadata::default(), span),
+                ],
+            },
+            span,
+        );
+
+        for pattern in [&successor, &legacy] {
+            assert!(
+                matches!(bind_leaf_pattern(pattern, &value), Ok(None)),
+                "decoded pattern carriers must preserve the same lowering result"
+            );
+        }
+    }
+
+    #[test]
+    fn static_pattern_reader_distinguishes_non_node_carrier_roles() {
+        let span = Span::new(0, 0);
+        let value = LoweredValue::Tuple(Vec::new());
+        let structural = Expr::BareList(Vec::new(), span);
+        let undecodable = Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
+            head: "future-pattern".into(),
+            meta: Metadata::default(),
+            children: Vec::new(),
+            span,
+        }));
+        let malformed = Expr::List(
+            List {
+                elements: vec![
+                    Expr::Atom(Atom::Tag(DeepTag::PatVar), span),
+                    Expr::Atom(Atom::Name("not-metadata".into()), span),
+                ],
+            },
+            span,
+        );
+
+        let reason = |pattern: &Expr| match bind_leaf_pattern(pattern, &value) {
+            Err(reason) => reason,
+            Ok(_) => panic!("non-node carrier unexpectedly matched"),
+        };
+        assert_eq!(reason(&structural), "a structural-list sub-pattern");
+        assert_eq!(
+            reason(&undecodable),
+            "an undecodable `future-pattern` sub-pattern"
+        );
+        assert_eq!(reason(&malformed), "a malformed legacy-list sub-pattern");
+    }
+
+    #[test]
     fn vectorized_root_map_checks_the_complete_correspondence() {
         let mut before = Dag::new();
         let x = before.add_node(
@@ -20046,12 +20577,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn collect_param_bound_names_preserves_legacy_and_bare_binders() {
+        let span = Span::new(0, 0);
+        let legacy = Expr::List(
+            List {
+                elements: vec![
+                    Expr::Atom(Atom::Name("legacy".into()), span),
+                    Expr::Map(Metadata::default(), span),
+                ],
+            },
+            span,
+        );
+        let bare = Expr::BareList(
+            vec![
+                Expr::Atom(Atom::Name("bare".into()), span),
+                Expr::Map(Metadata::default(), span),
+            ],
+            span,
+        );
+        let mut out = chelis_unord::UnordSet::new();
+        collect_param_bound_names(&legacy, &mut out);
+        collect_param_bound_names(&bare, &mut out);
+        assert_eq!(out.into_sorted(), ["bare", "legacy"]);
+    }
+
     /// chelis#1087: the param-slot UnknownForm arm is unreachable by role
     /// construction (a Binder slot stamps to atoms, Nodes, or BareLists,
-    /// never an UnknownForm), so it is a debug-unreachable rather than a
-    /// silent skip. The guard must actually fire; an assertion nothing
-    /// triggers is the "belief without a test" shape the boundary-guard
-    /// test below also pins.
+    /// never an UnknownForm), so it remains a debug-unreachable rather than
+    /// acquiring legacy raw-List binder semantics through `Expr::carrier`.
     #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "unreachable by role construction")]
@@ -20064,6 +20618,275 @@ mod tests {
             span: chelis_deep::Span::new(0, 0),
         }));
         collect_param_bound_names(&unknown, &mut out);
+    }
+
+    fn runtime_metadata(expr: Expr) -> Metadata {
+        Metadata::from(chelis_deep::annotations::MetadataValue::PropertySeed(
+            chelis_deep::annotations::RuntimeExpression::try_new(expr)
+                .expect("valid runtime metadata expression"),
+        ))
+    }
+
+    fn empty_lower_ctx() -> LowerCtx<'static> {
+        LowerCtx::new(
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            LinearityInfo::default(),
+        )
+    }
+
+    fn pattern_scope_depends_on_bad(pattern: Expr) -> bool {
+        let span = Span::new(0, 0);
+        let arm = Expr::List(
+            List {
+                elements: vec![
+                    Expr::Atom(Atom::Tag(DeepTag::Arm), span),
+                    Expr::Map(Metadata::default(), span),
+                    pattern,
+                    Expr::BareList(Vec::new(), span),
+                    Expr::node(
+                        DeepTag::Var,
+                        Metadata::default(),
+                        vec![Expr::Atom(Atom::Name("bad".into()), span)],
+                        span,
+                    ),
+                ],
+            },
+            span,
+        );
+        let match_expr = Expr::List(
+            List {
+                elements: vec![
+                    Expr::Atom(Atom::Tag(DeepTag::Match), span),
+                    Expr::Map(Metadata::default(), span),
+                    Expr::node(
+                        DeepTag::Lit,
+                        Metadata::default(),
+                        vec![Expr::Atom(Atom::Int(0), span)],
+                        span,
+                    ),
+                    arm,
+                ],
+            },
+            span,
+        );
+        let top_level_defs = BTreeMap::from([("bad".into(), Expr::Atom(Atom::Int(0), span))]);
+        let signatures = BTreeMap::new();
+        let dtype_bound_names = BTreeMap::new();
+        let types = LowerabilityTypes {
+            signatures: &signatures,
+            dtype_bound_names: &dtype_bound_names,
+        };
+        let mut cache = BTreeMap::from([("bad".into(), false)]);
+        expr_depends_on_nonlowerable_name(
+            &match_expr,
+            &top_level_defs,
+            &types,
+            &BTreeMap::new(),
+            &mut cache,
+            &mut UnordSet::new(),
+            &UnordSet::new(),
+        )
+    }
+
+    #[test]
+    fn pattern_scope_ignores_metadata_and_malformed_list_decoy_binders() {
+        let span = Span::new(0, 0);
+        let metadata_pattern = chelis_deep::parser::parse_str(
+            "(match {} (lit {} 0) \
+             (arm {} (pat-var {} bad) () (lit {} 0)))",
+        )
+        .expect("metadata match parses")
+        .remove(0);
+        let metadata_decoy = Expr::MetaExpr(
+            chelis_deep::MetaExpr {
+                metadata: runtime_metadata(metadata_pattern),
+                expr: Box::new(Expr::node(
+                    DeepTag::PatWild,
+                    Metadata::default(),
+                    Vec::new(),
+                    span,
+                )),
+            },
+            span,
+        );
+        let malformed_decoy = Expr::List(
+            List {
+                elements: vec![
+                    Expr::Atom(Atom::Tag(DeepTag::PatWild), span),
+                    Expr::Atom(Atom::Name("not-metadata".into()), span),
+                    Expr::node(
+                        DeepTag::PatVar,
+                        Metadata::default(),
+                        vec![Expr::Atom(Atom::Name("bad".into()), span)],
+                        span,
+                    ),
+                ],
+            },
+            span,
+        );
+        let real_binder = Expr::node(
+            DeepTag::PatVar,
+            Metadata::default(),
+            vec![Expr::Atom(Atom::Name("bad".into()), span)],
+            span,
+        );
+
+        assert!(
+            pattern_scope_depends_on_bad(metadata_decoy),
+            "metadata-only PatVar names must not hide real nonlowerable dependencies"
+        );
+        assert!(
+            pattern_scope_depends_on_bad(malformed_decoy),
+            "malformed legacy patterns must not contribute binders"
+        );
+        assert!(
+            !pattern_scope_depends_on_bad(real_binder),
+            "a real executable pattern binder still scopes the arm"
+        );
+    }
+
+    #[test]
+    fn parameter_readers_distinguish_legacy_bare_and_unknown_sources() {
+        let span = Span::new(0, 0);
+        let ty = Expr::node(
+            DeepTag::TPrim,
+            Metadata::default(),
+            vec![Expr::Atom(Atom::Name("f32".into()), span)],
+            span,
+        );
+        let metadata = Metadata::from(chelis_deep::annotations::MetadataValue::Type(
+            chelis_deep::annotations::TypeSyntax::try_new(ty).expect("parameter type"),
+        ));
+        let legacy = Expr::List(
+            List {
+                elements: vec![
+                    Expr::Atom(Atom::Name("x".into()), span),
+                    Expr::Map(metadata.clone(), span),
+                ],
+            },
+            span,
+        );
+        let bare = Expr::BareList(
+            vec![
+                Expr::Atom(Atom::Name("x".into()), span),
+                Expr::Map(metadata.clone(), span),
+            ],
+            span,
+        );
+        let unknown = Expr::UnknownForm(Box::new(chelis_deep::ast::UnknownFormData {
+            head: "x".into(),
+            meta: metadata,
+            children: Vec::new(),
+            span,
+        }));
+        let fn_with_param = |param| {
+            Expr::node(
+                DeepTag::Fn,
+                Metadata::default(),
+                vec![
+                    Expr::node(DeepTag::Params, Metadata::default(), vec![param], span),
+                    Expr::node(
+                        DeepTag::Lit,
+                        Metadata::default(),
+                        vec![Expr::Atom(Atom::Int(0), span)],
+                        span,
+                    ),
+                ],
+                span,
+            )
+        };
+
+        for accepted in [&legacy, &bare] {
+            let Some((name, Some(param_ty))) = param_name_and_type_expr(accepted) else {
+                panic!("legacy List and BareList typed parameters remain accepted");
+            };
+            assert_eq!(name, "x");
+            assert_eq!(param_ty.tag(), Some(DeepTag::TPrim));
+            assert_eq!(
+                extract_param_type(&fn_with_param(accepted.clone()), 0).and_then(Expr::tag),
+                Some(DeepTag::TPrim)
+            );
+        }
+        assert_eq!(param_name_and_type_expr(&unknown), None);
+        assert_eq!(extract_param_type(&fn_with_param(unknown), 0), None);
+    }
+
+    #[test]
+    fn raw_parameter_forms_with_extra_children_fail_loudly() {
+        let span = Span::new(0, 0);
+        let ty = Expr::node(
+            DeepTag::TPrim,
+            Metadata::default(),
+            vec![Expr::Atom(Atom::Name("f32".into()), span)],
+            span,
+        );
+        let metadata = Metadata::from(chelis_deep::annotations::MetadataValue::Type(
+            chelis_deep::annotations::TypeSyntax::try_new(ty).expect("parameter type"),
+        ));
+        let malformed = [
+            Expr::List(
+                List {
+                    elements: vec![
+                        Expr::Atom(Atom::Name("x".into()), span),
+                        Expr::Map(metadata.clone(), span),
+                        Expr::Atom(Atom::Name("extra".into()), span),
+                    ],
+                },
+                span,
+            ),
+            Expr::BareList(
+                vec![
+                    Expr::Atom(Atom::Name("x".into()), span),
+                    Expr::Map(metadata, span),
+                    Expr::Atom(Atom::Name("extra".into()), span),
+                ],
+                span,
+            ),
+        ];
+
+        for param in malformed {
+            let params = Expr::List(
+                List {
+                    elements: vec![
+                        Expr::Atom(Atom::Tag(DeepTag::Params), span),
+                        Expr::Map(Metadata::default(), span),
+                        param,
+                    ],
+                },
+                span,
+            );
+            let function = Expr::List(
+                List {
+                    elements: vec![
+                        Expr::Atom(Atom::Tag(DeepTag::Fn), span),
+                        Expr::Map(Metadata::default(), span),
+                        params,
+                        Expr::node(
+                            DeepTag::Lit,
+                            Metadata::default(),
+                            vec![Expr::Atom(Atom::Int(0), span)],
+                            span,
+                        ),
+                    ],
+                },
+                span,
+            );
+            let outcome = catch_lowering(move || {
+                let mut ctx = empty_lower_ctx();
+                ctx.lower_expr(&function)
+            });
+            let Err(diagnostic) = outcome else {
+                panic!("a malformed raw parameter must not disappear through filter_map");
+            };
+            assert!(
+                diagnostic
+                    .to_string()
+                    .contains("exactly a name and metadata map"),
+                "{diagnostic}"
+            );
+        }
     }
 
     fn parse_and_check(src: &str) -> chelis_types::CheckedProgram {
