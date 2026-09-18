@@ -79,3 +79,53 @@ fn guarded_match_tail_rejects_a_different_return_on_both_ingresses() {
         "{diagnostics:?}"
     );
 }
+
+#[test]
+fn same_local_alias_spelling_does_not_merge_distinct_borrowed_parameters() {
+    let diagnostics = ingress_messages(&format!(
+        "{CHOICE}
+         (defsig {{}} choose
+           (t-fn {{}}
+             (t-adt {{}} Choice)
+             (t-ref {{}} (t-tensor {{}} (d-lit {{}} 3) (t-prim {{}} f32)))
+             (t-ref {{}} (t-tensor {{}} (d-lit {{}} 3) (t-prim {{}} f32)))
+             (t-tensor {{}} (d-lit {{}} 3) (t-prim {{}} f32))))
+         (def {{}} choose
+           (fn {{}} (params {{}} choice left right)
+             (match {{}} (var {{}} choice)
+               (arm {{}} (pat-ctor {{}} Left)
+                 (lit {{type: (t-prim {{}} bool)}} true)
+                 (let {{}} (bind {{}} result (var {{}} left)) (var {{}} result)))
+               (arm {{}} (pat-ctor {{}} Right) ()
+                 (let {{}} (bind {{}} result (var {{}} right)) (var {{}} result))))))"
+    ));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|message| message.contains("doesn't match declared signature")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn locally_constructed_borrow_is_not_relaxed_into_an_owned_return() {
+    let diagnostics = ingress_messages(
+        "(defsig {} local
+           (t-fn {}
+             (t-ref {} (t-tensor {} (d-lit {} 3) (t-prim {} f32)))
+             (t-tensor {} (d-lit {} 3) (t-prim {} f32))))
+         (def {} local
+           (fn {} (params {} input)
+             (let {}
+               (bind {}
+                 owned (copy {} (var {} input))
+                 borrowed (borrow {} (var {} owned)))
+               (var {} borrowed))))",
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|message| message.contains("doesn't match declared signature")),
+        "{diagnostics:?}"
+    );
+}

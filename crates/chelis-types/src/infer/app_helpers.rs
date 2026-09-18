@@ -3,6 +3,8 @@
 //! This module contains code moved from the former inference monolith.
 //! The extraction preserves control flow and diagnostic order.
 
+use std::collections::BTreeMap;
+
 use super::*;
 
 pub(super) fn auto_borrow_call_arg_types(
@@ -85,9 +87,10 @@ pub(super) fn unify_checked_call_contract(
 }
 
 /// Implicit-copy fan-out v3 Shape A relaxation: when a def's body's
-/// tail-position expression is a bare `(var x)` reference (possibly
-/// wrapped in `let`, `if`, or `match` structures whose sibling branches
-/// all return the same name) and the body's inferred return type is
+/// tail-position expression resolves to a borrowed function parameter
+/// (possibly through a direct `let` alias and wrapped in
+/// `let`, `if`, or `match` structures whose sibling branches
+/// all return the same parameter identity) and the body's inferred return type is
 /// `Ref(R)` while the declared return is owned `R`, return a relaxed
 /// declared type `Fn(params, Ref(R))` so the def-body unify can succeed.
 /// Returns `None` for any other body shape; the caller surfaces the
@@ -96,7 +99,7 @@ pub(super) fn unify_checked_call_contract(
 /// The PR #91 (W4-A) version of this helper accepted only a bare
 /// `(fn (params...) (var x))` body.  0.7.9 broadens the gate to walk
 /// `let`/`if`/`match` tail-position structures via
-/// `descend_to_tail_var`, closing `Linearity-ShapeABroadReturn-F1`.
+/// `descend_to_tail_parameter`, closing `Linearity-ShapeABroadReturn-F1`.
 pub(super) fn shape_a_relaxed_return(
     body_expr: &deep::Expr,
     body_ty: &Type,
@@ -104,8 +107,8 @@ pub(super) fn shape_a_relaxed_return(
 ) -> Option<Type> {
     // body is the def's body, which the desugarer wraps as
     // `(fn (params ...) body_inner)` whenever the def has params.  Walk
-    // the inner expression's tail position to confirm it resolves to a
-    // bare `(var name)` reference across every reachable sibling.
+    // the inner expression's tail position to confirm it resolves to the
+    // same caller-owned borrowed parameter across every reachable sibling.
     let body_children = match body_expr.carrier() {
         deep::ExprCarrier::DecodedNode(DeepTag::Fn, _, children) => children,
         deep::ExprCarrier::DecodedNode(_, _, _)
@@ -116,8 +119,6 @@ pub(super) fn shape_a_relaxed_return(
         | deep::ExprCarrier::MetadataExpression(_)
         | deep::ExprCarrier::MalformedLegacyList(_) => return None,
     };
-    let inner = body_children.get(1)?;
-    descend_to_tail_var(inner)?;
 
     // The body's inferred type and the declared type both must be
     // `Fn(params, ret)` with matching params and a return-position
@@ -129,6 +130,9 @@ pub(super) fn shape_a_relaxed_return(
     if body_params.len() != decl_params.len() {
         return None;
     }
+    let parameter_roots = borrowed_parameter_roots(body_children.first()?, body_params)?;
+    let inner = body_children.get(1)?;
+    descend_to_tail_parameter(inner, &parameter_roots)?;
     let Type::Ref(body_inner_ret) = body_ret.as_ref() else {
         return None;
     };
@@ -144,33 +148,70 @@ pub(super) fn shape_a_relaxed_return(
     ))
 }
 
-/// Descend through `let`, `if`, and `match` to a tail-position
-/// `(var name)` reference.  Returns `Some(name)` when every sibling
-/// branch resolves to the same bare-var name, `None` otherwise.
+/// Return the lexical roots of borrowed function parameters.
+///
+/// Owned parameters are not eligible for Shape A's borrow-to-owned return
+/// relaxation. The returned map records binding identity separately from the
+/// spelling currently used to reach it.
+fn borrowed_parameter_roots(
+    params_expr: &deep::Expr,
+    body_params: &[Type],
+) -> Option<BTreeMap<String, String>> {
+    let deep::ExprCarrier::DecodedNode(DeepTag::Params, _, params) = params_expr.carrier() else {
+        return None;
+    };
+    if params.len() != body_params.len() {
+        return None;
+    }
+
+    let mut roots = BTreeMap::new();
+    for (param, ty) in params.iter().zip(body_params) {
+        if matches!(ty, Type::Ref(_)) {
+            let name = param_name_for_refs(param)?;
+            roots.insert(name.clone(), name);
+        }
+    }
+    Some(roots)
+}
+
+fn direct_tail_parameter(expr: &deep::Expr, roots: &BTreeMap<String, String>) -> Option<String> {
+    let deep::ExprCarrier::DecodedNode(DeepTag::Var, _, children) = expr.carrier() else {
+        return None;
+    };
+    let name = children.first().and_then(symbol_name)?;
+    roots.get(name).cloned()
+}
+
+/// Descend through `let`, `if`, and `match` to a tail-position reference
+/// rooted in a borrowed function parameter. Returns that parameter's identity
+/// when every sibling branch resolves to the same root, `None` otherwise.
 ///
 /// This is the broader-Shape-A coverage closure for
 /// `Linearity-ShapeABroadReturn-F1`.  The rules:
 ///
-/// - `(var x)` returns `Some("x")` (the leaf case from PR #91).
-/// - `(let bind body)` recurses into `body` (the second child).
+/// - `(var x)` returns the borrowed parameter identity currently bound to `x`.
+/// - `(let bind body)` forwards only direct aliases of an eligible parameter;
+///   every other binding shadows the spelling without acquiring provenance.
 /// - `(if cond then_e else_e)` recurses into both branches; both must
-///   resolve to the same name.
+///   resolve to the same parameter identity.
 /// - `(match scrutinee arm ...)` recurses into every arm body (the
 ///   third child of each `(arm pattern guard body)` triple); all arms
-///   must resolve to the same name.
+///   must resolve to the same parameter identity, and pattern binders shadow
+///   outer names in their arm.
 /// - Otherwise returns `None`.
 ///
 /// The descent is type-agnostic; the surrounding logic in
 /// `shape_a_relaxed_return` already verifies that the body's inferred
 /// return type is `Ref(R)` and the declared return is `R` structurally.
 ///
-/// The "same name across siblings" requirement is intentional: the
-/// existing relaxation is justified by the caller's borrow lifetime
-/// already covering the parameter being returned.  Heterogeneous
-/// bare-var returns would extend the relaxation beyond v3 scope and
-/// need a richer coercion story.
-pub(super) fn descend_to_tail_var(expr: &deep::Expr) -> Option<&str> {
-    stack_guard!("descend_to_tail_var", expr, None);
+/// Comparing lexical roots rather than source names enforces [04-LIN-1] and
+/// [04-LIN-4]: a same-spelled local or selected arm cannot manufacture an
+/// owned result from a borrow whose lifetime the caller did not provide.
+fn descend_to_tail_parameter(
+    expr: &deep::Expr,
+    roots: &BTreeMap<String, String>,
+) -> Option<String> {
+    stack_guard!("descend_to_tail_parameter", expr, None);
     let (tag, children) = match expr.carrier() {
         deep::ExprCarrier::DecodedNode(tag, _, children) => (tag, children),
         deep::ExprCarrier::StructuralList(_)
@@ -181,18 +222,36 @@ pub(super) fn descend_to_tail_var(expr: &deep::Expr) -> Option<&str> {
         | deep::ExprCarrier::MalformedLegacyList(_) => return None,
     };
     match tag {
-        DeepTag::Var => children.first().and_then(symbol_name),
+        DeepTag::Var => direct_tail_parameter(expr, roots),
         DeepTag::Let => {
+            let bind = children.first()?;
             let body = children.get(1)?;
-            descend_to_tail_var(body)
+            let deep::ExprCarrier::DecodedNode(DeepTag::Bind, _, bind_children) = bind.carrier()
+            else {
+                return None;
+            };
+            let (pairs, remainder) = bind_children.as_chunks::<2>();
+            if !remainder.is_empty() {
+                return None;
+            }
+            let mut nested = roots.clone();
+            for pair in pairs {
+                let name = symbol_name(&pair[0])?.to_string();
+                if let Some(root) = direct_tail_parameter(&pair[1], &nested) {
+                    nested.insert(name, root);
+                } else {
+                    nested.remove(&name);
+                }
+            }
+            descend_to_tail_parameter(body, &nested)
         }
         DeepTag::If => {
             let then_e = children.get(1)?;
             let else_e = children.get(2)?;
-            let then_name = descend_to_tail_var(then_e)?;
-            let else_name = descend_to_tail_var(else_e)?;
-            if then_name == else_name {
-                Some(then_name)
+            let then_root = descend_to_tail_parameter(then_e, roots)?;
+            let else_root = descend_to_tail_parameter(else_e, roots)?;
+            if then_root == else_root {
+                Some(then_root)
             } else {
                 None
             }
@@ -204,7 +263,7 @@ pub(super) fn descend_to_tail_var(expr: &deep::Expr) -> Option<&str> {
             if arms.is_empty() {
                 return None;
             }
-            let mut name: Option<&str> = None;
+            let mut name: Option<String> = None;
             for arm in arms {
                 let arm_children = match arm.carrier() {
                     deep::ExprCarrier::DecodedNode(DeepTag::Arm, _, children) => children,
@@ -216,11 +275,15 @@ pub(super) fn descend_to_tail_var(expr: &deep::Expr) -> Option<&str> {
                     | deep::ExprCarrier::MetadataExpression(_)
                     | deep::ExprCarrier::MalformedLegacyList(_) => return None,
                 };
+                let mut arm_roots = roots.clone();
+                for binder in chelis_deep::pattern_binder_names(&arm_children[0]) {
+                    arm_roots.remove(&binder);
+                }
                 let arm_body = arm_children.get(2)?;
-                let arm_name = descend_to_tail_var(arm_body)?;
-                match name {
-                    None => name = Some(arm_name),
-                    Some(prev) if prev == arm_name => {}
+                let arm_root = descend_to_tail_parameter(arm_body, &arm_roots)?;
+                match &name {
+                    None => name = Some(arm_root),
+                    Some(previous) if previous == &arm_root => {}
                     Some(_) => return None,
                 }
             }
