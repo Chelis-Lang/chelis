@@ -106,14 +106,17 @@ pub(super) fn shape_a_relaxed_return(
     // `(fn (params ...) body_inner)` whenever the def has params.  Walk
     // the inner expression's tail position to confirm it resolves to a
     // bare `(var name)` reference across every reachable sibling.
-    let body_list = match body_expr {
-        deep::Expr::List(list, _) => list,
-        _ => return None,
+    let body_children = match body_expr.carrier() {
+        deep::ExprCarrier::DecodedNode(DeepTag::Fn, _, children) => children,
+        deep::ExprCarrier::DecodedNode(_, _, _)
+        | deep::ExprCarrier::StructuralList(_)
+        | deep::ExprCarrier::UndecodableHead(_, _, _)
+        | deep::ExprCarrier::Atom(_)
+        | deep::ExprCarrier::MetadataMap(_)
+        | deep::ExprCarrier::MetadataExpression(_)
+        | deep::ExprCarrier::MalformedLegacyList(_) => return None,
     };
-    if get_tag(body_list) != Some(DeepTag::Fn) {
-        return None;
-    }
-    let inner = children(body_list).get(1)?;
+    let inner = body_children.get(1)?;
     descend_to_tail_var(inner)?;
 
     // The body's inferred type and the declared type both must be
@@ -168,20 +171,24 @@ pub(super) fn shape_a_relaxed_return(
 /// need a richer coercion story.
 pub(super) fn descend_to_tail_var(expr: &deep::Expr) -> Option<&str> {
     stack_guard!("descend_to_tail_var", expr, None);
-    let list = match expr {
-        deep::Expr::List(list, _) => list,
-        _ => return None,
+    let (tag, children) = match expr.carrier() {
+        deep::ExprCarrier::DecodedNode(tag, _, children) => (tag, children),
+        deep::ExprCarrier::StructuralList(_)
+        | deep::ExprCarrier::UndecodableHead(_, _, _)
+        | deep::ExprCarrier::Atom(_)
+        | deep::ExprCarrier::MetadataMap(_)
+        | deep::ExprCarrier::MetadataExpression(_)
+        | deep::ExprCarrier::MalformedLegacyList(_) => return None,
     };
-    match get_tag(list) {
-        Some(DeepTag::Var) => var_name_list(list),
-        Some(DeepTag::Let) => {
-            let body = children(list).get(1)?;
+    match tag {
+        DeepTag::Var => children.first().and_then(symbol_name),
+        DeepTag::Let => {
+            let body = children.get(1)?;
             descend_to_tail_var(body)
         }
-        Some(DeepTag::If) => {
-            let kids = children(list);
-            let then_e = kids.get(1)?;
-            let else_e = kids.get(2)?;
+        DeepTag::If => {
+            let then_e = children.get(1)?;
+            let else_e = children.get(2)?;
             let then_name = descend_to_tail_var(then_e)?;
             let else_name = descend_to_tail_var(else_e)?;
             if then_name == else_name {
@@ -190,24 +197,26 @@ pub(super) fn descend_to_tail_var(expr: &deep::Expr) -> Option<&str> {
                 None
             }
         }
-        Some(DeepTag::Match) => {
-            let kids = children(list);
+        DeepTag::Match => {
             // Skip the scrutinee (first child); every remaining child is
             // expected to be an `(arm pattern guard body)` triple.
-            let arms = kids.get(1..)?;
+            let arms = children.get(1..)?;
             if arms.is_empty() {
                 return None;
             }
             let mut name: Option<&str> = None;
             for arm in arms {
-                let arm_list = match arm {
-                    deep::Expr::List(list, _) => list,
-                    _ => return None,
+                let arm_children = match arm.carrier() {
+                    deep::ExprCarrier::DecodedNode(DeepTag::Arm, _, children) => children,
+                    deep::ExprCarrier::DecodedNode(_, _, _)
+                    | deep::ExprCarrier::StructuralList(_)
+                    | deep::ExprCarrier::UndecodableHead(_, _, _)
+                    | deep::ExprCarrier::Atom(_)
+                    | deep::ExprCarrier::MetadataMap(_)
+                    | deep::ExprCarrier::MetadataExpression(_)
+                    | deep::ExprCarrier::MalformedLegacyList(_) => return None,
                 };
-                if get_tag(arm_list) != Some(DeepTag::Arm) {
-                    return None;
-                }
-                let arm_body = children(arm_list).get(2)?;
+                let arm_body = arm_children.get(2)?;
                 let arm_name = descend_to_tail_var(arm_body)?;
                 match name {
                     None => name = Some(arm_name),
