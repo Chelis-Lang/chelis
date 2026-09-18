@@ -929,6 +929,7 @@ dependencies = [
  "chelis-unord",
  "chelis-vocab",
  "half",
+ "proc-macro2",
  "quote",
  "schemars",
  "serde",

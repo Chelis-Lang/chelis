@@ -5,7 +5,9 @@ use chelis_deep::{Atom, Expr, List, Metadata};
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
 use chelis_types::{CheckedProgram, check_ir_program, check_linearity, check_typed_program};
+use proc_macro2::{TokenStream, TokenTree};
 use std::collections::BTreeSet;
+use syn::ext::IdentExt;
 use syn::visit::{self, Visit};
 
 const CARRIER_ROLES: [&str; 7] = [
@@ -18,9 +20,31 @@ const CARRIER_ROLES: [&str; 7] = [
     "MalformedLegacyList",
 ];
 
+fn ident_is(ident: &syn::Ident, expected: &str) -> bool {
+    ident.unraw() == expected
+}
+
+fn path_ends_with(path: &syn::Path, expected: &str) -> bool {
+    path.segments
+        .last()
+        .is_some_and(|segment| ident_is(&segment.ident, expected))
+}
+
+fn path_is(path: &syn::Path, expected: &[&str]) -> bool {
+    path.segments.len() == expected.len()
+        && path
+            .segments
+            .iter()
+            .zip(expected)
+            .all(|(segment, expected)| ident_is(&segment.ident, expected))
+}
+
 fn direct_carrier_call(expr: &syn::Expr) -> bool {
     match expr {
-        syn::Expr::MethodCall(call) => call.method == "carrier",
+        syn::Expr::MethodCall(call) => ident_is(&call.method, "carrier"),
+        syn::Expr::Call(call) => {
+            matches!(&*call.func, syn::Expr::Path(path) if path_ends_with(&path.path, "carrier"))
+        }
         syn::Expr::Group(group) => direct_carrier_call(&group.expr),
         syn::Expr::Paren(paren) => direct_carrier_call(&paren.expr),
         _ => false,
@@ -52,9 +76,23 @@ fn carrier_roles(pattern: &syn::Pat) -> BTreeSet<String> {
     scan.roles
 }
 
+fn tokens_mention(tokens: TokenStream, expected: &str) -> bool {
+    tokens.into_iter().any(|token| match token {
+        TokenTree::Ident(ident) => ident.to_string().trim_start_matches("r#") == expected,
+        TokenTree::Group(group) => tokens_mention(group.stream(), expected),
+        TokenTree::Punct(_) | TokenTree::Literal(_) => false,
+    })
+}
+
 fn macro_mentions_carrier(mac: &syn::Macro) -> bool {
-    let tokens = mac.tokens.to_string();
-    tokens.contains(". carrier (") || tokens.contains(":: carrier (")
+    tokens_mention(mac.tokens.clone(), "carrier")
+}
+
+fn cfg_test(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        attr.path().is_ident("cfg")
+            && matches!(&attr.meta, syn::Meta::List(list) if tokens_mention(list.tokens.clone(), "test"))
+    })
 }
 
 fn carrier_totality_findings(source: &str) -> Vec<String> {
@@ -90,10 +128,29 @@ fn carrier_totality_findings(source: &str) -> Vec<String> {
         }
 
         fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
-            if call.method == "carrier" {
+            if ident_is(&call.method, "carrier") {
                 self.carrier_calls += 1;
+            } else if ident_is(&call.method, "to_list") {
+                self.findings
+                    .push("Node-to-List bridge in a semantic reader".to_string());
             }
             visit::visit_expr_method_call(self, call);
+        }
+
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(path) = &*call.func {
+                if path_ends_with(&path.path, "carrier") {
+                    self.carrier_calls += 1;
+                } else if path_ends_with(&path.path, "to_list") {
+                    self.findings
+                        .push("Node-to-List bridge in a semantic reader".to_string());
+                }
+                if path_is(&path.path, &["Expr", "List"]) {
+                    self.findings
+                        .push("legacy Expr::List construction in a semantic reader".to_string());
+                }
+            }
+            visit::visit_expr_call(self, call);
         }
 
         fn visit_macro(&mut self, mac: &'ast syn::Macro) {
@@ -102,6 +159,12 @@ fn carrier_totality_findings(source: &str) -> Vec<String> {
                     .push("carrier access hidden inside a macro".to_string());
             }
             visit::visit_macro(self, mac);
+        }
+
+        fn visit_item_mod(&mut self, item_mod: &'ast syn::ItemMod) {
+            if !cfg_test(&item_mod.attrs) {
+                visit::visit_item_mod(self, item_mod);
+            }
         }
     }
 
@@ -233,23 +296,11 @@ def bad(pair: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] =
 #[test]
 fn linearity_reader_has_only_role_total_carrier_matches_and_no_node_bridge() {
     let source = include_str!("../src/linearity.rs");
-    let production = source
-        .split("#[cfg(test)]")
-        .next()
-        .expect("linearity source has a production prefix");
 
-    let carrier_findings = carrier_totality_findings(production);
+    let carrier_findings = carrier_totality_findings(source);
     assert!(
         carrier_findings.is_empty(),
         "E5b requires every carrier access to be a direct, role-total match: {carrier_findings:?}"
-    );
-    assert!(
-        !production.contains(".to_list("),
-        "E5b forbids Node-to-List bridges in semantic linearity readers"
-    );
-    assert!(
-        !production.contains("Expr::List("),
-        "linearity readers must disposition legacy lists through Expr::carrier"
     );
     for disposition in [
         "ExprCarrier::DecodedNode",
@@ -261,7 +312,7 @@ fn linearity_reader_has_only_role_total_carrier_matches_and_no_node_bridge() {
         "ExprCarrier::MalformedLegacyList",
     ] {
         assert!(
-            production.contains(disposition),
+            source.contains(disposition),
             "missing explicit carrier disposition `{disposition}`"
         );
     }
@@ -304,6 +355,34 @@ fn decoded_parts(expr: &Expr) -> Option<(DeepTag, &Metadata, &[Expr])> {
     }
 }
 "#,
+        r#"
+fn decoded_parts(expr: &Expr) -> Option<(DeepTag, &Metadata, &[Expr])> {
+    match Expr::carrier(expr) {
+        ExprCarrier::DecodedNode(tag, metadata, children) => Some((tag, metadata, children)),
+        _ => None,
+    }
+}
+"#,
+        r#"
+macro_rules! invoke {
+    ($value:expr, $method:ident) => {
+        $value.$method()
+    };
+}
+fn decoded_parts(expr: &Expr) -> Option<(DeepTag, &Metadata, &[Expr])> {
+    invoke!(expr, carrier)
+}
+"#,
+        r#"
+// #[cfg(test)] is documentation here, not an item attribute.
+fn decoded_parts(expr: &Expr) -> Option<(DeepTag, &Metadata, &[Expr])> {
+    let carrier = expr.carrier();
+    match carrier {
+        ExprCarrier::DecodedNode(tag, metadata, children) => Some((tag, metadata, children)),
+        _ => None,
+    }
+}
+"#,
     ];
     for adapter in incomplete_adapters {
         assert!(
@@ -320,5 +399,18 @@ fn maybe_name(enabled: bool) -> Option<&'static str> {
     assert!(
         carrier_totality_findings(unrelated_option).is_empty(),
         "ordinary Option helpers without carrier access are outside the totality ratchet"
+    );
+
+    let test_only_carrier = r#"
+#[cfg(test)]
+mod tests {
+    fn test_helper(expr: &Expr) {
+        let _ = expr.carrier();
+    }
+}
+"#;
+    assert!(
+        carrier_totality_findings(test_only_carrier).is_empty(),
+        "an actual cfg(test) module is outside the production ratchet"
     );
 }
