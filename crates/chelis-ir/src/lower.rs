@@ -11654,7 +11654,6 @@ impl<'program> LowerCtx<'program> {
         // Subctx inherits the parent's current span so synthesized loads
         // for vmap's parameters carry the vmap-call's span.
         subctx.current_span_id = self.current_span_id.clone();
-        let captured_bindings = self.seed_subctx_with_lexical_scope(&mut subctx, &param_names);
         for (name, param_expr) in param_names.iter().zip(param_types.iter().cloned()) {
             let load = subctx.dag.add_node(
                 RiscOp::Load {
@@ -11668,12 +11667,36 @@ impl<'program> LowerCtx<'program> {
                 .bindings
                 .insert(name.clone(), LoweredValue::Node(load));
         }
+        // Keep mapped formal Loads before capture Loads in canonical order.
+        // A symbolic batch lift can then read a formal's axis as its explicit
+        // runtime extent witness.
+        let captured_bindings = self.seed_subctx_with_lexical_scope(&mut subctx, &param_names);
         let root_value = subctx.lower_resolved_body(fn_expr, &param_names, body);
         for root in root_value.flatten_nodes() {
             subctx.dag.add_root(root);
         }
+        // Body lowering can resolve a top-level binding directly from the
+        // program environment instead of the parent's already-materialized
+        // binding map. Classify from the completed unbatched DAG: every Load
+        // that is not one of this callable's mapped formals is lexical.
+        let mapped_formals = param_names.iter().cloned().collect::<UnordSet<_>>();
+        let captured_loads = subctx
+            .dag
+            .nodes()
+            .iter()
+            .filter_map(|node| match &node.op {
+                RiscOp::Load { name } if !mapped_formals.contains(name.as_str()) => {
+                    Some(name.as_str().to_string())
+                }
+                _ => None,
+            })
+            .collect::<UnordSet<_>>();
 
-        let vmapped = match vmap::vectorize_axis0(&subctx.dag, batch_dim.clone()) {
+        let vmapped = match vmap::vectorize_axis0_with_captures(
+            &subctx.dag,
+            batch_dim.clone(),
+            &captured_loads,
+        ) {
             Ok(dag) => dag,
             Err(message) => raise_lowering_error(
                 format!("`vmap` lowering failed: {message}"),
@@ -11904,7 +11927,6 @@ impl<'program> LowerCtx<'program> {
         // Subctx inherits the parent's current span so synthesized loads
         // for vmap(grad)'s parameters carry the call's span.
         subctx.current_span_id = self.current_span_id.clone();
-        let captured_bindings = self.seed_subctx_with_lexical_scope(&mut subctx, &param_names);
         let mut wrt = Vec::new();
         let mut wrt_param_indices = Vec::new();
         for (index, (name, param_ty)) in param_names
@@ -11928,6 +11950,9 @@ impl<'program> LowerCtx<'program> {
                 .bindings
                 .insert(name.clone(), LoweredValue::Node(load));
         }
+        // As in ordinary vmap, mapped formal Loads precede invariant capture
+        // Loads so a symbolic capture lift can name a real batch witness.
+        let captured_bindings = self.seed_subctx_with_lexical_scope(&mut subctx, &param_names);
 
         let output = subctx
             .lower_resolved_body(fn_expr, &param_names, body)
@@ -11945,6 +11970,18 @@ impl<'program> LowerCtx<'program> {
             return LoweredValue::Tuple(Vec::new());
         }
         subctx.dag.add_root(output);
+        let mapped_formals = param_names.iter().cloned().collect::<UnordSet<_>>();
+        let captured_loads = subctx
+            .dag
+            .nodes()
+            .iter()
+            .filter_map(|node| match &node.op {
+                RiscOp::Load { name } if !mapped_formals.contains(name.as_str()) => {
+                    Some(name.as_str().to_string())
+                }
+                _ => None,
+            })
+            .collect::<UnordSet<_>>();
         // Issue #197: route through grad_dag_checked so a
         // non-differentiable op surfaces a structured
         // `AdError::NotSupported` diagnostic rather than a generic
@@ -11956,15 +11993,18 @@ impl<'program> LowerCtx<'program> {
                 body.span_id().map(ToOwned::to_owned),
             )
         });
-        let (vmapped, batched_ids) =
-            match vmap::vectorize_axis0_with_node_map(&grad_result.dag, batch_dim.clone()) {
-                Ok(batched) => batched,
-                Err(message) => raise_lowering_error(
-                    format!("`vmap(grad(...))` lowering failed: {message}"),
-                    Some(body.span()),
-                    body.span_id().map(ToOwned::to_owned),
-                ),
-            };
+        let (vmapped, batched_ids) = match vmap::vectorize_axis0_with_node_map_and_captures(
+            &grad_result.dag,
+            batch_dim.clone(),
+            &captured_loads,
+        ) {
+            Ok(batched) => batched,
+            Err(message) => raise_lowering_error(
+                format!("`vmap(grad(...))` lowering failed: {message}"),
+                Some(body.span()),
+                body.span_id().map(ToOwned::to_owned),
+            ),
+        };
         let invalid_mapping = |message: String| -> ! {
             raise_fatal_lowering_error(
                 format!("`vmap(grad(...))` root correspondence failed: {message}"),

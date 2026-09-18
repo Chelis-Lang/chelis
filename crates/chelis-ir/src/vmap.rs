@@ -6,6 +6,22 @@ pub fn vectorize_axis0(dag: &Dag, batch_dim: DimInfo) -> Result<Dag, String> {
     vectorize_axis0_with_node_map(dag, batch_dim).map(|(batched, _)| batched)
 }
 
+/// Vectorize `dag` while treating the named lexical loads as loop-invariant
+/// captures rather than mapped formals.
+///
+/// A capture keeps its authored load type. Its mapped identity is an explicit
+/// rank-inserting [`RiscOp::Expand`] (the IR representation of source
+/// `insert`) so downstream elementwise nodes still receive shape-equal
+/// operands without acquiring implicit broadcasting semantics.
+pub fn vectorize_axis0_with_captures(
+    dag: &Dag,
+    batch_dim: DimInfo,
+    captured_loads: &UnordSet<String>,
+) -> Result<Dag, String> {
+    vectorize_axis0_with_node_map_and_captures(dag, batch_dim, captured_loads)
+        .map(|(batched, _)| batched)
+}
+
 /// [`vectorize_axis0`] plus the batched id of every input node, indexed by the
 /// input `NodeId`.
 ///
@@ -17,6 +33,17 @@ pub fn vectorize_axis0(dag: &Dag, batch_dim: DimInfo) -> Result<Dag, String> {
 pub fn vectorize_axis0_with_node_map(
     dag: &Dag,
     batch_dim: DimInfo,
+) -> Result<(Dag, Vec<NodeId>), String> {
+    vectorize_axis0_with_node_map_and_captures(dag, batch_dim, &UnordSet::new())
+}
+
+/// [`vectorize_axis0_with_captures`] plus the mapped identity of every source
+/// node. Captured `Load`s map to their explicit batch lift, not to the raw
+/// authored-rank load.
+pub fn vectorize_axis0_with_node_map_and_captures(
+    dag: &Dag,
+    batch_dim: DimInfo,
+    captured_loads: &UnordSet<String>,
 ) -> Result<(Dag, Vec<NodeId>), String> {
     let mut out = Dag::new();
     let concrete_batch = match &batch_dim {
@@ -42,6 +69,10 @@ pub fn vectorize_axis0_with_node_map(
 
     for node in dag.nodes() {
         let shared = shared_bound_nodes.contains(&node.id);
+        let captured_load = matches!(
+            &node.op,
+            RiscOp::Load { name } if captured_loads.contains(name.as_str())
+        );
         let output_type = if shared {
             node.output_type.clone()
         } else {
@@ -205,6 +236,66 @@ pub fn vectorize_axis0_with_node_map(
                 expanded
             };
             inputs.push(expanded);
+        }
+
+        // A lexical capture is one loop-invariant value, not an additional
+        // mapped argument. Preserve its authored-rank Load and make the
+        // source node's mapped identity an explicit inserted batch axis.
+        // This is deliberately the same structural movement used for an
+        // authored constant payload; elementwise operators remain exact-
+        // shape operations.
+        if !shared && captured_load {
+            let raw = out.add_node(
+                node.op.clone(),
+                Vec::new(),
+                node.output_type.clone(),
+                node.span_id.clone(),
+            );
+            if let Some(raw_node) = out.node_mut(raw)
+                && !node.merged_spans.is_empty()
+            {
+                raw_node.merged_spans = node.merged_spans.clone();
+            }
+            let (size, expand_inputs) = match concrete_batch {
+                Some(batch) => (RtDim::Lit(batch), vec![raw]),
+                None => {
+                    let witness = batch_witness.ok_or_else(|| {
+                        format!(
+                            "vmap cannot locate a batched tensor witness for captured load {}",
+                            match &node.op {
+                                RiscOp::Load { name } => name.as_str(),
+                                _ => unreachable!("captured_load only marks Load"),
+                            }
+                        )
+                    })?;
+                    (
+                        RtDim::InputAxis {
+                            tensor: 1,
+                            axis: RtAxis::Lit(0),
+                        },
+                        vec![raw, witness],
+                    )
+                }
+            };
+            let new_id = out.add_node(
+                RiscOp::Expand { axis: 0, size },
+                expand_inputs,
+                output_type,
+                node.span_id.clone(),
+            );
+            mapped_ids.push(new_id);
+            let remapped_shape_deps = remap_shape_deps(node.id, &node.shape_deps, &mapped_ids)?;
+            let remapped_result_claims =
+                remap_result_claim_deps(node.id, &node.result_claim_deps, &mapped_ids)?;
+            if let Some(new_node) = out.node_mut(new_id) {
+                new_node.merged_spans = node.merged_spans.clone();
+                new_node.shape_deps = remapped_shape_deps;
+                new_node.result_claim_deps = remapped_result_claims;
+            }
+            if let Some(reusable_input) = node.reusable_input {
+                out.set_reusable_input(new_id, mapped_ids[reusable_input.0]);
+            }
+            continue;
         }
 
         // A non-shared constant tensor has one authored payload, not one

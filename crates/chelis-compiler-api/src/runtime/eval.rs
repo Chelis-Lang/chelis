@@ -751,19 +751,15 @@ impl<'a> EvalContext<'a> {
                     let captured = self.resolve_top_level(&input.name)?;
                     let staged_value =
                         stage_kernel_argument(name, &input.name, &captured, input.ty.precision)?;
-                    // chelis#377: a `vmap` inside the body types a captured
-                    // binding's `Load` at the batched rank while the binding
-                    // keeps its declared rank; the transforms reject that
-                    // before evaluation (`apply_transform`), and so does the
-                    // kernel path, with the same diagnostic, rather than
-                    // reaching an elementwise op with disagreeing operands.
+                    // A captured kernel input keeps its authored rank. Any
+                    // mapped batch lift is an explicit consumer inside the
+                    // DAG, never a widened `Load` contract. Keep this guard as
+                    // a defensive invariant check before evaluation.
                     if staged_value.shape.len() != input.ty.dims.len() {
                         return Err(format!(
-                            "host runtime: kernel `{name}` over a def capturing top-level \
-                             binding `{}` is unsupported: the kernel types the capture as \
-                             rank {} but the binding is rank {}. vmap-with-captures must \
-                             broadcast the capture across the batch axis, not batch it \
-                             (tracked residual, chelis#377).",
+                            "host runtime: kernel `{name}` capture rank invariant failed for \
+                             top-level binding `{}`: the authored-rank input expects rank {} \
+                             but the binding has rank {}.",
                             input.name,
                             input.ty.dims.len(),
                             staged_value.shape.len(),
@@ -5299,9 +5295,32 @@ mod legacy_capture_order_tests {
     }
 
     #[test]
-    fn transform_preparation_retains_vmap_capture_rank_refusal() {
+    fn transform_preparation_supports_vmap_capture_at_authored_rank() {
         let library = checked_library(
             "weights = { _ = print(\"initialize\")\n scalar_to_tensor(3.0f32) }\n\
+             def weighted(x: tensor[f32]) -> tensor[f32] = mul(x, weights)\n\
+             def mapped() = vmap(weighted)\n",
+        );
+        let tensors = UnordMap::new();
+        let mut ctx = context(&library, &tensors);
+        let factory = ctx.resolve_top_level("mapped").unwrap();
+        let callable = ctx.apply_resolved_callable(factory, vec![]).unwrap();
+        let input = RuntimeValue::Tensor(
+            RuntimeTensorValue::from_wide("test", Prim::F32, vec![2], vec![2.0, 4.0]).unwrap(),
+        );
+        let actual = ctx.apply_resolved_callable(callable, vec![input]).unwrap();
+        let expected = RuntimeValue::Tensor(
+            RuntimeTensorValue::from_wide("test", Prim::F32, vec![2], vec![6.0, 12.0]).unwrap(),
+        );
+        assert_eq!(bits(&actual), bits(&expected));
+        assert_eq!(ctx.transcript, ["initialize"]);
+        assert_eq!(ctx.random_counter, 5);
+    }
+
+    #[test]
+    fn transform_preparation_vmap_capture_preserves_initializer_failure() {
+        let library = checked_library(
+            "weights = { _ = print(\"initialize\")\n scalar_to_tensor(cast(floor_div(1i32, 0i32), f32)) }\n\
              def weighted(x: tensor[f32]) -> tensor[f32] = mul(x, weights)\n\
              def mapped() = vmap(weighted)\n",
         );
@@ -5312,12 +5331,11 @@ mod legacy_capture_order_tests {
         let error = ctx
             .apply_resolved_callable(callable, vec![zeros()])
             .unwrap_err();
-        assert_eq!(
-            error,
-            "host runtime: `vmap(...)` over a def capturing top-level binding `weights` is unsupported: the transform types the capture as rank 1 (batched) but the binding is rank 0. vmap-with-captures must broadcast the capture across the batch axis, not batch it (tracked residual, chelis#377)."
-        );
+        assert_eq!(error, "numeric trap: division by zero in floor_div at i32");
         assert_eq!(ctx.transcript, ["initialize"]);
         assert_eq!(ctx.random_counter, 5);
+        assert!(!ctx.bindings.contains_key("weights"));
+        assert!(!ctx.declaration_values.contains_key("weights"));
     }
 
     #[test]

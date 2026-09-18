@@ -415,6 +415,10 @@ vmap(f)(x) = stack([f(x[i]) for i in batch_dimension])
 
 But it is **not** implemented as a loop. Instead, it is a DAG rewrite that lifts every operation to operate over the additional batch dimension.
 
+The executable [`vmap_tensor_capture.ch`](../examples/vmap_tensor_capture.ch)
+demonstrates that the mapped input varies by row while one lexical tensor
+capture is shared across all rows.
+
 Fusing `vmap(grad(f))` does not remove §2.3's shape-preserving zero
 cotangents or change §2.2's selected-parameter order. An absent adjoint after
 lowering a complete body gives an exact positive-zero tensor of the batched
@@ -426,7 +430,14 @@ multi-result fused gradients.
 
 ### 3.3 DAG Rewrite Rules
 
-For each node in the original DAG, the vmap transformation adds the batch dimension as follows:
+For each node in the original DAG, the vmap transformation adds the batch dimension as follows.
+Only a tensor `Load` that denotes a mapped formal receives the batch dimension
+at the call boundary. A tensor `Load` that denotes a lexical capture retains
+its authored type and is served once at that exact rank. When a batched
+consumer needs that captured value, the rewrite inserts an explicit
+`Insert(capture, axis=0, size=batch)` movement node, whose result has the batch
+axis prepended. This explicit lift does not authorize implicit rank extension
+or shape broadcasting in elementwise primitives.
 
 | Original Op | vmapped Op |
 |-------------|------------|
@@ -439,7 +450,8 @@ For each node in the original DAG, the vmap transformation adds the batch dimens
 | `Expand(x, dim, size)` | `Expand(x', dim, size)` -- broadcast within each batch element |
 | `Insert(x, dim, size)` | `Insert(x', dim, size)` -- insert within each batch element |
 | `Const(v, D, P)` | Batch-typed `Const(v, {batch} + D, P)` -- broadcast constant |
-| `Load(buf)` | Load with batch dimension added to buffer type |
+| `Load(mapped_formal)` | Load with batch dimension added to the mapped formal type |
+| `Load(capture)` | Exact authored capture load followed by `Insert(capture, 0, batch)` |
 
 The key principle: the batch dimension passes through all operations without being touched. Elementwise ops are naturally batched. Reductions reduce over the original axis, not the batch axis. Shape operations preserve the batch dimension. The rank-0 subgraph that produces a bound, and the bound carrier inside a movement operation, follow §3.7: in the rewritten DAG's numbering a positional `dim` and an `InputAxis` axis shift by the inserted batch axis, and a rank-0 extent value is shared rather than batched.
 
@@ -452,7 +464,7 @@ The key principle: the batch dimension passes through all operations without bei
                             -> tensor[D' with batch inserted at n, P]
 ```
 
-If `f` takes multiple arguments, each tensor argument gains the batch dimension:
+If `f` takes multiple arguments, each mapped tensor formal gains the batch dimension:
 
 ```
       G |- f : (tensor[D1, P], tensor[D2, P]) -> tensor[D3, P]
@@ -460,6 +472,12 @@ If `f` takes multiple arguments, each tensor argument gains the batch dimension:
       G |- vmap(f) : (tensor[{batch} + D1, P], tensor[{batch} + D2, P])
                              -> tensor[{batch} + D3, P]
 ```
+
+A lexical tensor capture is not an additional mapped argument. In the
+conceptual expansion in §3.2 it is loop-invariant, and its authored rank is
+unchanged. The transformed DAG makes its use shape-equal with mapped values by
+the explicit `Insert` rule in §3.3. A plain elementwise application to
+different-rank tensors remains a type error under spec/04 and spec/05.
 
 ### 3.5 Composition
 
