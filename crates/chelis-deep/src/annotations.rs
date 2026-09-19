@@ -1031,3 +1031,110 @@ mod shared_storage_receipt {
         assert!(!original.is_empty());
     }
 }
+
+#[cfg(test)]
+mod core_key_order_lock {
+    use super::{Metadata, MetadataKey, MetadataValue, Spanned};
+    use crate::Span;
+
+    fn span() -> Span {
+        Span::new(0, 0)
+    }
+
+    fn text(value: &str) -> Spanned<String> {
+        Spanned::new(value.to_string(), span())
+    }
+
+    fn observed(metadata: &Metadata) -> Vec<MetadataKey> {
+        metadata.values().map(|value| value.key()).collect()
+    }
+
+    fn sorted(keys: &[MetadataKey]) -> Vec<MetadataKey> {
+        let mut keys = keys.to_vec();
+        keys.sort();
+        keys
+    }
+
+    /// `values()` yields `MetadataKey` order, which the `BTreeMap` this
+    /// storage replaced supplied for free and a key-sorted vector supplies
+    /// only while every mutation keeps it sorted. Nothing else in the crate
+    /// asserts it, and two consumers observe it directly: `Metadata`'s
+    /// `PartialEq` compares `values()` pairwise, so a reordering makes two
+    /// equal annotation sets compare unequal, and `chelis_surf::resugar`
+    /// builds a property declaration's option list in this order, so a
+    /// reordering changes decompiled Surf text. Serialization is insulated,
+    /// because `WireMetadata::from_metadata` re-sorts by key spelling.
+    ///
+    /// The three mutating paths are exercised in one sequence: scrambled
+    /// `insert`s, a `replace` onto an occupied key, a `remove` from the
+    /// middle, and a `replace` that re-inserts into that middle slot.
+    ///
+    /// Proved failing first. Replacing the sorted `storage.core.insert(index,
+    /// value)` in `Metadata::insert` with `storage.core.push(value)`, and
+    /// changing nothing else, leaves the first assertion reporting insertion
+    /// order `[Doc, SurfPath, ChelisRole, PropertySourceId]` against the
+    /// required `[ChelisRole, PropertySourceId, SurfPath, Doc]`.
+    #[test]
+    fn values_are_key_ordered_through_insert_replace_and_remove() {
+        // Deliberately scrambled against the declared key order: Doc is the
+        // twenty-seventh key, SurfPath the twenty-first, ChelisRole the
+        // ninth, PropertySourceId the thirteenth.
+        let mut metadata = Metadata::default();
+        metadata.insert(MetadataValue::Doc(text("doc"))).unwrap();
+        metadata
+            .insert(MetadataValue::SurfPath(text("path")))
+            .unwrap();
+        metadata
+            .insert(MetadataValue::ChelisRole(text("role")))
+            .unwrap();
+        metadata
+            .insert(MetadataValue::PropertySourceId(text("source")))
+            .unwrap();
+
+        let expected = vec![
+            MetadataKey::ChelisRole,
+            MetadataKey::PropertySourceId,
+            MetadataKey::SurfPath,
+            MetadataKey::Doc,
+        ];
+        assert_eq!(
+            observed(&metadata),
+            expected,
+            "scrambled inserts must still yield MetadataKey order"
+        );
+        assert_eq!(observed(&metadata), sorted(&observed(&metadata)));
+
+        // `replace` onto an occupied key keeps its slot.
+        let prior = metadata.replace(MetadataValue::Doc(text("rewritten")));
+        assert!(matches!(prior, Some(MetadataValue::Doc(_))));
+        assert_eq!(observed(&metadata), expected);
+        assert_eq!(
+            metadata.doc().expect("doc survives replace").value(),
+            "rewritten"
+        );
+
+        // `remove` from the middle keeps the rest ordered.
+        let removed = metadata.remove(MetadataKey::PropertySourceId);
+        assert!(matches!(removed, Some(MetadataValue::PropertySourceId(_))));
+        assert_eq!(
+            observed(&metadata),
+            vec![
+                MetadataKey::ChelisRole,
+                MetadataKey::SurfPath,
+                MetadataKey::Doc
+            ]
+        );
+
+        // `replace` on an absent key inserts at its sorted slot, not the end.
+        assert!(
+            metadata
+                .replace(MetadataValue::PropertySourceId(text("again")))
+                .is_none()
+        );
+        assert_eq!(observed(&metadata), expected);
+        assert!(
+            observed(&metadata).windows(2).all(|pair| pair[0] < pair[1]),
+            "keys must be strictly increasing"
+        );
+    }
+}
