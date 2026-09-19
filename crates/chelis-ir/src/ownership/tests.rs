@@ -3371,3 +3371,92 @@ fn cyclic_jump_with_a_reachable_exit_uses_the_fixed_point() {
     );
     super::last_use::verify_canonical(&program).unwrap();
 }
+
+/// chelis#2205: the container-consumer table's key is the row's heap kind on
+/// both the result and the named operand, not a bare result-equals-operand
+/// comparison.
+///
+/// Evidentiary status: DISPOSITION LOCK for the representation the #2225
+/// review arrived at. Each negative row names the one comparison that rejects
+/// it, and deleting that comparison from `container_consumer_operand` makes
+/// exactly that row match. Without the kind on the row, `builtin:concat`
+/// against a dictionary matches and routes a dictionary to
+/// `chelis_list_concat_owned`; the kind is what makes that shape not a row by
+/// construction rather than an emitter guard firing after the scheduler has
+/// already retired the operand's terminal.
+#[test]
+fn a_consumer_row_matches_only_its_own_heap_kind() {
+    use super::ir::container_consumer_operand;
+    let list = ValueClass::Heap(HeapKind::List);
+    let dict = ValueClass::Heap(HeapKind::Dict);
+    let tensor = ValueClass::Heap(HeapKind::Tensor);
+
+    for (label, class) in [
+        ("builtin:append", list),
+        ("builtin:concat", list),
+        ("builtin:dict_insert", dict),
+        ("builtin:dict_merge", dict),
+        ("builtin:dict_remove", dict),
+    ] {
+        assert_eq!(
+            container_consumer_operand(label, Some(class), |_| Some(class)),
+            Some(0),
+            "{label} consumes its operand at its own kind"
+        );
+    }
+
+    // Rejected by the result comparison: the row's kind is List.
+    assert_eq!(
+        container_consumer_operand("builtin:concat", Some(dict), |_| Some(dict)),
+        None,
+        "a dictionary application never matches the list-kinded `concat` row"
+    );
+    // Rejected by the result comparison: the row's kind is Dict.
+    assert_eq!(
+        container_consumer_operand("builtin:dict_merge", Some(list), |_| Some(list)),
+        None,
+        "a list application never matches the dictionary-kinded `dict_merge` row"
+    );
+    // Rejected by the operand comparison: the result carries the row's kind
+    // but the named operand does not.
+    assert_eq!(
+        container_consumer_operand("builtin:dict_insert", Some(dict), |_| Some(list)),
+        None,
+        "the named operand must carry the row's kind too"
+    );
+    // Rejected by the result comparison, and the shape tensor `concat`
+    // actually has: a `List[tensor]` of parts producing a tensor.
+    assert_eq!(
+        container_consumer_operand("builtin:concat", Some(tensor), |_| Some(list)),
+        None,
+        "tensor `concat` shares the label and is still not a row"
+    );
+    // Rejected by the label lookup: kind agreement alone is not membership.
+    // `chunk`, `map`, `flatten`, `zip` and `enumerate` all take a list and
+    // return a list.
+    for label in [
+        "builtin:chunk",
+        "builtin:map",
+        "builtin:flatten",
+        "builtin:zip",
+        "builtin:enumerate",
+        "builtin:dict_keys",
+    ] {
+        assert_eq!(
+            container_consumer_operand(label, Some(list), |_| Some(list)),
+            None,
+            "{label} is not a row, however well its classes agree"
+        );
+    }
+    // Rejected by the result comparison: a non-heap result cannot carry a
+    // heap kind.
+    assert_eq!(
+        container_consumer_operand(
+            "builtin:append",
+            Some(ValueClass::NonHeap(NonHeapKind::Unit)),
+            |_| { Some(list) }
+        ),
+        None,
+        "a unit-returning application is not a container consumer"
+    );
+}

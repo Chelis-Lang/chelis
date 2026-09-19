@@ -1522,3 +1522,136 @@ fn signature_entry_requires_tensor_observations_and_preserves_borrows() {
         }
     }
 }
+
+/// chelis#2205: a dictionary whose scheduled last use is `dict_insert` moves
+/// into the builtin, exactly as a list does into `append`.
+///
+/// Counted receipt, asserted as a ratio: for an N-step let-bound insert chain
+/// the number of `builtin:dict_insert` applications that still BORROW their
+/// container must not grow with N. Evidentiary status: REGRESSION TEST,
+/// proven failing first: without the dictionary rows in
+/// `CONTAINER_CONSUMERS` the 8-step chain renders 8 borrowing inserts and the
+/// 16-step chain 16 (no step moves); with them both render 0.
+#[test]
+fn dict_insert_at_a_dicts_last_use_moves_and_the_chain_stops_borrowing() {
+    fn chain(steps: usize) -> String {
+        let mut source =
+            String::from("def build() -> i64 = {\n  d0 = dict_of([] : List[(i64, i64)])\n");
+        for step in 1..=steps {
+            source.push_str(&format!(
+                "  d{step} = dict_insert(d{}, cast({step}, i64), cast({step}, i64))\n",
+                step - 1
+            ));
+        }
+        source.push_str(&format!("  len(d{steps})\n}}\nbuilt = build()\n"));
+        source
+    }
+    fn dispositions(steps: usize) -> (usize, usize) {
+        let text = unit_text(&verified_source(&chain(steps)), "build");
+        (
+            count(&text, "builtin:dict_insert(borrow"),
+            count(&text, "builtin:dict_insert(move"),
+        )
+    }
+    let (small_borrow, small_move) = dispositions(8);
+    let (large_borrow, large_move) = dispositions(16);
+    eprintln!(
+        "#2205 dict receipt: 8-step chain borrows {small_borrow} / moves {small_move}; \
+         16-step chain borrows {large_borrow} / moves {large_move}"
+    );
+    assert_eq!(
+        small_borrow + small_move,
+        8,
+        "every insert in the 8-step chain is rendered exactly once"
+    );
+    assert!(
+        large_borrow <= small_borrow,
+        "#2205: borrowing inserts must not grow with the chain; 8 steps borrowed \
+         {small_borrow}, 16 steps borrowed {large_borrow}"
+    );
+    assert_eq!(
+        (small_borrow, large_borrow, small_move, large_move),
+        (0, 0, 8, 16),
+        "#2205: every insert in a let-bound chain is its dictionary's last use and moves; \
+         a count of rendered applications carries no machine budget, so the exact figure is \
+         locked too"
+    );
+}
+
+/// chelis#2205: `dict_merge` and `dict_remove` move their consumed operand at
+/// its last use too, so the dictionary kind is covered by its whole table
+/// row set rather than by `dict_insert` alone.
+#[test]
+fn dict_merge_and_dict_remove_move_at_their_last_use() {
+    let merged = unit_text(
+        &verified_source(
+            "def fold_two() -> i64 = {\n  a = dict_insert(dict_of([] : List[(i64, i64)]), cast(1, i64), cast(1, i64))\n  b = dict_insert(dict_of([] : List[(i64, i64)]), cast(2, i64), cast(2, i64))\n  joined = dict_merge(a, b)\n  len(joined)\n}\nresult = fold_two()\n",
+        ),
+        "fold_two",
+    );
+    assert!(
+        merged.contains("builtin:dict_merge(move"),
+        "the merge is `a`'s last use and moves it: {merged}"
+    );
+    let removed = unit_text(
+        &verified_source(
+            "def shrink_dict() -> i64 = {\n  a = dict_insert(dict_of([] : List[(i64, i64)]), cast(1, i64), cast(1, i64))\n  smaller = dict_remove(a, cast(1, i64))\n  len(smaller)\n}\nresult = shrink_dict()\n",
+        ),
+        "shrink_dict",
+    );
+    assert!(
+        removed.contains("builtin:dict_remove(move"),
+        "the removal is `a`'s last use and moves it: {removed}"
+    );
+}
+
+/// chelis#2205 negative half for the dictionary kind: a dictionary read after
+/// the insert is not moved into it, and one read twice moves only at the
+/// second, final insert.
+#[test]
+fn dict_insert_before_a_later_read_keeps_borrowing() {
+    let text = unit_text(
+        &verified_source(
+            "def twice() -> i64 = {\n  a = dict_insert(dict_of([] : List[(i64, i64)]), cast(1, i64), cast(1, i64))\n  b = dict_insert(a, cast(4, i64), cast(4, i64))\n  c = dict_insert(a, cast(5, i64), cast(5, i64))\n  add(len(b), len(c))\n}\nresult = twice()\n",
+        ),
+        "twice",
+    );
+    let lines: Vec<&str> = text.lines().collect();
+    let sites: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.contains("builtin:dict_insert("))
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(sites.len(), 3, "three inserts are rendered: {text}");
+    assert!(
+        lines[sites[1]].contains("builtin:dict_insert(borrow"),
+        "the insert into `a` that is read again still borrows it: {text}"
+    );
+    assert!(
+        lines[sites[2]].contains("builtin:dict_insert(move"),
+        "the last insert is `a`'s last use and moves it: {text}"
+    );
+}
+
+/// chelis#2205: an aggregate that retains the dictionary does not stop the
+/// insert at the binding's last use from being a verified Move; the
+/// strong-owner count, not the IR, decides whether the runtime rewrites in
+/// place.
+#[test]
+fn dict_insert_at_last_use_moves_even_when_an_aggregate_holds_the_dict() {
+    let text = unit_text(
+        &verified_source(
+            "def held() -> i64 = {\n  d = dict_insert(dict_of([] : List[(i64, i64)]), cast(1, i64), cast(1, i64))\n  kept = (d, cast(9, i64))\n  grown = dict_insert(d, cast(2, i64), cast(2, i64))\n  add(len(grown), len(kept.0))\n}\nresult = held()\n",
+        ),
+        "held",
+    );
+    assert!(
+        text.contains("= copy clone"),
+        "the tuple retains `d`: {text}"
+    );
+    assert!(
+        text.contains("builtin:dict_insert(move"),
+        "the insert is `d`'s last use and moves it: {text}"
+    );
+}
