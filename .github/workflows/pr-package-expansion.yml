@@ -197,6 +197,7 @@ jobs:
     name: Manual Package Expansion Summary
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: read
       pull-requests: read
     needs: [integration-plan, package-expansion-shard]
@@ -236,6 +237,17 @@ jobs:
           pattern: integration-package-expansion-*
           path: candidate/target/integration-change/receipts/package-expansion
 
+      - name: Record the default-branch failure baseline
+        id: failure-baseline
+        continue-on-error: true
+        working-directory: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: >-
+          python3 ../trusted/scripts/ci_failure_baseline.py
+          --output target/integration-change/failure-baseline
+
       - name: Summarize the informational package expansion
         working-directory: candidate
         env:
@@ -268,6 +280,8 @@ jobs:
               --plan target/integration-change/plan.json \
               --lane package-expansion \
               --receipts-root target/integration-change/receipts/package-expansion \
+              --failure-baseline \
+                target/integration-change/failure-baseline/baseline.json \
               --output target/integration-change/package-expansion-summary ||
               report_status=$?
             {

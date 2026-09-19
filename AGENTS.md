@@ -234,6 +234,18 @@ obligations.
   [Worktree And Branch Discipline](#worktree-and-branch-discipline) requires. Resolve
   failures introduced by the candidate; identify inherited failures and any missing,
   timed-out or otherwise incomplete coverage explicitly.
+- The expansion report makes that split itself. It differences every observed failure
+  against the newest complete nightly default-branch run and reports three disjoint
+  counts: introduced, inherited, and unrun. It is clean when nothing was introduced, so
+  a clean report is a real result rather than an absence of coverage, and a red one
+  names the rows to act on. Read the counts, not the shard timings. An introduced row
+  marked `absent` means the baseline never ran that test, so it confirms nothing and you
+  establish the verdict yourself. Inherited rows belong to the default branch, not the
+  candidate; do not repair them in the pull request. An unrun count is coverage the lane
+  did not reach, never evidence of a pass, and it is the number to cite when a claim
+  needs the coverage the expansion did not deliver. A report that says it had no usable
+  baseline has classified nothing: it is not clean, and its dispatch needs repeating
+  once the nightly is available.
 - Classify every finding against the pull request's stated scope. A finding is in scope
   only when the pull request introduces it, worsens it, or claims to correct it. Mere
   discovery during review, including a pre-existing spec/implementation mismatch in an
