@@ -1116,6 +1116,12 @@ pub(super) fn cast_result_from_source(
         // settled answer into it: returning an unconstrained variable with
         // nothing to settle it is how an earlier revision let an ill-typed
         // program reach codegen.
+        //
+        // chelis#2151: a source carrying a declared dtype-family bound suspends
+        // here too. It is settled by `unify::discharge_bounded_scalar_casts`
+        // at the first binding that follows. The result variable returned
+        // below is always consumed by one, so no second, cast-time copy of that
+        // decision is needed.
         Type::Var(source_var) => {
             let result = vg.fresh_type();
             subst.record_deferred_tensor_operand(
@@ -1136,6 +1142,44 @@ pub(super) fn cast_result_from_source(
             Err(error) => report(errors, *error),
         },
     }
+}
+
+/// The [05-OP-6] / [05-OP-63] decision for a scalar source whose type is a
+/// variable carrying a declared dtype-family bound (chelis#2151), when that
+/// decision is final. Its only caller is `unify::discharge_bounded_scalar_casts`.
+///
+/// It mirrors the `Type::Prim` arm of [`cast_result_from_settled_source`], with
+/// the bound standing in for the concrete source. It returns `None` when the
+/// answer could still depend on how the variable is later bound, and the
+/// caller then suspends as before:
+///
+/// - The scalar-target check and the `cast_trunc` integer-target check read
+///   only the target, so rejecting on them now is order-independent.
+/// - Every accepting answer is final: the result is the named primitive
+///   whatever the source becomes, and a `Float` bound admits only float
+///   sources.
+/// - `cast_trunc` from an `Int` or `Numeric` bound would reject on the SOURCE.
+///   For an inference variable that later binds to a float, rejecting now would
+///   refuse a valid program, so it is not decided here.
+pub(crate) fn bounded_scalar_cast_result(
+    bound: TypeVarRestriction,
+    new_prec: Prim,
+    mode: CastMode,
+) -> Option<Result<Type, Box<CheckError>>> {
+    if !new_prec.is_valid_scalar_cast_target() {
+        return Some(Err(Box::new(unsupported_precision_error(
+            new_prec, /* tensor = */ false,
+        ))));
+    }
+    if mode == CastMode::Trunc {
+        if let Some(error) = trunc_pair_error(None, new_prec) {
+            return Some(Err(Box::new(error)));
+        }
+        if bound != TypeVarRestriction::ActiveFloat {
+            return None;
+        }
+    }
+    Some(Ok(Type::Prim(new_prec)))
 }
 
 /// The [05-OP-6] source/target contract: `cast_trunc` is float-to-integer
