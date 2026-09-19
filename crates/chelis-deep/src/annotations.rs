@@ -533,7 +533,7 @@ macro_rules! core_inventory {
         }
         impl Metadata {
             $(pub fn $getter(&self) -> Option<&$payload> {
-                match self.storage.as_ref()?.core.get(&MetadataKey::$variant)? { MetadataValue::$variant(v) => Some(v), _ => unreachable!("variant determines its key") }
+                match self.storage.as_ref()?.get(MetadataKey::$variant)? { MetadataValue::$variant(v) => Some(v), _ => unreachable!("variant determines its key") }
             })+
         }
     };
@@ -571,10 +571,68 @@ core_inventory! {
     Destructure, destructure, Present, "destructure";
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+/// Core annotations, held as a key-sorted vector rather than a map.
+///
+/// The core inventory has thirty keys and a real node carries a handful: the
+/// chelis#1604 metadata fixture has 72 maps, 41 of them empty and none above
+/// three entries. `MetadataValue` is 184 bytes wide on a 64-bit target, and a
+/// `BTreeMap` allocates one full eleven-slot leaf node whatever it holds, so
+/// a one-entry map costs a measured 2048 bytes.
+///
+/// A vector does not allocate only what it stores. It takes the four-slot
+/// minimum non-zero capacity, a measured 736 bytes, and holds one to four
+/// entries in that one allocation; it reallocates crossing four and stays
+/// under the leaf node's footprint up to eight. So the win is under a third
+/// of the map at every size this corpus contains, not the arbitrary factor
+/// "only what it stores" would suggest. Empty metadata still allocates
+/// nothing, because the handle itself is `None`.
+///
+/// Iteration keeps the key order every consumer already relies on, which
+/// `core_key_order_lock` pins, and lookup is a binary search over at most
+/// thirty elements.
+#[derive(Debug, PartialEq, Default)]
 struct Storage {
-    core: BTreeMap<MetadataKey, MetadataValue>,
+    core: Vec<MetadataValue>,
     extensions: ExtensionMap,
+}
+
+// Counted receipt for the shared-storage promise (chelis#2117).
+//
+// `Metadata::clone` must not copy annotation storage; only a write through
+// `Arc::make_mut` may. A test build counts every deep copy so
+// `storage_copies_are_independent_of_clone_count` can assert that promise as
+// a ratio instead of a wall clock. Release builds compile the recorder away.
+#[cfg(test)]
+thread_local! {
+    static STORAGE_COPIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn record_storage_copy() {
+    STORAGE_COPIES.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn record_storage_copy() {}
+
+impl Clone for Storage {
+    fn clone(&self) -> Self {
+        record_storage_copy();
+        Self {
+            core: self.core.clone(),
+            extensions: self.extensions.clone(),
+        }
+    }
+}
+
+impl Storage {
+    fn locate(&self, key: MetadataKey) -> Result<usize, usize> {
+        self.core.binary_search_by(|value| value.key().cmp(&key))
+    }
+    fn get(&self, key: MetadataKey) -> Option<&MetadataValue> {
+        self.locate(key).ok().map(|index| &self.core[index])
+    }
 }
 
 /// Empty metadata occupies one pointer and allocates nothing.
@@ -614,7 +672,10 @@ struct Storage {
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct Metadata {
-    storage: Option<Box<Storage>>,
+    /// Shared behind a reference count. Cloning a Deep tree copies one
+    /// pointer per node instead of every node's annotation storage; a write
+    /// copies through `Arc::make_mut`, so sharing stays invisible.
+    storage: Option<std::sync::Arc<Storage>>,
 }
 impl PartialEq for Metadata {
     fn eq(&self, other: &Self) -> bool {
@@ -646,28 +707,50 @@ impl Metadata {
             .is_none_or(|s| s.core.is_empty() && s.extensions.is_empty())
     }
     pub fn insert(&mut self, value: MetadataValue) -> Result<(), MetadataError> {
-        let storage = self.storage.get_or_insert_with(Default::default);
-        if storage.core.contains_key(&value.key()) {
-            return Err(invalid(
-                value.key().spelling(),
-                value.span(),
-                "exactly one occurrence of this metadata key",
-            ));
-        }
-        storage.core.insert(value.key(), value);
+        // Decide before `Arc::make_mut`. A rejected duplicate writes nothing,
+        // so it must not deep-copy shared storage on its way to an error.
+        let index = match self
+            .storage
+            .as_ref()
+            .map(|storage| storage.locate(value.key()))
+        {
+            Some(Ok(_)) => {
+                return Err(invalid(
+                    value.key().spelling(),
+                    value.span(),
+                    "exactly one occurrence of this metadata key",
+                ));
+            }
+            Some(Err(index)) => index,
+            None => 0,
+        };
+        let storage = std::sync::Arc::make_mut(self.storage.get_or_insert_with(Default::default));
+        storage.core.insert(index, value);
         Ok(())
     }
     pub fn replace(&mut self, value: MetadataValue) -> Option<MetadataValue> {
-        self.storage
-            .get_or_insert_with(Default::default)
-            .core
-            .insert(value.key(), value)
+        let storage = std::sync::Arc::make_mut(self.storage.get_or_insert_with(Default::default));
+        match storage.locate(value.key()) {
+            Ok(index) => Some(std::mem::replace(&mut storage.core[index], value)),
+            Err(index) => {
+                storage.core.insert(index, value);
+                None
+            }
+        }
     }
     pub fn remove(&mut self, key: MetadataKey) -> Option<MetadataValue> {
-        self.storage.as_mut()?.core.remove(&key)
+        // Decide before `Arc::make_mut`, for the same reason `insert` does:
+        // removing a key that is not there writes nothing.
+        let index = self.storage.as_ref()?.locate(key).ok()?;
+        let storage = std::sync::Arc::make_mut(
+            self.storage
+                .as_mut()
+                .expect("storage was present when the index was located"),
+        );
+        Some(storage.core.remove(index))
     }
     pub fn values(&self) -> impl Iterator<Item = &MetadataValue> {
-        self.storage.iter().flat_map(|s| s.core.values())
+        self.storage.iter().flat_map(|s| s.core.iter())
     }
     pub fn extensions(&self) -> &ExtensionMap {
         static EMPTY: ExtensionMap = ExtensionMap {
@@ -676,7 +759,7 @@ impl Metadata {
         self.storage.as_ref().map_or(&EMPTY, |s| &s.extensions)
     }
     pub fn extensions_mut(&mut self) -> &mut ExtensionMap {
-        &mut self.storage.get_or_insert_with(Default::default).extensions
+        &mut std::sync::Arc::make_mut(self.storage.get_or_insert_with(Default::default)).extensions
     }
 
     /// Visit the live expression leaves and annotations of structural payloads.
@@ -847,5 +930,292 @@ impl ExtensionMap {
                 .or_insert_with(|| value.clone());
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod shared_storage_receipt {
+    use super::{Metadata, MetadataKey, MetadataValue, STORAGE_COPIES, Spanned};
+    use crate::tag::DeepTag;
+    use crate::{Atom, Expr, Span};
+
+    fn span() -> Span {
+        Span::new(0, 0)
+    }
+
+    fn copies_since(start: usize) -> usize {
+        STORAGE_COPIES.with(|count| count.get()) - start
+    }
+
+    fn copies_now() -> usize {
+        STORAGE_COPIES.with(|count| count.get())
+    }
+
+    fn annotated() -> Metadata {
+        let mut metadata = Metadata::default();
+        metadata
+            .insert(MetadataValue::Doc(Spanned::new("note".to_string(), span())))
+            .expect("empty metadata accepts one doc annotation");
+        metadata
+    }
+
+    /// A nested `app` chain of `depth` annotated nodes over one annotated
+    /// `var` leaf, so the tree carries exactly `depth + 1` non-empty
+    /// metadata maps.
+    fn annotated_chain(depth: usize) -> Expr {
+        let mut expr = Expr::node(
+            DeepTag::Var,
+            annotated(),
+            vec![Expr::Atom(Atom::Name("f".to_string()), span())],
+            span(),
+        );
+        for _ in 0..depth {
+            expr = Expr::node(
+                DeepTag::App,
+                annotated(),
+                vec![expr, Expr::Atom(Atom::Int(1), span())],
+                span(),
+            );
+        }
+        expr
+    }
+
+    /// chelis#2117: cloning a Deep tree must not copy its annotation
+    /// storage, so the deep-copy count is a property of how many writes
+    /// the clone performs and not of how many annotated nodes it spans.
+    /// Doubling the node count must leave that count unchanged.
+    ///
+    /// Proved failing first. Reverting only the storage handle to
+    /// `Option<Box<Storage>>`, with this counter and both trees unchanged,
+    /// records `8` deep copies for the 8-node tree and `16` for the
+    /// 16-node tree: a ratio of 2.0 against the 1.0 this asserts, because
+    /// a boxed map is copied once per annotated node on every tree clone.
+    /// The twin below fails the same revert with `0` copies where it
+    /// requires `1`, since an unshared box never needs one.
+    #[test]
+    fn storage_copies_are_independent_of_clone_count() {
+        let small = annotated_chain(7);
+        let large = annotated_chain(15);
+
+        let start = copies_now();
+        let small_clone = small.clone();
+        let small_copies = copies_since(start);
+
+        let start = copies_now();
+        let large_clone = large.clone();
+        let large_copies = copies_since(start);
+
+        assert_eq!(
+            small_copies, 0,
+            "cloning an 8-node annotated tree copied annotation storage"
+        );
+        assert_eq!(
+            large_copies, small_copies,
+            "doubling the annotated node count changed the deep-copy count"
+        );
+        assert_eq!(small_clone, small);
+        assert_eq!(large_clone, large);
+    }
+
+    /// A no-op must not un-share. `insert` of a duplicate key and `remove`
+    /// of an absent key both write nothing, so both decide before
+    /// `Arc::make_mut`; an eager `make_mut` would deep-copy the storage and
+    /// silently give up the sharing this change exists to buy. The proof
+    /// that sharing survived is the last assertion: the next real write
+    /// still costs exactly one copy, which only a still-shared storage does.
+    ///
+    /// Proved failing first, once per method, since the test stops at the
+    /// first failure. Hoisting `Arc::make_mut` back above the decision in
+    /// `insert`, which is how it was first written, fails with 1 copy
+    /// against the required 0 on the rejected duplicate. Hoisting it in
+    /// `remove` fails the same way on the absent key.
+    #[test]
+    fn a_rejected_or_absent_key_operation_does_not_unshare_storage() {
+        let original = annotated();
+        let mut copy = original.clone();
+
+        let start = copies_now();
+        assert!(
+            copy.insert(MetadataValue::Doc(Spanned::new(
+                "again".to_string(),
+                span()
+            )))
+            .is_err(),
+            "the clone already carries a doc annotation"
+        );
+        assert_eq!(
+            copies_since(start),
+            0,
+            "a rejected duplicate insert must not copy shared storage"
+        );
+
+        let start = copies_now();
+        assert!(copy.remove(MetadataKey::SurfPath).is_none());
+        assert_eq!(
+            copies_since(start),
+            0,
+            "removing an absent key must not copy shared storage"
+        );
+
+        let start = copies_now();
+        copy.replace(MetadataValue::Doc(Spanned::new(
+            "rewritten".to_string(),
+            span(),
+        )));
+        assert_eq!(
+            copies_since(start),
+            1,
+            "the no-ops must have left the storage shared"
+        );
+        assert_eq!(
+            original.doc().expect("original is untouched").value(),
+            "note"
+        );
+    }
+
+    /// The negative twin: sharing must stay invisible. A write through a
+    /// clone copies exactly the one storage it touches and leaves the
+    /// original alone.
+    #[test]
+    fn writing_through_a_clone_copies_once_and_does_not_alias() {
+        let original = annotated();
+        let mut copy = original.clone();
+
+        let start = copies_now();
+        copy.replace(MetadataValue::Doc(Spanned::new(
+            "rewritten".to_string(),
+            span(),
+        )));
+        assert_eq!(
+            copies_since(start),
+            1,
+            "a write through a shared clone must copy exactly one storage"
+        );
+
+        assert_eq!(
+            original.doc().expect("original keeps its doc").value(),
+            "note"
+        );
+        assert_eq!(
+            copy.doc().expect("clone carries the write").value(),
+            "rewritten"
+        );
+
+        let start = copies_now();
+        copy.remove(MetadataKey::Doc);
+        assert_eq!(
+            copies_since(start),
+            0,
+            "a second write to unshared storage must not copy again"
+        );
+        assert!(copy.is_empty());
+        assert!(!original.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod core_key_order_lock {
+    use super::{Metadata, MetadataKey, MetadataValue, Spanned};
+    use crate::Span;
+
+    fn span() -> Span {
+        Span::new(0, 0)
+    }
+
+    fn text(value: &str) -> Spanned<String> {
+        Spanned::new(value.to_string(), span())
+    }
+
+    fn observed(metadata: &Metadata) -> Vec<MetadataKey> {
+        metadata.values().map(|value| value.key()).collect()
+    }
+
+    fn sorted(keys: &[MetadataKey]) -> Vec<MetadataKey> {
+        let mut keys = keys.to_vec();
+        keys.sort();
+        keys
+    }
+
+    /// `values()` yields `MetadataKey` order, which the `BTreeMap` this
+    /// storage replaced supplied for free and a key-sorted vector supplies
+    /// only while every mutation keeps it sorted. Nothing else in the crate
+    /// asserts it, and two consumers observe it directly: `Metadata`'s
+    /// `PartialEq` compares `values()` pairwise, so a reordering makes two
+    /// equal annotation sets compare unequal, and `chelis_surf::resugar`
+    /// builds a property declaration's option list in this order, so a
+    /// reordering changes decompiled Surf text. Serialization is insulated,
+    /// because `WireMetadata::from_metadata` re-sorts by key spelling.
+    ///
+    /// The three mutating paths are exercised in one sequence: scrambled
+    /// `insert`s, a `replace` onto an occupied key, a `remove` from the
+    /// middle, and a `replace` that re-inserts into that middle slot.
+    ///
+    /// Proved failing first. Replacing the sorted `storage.core.insert(index,
+    /// value)` in `Metadata::insert` with `storage.core.push(value)`, and
+    /// changing nothing else, leaves the first assertion reporting insertion
+    /// order `[Doc, SurfPath, ChelisRole, PropertySourceId]` against the
+    /// required `[ChelisRole, PropertySourceId, SurfPath, Doc]`.
+    #[test]
+    fn values_are_key_ordered_through_insert_replace_and_remove() {
+        // Deliberately scrambled against the declared key order: Doc is the
+        // twenty-seventh key, SurfPath the twenty-first, ChelisRole the
+        // ninth, PropertySourceId the thirteenth.
+        let mut metadata = Metadata::default();
+        metadata.insert(MetadataValue::Doc(text("doc"))).unwrap();
+        metadata
+            .insert(MetadataValue::SurfPath(text("path")))
+            .unwrap();
+        metadata
+            .insert(MetadataValue::ChelisRole(text("role")))
+            .unwrap();
+        metadata
+            .insert(MetadataValue::PropertySourceId(text("source")))
+            .unwrap();
+
+        let expected = vec![
+            MetadataKey::ChelisRole,
+            MetadataKey::PropertySourceId,
+            MetadataKey::SurfPath,
+            MetadataKey::Doc,
+        ];
+        assert_eq!(
+            observed(&metadata),
+            expected,
+            "scrambled inserts must still yield MetadataKey order"
+        );
+        assert_eq!(observed(&metadata), sorted(&observed(&metadata)));
+
+        // `replace` onto an occupied key keeps its slot.
+        let prior = metadata.replace(MetadataValue::Doc(text("rewritten")));
+        assert!(matches!(prior, Some(MetadataValue::Doc(_))));
+        assert_eq!(observed(&metadata), expected);
+        assert_eq!(
+            metadata.doc().expect("doc survives replace").value(),
+            "rewritten"
+        );
+
+        // `remove` from the middle keeps the rest ordered.
+        let removed = metadata.remove(MetadataKey::PropertySourceId);
+        assert!(matches!(removed, Some(MetadataValue::PropertySourceId(_))));
+        assert_eq!(
+            observed(&metadata),
+            vec![
+                MetadataKey::ChelisRole,
+                MetadataKey::SurfPath,
+                MetadataKey::Doc
+            ]
+        );
+
+        // `replace` on an absent key inserts at its sorted slot, not the end.
+        assert!(
+            metadata
+                .replace(MetadataValue::PropertySourceId(text("again")))
+                .is_none()
+        );
+        assert_eq!(observed(&metadata), expected);
+        assert!(
+            observed(&metadata).windows(2).all(|pair| pair[0] < pair[1]),
+            "keys must be strictly increasing"
+        );
     }
 }
