@@ -95,7 +95,12 @@ expanded Deep. `normalize_deep` may erase only the derived metadata enumerated b
 `spec/03-deep-syntax.md` section 6.3.2. A well-formed public Deep node has a Surf
 representation unless it carries non-forgeable producer provenance that Surf
 deliberately cannot author; §6.3.1 defines that fail-closed exception. An
-unmapped tag is an implementation or specification bug.
+unmapped tag is an implementation or specification bug. A `grad` carrying
+`wrt` is in the resugaring domain only when its operative selector is a
+well-formed integer selector for a statically resolved callable origin and
+agrees exactly with the ordered metadata names. Contradictory, malformed,
+absent, or dynamically unresolved selectors fail resugaring; the round-trip
+laws do not authorize dropping or reconstructing the operative child.
 
 ---
 

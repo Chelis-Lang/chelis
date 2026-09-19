@@ -4,9 +4,9 @@ use assert_cmd::Command;
 use std::fs;
 use tempfile::tempdir;
 
-fn run(command: &str, source: &str) -> std::process::Output {
+fn run_file(command: &str, extension: &str, source: &str) -> std::process::Output {
     let directory = tempdir().expect("tempdir");
-    let path = directory.path().join("selector.ch");
+    let path = directory.path().join(format!("selector.{extension}"));
     fs::write(&path, source).expect("write fixture");
     Command::cargo_bin("chelis")
         .expect("chelis binary")
@@ -14,6 +14,10 @@ fn run(command: &str, source: &str) -> std::process::Output {
         .args([command, path.to_str().expect("UTF-8 path")])
         .output()
         .expect("run chelis")
+}
+
+fn run(command: &str, source: &str) -> std::process::Output {
+    run_file(command, "ch", source)
 }
 
 #[test]
@@ -72,4 +76,24 @@ out = grad(alias, wrt=w)(2.0f32, 3.0f32)
             && deep.contains("(lit {type: (t-prim {} i32)} 1)"),
         "{deep}"
     );
+}
+
+#[test]
+fn surf_rejects_a_malformed_operative_selector_instead_of_dropping_it() {
+    let output = run_file(
+        "surf",
+        "dp",
+        "(def {} selected \
+           (grad {wrt: (var {} w)} \
+             (fn {} (params {} x w) (app {} (var {} mul) (var {} x) (var {} w))) \
+             (var {} selector)))",
+    );
+    assert!(!output.status.success(), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).expect("UTF-8 stderr");
+    assert!(
+        stderr.contains("grad") && stderr.contains("integer"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("grad("), "{stderr}");
 }

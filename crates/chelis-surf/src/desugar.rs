@@ -729,6 +729,72 @@ impl GradSelectorResolver {
                     params,
                 }
             }
+            DeepTag::If if children.len() == 3 => {
+                let consequence = self.deep_callable_origin(&children[1], scope, lexical_name);
+                let alternative = self.deep_callable_origin(&children[2], scope, lexical_name);
+                consequence.alternate(&alternative)
+            }
+            DeepTag::Match if children.len() >= 2 => {
+                let mut result = None;
+                for arm in &children[1..] {
+                    let deep::ExprCarrier::DecodedNode(DeepTag::Arm, _, arm_children) =
+                        arm.carrier()
+                    else {
+                        return CallableOrigin::Unknown;
+                    };
+                    if arm_children.len() != 3 {
+                        return CallableOrigin::Unknown;
+                    }
+                    let mut arm_scope = scope.clone();
+                    bind_deep_pattern(&arm_children[0], &mut arm_scope);
+                    let arm_origin =
+                        self.deep_callable_origin(&arm_children[2], &arm_scope, lexical_name);
+                    result = Some(result.map_or_else(
+                        || arm_origin.clone(),
+                        |prior: CallableOrigin| prior.alternate(&arm_origin),
+                    ));
+                }
+                result.unwrap_or(CallableOrigin::Unknown)
+            }
+            DeepTag::Tuple => CallableOrigin::Tuple(
+                children
+                    .iter()
+                    .map(|child| self.deep_callable_origin(child, scope, lexical_name))
+                    .collect(),
+            ),
+            DeepTag::TupleGet if children.len() == 2 => {
+                let tuple = self.deep_callable_origin(&children[0], scope, lexical_name);
+                match tuple {
+                    CallableOrigin::Tuple(values) => deep_integer_literal(&children[1])
+                        .and_then(|index| usize::try_from(index).ok())
+                        .and_then(|index| values.get(index).cloned())
+                        .unwrap_or(CallableOrigin::Unknown),
+                    _ => CallableOrigin::Unknown,
+                }
+            }
+            DeepTag::Block => children
+                .last()
+                .map(|child| self.deep_callable_origin(child, scope, lexical_name))
+                .unwrap_or(CallableOrigin::NonCallable),
+            DeepTag::Let if children.len() == 2 => {
+                let deep::ExprCarrier::DecodedNode(DeepTag::Bind, _, bindings) =
+                    children[0].carrier()
+                else {
+                    return CallableOrigin::Unknown;
+                };
+                if !bindings.len().is_multiple_of(2) {
+                    return CallableOrigin::Unknown;
+                }
+                let mut scoped = scope.clone();
+                for pair in bindings.as_chunks::<2>().0 {
+                    let Some(name) = deep_symbol_name(&pair[0]) else {
+                        return CallableOrigin::Unknown;
+                    };
+                    let value = self.deep_callable_origin(&pair[1], &scoped, name);
+                    scoped.bind(name.to_string(), value);
+                }
+                self.deep_callable_origin(&children[1], &scoped, lexical_name)
+            }
             _ => CallableOrigin::Unknown,
         }
     }
@@ -849,6 +915,60 @@ fn deep_parameter_name(expr: &deep::Expr) -> Option<String> {
             .and_then(deep_symbol_name)
             .map(str::to_string),
         _ => None,
+    }
+}
+
+fn deep_integer_literal(expr: &deep::Expr) -> Option<i64> {
+    let deep::ExprCarrier::DecodedNode(DeepTag::Lit, _, children) = expr.carrier() else {
+        return None;
+    };
+    let [deep::Expr::Atom(deep::Atom::Int(value), _)] = children else {
+        return None;
+    };
+    Some(*value)
+}
+
+fn bind_deep_pattern(pattern: &deep::Expr, scope: &mut CallableScope) {
+    let deep::ExprCarrier::DecodedNode(tag, _, children) = pattern.carrier() else {
+        return;
+    };
+    match tag {
+        DeepTag::PatVar => {
+            if let Some(name) = children.first().and_then(deep_symbol_name) {
+                scope.bind(name.to_string(), CallableOrigin::Unknown);
+            }
+        }
+        DeepTag::PatAs => {
+            if let Some(name) = children.first().and_then(deep_symbol_name) {
+                scope.bind(name.to_string(), CallableOrigin::Unknown);
+            }
+            if let Some(nested) = children.get(1) {
+                bind_deep_pattern(nested, scope);
+            }
+        }
+        DeepTag::PatTuple => {
+            for child in children {
+                bind_deep_pattern(child, scope);
+            }
+        }
+        DeepTag::PatCtor => {
+            for child in children.iter().skip(1) {
+                bind_deep_pattern(child, scope);
+            }
+        }
+        DeepTag::PatRecord => {
+            for field in children.iter().skip(1) {
+                let deep::ExprCarrier::DecodedNode(DeepTag::Kv, _, field_children) =
+                    field.carrier()
+                else {
+                    continue;
+                };
+                if let Some(value_pattern) = field_children.get(1) {
+                    bind_deep_pattern(value_pattern, scope);
+                }
+            }
+        }
+        _ => {}
     }
 }
 

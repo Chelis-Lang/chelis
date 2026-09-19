@@ -47,6 +47,14 @@ COMMANDS = (
 )
 
 
+def oracle_environment() -> dict[str, str]:
+    """Return an environment pinned to this worktree's oracle-owned target."""
+    environment = os.environ.copy()
+    environment["CARGO_TARGET_DIR"] = str(ROOT / "target" / "agents" / "1955-oracle")
+    environment.setdefault("PYO3_PYTHON", sys.executable)
+    return environment
+
+
 def main() -> int:
     expected_python = (ROOT / ".venv" / "bin" / "python").resolve()
     if pathlib.Path(sys.executable).resolve() != expected_python:
@@ -57,9 +65,7 @@ def main() -> int:
         )
         return 2
 
-    environment = os.environ.copy()
-    environment.setdefault("CARGO_TARGET_DIR", str(ROOT / "target" / "agents" / "1955"))
-    environment.setdefault("PYO3_PYTHON", sys.executable)
+    environment = oracle_environment()
 
     for label, *command in COMMANDS:
         print(f"== {label}: {' '.join(command)}", flush=True)

@@ -122,9 +122,11 @@ performs those checks nor treats a well-shaped annotation as trusted.
 For a `grad` node that carries `wrt`, the operative integer selector child and
 the ordered `wrt` variable-reference metadata SHALL identify the same formal
 parameters of the resolved callable target, including repeated parameters.
-A consumer that can resolve the callable origin SHALL reject a contradictory
+A public semantic or resugaring consumer SHALL reject a malformed or absent
+operative selector child, a callable origin it cannot resolve, a contradictory
 name/index pair, an out-of-range index, or unequal metadata/index arity. It
-SHALL NOT rewrite either representation to make them agree.
+SHALL NOT omit or rewrite either representation to make them agree, including
+when reconstructing Surf from a lone Deep expression.
 
 > **[03-META-3]** Producer-specific keys and `span_*` extensions carry opaque
 > data. Chelis semantic passes SHALL neither interpret nor rewrite their
@@ -602,7 +604,10 @@ wildcard spelling); it does not allocate an inference variable.
 The `grad` metadata `wrt` records parameter names using [03-META-2]'s
 variable-reference syntax. Its optional child selects integer parameter
 indices under the transform's type-checking contract; metadata names are
-not runtime variable lookups and do not replace that index child.
+not runtime variable lookups and do not replace that index child. The child is
+optional only when `wrt` is absent; a `grad` carrying `wrt` requires its
+operative integer selector and the fail-closed consistency checks of
+[03-META-2].
 
 ### 2.8 Metaprogramming
 

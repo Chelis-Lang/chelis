@@ -5,12 +5,13 @@
 use chelis_deep::printer::print_canonical;
 use chelis_surf::{
     ast::Decl,
+    decompile::try_decompile_program,
     desugar::{
         DesugarError, desugar_decl_only, desugar_expr_in_program, desugar_expr_in_program_scope,
         desugar_expr_only, desugar_program,
     },
     parser::parse_str,
-    resugar::resugar_program,
+    resugar::{resugar_expression, resugar_program},
 };
 
 #[test]
@@ -343,4 +344,60 @@ fn matching_deep_round_trips_and_contradictory_metadata_rejects() {
             .to_string()
             .contains("outside")
     );
+}
+
+#[test]
+fn expression_resugaring_and_lone_decompilation_reject_unpreservable_selectors() {
+    for (label, source) in [
+        (
+            "contradictory inline callable",
+            "(grad {wrt: (var {} w)} \
+               (fn {} (params {} x w) (app {} (var {} mul) (var {} x) (var {} w))) \
+               (lit {type: (t-prim {} i32)} 0))",
+        ),
+        (
+            "malformed non-integer selector",
+            "(grad {wrt: (var {} w)} \
+               (fn {} (params {} x w) (app {} (var {} mul) (var {} x) (var {} w))) \
+               (var {} selector))",
+        ),
+        (
+            "dynamic callable target",
+            "(grad {wrt: (var {} w)} (var {} chosen) \
+               (lit {type: (t-prim {} i32)} 0))",
+        ),
+        (
+            "distinct inline branch origins",
+            "(grad {wrt: (var {} w)} \
+               (if {} (lit {} true) \
+                 (fn {} (params {} x w) (app {} (var {} mul) (var {} x) (var {} w))) \
+                 (fn {} (params {} x w) (app {} (var {} add) (var {} x) (var {} w)))) \
+               (lit {type: (t-prim {} i32)} 1))",
+        ),
+    ] {
+        let deep = chelis_deep::parser::parse_str(source).expect("Deep expression parses");
+        assert_eq!(deep.len(), 1, "{label}");
+        assert!(
+            resugar_expression(&deep[0]).is_err(),
+            "public expression resugaring rewrote {label}"
+        );
+        assert!(
+            try_decompile_program(&deep).is_err(),
+            "lone-expression decompilation fallback rewrote {label}"
+        );
+    }
+
+    let same_origin = chelis_deep::parser::parse_str(
+        "(let {} \
+           (bind {} \
+             base (fn {} (params {} x w) (app {} (var {} mul) (var {} x) (var {} w))) \
+             left (var {} base) \
+             right (var {} base)) \
+           (grad {wrt: (var {} w)} \
+             (if {} (lit {} true) (var {} left) (var {} right)) \
+             (lit {type: (t-prim {} i32)} 1)))",
+    )
+    .expect("same-origin Deep expression parses");
+    resugar_expression(&same_origin[0]).expect("same-origin branch selector resugars");
+    try_decompile_program(&same_origin).expect("same-origin branch selector decompiles");
 }

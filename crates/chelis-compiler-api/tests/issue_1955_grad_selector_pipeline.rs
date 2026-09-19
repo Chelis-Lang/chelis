@@ -81,6 +81,74 @@ fn linked_branch_joins_require_exact_callable_origin() {
 }
 
 #[test]
+fn layered_context_preserves_same_origin_structural_joins() {
+    let library_decls = chelis_surf::parser::parse_str(
+        "def pkg__pair__left(x: f32, w: f32) -> f32 = mul(x, w)\n\
+         def pkg__pair__right(x: f32, w: f32) -> f32 = add(x, w)\n\
+         left_alias = pkg__pair__left\n\
+         same_if = if true then pkg__pair__left else left_alias\n\
+         same_match = match true with {\n\
+           | true => pkg__pair__left\n\
+           | false => left_alias\n\
+         }\n\
+         same_tuple = (if true then (pkg__pair__left,) else (left_alias,)).0\n\
+         same_block = if true then {\n\
+           local = pkg__pair__left\n\
+           local\n\
+         } else {\n\
+           local = left_alias\n\
+           local\n\
+         }\n\
+         distinct_if = if true then pkg__pair__left else pkg__pair__right\n\
+         distinct_match = match true with {\n\
+           | true => pkg__pair__left\n\
+           | false => pkg__pair__right\n\
+         }\n\
+         distinct_tuple = (if true then (pkg__pair__left,) else (pkg__pair__right,)).0\n\
+         distinct_block = if true then {\n\
+           local = pkg__pair__left\n\
+           local\n\
+         } else {\n\
+           local = pkg__pair__right\n\
+           local\n\
+         }\n",
+    )
+    .expect("layered library parses");
+    let library =
+        chelis_surf::desugar::desugar_program(&library_decls).expect("layered library desugars");
+
+    let same = chelis_surf::parser::parse_str(
+        "selected = (\n\
+           grad(same_if, wrt=w),\n\
+           grad(same_match, wrt=w),\n\
+           grad(same_tuple, wrt=w),\n\
+           grad(same_block, wrt=w)\n\
+         )\n",
+    )
+    .expect("same-origin entry parses");
+    assert!(prepare_surf_decls_with_context(&same, &library, None).is_ok());
+
+    for name in [
+        "distinct_if",
+        "distinct_match",
+        "distinct_tuple",
+        "distinct_block",
+    ] {
+        let entry = chelis_surf::parser::parse_str(&format!("selected = grad({name}, wrt=w)\n"))
+            .expect("distinct-origin entry parses");
+        assert!(
+            matches!(
+                prepare_surf_decls_with_context(&entry, &library, None),
+                Err(PreparationError::SurfDesugar(
+                    DesugarError::UnresolvedGradTarget { .. }
+                ))
+            ),
+            "{name}"
+        );
+    }
+}
+
+#[test]
 fn contradictory_deep_selector_is_rejected_without_rewriting() {
     let source = "(def {} pair (fn {} (params {} x w) (app {} (var {} mul) (var {} x) (var {} w))))\n\
                   (def {} selected (grad {wrt: (var {} w)} (var {} pair) \
