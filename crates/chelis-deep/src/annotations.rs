@@ -582,10 +582,10 @@ core_inventory! {
 /// A vector does not allocate only what it stores. It takes the four-slot
 /// minimum non-zero capacity, a measured 736 bytes, and holds one to four
 /// entries in that one allocation; it reallocates crossing four and stays
-/// under the leaf node's footprint up to eight. So the win is under a third
-/// of the map at every size this corpus contains, not the arbitrary factor
-/// "only what it stores" would suggest. Empty metadata still allocates
-/// nothing, because the handle itself is `None`.
+/// under the leaf node's footprint up to eight. So the win is about a third
+/// of the map, 736 against 2048, at every size this corpus contains, not the
+/// arbitrary factor "only what it stores" would suggest. Empty metadata still
+/// allocates nothing, because the handle itself is `None`.
 ///
 /// Iteration keeps the key order every consumer already relies on, which
 /// `core_key_order_lock` pins, and lookup is a binary search over at most
@@ -933,31 +933,54 @@ impl ExtensionMap {
     }
 }
 
+/// Shared vocabulary for the annotation test modules below, so the
+/// deep-copy counter and the key-order helpers have one definition each.
 #[cfg(test)]
-mod shared_storage_receipt {
+mod test_support {
     use super::{Metadata, MetadataKey, MetadataValue, STORAGE_COPIES, Spanned};
-    use crate::tag::DeepTag;
-    use crate::{Atom, Expr, Span};
+    use crate::Span;
 
-    fn span() -> Span {
+    pub(super) fn span() -> Span {
         Span::new(0, 0)
     }
 
-    fn copies_since(start: usize) -> usize {
-        STORAGE_COPIES.with(|count| count.get()) - start
+    pub(super) fn text(value: &str) -> Spanned<String> {
+        Spanned::new(value.to_string(), span())
     }
 
-    fn copies_now() -> usize {
+    pub(super) fn observed(metadata: &Metadata) -> Vec<MetadataKey> {
+        metadata.values().map(|value| value.key()).collect()
+    }
+
+    /// Strictly increasing, not merely equal to a sorted copy: a vector
+    /// carrying one key twice passes the latter and fails this.
+    pub(super) fn strictly_increasing(metadata: &Metadata) -> bool {
+        observed(metadata).windows(2).all(|pair| pair[0] < pair[1])
+    }
+
+    pub(super) fn copies_now() -> usize {
         STORAGE_COPIES.with(|count| count.get())
     }
 
-    fn annotated() -> Metadata {
+    pub(super) fn copies_since(start: usize) -> usize {
+        copies_now() - start
+    }
+
+    pub(super) fn annotated() -> Metadata {
         let mut metadata = Metadata::default();
         metadata
             .insert(MetadataValue::Doc(Spanned::new("note".to_string(), span())))
             .expect("empty metadata accepts one doc annotation");
         metadata
     }
+}
+
+#[cfg(test)]
+mod shared_storage_receipt {
+    use super::test_support::{annotated, copies_now, copies_since, span};
+    use super::{Metadata, MetadataKey, MetadataValue, Spanned};
+    use crate::tag::DeepTag;
+    use crate::{Atom, Expr};
 
     /// A nested `app` chain of `depth` annotated nodes over one annotated
     /// `var` leaf, so the tree carries exactly `depth + 1` non-empty
@@ -1015,6 +1038,20 @@ mod shared_storage_receipt {
         );
         assert_eq!(small_clone, small);
         assert_eq!(large_clone, large);
+    }
+
+    /// Switching `Box` to `Arc` narrows auto traits: `Box<T>: Send` needs
+    /// only `T: Send`, while `Arc<T>: Send` needs `T: Send + Sync`. If a
+    /// payload ever stops being `Sync`, `Metadata` would silently stop being
+    /// `Send` and every consumer that moves a Deep tree across a thread
+    /// would fail to compile somewhere far from here. Landed from the #2210
+    /// review round.
+    #[test]
+    fn metadata_and_expr_stay_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Metadata>();
+        assert_send_sync::<Expr>();
+        assert_send_sync::<MetadataValue>();
     }
 
     /// A no-op must not un-share. `insert` of a duplicate key and `remove`
@@ -1115,36 +1152,26 @@ mod shared_storage_receipt {
 
 #[cfg(test)]
 mod core_key_order_lock {
-    use super::{Metadata, MetadataKey, MetadataValue, Spanned};
-    use crate::Span;
-
-    fn span() -> Span {
-        Span::new(0, 0)
-    }
-
-    fn text(value: &str) -> Spanned<String> {
-        Spanned::new(value.to_string(), span())
-    }
-
-    fn observed(metadata: &Metadata) -> Vec<MetadataKey> {
-        metadata.values().map(|value| value.key()).collect()
-    }
-
-    fn sorted(keys: &[MetadataKey]) -> Vec<MetadataKey> {
-        let mut keys = keys.to_vec();
-        keys.sort();
-        keys
-    }
+    use super::test_support::{observed, strictly_increasing, text};
+    use super::{Metadata, MetadataKey, MetadataValue};
 
     /// `values()` yields `MetadataKey` order, which the `BTreeMap` this
     /// storage replaced supplied for free and a key-sorted vector supplies
-    /// only while every mutation keeps it sorted. Nothing else in the crate
-    /// asserts it, and two consumers observe it directly: `Metadata`'s
-    /// `PartialEq` compares `values()` pairwise, so a reordering makes two
-    /// equal annotation sets compare unequal, and `chelis_surf::resugar`
-    /// builds a property declaration's option list in this order, so a
-    /// reordering changes decompiled Surf text. Serialization is insulated,
-    /// because `WireMetadata::from_metadata` re-sorts by key spelling.
+    /// only while every mutation keeps it sorted. Two consumers observe the
+    /// order directly: `Metadata`'s `PartialEq` compares `values()`
+    /// pairwise, so a reordering makes two equal annotation sets compare
+    /// unequal, and `chelis_surf::resugar` builds a property declaration's
+    /// option list in this order, so a reordering changes decompiled Surf
+    /// text. Serialization is insulated, because
+    /// `WireMetadata::from_metadata` re-sorts by key spelling.
+    ///
+    /// It is a correctness invariant and not only a formatting one, which
+    /// the #2210 review round established by mutating the sorted insert to
+    /// a `push`: an unsorted vector makes the binary search stop finding
+    /// keys that are present, so `insert` silently accepts a duplicate.
+    /// Two entries for one key then make the
+    /// `unreachable!("variant determines its key")` in the generated
+    /// getters reachable in principle, and `remove` deletes one of the two.
     ///
     /// The three mutating paths are exercised in one sequence: scrambled
     /// `insert`s, a `replace` onto an occupied key, a `remove` from the
@@ -1183,7 +1210,7 @@ mod core_key_order_lock {
             expected,
             "scrambled inserts must still yield MetadataKey order"
         );
-        assert_eq!(observed(&metadata), sorted(&observed(&metadata)));
+        assert!(strictly_increasing(&metadata));
 
         // `replace` onto an occupied key keeps its slot.
         let prior = metadata.replace(MetadataValue::Doc(text("rewritten")));
@@ -1214,8 +1241,253 @@ mod core_key_order_lock {
         );
         assert_eq!(observed(&metadata), expected);
         assert!(
-            observed(&metadata).windows(2).all(|pair| pair[0] < pair[1]),
+            strictly_increasing(&metadata),
             "keys must be strictly increasing"
         );
+    }
+}
+
+#[cfg(test)]
+mod shared_storage_order {
+    //! Coverage of the locate-here-apply-there seam. `insert`, `remove` and
+    //! `replace` each binary-search against a shared borrow and then apply
+    //! that index after `Arc::make_mut`, which hands back a different
+    //! allocation whenever the storage is shared. Every other order test in
+    //! this crate builds a fresh `Metadata` and mutates it, so `make_mut`
+    //! never clones and that seam never runs; these hold a live co-owner
+    //! across each write, and assert the deep-copy count so a probe that
+    //! stops reaching the seam fails instead of passing vacuously.
+    //!
+    //! Landed from the #2210 review round (rt-2210-round1). The assertions
+    //! and their messages are the reviewer's; only the helper imports were
+    //! folded onto `test_support`, which already held byte-identical copies
+    //! of `span` and `text`, and the reviewer's `keys` is `observed` here.
+    //!
+    //! Order mutations, each run on this tree, killing the module's own
+    //! `core_key_order_lock` as well. The five add shared-path coverage
+    //! rather than catching a defect the suite misses today.
+    //!
+    //! | mutation | also killed here |
+    //! |---|---|
+    //! | `insert`'s `core.insert(index, value)` to `core.push(value)` | insert, remove, no-op |
+    //! | `remove`'s `core.remove(index)` to `core.swap_remove(index)` | remove |
+    //! | `replace`'s absent-key `core.insert(index, value)` to `core.push(value)` | replace |
+    use super::test_support::{
+        copies_now, copies_since, observed, span, strictly_increasing, text,
+    };
+    use super::{Metadata, MetadataKey, MetadataValue};
+
+    /// Deliberately scrambled against the declared key order: ChelisRole is
+    /// ninth, PropertySourceId thirteenth, SurfPath twenty-first, Doc
+    /// twenty-seventh.
+    fn scrambled() -> Vec<MetadataValue> {
+        vec![
+            MetadataValue::Doc(text("d")),
+            MetadataValue::SurfPath(text("p")),
+            MetadataValue::ChelisRole(text("r")),
+            MetadataValue::PropertySourceId(text("s")),
+        ]
+    }
+    fn expected_order() -> Vec<MetadataKey> {
+        vec![
+            MetadataKey::ChelisRole,
+            MetadataKey::PropertySourceId,
+            MetadataKey::SurfPath,
+            MetadataKey::Doc,
+        ]
+    }
+
+    /// `insert` locates against a shared borrow and applies that index after
+    /// `Arc::make_mut`, which hands back a different allocation whenever the
+    /// storage is shared. Every other order test in this crate builds a
+    /// fresh `Metadata` and mutates it, so `make_mut` never clones and that
+    /// seam never executes. Here a live co-owner holds the storage shared
+    /// across every insert, and the deep-copy count is asserted rather than
+    /// assumed, so the test fails loudly if it ever stops exercising the
+    /// shared path instead of passing vacuously.
+    #[test]
+    fn insert_through_a_shared_handle_keeps_key_order_at_every_step() {
+        // Seeded, not empty. An insert into `storage: None` allocates a
+        // fresh `Arc` at count one, so `make_mut` never clones and the seam
+        // is not reached; the copy assertion below caught exactly that when
+        // this started from `Metadata::default()`. Destructure is the last
+        // declared key, so the scrambled inserts still land at index 0 three
+        // times and mid-vector once.
+        let mut metadata: Metadata = MetadataValue::Destructure(super::Present::new(span())).into();
+        let mut pins = Vec::new();
+        for value in scrambled() {
+            let pin = metadata.clone();
+            let before = observed(&pin).len();
+
+            let start = copies_now();
+            metadata.insert(value).expect("each key appears once");
+            assert_eq!(
+                copies_since(start),
+                1,
+                "the insert did not run against shared storage, so this test \
+                 no longer covers the locate-then-make_mut seam"
+            );
+
+            assert!(
+                strictly_increasing(&metadata),
+                "unsorted after an insert through shared storage: {:?}",
+                observed(&metadata)
+            );
+            assert_eq!(observed(&pin).len(), before, "the co-owner saw the insert");
+            pins.push(pin);
+        }
+        let mut expected = expected_order();
+        expected.push(MetadataKey::Destructure);
+        assert_eq!(observed(&metadata), expected);
+        for pin in &pins {
+            assert!(strictly_increasing(pin));
+        }
+    }
+
+    /// The same seam in `remove`, with the victim taken from every position
+    /// in turn so the surviving prefix and suffix are both exercised.
+    #[test]
+    fn remove_through_a_shared_handle_keeps_key_order() {
+        let full = Metadata::try_from_values(scrambled()).expect("distinct keys");
+        for victim in expected_order() {
+            let mut metadata = full.clone();
+            let pin = metadata.clone();
+
+            let start = copies_now();
+            assert!(metadata.remove(victim).is_some(), "{victim:?} was present");
+            assert_eq!(
+                copies_since(start),
+                1,
+                "the remove did not run against shared storage"
+            );
+
+            assert!(
+                strictly_increasing(&metadata),
+                "unsorted after a remove through shared storage: {:?}",
+                observed(&metadata)
+            );
+            assert_eq!(
+                observed(&metadata),
+                expected_order()
+                    .into_iter()
+                    .filter(|key| *key != victim)
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                observed(&pin),
+                expected_order(),
+                "the co-owner saw the removal"
+            );
+            assert_eq!(
+                observed(&full),
+                expected_order(),
+                "the source saw the removal"
+            );
+        }
+    }
+
+    /// `replace` onto an absent key takes the same insertion path and must
+    /// land at the sorted slot in the copy, not at the end of it.
+    #[test]
+    fn replace_through_a_shared_handle_inserts_at_the_sorted_slot() {
+        let partial = Metadata::try_from_values([
+            MetadataValue::ChelisRole(text("r")),
+            MetadataValue::Doc(text("d")),
+        ])
+        .expect("distinct keys");
+        let mut metadata = partial.clone();
+        let pin = metadata.clone();
+
+        let start = copies_now();
+        assert!(
+            metadata
+                .replace(MetadataValue::SurfPath(text("p")))
+                .is_none()
+        );
+        assert_eq!(
+            copies_since(start),
+            1,
+            "the replace did not run against shared storage"
+        );
+
+        assert_eq!(
+            observed(&metadata),
+            vec![
+                MetadataKey::ChelisRole,
+                MetadataKey::SurfPath,
+                MetadataKey::Doc
+            ],
+            "SurfPath must land between ChelisRole and Doc, not at the end"
+        );
+        assert!(strictly_increasing(&metadata));
+        assert_eq!(
+            observed(&pin),
+            vec![MetadataKey::ChelisRole, MetadataKey::Doc]
+        );
+    }
+
+    /// The no-op fast paths must be observational identity, and must leave
+    /// the storage usable: a real write afterwards still lands at its sorted
+    /// slot. Run against unshared and shared storage in turn, because the
+    /// two take different routes through `Arc::make_mut`.
+    #[test]
+    fn no_op_operations_are_observationally_identity() {
+        for shared in [false, true] {
+            let base = Metadata::try_from_values(scrambled()).expect("distinct keys");
+            let mut metadata = base.clone();
+            let pin = shared.then(|| metadata.clone());
+
+            let before = observed(&metadata);
+            assert!(metadata.insert(MetadataValue::Doc(text("dup"))).is_err());
+            assert!(metadata.remove(MetadataKey::Lin).is_none());
+            assert!(metadata.remove(MetadataKey::Span).is_none());
+
+            assert_eq!(observed(&metadata), before, "a no-op changed the key order");
+            assert_eq!(metadata, base, "a no-op changed the value");
+            assert_eq!(metadata.doc().expect("doc survives").value(), "d");
+            assert!(strictly_increasing(&metadata));
+            if let Some(pin) = pin {
+                assert_eq!(pin, base, "a no-op disturbed the co-owner");
+            }
+
+            let mut after = metadata.clone();
+            after
+                .insert(MetadataValue::Opaque(super::Present::new(span())))
+                .expect("Opaque is absent");
+            assert!(
+                strictly_increasing(&after),
+                "a write after the no-ops went astray"
+            );
+            assert_eq!(
+                metadata, base,
+                "the later write leaked back into the source"
+            );
+        }
+    }
+
+    /// The rejected-duplicate error must not depend on whether the storage
+    /// was shared, which is the only externally visible thing the fast path
+    /// could have changed.
+    #[test]
+    fn rejected_duplicate_reports_the_same_error_shared_or_not() {
+        let owned: Metadata = MetadataValue::Doc(text("base")).into();
+        let mut unshared = owned.clone();
+        drop(owned);
+        let from_unshared = unshared
+            .insert(MetadataValue::Doc(text("dup")))
+            .expect_err("Doc is already present");
+
+        let kept: Metadata = MetadataValue::Doc(text("base")).into();
+        let mut shared = kept.clone();
+        let from_shared = shared
+            .insert(MetadataValue::Doc(text("dup")))
+            .expect_err("Doc is already present");
+
+        assert_eq!(format!("{from_unshared:?}"), format!("{from_shared:?}"));
+        assert!(
+            format!("{from_unshared:?}").contains("doc"),
+            "{from_unshared:?}"
+        );
+        assert_eq!(kept.doc().expect("source intact").value(), "base");
     }
 }
