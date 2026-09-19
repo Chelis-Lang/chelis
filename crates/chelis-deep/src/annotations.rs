@@ -573,12 +573,23 @@ core_inventory! {
 
 /// Core annotations, held as a key-sorted vector rather than a map.
 ///
-/// The core inventory has thirty keys and a real node carries a handful. A
-/// `BTreeMap` allocates one full eleven-slot leaf node whatever it holds, and
-/// `MetadataValue` is 184 bytes wide on a 64-bit target, so a one-entry map
-/// costs a two-kilobyte allocation. A key-sorted vector allocates only what it
-/// stores, keeps the key-ordered iteration every consumer already relies on,
-/// and finds a key by binary search over at most thirty elements.
+/// The core inventory has thirty keys and a real node carries a handful: the
+/// chelis#1604 metadata fixture has 72 maps, 41 of them empty and none above
+/// three entries. `MetadataValue` is 184 bytes wide on a 64-bit target, and a
+/// `BTreeMap` allocates one full eleven-slot leaf node whatever it holds, so
+/// a one-entry map costs a measured 2048 bytes.
+///
+/// A vector does not allocate only what it stores. It takes the four-slot
+/// minimum non-zero capacity, a measured 736 bytes, and holds one to four
+/// entries in that one allocation; it reallocates crossing four and stays
+/// under the leaf node's footprint up to eight. So the win is under a third
+/// of the map at every size this corpus contains, not the arbitrary factor
+/// "only what it stores" would suggest. Empty metadata still allocates
+/// nothing, because the handle itself is `None`.
+///
+/// Iteration keeps the key order every consumer already relies on, which
+/// `core_key_order_lock` pins, and lookup is a binary search over at most
+/// thirty elements.
 #[derive(Debug, PartialEq, Default)]
 struct Storage {
     core: Vec<MetadataValue>,
@@ -696,18 +707,26 @@ impl Metadata {
             .is_none_or(|s| s.core.is_empty() && s.extensions.is_empty())
     }
     pub fn insert(&mut self, value: MetadataValue) -> Result<(), MetadataError> {
-        let storage = std::sync::Arc::make_mut(self.storage.get_or_insert_with(Default::default));
-        match storage.locate(value.key()) {
-            Ok(_) => Err(invalid(
-                value.key().spelling(),
-                value.span(),
-                "exactly one occurrence of this metadata key",
-            )),
-            Err(index) => {
-                storage.core.insert(index, value);
-                Ok(())
+        // Decide before `Arc::make_mut`. A rejected duplicate writes nothing,
+        // so it must not deep-copy shared storage on its way to an error.
+        let index = match self
+            .storage
+            .as_ref()
+            .map(|storage| storage.locate(value.key()))
+        {
+            Some(Ok(_)) => {
+                return Err(invalid(
+                    value.key().spelling(),
+                    value.span(),
+                    "exactly one occurrence of this metadata key",
+                ));
             }
-        }
+            Some(Err(index)) => index,
+            None => 0,
+        };
+        let storage = std::sync::Arc::make_mut(self.storage.get_or_insert_with(Default::default));
+        storage.core.insert(index, value);
+        Ok(())
     }
     pub fn replace(&mut self, value: MetadataValue) -> Option<MetadataValue> {
         let storage = std::sync::Arc::make_mut(self.storage.get_or_insert_with(Default::default));
@@ -720,8 +739,14 @@ impl Metadata {
         }
     }
     pub fn remove(&mut self, key: MetadataKey) -> Option<MetadataValue> {
-        let storage = std::sync::Arc::make_mut(self.storage.as_mut()?);
-        let index = storage.locate(key).ok()?;
+        // Decide before `Arc::make_mut`, for the same reason `insert` does:
+        // removing a key that is not there writes nothing.
+        let index = self.storage.as_ref()?.locate(key).ok()?;
+        let storage = std::sync::Arc::make_mut(
+            self.storage
+                .as_mut()
+                .expect("storage was present when the index was located"),
+        );
         Some(storage.core.remove(index))
     }
     pub fn values(&self) -> impl Iterator<Item = &MetadataValue> {
@@ -990,6 +1015,62 @@ mod shared_storage_receipt {
         );
         assert_eq!(small_clone, small);
         assert_eq!(large_clone, large);
+    }
+
+    /// A no-op must not un-share. `insert` of a duplicate key and `remove`
+    /// of an absent key both write nothing, so both decide before
+    /// `Arc::make_mut`; an eager `make_mut` would deep-copy the storage and
+    /// silently give up the sharing this change exists to buy. The proof
+    /// that sharing survived is the last assertion: the next real write
+    /// still costs exactly one copy, which only a still-shared storage does.
+    ///
+    /// Proved failing first, once per method, since the test stops at the
+    /// first failure. Hoisting `Arc::make_mut` back above the decision in
+    /// `insert`, which is how it was first written, fails with 1 copy
+    /// against the required 0 on the rejected duplicate. Hoisting it in
+    /// `remove` fails the same way on the absent key.
+    #[test]
+    fn a_rejected_or_absent_key_operation_does_not_unshare_storage() {
+        let original = annotated();
+        let mut copy = original.clone();
+
+        let start = copies_now();
+        assert!(
+            copy.insert(MetadataValue::Doc(Spanned::new(
+                "again".to_string(),
+                span()
+            )))
+            .is_err(),
+            "the clone already carries a doc annotation"
+        );
+        assert_eq!(
+            copies_since(start),
+            0,
+            "a rejected duplicate insert must not copy shared storage"
+        );
+
+        let start = copies_now();
+        assert!(copy.remove(MetadataKey::SurfPath).is_none());
+        assert_eq!(
+            copies_since(start),
+            0,
+            "removing an absent key must not copy shared storage"
+        );
+
+        let start = copies_now();
+        copy.replace(MetadataValue::Doc(Spanned::new(
+            "rewritten".to_string(),
+            span(),
+        )));
+        assert_eq!(
+            copies_since(start),
+            1,
+            "the no-ops must have left the storage shared"
+        );
+        assert_eq!(
+            original.doc().expect("original is untouched").value(),
+            "note"
+        );
     }
 
     /// The negative twin: sharing must stay invisible. A write through a
