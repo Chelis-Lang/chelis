@@ -779,6 +779,11 @@ Deep has exactly one textual representation per program.
 - No trailing whitespace. Single newline at EOF.
 
 ### 6.2 Ordering
+- Annotation map entries: ascending by key spelling under ASCII byte
+  comparison, so `Zeta_role`, `_under`, and `doc` appear in that order.
+  Producer-specific and `span_*` extension keys take their places in that one
+  sequence beside the defined keys rather than forming a separate group.
+  [03-META-1] makes every key unique, so the order is total.
 - Module declarations: declaration order (not sorted).
 - Import names within an import: alphabetized.
 - Record and record-update `kv` pairs: written order, which is left-to-right
