@@ -696,6 +696,30 @@ fn append_before_a_later_read_keeps_borrowing() {
     );
 }
 
+/// RT-2225 verification P0: tensor `concat` takes a `List[tensor]` of parts as
+/// its first operand and produces a tensor. That list is borrowed by the
+/// runtime and released after the call; it must never be upgraded to a move,
+/// or the release disappears (a leak on the round-1 head) and the emitter's
+/// fail-closed check refuses the program (the repair head). The result class
+/// keeps the two `concat`s apart.
+#[test]
+fn tensor_concat_keeps_its_parts_list_borrowed() {
+    let text = unit_text(
+        &verified_source(
+            "def join(a: tensor[2, f32], b: tensor[2, f32]) -> tensor[4, f32] = concat([a, b], 0)\n",
+        ),
+        "join",
+    );
+    assert!(
+        text.contains("builtin:concat(borrow"),
+        "the parts list of a tensor concat stays borrowed: {text}"
+    );
+    assert!(
+        !text.contains("builtin:concat(move"),
+        "a tensor concat never consumes its parts list: {text}"
+    );
+}
+
 /// chelis#2205: a tuple-held alias retains the list, so the append at the
 /// binding's last use is still a verified Move (the strong-owner count, not
 /// the IR, decides whether the runtime pushes in place).

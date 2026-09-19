@@ -234,8 +234,17 @@ fn upgrade_container_last_use_moves(
                         kind: ApplyKind::Intrinsic,
                         label,
                         args,
+                        schema,
                         ..
                     } => consuming_container_operand(label).and_then(|position| {
+                        // The label alone does not select the list builtin:
+                        // tensor `concat` takes a `List[tensor]` of parts as
+                        // its first operand and produces a tensor, and that
+                        // list is borrowed, never consumed. The result class
+                        // is what tells the two apart (RT-2225 verification).
+                        if schema.result != Some(ValueClass::Heap(HeapKind::List)) {
+                            return None;
+                        }
                         let operand = args.get(position)?;
                         let list_owner = owners.get(&operand.owner).is_some_and(|info| {
                             info.origin == OwnerOrigin::Owned
