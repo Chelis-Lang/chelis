@@ -1137,6 +1137,51 @@ class SchemaTests(unittest.TestCase):
             with self.subTest(neighbor=neighbor):
                 self.assertFalse(any(rule.matches(neighbor) for rule in rules))
 
+    def test_wire_invocation_owner_scripts_have_exact_automated_owners(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        config = owned.read_config(root / ".config/ci-test-targets.toml")
+        expected = {
+            "scripts/capacity_census_wire_invocation_owners.py": (
+                "heavy-e2e.yml",
+                "dtype-phase3-oracle",
+                "daily and workflow_dispatch",
+                "chelis#2048",
+            ),
+            "scripts/test_capacity_census_wire_invocation_owners.py": (
+                "ci.yml",
+                "script-unit",
+                "pull_request and push",
+                "chelis#2048",
+            ),
+        }
+        rules = {
+            rule.prefix: rule
+            for rule in config.path_rules
+            if rule.prefix in expected
+        }
+        self.assertEqual(set(rules), set(expected))
+        for path, owner_identity in expected.items():
+            with self.subTest(path=path):
+                rule = rules[path]
+                self.assertEqual(rule.prefix, path)
+                self.assertEqual(rule.disposition, "owner")
+                self.assertIsNotNone(rule.owner)
+                self.assertEqual(
+                    (
+                        rule.owner.workflow,
+                        rule.owner.job,
+                        rule.owner.cadence,
+                        rule.owner.tracking_issue,
+                    ),
+                    owner_identity,
+                )
+        for neighbor in (
+            "scripts/capacity_census_wire_invocation_owners_extra.py",
+            "scripts/test_capacity_census_wire_invocation_owners_extra.py",
+        ):
+            with self.subTest(neighbor=neighbor):
+                self.assertFalse(any(rule.matches(neighbor) for rule in rules.values()))
+
     def test_path_rules_cannot_override_existing_docs_only_policy(self) -> None:
         for path in ("README.md", "spec/05-risc-primitives.md", "new-tools/new.py"):
             text = config_text() + (

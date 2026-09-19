@@ -544,7 +544,7 @@ def dag_cases():
         bad["nodes"][4]["op"] = op
         add("result-claim-invalid-producer-" + op["kind"], bad, False, "supported producing axis")
 
-    # Wire v14: the checker-assigned local-ascription id is an opaque
+    # Wire v15: the checker-assigned local-ascription id is an opaque
     # artifact-local identity. It admits the complete u64 domain but never a
     # signed or fractional numeric representation.
     local_ascription = copy.deepcopy(witness)
