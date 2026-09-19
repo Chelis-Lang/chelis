@@ -580,6 +580,17 @@ class SchemaTests(unittest.TestCase):
         for identity in observer_debt:
             self.assertIn(f"test(/^{identity.test}$/)", heavy)
         self.assertIn('cron: "17 3 * * *"', heavy)
+        heavy_rule = next(
+            rule
+            for rule in config.path_rules
+            if rule.prefix == ".github/workflows/heavy-e2e.yml"
+        )
+        self.assertEqual(heavy_rule.disposition, "owner")
+        self.assertIsNotNone(heavy_rule.owner)
+        self.assertEqual(
+            (heavy_rule.owner.workflow, heavy_rule.owner.job),
+            ("ci.yml", "script-unit"),
+        )
         for rule in config.path_rules:
             if rule.owner is not None:
                 workflow = (root / ".github/workflows" / rule.owner.workflow).read_text()
@@ -991,10 +1002,9 @@ class SchemaTests(unittest.TestCase):
                       "test_installed_artifact_canary.py"):
             with self.subTest(suite=suite):
                 self.assertIn("release.yml", (root / "scripts" / suite).read_text(encoding="utf-8"))
-        # Sibling workflow files and release helper scripts must not inherit
-        # the exact rule; an unreviewed lane still needs its own mapping.
+        # Unreviewed sibling workflow files and release helper scripts must not
+        # inherit the exact rule; each reviewed lane needs its own mapping.
         for path in (".github/workflows/new-release-lane.yml",
-                     ".github/workflows/heavy-e2e.yml",
                      ".github/scripts/verify_release_smt.py"):
             self.assertFalse(any(rule.matches(path) for rule in config.path_rules), path)
             self.assertFalse(owned.is_docs_only([path]))

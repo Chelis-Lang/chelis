@@ -1330,9 +1330,18 @@ cadence = "pull_request and push"
 reason = "the trusted workflow-run receipt boundary and read-only topology are locked by script-unit"
 tracking_issue = "chelis#1824"
 
+[[path_rule]]
+prefix = ".github/workflows/heavy-e2e.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the unattended owner graph, feature-gated debt command, exact selector, and nightly reporting are locked by script-unit"
+tracking_issue = "chelis#2201"
+
 # The release workflow is text-parsed by the script-unit suites that lock its
 # job graph, cargo build targets, runtime-header manifests, glibc 2.31 lane,
-# installed-artifact canary wiring, and release-notes extraction. Sibling
+# installed-artifact canary wiring, and release-notes extraction. Other sibling
 # workflow files and .github/scripts stay unclassified.
 [[path_rule]]
 prefix = ".github/workflows/release.yml"
