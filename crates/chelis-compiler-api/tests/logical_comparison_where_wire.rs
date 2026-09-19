@@ -45,6 +45,25 @@ fn payload(op: serde_json::Value, inputs: Vec<u64>, precision: &str) -> String {
     .to_string()
 }
 
+fn payload_value(op: serde_json::Value, inputs: Vec<u64>, precision: &str) -> serde_json::Value {
+    serde_json::from_str(&payload(op, inputs, precision)).unwrap()
+}
+
+fn dims(size: u64) -> serde_json::Value {
+    serde_json::json!([{"kind": "lit", "size": size}])
+}
+
+fn assert_valid(payload: &serde_json::Value) {
+    WireDag::from_validated_json(&payload.to_string()).unwrap();
+}
+
+fn assert_contract_error(payload: &serde_json::Value, expected: &str) {
+    match WireDag::from_validated_json(&payload.to_string()).unwrap_err() {
+        WireDagDecodeError::Contract(error) => assert_eq!(error.to_string(), expected),
+        other => panic!("expected contract error, got {other:?}"),
+    }
+}
+
 #[test]
 fn wire_v15_round_trips_direct_comparison_logical_and_where_vocabulary() {
     assert_eq!(WIRE_DAG_SCHEMA_VERSION, 15);
@@ -130,52 +149,137 @@ fn wire_enums_are_closed_and_have_exact_spellings() {
 }
 
 #[test]
-fn wire_contract_rejects_bad_arity_domains_shapes_and_outputs() {
-    for (op, inputs, precision, needle) in [
-        (
-            serde_json::json!({"kind": "compare", "comparison": "eq"}),
-            vec![0],
-            "f32",
-            "inputs",
-        ),
-        (
-            serde_json::json!({"kind": "logical", "logical": "and"}),
-            vec![0, 1],
-            "f32",
-            "bool",
-        ),
-        (
-            serde_json::json!({"kind": "compare", "comparison": "eq"}),
-            vec![0, 1],
-            "string",
-            "numeric or bool",
-        ),
-        (
-            serde_json::json!({"kind": "compare", "comparison": "eq"}),
-            vec![0, 1],
-            "f8e4m3",
-            "active numeric",
-        ),
-        (
-            serde_json::json!({"kind": "where"}),
-            vec![0, 1],
-            "f32",
-            "inputs",
-        ),
-    ] {
-        let error = WireDag::from_validated_json(&payload(op, inputs, precision)).unwrap_err();
-        assert!(
-            matches!(error, WireDagDecodeError::Contract(_)),
-            "expected contract error, got {error:?}"
-        );
-        assert!(
-            error
-                .to_string()
-                .to_ascii_lowercase()
-                .contains(&needle.to_ascii_lowercase()),
-            "{error}"
-        );
-    }
+fn wire_v15_comparison_validation_has_direct_positive_negative_parity() {
+    const CONTRACT: &str = "WireDag Compare node 2 requires two same-shape, same-precision active numeric or bool operands and a same-shape Bool output; ordered comparisons require active numeric operands";
+
+    let valid = payload_value(
+        serde_json::json!({"kind": "compare", "comparison": "eq"}),
+        vec![0, 1],
+        "f32",
+    );
+    assert_valid(&valid);
+
+    let mut output_shape = valid.clone();
+    output_shape["nodes"][2]["output_type"]["dims"] = dims(3);
+    assert_contract_error(&output_shape, CONTRACT);
+
+    let mut output_dtype = valid.clone();
+    output_dtype["nodes"][2]["output_type"]["precision"] = "f32".into();
+    assert_contract_error(&output_dtype, CONTRACT);
+
+    let equality_f8e4m3 = payload_value(
+        serde_json::json!({"kind": "compare", "comparison": "eq"}),
+        vec![0, 1],
+        "f8e4m3",
+    );
+    assert_contract_error(&equality_f8e4m3, CONTRACT);
+
+    let ordered_f8e4m3 = payload_value(
+        serde_json::json!({"kind": "compare", "comparison": "gte"}),
+        vec![0, 1],
+        "f8e4m3",
+    );
+    assert_contract_error(&ordered_f8e4m3, CONTRACT);
+
+    let bad_arity = payload_value(
+        serde_json::json!({"kind": "compare", "comparison": "eq"}),
+        vec![0],
+        "f32",
+    );
+    assert_contract_error(
+        &bad_arity,
+        "WireDag Compare node 2 requires exactly two inputs",
+    );
+}
+
+#[test]
+fn wire_v15_logical_validation_has_direct_positive_negative_parity() {
+    const AND_CONTRACT: &str =
+        "WireDag Logical node 2 requires exactly 2 same-shape bool input(s) and a Bool output";
+    const NOT_CONTRACT: &str =
+        "WireDag Logical node 2 requires exactly 1 same-shape bool input(s) and a Bool output";
+
+    let valid_and = payload_value(
+        serde_json::json!({"kind": "logical", "logical": "and"}),
+        vec![0, 1],
+        "bool",
+    );
+    assert_valid(&valid_and);
+
+    let valid_not = payload_value(
+        serde_json::json!({"kind": "logical", "logical": "not"}),
+        vec![0],
+        "bool",
+    );
+    assert_valid(&valid_not);
+
+    let mut input_shape = valid_and.clone();
+    input_shape["nodes"][0]["output_type"]["dims"] = dims(3);
+    assert_contract_error(&input_shape, AND_CONTRACT);
+
+    let mut input_dtype = valid_and.clone();
+    input_dtype["nodes"][0]["output_type"]["precision"] = "f32".into();
+    assert_contract_error(&input_dtype, AND_CONTRACT);
+
+    let mut output_shape = valid_and.clone();
+    output_shape["nodes"][2]["output_type"]["dims"] = dims(3);
+    assert_contract_error(&output_shape, AND_CONTRACT);
+
+    let mut output_dtype = valid_and.clone();
+    output_dtype["nodes"][2]["output_type"]["precision"] = "f32".into();
+    assert_contract_error(&output_dtype, AND_CONTRACT);
+
+    let and_bad_arity = payload_value(
+        serde_json::json!({"kind": "logical", "logical": "and"}),
+        vec![0],
+        "bool",
+    );
+    assert_contract_error(&and_bad_arity, AND_CONTRACT);
+
+    let not_bad_arity = payload_value(
+        serde_json::json!({"kind": "logical", "logical": "not"}),
+        vec![0, 1],
+        "bool",
+    );
+    assert_contract_error(&not_bad_arity, NOT_CONTRACT);
+}
+
+#[test]
+fn wire_v15_where_validation_has_direct_positive_negative_parity() {
+    const CONTRACT: &str = "WireDag Where node 3 requires a same-shape Bool condition and exactly matching branch/output types";
+
+    let valid = payload_value(serde_json::json!({"kind": "where"}), vec![0, 1, 2], "f32");
+    assert_valid(&valid);
+
+    let mut condition_shape = valid.clone();
+    condition_shape["nodes"][0]["output_type"]["dims"] = dims(3);
+    assert_contract_error(&condition_shape, CONTRACT);
+
+    let mut condition_dtype = valid.clone();
+    condition_dtype["nodes"][0]["output_type"]["precision"] = "f32".into();
+    assert_contract_error(&condition_dtype, CONTRACT);
+
+    let mut branch_shape = valid.clone();
+    branch_shape["nodes"][2]["output_type"]["dims"] = dims(3);
+    assert_contract_error(&branch_shape, CONTRACT);
+
+    let mut branch_dtype = valid.clone();
+    branch_dtype["nodes"][2]["output_type"]["precision"] = "f64".into();
+    assert_contract_error(&branch_dtype, CONTRACT);
+
+    let mut output_shape = valid.clone();
+    output_shape["nodes"][3]["output_type"]["dims"] = dims(3);
+    assert_contract_error(&output_shape, CONTRACT);
+
+    let mut output_dtype = valid.clone();
+    output_dtype["nodes"][3]["output_type"]["precision"] = "f64".into();
+    assert_contract_error(&output_dtype, CONTRACT);
+
+    let bad_arity = payload_value(serde_json::json!({"kind": "where"}), vec![0, 1], "f32");
+    assert_contract_error(
+        &bad_arity,
+        "WireDag Where node 2 requires exactly three inputs",
+    );
 }
 
 #[test]
