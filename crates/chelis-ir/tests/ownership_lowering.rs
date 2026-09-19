@@ -613,6 +613,100 @@ length = length_after_wrap()
     assert!(named.contains("builtin:Some(move"), "{named}");
 }
 
+/// chelis#2205: a list whose scheduled last use is `append` moves into the
+/// builtin; one that is read again afterwards stays borrowed.
+///
+/// Counted receipt, asserted as a ratio: for an N-step let-bound append chain
+/// the number of `builtin:append` applications that still BORROW their
+/// container must not grow with N. Evidentiary status: REGRESSION TEST,
+/// proven failing first: on `main` (`1b7e9fcd7`) the 8-step chain rendered 8
+/// borrowing appends and the 16-step chain 16 (no step moved); after the
+/// last-use upgrade both render 0, and every step moves.
+#[test]
+fn append_at_a_lists_last_use_moves_and_the_chain_stops_borrowing() {
+    fn chain(steps: usize) -> String {
+        let mut source = String::from("def build() -> i64 = {\n  x0: List[i64] = []\n");
+        for step in 1..=steps {
+            source.push_str(&format!(
+                "  x{step} = append(x{}, cast({step}, i64))\n",
+                step - 1
+            ));
+        }
+        source.push_str(&format!("  len(x{steps})\n}}\nbuilt = build()\n"));
+        source
+    }
+    fn borrowing_appends(steps: usize) -> (usize, usize) {
+        let text = unit_text(&verified_source(&chain(steps)), "build");
+        (
+            count(&text, "builtin:append(borrow"),
+            count(&text, "builtin:append(move"),
+        )
+    }
+    let (small_borrow, small_move) = borrowing_appends(8);
+    let (large_borrow, large_move) = borrowing_appends(16);
+    eprintln!(
+        "#2205 receipt: 8-step chain borrows {small_borrow} / moves {small_move}; \
+         16-step chain borrows {large_borrow} / moves {large_move}"
+    );
+    assert_eq!(
+        small_borrow + small_move,
+        8,
+        "every append in the 8-step chain is rendered exactly once"
+    );
+    assert!(
+        large_borrow <= small_borrow,
+        "#2205: borrowing appends must not grow with the chain; 8 steps borrowed \
+         {small_borrow}, 16 steps borrowed {large_borrow}"
+    );
+}
+
+/// chelis#2205 negative half: a list read after the append is not moved into
+/// it, and a list read twice moves only at the second, final append.
+#[test]
+fn append_before_a_later_read_keeps_borrowing() {
+    let text = unit_text(
+        &verified_source(
+            "def twice() -> i64 = {\n  a = [cast(1, i64)]\n  b = append(a, cast(4, i64))\n  c = append(a, cast(5, i64))\n  add(len(b), len(c))\n}\nresult = twice()\n",
+        ),
+        "twice",
+    );
+    let first = line_index(&text, "builtin:append(");
+    let second = text
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| line.contains("builtin:append("))
+        .nth(1)
+        .map(|(index, _)| index)
+        .expect("two appends");
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(
+        lines[first].contains("builtin:append(borrow"),
+        "the first append still borrows `a`, which is read again: {text}"
+    );
+    assert!(
+        lines[second].contains("builtin:append(move"),
+        "the second append is `a`'s last use and moves it: {text}"
+    );
+}
+
+/// chelis#2205: a tuple-held alias retains the list, so the append at the
+/// binding's last use is still a verified Move (the strong-owner count, not
+/// the IR, decides whether the runtime pushes in place).
+#[test]
+fn append_at_last_use_moves_even_when_an_aggregate_holds_the_list() {
+    let text = unit_text(
+        &verified_source(
+            "def held() -> i64 = {\n  xs = [cast(1, i64), cast(2, i64)]\n  held = (xs, cast(9, i64))\n  zs = append(xs, cast(3, i64))\n  add(len(zs), len(held.0))\n}\nresult = held()\n",
+        ),
+        "held",
+    );
+    assert!(text.contains("= copy clone"), "the tuple retains `xs`: {text}");
+    assert!(
+        text.contains("builtin:append(move"),
+        "the append is `xs`'s last use and moves it: {text}"
+    );
+}
+
 #[test]
 fn fold_accumulator_is_one_owned_block_parameter_on_both_paths() {
     let alias = unit_text(&verified_fixture("issue_1346_fold_alias"), "roots");
