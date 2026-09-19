@@ -2185,6 +2185,196 @@ fn live_mask_for_roots(dag: &Dag, roots: &[NodeId]) -> Vec<bool> {
     live
 }
 
+/// The node selection an evaluation runs under, and which of its values the
+/// caller needs back.
+///
+/// chelis#828 work class 1. The evaluator used to hold every executed node's
+/// tensor until it returned, so peak host memory tracked the number of
+/// EXECUTED NODES rather than the number of tensors simultaneously reachable.
+/// A deep feed-forward model therefore paid for every activation it had ever
+/// computed, which is why an operator-complete model is OOM-killed under
+/// `chelis eval` (`Chelis-Lang/hydronnx#54`).
+///
+/// The distinction this enum draws is the one the caller already makes. An
+/// entrypoint that NAMES ITS ROOTS has said which values are results, so it
+/// asks for [`EvaluationScope::Roots`] and the evaluation loop drops every
+/// other value once the last step that reads it has run. An entrypoint that
+/// names no roots cannot know what to keep, so it keeps everything: that is
+/// the all-values API the tracker preserves, and `eval_tensor`,
+/// `eval_tensor_with`, `eval_tensor_with_strict`, the segment entrypoint and
+/// both plan entrypoints all use it.
+///
+/// The live mask travels with the selection rather than beside it, so a run
+/// cannot mask off one set of nodes while retaining the roots of another.
+#[derive(Clone, Copy)]
+enum EvaluationScope<'a> {
+    /// Execute every node in the graph and return every value.
+    WholeDag,
+    /// Execute only the masked nodes and return every executed value. A plan
+    /// masks nothing off in practice but still names no roots, so it cannot
+    /// say which values are results.
+    MaskedAllValues(&'a [bool]),
+    /// Execute only the masked nodes and return exactly `roots`. Every other
+    /// value is freed after the last step that reads it.
+    Roots {
+        live: &'a [bool],
+        roots: &'a [NodeId],
+    },
+}
+
+impl<'a> EvaluationScope<'a> {
+    fn live(&self) -> Option<&'a [bool]> {
+        match self {
+            Self::WholeDag => None,
+            Self::MaskedAllValues(live) => Some(live),
+            Self::Roots { live, .. } => Some(live),
+        }
+    }
+
+    /// The values this run must keep, or `None` when it keeps all of them.
+    fn retained_roots(&self) -> Option<&'a [NodeId]> {
+        match self {
+            Self::WholeDag | Self::MaskedAllValues(_) => None,
+            Self::Roots { roots, .. } => Some(roots),
+        }
+    }
+}
+
+/// One evaluation's outputs, and what holding them cost.
+struct EvaluatedValues {
+    values: UnordMap<NodeId, TensorValue>,
+    random_counter: u64,
+    /// The most entries `values` ever held at once, sampled after each node's
+    /// own value is inserted and before that step's reclamation runs, so it
+    /// records the true transient rather than the post-reclamation residue.
+    ///
+    /// This is chelis#828's receipt: under [`EvaluationScope::Roots`] it must
+    /// track the live working set instead of the executed node count. It is
+    /// read by this module's reclamation tests; nothing in the shipped lanes
+    /// consumes it, and exporting it would be public surface the tracker did
+    /// not ask for.
+    #[cfg_attr(not(test), allow(dead_code))]
+    peak_live_values: usize,
+    /// The most tensor ELEMENTS `values` ever held at once, by the same
+    /// sampling rule. [`TensorStorage`] owns its buffer outright rather than
+    /// sharing a handle, so removing an entry releases that entry's elements
+    /// and this count is a faithful proxy for the evaluator's own footprint.
+    #[cfg_attr(not(test), allow(dead_code))]
+    peak_live_elements: usize,
+}
+
+/// For each step of `order`, the values that become unreachable once that step
+/// has run.
+///
+/// A value stays reachable while some LATER step still reads it, and this
+/// evaluator reads a value through more edges than [`DagNode::inputs`]:
+///
+/// - a `Const` sizes itself from a `shape_deps` value's realized shape;
+/// - a producer's declared-result obligation names its witness through
+///   `result_claim_deps`;
+/// - a local extent guard reads its `activation`, its declaring
+///   [`crate::axis_sources::CanonicalExtent::Witness`], and every member of a
+///   [`crate::axis_sources::SameShapeAgreement`], all by node id rather than
+///   through the site node's operand list.
+///
+/// Every one of those is a read, so every one of them extends a lifetime here.
+/// Freeing a value one of them still reads would be a wrong answer or a
+/// spurious "not available" error, which is a far worse defect than the memory
+/// growth this reclamation exists to fix. A movement bound (`RtDim::Node`,
+/// `RtDim::InputAxis`) and every `ComputedAxisExtent` observation address the
+/// site node's own `inputs` slots, so `inputs` already covers them.
+///
+/// Steps the live mask skips never run and therefore never read; the scan
+/// skips them for the same reason the evaluation loop does, so a masked-off
+/// consumer does not pin a value its live consumers have finished with.
+///
+/// `retain` is never freed. A node that is both a selected root and an
+/// intermediate is therefore kept, which is what makes overlapping root cones
+/// safe.
+fn value_free_schedule(
+    dag: &Dag,
+    order: &[crate::execution_spine::Step],
+    live: Option<&[bool]>,
+    local_guard_sites: &UnordMap<NodeId, Vec<(usize, crate::axis_sources::LocalGuardClaim)>>,
+    retain: &[NodeId],
+) -> Vec<Vec<NodeId>> {
+    let mut last_use: Vec<Option<usize>> = vec![None; dag.len()];
+    let mut produced_at: Vec<Option<usize>> = vec![None; dag.len()];
+    for (index, step) in order.iter().enumerate() {
+        let crate::execution_spine::Step::Node(id) = step else {
+            continue;
+        };
+        let Some(node) = dag.get(*id) else {
+            continue;
+        };
+        if live.is_some_and(|mask| !mask[node.id.0]) {
+            continue;
+        }
+        {
+            let mut read = |source: NodeId| {
+                if let Some(slot) = last_use.get_mut(source.0) {
+                    *slot = Some(index);
+                }
+            };
+            for input in &node.inputs {
+                read(*input);
+            }
+            for dep in &node.shape_deps {
+                read(*dep);
+            }
+            for dep in &node.result_claim_deps {
+                read(*dep);
+            }
+            if let Some(sites) = local_guard_sites.get(&node.id) {
+                for (_, claim) in sites {
+                    if let Some(activation) = claim.activation {
+                        read(activation);
+                    }
+                    if let crate::axis_sources::CanonicalExtent::Witness(witness) = &claim.canonical
+                    {
+                        read(*witness);
+                    }
+                    if let crate::axis_sources::LocalGuardObservation::SameShapeAgreement(
+                        agreement,
+                    ) = &claim.observed
+                    {
+                        for member in agreement.members() {
+                            read(*member);
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(slot) = produced_at.get_mut(node.id.0) {
+            *slot = Some(index);
+        }
+    }
+
+    let mut retained = vec![false; dag.len()];
+    for root in retain {
+        if let Some(slot) = retained.get_mut(root.0) {
+            *slot = true;
+        }
+    }
+
+    let mut schedule = vec![Vec::new(); order.len()];
+    for (raw, produced) in produced_at.iter().enumerate() {
+        let Some(produced) = *produced else {
+            continue;
+        };
+        if retained[raw] {
+            continue;
+        }
+        // A topologically ordered schedule always reads a value after it is
+        // produced; taking the later of the two costs nothing and keeps a
+        // malformed schedule from scheduling a free before the insert it
+        // would undo.
+        let free_at = last_use[raw].unwrap_or(produced).max(produced);
+        schedule[free_at].push(NodeId(raw));
+    }
+    schedule
+}
+
 struct PreparedTensorInputs {
     inputs: UnordMap<String, TensorValue>,
     required_symbols: UnordSet<String>,
@@ -2279,18 +2469,18 @@ where
 
 fn eval_tensor_internal<F>(
     dag: &Dag,
-    live: Option<&[bool]>,
+    scope: EvaluationScope<'_>,
     strict_loads: bool,
     random_counter: u64,
     execution: Option<&mut crate::evaluation::ExecutionFrame<'_>>,
     load_input: F,
-) -> Result<(UnordMap<NodeId, TensorValue>, u64), String>
+) -> Result<EvaluatedValues, String>
 where
     F: FnMut(&str) -> Option<TensorValue>,
 {
     eval_tensor_internal_with_result_claims(
         dag,
-        live,
+        scope,
         strict_loads,
         random_counter,
         execution,
@@ -2301,16 +2491,17 @@ where
 
 fn eval_tensor_internal_with_result_claims<F>(
     dag: &Dag,
-    live: Option<&[bool]>,
+    scope: EvaluationScope<'_>,
     strict_loads: bool,
     random_counter: u64,
     mut execution: Option<&mut crate::evaluation::ExecutionFrame<'_>>,
     result_claims: &[crate::TensorType],
     mut load_input: F,
-) -> Result<(UnordMap<NodeId, TensorValue>, u64), String>
+) -> Result<EvaluatedValues, String>
 where
     F: FnMut(&str) -> Option<TensorValue>,
 {
+    let live = scope.live();
     let PreparedTensorInputs {
         inputs: resolved_inputs,
         required_symbols,
@@ -2450,6 +2641,12 @@ where
     };
 
     let mut values: UnordMap<NodeId, TensorValue> = UnordMap::new();
+    // chelis#828's receipt, sampled once per executed node. `live_elements`
+    // is maintained incrementally so the sample costs two comparisons rather
+    // than a walk of the map.
+    let mut live_elements: usize = 0;
+    let mut peak_live_values: usize = 0;
+    let mut peak_live_elements: usize = 0;
 
     // chelis#616: op-declared runtime dims (node-valued movement / reshape
     // output extents) have no pre-eval binding; each binds to its actual
@@ -2520,7 +2717,15 @@ where
             .map(|node| crate::execution_spine::Step::Node(node.id))
             .collect(),
     };
-    for step in order {
+    // chelis#828 work class 1. Built from the BOUND graph, whose node ids
+    // `bind_symbolic_dims` preserves, and from the same live mask and guard
+    // sites the loop below consults, so a step's reads in the scan are exactly
+    // the reads it performs.
+    let free_schedule = scope
+        .retained_roots()
+        .map(|roots| value_free_schedule(&bound_dag, &order, live, &local_guard_sites, roots));
+
+    for (index, step) in order.into_iter().enumerate() {
         let id = match step {
             crate::execution_spine::Step::Node(id) => id,
             crate::execution_spine::Step::Control { control, .. } => {
@@ -3440,10 +3645,33 @@ where
                 local_guard_verdict(*axis, claim, observed, &mut runtime_dims, &values)?;
             }
         }
-        values.insert(node.id, value);
+        let produced_elements = value.len();
+        if let Some(replaced) = values.insert(node.id, value) {
+            live_elements -= replaced.len();
+        }
+        live_elements += produced_elements;
+        peak_live_values = peak_live_values.max(values.len());
+        peak_live_elements = peak_live_elements.max(live_elements);
+        // Reclaim AFTER the sample above: the sample is the transient this
+        // step actually held, and reclamation is what keeps the next one
+        // bounded. Under an all-values scope there is no schedule and
+        // nothing is removed, so that lane's map is byte-for-byte what it
+        // always was.
+        if let Some(schedule) = &free_schedule {
+            for dead in &schedule[index] {
+                if let Some(freed) = values.remove(dead) {
+                    live_elements -= freed.len();
+                }
+            }
+        }
     }
 
-    Ok((values, path_random_counter))
+    Ok(EvaluatedValues {
+        values,
+        random_counter: path_random_counter,
+        peak_live_values,
+        peak_live_elements,
+    })
 }
 
 fn local_guard_is_active(
@@ -3550,13 +3778,15 @@ where
     let live = vec![true; dag.len()];
     eval_tensor_internal(
         dag,
-        Some(&live),
+        // A plan entrypoint names no roots, so it cannot say which values are
+        // results and keeps all of them (chelis#828).
+        EvaluationScope::MaskedAllValues(&live),
         true,
         starting_counter,
         Some(&mut frame),
         load_input,
     )
-    .map(|(values, _)| values)
+    .map(|evaluated| evaluated.values)
 }
 
 /// Execute the same source plan with invocation-local literal result claims.
@@ -3576,14 +3806,14 @@ where
     let live = vec![true; dag.len()];
     eval_tensor_internal_with_result_claims(
         dag,
-        Some(&live),
+        EvaluationScope::MaskedAllValues(&live),
         true,
         starting_counter,
         Some(&mut frame),
         result_claims,
         load_input,
     )
-    .map(|(values, _)| values)
+    .map(|evaluated| evaluated.values)
 }
 
 /// Why a selected-input preparation callback is being queried.
@@ -3682,7 +3912,15 @@ pub(crate) fn eval_tensor_segment_with_strict<F>(
 where
     F: FnMut(&str) -> Option<TensorValue>,
 {
-    eval_tensor_internal(dag, None, true, 0, Some(frame), load_input).map(|(values, _)| values)
+    eval_tensor_internal(
+        dag,
+        EvaluationScope::WholeDag,
+        true,
+        0,
+        Some(frame),
+        load_input,
+    )
+    .map(|evaluated| evaluated.values)
 }
 
 /// The extent an op-computed axis is about to produce, read from the site
@@ -3830,13 +4068,13 @@ where
 {
     eval_tensor_internal(
         dag,
-        None,
+        EvaluationScope::WholeDag,
         false,
         INITIAL_RANDOM_STREAM_ORDINAL,
         None,
         load_input,
     )
-    .map(|(values, _)| values)
+    .map(|evaluated| evaluated.values)
 }
 
 pub fn eval_tensor_with_strict<F>(
@@ -3848,15 +4086,22 @@ where
 {
     eval_tensor_internal(
         dag,
-        None,
+        EvaluationScope::WholeDag,
         true,
         INITIAL_RANDOM_STREAM_ORDINAL,
         None,
         load_input,
     )
-    .map(|(values, _)| values)
+    .map(|evaluated| evaluated.values)
 }
 
+/// Evaluate `roots` and return their values.
+///
+/// The result holds exactly the named roots. Every other value is freed once
+/// the last step that reads it has run, so peak memory tracks the live working
+/// set rather than the executed node count (chelis#828). Empty roots select
+/// the whole DAG and keep the all-values contract, as do [`eval_tensor`],
+/// [`eval_tensor_with`] and [`eval_tensor_with_strict`].
 pub fn eval_tensor_roots_with<F>(
     dag: &Dag,
     roots: &[NodeId],
@@ -3866,29 +4111,37 @@ where
     F: FnMut(&str) -> Option<TensorValue>,
 {
     if roots.is_empty() {
+        // Empty roots select the whole DAG, which is the all-values contract.
         return eval_tensor_internal(
             dag,
-            None,
+            EvaluationScope::WholeDag,
             false,
             INITIAL_RANDOM_STREAM_ORDINAL,
             None,
             load_input,
         )
-        .map(|(values, _)| values);
+        .map(|evaluated| evaluated.values);
     }
     reject_drop_roots(dag, roots)?;
     let live = live_mask_for_roots(dag, roots);
     eval_tensor_internal(
         dag,
-        Some(&live),
+        EvaluationScope::Roots { live: &live, roots },
         false,
         INITIAL_RANDOM_STREAM_ORDINAL,
         None,
         load_input,
     )
-    .map(|(values, _)| values)
+    .map(|evaluated| evaluated.values)
 }
 
+/// Evaluate `roots` and return their values.
+///
+/// The result holds exactly the named roots. Every other value is freed once
+/// the last step that reads it has run, so peak memory tracks the live working
+/// set rather than the executed node count (chelis#828). Empty roots select
+/// the whole DAG and keep the all-values contract, as do [`eval_tensor`],
+/// [`eval_tensor_with`] and [`eval_tensor_with_strict`].
 pub fn eval_tensor_roots_with_strict<F>(
     dag: &Dag,
     roots: &[NodeId],
@@ -3898,32 +4151,37 @@ where
     F: FnMut(&str) -> Option<TensorValue>,
 {
     if roots.is_empty() {
+        // Empty roots select the whole DAG, which is the all-values contract.
         return eval_tensor_internal(
             dag,
-            None,
+            EvaluationScope::WholeDag,
             true,
             INITIAL_RANDOM_STREAM_ORDINAL,
             None,
             load_input,
         )
-        .map(|(values, _)| values);
+        .map(|evaluated| evaluated.values);
     }
     reject_drop_roots(dag, roots)?;
     let live = live_mask_for_roots(dag, roots);
     eval_tensor_internal(
         dag,
-        Some(&live),
+        EvaluationScope::Roots { live: &live, roots },
         true,
         INITIAL_RANDOM_STREAM_ORDINAL,
         None,
         load_input,
     )
-    .map(|(values, _)| values)
+    .map(|evaluated| evaluated.values)
 }
 
 /// Evaluate roots while threading the executed Random path's next ordinal.
 /// Only `UniformLike` nodes carrying a scalar Bool activation participate;
 /// ordinary baked-seed DAGs retain their historical behavior.
+///
+/// The returned map holds exactly the named roots; see
+/// [`eval_tensor_roots_with_strict`]. Empty roots select the whole DAG and
+/// keep the all-values contract.
 pub fn eval_tensor_roots_with_strict_random_progress<F>(
     dag: &Dag,
     roots: &[NodeId],
@@ -3934,15 +4192,37 @@ where
     F: FnMut(&str) -> Option<TensorValue>,
 {
     if roots.is_empty() {
-        return eval_tensor_internal(dag, None, true, random_counter, None, load_input);
+        // Empty roots select the whole DAG, which is the all-values contract.
+        return eval_tensor_internal(
+            dag,
+            EvaluationScope::WholeDag,
+            true,
+            random_counter,
+            None,
+            load_input,
+        )
+        .map(|evaluated| (evaluated.values, evaluated.random_counter));
     }
     reject_drop_roots(dag, roots)?;
     let live = live_mask_for_roots(dag, roots);
-    eval_tensor_internal(dag, Some(&live), true, random_counter, None, load_input)
+    eval_tensor_internal(
+        dag,
+        EvaluationScope::Roots { live: &live, roots },
+        true,
+        random_counter,
+        None,
+        load_input,
+    )
+    .map(|evaluated| (evaluated.values, evaluated.random_counter))
 }
 
 /// Evaluate roots with the caller's literal result obligations at their
 /// producing operations, retaining the ordinary executed Random prefix.
+///
+/// The returned map holds exactly the named roots. Unlike the other
+/// root-scoped entry points this one has no empty-roots fallback: empty roots
+/// mask every node off, so nothing executes and the result is empty. Callers
+/// that want the whole DAG use [`eval_tensor_with_strict`].
 pub fn eval_tensor_roots_with_result_claims<F>(
     dag: &Dag,
     roots: &[NodeId],
@@ -3957,13 +4237,14 @@ where
     let live = live_mask_for_roots(dag, roots);
     eval_tensor_internal_with_result_claims(
         dag,
-        Some(&live),
+        EvaluationScope::Roots { live: &live, roots },
         true,
         random_counter,
         None,
         result_claims,
         load_input,
     )
+    .map(|evaluated| (evaluated.values, evaluated.random_counter))
 }
 
 fn reject_drop_roots(dag: &Dag, roots: &[NodeId]) -> Result<(), String> {
@@ -5906,5 +6187,605 @@ mod tests {
         );
         let min_out = reduce_argcmp(&min_input, 0, ArgReduceOp::Argmin).expect("argmin");
         assert_eq!(min_out.storage().to_i64_exact_vec(), Some(vec![1]));
+    }
+}
+
+/// chelis#828 work class 1: values reclaimed after their last use.
+///
+/// The receipt is a counted quantity, not a wall clock: `peak_live_values` is
+/// the most entries the evaluator's value map ever held at once, sampled after
+/// each node's own value lands and before that step's reclamation runs. Under
+/// the all-values contract that number is the executed node count; under a
+/// root-scoped run it must be the live working set.
+///
+/// The negative controls matter more than the receipt, and the two reader
+/// families fail differently. An operand read indexes `values[&node.inputs[i]]`
+/// directly, so freeing one early panics. The `Const` shape-dependency
+/// fallback does not: it ends in a default-empty unwrap, so a freed dependency
+/// silently becomes shape `[]` and the Const materializes one element. That
+/// quiet case is the one worth an evaluator-level test, and
+/// `a_const_sized_from_a_freed_shape_dependency_is_silently_the_wrong_shape`
+/// is it.
+///
+/// The remaining edges are covered at the schedule level only. `shape_deps`
+/// now has both; `result_claim_deps` has no evaluator test because this lane
+/// never reads it, and it is in the reader set as a deliberate conservatism;
+/// the three guard edges raise rather than answer wrongly, and building a real
+/// guard site needs the axis-source derivation rather than a hand-built DAG.
+#[cfg(test)]
+mod value_reclamation {
+    use super::*;
+    use crate::dag::RiscOp;
+    use crate::execution_spine::Step;
+    use chelis_types::types::Prim;
+
+    fn vec3() -> TensorType {
+        TensorType {
+            dims: vec![DimInfo::Lit(3)],
+            precision: Prim::F32,
+        }
+    }
+
+    fn x_input() -> TensorValue {
+        TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0])
+    }
+
+    fn load_x() -> impl FnMut(&str) -> Option<TensorValue> {
+        |name: &str| (name == "x").then(x_input)
+    }
+
+    /// `Load x` followed by `links` chained `Neg` nodes. Every intermediate
+    /// has exactly one consumer and is dead the moment that consumer runs, so
+    /// the live working set never exceeds two values however long the chain.
+    fn neg_chain(links: usize) -> (Dag, NodeId) {
+        let mut dag = Dag::new();
+        let mut last = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec3(), None);
+        for _ in 0..links {
+            last = dag.add_node(RiscOp::Neg, vec![last], vec3(), None);
+        }
+        dag.add_root(last);
+        (dag, last)
+    }
+
+    fn run(dag: &Dag, scope: EvaluationScope<'_>) -> EvaluatedValues {
+        eval_tensor_internal(
+            dag,
+            scope,
+            true,
+            INITIAL_RANDOM_STREAM_ORDINAL,
+            None,
+            load_x(),
+        )
+        .expect("the fixture evaluates")
+    }
+
+    fn elements(values: &UnordMap<NodeId, TensorValue>, id: NodeId) -> Vec<f64> {
+        values
+            .get(&id)
+            .unwrap_or_else(|| panic!("node {} is absent from the result", id.0))
+            .to_f64_lossy_vec()
+    }
+
+    /// The receipt.
+    ///
+    /// This test was run against this same tree with the reclamation
+    /// neutralized (`free_schedule` forced to `None`), so it is known to fail
+    /// without it. The root-scoped peak then equalled the executed node count:
+    /// `peak_live_values` was 65 for the 64-link chain and 129 for the
+    /// 128-link chain, against the 2 asserted below. (The 128 figure needed
+    /// its own run, because the loop aborts at 64 otherwise.) The all-values
+    /// assertions passed in both configurations, which is the point of
+    /// keeping them here: they pin the contract the tracker asked to
+    /// preserve, and they are what measures 195 and 387 elements.
+    #[test]
+    fn root_scoped_peak_tracks_the_working_set_not_the_executed_node_count() {
+        for links in [64usize, 128] {
+            let (dag, root) = neg_chain(links);
+            let live = live_mask_for_roots(&dag, &[root]);
+
+            let retaining = run(&dag, EvaluationScope::MaskedAllValues(&live));
+            let reclaiming = run(
+                &dag,
+                EvaluationScope::Roots {
+                    live: &live,
+                    roots: &[root],
+                },
+            );
+
+            assert_eq!(
+                retaining.peak_live_values,
+                links + 1,
+                "the all-values contract holds every executed node's value"
+            );
+            assert_eq!(
+                retaining.peak_live_elements,
+                3 * (links + 1),
+                "and every one of their elements"
+            );
+
+            assert_eq!(
+                reclaiming.peak_live_values, 2,
+                "a {links}-link chain is never more than two values wide"
+            );
+            assert_eq!(reclaiming.peak_live_elements, 6);
+            assert_eq!(
+                reclaiming.values.len(),
+                1,
+                "only the selected root survives the run"
+            );
+
+            // Identical, not merely close: the same chain of exact f32
+            // negations either way.
+            let expected = if links % 2 == 0 {
+                vec![1.0, 2.0, 3.0]
+            } else {
+                vec![-1.0, -2.0, -3.0]
+            };
+            assert_eq!(elements(&reclaiming.values, root), expected);
+            assert_eq!(
+                elements(&reclaiming.values, root),
+                elements(&retaining.values, root)
+            );
+        }
+    }
+
+    /// `x` feeds the head of a chain AND its tail, four steps later. Freeing
+    /// it when the first consumer runs would panic in `Add`'s operand index;
+    /// freeing it at the right step still leaves the answer exact.
+    fn diamond() -> (Dag, [NodeId; 5]) {
+        let mut dag = Dag::new();
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec3(), None);
+        let a = dag.add_node(RiscOp::Neg, vec![x], vec3(), None);
+        let b = dag.add_node(RiscOp::Neg, vec![a], vec3(), None);
+        let c = dag.add_node(RiscOp::Neg, vec![b], vec3(), None);
+        let d = dag.add_node(RiscOp::Add, vec![c, x], vec3(), None);
+        dag.add_root(d);
+        (dag, [x, a, b, c, d])
+    }
+
+    #[test]
+    fn a_value_with_a_later_second_consumer_outlives_its_first() {
+        let (dag, [x, _a, _b, _c, d]) = diamond();
+        let live = live_mask_for_roots(&dag, &[d]);
+
+        let reclaiming = run(
+            &dag,
+            EvaluationScope::Roots {
+                live: &live,
+                roots: &[d],
+            },
+        );
+        let retaining = run(&dag, EvaluationScope::MaskedAllValues(&live));
+
+        // -x + x, elementwise and exact.
+        assert_eq!(elements(&reclaiming.values, d), vec![0.0, 0.0, 0.0]);
+        assert_eq!(
+            elements(&reclaiming.values, d),
+            elements(&retaining.values, d)
+        );
+        assert_eq!(reclaiming.values.len(), 1);
+        assert!(
+            reclaiming.values.get(&x).is_none(),
+            "x is not a selected root and does not survive the run"
+        );
+        // Three values are live while the chain passes the retained `x`:
+        // `x` itself, the chain's previous link, and the new one.
+        assert_eq!(reclaiming.peak_live_values, 3);
+        assert_eq!(retaining.peak_live_values, 5);
+    }
+
+    #[test]
+    fn a_selected_root_that_is_also_an_intermediate_is_kept() {
+        let (dag, [_x, _a, b, _c, d]) = diamond();
+        let roots = [b, d];
+        let live = live_mask_for_roots(&dag, &roots);
+
+        let reclaiming = run(
+            &dag,
+            EvaluationScope::Roots {
+                live: &live,
+                roots: &roots,
+            },
+        );
+        let retaining = run(&dag, EvaluationScope::MaskedAllValues(&live));
+
+        // `b` is `-(-x)`, and it still feeds `c`.
+        assert_eq!(elements(&reclaiming.values, b), vec![1.0, 2.0, 3.0]);
+        assert_eq!(elements(&reclaiming.values, d), vec![0.0, 0.0, 0.0]);
+        assert_eq!(
+            elements(&reclaiming.values, b),
+            elements(&retaining.values, b)
+        );
+        assert_eq!(
+            elements(&reclaiming.values, d),
+            elements(&retaining.values, d)
+        );
+        assert_eq!(
+            reclaiming.values.len(),
+            2,
+            "both selected roots survive and nothing else does"
+        );
+        assert_eq!(reclaiming.peak_live_values, 4);
+    }
+
+    #[test]
+    fn overlapping_root_cones_share_one_intermediate() {
+        let mut dag = Dag::new();
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec3(), None);
+        let shared = dag.add_node(RiscOp::Neg, vec![x], vec3(), None);
+        let left = dag.add_node(RiscOp::Neg, vec![shared], vec3(), None);
+        let right = dag.add_node(RiscOp::Add, vec![shared, shared], vec3(), None);
+        dag.add_root(left);
+        dag.add_root(right);
+        let roots = [left, right];
+        let live = live_mask_for_roots(&dag, &roots);
+
+        let reclaiming = run(
+            &dag,
+            EvaluationScope::Roots {
+                live: &live,
+                roots: &roots,
+            },
+        );
+        let retaining = run(&dag, EvaluationScope::MaskedAllValues(&live));
+
+        assert_eq!(elements(&reclaiming.values, left), vec![1.0, 2.0, 3.0]);
+        assert_eq!(elements(&reclaiming.values, right), vec![-2.0, -4.0, -6.0]);
+        assert_eq!(
+            elements(&reclaiming.values, right),
+            elements(&retaining.values, right)
+        );
+        assert_eq!(reclaiming.values.len(), 2);
+        assert!(
+            reclaiming.values.get(&shared).is_none(),
+            "the shared intermediate is freed once the second cone has read it"
+        );
+    }
+
+    /// The preserved contract. Every entrypoint that names no roots returns
+    /// one entry per executed node, exactly as before chelis#828.
+    #[test]
+    fn the_all_values_entrypoints_still_return_every_executed_node() {
+        let (dag, root) = neg_chain(8);
+        let expected = dag.len();
+
+        let with_strict = eval_tensor_with_strict(&dag, load_x()).expect("whole-DAG eval");
+        assert_eq!(with_strict.len(), expected);
+
+        let lenient = eval_tensor_with(&dag, load_x()).expect("whole-DAG eval");
+        assert_eq!(lenient.len(), expected);
+
+        let mut inputs = UnordMap::new();
+        inputs.insert("x".to_string(), x_input());
+        assert_eq!(eval_tensor(&dag, &inputs).expect("eval").len(), expected);
+
+        // Empty roots select the whole DAG, so they keep the same contract.
+        let empty_roots = eval_tensor_roots_with_strict(&dag, &[], load_x()).expect("eval");
+        assert_eq!(empty_roots.len(), expected);
+
+        // And a named root returns only that root, with the same answer.
+        let scoped = eval_tensor_roots_with_strict(&dag, &[root], load_x()).expect("eval");
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(elements(&scoped, root), elements(&with_strict, root));
+    }
+
+    /// The result-claims entry point has no empty-roots fallback, unlike its
+    /// three siblings. Its doc comment now says so; this is the run behind
+    /// that sentence, so the difference is locked rather than asserted from
+    /// reading the branch that is missing.
+    #[test]
+    fn empty_roots_select_nothing_for_the_result_claims_entry_point() {
+        let (dag, root) = neg_chain(4);
+
+        let (empty, _) = eval_tensor_roots_with_result_claims(&dag, &[], 0, &[], load_x())
+            .expect("empty roots are not an error");
+        assert!(
+            empty.is_empty(),
+            "every node is masked off, so nothing executes"
+        );
+
+        // Its siblings take the whole DAG instead, which is the rule this
+        // entry point does NOT share.
+        let whole = eval_tensor_roots_with_strict(&dag, &[], load_x()).expect("whole DAG");
+        assert_eq!(whole.len(), dag.len());
+
+        // And with a root named, it returns that root alone.
+        let (scoped, _) = eval_tensor_roots_with_result_claims(&dag, &[root], 0, &[], load_x())
+            .expect("named root");
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(elements(&scoped, root), vec![1.0, 2.0, 3.0]);
+    }
+
+    /// The one reader edge whose loss is SILENT, exercised through the
+    /// evaluator rather than through the schedule.
+    ///
+    /// `Const` sizes itself from `concrete_shape_with`, and when that fails it
+    /// falls back to a `shape_deps` value's realized shape. That fallback ends
+    /// in a default-empty unwrap, so a freed shape dependency does not raise:
+    /// the shape silently becomes `[]` and the Const materializes one element
+    /// instead of the operand's width. Nothing downstream complains, because a
+    /// rank-zero operand is a legal broadcast.
+    ///
+    /// `x` is reachable ONLY through the shape dependency here. No node takes
+    /// it as an operand, so `inputs` alone gives it no reader and the schedule
+    /// frees it at its own production step.
+    ///
+    /// Measured on this tree with the extra reader edges removed from
+    /// `value_free_schedule` (the `shape_deps`, `result_claim_deps` and guard
+    /// blocks skipped, which is the reviewer's M2 mutation): this test failed
+    /// with `left: ([], [-2.0])` against `right: ([3], [-2.0, -2.0, -2.0])`.
+    /// With the edges in place it passes. It is the evaluator-level binding
+    /// the five schedule tests below do not provide.
+    ///
+    /// `Named("*", None)` is what keeps the fallback reachable:
+    /// `required_symbolic_dims` skips that name, so no symbolic binding runs,
+    /// `runtime_dims` stays empty, and `concrete_shape_with` fails as the
+    /// fallback's own precondition requires.
+    #[test]
+    fn a_const_sized_from_a_freed_shape_dependency_is_silently_the_wrong_shape() {
+        let starred = TensorType {
+            dims: vec![DimInfo::Named("*".to_string(), None)],
+            precision: Prim::F32,
+        };
+        let mut dag = Dag::new();
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec3(), None);
+        let sized = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 2.0),
+            vec![],
+            starred.clone(),
+            None,
+        );
+        dag.add_shape_dep(sized, x);
+        let out = dag.add_node(RiscOp::Neg, vec![sized], starred, None);
+        dag.add_root(out);
+
+        let live = live_mask_for_roots(&dag, &[out]);
+        let reclaiming = run(
+            &dag,
+            EvaluationScope::Roots {
+                live: &live,
+                roots: &[out],
+            },
+        );
+
+        let value = reclaiming
+            .values
+            .get(&out)
+            .expect("the selected root survives");
+        // Shape and elements in ONE assertion: asserting the shape first would
+        // pre-empt the element vector, and then this comment could only report
+        // half of what a losing run prints.
+        assert_eq!(
+            (value.shape.clone(), value.to_f64_lossy_vec()),
+            (vec![3], vec![-2.0, -2.0, -2.0]),
+            "the Const takes its width from the shape dependency's realized shape"
+        );
+
+        // The same answer through the all-values lane, which frees nothing.
+        let retaining = run(&dag, EvaluationScope::MaskedAllValues(&live));
+        assert_eq!(elements(&retaining.values, out), value.to_f64_lossy_vec());
+    }
+
+    // ------------------------------------------------------------------
+    // The reader edges that are not `DagNode::inputs`. Each test pairs the
+    // extra edge against the same graph without it, so it shows both that
+    // the edge extends the lifetime and that the lifetime would otherwise
+    // end early. Without the pair, the assertion could pass for a schedule
+    // that never frees anything.
+    // ------------------------------------------------------------------
+
+    fn node_order(dag: &Dag) -> Vec<Step> {
+        dag.nodes().iter().map(|node| Step::Node(node.id)).collect()
+    }
+
+    /// The step index at which `id` is scheduled to be freed, or `None` when
+    /// the schedule keeps it to the end.
+    fn freed_at(schedule: &[Vec<NodeId>], id: NodeId) -> Option<usize> {
+        schedule.iter().position(|step| step.contains(&id))
+    }
+
+    fn schedule_for(dag: &Dag, retain: &[NodeId]) -> Vec<Vec<NodeId>> {
+        value_free_schedule(dag, &node_order(dag), None, &UnordMap::new(), retain)
+    }
+
+    /// A chain plus one spectator node, so a graph without the extra edge
+    /// frees the spectator's source at step 1 and a graph with it does not.
+    fn spectator_graph() -> (Dag, NodeId, NodeId, NodeId) {
+        let mut dag = Dag::new();
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec3(), None);
+        let a = dag.add_node(RiscOp::Neg, vec![x], vec3(), None);
+        let late = dag.add_node(RiscOp::Neg, vec![a], vec3(), None);
+        dag.add_root(late);
+        (dag, x, a, late)
+    }
+
+    #[test]
+    fn without_an_extra_edge_the_source_is_freed_at_its_only_consumer() {
+        let (dag, x, _a, late) = spectator_graph();
+        let schedule = schedule_for(&dag, &[late]);
+        assert_eq!(
+            freed_at(&schedule, x),
+            Some(1),
+            "x's only reader is the node at index 1"
+        );
+    }
+
+    #[test]
+    fn a_shape_dependency_extends_the_lifetime_it_reads() {
+        let (mut dag, x, _a, late) = spectator_graph();
+        dag.add_shape_dep(late, x);
+        let schedule = schedule_for(&dag, &[late]);
+        assert_eq!(
+            freed_at(&schedule, x),
+            Some(2),
+            "a Const sizes itself from a shape dependency's realized shape, \
+             so the dependency is a read"
+        );
+    }
+
+    #[test]
+    fn a_result_claim_dependency_extends_the_lifetime_it_reads() {
+        let (mut dag, x, _a, late) = spectator_graph();
+        dag.add_result_claim_dep(late, x);
+        let schedule = schedule_for(&dag, &[late]);
+        assert_eq!(
+            freed_at(&schedule, x),
+            Some(2),
+            "the producer discharges its obligation against the witness's value"
+        );
+    }
+
+    fn guard_claim(
+        canonical: crate::axis_sources::CanonicalExtent,
+        observed: crate::axis_sources::LocalGuardObservation,
+        activation: Option<NodeId>,
+    ) -> crate::axis_sources::LocalGuardClaim {
+        crate::axis_sources::LocalGuardClaim {
+            claim: "n".to_string(),
+            canonical,
+            op: "expand",
+            observed,
+            activation,
+        }
+    }
+
+    fn schedule_with_guard(
+        dag: &Dag,
+        site: NodeId,
+        claim: crate::axis_sources::LocalGuardClaim,
+        retain: &[NodeId],
+    ) -> Vec<Vec<NodeId>> {
+        let mut sites = UnordMap::new();
+        sites.insert(site, vec![(0usize, claim)]);
+        value_free_schedule(dag, &node_order(dag), None, &sites, retain)
+    }
+
+    #[test]
+    fn a_guard_activation_extends_the_lifetime_it_reads() {
+        let (dag, x, _a, late) = spectator_graph();
+        let schedule = schedule_with_guard(
+            &dag,
+            late,
+            guard_claim(
+                crate::axis_sources::CanonicalExtent::Resolved(3),
+                crate::axis_sources::LocalGuardObservation::RealizedExtent,
+                Some(x),
+            ),
+            &[late],
+        );
+        assert_eq!(
+            freed_at(&schedule, x),
+            Some(2),
+            "`local_guard_is_active` reads the activation node's value at the site"
+        );
+    }
+
+    #[test]
+    fn a_guard_witness_extends_the_lifetime_it_reads() {
+        let (dag, x, _a, late) = spectator_graph();
+        let schedule = schedule_with_guard(
+            &dag,
+            late,
+            guard_claim(
+                crate::axis_sources::CanonicalExtent::Witness(x),
+                crate::axis_sources::LocalGuardObservation::RealizedExtent,
+                None,
+            ),
+            &[late],
+        );
+        assert_eq!(
+            freed_at(&schedule, x),
+            Some(2),
+            "`local_guard_verdict` reads the declaring witness's scalar"
+        );
+    }
+
+    /// A graph whose penultimate node is a same-shape producer over `x`, so
+    /// an agreement derived from it names `x` while the final node does not
+    /// read `x` through any operand slot.
+    fn agreement_graph() -> (Dag, NodeId, NodeId, NodeId) {
+        let mut dag = Dag::new();
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec3(), None);
+        let a = dag.add_node(RiscOp::Neg, vec![x], vec3(), None);
+        let mix = dag.add_node(RiscOp::Add, vec![x, a], vec3(), None);
+        let late = dag.add_node(RiscOp::Neg, vec![mix], vec3(), None);
+        dag.add_root(late);
+        (dag, x, mix, late)
+    }
+
+    #[test]
+    fn without_an_agreement_the_last_operand_read_ends_the_lifetime() {
+        let (dag, x, mix, late) = agreement_graph();
+        let schedule = schedule_for(&dag, &[late]);
+        assert_eq!(
+            freed_at(&schedule, x),
+            Some(mix.0),
+            "x's last operand reader is the same-shape producer"
+        );
+    }
+
+    #[test]
+    fn a_same_shape_agreement_member_extends_the_lifetime_it_reads() {
+        let (dag, x, mix, late) = agreement_graph();
+        let agreement = crate::axis_sources::same_shape_result_agreement(&dag, mix)
+            .expect("a same-shape producer")
+            .expect("positive rank");
+        assert_eq!(agreement.members(), &[x, NodeId(1)]);
+
+        // The site is the FINAL node, which reads neither member through an
+        // operand slot. Only the agreement keeps them alive that far.
+        let schedule = schedule_with_guard(
+            &dag,
+            late,
+            guard_claim(
+                crate::axis_sources::CanonicalExtent::Resolved(3),
+                crate::axis_sources::LocalGuardObservation::SameShapeAgreement(agreement),
+                None,
+            ),
+            &[late],
+        );
+        assert_eq!(
+            freed_at(&schedule, x),
+            Some(late.0),
+            "`same_shape_agreement_extent` compares every member's realized shape"
+        );
+    }
+
+    #[test]
+    fn a_masked_off_consumer_does_not_pin_a_value() {
+        // `dead` reads `x` but never executes under the root mask, so it must
+        // not hold `x` past the live consumer that finishes with it.
+        let mut dag = Dag::new();
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec3(), None);
+        let live_use = dag.add_node(RiscOp::Neg, vec![x], vec3(), None);
+        let dead = dag.add_node(RiscOp::Neg, vec![x], vec3(), None);
+        dag.add_root(live_use);
+        dag.add_root(dead);
+
+        let mask = live_mask_for_roots(&dag, &[live_use]);
+        let schedule = value_free_schedule(
+            &dag,
+            &node_order(&dag),
+            Some(&mask),
+            &UnordMap::new(),
+            &[live_use],
+        );
+        assert_eq!(freed_at(&schedule, x), Some(1));
+        assert_eq!(
+            freed_at(&schedule, dead),
+            None,
+            "a node the mask skips produces nothing to free"
+        );
+
+        // And with both selected, the dead consumer runs and pins `x`.
+        let both = live_mask_for_roots(&dag, &[live_use, dead]);
+        let schedule = value_free_schedule(
+            &dag,
+            &node_order(&dag),
+            Some(&both),
+            &UnordMap::new(),
+            &[live_use, dead],
+        );
+        assert_eq!(freed_at(&schedule, x), Some(2));
     }
 }
