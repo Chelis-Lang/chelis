@@ -34,8 +34,13 @@ rewrite. Base updates require one exact
 `Candidate-base-update: <head> <reason>` PR-body line, and other rewrites require
 `Candidate-history-rewrite: <head> <reason>`. The declaration records necessity;
 it does not replace review of a conflict resolution or approval for a force
-push. A force-pushed-away old head that Git can no longer inspect fails closed
-unless the current head has the explicit history-rewrite declaration.
+push. Classifying a force-push needs the pre-push head, which is reachable
+from no ref once it is replaced, so even a `fetch-depth: 0` checkout has to
+fetch that commit by SHA before running the classifier; both invocations do.
+A pre-push head that still cannot be obtained fails closed and requires the
+explicit history-rewrite declaration, and the failure says the head could not
+be inspected rather than reporting a missing line as if the author had
+forgotten to write one.
 The introducing implementation event requires the exact new head. The
 acknowledgement workflow also runs on later body edits and accepts that recorded
 head only while it remains an ancestor of the current head, so deleting a

@@ -336,6 +336,34 @@ class CandidateLifecycleTests(unittest.TestCase):
             "history-rewrite-unverifiable",
         )
 
+
+    def test_an_uninspectable_pre_push_head_says_so_rather_than_blaming_the_author(
+        self,
+    ) -> None:
+        """The demand must name its cause, not read as a forgotten line.
+
+        chelis#2229: a clean forward rebase produced
+        `Candidate-history-rewrite: requires exactly one exact-head line in
+        the PR body` while the body already carried a correct
+        `Candidate-base-update:` line. The author has no way to tell from
+        that message that the checkout never obtained the pre-push head.
+        """
+
+        with self.assertRaises(ValueError) as raised:
+            lifecycle.validate_payload(
+                payload(
+                    body=f"Candidate-base-update: {HEAD} a real conflict"
+                ),
+                UnavailableGraph(ancestors=set()),
+            )
+
+        message = str(raised.exception)
+        self.assertIn(f"the pre-push head {BEFORE} could not be inspected", message)
+        self.assertIn("old force-pushed head is unavailable", message)
+        self.assertIn("cannot be classified as a base update", message)
+        # The stricter declaration is still what unblocks it: fail-safe.
+        self.assertIn("Candidate-history-rewrite:", message)
+
     def test_empty_or_duplicate_acknowledgements_fail_closed(self) -> None:
         graph = FakeGraph(
             ancestors={(BEFORE, HEAD)},
@@ -426,6 +454,48 @@ class GitGraphIntegrationTests(unittest.TestCase):
                 ),
                 "base-rebase",
             )
+
+
+
+class AcknowledgementWorkflowFetchTests(unittest.TestCase):
+    """The workflow must hand the classifier the head it needs.
+
+    `pr-contract-acknowledgements.yml` checks out at `fetch-depth: 0`, but a
+    full clone holds only what refs reach, and a force-pushed-away head is
+    reachable from none. The step therefore has to fetch it by SHA
+    (chelis#2229).
+    """
+
+    WORKFLOW = (
+        Path(__file__).resolve().parents[1]
+        / ".github/workflows/pr-contract-acknowledgements.yml"
+    )
+
+    def lifecycle_step_body(self) -> str:
+        text = self.WORKFLOW.read_text()
+        start = text.index("Require persistent candidate lifecycle declaration")
+        end = text.index("- name: Require protected-test acknowledgements")
+        return text[start:end]
+
+    def test_the_step_fetches_the_pre_push_head(self) -> None:
+        body = self.lifecycle_step_body()
+
+        self.assertIn('BEFORE: ${{ github.event.before }}', body)
+        self.assertIn('ACTION: ${{ github.event.action }}', body)
+        self.assertIn('git fetch --no-tags origin "$BEFORE"', body)
+
+    def test_that_fetch_is_not_silenced(self) -> None:
+        fetches = [
+            line
+            for line in self.lifecycle_step_body().splitlines()
+            if "git fetch" in line and '"$BEFORE"' in line
+        ]
+        self.assertTrue(fetches, "no pre-push head fetch")
+        for line in fetches:
+            # `2>/dev/null || true` is how the sibling invocation hides this
+            # failure, and hiding it is the defect rather than a detail of it.
+            self.assertNotIn("2>/dev/null", line)
+            self.assertNotIn("|| true", line)
 
 
 if __name__ == "__main__":

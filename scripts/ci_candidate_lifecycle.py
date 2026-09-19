@@ -298,13 +298,27 @@ def validate_payload(
             base=base,
             graph=active_graph,
         )
-    except GraphInspectionError:
-        _require_acknowledgement(
-            body,
-            prefix="Candidate-history-rewrite:",
-            head=head,
-            graph=active_graph,
-        )
+    except GraphInspectionError as inspection:
+        # Keep the fail-safe direction: an update nobody can classify still
+        # owes the stricter declaration. Say why, though. Without this the
+        # author reads "Candidate-history-rewrite: requires exactly one
+        # exact-head line" and concludes they forgot to write one, when the
+        # real state is that this checkout never obtained the pre-push head
+        # (chelis#2229).
+        try:
+            _require_acknowledgement(
+                body,
+                prefix="Candidate-history-rewrite:",
+                head=head,
+                graph=active_graph,
+            )
+        except ValueError as missing:
+            raise ValueError(
+                f"the pre-push head {before} could not be inspected "
+                f"({inspection}), so this update cannot be classified as a "
+                "base update and the stricter declaration is required: "
+                f"{missing}"
+            ) from inspection
         return "history-rewrite-unverifiable"
     if kind in {"base-merge", "base-rebase"}:
         _require_acknowledgement(
