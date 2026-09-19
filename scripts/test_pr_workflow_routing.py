@@ -96,8 +96,66 @@ def run_rebase_selector(
         )
 
 
+def assert_backstop_fetches_stay_connected(
+    test: unittest.TestCase, body: str, targets: tuple[str, ...]
+) -> None:
+    """No backstop fetch of `targets` may carry a depth limit.
+
+    `git fetch --depth=N` records the fetched commit in `.git/shallow`, and
+    git then ignores the parents that commit records even when those parent
+    objects are already in the clone. No later ordinary fetch removes the
+    graft. Grafting the target snapshot cuts the one edge
+    `ci_candidate_identity.py` crosses to reach the branch point, and its
+    `git merge-base` then reports no common ancestor with an empty stderr
+    (chelis#2228).
+    """
+
+    for target in targets:
+        fetches = [
+            line
+            for line in body.splitlines()
+            if "git fetch" in line and f"origin {target}" in line
+        ]
+        test.assertTrue(fetches, f"no backstop fetch of {target}")
+        for line in fetches:
+            test.assertNotIn(
+                "--depth",
+                line,
+                f"the {target} backstop grafts the commit it fetches",
+            )
+
+
+def assert_candidate_deepening_stays_connected(
+    test: unittest.TestCase, workflow: dict
+) -> None:
+    detect = next(
+        step
+        for step in workflow["jobs"]["changes"]["steps"]
+        if step.get("id") == "detect"
+    )
+    body = detect["run"]
+    test.assertIn('git fetch --depth=$((COMMITS + 1)) origin "$HEAD"', body)
+    # The identity step walks from the candidate's first parent, which the
+    # event payload's base does not name once the target has advanced.
+    test.assertIn("git cat-file commit HEAD", body)
+    assert_backstop_fetches_stay_connected(
+        test, body, ('"$BASE"', '"$first_parent"')
+    )
+
+
 def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
     test.assertEqual(workflow["permissions"], {"contents": "read"})
+    assert_candidate_deepening_stays_connected(test, workflow)
+    authorship = next(
+        step
+        for step in workflow["jobs"]["no-ai-authorship"]["steps"]
+        if step.get("name") == "Check commits for AI authorship markers"
+    )
+    # A grafted base stops excluding its own ancestors from `$BASE..$HEAD`,
+    # so this scan would read commits that merged before the pull request.
+    assert_backstop_fetches_stay_connected(
+        test, authorship["run"], ('"$BASE"',)
+    )
     events = actions_events(workflow)
     test.assertEqual(
         set(events["pull_request"]["types"]),
@@ -448,6 +506,7 @@ def assert_retarget_workflow(test: unittest.TestCase, workflow: dict) -> None:
 
 
 def assert_hull_retarget_dispatch(test: unittest.TestCase, workflow: dict) -> None:
+    assert_candidate_deepening_stays_connected(test, workflow)
     events = actions_events(workflow)
     test.assertEqual(
         set(events["pull_request"]["types"]),
@@ -875,6 +934,55 @@ class PullRequestWorkflowRoutingTests(unittest.TestCase):
             bootstrap["run"] = bootstrap["run"].replace(
                 "scripts/ci_contract_paths.py",
                 "scripts/no-contract-paths.py",
+            )
+            with self.subTest(workflow=workflow_path.name), self.assertRaises(
+                AssertionError
+            ):
+                assertion(self, workflow)
+
+    def test_a_depth_limited_backstop_fetch_is_rejected(self) -> None:
+        for workflow_path, assertion, job, step_key, step_name in (
+            (CI, assert_ci_metadata_routing, "changes", "id", "detect"),
+            (HULL, assert_hull_retarget_dispatch, "changes", "id", "detect"),
+            (
+                CI,
+                assert_ci_metadata_routing,
+                "no-ai-authorship",
+                "name",
+                "Check commits for AI authorship markers",
+            ),
+        ):
+            workflow = copy.deepcopy(yaml.safe_load(workflow_path.read_text()))
+            step = next(
+                candidate
+                for candidate in workflow["jobs"][job]["steps"]
+                if candidate.get(step_key) == step_name
+            )
+            step["run"] = step["run"].replace(
+                'git fetch --no-tags origin "$BASE"',
+                'git fetch --no-tags --depth=1 origin "$BASE"',
+                1,
+            )
+            with self.subTest(
+                workflow=workflow_path.name, job=job
+            ), self.assertRaises(AssertionError):
+                assertion(self, workflow)
+
+    def test_the_first_parent_backstop_cannot_be_dropped(self) -> None:
+        for workflow_path, assertion in (
+            (CI, assert_ci_metadata_routing),
+            (HULL, assert_hull_retarget_dispatch),
+        ):
+            workflow = copy.deepcopy(yaml.safe_load(workflow_path.read_text()))
+            detect = next(
+                step
+                for step in workflow["jobs"]["changes"]["steps"]
+                if step.get("id") == "detect"
+            )
+            detect["run"] = detect["run"].replace(
+                'git fetch --no-tags origin "$first_parent"',
+                "true",
+                1,
             )
             with self.subTest(workflow=workflow_path.name), self.assertRaises(
                 AssertionError

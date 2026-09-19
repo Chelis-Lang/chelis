@@ -185,7 +185,17 @@ jobs:
           else
             git fetch origin "$HEAD" "$BASE" 2>/dev/null || true
           fi
-          git fetch --depth=1 origin "$BASE" 2>/dev/null || true
+          # Neither backstop may carry `--depth`; see the identical block in
+          # ci.yml. A shallow fetch grafts the commit in .git/shallow, git
+          # then ignores its recorded parents even when those objects are
+          # already present, and the identity step's `git merge-base` reports
+          # no common ancestor (chelis#2228).
+          git fetch --no-tags origin "$BASE" 2>/dev/null || true
+          first_parent="$(git cat-file commit HEAD \
+            | awk '/^parent /{print $2; exit}')"
+          if [ -n "$first_parent" ] && [ "$first_parent" != "$BASE" ]; then
+            git fetch --no-tags origin "$first_parent" 2>/dev/null || true
+          fi
           git diff --name-only "$BASE..$HEAD" \
             | python3 scripts/ci_detect_docs_only.py
 

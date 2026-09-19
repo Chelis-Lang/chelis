@@ -62,7 +62,9 @@ def _git(repository_path: Path, *arguments: str) -> str:
     return _run(repository_path, ["git", *arguments]).decode().strip()
 
 
-def _commit_parents(repository_path: Path, sha: str) -> list[str]:
+def _commit_parents(
+    repository_path: Path, sha: str, label: str = "candidate parent"
+) -> list[str]:
     raw = _run(repository_path, ["git", "cat-file", "commit", sha])
     parents: list[str] = []
     for line in raw.splitlines():
@@ -73,9 +75,80 @@ def _commit_parents(repository_path: Path, sha: str) -> list[str]:
         try:
             parent = line.removeprefix(b"parent ").decode("ascii")
         except UnicodeDecodeError as error:
-            raise IdentityError("candidate parent was not an ASCII SHA") from error
-        parents.append(_full_sha("candidate parent", parent))
+            raise IdentityError(f"{label} was not an ASCII SHA") from error
+        parents.append(_full_sha(label, parent))
     return parents
+
+
+def _is_shallow_boundary(repository_path: Path, sha: str) -> str | None:
+    """Return the first parent git refuses to walk from `sha`, if any.
+
+    A shallow fetch records the commit in `.git/shallow`, after which git
+    treats it as parentless. The commit object is untouched, so `cat-file`
+    still reports the parents that the traversal now ignores; the gap
+    between the two is what makes a commit a graft boundary.
+    """
+
+    recorded = _commit_parents(repository_path, sha, label="commit parent")
+    if not recorded:
+        return None
+    walked = (
+        _run(repository_path, ["git", "rev-list", "--parents", "-n", "1", sha])
+        .decode()
+        .split()
+    )
+    return None if len(walked) > 1 else recorded[0]
+
+
+def _patch_base(repository_path: Path, base_sha: str, head_sha: str) -> str:
+    """Resolve the merge base, telling truncation apart from divergence.
+
+    `git merge-base` exits 1 with no stderr both when the two commits share
+    no history and when the clone cannot see far enough to find out, so the
+    bare failure is unreadable (chelis#2228). Both outcomes still block: a
+    patch base that cannot be established is not one that may be guessed.
+    """
+
+    completed = subprocess.run(
+        ["git", "merge-base", base_sha, head_sha],
+        cwd=repository_path,
+        capture_output=True,
+    )
+    if completed.returncode == 0:
+        return completed.stdout.decode().strip()
+    stderr = completed.stderr.decode(errors="replace").strip()
+    if completed.returncode != 1 or stderr:
+        raise IdentityError(
+            f"git merge-base {base_sha} {head_sha} failed: "
+            f"{stderr or 'no error output'}"
+        )
+    shallow = _git(repository_path, "rev-parse", "--is-shallow-repository")
+    if shallow != "true":
+        raise IdentityError(
+            f"the candidate's parents share no history: git merge-base "
+            f"{base_sha} {head_sha} found no common ancestor in a complete "
+            "clone, so this candidate is not a merge of the pull request "
+            "into its target"
+        )
+    truncations = [
+        f"{name} {sha} is a shallow boundary whose recorded parent "
+        f"{parent} is not reachable"
+        for name, sha in (("base", base_sha), ("head", head_sha))
+        for parent in [_is_shallow_boundary(repository_path, sha)]
+        if parent is not None
+    ]
+    raise IdentityError(
+        f"the patch base is not resolvable: git merge-base {base_sha} "
+        f"{head_sha} found no common ancestor, but this checkout is shallow "
+        + (
+            "and " + "; ".join(truncations)
+            if truncations
+            else "so the walk may have stopped at a graft"
+        )
+        + ". Deepen the candidate checkout until the target snapshot "
+        "connects to the pull request's branch point; a depth-limited fetch "
+        "of either commit grafts it and hides the parents it already has"
+    )
 
 
 def _changed_paths(
@@ -220,9 +293,7 @@ def build_identity(
             )
     base_sha = observed_base_sha
 
-    patch_base_sha = _git(
-        repository_path, "merge-base", base_sha, head_sha
-    )
+    patch_base_sha = _patch_base(repository_path, base_sha, head_sha)
     _full_sha("patch_base_sha", patch_base_sha)
     paths = _changed_paths(repository_path, patch_base_sha, head_sha)
     return {

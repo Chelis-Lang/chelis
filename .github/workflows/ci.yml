@@ -183,7 +183,28 @@ jobs:
           else
             git fetch origin "$HEAD" "$BASE" 2>/dev/null || true
           fi
-          git fetch --depth=1 origin "$BASE" 2>/dev/null || true
+          # Neither backstop may carry `--depth`. A shallow fetch records
+          # the commit in .git/shallow, and git then ignores that commit's
+          # recorded parents even when the parent objects are already in
+          # the clone; no later ordinary fetch removes the graft. When the
+          # target has advanced past this pull request's branch point, the
+          # graft cuts the one edge `Record immutable candidate identity`
+          # must cross, and its `git merge-base` reports no common ancestor
+          # with an empty stderr (chelis#2228). A depth-less fetch into a
+          # shallow clone stops at the commits already present, so it costs
+          # the gap between the target snapshot and the branch point.
+          git fetch --no-tags origin "$BASE" 2>/dev/null || true
+          # The identity step walks from the candidate's FIRST PARENT, the
+          # target snapshot GitHub actually merged, which differs from the
+          # event payload's base whenever the target advanced after that
+          # payload was built. Read it from the raw commit header: a
+          # shallow graft hides the parents from `rev-parse HEAD^1` but
+          # never from `cat-file`.
+          first_parent="$(git cat-file commit HEAD \
+            | awk '/^parent /{print $2; exit}')"
+          if [ -n "$first_parent" ] && [ "$first_parent" != "$BASE" ]; then
+            git fetch --no-tags origin "$first_parent" 2>/dev/null || true
+          fi
           git diff --name-only "$BASE..$HEAD" \
             | python3 scripts/ci_detect_docs_only.py
 
@@ -1341,13 +1362,18 @@ jobs:
              [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             # Deepen head to the PR commit range, then backstop-fetch the
             # base commit so `base..head` resolves at the shallow boundary
-            # (both no-ops if already present).
+            # (both no-ops if already present). The backstop is depth-less
+            # for the reason given in the `changes` job: `--depth=1` grafts
+            # the base in .git/shallow, and `$BASE..$HEAD` then stops
+            # excluding the base's ancestors, so this scan reads commits
+            # that merged into the target long before the pull request
+            # existed (chelis#2228).
             if [ "$EVENT_NAME" = "pull_request" ]; then
               git fetch --depth=$((COMMITS + 1)) origin "$HEAD" 2>/dev/null || true
             else
               git fetch origin "$HEAD" "$BASE" 2>/dev/null || true
             fi
-            git fetch --depth=1 origin "$BASE" 2>/dev/null || true
+            git fetch --no-tags origin "$BASE" 2>/dev/null || true
             RANGE="$BASE..$HEAD"
           else
             git fetch --depth=2 origin "$GITHUB_SHA" 2>/dev/null || true
