@@ -65,7 +65,7 @@ COMMANDS = (
         "--test",
         "parity",
         "-E",
-        "test(parity_grad_selector_provenance)",
+        "test(illustrative_grad_selector_provenance_checks_and_evaluates)",
         "--no-fail-fast",
     ),
 )

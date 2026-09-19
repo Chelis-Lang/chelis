@@ -457,8 +457,10 @@ fn parity_grad_wrt_order() {
 }
 
 #[test]
-fn parity_grad_selector_provenance() {
-    let path = examples_root().join("grad_selector_provenance.ch");
+fn illustrative_grad_selector_provenance_checks_and_evaluates() {
+    let path = examples_root()
+        .join("illustrative")
+        .join("grad_selector_provenance.ch");
     assert_check_clean(&path);
     assert_eq!(
         run_eval(&path),

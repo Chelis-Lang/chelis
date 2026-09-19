@@ -80,7 +80,7 @@ origin are rejected.
 
 The executable [`grad_wrt_order.ch`](../examples/grad_wrt_order.ch) example
 distinguishes written target order from declaration order using unequal
-cotangents. [`grad_selector_provenance.ch`](../examples/grad_selector_provenance.ch)
+cotangents. [`grad_selector_provenance.ch`](../examples/illustrative/grad_selector_provenance.ch)
 checks and evaluates alias-preserving constructor and record pattern projection.
 
 ### 2.3 Algorithm: Reverse-Mode AD

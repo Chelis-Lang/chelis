@@ -935,7 +935,7 @@ class SchemaTests(unittest.TestCase):
                 "pull_request and push",
                 "chelis#1955",
             ),
-            "examples/grad_selector_provenance.ch": (
+            "examples/illustrative/grad_selector_provenance.ch": (
                 "ci.yml",
                 "ci-fast",
                 "pull_request and push",

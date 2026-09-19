@@ -1,5 +1,7 @@
--- Named grad selectors retain the callable's formal names through immutable
--- aliases and nested ADT constructor/record pattern projection.
+-- Illustrative evaluator/checker coverage: named grad selectors retain the
+-- callable's formal names through immutable aliases and nested ADT
+-- constructor/record pattern projection. The C host lane does not yet lower
+-- AD through functions extracted from constructor or record payloads.
 type FnBox =
   | FnBox(f32 -> f32 -> f32)
 type Outer =

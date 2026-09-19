@@ -1275,12 +1275,12 @@ disposition = "packages"
 packages = ["chelis-cli"]
 
 [[path_rule]]
-prefix = "examples/grad_selector_provenance.ch"
+prefix = "examples/illustrative/grad_selector_provenance.ch"
 disposition = "owner"
 workflow = "ci.yml"
 job = "ci-fast"
 cadence = "pull_request and push"
-reason = "the standing chelis-cli::parity target checks and evaluates this exact callable-provenance example"
+reason = "the standing chelis-cli::parity target checks and evaluates this exact illustrative callable-provenance example without treating it as C-host phase proof"
 tracking_issue = "chelis#1955"
 
 [[path_rule]]
