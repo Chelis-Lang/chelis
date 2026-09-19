@@ -2181,6 +2181,24 @@ reason = "the completion oracle executes current wire graph, codec and admission
 tracking_issue = "chelis#729"
 
 [[path_rule]]
+prefix = "scripts/dtype_pre_phase4c_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the composite prerequisite manifest and receipt framework are imported and exercised by the PR script-unit suite"
+tracking_issue = "chelis#1296"
+
+[[path_rule]]
+prefix = "scripts/test_dtype_pre_phase4c_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the composite prerequisite manifest and receipt positive, negative, and mutation controls execute in the PR script-unit suite"
+tracking_issue = "chelis#1296"
+
+[[path_rule]]
 prefix = "scripts/dtype_direct_arithmetic_oracle.py"
 disposition = "owner"
 workflow = "ci.yml"
