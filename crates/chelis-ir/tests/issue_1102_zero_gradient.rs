@@ -30,7 +30,7 @@ fn proven_shaped_zero_gradient_retains_a_typed_root() {
     let library = surf_to_library(
         r#"
 def constish(x: tensor[3, f32]) -> f32 = cast(1.0, f32)
-def g(theta: tensor[3, f32]) -> tensor[3, f32] = grad(constish, wrt=theta)(theta)
+def g(theta: tensor[3, f32]) -> tensor[3, f32] = grad(constish, wrt=x)(theta)
 "#,
     )
     .expect("a proven zero gradient must lower");
