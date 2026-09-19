@@ -3,8 +3,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use chelis_ir::dag::{
-    Dag, DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStep,
-    FusedStepOp, NodeId, ReduceWindowKind, RiscOp, RtAxis, RtDim, TensorType,
+    ComparisonKind, Dag, DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, FusedInput,
+    FusedStep, FusedStepOp, LogicalKind, NodeId, ReduceWindowKind, RiscOp, RtAxis, RtDim,
+    TensorType,
 };
 use chelis_ir::evaluation::{DrawId, EvaluationEmissionView, RandomSite};
 #[cfg(feature = "native-random-observer")]
@@ -1740,6 +1741,11 @@ impl CEmitter {
             }
             RiscOp::Relu => self.emit_relu(id, &node.inputs, &node.output_type),
             RiscOp::ReluAdjoint => self.emit_relu_adjoint(id, &node.inputs, &node.output_type),
+            RiscOp::Compare(kind) => {
+                self.emit_compare(id, *kind, &node.inputs, &node.output_type, dag)
+            }
+            RiscOp::Logical(kind) => self.emit_logical(id, *kind, &node.inputs, &node.output_type),
+            RiscOp::Where => self.emit_where(id, &node.inputs, &node.output_type),
             RiscOp::CmpLt => self.emit_cmplt(id, &node.inputs, &node.output_type, dag),
             RiscOp::Neg => self.emit_unary(id, UnaryEmission::Neg, &node.inputs, &node.output_type),
             RiscOp::Recip => self.emit_recip(id, &node.inputs, &node.output_type),
@@ -3535,16 +3541,16 @@ impl CEmitter {
         self.line("}");
     }
 
-    // ---- CmpLt ----
-    /// Comparable-scalar load expression for one cmplt operand. The
-    /// operand carries its own precision `p` (cmplt:
+    // ---- Typed comparisons ----
+    /// Comparable-scalar load expression for one comparison operand. The
+    /// operand carries its own precision `p`:
     /// `∀D,p. (tensor[D,p], tensor[D,p]) → tensor[D,bool]`), so we read
     /// it through a `p`-typed pointer (`ptr_var` must already be cast to
     /// the storage element type). Reduced-float operands (`bf16`/`f16`)
     /// store as `uint16_t` and must convert to `f32` before the
     /// numeric `<`, matching the evaluator's value comparison rather
     /// than a 16-bit bit-pattern comparison.
-    fn cmplt_cmp_value(ty: &TensorType, ptr_var: &str, idx: &str) -> String {
+    fn comparison_value(ty: &TensorType, ptr_var: &str, idx: &str) -> String {
         if Self::is_reduced_float(ty) {
             let conv = Self::reduced_to_f32_fn(ty.precision);
             format!("{conv}({ptr_var}[{idx}])")
@@ -3553,7 +3559,18 @@ impl CEmitter {
         }
     }
 
-    /// #517: cmplt reads each operand through its OWN element dtype,
+    fn comparison_operator(kind: ComparisonKind) -> &'static str {
+        match kind {
+            ComparisonKind::CmpLt | ComparisonKind::Lt => "<",
+            ComparisonKind::Eq => "==",
+            ComparisonKind::Neq => "!=",
+            ComparisonKind::Gt => ">",
+            ComparisonKind::Gte => ">=",
+            ComparisonKind::Lte => "<=",
+        }
+    }
+
+    /// #517/#630/#666: comparisons read each operand through its OWN element dtype,
     /// resolved from the input DAG nodes — not through the boolean
     /// output type. The result uses the canonical one-byte Bool8
     /// representation,
@@ -3564,9 +3581,10 @@ impl CEmitter {
     /// f64 read through `float*` truncates the 8-byte payload). Both
     /// operands share precision `p` per the signature, but each type is
     /// resolved independently for robustness.
-    fn emit_cmplt(
+    fn emit_compare(
         &mut self,
         id: usize,
+        kind: ComparisonKind,
         inputs: &[NodeId],
         ty: &TensorType,
         dag: VerifiedDagView<'_>,
@@ -3588,8 +3606,9 @@ impl CEmitter {
         self.line(&format!(
             "const {et_b}* restrict __in_b_{id} = (const {et_b}*)t{b}_data;"
         ));
-        let cmp_a = Self::cmplt_cmp_value(&a_ty, &format!("__in_a_{id}"), "i");
-        let cmp_b = Self::cmplt_cmp_value(&b_ty, &format!("__in_b_{id}"), "i");
+        let cmp_a = Self::comparison_value(&a_ty, &format!("__in_a_{id}"), "i");
+        let cmp_b = Self::comparison_value(&b_ty, &format!("__in_b_{id}"), "i");
+        let operator = Self::comparison_operator(kind);
         self.line(&format!(
             "if (chelis_is_contiguous(t{a}) && ({identity}) && chelis_is_contiguous(t{b}) && t{a}_size == t{id}_size && t{b}_size == t{id}_size) {{"
         ));
@@ -3599,7 +3618,7 @@ impl CEmitter {
         self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
         self.indent += 1;
         self.line(&format!(
-            "__out_{id}[i] = ({cmp_a} < {cmp_b}) ? UINT8_C(1) : UINT8_C(0);"
+            "__out_{id}[i] = ({cmp_a} {operator} {cmp_b}) ? UINT8_C(1) : UINT8_C(0);"
         ));
         self.indent -= 1;
         self.line("}");
@@ -3611,10 +3630,165 @@ impl CEmitter {
         self.indent += 1;
         self.line(&format!("int64_t idx_a = i * t{id}_input{a}_step;"));
         self.line(&format!("int64_t idx_b = i * t{id}_input{b}_step;"));
-        let cmp_a_strided = Self::cmplt_cmp_value(&a_ty, &format!("__in_a_{id}"), "idx_a");
-        let cmp_b_strided = Self::cmplt_cmp_value(&b_ty, &format!("__in_b_{id}"), "idx_b");
+        let cmp_a_strided = Self::comparison_value(&a_ty, &format!("__in_a_{id}"), "idx_a");
+        let cmp_b_strided = Self::comparison_value(&b_ty, &format!("__in_b_{id}"), "idx_b");
         self.line(&format!(
-            "__out_{id}[i] = ({cmp_a_strided} < {cmp_b_strided}) ? UINT8_C(1) : UINT8_C(0);"
+            "__out_{id}[i] = ({cmp_a_strided} {operator} {cmp_b_strided}) ? UINT8_C(1) : UINT8_C(0);"
+        ));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// Temporary integration bridge for backend branches that still carry
+    /// the legacy identity. New producers use `Compare(CmpLt)`.
+    fn emit_cmplt(
+        &mut self,
+        id: usize,
+        inputs: &[NodeId],
+        ty: &TensorType,
+        dag: VerifiedDagView<'_>,
+    ) {
+        self.emit_compare(id, ComparisonKind::CmpLt, inputs, ty, dag);
+    }
+
+    // ---- Typed logical operations ----
+    fn emit_logical(&mut self, id: usize, kind: LogicalKind, inputs: &[NodeId], ty: &TensorType) {
+        let left = inputs[0].0;
+        let right = inputs.get(1).map(|input| input.0);
+        let identity = self.emit_elementwise_index_steps(id, inputs, ty);
+        self.emit_slot_wrapper(id, ty);
+        self.line(&format!(
+            "uint8_t* restrict __out_{id} = (uint8_t*)t{id}_data;"
+        ));
+        self.line(&format!(
+            "const uint8_t* restrict __logical_left_{id} = (const uint8_t*)t{left}_data;"
+        ));
+        if let Some(right) = right {
+            self.line(&format!(
+                "const uint8_t* restrict __logical_right_{id} = (const uint8_t*)t{right}_data;"
+            ));
+        }
+        let contiguous = if let Some(right) = right {
+            format!(
+                "chelis_is_contiguous(t{left}) && chelis_is_contiguous(t{right}) && \
+                 ({identity}) && t{left}_size == t{id}_size && t{right}_size == t{id}_size"
+            )
+        } else {
+            format!("chelis_is_contiguous(t{left}) && ({identity}) && t{left}_size == t{id}_size")
+        };
+        let expression = |left_index: &str, right_index: Option<&str>| match kind {
+            LogicalKind::And => format!(
+                "(__logical_left_{id}[{left_index}] != UINT8_C(0) && \
+                 __logical_right_{id}[{}] != UINT8_C(0))",
+                right_index.expect("and has a right input")
+            ),
+            LogicalKind::Or => format!(
+                "(__logical_left_{id}[{left_index}] != UINT8_C(0) || \
+                 __logical_right_{id}[{}] != UINT8_C(0))",
+                right_index.expect("or has a right input")
+            ),
+            LogicalKind::Not => {
+                format!("(__logical_left_{id}[{left_index}] == UINT8_C(0))")
+            }
+        };
+        self.line(&format!("if ({contiguous}) {{"));
+        self.indent += 1;
+        self.line("#pragma omp parallel for simd");
+        self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
+        self.indent += 1;
+        self.line(&format!(
+            "__out_{id}[i] = {} ? UINT8_C(1) : UINT8_C(0);",
+            expression("i", right.map(|_| "i"))
+        ));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("} else {");
+        self.indent += 1;
+        self.line("#pragma omp parallel for");
+        self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
+        self.indent += 1;
+        self.line(&format!("int64_t idx_left = i * t{id}_input{left}_step;"));
+        if let Some(right) = right {
+            self.line(&format!("int64_t idx_right = i * t{id}_input{right}_step;"));
+        }
+        self.line(&format!(
+            "__out_{id}[i] = {} ? UINT8_C(1) : UINT8_C(0);",
+            expression("idx_left", right.map(|_| "idx_right"))
+        ));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    // ---- Stored-bit conditional selection ----
+    fn emit_where(&mut self, id: usize, inputs: &[NodeId], ty: &TensorType) {
+        let condition = inputs[0].0;
+        let then_value = inputs[1].0;
+        let else_value = inputs[2].0;
+        let element_size = Self::elem_type(ty);
+        let identity = self.emit_elementwise_index_steps(id, inputs, ty);
+        self.emit_slot_wrapper(id, ty);
+        self.line(&format!(
+            "uint8_t* restrict __where_out_{id} = (uint8_t*)t{id}_data;"
+        ));
+        self.line(&format!(
+            "const uint8_t* restrict __where_condition_{id} = (const uint8_t*)t{condition}_data;"
+        ));
+        self.line(&format!(
+            "const uint8_t* restrict __where_then_{id} = (const uint8_t*)t{then_value}_data;"
+        ));
+        self.line(&format!(
+            "const uint8_t* restrict __where_else_{id} = (const uint8_t*)t{else_value}_data;"
+        ));
+        self.line(&format!(
+            "const size_t __where_width_{id} = sizeof({element_size});"
+        ));
+        let contiguity_cond = format!(
+            "chelis_is_contiguous(t{condition}) && chelis_is_contiguous(t{then_value}) && \
+             chelis_is_contiguous(t{else_value}) && t{condition}_size == t{id}_size && \
+             t{then_value}_size == t{id}_size && t{else_value}_size == t{id}_size"
+        );
+        self.line(&format!("if (({contiguity_cond}) && ({identity})) {{"));
+        self.indent += 1;
+        self.line("#pragma omp parallel for");
+        self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
+        self.indent += 1;
+        self.line(&format!(
+            "const uint8_t* selected = __where_condition_{id}[i] != UINT8_C(0) \
+             ? __where_then_{id} : __where_else_{id};"
+        ));
+        self.line(&format!(
+            "memcpy(__where_out_{id} + (size_t)i * __where_width_{id}, \
+             selected + (size_t)i * __where_width_{id}, __where_width_{id});"
+        ));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("} else {");
+        self.indent += 1;
+        self.line("#pragma omp parallel for");
+        self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
+        self.indent += 1;
+        self.line(&format!(
+            "int64_t idx_condition = i * t{id}_input{condition}_step;"
+        ));
+        self.line(&format!(
+            "int64_t idx_then = i * t{id}_input{then_value}_step;"
+        ));
+        self.line(&format!(
+            "int64_t idx_else = i * t{id}_input{else_value}_step;"
+        ));
+        self.line(&format!(
+            "const uint8_t* selected = __where_condition_{id}[idx_condition] != UINT8_C(0) \
+             ? __where_then_{id} + (size_t)idx_then * __where_width_{id} \
+             : __where_else_{id} + (size_t)idx_else * __where_width_{id};"
+        ));
+        self.line(&format!(
+            "memcpy(__where_out_{id} + (size_t)i * __where_width_{id}, selected, __where_width_{id});"
         ));
         self.indent -= 1;
         self.line("}");

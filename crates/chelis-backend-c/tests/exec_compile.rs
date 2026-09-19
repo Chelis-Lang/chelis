@@ -13,9 +13,12 @@ mod runtime_archive;
 mod support;
 use chelis_ir::ConcreteHostType as HostType;
 use chelis_ir::dag::{
-    Dag, DimInfo, ExtremaKind, ExtremaOperand, ReduceWindowKind, RiscOp, TensorType,
+    ComparisonKind, Dag, DimInfo, ExtremaKind, ExtremaOperand, LogicalKind, ReduceWindowKind,
+    RiscOp, TensorType,
 };
+use chelis_ir::eval::{TensorValue, eval_tensor};
 use chelis_ir::fuse::fuse;
+use chelis_ir::grad::grad_dag_checked;
 use chelis_ir::host::{
     ConcreteHostExpr as HostExpr, ConcreteHostExprKind as HostExprKind,
     ConcreteHostFunction as HostFunction, ConcreteHostParam as HostParam,
@@ -4894,6 +4897,625 @@ fn exec_cmplt_f64_runtime_operands_match_evaluator() {
         &[-7.5, 2.25, -5.0, 10.0, 3.0],
         &[-3.5, 10.0, 3.0, 2.0, 3.0],
     );
+}
+
+fn typed_storage(prim: Prim, raw: chelis_types::RawTensor) -> chelis_types::TensorStorage {
+    chelis_types::finalize_tensor("typed C nonnumeric test", prim, raw).unwrap()
+}
+
+fn typed_value(storage: chelis_types::TensorStorage) -> TensorValue {
+    TensorValue::from_storage(vec![storage.len()], storage)
+}
+
+fn c_storage_case(storage: &chelis_types::TensorStorage) -> (&'static str, &'static str, String) {
+    use chelis_types::StorageView;
+
+    let values = match storage.view() {
+        StorageView::F64(values) => values
+            .iter()
+            .map(|value| format!("test_f64(UINT64_C(0x{:016x}))", value.to_bits()))
+            .collect::<Vec<_>>(),
+        StorageView::F32(values) => values
+            .iter()
+            .map(|value| format!("test_f32(UINT32_C(0x{:08x}))", value.to_bits()))
+            .collect::<Vec<_>>(),
+        StorageView::F16(values) => values
+            .iter()
+            .map(|value| format!("UINT16_C(0x{:04x})", value.to_bits()))
+            .collect::<Vec<_>>(),
+        StorageView::Bf16(values) => values
+            .iter()
+            .map(|value| format!("UINT16_C(0x{:04x})", value.to_bits()))
+            .collect::<Vec<_>>(),
+        StorageView::I64(values) => values
+            .iter()
+            .map(|value| {
+                if *value == i64::MIN {
+                    "INT64_MIN".to_string()
+                } else {
+                    format!("INT64_C({value})")
+                }
+            })
+            .collect::<Vec<_>>(),
+        StorageView::I32(values) => values
+            .iter()
+            .map(|value| format!("INT32_C({value})"))
+            .collect::<Vec<_>>(),
+        StorageView::I16(values) => values
+            .iter()
+            .map(|value| format!("INT16_C({value})"))
+            .collect::<Vec<_>>(),
+        StorageView::I8(values) => values
+            .iter()
+            .map(|value| format!("INT8_C({value})"))
+            .collect::<Vec<_>>(),
+        StorageView::Bool(values) => values
+            .iter()
+            .map(|value| format!("UINT8_C({value})"))
+            .collect::<Vec<_>>(),
+    };
+    let (c_type, c_dtype) = match storage.prim() {
+        Prim::F64 => ("double", "CHELIS_DTYPE_F64"),
+        Prim::F32 => ("float", "CHELIS_DTYPE_F32"),
+        Prim::F16 => ("uint16_t", "CHELIS_DTYPE_F16"),
+        Prim::Bf16 => ("uint16_t", "CHELIS_DTYPE_BF16"),
+        Prim::Int64 => ("int64_t", "CHELIS_DTYPE_I64"),
+        Prim::Int32 => ("int32_t", "CHELIS_DTYPE_I32"),
+        Prim::Int16 => ("int16_t", "CHELIS_DTYPE_I16"),
+        Prim::Int8 => ("int8_t", "CHELIS_DTYPE_I8"),
+        Prim::Bool => ("uint8_t", "CHELIS_DTYPE_BOOL"),
+        other => panic!("unsupported C test dtype {other:?}"),
+    };
+    (c_type, c_dtype, values.join(", "))
+}
+
+const TYPED_NONNUMERIC_HARNESS: &str = r#"
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include "chelis_runtime.h"
+
+static float test_f32(uint32_t bits) {
+    float value;
+    memcpy(&value, &bits, sizeof value);
+    return value;
+}
+
+static double test_f64(uint64_t bits) {
+    double value;
+    memcpy(&value, &bits, sizeof value);
+    return value;
+}
+
+static chelis_tensor *test_view(void *data, int64_t count, chelis_dtype dtype) {
+    int64_t shape[1] = { count };
+    return chelis_tensor_entry_borrow(
+        1, shape, dtype, data, count * chelis_dtype_size(dtype)
+    );
+}
+"#;
+
+#[test]
+fn typed_comparison_c_matrix_matches_evaluator_for_every_identity_and_dtype() {
+    use chelis_unord::UnordMap;
+
+    let kinds = [
+        ComparisonKind::CmpLt,
+        ComparisonKind::Lt,
+        ComparisonKind::Eq,
+        ComparisonKind::Neq,
+        ComparisonKind::Gt,
+        ComparisonKind::Gte,
+        ComparisonKind::Lte,
+    ];
+    for prim in [
+        Prim::F16,
+        Prim::Bf16,
+        Prim::F32,
+        Prim::F64,
+        Prim::Int8,
+        Prim::Int16,
+        Prim::Int32,
+        Prim::Int64,
+    ] {
+        let (lhs, rhs) = if prim.is_float() {
+            (
+                typed_storage(
+                    prim,
+                    chelis_types::RawTensor::Float(vec![
+                        f64::from_bits(0xfff8_1234_5678_9abc),
+                        -0.0,
+                        f64::INFINITY,
+                        -2.0,
+                        4.0,
+                    ]),
+                ),
+                typed_storage(
+                    prim,
+                    chelis_types::RawTensor::Float(vec![0.0, 0.0, f64::INFINITY, -1.0, 4.0]),
+                ),
+            )
+        } else {
+            (
+                typed_storage(prim, chelis_types::RawTensor::Int(vec![-2, 0, 3, 4, 5])),
+                typed_storage(prim, chelis_types::RawTensor::Int(vec![-1, 0, 2, 4, 6])),
+            )
+        };
+        let n = lhs.len();
+        let operand_ty = vec_prim(n, prim);
+        let bool_ty = vec_prim(n, Prim::Bool);
+        let mut dag = Dag::new();
+        let left = dag.add_node(
+            RiscOp::Load {
+                name: "left".into(),
+            },
+            vec![],
+            operand_ty.clone(),
+            None,
+        );
+        let right = dag.add_node(
+            RiscOp::Load {
+                name: "right".into(),
+            },
+            vec![],
+            operand_ty,
+            None,
+        );
+        let outputs = kinds
+            .iter()
+            .map(|kind| {
+                let output = dag.add_node(
+                    RiscOp::Compare(*kind),
+                    vec![left, right],
+                    bool_ty.clone(),
+                    None,
+                );
+                dag.add_root(output);
+                output
+            })
+            .collect::<Vec<_>>();
+        let evaluated = eval_tensor(
+            &dag,
+            &UnordMap::from([
+                ("left".into(), typed_value(lhs.clone())),
+                ("right".into(), typed_value(rhs.clone())),
+            ]),
+        )
+        .unwrap();
+        let expected = outputs
+            .iter()
+            .flat_map(|output| {
+                evaluated[output]
+                    .storage()
+                    .to_i64_exact_vec()
+                    .unwrap()
+                    .into_iter()
+                    .map(|value| value.to_string())
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let function = format!("typed_compare_{}", prim.name());
+        let source = codegen(&dag, &function).unwrap().c_source;
+        assert!(
+            !source.contains("FusedStepOp"),
+            "typed comparisons must not rely on fused vocabulary"
+        );
+        let (c_type, c_dtype, lhs_init) = c_storage_case(&lhs);
+        let (_, _, rhs_init) = c_storage_case(&rhs);
+        let harness = format!(
+            r#"{TYPED_NONNUMERIC_HARNESS}
+extern void {function}(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    {c_type} left_data[{n}] = {{ {lhs_init} }};
+    {c_type} right_data[{n}] = {{ {rhs_init} }};
+    uint8_t expected[{output_count}][{n}] = {{ {expected} }};
+    chelis_tensor *left = test_view(left_data, {n}, {c_dtype});
+    chelis_tensor *right = test_view(right_data, {n}, {c_dtype});
+    chelis_tensor *inputs[2] = {{ left, right }};
+    chelis_tensor *outputs[{output_count}] = {{ 0 }};
+    {function}(inputs, 2, outputs, {output_count});
+    for (int output = 0; output < {output_count}; ++output) {{
+        chelis_read_view view = chelis_tensor_read_view(outputs[output]);
+        if (view.dtype != CHELIS_DTYPE_BOOL) return 10 + output;
+        if (memcmp(view.data, expected[output], {n}) != 0) return 30 + output;
+        chelis_tensor_release(outputs[output]);
+    }}
+    return 0;
+}}
+"#,
+            output_count = kinds.len()
+        );
+        let (ok, output) = compile_and_run_kernel_capturing(&function, &source, &harness);
+        assert!(ok, "{prim:?}: {output}\n{source}");
+    }
+}
+
+#[test]
+fn typed_logical_c_truth_tables_are_bool8() {
+    let ty = vec_prim(4, Prim::Bool);
+    let mut dag = Dag::new();
+    let left = dag.add_node(
+        RiscOp::Load {
+            name: "left".into(),
+        },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let right = dag.add_node(
+        RiscOp::Load {
+            name: "right".into(),
+        },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    for op in [
+        RiscOp::Logical(LogicalKind::And),
+        RiscOp::Logical(LogicalKind::Or),
+        RiscOp::Logical(LogicalKind::Not),
+    ] {
+        let inputs = if matches!(op, RiscOp::Logical(LogicalKind::Not)) {
+            vec![left]
+        } else {
+            vec![left, right]
+        };
+        let output = dag.add_node(op, inputs, ty.clone(), None);
+        dag.add_root(output);
+    }
+    let source = codegen(&dag, "typed_logical").unwrap().c_source;
+    let harness = format!(
+        r#"{TYPED_NONNUMERIC_HARNESS}
+extern void typed_logical(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    uint8_t left_data[4] = {{ 0, 0, 1, 1 }};
+    uint8_t right_data[4] = {{ 0, 1, 0, 1 }};
+    uint8_t expected[3][4] = {{ {{0,0,0,1}}, {{0,1,1,1}}, {{1,1,0,0}} }};
+    chelis_tensor *inputs[2] = {{
+        test_view(left_data, 4, CHELIS_DTYPE_BOOL),
+        test_view(right_data, 4, CHELIS_DTYPE_BOOL)
+    }};
+    chelis_tensor *outputs[3] = {{ 0 }};
+    typed_logical(inputs, 2, outputs, 3);
+    for (int i = 0; i < 3; ++i) {{
+        chelis_read_view view = chelis_tensor_read_view(outputs[i]);
+        if (view.dtype != CHELIS_DTYPE_BOOL || memcmp(view.data, expected[i], 4)) return 10 + i;
+        chelis_tensor_release(outputs[i]);
+    }}
+    return 0;
+}}
+"#
+    );
+    let (ok, output) = compile_and_run_kernel_capturing("typed_logical", &source, &harness);
+    assert!(ok, "{output}\n{source}");
+}
+
+#[test]
+fn typed_bool_eq_neq_c_match_exact_bool_identity() {
+    let ty = vec_prim(4, Prim::Bool);
+    let mut dag = Dag::new();
+    let left = dag.add_node(
+        RiscOp::Load {
+            name: "left".into(),
+        },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let right = dag.add_node(
+        RiscOp::Load {
+            name: "right".into(),
+        },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    for kind in [ComparisonKind::Eq, ComparisonKind::Neq] {
+        let output = dag.add_node(RiscOp::Compare(kind), vec![left, right], ty.clone(), None);
+        dag.add_root(output);
+    }
+    let source = codegen(&dag, "typed_bool_compare").unwrap().c_source;
+    let harness = format!(
+        r#"{TYPED_NONNUMERIC_HARNESS}
+extern void typed_bool_compare(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    uint8_t left_data[4] = {{ 0, 0, 1, 1 }};
+    uint8_t right_data[4] = {{ 0, 1, 0, 1 }};
+    uint8_t expected[2][4] = {{ {{1,0,0,1}}, {{0,1,1,0}} }};
+    chelis_tensor *inputs[2] = {{
+        test_view(left_data, 4, CHELIS_DTYPE_BOOL),
+        test_view(right_data, 4, CHELIS_DTYPE_BOOL)
+    }};
+    chelis_tensor *outputs[2] = {{ 0 }};
+    typed_bool_compare(inputs, 2, outputs, 2);
+    for (int i = 0; i < 2; ++i) {{
+        chelis_read_view view = chelis_tensor_read_view(outputs[i]);
+        if (view.dtype != CHELIS_DTYPE_BOOL || memcmp(view.data, expected[i], 4)) return 10 + i;
+        chelis_tensor_release(outputs[i]);
+    }}
+    return 0;
+}}
+"#
+    );
+    let (ok, output) = compile_and_run_kernel_capturing("typed_bool_compare", &source, &harness);
+    assert!(ok, "{output}\n{source}");
+}
+
+#[test]
+fn typed_where_c_copies_selected_storage_bits_for_every_admitted_dtype() {
+    use chelis_unord::UnordMap;
+
+    for prim in [
+        Prim::F16,
+        Prim::Bf16,
+        Prim::F32,
+        Prim::F64,
+        Prim::Int8,
+        Prim::Int16,
+        Prim::Int32,
+        Prim::Int64,
+        Prim::Bool,
+    ] {
+        let (then_storage, else_storage) = if prim.is_float() {
+            (
+                typed_storage(
+                    prim,
+                    chelis_types::RawTensor::Float(vec![
+                        f64::from_bits(0xfff8_1234_5678_9abc),
+                        -0.0,
+                        4.0,
+                        -7.0,
+                    ]),
+                ),
+                typed_storage(
+                    prim,
+                    chelis_types::RawTensor::Float(vec![
+                        f64::from_bits(0x7ff8_abcd_1234_5678),
+                        0.0,
+                        2.0,
+                        9.0,
+                    ]),
+                ),
+            )
+        } else if prim == Prim::Bool {
+            (
+                typed_storage(prim, chelis_types::RawTensor::Int(vec![1, 0, 1, 0])),
+                typed_storage(prim, chelis_types::RawTensor::Int(vec![0, 1, 0, 1])),
+            )
+        } else {
+            (
+                typed_storage(prim, chelis_types::RawTensor::Int(vec![1, 0, -2, 7])),
+                typed_storage(prim, chelis_types::RawTensor::Int(vec![0, 1, 3, -9])),
+            )
+        };
+        let condition = typed_storage(Prim::Bool, chelis_types::RawTensor::Int(vec![1, 0, 1, 0]));
+        let mut dag = Dag::new();
+        let condition_id = dag.add_node(
+            RiscOp::Load {
+                name: "condition".into(),
+            },
+            vec![],
+            vec_prim(4, Prim::Bool),
+            None,
+        );
+        let then_id = dag.add_node(
+            RiscOp::Load {
+                name: "then".into(),
+            },
+            vec![],
+            vec_prim(4, prim),
+            None,
+        );
+        let else_id = dag.add_node(
+            RiscOp::Load {
+                name: "else".into(),
+            },
+            vec![],
+            vec_prim(4, prim),
+            None,
+        );
+        let output = dag.add_node(
+            RiscOp::Where,
+            vec![condition_id, then_id, else_id],
+            vec_prim(4, prim),
+            None,
+        );
+        dag.add_root(output);
+        let evaluated = eval_tensor(
+            &dag,
+            &UnordMap::from([
+                ("condition".into(), typed_value(condition.clone())),
+                ("then".into(), typed_value(then_storage.clone())),
+                ("else".into(), typed_value(else_storage.clone())),
+            ]),
+        )
+        .unwrap();
+        let expected_storage = evaluated[&output].storage();
+        let function = format!("typed_where_{}", prim.name());
+        let source = codegen(&dag, &function).unwrap().c_source;
+        let (c_type, c_dtype, then_init) = c_storage_case(&then_storage);
+        let (_, _, else_init) = c_storage_case(&else_storage);
+        let (_, _, expected_init) = c_storage_case(expected_storage);
+        let harness = format!(
+            r#"{TYPED_NONNUMERIC_HARNESS}
+extern void {function}(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    uint8_t condition_data[4] = {{ 1, 0, 1, 0 }};
+    {c_type} then_data[4] = {{ {then_init} }};
+    {c_type} else_data[4] = {{ {else_init} }};
+    {c_type} expected[4] = {{ {expected_init} }};
+    chelis_tensor *inputs[3] = {{
+        test_view(condition_data, 4, CHELIS_DTYPE_BOOL),
+        test_view(then_data, 4, {c_dtype}),
+        test_view(else_data, 4, {c_dtype})
+    }};
+    chelis_tensor *outputs[1] = {{ 0 }};
+    {function}(inputs, 3, outputs, 1);
+    chelis_read_view view = chelis_tensor_read_view(outputs[0]);
+    if (view.dtype != {c_dtype}) return 10;
+    if (memcmp(view.data, expected, sizeof expected)) return 11;
+    chelis_tensor_release(outputs[0]);
+    return 0;
+}}
+"#
+        );
+        let (ok, output_text) = compile_and_run_kernel_capturing(&function, &source, &harness);
+        assert!(ok, "{prim:?}: {output_text}\n{source}");
+    }
+}
+
+#[test]
+fn issue_630_eq_neq_owned_copied_and_borrowed_tensors_match_ieee() {
+    let values = typed_storage(
+        Prim::F32,
+        chelis_types::RawTensor::Float(vec![f64::from(f32::from_bits(0x7fc5_4321)), -0.0, 3.5]),
+    );
+    let mut dag = Dag::new();
+    let ty = vec_prim(3, Prim::F32);
+    let bool_ty = vec_prim(3, Prim::Bool);
+    let borrowed = dag.add_node(
+        RiscOp::Load {
+            name: "borrowed".into(),
+        },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let copied = dag.add_node(RiscOp::Copy, vec![borrowed], ty.clone(), None);
+    let owned = dag.add_node(
+        RiscOp::ConstTensor {
+            data: values.clone(),
+        },
+        vec![],
+        ty,
+        None,
+    );
+    for (left, right) in [(borrowed, borrowed), (copied, borrowed), (owned, owned)] {
+        for kind in [ComparisonKind::Eq, ComparisonKind::Neq] {
+            let output = dag.add_node(
+                RiscOp::Compare(kind),
+                vec![left, right],
+                bool_ty.clone(),
+                None,
+            );
+            dag.add_root(output);
+        }
+    }
+    let source = codegen(&dag, "issue_630_native_forms").unwrap().c_source;
+    let (c_type, c_dtype, init) = c_storage_case(&values);
+    let harness = format!(
+        r#"{TYPED_NONNUMERIC_HARNESS}
+extern void issue_630_native_forms(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    {c_type} data[3] = {{ {init} }};
+    uint8_t eq[3] = {{ 0, 1, 1 }};
+    uint8_t neq[3] = {{ 1, 0, 0 }};
+    chelis_tensor *inputs[1] = {{ test_view(data, 3, {c_dtype}) }};
+    chelis_tensor *outputs[6] = {{ 0 }};
+    issue_630_native_forms(inputs, 1, outputs, 6);
+    for (int form = 0; form < 3; ++form) {{
+        if (memcmp(chelis_tensor_read_view(outputs[form * 2]).data, eq, 3)) return 10 + form;
+        if (memcmp(chelis_tensor_read_view(outputs[form * 2 + 1]).data, neq, 3)) return 20 + form;
+    }}
+    return 0;
+}}
+"#
+    );
+    let (ok, output) =
+        compile_and_run_kernel_capturing("issue_630_native_forms", &source, &harness);
+    assert!(ok, "{output}\n{source}");
+}
+
+#[test]
+fn issue_666_typed_gte_where_forward_and_gradient_match_selected_branch() {
+    let scalar_f32 = TensorType {
+        dims: vec![],
+        precision: Prim::F32,
+    };
+    let scalar_bool = TensorType {
+        dims: vec![],
+        precision: Prim::Bool,
+    };
+    let vector_f32 = vec_prim(2, Prim::F32);
+    let mut dag = Dag::new();
+    let x = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vector_f32.clone(),
+        None,
+    );
+    let zero_a = dag.add_node(
+        RiscOp::synth_const(Prim::F32, 0.0),
+        vec![],
+        scalar_f32.clone(),
+        None,
+    );
+    let zero_b = dag.add_node(
+        RiscOp::synth_const(Prim::F32, 0.0),
+        vec![],
+        scalar_f32.clone(),
+        None,
+    );
+    let nan = dag.add_node(RiscOp::Div, vec![zero_a, zero_b], scalar_f32.clone(), None);
+    let zero_c = dag.add_node(
+        RiscOp::synth_const(Prim::F32, 0.0),
+        vec![],
+        scalar_f32.clone(),
+        None,
+    );
+    let condition = dag.add_node(
+        RiscOp::Compare(ComparisonKind::Gte),
+        vec![nan, zero_c],
+        scalar_bool,
+        None,
+    );
+    let then_value = dag.add_node(
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: Prim::F32,
+        },
+        vec![x],
+        scalar_f32.clone(),
+        None,
+    );
+    let squared = dag.add_node(RiscOp::Mul, vec![x, x], vector_f32, None);
+    let else_value = dag.add_node(
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: Prim::F32,
+        },
+        vec![squared],
+        scalar_f32.clone(),
+        None,
+    );
+    let output = dag.add_node(
+        RiscOp::Where,
+        vec![condition, then_value, else_value],
+        scalar_f32,
+        None,
+    );
+    let differentiated = grad_dag_checked(&dag, output, &[x]).unwrap();
+    let source = codegen(&differentiated.dag, "issue_666_native_grad")
+        .unwrap()
+        .c_source;
+    let harness = format!(
+        r#"{TYPED_NONNUMERIC_HARNESS}
+extern void issue_666_native_grad(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    float data[2] = {{ 3.0f, 4.0f }};
+    chelis_tensor *inputs[1] = {{ test_view(data, 2, CHELIS_DTYPE_F32) }};
+    chelis_tensor *outputs[2] = {{ 0 }};
+    issue_666_native_grad(inputs, 1, outputs, 2);
+    float forward = ((const float *)chelis_tensor_read_view(outputs[0]).data)[0];
+    const float *gradient = (const float *)chelis_tensor_read_view(outputs[1]).data;
+    if (forward != 25.0f) return 10;
+    if (gradient[0] != 6.0f || gradient[1] != 8.0f) return 11;
+    return 0;
+}}
+"#
+    );
+    let (ok, output) = compile_and_run_kernel_capturing("issue_666_native_grad", &source, &harness);
+    assert!(ok, "{output}\n{source}");
 }
 
 fn direct_int_sub_case(
