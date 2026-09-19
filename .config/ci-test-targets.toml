@@ -1345,6 +1345,15 @@ reason = "the reviewed target-duration baseline is authenticated and mutation-te
 tracking_issue = "chelis#1824"
 
 [[path_rule]]
+prefix = ".github/workflows/changelog.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the required Changelog check's trigger set and per-head concurrency contract are locked by script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
 prefix = ".github/workflows/ci.yml"
 disposition = "owner"
 workflow = "ci.yml"

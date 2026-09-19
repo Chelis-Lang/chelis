@@ -144,6 +144,26 @@ def assert_candidate_deepening_stays_connected(
     )
 
 
+def assert_never_cancels_in_progress(
+    test: unittest.TestCase, scope: dict, label: str
+) -> None:
+    """No concurrency block governing these checks may cancel in progress.
+
+    A bare string group is accepted: GitHub defaults `cancel-in-progress` to
+    false for it. Anything else must say `false` literally, so neither a
+    quoted string nor an expression can smuggle the cancellation back.
+    """
+
+    concurrency = scope.get("concurrency")
+    if not isinstance(concurrency, dict):
+        return
+    test.assertIs(
+        concurrency.get("cancel-in-progress", False),
+        False,
+        f"{label} cancels a run already in progress",
+    )
+
+
 def assert_per_head_metadata_concurrency(
     test: unittest.TestCase, workflow: dict, prefix: str
 ) -> None:
@@ -163,7 +183,15 @@ def assert_per_head_metadata_concurrency(
     test.assertTrue(group.startswith(prefix), group)
     test.assertIn("github.event.pull_request.number", group)
     test.assertIn("github.event.pull_request.head.sha", group)
-    test.assertIs(concurrency["cancel-in-progress"], False)
+    assert_never_cancels_in_progress(test, workflow, "the workflow")
+    # A job-level `concurrency` block does not replace the workflow-level one;
+    # it adds a second group the job also belongs to, so `cancel-in-progress:
+    # true` there restores exactly the cancellation this contract removes while
+    # leaving the workflow-level block untouched. The idiom is in use here
+    # (`pr-base-retarget.yml` gives its coordinator one), so reading only the
+    # workflow level would leave the contract open to a plausible refactor.
+    for job_id, job in workflow["jobs"].items():
+        assert_never_cancels_in_progress(test, job, f"job {job_id}")
 
 
 def assert_changelog_workflow(test: unittest.TestCase, workflow: dict) -> None:
@@ -1049,12 +1077,20 @@ class PullRequestWorkflowRoutingTests(unittest.TestCase):
             (CHANGELOG, assert_changelog_workflow),
             (ACKNOWLEDGEMENTS, assert_acknowledgement_workflow),
         ):
-            for change in ("cancel", "group"):
+            for change in ("cancel", "group", "job-level", "quoted"):
                 workflow = copy.deepcopy(
                     yaml.safe_load(workflow_path.read_text())
                 )
                 if change == "cancel":
                     workflow["concurrency"]["cancel-in-progress"] = True
+                elif change == "quoted":
+                    workflow["concurrency"]["cancel-in-progress"] = "true"
+                elif change == "job-level":
+                    job = next(iter(workflow["jobs"].values()))
+                    job["concurrency"] = {
+                        "group": "sneak-${{ github.event.pull_request.number }}",
+                        "cancel-in-progress": True,
+                    }
                 else:
                     workflow["concurrency"]["group"] = workflow["concurrency"][
                         "group"
