@@ -907,6 +907,85 @@ fn issue_2059_execution_profile_defs_snapshot_is_program_scoped() {
     );
 }
 
+/// chelis#2204: an anonymous `fn` captures the whole enclosing binding frame
+/// and the list combinators clone the callback once per element, so before
+/// this fix every element deep-copied every binding in scope, including
+/// bindings the callback never mentions. A `fold` was quadratic in whatever
+/// happened to be in scope.
+///
+/// Counted receipt in the shape of chelis#2059's
+/// `EXECUTION_PROFILE_DEFS_SNAPSHOTS`: `frame_value_copies` counts binding
+/// entries deep-copied by frame clones. The fixture binds one unused list and
+/// folds one closure over `applications` elements; the asymptotic promise is
+/// that the copies do not grow with the application count, asserted as a
+/// comparison between two application counts rather than a machine budget.
+///
+/// Evidentiary status: REGRESSION TEST, proven failing first. With the
+/// counter and this test in place but the frame representation unchanged
+/// (`clone_frame`/`clone_callable` over the by-value `UnordMap` frame), the
+/// receipt read FAIL_SMALL copies at 100 applications and FAIL_LARGE at 400:
+/// two frame copies per element. After the fix both read PASS_COUNT.
+///
+/// The nested-let companion fixture keeps the receipt honest: a block that
+/// shadows an enclosing local must still copy that local when it saves the
+/// frame, so a counter that stopped measuring would fail there rather than
+/// pass vacuously here.
+#[test]
+fn issue_2204_frame_copies_do_not_scale_with_closure_applications() {
+    fn evaluate(source: &str, binding: &str) -> (u64, String) {
+        let checked = checked_surf(source);
+        let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
+        let inputs = HostEvaluationInputs {
+            roots: &empty_tensors,
+            bindings: None,
+        };
+        super::frame::reset_frame_value_copies();
+        let outcome =
+            evaluate_host_program_with_library_and_types(&checked, None, None, inputs, None, None)
+                .expect("#2204 fixture evaluates");
+        let copies = super::frame::frame_value_copies();
+        let value = outcome
+            .host_bindings
+            .get(binding)
+            .map(render_value)
+            .unwrap_or_else(|| panic!("#2204 fixture binds `{binding}`"));
+        (copies, value)
+    }
+    fn fold_fixture(applications: usize) -> String {
+        // `unused` is in scope and never read by the closure; before the fix
+        // it was copied on every application anyway.
+        format!(
+            "result = {{\n  unused = range(cast(0, i64), cast(64, i64))\n  \
+             fold(fn (acc: i64, x: i64) -> add(acc, x), cast(0, i64), \
+             range(cast(0, i64), cast({applications}, i64)))\n}}\n"
+        )
+    }
+
+    let (small, small_result) = evaluate(&fold_fixture(100), "result");
+    let (large, large_result) = evaluate(&fold_fixture(400), "result");
+    assert_eq!(small_result, "4950", "#2204: 100-element fold must still sum correctly");
+    assert_eq!(large_result, "79800", "#2204: 400-element fold must still sum correctly");
+    assert!(
+        large <= small,
+        "#2204: frame copies must not grow with closure applications; 100 applications \
+         copied {small} binding entries, 400 applications copied {large}"
+    );
+
+    // Companion: the counter is live. Entering a nested block saves the
+    // enclosing frame, and that frame holds one local, so exactly that copy
+    // is observed.
+    let (nested, nested_result) = evaluate(
+        "result = {\n  a = cast(1, i64)\n  b = {\n    c = cast(2, i64)\n    add(a, c)\n  }\n  b\n}\n",
+        "result",
+    );
+    assert_eq!(nested_result, "3", "#2204: nested-let companion must still compute");
+    assert!(
+        nested >= 1,
+        "#2204: the frame-copy counter must observe the nested block's frame save, or this \
+         receipt would pass without measuring anything"
+    );
+}
+
 #[test]
 fn dropout_entered_error_prefix_and_nested_handler_unwind_preserve_parent() {
     let checked = checked_surf(

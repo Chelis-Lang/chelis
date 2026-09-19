@@ -15,6 +15,7 @@ use crate::schema::{DictEntryValue, ExecutionValue, TensorValue};
 
 mod csv;
 mod eval;
+mod frame;
 mod host_ops;
 mod invariant;
 mod named_axis;

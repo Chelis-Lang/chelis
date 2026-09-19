@@ -22,6 +22,25 @@ use super::named_axis::*;
 use super::transforms::*;
 use super::*;
 
+/// Deep-copy a binding frame, recording the entries copied (chelis#2204).
+fn clone_frame(frame: &UnordMap<String, RuntimeValue>) -> UnordMap<String, RuntimeValue> {
+    super::frame::record_frame_copy(frame.len());
+    frame.clone()
+}
+
+/// Clone a callable for one more application, recording the captured frame
+/// entries the clone deep-copies (chelis#2204).
+fn clone_callable(callable: &RuntimeValue) -> RuntimeValue {
+    match callable {
+        RuntimeValue::Closure { env, .. } => super::frame::record_frame_copy(env.len()),
+        RuntimeValue::Transform { captured_env, .. } => {
+            super::frame::record_frame_copy(captured_env.len());
+        }
+        _ => {}
+    }
+    callable.clone()
+}
+
 thread_local! {
     /// Counts how many times an [`EvalContext`] cloned the whole program's
     /// top-level defs to classify an execution profile (chelis#2059). The
@@ -1204,7 +1223,7 @@ impl<'a> EvalContext<'a> {
                 Ok(RuntimeValue::Transform {
                     kind: TransformKind::Grad,
                     transform_expr: node.expr.clone(),
-                    captured_env: self.bindings.clone(),
+                    captured_env: clone_frame(&self.bindings),
                     invocation_contracts: Box::default(),
                 })
             }
@@ -1213,7 +1232,7 @@ impl<'a> EvalContext<'a> {
                 Ok(RuntimeValue::Transform {
                     kind: TransformKind::Vmap,
                     transform_expr: node.expr.clone(),
-                    captured_env: self.bindings.clone(),
+                    captured_env: clone_frame(&self.bindings),
                     invocation_contracts: Box::default(),
                 })
             }
@@ -1577,7 +1596,7 @@ impl<'a> EvalContext<'a> {
             body,
             // Named declarations are initialized in an empty lexical frame;
             // an anonymous fn must retain every actual local shadow.
-            env: self.bindings.clone(),
+            env: clone_frame(&self.bindings),
             precision_env: self.precision_bindings.clone(),
             def_name: None,
         })
@@ -2359,7 +2378,7 @@ impl<'a> EvalContext<'a> {
                     self.precision_bindings = saved_precisions;
                     return result;
                 }
-                let saved = self.bindings.clone();
+                let saved = clone_frame(&self.bindings);
                 let saved_types = std::mem::take(&mut self.binding_types);
                 let saved_precisions = std::mem::take(&mut self.precision_bindings);
                 self.bindings = env;
@@ -2981,7 +3000,7 @@ impl<'a> EvalContext<'a> {
                 let mut out = Vec::with_capacity(items.len());
                 for item in items {
                     out.push(self.apply_resolved_callable_with_arg_types(
-                        callback.clone(),
+                        clone_callable(&callback),
                         vec![item],
                         &callback_arg_types,
                         callback_result_type,
@@ -3003,7 +3022,7 @@ impl<'a> EvalContext<'a> {
                 let mut out = Vec::new();
                 for item in items {
                     let keep = self.apply_resolved_callable_with_arg_types(
-                        callback.clone(),
+                        clone_callable(&callback),
                         vec![item.clone()],
                         &callback_arg_types,
                         None,
@@ -3038,7 +3057,7 @@ impl<'a> EvalContext<'a> {
                 ];
                 for item in items {
                     acc = self.apply_resolved_callable_with_arg_types(
-                        callback.clone(),
+                        clone_callable(&callback),
                         vec![acc, item],
                         &callback_arg_types,
                         result_type_expr,
@@ -3068,7 +3087,7 @@ impl<'a> EvalContext<'a> {
                 let mut out = Vec::with_capacity(items.len());
                 for item in items {
                     acc = self.apply_resolved_callable_with_arg_types(
-                        callback.clone(),
+                        clone_callable(&callback),
                         vec![acc, item],
                         &callback_arg_types,
                         callback_result_type,
@@ -3139,7 +3158,7 @@ impl<'a> EvalContext<'a> {
                 for i in 0..n {
                     let index = RuntimeValue::int64(i as i64);
                     acc = self.apply_resolved_callable_with_arg_types(
-                        callback.clone(),
+                        clone_callable(&callback),
                         vec![acc, index],
                         &callback_arg_types,
                         callback_result_type,
@@ -3202,7 +3221,7 @@ impl<'a> EvalContext<'a> {
                 let mut rejected = Vec::new();
                 for item in items {
                     let keep = self.apply_resolved_callable_with_arg_types(
-                        callback.clone(),
+                        clone_callable(&callback),
                         vec![item.clone()],
                         &callback_arg_types,
                         None,
@@ -3236,7 +3255,7 @@ impl<'a> EvalContext<'a> {
                 let mut out = Vec::new();
                 for item in items {
                     let mapped = self.apply_resolved_callable_with_arg_types(
-                        callback.clone(),
+                        clone_callable(&callback),
                         vec![item.clone()],
                         &callback_arg_types,
                         result_type_expr,
