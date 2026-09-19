@@ -533,7 +533,7 @@ macro_rules! core_inventory {
         }
         impl Metadata {
             $(pub fn $getter(&self) -> Option<&$payload> {
-                match self.storage.as_ref()?.core.get(&MetadataKey::$variant)? { MetadataValue::$variant(v) => Some(v), _ => unreachable!("variant determines its key") }
+                match self.storage.as_ref()?.get(MetadataKey::$variant)? { MetadataValue::$variant(v) => Some(v), _ => unreachable!("variant determines its key") }
             })+
         }
     };
@@ -571,9 +571,17 @@ core_inventory! {
     Destructure, destructure, Present, "destructure";
 }
 
+/// Core annotations, held as a key-sorted vector rather than a map.
+///
+/// The core inventory has thirty keys and a real node carries a handful. A
+/// `BTreeMap` allocates one full eleven-slot leaf node whatever it holds, and
+/// `MetadataValue` is 184 bytes wide on a 64-bit target, so a one-entry map
+/// costs a two-kilobyte allocation. A key-sorted vector allocates only what it
+/// stores, keeps the key-ordered iteration every consumer already relies on,
+/// and finds a key by binary search over at most thirty elements.
 #[derive(Debug, PartialEq, Default)]
 struct Storage {
-    core: BTreeMap<MetadataKey, MetadataValue>,
+    core: Vec<MetadataValue>,
     extensions: ExtensionMap,
 }
 
@@ -604,6 +612,15 @@ impl Clone for Storage {
             core: self.core.clone(),
             extensions: self.extensions.clone(),
         }
+    }
+}
+
+impl Storage {
+    fn locate(&self, key: MetadataKey) -> Result<usize, usize> {
+        self.core.binary_search_by(|value| value.key().cmp(&key))
+    }
+    fn get(&self, key: MetadataKey) -> Option<&MetadataValue> {
+        self.locate(key).ok().map(|index| &self.core[index])
     }
 }
 
@@ -680,27 +697,35 @@ impl Metadata {
     }
     pub fn insert(&mut self, value: MetadataValue) -> Result<(), MetadataError> {
         let storage = std::sync::Arc::make_mut(self.storage.get_or_insert_with(Default::default));
-        if storage.core.contains_key(&value.key()) {
-            return Err(invalid(
+        match storage.locate(value.key()) {
+            Ok(_) => Err(invalid(
                 value.key().spelling(),
                 value.span(),
                 "exactly one occurrence of this metadata key",
-            ));
+            )),
+            Err(index) => {
+                storage.core.insert(index, value);
+                Ok(())
+            }
         }
-        storage.core.insert(value.key(), value);
-        Ok(())
     }
     pub fn replace(&mut self, value: MetadataValue) -> Option<MetadataValue> {
         let storage = std::sync::Arc::make_mut(self.storage.get_or_insert_with(Default::default));
-        storage.core.insert(value.key(), value)
+        match storage.locate(value.key()) {
+            Ok(index) => Some(std::mem::replace(&mut storage.core[index], value)),
+            Err(index) => {
+                storage.core.insert(index, value);
+                None
+            }
+        }
     }
     pub fn remove(&mut self, key: MetadataKey) -> Option<MetadataValue> {
-        std::sync::Arc::make_mut(self.storage.as_mut()?)
-            .core
-            .remove(&key)
+        let storage = std::sync::Arc::make_mut(self.storage.as_mut()?);
+        let index = storage.locate(key).ok()?;
+        Some(storage.core.remove(index))
     }
     pub fn values(&self) -> impl Iterator<Item = &MetadataValue> {
-        self.storage.iter().flat_map(|s| s.core.values())
+        self.storage.iter().flat_map(|s| s.core.iter())
     }
     pub fn extensions(&self) -> &ExtensionMap {
         static EMPTY: ExtensionMap = ExtensionMap {
