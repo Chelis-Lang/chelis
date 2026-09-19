@@ -103,7 +103,7 @@ disposition = "owner"
 workflow = "ci.yml"
 job = "ci-fast"
 cadence = "pull_request and push"
-reason = "ci-fast executes the oracle's four standing Rust acceptance targets, while script-unit locks its command roster and fallback guard"
+reason = "ci-fast executes the oracle's five standing Rust acceptance targets, while script-unit locks its command roster and fallback guard"
 tracking_issue = "chelis#1955"
 
 [[path_rule]]
@@ -255,7 +255,12 @@ package = "chelis-cli"
 name = "issue_1956_named_axis_inputs_cli"
 
 # chelis#1955 / chelis#1473: callable-origin identity must agree across the
-# Surf resolver, contextual compiler preparation, and shell-visible CLI.
+# semantic checker, Surf resolver, contextual compiler preparation, and
+# shell-visible CLI.
+[[standing_target]]
+package = "chelis-types"
+name = "issue_1955_grad_selector_checker"
+
 [[standing_target]]
 package = "chelis-surf"
 name = "issue_1955_grad_selector_identity"

@@ -911,6 +911,7 @@ class SchemaTests(unittest.TestCase):
         config = owned.read_config(root / ".config/ci-test-targets.toml")
         self.assertTrue(
             {
+                owned.Identity("chelis-types", "issue_1955_grad_selector_checker"),
                 owned.Identity("chelis-surf", "issue_1955_grad_selector_identity"),
                 owned.Identity(
                     "chelis-compiler-api", "issue_1955_grad_selector_pipeline"

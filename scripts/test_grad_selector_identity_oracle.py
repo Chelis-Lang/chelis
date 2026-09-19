@@ -22,6 +22,7 @@ class GradSelectorIdentityOracleTest(unittest.TestCase):
         self.assertEqual(
             labels,
             [
+                "types semantic checker boundary",
                 "surf selector identity",
                 "compiler preparation propagation",
                 "CLI selector diagnostics",

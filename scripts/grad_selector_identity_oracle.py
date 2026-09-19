@@ -12,6 +12,17 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 COMMANDS = (
     (
+        "types semantic checker boundary",
+        "cargo",
+        "nextest",
+        "run",
+        "-p",
+        "chelis-types",
+        "--test",
+        "issue_1955_grad_selector_checker",
+        "--no-fail-fast",
+    ),
+    (
         "surf selector identity",
         "cargo",
         "nextest",
