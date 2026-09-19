@@ -96,6 +96,29 @@ fn unique_concat_owned_extends_in_place_and_shared_concat_owned_clones() {
     }
 }
 
+/// RT-2225 round 1 P0: an rhs that aliases the consumed lhs is a retained
+/// second owner (`concat(xs, kept)` with `kept` an alias of `xs`), so it must
+/// take the cloning path rather than the alias guard's abort.
+#[test]
+fn concat_owned_with_an_aliasing_rhs_clones_instead_of_aborting() {
+    unsafe {
+        let list = chelis_list_empty();
+        chelis_list_push(list, int_value(1));
+        chelis_list_push(list, int_value(2));
+        chelis_list_retain(list);
+        let joined = chelis_list_concat_owned(list, list);
+        assert!(
+            !std::ptr::eq(joined, list),
+            "an aliasing rhs never extends in place"
+        );
+        assert_eq!(chelis_list_len(joined), 4);
+        assert_eq!(chelis_list_len(list), 2, "the shared view is untouched");
+        assert_eq!(int_at(joined, 3), 2);
+        chelis_list_release(list);
+        chelis_list_release(joined);
+    }
+}
+
 #[test]
 fn null_inputs_behave_like_the_cloning_entry_points() {
     unsafe {

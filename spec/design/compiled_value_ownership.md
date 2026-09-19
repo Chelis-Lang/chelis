@@ -552,8 +552,10 @@ sharing half is the runtime's: as with tensor reuse in C6, the consuming
 entry point (`chelis_list_append_owned`, `chelis_list_concat_owned`, private to
 the emitter like the accumulator ABI) re-checks the strong-owner count and
 mutates in place only at one, otherwise cloning and releasing the consumed
-input. A retained alias, whether a tuple, an option, an ADT, or a callee that
-stored the list, therefore never observes a mutation, and no static rule
+input; an rhs that aliases the consumed lhs is such a retained owner and takes
+the same cloning path. A retained alias, whether a tuple, an option, an ADT, or
+a callee that stored the list, therefore never observes a mutation, and no
+static rule
 inside one unit has to prove exclusivity for a parameter whose callers may
 have retained it. A runtime `refcount == 1` test on its own is not this rule:
 without the verified move it cannot exclude an un-retained borrow, which is

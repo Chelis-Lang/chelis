@@ -4714,10 +4714,12 @@ pub unsafe extern "C" fn chelis_list_concat_owned(
     if lhs.is_null() {
         return chelis_list_concat(lhs, rhs);
     }
-    if std::ptr::eq(lhs as *const chelis_list, rhs) {
-        runtime_fail!("chelis_list_concat_owned source aliases destination");
-    }
-    if (*lhs).header.strong.load(Ordering::Relaxed) == 1 {
+    // An rhs that aliases lhs is a retained second owner of the same list
+    // (the emitter's operand identities are distinct even when the runtime
+    // pointer is one), so it takes the cloning path below like every other
+    // shared input; the in-place arm never reads a list it is extending.
+    let aliased = std::ptr::eq(lhs as *const chelis_list, rhs);
+    if !aliased && (*lhs).header.strong.load(Ordering::Relaxed) == 1 {
         if !rhs.is_null() {
             for &value in &(*rhs).items {
                 (*lhs).items.push(chelis_value_clone(value));

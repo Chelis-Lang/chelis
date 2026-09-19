@@ -4807,6 +4807,15 @@ impl<'a> HostEmitter<'a> {
             }
             "concat" => {
                 if matches!(ty, HostType::Tensor(_)) {
+                    // Only a list-classed owner is ever upgraded to a move
+                    // (chelis#2205); a moved tensor operand here would mean
+                    // the scheduler and the emitter disagree about the class.
+                    if container_operand_is_moved(site, "builtin:concat")? {
+                        return Err(invalid_abi_shape(
+                            "tensor `concat` received a moved container operand".to_string(),
+                            "verified C host ownership emission",
+                        ));
+                    }
                     self.lines.push(format!(
                         "{}{target} = chelis_tensor_concat({}, {});",
                         self.indent, arg_vars[0].0, arg_vars[1].0

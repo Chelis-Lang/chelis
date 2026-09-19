@@ -658,6 +658,13 @@ fn append_at_a_lists_last_use_moves_and_the_chain_stops_borrowing() {
         "#2205: borrowing appends must not grow with the chain; 8 steps borrowed \
          {small_borrow}, 16 steps borrowed {large_borrow}"
     );
+    assert_eq!(
+        (small_borrow, large_borrow, small_move, large_move),
+        (0, 0, 8, 16),
+        "#2205: every append in a let-bound chain is its container's last use and moves; \
+         a count of rendered applications carries no machine budget, so the exact figure is \
+         locked too"
+    );
 }
 
 /// chelis#2205 negative half: a list read after the append is not moved into

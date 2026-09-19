@@ -190,6 +190,52 @@ def main() -> i64 = {\n\
   }\n\
 }\n";
 
+/// RT-2225 round 1 P0 witnesses: `concat` whose rhs aliases the consumed lhs
+/// through a branch, an index, an ADT or a match arm. Two operand identities,
+/// one runtime list; the owned entry point must clone, never abort.
+const BRANCH_KEEP: &str = "module Az.Main\n\
+export (main)\n\
+def main() -> i64 = {\n\
+  xs = [cast(1, i64), cast(2, i64)]\n\
+  ys = if gt(len(xs), cast(0, i64)) then xs else [cast(9, i64)]\n\
+  zs = concat(xs, ys)\n\
+  len(zs)\n\
+}\n";
+
+const INDEX_CONCAT: &str = "module Az.Main\n\
+export (main)\n\
+def main() -> i64 = {\n\
+  inner = [cast(1, i64), cast(2, i64)]\n\
+  outer = [inner, inner]\n\
+  a = index(outer, cast(0, i64))\n\
+  b = index(outer, cast(1, i64))\n\
+  joined = concat(a, b)\n\
+  len(joined)\n\
+}\n";
+
+const ADT_CONCAT: &str = "module Az.Main\n\
+export (main)\n\
+type Pair2 = | Both(List[i64], List[i64])\n\
+def main() -> i64 = {\n\
+  xs = [cast(1, i64), cast(2, i64)]\n\
+  p = Both(xs, xs)\n\
+  match p with {\n\
+    | Both(l, r) => len(concat(l, r))\n\
+  }\n\
+}\n";
+
+const MATCH_ARM_CONCAT: &str = "module Az.Main\n\
+export (main)\n\
+def main() -> i64 = {\n\
+  xs = [cast(1, i64), cast(2, i64)]\n\
+  held = Some(xs)\n\
+  out = match held with {\n\
+    | Some(kept) => concat(xs, kept)\n\
+    | None => xs\n\
+  }\n\
+  len(out)\n\
+}\n";
+
 /// An N-step let-bound append chain: every step's input is dead after it.
 fn append_chain(steps: usize) -> String {
     let mut source = String::from(
@@ -220,6 +266,10 @@ fn alias_controls_and_witnesses_keep_their_values_on_both_lanes() {
         ("tuple_held", TUPLE_HELD, "main = 5"),
         ("returned_pair", RETURNED_PAIR, "main = 5"),
         ("concat_held", CONCAT_HELD, "main = 42"),
+        ("branch_keep", BRANCH_KEEP, "main = 4"),
+        ("index_concat", INDEX_CONCAT, "main = 4"),
+        ("adt_concat", ADT_CONCAT, "main = 4"),
+        ("match_arm_concat", MATCH_ARM_CONCAT, "main = 4"),
     ] {
         let evaluated = eval_main(program);
         assert_eq!(evaluated, expected, "{name}: eval value");
@@ -248,5 +298,11 @@ fn let_bound_append_chain_does_not_clone_per_step() {
         large <= small,
         "#2205: cloning appends must not grow with the chain; an 8-step chain emitted {small} \
          `chelis_list_append(` calls and a 16-step chain emitted {large}"
+    );
+    assert_eq!(
+        (small, large),
+        (0, 0),
+        "#2205: a let-bound chain never clones; the exact count is a count of emitted calls \
+         and carries no machine budget"
     );
 }
