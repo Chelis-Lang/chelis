@@ -1635,6 +1635,15 @@ reason = "script-unit validates default-branch baseline run selection, base cont
 tracking_issue = "chelis#1824"
 
 [[path_rule]]
+prefix = "scripts/test_ci_preflight_carrier.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the always-completes and single-carrier contract's own tests"
+tracking_issue = "chelis#2228"
+
+[[path_rule]]
 prefix = "scripts/ci_establish_candidate_clone.py"
 disposition = "owner"
 workflow = "ci.yml"

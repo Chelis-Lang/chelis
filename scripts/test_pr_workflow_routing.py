@@ -424,6 +424,14 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
     test.assertLess(
         changes["steps"].index(bootstrap), changes["steps"].index(detect)
     )
+    # The verdict is split in two so the identity step can sit between
+    # them: it needs a gate to run behind, and the verdict needs its
+    # outcome. `scripts/test_ci_preflight_carrier.py` owns the always-
+    # completes and single-carrier properties; what is checked here is
+    # that the routing inputs still reach the pair.
+    gate = next(
+        step for step in changes["steps"] if step.get("id") == "preflight-gate"
+    )
     record = next(
         step
         for step in changes["steps"]
@@ -431,18 +439,24 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
     )
     test.assertIn("candidate_preflight=", record["run"])
     test.assertIn("ci_contract_changed=", record["run"])
-    test.assertIn('if [ "$lifecycle" != "success" ]', record["run"])
-    test.assertIn('if [ "$detected_contract" = "true" ]', record["run"])
-    test.assertIn('[ "$bootstrap_contract" = "true" ]', record["run"])
-    test.assertIn('[ "$rebase_contract" = "true" ]', record["run"])
+    test.assertIn('if [ "$lifecycle" != "success" ]', gate["run"])
+    test.assertIn('if [ "$detected_contract" = "true" ]', gate["run"])
+    test.assertIn('[ "$bootstrap_contract" = "true" ]', gate["run"])
+    test.assertIn('[ "$rebase_contract" = "true" ]', gate["run"])
     identity = next(
         step
         for step in changes["steps"]
         if step.get("name") == "Record immutable candidate identity"
     )
-    test.assertEqual(
-        identity["if"],
-        "github.event_name == 'pull_request' && steps.candidate-preflight.outputs.candidate_preflight == 'success'",
+    test.assertIn(
+        "steps.preflight-gate.outputs.gate == 'success'", identity["if"]
+    )
+    test.assertIn("github.event_name == 'pull_request'", identity["if"])
+    test.assertLess(
+        changes["steps"].index(gate), changes["steps"].index(identity)
+    )
+    test.assertLess(
+        changes["steps"].index(identity), changes["steps"].index(record)
     )
     test.assertEqual(identity["working-directory"], "candidate")
     test.assertIn("scripts/ci_candidate_identity.py", identity["run"])
@@ -456,11 +470,13 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
         for step in changes["steps"]
         if step.get("name") == "Upload immutable candidate identity"
     )
-    test.assertEqual(upload["if"], identity["if"])
+    # The upload now follows the identity it uploads rather than sharing
+    # its condition, so an unrecorded identity is never published.
+    test.assertIn("steps.identity.outcome == 'success'", upload["if"])
     test.assertEqual(upload["with"]["name"], "candidate-identity-ci")
     test.assertEqual(upload["with"]["if-no-files-found"], "error")
     test.assertIn("candidate-identity.json", upload["with"]["path"])
-    test.assertIn('if [ "$contract_changed" = "true" ]', record["run"])
+    test.assertIn('if [ "$contract_changed" = "true" ]', gate["run"])
     docs = workflow["jobs"]["docs"]
     test.assertIn("candidate_preflight", str(docs["steps"]))
     for job_id in PREFLIGHT_GATED_JOBS:
@@ -693,15 +709,24 @@ def assert_hull_retarget_dispatch(test: unittest.TestCase, workflow: dict) -> No
         for step in changes["steps"]
         if step.get("id") == "candidate-preflight"
     )
-    test.assertIn('[ "$rebase_contract" = "true" ]', record["run"])
+    gate = next(
+        step for step in changes["steps"] if step.get("id") == "preflight-gate"
+    )
+    test.assertIn('[ "$rebase_contract" = "true" ]', gate["run"])
     identity = next(
         step
         for step in changes["steps"]
         if step.get("name") == "Record immutable candidate identity"
     )
-    test.assertEqual(
-        identity["if"],
-        "github.event_name == 'pull_request' && steps.candidate-preflight.outputs.candidate_preflight == 'success'",
+    test.assertIn(
+        "steps.preflight-gate.outputs.gate == 'success'", identity["if"]
+    )
+    test.assertIn("github.event_name == 'pull_request'", identity["if"])
+    test.assertLess(
+        changes["steps"].index(gate), changes["steps"].index(identity)
+    )
+    test.assertLess(
+        changes["steps"].index(identity), changes["steps"].index(record)
     )
     test.assertEqual(identity["working-directory"], "candidate")
     test.assertIn("scripts/ci_candidate_identity.py", identity["run"])
@@ -715,20 +740,28 @@ def assert_hull_retarget_dispatch(test: unittest.TestCase, workflow: dict) -> No
         for step in changes["steps"]
         if step.get("name") == "Upload immutable candidate identity"
     )
-    test.assertEqual(upload["if"], identity["if"])
+    # The upload now follows the identity it uploads rather than sharing
+    # its condition, so an unrecorded identity is never published.
+    test.assertIn("steps.identity.outcome == 'success'", upload["if"])
     test.assertEqual(upload["with"]["name"], "candidate-identity-hull")
     test.assertEqual(upload["with"]["if-no-files-found"], "error")
     conformance = workflow["jobs"]["conformance"]
+    # Hull skips a failed verdict, because the required Docs context is
+    # the single carrier that states the reason and a second red context
+    # told a reader nothing. It still runs when the `changes` job itself
+    # did not succeed, so a broken detector can never skip the gate on a
+    # code pull request. `scripts/test_ci_preflight_carrier.py` owns the
+    # carrier property; this pins the exact expression.
     test.assertEqual(
         conformance["if"],
         "${{ !cancelled() && "
-        "(needs.changes.outputs.candidate_preflight != 'success' || "
-        "needs.changes.result != 'success' || "
-        "needs.changes.outputs.rebase_lane == 'full' || "
+        "(needs.changes.result != 'success' || "
+        "(needs.changes.outputs.candidate_preflight == 'success' && "
+        "(needs.changes.outputs.rebase_lane == 'full' || "
         "(needs.changes.outputs.rebase_lane == 'targeted' && "
         "needs.changes.outputs.rebase_run_hull == 'true') || "
         "(needs.changes.outputs.rebase_lane == 'ordinary' && "
-        "needs.changes.outputs.docs_only != 'true')) }}",
+        "needs.changes.outputs.docs_only != 'true')))) }}",
     )
     preflight = conformance["steps"][0]
     test.assertEqual(

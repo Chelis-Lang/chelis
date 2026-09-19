@@ -83,9 +83,23 @@ PR-author guide. A workflow-native bootstrap applies the same conservative path
 boundary independently, so narrowing the candidate-controlled classifier still
 runs its contract tests. Those changes run the cheap routing, lifecycle,
 change-owned topology and hosted-coverage unit suites in the detector job. A
-failure is recorded as `candidate_preflight=failure`; expensive CI and Hull
-build work is suppressed, while the required Docs and Hull contexts run a cheap
-failure step rather than reporting skipped success.
+failure is recorded as `candidate_preflight=failure` with a stated reason, and
+the required Docs context is the single carrier: it fails, names what could
+not be evaluated, and every other job skips. A skipped required context
+satisfies branch protection here, so that one context is what stops an
+unevaluable candidate merging; failing more of them told a reader nothing.
+Hull still runs when the detector job itself did not succeed, so a broken
+detector cannot skip the gate on a code pull request.
+
+No step in that job can fail it. A hard failure there used to leave required
+contexts with no check run at all, which cannot be waited out, re-run into
+existence or overridden, and that is what made a pull request unmergeable
+rather than merely red. The job therefore always completes and always emits
+its outputs. Tolerating a step must not make its failure ignorable, so the
+gate reads every one of them and a test fails if a tolerated step is not
+read. The identity step runs between the gate and the verdict, behind the
+same condition it had when it sat after the verdict, so moving it earlier
+does not run it on a candidate the verdict would have stopped.
 
 CI and Hull each publish an immutable identity for the synthetic candidate they
 checked out. The checked-out candidate's first parent is the authoritative
