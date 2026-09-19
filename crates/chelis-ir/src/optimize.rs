@@ -882,6 +882,407 @@ mod tests {
     }
 
     #[test]
+    fn constant_fold_comparisons_obey_ieee_nan_and_signed_zero_rules() {
+        let scalar_f64 = TensorType {
+            dims: vec![],
+            precision: chelis_types::types::Prim::F64,
+        };
+        let scalar_bool = TensorType {
+            dims: vec![],
+            precision: chelis_types::types::Prim::Bool,
+        };
+        let nan = f64::from_bits(0x7ff8_1234_5678_9abc);
+        let cases = [
+            (
+                nan,
+                1.0,
+                [
+                    (ComparisonKind::CmpLt, false),
+                    (ComparisonKind::Lt, false),
+                    (ComparisonKind::Eq, false),
+                    (ComparisonKind::Neq, true),
+                    (ComparisonKind::Gt, false),
+                    (ComparisonKind::Gte, false),
+                    (ComparisonKind::Lte, false),
+                ],
+            ),
+            (
+                0.0,
+                -0.0,
+                [
+                    (ComparisonKind::CmpLt, false),
+                    (ComparisonKind::Lt, false),
+                    (ComparisonKind::Eq, true),
+                    (ComparisonKind::Neq, false),
+                    (ComparisonKind::Gt, false),
+                    (ComparisonKind::Gte, true),
+                    (ComparisonKind::Lte, true),
+                ],
+            ),
+        ];
+
+        for (lhs_value, rhs_value, comparisons) in cases {
+            for (kind, expected) in comparisons {
+                let mut dag = Dag::new();
+                let lhs = dag.add_node(
+                    RiscOp::Const {
+                        value: scalar_from_f64("test", scalar_f64.precision, lhs_value).unwrap(),
+                    },
+                    vec![],
+                    scalar_f64.clone(),
+                    None,
+                );
+                let rhs = dag.add_node(
+                    RiscOp::Const {
+                        value: scalar_from_f64("test", scalar_f64.precision, rhs_value).unwrap(),
+                    },
+                    vec![],
+                    scalar_f64.clone(),
+                    None,
+                );
+                let comparison = dag.add_node(
+                    RiscOp::Compare(kind),
+                    vec![lhs, rhs],
+                    scalar_bool.clone(),
+                    None,
+                );
+
+                constant_fold(&mut dag);
+
+                match &dag.get(comparison).unwrap().op {
+                    RiscOp::Const { value } => assert_eq!(
+                        value.as_bool_exact(),
+                        Some(expected),
+                        "{kind:?}({lhs_value:?}, {rhs_value:?})"
+                    ),
+                    other => panic!("constant comparison must fold, got {other:?}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn constant_fold_bool_logical_truth_tables() {
+        let scalar_bool = TensorType {
+            dims: vec![],
+            precision: chelis_types::types::Prim::Bool,
+        };
+
+        for (kind, truth_table) in [
+            (
+                LogicalKind::And,
+                [
+                    (false, false, false),
+                    (false, true, false),
+                    (true, false, false),
+                    (true, true, true),
+                ],
+            ),
+            (
+                LogicalKind::Or,
+                [
+                    (false, false, false),
+                    (false, true, true),
+                    (true, false, true),
+                    (true, true, true),
+                ],
+            ),
+        ] {
+            for (lhs_value, rhs_value, expected) in truth_table {
+                let mut dag = Dag::new();
+                let lhs = dag.add_node(
+                    RiscOp::Const {
+                        value: scalar_from_i64("test", scalar_bool.precision, i64::from(lhs_value))
+                            .unwrap(),
+                    },
+                    vec![],
+                    scalar_bool.clone(),
+                    None,
+                );
+                let rhs = dag.add_node(
+                    RiscOp::Const {
+                        value: scalar_from_i64("test", scalar_bool.precision, i64::from(rhs_value))
+                            .unwrap(),
+                    },
+                    vec![],
+                    scalar_bool.clone(),
+                    None,
+                );
+                let logical = dag.add_node(
+                    RiscOp::Logical(kind),
+                    vec![lhs, rhs],
+                    scalar_bool.clone(),
+                    None,
+                );
+
+                constant_fold(&mut dag);
+
+                match &dag.get(logical).unwrap().op {
+                    RiscOp::Const { value } => assert_eq!(
+                        value.as_bool_exact(),
+                        Some(expected),
+                        "{kind:?}({lhs_value}, {rhs_value})"
+                    ),
+                    other => panic!("constant logical operation must fold, got {other:?}"),
+                }
+            }
+        }
+
+        for (input_value, expected) in [(false, true), (true, false)] {
+            let mut dag = Dag::new();
+            let input = dag.add_node(
+                RiscOp::Const {
+                    value: scalar_from_i64("test", scalar_bool.precision, i64::from(input_value))
+                        .unwrap(),
+                },
+                vec![],
+                scalar_bool.clone(),
+                None,
+            );
+            let logical = dag.add_node(
+                RiscOp::Logical(LogicalKind::Not),
+                vec![input],
+                scalar_bool.clone(),
+                None,
+            );
+
+            constant_fold(&mut dag);
+
+            match &dag.get(logical).unwrap().op {
+                RiscOp::Const { value } => {
+                    assert_eq!(value.as_bool_exact(), Some(expected), "Not({input_value})")
+                }
+                other => panic!("constant logical not must fold, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn constant_fold_where_preserves_selected_f64_bits() {
+        let scalar_bool = TensorType {
+            dims: vec![],
+            precision: chelis_types::types::Prim::Bool,
+        };
+        let scalar_f64 = TensorType {
+            dims: vec![],
+            precision: chelis_types::types::Prim::F64,
+        };
+        let then_bits = 0x7ff8_1234_5678_9abc;
+        let else_bits = 0x8000_0000_0000_0000;
+
+        for (condition_value, expected_bits) in [(true, then_bits), (false, else_bits)] {
+            let mut dag = Dag::new();
+            let condition = dag.add_node(
+                RiscOp::Const {
+                    value: scalar_from_i64(
+                        "test",
+                        scalar_bool.precision,
+                        i64::from(condition_value),
+                    )
+                    .unwrap(),
+                },
+                vec![],
+                scalar_bool.clone(),
+                None,
+            );
+            let then_value = dag.add_node(
+                RiscOp::Const {
+                    value: scalar_from_f64("test", scalar_f64.precision, f64::from_bits(then_bits))
+                        .unwrap(),
+                },
+                vec![],
+                scalar_f64.clone(),
+                None,
+            );
+            let else_value = dag.add_node(
+                RiscOp::Const {
+                    value: scalar_from_f64("test", scalar_f64.precision, f64::from_bits(else_bits))
+                        .unwrap(),
+                },
+                vec![],
+                scalar_f64.clone(),
+                None,
+            );
+            let selected = dag.add_node(
+                RiscOp::Where,
+                vec![condition, then_value, else_value],
+                scalar_f64.clone(),
+                None,
+            );
+
+            constant_fold(&mut dag);
+
+            match &dag.get(selected).unwrap().op {
+                RiscOp::Const { value } => match value.element_ref() {
+                    ElementRef::F64(observed) => {
+                        assert_eq!(observed.to_bits(), expected_bits, "{condition_value}")
+                    }
+                    other => panic!("expected f64 folded value, got {other:?}"),
+                },
+                other => panic!("constant where must fold, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn constant_fold_new_ops_decline_nonconstant_and_type_invalid_inputs() {
+        let scalar_bool = TensorType {
+            dims: vec![],
+            precision: chelis_types::types::Prim::Bool,
+        };
+        let scalar_f32 = scalar_f32();
+        let scalar_f64 = TensorType {
+            dims: vec![],
+            precision: chelis_types::types::Prim::F64,
+        };
+
+        let mut mismatched_comparison = Dag::new();
+        let lhs = mismatched_comparison.add_node(
+            RiscOp::Const {
+                value: scalar_from_f64("test", scalar_f32.precision, 1.0).unwrap(),
+            },
+            vec![],
+            scalar_f32.clone(),
+            None,
+        );
+        let rhs = mismatched_comparison.add_node(
+            RiscOp::Const {
+                value: scalar_from_f64("test", scalar_f64.precision, 1.0).unwrap(),
+            },
+            vec![],
+            scalar_f64,
+            None,
+        );
+        let comparison = mismatched_comparison.add_node(
+            RiscOp::Compare(ComparisonKind::Eq),
+            vec![lhs, rhs],
+            scalar_bool.clone(),
+            None,
+        );
+        constant_fold(&mut mismatched_comparison);
+        assert!(matches!(
+            mismatched_comparison.get(comparison).unwrap().op,
+            RiscOp::Compare(ComparisonKind::Eq)
+        ));
+
+        let mut invalid_logical = Dag::new();
+        let lhs = invalid_logical.add_node(
+            RiscOp::synth_const(scalar_f32.precision, 1.0),
+            vec![],
+            scalar_f32.clone(),
+            None,
+        );
+        let rhs = invalid_logical.add_node(
+            RiscOp::synth_const(scalar_f32.precision, 0.0),
+            vec![],
+            scalar_f32.clone(),
+            None,
+        );
+        let logical = invalid_logical.add_node(
+            RiscOp::Logical(LogicalKind::And),
+            vec![lhs, rhs],
+            scalar_bool.clone(),
+            None,
+        );
+        constant_fold(&mut invalid_logical);
+        assert!(matches!(
+            invalid_logical.get(logical).unwrap().op,
+            RiscOp::Logical(LogicalKind::And)
+        ));
+
+        let mut nonconstant_logical = Dag::new();
+        let lhs = nonconstant_logical.add_node(
+            RiscOp::Load {
+                name: "flag".into(),
+            },
+            vec![],
+            scalar_bool.clone(),
+            None,
+        );
+        let rhs = nonconstant_logical.add_node(
+            RiscOp::synth_const(scalar_bool.precision, 1.0),
+            vec![],
+            scalar_bool.clone(),
+            None,
+        );
+        let logical = nonconstant_logical.add_node(
+            RiscOp::Logical(LogicalKind::Or),
+            vec![lhs, rhs],
+            scalar_bool.clone(),
+            None,
+        );
+        constant_fold(&mut nonconstant_logical);
+        assert!(matches!(
+            nonconstant_logical.get(logical).unwrap().op,
+            RiscOp::Logical(LogicalKind::Or)
+        ));
+
+        let mut invalid_where = Dag::new();
+        let condition = invalid_where.add_node(
+            RiscOp::synth_const(scalar_f32.precision, 1.0),
+            vec![],
+            scalar_f32.clone(),
+            None,
+        );
+        let then_value = invalid_where.add_node(
+            RiscOp::synth_const(scalar_f32.precision, 2.0),
+            vec![],
+            scalar_f32.clone(),
+            None,
+        );
+        let else_value = invalid_where.add_node(
+            RiscOp::synth_const(scalar_f32.precision, 3.0),
+            vec![],
+            scalar_f32.clone(),
+            None,
+        );
+        let selected = invalid_where.add_node(
+            RiscOp::Where,
+            vec![condition, then_value, else_value],
+            scalar_f32.clone(),
+            None,
+        );
+        constant_fold(&mut invalid_where);
+        assert!(matches!(
+            invalid_where.get(selected).unwrap().op,
+            RiscOp::Where
+        ));
+
+        let mut nonconstant_where = Dag::new();
+        let condition = nonconstant_where.add_node(
+            RiscOp::synth_const(scalar_bool.precision, 1.0),
+            vec![],
+            scalar_bool,
+            None,
+        );
+        let then_value = nonconstant_where.add_node(
+            RiscOp::Load {
+                name: "then".into(),
+            },
+            vec![],
+            scalar_f32.clone(),
+            None,
+        );
+        let else_value = nonconstant_where.add_node(
+            RiscOp::synth_const(scalar_f32.precision, 3.0),
+            vec![],
+            scalar_f32.clone(),
+            None,
+        );
+        let selected = nonconstant_where.add_node(
+            RiscOp::Where,
+            vec![condition, then_value, else_value],
+            scalar_f32,
+            None,
+        );
+        constant_fold(&mut nonconstant_where);
+        assert!(matches!(
+            nonconstant_where.get(selected).unwrap().op,
+            RiscOp::Where
+        ));
+    }
+
+    #[test]
     fn dce_removes_dead_nodes() {
         let mut dag = Dag::new();
         let a = dag.add_node(
