@@ -54,11 +54,12 @@ pub(super) fn validate_semantic_program(
     exprs: &[deep::Expr],
     type_env: &IrTypeEnv,
     top_level_references: &TopLevelReferenceGraph,
+    selector_context: &SelectorCallableContext,
     errors: &mut DiagnosticSink<'_>,
 ) {
     top_level_references.report_initialization_errors(errors);
     validate_core_transform_fragment(exprs, errors);
-    validate_grad_selector_identity(exprs, errors);
+    validate_grad_selector_identity(exprs, selector_context, errors);
     validate_vmap_extent_dependencies(exprs, type_env, errors);
     let mut static_env = UnordMap::new();
     let shape_env = shape_type_env(type_env);

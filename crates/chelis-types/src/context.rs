@@ -34,6 +34,10 @@
 //! - **Ir type-env**: cloned per check call. Library declared types
 //!   remain visible to new-code shape validation; the new-code's own
 //!   declared types are added on top.
+//! - **Callable provenance**: immutable ordered formal-name identities are
+//!   retained for library values so contextual `grad` validation applies the
+//!   same metadata/index consistency rule as a monolithic check. New
+//!   declarations shadow this snapshot without mutating it.
 //!
 //! ## No leak invariant
 //!
@@ -116,10 +120,12 @@ pub struct TypeEnv {
 // Source-free snapshots are faithful transports from a trusted checker
 // producer, not independently re-proved programs. Structural validation does
 // not establish completeness of a maliciously edited label summary.
-// v2 added #2071's type-variable restrictions. v3 adds checked collection
+// v2 added #2071's type-variable restrictions. v3 added checked collection
 // relations to `Scheme`; reading an older snapshot as an empty relation list
-// would change which indirect calls are admitted.
-const TYPE_ENV_FORMAT_VERSION: u32 = 3;
+// would change which indirect calls are admitted. v4 adds immutable callable
+// provenance; reading v3 as an empty map would reject valid contextual named
+// gradient selectors.
+const TYPE_ENV_FORMAT_VERSION: u32 = 4;
 
 #[derive(Serialize)]
 struct TypeEnvWireRef<'a> {
@@ -187,6 +193,10 @@ pub(crate) struct TypeEnvInner {
     /// cycle / unbound suppression logic to distinguish library
     /// references from new-code references.
     pub(crate) library_def_names: UnordSet<String>,
+    /// Module-scoped immutable callable identities and ordered formal names
+    /// accepted from the library source. Contextual `grad` validation seeds
+    /// its structural resolver from this snapshot.
+    pub(crate) selector_callables: crate::infer::SelectorCallableContext,
     /// Checker-enforced opacity metadata (RFC D-CHECK): per-module
     /// export sets, binding -> module attribution, and producer text,
     /// accumulated across the library and new-code phases. Defaults
@@ -215,6 +225,7 @@ impl TypeEnv {
                 adt_reg,
                 ir_types: BTreeMap::new(),
                 library_def_names: UnordSet::new(),
+                selector_callables: BTreeMap::new(),
                 opacity: crate::opacity::OpacityModuleMeta::default(),
             }),
             library_proof_id: None,
@@ -513,11 +524,11 @@ mod tests {
     }
 
     #[test]
-    fn type_env_rejects_the_pre_collection_contract_version() {
+    fn type_env_rejects_the_pre_callable_provenance_version() {
         let mut encoded = bincode::serialize(&TypeEnv::empty()).expect("TypeEnv serializes");
-        encoded[..4].copy_from_slice(&2_u32.to_le_bytes());
+        encoded[..4].copy_from_slice(&3_u32.to_le_bytes());
         let error = bincode::deserialize::<TypeEnv>(&encoded)
-            .expect_err("TypeEnv v2 must not decode as an unconstrained v3 snapshot");
+            .expect_err("TypeEnv v3 must not decode without callable provenance");
         assert!(
             error.to_string().contains("obsolete TypeEnv format"),
             "unexpected predecessor-version diagnostic: {error}"

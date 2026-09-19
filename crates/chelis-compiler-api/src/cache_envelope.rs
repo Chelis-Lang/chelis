@@ -80,7 +80,8 @@ impl CachePayload for crate::LibraryContext {
     // V15 (#1875): versioned TypeEnv with mandatory dimension-label transport.
     // V16: definition-checked operation contracts and operand-value restrictions.
     // V17 retains checker-owned local tensor-ascription obligations.
-    const FORMAT_VERSION: u32 = 17;
+    // V18 retains TypeEnv callable provenance for contextual grad selectors.
+    const FORMAT_VERSION: u32 = 18;
     const KEY_DOMAIN: &'static [u8] = b"chelis_library_typecheck_v";
 }
 
@@ -91,7 +92,8 @@ impl CachePayload for crate::StdLibContext {
     // V21 carries exact result-claim witness roles in the lowered library.
     // V22 retains distinct literal-result declaration tokens and producer ownership.
     // V23 retains checker-owned local tensor-ascription obligations.
-    const FORMAT_VERSION: u32 = 23;
+    // V24 retains TypeEnv callable provenance for contextual grad selectors.
+    const FORMAT_VERSION: u32 = 24;
     const KEY_DOMAIN: &'static [u8] = b"chelis_std_typecheck_v";
 }
 

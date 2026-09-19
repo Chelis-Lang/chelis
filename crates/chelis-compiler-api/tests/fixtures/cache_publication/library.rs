@@ -4,7 +4,7 @@ fn exercise(path: &std::path::Path, value: &LibraryContext) {
     let _: Option<LibraryContext> = cache_envelope::load(path, [0; 32]).unwrap();
 }
 
-const _: () = assert!(<LibraryContext as cache_envelope::CachePayload>::FORMAT_VERSION == 17);
+const _: () = assert!(<LibraryContext as cache_envelope::CachePayload>::FORMAT_VERSION == 18);
 const _: () = assert!(same(
     <LibraryContext as cache_envelope::CachePayload>::KEY_DOMAIN,
     b"chelis_library_typecheck_v"

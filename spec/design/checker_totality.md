@@ -3864,9 +3864,11 @@ transported contracts without inspecting the callee body.
    extent evidence from leaking into later calls or independently specialized
    aliases.
 6. Serialized TypeEnv checker reuse and published package identities both
-   include the relation. TypeEnv format 3 follows #2071's format 2 and is the
-   source-free checker-reuse path exercised here. CHB format 5 follows #2071's
-   format 4, and Reef schema format 3 follows schema format 2; those two
+   include the relation. TypeEnv format 4 follows the relation-bearing format
+   3 and additionally retains callable provenance for contextual named
+   gradient selectors; it is the source-free checker-reuse path exercised
+   here. CHB format 5 follows #2071's format 4, and Reef schema format 3
+   follows schema format 2; those two
    surfaces protect package publication and identity, not compiler reuse from
    CHB or Reef schema. All predecessors are rejected rather than decoded as
    unconstrained. Canonical package relations share the function type's

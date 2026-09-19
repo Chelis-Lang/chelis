@@ -1,12 +1,16 @@
 //! Checker-boundary validation for `grad` selector identity.
 
 use super::*;
+use sha2::{Digest, Sha256};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct SelectorCallableId(usize);
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct SelectorCallableId {
+    namespace: [u8; 32],
+    ordinal: u64,
+}
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum SelectorCallableOrigin {
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum SelectorCallableOrigin {
     Known {
         identity: SelectorCallableId,
         params: Vec<String>,
@@ -22,6 +26,16 @@ enum SelectorCallableOrigin {
         name: String,
         fields: BTreeMap<String, SelectorCallableOrigin>,
     },
+}
+
+pub(crate) type SelectorCallableContext =
+    BTreeMap<Option<String>, BTreeMap<String, SelectorCallableOrigin>>;
+
+type SelectorIdentityTable = BTreeMap<usize, SelectorCallableId>;
+
+struct SelectorResolution {
+    context: SelectorCallableContext,
+    identities: SelectorIdentityTable,
 }
 
 impl SelectorCallableOrigin {
@@ -101,18 +115,165 @@ impl SelectorCallableOrigin {
 /// entries cannot drift into separate acceptance rules.
 pub(super) fn validate_grad_selector_identity(
     exprs: &[deep::Expr],
+    inherited: &SelectorCallableContext,
     errors: &mut DiagnosticSink<'_>,
 ) {
+    let resolution = resolve_selector_callable_context(exprs, inherited);
     let mut module_items: BTreeMap<Option<String>, Vec<&deep::Expr>> = BTreeMap::new();
     for (module, expr) in top_level_decl_items_with_modules(exprs) {
         module_items.entry(module).or_default().push(expr);
     }
-    for items in module_items.into_values() {
-        let mut callables = BTreeMap::new();
-        preseed_selector_function_declarations(&items, &mut callables);
-        collect_selector_callable_declarations(&items, &mut callables);
+    for (module, items) in module_items {
+        let callables = resolution.context.get(&module).cloned().unwrap_or_default();
         for expr in items {
-            walk_grad_selector_identity(expr, &callables, &BTreeMap::new(), errors);
+            walk_grad_selector_identity(
+                expr,
+                &callables,
+                &BTreeMap::new(),
+                &resolution.identities,
+                errors,
+            );
+        }
+    }
+}
+
+pub(crate) fn extend_selector_callable_context(
+    exprs: &[deep::Expr],
+    inherited: &SelectorCallableContext,
+) -> SelectorCallableContext {
+    resolve_selector_callable_context(exprs, inherited).context
+}
+
+fn resolve_selector_callable_context(
+    exprs: &[deep::Expr],
+    inherited: &SelectorCallableContext,
+) -> SelectorResolution {
+    let identities = selector_identity_table(exprs, inherited);
+    let mut context = inherited.clone();
+    let mut module_items: BTreeMap<Option<String>, Vec<&deep::Expr>> = BTreeMap::new();
+    for (module, expr) in top_level_decl_items_with_modules(exprs) {
+        module_items.entry(module).or_default().push(expr);
+    }
+    for (module, items) in module_items {
+        let callables = context.entry(module).or_default();
+        preseed_selector_function_declarations(&items, callables, &identities);
+        collect_selector_callable_declarations(&items, callables, &identities);
+    }
+    SelectorResolution {
+        context,
+        identities,
+    }
+}
+
+fn selector_identity_table(
+    exprs: &[deep::Expr],
+    inherited: &SelectorCallableContext,
+) -> SelectorIdentityTable {
+    let namespace = selector_identity_namespace(exprs, inherited);
+    let mut identities = BTreeMap::new();
+    let mut next_ordinal = 0_u64;
+    for expr in exprs {
+        collect_selector_identities(expr, namespace, &mut next_ordinal, &mut identities);
+    }
+    identities
+}
+
+fn selector_identity_namespace(
+    exprs: &[deep::Expr],
+    inherited: &SelectorCallableContext,
+) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"chelis-selector-callable-origin-v1");
+    let canonical = chelis_deep::printer::print_canonical_flat(exprs);
+    hash_selector_bytes(&mut hasher, canonical.as_bytes());
+    hasher.update((inherited.len() as u64).to_le_bytes());
+    for (module, callables) in inherited {
+        match module {
+            Some(module) => {
+                hasher.update([1]);
+                hash_selector_bytes(&mut hasher, module.as_bytes());
+            }
+            None => hasher.update([0]),
+        }
+        hasher.update((callables.len() as u64).to_le_bytes());
+        for (name, origin) in callables {
+            hash_selector_bytes(&mut hasher, name.as_bytes());
+            hash_selector_origin(&mut hasher, origin);
+        }
+    }
+    hasher.finalize().into()
+}
+
+fn hash_selector_bytes(hasher: &mut Sha256, value: &[u8]) {
+    hasher.update((value.len() as u64).to_le_bytes());
+    hasher.update(value);
+}
+
+fn hash_selector_origin(hasher: &mut Sha256, origin: &SelectorCallableOrigin) {
+    match origin {
+        SelectorCallableOrigin::Known { identity, params } => {
+            hasher.update([0]);
+            hasher.update(identity.namespace);
+            hasher.update(identity.ordinal.to_le_bytes());
+            hasher.update((params.len() as u64).to_le_bytes());
+            for param in params {
+                hash_selector_bytes(hasher, param.as_bytes());
+            }
+        }
+        SelectorCallableOrigin::Unknown => hasher.update([1]),
+        SelectorCallableOrigin::NonCallable => hasher.update([2]),
+        SelectorCallableOrigin::Tuple(values) => {
+            hasher.update([3]);
+            hasher.update((values.len() as u64).to_le_bytes());
+            for value in values {
+                hash_selector_origin(hasher, value);
+            }
+        }
+        SelectorCallableOrigin::Constructor { name, payloads } => {
+            hasher.update([4]);
+            hash_selector_bytes(hasher, name.as_bytes());
+            hasher.update((payloads.len() as u64).to_le_bytes());
+            for payload in payloads {
+                hash_selector_origin(hasher, payload);
+            }
+        }
+        SelectorCallableOrigin::Record { name, fields } => {
+            hasher.update([5]);
+            hash_selector_bytes(hasher, name.as_bytes());
+            hasher.update((fields.len() as u64).to_le_bytes());
+            for (field, value) in fields {
+                hash_selector_bytes(hasher, field.as_bytes());
+                hash_selector_origin(hasher, value);
+            }
+        }
+    }
+}
+
+fn collect_selector_identities(
+    expr: &deep::Expr,
+    namespace: [u8; 32],
+    next_ordinal: &mut u64,
+    identities: &mut SelectorIdentityTable,
+) {
+    stack_guard!("collect_selector_identities", expr);
+    if let deep::Expr::MetaExpr(meta, _) = expr {
+        collect_selector_identities(&meta.expr, namespace, next_ordinal, identities);
+        return;
+    }
+    if selector_callable_params(expr).is_some() {
+        let key = selector_callable_key(expr);
+        identities.entry(key).or_insert_with(|| {
+            let identity = SelectorCallableId {
+                namespace,
+                ordinal: *next_ordinal,
+            };
+            *next_ordinal += 1;
+            identity
+        });
+    }
+    if let Some((_, _, children)) = stamped_parts(expr) {
+        for child in children {
+            collect_selector_identities(child, namespace, next_ordinal, identities);
         }
     }
 }
@@ -120,6 +281,7 @@ pub(super) fn validate_grad_selector_identity(
 fn preseed_selector_function_declarations(
     exprs: &[&deep::Expr],
     callables: &mut BTreeMap<String, SelectorCallableOrigin>,
+    identities: &SelectorIdentityTable,
 ) {
     for expr in exprs {
         let Some((DeepTag::Def, _, children)) = stamped_parts(expr) else {
@@ -132,12 +294,12 @@ fn preseed_selector_function_declarations(
         let Some(params) = selector_callable_params(value) else {
             continue;
         };
+        let Some(identity) = selector_callable_identity(value, identities) else {
+            continue;
+        };
         callables.insert(
             name.to_string(),
-            SelectorCallableOrigin::Known {
-                identity: selector_callable_identity(value),
-                params,
-            },
+            SelectorCallableOrigin::Known { identity, params },
         );
     }
 }
@@ -145,6 +307,7 @@ fn preseed_selector_function_declarations(
 fn collect_selector_callable_declarations(
     exprs: &[&deep::Expr],
     callables: &mut BTreeMap<String, SelectorCallableOrigin>,
+    identities: &SelectorIdentityTable,
 ) {
     for expr in exprs {
         let Some((DeepTag::Def, _, children)) = stamped_parts(expr) else {
@@ -154,7 +317,7 @@ fn collect_selector_callable_declarations(
         else {
             continue;
         };
-        let origin = selector_callable_origin(value, callables, &BTreeMap::new());
+        let origin = selector_callable_origin(value, callables, &BTreeMap::new(), identities);
         callables.insert(name.to_string(), origin);
     }
 }
@@ -170,8 +333,15 @@ fn selector_callable_params(expr: &deep::Expr) -> Option<Vec<String>> {
     params.iter().map(param_name_for_refs).collect()
 }
 
-fn selector_callable_identity(expr: &deep::Expr) -> SelectorCallableId {
-    SelectorCallableId(strip_selector_metadata(expr) as *const deep::Expr as usize)
+fn selector_callable_key(expr: &deep::Expr) -> usize {
+    strip_selector_metadata(expr) as *const deep::Expr as usize
+}
+
+fn selector_callable_identity(
+    expr: &deep::Expr,
+    identities: &SelectorIdentityTable,
+) -> Option<SelectorCallableId> {
+    identities.get(&selector_callable_key(expr)).copied()
 }
 
 fn strip_selector_metadata(mut expr: &deep::Expr) -> &deep::Expr {
@@ -215,11 +385,12 @@ fn walk_grad_selector_identity(
     expr: &deep::Expr,
     callables: &BTreeMap<String, SelectorCallableOrigin>,
     locals: &BTreeMap<String, SelectorCallableOrigin>,
+    identities: &SelectorIdentityTable,
     errors: &mut DiagnosticSink<'_>,
 ) {
     stack_guard!("walk_grad_selector_identity", expr);
     if let deep::Expr::MetaExpr(meta, _) = expr {
-        walk_grad_selector_identity(&meta.expr, callables, locals, errors);
+        walk_grad_selector_identity(&meta.expr, callables, locals, identities, errors);
         return;
     }
     let Some((tag, metadata, children)) = stamped_parts(expr) else {
@@ -236,7 +407,7 @@ fn walk_grad_selector_identity(
                     }
                 }
             }
-            walk_grad_selector_identity(&children[1], callables, &scoped, errors);
+            walk_grad_selector_identity(&children[1], callables, &scoped, identities, errors);
             return;
         }
         DeepTag::Let if children.len() == 2 => {
@@ -249,18 +420,18 @@ fn walk_grad_selector_identity(
             }
             let mut scoped = locals.clone();
             for pair in bindings.as_chunks::<2>().0 {
-                walk_grad_selector_identity(&pair[1], callables, &scoped, errors);
+                walk_grad_selector_identity(&pair[1], callables, &scoped, identities, errors);
                 if let Some(name) = symbol_name(&pair[0]) {
-                    let origin = selector_callable_origin(&pair[1], callables, &scoped);
+                    let origin = selector_callable_origin(&pair[1], callables, &scoped, identities);
                     scoped.insert(name.to_string(), origin);
                 }
             }
-            walk_grad_selector_identity(&children[1], callables, &scoped, errors);
+            walk_grad_selector_identity(&children[1], callables, &scoped, identities, errors);
             return;
         }
         DeepTag::Match if !children.is_empty() => {
-            walk_grad_selector_identity(&children[0], callables, locals, errors);
-            let scrutinee = selector_callable_origin(&children[0], callables, locals);
+            walk_grad_selector_identity(&children[0], callables, locals, identities, errors);
+            let scrutinee = selector_callable_origin(&children[0], callables, locals, identities);
             for arm in &children[1..] {
                 let Some((DeepTag::Arm, _, arm_children)) = stamped_parts(arm) else {
                     continue;
@@ -270,8 +441,20 @@ fn walk_grad_selector_identity(
                 }
                 let mut scoped = locals.clone();
                 bind_selector_match_pattern(&arm_children[0], &scrutinee, &mut scoped);
-                walk_grad_selector_identity(&arm_children[1], callables, &scoped, errors);
-                walk_grad_selector_identity(&arm_children[2], callables, &scoped, errors);
+                walk_grad_selector_identity(
+                    &arm_children[1],
+                    callables,
+                    &scoped,
+                    identities,
+                    errors,
+                );
+                walk_grad_selector_identity(
+                    &arm_children[2],
+                    callables,
+                    &scoped,
+                    identities,
+                    errors,
+                );
             }
             return;
         }
@@ -281,11 +464,11 @@ fn walk_grad_selector_identity(
     if tag == DeepTag::Grad
         && let Some(wrt) = metadata.wrt()
     {
-        validate_one_grad_selector(children, wrt, callables, locals, errors);
+        validate_one_grad_selector(children, wrt, callables, locals, identities, errors);
     }
 
     for child in children {
-        walk_grad_selector_identity(child, callables, locals, errors);
+        walk_grad_selector_identity(child, callables, locals, identities, errors);
     }
 }
 
@@ -294,6 +477,7 @@ fn validate_one_grad_selector(
     wrt: &chelis_deep::annotations::WrtTargets,
     callables: &BTreeMap<String, SelectorCallableOrigin>,
     locals: &BTreeMap<String, SelectorCallableOrigin>,
+    identities: &SelectorIdentityTable,
     errors: &mut DiagnosticSink<'_>,
 ) {
     let names = wrt
@@ -316,7 +500,7 @@ fn validate_one_grad_selector(
         ));
         return;
     };
-    let origin = selector_callable_origin(target, callables, locals);
+    let origin = selector_callable_origin(target, callables, locals, identities);
     let SelectorCallableOrigin::Known { params, .. } = origin else {
         errors.push(CheckError::new(
             CheckErrorKind::TypeMismatch,
@@ -375,11 +559,12 @@ fn selector_match_origin(
     children: &[deep::Expr],
     callables: &BTreeMap<String, SelectorCallableOrigin>,
     locals: &BTreeMap<String, SelectorCallableOrigin>,
+    identities: &SelectorIdentityTable,
 ) -> SelectorCallableOrigin {
     let Some(scrutinee_expr) = children.first() else {
         return SelectorCallableOrigin::Unknown;
     };
-    let scrutinee = selector_callable_origin(scrutinee_expr, callables, locals);
+    let scrutinee = selector_callable_origin(scrutinee_expr, callables, locals, identities);
     let mut result = None;
     for arm in &children[1..] {
         let Some((DeepTag::Arm, _, arm_children)) = stamped_parts(arm) else {
@@ -390,7 +575,7 @@ fn selector_match_origin(
         };
         let mut scoped = locals.clone();
         bind_selector_match_pattern(pattern, &scrutinee, &mut scoped);
-        let origin = selector_callable_origin(body, callables, &scoped);
+        let origin = selector_callable_origin(body, callables, &scoped, identities);
         result = Some(result.map_or_else(
             || origin.clone(),
             |prior: SelectorCallableOrigin| prior.alternate(&origin),
@@ -484,6 +669,7 @@ fn selector_callable_origin(
     expr: &deep::Expr,
     callables: &BTreeMap<String, SelectorCallableOrigin>,
     locals: &BTreeMap<String, SelectorCallableOrigin>,
+    identities: &SelectorIdentityTable,
 ) -> SelectorCallableOrigin {
     stack_guard!(
         "selector_callable_origin",
@@ -499,25 +685,25 @@ fn selector_callable_origin(
             .unwrap_or(SelectorCallableOrigin::Unknown);
     }
     if let Some(params) = selector_callable_params(expr) {
-        return SelectorCallableOrigin::Known {
-            identity: selector_callable_identity(expr),
-            params,
+        let Some(identity) = selector_callable_identity(expr, identities) else {
+            return SelectorCallableOrigin::Unknown;
         };
+        return SelectorCallableOrigin::Known { identity, params };
     }
     let Some((tag, _, children)) = stamped_parts(expr) else {
         return SelectorCallableOrigin::Unknown;
     };
     match tag {
         DeepTag::If if children.len() == 3 => {
-            let consequence = selector_callable_origin(&children[1], callables, locals);
-            let alternative = selector_callable_origin(&children[2], callables, locals);
+            let consequence = selector_callable_origin(&children[1], callables, locals, identities);
+            let alternative = selector_callable_origin(&children[2], callables, locals, identities);
             consequence.alternate(&alternative)
         }
-        DeepTag::Match => selector_match_origin(children, callables, locals),
+        DeepTag::Match => selector_match_origin(children, callables, locals, identities),
         DeepTag::Tuple => SelectorCallableOrigin::Tuple(
             children
                 .iter()
-                .map(|child| selector_callable_origin(child, callables, locals))
+                .map(|child| selector_callable_origin(child, callables, locals, identities))
                 .collect(),
         ),
         DeepTag::App
@@ -532,7 +718,7 @@ fn selector_callable_origin(
                     .to_string(),
                 payloads: children[1..]
                     .iter()
-                    .map(|child| selector_callable_origin(child, callables, locals))
+                    .map(|child| selector_callable_origin(child, callables, locals, identities))
                     .collect(),
             }
         }
@@ -550,7 +736,7 @@ fn selector_callable_origin(
                 };
                 fields.insert(
                     field_name.to_string(),
-                    selector_callable_origin(value, callables, locals),
+                    selector_callable_origin(value, callables, locals, identities),
                 );
             }
             SelectorCallableOrigin::Record {
@@ -559,7 +745,7 @@ fn selector_callable_origin(
             }
         }
         DeepTag::TupleGet if children.len() == 2 => {
-            let tuple = selector_callable_origin(&children[0], callables, locals);
+            let tuple = selector_callable_origin(&children[0], callables, locals, identities);
             match tuple {
                 SelectorCallableOrigin::Tuple(values) => selector_integer_literal(&children[1])
                     .and_then(|index| usize::try_from(index).ok())
@@ -570,7 +756,7 @@ fn selector_callable_origin(
         }
         DeepTag::Block => children
             .last()
-            .map(|item| selector_callable_origin(item, callables, locals))
+            .map(|item| selector_callable_origin(item, callables, locals, identities))
             .unwrap_or(SelectorCallableOrigin::NonCallable),
         DeepTag::Let if children.len() == 2 => {
             let Some((DeepTag::Bind, _, bindings)) = children.first().and_then(stamped_parts)
@@ -585,10 +771,10 @@ fn selector_callable_origin(
                 let Some(name) = symbol_name(&pair[0]) else {
                     return SelectorCallableOrigin::Unknown;
                 };
-                let origin = selector_callable_origin(&pair[1], callables, &scoped);
+                let origin = selector_callable_origin(&pair[1], callables, &scoped, identities);
                 scoped.insert(name.to_string(), origin);
             }
-            selector_callable_origin(&children[1], callables, &scoped)
+            selector_callable_origin(&children[1], callables, &scoped, identities)
         }
         DeepTag::Lit
         | DeepTag::RecordUpdate

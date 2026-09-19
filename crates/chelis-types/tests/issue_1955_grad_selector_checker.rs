@@ -7,9 +7,10 @@ use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
 use chelis_types::errors::{CheckError, CheckErrorKind};
 use chelis_types::{
-    TypeEnv, build_compiled_library_context, build_type_env_from_library, check_ir_fitness,
-    check_ir_program, check_ir_with_context, check_program, check_typed_program, infer_ir_program,
-    infer_program,
+    CheckedProgram, TypeEnv, build_compiled_library_context,
+    build_compiled_library_context_with_base, build_type_env_from_library, check_ir_fitness,
+    check_ir_program, check_ir_with_context, check_ir_with_signature_context, check_program,
+    check_typed_program, infer_ir_program, infer_program,
 };
 
 fn selector_program(index: i64) -> Vec<Expr> {
@@ -40,6 +41,22 @@ fn selector_program(index: i64) -> Vec<Expr> {
 fn stamped_selector_program(index: i64) -> Vec<Expr> {
     chelis_deep::parse_and_stamp_file(&print_canonical(&selector_program(index)))
         .expect("selector fixture must stamp")
+}
+
+fn checked_pair_context() -> (TypeEnv, CheckedProgram) {
+    let mut pair = selector_program(1);
+    pair.pop()
+        .expect("selector fixture must end with the selected binding");
+    build_compiled_library_context(&pair).expect("pair library must check")
+}
+
+fn contextual_selector_program(index: i64) -> Vec<Expr> {
+    let mut program = selector_program(index);
+    vec![
+        program
+            .pop()
+            .expect("selector fixture must end with the selected binding"),
+    ]
 }
 
 fn assert_selector_contradiction(errors: &[CheckError]) {
@@ -114,5 +131,78 @@ fn neighboring_public_semantic_entries_reject_the_same_contradiction() {
     ] {
         assert!(!errors.is_empty(), "{entry} accepted the contradiction");
         assert_selector_contradiction(&errors);
+    }
+}
+
+#[test]
+fn check_ir_with_context_accepts_consistent_library_callable_identity() {
+    let (context, _) = checked_pair_context();
+    check_ir_with_context(&context, &contextual_selector_program(1))
+        .expect("context callable index 1 selects metadata parameter `w`");
+}
+
+#[test]
+fn check_ir_with_context_rejects_contradictory_library_callable_identity() {
+    let (context, _) = checked_pair_context();
+    let result = check_ir_with_context(&context, &contextual_selector_program(0))
+        .expect_err("context callable index 0 selects `x`, not metadata `w`");
+    assert_selector_contradiction(&result.errors);
+}
+
+#[test]
+fn check_ir_with_signature_context_accepts_consistent_library_callable_identity() {
+    let (context, library) = checked_pair_context();
+    check_ir_with_signature_context(
+        &context,
+        library.signature_inference(),
+        &contextual_selector_program(1),
+    )
+    .expect("signature context callable index 1 selects metadata parameter `w`");
+}
+
+#[test]
+fn check_ir_with_signature_context_rejects_contradictory_library_callable_identity() {
+    let (context, library) = checked_pair_context();
+    let result = check_ir_with_signature_context(
+        &context,
+        library.signature_inference(),
+        &contextual_selector_program(0),
+    )
+    .expect_err("signature context callable index 0 selects `x`, not metadata `w`");
+    assert_selector_contradiction(&result.errors);
+}
+
+#[test]
+fn compiled_library_with_base_accepts_consistent_base_callable_identity() {
+    let (base, _) = checked_pair_context();
+    build_compiled_library_context_with_base(&base, &contextual_selector_program(1))
+        .expect("base callable index 1 selects metadata parameter `w`");
+}
+
+#[test]
+fn compiled_library_with_base_rejects_contradictory_base_callable_identity() {
+    let (base, _) = checked_pair_context();
+    let result = build_compiled_library_context_with_base(&base, &contextual_selector_program(0))
+        .expect_err("base callable index 0 selects `x`, not metadata `w`");
+    assert_selector_contradiction(&result.errors);
+}
+
+#[test]
+fn standalone_and_serialized_type_envs_preserve_library_callable_identity() {
+    let mut pair = selector_program(1);
+    pair.pop()
+        .expect("selector fixture must end with the selected binding");
+    let live = build_type_env_from_library(&pair).expect("standalone TypeEnv must build");
+    let encoded = bincode::serialize(&live).expect("TypeEnv must serialize");
+    let decoded: TypeEnv = bincode::deserialize(&encoded).expect("TypeEnv must deserialize");
+
+    for (label, context) in [("live", live), ("decoded", decoded)] {
+        check_ir_with_context(&context, &contextual_selector_program(1))
+            .unwrap_or_else(|error| panic!("{label} context lost valid origin: {error:#?}"));
+        let result = match check_ir_with_context(&context, &contextual_selector_program(0)) {
+            Ok(_) => panic!("{label} context accepted contradictory selector"),
+            Err(error) => error,
+        };
+        assert_selector_contradiction(&result.errors);
     }
 }
