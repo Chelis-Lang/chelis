@@ -18,6 +18,7 @@ ACKNOWLEDGEMENTS = ROOT / ".github/workflows/pr-contract-acknowledgements.yml"
 EXPANSION = ROOT / ".github/workflows/pr-package-expansion.yml"
 RETARGET = ROOT / ".github/workflows/pr-base-retarget.yml"
 RECEIPT = ROOT / ".github/workflows/pr-candidate-receipt.yml"
+CHANGELOG = ROOT / ".github/workflows/changelog.yml"
 HULL = ROOT / ".github/workflows/conformance.yml"
 AGENTS = ROOT / "AGENTS.md"
 AUTHOR_GUIDE = ROOT / "docs/guard_changes_for_pr_authors.md"
@@ -141,6 +142,56 @@ def assert_candidate_deepening_stays_connected(
     assert_backstop_fetches_stay_connected(
         test, body, ('"$BASE"', '"$first_parent"')
     )
+
+
+def assert_per_head_metadata_concurrency(
+    test: unittest.TestCase, workflow: dict, prefix: str
+) -> None:
+    """A per-head check must not cancel its own in-flight run.
+
+    Both of these checks are rerun by a pull-request body edit, and the agent
+    contract asks for exactly that edit -- recording the reviewed head and its
+    CI evidence -- immediately before merging. Cancelling the run already in
+    flight for the same head leaves a `cancelled` check run that reads as a
+    failure on a green pull request. Runs for different heads answer about
+    different commits and never race, so keying the group by head SHA is what
+    makes not cancelling safe as well as cheap.
+    """
+
+    concurrency = workflow["concurrency"]
+    group = concurrency["group"]
+    test.assertTrue(group.startswith(prefix), group)
+    test.assertIn("github.event.pull_request.number", group)
+    test.assertIn("github.event.pull_request.head.sha", group)
+    test.assertIs(concurrency["cancel-in-progress"], False)
+
+
+def assert_changelog_workflow(test: unittest.TestCase, workflow: dict) -> None:
+    events = actions_events(workflow)
+    # `edited` stays: GitHub delivers a base-branch change as an `edited`
+    # event, and this check reads `base.sha`. A body-only or title-only edit
+    # also arrives that way, which is wasteful but harmless; narrowing it with
+    # a job-level `if` is not available, because a skipped required context
+    # satisfies branch protection here and would let an edit turn a failing
+    # Changelog green. `labeled`/`unlabeled` carry the `no-changelog` label.
+    test.assertEqual(
+        set(events["pull_request"]["types"]),
+        {
+            "opened",
+            "synchronize",
+            "reopened",
+            "edited",
+            "labeled",
+            "unlabeled",
+        },
+    )
+    test.assertEqual(workflow["permissions"], {"contents": "read"})
+    job = workflow["jobs"]["changelog"]
+    test.assertEqual(job["name"], "Changelog")
+    text = str(job)
+    test.assertIn("scripts.test_changelog", text)
+    test.assertIn("changelog.py check-pr", text)
+    assert_per_head_metadata_concurrency(test, workflow, "changelog-")
 
 
 def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
@@ -651,7 +702,9 @@ def assert_acknowledgement_workflow(test: unittest.TestCase, workflow: dict) -> 
         set(events["pull_request"]["types"]),
         {"opened", "synchronize", "reopened", "edited"},
     )
-    test.assertIn("pull_request.number", str(workflow["concurrency"]))
+    assert_per_head_metadata_concurrency(
+        test, workflow, "pr-contract-acknowledgements-"
+    )
     job = workflow["jobs"]["acknowledgements"]
     test.assertEqual(job["name"], "PR Contract Acknowledgements")
     test.assertEqual(
@@ -897,6 +950,7 @@ class PullRequestWorkflowRoutingTests(unittest.TestCase):
         assert_candidate_receipt_workflow(
             self, yaml.safe_load(RECEIPT.read_text())
         )
+        assert_changelog_workflow(self, yaml.safe_load(CHANGELOG.read_text()))
         assert_author_machine_tokens(self)
 
     def test_body_edits_cannot_reenter_compiler_ci(self) -> None:
@@ -988,6 +1042,40 @@ class PullRequestWorkflowRoutingTests(unittest.TestCase):
                 AssertionError
             ):
                 assertion(self, workflow)
+
+
+    def test_a_metadata_check_may_not_cancel_its_own_head(self) -> None:
+        for workflow_path, assertion in (
+            (CHANGELOG, assert_changelog_workflow),
+            (ACKNOWLEDGEMENTS, assert_acknowledgement_workflow),
+        ):
+            for change in ("cancel", "group"):
+                workflow = copy.deepcopy(
+                    yaml.safe_load(workflow_path.read_text())
+                )
+                if change == "cancel":
+                    workflow["concurrency"]["cancel-in-progress"] = True
+                else:
+                    workflow["concurrency"]["group"] = workflow["concurrency"][
+                        "group"
+                    ].replace(
+                        "-${{ github.event.pull_request.head.sha }}", ""
+                    )
+                with self.subTest(
+                    workflow=workflow_path.name, change=change
+                ), self.assertRaises(AssertionError):
+                    assertion(self, workflow)
+
+    def test_the_changelog_check_keeps_its_base_change_and_label_triggers(
+        self,
+    ) -> None:
+        for dropped in ("edited", "labeled", "unlabeled"):
+            workflow = copy.deepcopy(yaml.safe_load(CHANGELOG.read_text()))
+            actions_events(workflow)["pull_request"]["types"].remove(dropped)
+            with self.subTest(dropped=dropped), self.assertRaises(
+                AssertionError
+            ):
+                assert_changelog_workflow(self, workflow)
 
     def test_trusted_classifier_cannot_reuse_candidate_writable_paths(self) -> None:
         for workflow_path, assertion in (

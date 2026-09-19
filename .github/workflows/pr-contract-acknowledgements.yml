@@ -4,9 +4,17 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, edited]
 
+# Keyed by head SHA, and never cancelling, for the reason recorded in
+# changelog.yml. This check exists to be rerun by a body edit, and the edit
+# that reruns it is the one the agent contract asks for immediately before
+# merging, so cancelling the in-flight run for the same head is the common
+# case rather than the exception. Runs for different heads answer different
+# questions and never race.
 concurrency:
-  group: pr-contract-acknowledgements-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  group: >-
+    pr-contract-acknowledgements-${{ github.event.pull_request.number }}-${{
+    github.event.pull_request.head.sha }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
