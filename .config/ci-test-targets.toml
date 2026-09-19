@@ -190,6 +190,24 @@ reason = "the Phase 1 selection and receipt unit contracts execute in the PR scr
 tracking_issue = "chelis#893"
 
 [[path_rule]]
+prefix = "scripts/runtime_representation_phase2.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "runtime-representation-phase0-oracle"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "the representation gate executes this Phase 2 selection, receipt, binding, and native-control driver"
+tracking_issue = "chelis#893"
+
+[[path_rule]]
+prefix = "scripts/test_runtime_representation_phase2.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the Phase 2 selection and receipt unit contracts execute in the PR script-unit discovery"
+tracking_issue = "chelis#893"
+
+[[path_rule]]
 prefix = "spec/design/runtime_representation_phase0_inventory.json"
 disposition = "owner"
 workflow = "heavy-e2e.yml"
@@ -205,6 +223,15 @@ workflow = "heavy-e2e.yml"
 job = "runtime-representation-phase0-oracle"
 cadence = "daily 03:17 UTC and workflow_dispatch"
 reason = "the Phase 2 representation gate validates and executes this frozen Phase 1 test selection"
+tracking_issue = "chelis#893"
+
+[[path_rule]]
+prefix = "spec/design/runtime_representation_phase2_tests.json"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "runtime-representation-phase0-oracle"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "the representation gate validates and executes this frozen Phase 2 test selection"
 tracking_issue = "chelis#893"
 
 [[path_rule]]

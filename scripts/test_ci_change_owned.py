@@ -995,6 +995,18 @@ class SchemaTests(unittest.TestCase):
                 "pull_request and push",
                 "chelis#893",
             ),
+            "scripts/runtime_representation_phase2.py": (
+                "heavy-e2e.yml",
+                "runtime-representation-phase0-oracle",
+                "daily 03:17 UTC and workflow_dispatch",
+                "chelis#893",
+            ),
+            "scripts/test_runtime_representation_phase2.py": (
+                "ci.yml",
+                "script-unit",
+                "pull_request and push",
+                "chelis#893",
+            ),
             "scripts/test_unrepresentable_domain_oracle.py": (
                 "ci.yml",
                 "script-unit",
@@ -1008,6 +1020,12 @@ class SchemaTests(unittest.TestCase):
                 "chelis#908",
             ),
             "spec/design/runtime_representation_phase1_tests.json": (
+                "heavy-e2e.yml",
+                "runtime-representation-phase0-oracle",
+                "daily 03:17 UTC and workflow_dispatch",
+                "chelis#893",
+            ),
+            "spec/design/runtime_representation_phase2_tests.json": (
                 "heavy-e2e.yml",
                 "runtime-representation-phase0-oracle",
                 "daily 03:17 UTC and workflow_dispatch",
@@ -1038,9 +1056,12 @@ class SchemaTests(unittest.TestCase):
         for neighbor in (
             "scripts/runtime_representation_phase1_extra.py",
             "scripts/test_runtime_representation_phase1_extra.py",
+            "scripts/runtime_representation_phase2_extra.py",
+            "scripts/test_runtime_representation_phase2_extra.py",
             "scripts/test_unrepresentable_domain_oracle_extra.py",
             "scripts/unrepresentable_domain_oracle_extra.py",
             "spec/design/runtime_representation_phase1_tests_extra.json",
+            "spec/design/runtime_representation_phase2_tests_extra.json",
         ):
             with self.subTest(neighbor=neighbor):
                 self.assertFalse(
