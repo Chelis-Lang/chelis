@@ -322,10 +322,10 @@ result = with seed(42i64) {
 }
 
 #[test]
-fn cpu_resource_gradient_compiles_and_executes_without_a_runtime_resource_action() {
+fn exact_cpu_resource_gradient_compiles_and_executes_without_a_runtime_resource_action() {
     let c = ownership_support::emit_selected(
         r#"
-def loss(x: tensor[4, f32]) -> f32 = with device("cpu:author-device") {
+def loss(x: tensor[4, f32]) -> f32 = with device("cpu") {
   with seed(42i64) { tensor_to_scalar(sum(dropout(x, 0.5f32), 0)) }
 }
 def derivative(x: tensor[4, f32]) -> tensor[4, f32] = grad(loss)(x)

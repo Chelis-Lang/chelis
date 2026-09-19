@@ -551,7 +551,7 @@ does not describe the sealed fixed-control C lane (see #1872).
 | `IO` | file ops, `mmap_*`, `process_run`, `print` | root / runtime |
 | `Test` | `test_assert*` | pinned at root, no handler |
 | `Accum` | accumulation contexts | — |
-| `Resource(String)` | device/resource pinning | `with device("gpu:0"|"cpu") { ... }` |
+| `Resource(String)` | device/resource pinning | exact `with device("cpu") { ... }` for host C; every other selector is rejected before C artifacts |
 
 Effects are inferred and checked after types, before lowering. The style gate and
 `chelis check` report effect rows per function.
@@ -560,6 +560,9 @@ The C/HIP compiler APIs check Resource regions against their selected target
 before emitting an artifact or invoking an emission observer. Entry-scoped C
 compilation checks the selected source dependency closure, with lexical locals
 excluded from helper resolution; whole-program emission checks all definitions.
+The C target positively recognizes only the exact `cpu` host selector; it
+rejects labeled CPU, CUDA, Metal, GPU, unknown, empty, and malformed selectors
+with `BuildTargetMismatch` rather than erasing the region into host execution.
 Contextual compilation retains its existing callable-lane limitations:
 region-bearing imported helpers can decline before a tensor entry is selected.
 That decline is not evidence of successful Resource validation or support.

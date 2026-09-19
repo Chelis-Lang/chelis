@@ -845,7 +845,7 @@ standard ("execute everything"). Each has a tracked task.
 | HIP runtime behavior ([#689]/[#690] symptoms at runtime) | **executed on gfx1151** (HIP 7.13, chelis 0.16.1, via `scripts/hip_test.py`): [#689] confirmed - `neg`/`sum` run an `_f32` kernel over the `CHELIS_I64` buffer and return garbage (e.g. `sum([10¹²,2·10¹²,3·10¹²,4·10¹²])` = 3567587328 vs 10¹³; `neg` also drops the upper lanes), while `add`/`mul` (correct `_i64` kernels) and f32 `neg` are exact. [#690] confirmed - HIP `trunc_div` by zero returns silently (exit 0, garbage) where the evaluator aborts branded. Repro archived at `docs/investigations/probes/hip_runtime/`; red-team re-ran the probes (PASS) and the runtime results are posted on [#689](https://github.com/Chelis-Lang/chelis/issues/689#issuecomment-5011825763), [#690](https://github.com/Chelis-Lang/chelis/issues/690#issuecomment-5011825818), and [#736](https://github.com/Chelis-Lang/chelis/issues/736#issuecomment-5011825877) | [#736]: probes executed + posted; both issues off the emission-only caveat |
 | Metal runtime execution (typed kernels actually computing) | emission-locked (`metal_dtype_emission_and_bool_add.rs`); never executed | [#737]: a small driver harness (main.mm + chelis runtime link) on an arm64 Mac; promote the emission locks to run locks |
 | [#688]'s opaque produced-value chokepoint (`flatten_field_value`) | the CLASS is executed (spurious fuzz-tier counterexample); the cited site is not | tracked on [#688] itself: needs `--features smt` + an `@opaque` int64-field type; exact repro sketch is in the issue comments |
-| `with seed` / `with device` semantics (cross-lane seeding reproducibility) | the `with seed` half is SWEPT (2026-07-18 sweep + 2026-07-19 re-sweep on [#735]: eval vs compiled-C host lane, all probes f32-bit-identical post the [#770]/[#771]/[#776] fixes, independently re-run 253/253); [05-RNG-1] shipped (PR #781) | [#735]: remaining authoring - `with device` selection, vmap x seed, grad-through-seeded-draws numerics; GPU/kernel-lane RNG sweep is the [#736] follow-on; the unconditional cross-lane atom's blocker cleared 2026-07-20 ([#731] Phase 1 merged, PR #793) - re-sweep + atom (b) shipment unblocked |
+| `with seed` / `with device` semantics (cross-lane seeding reproducibility) | the `with seed` half is SWEPT (2026-07-18 sweep + 2026-07-19 re-sweep on [#735]: eval vs compiled-C host lane, all probes f32-bit-identical post the [#770]/[#771]/[#776] fixes, independently re-run 253/253); [05-RNG-1] shipped (PR #781) | [#735] owns only the core host-C typed-rejection fence. [#2104] owns `with device` vocabulary, placement/residency, transfer, seeding, and grad/vmap semantics; the GPU/kernel-lane RNG sweep remains the [#736] follow-on. The unconditional cross-lane atom's blocker cleared 2026-07-20 ([#731] Phase 1 merged, PR #793) - re-sweep + atom (b) shipment unblocked |
 | shell repos' compiled-lane numerics (school validates eval-only) | audit note, unexecuted downstream | [#738]: conform-contract amendment proposal - shells gain a compiled-lane numerical row |
 | census rows 13-16 of [#730] (dead-by-probe placeholder sites) | probed dead or dead-by-inspection | re-verified mechanically at [#730] Phase 0; §C1.4 raise-or-prove applies regardless |
 
@@ -893,13 +893,14 @@ formal development (the canonical calculus; our spec text lags it):
   [#794]).
 - **Genuinely open, still owed**: what `with device` selects
   operationally, vmap x seed (not in LaCaDiLE at all; its own sweep),
-  the numerics of grad THROUGH seeded draws (LaCaDiLE yields only
-  seed-before-grad), and the GPU/kernel RNG lanes (the [#736]
-  follow-on). All stay [#735] authoring.
+  and the numerics of grad THROUGH seeded draws (LaCaDiLE yields only
+  seed-before-grad) are [#2104]'s experimental placement/transform
+  contract. The GPU/kernel RNG lanes remain the [#736] follow-on.
 
 [#731] makes the BODIES type-checked (with the T-Handle shape as the
 formal target, per its §C1.5) and [#730] makes unknown KINDS loud;
-[#735]'s remaining output is atoms plus the parked sweeps, not code.
+[#735] is the core typed-rejection fence only; the broader atoms and
+parked experimental sweeps are [#2104]/[#736] work.
 
 [#680]: https://github.com/Chelis-Lang/chelis/issues/680
 [#681]: https://github.com/Chelis-Lang/chelis/issues/681

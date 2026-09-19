@@ -233,6 +233,9 @@ def set_package_expansion(
         set(plan["eligible_targets"])
         | {identity.canonical for identity in identities}
     )
+    plan["target_features"].update(
+        {identity.canonical: [] for identity in identities}
+    )
     plan["package_expansion"] = sorted(
         identity.canonical for identity in identities
     )
@@ -370,10 +373,6 @@ class SchemaTests(unittest.TestCase):
                 config_text(manual_only_target=("p", "missing")),
                 "manual-only target",
             ),
-            (
-                config_text(manual_only_target=("p", "gated")),
-                "manual-only target is not default-feature eligible",
-            ),
             (config_text(path_rule="missing/"), "path rule"),
             (
                 config_text(
@@ -398,6 +397,21 @@ class SchemaTests(unittest.TestCase):
         owned.validate_config(
             config, fixture_metadata(), tracked, fixture_sources().__getitem__
         )
+
+    def test_feature_gated_manual_and_excluded_targets_are_valid(self) -> None:
+        tracked = set(fixture_sources()) | {"scripts/tool.py"}
+        for content in (
+            config_text(manual_only_target=("p", "gated")),
+            config_text(target_exclusion=("p", "gated")),
+            config_text(test_exclusion=("p", "gated", "gated_case")),
+        ):
+            with self.subTest(content=content):
+                owned.validate_config(
+                    load_config(content),
+                    fixture_metadata(),
+                    tracked,
+                    fixture_sources().__getitem__,
+                )
 
     def test_deleted_exact_path_rule_is_live_from_base_inventory(self) -> None:
         config = load_config(config_text(path_rule="removed-root.toml"))
@@ -447,7 +461,7 @@ class SchemaTests(unittest.TestCase):
             owned.Identity("chelis-types", "issue_1294_standard_lowerings"),
         } <= set(config.standing_targets))
         self.assertEqual(len(config.target_exclusions), 3)
-        self.assertEqual(len(config.test_exclusions), 6)
+        self.assertEqual(len(config.test_exclusions), 14)
         self.assertEqual(
             set(config.manual_only_targets),
             {
@@ -467,13 +481,42 @@ class SchemaTests(unittest.TestCase):
             manual_owner.cadence,
             "pull_request and exact-candidate workflow_dispatch when directly modified",
         )
+        observer_debt = {
+            identity: owner
+            for identity, owner in config.test_exclusions.items()
+            if owner.tracking_issue == "chelis#2201"
+        }
+        self.assertEqual(
+            {identity.test for identity in observer_debt},
+            {
+                "authored_observer_spellings_do_not_collide_with_private_support_or_wrappers",
+                "feature_on_ordinary_public_call_emits_no_observation",
+                "host_source_identity_qualifies_nested_and_following_helper_occurrences",
+                "nested_host_and_fixed_frames_record_actual_forward_replay_and_restoration",
+                "repeated_direct_callees_keep_linked_identity_and_restore_the_call_stack",
+                "repeated_observed_calls_restart_sequence_and_keep_invocation_identity",
+                "sink_error_is_not_silent_success",
+                "unsupported_argument_effects_cannot_certify_descendant_calls",
+            },
+        )
         for owner in (
             *config.target_exclusions.values(),
-            *config.test_exclusions.values(),
+            *(
+                owner
+                for owner in config.test_exclusions.values()
+                if owner.tracking_issue != "chelis#2201"
+            ),
         ):
             self.assertEqual(owner.workflow, "heavy-e2e.yml")
             self.assertEqual(owner.job, "full-workspace")
             self.assertEqual(owner.cadence, "daily 03:17 UTC and workflow_dispatch")
+        for owner in observer_debt.values():
+            self.assertEqual(owner.workflow, "heavy-e2e.yml")
+            self.assertEqual(owner.job, "native-random-observer-debt")
+            self.assertEqual(
+                owner.cadence,
+                "daily 03:17 UTC and workflow_dispatch",
+            )
         self.assertEqual(
             sum(
                 owner.tracking_issue == "chelis#1824"
@@ -533,7 +576,21 @@ class SchemaTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         heavy = (root / ".github/workflows/heavy-e2e.yml").read_text()
         self.assertIn("\n  full-workspace:\n", heavy)
+        self.assertIn("\n  native-random-observer-debt:\n", heavy)
+        for identity in observer_debt:
+            self.assertIn(f"test(/^{identity.test}$/)", heavy)
         self.assertIn('cron: "17 3 * * *"', heavy)
+        heavy_rule = next(
+            rule
+            for rule in config.path_rules
+            if rule.prefix == ".github/workflows/heavy-e2e.yml"
+        )
+        self.assertEqual(heavy_rule.disposition, "owner")
+        self.assertIsNotNone(heavy_rule.owner)
+        self.assertEqual(
+            (heavy_rule.owner.workflow, heavy_rule.owner.job),
+            ("ci.yml", "script-unit"),
+        )
         for rule in config.path_rules:
             if rule.owner is not None:
                 workflow = (root / ".github/workflows" / rule.owner.workflow).read_text()
@@ -974,10 +1031,9 @@ class SchemaTests(unittest.TestCase):
                       "test_installed_artifact_canary.py"):
             with self.subTest(suite=suite):
                 self.assertIn("release.yml", (root / "scripts" / suite).read_text(encoding="utf-8"))
-        # Sibling workflow files and release helper scripts must not inherit
-        # the exact rule; an unreviewed lane still needs its own mapping.
+        # Unreviewed sibling workflow files and release helper scripts must not
+        # inherit the exact rule; each reviewed lane needs its own mapping.
         for path in (".github/workflows/new-release-lane.yml",
-                     ".github/workflows/heavy-e2e.yml",
                      ".github/scripts/verify_release_smt.py"):
             self.assertFalse(any(rule.matches(path) for rule in config.path_rules), path)
             self.assertFalse(owned.is_docs_only([path]))
@@ -1041,6 +1097,7 @@ class DurationBaselineTests(unittest.TestCase):
             "target_dispositions": [],
             "selected_packages": ["p"],
             "eligible_targets": [identity.canonical],
+            "target_features": {identity.canonical: []},
             "change_owned": [identity.canonical],
             "package_expansion": [],
             "standing_targets": [],
@@ -1335,6 +1392,63 @@ class PlanningTests(unittest.TestCase):
         self.assertEqual(plan["config_digest"], owned.config_digest(load_config()))
         owned.verify_plan_digest(plan)
 
+    def test_direct_feature_gated_target_is_owned_with_sealed_features(self) -> None:
+        plan = self.plan(
+            [owned.ChangeRecord("M", "crates/p/tests/gated.rs")]
+        )
+
+        self.assertEqual(plan["change_owned"], ["p::gated"])
+        self.assertEqual(plan["target_features"]["p::gated"], ["extra"])
+        disposition = plan["path_dispositions"][0]
+        self.assertEqual(
+            disposition["kind"],
+            "integration_target_directly_modified",
+        )
+        self.assertNotIn("required_features", disposition)
+        owned.verify_plan_digest(plan)
+
+    def test_direct_excluded_feature_gated_target_keeps_its_owner(self) -> None:
+        plan = self.plan(
+            [owned.ChangeRecord("M", "crates/p/tests/gated.rs")],
+            config=load_config(config_text(target_exclusion=("p", "gated"))),
+        )
+
+        self.assertEqual(plan["change_owned"], [])
+        self.assertEqual(plan["package_expansion"], [])
+        self.assertEqual(plan["selected_packages"], [])
+        self.assertEqual(
+            plan["path_dispositions"][0]["kind"],
+            "integration_target_excluded",
+        )
+        self.assertEqual(
+            plan["path_dispositions"][0]["owner"],
+            OWNER,
+        )
+        self.assertEqual(plan["target_features"]["p::gated"], ["extra"])
+        owned.verify_plan_digest(plan)
+
+    def test_plan_rejects_incomplete_or_malformed_target_features(self) -> None:
+        plan = self.plan(
+            [owned.ChangeRecord("M", "crates/p/tests/gated.rs")]
+        )
+        mutations = [
+            lambda value: value["target_features"].pop("p::gated"),
+            lambda value: value["target_features"].update(
+                {"p::gated": ["extra", "extra"]}
+            ),
+            lambda value: value["target_features"].update(
+                {"p::gated": ["../extra"]}
+            ),
+        ]
+
+        for mutate in mutations:
+            with self.subTest(mutate=mutate):
+                malformed = copy.deepcopy(plan)
+                mutate(malformed)
+                owned.attach_plan_digest(malformed)
+                with self.assertRaisesRegex(ValueError, "target_features"):
+                    owned.verify_plan_digest(malformed)
+
     def test_required_package_rule_promotes_complete_package_to_required(self) -> None:
         sources = fixture_sources() | {"crates/p/src/contract.rs": ""}
         plan = owned.make_plan(
@@ -1359,7 +1473,7 @@ class PlanningTests(unittest.TestCase):
         self.assertNotIn("required_packages", plan)
         self.assertEqual(
             plan["change_owned"],
-            ["p::default_gated", "p::smoke"],
+            ["p::default_gated", "p::gated", "p::smoke"],
         )
         self.assertEqual(plan["package_expansion"], [])
         self.assertEqual(plan["standing_coverage_reuse"], ["p::smoke"])
@@ -1405,7 +1519,7 @@ class PlanningTests(unittest.TestCase):
         self.assertEqual(plan["mode"], "targeted_rebase")
         self.assertEqual(
             plan["change_owned"],
-            ["p::default_gated", "p::smoke"],
+            ["p::default_gated", "p::gated", "p::smoke"],
         )
         self.assertEqual(plan["package_expansion"], [])
         self.assertEqual(plan["standing_coverage_reuse"], [])
@@ -1414,6 +1528,7 @@ class PlanningTests(unittest.TestCase):
             owned.change_owned_shard_plan(
                 [
                     owned.Identity("p", "default_gated"),
+                    owned.Identity("p", "gated"),
                     owned.Identity("p", "smoke"),
                 ],
                 duration_baseline(),
@@ -1443,7 +1558,7 @@ class PlanningTests(unittest.TestCase):
         self.assertEqual(plan["selected_packages"], ["p", "q"])
         self.assertEqual(
             plan["change_owned"],
-            ["p::default_gated", "p::smoke", "q::smoke"],
+            ["p::default_gated", "p::gated", "p::smoke", "q::smoke"],
         )
         owned.verify_plan_digest(plan)
 
@@ -1468,7 +1583,7 @@ class PlanningTests(unittest.TestCase):
         self.assertEqual(plan["selected_packages"], ["p"])
         self.assertEqual(
             plan["change_owned"],
-            ["p::default_gated", "p::smoke"],
+            ["p::default_gated", "p::gated", "p::smoke"],
         )
         owned.verify_plan_digest(plan)
 
@@ -2179,11 +2294,11 @@ class ShardingAndExecutionTests(unittest.TestCase):
             sorted(identity.canonical for identity in weights),
         )
 
-    def test_package_expansion_preserves_the_trusted_v3_plan_envelope(
+    def test_package_expansion_preserves_the_trusted_compatibility_envelope(
         self,
     ) -> None:
         plan = self._plan(lane="package-expansion")
-        self.assertEqual(plan["version"], 3)
+        self.assertEqual(plan["version"], owned.PLAN_VERSION)
         self.assertEqual(
             plan["shard_planning"]["package_expansion"],
             {"algorithm": "sha256-modulo-v1"},
@@ -2264,6 +2379,33 @@ class ShardingAndExecutionTests(unittest.TestCase):
         self.assertEqual(
             manual[manual.index("--run-ignored") + 1],
             "all",
+        )
+
+        gated = owned.target_command(
+            owned.Identity("p", "gated"),
+            config.test_exclusions,
+            list_only=True,
+            required_features=("extra",),
+        )
+        self.assertEqual(
+            gated[gated.index("--features") + 1],
+            "extra",
+        )
+
+    def test_group_command_activates_sorted_feature_union(self) -> None:
+        command = owned.target_group_command(
+            (
+                owned.Identity("p", "alpha"),
+                owned.Identity("p", "beta"),
+            ),
+            {},
+            list_only=False,
+            required_features=("zeta", "alpha", "zeta"),
+        )
+
+        self.assertEqual(
+            command[command.index("--features") + 1],
+            "alpha,zeta",
         )
 
     def test_expansion_groups_are_package_scoped_and_bounded(self) -> None:
@@ -2591,6 +2733,7 @@ class ShardingAndExecutionTests(unittest.TestCase):
             "target_dispositions": [],
             "selected_packages": ["p"],
             "eligible_targets": [identity.canonical],
+            "target_features": {identity.canonical: []},
             "change_owned": (
                 [identity.canonical] if lane_key == "change_owned" else []
             ),
@@ -3314,6 +3457,7 @@ class ReportTests(unittest.TestCase):
             "target_dispositions": [],
             "selected_packages": ["p", "q"],
             "eligible_targets": ["p::smoke", "q::smoke"],
+            "target_features": {"p::smoke": [], "q::smoke": []},
             "change_owned": ["p::smoke", "q::smoke"],
             "package_expansion": [],
             "standing_targets": ["p::smoke"],

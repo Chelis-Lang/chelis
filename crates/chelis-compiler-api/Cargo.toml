@@ -47,5 +47,20 @@ serde_json = "1"
 syn = { version = "2", features = ["full", "visit", "extra-traits"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 
+[[test]]
+name = "emission_observer"
+path = "tests/emission_observer.rs"
+required-features = ["emission-observer"]
+
+[[test]]
+name = "native_random_observer"
+path = "tests/native_random_observer.rs"
+required-features = ["native-random-observer"]
+
+[[test]]
+name = "compilation_trace"
+path = "tests/compilation_trace.rs"
+required-features = ["compilation-trace"]
+
 [lints]
 workspace = true

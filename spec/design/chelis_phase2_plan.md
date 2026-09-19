@@ -169,8 +169,9 @@ resumable computations - complexity that is hard for both humans and LLMs.
   tree, and downstream passes consume that upgraded representation
 - `dropout(x, rate)` is the minimum concrete `Random` source
 - `with seed(42) { ... }` handles `Random`
-- `with device("gpu:0") { ... }` marks a resource region validated against
-  `chelis build --target ...`
+- `with device("...") { ... }` marks a resource region validated against
+  `chelis build --target ...`; host C admits only exact `cpu` under
+  `spec/04-type-system.md` [04-EFF-2]
 - unhandled top-level `Random` is a check error with repair guidance
 - seeded `dropout` is implemented in lowering/eval/AD, but not yet in emitted C/HIP
   codegen
@@ -240,7 +241,9 @@ resumable computations - complexity that is hard for both humans and LLMs.
 - Deep metadata validation: `(effects {} random)` on `fn` metadata is accepted
 - seeded lowering/eval is deterministic for same seed and observably different for
   different seeds
-- build-target mismatch is reported for incompatible `with device(...)` regions
+- build-target mismatch is reported for incompatible `with device(...)` regions;
+  host C admits only exact `cpu`, and rejects every other selector before
+  artifact emission
 
 ### Acceptance Gate
 
@@ -250,7 +253,8 @@ Current shipped-subset oracle:
 cargo test -p chelis-effects
 cargo test -p chelis-types --test linearity
 cargo test -p chelis-cli --test cli check_reports_unhandled_random_effect
-cargo test -p chelis-cli --test cli build_rejects_gpu_device_region_for_c_target
+cargo test -p chelis-compiler-api --test resource_target_admission
+cargo test -p chelis-cli --test issue_735_device_fence
 ```
 
 Supporting manual gates for the local HIP-capable validation path:
