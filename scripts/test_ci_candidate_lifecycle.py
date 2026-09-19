@@ -549,12 +549,22 @@ class LifecycleInvocationTests(unittest.TestCase):
     def test_no_invocation_silences_its_pre_push_head_fetch(self) -> None:
         """Assert the property, not a list of the spellings that break it.
 
-        Matching `2>/dev/null` as a substring is evaded by a space, by
-        `2>&-`, or by moving the redirect somewhere else in the step, and
-        chasing each spelling adds witnesses rather than coverage. The
-        command is normalised first, then two rules decide it: no
-        redirection of stderr away from stderr, and a fallback that reports
-        rather than one that swallows.
+        Matching `2>/dev/null` as a substring is evaded by a space or by
+        `2>&-`, and chasing each spelling adds witnesses rather than
+        coverage. The command is normalised first, then two rules decide
+        it: no redirection of stderr away from stderr, and a fallback that
+        reports rather than one that swallows.
+
+        What is proved, exactly: those two rules hold **of the joined
+        command the fetch sits on**, plus the one step-wide spelling
+        `exec 2>`, which is rejected outright. A construct that wraps that
+        command or the step rather than appearing on it is outside this
+        scope and passes: a brace group or subshell around the fetch, an
+        `exec` redirect written another way, or a fallback continued onto a
+        following line. Those are not spellings a maintainer writes by
+        accident, so they are recorded here rather than chased; this
+        docstring exists so nobody reads the guard as proving more than it
+        does.
         """
 
         for workflow, body in self.all_steps().items():
