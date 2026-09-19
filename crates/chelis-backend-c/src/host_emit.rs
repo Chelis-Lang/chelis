@@ -2954,13 +2954,19 @@ struct HostEmitter<'a> {
 /// Whether the verified intrinsic application labelled `label` at this site
 /// takes its container operand by Move (chelis#2205).
 ///
-/// The operand position lives in `chelis_ir::ownership`'s
-/// `CONTAINER_CONSUMERS` table, which this crate cannot read, so the answer
-/// comes from the dispositions the verifier already recorded rather than
-/// from a restated position. The site of a builtin expression carries
-/// exactly one intrinsic application with that label; two would mean the
-/// emitter and the ownership sites disagree about the tree, so that fails
-/// closed.
+/// Every call site below hands `arg_vars[0]` to the consuming entry point,
+/// so this answers a question about operand zero specifically, and it
+/// refuses a move anywhere else rather than reporting it as a consumed
+/// container. `chelis_ir::ownership`'s `CONTAINER_CONSUMERS` table chooses
+/// which operand the scheduler upgrades and this crate cannot read it, so a
+/// row naming a different operand is a disagreement only the refusal can
+/// catch. Reporting "some operand moved" instead would route a
+/// still-borrowed operand into an entry point that releases it, which is a
+/// double release; ignoring the move entirely would merely leak. Neither is
+/// acceptable, and the disagreement is a compiler defect, so it fails
+/// closed. The site of a builtin expression carries exactly one intrinsic
+/// application with that label; two would mean the emitter and the
+/// ownership sites disagree about the tree, and that fails closed too.
 fn container_operand_is_moved(
     site: &ProjectedHostSite<'_>,
     label: &str,
@@ -2976,22 +2982,27 @@ fn container_operand_is_moved(
             && *site_label == label
         {
             // Lowering borrows every builtin operand and the scheduler
-            // upgrades at most the one operand its row names, so scanning for
-            // a moved operand answers the question without this emitter
-            // having to restate the table's operand position. Two moved
-            // operands mean the scheduler and this emitter disagree about the
-            // row, which fails closed rather than picking one.
-            let mut moved = args
+            // upgrades at most the one operand its row names. This emitter
+            // consumes operand zero, so exactly one moved operand at
+            // position zero is the consuming shape, no moved operand is the
+            // borrowing shape, and anything else is a disagreement between
+            // the table and this emitter that must not reach generated code.
+            let mut positions = args
                 .iter()
-                .filter(|arg| arg.use_() == VerifiedOwnershipUse::Move);
-            let first_moved = moved.next().is_some();
-            if moved.next().is_some() {
+                .enumerate()
+                .filter(|(_, arg)| arg.use_() == VerifiedOwnershipUse::Move)
+                .map(|(position, _)| position);
+            let moved = positions.next();
+            if positions.next().is_some() || matches!(moved, Some(position) if position != 0) {
                 return Err(invalid_abi_shape(
-                    format!("verified `{label}` application carries two moved operands"),
+                    format!(
+                        "verified `{label}` application moves an operand this emitter \
+                         does not consume; it consumes operand 0 only"
+                    ),
                     "verified C host ownership emission",
                 ));
             }
-            if found.replace(first_moved).is_some() {
+            if found.replace(moved.is_some()).is_some() {
                 return Err(invalid_abi_shape(
                     format!("verified builtin site carries two `{label}` applications"),
                     "verified C host ownership emission",

@@ -14,8 +14,9 @@ use chelis_runtime::{
     chelis_dict_insert_owned, chelis_dict_len, chelis_dict_merge, chelis_dict_merge_owned,
     chelis_dict_release, chelis_dict_remove, chelis_dict_remove_owned, chelis_dict_retain,
     chelis_list_empty, chelis_list_len, chelis_list_push, chelis_option_is_some,
-    chelis_option_release, chelis_option_unwrap, chelis_scalar_from_bits, chelis_value,
-    chelis_value_release, chelis_value_take_list, chelis_value_unbox_scalar, CHELIS_DTYPE_I64,
+    chelis_option_release, chelis_option_unwrap, chelis_scalar_from_bits, chelis_string_from_utf8,
+    chelis_value, chelis_value_release, chelis_value_take_list, chelis_value_take_string,
+    chelis_value_unbox_scalar, CHELIS_DTYPE_I64,
 };
 
 unsafe fn int_value(value: i64) -> chelis_value {
@@ -38,6 +39,10 @@ unsafe fn int_at(dict: *const chelis_dict, key: i64) -> Option<i64> {
     };
     chelis_option_release(option);
     found
+}
+
+unsafe fn text_value(text: &str) -> chelis_value {
+    chelis_value_take_string(chelis_string_from_utf8(text.as_ptr(), text.len() as i64))
 }
 
 /// A fresh single-entry dictionary. There is no `chelis_dict_empty`; the
@@ -342,5 +347,81 @@ fn owned_entries_agree_with_the_cloning_entries() {
         chelis_value_release(key);
         chelis_value_release(value);
         chelis_dict_release(rhs);
+    }
+}
+
+/// String keys and heap values, so the consuming entries actually execute
+/// their release paths on refcounted handles.
+///
+/// Every other fixture in this file uses `i64` keys and values, and
+/// releasing a scalar is a no-op, so those rows never run one line of the
+/// release work `chelis_dict_remove_owned` and `chelis_dict_insert_owned`
+/// owe. This one does: the removed key is a `chelis_string` and the removed
+/// value is a `chelis_list`, both with real strong counts.
+///
+/// What this covers and what it does not, stated because the distinction
+/// decided the shape of the test. Releasing one time too many, releasing the
+/// wrong handle, or reading a handle after releasing it all abort here,
+/// because `require_live_kind` rejects a handle at count zero and the
+/// dictionary's own entries are read after the removal. Releasing one time
+/// too few does not: a leaked strong count is invisible in-process without
+/// the allocation ledger, which is a compile-time feature this test binary
+/// does not enable. chelis#2242 tracks the omission half, which belongs in
+/// chelis#1286's ledger oracle rather than here, whose child universe is
+/// frozen and is not mine to edit.
+#[test]
+fn string_keyed_entries_survive_the_consuming_entries_release_paths() {
+    unsafe {
+        let key = text_value("alpha");
+        let other = text_value("beta");
+        let inner = chelis_list_empty();
+        chelis_list_push(inner, int_value(5));
+        let payload = chelis_value_take_list(inner);
+
+        let dict = chelis_dict_insert(std::ptr::null(), key, payload);
+        chelis_value_release(payload);
+        let dict = chelis_dict_insert_owned(dict, other, text_value("kept"));
+        assert_eq!(chelis_dict_len(dict), 2);
+
+        // Replacing a string-keyed entry releases the list it displaces and
+        // retains the string that replaces it.
+        let replaced = chelis_dict_insert_owned(dict, key, text_value("replacement"));
+        assert!(std::ptr::eq(replaced, dict));
+        assert_eq!(chelis_dict_len(replaced), 2);
+        assert!(chelis_dict_contains(replaced, key));
+        assert!(chelis_dict_contains(replaced, other));
+
+        // Removing it releases the string key and the string value. Reading
+        // the survivor afterwards is what turns an over-release into an
+        // abort rather than a silent pass.
+        let shrunk = chelis_dict_remove_owned(replaced, key);
+        assert!(std::ptr::eq(shrunk, replaced));
+        assert_eq!(chelis_dict_len(shrunk), 1);
+        assert!(!chelis_dict_contains(shrunk, key));
+        assert!(chelis_dict_contains(shrunk, other));
+        let survivor = chelis_dict_get(shrunk, other);
+        assert!(chelis_option_is_some(survivor));
+        let held = chelis_option_unwrap(survivor);
+        chelis_value_release(held);
+        chelis_option_release(survivor);
+
+        // A merge that displaces the survivor releases it and keeps the
+        // right-hand side's string, again read back afterwards.
+        let rhs_key = text_value("beta");
+        let rhs = chelis_dict_insert(std::ptr::null(), rhs_key, text_value("merged"));
+        let merged = chelis_dict_merge_owned(shrunk, rhs);
+        assert!(std::ptr::eq(merged, shrunk));
+        assert_eq!(chelis_dict_len(merged), 1);
+        let after = chelis_dict_get(merged, other);
+        assert!(chelis_option_is_some(after));
+        let value = chelis_option_unwrap(after);
+        chelis_value_release(value);
+        chelis_option_release(after);
+
+        chelis_value_release(key);
+        chelis_value_release(other);
+        chelis_value_release(rhs_key);
+        chelis_dict_release(rhs);
+        chelis_dict_release(merged);
     }
 }

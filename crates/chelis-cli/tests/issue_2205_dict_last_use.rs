@@ -174,6 +174,23 @@ def main() -> i64 = {\n\
   }\n\
 }\n";
 
+/// String keys and string values, so the compiled lane runs the consuming
+/// entries' release paths on refcounted handles rather than on scalars. The
+/// integer fixtures above never execute one line of that work.
+const STRING_KEYED: &str = "module Dc.Main\n\
+export (main)\n\
+def main() -> i64 = {\n\
+  d = dict_insert(dict_of([] : List[(string, string)]), \"alpha\", \"one\")\n\
+  held = Some(d)\n\
+  grown = dict_insert(d, \"beta\", \"two\")\n\
+  replaced = dict_insert(grown, \"alpha\", \"three\")\n\
+  shrunk = dict_remove(replaced, \"beta\")\n\
+  match held with {\n\
+    | Some(original) => add(mul(len(shrunk), cast(10, i64)), len(original))\n\
+  | None => cast(0, i64)\n\
+  }\n\
+}\n";
+
 /// A `dict_merge` whose right-hand side aliases the consumed left-hand side
 /// through a branch: two operand identities, one runtime dictionary. The
 /// owned entry point must clone, never abort.
@@ -276,6 +293,7 @@ fn dict_alias_controls_keep_their_values_on_both_lanes() {
         ("dict_branch_merge", BRANCH_MERGE, "main = 1"),
         ("dict_match_arm_merge", MATCH_ARM_MERGE, "main = 1"),
         ("dict_list_index_merge", LIST_INDEX_MERGE, "main = 1"),
+        ("dict_string_keyed", STRING_KEYED, "main = 11"),
     ] {
         let evaluated = eval_main(program);
         assert_eq!(evaluated, expected, "{name}: eval value");
