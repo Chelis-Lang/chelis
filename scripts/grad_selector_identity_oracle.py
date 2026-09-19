@@ -56,7 +56,7 @@ COMMANDS = (
         "--no-fail-fast",
     ),
     (
-        "executable provenance example",
+        "illustrative provenance example",
         "cargo",
         "nextest",
         "run",
@@ -66,6 +66,19 @@ COMMANDS = (
         "parity",
         "-E",
         "test(illustrative_grad_selector_provenance_checks_and_evaluates)",
+        "--no-fail-fast",
+    ),
+    (
+        "repository Surf retraction",
+        "cargo",
+        "nextest",
+        "run",
+        "-p",
+        "chelis-cli",
+        "--test",
+        "canonical_surf_roundtrip",
+        "-E",
+        "test(repository_surf_corpus_obeys_the_normalized_deep_retraction_law)",
         "--no-fail-fast",
     ),
 )

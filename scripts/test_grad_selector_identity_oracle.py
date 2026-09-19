@@ -26,7 +26,8 @@ class GradSelectorIdentityOracleTest(unittest.TestCase):
                 "surf selector identity",
                 "compiler preparation propagation",
                 "CLI selector diagnostics",
-                "executable provenance example",
+                "illustrative provenance example",
+                "repository Surf retraction",
             ],
         )
         self.assertIn("(0..wrt.len())", ORACLE.read_text())

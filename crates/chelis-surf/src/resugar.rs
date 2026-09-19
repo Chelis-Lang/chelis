@@ -395,14 +395,7 @@ fn deep_callable_params(expr: &DeepExpr) -> Option<Vec<String>> {
     if params.tag != DeepTag::Params {
         return None;
     }
-    params
-        .children
-        .iter()
-        .map(|param| match param {
-            DeepExpr::MetaExpr(meta, _) => atom_name(&meta.expr).map(str::to_string),
-            other => atom_name(other).map(str::to_string),
-        })
-        .collect()
+    params.children.iter().map(parameter_name).collect()
 }
 
 fn deep_callable_identity(expr: &DeepExpr) -> DeepCallableId {
