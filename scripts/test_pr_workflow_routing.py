@@ -157,11 +157,25 @@ def assert_never_cancels_in_progress(
     concurrency = scope.get("concurrency")
     if not isinstance(concurrency, dict):
         return
-    test.assertIs(
-        concurrency.get("cancel-in-progress", False),
-        False,
-        f"{label} cancels a run already in progress",
-    )
+    # The key is matched case-insensitively as normalisation, not as a defence
+    # against a known bypass: GitHub either rejects a workflow whose key it
+    # does not recognise, which is loud, or ignores it and falls back to
+    # false, which is harmless, so `Cancel-In-Progress: true` is a typo rather
+    # than an evasion. Folding the case here is the same principle that makes
+    # this guard reject a `${{ }}` expression in that field. A guard should
+    # answer its own question rather than depend on how something it cannot
+    # see is parsed.
+    declared = [
+        value
+        for key, value in concurrency.items()
+        if isinstance(key, str) and key.lower() == "cancel-in-progress"
+    ]
+    for value in declared or [False]:
+        test.assertIs(
+            value,
+            False,
+            f"{label} cancels a run already in progress",
+        )
 
 
 def assert_per_head_metadata_concurrency(
@@ -1071,13 +1085,18 @@ class PullRequestWorkflowRoutingTests(unittest.TestCase):
             ):
                 assertion(self, workflow)
 
-
     def test_a_metadata_check_may_not_cancel_its_own_head(self) -> None:
         for workflow_path, assertion in (
             (CHANGELOG, assert_changelog_workflow),
             (ACKNOWLEDGEMENTS, assert_acknowledgement_workflow),
         ):
-            for change in ("cancel", "group", "job-level", "quoted"):
+            for change in (
+                "cancel",
+                "group",
+                "job-level",
+                "quoted",
+                "mixed-case",
+            ):
                 workflow = copy.deepcopy(
                     yaml.safe_load(workflow_path.read_text())
                 )
@@ -1085,6 +1104,9 @@ class PullRequestWorkflowRoutingTests(unittest.TestCase):
                     workflow["concurrency"]["cancel-in-progress"] = True
                 elif change == "quoted":
                     workflow["concurrency"]["cancel-in-progress"] = "true"
+                elif change == "mixed-case":
+                    del workflow["concurrency"]["cancel-in-progress"]
+                    workflow["concurrency"]["Cancel-In-Progress"] = True
                 elif change == "job-level":
                     job = next(iter(workflow["jobs"].values()))
                     job["concurrency"] = {
