@@ -38,8 +38,11 @@ fn checked_library_round_trips_preserve_generic_and_primitive_function_values() 
                 format!("primitive_average(to_tensor({values}), 0i32)"),
             ] {
                 let source = format!("out: tensor[{dtype}] = {expression}\n");
-                let verdict =
-                    check_ir_with_context(env, &desugar_program(&parse_str(&source).unwrap()));
+                let verdict = check_ir_with_context(
+                    env,
+                    &desugar_program(&parse_str(&source).unwrap())
+                        .expect("Surf fixture must desugar"),
+                );
                 if accepts {
                     verdict.unwrap_or_else(|errors| panic!("{source}: {errors:?}"));
                 } else {
@@ -101,7 +104,10 @@ fn checked_library_round_trips_preserve_window_reduction_contracts() {
                 false,
             ),
         ] {
-            let verdict = check_ir_with_context(env, &desugar_program(&parse_str(source).unwrap()));
+            let verdict = check_ir_with_context(
+                env,
+                &desugar_program(&parse_str(source).unwrap()).expect("Surf fixture must desugar"),
+            );
             if accepted {
                 verdict.unwrap_or_else(|errors| panic!("{source}: {errors:?}"));
             } else {

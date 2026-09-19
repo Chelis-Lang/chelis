@@ -243,7 +243,14 @@ pub fn parse(request: ParseRequest) -> Result<ParseResult> {
 
 pub fn desugar(request: DesugarRequest) -> Result<DesugarResult> {
     let decls = parse_surf(&request.source)?;
-    let deep_exprs = chelis_surf::desugar::desugar_program(&decls);
+    let deep_exprs = chelis_surf::desugar::desugar_program(&decls).map_err(|error| {
+        stage_error_with_span(
+            "desugar",
+            error.to_string(),
+            GeneralKind::TypeMismatch,
+            deep_span_to_diagnostic(error.span()),
+        )
+    })?;
     Ok(DesugarResult {
         deep_text: chelis_deep::printer::print_canonical(&deep_exprs),
         deep_ast: deep_exprs
@@ -2806,7 +2813,12 @@ fn compile_rewritten_decls_in_context(
 ) -> Result<CompiledSource> {
     let _linked = chelis_types::install_linked_program_guard();
     bail_if_cancelled("desugar")?;
-    let prepared = crate::pipeline::prepare_surf_decls(rewritten, None).map_err(|error| {
+    let prepared = crate::pipeline::prepare_surf_decls_with_context(
+        rewritten,
+        context.checked_library().program().exprs(),
+        None,
+    )
+    .map_err(|error| {
         pipeline_rejection_to_compiler_error(crate::pipeline::PipelineRejection::Preparation(error))
     })?;
     bail_if_cancelled("check")?;
@@ -3468,6 +3480,17 @@ pub(crate) fn pipeline_rejection_to_compiler_error(
                 GeneralKind::SurfParseError,
                 Some(parse_error_span_surf(&source, &error)),
             )
+        }
+        PipelineRejection::Preparation(PreparationError::SurfDesugar(error)) => {
+            stage_error_with_span(
+                "desugar",
+                error.to_string(),
+                GeneralKind::TypeMismatch,
+                deep_span_to_diagnostic(error.span()),
+            )
+        }
+        PipelineRejection::Preparation(PreparationError::DeepSelector(error)) => {
+            stage_error("validate", error.to_string(), GeneralKind::TypeMismatch)
         }
         PipelineRejection::Preparation(PreparationError::DeepParse(error)) => {
             deep_ingress_error("parse", &error)
@@ -7336,9 +7359,9 @@ mod tests {
              }\n",
         )
         .unwrap();
-        let checked =
-            chelis_types::check_ir_program(&chelis_surf::desugar::desugar_program(&declarations))
-                .unwrap();
+        let deep = chelis_surf::desugar::desugar_program(&declarations)
+            .expect("Surf fixture must desugar");
+        let checked = chelis_types::check_ir_program(&deep).unwrap();
         let dag = chelis_ir::host::lower_named_tensor_entry_dag(&checked, "f").unwrap();
         let projected = wire_dag(&dag).unwrap();
         let json = serde_json::to_value(&projected).unwrap();
@@ -7367,9 +7390,9 @@ mod tests {
              } else x\n",
         )
         .unwrap();
-        let checked =
-            chelis_types::check_ir_program(&chelis_surf::desugar::desugar_program(&declarations))
-                .unwrap();
+        let deep = chelis_surf::desugar::desugar_program(&declarations)
+            .expect("Surf fixture must desugar");
+        let checked = chelis_types::check_ir_program(&deep).unwrap();
         let dag = chelis_ir::host::lower_named_tensor_entry_dag(&checked, "f").unwrap();
         let projected = wire_dag(&dag).unwrap();
         let claim = projected

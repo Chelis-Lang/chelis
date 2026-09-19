@@ -34,13 +34,16 @@ use super::{PropertyOutcome, PropertyRunOptions, PropertyStatus, PropertyTier};
 
 /// Does this property have at least one binder whose type is an
 /// invariant-carrying opaque type? If so, the injection path owns it.
-pub(super) fn property_has_opaque_invariant_binder(decls: &[Decl], params: &[Param]) -> bool {
-    let exprs = chelis_surf::desugar::desugar_program(decls);
+pub(super) fn property_has_opaque_invariant_binder(
+    decls: &[Decl],
+    params: &[Param],
+) -> Result<bool, String> {
+    let exprs = chelis_surf::desugar::desugar_program(decls).map_err(|error| error.to_string())?;
     let invariants = crate::opaque::collect_opaque_invariants(&exprs);
-    params.iter().any(|p| {
+    Ok(params.iter().any(|p| {
         matches!(&p.ty, Some(TypeExpr::Named(name, _))
             if invariants.iter().any(|inv| &inv.type_name == name))
-    })
+    }))
 }
 
 /// Run a user property that has an invariant-carrying opaque binder
@@ -56,7 +59,20 @@ pub(super) fn prove_with_injection(
     let seed = options.injection_seed();
     let samples_needed = options.samples;
 
-    let exprs = chelis_surf::desugar::desugar_program(decls);
+    let exprs = match chelis_surf::desugar::desugar_program(decls) {
+        Ok(exprs) => exprs,
+        Err(error) => {
+            return outcome(
+                property_name,
+                PropertyStatus::Error,
+                0,
+                seed,
+                None,
+                Some(format!("injection desugar failed: {error}")),
+                Vec::new(),
+            );
+        }
+    };
     let invariants = crate::opaque::collect_opaque_invariants(&exprs);
     let consts = resolve_constants(&exprs, &invariants);
     let module_source = chelis_deep::printer::print_canonical(&exprs);
@@ -84,11 +100,45 @@ pub(super) fn prove_with_injection(
     }
 
     // The desugared property body + preconditions (Deep).
-    let body_deep = chelis_surf::desugar::desugar_expr_only(body);
-    let pre_deep: Vec<Expr> = preconditions
+    let bound_names = params
         .iter()
-        .map(chelis_surf::desugar::desugar_expr_only)
-        .collect();
+        .map(|parameter| parameter.name.clone())
+        .collect::<Vec<_>>();
+    let body_deep =
+        match chelis_surf::desugar::desugar_expr_in_program_scope(decls, body, &bound_names) {
+            Ok(body) => body,
+            Err(error) => {
+                return outcome(
+                    property_name,
+                    PropertyStatus::Error,
+                    0,
+                    seed,
+                    None,
+                    Some(format!("property body desugar failed: {error}")),
+                    Vec::new(),
+                );
+            }
+        };
+    let pre_deep: Vec<Expr> = match preconditions
+        .iter()
+        .map(|precondition| {
+            chelis_surf::desugar::desugar_expr_in_program_scope(decls, precondition, &bound_names)
+        })
+        .collect::<Result<_, _>>()
+    {
+        Ok(preconditions) => preconditions,
+        Err(error) => {
+            return outcome(
+                property_name,
+                PropertyStatus::Error,
+                0,
+                seed,
+                None,
+                Some(format!("property precondition desugar failed: {error}")),
+                Vec::new(),
+            );
+        }
+    };
 
     let mut rng = crate::opaque::GenRng::new(seed);
     let mut accepted = 0usize;

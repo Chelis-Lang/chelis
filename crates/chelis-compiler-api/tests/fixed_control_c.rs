@@ -46,8 +46,10 @@ fn checked_body_plan(
     context: &RandomExecutionContext,
 ) -> EvaluationPlan {
     let parsed = chelis_surf::parser::parse_str(source).unwrap();
-    let checked =
-        chelis_types::check_ir_program(&chelis_surf::desugar::desugar_program(&parsed)).unwrap();
+    let checked = chelis_types::check_ir_program(
+        &chelis_surf::desugar::desugar_program(&parsed).expect("Surf fixture must desugar"),
+    )
+    .unwrap();
     // The ordinary host selector cuts at lexical handlers. This test lowers
     // the checked body itself; it does not claim full host/API transport.
     fn children(expr: &chelis_deep::Expr) -> &[chelis_deep::Expr] {

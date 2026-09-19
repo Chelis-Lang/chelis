@@ -20,7 +20,7 @@ use chelis_types::{
 
 fn parse_then_desugar(src: &str) -> Vec<Expr> {
     let decls = parse_surf(src).expect("surf parse");
-    desugar_program(&decls)
+    desugar_program(&decls).expect("Surf fixture must desugar")
 }
 
 /// Build (library_typeenv, library_checked_with_effects) from library Surf source.

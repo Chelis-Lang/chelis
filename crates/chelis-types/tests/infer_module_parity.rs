@@ -28,7 +28,7 @@ use chelis_types::{CheckedProgram, InferResult, check_ir_program};
 fn surf_to_deep(source: &str, label: &str) -> Vec<Expr> {
     let decls = parse_surf(source).unwrap_or_else(|e| panic!("{label}: surf parse failed: {e:?}"));
     chelis_macros::expand_program(
-        &desugar_program(&decls),
+        &desugar_program(&decls).expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .unwrap_or_else(|e| panic!("{label}: macro expansion failed: {e:?}"))

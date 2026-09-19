@@ -19,6 +19,8 @@ use chelis_deep::annotations::{
 };
 use chelis_deep::ast as deep;
 use chelis_vocab::EffectKind;
+use std::collections::BTreeMap;
+use thiserror::Error;
 
 use crate::ast::*;
 pub(crate) use crate::dtype_name::{
@@ -29,12 +31,59 @@ pub(crate) use crate::dtype_name::{
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Desugar parser-validated declarations. Programmatic callers must satisfy
-/// the same declaration contracts; invalid input cannot construct a Deep Node.
-pub fn desugar_program(decls: &[Decl]) -> Vec<deep::Expr> {
-    crate::parser::validate_bound_ownership(decls)
-        .expect("desugar_program requires valid signature/bound ownership");
-    let ctx = DesugarCtx::new(decls);
+/// A Surf program that cannot be translated to semantically faithful Deep.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum DesugarError {
+    #[error("invalid Surf declaration ownership: {message}")]
+    InvalidDeclarationOwnership { message: String },
+    #[error(
+        "unknown `grad` parameter `{parameter}` for callable `{callable}`; available parameters: {available:?}"
+    )]
+    UnknownGradParameter {
+        callable: String,
+        parameter: String,
+        available: Vec<String>,
+        span: Span,
+    },
+    #[error(
+        "cannot resolve the parameter identity of `grad` target `{target}`; use a direct declaration, inline lambda, or immutable alias"
+    )]
+    UnresolvedGradTarget { target: String, span: Span },
+    #[error("`grad` target `{target}` is not callable")]
+    NonCallableGradTarget { target: String, span: Span },
+}
+
+impl DesugarError {
+    pub fn span(&self) -> Option<Span> {
+        match self {
+            Self::InvalidDeclarationOwnership { .. } => None,
+            Self::UnknownGradParameter { span, .. }
+            | Self::UnresolvedGradTarget { span, .. }
+            | Self::NonCallableGradTarget { span, .. } => Some(*span),
+        }
+    }
+}
+
+/// Desugar parser-validated declarations. Programmatic callers receive the
+/// same typed failure as source callers; Deep is never constructed with a
+/// guessed selector index.
+pub fn desugar_program(decls: &[Decl]) -> Result<Vec<deep::Expr>, DesugarError> {
+    desugar_program_with_context(decls, &[])
+}
+
+/// Desugar declarations with callable origins supplied by an already checked
+/// linked library context.
+pub fn desugar_program_with_context(
+    decls: &[Decl],
+    context: &[deep::Expr],
+) -> Result<Vec<deep::Expr>, DesugarError> {
+    crate::parser::validate_bound_ownership(decls).map_err(|error| {
+        DesugarError::InvalidDeclarationOwnership {
+            message: error.to_string(),
+        }
+    })?;
+    let resolved_grad_indices = GradSelectorResolver::resolve_program_with_context(decls, context)?;
+    let ctx = DesugarCtx::new(decls, resolved_grad_indices);
     let exprs: Vec<deep::Expr> = decls
         .iter()
         .flat_map(|decl| ctx.desugar_decl(decl))
@@ -44,15 +93,42 @@ pub fn desugar_program(decls: &[Decl]) -> Vec<deep::Expr> {
     // at the output boundary so downstream consumers work unchanged during
     // the transition period (#908). Once all consumers handle Node
     // directly, remove this normalization.
-    normalize_to_lists(&exprs)
+    Ok(normalize_to_lists(&exprs))
 }
 
-pub fn desugar_decl_only(decl: &Decl) -> Vec<deep::Expr> {
-    normalize_to_lists(&DesugarCtx::default().desugar_decl(decl))
+pub fn desugar_decl_only(decl: &Decl) -> Result<Vec<deep::Expr>, DesugarError> {
+    desugar_program(std::slice::from_ref(decl))
 }
 
-pub fn desugar_expr_only(expr: &Expr) -> deep::Expr {
-    normalize_single(&DesugarCtx::default().desugar_expr(expr))
+pub fn desugar_expr_only(expr: &Expr) -> Result<deep::Expr, DesugarError> {
+    let resolved_grad_indices = GradSelectorResolver::resolve_expression(expr)?;
+    Ok(normalize_single(
+        &DesugarCtx::with_resolved_grad_indices(resolved_grad_indices).desugar_expr(expr),
+    ))
+}
+
+/// Desugar an expression using the declarations that establish its callable
+/// aliases and formal-parameter identities.
+pub fn desugar_expr_in_program(decls: &[Decl], expr: &Expr) -> Result<deep::Expr, DesugarError> {
+    desugar_expr_in_program_scope(decls, expr, &[])
+}
+
+/// Desugar an expression using its program and lexical binder context.
+pub fn desugar_expr_in_program_scope(
+    decls: &[Decl],
+    expr: &Expr,
+    bound_names: &[String],
+) -> Result<deep::Expr, DesugarError> {
+    crate::parser::validate_bound_ownership(decls).map_err(|error| {
+        DesugarError::InvalidDeclarationOwnership {
+            message: error.to_string(),
+        }
+    })?;
+    let resolved_grad_indices =
+        GradSelectorResolver::resolve_expression_in_program(decls, expr, bound_names)?;
+    Ok(normalize_single(
+        &DesugarCtx::new(decls, resolved_grad_indices).desugar_expr_with_scope(expr, bound_names),
+    ))
 }
 
 fn normalize_to_lists(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
@@ -114,7 +190,7 @@ fn normalize_single(expr: &deep::Expr) -> deep::Expr {
 
 #[derive(Default)]
 struct DesugarCtx {
-    top_level_fn_params: UnordMap<String, Vec<String>>,
+    resolved_grad_indices: Vec<(usize, Vec<i64>)>,
     /// Per-function tensor element types declared in the function's
     /// signature, indexed by parameter position. `None` for non-tensor
     /// parameters or parameters with no declared type.
@@ -195,15 +271,13 @@ impl DesugarCtx {
         desugar_type_with_scope_mode(ty, &UnordSet::new(), &tvar_set, true)
     }
 
-    fn new(decls: &[Decl]) -> Self {
-        let mut top_level_fn_params = UnordMap::new();
+    fn new(decls: &[Decl], resolved_grad_indices: Vec<(usize, Vec<i64>)>) -> Self {
         let mut top_level_fn_tensor_param_prec = UnordMap::new();
         let mut explicit_sig_names = UnordSet::new();
         let mut def_effects = UnordMap::new();
         let mut declared_type_binders = UnordMap::new();
         for decl in decls {
             for_each_decl(decl, &mut |d| {
-                collect_top_level_fn_params(d, &mut top_level_fn_params);
                 collect_top_level_fn_tensor_param_prec(d, &mut top_level_fn_tensor_param_prec);
                 collect_explicit_sig_names(d, &mut explicit_sig_names);
                 collect_def_effects(d, &mut def_effects);
@@ -211,7 +285,7 @@ impl DesugarCtx {
             });
         }
         Self {
-            top_level_fn_params,
+            resolved_grad_indices,
             top_level_fn_tensor_param_prec,
             explicit_sig_names,
             def_effects,
@@ -220,16 +294,932 @@ impl DesugarCtx {
             current_type_binders: std::cell::RefCell::new(UnordMap::new()),
         }
     }
+
+    fn with_resolved_grad_indices(resolved_grad_indices: Vec<(usize, Vec<i64>)>) -> Self {
+        Self {
+            resolved_grad_indices,
+            ..Self::default()
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum CallableOrigin {
+    Known {
+        identity: LexicalCallableId,
+        display_name: String,
+        params: Vec<String>,
+    },
+    Unknown,
+    NonCallable,
+    Tuple(Vec<CallableOrigin>),
+    Constructor {
+        name: String,
+        payloads: Vec<CallableOrigin>,
+    },
+    Record {
+        name: String,
+        fields: BTreeMap<String, CallableOrigin>,
+    },
+}
+
+impl CallableOrigin {
+    fn alternate(&self, other: &Self) -> Self {
+        match (self, other) {
+            (
+                Self::Known {
+                    identity: left_identity,
+                    params: left_params,
+                    ..
+                },
+                Self::Known {
+                    identity: right_identity,
+                    params: right_params,
+                    ..
+                },
+            ) if left_identity == right_identity && left_params == right_params => self.clone(),
+            (Self::Tuple(left), Self::Tuple(right)) if left.len() == right.len() => Self::Tuple(
+                left.iter()
+                    .zip(right)
+                    .map(|(left, right)| left.alternate(right))
+                    .collect(),
+            ),
+            (
+                Self::Constructor {
+                    name: left_name,
+                    payloads: left,
+                },
+                Self::Constructor {
+                    name: right_name,
+                    payloads: right,
+                },
+            ) if left_name == right_name && left.len() == right.len() => Self::Constructor {
+                name: left_name.clone(),
+                payloads: left
+                    .iter()
+                    .zip(right)
+                    .map(|(left, right)| left.alternate(right))
+                    .collect(),
+            },
+            (
+                Self::Record {
+                    name: left_name,
+                    fields: left,
+                },
+                Self::Record {
+                    name: right_name,
+                    fields: right,
+                },
+            ) if left_name == right_name && left.keys().eq(right.keys()) => Self::Record {
+                name: left_name.clone(),
+                fields: left
+                    .iter()
+                    .map(|(field, left)| {
+                        (
+                            field.clone(),
+                            left.alternate(
+                                right
+                                    .get(field)
+                                    .expect("equal record key sets contain every left key"),
+                            ),
+                        )
+                    })
+                    .collect(),
+            },
+            (Self::NonCallable, Self::NonCallable) => Self::NonCallable,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+/// Resolver-local identity allocated in deterministic lexical traversal order.
+///
+/// Aliases copy this identity. Distinct declaration or lambda sites receive
+/// distinct identities even when their display labels and formal names match.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LexicalCallableId(u64);
+
+#[derive(Clone, Default)]
+struct CallableScope {
+    values: UnordMap<String, CallableOrigin>,
+}
+
+impl CallableScope {
+    fn lookup(&self, name: &str) -> CallableOrigin {
+        self.values
+            .get(name)
+            .cloned()
+            .unwrap_or(CallableOrigin::Unknown)
+    }
+
+    fn bind(&mut self, name: String, value: CallableOrigin) {
+        self.values.insert(name, value);
+    }
+}
+
+#[derive(Default)]
+struct GradSelectorResolver {
+    globals: CallableScope,
+    resolved: Vec<(usize, Vec<i64>)>,
+    next_callable_identity: u64,
+    deep_callable_identities: UnordMap<usize, LexicalCallableId>,
+}
+
+impl GradSelectorResolver {
+    fn fresh_callable_identity(&mut self) -> LexicalCallableId {
+        let identity = LexicalCallableId(self.next_callable_identity);
+        self.next_callable_identity += 1;
+        identity
+    }
+
+    fn resolve_program_with_context(
+        decls: &[Decl],
+        context: &[deep::Expr],
+    ) -> Result<Vec<(usize, Vec<i64>)>, DesugarError> {
+        let mut resolver = Self::default();
+        resolver.preseed_deep_function_origins(context);
+        resolver.seed_deep_origins(context);
+        for decl in decls {
+            resolver.seed_function_origins(decl);
+        }
+        for decl in decls {
+            resolver.visit_decl(decl)?;
+        }
+        Ok(resolver.resolved)
+    }
+
+    fn preseed_deep_function_origins(&mut self, exprs: &[deep::Expr]) {
+        for expr in exprs {
+            let deep::ExprCarrier::DecodedNode(tag, _, children) = expr.carrier() else {
+                continue;
+            };
+            match tag {
+                DeepTag::Module => self.preseed_deep_function_origins(&children[1..]),
+                DeepTag::Def if children.len() == 2 => {
+                    let Some(name) = deep_symbol_name(&children[0]) else {
+                        continue;
+                    };
+                    let Some(params) = deep_function_parameters(&children[1]) else {
+                        continue;
+                    };
+                    let identity = self.deep_callable_identity(&children[1]);
+                    self.globals.bind(
+                        name.to_string(),
+                        CallableOrigin::Known {
+                            identity,
+                            display_name: name.to_string(),
+                            params,
+                        },
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn deep_callable_identity(&mut self, expr: &deep::Expr) -> LexicalCallableId {
+        let expr = strip_deep_metadata(expr);
+        let key = expr as *const deep::Expr as usize;
+        if let Some(identity) = self.deep_callable_identities.get(&key) {
+            return *identity;
+        }
+        let identity = self.fresh_callable_identity();
+        self.deep_callable_identities.insert(key, identity);
+        identity
+    }
+
+    fn seed_deep_origins(&mut self, exprs: &[deep::Expr]) {
+        for expr in exprs {
+            let deep::ExprCarrier::DecodedNode(tag, _, children) = expr.carrier() else {
+                continue;
+            };
+            match tag {
+                DeepTag::Module => self.seed_deep_origins(&children[1..]),
+                DeepTag::Def if children.len() == 2 => {
+                    let Some(name) = deep_symbol_name(&children[0]) else {
+                        continue;
+                    };
+                    let scope = self.globals.clone();
+                    let value = self.deep_callable_origin(&children[1], &scope, name);
+                    self.globals.bind(name.to_string(), value);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn resolve_expression(expr: &Expr) -> Result<Vec<(usize, Vec<i64>)>, DesugarError> {
+        let mut resolver = Self::default();
+        resolver.visit_expr(expr, &CallableScope::default())?;
+        Ok(resolver.resolved)
+    }
+
+    fn resolve_expression_in_program(
+        decls: &[Decl],
+        expr: &Expr,
+        bound_names: &[String],
+    ) -> Result<Vec<(usize, Vec<i64>)>, DesugarError> {
+        let mut resolver = Self::default();
+        for decl in decls {
+            resolver.seed_function_origins(decl);
+        }
+        for decl in decls {
+            resolver.visit_decl(decl)?;
+        }
+        let mut scope = resolver.globals.clone();
+        for name in bound_names {
+            scope.bind(name.clone(), CallableOrigin::Unknown);
+        }
+        resolver.visit_expr(expr, &scope)?;
+        Ok(resolver.resolved)
+    }
+
+    fn seed_function_origins(&mut self, decl: &Decl) {
+        match decl {
+            Decl::Module { decls, .. } => {
+                for decl in decls {
+                    self.seed_function_origins(decl);
+                }
+            }
+            Decl::FunDef { name, params, .. } | Decl::Property { name, params, .. } => {
+                let identity = self.fresh_callable_identity();
+                self.globals.bind(
+                    name.clone(),
+                    CallableOrigin::Known {
+                        identity,
+                        display_name: name.clone(),
+                        params: params.iter().map(|param| param.name.clone()).collect(),
+                    },
+                );
+            }
+            _ => {}
+        }
+    }
+
+    fn visit_decl(&mut self, decl: &Decl) -> Result<(), DesugarError> {
+        match decl {
+            Decl::Module { decls, .. } => {
+                for decl in decls {
+                    self.visit_decl(decl)?;
+                }
+            }
+            Decl::FunDef {
+                name, params, body, ..
+            }
+            | Decl::Property {
+                name, params, body, ..
+            } => {
+                let callable = self.globals.lookup(name);
+                let mut scope = self.globals.clone();
+                for param in params {
+                    scope.bind(param.name.clone(), CallableOrigin::Unknown);
+                }
+                if let Decl::Property {
+                    preconditions,
+                    options,
+                    ..
+                } = decl
+                {
+                    for precondition in preconditions {
+                        self.visit_expr(precondition, &scope)?;
+                    }
+                    for option in options {
+                        match option {
+                            PropertyOption::Tolerance(value, _)
+                            | PropertyOption::Seed(value, _)
+                            | PropertyOption::Samples(value, _) => {
+                                self.visit_expr(value, &scope)?;
+                            }
+                            PropertyOption::Contract(..) => {}
+                        }
+                    }
+                }
+                self.visit_expr(body, &scope)?;
+                self.globals.bind(name.clone(), callable);
+            }
+            Decl::LetDef { name, value, .. } => {
+                let scope = self.globals.clone();
+                let value = self.visit_expr(value, &scope)?;
+                self.globals.bind(name.clone(), value);
+            }
+            Decl::MacroDef {
+                params, body, name, ..
+            } => {
+                let mut scope = self.globals.clone();
+                for param in params {
+                    scope.bind(param.clone(), CallableOrigin::Unknown);
+                }
+                let value = self.visit_expr(body, &scope)?;
+                self.globals.bind(name.clone(), value);
+            }
+            Decl::TypeDef {
+                invariant: Some(invariant),
+                ..
+            } => {
+                let mut scope = self.globals.clone();
+                scope.bind(invariant.binder.clone(), CallableOrigin::Unknown);
+                self.visit_expr(&invariant.body, &scope)?;
+            }
+            Decl::Import { .. }
+            | Decl::Sig { .. }
+            | Decl::Dim { .. }
+            | Decl::TypeDef {
+                invariant: None, ..
+            }
+            | Decl::TypeAlias { .. }
+            | Decl::Export { .. } => {}
+        }
+        Ok(())
+    }
+
+    fn visit_expr(
+        &mut self,
+        expr: &Expr,
+        scope: &CallableScope,
+    ) -> Result<CallableOrigin, DesugarError> {
+        let ordinary = match expr {
+            Expr::Lit(..) | Expr::Constructor(..) => CallableOrigin::NonCallable,
+            Expr::Var(name, _) => scope.lookup(name),
+            Expr::Apply(function, arguments, _) => {
+                self.visit_expr(function, scope)?;
+                let payloads = arguments
+                    .iter()
+                    .map(|argument| self.visit_expr(argument, scope))
+                    .collect::<Result<Vec<_>, _>>()?;
+                match function.as_ref() {
+                    Expr::Constructor(name, _) => CallableOrigin::Constructor {
+                        name: name.clone(),
+                        payloads,
+                    },
+                    _ => CallableOrigin::Unknown,
+                }
+            }
+            Expr::List(items, _)
+            | Expr::Par(items, _)
+            | Expr::Do(items, _)
+            | Expr::Tuple(items, _) => {
+                let values = items
+                    .iter()
+                    .map(|item| self.visit_expr(item, scope))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if matches!(expr, Expr::Tuple(..)) {
+                    CallableOrigin::Tuple(values)
+                } else if matches!(expr, Expr::Do(..)) {
+                    values
+                        .last()
+                        .cloned()
+                        .unwrap_or(CallableOrigin::NonCallable)
+                } else {
+                    CallableOrigin::NonCallable
+                }
+            }
+            Expr::Record(name, fields, _) => CallableOrigin::Record {
+                name: name.clone(),
+                fields: fields
+                    .iter()
+                    .map(|(field, value)| {
+                        self.visit_expr(value, scope)
+                            .map(|origin| (field.clone(), origin))
+                    })
+                    .collect::<Result<_, _>>()?,
+            },
+            Expr::RecordUpdate(base, fields, _) => {
+                self.visit_expr(base, scope)?;
+                for (_, value) in fields {
+                    self.visit_expr(value, scope)?;
+                }
+                CallableOrigin::NonCallable
+            }
+            Expr::Access(target, _, _) => {
+                self.visit_expr(target, scope)?;
+                CallableOrigin::Unknown
+            }
+            Expr::TupleGet(target, index, _) => {
+                let target = self.visit_expr(target, scope)?;
+                match target {
+                    CallableOrigin::Tuple(values) => usize::try_from(*index)
+                        .ok()
+                        .and_then(|index| values.get(index).cloned())
+                        .unwrap_or(CallableOrigin::Unknown),
+                    _ => CallableOrigin::Unknown,
+                }
+            }
+            Expr::Binary(_, left, right, _) => {
+                self.visit_expr(left, scope)?;
+                self.visit_expr(right, scope)?;
+                CallableOrigin::NonCallable
+            }
+            Expr::Unary(_, operand, _) => {
+                self.visit_expr(operand, scope)?;
+                CallableOrigin::NonCallable
+            }
+            Expr::Pipe(head, stages, _) => {
+                self.visit_expr(head, scope)?;
+                for stage in stages {
+                    self.visit_expr(stage, scope)?;
+                }
+                CallableOrigin::Unknown
+            }
+            Expr::If(condition, consequence, alternative, _) => {
+                self.visit_expr(condition, scope)?;
+                let consequence = self.visit_expr(consequence, scope)?;
+                let alternative = self.visit_expr(alternative, scope)?;
+                consequence.alternate(&alternative)
+            }
+            Expr::Match(scrutinee, arms, _) => {
+                let scrutinee = self.visit_expr(scrutinee, scope)?;
+                let mut result: Option<CallableOrigin> = None;
+                for arm in arms {
+                    let mut arm_scope = scope.clone();
+                    bind_match_pattern(&arm.pattern, &scrutinee, &mut arm_scope);
+                    if let Some(guard) = &arm.guard {
+                        self.visit_expr(guard, &arm_scope)?;
+                    }
+                    let arm_value = self.visit_expr(&arm.body, &arm_scope)?;
+                    result = Some(
+                        result
+                            .map_or_else(|| arm_value.clone(), |prior| prior.alternate(&arm_value)),
+                    );
+                }
+                result.unwrap_or(CallableOrigin::Unknown)
+            }
+            Expr::Lambda(params, body, _) => {
+                let identity = self.fresh_callable_identity();
+                let names = params
+                    .iter()
+                    .map(|param| param.name.clone())
+                    .collect::<Vec<_>>();
+                let mut body_scope = scope.clone();
+                for name in &names {
+                    body_scope.bind(name.clone(), CallableOrigin::Unknown);
+                }
+                self.visit_expr(body, &body_scope)?;
+                CallableOrigin::Known {
+                    identity,
+                    display_name: "<inline lambda>".to_string(),
+                    params: names,
+                }
+            }
+            Expr::Cast(value, _, _, _) => {
+                self.visit_expr(value, scope)?;
+                CallableOrigin::NonCallable
+            }
+            Expr::Grad(function, wrt, span) => {
+                let target = self.visit_expr(function, scope)?;
+                if let Some(wrt) = wrt {
+                    let indices = resolve_selector_indices(function, &target, wrt, *span)?;
+                    self.resolved
+                        .push((function.as_ref() as *const Expr as usize, indices));
+                }
+                CallableOrigin::Unknown
+            }
+            Expr::Vmap(function, _, _)
+            | Expr::Jit(function, _)
+            | Expr::Realize(function, _)
+            | Expr::Copy(function, _)
+            | Expr::Borrow(function, _)
+            | Expr::Quote(function, _)
+            | Expr::Unquote(function, _)
+            | Expr::Splice(function, _) => {
+                self.visit_expr(function, scope)?;
+                CallableOrigin::Unknown
+            }
+            Expr::WithSeed(argument, body, _) | Expr::WithDevice(argument, body, _) => {
+                self.visit_expr(argument, scope)?;
+                self.visit_expr(body, scope)?
+            }
+            Expr::Annotate(value, _, _) => self.visit_expr(value, scope)?,
+            Expr::Block(bindings, body, _) => {
+                let mut block_scope = scope.clone();
+                for binding in bindings {
+                    let value = self.visit_expr(&binding.value, &block_scope)?;
+                    bind_let_pattern(&binding.pattern, &value, &mut block_scope);
+                }
+                self.visit_expr(body, &block_scope)?
+            }
+        };
+        Ok(ordinary)
+    }
+
+    fn deep_callable_origin(
+        &mut self,
+        expr: &deep::Expr,
+        scope: &CallableScope,
+        lexical_name: &str,
+    ) -> CallableOrigin {
+        let expr = strip_deep_metadata(expr);
+        let deep::ExprCarrier::DecodedNode(tag, _, children) = expr.carrier() else {
+            return CallableOrigin::Unknown;
+        };
+        match tag {
+            DeepTag::Var => children
+                .first()
+                .and_then(deep_symbol_name)
+                .map_or(CallableOrigin::Unknown, |name| scope.lookup(name)),
+            DeepTag::Fn => {
+                let Some(deep::ExprCarrier::DecodedNode(DeepTag::Params, _, params)) =
+                    children.first().map(deep::Expr::carrier)
+                else {
+                    return CallableOrigin::Unknown;
+                };
+                let Some(params) = params.iter().map(deep_parameter_name).collect() else {
+                    return CallableOrigin::Unknown;
+                };
+                CallableOrigin::Known {
+                    identity: self.deep_callable_identity(expr),
+                    display_name: lexical_name.to_string(),
+                    params,
+                }
+            }
+            DeepTag::If if children.len() == 3 => {
+                let consequence = self.deep_callable_origin(&children[1], scope, lexical_name);
+                let alternative = self.deep_callable_origin(&children[2], scope, lexical_name);
+                consequence.alternate(&alternative)
+            }
+            DeepTag::Match if children.len() >= 2 => {
+                let scrutinee = self.deep_callable_origin(&children[0], scope, lexical_name);
+                let mut result = None;
+                for arm in &children[1..] {
+                    let deep::ExprCarrier::DecodedNode(DeepTag::Arm, _, arm_children) =
+                        arm.carrier()
+                    else {
+                        return CallableOrigin::Unknown;
+                    };
+                    if arm_children.len() != 3 {
+                        return CallableOrigin::Unknown;
+                    }
+                    let mut arm_scope = scope.clone();
+                    bind_deep_match_pattern(&arm_children[0], &scrutinee, &mut arm_scope);
+                    let arm_origin =
+                        self.deep_callable_origin(&arm_children[2], &arm_scope, lexical_name);
+                    result = Some(result.map_or_else(
+                        || arm_origin.clone(),
+                        |prior: CallableOrigin| prior.alternate(&arm_origin),
+                    ));
+                }
+                result.unwrap_or(CallableOrigin::Unknown)
+            }
+            DeepTag::Tuple => CallableOrigin::Tuple(
+                children
+                    .iter()
+                    .map(|child| self.deep_callable_origin(child, scope, lexical_name))
+                    .collect(),
+            ),
+            DeepTag::App
+                if children
+                    .first()
+                    .and_then(deep_variable_name)
+                    .is_some_and(is_constructor_name) =>
+            {
+                CallableOrigin::Constructor {
+                    name: deep_variable_name(&children[0])
+                        .expect("constructor guard established the name")
+                        .to_string(),
+                    payloads: children[1..]
+                        .iter()
+                        .map(|child| self.deep_callable_origin(child, scope, lexical_name))
+                        .collect(),
+                }
+            }
+            DeepTag::Record if !children.is_empty() => {
+                let Some(name) = children.first().and_then(deep_symbol_name) else {
+                    return CallableOrigin::Unknown;
+                };
+                let mut fields = BTreeMap::new();
+                for field in &children[1..] {
+                    let deep::ExprCarrier::DecodedNode(DeepTag::Kv, _, field_children) =
+                        field.carrier()
+                    else {
+                        return CallableOrigin::Unknown;
+                    };
+                    let [field_name, value] = field_children else {
+                        return CallableOrigin::Unknown;
+                    };
+                    let Some(field_name) = deep_symbol_name(field_name) else {
+                        return CallableOrigin::Unknown;
+                    };
+                    fields.insert(
+                        field_name.to_string(),
+                        self.deep_callable_origin(value, scope, lexical_name),
+                    );
+                }
+                CallableOrigin::Record {
+                    name: name.to_string(),
+                    fields,
+                }
+            }
+            DeepTag::TupleGet if children.len() == 2 => {
+                let tuple = self.deep_callable_origin(&children[0], scope, lexical_name);
+                match tuple {
+                    CallableOrigin::Tuple(values) => deep_integer_literal(&children[1])
+                        .and_then(|index| usize::try_from(index).ok())
+                        .and_then(|index| values.get(index).cloned())
+                        .unwrap_or(CallableOrigin::Unknown),
+                    _ => CallableOrigin::Unknown,
+                }
+            }
+            DeepTag::Block => children
+                .last()
+                .map(|child| self.deep_callable_origin(child, scope, lexical_name))
+                .unwrap_or(CallableOrigin::NonCallable),
+            DeepTag::Let if children.len() == 2 => {
+                let deep::ExprCarrier::DecodedNode(DeepTag::Bind, _, bindings) =
+                    children[0].carrier()
+                else {
+                    return CallableOrigin::Unknown;
+                };
+                if !bindings.len().is_multiple_of(2) {
+                    return CallableOrigin::Unknown;
+                }
+                let mut scoped = scope.clone();
+                for pair in bindings.as_chunks::<2>().0 {
+                    let Some(name) = deep_symbol_name(&pair[0]) else {
+                        return CallableOrigin::Unknown;
+                    };
+                    let value = self.deep_callable_origin(&pair[1], &scoped, name);
+                    scoped.bind(name.to_string(), value);
+                }
+                self.deep_callable_origin(&children[1], &scoped, lexical_name)
+            }
+            _ => CallableOrigin::Unknown,
+        }
+    }
+}
+
+fn resolve_selector_indices(
+    target_expr: &Expr,
+    target: &CallableOrigin,
+    wrt: &[String],
+    span: Span,
+) -> Result<Vec<i64>, DesugarError> {
+    let target_name = match target_expr {
+        Expr::Var(name, _) => name.clone(),
+        Expr::Lambda(..) => "<inline lambda>".to_string(),
+        _ => "<dynamic expression>".to_string(),
+    };
+    let CallableOrigin::Known {
+        display_name,
+        params,
+        ..
+    } = target
+    else {
+        return Err(match target {
+            CallableOrigin::NonCallable
+            | CallableOrigin::Tuple(_)
+            | CallableOrigin::Constructor { .. }
+            | CallableOrigin::Record { .. } => DesugarError::NonCallableGradTarget {
+                target: target_name,
+                span,
+            },
+            CallableOrigin::Unknown => DesugarError::UnresolvedGradTarget {
+                target: target_name,
+                span,
+            },
+            CallableOrigin::Known { .. } => unreachable!(),
+        });
+    };
+    wrt.iter()
+        .map(|parameter| {
+            params
+                .iter()
+                .position(|candidate| candidate == parameter)
+                .map(|index| index as i64)
+                .ok_or_else(|| DesugarError::UnknownGradParameter {
+                    callable: display_name.clone(),
+                    parameter: parameter.clone(),
+                    available: params.clone(),
+                    span,
+                })
+        })
+        .collect()
+}
+
+fn bind_let_pattern(pattern: &LetPattern, value: &CallableOrigin, scope: &mut CallableScope) {
+    match pattern {
+        LetPattern::Var(name, _) => scope.bind(name.clone(), value.clone()),
+        LetPattern::Wildcard(_) => {}
+        LetPattern::Tuple(patterns, _) => {
+            for (index, pattern) in patterns.iter().enumerate() {
+                let value = match value {
+                    CallableOrigin::Tuple(values) => values
+                        .get(index)
+                        .cloned()
+                        .unwrap_or(CallableOrigin::Unknown),
+                    _ => CallableOrigin::Unknown,
+                };
+                bind_let_pattern(pattern, &value, scope);
+            }
+        }
+    }
+}
+
+fn bind_match_pattern(pattern: &Pattern, value: &CallableOrigin, scope: &mut CallableScope) {
+    match pattern {
+        Pattern::Wildcard(..) | Pattern::Lit(..) => {}
+        Pattern::Var(name, _) => scope.bind(name.clone(), value.clone()),
+        Pattern::Constructor(name, patterns, _) => {
+            for (index, pattern) in patterns.iter().enumerate() {
+                let value = match value {
+                    CallableOrigin::Constructor {
+                        name: value_name,
+                        payloads,
+                    } if value_name == name => payloads
+                        .get(index)
+                        .cloned()
+                        .unwrap_or(CallableOrigin::Unknown),
+                    _ => CallableOrigin::Unknown,
+                };
+                bind_match_pattern(pattern, &value, scope);
+            }
+        }
+        Pattern::Tuple(patterns, _) => {
+            for (index, pattern) in patterns.iter().enumerate() {
+                let value = match value {
+                    CallableOrigin::Tuple(values) => values
+                        .get(index)
+                        .cloned()
+                        .unwrap_or(CallableOrigin::Unknown),
+                    _ => CallableOrigin::Unknown,
+                };
+                bind_match_pattern(pattern, &value, scope);
+            }
+        }
+        Pattern::Record(name, fields, _) => {
+            for (field, pattern) in fields {
+                let field_value = match value {
+                    CallableOrigin::Record {
+                        name: value_name,
+                        fields,
+                    } if value_name == name => fields
+                        .get(field)
+                        .cloned()
+                        .unwrap_or(CallableOrigin::Unknown),
+                    _ => CallableOrigin::Unknown,
+                };
+                bind_match_pattern(pattern, &field_value, scope);
+            }
+        }
+        Pattern::As(name, pattern, _) => {
+            scope.bind(name.clone(), value.clone());
+            bind_match_pattern(pattern, value, scope);
+        }
+    }
+}
+
+fn deep_symbol_name(expr: &deep::Expr) -> Option<&str> {
+    match expr {
+        deep::Expr::Atom(deep::Atom::Name(name), _) => Some(name),
+        _ => None,
+    }
+}
+
+fn deep_variable_name(expr: &deep::Expr) -> Option<&str> {
+    let deep::ExprCarrier::DecodedNode(DeepTag::Var, _, children) = expr.carrier() else {
+        return None;
+    };
+    children.first().and_then(deep_symbol_name)
+}
+
+fn is_constructor_name(name: &str) -> bool {
+    name.rsplit(['.', '_'])
+        .find(|component| !component.is_empty())
+        .and_then(|component| component.chars().next())
+        .is_some_and(char::is_uppercase)
+}
+
+fn deep_parameter_name(expr: &deep::Expr) -> Option<String> {
+    match expr {
+        deep::Expr::Atom(deep::Atom::Name(name), _) => Some(name.clone()),
+        deep::Expr::MetaExpr(meta, _) => deep_parameter_name(&meta.expr),
+        deep::Expr::BareList(elements, _) => elements
+            .first()
+            .and_then(deep_symbol_name)
+            .map(str::to_string),
+        deep::Expr::List(list, _) => list
+            .elements
+            .first()
+            .and_then(deep_symbol_name)
+            .map(str::to_string),
+        _ => None,
+    }
+}
+
+fn deep_function_parameters(expr: &deep::Expr) -> Option<Vec<String>> {
+    let expr = strip_deep_metadata(expr);
+    let deep::ExprCarrier::DecodedNode(DeepTag::Fn, _, children) = expr.carrier() else {
+        return None;
+    };
+    let deep::ExprCarrier::DecodedNode(DeepTag::Params, _, params) = children.first()?.carrier()
+    else {
+        return None;
+    };
+    params.iter().map(deep_parameter_name).collect()
+}
+
+fn strip_deep_metadata(mut expr: &deep::Expr) -> &deep::Expr {
+    while let deep::Expr::MetaExpr(meta, _) = expr {
+        expr = &meta.expr;
+    }
+    expr
+}
+
+fn deep_integer_literal(expr: &deep::Expr) -> Option<i64> {
+    let deep::ExprCarrier::DecodedNode(DeepTag::Lit, _, children) = expr.carrier() else {
+        return None;
+    };
+    let [deep::Expr::Atom(deep::Atom::Int(value), _)] = children else {
+        return None;
+    };
+    Some(*value)
+}
+
+fn bind_deep_match_pattern(
+    pattern: &deep::Expr,
+    value: &CallableOrigin,
+    scope: &mut CallableScope,
+) {
+    let deep::ExprCarrier::DecodedNode(tag, _, children) = pattern.carrier() else {
+        return;
+    };
+    match tag {
+        DeepTag::PatVar => {
+            if let Some(name) = children.first().and_then(deep_symbol_name) {
+                scope.bind(name.to_string(), value.clone());
+            }
+        }
+        DeepTag::PatAs => {
+            if let Some(name) = children.first().and_then(deep_symbol_name) {
+                scope.bind(name.to_string(), value.clone());
+            }
+            if let Some(nested) = children.get(1) {
+                bind_deep_match_pattern(nested, value, scope);
+            }
+        }
+        DeepTag::PatTuple => {
+            for (index, child) in children.iter().enumerate() {
+                let child_value = match value {
+                    CallableOrigin::Tuple(values) => values
+                        .get(index)
+                        .cloned()
+                        .unwrap_or(CallableOrigin::Unknown),
+                    _ => CallableOrigin::Unknown,
+                };
+                bind_deep_match_pattern(child, &child_value, scope);
+            }
+        }
+        DeepTag::PatCtor => {
+            let pattern_name = children.first().and_then(deep_symbol_name);
+            for (index, child) in children.iter().skip(1).enumerate() {
+                let child_value = match value {
+                    CallableOrigin::Constructor { name, payloads }
+                        if pattern_name.is_some_and(|pattern_name| pattern_name == name) =>
+                    {
+                        payloads
+                            .get(index)
+                            .cloned()
+                            .unwrap_or(CallableOrigin::Unknown)
+                    }
+                    _ => CallableOrigin::Unknown,
+                };
+                bind_deep_match_pattern(child, &child_value, scope);
+            }
+        }
+        DeepTag::PatRecord => {
+            let pattern_name = children.first().and_then(deep_symbol_name);
+            for field in children.iter().skip(1) {
+                let deep::ExprCarrier::DecodedNode(DeepTag::Kv, _, field_children) =
+                    field.carrier()
+                else {
+                    continue;
+                };
+                if let [field_name, value_pattern] = field_children {
+                    let field_value = match value {
+                        CallableOrigin::Record { name, fields }
+                            if pattern_name.is_some_and(|pattern_name| pattern_name == name) =>
+                        {
+                            deep_symbol_name(field_name)
+                                .and_then(|field_name| fields.get(field_name))
+                                .cloned()
+                                .unwrap_or(CallableOrigin::Unknown)
+                        }
+                        _ => CallableOrigin::Unknown,
+                    };
+                    bind_deep_match_pattern(value_pattern, &field_value, scope);
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 #[cfg(test)]
 fn desugar_decl(decl: &Decl) -> Vec<deep::Expr> {
-    DesugarCtx::new(std::slice::from_ref(decl)).desugar_decl(decl)
+    desugar_decl_only(decl).expect("internal Surf declaration fixture must desugar")
 }
 
 #[cfg(test)]
 fn desugar_expr(expr: &Expr) -> deep::Expr {
-    DesugarCtx::default().desugar_expr(expr)
+    desugar_expr_only(expr).expect("internal Surf expression fixture must desugar")
 }
 
 // ---------------------------------------------------------------------------
@@ -834,15 +1824,6 @@ fn for_each_decl(decl: &Decl, visit: &mut impl FnMut(&Decl)) {
         for d in decls {
             for_each_decl(d, visit);
         }
-    }
-}
-
-fn collect_top_level_fn_params(decl: &Decl, out: &mut UnordMap<String, Vec<String>>) {
-    if let Decl::FunDef { name, params, .. } | Decl::Property { name, params, .. } = decl {
-        out.insert(
-            name.clone(),
-            params.iter().map(|param| param.name.clone()).collect(),
-        );
     }
 }
 
@@ -1518,29 +2499,6 @@ impl DesugarCtx {
         self.desugar_expr_with_scope(expr, &[])
     }
 
-    fn resolve_grad_wrt_indices(
-        &self,
-        f: &Expr,
-        wrt: &[String],
-        local_fn_params: &[String],
-    ) -> Option<Vec<i64>> {
-        let params = match f {
-            Expr::Var(name, _) => self.top_level_fn_params.get(name)?.clone(),
-            Expr::Lambda(params, _, _) => params.iter().map(|param| param.name.clone()).collect(),
-            _ if !local_fn_params.is_empty() => local_fn_params.to_vec(),
-            _ => return None,
-        };
-
-        wrt.iter()
-            .map(|name| {
-                params
-                    .iter()
-                    .position(|param| param == name)
-                    .map(|index| index as i64)
-            })
-            .collect()
-    }
-
     fn desugar_grad(
         &self,
         f: &Expr,
@@ -1552,9 +2510,12 @@ impl DesugarCtx {
             return node(DeepTag::Grad, vec![desugared_fn]);
         };
 
+        let key = f as *const Expr as usize;
         let indices = self
-            .resolve_grad_wrt_indices(f, wrt, local_fn_params)
-            .unwrap_or_else(|| (0..wrt.len()).map(|index| index as i64).collect());
+            .resolved_grad_indices
+            .iter()
+            .find_map(|(candidate, indices)| (*candidate == key).then(|| indices.clone()))
+            .expect("fallible selector resolution runs before Deep construction");
 
         let mut variables = wrt.iter().map(|name| {
             VariableRef::new(
@@ -2896,7 +3857,7 @@ mod tests {
   with contract = "std.normal_cdf.range"
 "#;
         let decls = crate::parser::parse_str(source).expect("parse");
-        let deep = desugar_program(&decls);
+        let deep = desugar_program(&decls).expect("Surf fixture must desugar");
         let contracts = deep
             .iter()
             .find_map(|expr| match expr {
@@ -3424,11 +4385,11 @@ mod tests {
             Some(vec!["w".to_string(), "b".to_string()]),
             s(),
         );
+        let Expr::Grad(target, _, _) = &expr else {
+            unreachable!()
+        };
         let ctx = DesugarCtx {
-            top_level_fn_params: UnordMap::from([(
-                "loss".to_string(),
-                vec!["x".to_string(), "w".to_string(), "b".to_string()],
-            )]),
+            resolved_grad_indices: vec![(target.as_ref() as *const Expr as usize, vec![1, 2])],
             ..DesugarCtx::default()
         };
         let actual = print_expr(&ctx.desugar_expr(&expr))
@@ -3641,7 +4602,7 @@ mod tests {
     fn typealias_desugaring_uses_its_explicit_binder_scope() {
         let declarations = crate::parser::parse_str("type Matrix[p, rows] = tensor[rows, p]")
             .expect("typealias parses");
-        let deep = desugar_program(&declarations);
+        let deep = desugar_program(&declarations).expect("Surf fixture must desugar");
         assert_eq!(
             print_expr(&deep[0]),
             "(typealias {} Matrix (p rows) (t-tensor {} (d-var {} rows) (t-var {} p)))"
@@ -3652,7 +4613,7 @@ mod tests {
     fn zero_parameter_typealias_dimension_is_symbolic_not_implicitly_bound() {
         let declarations =
             crate::parser::parse_str("type Weights = tensor[n, f32]").expect("alias parses");
-        let deep = desugar_program(&declarations);
+        let deep = desugar_program(&declarations).expect("Surf fixture must desugar");
         assert_eq!(
             print_expr(&deep[0]),
             "(typealias {} Weights () (t-tensor {} (d-name {} n) (t-prim {} f32)))"
@@ -3664,7 +4625,7 @@ mod tests {
         let declarations =
             crate::parser::parse_str("type Batch[rows] = | Batch { values: tensor[rows, f32] }")
                 .expect("deftype parses");
-        let deep = desugar_program(&declarations);
+        let deep = desugar_program(&declarations).expect("Surf fixture must desugar");
         assert_eq!(
             print_expr(&deep[0]),
             "(deftype {}\n  Batch\n  (rows)\n  (variant {}\n    Batch\n    (field {} values (t-tensor {} (d-var {} rows) (t-prim {} f32)))))"

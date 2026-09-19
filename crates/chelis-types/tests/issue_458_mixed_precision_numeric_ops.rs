@@ -39,9 +39,12 @@ use chelis_types::errors::CheckErrorKind;
 /// program type-checked cleanly.
 fn check_diagnostics(source: &str) -> Vec<(CheckErrorKind, String)> {
     let decls = parse_str(source).expect("surf parse");
-    let exprs = expand_program(&desugar_program(&decls), &ExpansionOptions::default())
-        .expect("macro expand")
-        .into_exprs();
+    let exprs = expand_program(
+        &desugar_program(&decls).expect("Surf fixture must desugar"),
+        &ExpansionOptions::default(),
+    )
+    .expect("macro expand")
+    .into_exprs();
     match check_ir_program(&exprs) {
         Ok(_) => Vec::new(),
         Err(rep) => rep

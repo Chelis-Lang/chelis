@@ -2412,9 +2412,10 @@ mod tests {
                 prim = prim.name(),
             );
             let declarations = chelis_surf::parser::parse_str(&source).unwrap();
-            let checked = chelis_types::check_ir_program(&chelis_surf::desugar::desugar_program(
-                &declarations,
-            ))
+            let checked = chelis_types::check_ir_program(
+                &chelis_surf::desugar::desugar_program(&declarations)
+                    .expect("Surf fixture must desugar"),
+            )
             .unwrap();
             let session = crate::host::HostLoweringSession::new(&checked);
             let plan = |name| {

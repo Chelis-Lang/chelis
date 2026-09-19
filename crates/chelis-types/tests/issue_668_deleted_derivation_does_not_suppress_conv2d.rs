@@ -12,6 +12,7 @@ fn deep(source: &str) -> Vec<chelis_deep::Expr> {
     desugar_program(&parse_surf(source).unwrap_or_else(|error| {
         panic!("fixture must parse as Surf: {error:?}\n{source}");
     }))
+    .expect("Surf fixture must desugar")
 }
 
 fn messages(errors: &[CheckError]) -> Vec<String> {

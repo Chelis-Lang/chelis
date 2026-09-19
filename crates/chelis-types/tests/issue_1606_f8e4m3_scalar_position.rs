@@ -20,7 +20,7 @@ use serde_json::Value;
 fn surf_to_deep(source: &str) -> Vec<chelis_deep::Expr> {
     let decls = parse_str(source).expect("surf parse");
     chelis_macros::expand_program(
-        &desugar_program(&decls),
+        &desugar_program(&decls).expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("macro expand")
@@ -323,7 +323,7 @@ fn surf_with_legacy_tensor_precision(source: &str, name: &str) -> Vec<chelis_dee
     *precision = Value::String(name.to_string());
     let legacy: Vec<chelis_surf::ast::Decl> =
         serde_json::from_value(encoded).expect("decode legacy precision string");
-    desugar_program(&legacy)
+    desugar_program(&legacy).expect("Surf fixture must desugar")
 }
 
 #[test]
@@ -983,9 +983,11 @@ fn a_tensor_element_reserved_site_has_one_located_owner() {
 fn deep_surf_deep_roundtrip_preserves_tensor_precision_diagnostic_span() {
     for name in ["f8e4m3", "f8e5m2"] {
         let source = format!("def classify(x: tensor[3, {name}]) -> i32 = 0i32");
-        let original = desugar_program(&parse_str(&source).expect("parse source"));
+        let original = desugar_program(&parse_str(&source).expect("parse source"))
+            .expect("Surf fixture must desugar");
         let restored =
-            desugar_program(&resugar_program(&original).expect("resugar direct Deep program"));
+            desugar_program(&resugar_program(&original).expect("resugar direct Deep program"))
+                .expect("Surf fixture must desugar");
         let offset = source.find(name).expect("reserved precision site");
         let expected_span = format!("source:{offset}..{}", offset + name.len());
 

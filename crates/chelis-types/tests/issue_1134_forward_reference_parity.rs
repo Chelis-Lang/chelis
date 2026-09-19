@@ -23,7 +23,7 @@ fn deep_file_program(source: &str) -> Vec<chelis_deep::Expr> {
 
 fn surf_program(source: &str) -> Vec<chelis_deep::Expr> {
     let declarations = parse_surf(source).expect("Surf fixture must parse");
-    desugar_program(&declarations)
+    desugar_program(&declarations).expect("Surf fixture must desugar")
 }
 
 fn diagnostics(program: &[chelis_deep::Expr]) -> (Diagnostics, Diagnostics) {

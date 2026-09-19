@@ -5,7 +5,7 @@ use chelis_surf::parser::parse_str;
 
 fn expand_surf(source: &str) -> String {
     let decls = parse_str(source).expect("surf parse should succeed");
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     let expanded = expand_program(&deep, &ExpansionOptions::default()).expect("macro expansion");
     print_canonical(expanded.exprs())
 }
@@ -83,7 +83,7 @@ fn ordinary_defs_cannot_collide_with_standard_prelude_macros() {
     for name in ["linear_layer", "residual", "cross_entropy"] {
         let decls = parse_str(&format!("def {name}(x: f32) -> f32 = x\n"))
             .expect("surf parse should succeed");
-        let deep = desugar_program(&decls);
+        let deep = desugar_program(&decls).expect("Surf fixture must desugar");
         let err = expand_program(&deep, &ExpansionOptions::default())
             .expect_err("a standard-prelude macro name must reject an ordinary def");
         let message = err.to_string();
@@ -96,7 +96,7 @@ fn ordinary_defs_cannot_collide_with_standard_prelude_macros() {
     }
 
     let decls = parse_str("sig residual: f32 -> f32\n").expect("surf parse should succeed");
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     let err = expand_program(&deep, &ExpansionOptions::default())
         .expect_err("a standard-prelude macro name must reject an ordinary sig");
     assert!(
@@ -123,7 +123,7 @@ fn ordinary_prelude_names_are_available_when_prelude_loading_is_disabled() {
     for name in ["linear_layer", "residual", "cross_entropy"] {
         let decls = parse_str(&format!("def {name}(x: f32) -> f32 = x\n"))
             .expect("surf parse should succeed");
-        let deep = desugar_program(&decls);
+        let deep = desugar_program(&decls).expect("Surf fixture must desugar");
         expand_program(
             &deep,
             &ExpansionOptions {
@@ -147,7 +147,7 @@ def f(x: f32) -> f32 = capture(x)
 "#,
     )
     .expect("surf parse should succeed");
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     let expanded = expand_program(&deep, &ExpansionOptions::default()).expect("macro expansion");
     let text = print_canonical(expanded.exprs());
 
@@ -196,7 +196,7 @@ def f(x: f32) -> f32 = loop(x)
 "#,
     )
     .expect("surf parse should succeed");
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     let err = expand_program(
         &deep,
         &ExpansionOptions {

@@ -721,7 +721,22 @@ fn prove_surf_property(
     let auto_recursive =
         options.tier == "auto" && property_reaches_recursive_model(decls, property);
     if options.tier == "induction-only" || auto_recursive {
-        let deep = chelis_surf::desugar::desugar_program(decls);
+        let deep = match chelis_surf::desugar::desugar_program(decls) {
+            Ok(deep) => deep,
+            Err(error) => {
+                return PropertyOutcome::new(
+                    property.name.clone(),
+                    PropertyStatus::Error,
+                    PropertyTier::Induction,
+                    0,
+                    seed,
+                    None,
+                    Some(format!("induction desugar failed: {error}")),
+                    false,
+                    Vec::new(),
+                );
+            }
+        };
         if let Err(infer) = chelis_types::check_typed_program(&deep) {
             return PropertyOutcome::new(
                 property.name.clone(),
@@ -751,7 +766,24 @@ fn prove_surf_property(
     // Assumption injection (RFC D-INJECT): a property with an
     // invariant-carrying opaque binder is verified ONLY over
     // invariant-satisfying binder values; the injection path owns it.
-    if injection::property_has_opaque_invariant_binder(module_decls, &property.params) {
+    let has_injected_binder =
+        match injection::property_has_opaque_invariant_binder(module_decls, &property.params) {
+            Ok(has_injected_binder) => has_injected_binder,
+            Err(error) => {
+                return PropertyOutcome::new(
+                    property.name.clone(),
+                    PropertyStatus::Error,
+                    PropertyTier::None,
+                    0,
+                    seed,
+                    None,
+                    Some(error),
+                    false,
+                    Vec::new(),
+                );
+            }
+        };
+    if has_injected_binder {
         let mut outcome = injection::prove_with_injection(
             module_decls,
             &property.name,

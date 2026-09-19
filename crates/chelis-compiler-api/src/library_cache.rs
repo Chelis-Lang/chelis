@@ -116,6 +116,7 @@ use crate::stdlib_cache::{StdLibContext, cache_disabled, typecheck_cache_dir};
 // V12: scalar/storage payloads use the exact dtype-tagged bit codecs;
 // the changed key rejects previous positional payloads before decode.
 // V17 retains checker-owned local tensor-ascription obligations.
+// V18 retains TypeEnv callable provenance for contextual grad selectors.
 const LIBRARY_CACHE_FORMAT_VERSION: u32 =
     <LibraryContext as cache_envelope::CachePayload>::FORMAT_VERSION;
 
@@ -542,7 +543,11 @@ pub fn build_library_context(
     // mangled); accept the linker name format while building the context.
     let _linked = chelis_types::install_linked_program_guard();
 
-    let prepared = match crate::pipeline::prepare_surf_decls(dependency_decls, None) {
+    let prepared = match crate::pipeline::prepare_surf_decls_with_context(
+        dependency_decls,
+        stdlib_ctx.checked_library().program().exprs(),
+        None,
+    ) {
         Ok(prepared) => prepared,
         Err(_) => return Ok(None),
     };
@@ -614,8 +619,8 @@ mod tests {
     use crate::stdlib_cache::build_stdlib_context;
 
     #[test]
-    fn cache_format_version_tracks_canonical_collection_bytes_and_nominal_kinds() {
-        assert_eq!(LIBRARY_CACHE_FORMAT_VERSION, 17);
+    fn cache_format_version_tracks_type_env_callable_provenance() {
+        assert_eq!(LIBRARY_CACHE_FORMAT_VERSION, 18);
     }
 
     #[test]
@@ -624,7 +629,7 @@ mod tests {
         let decls = sample_decls("different_key");
         let stdlib_key = key(5);
         let current_key = library_cache_key(&decls, stdlib_key);
-        let preceding_key = library_cache_key_at_version(&decls, stdlib_key, 11);
+        let preceding_key = library_cache_key_at_version(&decls, stdlib_key, 17);
         assert_ne!(current_key, preceding_key);
 
         let context = build_library_context(&stdlib_context, &decls)

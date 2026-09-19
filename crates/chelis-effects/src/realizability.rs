@@ -1286,7 +1286,7 @@ mod tests {
     fn check_program_from_source(source: &str) -> CheckedProgram {
         let decls = chelis_surf::parser::parse_str(source).expect("parse");
         let deep = chelis_macros::expand_program(
-            &chelis_surf::desugar::desugar_program(&decls),
+            &chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar"),
             &chelis_macros::ExpansionOptions::default(),
         )
         .expect("desugar")

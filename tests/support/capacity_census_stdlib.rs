@@ -526,7 +526,10 @@ pub(super) fn stdlib_rows(root: &Path) -> Vec<Row> {
         .unwrap_or_else(|error| panic!("stdlib declaration linking failed: {error}"));
     let exprs = linked
         .iter()
-        .flat_map(|module| chelis_surf::desugar::desugar_program(&module.declarations))
+        .flat_map(|module| {
+            chelis_surf::desugar::desugar_program(&module.declarations)
+                .expect("linked stdlib Surf must desugar")
+        })
         .collect::<Vec<_>>();
     let surface = resolve(&exprs);
     let closure = Closure::new(&surface);
@@ -535,7 +538,8 @@ pub(super) fn stdlib_rows(root: &Path) -> Vec<Row> {
         .iter()
         .flat_map(|module| {
             rows_for_source(
-                &chelis_surf::desugar::desugar_program(&originals[&module.source_label]),
+                &chelis_surf::desugar::desugar_program(&originals[&module.source_label])
+                    .expect("stdlib Surf fixture must desugar"),
                 &module.source_label,
                 Some(&module.names),
                 Some(&module.exports),

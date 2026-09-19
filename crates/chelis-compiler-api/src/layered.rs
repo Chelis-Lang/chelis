@@ -114,7 +114,11 @@ pub fn check_layered(
     // failure here is a real front-end error, not a clean miss — but the
     // monolithic path would surface it too, so hand back `Ok(None)` and
     // let the monolithic path produce the byte-identical diagnostic.
-    let prepared = match crate::pipeline::prepare_surf_decls(non_stdlib_decls, None) {
+    let prepared = match crate::pipeline::prepare_surf_decls_with_context(
+        non_stdlib_decls,
+        stdlib_ctx.checked_library().program().exprs(),
+        None,
+    ) {
         Ok(prepared) => prepared,
         Err(_) => return Ok(None),
     };
@@ -267,7 +271,11 @@ pub fn check_layered_for_build(
     // check it against the chelis-std sub-context — the pre-chelis#1168
     // two-layer path, byte-for-byte.
     if dependency_decls.is_empty() {
-        let prepared = match crate::pipeline::prepare_surf_decls(entry_decls, None) {
+        let prepared = match crate::pipeline::prepare_surf_decls_with_context(
+            entry_decls,
+            stdlib_ctx.checked_library().program().exprs(),
+            None,
+        ) {
             Ok(prepared) => prepared,
             Err(_) => return Ok(None),
         };
@@ -307,7 +315,11 @@ pub fn check_layered_for_build(
     let mut combined_decls = Vec::with_capacity(dependency_decls.len() + entry_decls.len());
     combined_decls.extend_from_slice(dependency_decls);
     combined_decls.extend_from_slice(entry_decls);
-    let combined_deep = match crate::pipeline::prepare_surf_decls(&combined_decls, None) {
+    let combined_deep = match crate::pipeline::prepare_surf_decls_with_context(
+        &combined_decls,
+        stdlib_ctx.checked_library().program().exprs(),
+        None,
+    ) {
         Ok(prepared) => prepared.into_expanded_deep(),
         Err(_) => return Ok(None),
     };

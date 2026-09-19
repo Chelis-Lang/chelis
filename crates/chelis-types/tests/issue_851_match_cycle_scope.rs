@@ -6,7 +6,7 @@ use chelis_types::check_typed_program;
 
 fn diagnostics(source: &str) -> Vec<String> {
     let decls = parse_surf(source).expect("Surf fixture must parse");
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     match check_typed_program(&deep) {
         Ok(_) => Vec::new(),
         Err(result) => result
@@ -56,7 +56,7 @@ a = (b : tensor[4, f32])
 b = (a : tensor[4, f32])
 "#;
     let decls = parse_surf(source).expect("Surf cycle fixture must parse");
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     let errors: Vec<_> = chelis_types::infer_ir_program(&deep)
         .errors
         .into_iter()

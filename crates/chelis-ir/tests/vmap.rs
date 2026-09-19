@@ -518,7 +518,7 @@ fn check_effects_linearity_deep(deep_src: &str) -> chelis_types::CheckedProgram 
 fn lower_surf_program(src: &str) -> Result<Dag, chelis_ir::lower::LowerDiagnostic> {
     let decls = chelis_surf::parser::parse_str(src).expect("surf parse");
     let exprs = chelis_macros::expand_program(
-        &chelis_surf::desugar::desugar_program(&decls),
+        &chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("expand")
@@ -761,7 +761,7 @@ fn vmap_grad_records_the_batched_forward_activation_as_a_shape_dep() {
     let source = "def h(x: tensor[2, f32]) -> tensor[f32] = sum(mul(x, x), 0i32)\n\
                   def main() = vmap(grad(h))(to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32]]))\n";
     let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
     let checked = check_ir_program(&exprs).expect("check");
     let checked = chelis_effects::check_program(&checked).expect("effects");
     let checked = chelis_types::check_linearity(&checked).expect("linearity");

@@ -14,7 +14,7 @@ mod common;
 
 const SHAPED_ZERO_PROGRAM: &str = "\
 def constish(x: tensor[3, f32]) -> f32 = cast(1.0, f32)\n\
-def g(theta: tensor[3, f32]) -> tensor[3, f32] = grad(constish, wrt=theta)(theta)\n\
+def g(theta: tensor[3, f32]) -> tensor[3, f32] = grad(constish, wrt=x)(theta)\n\
 out = g(to_tensor([cast(3.0, f32), cast(-2.0, f32), cast(7.0, f32)]))\n";
 
 const RANK_ZERO_TENSOR_PROGRAM: &str = "\

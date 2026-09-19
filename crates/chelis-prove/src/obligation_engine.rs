@@ -380,7 +380,8 @@ pub fn run_surf_source_obligations(
     options: &ObligationRunOptions,
 ) -> Result<ObligationRunResult, String> {
     let decls = chelis_surf::parser::parse_str(source).map_err(|e| format!("parse: {e}"))?;
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let exprs =
+        chelis_surf::desugar::desugar_program(&decls).map_err(|e| format!("desugar: {e}"))?;
     let sigs: BTreeMap<String, Type> = match chelis_types::check_typed_program(&exprs) {
         Ok(checked) => checked
             .signature_inference()

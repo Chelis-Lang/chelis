@@ -17,7 +17,8 @@ fn expanding_scalar_blocks_does_not_copy_each_remaining_tail() {
                 source.push_str("v511\n}\n");
             }
             let decls = chelis_surf::parser::parse_str(&source).unwrap();
-            let deep = chelis_surf::desugar::desugar_program(&decls);
+            let deep =
+                chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
             let started = Instant::now();
             let expanded = expand_program(
                 &deep,

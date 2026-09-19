@@ -121,6 +121,7 @@ mod expr_function;
 mod expr_pattern;
 pub(crate) mod expr_record;
 mod expr_transform;
+mod grad_selector;
 mod operand_deferral;
 mod program;
 pub(crate) mod recursion;
@@ -161,6 +162,10 @@ use expr_function::*;
 use expr_pattern::*;
 use expr_record::*;
 use expr_transform::*;
+use grad_selector::validate_grad_selector_identity;
+pub(crate) use grad_selector::{
+    SelectorCallableContext, extend_selector_callable_context, selector_callable_context_digest,
+};
 use operand_deferral::*;
 use program::*;
 use rigid::*;

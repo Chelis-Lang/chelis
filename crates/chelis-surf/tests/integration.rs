@@ -15,7 +15,7 @@ fn roundtrip(surf_source: &str) {
     });
 
     // 2. Desugar to Deep
-    let deep_exprs = desugar_program(&decls);
+    let deep_exprs = desugar_program(&decls).expect("Surf fixture must desugar");
     assert!(
         !deep_exprs.is_empty(),
         "Desugarer produced no output for:\n{surf_source}"
@@ -58,7 +58,7 @@ fn roundtrip_property_decl_desugars_to_property_metadata() {
   with samples = 3
 "#;
     let decls = surf_parse(source).expect("property parses");
-    let deep_exprs = desugar_program(&decls);
+    let deep_exprs = desugar_program(&decls).expect("Surf fixture must desugar");
     let deep_text = print_canonical(&deep_exprs);
     assert!(deep_text.contains("chelis_role: \"property\""));
     assert!(deep_text.contains("property_source_kind: \"user\""));
@@ -75,7 +75,7 @@ fn opaque_type_decl_desugars_to_metadata() {
 type Probability = | Probability { value: f32 }
 "#;
     let decls = surf_parse(source).expect("opaque type parses");
-    let deep_exprs = desugar_program(&decls);
+    let deep_exprs = desugar_program(&decls).expect("Surf fixture must desugar");
     let deep_text = print_canonical(&deep_exprs);
     assert!(deep_text.contains("opaque: true"));
     assert!(deep_text.contains("Probability"));
@@ -87,7 +87,7 @@ type Probability = | Probability { value: f32 }
 /// Desugar a single Surf module and print canonical Deep.
 fn desugar_to_deep(source: &str) -> String {
     let decls = surf_parse(source).expect("Surf parses");
-    let deep_exprs = desugar_program(&decls);
+    let deep_exprs = desugar_program(&decls).expect("Surf fixture must desugar");
     print_canonical(&deep_exprs)
 }
 
@@ -229,7 +229,7 @@ fn roundtrip_example_mlp() {
 #[test]
 fn dim_params_produce_d_var() {
     let decls = surf_parse("def transpose[batch, hidden](x: tensor[batch, hidden, f32]) -> tensor[hidden, batch, f32] = x").unwrap();
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     let text = print_canonical(&deep);
     // batch and hidden are declared dim params → must be d-var, not d-name
     assert!(
@@ -252,7 +252,7 @@ fn dim_params_produce_d_var() {
 #[test]
 fn wildcard_dimension_desugars_to_d_name_star() {
     let decls = surf_parse("def f(x: tensor[*, f32]) -> tensor[*, f32] = x").unwrap();
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     let text = print_canonical(&deep);
     assert!(
         text.contains("(d-name {} *)"),
@@ -265,7 +265,7 @@ fn wildcard_dimension_desugars_to_d_name_star() {
 #[test]
 fn typed_def_emits_defsig() {
     let decls = surf_parse("def f(x: f32) -> f32 = x").unwrap();
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     let text = print_canonical(&deep);
     assert!(text.contains("(defsig {} f"), "Missing defsig in:\n{text}");
     assert!(text.contains("(def {}\n  f"), "Missing def in:\n{text}");
@@ -274,7 +274,7 @@ fn typed_def_emits_defsig() {
 #[test]
 fn type_var_not_prim() {
     let decls = surf_parse("type Option[a] = | Some(a) | None").unwrap();
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     let text = print_canonical(&deep);
     assert!(
         text.contains("(t-var {} a)"),
@@ -285,7 +285,7 @@ fn type_var_not_prim() {
 #[test]
 fn annotation_in_metadata() {
     let decls = surf_parse("def f(x) = x : f32").unwrap();
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     let text = print_canonical(&deep);
     assert!(
         text.contains("type: (t-prim {} f32)"),
@@ -298,7 +298,7 @@ fn pat_lit_raw_value() {
     let decls =
         surf_parse("type B = | T | F\ndef f(x: f32) -> f32 = match x with { | 0 => 1 | _ => x }")
             .unwrap();
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     let text = print_canonical(&deep);
     assert!(
         text.contains("(pat-lit {} 0)"),
@@ -310,7 +310,7 @@ fn pat_lit_raw_value() {
 fn no_legacy_tags() {
     // Verify no legacy tags appear in desugared output
     let decls = surf_parse("def f(x: f32) -> f32 = x + 1").unwrap();
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     let text = print_canonical(&deep);
     assert!(
         !text.contains("(sig "),
@@ -329,7 +329,7 @@ fn no_legacy_tags() {
 #[test]
 fn effect_annotations_desugar_into_t_fn_metadata() {
     let decls = surf_parse("sig f: f32 -> f32 ! {Diff, Random, Resource(\"gpu:0\")}").unwrap();
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     let text = print_canonical(&deep);
     assert!(
         text.contains("{eff: (effects {} diff random (resource {} \"gpu:0\"))}"),
@@ -344,7 +344,7 @@ fn effect_annotations_desugar_into_t_fn_metadata() {
 #[test]
 fn hof_argument_sig_desugars_to_nested_t_fn() {
     let hof = surf_parse("sig f[a, b, c]: (a -> b) -> c").unwrap();
-    let hof_text = print_canonical(&desugar_program(&hof));
+    let hof_text = print_canonical(&desugar_program(&hof).expect("Surf fixture must desugar"));
     assert!(
         hof_text.contains("(t-fn {} (t-fn {} (t-var {} a) (t-var {} b)) (t-var {} c))"),
         "HOF sig did not desugar to a nested t-fn; got:\n{hof_text}"
@@ -352,7 +352,8 @@ fn hof_argument_sig_desugars_to_nested_t_fn() {
     deep_parse_strict(&hof_text).expect("HOF sig Deep validates");
 
     let curried = surf_parse("sig f[a, b, c]: a -> b -> c").unwrap();
-    let curried_text = print_canonical(&desugar_program(&curried));
+    let curried_text =
+        print_canonical(&desugar_program(&curried).expect("Surf fixture must desugar"));
     assert!(
         curried_text.contains("(t-fn {} (t-var {} a) (t-var {} b) (t-var {} c))"),
         "curried sig did not desugar to a flat t-fn; got:\n{curried_text}"
@@ -383,7 +384,7 @@ fn hof_argument_sig_desugars_to_nested_t_fn() {
 fn bare_realize_as_pipe_stage_parses() {
     let src = "def f(x: tensor[3, f32]) -> tensor[3, f32] = x |> realize";
     let decls = surf_parse(src).expect("bare `|> realize` should parse");
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     let text = print_canonical(&deep);
     // Canonical desugar: pipe with a synthesized unary lambda calling
     // the unary builtin on the piped value.
@@ -408,7 +409,7 @@ fn bare_realize_as_pipe_stage_parses() {
 fn bare_copy_as_pipe_stage_parses() {
     let src = "def f(x: tensor[3, f32]) -> tensor[3, f32] = x |> copy";
     let decls = surf_parse(src).expect("bare `|> copy` should parse");
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     let text = print_canonical(&deep);
     assert!(
         text.contains("(pipe {"),
@@ -436,7 +437,7 @@ fn chained_bare_keyword_with_named_pipe_stages_parses() {
     // the next `|>` while parsing the bare keyword stage).
     let src = "def f(x: tensor[3, f32]) -> tensor[3, f32] = x |> realize |> relu";
     let decls = surf_parse(src).expect("chained bare-keyword + named pipe should parse");
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     let text = print_canonical(&deep);
     assert!(
         text.contains("(pipe {"),
@@ -464,7 +465,7 @@ fn keyword_with_arg_form_in_pipe_stage_still_parses() {
     // pipe stage to ensure neither path interferes with the other.
     let src = "def f(x: tensor[3, f32]) -> tensor[3, f32] = cast(x, f32) |> realize";
     let decls = surf_parse(src).expect("cast arg form + bare-realize pipe should parse");
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     let text = print_canonical(&deep);
     // The cast call retains its arg form.
     assert!(
@@ -561,7 +562,7 @@ fn top_level_bare_unary_builtin_reference_parses() {
         let decls = surf_parse(&src)
             .unwrap_or_else(|e| panic!("bare top-level `{kw}` should parse, got: {e}"));
         assert_eq!(decls.len(), 1, "expected one decl for `{src}`");
-        let deep = desugar_program(&decls);
+        let deep = desugar_program(&decls).expect("Surf fixture must desugar");
         let text = print_canonical(&deep);
         // η-expanded body references the builtin.
         assert!(
@@ -579,7 +580,7 @@ fn bare_unary_builtin_as_juxtaposition_argument_parses() {
         let src = format!("def f(x: tensor[3, f32]) -> tensor[3, f32] = apply_fn({kw})\n");
         let decls =
             surf_parse(&src).unwrap_or_else(|e| panic!("`apply_fn({kw})` should parse, got: {e}"));
-        let deep = desugar_program(&decls);
+        let deep = desugar_program(&decls).expect("Surf fixture must desugar");
         let text = print_canonical(&deep);
         // The `apply_fn` call must remain a single `app` of `apply_fn`
         // applied to the synthesized lambda (or builtin reference) — not
@@ -597,7 +598,7 @@ fn one_arg_cast_pipe_stage_parses() {
     // fills the first slot, the type argument fills the second.
     let src = "def f(x: tensor[3, f32]) -> tensor[3, f32] = x |> cast(f32)\n";
     let decls = surf_parse(src).expect("`x |> cast(f32)` should parse per spec §3.6");
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     let text = print_canonical(&deep);
     assert!(
         text.contains("(pipe {"),
@@ -617,7 +618,7 @@ fn one_arg_cast_pipe_stage_parses() {
 fn parsed_surf_expression_spans_enter_deep_metadata() {
     let source = "def f(x) = add(x, 1)";
     let decls = surf_parse(source).unwrap();
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     let text = print_canonical(&deep);
     assert!(
         text.contains("(app {span: \"surf:11..20\"}"),
@@ -636,7 +637,7 @@ fn parsed_surf_expression_spans_enter_deep_metadata() {
 #[test]
 fn with_seed_desugars_to_handle_effect() {
     let decls = surf_parse("def f() = with seed(42) { dropout(x, 0.5) }").unwrap();
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     let text = print_canonical(&deep);
     assert!(
         text.contains("(handle-effect {effect: random"),
@@ -647,7 +648,7 @@ fn with_seed_desugars_to_handle_effect() {
 #[test]
 fn with_device_desugars_to_handle_effect() {
     let decls = surf_parse("def f() = with device(\"gpu:0\") { x }").unwrap();
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     let text = print_canonical(&deep);
     assert!(
         text.contains("(handle-effect {effect: resource"),

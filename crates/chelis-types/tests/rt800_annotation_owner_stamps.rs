@@ -10,7 +10,7 @@ use chelis_types::{
 
 fn surf(source: &str) -> Vec<Expr> {
     let parsed = chelis_surf::parser::parse_str(source).expect("Surf source should parse");
-    chelis_surf::desugar::desugar_program(&parsed)
+    chelis_surf::desugar::desugar_program(&parsed).expect("Surf fixture must desugar")
 }
 
 fn expanded_surf(source: &str) -> Vec<Expr> {

@@ -246,12 +246,12 @@ fn checked_applications_and_lexical_shadows_remain_distinct() {
         "def apply(len: (f32 -> f32), x: f32) -> f32 = len(x)",
         "def apply(to_string: (f32 -> f32), x: f32) -> f32 = to_string(x)",
     ] {
-        let deep = desugar_program(&parse_str(source).unwrap());
+        let deep = desugar_program(&parse_str(source).unwrap()).expect("Surf fixture must desugar");
         let checked = chelis_types::check_typed_program(&deep);
         assert!(checked.is_ok(), "{source}: {checked:?}");
     }
     for source in ["a = len(1)", "a = concat([1], 1.0)"] {
-        let deep = desugar_program(&parse_str(source).unwrap());
+        let deep = desugar_program(&parse_str(source).unwrap()).expect("Surf fixture must desugar");
         assert!(
             chelis_types::check_typed_program(&deep).is_err(),
             "{source}"
@@ -269,7 +269,7 @@ fn symbolic_observation_preserves_legal_applications_and_rejects_wrong_bounds() 
         "sig render[p: Numeric]: p -> string\ndef render(x) = to_string(x)\nresult = render(1i64)",
         "def equal(x,y) = eq(x,y)\na = equal(1,1)\nb = equal([1],[1])",
     ] {
-        let deep = desugar_program(&parse_str(source).unwrap());
+        let deep = desugar_program(&parse_str(source).unwrap()).expect("Surf fixture must desugar");
         assert!(chelis_types::check_typed_program(&deep).is_ok(), "{source}");
     }
     for source in [
@@ -279,7 +279,7 @@ fn symbolic_observation_preserves_legal_applications_and_rejects_wrong_bounds() 
         "sig size[p: Int]: p -> i64\ndef size(x) = len(x)\nresult = size(1i64)",
         "def equal(x,y) = eq(x,y)\nresult = equal(1,[1])",
     ] {
-        let deep = desugar_program(&parse_str(source).unwrap());
+        let deep = desugar_program(&parse_str(source).unwrap()).expect("Surf fixture must desugar");
         let errors = chelis_types::check_typed_program(&deep).unwrap_err();
         assert!(!errors.errors.is_empty(), "{source}");
         assert!(

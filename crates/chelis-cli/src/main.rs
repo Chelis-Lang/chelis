@@ -1966,7 +1966,7 @@ fn cmd_eval_inner(
             // value root, so eval and C disagreed about owed output. Filter
             // by entry-file declaration identity, but take names/topology
             // exclusively from the manifest.
-            let selected_roots = manifest_root_names_from_decls(&entry_decls, &checked, target);
+            let selected_roots = manifest_root_names_from_decls(&entry_decls, &checked, target)?;
             if json {
                 prepare_eval_json(try_eval_result_for_target(
                     SourceKind::Surf,
@@ -2361,7 +2361,7 @@ const CHECK_ERRORS_EXIT_CODE: i32 = 2;
 /// agree on the verdict.
 const EMPTY_PROGRAM_MESSAGE: &str = "empty program: no declarations found";
 
-/// Build a synthetic `cmd_check_one` JSON report for an error that
+/// Build a synthetic `cmd_check_one` JSON report for an unclassified error that
 /// short-circuits parsing or program preparation, so the
 /// `chelis check` exit-code invariant (issue #207) holds even when
 /// the per-file pipeline never reaches the fitness checker. The
@@ -2370,6 +2370,23 @@ const EMPTY_PROGRAM_MESSAGE: &str = "empty program: no declarations found";
 /// node program with score 0.
 fn synthetic_check_report_with_error(message: &str) -> CheckResult {
     synthetic_check_report_with_errors(std::slice::from_ref(&message.to_string()))
+}
+
+fn synthetic_check_report_with_typed_error(
+    kind: chelis_types::errors::CheckErrorKind,
+    message: String,
+    span_offset: Option<usize>,
+) -> CheckResult {
+    synthetic_check_report_from_errors(vec![chelis_types::errors::CheckError {
+        kind,
+        message,
+        severity: 0.5,
+        expected: None,
+        got: None,
+        span_offset,
+        span_id: None,
+        suggestions: Vec::new(),
+    }])
 }
 
 /// The same synthetic report, carrying one diagnostic per message.
@@ -2400,6 +2417,12 @@ fn synthetic_check_report_with_errors(messages: &[String]) -> CheckResult {
             suggestions: Vec::new(),
         })
         .collect();
+    synthetic_check_report_from_errors(errors)
+}
+
+fn synthetic_check_report_from_errors(
+    errors: Vec<chelis_types::errors::CheckError>,
+) -> CheckResult {
     let report = chelis_types::FitnessReport {
         score: 0.0,
         components: chelis_types::fitness::FitnessComponents {
@@ -3031,7 +3054,16 @@ fn cmd_check_one_on_grown_stack(
                     // reads in a terminal rather than parses out of JSON.
                     let message = error.to_string();
                     eprintln!("error: {message}");
-                    return synthetic_check_report_with_error(&message);
+                    return match error {
+                        chelis_compiler_api::pipeline::PreparationError::SurfDesugar(error) => {
+                            synthetic_check_report_with_typed_error(
+                                chelis_types::errors::CheckErrorKind::TypeMismatch,
+                                message,
+                                error.span().map(|span| span.offset),
+                            )
+                        }
+                        _ => synthetic_check_report_with_error(&message),
+                    };
                 }
             };
             // chelis#1664 made this call fallible when inferred signatures
@@ -3946,7 +3978,7 @@ fn cmd_build(
         lower_build_program_for_cli(&checked_compilation, &root_manifest, target)?;
     let tensor_root_names = checked_compilation.root_metadata().tensor_names().clone();
     let entry_root_names =
-        lowered_root_names_from_decls(&entry_decls, &deep_exprs, checked.type_env());
+        lowered_root_names_from_decls(&entry_decls, &deep_exprs, checked.type_env())?;
     let selected = tensor_root_names
         .iter()
         .enumerate()
@@ -11362,30 +11394,37 @@ fn lowered_root_names_from_decls(
     decls: &[Decl],
     program_exprs: &[DeepExpr],
     type_env: &BTreeMap<String, DeepExpr>,
-) -> Vec<String> {
-    let deep_exprs = chelis_surf::desugar::desugar_program(decls);
-    lowered_root_names_from_selected_exprs(&deep_exprs, program_exprs, type_env)
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let deep_exprs =
+        chelis_surf::desugar::desugar_program(decls).map_err(|error| error.to_string())?;
+    Ok(lowered_root_names_from_selected_exprs(
+        &deep_exprs,
+        program_exprs,
+        type_env,
+    ))
 }
 
 fn manifest_root_names_from_decls(
     decls: &[Decl],
     checked: &chelis_types::CheckedProgram,
     target: chelis_types::types::Target,
-) -> Vec<String> {
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let mut selected_defs = UnordSet::new();
-    for expr in chelis_surf::desugar::desugar_program(decls) {
+    for expr in chelis_surf::desugar::desugar_program(decls).map_err(|error| error.to_string())? {
         collect_manifest_decl_names(&expr, &mut selected_defs);
     }
     let realizability = chelis_effects::realizability::infer_realizability(
         checked,
         chelis_compiler_api::target_capability::tensor_capable_prims(target),
     );
-    chelis_effects::realizability::compute_root_manifest(checked, &realizability)
-        .entries
-        .into_iter()
-        .filter(|entry| selected_defs.contains(entry.def_name.as_str()))
-        .map(|entry| entry.name)
-        .collect()
+    Ok(
+        chelis_effects::realizability::compute_root_manifest(checked, &realizability)
+            .entries
+            .into_iter()
+            .filter(|entry| selected_defs.contains(entry.def_name.as_str()))
+            .map(|entry| entry.name)
+            .collect(),
+    )
 }
 
 fn collect_manifest_decl_names(expr: &DeepExpr, names: &mut UnordSet<String>) {

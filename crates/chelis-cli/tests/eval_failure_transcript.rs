@@ -9,7 +9,8 @@ fn eval_source(source: &str, json: bool, deep: bool) -> std::process::Output {
     let dir = tempdir().expect("tempdir");
     let (name, source) = if deep {
         let declarations = chelis_surf::parser::parse_str(source).expect("parse Surf");
-        let expressions = chelis_surf::desugar::desugar_program(&declarations);
+        let expressions = chelis_surf::desugar::desugar_program(&declarations)
+            .expect("Surf fixture must desugar");
         (
             "failure.dp",
             chelis_deep::printer::print_canonical(&expressions),

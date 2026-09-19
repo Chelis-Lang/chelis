@@ -3,6 +3,7 @@ use chelis_types::{TypeEnv, build_type_env_from_library, check_ir_program, check
 
 fn surf(source: &str) -> Vec<chelis_deep::Expr> {
     desugar_program(&parse_str(source).expect("Surf fixture parses"))
+        .expect("Surf fixture must desugar")
 }
 
 fn assert_checks(source: &str) {

@@ -41,8 +41,8 @@ fn assert_alias_formats_to(source: &str, expected: &str) {
     );
 
     let canonical = parse_str(&formatted).expect("canonical output parses");
-    let authored_deep = desugar_program(&authored);
-    let canonical_deep = desugar_program(&canonical);
+    let authored_deep = desugar_program(&authored).expect("Surf fixture must desugar");
+    let canonical_deep = desugar_program(&canonical).expect("Surf fixture must desugar");
     assert_eq!(
         print_canonical(
             &normalize_deep_for_surface_roundtrip(&authored_deep)
@@ -130,7 +130,8 @@ fn every_deep_string_has_one_reparseable_canonical_surf_spelling() {
     let surf = format_program(&resugar_program(&deep).expect("Deep control string resugars"));
     assert_eq!(surf, "value = \"\\u{8}\\u{1f}\\u{7f}\\u{85}\"\n");
     let redesugared =
-        desugar_program(&parse_str(&surf).expect("resugared control string reparses"));
+        desugar_program(&parse_str(&surf).expect("resugared control string reparses"))
+            .expect("Surf fixture must desugar");
     assert_eq!(
         print_canonical(
             &normalize_deep_for_surface_roundtrip(&deep)
@@ -153,7 +154,8 @@ fn hand_authored_deep_without_optional_surface_origin_metadata_roundtrips() {
         let surf = format_program(&resugar_program(&deep).expect("public Deep resugars"));
         assert_eq!(surf, expected_surf);
 
-        let redesugared = desugar_program(&parse_str(&surf).expect("resugared Surf reparses"));
+        let redesugared = desugar_program(&parse_str(&surf).expect("resugared Surf reparses"))
+            .expect("Surf fixture must desugar");
         assert_eq!(
             print_canonical(
                 &normalize_deep_for_surface_roundtrip(&deep)
@@ -392,8 +394,10 @@ fn a_float_suffixed_integer_body_is_canonical_and_distinct() {
         );
     }
 
-    let integer_bodied = desugar_program(&parse_str("result = 8000000f64\n").expect("parses"));
-    let decimal_bodied = desugar_program(&parse_str("result = 8000000.0f64\n").expect("parses"));
+    let integer_bodied = desugar_program(&parse_str("result = 8000000f64\n").expect("parses"))
+        .expect("Surf fixture must desugar");
+    let decimal_bodied = desugar_program(&parse_str("result = 8000000.0f64\n").expect("parses"))
+        .expect("Surf fixture must desugar");
     assert!(
         print_canonical(&integer_bodied).contains("literal_source: integer"),
         "the integer body must desugar to [04-LIT-1]'s marked cross-family form",
@@ -444,7 +448,8 @@ fn an_integer_body_that_overflows_its_suffix_width_is_rejected_as_non_finite() {
             format_source(source).expect("a representable integer body formats"),
             formatted,
         );
-        let deep = desugar_program(&parse_str(source).expect("parses"));
+        let deep = desugar_program(&parse_str(source).expect("parses"))
+            .expect("Surf fixture must desugar");
         resugar_program(&deep).unwrap_or_else(|error| {
             panic!("canonical Surf must have a resugarable Deep: {error}\n{source}")
         });
@@ -482,8 +487,8 @@ fn trailing_separators_parse_and_format_to_a_fixed_point() {
         "import Demo (value,)",
         "export (value,)",
         "result = grad(f,)",
-        "result = grad(f, wrt=x,)",
-        "result = grad(f, wrt=(x, y,))",
+        "result = grad(fn (x: f32) -> x, wrt=x,)",
+        "result = grad(fn (x: f32, y: f32) -> add(x, y), wrt=(x, y,))",
         "result = vmap(f,)",
         "result = vmap(f, axis=1,)",
         "result = cast(x, f64,)",
@@ -517,9 +522,11 @@ fn trailing_separators_parse_and_format_to_a_fixed_point() {
             "printer retained a trailing separator: {formatted}",
         );
 
-        let authored_deep = desugar_program(&parse_str(source).expect("alias parses"));
+        let authored_deep = desugar_program(&parse_str(source).expect("alias parses"))
+            .expect("Surf fixture must desugar");
         let formatted_deep =
-            desugar_program(&parse_str(&formatted).expect("formatted output parses"));
+            desugar_program(&parse_str(&formatted).expect("formatted output parses"))
+                .expect("Surf fixture must desugar");
         assert_eq!(
             print_canonical(
                 &normalize_deep_for_surface_roundtrip(&authored_deep)
@@ -531,6 +538,25 @@ fn trailing_separators_parse_and_format_to_a_fixed_point() {
             ),
             "separator removal changed Deep meaning for {source}",
         );
+    }
+}
+
+#[test]
+fn trailing_separator_formatting_preserves_named_grad_rejection() {
+    let source = "result = grad(f, wrt=x,)";
+    let formatted = format_source(source).expect("unresolved selector still formats");
+    assert_eq!(formatted, "result = grad(f, wrt=x)\n");
+    assert_eq!(
+        format_source(&formatted).expect("formatted selector reparses"),
+        formatted
+    );
+
+    for candidate in [source, formatted.as_str()] {
+        let declarations = parse_str(candidate).expect("selector syntax parses");
+        assert!(matches!(
+            desugar_program(&declarations),
+            Err(chelis_surf::desugar::DesugarError::UnresolvedGradTarget { .. })
+        ));
     }
 }
 
@@ -633,7 +659,7 @@ fn record_construction_and_update_preserve_left_to_right_field_order() {
     let source =
         "a = Point { z: first(), a: second() }\nupdated = a with { y: third(), b: fourth() }";
     let decls = parse_str(source).expect("canonical record program parses");
-    let deep = print_canonical(&desugar_program(&decls));
+    let deep = print_canonical(&desugar_program(&decls).expect("Surf fixture must desugar"));
 
     let z = deep.find("(kv {} z").expect("z field exists");
     let a = deep.find("(kv {} a").expect("a field exists");
@@ -661,7 +687,8 @@ fn zero_field_deep_records_and_record_patterns_keep_their_distinct_surface_form(
     assert!(surf.contains("value = Empty {}"), "{surf}");
     assert!(surf.contains("| Empty {} => 1"), "{surf}");
 
-    let redesugared = desugar_program(&parse_str(&surf).expect("resugared records reparse"));
+    let redesugared = desugar_program(&parse_str(&surf).expect("resugared records reparse"))
+        .expect("Surf fixture must desugar");
     assert_eq!(
         print_canonical(
             &normalize_deep_for_surface_roundtrip(&deep)
@@ -677,12 +704,14 @@ fn zero_field_deep_records_and_record_patterns_keep_their_distinct_surface_form(
 #[test]
 fn explicitly_pure_function_round_trips_without_becoming_inferred() {
     let source = "def declared() ! {} = ()\n";
-    let deep = desugar_program(&parse_str(source).expect("declared-pure Surf parses"));
+    let deep = desugar_program(&parse_str(source).expect("declared-pure Surf parses"))
+        .expect("Surf fixture must desugar");
     let surf = format_program(&resugar_program(&deep).expect("declared-pure Deep resugars"));
 
     assert_eq!(surf, source, "explicit `! {{}}` is a semantic declaration");
 
-    let redesugared = desugar_program(&parse_str(&surf).expect("resugared Surf reparses"));
+    let redesugared = desugar_program(&parse_str(&surf).expect("resugared Surf reparses"))
+        .expect("Surf fixture must desugar");
     assert_eq!(
         print_canonical(
             &normalize_deep_for_surface_roundtrip(&deep)
@@ -853,7 +882,7 @@ fn default_type_suffixes_are_preserved_when_contextual_adoption_changes_meaning(
         "explicit_default_int = 42i32\n",
     );
     let parsed = parse_str(source).expect("all contextual forms parse");
-    let desugared = desugar_program(&parsed);
+    let desugared = desugar_program(&parsed).expect("Surf fixture must desugar");
     let deep = print_canonical(&desugared);
     assert!(deep.contains("(t-prim {} f64)"));
     assert!(deep.contains("(t-prim {} f32)"));
@@ -869,10 +898,12 @@ fn contextual_signed_minimum_preserves_its_adopted_int64_type() {
         "contextual = cast(-9223372036854775808, i64)\n",
         "explicit = cast(-9223372036854775808i64, i64)\n",
     );
-    let deep = desugar_program(&parse_str(source).expect("signed minima parse"));
+    let deep = desugar_program(&parse_str(source).expect("signed minima parse"))
+        .expect("Surf fixture must desugar");
     let surf = format_program(&resugar_program(&deep).expect("signed minima resugar"));
     assert_eq!(surf, source);
-    let redesugared = desugar_program(&parse_str(&surf).expect("signed minima reparse"));
+    let redesugared = desugar_program(&parse_str(&surf).expect("signed minima reparse"))
+        .expect("Surf fixture must desugar");
     assert_eq!(
         print_canonical(
             &normalize_deep_for_surface_roundtrip(&deep)
@@ -915,13 +946,15 @@ fn multi_pair_deep_bind_resugars_as_ordered_surf_bindings() {
 #[test]
 fn inferred_block_literal_types_do_not_become_authored_annotations() {
     let source = "value = {\n  x = 1\n  y = 2\n  f(x, y)\n}\n";
-    let deep = desugar_program(&parse_str(source).expect("untyped block parses"));
+    let deep = desugar_program(&parse_str(source).expect("untyped block parses"))
+        .expect("Surf fixture must desugar");
     let surf = format_program(&resugar_program(&deep).expect("untyped block resugars"));
 
     assert_eq!(surf, source);
 
     let typed = "value = {\n  x: i32 = 1\n  x\n}\n";
-    let deep = desugar_program(&parse_str(typed).expect("typed block parses"));
+    let deep = desugar_program(&parse_str(typed).expect("typed block parses"))
+        .expect("Surf fixture must desugar");
     assert_eq!(
         format_program(&resugar_program(&deep).expect("typed block resugars")),
         typed,
@@ -931,14 +964,16 @@ fn inferred_block_literal_types_do_not_become_authored_annotations() {
 #[test]
 fn authored_expression_annotation_on_a_binding_survives_structural_resugaring() {
     let source = "value = {\n  shaped = (reshape(x) : Result)\n  shaped\n}\n";
-    let deep = desugar_program(&parse_str(source).expect("annotated binding parses"));
+    let deep = desugar_program(&parse_str(source).expect("annotated binding parses"))
+        .expect("Surf fixture must desugar");
     let surf = format_program(&resugar_program(&deep).expect("annotated binding resugars"));
 
     assert_eq!(
         surf,
         "value = {\n  shaped: Result = reshape(x)\n  shaped\n}\n"
     );
-    let redesugared = desugar_program(&parse_str(&surf).expect("resugared binding reparses"));
+    let redesugared = desugar_program(&parse_str(&surf).expect("resugared binding reparses"))
+        .expect("Surf fixture must desugar");
     assert_eq!(
         print_canonical(
             &normalize_deep_for_surface_roundtrip(&deep)
@@ -960,7 +995,8 @@ fn empty_expression_and_type_tuples_normalize_to_unit_without_erasure() {
     .expect("empty Deep tuple forms parse");
     let surf = format_program(&resugar_program(&deep).expect("empty tuples resugar"));
     assert_eq!(surf, "value: unit = ()\n");
-    let redesugared = desugar_program(&parse_str(&surf).expect("unit Surf reparses"));
+    let redesugared = desugar_program(&parse_str(&surf).expect("unit Surf reparses"))
+        .expect("Surf fixture must desugar");
     assert_eq!(
         print_canonical(
             &normalize_deep_for_surface_roundtrip(&deep)
@@ -991,7 +1027,8 @@ fn deep_negative_literals_normalize_to_surfs_unary_minus_shape() {
             &resugar_expression(&deep[0]).expect("negative Deep literal resugars"),
         );
         let wrapped = format!("value = {surf}\n");
-        let redesugared = desugar_program(&parse_str(&wrapped).expect("resugared Surf reparses"));
+        let redesugared = desugar_program(&parse_str(&wrapped).expect("resugared Surf reparses"))
+            .expect("Surf fixture must desugar");
         let original = parse_deep(&format!("(def {{}} value {deep_source})"))
             .expect("negative fixture wraps as a definition");
         assert_eq!(
@@ -1018,7 +1055,7 @@ fn negative_deep_literal_patterns_have_one_reparseable_surface_form() {
         let surf = format_program(&resugar_program(&deep).expect("negative pattern resugars"));
         let reparsed = parse_str(&surf)
             .unwrap_or_else(|error| panic!("negative pattern did not reparse: {error}\n{surf}"));
-        let redesugared = desugar_program(&reparsed);
+        let redesugared = desugar_program(&reparsed).expect("Surf fixture must desugar");
         assert_eq!(
             print_canonical(
                 &normalize_deep_for_surface_roundtrip(&deep)
@@ -1060,7 +1097,8 @@ fn deep_application_callee_grouping_preserves_association_and_scope() {
             format_expression(&resugar_expression(&deep[0]).expect("Deep application resugars"));
         assert_eq!(surf, expected_surf, "Deep fixture: {deep_source}");
         let wrapped = format!("value = {surf}\n");
-        let redesugared = desugar_program(&parse_str(&wrapped).expect("callee grouping reparses"));
+        let redesugared = desugar_program(&parse_str(&wrapped).expect("callee grouping reparses"))
+            .expect("Surf fixture must desugar");
         let original = parse_deep(&format!("(def {{}} value {deep_source})"))
             .expect("application fixture wraps as a definition");
         assert_eq!(
@@ -1083,7 +1121,8 @@ fn standalone_checked_definition_type_becomes_a_real_surf_signature() {
         .expect("checked standalone definition parses");
     let surf = format_program(&resugar_program(&deep).expect("checked definition resugars"));
     assert_eq!(surf, "value: i32 = 42\n");
-    let redesugared = desugar_program(&parse_str(&surf).expect("typed binding reparses"));
+    let redesugared = desugar_program(&parse_str(&surf).expect("typed binding reparses"))
+        .expect("Surf fixture must desugar");
     assert_eq!(
         print_canonical(
             &normalize_deep_for_surface_roundtrip(&deep)
@@ -1136,14 +1175,14 @@ fn canonical_program_round_trips_through_deep_and_the_shared_surf_ast() {
         "answer: i32 = 42\n",
     );
     let surf = parse_str(source).expect("canonical program parses");
-    let deep = desugar_program(&surf);
+    let deep = desugar_program(&surf).expect("Surf fixture must desugar");
     let resugared = resugar_program(&deep).expect("all public Deep declarations resugar");
     let rendered = format_program(&resugared);
 
     assert_eq!(rendered, source);
     let reparsed = parse_str(&rendered).expect("resugared program reparses");
     assert_eq!(
-        print_canonical(&desugar_program(&reparsed)),
+        print_canonical(&desugar_program(&reparsed).expect("Surf fixture must desugar")),
         print_canonical(&deep)
     );
 }
@@ -1166,13 +1205,13 @@ fn opaque_invariants_properties_and_resource_effects_round_trip() {
     ))
     .expect("fixture canonicalizes");
     let surf = parse_str(&source).expect("canonical opaque/property program parses");
-    let deep = desugar_program(&surf);
+    let deep = desugar_program(&surf).expect("Surf fixture must desugar");
     let rendered = format_program(&resugar_program(&deep).expect("program resugars"));
 
     assert_eq!(rendered, source);
     let reparsed = parse_str(&rendered).expect("resugared program reparses");
     assert_eq!(
-        print_canonical(&desugar_program(&reparsed)),
+        print_canonical(&desugar_program(&reparsed).expect("Surf fixture must desugar")),
         print_canonical(&deep)
     );
 }
@@ -1200,7 +1239,8 @@ fn property_options_canonicalize_non_contract_options_before_ordered_contracts()
         format_source(authored).expect("property formats"),
         canonical
     );
-    let deep = desugar_program(&parse_str(canonical).expect("canonical property parses"));
+    let deep = desugar_program(&parse_str(canonical).expect("canonical property parses"))
+        .expect("Surf fixture must desugar");
     let resugared = format_program(&resugar_program(&deep).expect("property resugars"));
     assert_eq!(resugared, canonical);
 }
@@ -1456,7 +1496,7 @@ fn pipe_call_stage_metadata_preserves_the_one_canonical_sugar() {
         "later = x |> fn (v) -> f(y, v)\n",
     );
     let surf = parse_str(source).expect("canonical pipe stages parse");
-    let deep = desugar_program(&surf);
+    let deep = desugar_program(&surf).expect("Surf fixture must desugar");
     let printed = print_canonical(&deep);
 
     assert_eq!(
@@ -1471,9 +1511,10 @@ fn pipe_call_stage_metadata_preserves_the_one_canonical_sugar() {
                 .expect("valid metadata for round-trip normalization")
         ),
         print_canonical(
-            &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&desugar_program(
-                &parse_str(&resugared).unwrap()
-            ))
+            &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(
+                &desugar_program(&parse_str(&resugared).unwrap())
+                    .expect("Surf fixture must desugar")
+            )
             .expect("valid metadata for round-trip normalization")
         )
     );
@@ -1498,16 +1539,17 @@ fn operator_named_and_finite_list_pipe_stages_keep_their_call_stage_sugar() {
         "chained = x |> fn (p) -> cast(p, f32) |> mul(cast(2.0, f32))\n",
     );
     let surf = parse_str(source).expect("operator-named pipe stages parse");
-    let deep = desugar_program(&surf);
+    let deep = desugar_program(&surf).expect("Surf fixture must desugar");
     let resugared = resugar_program(&deep).expect("operator-named pipe stages resugar");
     let rendered = format_program(&resugared);
 
     assert_eq!(rendered, source);
     assert_eq!(
         print_canonical(
-            &normalize_deep_for_surface_roundtrip(&desugar_program(
-                &parse_str(&rendered).expect("resugared pipe stages reparse")
-            ))
+            &normalize_deep_for_surface_roundtrip(
+                &desugar_program(&parse_str(&rendered).expect("resugared pipe stages reparse"))
+                    .expect("Surf fixture must desugar")
+            )
             .expect("valid metadata for round-trip normalization")
         ),
         print_canonical(
@@ -1541,7 +1583,7 @@ fn a_nested_stage_rebinding_the_pipe_parameter_keeps_its_sugar() {
     // stranding anything and keeps its call-stage sugar.
     let source = "nested = x |> fn (p) -> cast(p, f32) |> mul(y |> add(z))\n";
     let surf = parse_str(source).expect("a nested pipe operand parses");
-    let deep = desugar_program(&surf);
+    let deep = desugar_program(&surf).expect("Surf fixture must desugar");
     assert_eq!(
         print_canonical(&deep).matches("__chelis_pipe").count(),
         4,
@@ -1552,9 +1594,12 @@ fn a_nested_stage_rebinding_the_pipe_parameter_keeps_its_sugar() {
     assert_eq!(rendered, source);
     assert_eq!(
         print_canonical(
-            &normalize_deep_for_surface_roundtrip(&desugar_program(
-                &parse_str(&rendered).expect("the resugared nested stage reparses")
-            ))
+            &normalize_deep_for_surface_roundtrip(
+                &desugar_program(
+                    &parse_str(&rendered).expect("the resugared nested stage reparses")
+                )
+                .expect("Surf fixture must desugar")
+            )
             .expect("valid metadata for round-trip normalization")
         ),
         print_canonical(
@@ -1689,13 +1734,15 @@ fn call_first_pipe_safe_ordinary_stages_preserve_the_roundtrip() {
         "result = x |> f(y |> g(z))\n",
         "result = x |> realize |> copy |> cast(f32)\n",
     ] {
-        let deep = desugar_program(&parse_str(source).expect("safe stage parses"));
+        let deep = desugar_program(&parse_str(source).expect("safe stage parses"))
+            .expect("Surf fixture must desugar");
         let rendered = format_program(&resugar_program(&deep).expect("safe stage resugars"));
         assert_eq!(
             format_source(&rendered).expect("emitted Surf reparses"),
             rendered
         );
-        let roundtrip = desugar_program(&parse_str(&rendered).unwrap());
+        let roundtrip =
+            desugar_program(&parse_str(&rendered).unwrap()).expect("Surf fixture must desugar");
         assert_eq!(
             print_canonical(&normalize_deep_for_surface_roundtrip(&deep).unwrap()),
             print_canonical(&normalize_deep_for_surface_roundtrip(&roundtrip).unwrap()),
@@ -1933,9 +1980,11 @@ fn deep_resugaring_recovers_dimension_and_precision_quantifiers() {
         "def sort_values[n, p](values: &tensor[n, p], axis: i32)",
         " -> (tensor[n, p], tensor[n, i64]) = sort(values, axis)\n",
     );
-    let deep = desugar_program(&parse_str(source).expect("quantified definition parses"));
+    let deep = desugar_program(&parse_str(source).expect("quantified definition parses"))
+        .expect("Surf fixture must desugar");
     let resugared = format_program(&resugar_program(&deep).expect("quantifiers resugar"));
-    let redesugared = desugar_program(&parse_str(&resugared).expect("resugared source parses"));
+    let redesugared = desugar_program(&parse_str(&resugared).expect("resugared source parses"))
+        .expect("Surf fixture must desugar");
 
     assert_eq!(resugared, source);
     assert_eq!(
@@ -1959,9 +2008,10 @@ fn tuple_destructuring_resugars_without_losing_linearity_markers() {
         "}\n",
     );
     let surf = parse_str(source).expect("tuple destructuring parses");
-    let deep = desugar_program(&surf);
+    let deep = desugar_program(&surf).expect("Surf fixture must desugar");
     let resugared = format_program(&resugar_program(&deep).expect("destructuring resugars"));
-    let redesugared = desugar_program(&parse_str(&resugared).expect("resugared source parses"));
+    let redesugared = desugar_program(&parse_str(&resugared).expect("resugared source parses"))
+        .expect("Surf fixture must desugar");
 
     assert_eq!(resugared, source);
     assert_eq!(
@@ -1985,9 +2035,10 @@ fn synthesized_destructuring_temporaries_do_not_capture_authored_names() {
         "  __chelis_tmp0\n",
         "}\n",
     );
-    let deep = print_canonical(&desugar_program(
-        &parse_str(source).expect("capture regression fixture parses"),
-    ));
+    let deep = print_canonical(
+        &desugar_program(&parse_str(source).expect("capture regression fixture parses"))
+            .expect("Surf fixture must desugar"),
+    );
 
     assert_eq!(
         deep.matches("__chelis_tmp0").count(),

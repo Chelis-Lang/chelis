@@ -37,7 +37,7 @@ use chelis_types::errors::CheckError;
 
 fn typecheck_surf(source: &str) -> Vec<CheckError> {
     let decls = parse_str(source).expect("surf parse should succeed");
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     match check_typed_program(&deep) {
         Ok(_) => Vec::new(),
         Err(prog_errors) => prog_errors.errors,
@@ -46,7 +46,7 @@ fn typecheck_surf(source: &str) -> Vec<CheckError> {
 
 fn typecheck_surf_program(source: &str) -> Result<CheckedProgram, Vec<CheckError>> {
     let decls = parse_str(source).expect("surf parse should succeed");
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     check_typed_program(&deep).map_err(|prog_errors| prog_errors.errors)
 }
 

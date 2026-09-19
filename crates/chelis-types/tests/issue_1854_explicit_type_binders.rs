@@ -15,6 +15,7 @@ const RESERVED_DTYPES: [&str; 2] = ["f8e4m3", "f8e5m2"];
 
 fn surf(source: &str) -> Vec<Expr> {
     desugar_program(&parse_surf(source).expect("Surf fixture must parse"))
+        .expect("Surf fixture must desugar")
 }
 
 #[derive(Debug, PartialEq, Eq)]

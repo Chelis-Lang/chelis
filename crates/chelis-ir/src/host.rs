@@ -20213,7 +20213,8 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
 
     fn surf_check(src: &str) -> CheckedProgram {
         let decls = chelis_surf::parser::parse_str(src).expect("surf parse failed");
-        let deep = chelis_surf::desugar::desugar_program(&decls);
+        let deep =
+            chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
         chelis_types::check_ir_program(&deep)
             .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors))
     }
@@ -23561,7 +23562,7 @@ mod record_hoist_binder_vocabulary_tests {
     /// emits proves nothing about the representation everybody emits.
     fn deep_program(source: &str) -> Vec<Expr> {
         let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
-        chelis_surf::desugar::desugar_program(&decls)
+        chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar")
     }
 
     /// The body of the named `def`, which is the subtree the hoist walks.

@@ -54,7 +54,7 @@ use chelis_deep::Expr;
 /// CLI does for a `.ch` file (`parse_str -> desugar_program -> expand_program`).
 fn render_deep(surf_source: &str) -> Vec<Expr> {
     let decls = chelis_surf::parser::parse_str(surf_source).expect("surf parse");
-    let deep = chelis_surf::desugar::desugar_program(&decls);
+    let deep = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
     chelis_macros::expand_program(&deep, &chelis_macros::ExpansionOptions::default())
         .expect("macro expand")
         .into_exprs()

@@ -11,7 +11,7 @@ const REJECTED_DTYPES: &[&str] = &["i8", "i16", "i32", "i64", "bool"];
 
 fn diagnostics(source: &str) -> Vec<CheckError> {
     let decls = parse_surf(source).expect("Surf fixture must parse");
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     match check_typed_program(&deep) {
         Ok(_) => Vec::new(),
         Err(report) => report.errors,

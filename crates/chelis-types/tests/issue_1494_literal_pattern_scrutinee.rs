@@ -31,7 +31,7 @@ use chelis_types::{check_ir_program, check_typed_program};
 
 fn desugared(source: &str) -> Vec<Expr> {
     let decls = parse_surf(source).unwrap_or_else(|e| panic!("surf must parse: {source}\n{e:?}"));
-    desugar_program(&decls)
+    desugar_program(&decls).expect("Surf fixture must desugar")
 }
 
 fn expanded(source: &str) -> Vec<Expr> {

@@ -906,6 +906,64 @@ class SchemaTests(unittest.TestCase):
                     ("ci.yml", "script-unit"),
                 )
 
+    def test_grad_selector_identity_oracle_has_exact_positive_ownership(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        config = owned.read_config(root / ".config/ci-test-targets.toml")
+        self.assertTrue(
+            {
+                owned.Identity("chelis-types", "issue_1955_grad_selector_checker"),
+                owned.Identity("chelis-surf", "issue_1955_grad_selector_identity"),
+                owned.Identity(
+                    "chelis-compiler-api", "issue_1955_grad_selector_pipeline"
+                ),
+                owned.Identity("chelis-cli", "issue_1955_grad_selector_identity"),
+                owned.Identity("chelis-cli", "parity"),
+            }
+            <= set(config.standing_targets)
+        )
+
+        expected_owners = {
+            "scripts/grad_selector_identity_oracle.py": (
+                "ci.yml",
+                "ci-fast",
+                "pull_request and push",
+                "chelis#1955",
+            ),
+            "scripts/test_grad_selector_identity_oracle.py": (
+                "ci.yml",
+                "script-unit",
+                "pull_request and push",
+                "chelis#1955",
+            ),
+            "examples/illustrative/grad_selector_provenance.ch": (
+                "ci.yml",
+                "ci-fast",
+                "pull_request and push",
+                "chelis#1955",
+            ),
+        }
+        for path, expected in expected_owners.items():
+            with self.subTest(path=path):
+                classification, package_matches, rules = (
+                    owned.static_path_classification(path, (), config)
+                )
+                self.assertEqual(classification, "rule")
+                self.assertEqual(package_matches, [])
+                self.assertEqual(len(rules), 1)
+                rule = rules[0]
+                self.assertEqual(rule.prefix, path)
+                self.assertEqual(rule.disposition, "owner")
+                self.assertIsNotNone(rule.owner)
+                self.assertEqual(
+                    (
+                        rule.owner.workflow,
+                        rule.owner.job,
+                        rule.owner.cadence,
+                        rule.owner.tracking_issue,
+                    ),
+                    expected,
+                )
+
     def test_stale_nightly_fixture_paths_have_exact_automated_owners(self) -> None:
         config = owned.read_config(
             Path(__file__).resolve().parents[1] / ".config/ci-test-targets.toml"

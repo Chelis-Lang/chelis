@@ -113,7 +113,7 @@ fn issue_872_declared_function_alias_retains_erased_opaque_return() {
 /// Desugar a Surf module string to Deep.
 fn deep_of(surf: &str) -> Vec<Expr> {
     let decls = chelis_surf::parser::parse_str(surf).expect("parse surf");
-    chelis_surf::desugar::desugar_program(&decls)
+    chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar")
 }
 
 /// Run the checker and build the def-name -> inferred-type map the

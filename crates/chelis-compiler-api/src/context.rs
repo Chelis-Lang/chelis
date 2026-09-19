@@ -795,7 +795,8 @@ const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V23\n";
 /// V23 carries exact result-claim witness roles in the lowered library.
 /// V24 retains literal-result declaration tokens in the lowered library.
 /// V25 retains checker-owned local tensor-ascription obligations.
-const CACHE_FORMAT_VERSION: u32 = 25;
+/// V26 retains TypeEnv callable provenance for contextual grad selectors.
+const CACHE_FORMAT_VERSION: u32 = 26;
 
 /// On-disk envelope for the Phase I cache. The full file layout is:
 ///
@@ -1271,8 +1272,9 @@ fn build_checked_library_layered(
     // (the package's own modules + non-stdlib path-deps). A macro-expansion
     // failure is a real front-end error the monolithic path also surfaces,
     // so hand back `None` for the byte-identical diagnostic.
-    let prepared = match crate::pipeline::prepare_surf_decls(
+    let prepared = match crate::pipeline::prepare_surf_decls_with_context(
         &reef_state.linked_non_stdlib_library_decls,
+        stdlib_ctx.checked_library().program().exprs(),
         None,
     ) {
         Ok(prepared) => prepared,
@@ -1385,14 +1387,9 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn cache_format_version_tracks_canonical_collection_bytes_and_nominal_kinds() {
+    fn cache_format_version_tracks_type_env_callable_provenance() {
         assert_eq!(CACHE_MAGIC, b"CHELIS_CTX_V23\n");
-        assert_eq!(CACHE_FORMAT_VERSION, 25);
-    }
-
-    #[test]
-    fn cache_format_version_tracks_the_deferred_ledger_removal() {
-        assert_eq!(CACHE_FORMAT_VERSION, 25);
+        assert_eq!(CACHE_FORMAT_VERSION, 26);
     }
 
     /// chelis#1156: the cache identity must distinguish two BUILDS, not
@@ -1588,7 +1585,7 @@ mod tests {
         let unversioned = bincode::serialize(&context).expect("raw positional payload");
         let error = CompiledContext::decode(&unversioned).expect_err("no raw fallback");
         assert!(error.contains("magic"), "{error}");
-        for version in [21_u32, 22, 23, 24, CACHE_FORMAT_VERSION + 1] {
+        for version in [21_u32, 22, 23, 24, 25, CACHE_FORMAT_VERSION + 1] {
             let mut truncated = CACHE_MAGIC.to_vec();
             truncated.extend_from_slice(&version.to_le_bytes());
             let error = CompiledContext::decode(&truncated)

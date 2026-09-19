@@ -24,7 +24,7 @@ use chelis_surf::parser::parse_str;
 
 fn deep_of(source: &str) -> String {
     let decls = parse_str(source).expect("parse");
-    print_canonical_flat(&desugar_program(&decls))
+    print_canonical_flat(&desugar_program(&decls).expect("Surf fixture must desugar"))
 }
 
 fn prim_of(name: &str) -> String {

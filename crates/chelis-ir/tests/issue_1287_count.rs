@@ -125,7 +125,7 @@ fn verifier_rejects_noncanonical_axes_wrong_dtype_and_wrong_shape() {
 
 fn lower_surf(source: &str) -> Result<Dag, String> {
     let decls = chelis_surf::parser::parse_str(source).map_err(|e| format!("parse: {e:?}"))?;
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
     let checked = check_typed_program(&exprs).map_err(|r| format!("check: {:#?}", r.errors))?;
     let checked = chelis_effects::check_program(&checked).map_err(|e| format!("effects: {e:?}"))?;
     let checked =

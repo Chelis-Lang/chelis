@@ -12,9 +12,10 @@ use chelis_unord::UnordMap;
 // #1764: admission and lowering must specialize the same typed rate, before AD.
 fn typed_rate_plan(source: &str) -> Result<EvaluationPlan, String> {
     let declarations = chelis_surf::parser::parse_str(source).unwrap();
-    let checked =
-        chelis_types::check_ir_program(&chelis_surf::desugar::desugar_program(&declarations))
-            .unwrap();
+    let checked = chelis_types::check_ir_program(
+        &chelis_surf::desugar::desugar_program(&declarations).expect("Surf fixture must desugar"),
+    )
+    .unwrap();
     let context = RandomExecutionContext::new(RandomLoweringState {
         seed: Some(42),
         counter: 0,
@@ -276,9 +277,10 @@ fn staged_claim_failure_commits_the_preceding_draw_and_reuse_keeps_live_ordinals
     use chelis_ir::host::staged::HostStage;
     let source = "def sample[m, n](source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = {\n dead = dropout(source, 0.0f32)\n dropout(reshape(x, [numel(dead), 2i64]), 0.5f32)\n}";
     let declarations = chelis_surf::parser::parse_str(source).unwrap();
-    let checked =
-        chelis_types::check_ir_program(&chelis_surf::desugar::desugar_program(&declarations))
-            .unwrap();
+    let checked = chelis_types::check_ir_program(
+        &chelis_surf::desugar::desugar_program(&declarations).expect("Surf fixture must desugar"),
+    )
+    .unwrap();
     let mut context = RandomExecutionContext::new(RandomLoweringState {
         seed: Some(42),
         counter: 5,
@@ -600,7 +602,8 @@ fn valid_uniform_like_occupies_one_shared_ordinal_between_dropout_calls() {
 #[test]
 fn local_movement_failure_occurs_after_the_earlier_entered_draw() {
     let declarations = chelis_surf::parser::parse_str("def sample[n](x: tensor[n, f32]) -> tensor[3, f32] = {\n dead = dropout(x, 0.0f32)\n shrink(x, [[0i64, 3i64]])\n}\n").unwrap();
-    let expressions = chelis_surf::desugar::desugar_program(&declarations);
+    let expressions =
+        chelis_surf::desugar::desugar_program(&declarations).expect("Surf fixture must desugar");
     let checked = chelis_types::check_ir_program(&expressions).unwrap();
     let mut context = RandomExecutionContext::new(RandomLoweringState {
         seed: Some(42),
@@ -632,7 +635,8 @@ fn local_movement_failure_occurs_after_the_earlier_entered_draw() {
 fn explicit_drop_in_gradient_retains_draws_and_verified_terminal_ownership() {
     let source = "def loss(x: tensor[32, f32]) -> tensor[f32] = {\n dead = dropout(x, 0.0f32)\n _ = drop(dead)\n sum(dropout(x, 0.5f32), 0)\n}\ndef sample(x: tensor[32, f32]) -> tensor[32, f32] = grad(loss)(x)\n";
     let declarations = chelis_surf::parser::parse_str(source).unwrap();
-    let expressions = chelis_surf::desugar::desugar_program(&declarations);
+    let expressions =
+        chelis_surf::desugar::desugar_program(&declarations).expect("Surf fixture must desugar");
     let checked = chelis_types::check_ir_program(&expressions).unwrap();
     let mut context = RandomExecutionContext::new(RandomLoweringState {
         seed: Some(42),

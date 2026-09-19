@@ -23,7 +23,7 @@ use chelis_types::{
 
 fn surf_to_deep(source: &str) -> Vec<chelis_deep::Expr> {
     let decls = parse_str(source).expect("surf parse");
-    desugar_program(&decls)
+    desugar_program(&decls).expect("Surf fixture must desugar")
 }
 
 fn check_library_with_linearity(library_src: &str) -> chelis_types::CheckedProgram {

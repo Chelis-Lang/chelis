@@ -97,6 +97,24 @@ cadence = "pull_request and workflow_dispatch"
 reason = "the dedicated diagnostic-kind job executes every controlled mutation, with its helper contracts covered by script-unit"
 tracking_issue = "chelis#1824"
 
+[[path_rule]]
+prefix = "scripts/grad_selector_identity_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "ci-fast"
+cadence = "pull_request and push"
+reason = "ci-fast executes the oracle's five standing Rust acceptance targets, while script-unit locks its command roster and fallback guard"
+tracking_issue = "chelis#1955"
+
+[[path_rule]]
+prefix = "scripts/test_grad_selector_identity_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the managed-interpreter acceptance roster and unsafe-fallback guard execute in script-unit"
+tracking_issue = "chelis#1955"
+
 # The completion runner consumes these exact runtime-extent corpus inputs.
 [[path_rule]]
 prefix = "scripts/runtime_extent_oracle.py"
@@ -235,6 +253,25 @@ name = "issue_1956_named_axis_inputs"
 [[standing_target]]
 package = "chelis-cli"
 name = "issue_1956_named_axis_inputs_cli"
+
+# chelis#1955 / chelis#1473: callable-origin identity must agree across the
+# semantic checker, Surf resolver, contextual compiler preparation, and
+# shell-visible CLI.
+[[standing_target]]
+package = "chelis-types"
+name = "issue_1955_grad_selector_checker"
+
+[[standing_target]]
+package = "chelis-surf"
+name = "issue_1955_grad_selector_identity"
+
+[[standing_target]]
+package = "chelis-compiler-api"
+name = "issue_1955_grad_selector_pipeline"
+
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_1955_grad_selector_identity"
 
 # chelis#1975: fused zero slots, forward checks, and exact eval/native values.
 [[standing_target]]
@@ -1236,6 +1273,15 @@ tracking_issue = "chelis#1956"
 prefix = "examples/grad_scalar_extent_claim.ch"
 disposition = "packages"
 packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "examples/illustrative/grad_selector_provenance.ch"
+disposition = "owner"
+workflow = "ci.yml"
+job = "ci-fast"
+cadence = "pull_request and push"
+reason = "the standing chelis-cli::issue_1955_grad_selector_identity target checks and evaluates this exact illustrative callable-provenance example without treating it as C-host phase proof"
+tracking_issue = "chelis#1955"
 
 [[path_rule]]
 prefix = ".cargo/"

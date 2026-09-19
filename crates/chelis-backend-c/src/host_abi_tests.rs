@@ -246,7 +246,8 @@ fn public_backend_emission_edges_cannot_borrow_raw_payloads() {
 
 fn verified_host_from_source(source: &str) -> chelis_ir::ownership::VerifiedHostProgram {
     let declarations = chelis_surf::parser::parse_str(source).expect("parse host source");
-    let deep = chelis_surf::desugar::desugar_program(&declarations);
+    let deep =
+        chelis_surf::desugar::desugar_program(&declarations).expect("Surf fixture must desugar");
     let checked = chelis_types::check_typed_program(&deep)
         .unwrap_or_else(|errors| panic!("check host source: {:?}", errors.errors));
     let checked = chelis_effects::check_program(&checked).expect("effects host source");
@@ -275,7 +276,8 @@ pub(crate) fn verified_execution_host_from_source(
     source: &str,
 ) -> chelis_ir::ownership::VerifiedHostProgram {
     let declarations = chelis_surf::parser::parse_str(source).expect("parse host source");
-    let deep = chelis_surf::desugar::desugar_program(&declarations);
+    let deep =
+        chelis_surf::desugar::desugar_program(&declarations).expect("Surf fixture must desugar");
     let checked = chelis_types::check_typed_program(&deep)
         .unwrap_or_else(|errors| panic!("check host source: {:?}", errors.errors));
     let checked = chelis_effects::check_program(&checked).expect("effects host source");
@@ -634,7 +636,8 @@ fn abi_projection_preserves_exact_verified_site_and_nested_dag_cursors() {
         "../../chelis-cli/tests/fixtures/compiled_value_ownership/issue_543_adt_tensor.ch"
     );
     let declarations = chelis_surf::parser::parse_str(source).expect("parse ownership fixture");
-    let deep = chelis_surf::desugar::desugar_program(&declarations);
+    let deep =
+        chelis_surf::desugar::desugar_program(&declarations).expect("Surf fixture must desugar");
     let checked = chelis_types::check_typed_program(&deep)
         .unwrap_or_else(|errors| panic!("check fixture: {:?}", errors.errors));
     let checked = chelis_effects::check_program(&checked).expect("effects fixture");

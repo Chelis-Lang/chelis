@@ -249,7 +249,7 @@ fn legacy_expr(expr: &Expr) -> Expr {
 
 fn checked_program(source: &str, legacy: bool) -> CheckedProgram {
     let declarations = parse_str(source).expect("Surf fixture parses");
-    let successor = desugar_program(&declarations);
+    let successor = desugar_program(&declarations).expect("Surf fixture must desugar");
     if legacy {
         let legacy = successor.iter().map(legacy_expr).collect::<Vec<_>>();
         check_ir_program(&legacy).expect("legacy fixture type-checks")

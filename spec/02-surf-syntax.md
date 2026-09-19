@@ -95,7 +95,12 @@ expanded Deep. `normalize_deep` may erase only the derived metadata enumerated b
 `spec/03-deep-syntax.md` section 6.3.2. A well-formed public Deep node has a Surf
 representation unless it carries non-forgeable producer provenance that Surf
 deliberately cannot author; §6.3.1 defines that fail-closed exception. An
-unmapped tag is an implementation or specification bug.
+unmapped tag is an implementation or specification bug. A `grad` carrying
+`wrt` is in the resugaring domain only when its operative selector is a
+well-formed integer selector for a statically resolved callable origin and
+agrees exactly with the ordered metadata names. Contradictory, malformed,
+absent, or dynamically unresolved selectors fail resugaring; the round-trip
+laws do not authorize dropping or reconstructing the operative child.
 
 ---
 
@@ -821,6 +826,20 @@ Transforms use call syntax in Surf but desugar to dedicated Deep tags. The parse
 | `realize(e)` | `(realize {} e')` | |
 | `copy(e)` | `(copy {} e')` | |
 | `&x` | `(borrow {} (var {} x))` | Explicit read-only borrow; usually inferred at call sites |
+
+For a named `wrt`, desugaring resolves the target value to its immutable
+callable origin and maps each written selector name to that origin's ordered
+formal parameters. Direct definitions, inline lambdas, and lexical aliases
+retain that identity through alias chains; rebinding or shadowing affects only
+subsequent bindings. Tuple, ADT constructor payload, and record-field patterns
+project the corresponding callable origin from their scrutinee, recursively
+through nested patterns. A branch or aggregate join retains a callable origin
+only when the exact lexical origin identity and ordered formal list agree on
+every contributing path; equal display labels or equal function signatures do
+not make distinct lambdas or declarations the same callable. Selector order
+and duplicates are preserved. An unknown formal name, a dynamic or non-callable
+target, or a target whose callable origin cannot be established is a desugaring
+error; no positional fallback is permitted.
 
 Transforms compose naturally: `jit(grad(loss_fn))` **⟹** `(jit {} (grad {} (var {} loss_fn)))`.
 When `grad` targets one differentiable parameter, the result is that gradient value.

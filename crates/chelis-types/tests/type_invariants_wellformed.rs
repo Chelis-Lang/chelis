@@ -20,7 +20,7 @@ use chelis_types::infer_ir_program;
 
 fn deep_of_surf(source: &str) -> Vec<chelis_deep::Expr> {
     let decls = parse_str(source).expect("surf parse should succeed");
-    desugar_program(&decls)
+    desugar_program(&decls).expect("Surf fixture must desugar")
 }
 
 fn deep_of_dp(source: &str) -> Vec<chelis_deep::Expr> {

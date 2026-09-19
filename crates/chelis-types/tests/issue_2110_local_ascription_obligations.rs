@@ -10,7 +10,7 @@ use chelis_types::{
 
 fn check_surf(source: &str) -> Result<CheckedProgram, chelis_types::InferResult> {
     let decls = parse_str(source).expect("Surf parse");
-    check_ir_program(&desugar_program(&decls))
+    check_ir_program(&desugar_program(&decls).expect("Surf fixture must desugar"))
 }
 
 fn checked_surf(source: &str) -> CheckedProgram {
@@ -366,9 +366,10 @@ def library_f(x: tensor[*, f32]) -> tensor[*, f32] = {
 "#,
     )
     .expect("library Surf parse");
-    let (context, library_checked) =
-        build_compiled_library_context(&desugar_program(&library_decls))
-            .expect("library type check");
+    let (context, library_checked) = build_compiled_library_context(
+        &desugar_program(&library_decls).expect("Surf fixture must desugar"),
+    )
+    .expect("library type check");
 
     let application_decls = parse_str(
         r#"
@@ -380,8 +381,11 @@ def application_f(x: tensor[*, f32]) -> tensor[*, f32] = {
 "#,
     )
     .expect("application Surf parse");
-    let application_checked = check_ir_with_context(&context, &desugar_program(&application_decls))
-        .expect("application type check");
+    let application_checked = check_ir_with_context(
+        &context,
+        &desugar_program(&application_decls).expect("Surf fixture must desugar"),
+    )
+    .expect("application type check");
     let composed = CheckedProgram::compose(&library_checked, &application_checked)
         .expect("proof-bound checked programs compose");
 

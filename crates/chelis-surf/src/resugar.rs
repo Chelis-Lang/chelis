@@ -98,6 +98,35 @@ pub enum ResugarError {
         key: &'static str,
         value: String,
     },
+
+    #[error(
+        "Deep `grad` selector metadata names parameter `{metadata_parameter}`, but index {index} selects parameter `{indexed_parameter}`"
+    )]
+    ContradictoryGradSelector {
+        metadata_parameter: String,
+        index: i64,
+        indexed_parameter: String,
+    },
+
+    #[error(
+        "Deep `grad` selector metadata names {metadata_count} parameter(s), but its index child selects {index_count}"
+    )]
+    GradSelectorArityMismatch {
+        metadata_count: usize,
+        index_count: usize,
+    },
+
+    #[error(
+        "Deep `grad` selector metadata names parameter `{metadata_parameter}`, but index {index} is outside the callable's {parameter_count} parameter(s)"
+    )]
+    InvalidGradSelectorIndex {
+        metadata_parameter: String,
+        index: i64,
+        parameter_count: usize,
+    },
+
+    #[error("Deep `grad` selector target `{target}` has no statically resolvable callable origin")]
+    UnresolvedGradSelectorTarget { target: String },
 }
 
 #[derive(Clone, Copy)]
@@ -160,6 +189,7 @@ fn defsig_parts<'a>(node: &NodeRef<'a>) -> Result<(Vec<String>, &'a DeepExpr), R
 /// path to invent a second spelling for an AST construct.
 pub fn resugar_expression(expr: &DeepExpr) -> Result<Expr, ResugarError> {
     chelis_deep::metadata::validate_metadata(std::slice::from_ref(expr))?;
+    validate_grad_selector_consistency(std::slice::from_ref(expr))?;
     reject_extensions(expr)?;
     validate_binder_literal_adoption(expr, &[], &[])?;
     resugar_expression_inner(expr)
@@ -192,12 +222,597 @@ fn resugar_expression_inner(expr: &DeepExpr) -> Result<Expr, ResugarError> {
 /// or a grouped `dim` declaration.
 pub fn resugar_program(exprs: &[DeepExpr]) -> Result<Vec<Decl>, ResugarError> {
     chelis_deep::metadata::validate_metadata(exprs)?;
+    validate_grad_selector_consistency(exprs)?;
     for expr in exprs {
         reject_extensions(expr)?;
     }
     let declarations = resugar_declaration_sequence(exprs)?;
     validate_surface_declarations(&declarations)?;
     Ok(declarations)
+}
+
+pub fn validate_grad_selector_consistency(exprs: &[DeepExpr]) -> Result<(), ResugarError> {
+    let mut callables = BTreeMap::<String, DeepCallableOrigin>::new();
+    preseed_deep_function_declarations(exprs, &mut callables);
+    collect_deep_callable_declarations(exprs, &mut callables);
+    for expr in exprs {
+        walk_grad_selector_consistency(expr, &callables, &BTreeMap::new())?;
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DeepCallableId(usize);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum DeepCallableOrigin {
+    Known {
+        identity: DeepCallableId,
+        params: Vec<String>,
+    },
+    Unknown,
+    NonCallable,
+    Tuple(Vec<DeepCallableOrigin>),
+    Constructor {
+        name: String,
+        payloads: Vec<DeepCallableOrigin>,
+    },
+    Record {
+        name: String,
+        fields: BTreeMap<String, DeepCallableOrigin>,
+    },
+}
+
+impl DeepCallableOrigin {
+    fn alternate(&self, other: &Self) -> Self {
+        match (self, other) {
+            (
+                Self::Known {
+                    identity: left_identity,
+                    params: left_params,
+                },
+                Self::Known {
+                    identity: right_identity,
+                    params: right_params,
+                },
+            ) if left_identity == right_identity && left_params == right_params => self.clone(),
+            (Self::Tuple(left), Self::Tuple(right)) if left.len() == right.len() => Self::Tuple(
+                left.iter()
+                    .zip(right)
+                    .map(|(left, right)| left.alternate(right))
+                    .collect(),
+            ),
+            (
+                Self::Constructor {
+                    name: left_name,
+                    payloads: left,
+                },
+                Self::Constructor {
+                    name: right_name,
+                    payloads: right,
+                },
+            ) if left_name == right_name && left.len() == right.len() => Self::Constructor {
+                name: left_name.clone(),
+                payloads: left
+                    .iter()
+                    .zip(right)
+                    .map(|(left, right)| left.alternate(right))
+                    .collect(),
+            },
+            (
+                Self::Record {
+                    name: left_name,
+                    fields: left,
+                },
+                Self::Record {
+                    name: right_name,
+                    fields: right,
+                },
+            ) if left_name == right_name && left.keys().eq(right.keys()) => Self::Record {
+                name: left_name.clone(),
+                fields: left
+                    .iter()
+                    .map(|(field, left)| {
+                        (
+                            field.clone(),
+                            left.alternate(
+                                right
+                                    .get(field)
+                                    .expect("equal record key sets contain every left key"),
+                            ),
+                        )
+                    })
+                    .collect(),
+            },
+            (Self::NonCallable, Self::NonCallable) => Self::NonCallable,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+fn preseed_deep_function_declarations(
+    exprs: &[DeepExpr],
+    callables: &mut BTreeMap<String, DeepCallableOrigin>,
+) {
+    for expr in exprs {
+        let Ok(node) = node_ref(expr) else {
+            continue;
+        };
+        match node.tag {
+            DeepTag::Module => {
+                preseed_deep_function_declarations(&node.children[1..], callables);
+            }
+            DeepTag::Def if node.children.len() == 2 => {
+                let Some(name) = atom_name(&node.children[0]) else {
+                    continue;
+                };
+                let Some(params) = deep_callable_params(&node.children[1]) else {
+                    continue;
+                };
+                callables.insert(
+                    name.to_string(),
+                    DeepCallableOrigin::Known {
+                        identity: deep_callable_identity(&node.children[1]),
+                        params,
+                    },
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_deep_callable_declarations(
+    exprs: &[DeepExpr],
+    callables: &mut BTreeMap<String, DeepCallableOrigin>,
+) {
+    for expr in exprs {
+        let Ok(node) = node_ref(expr) else {
+            continue;
+        };
+        match node.tag {
+            DeepTag::Module => collect_deep_callable_declarations(&node.children[1..], callables),
+            DeepTag::Def if node.children.len() == 2 => {
+                let Some(name) = atom_name(&node.children[0]) else {
+                    continue;
+                };
+                let origin =
+                    deep_callable_origin_in_scope(&node.children[1], callables, &BTreeMap::new());
+                callables.insert(name.to_string(), origin);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn deep_callable_params(expr: &DeepExpr) -> Option<Vec<String>> {
+    let expr = strip_deep_metadata(expr);
+    let function = node_ref(expr).ok()?;
+    if function.tag != DeepTag::Fn {
+        return None;
+    }
+    let params = node_ref(function.children.first()?).ok()?;
+    if params.tag != DeepTag::Params {
+        return None;
+    }
+    params.children.iter().map(parameter_name).collect()
+}
+
+fn deep_callable_identity(expr: &DeepExpr) -> DeepCallableId {
+    DeepCallableId(strip_deep_metadata(expr) as *const DeepExpr as usize)
+}
+
+fn strip_deep_metadata(mut expr: &DeepExpr) -> &DeepExpr {
+    while let DeepExpr::MetaExpr(meta, _) = expr {
+        expr = &meta.expr;
+    }
+    expr
+}
+
+fn walk_grad_selector_consistency(
+    expr: &DeepExpr,
+    callables: &BTreeMap<String, DeepCallableOrigin>,
+    locals: &BTreeMap<String, DeepCallableOrigin>,
+) -> Result<(), ResugarError> {
+    let node = match node_ref(expr) {
+        Ok(node) => node,
+        Err(_) => {
+            match expr {
+                DeepExpr::BareList(children, _) => {
+                    for child in children {
+                        walk_grad_selector_consistency(child, callables, locals)?;
+                    }
+                }
+                DeepExpr::Map(metadata, _) => {
+                    let mut result = Ok(());
+                    metadata.visit_syntax(&mut |_, value| {
+                        if result.is_ok() {
+                            result = walk_grad_selector_consistency(value, callables, locals);
+                        }
+                    });
+                    result?;
+                }
+                DeepExpr::MetaExpr(meta, _) => {
+                    walk_grad_selector_consistency(&meta.expr, callables, locals)?;
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+    };
+
+    match node.tag {
+        DeepTag::Fn if node.children.len() == 2 => {
+            let mut scoped = locals.clone();
+            if let Ok(params) = node_ref(&node.children[0])
+                && params.tag == DeepTag::Params
+            {
+                for param in params.children {
+                    if let Some(name) = parameter_name(param) {
+                        scoped.insert(name, DeepCallableOrigin::Unknown);
+                    }
+                }
+            }
+            walk_grad_selector_consistency(&node.children[1], callables, &scoped)?;
+            return Ok(());
+        }
+        DeepTag::Let if node.children.len() == 2 => {
+            let Ok(bindings) = node_ref(&node.children[0]) else {
+                return Ok(());
+            };
+            if bindings.tag != DeepTag::Bind || !bindings.children.len().is_multiple_of(2) {
+                return Ok(());
+            }
+            let mut scoped = locals.clone();
+            for pair in bindings.children.as_chunks::<2>().0 {
+                walk_grad_selector_consistency(&pair[1], callables, &scoped)?;
+                if let Some(name) = atom_name(&pair[0]) {
+                    let origin = deep_callable_origin_in_scope(&pair[1], callables, &scoped);
+                    scoped.insert(name.to_string(), origin);
+                }
+            }
+            walk_grad_selector_consistency(&node.children[1], callables, &scoped)?;
+            return Ok(());
+        }
+        DeepTag::Match if !node.children.is_empty() => {
+            walk_grad_selector_consistency(&node.children[0], callables, locals)?;
+            let scrutinee = deep_callable_origin_in_scope(&node.children[0], callables, locals);
+            for arm in &node.children[1..] {
+                let Ok(arm) = node_ref(arm) else {
+                    continue;
+                };
+                if arm.tag != DeepTag::Arm || arm.children.len() != 3 {
+                    continue;
+                }
+                let mut scoped = locals.clone();
+                bind_deep_match_pattern(&arm.children[0], &scrutinee, &mut scoped);
+                walk_grad_selector_consistency(&arm.children[1], callables, &scoped)?;
+                walk_grad_selector_consistency(&arm.children[2], callables, &scoped)?;
+            }
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    if node.tag == DeepTag::Grad
+        && let Some(wrt) = node.meta.wrt()
+    {
+        if node.children.len() != 2 {
+            return Err(ResugarError::InvalidChild {
+                tag: node.tag.as_str(),
+                index: 1,
+                expected: "an operative integer selector child paired with `wrt` metadata",
+            });
+        }
+        let names = wrt
+            .variables()
+            .map(|variable| variable.name().value().clone())
+            .collect::<Vec<_>>();
+        let indices =
+            grad_selector_indices(&node.children[1]).ok_or(ResugarError::InvalidChild {
+                tag: node.tag.as_str(),
+                index: 1,
+                expected: "an integer `(lit ...)` or nonempty tuple of integer literals",
+            })?;
+        let origin = deep_callable_origin_in_scope(&node.children[0], callables, locals);
+        let DeepCallableOrigin::Known { params, .. } = origin else {
+            return Err(ResugarError::UnresolvedGradSelectorTarget {
+                target: variable_name(&node.children[0])
+                    .unwrap_or("<dynamic expression>")
+                    .to_string(),
+            });
+        };
+        if indices.len() != names.len() {
+            return Err(ResugarError::GradSelectorArityMismatch {
+                metadata_count: names.len(),
+                index_count: indices.len(),
+            });
+        }
+        for (name, index) in names.into_iter().zip(indices) {
+            let indexed = usize::try_from(index)
+                .ok()
+                .and_then(|index| params.get(index));
+            match indexed {
+                Some(indexed_parameter) if indexed_parameter != &name => {
+                    return Err(ResugarError::ContradictoryGradSelector {
+                        metadata_parameter: name,
+                        index,
+                        indexed_parameter: indexed_parameter.clone(),
+                    });
+                }
+                None => {
+                    return Err(ResugarError::InvalidGradSelectorIndex {
+                        metadata_parameter: name,
+                        index,
+                        parameter_count: params.len(),
+                    });
+                }
+                Some(_) => {}
+            }
+        }
+    }
+
+    for child in node.children {
+        walk_grad_selector_consistency(child, callables, locals)?;
+    }
+    Ok(())
+}
+
+fn deep_match_callable_origin(
+    node: NodeRef<'_>,
+    callables: &BTreeMap<String, DeepCallableOrigin>,
+    locals: &BTreeMap<String, DeepCallableOrigin>,
+) -> DeepCallableOrigin {
+    if node.children.len() < 2 {
+        return DeepCallableOrigin::Unknown;
+    }
+    let scrutinee = deep_callable_origin_in_scope(&node.children[0], callables, locals);
+    let mut result = None;
+    for arm in &node.children[1..] {
+        let Ok(arm) = node_ref(arm) else {
+            return DeepCallableOrigin::Unknown;
+        };
+        if arm.tag != DeepTag::Arm || arm.children.len() != 3 {
+            return DeepCallableOrigin::Unknown;
+        }
+        let mut scoped = locals.clone();
+        bind_deep_match_pattern(&arm.children[0], &scrutinee, &mut scoped);
+        let origin = deep_callable_origin_in_scope(&arm.children[2], callables, &scoped);
+        result = Some(result.map_or_else(
+            || origin.clone(),
+            |prior: DeepCallableOrigin| prior.alternate(&origin),
+        ));
+    }
+    result.unwrap_or(DeepCallableOrigin::Unknown)
+}
+
+fn bind_deep_match_pattern(
+    pattern: &DeepExpr,
+    value: &DeepCallableOrigin,
+    locals: &mut BTreeMap<String, DeepCallableOrigin>,
+) {
+    let Ok(node) = node_ref(pattern) else {
+        return;
+    };
+    match node.tag {
+        DeepTag::PatVar => {
+            if let Some(name) = node.children.first().and_then(atom_name) {
+                locals.insert(name.to_string(), value.clone());
+            }
+        }
+        DeepTag::PatAs => {
+            if let Some(name) = node.children.first().and_then(atom_name) {
+                locals.insert(name.to_string(), value.clone());
+            }
+            if let Some(nested) = node.children.get(1) {
+                bind_deep_match_pattern(nested, value, locals);
+            }
+        }
+        DeepTag::PatTuple => {
+            for (index, child) in node.children.iter().enumerate() {
+                let child_value = match value {
+                    DeepCallableOrigin::Tuple(values) => values
+                        .get(index)
+                        .cloned()
+                        .unwrap_or(DeepCallableOrigin::Unknown),
+                    _ => DeepCallableOrigin::Unknown,
+                };
+                bind_deep_match_pattern(child, &child_value, locals);
+            }
+        }
+        DeepTag::PatCtor => {
+            let pattern_name = node.children.first().and_then(atom_name);
+            for (index, child) in node.children.iter().skip(1).enumerate() {
+                let child_value = match value {
+                    DeepCallableOrigin::Constructor { name, payloads }
+                        if pattern_name.is_some_and(|pattern_name| pattern_name == name) =>
+                    {
+                        payloads
+                            .get(index)
+                            .cloned()
+                            .unwrap_or(DeepCallableOrigin::Unknown)
+                    }
+                    _ => DeepCallableOrigin::Unknown,
+                };
+                bind_deep_match_pattern(child, &child_value, locals);
+            }
+        }
+        DeepTag::PatRecord => {
+            let pattern_name = node.children.first().and_then(atom_name);
+            for field in node.children.iter().skip(1) {
+                let Ok(field) = node_ref(field) else {
+                    continue;
+                };
+                if field.tag == DeepTag::Kv
+                    && let [field_name, value_pattern] = field.children
+                {
+                    let field_value = match value {
+                        DeepCallableOrigin::Record { name, fields }
+                            if pattern_name.is_some_and(|pattern_name| pattern_name == name) =>
+                        {
+                            atom_name(field_name)
+                                .and_then(|field_name| fields.get(field_name))
+                                .cloned()
+                                .unwrap_or(DeepCallableOrigin::Unknown)
+                        }
+                        _ => DeepCallableOrigin::Unknown,
+                    };
+                    bind_deep_match_pattern(value_pattern, &field_value, locals);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn deep_callable_origin_in_scope(
+    expr: &DeepExpr,
+    callables: &BTreeMap<String, DeepCallableOrigin>,
+    locals: &BTreeMap<String, DeepCallableOrigin>,
+) -> DeepCallableOrigin {
+    let expr = strip_deep_metadata(expr);
+    if let Some(name) = variable_name(expr) {
+        return locals
+            .get(name)
+            .cloned()
+            .or_else(|| callables.get(name).cloned())
+            .unwrap_or(DeepCallableOrigin::Unknown);
+    }
+    if let Some(params) = deep_callable_params(expr) {
+        return DeepCallableOrigin::Known {
+            identity: deep_callable_identity(expr),
+            params,
+        };
+    }
+    let Ok(node) = node_ref(expr) else {
+        return DeepCallableOrigin::Unknown;
+    };
+    match node.tag {
+        DeepTag::If if node.children.len() == 3 => {
+            let consequence = deep_callable_origin_in_scope(&node.children[1], callables, locals);
+            let alternative = deep_callable_origin_in_scope(&node.children[2], callables, locals);
+            consequence.alternate(&alternative)
+        }
+        DeepTag::Match => deep_match_callable_origin(node, callables, locals),
+        DeepTag::Tuple => DeepCallableOrigin::Tuple(
+            node.children
+                .iter()
+                .map(|child| deep_callable_origin_in_scope(child, callables, locals))
+                .collect(),
+        ),
+        DeepTag::App
+            if node
+                .children
+                .first()
+                .and_then(variable_name)
+                .is_some_and(is_constructor_name) =>
+        {
+            DeepCallableOrigin::Constructor {
+                name: variable_name(&node.children[0])
+                    .expect("constructor guard established the name")
+                    .to_string(),
+                payloads: node.children[1..]
+                    .iter()
+                    .map(|child| deep_callable_origin_in_scope(child, callables, locals))
+                    .collect(),
+            }
+        }
+        DeepTag::Record if !node.children.is_empty() => {
+            let Some(name) = atom_name(&node.children[0]) else {
+                return DeepCallableOrigin::Unknown;
+            };
+            let mut fields = BTreeMap::new();
+            for field in &node.children[1..] {
+                let Ok(field) = node_ref(field) else {
+                    return DeepCallableOrigin::Unknown;
+                };
+                if field.tag != DeepTag::Kv {
+                    return DeepCallableOrigin::Unknown;
+                }
+                let [field_name, value] = field.children else {
+                    return DeepCallableOrigin::Unknown;
+                };
+                let Some(field_name) = atom_name(field_name) else {
+                    return DeepCallableOrigin::Unknown;
+                };
+                fields.insert(
+                    field_name.to_string(),
+                    deep_callable_origin_in_scope(value, callables, locals),
+                );
+            }
+            DeepCallableOrigin::Record {
+                name: name.to_string(),
+                fields,
+            }
+        }
+        DeepTag::TupleGet if node.children.len() == 2 => {
+            let tuple = deep_callable_origin_in_scope(&node.children[0], callables, locals);
+            match tuple {
+                DeepCallableOrigin::Tuple(values) => integer_literal(&node.children[1])
+                    .and_then(|index| usize::try_from(index).ok())
+                    .and_then(|index| values.get(index).cloned())
+                    .unwrap_or(DeepCallableOrigin::Unknown),
+                _ => DeepCallableOrigin::Unknown,
+            }
+        }
+        DeepTag::Block => node
+            .children
+            .last()
+            .map(|item| deep_callable_origin_in_scope(item, callables, locals))
+            .unwrap_or(DeepCallableOrigin::NonCallable),
+        DeepTag::Let if node.children.len() == 2 => {
+            let Ok(bindings) = node_ref(&node.children[0]) else {
+                return DeepCallableOrigin::Unknown;
+            };
+            if bindings.tag != DeepTag::Bind || !bindings.children.len().is_multiple_of(2) {
+                return DeepCallableOrigin::Unknown;
+            }
+            let mut scoped = locals.clone();
+            for pair in bindings.children.as_chunks::<2>().0 {
+                let Some(name) = atom_name(&pair[0]) else {
+                    return DeepCallableOrigin::Unknown;
+                };
+                let origin = deep_callable_origin_in_scope(&pair[1], callables, &scoped);
+                scoped.insert(name.to_string(), origin);
+            }
+            deep_callable_origin_in_scope(&node.children[1], callables, &scoped)
+        }
+        DeepTag::Lit
+        | DeepTag::RecordUpdate
+        | DeepTag::Par
+        | DeepTag::PatLit
+        | DeepTag::PatTuple
+        | DeepTag::PatRecord
+        | DeepTag::PatWild
+        | DeepTag::PatCtor
+        | DeepTag::PatAs
+        | DeepTag::PatVar => DeepCallableOrigin::NonCallable,
+        _ => DeepCallableOrigin::Unknown,
+    }
+}
+
+fn parameter_name(expr: &DeepExpr) -> Option<String> {
+    match expr {
+        DeepExpr::Atom(Atom::Name(name), _) => Some(name.clone()),
+        DeepExpr::MetaExpr(meta, _) => parameter_name(&meta.expr),
+        DeepExpr::BareList(elements, _) => elements.first().and_then(atom_name).map(str::to_string),
+        DeepExpr::List(list, _) => list
+            .elements
+            .first()
+            .and_then(atom_name)
+            .map(str::to_string),
+        _ => None,
+    }
+}
+
+fn grad_selector_indices(expr: &DeepExpr) -> Option<Vec<i64>> {
+    if let Some(index) = integer_literal(expr) {
+        return Some(vec![index]);
+    }
+    let tuple = node_ref(expr).ok()?;
+    (tuple.tag == DeepTag::Tuple)
+        .then(|| tuple.children.iter().map(integer_literal).collect())
+        .flatten()
 }
 
 // Structural annotation containers can own extensions too. The typed syntax
@@ -3857,6 +4472,13 @@ fn at_least(node: &NodeRef<'_>, minimum: usize) -> Result<(), ResugarError> {
 
 fn starts_uppercase(name: &str) -> bool {
     name.chars().next().is_some_and(char::is_uppercase)
+}
+
+fn is_constructor_name(name: &str) -> bool {
+    name.rsplit(['.', '_'])
+        .find(|component| !component.is_empty())
+        .and_then(|component| component.chars().next())
+        .is_some_and(char::is_uppercase)
 }
 
 fn describe_deep(expr: &DeepExpr) -> String {

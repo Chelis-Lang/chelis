@@ -21,7 +21,8 @@ def derivative(x: tensor[3, f32]) -> tensor[3, f32] = grad(loss)(x)
 
 #[cfg(feature = "lowering-trace")]
 fn checked(source: &str) -> CheckedProgram {
-    let deep = desugar_program(&parse_str(source).expect("parse fixture"));
+    let deep = desugar_program(&parse_str(source).expect("parse fixture"))
+        .expect("Surf fixture must desugar");
     let program = check_typed_program(&deep).expect("check fixture types");
     let program = chelis_effects::check_program(&program).expect("check fixture effects");
     chelis_types::check_linearity(&program).expect("check fixture linearity")
@@ -244,7 +245,7 @@ x: tensor[32, f32] = x
 empty_scope = with seed(7i64) { x }
 unrelated = with seed(99i64) { x }
 "#;
-    let deep = desugar_program(&parse_str(source).unwrap());
+    let deep = desugar_program(&parse_str(source).unwrap()).expect("Surf fixture must desugar");
     let env = chelis_types::build_type_env_from_library(&deep).unwrap();
     let library =
         chelis_ir::lower::try_lower_program_to_evaluation_library(&checked(source)).unwrap();
@@ -259,7 +260,7 @@ unrelated = with seed(99i64) { x }
             vec![42],
         ),
     ] {
-        let deep = desugar_program(&parse_str(body).unwrap());
+        let deep = desugar_program(&parse_str(body).unwrap()).expect("Surf fixture must desugar");
         let program = chelis_types::check_ir_with_context(&env, &deep).unwrap();
         let program = chelis_effects::check_program(&program).unwrap();
         let program = chelis_types::check_linearity(&program).unwrap();

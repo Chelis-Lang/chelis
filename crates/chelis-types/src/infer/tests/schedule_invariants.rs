@@ -201,7 +201,8 @@ fn measure(program: &Program) -> Measured {
     let source = program.source();
     let declarations = chelis_surf::parser::parse_str(&source)
         .unwrap_or_else(|error| panic!("generated Surf must parse: {error:?}\n{source}"));
-    let exprs = chelis_surf::desugar::desugar_program(&declarations);
+    let exprs =
+        chelis_surf::desugar::desugar_program(&declarations).expect("Surf fixture must desugar");
     let items = top_level_decl_items_with_modules(&exprs);
     let flat = items
         .iter()
@@ -1283,7 +1284,8 @@ fn cycle_precedence_value_is_available_before_the_cyclic_component() {
                   later = 5i32\n\n\
                   def read_root() -> i32 = root\n";
     let declarations = chelis_surf::parser::parse_str(source).expect("fixture parses");
-    let exprs = chelis_surf::desugar::desugar_program(&declarations);
+    let exprs =
+        chelis_surf::desugar::desugar_program(&declarations).expect("Surf fixture must desugar");
     let items = top_level_decl_items_with_modules(&exprs);
     let plan = FunctionInferencePlan::build(&items);
     let schedule = primary_inference_schedule(&plan, &items);

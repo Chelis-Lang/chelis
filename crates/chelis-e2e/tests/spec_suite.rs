@@ -54,7 +54,8 @@ fn lower_deep(src: &str) -> Dag {
 fn spec_surf_to_deep_roundtrip() {
     let src = include_str!("../../../examples/mnist.ch");
     let decls = chelis_surf::parser::parse_str(src).expect("Surf parse failed");
-    let deep_exprs = chelis_surf::desugar::desugar_program(&decls);
+    let deep_exprs =
+        chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
     let deep_text = chelis_deep::printer::print_canonical(&deep_exprs);
 
     // Re-parse the canonical Deep text -- must succeed without error.
@@ -76,7 +77,8 @@ fn spec_surf_to_deep_roundtrip() {
 fn spec_deep_strict_validates_desugared() {
     let src = include_str!("../../../examples/mnist.ch");
     let decls = chelis_surf::parser::parse_str(src).expect("Surf parse failed");
-    let deep_exprs = chelis_surf::desugar::desugar_program(&decls);
+    let deep_exprs =
+        chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
 
     let warnings = chelis_deep::validate::validate(&deep_exprs);
     let unknown_tags: Vec<_> = warnings
@@ -111,7 +113,8 @@ fn spec_all_executable_examples_parse_and_check() {
                 result.err()
             );
             let decls = result.unwrap();
-            let deep_exprs = chelis_surf::desugar::desugar_program(&decls);
+            let deep_exprs =
+                chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
             assert!(
                 !deep_exprs.is_empty(),
                 "{} desugared to empty",
@@ -143,7 +146,8 @@ fn spec_all_executable_examples_parse_and_check() {
 fn spec_deep_3tuple_format() {
     let src = include_str!("../../../examples/hello_tensor.ch");
     let decls = chelis_surf::parser::parse_str(src).expect("Surf parse failed");
-    let deep_exprs = chelis_surf::desugar::desugar_program(&decls);
+    let deep_exprs =
+        chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
 
     fn check_3tuple(expr: &Expr) {
         match expr {
@@ -216,7 +220,8 @@ fn spec_correct_program_fitness_1() {
     // Use the Surf pipeline: a well-typed Surf program should get fitness 1.0.
     let surf_src = "def f[n](x: tensor[n, f32]) -> tensor[n, f32] = relu(x)";
     let decls = chelis_surf::parser::parse_str(surf_src).expect("Surf parse failed");
-    let deep_exprs = chelis_surf::desugar::desugar_program(&decls);
+    let deep_exprs =
+        chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
     let report = chelis_types::check_program(&deep_exprs);
     assert!(
         (report.score - 1.0).abs() < 1e-9,
@@ -238,7 +243,8 @@ fn spec_precision_mismatch_is_error() {
 def bad[n](a: tensor[n, f32], b: tensor[n, bf16]) -> tensor[n, f32] = add(a, b)
     "#;
     let decls = chelis_surf::parser::parse_str(surf_src).expect("Surf parse failed");
-    let deep_exprs = chelis_surf::desugar::desugar_program(&decls);
+    let deep_exprs =
+        chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
     let result = chelis_types::infer_program(&deep_exprs);
     assert!(!result.errors.is_empty(), "expected type errors");
     let has_precision_error = result
@@ -259,7 +265,8 @@ fn spec_dimension_mismatch_is_error() {
 def bad(a: tensor[batch, f32], b: tensor[seq, f32]) -> tensor[batch, f32] = add(a, b)
     "#;
     let decls = chelis_surf::parser::parse_str(surf_src).expect("Surf parse failed");
-    let deep_exprs = chelis_surf::desugar::desugar_program(&decls);
+    let deep_exprs =
+        chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
     let result = chelis_types::infer_program(&deep_exprs);
     assert!(!result.errors.is_empty(), "expected type errors");
     let has_dim_error = result
@@ -299,7 +306,8 @@ fn spec_top_level_initialization_cycle_is_not_a_perfect_wrapperless_check() {
     // `check_typed_program`.
     let declarations =
         chelis_surf::parser::parse_str("a = b\nb = a\n").expect("cycle fixture must parse");
-    let deep_exprs = chelis_surf::desugar::desugar_program(&declarations);
+    let deep_exprs =
+        chelis_surf::desugar::desugar_program(&declarations).expect("Surf fixture must desugar");
     let inferred = chelis_types::infer_program(&deep_exprs);
     assert!(
         inferred

@@ -12,7 +12,7 @@ use chelis_types::{check_linearity, check_typed_program};
 /// Full Surf-to-DAG pipeline.
 fn surf_to_dag(source: &str) -> Result<Dag, String> {
     let decls = surf_parse(source).map_err(|e| format!("surf parse: {e:?}"))?;
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     let checked = check_typed_program(&deep)
         .map_err(|errs| format!("typecheck failed: {:?}", errs.errors))?;
     let checked = chelis_effects::check_program(&checked)

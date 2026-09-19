@@ -68,11 +68,20 @@ dw = grad(loss, wrt=w)(w, x, y)
 
 When `wrt` is specified, the gradient result contains entries only for the listed
 parameters, in the order they appear in `wrt`. One listed parameter returns one
-gradient value directly; multiple listed parameters return a flat tuple.
+gradient value directly; multiple listed parameters return a flat tuple. Repeated
+parameter names are retained as repeated result positions. Each name denotes a
+formal parameter of the target callable's immutable lexical origin, so aliases
+and alias chains do not rename or reorder formals. Branches retain that origin
+only when every path has the same exact lexical identity and ordered formals;
+same-signature lambdas or declarations remain distinct. Tuple, ADT constructor,
+and record patterns recursively project callable origins from their scrutinee
+payloads. Unknown names and targets without a statically established callable
+origin are rejected.
 
 The executable [`grad_wrt_order.ch`](../examples/grad_wrt_order.ch) example
 distinguishes written target order from declaration order using unequal
-cotangents.
+cotangents. [`grad_selector_provenance.ch`](../examples/illustrative/grad_selector_provenance.ch)
+checks and evaluates alias-preserving constructor and record pattern projection.
 
 ### 2.3 Algorithm: Reverse-Mode AD
 

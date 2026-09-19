@@ -33,7 +33,8 @@ fn run(surf: &str, tier: &str) -> Vec<ObligationOutcome> {
 
 fn run_deep(surf: &str, tier: &str) -> Vec<ObligationOutcome> {
     let declarations = chelis_surf::parser::parse_str(surf).expect("parse Surf fixture");
-    let expressions = chelis_surf::desugar::desugar_program(&declarations);
+    let expressions =
+        chelis_surf::desugar::desugar_program(&declarations).expect("Surf fixture must desugar");
     let source = chelis_deep::printer::print_canonical(&expressions);
     match run_deep_source_obligations(&source, &options(tier)).expect("engine run") {
         ObligationRunResult::Ran(outcomes) => outcomes,

@@ -44,8 +44,11 @@ fn stdlib_and_dependency_direct_snapshots_keep_callable_labels() {
                     false,
                 ),
             ] {
-                let verdict =
-                    check_ir_with_context(env, &desugar_program(&parse_str(source).unwrap()));
+                let verdict = check_ir_with_context(
+                    env,
+                    &desugar_program(&parse_str(source).unwrap())
+                        .expect("Surf fixture must desugar"),
+                );
                 assert_eq!(verdict.is_ok(), accepts, "{source}: {verdict:?}");
             }
         }

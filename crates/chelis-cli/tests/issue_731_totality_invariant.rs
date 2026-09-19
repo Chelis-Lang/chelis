@@ -357,7 +357,8 @@ fn assert_reports_errors(name: &str, exprs: &[deep::Expr]) {
 fn surf_to_deep(source: &str) -> Vec<deep::Expr> {
     let decls = chelis_surf::parser::parse_str(source).expect("control/hole Surf must parse");
     assert!(!decls.is_empty(), "program must have declarations");
-    let deep_exprs = chelis_surf::desugar::desugar_program(&decls);
+    let deep_exprs =
+        chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
     chelis_macros::expand_program(&deep_exprs, &chelis_macros::ExpansionOptions::default())
         .expect("macro expansion must succeed")
         .into_exprs()

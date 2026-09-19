@@ -37,7 +37,8 @@ fn both_checker_apis_enforce_the_signature_binder() {
         ),
     ] {
         let declarations = chelis_surf::parser::parse_str(source).expect("parse fixture");
-        let deep = chelis_surf::desugar::desugar_program(&declarations);
+        let deep = chelis_surf::desugar::desugar_program(&declarations)
+            .expect("Surf fixture must desugar");
         let text = chelis_deep::printer::print_canonical_flat(&deep);
         let stamped = chelis_deep::parse_and_stamp_file(&text).expect("stamp fixture");
         for (name, result) in [

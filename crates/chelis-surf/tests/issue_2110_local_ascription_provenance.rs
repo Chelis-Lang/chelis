@@ -59,7 +59,7 @@ def f(x: tensor[*, f32]) -> tensor[*, f32] = {
 }
 "#;
     let decls = parse_str(source).expect("Surf parse");
-    let program = desugar_program(&decls);
+    let program = desugar_program(&decls).expect("Surf fixture must desugar");
     let mut bindings = Vec::new();
     for expr in &program {
         collect_bindings(expr, &mut bindings);

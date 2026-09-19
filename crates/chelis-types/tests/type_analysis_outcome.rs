@@ -34,7 +34,7 @@ fn rejected_analysis_carries_fitness_without_a_checked_program() {
 fn analysis_rejects_a_top_level_binding_cycle() {
     let surf = "module Cycle\na: i32 = add(b, 1)\nb: i32 = add(a, 1)\n";
     let decls = chelis_surf::parser::parse_str(surf).expect("Surf fixture must parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
 
     let TypeAnalysisOutcome::Rejected { fitness } = analyze_ir_program(&exprs) else {
         panic!("a top-level binding cycle must reject type analysis");
@@ -55,7 +55,7 @@ fn analysis_accepts_finite_recursive_functions() {
     let surf =
         "module Rec\ndef descend(n: i32) -> i32 = if eq(n, 0) then 0 else descend(sub(n, 1))\n";
     let decls = chelis_surf::parser::parse_str(surf).expect("Surf fixture must parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
 
     assert!(matches!(
         analyze_ir_program(&exprs),
@@ -67,7 +67,7 @@ fn analysis_accepts_finite_recursive_functions() {
 fn analysis_accepts_recursion_without_a_base_case() {
     let surf = "module Rec\ndef forever(n: i32) -> i32 = forever(n)\n";
     let decls = chelis_surf::parser::parse_str(surf).expect("Surf fixture must parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
 
     // [04-INF-2]/[04-INF-3] admit uniform recursion. A backend may still refuse
     // an unsupported recursive lowering under chelis#730, but that capability
@@ -86,7 +86,7 @@ fn analysis_accepts_a_deep_finite_expression() {
     }
     let surf = format!("module Deep\ndef value() -> i32 = {body}\n");
     let decls = chelis_surf::parser::parse_str(&surf).expect("deep Surf fixture must parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
 
     assert!(matches!(
         analyze_ir_program(&exprs),

@@ -136,7 +136,7 @@ fn validate_markdown_file(path: &PathBuf, expectations: Option<MarkdownExpectati
         );
         let decls = parse_surf(&block.body)
             .unwrap_or_else(|err| panic!("{label} failed to parse: {err}\n{}", block.body));
-        let deep = desugar_program(&decls);
+        let deep = desugar_program(&decls).expect("Surf fixture must desugar");
         let report = chelis_types::check_program(&deep);
         assert_valid_report(&label, &report);
 

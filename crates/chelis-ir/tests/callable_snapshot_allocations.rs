@@ -45,7 +45,8 @@ fn lowering_scalar_helpers_keeps_scope_snapshot_allocations_bounded() {
             }
             writeln!(source, "x = (x : tensor[f64])\nout = helper15({arguments})").unwrap();
             let decls = chelis_surf::parser::parse_str(&source).unwrap();
-            let deep = chelis_surf::desugar::desugar_program(&decls);
+            let deep =
+                chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
             let expanded = chelis_macros::expand_program(
                 &deep,
                 &chelis_macros::ExpansionOptions {

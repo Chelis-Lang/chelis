@@ -119,6 +119,20 @@ performs those checks nor treats a well-shaped annotation as trusted.
 > elements record the original arguments without interpreting or rewriting
 > their contents as annotations or runtime expressions.
 
+For a `grad` node that carries `wrt`, the operative integer selector child and
+the ordered `wrt` variable-reference metadata SHALL identify the same formal
+parameters of the resolved callable target, including repeated parameters.
+A public semantic or resugaring consumer SHALL reject a malformed or absent
+operative selector child, a callable origin it cannot resolve, a contradictory
+name/index pair, an out-of-range index, or unequal metadata/index arity. It
+SHALL NOT omit or rewrite either representation to make them agree, including
+when reconstructing Surf from a lone Deep expression. Callable-origin
+resolution follows the language's binding rules: function declarations are
+available to legal forward references under [04-INF-8], and a `match` pattern
+receives the corresponding origin projected from its scrutinee, including
+recursive tuple, ADT constructor payload, and record-field projection. Textual
+declaration order and pattern introduction SHALL NOT erase either origin.
+
 > **[03-META-3]** Producer-specific keys and `span_*` extensions carry opaque
 > data. Chelis semantic passes SHALL neither interpret nor rewrite their
 > payloads. Producer tools may interpret their own data. Compiler-interpreted
@@ -595,7 +609,10 @@ wildcard spelling); it does not allocate an inference variable.
 The `grad` metadata `wrt` records parameter names using [03-META-2]'s
 variable-reference syntax. Its optional child selects integer parameter
 indices under the transform's type-checking contract; metadata names are
-not runtime variable lookups and do not replace that index child.
+not runtime variable lookups and do not replace that index child. The child is
+optional only when `wrt` is absent; a `grad` carrying `wrt` requires its
+operative integer selector and the fail-closed consistency checks of
+[03-META-2].
 
 ### 2.8 Metaprogramming
 

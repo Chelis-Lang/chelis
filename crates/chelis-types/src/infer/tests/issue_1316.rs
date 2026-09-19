@@ -73,7 +73,7 @@ fn generated_program(definitions: usize, shape: GraphShape) -> Vec<deep::Expr> {
         ));
     }
     let declarations = chelis_surf::parser::parse_str(&source).expect("generated Surf parses");
-    chelis_surf::desugar::desugar_program(&declarations)
+    chelis_surf::desugar::desugar_program(&declarations).expect("Surf fixture must desugar")
 }
 
 fn plan_for(program: &[deep::Expr]) -> FunctionInferencePlan {
@@ -338,7 +338,8 @@ fn issue_1316_unknown_call_diagnostic_order_is_stable_across_drivers() {
          def second(x: i32) -> i32 = missing_second(x)\n",
     )
     .expect("fixture parses");
-    let program = chelis_surf::desugar::desugar_program(&declarations);
+    let program =
+        chelis_surf::desugar::desugar_program(&declarations).expect("Surf fixture must desugar");
     let messages = |result: Result<CheckedProgram, InferResult>| {
         result
             .expect_err("unknown calls must reject")

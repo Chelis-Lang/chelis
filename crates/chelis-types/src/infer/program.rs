@@ -391,7 +391,13 @@ fn bind_library_products(
     mut checked: CheckedProgram,
     context_library_proof_id: Option<LibraryProofId>,
 ) -> (TypeEnv, CheckedProgram) {
-    let proof_id = LibraryProofId::for_library(checked.exprs(), context_library_proof_id);
+    let selector_context_digest =
+        selector_callable_context_digest(&type_env.inner().selector_callables);
+    let proof_id = LibraryProofId::for_library(
+        checked.exprs(),
+        context_library_proof_id,
+        selector_context_digest,
+    );
     type_env.bind_library_proof(proof_id);
     checked.bind_library_proof(proof_id);
     checked.bind_context_library_proof(context_library_proof_id);
@@ -702,7 +708,13 @@ pub(super) fn infer_program_with_product_in_session(
     // entries supply; stamped input stays stamped and every reader below must
     // handle that carrier directly.
     let semantic_type_env = build_ir_type_env(exprs);
-    validate_semantic_program(exprs, &semantic_type_env, &top_level_references, errors);
+    validate_semantic_program(
+        exprs,
+        &semantic_type_env,
+        &top_level_references,
+        &SelectorCallableContext::default(),
+        errors,
+    );
     if cancellation_gate(errors) {
         stack_scope.drain_into(errors);
         product.top_level_references = top_level_references;
@@ -789,6 +801,7 @@ pub(crate) fn build_type_env_from_library_in_session(
         library_exprs,
         &library_ir,
         &product.top_level_references,
+        &SelectorCallableContext::default(),
         errors,
     );
     log_sub("validate_semantic_program", &mut sub_t);
@@ -847,6 +860,8 @@ pub(crate) fn build_type_env_from_library_in_session(
     if !errors.is_empty() {
         return Err(stats);
     }
+    let selector_callables =
+        extend_selector_callable_context(&library_annotated, &SelectorCallableContext::default());
 
     Ok(TypeEnv::from_inner(TypeEnvInner {
         env: state.env,
@@ -855,6 +870,7 @@ pub(crate) fn build_type_env_from_library_in_session(
         adt_reg: state.adt_reg,
         ir_types: library_ir_annotated,
         library_def_names,
+        selector_callables,
         opacity: state.opacity,
     }))
 }
@@ -936,6 +952,7 @@ pub(crate) fn build_compiled_library_context_in_session(
         library_exprs,
         &library_ir,
         &product.top_level_references,
+        &SelectorCallableContext::default(),
         errors,
     );
     validate_tensor_precisions_in_program(library_exprs, errors);
@@ -980,6 +997,8 @@ pub(crate) fn build_compiled_library_context_in_session(
         return Err(stats);
     }
     let library_ir_annotated = build_ir_type_env(&library_annotated);
+    let selector_callables =
+        extend_selector_callable_context(&library_annotated, &SelectorCallableContext::default());
 
     let type_env = TypeEnv::from_inner(TypeEnvInner {
         env: state.env,
@@ -988,6 +1007,7 @@ pub(crate) fn build_compiled_library_context_in_session(
         adt_reg: state.adt_reg,
         ir_types: library_ir_annotated.clone(),
         library_def_names,
+        selector_callables,
         opacity: state.opacity,
     });
 
@@ -1101,6 +1121,7 @@ pub(crate) fn build_compiled_library_context_with_base_in_session(
         library_exprs,
         &combined_ir,
         &product.top_level_references,
+        &base.inner().selector_callables,
         errors,
     );
     validate_tensor_precisions_in_program(library_exprs, errors);
@@ -1144,6 +1165,8 @@ pub(crate) fn build_compiled_library_context_with_base_in_session(
         return Err(stats);
     }
     let new_ir_annotated = build_ir_type_env(&library_annotated);
+    let selector_callables =
+        extend_selector_callable_context(&library_annotated, &base.inner().selector_callables);
 
     // The returned TypeEnv's `ir_types` is the union: base declared types
     // plus this layer's, this layer winning on shadow.
@@ -1161,6 +1184,7 @@ pub(crate) fn build_compiled_library_context_with_base_in_session(
         adt_reg: state.adt_reg,
         ir_types: combined_ir_annotated,
         library_def_names,
+        selector_callables,
         opacity: state.opacity,
     });
 
@@ -1297,6 +1321,7 @@ pub(crate) fn check_ir_with_signature_context_in_session(
         new_exprs,
         &combined_ir,
         &product.top_level_references,
+        &context.inner().selector_callables,
         errors,
     );
     log_sub("validate_semantic_program", &mut sub_t);
@@ -1441,7 +1466,13 @@ pub(crate) fn infer_ir_program_in_session(
         stack_scope.drain_into(errors);
         return stats;
     }
-    validate_semantic_program(exprs, &type_env, &product.top_level_references, errors);
+    validate_semantic_program(
+        exprs,
+        &type_env,
+        &product.top_level_references,
+        &SelectorCallableContext::default(),
+        errors,
+    );
     if cancellation_gate(errors) {
         stack_scope.drain_into(errors);
         return stats;

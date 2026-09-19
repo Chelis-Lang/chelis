@@ -17,7 +17,7 @@ const ARITHMETIC: [&str; 8] = [
 fn diagnostics(source: &str) -> Vec<CheckError> {
     let surf = chelis_surf::parser::parse_str(source).expect("Surf parse");
     let deep = chelis_macros::expand_program(
-        &chelis_surf::desugar::desugar_program(&surf),
+        &chelis_surf::desugar::desugar_program(&surf).expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("expand")
@@ -200,7 +200,8 @@ fn declaration_binders_stay_independent_and_rigid() {
 fn cached_library_bounds_and_lexical_aliases_preserve_the_boundary() {
     let library = chelis_surf::desugar::desugar_program(
         &chelis_surf::parser::parse_str("def id[p: Float](x: p) -> p = x\n").unwrap(),
-    );
+    )
+    .expect("Surf fixture must desugar");
     let context = chelis_types::build_type_env_from_library(&library).unwrap();
     let bytes = bincode::serialize(&context).unwrap();
     let context: chelis_types::TypeEnv = bincode::deserialize(&bytes).unwrap();
@@ -208,7 +209,8 @@ fn cached_library_bounds_and_lexical_aliases_preserve_the_boundary() {
         let source = format!("def f[p: Float](xs: tensor[3, p], c: p) = gt({operand}, id(c))\n");
         let deep = chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(&source).unwrap(),
-        );
+        )
+        .expect("Surf fixture must desugar");
         let errors = chelis_types::check_ir_with_context(&context, &deep)
             .err()
             .map_or(vec![], |r| r.errors);

@@ -34,6 +34,10 @@
 //! - **Ir type-env**: cloned per check call. Library declared types
 //!   remain visible to new-code shape validation; the new-code's own
 //!   declared types are added on top.
+//! - **Callable provenance**: immutable ordered formal-name identities are
+//!   retained for library values so contextual `grad` validation applies the
+//!   same metadata/index consistency rule as a monolithic check. New
+//!   declarations shadow this snapshot without mutating it.
 //!
 //! ## No leak invariant
 //!
@@ -81,10 +85,15 @@ use crate::unify::Subst;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LibraryProofId {
     digest: [u8; 32],
+    selector_context_digest: [u8; 32],
 }
 
 impl LibraryProofId {
-    pub(crate) fn for_library(annotated_exprs: &[deep::Expr], context: Option<Self>) -> Self {
+    pub(crate) fn for_library(
+        annotated_exprs: &[deep::Expr],
+        context: Option<Self>,
+        selector_context_digest: [u8; 32],
+    ) -> Self {
         let mut hasher = Sha256::new();
         hasher.update(b"chelis-library-proof-v1");
         if let Some(context) = context {
@@ -96,8 +105,10 @@ impl LibraryProofId {
         let canonical = chelis_deep::printer::print_canonical_flat(annotated_exprs);
         hasher.update((canonical.len() as u64).to_le_bytes());
         hasher.update(canonical.as_bytes());
+        hasher.update(selector_context_digest);
         Self {
             digest: hasher.finalize().into(),
+            selector_context_digest,
         }
     }
 }
@@ -116,10 +127,12 @@ pub struct TypeEnv {
 // Source-free snapshots are faithful transports from a trusted checker
 // producer, not independently re-proved programs. Structural validation does
 // not establish completeness of a maliciously edited label summary.
-// v2 added #2071's type-variable restrictions. v3 adds checked collection
+// v2 added #2071's type-variable restrictions. v3 added checked collection
 // relations to `Scheme`; reading an older snapshot as an empty relation list
-// would change which indirect calls are admitted.
-const TYPE_ENV_FORMAT_VERSION: u32 = 3;
+// would change which indirect calls are admitted. v4 adds immutable callable
+// provenance; reading v3 as an empty map would reject valid contextual named
+// gradient selectors.
+const TYPE_ENV_FORMAT_VERSION: u32 = 4;
 
 #[derive(Serialize)]
 struct TypeEnvWireRef<'a> {
@@ -187,6 +200,10 @@ pub(crate) struct TypeEnvInner {
     /// cycle / unbound suppression logic to distinguish library
     /// references from new-code references.
     pub(crate) library_def_names: UnordSet<String>,
+    /// Module-scoped immutable callable identities and ordered formal names
+    /// accepted from the library source. Contextual `grad` validation seeds
+    /// its structural resolver from this snapshot.
+    pub(crate) selector_callables: crate::infer::SelectorCallableContext,
     /// Checker-enforced opacity metadata (RFC D-CHECK): per-module
     /// export sets, binding -> module attribution, and producer text,
     /// accumulated across the library and new-code phases. Defaults
@@ -215,6 +232,7 @@ impl TypeEnv {
                 adt_reg,
                 ir_types: BTreeMap::new(),
                 library_def_names: UnordSet::new(),
+                selector_callables: crate::infer::SelectorCallableContext::default(),
                 opacity: crate::opacity::OpacityModuleMeta::default(),
             }),
             library_proof_id: None,
@@ -274,10 +292,14 @@ impl TypeEnv {
 
     /// Confirm that this context and a checked program are one library product pair.
     ///
-    /// The library builders derive one opaque identity from accepted checked source.
-    /// Cache parsing requires that identity and the declared-type map to match.
+    /// The library builders derive one opaque identity from accepted checked source
+    /// and its exact callable-selector provenance snapshot. Cache parsing requires
+    /// that identity, the provenance digest, and the declared-type map to match.
     pub fn matches_checked_program(&self, program: &crate::CheckedProgram) -> bool {
-        self.library_proof_id.is_some()
+        let selector_context_digest =
+            crate::infer::selector_callable_context_digest(&self.inner.selector_callables);
+        self.library_proof_id
+            .is_some_and(|proof| proof.selector_context_digest == selector_context_digest)
             && self.library_proof_id == program.library_proof_id()
             && self.inner.ir_types.eq(program.type_env())
     }
@@ -513,11 +535,11 @@ mod tests {
     }
 
     #[test]
-    fn type_env_rejects_the_pre_collection_contract_version() {
+    fn type_env_rejects_the_pre_callable_provenance_version() {
         let mut encoded = bincode::serialize(&TypeEnv::empty()).expect("TypeEnv serializes");
-        encoded[..4].copy_from_slice(&2_u32.to_le_bytes());
+        encoded[..4].copy_from_slice(&3_u32.to_le_bytes());
         let error = bincode::deserialize::<TypeEnv>(&encoded)
-            .expect_err("TypeEnv v2 must not decode as an unconstrained v3 snapshot");
+            .expect_err("TypeEnv v3 must not decode without callable provenance");
         assert!(
             error.to_string().contains("obsolete TypeEnv format"),
             "unexpected predecessor-version diagnostic: {error}"

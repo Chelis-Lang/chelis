@@ -118,7 +118,7 @@ mod tests {
     #[test]
     fn verbose_mode_is_canonical_surf_plus_comments() {
         let surf = parse_str("def f(x: f32) -> f32 = x").expect("Surf parses");
-        let deep = desugar_program(&surf);
+        let deep = desugar_program(&surf).expect("Surf fixture must desugar");
 
         let rendered =
             try_decompile_program_with_context(&deep, &DecompileOptions::verbose(), None)

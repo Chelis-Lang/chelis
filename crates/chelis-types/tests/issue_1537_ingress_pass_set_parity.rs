@@ -44,7 +44,7 @@ fn unstamped(source: Source) -> Vec<Expr> {
         Source::Surf(source) => {
             let declarations = parse_surf(source)
                 .unwrap_or_else(|error| panic!("Surf fixture must parse:\n{source}\n{error}"));
-            desugar_program(&declarations)
+            desugar_program(&declarations).expect("Surf fixture must desugar")
         }
         Source::Deep(source) => parse_deep(source)
             .unwrap_or_else(|error| panic!("Deep fixture must parse:\n{source}\n{error}")),

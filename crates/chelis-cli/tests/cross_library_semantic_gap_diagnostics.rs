@@ -68,7 +68,7 @@ use chelis_types::{check_ir_program, check_linearity};
 /// runs before invoking the backend.
 fn rejections_for_source(source: &str) -> Vec<SummaryRejection> {
     let decls = parse_str(source).expect("parse_str");
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     let checked = check_ir_program(&deep).expect("check_ir_program");
     let checked = chelis_effects::check_program(&checked).expect("effect check");
     let checked = check_linearity(&checked).expect("linearity check");
@@ -475,7 +475,7 @@ fn summarized_gather_helper_has_specialization() {
                   def f(table: tensor[1000, 128, f32], indices: tensor[64, i64]) \
                   -> tensor[64, 128, f32] = my_g(table, indices)\n";
     let decls = parse_str(source).expect("parse_str");
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     let checked = check_ir_program(&deep).expect("check_ir_program");
     let checked = chelis_effects::check_program(&checked).expect("effect check");
     let checked = check_linearity(&checked).expect("linearity check");

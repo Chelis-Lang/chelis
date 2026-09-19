@@ -26,7 +26,8 @@ const C_TENSOR_PRIMS: &[Prim] = &[
 ];
 
 fn manifested(source: &str) -> ManifestedProgram {
-    let deep = desugar_program(&parse_str(source).expect("parse fixture"));
+    let deep = desugar_program(&parse_str(source).expect("parse fixture"))
+        .expect("Surf fixture must desugar");
     let checked: CheckedProgram = check_typed_program(&deep).expect("check fixture types");
     let checked = chelis_effects::check_program(&checked).expect("check fixture effects");
     let checked = check_linearity(&checked).expect("check fixture linearity");

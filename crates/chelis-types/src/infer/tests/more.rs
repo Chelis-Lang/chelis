@@ -297,7 +297,7 @@ fn ir_literal_dimension_mismatch_surfaces_error() {
          def main(a: tensor[3, 3, f32]) -> tensor[f32] = want_2x2(a)\n",
     )
     .expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
 
     let result = infer_ir_program(&exprs);
     assert!(
@@ -326,7 +326,7 @@ fn ir_rejects_polymorphic_dims_pinned_by_body() {
          def main() -> f32 = cast(0.0, f32)\n",
     )
     .expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
 
     let result = infer_ir_program(&exprs);
     assert!(
@@ -354,7 +354,7 @@ fn ir_preserves_unresolved_name_errors() {
          def main() -> f32 = probe(cast(1.0, f32))\n",
     )
     .expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
 
     let result = infer_ir_program(&exprs);
     assert!(
@@ -397,7 +397,7 @@ fn ir_resolves_consistently_mangled_constructor_names() {
            }\n",
     )
     .expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
 
     let result = infer_ir_program(&exprs);
     assert!(
@@ -425,7 +425,7 @@ fn ir_rejects_out_of_scope_terminal_constructor_name() {
              Pkg__chelis__std__Std__Nn__Generate__KVCache[p] = KVCache([])\n",
     )
     .expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
 
     let result = infer_ir_program(&exprs);
     assert!(
@@ -706,7 +706,7 @@ fn pad_sequences_to_literal_width_matches_declared_shape() {
          pad_sequences_to([[cast(10.0, f32)]], cast(4, i64), cast(0.0, f32))\n",
     )
     .expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
     let result = infer_ir_program(&exprs);
     assert!(
         result.errors.is_empty(),
@@ -722,7 +722,7 @@ fn pad_sequences_to_wrong_literal_width_is_rejected() {
          pad_sequences_to([[cast(10.0, f32)]], cast(4, i64), cast(0.0, f32))\n",
     )
     .expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
     let result = infer_ir_program(&exprs);
     assert!(
         !result.errors.is_empty(),
@@ -745,7 +745,7 @@ fn pad_sequences_to_mismatched_width_through_shared_sig_dim_is_rejected() {
          }\n",
     )
     .expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
     let result = infer_ir_program(&exprs);
     assert!(
         result
@@ -1199,18 +1199,21 @@ def summarize(x: tensor[batch, hidden, hidden, f32]) -> (tensor[batch, hidden, f
 
 #[test]
 fn surf_einsum_rejects_ellipsis_in_3h() {
-    let result = check_ir_program(&chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str(
-            r#"
+    let result = check_ir_program(
+        &chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(
+                r#"
 def bad(
   x: tensor[batch, seq, hidden, f32],
   w: tensor[hidden, out_dim, f32]
 ) -> tensor[batch, seq, out_dim, f32] =
   einsum("...h,ho->...o", x, w)
 "#,
+            )
+            .expect("surf parse"),
         )
-        .expect("surf parse"),
-    ));
+        .expect("Surf fixture must desugar"),
+    );
     let err = result.expect_err("ellipsis should be rejected in 3h einsum");
     assert!(
         err.errors.iter().any(|error| {
@@ -1224,9 +1227,10 @@ def bad(
 
 #[test]
 fn surf_where_rejects_non_bool_condition_tensor() {
-    let result = check_ir_program(&chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str(
-            r#"
+    let result = check_ir_program(
+        &chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(
+                r#"
 def bad(
   cond: tensor[batch, hidden, f32],
   x: tensor[batch, hidden, f32],
@@ -1234,9 +1238,11 @@ def bad(
 ) -> tensor[batch, hidden, f32] =
   where(cond, x, y)
 "#,
+            )
+            .expect("surf parse"),
         )
-        .expect("surf parse"),
-    ));
+        .expect("Surf fixture must desugar"),
+    );
     let err = result.expect_err("where should reject non-bool condition tensors");
     assert!(
         err.errors
@@ -1249,9 +1255,10 @@ def bad(
 
 #[test]
 fn surf_scatter_replace_rejects_unknown_mode() {
-    let result = check_ir_program(&chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str(
-            r#"
+    let result = check_ir_program(
+        &chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(
+                r#"
 def bad(
   base: tensor[seq, hidden, f32],
   ids: tensor[seq, i64],
@@ -1259,9 +1266,11 @@ def bad(
 ) -> tensor[seq, hidden, f32] =
   scatter(base, ids, updates, 0, "last")
 "#,
+            )
+            .expect("surf parse"),
         )
-        .expect("surf parse"),
-    ));
+        .expect("Surf fixture must desugar"),
+    );
     let err = result.expect_err("scatter should reject unsupported mode");
     assert!(
         err.errors.iter().any(|error| {
@@ -1276,16 +1285,19 @@ def bad(
 
 #[test]
 fn surf_einsum_rejects_static_extent_mismatch() {
-    let result = check_ir_program(&chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str(
-            r#"
+    let result = check_ir_program(
+        &chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(
+                r#"
 a = pad_sequences([[1.0, 2.0], [3.0, 4.0]], 0.0)
 b = pad_sequences([[5.0, 6.0], [7.0, 8.0], [9.0, 10.0]], 0.0)
 out = einsum("ij,jk->ik", a, b)
 "#,
+            )
+            .expect("surf parse"),
         )
-        .expect("surf parse"),
-    ));
+        .expect("Surf fixture must desugar"),
+    );
     let err = result.expect_err("static einsum extent mismatch should be rejected");
     assert!(
         err.errors.iter().any(|error| {
@@ -1298,18 +1310,21 @@ out = einsum("ij,jk->ik", a, b)
 
 #[test]
 fn surf_scatter_replace_accepts_static_duplicate_indices() {
-    let result = check_ir_program(&chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str(
-            r#"
+    let result = check_ir_program(
+        &chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(
+                r#"
 base = pad_sequences([[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]], 0.0)
 ids: List[i64] = [cast(1, i64), cast(1, i64)]
 idx = to_tensor(ids)
 updates = pad_sequences([[5.0, 5.0], [6.0, 6.0]], 0.0)
 out = scatter(base, idx, updates, 0, "replace")
 "#,
+            )
+            .expect("surf parse"),
         )
-        .expect("surf parse"),
-    ));
+        .expect("Surf fixture must desugar"),
+    );
     result.expect("static scatter duplicate indices follow deterministic last-write-wins");
 }
 
@@ -1329,15 +1344,18 @@ total = fold(fn (acc: i64, x: i64) -> add(acc, x), cast(0, i64), filtered)
 
 #[test]
 fn surf_append_rejects_wrong_element_type() {
-    let result = check_ir_program(&chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str(
-            r#"
+    let result = check_ir_program(
+        &chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(
+                r#"
 xs: List[i64] = [cast(1, i64)]
 bad = append(xs, "oops")
 "#,
+            )
+            .expect("surf parse"),
         )
-        .expect("surf parse"),
-    ));
+        .expect("Surf fixture must desugar"),
+    );
     let err = result.expect_err("append should reject mismatched element type");
     assert!(
         err.errors
@@ -1350,15 +1368,18 @@ bad = append(xs, "oops")
 
 #[test]
 fn surf_filter_rejects_non_bool_callback() {
-    let result = check_ir_program(&chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str(
-            r#"
+    let result = check_ir_program(
+        &chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(
+                r#"
 xs: List[i64] = [cast(1, i64)]
 bad = filter(fn (x: i64) -> add(x, cast(1, i64)), xs)
 "#,
+            )
+            .expect("surf parse"),
         )
-        .expect("surf parse"),
-    ));
+        .expect("Surf fixture must desugar"),
+    );
     let err = result.expect_err("filter should reject non-bool callback");
     assert!(
         err.errors
@@ -1373,15 +1394,18 @@ bad = filter(fn (x: i64) -> add(x, cast(1, i64)), xs)
 
 #[test]
 fn surf_dict_entries_rejects_non_dict_input() {
-    let result = check_ir_program(&chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str(
-            r#"
+    let result = check_ir_program(
+        &chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(
+                r#"
 xs: List[i64] = [cast(1, i64)]
 bad = dict_entries(xs)
 "#,
+            )
+            .expect("surf parse"),
         )
-        .expect("surf parse"),
-    ));
+        .expect("Surf fixture must desugar"),
+    );
     let err = result.expect_err("dict_entries should reject non-dict input");
     assert!(
         err.errors
@@ -1394,14 +1418,17 @@ bad = dict_entries(xs)
 
 #[test]
 fn surf_to_list_rejects_rank2_tensor() {
-    let result = check_ir_program(&chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str(
-            r#"
+    let result = check_ir_program(
+        &chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(
+                r#"
 def bad(x: tensor[2, 2, f32]) -> List[f32] = to_list(x)
 "#,
+            )
+            .expect("surf parse"),
         )
-        .expect("surf parse"),
-    ));
+        .expect("Surf fixture must desugar"),
+    );
     let err = result.expect_err("to_list should reject rank-2 tensor input");
     assert!(
         err.errors.iter().any(|error| {
@@ -1414,15 +1441,18 @@ def bad(x: tensor[2, 2, f32]) -> List[f32] = to_list(x)
 
 #[test]
 fn surf_fold_rejects_accumulator_mismatch() {
-    let result = check_ir_program(&chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str(
-            r#"
+    let result = check_ir_program(
+        &chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(
+                r#"
 xs: List[i64] = [cast(1, i64)]
 bad = fold(fn (acc: string, x: i64) -> string_concat(acc, to_string(x)), cast(0, i64), xs)
 "#,
+            )
+            .expect("surf parse"),
         )
-        .expect("surf parse"),
-    ));
+        .expect("Surf fixture must desugar"),
+    );
     let err = result.expect_err("fold should reject mismatched accumulator type");
     assert!(
         err.errors.iter().any(|error| error.message.contains("fold")
@@ -1454,6 +1484,7 @@ out = f(to_tensor([1.0, 2.0, 3.0]))
         )
         .expect("surf parse"),
     )
+    .expect("Surf fixture must desugar")
 }
 
 #[test]
@@ -1480,9 +1511,10 @@ fn surf_polymorphic_tuple_fold_with_tensor_slot_type_checks() {
 
 #[test]
 fn surf_collection_helper_builtins_type_check() {
-    let result = check_ir_program(&chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str(
-            r#"
+    let result = check_ir_program(
+        &chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(
+                r#"
 xs: List[i64] = [cast(1, i64), cast(2, i64), cast(3, i64)]
 prefix = take(xs, cast(2, i64))
 suffix = drop(xs, cast(1, i64))
@@ -1496,23 +1528,28 @@ extended = dict_insert(base, "beta", cast(2, i64))
 merged = dict_merge(extended, dict_of([("beta", cast(20, i64)), ("gamma", cast(3, i64))]))
 trimmed = dict_remove(merged, "gamma")
 "#,
+            )
+            .expect("surf parse"),
         )
-        .expect("surf parse"),
-    ));
+        .expect("Surf fixture must desugar"),
+    );
     result.expect("collection helper builtins should type check");
 }
 
 #[test]
 fn surf_take_rejects_non_integer_count() {
-    let result = check_ir_program(&chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str(
-            r#"
+    let result = check_ir_program(
+        &chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(
+                r#"
 xs: List[i64] = [cast(1, i64), cast(2, i64)]
 bad = take(xs, "two")
 "#,
+            )
+            .expect("surf parse"),
         )
-        .expect("surf parse"),
-    ));
+        .expect("Surf fixture must desugar"),
+    );
     let err = result.expect_err("take should reject non-integer count");
     assert!(
         err.errors
@@ -1525,15 +1562,18 @@ bad = take(xs, "two")
 
 #[test]
 fn surf_dict_insert_rejects_value_type_mismatch() {
-    let result = check_ir_program(&chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str(
-            r#"
+    let result = check_ir_program(
+        &chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(
+                r#"
 base: Dict[string, i64] = dict_of([("alpha", cast(1, i64))])
 bad = dict_insert(base, "beta", "two")
 "#,
+            )
+            .expect("surf parse"),
         )
-        .expect("surf parse"),
-    ));
+        .expect("Surf fixture must desugar"),
+    );
     let err = result.expect_err("dict_insert should reject mismatched value type");
     assert!(
         err.errors
@@ -1548,16 +1588,19 @@ bad = dict_insert(base, "beta", "two")
 
 #[test]
 fn surf_dict_merge_rejects_mismatched_dict_value_types() {
-    let result = check_ir_program(&chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str(
-            r#"
+    let result = check_ir_program(
+        &chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(
+                r#"
 lhs: Dict[string, i64] = dict_of([("alpha", cast(1, i64))])
 rhs: Dict[string, string] = dict_of([("beta", "two")])
 bad = dict_merge(lhs, rhs)
 "#,
+            )
+            .expect("surf parse"),
         )
-        .expect("surf parse"),
-    ));
+        .expect("Surf fixture must desugar"),
+    );
     let err = result.expect_err("dict_merge should reject mismatched dict value types");
     assert!(
         err.errors
@@ -1573,15 +1616,18 @@ bad = dict_merge(lhs, rhs)
 
 #[test]
 fn surf_scan_rejects_accumulator_mismatch() {
-    let result = check_ir_program(&chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str(
-            r#"
+    let result = check_ir_program(
+        &chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(
+                r#"
 xs: List[i64] = [cast(1, i64)]
 bad = scan(fn (acc: string, x: i64) -> string_concat(acc, to_string(x)), cast(0, i64), xs)
 "#,
+            )
+            .expect("surf parse"),
         )
-        .expect("surf parse"),
-    ));
+        .expect("Surf fixture must desugar"),
+    );
     let err = result.expect_err("scan should reject mismatched accumulator type");
     assert!(
         err.errors.iter().any(|error| error.message.contains("scan")
@@ -1595,15 +1641,18 @@ bad = scan(fn (acc: string, x: i64) -> string_concat(acc, to_string(x)), cast(0,
 
 #[test]
 fn surf_partition_rejects_non_bool_callback() {
-    let result = check_ir_program(&chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str(
-            r#"
+    let result = check_ir_program(
+        &chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(
+                r#"
 xs: List[i64] = [cast(1, i64)]
 bad = partition(fn (x: i64) -> add(x, cast(1, i64)), xs)
 "#,
+            )
+            .expect("surf parse"),
         )
-        .expect("surf parse"),
-    ));
+        .expect("Surf fixture must desugar"),
+    );
     let err = result.expect_err("partition should reject non-bool callback");
     assert!(
         err.errors
@@ -1618,15 +1667,18 @@ bad = partition(fn (x: i64) -> add(x, cast(1, i64)), xs)
 
 #[test]
 fn surf_flat_map_rejects_non_list_callback() {
-    let result = check_ir_program(&chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str(
-            r#"
+    let result = check_ir_program(
+        &chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(
+                r#"
 xs: List[i64] = [cast(1, i64)]
 bad = flat_map(fn (x: i64) -> add(x, cast(1, i64)), xs)
 "#,
+            )
+            .expect("surf parse"),
         )
-        .expect("surf parse"),
-    ));
+        .expect("Surf fixture must desugar"),
+    );
     let err = result.expect_err("flat_map should reject non-list callback");
     assert!(
         err.errors
@@ -1639,15 +1691,18 @@ bad = flat_map(fn (x: i64) -> add(x, cast(1, i64)), xs)
 
 #[test]
 fn surf_flatten_rejects_non_nested_list_input() {
-    let result = check_ir_program(&chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str(
-            r#"
+    let result = check_ir_program(
+        &chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(
+                r#"
 xs: List[i64] = [cast(1, i64)]
 bad = flatten(xs)
 "#,
+            )
+            .expect("surf parse"),
         )
-        .expect("surf parse"),
-    ));
+        .expect("Surf fixture must desugar"),
+    );
     let err = result.expect_err("flatten should reject non-nested list input");
     assert!(
         err.errors
@@ -1660,15 +1715,18 @@ bad = flatten(xs)
 
 #[test]
 fn surf_dict_remove_rejects_mismatched_key_type() {
-    let result = check_ir_program(&chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str(
-            r#"
+    let result = check_ir_program(
+        &chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(
+                r#"
 base: Dict[string, i64] = dict_of([("alpha", cast(1, i64))])
 bad = dict_remove(base, cast(7, i64))
 "#,
+            )
+            .expect("surf parse"),
         )
-        .expect("surf parse"),
-    ));
+        .expect("Surf fixture must desugar"),
+    );
     let err = result.expect_err("dict_remove should reject mismatched key type");
     assert!(
         err.errors.iter().any(|error| {
@@ -1682,15 +1740,18 @@ bad = dict_remove(base, cast(7, i64))
 
 #[test]
 fn surf_chunk_rejects_non_integer_size() {
-    let result = check_ir_program(&chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str(
-            r#"
+    let result = check_ir_program(
+        &chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(
+                r#"
 xs: List[i64] = [cast(1, i64)]
 bad = chunk(xs, "two")
 "#,
+            )
+            .expect("surf parse"),
         )
-        .expect("surf parse"),
-    ));
+        .expect("Surf fixture must desugar"),
+    );
     let err = result.expect_err("chunk should reject non-integer size");
     assert!(
         err.errors
@@ -1707,7 +1768,7 @@ bad = chunk(xs, "two")
 
 fn ir_errors_from_surf(src: &str) -> Vec<CheckError> {
     let decls = chelis_surf::parser::parse_str(src).expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
     infer_ir_program(&exprs).errors
 }
 

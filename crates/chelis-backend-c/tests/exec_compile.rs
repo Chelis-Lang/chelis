@@ -6488,8 +6488,10 @@ fn runtime_branch_local_ascription_c() -> chelis_backend_c::CodegenResult {
                     y\n\
                   } else x\n";
     let decls = chelis_surf::parser::parse_str(source).expect("Surf parse");
-    let checked = chelis_types::check_ir_program(&chelis_surf::desugar::desugar_program(&decls))
-        .unwrap_or_else(|report| panic!("type check failed: {:?}", report.errors));
+    let checked = chelis_types::check_ir_program(
+        &chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar"),
+    )
+    .unwrap_or_else(|report| panic!("type check failed: {:?}", report.errors));
     let dag = chelis_ir::host::lower_named_tensor_entry_dag(&checked, "f")
         .expect("named tensor entry lowers");
     let generated = codegen_with_options(
