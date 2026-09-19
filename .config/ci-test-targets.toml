@@ -1787,6 +1787,15 @@ reason = "the Phase 4B freeze and per-file contract acknowledgement run in the r
 tracking_issue = "chelis#1870"
 
 [[path_rule]]
+prefix = "spec/design/loud_unsupported_issue_manifest.json"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the checked-in rejection registry agreement and offline authority-admission controls execute in script-unit; complete live issue-state validation runs in the daily/manual standing workflow"
+tracking_issue = "chelis#1870"
+
+[[path_rule]]
 prefix = "scripts/generate_rejection_registries.py"
 disposition = "owner"
 workflow = "ci.yml"

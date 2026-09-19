@@ -1241,6 +1241,34 @@ class SchemaTests(unittest.TestCase):
             with self.subTest(neighbor=neighbor):
                 self.assertFalse(any(rule.matches(neighbor) for rule in rules.values()))
 
+    def test_rejection_issue_manifest_has_an_exact_script_unit_owner(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        config = owned.read_config(root / ".config/ci-test-targets.toml")
+        path = "spec/design/loud_unsupported_issue_manifest.json"
+        rules = [rule for rule in config.path_rules if rule.matches(path)]
+        self.assertEqual(len(rules), 1)
+        rule = rules[0]
+        self.assertEqual(rule.prefix, path)
+        self.assertEqual(rule.disposition, "owner")
+        self.assertIsNotNone(rule.owner)
+        self.assertEqual(
+            (
+                rule.owner.workflow,
+                rule.owner.job,
+                rule.owner.cadence,
+                rule.owner.tracking_issue,
+            ),
+            (
+                "ci.yml",
+                "script-unit",
+                "pull_request and push",
+                "chelis#1870",
+            ),
+        )
+        self.assertFalse(
+            rule.matches("spec/design/loud_unsupported_issue_manifest_extra.json")
+        )
+
     def test_path_rules_cannot_override_existing_docs_only_policy(self) -> None:
         for path in ("README.md", "spec/05-risc-primitives.md", "new-tools/new.py"):
             text = config_text() + (
