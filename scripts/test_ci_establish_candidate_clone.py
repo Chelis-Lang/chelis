@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
-import re
+import shlex
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -241,52 +243,158 @@ class CandidateCloneInvariantTests(unittest.TestCase):
 
 
 class CandidateCloneConfinementTests(unittest.TestCase):
-    """An invariant a later fetch can violate reads as a guarantee it lost.
+    """An invariant a later step can violate reads as a guarantee it lost.
 
-    A fetch can only add history, with one exception: a depth-limited fetch
-    adds a graft, which is what broke the property in chelis#2228 and again
-    in chelis#2234. So the establishing step owns every fetch in its job,
-    and this fails if another step acquires one.
+    A fetch can only add history, with two exceptions: a depth-limited
+    fetch adds a graft, and a checkout re-clones. Both broke the property,
+    in chelis#2228 and again in chelis#2234. So the establishing step owns
+    both, and these fail if another step acquires either.
+
+    Reading `run:` blocks alone is not enough and was the first version's
+    hole: `actions/checkout` takes `fetch-depth` as an input, so the
+    command that creates the original graft never appears in a run line at
+    all.
     """
 
-    DEPTH_ARGUMENT = re.compile(r"--(depth|deepen|shallow-since|shallow-exclude)\b")
+    SHAPE_SUBCOMMANDS = {"fetch", "pull", "clone"}
+    DEPTH_FLAGS = ("--depth", "--deepen", "--shallow-since", "--shallow-exclude")
 
     def changes_steps(self, workflow: str) -> list[dict]:
         parsed = yaml.safe_load((WORKFLOWS / workflow).read_text())
         return parsed["jobs"]["changes"]["steps"]
 
-    def test_only_the_establishing_step_fetches(self) -> None:
+    @staticmethod
+    def commands(body: str) -> list[str]:
+        """Fold continuations and collapse whitespace before matching.
+
+        A line-scoped, literal scan is evaded by the spellings this file
+        already uses elsewhere: a backslash continuation, a second space,
+        and `git -C <dir>`. Normalising once beats adding a witness per
+        spelling, which has no end.
+        """
+
+        joined: list[str] = []
+        pending = ""
+        for line in body.splitlines():
+            stripped = line.rstrip()
+            if stripped.endswith("\\"):
+                pending += stripped[:-1].rstrip() + " "
+                continue
+            joined.append((pending + stripped.strip()).strip())
+            pending = ""
+        if pending:
+            joined.append(pending.strip())
+        return [" ".join(command.split()) for command in joined if command]
+
+    @classmethod
+    def git_invocations(cls, command: str) -> list[list[str]]:
+        """Every `git ...` in one command, with its subcommand resolved.
+
+        `git -C dir fetch` and `git fetch` must look the same here, so the
+        global options and their values are skipped rather than matched.
+        """
+
+        try:
+            tokens = shlex.split(command, comments=True)
+        except ValueError:
+            tokens = command.split()
+        found: list[list[str]] = []
+        for index, token in enumerate(tokens):
+            if token != "git" and not token.endswith("/git"):
+                continue
+            rest = tokens[index + 1:]
+            position = 0
+            while position < len(rest) and rest[position].startswith("-"):
+                # `-C <path>` and `-c <name>=<value>` take a value.
+                position += 2 if rest[position] in {"-C", "-c"} else 1
+            if position < len(rest):
+                found.append([rest[position], *rest[position + 1:]])
+        return found
+
+    def shape_changing(self, body: str) -> list[tuple[str, list[str]]]:
+        out = []
+        for command in self.commands(body):
+            for invocation in self.git_invocations(command):
+                if invocation[0] in self.SHAPE_SUBCOMMANDS:
+                    out.append((command, invocation))
+        return out
+
+    def test_only_the_establishing_step_changes_the_clone_shape(self) -> None:
         for workflow in ("ci.yml", "conformance.yml"):
             with self.subTest(workflow=workflow):
                 steps = self.changes_steps(workflow)
                 owners = [step for step in steps if step.get("id") == "clone"]
                 self.assertEqual(len(owners), 1, "one step owns the clone")
                 strays = [
-                    (step.get("name"), line.strip())
+                    (step.get("name"), command)
                     for step in steps
                     if step.get("id") != "clone"
-                    for line in step.get("run", "").splitlines()
-                    if "git fetch" in line
+                    for command, _ in self.shape_changing(step.get("run", ""))
                 ]
                 self.assertEqual(strays, [])
 
     def test_only_the_establishing_step_may_limit_depth(self) -> None:
-        """The narrower property, and the one that actually bites.
+        """The narrower rule, and the one that actually bites.
 
         A depth-less fetch cannot graft, so it cannot violate the
-        invariant. A depth-limited one can, wherever it is written.
+        invariant. A depth-limited one can, wherever it is written and
+        however it is spelled.
         """
 
         for workflow in ("ci.yml", "conformance.yml"):
             with self.subTest(workflow=workflow):
                 limited = [
-                    (step.get("name"), line.strip())
+                    (step.get("name"), command)
                     for step in self.changes_steps(workflow)
                     if step.get("id") != "clone"
-                    for line in step.get("run", "").splitlines()
-                    if "git fetch" in line and self.DEPTH_ARGUMENT.search(line)
+                    for command, invocation in self.shape_changing(
+                        step.get("run", "")
+                    )
+                    if any(
+                        token.startswith(self.DEPTH_FLAGS) for token in invocation
+                    )
                 ]
                 self.assertEqual(limited, [])
+
+    def test_no_checkout_can_reclone_over_the_established_candidate(
+        self,
+    ) -> None:
+        """`actions/checkout` never appears in a run line, and it grafts.
+
+        It takes `fetch-depth` as an input, so a second checkout at the
+        candidate path after the establishing step would replace the clone
+        whose shape was just asserted, and every `run:`-scoped guard would
+        miss it. The rule is positional: every checkout runs before the
+        owner, and only the sanctioned one targets the candidate path.
+        """
+
+        for workflow in ("ci.yml", "conformance.yml"):
+            steps = self.changes_steps(workflow)
+            owner = next(
+                index for index, step in enumerate(steps)
+                if step.get("id") == "clone"
+            )
+            checkouts = [
+                (index, step)
+                for index, step in enumerate(steps)
+                if "actions/checkout" in str(step.get("uses", ""))
+            ]
+            with self.subTest(workflow=workflow):
+                self.assertTrue(checkouts, "the job must check something out")
+                late = [
+                    step.get("name") or step.get("id")
+                    for index, step in checkouts
+                    if index > owner
+                ]
+                self.assertEqual(late, [], "a checkout after the owner reclones")
+                # Matched by name rather than id, because the step has no
+                # id on this branch and a guard should not require one.
+                candidate_path = [
+                    step.get("name")
+                    for _, step in checkouts
+                    if (step.get("with") or {}).get("path") == "candidate"
+                ]
+                self.assertEqual(candidate_path, ["Checkout exact candidate"])
 
     def test_the_verifiers_consume_the_established_clone(self) -> None:
         for workflow in ("ci.yml", "conformance.yml"):
@@ -302,6 +410,95 @@ class CandidateCloneConfinementTests(unittest.TestCase):
                     "steps.clone.outputs.target_tip",
                     steps.get("candidate-lifecycle", ""),
                 )
+
+
+class EstablishingStepPreambleTests(unittest.TestCase):
+    """The preamble must reach the module, not die above it.
+
+    This step's outcome gates the candidate preflight and the step after it
+    reads the clone, so a preamble command exiting under errexit closes
+    required contexts saying nothing. The repair for that was verified once
+    by hand, which is the same shape as the finding that prompted it, so
+    the probe is encoded here instead.
+    """
+
+    def clone_step_body(self) -> str:
+        parsed = yaml.safe_load((WORKFLOWS / "ci.yml").read_text())
+        return next(
+            step["run"]
+            for step in parsed["jobs"]["changes"]["steps"]
+            if step.get("id") == "clone"
+        )
+
+    def run_preamble(self, *, path: str) -> subprocess.CompletedProcess[str]:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate = root / "candidate"
+            (candidate / "scripts").mkdir(parents=True)
+            shutil.copy(
+                ROOT / "scripts/ci_establish_candidate_clone.py",
+                candidate / "scripts",
+            )
+            git(candidate, "init", "-b", "main")
+            git(candidate, "config", "user.name", "Preamble Test")
+            git(candidate, "config", "user.email", "preamble@example.invalid")
+            git(candidate, "commit", "--allow-empty", "-m", "root")
+            git(candidate, "remote", "add", "origin", "file:///no-such-remote")
+            body = root / "step.sh"
+            body.write_text(self.clone_step_body(), encoding="utf-8")
+            temp = root / "runner-temp"
+            temp.mkdir()
+            return subprocess.run(
+                ["bash", "-e", str(body)],
+                cwd=candidate,
+                text=True,
+                capture_output=True,
+                env={
+                    "PATH": path,
+                    "RUNNER_TEMP": str(temp),
+                    "GITHUB_OUTPUT": str(root / "out.txt"),
+                    "GITHUB_REPOSITORY": "Chelis-Lang/chelis",
+                    "PR_NUMBER": "1",
+                    "ACTION": "synchronize",
+                    "BASE": "1" * 40,
+                    "HEAD": "2" * 40,
+                    "BEFORE": "3" * 40,
+                    "COMMITS": "1",
+                },
+            )
+
+    def test_the_preamble_reaches_the_module_when_every_tool_fails(
+        self,
+    ) -> None:
+        """No `gh`, no `jq`, unreachable remote: the module must still run."""
+
+        completed = self.run_preamble(path="/usr/bin:/bin")
+
+        self.assertIn("could not read the live pull request", completed.stderr)
+        # Reaching the module is the property. It then fails closed *with
+        # information*, which is what the preamble must not pre-empt.
+        self.assertIn("CANDIDATE CLONE: FAIL", completed.stderr)
+        # bash still reports the missing tool; what matters is that the
+        # step's exit came from the module (1) rather than from a preamble
+        # command dying under errexit (127 for a missing tool, 5 for jq on
+        # a malformed document, 128 for git).
+        self.assertEqual(completed.returncode, 1)
+
+    def test_the_preamble_survives_a_malformed_pull_request_document(
+        self,
+    ) -> None:
+        """`// ""` defaults a null field; it does not survive an array."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            fake = Path(directory)
+            (fake / "gh").write_text("#!/bin/sh\nprintf '[]'\n", encoding="utf-8")
+            (fake / "gh").chmod(0o755)
+            completed = self.run_preamble(
+                path=f"{fake}:{os.environ.get('PATH', '/usr/bin:/bin')}"
+            )
+
+        self.assertIn("could not resolve the target tip", completed.stderr)
+        self.assertIn("CANDIDATE CLONE: FAIL", completed.stderr)
 
 
 if __name__ == "__main__":

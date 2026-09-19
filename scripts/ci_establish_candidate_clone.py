@@ -82,6 +82,24 @@ def is_shallow(repository_path: Path) -> bool:
     return _git(repository_path, "rev-parse", "--is-shallow-repository") == "true"
 
 
+def _reachable(repository_path: Path, sha: str) -> int:
+    completed = _run(repository_path, "rev-list", "--count", sha, check=False)
+    if completed.returncode != 0:
+        return 0
+    try:
+        return int(completed.stdout.strip())
+    except ValueError:
+        return 0
+
+
+def _would_deepen(repository_path: Path, head: str, depth: int) -> bool:
+    """True when fetching `head` at `depth` adds history rather than cutting it."""
+
+    if not is_shallow(repository_path):
+        return False
+    return _reachable(repository_path, head) < depth
+
+
 def first_parent(repository_path: Path, sha: str = "HEAD") -> str | None:
     """Read the first parent from the raw commit header.
 
@@ -119,15 +137,21 @@ def unmet_requirements(
 ) -> list[str]:
     """Return one line per part of the invariant this clone does not meet."""
 
-    unmet = [
-        f"{label} {sha} is not in the clone"
-        for label, sha in commits.items()
+    absent = {
+        label for label, sha in commits.items()
         if not _present(repository_path, sha)
-    ]
+    }
+    unmet = [f"{label} {commits[label]} is not in the clone" for label in sorted(absent)]
     for left, right in pairs:
         if left not in commits or right not in commits:
             continue
-        if any(f"{name} " in line for line in unmet for name in (left, right)):
+        # Skip a pair only when one of *its own* endpoints is missing. An
+        # earlier version matched label names as substrings of the lines
+        # already collected, so an absent "pre-push head" suppressed every
+        # pair whose text happened to contain "head". That could not cause
+        # a false pass, since the absence itself is reported, but it
+        # truncated the diagnosis to the first thing that went wrong.
+        if left in absent or right in absent:
             continue
         if not _resolves(repository_path, commits[left], commits[right]):
             unmet.append(
@@ -172,10 +196,14 @@ def establish(
 
     # The one depth-limited fetch in this job, and the reason this module
     # owns the invariant: its boundary is what grafts a commit. It runs
-    # only against a clone that is already shallow. Against a complete one
-    # it would *create* the graft, which is the hazard this module exists
-    # to remove rather than a cheaper way to reach the same place.
-    if commits > 0 and is_shallow(repository_path):
+    # only when it would actually deepen. Against a complete clone it
+    # would *create* the graft this module exists to remove; against a
+    # shallow clone that already reaches further than the requested depth
+    # it would SHORTEN it, dropping reachable commits and adding a second
+    # graft. Neither is a cheaper way to reach the same place. Today the
+    # candidate checkout is depth one so only the first case is reachable,
+    # but the rule is written for the depth, not for today's depth.
+    if commits > 0 and _would_deepen(repository_path, head, commits + 1):
         _fetch(
             repository_path,
             f"--depth={commits + 1}",

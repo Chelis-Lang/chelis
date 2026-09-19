@@ -203,13 +203,22 @@ jobs:
           current_pr="$RUNNER_TEMP/current-pr.json"
           target_tip=""
           if gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" > "$current_pr"; then
-            base_ref=$(jq -r '.base.ref // ""' "$current_pr")
+            # A bare assignment is not a guard. `// ""` defaults a null
+            # field; it does not survive a malformed document, and jq exits
+            # 5 on an array or on non-JSON written under a zero exit code,
+            # and 127 when it is absent. The same applies to the rev-parse
+            # below, which is reachable after a successful fetch.
+            if ! base_ref=$(jq -r '.base.ref // ""' "$current_pr"); then
+              base_ref=""
+            fi
             # Pre-existing and unguarded until now: a base branch renamed
             # upstream leaves `refs/heads/$base_ref` gone (chelis#2240).
             if [ -n "$base_ref" ] &&
-               git fetch --no-tags origin "refs/heads/$base_ref"; then
-              target_tip=$(git rev-parse FETCH_HEAD)
+               git fetch --no-tags origin "refs/heads/$base_ref" &&
+               target_tip=$(git rev-parse FETCH_HEAD); then
+              :
             else
+              target_tip=""
               echo "could not resolve the target tip for base ref" \
                 "'${base_ref:-<unreadable>}'; the clone is established" \
                 "without it and the classifier will fail safe" >&2

@@ -48,9 +48,12 @@ chelis#2234 both were. A graft is what breaks the property and only a
 deepening fetch removes one, so the escalation when the cheap shape does not
 satisfy the assertion is `--unshallow`; the head deepen runs only against an
 already shallow clone, because against a complete one it would create the
-graft rather than avoid it. An invariant a later fetch could violate would
+graft rather than avoid it. An invariant a later step could violate would
 read as a guarantee it no longer gives, so that step owns every fetch in its
-job and a test fails if another acquires one. A clone that cannot be
+job and a test fails if another acquires one. The rule covers checkouts as
+well as run lines: `actions/checkout` takes a fetch depth as an input and
+re-clones, so it is the command that creates the graft in the first place
+and never appears in a run line at all. A clone that cannot be
 established fails the candidate preflight naming which pair it could not
 resolve. An update that still cannot be classified fails closed, requires the
 history-rewrite declaration, and the failure names that cause rather than
