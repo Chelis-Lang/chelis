@@ -71,6 +71,34 @@ class AdvancedTargetOrigin:
         return destination
 
 
+class OrdinaryPushOrigin:
+    """The common synchronize event: a descendant push, base unchanged.
+
+    The escalation's cost argument rests on how often it fires, so the
+    frequency has to be a tested property rather than an assertion.
+    """
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        git(root, "init", "-b", "main")
+        git(root, "config", "user.name", "Candidate Clone Test")
+        git(root, "config", "user.email", "clone@example.invalid")
+        self.commit("root.txt", "root\n")
+        self.base = self.commit("base.txt", "base\n")
+        git(root, "checkout", "-b", "feature")
+        self.before = self.commit("feature.txt", "one\n")
+        self.head = self.commit("feature.txt", "two\n")
+        git(root, "checkout", "-b", "candidate", self.base)
+        git(root, "merge", "--no-ff", "feature", "-m", "synthetic candidate")
+        self.candidate = git(root, "rev-parse", "HEAD")
+
+    def commit(self, name: str, body: str) -> str:
+        (self.root / name).write_text(body, encoding="utf-8")
+        git(self.root, "add", name)
+        git(self.root, "commit", "-m", name)
+        return git(self.root, "rev-parse", "HEAD")
+
+
 class CandidateCloneInvariantTests(unittest.TestCase):
     def origin_and_clone(self, *, depth: int | None = 1):
         origin = tempfile.TemporaryDirectory()
@@ -127,6 +155,43 @@ class CandidateCloneInvariantTests(unittest.TestCase):
             commits=1,
         )
 
+        self.assertEqual([note for note in notes if "deepening" in note], [])
+
+
+    def test_an_ordinary_descendant_push_does_not_deepen(self) -> None:
+        """The escalation is the exception, on a shallow clone too.
+
+        `--unshallow` is bounded below by the whole history, so the
+        argument for it can only be about how rarely it fires. This is the
+        common synchronize event: the pre-push head is an ancestor of the
+        head and the target has not advanced, so the deepened range already
+        contains every comparison and nothing escalates.
+        """
+
+        origin = tempfile.TemporaryDirectory()
+        checkout = tempfile.TemporaryDirectory()
+        self.addCleanup(origin.cleanup)
+        self.addCleanup(checkout.cleanup)
+        source = OrdinaryPushOrigin(Path(origin.name))
+        destination = Path(checkout.name)
+        git(destination, "init", "-b", "main")
+        git(destination, "remote", "add", "origin", source.root.as_uri())
+        git(destination, "fetch", "--no-tags", "--depth=1", "origin", source.candidate)
+        git(destination, "checkout", source.candidate)
+
+        _, notes = clone.establish(
+            destination,
+            base=source.base,
+            head=source.head,
+            before=source.before,
+            target_tip=source.base,
+            commits=2,
+        )
+
+        self.assertTrue(
+            (destination / ".git" / "shallow").exists(),
+            "this clone must still be shallow, or the case is not the cheap one",
+        )
         self.assertEqual([note for note in notes if "deepening" in note], [])
 
     def test_an_unreachable_commit_fails_with_the_pair_and_the_shape(
