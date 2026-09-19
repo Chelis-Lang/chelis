@@ -164,18 +164,37 @@ def download_artifacts(
     return documents
 
 
-def base_contains(repo: Path, commit: str, base_sha: str) -> bool:
-    """Whether the candidate's own merge base contains this baseline commit."""
-    for value in (commit, base_sha):
-        resolved = subprocess.run(
+def _resolves(repo: Path, value: str) -> bool:
+    return (
+        subprocess.run(
             ["git", "rev-parse", "--verify", "--quiet", f"{value}^{{commit}}"],
             cwd=repo,
             capture_output=True,
             text=True,
             check=False,
+        ).returncode
+        == 0
+    )
+
+
+def base_contains(repo: Path, commit: str, base_sha: str) -> bool:
+    """Whether the candidate's own merge base contains this baseline commit.
+
+    The two commits are not symmetric and their failure modes must not be. A
+    baseline commit this clone cannot resolve is genuinely not contained, so
+    it is skipped and the next run is tried. A *base* this clone cannot
+    resolve disqualifies every run alike, and the caller would then report
+    that none retains its artifacts, which is a false reason that sends a
+    reader to look at retention. That is raised instead, which puts this
+    function and the consumer's `_ancestor_distance` loud at the same end.
+    """
+    if not _resolves(repo, base_sha):
+        raise ValueError(
+            f"candidate base {base_sha} is not present in {repo}, so no "
+            f"baseline can be tested for containment"
         )
-        if resolved.returncode != 0:
-            return False
+    if not _resolves(repo, commit):
+        return False
     if commit == base_sha:
         return True
     contained = subprocess.run(

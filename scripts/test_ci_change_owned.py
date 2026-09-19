@@ -4121,27 +4121,76 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(classification["baseline"]["run_id"], "77")
 
     def test_the_fail_closed_lane_takes_no_failure_baseline(self) -> None:
+        """Including the conventional path, which is not a special spelling.
+
+        An argparse default would make exactly one path acceptable in the lane
+        that accepts none, so the informational branch resolves the default
+        and absence stays absence here.
+        """
+        for spelling in (
+            "somewhere/baseline.json",
+            str(owned.DEFAULT_FAILURE_BASELINE),
+        ):
+            with self.subTest(spelling=spelling):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    plan_path = root / "plan.json"
+                    plan_path.write_bytes(owned.canonical_json(self.plan))
+                    with self.assertRaisesRegex(
+                        ValueError, "takes no failure baseline"
+                    ):
+                        owned.main(
+                            [
+                                "report",
+                                "--plan",
+                                str(plan_path),
+                                "--lane",
+                                "change-owned",
+                                "--required",
+                                "--receipts-root",
+                                str(root),
+                                "--failure-baseline",
+                                spelling,
+                                "--output",
+                                str(root / "report"),
+                            ]
+                        )
+
+    def test_the_conventional_baseline_path_is_read_without_a_flag(self) -> None:
+        """The report runs candidate-side, so it must add no argument there."""
+        set_package_expansion(
+            self.plan,
+            [owned.Identity("p", "default_gated")],
+        )
+        owned.attach_plan_digest(self.plan)
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             plan_path = root / "plan.json"
             plan_path.write_bytes(owned.canonical_json(self.plan))
-            with self.assertRaisesRegex(ValueError, "takes no failure baseline"):
-                owned.main(
-                    [
-                        "report",
-                        "--plan",
-                        str(plan_path),
-                        "--lane",
-                        "change-owned",
-                        "--required",
-                        "--receipts-root",
-                        str(root),
-                        "--failure-baseline",
-                        str(root / "baseline.json"),
-                        "--output",
-                        str(root / "report"),
-                    ]
-                )
+            (root / "receipts").mkdir()
+            result = owned.main(
+                [
+                    "report",
+                    "--plan",
+                    str(plan_path),
+                    "--lane",
+                    "package-expansion",
+                    "--receipts-root",
+                    str(root / "receipts"),
+                    "--output",
+                    str(root / "report"),
+                ]
+            )
+            report = json.loads((root / "report" / "report.json").read_text())
+        self.assertEqual(result, 1)
+        self.assertFalse(report["observed_success"])
+        self.assertTrue(
+            any(
+                str(owned.DEFAULT_FAILURE_BASELINE) in finding
+                for finding in report["failures"]
+            ),
+            report["failures"],
+        )
 
     def test_informational_cli_records_malformed_receipts_and_fails_run(self) -> None:
         set_package_expansion(

@@ -4290,12 +4290,11 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument(
         "--failure-baseline",
         type=Path,
-        default=Path(DEFAULT_FAILURE_BASELINE),
         help=(
             "recorded default-branch failure baseline manifest, which the "
             "package-expansion lane classifies every observed failure "
-            "against; defaults to the conventional path its producing step "
-            "writes"
+            "against; the conventional path its producing step writes is "
+            "read when this is omitted"
         ),
     )
     report.add_argument("--output", type=Path, required=True)
@@ -4371,9 +4370,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ValueError("change-owned report requires --required")
     if args.lane == "package-expansion" and args.required:
         raise ValueError("package-expansion report must remain informational")
-    if args.lane == "change-owned" and args.failure_baseline != Path(
-        DEFAULT_FAILURE_BASELINE
-    ):
+    if args.lane == "change-owned" and args.failure_baseline is not None:
+        # An argparse default would make the exact conventional path the one
+        # spelling this fail-closed lane accepts, so the default is resolved
+        # in the informational branch instead and absence stays absence here.
         raise ValueError(
             "change-owned report is fail-closed and takes no failure baseline"
         )
@@ -4417,13 +4417,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             documents = load_receipt_documents(args.receipts_root)
             failure_baseline = None
             baseline_unavailable = None
-            if not args.failure_baseline.is_file():
+            manifest = (
+                args.failure_baseline
+                if args.failure_baseline is not None
+                else Path(DEFAULT_FAILURE_BASELINE)
+            )
+            if not manifest.is_file():
                 baseline_unavailable = (
-                    f"the baseline manifest is absent at {args.failure_baseline}; "
+                    f"the baseline manifest is absent at {manifest}; "
                     f"its producing step did not leave one"
                 )
             else:
-                failure_baseline = load_failure_baseline(args.failure_baseline)
+                failure_baseline = load_failure_baseline(manifest)
             result = summarize_package_expansion(
                 plan,
                 [receipt for receipt, _ in documents],

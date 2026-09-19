@@ -332,6 +332,50 @@ class BaselineBaseContainmentTests(unittest.TestCase):
             self.assertFalse(baseline.base_contains(root, second, first))
             self.assertFalse(baseline.base_contains(root, "e" * 40, second))
 
+    def test_an_unresolvable_base_is_loud_and_an_unresolvable_run_is_not(
+        self,
+    ) -> None:
+        """The two commits fail differently on purpose.
+
+        An absent baseline commit is genuinely not contained, so the next run
+        is tried. An absent base disqualifies every run alike, and the caller
+        would otherwise blame artifact retention for something that is not
+        about retention at all.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for command in (
+                ["git", "init", "--quiet", "--initial-branch=main", str(root)],
+                [
+                    "git", "-C", str(root), "config",
+                    "user.email", "t@example.invalid",
+                ],
+                ["git", "-C", str(root), "config", "user.name", "T"],
+            ):
+                subprocess.run(command, check=True, capture_output=True)
+            (root / "f").write_text("f")
+            subprocess.run(
+                ["git", "-C", str(root), "add", "-A"],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(root), "commit", "--quiet", "-m", "f"],
+                check=True,
+                capture_output=True,
+            )
+            head = subprocess.run(
+                ["git", "-C", str(root), "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            self.assertFalse(baseline.base_contains(root, "e" * 40, head))
+            with self.assertRaisesRegex(
+                ValueError, "candidate base .* not present"
+            ):
+                baseline.base_contains(root, head, "e" * 40)
+
     def test_the_plan_supplies_the_base_and_a_planless_one_is_rejected(
         self,
     ) -> None:
