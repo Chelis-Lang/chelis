@@ -206,6 +206,43 @@ C_INDEX_PROJECTION_OWNERS = (
     ("crates/chelis-backend-c/src/emit.rs", "CEmitter::emit_elementwise_index_steps"),
     ("crates/chelis-backend-c/src/host_emit.rs", "HostEmitter < 'a >::emit_elementwise_index_step"),
 )
+TYPED_NONNUMERIC_BACKEND_FINAL_FORMS = (
+    (
+        "crates/chelis-backend-c/src/emit.rs",
+        "backend-element-spelling",
+        "CEmitter::emit_compare",
+    ),
+    (
+        "crates/chelis-backend-c/src/emit.rs",
+        "backend-element-spelling",
+        "CEmitter::emit_logical",
+    ),
+    (
+        "crates/chelis-backend-c/src/emit.rs",
+        "backend-element-spelling",
+        "CEmitter::emit_where",
+    ),
+    (
+        "crates/chelis-backend-c/src/emit.rs",
+        "load-store-template",
+        "CEmitter::emit_where",
+    ),
+    (
+        "crates/chelis-backend-hip/src/emit.rs",
+        "backend-element-spelling",
+        "HipEmitter::comparison_c_type",
+    ),
+    (
+        "crates/chelis-backend-hip/src/kernels.rs",
+        "backend-element-spelling",
+        "NUMERIC_DEVICE_HELPERS",
+    ),
+    (
+        "crates/chelis-backend-hip/src/kernels.rs",
+        "backend-element-spelling",
+        "REDUCED_FLOAT_COMPARISON_HELPERS",
+    ),
+)
 UTF8_STRING_FINAL_FORMS = (
     (
         "crates/chelis-backend-c/src/host_emit.rs",
@@ -307,6 +344,8 @@ def owner_module_final_form(kind: str, path: str, owner: str) -> bool:
     ) or (
         kind == "backend-element-spelling"
         and (path, owner) in C_INDEX_PROJECTION_OWNERS
+    ) or (
+        (path, kind, owner) in TYPED_NONNUMERIC_BACKEND_FINAL_FORMS
     ) or (
         (path, kind, owner) in UTF8_STRING_FINAL_FORMS
     ) or (
@@ -686,6 +725,7 @@ def _owner_module_final_forms_manifest() -> dict[str, list[dict[str, str]]]:
     rows = [
         *PHASE2_FINAL_FORMS,
         *((path, "backend-element-spelling", owner) for path, owner in C_INDEX_PROJECTION_OWNERS),
+        *TYPED_NONNUMERIC_BACKEND_FINAL_FORMS,
         *UTF8_STRING_FINAL_FORMS,
         *((METADATA_OWNER, "width-arithmetic", owner) for owner in METADATA_FINAL_WIDTH_OWNERS),
         *((ELEMENT_OWNER, "dtype-contract", owner) for owner in ELEMENT_FINAL_CONTRACT_OWNERS),
@@ -2146,6 +2186,37 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
             ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "checked_c_indexing"),
         ),
         OracleLeg(
+            "typed nonnumeric IR semantics, verifier, optimizer, vmap, and AD",
+            (
+                "cargo", "nextest", "run", "-p", "chelis-ir",
+                "--test", "logical_bool_semantics",
+            ),
+        ),
+        OracleLeg(
+            "typed nonnumeric IR release semantics and AD",
+            (
+                "cargo", "nextest", "run", "--release", "-p", "chelis-ir",
+                "--test", "logical_bool_semantics",
+            ),
+        ),
+        OracleLeg(
+            "typed nonnumeric C exact dtype and stored-bit execution",
+            (
+                "cargo", "nextest", "run", "-p", "chelis-backend-c",
+                "--test", "exec_compile", "-E",
+                "test(typed_comparison_c_matrix_matches_evaluator_for_every_identity_and_dtype) | "
+                "test(typed_logical_c_truth_tables_are_bool8) | "
+                "test(typed_where_c_copies_selected_storage_bits_for_every_admitted_dtype)",
+            ),
+        ),
+        OracleLeg(
+            "typed nonnumeric HIP source and dtype admission controls",
+            (
+                "cargo", "nextest", "run", "-p", "chelis-backend-hip",
+                "--test", "logical_comparison_where",
+            ),
+        ),
+        OracleLeg(
             "checked C shared indexing optimized sanitizer execution",
             ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "exec_compile",
              "-E", "test(checked_c_indexing_)"),
@@ -2320,6 +2391,15 @@ def hardware_probe_manifest() -> tuple[dict[str, str], ...]:
             "status": "manual-required",
             "command": (
                 "scripts/hip_test.py -p chelis-backend-hip --test gpu_correctness "
+                "-- --ignored --test-threads=1"
+            ),
+        },
+        {
+            "lane": "hip-typed-nonnumeric",
+            "status": "manual-required",
+            "command": (
+                "scripts/hip_test.py -p chelis-backend-hip "
+                "--test logical_comparison_where_gpu "
                 "-- --ignored --test-threads=1"
             ),
         },

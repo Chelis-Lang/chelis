@@ -1005,7 +1005,7 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(final[path], [
             {"kind": "width-arithmetic", "owner": owner} for owner in sorted(owners)
         ])
-        commands = [leg.argv for leg in oracle.phase0_legs()]
+        commands = [" ".join(leg.argv) for leg in oracle.phase0_legs()]
         for test in ("checked_metadata", "metadata_compile", "checked_metadata_padding", "checked_c_metadata",
                      "checked_c_indexing", "checked_c_movement", "checked_c_reduction", "checked_c_sparse", "checked_c_matmul", "checked_c_window", "checked_c_literal", "exact_tagged_c_abi",
                      "op33_empty_tensor_axis_decomposition", "op33_tensor_validation",
@@ -1019,7 +1019,7 @@ class ManifestTests(unittest.TestCase):
         ))
 
     def test_retired_capacity_projection_has_a_release_execution_leg(self) -> None:
-        commands = [leg.argv for leg in oracle.phase0_legs()]
+        commands = [" ".join(leg.argv) for leg in oracle.phase0_legs()]
         self.assertTrue(any(
             "dim_expr_evaluation" in command and "--release" in command
             for command in commands
@@ -1036,6 +1036,36 @@ class ManifestTests(unittest.TestCase):
         commands = [leg.argv for leg in oracle.phase0_legs()]
         self.assertTrue(any("chelis-backend-c" in command and "checked_c_indexing" in command for command in commands))
         self.assertTrue(any("exec_compile" in command and "test(checked_c_indexing_)" in command for command in commands))
+
+    def test_typed_nonnumeric_backend_owners_require_exact_execution_controls(self) -> None:
+        manifest = oracle.coverage_manifest()
+        forms = manifest["source_inventory"]["owner_module_final_forms"]
+        for path, kind, owner in oracle.TYPED_NONNUMERIC_BACKEND_FINAL_FORMS:
+            self.assertTrue(oracle.owner_module_final_form(kind, path, owner))
+            self.assertFalse(oracle.owner_module_final_form(kind, path, owner + "_unchecked"))
+            self.assertFalse(oracle.owner_module_final_form("width-arithmetic", path, owner))
+            self.assertIn({"kind": kind, "owner": owner}, forms[path])
+        commands = [" ".join(leg.argv) for leg in oracle.phase0_legs()]
+        self.assertTrue(any(
+            "logical_bool_semantics" in command for command in commands
+        ))
+        self.assertTrue(any(
+            "exec_compile" in command
+            and "typed_comparison_c_matrix_matches_evaluator_for_every_identity_and_dtype" in command
+            and "typed_logical_c_truth_tables_are_bool8" in command
+            and "typed_where_c_copies_selected_storage_bits_for_every_admitted_dtype" in command
+            for command in commands
+        ))
+        self.assertTrue(any(
+            "logical_comparison_where" in command
+            and "chelis-backend-hip" in command
+            for command in commands
+        ))
+        hardware = oracle.hardware_probe_manifest()
+        self.assertTrue(any(
+            "logical_comparison_where_gpu" in probe["command"]
+            for probe in hardware
+        ))
 
     def test_utf8_string_byte_boundaries_are_exact_final_forms(self) -> None:
         manifest = oracle.coverage_manifest()
