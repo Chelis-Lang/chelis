@@ -63,7 +63,7 @@ COMMANDS = (
         "-p",
         "chelis-cli",
         "--test",
-        "parity",
+        "issue_1955_grad_selector_identity",
         "-E",
         "test(illustrative_grad_selector_provenance_checks_and_evaluates)",
         "--no-fail-fast",

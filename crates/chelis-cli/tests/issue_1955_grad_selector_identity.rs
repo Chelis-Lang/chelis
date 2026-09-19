@@ -2,6 +2,7 @@
 
 use assert_cmd::Command;
 use std::fs;
+use std::path::PathBuf;
 use tempfile::tempdir;
 
 fn run_file(command: &str, extension: &str, source: &str) -> std::process::Output {
@@ -18,6 +19,39 @@ fn run_file(command: &str, extension: &str, source: &str) -> std::process::Outpu
 
 fn run(command: &str, source: &str) -> std::process::Output {
     run_file(command, "ch", source)
+}
+
+fn illustrative_example() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/illustrative/grad_selector_provenance.ch")
+        .canonicalize()
+        .expect("illustrative selector example")
+}
+
+#[test]
+fn illustrative_grad_selector_provenance_checks_and_evaluates() {
+    let path = illustrative_example();
+    let checked = Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .args(["check", path.to_str().expect("UTF-8 path")])
+        .output()
+        .expect("check illustrative selector example");
+    assert!(checked.status.success(), "{checked:?}");
+    let report: serde_json::Value =
+        serde_json::from_slice(&checked.stdout).expect("check JSON report");
+    assert_eq!(report["score"], 1.0, "{report}");
+    assert_eq!(report["errors"], serde_json::json!([]), "{report}");
+
+    let evaluated = Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .args(["eval", "--file", path.to_str().expect("UTF-8 path")])
+        .output()
+        .expect("evaluate illustrative selector example");
+    assert!(evaluated.status.success(), "{evaluated:?}");
+    assert_eq!(
+        evaluated.stdout,
+        b"constructor_direct = 6.0\nconstructor_grad = 2.0\nrecord_direct = 6.0\nrecord_grad = 2.0\n",
+    );
 }
 
 #[test]
