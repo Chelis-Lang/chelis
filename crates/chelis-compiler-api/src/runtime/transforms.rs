@@ -193,13 +193,13 @@ impl<'a> EvalContext<'a> {
         let declaration_captures = matches!(kind, TransformKind::Grad)
             && fn_expr.and_then(var_name).is_some_and(|name| {
                 !captured_env.contains_key(name)
-                    && self.top_level_defs.get(name).is_some_and(|body| {
+                    && self.program.defs().get(name).is_some_and(|body| {
                         tagged_expr_children(body).is_some_and(|(tag, _)| tag == DeepTag::Fn)
                     })
             });
         let grad_formals = match kind {
             TransformKind::Grad => {
-                resolve_transform_fn_for_formals(transform_expr, &self.top_level_defs)
+                resolve_transform_fn_for_formals(transform_expr, self.program.defs())
                     .map(|(function, _)| function)
             }
             TransformKind::Vmap => None,
@@ -221,7 +221,7 @@ impl<'a> EvalContext<'a> {
         // to the Lit-dim marshalling below.
         let vmap_formals = match kind {
             TransformKind::Vmap => {
-                resolve_transform_fn_for_formals(transform_expr, &self.top_level_defs)
+                resolve_transform_fn_for_formals(transform_expr, self.program.defs())
             }
             TransformKind::Grad => None,
         };
@@ -378,7 +378,7 @@ impl<'a> EvalContext<'a> {
         // parameter names and the body erases parameter types and the checked
         // function signature. A nested function-valued capture then reaches
         // lowering as rank zero and corrupts the backward DAG (chelis#676).
-        let mut program_defs = self.top_level_defs.clone();
+        let mut program_defs = self.program.defs().clone();
         for (name, value) in captured_env.to_sorted() {
             if let RuntimeValue::Closure {
                 checked_function, ..
@@ -438,7 +438,7 @@ impl<'a> EvalContext<'a> {
             )
         } else {
             SubexprLoweringContext::new(
-                self.type_env.clone(),
+                self.program.type_env().clone(),
                 program_defs,
                 self.declared_signatures.clone(),
             )

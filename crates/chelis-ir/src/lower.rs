@@ -29,6 +29,28 @@ thread_local! {
     /// unwinds into structured diagnostics. The panic hook stays quiet in
     /// that scope so users see only the returned diagnostic.
     static SUPPRESS_LOWERING_PANIC_OUTPUT: Cell<bool> = const { Cell::new(false) };
+    /// Counts whole-program definition folds on this thread (chelis#2207).
+    /// `prepare_subexpr_lowering_context` folds every definition it admits,
+    /// so this rises once per context prepared, never once per definition.
+    static PROGRAM_DEF_FOLD_PASSES: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Whole-program definition folds on this thread since the last reset.
+///
+/// Preparing a [`SubexprLoweringContext`] folds the pipes in every definition
+/// it admits (chelis#1923), which is linear in the program. A caller that
+/// lowers many subexpressions against one fixed program should therefore
+/// prepare one context and reuse it; this counter is how a test states that
+/// obligation as a bound rather than as a wall clock, in the shape of
+/// chelis#1835's `host::host_summary_probe_builds`. A counted receipt cannot
+/// flake under machine load.
+pub fn program_def_fold_passes() -> u64 {
+    PROGRAM_DEF_FOLD_PASSES.with(Cell::get)
+}
+
+/// Reset [`program_def_fold_passes`] for this thread.
+pub fn reset_program_def_fold_passes() {
+    PROGRAM_DEF_FOLD_PASSES.with(|passes| passes.set(0));
 }
 
 pub fn with_suppress_unrepresentable_panic<R>(f: impl FnOnce() -> R) -> R {
@@ -1722,27 +1744,50 @@ pub fn try_lower_subexpr_program_with_random_state_progress(
     random_seed: Option<u64>,
     random_counter: u64,
 ) -> Result<(Dag, u64), LowerDiagnostic> {
-    assert_decode_once_at_boundary("lower_subexpr_program: expr", std::slice::from_ref(expr));
-    let full_type_env = full_type_env
-        .into_sorted()
-        .into_iter()
-        .collect::<BTreeMap<_, _>>();
-    let program_defs = program_defs
-        .into_sorted()
-        .into_iter()
-        .collect::<BTreeMap<_, _>>();
-    let context = prepare_subexpr_lowering_context(
-        &full_type_env,
-        Arc::new(program_defs),
-        Arc::new(full_type_env.clone()),
-    );
-    try_lower_subexpr_program_with_context_and_random_state(
+    let context = SubexprLoweringContext::over_program(full_type_env, program_defs);
+    try_lower_subexpr_program_with_context_progress(
         expr,
         scoped_tensor_types,
         &context,
         random_seed,
         random_counter,
     )
+}
+
+/// [`try_lower_subexpr_program_with_random_state_progress`] over a context the
+/// caller prepared once.
+///
+/// The context above is a pure function of the program's type environment and
+/// definition table, and preparing it folds the pipes in every definition
+/// (chelis#1923), which is linear in the program. A caller that lowers many
+/// subexpressions against one fixed program prepares one context with
+/// [`SubexprLoweringContext::over_program`] and calls this, so the fold is
+/// paid per program rather than per subexpression (chelis#2207).
+pub fn try_lower_subexpr_program_with_context_progress(
+    expr: &Expr,
+    scoped_tensor_types: UnordMap<String, TensorType>,
+    context: &SubexprLoweringContext,
+    random_seed: Option<u64>,
+    random_counter: u64,
+) -> Result<(Dag, u64), LowerDiagnostic> {
+    assert_decode_once_at_boundary("lower_subexpr_program: expr", std::slice::from_ref(expr));
+    try_lower_subexpr_program_with_context_and_random_state(
+        expr,
+        scoped_tensor_types,
+        context,
+        random_seed,
+        random_counter,
+    )
+}
+
+/// [`try_lower_subexpr_program`] over a context the caller prepared once.
+pub fn try_lower_subexpr_program_with_context(
+    expr: &Expr,
+    scoped_tensor_types: UnordMap<String, TensorType>,
+    context: &SubexprLoweringContext,
+) -> Result<Dag, LowerDiagnostic> {
+    try_lower_subexpr_program_with_context_progress(expr, scoped_tensor_types, context, None, 0)
+        .map(|(dag, _)| dag)
 }
 
 /// Lower fixed-control source for evaluation without erasing its entered
@@ -1754,23 +1799,27 @@ pub fn try_lower_subexpr_evaluation_plan(
     program_defs: UnordMap<String, Expr>,
     execution: &crate::evaluation::RandomExecutionContext,
 ) -> Result<crate::evaluation::EvaluationPlan, LowerDiagnostic> {
+    let context = SubexprLoweringContext::over_program(full_type_env, program_defs);
+    try_lower_subexpr_evaluation_plan_with_context(expr, scoped_tensor_types, &context, execution)
+}
+
+/// [`try_lower_subexpr_evaluation_plan`] over a context the caller prepared
+/// once. Same reuse contract as
+/// [`try_lower_subexpr_program_with_context_progress`] (chelis#2207).
+pub fn try_lower_subexpr_evaluation_plan_with_context(
+    expr: &Expr,
+    scoped_tensor_types: UnordMap<String, TensorType>,
+    context: &SubexprLoweringContext,
+    execution: &crate::evaluation::RandomExecutionContext,
+) -> Result<crate::evaluation::EvaluationPlan, LowerDiagnostic> {
     assert_decode_once_at_boundary(
         "lower_subexpr_evaluation_plan: expr",
         std::slice::from_ref(expr),
     );
-    let full_type_env = full_type_env
-        .into_sorted()
-        .into_iter()
-        .collect::<BTreeMap<_, _>>();
-    let context = prepare_subexpr_lowering_context(
-        &full_type_env,
-        Arc::new(program_defs.into_sorted().into_iter().collect()),
-        Arc::new(full_type_env.clone()),
-    );
     try_lower_subexpr_evaluation_with_ordered_inputs(
         expr,
         scoped_tensor_types.into_sorted(),
-        &context,
+        context,
         None,
         false,
         execution,
@@ -2046,6 +2095,35 @@ impl SubexprLoweringContext {
         )
     }
 
+    /// The context a program's type environment and definition table denote,
+    /// with the type environment standing in for declared signatures.
+    ///
+    /// This is exactly the context every `try_lower_subexpr_program`-family
+    /// free function builds for itself on each call. Preparing it folds the
+    /// pipes in every definition (chelis#1923), so a caller that lowers many
+    /// subexpressions against one fixed program builds it once here and uses
+    /// the `*_with_context` entries (chelis#2207). The context borrows
+    /// nothing, so it can be kept beside the tables it was derived from; the
+    /// caller owes that those tables do not change under it.
+    pub fn over_program(
+        full_type_env: UnordMap<String, Expr>,
+        program_defs: UnordMap<String, Expr>,
+    ) -> Self {
+        let full_type_env = full_type_env
+            .into_sorted()
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+        let program_defs = program_defs
+            .into_sorted()
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+        prepare_subexpr_lowering_context(
+            &full_type_env,
+            Arc::new(program_defs),
+            Arc::new(full_type_env.clone()),
+        )
+    }
+
     /// Build a subexpression context from the checked artifact that owns
     /// authored local-ascription obligations. Runtime transform lowering
     /// must use this entry rather than reconstructing a context from type
@@ -2316,6 +2394,14 @@ pub(crate) fn prepare_subexpr_lowering_context(
     // reaches lowering exactly as a pipe in the subexpression itself would.
     // Folded here, beside the decode-once assertions, so this boundary
     // normalizes everything it admits rather than half of it.
+    //
+    // The fold is linear in the program, and a context is a pure function of
+    // the three tables above, so a caller lowering many subexpressions
+    // against one fixed program prepares the context once instead of paying
+    // this per subexpression (chelis#2207, and the free `*_with_context`
+    // entries below). `PROGRAM_DEF_FOLD_PASSES` is how a test holds that
+    // caller to it.
+    PROGRAM_DEF_FOLD_PASSES.with(|passes| passes.set(passes.get() + 1));
     let program_defs = Arc::new(
         program_defs
             .iter()

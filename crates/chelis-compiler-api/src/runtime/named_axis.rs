@@ -5,11 +5,32 @@ use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, List, Metadata};
 use chelis_ir::dag::{Dag, DimInfo, NodeId, TensorType};
 use chelis_ir::eval::{TensorInputDemand, TensorValue as IrTensorValue};
-use chelis_ir::lower::{try_lower_subexpr_program, type_expr_has_rank_var};
+use chelis_ir::lower::type_expr_has_rank_var;
 use chelis_types::types::Prim;
 
 use super::transforms::*;
 use super::*;
+
+#[cfg(test)]
+thread_local! {
+    /// Named-axis routings on this thread (chelis#2207). A receipt that the
+    /// routing lane is reached at all: a fold-count test over a fixture that
+    /// stopped routing would otherwise pass vacuously, because the ordinary
+    /// host path computes the same answer.
+    static NAMED_AXIS_ROUTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Named-axis routings on this thread since the last reset.
+#[cfg(test)]
+pub(crate) fn named_axis_routes() -> u64 {
+    NAMED_AXIS_ROUTES.with(std::cell::Cell::get)
+}
+
+/// Reset [`named_axis_routes`] for this thread.
+#[cfg(test)]
+pub(crate) fn reset_named_axis_routes() {
+    NAMED_AXIS_ROUTES.with(|routes| routes.set(0));
+}
 
 impl<'a> EvalContext<'a> {
     /// chelis#338: does evaluating a call to `resolved_name` require
@@ -40,7 +61,7 @@ impl<'a> EvalContext<'a> {
     }
 
     fn def_requires_named_axis_routing_uncached(&mut self, resolved_name: &str) -> bool {
-        let Some(body) = self.top_level_defs.get(resolved_name).cloned() else {
+        let Some(body) = self.program.defs().get(resolved_name).cloned() else {
             return false;
         };
         let mut hit = false;
@@ -57,7 +78,8 @@ impl<'a> EvalContext<'a> {
                 continue;
             }
             let rank_poly_sig = self
-                .type_env
+                .program
+                .type_env()
                 .get(&referenced)
                 .map(type_expr_has_rank_var)
                 .unwrap_or(false);
@@ -94,11 +116,11 @@ impl<'a> EvalContext<'a> {
                     if let Some(declared) = self.binding_types.get(name) {
                         return declared.clone();
                     }
-                    if let Some(ty) = self.type_env.get(name) {
+                    if let Some(ty) = self.program.type_env().get(name) {
                         return Some(ty.clone());
                     }
                     if let Some((resolved, _)) = self.lookup_top_level_def(name)
-                        && let Some(ty) = self.type_env.get(&resolved)
+                        && let Some(ty) = self.program.type_env().get(&resolved)
                     {
                         return Some(ty.clone());
                     }
@@ -262,7 +284,7 @@ impl<'a> EvalContext<'a> {
                 ];
                 elements.extend(trial);
                 let trial = Expr::List(List { elements }, span);
-                if chelis_ir::lower::evaluation_profile(&trial, &self.top_level_defs)
+                if self.program_evaluation_profile(&trial)
                     == chelis_ir::evaluation::EvaluationProfile::FixedControl
                 {
                     argument
@@ -316,15 +338,26 @@ impl<'a> EvalContext<'a> {
         staged_inputs: UnordMap<String, IrTensorValue>,
         context_label: &str,
     ) -> Result<RuntimeValue, NamedAxisRouteError> {
-        let program_defs = self.top_level_defs.clone();
-        if let Some(name) = find_reachable_host_only_builtin_call(routed_expr, &program_defs) {
+        #[cfg(test)]
+        NAMED_AXIS_ROUTES.with(|routes| routes.set(routes.get() + 1));
+        if let Some(name) = find_reachable_host_only_builtin_call(routed_expr, self.program.defs())
+        {
             return Err(NamedAxisRouteError::NotLowerable(format!(
                 "host runtime: named-axis routing of `{context_label}` reaches host-runtime-only \
                  builtin `{name}`, which has no RISC DAG lowering \
                  (spec/05-risc-primitives.md SS3.6)"
             )));
         }
-        let profile = self.execution_profile(routed_expr, &program_defs);
+        let profile = self.execution_profile_over_program(routed_expr);
+        // The lowering universe of a routed reduction is the program's own
+        // type environment and definition table, both fixed for this
+        // evaluation context. Both branches below used to hand those two
+        // tables to a free `try_lower_*` entry, which sorted them, deep-cloned
+        // them and folded the pipes in every definition -- all of `chelis-std`
+        // included -- once per routed reduction (chelis#2207). The scope
+        // prepares that context once; cloning it here is four `Arc` bumps and
+        // releases the borrow on `self` that the input provider below needs.
+        let lowering_context = self.program.routing_lowering_context();
         let mut execution_plan = None;
         let lowered = if profile == chelis_ir::evaluation::EvaluationProfile::FixedControl {
             let context = chelis_ir::evaluation::RandomExecutionContext::new(
@@ -333,11 +366,10 @@ impl<'a> EvalContext<'a> {
                     counter: self.random_counter,
                 },
             );
-            chelis_ir::lower::try_lower_subexpr_evaluation_plan(
+            chelis_ir::lower::try_lower_subexpr_evaluation_plan_with_context(
                 routed_expr,
                 scoped_types,
-                self.type_env.clone(),
-                program_defs,
+                &lowering_context,
                 &context,
             )
             .map(|plan| {
@@ -346,11 +378,10 @@ impl<'a> EvalContext<'a> {
                 dag
             })
         } else {
-            try_lower_subexpr_program(
+            chelis_ir::lower::try_lower_subexpr_program_with_context(
                 routed_expr,
                 scoped_types,
-                self.type_env.clone(),
-                program_defs,
+                &lowering_context,
             )
         };
         let dag = lowered.map_err(|diagnostic| {
@@ -440,7 +471,7 @@ impl<'a> EvalContext<'a> {
         if !tensor.value.shape.is_empty() {
             return Ok(value);
         }
-        let Some(Expr::List(sig_list, _)) = self.type_env.get(resolved_name) else {
+        let Some(Expr::List(sig_list, _)) = self.program.type_env().get(resolved_name) else {
             return Ok(value);
         };
         if tag(sig_list) != Some(DeepTag::TFn) {
@@ -506,7 +537,8 @@ impl<'a> EvalContext<'a> {
             return Ok(None);
         };
         if self
-            .type_env
+            .program
+            .type_env()
             .get(&resolved)
             .is_some_and(|ty| ty.tag() == Some(DeepTag::TFn))
             || matches!(&body, Expr::List(body_list, _) if tag(body_list) == Some(DeepTag::Fn))

@@ -615,11 +615,9 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
         declaration_values: UnordMap::new(),
         named_axis_route_cache: UnordMap::new(),
         named_axis_route_visiting: UnordSet::new(),
-        top_level_defs,
-        sorted_defs_snapshot: None,
+        program: ProgramScope::new(top_level_defs, type_env),
         declared_signatures,
         adt_registry: program.adt_registry().clone(),
-        type_env,
         adt_fields,
         tensor_bindings,
         session: Some(chelis_ir::host::HostLoweringSession::new(eval_program)),
@@ -1019,6 +1017,93 @@ fn descend_manifest_path(value: RuntimeValue, step: RootPathStep) -> Option<Runt
     }
 }
 
+/// The program tables an evaluation context evaluates against, and the facts
+/// it derives from them once.
+///
+/// A derived fact describes the exact tables it was built from, so a table
+/// that can still be written after a fact is cached is how a stale fact
+/// happens. chelis#1835 and chelis#1921 are that defect on the host side, and
+/// `chelis_ir::host::HostLoweringSession` answers it by binding its facts to a
+/// borrowed program that they cannot outlive. These tables are owned by the
+/// evaluation context rather than borrowed, so the same guarantee comes from
+/// visibility instead: the constructor is the only writer, every accessor
+/// hands out a shared reference, and no `&mut` reaches either table. A later
+/// insert therefore fails to compile rather than silently invalidating a
+/// cached fact, which is the part a comment could not supply.
+struct ProgramScope {
+    /// Every top-level definition in scope, library and new code, registered
+    /// once by `register_top_level_defs` while the context is built.
+    defs: UnordMap<String, Expr>,
+    /// Combined library + new-code Deep type-env. Threaded into
+    /// subexpression lowering when the host runtime hits a `grad` / `vmap`
+    /// form or routes a named-axis call, so the lowerer resolves free names
+    /// the same way the C backend does. Empty when no library context is
+    /// present (e.g. unit tests that don't need transform support).
+    type_env: UnordMap<String, Expr>,
+    /// The sorted definition table the execution-profile classifier reads
+    /// (chelis#2059). Admission runs on every closure application and would
+    /// otherwise re-sort and deep-clone every definition per call.
+    sorted_defs: std::cell::OnceCell<std::rc::Rc<BTreeMap<String, Expr>>>,
+    /// The subexpression lowering context named-axis routing lowers through
+    /// (chelis#2207). Preparing one folds the pipes in every definition, so
+    /// before this a routed reduction re-folded the whole program, all of
+    /// `chelis-std` included, on every call.
+    routing_lowering_context: std::cell::OnceCell<chelis_ir::lower::SubexprLoweringContext>,
+}
+
+impl ProgramScope {
+    fn new(defs: UnordMap<String, Expr>, type_env: UnordMap<String, Expr>) -> Self {
+        Self {
+            defs,
+            type_env,
+            sorted_defs: std::cell::OnceCell::new(),
+            routing_lowering_context: std::cell::OnceCell::new(),
+        }
+    }
+
+    fn defs(&self) -> &UnordMap<String, Expr> {
+        &self.defs
+    }
+
+    fn type_env(&self) -> &UnordMap<String, Expr> {
+        &self.type_env
+    }
+
+    /// The sorted definition snapshot, built on first use and reused for the
+    /// scope's lifetime (chelis#2059).
+    fn sorted_defs(&self) -> std::rc::Rc<BTreeMap<String, Expr>> {
+        self.sorted_defs
+            .get_or_init(|| {
+                eval::record_defs_snapshot_build();
+                std::rc::Rc::new(
+                    self.defs
+                        .to_sorted()
+                        .into_iter()
+                        .map(|(name, expr)| (name.clone(), expr.clone()))
+                        .collect::<BTreeMap<String, Expr>>(),
+                )
+            })
+            .clone()
+    }
+
+    /// The lowering context named-axis routing uses, built on first use and
+    /// reused for the scope's lifetime (chelis#2207).
+    ///
+    /// This is the context `chelis_ir::lower::try_lower_subexpr_program` and
+    /// `try_lower_subexpr_evaluation_plan` build for themselves from the same
+    /// two tables, so routing through it lowers exactly as before.
+    fn routing_lowering_context(&self) -> chelis_ir::lower::SubexprLoweringContext {
+        self.routing_lowering_context
+            .get_or_init(|| {
+                chelis_ir::lower::SubexprLoweringContext::over_program(
+                    self.type_env.clone(),
+                    self.defs.clone(),
+                )
+            })
+            .clone()
+    }
+}
+
 struct EvalContext<'a> {
     /// Only lexical values; successful declarations never enter this frame.
     bindings: Frame,
@@ -1043,16 +1128,12 @@ struct EvalContext<'a> {
     named_axis_route_cache: UnordMap<String, bool>,
     /// Cycle guard for the recursive routing detection walk.
     named_axis_route_visiting: UnordSet<String>,
-    top_level_defs: UnordMap<String, Expr>,
-    /// Program-scoped, lazily built sorted snapshot of `top_level_defs`
-    /// (chelis#2059). `admit_execution_profile` runs on every closure
-    /// application; before this it re-cloned every top-level definition twice
-    /// per call to classify the body's execution profile, making a `chelis
-    /// test` run over a package with many defs O(defs x applications). The set
-    /// of defs is fixed for the context's lifetime (`register_top_level_defs`
-    /// runs once at construction), so the sort-and-clone is lifted here and
-    /// reused. `None` until the first classification asks for it.
-    sorted_defs_snapshot: Option<std::rc::Rc<std::collections::BTreeMap<String, Expr>>>,
+    /// The program's top-level definitions, its Deep type environment, and
+    /// the facts derived from both. Both tables are registered once during
+    /// construction and are fixed for the context's lifetime; `ProgramScope`
+    /// is what makes that a compile-time property rather than a convention,
+    /// because the derived facts would be stale if either table moved.
+    program: ProgramScope,
     /// Authored `defsig` function types, including source binder spellings.
     /// The inferred `type_env` intentionally freshens those binders, so the
     /// evaluator keeps this separate map for generic cast targets in bodies.
@@ -1060,12 +1141,6 @@ struct EvalContext<'a> {
     /// Checker-owned nominal definitions used when the executed constructor
     /// alone cannot reveal whether the parameter type has a float leaf.
     adt_registry: chelis_types::adt::AdtRegistry,
-    /// Combined library + new-code Deep type-env. Threaded into
-    /// [`chelis_ir::lower::lower_subexpr_program`] when the host runtime
-    /// hits a `grad` / `vmap` form so the lowerer can resolve free names
-    /// the same way the C backend does. Empty when no library context is
-    /// present (e.g. unit tests that don't need transform support).
-    type_env: UnordMap<String, Expr>,
     adt_fields: UnordMap<String, Vec<String>>,
     tensor_bindings: &'a UnordMap<String, RuntimeTensorValue>,
     /// The host-lowering session over the checked program under evaluation.
