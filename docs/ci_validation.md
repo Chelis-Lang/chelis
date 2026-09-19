@@ -57,7 +57,13 @@ target snapshot, even when `main` advances after GitHub creates the event
 payload; its second parent must still equal the event's exact PR head. The
 identity records those exact two parents and describes the PR patch from
 `merge-base(base, head)..head`; using `base..head` would incorrectly count
-unrelated target-branch advances as pull-request changes. It also records the
+unrelated target-branch advances as pull-request changes. Resolving that merge
+base means walking both parents back to the branch point, so the detector job's
+backstop fetches of the event base and of the candidate's first parent carry no
+depth limit. A depth-limited fetch records its commit in `.git/shallow`, after
+which git ignores the parents that commit already holds, and `merge-base` then
+reports no common ancestor at all (chelis#2228). The identity script separates
+that truncation from parents that genuinely share no history. It also records the
 stable patch id, an exact normalized-diff digest that retains added and removed
 bytes, and the changed paths and their digest. These producer artifacts are
 candidate-controlled inputs, not receipts.
