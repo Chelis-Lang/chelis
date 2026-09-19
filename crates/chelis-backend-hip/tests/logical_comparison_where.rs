@@ -2,7 +2,7 @@
 
 mod support;
 
-use chelis_ir::dag::{ComparisonKind, Dag, DimInfo, LogicalKind, RiscOp, TensorType};
+use chelis_ir::dag::{ComparisonKind, Dag, DimInfo, LogicalKind, RiscOp, RtDim, TensorType};
 use chelis_types::types::Prim;
 use support::codegen_hip;
 
@@ -192,4 +192,101 @@ fn where_selects_raw_stored_bits_for_every_admitted_branch_dtype() {
             "{source}"
         );
     }
+}
+
+#[test]
+fn permuted_stepped_views_feed_comparison_logical_and_where_stride_metadata() {
+    let matrix = |rows, cols, precision| TensorType {
+        dims: vec![DimInfo::Lit(rows), DimInfo::Lit(cols)],
+        precision,
+    };
+    let input_f32 = matrix(2, 4, Prim::F32);
+    let input_bool = matrix(2, 4, Prim::Bool);
+    let permuted_f32 = matrix(4, 2, Prim::F32);
+    let permuted_bool = matrix(4, 2, Prim::Bool);
+    let stepped_f32 = matrix(2, 2, Prim::F32);
+    let stepped_bool = matrix(2, 2, Prim::Bool);
+    let mut dag = Dag::new();
+    let view = |dag: &mut Dag,
+                name: &str,
+                input: &TensorType,
+                permuted: &TensorType,
+                stepped: &TensorType| {
+        let load = dag.add_node(
+            RiscOp::Load { name: name.into() },
+            vec![],
+            input.clone(),
+            None,
+        );
+        let permute = dag.add_node(
+            RiscOp::Permute { axes: vec![1, 0] },
+            vec![load],
+            permuted.clone(),
+            None,
+        );
+        dag.add_node(
+            RiscOp::Stride {
+                strides: vec![RtDim::Lit(2), RtDim::Lit(1)],
+            },
+            vec![permute],
+            stepped.clone(),
+            None,
+        )
+    };
+    let lhs = view(&mut dag, "lhs", &input_f32, &permuted_f32, &stepped_f32);
+    let rhs = view(&mut dag, "rhs", &input_f32, &permuted_f32, &stepped_f32);
+    let logical_lhs = view(
+        &mut dag,
+        "logical_lhs",
+        &input_bool,
+        &permuted_bool,
+        &stepped_bool,
+    );
+    let logical_rhs = view(
+        &mut dag,
+        "logical_rhs",
+        &input_bool,
+        &permuted_bool,
+        &stepped_bool,
+    );
+    let condition = view(
+        &mut dag,
+        "condition",
+        &input_bool,
+        &permuted_bool,
+        &stepped_bool,
+    );
+    let comparison = dag.add_node(
+        RiscOp::Compare(ComparisonKind::Gte),
+        vec![lhs, rhs],
+        stepped_bool.clone(),
+        None,
+    );
+    let logical = dag.add_node(
+        RiscOp::Logical(LogicalKind::And),
+        vec![logical_lhs, logical_rhs],
+        stepped_bool,
+        None,
+    );
+    let selected = dag.add_node(RiscOp::Where, vec![condition, lhs, rhs], stepped_f32, None);
+    dag.add_root(comparison);
+    dag.add_root(logical);
+    dag.add_root(selected);
+
+    let source = codegen_hip(&dag, "permuted_stepped_nonnumeric")
+        .expect("permuted/stepped direct nonnumeric HIP codegen")
+        .c_source;
+    assert!(
+        source.contains("chelis_int_checked_mul(d_t")
+            && source.contains("INT64_C(2)")
+            && source.contains("->strides[1]"),
+        "the transpose and stride must remain shared-view metadata:\n{source}"
+    );
+    assert!(source.contains("kernel_compare_gte"), "{source}");
+    assert!(source.contains("kernel_logical_and"), "{source}");
+    assert!(source.contains("kernel_where"), "{source}");
+    assert!(
+        source.matches("chelis_indices_to_flat(indices").count() >= 6,
+        "each direct operation must index its non-contiguous operands through supplied strides:\n{source}"
+    );
 }

@@ -6,7 +6,7 @@
 mod support;
 
 use chelis_backend_hip::HipCodegenResult;
-use chelis_ir::dag::{ComparisonKind, Dag, DimInfo, LogicalKind, RiscOp, TensorType};
+use chelis_ir::dag::{ComparisonKind, Dag, DimInfo, LogicalKind, RiscOp, RtDim, TensorType};
 use chelis_types::types::Prim;
 use std::collections::BTreeMap;
 use std::env;
@@ -76,20 +76,21 @@ fn runtime_library_path() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     candidates.push(manifest.join("../../target/debug/deps"));
     candidates.push(manifest.join("../../target/release/deps"));
-    for directory in candidates {
-        if let Some(path) = fs::read_dir(&directory).ok().and_then(|entries| {
-            entries.flatten().map(|entry| entry.path()).find(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| {
-                        name.starts_with("libchelis_runtime") && name.ends_with(".a")
-                    })
-            })
-        }) {
-            return path;
-        }
-    }
-    panic!("could not locate libchelis_runtime.a");
+    candidates
+        .into_iter()
+        .filter_map(|directory| fs::read_dir(directory).ok())
+        .flat_map(|entries| entries.flatten().map(|entry| entry.path()))
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("libchelis_runtime") && name.ends_with(".a"))
+        })
+        .max_by_key(|path| {
+            fs::metadata(path)
+                .and_then(|metadata| metadata.modified())
+                .ok()
+        })
+        .expect("could not locate libchelis_runtime.a")
 }
 
 fn stage_runtime(directory: &Path) {
@@ -120,7 +121,7 @@ fn build_main(
     function: &str,
     result: &HipCodegenResult,
     inputs: &BTreeMap<String, RawInput>,
-    outputs: &[Prim],
+    outputs: &[(Prim, usize)],
 ) -> String {
     let mut body = Vec::new();
     body.push("    int64_t shape[2] = { 2, 4 };".to_string());
@@ -159,13 +160,13 @@ fn build_main(
         result.input_labels.len(),
         outputs.len()
     ));
-    for (slot, precision) in outputs.iter().enumerate() {
+    for (slot, (precision, count)) in outputs.iter().enumerate() {
         body.push(format!(
             "    chelis_read_view output_{slot} = chelis_tensor_read_view(outputs[{slot}]);"
         ));
         body.push(format!("    printf(\"OUT {slot}\");"));
         body.push(format!(
-            "    for (int i = 0; i < {N}; ++i) printf(\" %llx\", (unsigned long long)((const {carrier} *)output_{slot}.data)[i]);",
+            "    for (int i = 0; i < {count}; ++i) printf(\" %llx\", (unsigned long long)((const {carrier} *)output_{slot}.data)[i]);",
             carrier = carrier(*precision),
         ));
         body.push("    printf(\"\\n\");".to_string());
@@ -187,6 +188,20 @@ fn compile_and_run(
     function: &str,
     inputs: &BTreeMap<String, RawInput>,
     outputs: &[Prim],
+) -> Vec<Vec<u64>> {
+    let shaped_outputs = outputs
+        .iter()
+        .copied()
+        .map(|precision| (precision, N))
+        .collect::<Vec<_>>();
+    compile_and_run_shaped(dag, function, inputs, &shaped_outputs)
+}
+
+fn compile_and_run_shaped(
+    dag: &Dag,
+    function: &str,
+    inputs: &BTreeMap<String, RawInput>,
+    outputs: &[(Prim, usize)],
 ) -> Vec<Vec<u64>> {
     let probe = Command::new("hipcc")
         .arg("--version")
@@ -250,7 +265,13 @@ fn compile_and_run(
             .map(|field| u64::from_str_radix(field, 16).expect("hex output"))
             .collect();
     }
-    assert!(parsed.iter().all(|row| row.len() == N), "{parsed:?}");
+    assert!(
+        parsed
+            .iter()
+            .zip(outputs)
+            .all(|(row, (_, count))| row.len() == *count),
+        "{parsed:?}"
+    );
     parsed
 }
 
@@ -631,5 +652,186 @@ fn real_hip_bool_logic_equality_and_where_matrix_is_exact() {
                 rhs_bits[index]
             })
             .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+#[ignore = "requires a real HIP GPU; run through scripts/hip_test.py"]
+fn real_hip_permuted_stepped_nonnumeric_views_are_exact() {
+    let matrix = |rows, cols, precision| TensorType {
+        dims: vec![DimInfo::Lit(rows), DimInfo::Lit(cols)],
+        precision,
+    };
+    let input_f32 = matrix(2, 4, Prim::F32);
+    let input_bool = matrix(2, 4, Prim::Bool);
+    let permuted_f32 = matrix(4, 2, Prim::F32);
+    let permuted_bool = matrix(4, 2, Prim::Bool);
+    let stepped_f32 = matrix(2, 2, Prim::F32);
+    let stepped_bool = matrix(2, 2, Prim::Bool);
+    let mut dag = Dag::new();
+    let view = |dag: &mut Dag,
+                name: &str,
+                input: &TensorType,
+                permuted: &TensorType,
+                stepped: &TensorType| {
+        let load = dag.add_node(
+            RiscOp::Load { name: name.into() },
+            vec![],
+            input.clone(),
+            None,
+        );
+        let permute = dag.add_node(
+            RiscOp::Permute { axes: vec![1, 0] },
+            vec![load],
+            permuted.clone(),
+            None,
+        );
+        dag.add_node(
+            RiscOp::Stride {
+                strides: vec![RtDim::Lit(2), RtDim::Lit(1)],
+            },
+            vec![permute],
+            stepped.clone(),
+            None,
+        )
+    };
+    let lhs = view(&mut dag, "lhs", &input_f32, &permuted_f32, &stepped_f32);
+    let rhs = view(&mut dag, "rhs", &input_f32, &permuted_f32, &stepped_f32);
+    let logical_lhs = view(
+        &mut dag,
+        "logical_lhs",
+        &input_bool,
+        &permuted_bool,
+        &stepped_bool,
+    );
+    let logical_rhs = view(
+        &mut dag,
+        "logical_rhs",
+        &input_bool,
+        &permuted_bool,
+        &stepped_bool,
+    );
+    let condition = view(
+        &mut dag,
+        "condition",
+        &input_bool,
+        &permuted_bool,
+        &stepped_bool,
+    );
+    for kind in [
+        ComparisonKind::Eq,
+        ComparisonKind::Neq,
+        ComparisonKind::Gte,
+        ComparisonKind::Lte,
+    ] {
+        let output = dag.add_node(
+            RiscOp::Compare(kind),
+            vec![lhs, rhs],
+            stepped_bool.clone(),
+            None,
+        );
+        dag.add_root(output);
+    }
+    for kind in [LogicalKind::And, LogicalKind::Or] {
+        let output = dag.add_node(
+            RiscOp::Logical(kind),
+            vec![logical_lhs, logical_rhs],
+            stepped_bool.clone(),
+            None,
+        );
+        dag.add_root(output);
+    }
+    let not = dag.add_node(
+        RiscOp::Logical(LogicalKind::Not),
+        vec![logical_lhs],
+        stepped_bool,
+        None,
+    );
+    dag.add_root(not);
+    let selected = dag.add_node(RiscOp::Where, vec![condition, lhs, rhs], stepped_f32, None);
+    dag.add_root(selected);
+
+    let lhs_bits = vec![
+        0x7fc1_2345,
+        0x4130_0000,
+        0x8000_0000,
+        0x4150_0000,
+        0x40a0_0000,
+        0x4170_0000,
+        0x0000_0000,
+        0x4188_0000,
+    ];
+    let rhs_bits = vec![
+        0x0000_0000,
+        0x41a8_0000,
+        0x0000_0000,
+        0x41b8_0000,
+        0x4080_0000,
+        0x41c8_0000,
+        0x8000_0000,
+        0x41d8_0000,
+    ];
+    let logical_lhs_bits = vec![1, 1, 0, 1, 0, 1, 1, 0];
+    let logical_rhs_bits = vec![1, 0, 0, 1, 1, 0, 0, 1];
+    let condition_bits = vec![1, 0, 1, 0, 0, 1, 0, 1];
+    let inputs = BTreeMap::from([
+        (
+            "lhs".into(),
+            RawInput {
+                precision: Prim::F32,
+                bits: lhs_bits.clone(),
+            },
+        ),
+        (
+            "rhs".into(),
+            RawInput {
+                precision: Prim::F32,
+                bits: rhs_bits.clone(),
+            },
+        ),
+        (
+            "logical_lhs".into(),
+            RawInput {
+                precision: Prim::Bool,
+                bits: logical_lhs_bits,
+            },
+        ),
+        (
+            "logical_rhs".into(),
+            RawInput {
+                precision: Prim::Bool,
+                bits: logical_rhs_bits,
+            },
+        ),
+        (
+            "condition".into(),
+            RawInput {
+                precision: Prim::Bool,
+                bits: condition_bits,
+            },
+        ),
+    ]);
+    let outputs = [
+        (Prim::Bool, 4),
+        (Prim::Bool, 4),
+        (Prim::Bool, 4),
+        (Prim::Bool, 4),
+        (Prim::Bool, 4),
+        (Prim::Bool, 4),
+        (Prim::Bool, 4),
+        (Prim::F32, 4),
+    ];
+    let actual = compile_and_run_shaped(&dag, "matrix_permuted_stepped", &inputs, &outputs);
+    assert_eq!(actual[0], vec![0, 0, 1, 1]);
+    assert_eq!(actual[1], vec![1, 1, 0, 0]);
+    assert_eq!(actual[2], vec![0, 1, 1, 1]);
+    assert_eq!(actual[3], vec![0, 0, 1, 1]);
+    assert_eq!(actual[4], vec![1, 0, 0, 0]);
+    assert_eq!(actual[5], vec![1, 1, 0, 1]);
+    assert_eq!(actual[6], vec![0, 1, 1, 0]);
+    assert_eq!(
+        actual[7],
+        vec![lhs_bits[0], rhs_bits[4], lhs_bits[2], rhs_bits[6]],
+        "where must retain the selected NaN payload and negative-zero images"
     );
 }

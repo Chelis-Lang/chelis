@@ -4912,6 +4912,10 @@ fn typed_value(storage: chelis_types::TensorStorage) -> TensorValue {
     TensorValue::from_storage(vec![storage.len()], storage)
 }
 
+fn typed_value_with_shape(shape: Vec<usize>, storage: chelis_types::TensorStorage) -> TensorValue {
+    TensorValue::from_storage(shape, storage)
+}
+
 fn c_storage_case(storage: &chelis_types::TensorStorage) -> (&'static str, &'static str, String) {
     use chelis_types::StorageView;
 
@@ -5367,6 +5371,260 @@ int main(void) {{
         let (ok, output_text) = compile_and_run_kernel_capturing(&function, &source, &harness);
         assert!(ok, "{prim:?}: {output_text}\n{source}");
     }
+}
+
+#[test]
+fn typed_nonnumeric_c_permuted_stepped_views_match_evaluator_and_preserve_bits() {
+    use chelis_ir::dag::RtDim;
+    use chelis_types::StorageView;
+    use chelis_unord::UnordMap;
+
+    let matrix = |rows, cols, precision| TensorType {
+        dims: vec![DimInfo::Lit(rows), DimInfo::Lit(cols)],
+        precision,
+    };
+    let input_f32 = matrix(2, 4, Prim::F32);
+    let input_bool = matrix(2, 4, Prim::Bool);
+    let permuted_f32 = matrix(4, 2, Prim::F32);
+    let permuted_bool = matrix(4, 2, Prim::Bool);
+    let stepped_f32 = matrix(2, 2, Prim::F32);
+    let stepped_bool = matrix(2, 2, Prim::Bool);
+
+    let lhs_storage = typed_storage(
+        Prim::F32,
+        chelis_types::RawTensor::Float(vec![
+            f64::from_bits(0x7ff8_2468_a000_0000),
+            11.0,
+            -0.0,
+            13.0,
+            5.0,
+            15.0,
+            0.0,
+            17.0,
+        ]),
+    );
+    let rhs_storage = typed_storage(
+        Prim::F32,
+        chelis_types::RawTensor::Float(vec![0.0, 21.0, 0.0, 23.0, 4.0, 25.0, -0.0, 27.0]),
+    );
+    let logical_lhs_storage = typed_storage(
+        Prim::Bool,
+        chelis_types::RawTensor::Int(vec![1, 1, 0, 1, 0, 1, 1, 0]),
+    );
+    let logical_rhs_storage = typed_storage(
+        Prim::Bool,
+        chelis_types::RawTensor::Int(vec![1, 0, 0, 1, 1, 0, 0, 1]),
+    );
+    let condition_storage = typed_storage(
+        Prim::Bool,
+        chelis_types::RawTensor::Int(vec![1, 0, 1, 0, 0, 1, 0, 1]),
+    );
+
+    let mut dag = Dag::new();
+    let add_stepped_view =
+        |dag: &mut Dag, input, permuted_ty: &TensorType, stepped_ty: &TensorType| {
+            let permuted = dag.add_node(
+                RiscOp::Permute { axes: vec![1, 0] },
+                vec![input],
+                permuted_ty.clone(),
+                None,
+            );
+            dag.add_node(
+                RiscOp::Stride {
+                    strides: vec![RtDim::Lit(2), RtDim::Lit(1)],
+                },
+                vec![permuted],
+                stepped_ty.clone(),
+                None,
+            )
+        };
+    let load = |dag: &mut Dag, name: &str, ty: &TensorType| {
+        dag.add_node(RiscOp::Load { name: name.into() }, vec![], ty.clone(), None)
+    };
+
+    let lhs_load = load(&mut dag, "lhs", &input_f32);
+    let rhs_load = load(&mut dag, "rhs", &input_f32);
+    let logical_lhs_load = load(&mut dag, "logical_lhs", &input_bool);
+    let logical_rhs_load = load(&mut dag, "logical_rhs", &input_bool);
+    let condition_load = load(&mut dag, "condition", &input_bool);
+    let lhs = add_stepped_view(&mut dag, lhs_load, &permuted_f32, &stepped_f32);
+    let rhs = add_stepped_view(&mut dag, rhs_load, &permuted_f32, &stepped_f32);
+    let logical_lhs = add_stepped_view(&mut dag, logical_lhs_load, &permuted_bool, &stepped_bool);
+    let logical_rhs = add_stepped_view(&mut dag, logical_rhs_load, &permuted_bool, &stepped_bool);
+    let condition = add_stepped_view(&mut dag, condition_load, &permuted_bool, &stepped_bool);
+
+    let mut bool_outputs = Vec::new();
+    for kind in [
+        ComparisonKind::Eq,
+        ComparisonKind::Neq,
+        ComparisonKind::Gte,
+        ComparisonKind::Lte,
+    ] {
+        let output = dag.add_node(
+            RiscOp::Compare(kind),
+            vec![lhs, rhs],
+            stepped_bool.clone(),
+            None,
+        );
+        dag.add_root(output);
+        bool_outputs.push(output);
+    }
+    for kind in [LogicalKind::And, LogicalKind::Or] {
+        let output = dag.add_node(
+            RiscOp::Logical(kind),
+            vec![logical_lhs, logical_rhs],
+            stepped_bool.clone(),
+            None,
+        );
+        dag.add_root(output);
+        bool_outputs.push(output);
+    }
+    let not = dag.add_node(
+        RiscOp::Logical(LogicalKind::Not),
+        vec![logical_lhs],
+        stepped_bool,
+        None,
+    );
+    dag.add_root(not);
+    bool_outputs.push(not);
+    let selected = dag.add_node(RiscOp::Where, vec![condition, lhs, rhs], stepped_f32, None);
+    dag.add_root(selected);
+
+    let evaluated = eval_tensor(
+        &dag,
+        &UnordMap::from([
+            (
+                "lhs".into(),
+                typed_value_with_shape(vec![2, 4], lhs_storage.clone()),
+            ),
+            (
+                "rhs".into(),
+                typed_value_with_shape(vec![2, 4], rhs_storage.clone()),
+            ),
+            (
+                "logical_lhs".into(),
+                typed_value_with_shape(vec![2, 4], logical_lhs_storage.clone()),
+            ),
+            (
+                "logical_rhs".into(),
+                typed_value_with_shape(vec![2, 4], logical_rhs_storage.clone()),
+            ),
+            (
+                "condition".into(),
+                typed_value_with_shape(vec![2, 4], condition_storage.clone()),
+            ),
+        ]),
+    )
+    .unwrap();
+    let expected_bool = bool_outputs
+        .iter()
+        .map(|output| evaluated[output].storage().to_i64_exact_vec().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        expected_bool,
+        vec![
+            vec![0, 0, 1, 1],
+            vec![1, 1, 0, 0],
+            vec![0, 1, 1, 1],
+            vec![0, 0, 1, 1],
+            vec![1, 0, 0, 0],
+            vec![1, 1, 0, 1],
+            vec![0, 1, 1, 0],
+        ],
+        "the fixture must retain NaN-false ordered comparisons, NaN-true neq, \
+         signed-zero equality, and both logical outcomes after permutation/stride"
+    );
+    let expected_where = evaluated[&selected].storage();
+    let (
+        StorageView::F32(lhs_values),
+        StorageView::F32(rhs_values),
+        StorageView::F32(where_values),
+    ) = (
+        lhs_storage.view(),
+        rhs_storage.view(),
+        expected_where.view(),
+    )
+    else {
+        unreachable!("f32 fixture")
+    };
+    assert_eq!(
+        where_values
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        vec![
+            lhs_values[0].to_bits(),
+            rhs_values[4].to_bits(),
+            lhs_values[2].to_bits(),
+            rhs_values[6].to_bits(),
+        ],
+        "where must copy the selected stored image, including the NaN payload and -0"
+    );
+
+    let function = "typed_nonnumeric_permuted_stepped";
+    let source = codegen(&dag, function).unwrap().c_source;
+    let (_, _, lhs_init) = c_storage_case(&lhs_storage);
+    let (_, _, rhs_init) = c_storage_case(&rhs_storage);
+    let (_, _, logical_lhs_init) = c_storage_case(&logical_lhs_storage);
+    let (_, _, logical_rhs_init) = c_storage_case(&logical_rhs_storage);
+    let (_, _, condition_init) = c_storage_case(&condition_storage);
+    let (_, _, expected_where_init) = c_storage_case(expected_where);
+    let expected_bool_init = expected_bool
+        .iter()
+        .map(|row| {
+            format!(
+                "{{ {} }}",
+                row.iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let harness = format!(
+        r#"{TYPED_NONNUMERIC_HARNESS}
+static chelis_tensor *test_matrix(void *data, chelis_dtype dtype) {{
+    int64_t shape[2] = {{ 2, 4 }};
+    return chelis_tensor_entry_borrow(
+        2, shape, dtype, data, 8 * chelis_dtype_size(dtype)
+    );
+}}
+
+extern void {function}(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    float lhs_data[8] = {{ {lhs_init} }};
+    float rhs_data[8] = {{ {rhs_init} }};
+    uint8_t logical_lhs_data[8] = {{ {logical_lhs_init} }};
+    uint8_t logical_rhs_data[8] = {{ {logical_rhs_init} }};
+    uint8_t condition_data[8] = {{ {condition_init} }};
+    uint8_t expected_bool[7][4] = {{ {expected_bool_init} }};
+    float expected_where[4] = {{ {expected_where_init} }};
+    chelis_tensor *inputs[5] = {{
+        test_matrix(lhs_data, CHELIS_DTYPE_F32),
+        test_matrix(rhs_data, CHELIS_DTYPE_F32),
+        test_matrix(logical_lhs_data, CHELIS_DTYPE_BOOL),
+        test_matrix(logical_rhs_data, CHELIS_DTYPE_BOOL),
+        test_matrix(condition_data, CHELIS_DTYPE_BOOL)
+    }};
+    chelis_tensor *outputs[8] = {{ 0 }};
+    {function}(inputs, 5, outputs, 8);
+    for (int output = 0; output < 7; ++output) {{
+        chelis_read_view view = chelis_tensor_read_view(outputs[output]);
+        if (view.dtype != CHELIS_DTYPE_BOOL || view.count != 4) return 10 + output;
+        if (memcmp(view.data, expected_bool[output], 4) != 0) return 30 + output;
+    }}
+    chelis_read_view where_view = chelis_tensor_read_view(outputs[7]);
+    if (where_view.dtype != CHELIS_DTYPE_F32 || where_view.count != 4) return 50;
+    if (memcmp(where_view.data, expected_where, sizeof expected_where) != 0) return 51;
+    for (int output = 0; output < 8; ++output) chelis_tensor_release(outputs[output]);
+    for (int input = 0; input < 5; ++input) chelis_tensor_release(inputs[input]);
+    return 0;
+}}
+"#
+    );
+    let (ok, output) = compile_and_run_kernel_capturing(function, &source, &harness);
+    assert!(ok, "{output}\n{source}");
 }
 
 #[test]
