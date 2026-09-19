@@ -194,6 +194,19 @@ pub(crate) fn reset_fold_copied_nodes() {
 /// `List` tree into a `Node` tree as a side effect, because the carrier is
 /// observable to printers, validators and the stamping rules.
 pub fn fold_pipes(expr: &Expr) -> Expr {
+    fold_changed(expr).unwrap_or_else(|| copied(expr))
+}
+
+/// Fold every `Pipe` below `expr`, reporting movement instead of detecting
+/// it: `Some(rebuilt)` when a pipe was folded somewhere in the subtree, `None`
+/// when the subtree is unchanged (chelis#2207).
+///
+/// An unchanged subtree is neither copied nor compared. The fold used to
+/// clone every child, deep-compare the clones against the originals, and
+/// clone the unchanged subtree again at every stamped node, which made a
+/// pipe-free program cost O(size x depth); the movement flag makes it
+/// linear, and the one copy the public API owes is made once at the root.
+fn fold_changed(expr: &Expr) -> Option<Expr> {
     // The non-stamped carriers hold children too, and a pipe can sit inside
     // one: a typed pipe-stage parameter arrives as a `MetaExpr` wrapper, and
     // a stage body can reach the fold through a `BareList` or an
@@ -202,40 +215,53 @@ pub fn fold_pipes(expr: &Expr) -> Expr {
     // malformed tree, so every carrier is walked.
     match expr {
         Expr::MetaExpr(meta_expr, span) => {
-            return Expr::MetaExpr(
+            let inner = fold_changed(&meta_expr.expr)?;
+            return Some(Expr::MetaExpr(
                 crate::ast::MetaExpr {
                     metadata: meta_expr.metadata.clone(),
-                    expr: Box::new(fold_pipes(&meta_expr.expr)),
+                    expr: Box::new(inner),
                 },
                 *span,
-            );
+            ));
         }
         Expr::BareList(items, span) => {
-            return Expr::BareList(items.iter().map(fold_pipes).collect(), *span);
+            return Some(Expr::BareList(fold_children(items)?, *span));
         }
         Expr::UnknownForm(data) => {
-            return Expr::UnknownForm(Box::new(crate::ast::UnknownFormData {
+            let children = fold_children(&data.children)?;
+            return Some(Expr::UnknownForm(Box::new(crate::ast::UnknownFormData {
                 head: data.head.clone(),
                 meta: data.meta.clone(),
-                children: data.children.iter().map(fold_pipes).collect(),
+                children,
                 span: data.span,
-            }));
+            })));
         }
         _ => {}
     }
-    let Some((tag, meta, kids)) = stamped(expr) else {
-        return copied(expr);
-    };
-    let folded: Vec<Expr> = kids.iter().map(fold_pipes).collect();
-    let children_moved = folded.iter().zip(kids).any(|(new, old)| new != old);
-    if tag != DeepTag::Pipe && !children_moved {
-        return copied(expr);
-    }
-    let rebuilt = rebuild(expr, tag, meta, folded);
+    let (tag, meta, kids) = stamped(expr)?;
+    let folded = fold_children(kids);
     if tag != DeepTag::Pipe {
-        return rebuilt;
+        return folded.map(|children| rebuild(expr, tag, meta, children));
     }
-    fold_one(&rebuilt).unwrap_or(rebuilt)
+    let children = folded.unwrap_or_else(|| kids.iter().map(copied).collect());
+    let rebuilt = rebuild(expr, tag, meta, children);
+    Some(fold_one(&rebuilt).unwrap_or(rebuilt))
+}
+
+/// Fold each of `kids`. `Some(children)` when at least one moved, with the
+/// unchanged siblings copied beside the rebuilt ones; `None` when none did.
+fn fold_children(kids: &[Expr]) -> Option<Vec<Expr>> {
+    let folded: Vec<Option<Expr>> = kids.iter().map(fold_changed).collect();
+    if folded.iter().all(Option::is_none) {
+        return None;
+    }
+    Some(
+        folded
+            .into_iter()
+            .zip(kids)
+            .map(|(new, old)| new.unwrap_or_else(|| copied(old)))
+            .collect(),
+    )
 }
 
 /// Rebuild `expr` with new children, in the carrier it arrived in.
@@ -399,8 +425,8 @@ mod tests {
     /// counter on the unchanged fold, a 64-deep chain copied 6,563 nodes and a
     /// 128-deep chain 25,411, a ratio of 3.9 (quadratic), and this assertion
     /// failed.
-    /// After the fix the same chains copy PASS_SMALL and PASS_LARGE: the one
-    /// owned result, and nothing per level.
+    /// After the fix the same chains copy 194 and 386 nodes, a ratio of 2.0:
+    /// the one owned result, and nothing per level.
     #[test]
     fn folding_a_pipe_free_chain_copies_linear_work() {
         fn chain(depth: usize) -> Expr {
