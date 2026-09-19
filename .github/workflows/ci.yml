@@ -183,16 +183,46 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         working-directory: candidate
         run: |
+          # Every command in this preamble is guarded. Under errexit an
+          # unguarded one exits the step, and this step's outcome now gates
+          # the candidate preflight, so a transient `gh` blip would close
+          # required contexts with nothing said about the candidate. Worse,
+          # `Compute docs_only` reads the clone this step establishes and
+          # cannot tolerate a failure of its own, so dying here would fail
+          # the whole job and leave required contexts with no check run at
+          # all, which is chelis#2228's unmergeable shape. The module below
+          # already fails closed *with information*; this preamble has to
+          # do the same rather than fail closed with none.
           current_pr="$RUNNER_TEMP/current-pr.json"
-          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" > "$current_pr"
-          base_ref=$(jq -er '.base.ref | select(length > 0)' "$current_pr")
-          git fetch --no-tags origin "refs/heads/$base_ref"
-          target_tip=$(git rev-parse FETCH_HEAD)
+          target_tip=""
+          if gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" > "$current_pr"; then
+            base_ref=$(jq -r '.base.ref // ""' "$current_pr")
+            # Pre-existing and unguarded until now: a base branch renamed
+            # upstream leaves `refs/heads/$base_ref` gone (chelis#2240).
+            if [ -n "$base_ref" ] &&
+               git fetch --no-tags origin "refs/heads/$base_ref"; then
+              target_tip=$(git rev-parse FETCH_HEAD)
+            else
+              echo "could not resolve the target tip for base ref" \
+                "'${base_ref:-<unreadable>}'; the clone is established" \
+                "without it and the classifier will fail safe" >&2
+            fi
+          else
+            echo "could not read the live pull request; the target tip is" \
+              "unresolved and the clone is established without it" >&2
+          fi
           echo "target_tip=$target_tip" >> "$GITHUB_OUTPUT"
           args=(--base "$BASE" --head "$HEAD" --commits "$COMMITS"
-                --target-tip "$target_tip" --github-output "$GITHUB_OUTPUT")
+                --github-output "$GITHUB_OUTPUT")
+          # Named explicitly, and not redundantly: `--unshallow`
+          # un-truncates what the refspec reaches rather than discovering
+          # commits, so a pre-push head unreachable from any live ref after
+          # a force-push stays absent unless it is asked for by name.
           if [ "$ACTION" = "synchronize" ] && [ -n "$BEFORE" ]; then
             args+=(--before "$BEFORE")
+          fi
+          if [ -n "$target_tip" ]; then
+            args+=(--target-tip "$target_tip")
           fi
           python3 ../candidate/scripts/ci_establish_candidate_clone.py "${args[@]}"
 
