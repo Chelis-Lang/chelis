@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
@@ -539,18 +540,37 @@ class LifecycleInvocationTests(unittest.TestCase):
             joined.append(pending.strip())
         return joined
 
+    #: Any redirection of file descriptor 2 other than onto stderr itself.
+    #: `2>/dev/null`, `2> /dev/null`, `2>&-` and `2>&1` all qualify.
+    STDERR_REDIRECT = re.compile(r"2>(?!&2(?:\b|$))")
+    #: A fallback that discards the status without saying anything.
+    DISCARDING_FALLBACK = re.compile(r"\|\|\s*(?:true|:)\s*$")
+
     def test_no_invocation_silences_its_pre_push_head_fetch(self) -> None:
+        """Assert the property, not a list of the spellings that break it.
+
+        Matching `2>/dev/null` as a substring is evaded by a space, by
+        `2>&-`, or by moving the redirect somewhere else in the step, and
+        chasing each spelling adds witnesses rather than coverage. The
+        command is normalised first, then two rules decide it: no
+        redirection of stderr away from stderr, and a fallback that reports
+        rather than one that swallows.
+        """
+
         for workflow, body in self.all_steps().items():
-            fetches = [
-                line
-                for line in self.joined_commands(body)
-                if "git fetch" in line and '"$BEFORE"' in line
-            ]
             with self.subTest(workflow=workflow):
+                # A step-wide silencer would defeat any per-command rule.
+                self.assertNotRegex(body, r"exec\s+2>")
+                fetches = [
+                    command
+                    for command in self.joined_commands(body)
+                    if "git fetch" in command and '"$BEFORE"' in command
+                ]
                 self.assertTrue(fetches, "no pre-push head fetch")
-                for line in fetches:
-                    self.assertNotIn("2>/dev/null", line)
-                    self.assertNotIn("|| true", line)
+                for command in fetches:
+                    normalised = " ".join(command.split())
+                    self.assertNotRegex(normalised, self.STDERR_REDIRECT)
+                    self.assertNotRegex(normalised, self.DISCARDING_FALLBACK)
 
 
 if __name__ == "__main__":
