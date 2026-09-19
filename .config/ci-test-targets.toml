@@ -1359,7 +1359,7 @@ disposition = "owner"
 workflow = "ci.yml"
 job = "script-unit"
 cadence = "pull_request and push"
-reason = "the gate's permitted-command inventory for this workflow is locked by script-unit"
+reason = "script-unit holds this workflow's reviewed registration as running no command the per-PR gate owns; it validates that membership, not a command inventory"
 tracking_issue = "chelis#2232"
 
 [[path_rule]]
@@ -1386,7 +1386,7 @@ disposition = "owner"
 workflow = "ci.yml"
 job = "script-unit"
 cadence = "pull_request and push"
-reason = "the gate's permitted-command inventory for this workflow is locked by script-unit"
+reason = "script-unit holds this workflow's reviewed registration as running no command the per-PR gate owns; it validates that membership, not a command inventory"
 tracking_issue = "chelis#2232"
 
 [[path_rule]]
@@ -1413,7 +1413,7 @@ disposition = "owner"
 workflow = "ci.yml"
 job = "script-unit"
 cadence = "pull_request and push"
-reason = "the gate's permitted-command inventory for this workflow is locked by script-unit"
+reason = "script-unit validates this workflow's flake-package contract and its reviewed registration as running no command the per-PR gate owns"
 tracking_issue = "chelis#2232"
 
 [[path_rule]]
