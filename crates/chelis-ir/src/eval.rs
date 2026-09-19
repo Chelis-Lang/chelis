@@ -6256,15 +6256,15 @@ mod value_reclamation {
 
     /// The receipt.
     ///
-    /// Numbers measured on this fixture at commit `e0250b290` with the
-    /// reclamation neutralized (`free_schedule` forced to `None`): the
-    /// root-scoped run peaked at 65 entries / 195 elements for the 64-link
-    /// chain and 129 / 387 for the 128-link chain, one entry per executed
-    /// node, and the two `assert_eq!`s on `reclaiming` below failed with
-    /// exactly those left-hand values. With the reclamation in place both
-    /// chains peak at 2 entries / 6 elements. The all-values assertions
-    /// passed either way, which is the point of keeping them here: they pin
-    /// the contract the tracker asked to preserve.
+    /// This test was run against this same tree with the reclamation
+    /// neutralized (`free_schedule` forced to `None`), so it is known to fail
+    /// without it. The root-scoped peak then equalled the executed node count:
+    /// `peak_live_values` was 65 for the 64-link chain and 129 for the
+    /// 128-link chain, against the 2 asserted below. (The 128 figure needed
+    /// its own run, because the loop aborts at 64 otherwise.) The all-values
+    /// assertions passed in both configurations, which is the point of
+    /// keeping them here: they pin the contract the tracker asked to
+    /// preserve, and they are what measures 195 and 387 elements.
     #[test]
     fn root_scoped_peak_tracks_the_working_set_not_the_executed_node_count() {
         for links in [64usize, 128] {
