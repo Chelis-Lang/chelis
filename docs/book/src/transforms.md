@@ -8,13 +8,16 @@ authoritative source is `spec/06-transformations.md`.
 
 ## Chelis 0.19 core-transform fence
 
-For the 0.19 core promise, write named transforms against a direct, unshadowed
-top-level function declaration, such as `grad(loss)` or `vmap(process)`.
-The checker rejects aliases of a top-level function at either module or local
-scope, and a local binding that shadows a top-level target, rather than
-silently selecting a different callable. An inline or locally bound `vmap`
-lambda remains supported when every parameter has explicit structure wherever
-`vmap` inserts the mapped axis. A whole type hole such as `_`, a type hole
+For the remaining 0.19 core-transform fence, write `vmap` targets and
+`grad` targets without an explicit `wrt` selector against a direct,
+unshadowed top-level function declaration, such as `grad(loss)` or
+`vmap(process)`. Those forms reject aliases of a top-level function at either
+module or local scope, and a local binding that shadows a top-level target,
+rather than silently selecting a different callable. An explicit named
+`grad(..., wrt=...)` selector instead follows the callable-origin contract
+described below. An inline or locally bound `vmap` lambda remains supported
+when every parameter has explicit structure wherever `vmap` inserts the
+mapped axis. A whole type hole such as `_`, a type hole
 nested through a reference or tuple, and a Deep rank hole are not explicit
 mapped structure: they could bind to the unsliced input rather than the mapped
 slice. Fixed-rank tensor dimension and precision variables remain supported
