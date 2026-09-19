@@ -419,7 +419,8 @@ mod tests {
     /// `fold_copied_nodes` counts expression nodes the fold copies. The
     /// assertion is a ratio, so it states the asymptotic promise with no
     /// machine budget: doubling the depth of a pipe-free chain may at most
-    /// triple the nodes copied.
+    /// triple the nodes copied. The exact-count assertion beside it locks the
+    /// constant too: a pipe-free tree is copied once, at the root.
     ///
     /// Evidentiary status: REGRESSION TEST, proven failing first. With the
     /// counter on the unchanged fold, a 64-deep chain copied 6,563 nodes and a
@@ -447,10 +448,10 @@ mod tests {
         let (small, small_size) = copied_nodes(64);
         let (large, _) = copied_nodes(128);
         eprintln!("#2207 receipt: depth 64 copied {small} nodes, depth 128 copied {large}");
-        assert!(
-            small >= small_size,
-            "#2207: the fold returns an owned copy, so it must record at least the \
-             {small_size} nodes of the result; {small} means the counter is not measuring"
+        assert_eq!(
+            small, small_size,
+            "#2207: a pipe-free tree is copied exactly once, at the root: the fold must \
+             record the {small_size} nodes of the result and nothing per level"
         );
         assert!(
             large <= small.saturating_mul(3),
