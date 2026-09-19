@@ -1,6 +1,8 @@
 //! Authoritative IR oracle for chelis#1284, chelis#630, and chelis#666.
 
-use chelis_ir::dag::{ComparisonKind, Dag, DimInfo, LogicalKind, RiscOp, TensorType};
+use chelis_ir::dag::{
+    ComparisonKind, Dag, DimInfo, ExtentWitnessSite, LogicalKind, RiscOp, RtAxis, TensorType,
+};
 use chelis_ir::eval::{TensorValue, eval_tensor};
 use chelis_ir::fuse::fuse;
 use chelis_ir::grad::{AdError, AdRejectionReason, grad_dag_checked};
@@ -452,6 +454,26 @@ fn verifier_rejects_invalid_domains_shapes_outputs_and_arities() {
             ty(&[2], Prim::F32),
             "branches",
         ),
+        (
+            RiscOp::Where,
+            vec![
+                ty(&[2], Prim::Bool),
+                ty(&[2], Prim::F8e4m3),
+                ty(&[2], Prim::F8e4m3),
+            ],
+            ty(&[2], Prim::F8e4m3),
+            "active tensor",
+        ),
+        (
+            RiscOp::Where,
+            vec![
+                ty(&[2], Prim::Bool),
+                ty(&[2], Prim::String),
+                ty(&[2], Prim::String),
+            ],
+            ty(&[2], Prim::String),
+            "active tensor",
+        ),
     ];
     for (op, input_types, output_type, needle) in cases {
         let mut dag = Dag::new();
@@ -506,6 +528,236 @@ fn verifier_rejects_invalid_domains_shapes_outputs_and_arities() {
             "{op:?} wrong arity was accepted: {errors:#?}"
         );
     }
+}
+
+#[test]
+fn verifier_compares_resolved_extents_semantically_without_merging_unresolved_symbols() {
+    let lit = TensorType {
+        dims: vec![DimInfo::Lit(2)],
+        precision: Prim::F32,
+    };
+    let named_left = TensorType {
+        dims: vec![DimInfo::Named("left".into(), Some(2))],
+        precision: Prim::F32,
+    };
+    let named_right = TensorType {
+        dims: vec![DimInfo::Named("right".into(), Some(2))],
+        precision: Prim::F32,
+    };
+    let bool_named = TensorType {
+        dims: vec![DimInfo::Named("predicate".into(), Some(2))],
+        precision: Prim::Bool,
+    };
+
+    let mut compare = Dag::new();
+    let left = compare.add_node(
+        RiscOp::Load {
+            name: "left".into(),
+        },
+        vec![],
+        lit.clone(),
+        None,
+    );
+    let right = compare.add_node(
+        RiscOp::Load {
+            name: "right".into(),
+        },
+        vec![],
+        named_left.clone(),
+        None,
+    );
+    let compared = compare.add_node(
+        RiscOp::Compare(ComparisonKind::Eq),
+        vec![left, right],
+        bool_named.clone(),
+        None,
+    );
+    compare.add_root(compared);
+    assert_eq!(
+        verify::verify(&compare),
+        Vec::<String>::new(),
+        "resolved named and literal extents are the same semantic shape"
+    );
+
+    let mut where_dag = Dag::new();
+    let condition = where_dag.add_node(
+        RiscOp::Load {
+            name: "condition".into(),
+        },
+        vec![],
+        bool_named,
+        None,
+    );
+    let then_value = where_dag.add_node(
+        RiscOp::Load {
+            name: "then".into(),
+        },
+        vec![],
+        named_left,
+        None,
+    );
+    let else_value = where_dag.add_node(
+        RiscOp::Load {
+            name: "else".into(),
+        },
+        vec![],
+        lit,
+        None,
+    );
+    let selected = where_dag.add_node(
+        RiscOp::Where,
+        vec![condition, then_value, else_value],
+        named_right,
+        None,
+    );
+    where_dag.add_root(selected);
+    assert_eq!(
+        verify::verify(&where_dag),
+        Vec::<String>::new(),
+        "where must accept equivalent resolved branch, condition, and output shapes"
+    );
+
+    let mut runtime_actualized = Dag::new();
+    let source = runtime_actualized.add_node(
+        RiscOp::Load {
+            name: "source".into(),
+        },
+        vec![],
+        ty(&[2], Prim::F32),
+        None,
+    );
+    let extent = runtime_actualized.add_node(
+        RiscOp::ExtentWitness {
+            site: ExtentWitnessSite::Caller,
+            parameter: "source".into(),
+            axis: RtAxis::Lit(0),
+            requirements: vec![],
+            claims: vec![],
+        },
+        vec![source],
+        TensorType {
+            dims: vec![],
+            precision: Prim::Int64,
+        },
+        None,
+    );
+    let reshaped = runtime_actualized.add_node(
+        RiscOp::Reshape {
+            new_shape: vec![chelis_ir::dag::RtDim::Node(1)],
+        },
+        vec![source, extent],
+        TensorType {
+            dims: vec![DimInfo::Named("_rt_dim_2_0".into(), None)],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    let compared = runtime_actualized.add_node(
+        RiscOp::Compare(ComparisonKind::Eq),
+        vec![source, reshaped],
+        TensorType {
+            dims: vec![DimInfo::Lit(2)],
+            precision: Prim::Bool,
+        },
+        None,
+    );
+    runtime_actualized.add_root(compared);
+    assert_eq!(
+        verify::verify(&runtime_actualized),
+        Vec::<String>::new(),
+        "an exact extent witness actualizes the same semantic extent under a synthesized name"
+    );
+
+    let mut wildcard_where = Dag::new();
+    let condition = wildcard_where.add_node(
+        RiscOp::Load {
+            name: "condition".into(),
+        },
+        vec![],
+        TensorType {
+            dims: vec![DimInfo::Named("runtime".into(), None)],
+            precision: Prim::Bool,
+        },
+        None,
+    );
+    let values = wildcard_where.add_node(
+        RiscOp::Load {
+            name: "values".into(),
+        },
+        vec![],
+        TensorType {
+            dims: vec![DimInfo::Named("runtime".into(), None)],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    let zero = wildcard_where.add_node(
+        RiscOp::synth_const(Prim::F32, 0.0),
+        vec![],
+        TensorType {
+            dims: vec![DimInfo::Named(String::new(), None)],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    let selected = wildcard_where.add_node(
+        RiscOp::Where,
+        vec![condition, zero, values],
+        TensorType {
+            dims: vec![DimInfo::Named(String::new(), None)],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    wildcard_where.add_root(selected);
+    assert_eq!(
+        wildcard_where.get(zero).unwrap().shape_deps,
+        vec![values],
+        "where must preserve the exact producer that actualizes an anonymous branch shape"
+    );
+    assert_eq!(
+        verify::verify(&wildcard_where),
+        Vec::<String>::new(),
+        "an anonymous uniform branch takes its shape from the matching where branch"
+    );
+
+    let unresolved = |name: &str| TensorType {
+        dims: vec![DimInfo::Named(name.into(), None)],
+        precision: Prim::F32,
+    };
+    let mut distinct_symbols = Dag::new();
+    let left = distinct_symbols.add_node(
+        RiscOp::Load {
+            name: "left".into(),
+        },
+        vec![],
+        unresolved("batch"),
+        None,
+    );
+    let right = distinct_symbols.add_node(
+        RiscOp::Load {
+            name: "right".into(),
+        },
+        vec![],
+        unresolved("sequence"),
+        None,
+    );
+    let compared = distinct_symbols.add_node(
+        RiscOp::Compare(ComparisonKind::Eq),
+        vec![left, right],
+        TensorType {
+            dims: vec![DimInfo::Named("batch".into(), None)],
+            precision: Prim::Bool,
+        },
+        None,
+    );
+    distinct_symbols.add_root(compared);
+    assert!(
+        verify::verify(&distinct_symbols)
+            .iter()
+            .any(|error| error.contains("operand shape")),
+        "distinct unresolved symbols must not be treated as the same shape"
+    );
 }
 
 #[test]

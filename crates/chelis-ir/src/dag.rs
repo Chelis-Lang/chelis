@@ -1828,6 +1828,44 @@ impl Dag {
         output_type: TensorType,
         span_id: Option<String>,
     ) -> NodeId {
+        // A uniform anonymous branch has no intrinsic extent source. Where's
+        // same-shape contract supplies one from an earlier peer branch or the
+        // condition, so retain that producer explicitly for verification,
+        // eval, and codegen.
+        let inferred_where_shape_deps = if matches!(op, RiscOp::Where) && inputs.len() == 3 {
+            [
+                (inputs[1], [inputs[2], inputs[0]]),
+                (inputs[2], [inputs[1], inputs[0]]),
+            ]
+            .into_iter()
+            .filter_map(|(target_id, sources)| {
+                let target = self.get(target_id)?;
+                if !matches!(target.op, RiscOp::Const { .. })
+                    || !target.inputs.is_empty()
+                    || !target.shape_deps.is_empty()
+                    || !target.output_type.dims.iter().any(|dim| {
+                        matches!(
+                            dim,
+                            DimInfo::Named(name, None) if name.is_empty() || name == "*"
+                        )
+                    })
+                {
+                    return None;
+                }
+                sources
+                    .into_iter()
+                    .find(|source_id| {
+                        self.get(*source_id).is_some_and(|source| {
+                            source.id.0 < target.id.0
+                                && source.output_type.dims.len() == target.output_type.dims.len()
+                        })
+                    })
+                    .map(|source| (target_id, source))
+            })
+            .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
         let id = NodeId(self.nodes.len());
         self.nodes.push(DagNode {
             id,
@@ -1840,6 +1878,9 @@ impl Dag {
             shape_deps: Vec::new(),
             result_claim_deps: Vec::new(),
         });
+        for (target, source) in inferred_where_shape_deps {
+            self.add_shape_dep(target, source);
+        }
         id
     }
 
@@ -3464,6 +3505,7 @@ mod tests {
                 kind: ExtremaKind::Max,
                 operand: ExtremaOperand::Left,
             },
+            RiscOp::Compare(ComparisonKind::CmpLt),
             RiscOp::Compare(ComparisonKind::Lt),
             RiscOp::Compare(ComparisonKind::Neq),
             RiscOp::Compare(ComparisonKind::Gt),

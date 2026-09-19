@@ -2266,20 +2266,8 @@ impl WireDag {
                     }
                     let lhs = inputs[0];
                     let rhs = inputs[1];
-                    let same_shape = lhs.output_type.dims.len() == rhs.output_type.dims.len()
-                        && lhs
-                            .output_type
-                            .dims
-                            .iter()
-                            .zip(&rhs.output_type.dims)
-                            .all(|(lhs, rhs)| wire_dim_info_equal(lhs, rhs));
-                    let output_shape = lhs.output_type.dims.len() == node.output_type.dims.len()
-                        && lhs
-                            .output_type
-                            .dims
-                            .iter()
-                            .zip(&node.output_type.dims)
-                            .all(|(input, output)| wire_dim_info_equal(input, output));
+                    let same_shape = wire_shape_equal(&lhs.output_type, &rhs.output_type);
+                    let output_shape = wire_shape_equal(&lhs.output_type, &node.output_type);
                     let ordered = matches!(
                         comparison,
                         WireComparisonKind::CmpLt
@@ -2373,25 +2361,13 @@ impl WireDag {
                     let condition = inputs[0];
                     let then_value = inputs[1];
                     let else_value = inputs[2];
-                    let same_type = |lhs: &WireTensorType, rhs: &WireTensorType| {
-                        lhs.precision == rhs.precision
-                            && lhs.dims.len() == rhs.dims.len()
-                            && lhs
-                                .dims
-                                .iter()
-                                .zip(&rhs.dims)
-                                .all(|(lhs, rhs)| wire_dim_info_equal(lhs, rhs))
-                    };
+                    let branch_precision =
+                        Prim::parse_interchange_name(&then_value.output_type.precision);
                     if condition.output_type.precision != Prim::Bool.interchange_name()
-                        || !same_type(&then_value.output_type, &else_value.output_type)
-                        || !same_type(&then_value.output_type, &node.output_type)
-                        || condition.output_type.dims.len() != node.output_type.dims.len()
-                        || !condition
-                            .output_type
-                            .dims
-                            .iter()
-                            .zip(&node.output_type.dims)
-                            .all(|(condition, output)| wire_dim_info_equal(condition, output))
+                        || !wire_tensor_type_equal(&then_value.output_type, &else_value.output_type)
+                        || !wire_tensor_type_equal(&then_value.output_type, &node.output_type)
+                        || !wire_shape_equal(&condition.output_type, &then_value.output_type)
+                        || !branch_precision.is_some_and(|prim| prim.is_valid_tensor_precision())
                     {
                         return Err(WireDagContractError::new(format!(
                             "WireDag Where node {} requires a same-shape Bool condition and exactly matching branch/output types",
@@ -2946,6 +2922,56 @@ fn wire_dim_info_equal(left: &WireDimInfo, right: &WireDimInfo) -> bool {
         ) => left_name == right_name && left_size == right_size,
         _ => false,
     }
+}
+
+fn wire_semantic_dim_info_equal(left: &WireDimInfo, right: &WireDimInfo) -> bool {
+    match (left, right) {
+        (WireDimInfo::Lit { size: left }, WireDimInfo::Lit { size: right }) => left == right,
+        (
+            WireDimInfo::Lit { size: left },
+            WireDimInfo::Named {
+                size: Some(right), ..
+            },
+        )
+        | (
+            WireDimInfo::Named {
+                size: Some(left), ..
+            },
+            WireDimInfo::Lit { size: right },
+        )
+        | (
+            WireDimInfo::Named {
+                size: Some(left), ..
+            },
+            WireDimInfo::Named {
+                size: Some(right), ..
+            },
+        ) => left == right,
+        (
+            WireDimInfo::Named {
+                name: left_name,
+                size: None,
+            },
+            WireDimInfo::Named {
+                name: right_name,
+                size: None,
+            },
+        ) => left_name == right_name,
+        _ => false,
+    }
+}
+
+fn wire_shape_equal(left: &WireTensorType, right: &WireTensorType) -> bool {
+    left.dims.len() == right.dims.len()
+        && left
+            .dims
+            .iter()
+            .zip(&right.dims)
+            .all(|(left, right)| wire_semantic_dim_info_equal(left, right))
+}
+
+fn wire_tensor_type_equal(left: &WireTensorType, right: &WireTensorType) -> bool {
+    left.precision == right.precision && wire_shape_equal(left, right)
 }
 
 /// Combined failure type for [`WireDag::from_validated_json`]. Parse,

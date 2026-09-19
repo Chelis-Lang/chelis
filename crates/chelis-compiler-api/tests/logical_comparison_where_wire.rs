@@ -53,6 +53,10 @@ fn dims(size: u64) -> serde_json::Value {
     serde_json::json!([{"kind": "lit", "size": size}])
 }
 
+fn named_dims(name: &str, size: Option<u64>) -> serde_json::Value {
+    serde_json::json!([{"kind": "named", "name": name, "size": size}])
+}
+
 fn assert_valid(payload: &serde_json::Value) {
     WireDag::from_validated_json(&payload.to_string()).unwrap();
 }
@@ -159,6 +163,17 @@ fn wire_v15_comparison_validation_has_direct_positive_negative_parity() {
     );
     assert_valid(&valid);
 
+    let mut resolved_shape_spellings = valid.clone();
+    resolved_shape_spellings["nodes"][0]["output_type"]["dims"] = named_dims("left", Some(2));
+    resolved_shape_spellings["nodes"][2]["output_type"]["dims"] = named_dims("output", Some(2));
+    assert_valid(&resolved_shape_spellings);
+
+    let mut distinct_unresolved_symbols = valid.clone();
+    distinct_unresolved_symbols["nodes"][0]["output_type"]["dims"] = named_dims("batch", None);
+    distinct_unresolved_symbols["nodes"][1]["output_type"]["dims"] = named_dims("sequence", None);
+    distinct_unresolved_symbols["nodes"][2]["output_type"]["dims"] = named_dims("batch", None);
+    assert_contract_error(&distinct_unresolved_symbols, CONTRACT);
+
     let mut output_shape = valid.clone();
     output_shape["nodes"][2]["output_type"]["dims"] = dims(3);
     assert_contract_error(&output_shape, CONTRACT);
@@ -250,6 +265,29 @@ fn wire_v15_where_validation_has_direct_positive_negative_parity() {
 
     let valid = payload_value(serde_json::json!({"kind": "where"}), vec![0, 1, 2], "f32");
     assert_valid(&valid);
+
+    let mut resolved_shape_spellings = valid.clone();
+    resolved_shape_spellings["nodes"][0]["output_type"]["dims"] = named_dims("condition", Some(2));
+    resolved_shape_spellings["nodes"][1]["output_type"]["dims"] = named_dims("then", Some(2));
+    resolved_shape_spellings["nodes"][3]["output_type"]["dims"] = named_dims("output", Some(2));
+    assert_valid(&resolved_shape_spellings);
+
+    for precision in ["f8e4m3", "string"] {
+        let inactive = payload_value(
+            serde_json::json!({"kind": "where"}),
+            vec![0, 1, 2],
+            precision,
+        );
+        assert_contract_error(&inactive, CONTRACT);
+    }
+
+    let mut distinct_unresolved_symbols = valid.clone();
+    distinct_unresolved_symbols["nodes"][0]["output_type"]["dims"] = named_dims("condition", None);
+    distinct_unresolved_symbols["nodes"][1]["output_type"]["dims"] = named_dims("branch", None);
+    distinct_unresolved_symbols["nodes"][2]["output_type"]["dims"] =
+        named_dims("other_branch", None);
+    distinct_unresolved_symbols["nodes"][3]["output_type"]["dims"] = named_dims("branch", None);
+    assert_contract_error(&distinct_unresolved_symbols, CONTRACT);
 
     let mut condition_shape = valid.clone();
     condition_shape["nodes"][0]["output_type"]["dims"] = dims(3);
