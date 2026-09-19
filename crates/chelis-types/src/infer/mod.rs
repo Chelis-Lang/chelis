@@ -163,7 +163,9 @@ use expr_pattern::*;
 use expr_record::*;
 use expr_transform::*;
 use grad_selector::validate_grad_selector_identity;
-pub(crate) use grad_selector::{SelectorCallableContext, extend_selector_callable_context};
+pub(crate) use grad_selector::{
+    SelectorCallableContext, extend_selector_callable_context, selector_callable_context_digest,
+};
 use operand_deferral::*;
 use program::*;
 use rigid::*;

@@ -391,7 +391,13 @@ fn bind_library_products(
     mut checked: CheckedProgram,
     context_library_proof_id: Option<LibraryProofId>,
 ) -> (TypeEnv, CheckedProgram) {
-    let proof_id = LibraryProofId::for_library(checked.exprs(), context_library_proof_id);
+    let selector_context_digest =
+        selector_callable_context_digest(&type_env.inner().selector_callables);
+    let proof_id = LibraryProofId::for_library(
+        checked.exprs(),
+        context_library_proof_id,
+        selector_context_digest,
+    );
     type_env.bind_library_proof(proof_id);
     checked.bind_library_proof(proof_id);
     checked.bind_context_library_proof(context_library_proof_id);
@@ -706,7 +712,7 @@ pub(super) fn infer_program_with_product_in_session(
         exprs,
         &semantic_type_env,
         &top_level_references,
-        &BTreeMap::new(),
+        &SelectorCallableContext::default(),
         errors,
     );
     if cancellation_gate(errors) {
@@ -795,7 +801,7 @@ pub(crate) fn build_type_env_from_library_in_session(
         library_exprs,
         &library_ir,
         &product.top_level_references,
-        &BTreeMap::new(),
+        &SelectorCallableContext::default(),
         errors,
     );
     log_sub("validate_semantic_program", &mut sub_t);
@@ -854,7 +860,8 @@ pub(crate) fn build_type_env_from_library_in_session(
     if !errors.is_empty() {
         return Err(stats);
     }
-    let selector_callables = extend_selector_callable_context(&library_annotated, &BTreeMap::new());
+    let selector_callables =
+        extend_selector_callable_context(&library_annotated, &SelectorCallableContext::default());
 
     Ok(TypeEnv::from_inner(TypeEnvInner {
         env: state.env,
@@ -945,7 +952,7 @@ pub(crate) fn build_compiled_library_context_in_session(
         library_exprs,
         &library_ir,
         &product.top_level_references,
-        &BTreeMap::new(),
+        &SelectorCallableContext::default(),
         errors,
     );
     validate_tensor_precisions_in_program(library_exprs, errors);
@@ -990,7 +997,8 @@ pub(crate) fn build_compiled_library_context_in_session(
         return Err(stats);
     }
     let library_ir_annotated = build_ir_type_env(&library_annotated);
-    let selector_callables = extend_selector_callable_context(&library_annotated, &BTreeMap::new());
+    let selector_callables =
+        extend_selector_callable_context(&library_annotated, &SelectorCallableContext::default());
 
     let type_env = TypeEnv::from_inner(TypeEnvInner {
         env: state.env,
@@ -1462,7 +1470,7 @@ pub(crate) fn infer_ir_program_in_session(
         exprs,
         &type_env,
         &product.top_level_references,
-        &BTreeMap::new(),
+        &SelectorCallableContext::default(),
         errors,
     );
     if cancellation_gate(errors) {

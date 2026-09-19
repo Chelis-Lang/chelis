@@ -206,3 +206,47 @@ fn standalone_and_serialized_type_envs_preserve_library_callable_identity() {
         assert_selector_contradiction(&result.errors);
     }
 }
+
+#[test]
+fn json_type_env_roundtrip_binds_exact_library_callable_metadata() {
+    let (context, checked) = checked_pair_context();
+    let encoded =
+        serde_json::to_value(&context).expect("a nonempty selector context must be JSON-safe");
+    let decoded: TypeEnv =
+        serde_json::from_value(encoded.clone()).expect("the JSON TypeEnv must round-trip");
+    assert_eq!(
+        serde_json::to_value(&decoded).expect("the decoded TypeEnv must re-encode"),
+        encoded,
+        "selector context serialization must be deterministic"
+    );
+    assert!(
+        decoded.matches_checked_program(&checked),
+        "an unchanged selector snapshot must match its checked program"
+    );
+
+    let mut reordered = encoded.clone();
+    let params = reordered["inner"]["selector_callables"]["root"]["pair"]["Known"]["params"]
+        .as_array_mut()
+        .expect("the pair callable must retain ordered formal names");
+    params.swap(0, 1);
+    let forged: TypeEnv =
+        serde_json::from_value(reordered).expect("the structurally valid forged TypeEnv decodes");
+    assert!(
+        !forged.matches_checked_program(&checked),
+        "swapping `(x, w)` to `(w, x)` must break the checked-library pairing"
+    );
+
+    let mut reidentified = encoded;
+    let ordinal = reidentified["inner"]["selector_callables"]["root"]["pair"]["Known"]["identity"]
+        ["ordinal"]
+        .as_u64()
+        .expect("the pair callable must retain its lexical origin");
+    reidentified["inner"]["selector_callables"]["root"]["pair"]["Known"]["identity"]["ordinal"] =
+        serde_json::json!(ordinal + 1);
+    let forged: TypeEnv = serde_json::from_value(reidentified)
+        .expect("the structurally valid reidentified TypeEnv decodes");
+    assert!(
+        !forged.matches_checked_program(&checked),
+        "changing the callable's lexical identity must break the checked-library pairing"
+    );
+}

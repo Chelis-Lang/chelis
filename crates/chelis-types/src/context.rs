@@ -85,10 +85,15 @@ use crate::unify::Subst;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LibraryProofId {
     digest: [u8; 32],
+    selector_context_digest: [u8; 32],
 }
 
 impl LibraryProofId {
-    pub(crate) fn for_library(annotated_exprs: &[deep::Expr], context: Option<Self>) -> Self {
+    pub(crate) fn for_library(
+        annotated_exprs: &[deep::Expr],
+        context: Option<Self>,
+        selector_context_digest: [u8; 32],
+    ) -> Self {
         let mut hasher = Sha256::new();
         hasher.update(b"chelis-library-proof-v1");
         if let Some(context) = context {
@@ -100,8 +105,10 @@ impl LibraryProofId {
         let canonical = chelis_deep::printer::print_canonical_flat(annotated_exprs);
         hasher.update((canonical.len() as u64).to_le_bytes());
         hasher.update(canonical.as_bytes());
+        hasher.update(selector_context_digest);
         Self {
             digest: hasher.finalize().into(),
+            selector_context_digest,
         }
     }
 }
@@ -225,7 +232,7 @@ impl TypeEnv {
                 adt_reg,
                 ir_types: BTreeMap::new(),
                 library_def_names: UnordSet::new(),
-                selector_callables: BTreeMap::new(),
+                selector_callables: crate::infer::SelectorCallableContext::default(),
                 opacity: crate::opacity::OpacityModuleMeta::default(),
             }),
             library_proof_id: None,
@@ -285,10 +292,14 @@ impl TypeEnv {
 
     /// Confirm that this context and a checked program are one library product pair.
     ///
-    /// The library builders derive one opaque identity from accepted checked source.
-    /// Cache parsing requires that identity and the declared-type map to match.
+    /// The library builders derive one opaque identity from accepted checked source
+    /// and its exact callable-selector provenance snapshot. Cache parsing requires
+    /// that identity, the provenance digest, and the declared-type map to match.
     pub fn matches_checked_program(&self, program: &crate::CheckedProgram) -> bool {
-        self.library_proof_id.is_some()
+        let selector_context_digest =
+            crate::infer::selector_callable_context_digest(&self.inner.selector_callables);
+        self.library_proof_id
+            .is_some_and(|proof| proof.selector_context_digest == selector_context_digest)
             && self.library_proof_id == program.library_proof_id()
             && self.inner.ir_types.eq(program.type_env())
     }

@@ -28,8 +28,30 @@ pub(crate) enum SelectorCallableOrigin {
     },
 }
 
-pub(crate) type SelectorCallableContext =
-    BTreeMap<Option<String>, BTreeMap<String, SelectorCallableOrigin>>;
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct SelectorCallableContext {
+    root: BTreeMap<String, SelectorCallableOrigin>,
+    modules: BTreeMap<String, BTreeMap<String, SelectorCallableOrigin>>,
+}
+
+impl SelectorCallableContext {
+    fn origins(&self, module: Option<&str>) -> Option<&BTreeMap<String, SelectorCallableOrigin>> {
+        match module {
+            Some(module) => self.modules.get(module),
+            None => Some(&self.root),
+        }
+    }
+
+    fn origins_mut(
+        &mut self,
+        module: Option<&str>,
+    ) -> &mut BTreeMap<String, SelectorCallableOrigin> {
+        match module {
+            Some(module) => self.modules.entry(module.to_string()).or_default(),
+            None => &mut self.root,
+        }
+    }
+}
 
 type SelectorIdentityTable = BTreeMap<usize, SelectorCallableId>;
 
@@ -124,7 +146,11 @@ pub(super) fn validate_grad_selector_identity(
         module_items.entry(module).or_default().push(expr);
     }
     for (module, items) in module_items {
-        let callables = resolution.context.get(&module).cloned().unwrap_or_default();
+        let callables = resolution
+            .context
+            .origins(module.as_deref())
+            .cloned()
+            .unwrap_or_default();
         for expr in items {
             walk_grad_selector_identity(
                 expr,
@@ -155,7 +181,7 @@ fn resolve_selector_callable_context(
         module_items.entry(module).or_default().push(expr);
     }
     for (module, items) in module_items {
-        let callables = context.entry(module).or_default();
+        let callables = context.origins_mut(module.as_deref());
         preseed_selector_function_declarations(&items, callables, &identities);
         collect_selector_callable_declarations(&items, callables, &identities);
     }
@@ -186,22 +212,42 @@ fn selector_identity_namespace(
     hasher.update(b"chelis-selector-callable-origin-v1");
     let canonical = chelis_deep::printer::print_canonical_flat(exprs);
     hash_selector_bytes(&mut hasher, canonical.as_bytes());
-    hasher.update((inherited.len() as u64).to_le_bytes());
-    for (module, callables) in inherited {
-        match module {
-            Some(module) => {
-                hasher.update([1]);
-                hash_selector_bytes(&mut hasher, module.as_bytes());
-            }
-            None => hasher.update([0]),
-        }
-        hasher.update((callables.len() as u64).to_le_bytes());
-        for (name, origin) in callables {
-            hash_selector_bytes(&mut hasher, name.as_bytes());
-            hash_selector_origin(&mut hasher, origin);
-        }
-    }
+    hash_selector_context(&mut hasher, inherited);
     hasher.finalize().into()
+}
+
+pub(crate) fn selector_callable_context_digest(context: &SelectorCallableContext) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"chelis-selector-callable-context-v1");
+    hash_selector_context(&mut hasher, context);
+    hasher.finalize().into()
+}
+
+fn hash_selector_context(hasher: &mut Sha256, context: &SelectorCallableContext) {
+    hash_selector_module(hasher, None, &context.root);
+    hasher.update((context.modules.len() as u64).to_le_bytes());
+    for (module, callables) in &context.modules {
+        hash_selector_module(hasher, Some(module), callables);
+    }
+}
+
+fn hash_selector_module(
+    hasher: &mut Sha256,
+    module: Option<&str>,
+    callables: &BTreeMap<String, SelectorCallableOrigin>,
+) {
+    match module {
+        Some(module) => {
+            hasher.update([1]);
+            hash_selector_bytes(hasher, module.as_bytes());
+        }
+        None => hasher.update([0]),
+    }
+    hasher.update((callables.len() as u64).to_le_bytes());
+    for (name, origin) in callables {
+        hash_selector_bytes(hasher, name.as_bytes());
+        hash_selector_origin(hasher, origin);
+    }
 }
 
 fn hash_selector_bytes(hasher: &mut Sha256, value: &[u8]) {

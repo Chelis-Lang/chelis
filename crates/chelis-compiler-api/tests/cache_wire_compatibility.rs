@@ -93,7 +93,7 @@ fn version_changes_alone_reject_old_subcontexts_before_payload_decode() {
             "stdlib-v15-key-input.bin",
             "stdlib-v15.tc",
             b"chelis_std_typecheck_v".as_slice(),
-            22_u32,
+            24_u32,
             stdlib_cache_key_input_bytes(&std_decls, [0x5a; 32]),
             std_key,
         ),
@@ -101,7 +101,7 @@ fn version_changes_alone_reject_old_subcontexts_before_payload_decode() {
             "library-v11-key-input.bin",
             "library-v11.tc",
             b"chelis_library_typecheck_v".as_slice(),
-            16_u32,
+            18_u32,
             library_cache_key_input_bytes(&dep_decls, std_key),
             lib_key,
         ),
@@ -353,6 +353,79 @@ fn current_compiled_disk_and_worker_preserve_scalar_storage_bits_and_reconstruct
             bincode::serialize(&context).unwrap()
         );
     }
+}
+
+fn swap_first_two_selector_formals(value: &mut serde_json::Value) {
+    let selector_context = &mut value["type_env"]["inner"]["selector_callables"];
+    let swap_in_origins = |origins: &mut serde_json::Map<String, serde_json::Value>| {
+        origins
+            .values_mut()
+            .find_map(|origin| {
+                let params = origin.get_mut("Known")?.get_mut("params")?.as_array_mut()?;
+                (params.len() >= 2).then_some(params)
+            })
+            .map(|params| params.swap(0, 1))
+            .is_some()
+    };
+    if swap_in_origins(
+        selector_context["root"]
+            .as_object_mut()
+            .expect("root selector origins"),
+    ) {
+        return;
+    }
+    for origins in selector_context["modules"]
+        .as_object_mut()
+        .expect("module selector origins")
+        .values_mut()
+    {
+        if swap_in_origins(origins.as_object_mut().expect("module origin map")) {
+            return;
+        }
+    }
+    panic!("fixture must contain a callable with two formals");
+}
+
+fn assert_selector_forgery_rejects<T>(context: &T)
+where
+    T: serde::Serialize + serde::de::DeserializeOwned,
+{
+    let mut encoded =
+        serde_json::to_value(context).expect("nonempty cache context must be JSON-safe");
+    serde_json::from_value::<T>(encoded.clone()).expect("unchanged context must round-trip");
+    swap_first_two_selector_formals(&mut encoded);
+    let error = match serde_json::from_value::<T>(encoded) {
+        Ok(_) => panic!("forged selector metadata must fail cache reconstruction"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("the type environment does not match the checked library"),
+        "unexpected selector-forgery rejection: {error}"
+    );
+}
+
+#[test]
+fn every_cached_library_decoder_rejects_forged_selector_callable_metadata() {
+    let pair_source = "def pair(x: f32, w: f32) -> f32 = x * w\n";
+    let pair_decls = chelis_surf::parser::parse_str(pair_source).unwrap();
+    let std_context = build_stdlib_context(&pair_decls).unwrap();
+    assert_selector_forgery_rejects(&std_context);
+
+    let empty_stdlib = build_stdlib_context(&[]).unwrap();
+    let library_context = build_library_context(&empty_stdlib, &pair_decls)
+        .unwrap()
+        .unwrap();
+    assert_selector_forgery_rejects(&library_context);
+
+    let directory = tempfile::tempdir().unwrap();
+    let package = directory.path().join("package");
+    historical_producer::package_fixture(&package);
+    migrate_historical_package_for_current_compiler(&package);
+    let reef_home = directory.path().join("reef-home");
+    let compiled = chelis_compiler_api::compile_reef_context(&reef_home, &package).unwrap();
+    assert_selector_forgery_rejects(&compiled);
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
