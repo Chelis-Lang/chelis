@@ -1167,11 +1167,19 @@ mod core_key_order_lock {
     ///
     /// It is a correctness invariant and not only a formatting one, which
     /// the #2210 review round established by mutating the sorted insert to
-    /// a `push`: an unsorted vector makes the binary search stop finding
-    /// keys that are present, so `insert` silently accepts a duplicate.
-    /// Two entries for one key then make the
-    /// `unreachable!("variant determines its key")` in the generated
-    /// getters reachable in principle, and `remove` deletes one of the two.
+    /// a `push` and measuring what followed. An unsorted vector makes the
+    /// binary search miss keys that are present: with
+    /// `[Doc, SurfPath, ChelisRole]` in the vector, `doc()` and
+    /// `surf_path()` both answer `None` while both keys sit in `values()`,
+    /// and `remove(Doc)` reports absent and removes nothing. `insert` then
+    /// accepts a duplicate, because its duplicate check is that same
+    /// search, and `values()` yields the key twice, so `PartialEq` and the
+    /// resugarer see a doubled entry while a read returns whichever copy
+    /// the search lands on. The `unreachable!("variant determines its
+    /// key")` in the generated getters is not affected:
+    /// `binary_search_by` returns `Ok` only at an index whose comparator
+    /// answered `Equal`, so a located value always carries the key that
+    /// was asked for.
     ///
     /// The three mutating paths are exercised in one sequence: scrambled
     /// `insert`s, a `replace` onto an occupied key, a `remove` from the

@@ -51,7 +51,7 @@ fn measure<T>(f: impl FnOnce() -> T) -> (usize, T) {
 }
 
 use chelis_deep::Span;
-use chelis_deep::annotations::{MetadataKey, MetadataValue, Spanned};
+use chelis_deep::annotations::{MetadataKey, MetadataValue, Present, Spanned};
 
 #[test]
 fn one_entry_btreemap_costs_about_two_kilobytes_and_the_vector_does_not() {
@@ -108,5 +108,43 @@ fn one_entry_btreemap_costs_about_two_kilobytes_and_the_vector_does_not() {
         vec_bytes - payload_bytes,
         4 * value_size,
         "a one-entry vector allocates the RawVec minimum of four slots"
+    );
+}
+
+/// The `Storage` comment also claims the vector "stays under the leaf
+/// node's footprint up to eight". Eight is the crossover, so pin both
+/// sides of it against the leaf node measured in the same run.
+#[test]
+fn the_vector_stays_under_the_leaf_node_up_to_eight_entries() {
+    let (leaf_bytes, _) = measure(|| {
+        let mut m: BTreeMap<MetadataKey, MetadataValue> = BTreeMap::new();
+        m.insert(
+            MetadataKey::Opaque,
+            MetadataValue::Opaque(Present::new(Span::new(0, 0))),
+        );
+        m
+    });
+
+    let width = std::mem::size_of::<MetadataValue>();
+    let mut vector: Vec<MetadataValue> = Vec::new();
+    let footprint = |vector: &mut Vec<MetadataValue>| {
+        let at = vector.len();
+        vector.insert(at, MetadataValue::Opaque(Present::new(Span::new(0, 0))));
+        vector.capacity() * width
+    };
+    let mut at_eight = 0;
+    for _ in 0..8 {
+        at_eight = footprint(&mut vector);
+    }
+    let at_nine = footprint(&mut vector);
+
+    println!("leaf node {leaf_bytes} B, eight entries {at_eight} B, nine {at_nine} B");
+    assert!(
+        at_eight < leaf_bytes,
+        "eight entries occupy {at_eight} B, which the comment says is under the {leaf_bytes} B leaf node"
+    );
+    assert!(
+        at_nine > leaf_bytes,
+        "nine entries occupy {at_nine} B, so eight is the crossover the comment names"
     );
 }
