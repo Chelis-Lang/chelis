@@ -4678,6 +4678,61 @@ pub unsafe extern "C" fn chelis_list_extend(list: *mut chelis_list, src: *const 
     resize_list_ledger(list, "chelis_list_extend");
 }
 
+/// Consuming append (chelis#2205). Takes ownership of `list`: when this is
+/// the only strong owner the value is pushed in place and the same list is
+/// returned; otherwise a fresh list is built exactly as `chelis_list_append`
+/// would, and the consumed input is released. The caller must have proved
+/// that no un-retained reference to `list` survives the call (the ownership
+/// verifier's Move); the strong-owner count then decides sharing, which is
+/// the half a static rule cannot see across functions.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_list_append_owned(
+    list: *mut chelis_list,
+    value: chelis_value,
+) -> *mut chelis_list {
+    if list.is_null() {
+        return chelis_list_append(list, value);
+    }
+    if (*list).header.strong.load(Ordering::Relaxed) == 1 {
+        (*list).items.push(chelis_value_clone(value));
+        resize_list_ledger(list, "chelis_list_append_owned");
+        return list;
+    }
+    let result = chelis_list_append(list, value);
+    release_list_ptr(list);
+    result
+}
+
+/// Consuming concat (chelis#2205): the in-place counterpart of
+/// `chelis_list_concat` for a uniquely owned `lhs`, with the same contract as
+/// `chelis_list_append_owned`. `rhs` stays borrowed and may not alias `lhs`.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_list_concat_owned(
+    lhs: *mut chelis_list,
+    rhs: *const chelis_list,
+) -> *mut chelis_list {
+    if lhs.is_null() {
+        return chelis_list_concat(lhs, rhs);
+    }
+    // An rhs that aliases lhs is a retained second owner of the same list
+    // (the emitter's operand identities are distinct even when the runtime
+    // pointer is one), so it takes the cloning path below like every other
+    // shared input; the in-place arm never reads a list it is extending.
+    let aliased = std::ptr::eq(lhs as *const chelis_list, rhs);
+    if !aliased && (*lhs).header.strong.load(Ordering::Relaxed) == 1 {
+        if !rhs.is_null() {
+            for &value in &(*rhs).items {
+                (*lhs).items.push(chelis_value_clone(value));
+            }
+        }
+        resize_list_ledger(lhs, "chelis_list_concat_owned");
+        return lhs;
+    }
+    let result = chelis_list_concat(lhs, rhs);
+    release_list_ptr(lhs);
+    result
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn chelis_list_concat(
     lhs: *const chelis_list,

@@ -1343,6 +1343,8 @@ fn build_c_runs_iter_foundation_and_matches_eval_output() {
         "chelis_list_with_capacity",
         "chelis_list_push",
         "chelis_list_extend",
+        "chelis_list_append_owned",
+        "chelis_list_concat_owned",
     ] {
         assert!(
             !runtime_header.contains(symbol),
@@ -1354,6 +1356,8 @@ fn build_c_runs_iter_foundation_and_matches_eval_output() {
         "chelis_list *chelis_list_with_capacity(int64_t capacity);",
         "void chelis_list_push(chelis_list *list, chelis_value value);",
         "void chelis_list_extend(chelis_list *list, const chelis_list *src);",
+        "chelis_list *chelis_list_append_owned(chelis_list *list, chelis_value value);",
+        "chelis_list *chelis_list_concat_owned(chelis_list *lhs, const chelis_list *rhs);",
     ] {
         assert!(
             generated.contains(declaration),
