@@ -4219,8 +4219,10 @@ where
 /// Evaluate roots with the caller's literal result obligations at their
 /// producing operations, retaining the ordinary executed Random prefix.
 ///
-/// The returned map holds exactly the named roots; see
-/// [`eval_tensor_roots_with_strict`].
+/// The returned map holds exactly the named roots. Unlike the other
+/// root-scoped entry points this one has no empty-roots fallback: empty roots
+/// mask every node off, so nothing executes and the result is empty. Callers
+/// that want the whole DAG use [`eval_tensor_with_strict`].
 pub fn eval_tensor_roots_with_result_claims<F>(
     dag: &Dag,
     roots: &[NodeId],
@@ -6196,10 +6198,20 @@ mod tests {
 /// the all-values contract that number is the executed node count; under a
 /// root-scoped run it must be the live working set.
 ///
-/// The negative controls matter more than the receipt. Freeing a value some
-/// later step still reads is a wrong answer or a spurious "not available"
-/// error, and the evaluator indexes `values[&node.inputs[i]]` directly, so a
-/// premature free surfaces as a panic rather than a quiet zero.
+/// The negative controls matter more than the receipt, and the two reader
+/// families fail differently. An operand read indexes `values[&node.inputs[i]]`
+/// directly, so freeing one early panics. The `Const` shape-dependency
+/// fallback does not: it ends in a default-empty unwrap, so a freed dependency
+/// silently becomes shape `[]` and the Const materializes one element. That
+/// quiet case is the one worth an evaluator-level test, and
+/// `a_const_sized_from_a_freed_shape_dependency_is_silently_the_wrong_shape`
+/// is it.
+///
+/// The remaining edges are covered at the schedule level only. `shape_deps`
+/// now has both; `result_claim_deps` has no evaluator test because this lane
+/// never reads it, and it is in the reader set as a deliberate conservatism;
+/// the three guard edges raise rather than answer wrongly, and building a real
+/// guard site needs the axis-source derivation rather than a hand-built DAG.
 #[cfg(test)]
 mod value_reclamation {
     use super::*;
@@ -6455,6 +6467,103 @@ mod value_reclamation {
         let scoped = eval_tensor_roots_with_strict(&dag, &[root], load_x()).expect("eval");
         assert_eq!(scoped.len(), 1);
         assert_eq!(elements(&scoped, root), elements(&with_strict, root));
+    }
+
+    /// The result-claims entry point has no empty-roots fallback, unlike its
+    /// three siblings. Its doc comment now says so; this is the run behind
+    /// that sentence, so the difference is locked rather than asserted from
+    /// reading the branch that is missing.
+    #[test]
+    fn empty_roots_select_nothing_for_the_result_claims_entry_point() {
+        let (dag, root) = neg_chain(4);
+
+        let (empty, _) = eval_tensor_roots_with_result_claims(&dag, &[], 0, &[], load_x())
+            .expect("empty roots are not an error");
+        assert!(
+            empty.is_empty(),
+            "every node is masked off, so nothing executes"
+        );
+
+        // Its siblings take the whole DAG instead, which is the rule this
+        // entry point does NOT share.
+        let whole = eval_tensor_roots_with_strict(&dag, &[], load_x()).expect("whole DAG");
+        assert_eq!(whole.len(), dag.len());
+
+        // And with a root named, it returns that root alone.
+        let (scoped, _) = eval_tensor_roots_with_result_claims(&dag, &[root], 0, &[], load_x())
+            .expect("named root");
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(elements(&scoped, root), vec![1.0, 2.0, 3.0]);
+    }
+
+    /// The one reader edge whose loss is SILENT, exercised through the
+    /// evaluator rather than through the schedule.
+    ///
+    /// `Const` sizes itself from `concrete_shape_with`, and when that fails it
+    /// falls back to a `shape_deps` value's realized shape. That fallback ends
+    /// in a default-empty unwrap, so a freed shape dependency does not raise:
+    /// the shape silently becomes `[]` and the Const materializes one element
+    /// instead of the operand's width. Nothing downstream complains, because a
+    /// rank-zero operand is a legal broadcast.
+    ///
+    /// `x` is reachable ONLY through the shape dependency here. No node takes
+    /// it as an operand, so `inputs` alone gives it no reader and the schedule
+    /// frees it at its own production step.
+    ///
+    /// Measured on this tree with the extra reader edges removed from
+    /// `value_free_schedule` (the `shape_deps`, `result_claim_deps` and guard
+    /// blocks skipped, which is the reviewer's M2 mutation): this test failed
+    /// with `left: ([], [-2.0])` against `right: ([3], [-2.0, -2.0, -2.0])`.
+    /// With the edges in place it passes. It is the evaluator-level binding
+    /// the five schedule tests below do not provide.
+    ///
+    /// `Named("*", None)` is what keeps the fallback reachable:
+    /// `required_symbolic_dims` skips that name, so no symbolic binding runs,
+    /// `runtime_dims` stays empty, and `concrete_shape_with` fails as the
+    /// fallback's own precondition requires.
+    #[test]
+    fn a_const_sized_from_a_freed_shape_dependency_is_silently_the_wrong_shape() {
+        let starred = TensorType {
+            dims: vec![DimInfo::Named("*".to_string(), None)],
+            precision: Prim::F32,
+        };
+        let mut dag = Dag::new();
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec3(), None);
+        let sized = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 2.0),
+            vec![],
+            starred.clone(),
+            None,
+        );
+        dag.add_shape_dep(sized, x);
+        let out = dag.add_node(RiscOp::Neg, vec![sized], starred, None);
+        dag.add_root(out);
+
+        let live = live_mask_for_roots(&dag, &[out]);
+        let reclaiming = run(
+            &dag,
+            EvaluationScope::Roots {
+                live: &live,
+                roots: &[out],
+            },
+        );
+
+        let value = reclaiming
+            .values
+            .get(&out)
+            .expect("the selected root survives");
+        // Shape and elements in ONE assertion: asserting the shape first would
+        // pre-empt the element vector, and then this comment could only report
+        // half of what a losing run prints.
+        assert_eq!(
+            (value.shape.clone(), value.to_f64_lossy_vec()),
+            (vec![3], vec![-2.0, -2.0, -2.0]),
+            "the Const takes its width from the shape dependency's realized shape"
+        );
+
+        // The same answer through the all-values lane, which frees nothing.
+        let retaining = run(&dag, EvaluationScope::MaskedAllValues(&live));
+        assert_eq!(elements(&retaining.values, out), value.to_f64_lossy_vec());
     }
 
     // ------------------------------------------------------------------
