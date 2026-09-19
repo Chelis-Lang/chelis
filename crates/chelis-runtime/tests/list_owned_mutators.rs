@@ -36,7 +36,10 @@ fn unique_append_owned_mutates_in_place_and_returns_the_same_list() {
         let one = int_value(2);
         let result = chelis_list_append_owned(list, one);
         chelis_value_release(one);
-        assert!(std::ptr::eq(result, list), "a uniquely owned list is extended in place");
+        assert!(
+            std::ptr::eq(result, list),
+            "a uniquely owned list is extended in place"
+        );
         assert_eq!(chelis_list_len(result), 2);
         assert_eq!(int_at(result, 1), 2);
         chelis_list_release(result);
@@ -53,7 +56,10 @@ fn shared_append_owned_clones_and_leaves_the_shared_view_untouched() {
         let three = int_value(3);
         let result = chelis_list_append_owned(list, three);
         chelis_value_release(three);
-        assert!(!std::ptr::eq(result, list), "a shared list is never mutated in place");
+        assert!(
+            !std::ptr::eq(result, list),
+            "a shared list is never mutated in place"
+        );
         assert_eq!(chelis_list_len(list), 1, "the shared view keeps its length");
         assert_eq!(chelis_list_len(result), 2);
         assert_eq!(int_at(result, 1), 3);

@@ -87,8 +87,8 @@ fn c_main(program: &str, name: &str) -> (String, String) {
         "build failed:\n{}",
         String::from_utf8_lossy(&built.stderr)
     );
-    let generated = std::fs::read_to_string(out_dir.join(format!("{name}.c")))
-        .expect("read generated C");
+    let generated =
+        std::fs::read_to_string(out_dir.join(format!("{name}.c"))).expect("read generated C");
     let status = common::link_generated(&out_dir, &format!("{name}.c"), name);
     assert!(status.success(), "link failed: {status}");
     let run = std::process::Command::new(out_dir.join(name))
@@ -192,7 +192,9 @@ def main() -> i64 = {\n\
 
 /// An N-step let-bound append chain: every step's input is dead after it.
 fn append_chain(steps: usize) -> String {
-    let mut source = String::from("module Ac.Main\nexport (main)\ndef main() -> i64 = {\n  x0: List[i64] = []\n");
+    let mut source = String::from(
+        "module Ac.Main\nexport (main)\ndef main() -> i64 = {\n  x0: List[i64] = []\n",
+    );
     for step in 1..=steps {
         source.push_str(&format!(
             "  x{step} = append(x{}, cast({step}, i64))\n",
@@ -239,7 +241,9 @@ fn let_bound_append_chain_does_not_clone_per_step() {
     }
     let small = cloning_calls(8);
     let large = cloning_calls(16);
-    eprintln!("#2205 receipt: 8-step chain emits {small} cloning appends, 16-step chain emits {large}");
+    eprintln!(
+        "#2205 receipt: 8-step chain emits {small} cloning appends, 16-step chain emits {large}"
+    );
     assert!(
         large <= small,
         "#2205: cloning appends must not grow with the chain; an 8-step chain emitted {small} \

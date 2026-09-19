@@ -541,6 +541,24 @@ post-dominance, not source scope alone:
   and
 - a manifested root consumes its owner before process teardown.
 
+A container operand of a consuming builtin (`append` and `concat` on a
+`List`, the table `consuming_container_operand` in the ownership IR) is moved
+into the builtin when the scheduler places that owner's terminal directly
+after the application: lowering borrows every builtin operand, and the
+last-use scheduler upgrades the borrow to a move and drops the terminal, so
+the verifier re-checks the move as it would any other (no live borrow, no
+later use). The move establishes only the borrow half of exclusivity. The
+sharing half is the runtime's: as with tensor reuse in C6, the consuming
+entry point (`chelis_list_append_owned`, `chelis_list_concat_owned`, private to
+the emitter like the accumulator ABI) re-checks the strong-owner count and
+mutates in place only at one, otherwise cloning and releasing the consumed
+input. A retained alias, whether a tuple, an option, an ADT, or a callee that
+stored the list, therefore never observes a mutation, and no static rule
+inside one unit has to prove exclusivity for a parameter whose callers may
+have retained it. A runtime `refcount == 1` test on its own is not this rule:
+without the verified move it cannot exclude an un-retained borrow, which is
+what chelis#943 measured and rejected.
+
 The runtime's test-only allocation ledger records allocation identity, kind,
 size, retain/release events, live owners, and peak live bytes. It is compiled
 out of release artifacts and is not a second ownership authority. For the

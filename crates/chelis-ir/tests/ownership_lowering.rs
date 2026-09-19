@@ -700,7 +700,10 @@ fn append_at_last_use_moves_even_when_an_aggregate_holds_the_list() {
         ),
         "held",
     );
-    assert!(text.contains("= copy clone"), "the tuple retains `xs`: {text}");
+    assert!(
+        text.contains("= copy clone"),
+        "the tuple retains `xs`: {text}"
+    );
     assert!(
         text.contains("builtin:append(move"),
         "the append is `xs`'s last use and moves it: {text}"

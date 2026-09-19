@@ -1,10 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::classify::{HeapKind, ValueClass};
 use super::error::OwnershipError;
 use super::ir::{
-    Block, BlockId, EdgeId, EdgeTerminal, HostSiteAction, HostSiteMap, Op, OpId, Operation,
-    OperationRole, OwnerId, OwnerOrigin, OwnershipProgram, OwnershipUse, ScheduleState, Terminal,
-    Terminator, Unit, UnitId,
+    ApplyKind, Block, BlockId, EdgeId, EdgeTerminal, HostSiteAction, HostSiteMap, Op, OpId,
+    Operation, OperationRole, OwnerId, OwnerOrigin, OwnershipProgram, OwnershipUse, ScheduleState,
+    Terminal, Terminator, Unit, UnitId, consuming_container_operand,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -193,9 +194,112 @@ pub(super) fn schedule(
         placed_by_unit.push((unit_index, placements));
     }
     rebuild_host_sites(program, sites, &placed_by_unit)?;
+    upgrade_container_last_use_moves(program, sites)?;
     let facts = ScheduleFacts { cfgs };
     super::verify::verify(program)?;
     Ok(facts)
+}
+
+/// chelis#2205: consume a container at its scheduled last use.
+///
+/// Lowering borrows every builtin operand, so a list whose last use is
+/// `append` or `concat` was cloned by the runtime and released one operation
+/// later. The scheduler has just placed that release: when a `Drop` terminal
+/// for the container operand of a consuming builtin (`consuming_container_operand`)
+/// sits directly after the application in the same block, the operand is dead
+/// after the call. Turn the borrow into a move, drop the terminal, and remove
+/// its host-site action, so the emitter sees a moved operand and the
+/// consuming entry point takes ownership. The final `verify` re-checks the
+/// move: an owner that is still borrowed elsewhere in the operation, or read
+/// again later, fails there rather than here.
+///
+/// Eligibility is deliberately narrow: an `Owned` list-classed owner, the
+/// terminal is a scheduled scope exit, and no other operand of the same
+/// application names the owner. Retained aliases are not the scheduler's
+/// concern: the strong-owner count at run time decides between an in-place
+/// push and a clone, which is why a moved operand can never mutate a view
+/// someone else still holds.
+fn upgrade_container_last_use_moves(
+    program: &mut OwnershipProgram,
+    sites: &mut HostSiteMap,
+) -> Result<usize, OwnershipError> {
+    let mut upgraded = 0;
+    for (unit_index, unit) in program.units.iter_mut().enumerate() {
+        let owners = &unit.owners;
+        for block in &mut unit.blocks {
+            let mut index = 0;
+            while index < block.ops.len() {
+                let candidate = match &block.ops[index].kind {
+                    Op::Apply {
+                        kind: ApplyKind::Intrinsic,
+                        label,
+                        args,
+                        ..
+                    } => consuming_container_operand(label).and_then(|position| {
+                        let operand = args.get(position)?;
+                        let list_owner = owners.get(&operand.owner).is_some_and(|info| {
+                            info.origin == OwnerOrigin::Owned
+                                && info.class == ValueClass::Heap(HeapKind::List)
+                        });
+                        let sole_use = args
+                            .iter()
+                            .enumerate()
+                            .all(|(other, arg)| other == position || arg.owner != operand.owner);
+                        (operand.use_ == OwnershipUse::Borrow && list_owner && sole_use)
+                            .then_some((position, operand.owner))
+                    }),
+                    _ => None,
+                };
+                let Some((position, owner)) = candidate else {
+                    index += 1;
+                    continue;
+                };
+                // The scheduler places every terminal owed at this point
+                // right after the application, in definition order, so the
+                // container's `Drop` may sit behind the terminals of the
+                // other operands. Only scheduled scope exits may intervene;
+                // any semantic operation means the owner is still live.
+                let mut terminal = None;
+                for (offset, following) in block.ops[index + 1..].iter().enumerate() {
+                    if following.role != OperationRole::ScheduledScopeExit {
+                        break;
+                    }
+                    if let Op::Drop { owner: dropped } = &following.kind
+                        && dropped.owner == owner
+                        && dropped.use_ == OwnershipUse::Move
+                    {
+                        terminal = Some((index + 1 + offset, following.id));
+                        break;
+                    }
+                }
+                let Some((terminal_index, terminal_id)) = terminal else {
+                    index += 1;
+                    continue;
+                };
+                if let Op::Apply { args, schema, .. } = &mut block.ops[index].kind {
+                    args[position].use_ = OwnershipUse::Move;
+                    schema.operands[position] = OwnershipUse::Move;
+                }
+                block.ops.remove(terminal_index);
+                let block_id = block.id;
+                for record in &mut sites.records {
+                    record.actions.retain(|action| {
+                        !matches!(
+                            action,
+                            HostSiteAction::Operation {
+                                unit,
+                                block,
+                                operation,
+                            } if *unit == unit_index && *block == block_id && *operation == terminal_id
+                        )
+                    });
+                }
+                upgraded += 1;
+                index += 1;
+            }
+        }
+    }
+    Ok(upgraded)
 }
 
 pub(super) fn verify_canonical(program: &OwnershipProgram) -> Result<(), OwnershipError> {

@@ -533,6 +533,14 @@ pub(crate) fn emit_host_abi_program(
         "chelis_list *chelis_list_with_capacity(int64_t capacity);".to_string(),
         "void chelis_list_push(chelis_list *list, chelis_value value);".to_string(),
         "void chelis_list_extend(chelis_list *list, const chelis_list *src);".to_string(),
+        // chelis#2205: consuming append/concat for a container operand the
+        // ownership verifier moved at its scheduled last use. The runtime
+        // pushes in place only at strong-owner count one and otherwise clones
+        // and releases the consumed input, so a retained alias is never
+        // mutated. Private for the same reason as the three above.
+        "chelis_list *chelis_list_append_owned(chelis_list *list, chelis_value value);".to_string(),
+        "chelis_list *chelis_list_concat_owned(chelis_list *lhs, const chelis_list *rhs);"
+            .to_string(),
     ]);
     if helper_requirements.needs_blas_header {
         out.push("#include \"chelis_blas.h\"".to_string());
@@ -2937,6 +2945,45 @@ struct HostEmitter<'a> {
     claim_on_spine: bool,
 }
 
+/// Whether the verified intrinsic application labelled `label` at this site
+/// takes its container operand (position 0, per
+/// `chelis_ir::ownership` `consuming_container_operand`) by Move (chelis#2205).
+/// The site of a builtin expression carries exactly one intrinsic application
+/// with that label; two would mean the emitter and the ownership sites
+/// disagree about the tree, so that fails closed.
+fn container_operand_is_moved(
+    site: &ProjectedHostSite<'_>,
+    label: &str,
+) -> Result<bool, Unsupported> {
+    let mut found = None;
+    for action in &site.directives {
+        if let VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
+            kind: VerifiedApplyKind::Intrinsic,
+            label: site_label,
+            args,
+            ..
+        }) = action
+            && *site_label == label
+        {
+            let moved = args
+                .first()
+                .is_some_and(|arg| arg.use_() == VerifiedOwnershipUse::Move);
+            if found.replace(moved).is_some() {
+                return Err(invalid_abi_shape(
+                    format!("verified builtin site carries two `{label}` applications"),
+                    "verified C host ownership emission",
+                ));
+            }
+        }
+    }
+    found.ok_or_else(|| {
+        invalid_abi_shape(
+            format!("verified builtin site carries no `{label}` application"),
+            "verified C host ownership emission",
+        )
+    })
+}
+
 /// Resolve the one verifier-authorized direct call at a host `Call` site.
 ///
 /// A diagnostic label or an intrinsic/indirect application cannot authorize
@@ -3962,7 +4009,7 @@ impl<'a> HostEmitter<'a> {
                 ty: expr_ty,
             } => {
                 require_same_abi_type(ty, expr_ty, "builtin expression")?;
-                self.assign_builtin(target, name, args, ty)?;
+                self.assign_builtin(target, name, args, ty, site)?;
                 self.emit_result_claim_guard(target, ty, result_claims.as_deref(), name);
             }
             HostExprKind::AdtConstruct {
@@ -4397,6 +4444,7 @@ impl<'a> HostEmitter<'a> {
         name: &str,
         args: &[HostExpr],
         ty: &HostType,
+        site: &ProjectedHostSite<'a>,
     ) -> Result<(), Unsupported> {
         // A checker-stamped float literal is represented as a cast around
         // its lexical f64 image. Materialize that literal directly at the
@@ -4741,8 +4789,16 @@ impl<'a> HostEmitter<'a> {
                 return Ok(());
             }
             "append" => {
+                // chelis#2205: a container the verifier moved at its last use
+                // is consumed by the owned entry point; a borrowed one still
+                // goes through the cloning call.
+                let entry = if container_operand_is_moved(site, "builtin:append")? {
+                    "chelis_list_append_owned"
+                } else {
+                    "chelis_list_append"
+                };
                 self.lines.push(format!(
-                    "{}{target} = chelis_list_append({}, {});",
+                    "{}{target} = {entry}({}, {});",
                     self.indent,
                     arg_vars[0].0,
                     self.box_value_expr(&arg_vars[1].0, &arg_vars[1].1)?
@@ -4756,8 +4812,13 @@ impl<'a> HostEmitter<'a> {
                         self.indent, arg_vars[0].0, arg_vars[1].0
                     ));
                 } else {
+                    let entry = if container_operand_is_moved(site, "builtin:concat")? {
+                        "chelis_list_concat_owned"
+                    } else {
+                        "chelis_list_concat"
+                    };
                     self.lines.push(format!(
-                        "{}{target} = chelis_list_concat({}, {});",
+                        "{}{target} = {entry}({}, {});",
                         self.indent, arg_vars[0].0, arg_vars[1].0
                     ));
                 }

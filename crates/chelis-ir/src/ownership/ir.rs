@@ -147,6 +147,20 @@ pub(crate) struct OperationSchema {
     pub(crate) result: Option<ValueClass>,
 }
 
+/// The builtin operand a consuming container builtin may take by Move at
+/// the operand's scheduled last use (chelis#2205). This table is the single
+/// authority the last-use scheduler consults; every other builtin operand
+/// stays borrowed, and `Some`'s payload keeps its [05-OP-44] constructor
+/// clone. The consuming runtime entry point pushes in place only when the
+/// strong-owner count is one, so a retained alias (a tuple, an option, an ADT
+/// or a callee that stored the list) still sees a clone.
+pub(crate) fn consuming_container_operand(label: &str) -> Option<usize> {
+    match label {
+        "builtin:append" | "builtin:concat" => Some(0),
+        _ => None,
+    }
+}
+
 /// Closed semantic class for an application. A free-form diagnostic label
 /// cannot create a direct call or select its callee.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
