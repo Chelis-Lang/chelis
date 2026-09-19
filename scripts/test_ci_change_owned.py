@@ -3872,6 +3872,84 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(summary["failures"], [])
         self.assertTrue(summary["observed_success"])
 
+    def test_a_shard_that_only_failed_tests_needs_no_unrun_row(self) -> None:
+        """The commonest real shape: complete coverage, failing tests.
+
+        Nothing else in this class exercises it, so without this the
+        classified-failure half of the unexplained-shard net can be deleted
+        and the suite stays green.
+        """
+        with self.expansion_fixture() as fixture:
+            fixture.write_junit(0, failing=["fast_case"])
+            fixture.receipts[0]["success"] = False
+            fixture.receipts[0]["failures"] = [
+                f"{fixture.receipts[0]['selected_targets'][0]}: "
+                f"test run failed with 100"
+            ]
+            owned.attach_receipt_digest(fixture.receipts[0])
+            fixture.baseline_failures = {"p::default_gated::fast_case"}
+            fixture.baseline_observed = {"p::default_gated::fast_case"}
+            summary = fixture.summarize()
+        self.assertEqual(summary["failure_classification"]["unrun_targets"], [])
+        self.assertEqual(
+            summary["failure_classification"]["inherited"],
+            ["p::default_gated::fast_case"],
+        )
+        self.assertEqual(summary["failures"], [])
+        self.assertTrue(summary["observed_success"])
+
+    def test_the_ancestry_probe_is_asked_baseline_then_base(self) -> None:
+        """Argument order is the whole rule, so bind it rather than stub it."""
+        asked: list[tuple[str, str]] = []
+
+        def record(repo, ancestor, descendant):
+            asked.append((ancestor, descendant))
+            return 1
+
+        with self.expansion_fixture() as fixture:
+            expected_base = fixture.plan["base_sha"]
+            expected_baseline = fixture.baseline().head_sha
+            fixture.summarize(distance=record)
+        self.assertEqual(asked, [(expected_baseline, expected_base)])
+        self.assertNotEqual(expected_baseline, expected_base)
+
+    def test_the_required_lane_keeps_its_coverage_findings(self) -> None:
+        """`classifies_coverage` must not reach the fail-closed lane.
+
+        The informational lane suppresses three findings because it reports
+        the same facts as counts. The change-owned lane has no such counts, so
+        the same switch there would silently accept incomplete coverage.
+        """
+        receipts = self.receipts()
+        executing = next(row for row in receipts if row["selected_targets"])
+        executing["executed_targets"] = []
+        executing["executed_tests"] = []
+        executing["success"] = False
+        executing["failures"] = ["timeout"]
+        owned.attach_receipt_digest(executing)
+        findings = owned._report_findings(self.plan, receipts, "change-owned")
+        self.assertTrue(
+            any("did not succeed" in finding for finding in findings)
+        )
+        self.assertTrue(
+            any(
+                "executed target coverage mismatch" in finding
+                for finding in findings
+            )
+        )
+        self.assertTrue(
+            any(
+                "selected test coverage mismatch" in finding
+                for finding in findings
+            )
+        )
+        with self.assertRaises(ValueError):
+            owned.validate_change_owned_report(
+                self.plan,
+                receipts,
+                self.standing_coverage(),
+            )
+
     def test_a_shard_failure_no_count_explains_is_reported(self) -> None:
         """The three counts are derived, so an unexplained shard fails loudly."""
         with self.expansion_fixture() as fixture:
@@ -4196,6 +4274,7 @@ class RoutingInventoryReconciliationTests(unittest.TestCase):
 
         self.assertIn("unclassified", str(raised.exception))
         self.assertIn("no routing rule", str(raised.exception))
+
 
 class JunitOutcomeTests(unittest.TestCase):
     def outcomes(self, body: str) -> tuple[set[str], set[str]]:

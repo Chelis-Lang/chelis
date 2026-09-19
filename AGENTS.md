@@ -244,8 +244,19 @@ obligations.
   candidate; do not repair them in the pull request. An unrun count is coverage the lane
   did not reach, never evidence of a pass, and it is the number to cite when a claim
   needs the coverage the expansion did not deliver. A report that says it had no usable
-  baseline has classified nothing: it is not clean, and its dispatch needs repeating
-  once the nightly is available.
+  baseline has classified nothing: it is not clean. When the message is that no run
+  retains every artifact, redispatch once a complete nightly exists; when it is that no
+  run is contained in the candidate's base, a later nightly is further away rather than
+  nearer, so update the candidate's base instead, under the rules above.
+- The baseline is the newest complete nightly the candidate's base contains, which is
+  usually a few commits behind that base rather than equal to it. Over that distance the
+  classification errs in both directions, and only one of them is safe. A test that went
+  red on `main` after the baseline is reported as introduced, so an introduced row you
+  cannot attribute to the candidate is worth checking against `main` before repairing
+  it. A test that was failing at the baseline, was fixed on `main` since, and is broken
+  again by the candidate reports as inherited, so an inherited row is not proof the
+  candidate is innocent of it. The summary prints the distance; treat a large one as a
+  reason to read the rows rather than the counts.
 - Classify every finding against the pull request's stated scope. A finding is in scope
   only when the pull request introduces it, worsens it, or claims to correct it. Mere
   discovery during review, including a pre-existing spec/implementation mismatch in an

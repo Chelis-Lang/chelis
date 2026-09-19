@@ -246,6 +246,8 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: >-
           python3 ../trusted/scripts/ci_failure_baseline.py
+          --plan target/integration-change/plan.json
+          --repo-path .
           --output target/integration-change/failure-baseline
 
       - name: Summarize the informational package expansion
@@ -280,8 +282,6 @@ jobs:
               --plan target/integration-change/plan.json \
               --lane package-expansion \
               --receipts-root target/integration-change/receipts/package-expansion \
-              --failure-baseline \
-                target/integration-change/failure-baseline/baseline.json \
               --output target/integration-change/package-expansion-summary ||
               report_status=$?
             {

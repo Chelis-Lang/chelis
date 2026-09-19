@@ -89,6 +89,13 @@ SOFT_BUDGET_SECONDS = 15 * 60
 EXPANSION_EXECUTION_SECONDS = 16 * 60
 EXPANSION_REPORT_VERSION = 2
 FAILURE_BASELINE_VERSION = 1
+# The report runs from the candidate checkout, so a new flag in its own
+# invocation is rejected outright by a candidate whose base predates this
+# change. A conventional path costs that candidate nothing: its parser never
+# sees the argument, and it reports exactly as it does today.
+DEFAULT_FAILURE_BASELINE = PurePosixPath(
+    "target/integration-change/failure-baseline/baseline.json"
+)
 DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 STANDING_EXECUTION = {
     "profile": "ci-fast",
@@ -3493,10 +3500,20 @@ def baseline_provenance(
 
     A baseline the candidate's merge base does not contain describes a
     different tree, and differencing against it would report a failure the
-    candidate introduced as one it inherited. That is the direction that
-    silently absolves a candidate, so it is refused rather than annotated.
-    An older baseline only over-reports, so it is annotated with its distance
-    and left usable.
+    candidate introduced as one it inherited. That is refused outright.
+
+    Distance behind the base is annotated rather than refused, but it is not
+    harmless in one direction only. A test green at the baseline and broken by
+    the candidate is correctly introduced, and a test broken on the default
+    branch after the baseline is over-reported as introduced, which is the safe
+    error. The unsafe case is a test that was failing at the baseline, was
+    fixed on the default branch since, and is broken again by the candidate:
+    its identity is still in ``baseline.failed``, so it reports as inherited.
+    Twelve identities moved that way between two nightlies five days apart, so
+    the window is real rather than theoretical. The producer therefore selects
+    the newest baseline the candidate's base contains, which makes the window
+    the commits between that baseline and the base and no larger, and the
+    report states the distance so a reader can size what is left.
     """
     base_sha = plan["base_sha"]
     measure = distance or _ancestor_distance
@@ -4093,7 +4110,7 @@ def _write_report_files(output: Path, report: Mapping[str, Any]) -> None:
         f"{len(report.get('standing_reused_targets', []))}",
         f"- Findings: {len(report['failures'])}",
     ]
-    lines.extend(_classification_lines(report))
+    lines.extend(_classification_counts(report))
     for row in report.get("shard_durations", []):
         weight = row["estimated_milliseconds"] / 1000
         actual = row["actual_milliseconds"]
@@ -4104,7 +4121,22 @@ def _write_report_files(output: Path, report: Mapping[str, Any]) -> None:
         )
     for finding in report["failures"]:
         lines.append(f"  - {finding}")
+    lines.extend(_classification_lines(report))
     (output / "summary.md").write_text("\n".join(lines) + "\n")
+
+
+def _classification_counts(report: Mapping[str, Any]) -> list[str]:
+    """The three disjoint counts, beside the header the reader sees first."""
+    if report.get("lane") != "package-expansion":
+        return []
+    classification = report.get("failure_classification")
+    if classification is None:
+        return ["- Failure classification: unavailable, see below"]
+    return [
+        f"- Introduced failures: {len(classification['introduced'])}",
+        f"- Inherited failures: {len(classification['inherited'])}",
+        f"- Unrun targets: {len(classification['unrun_targets'])}",
+    ]
 
 
 def _classification_lines(report: Mapping[str, Any]) -> list[str]:
@@ -4128,19 +4160,28 @@ def _classification_lines(report: Mapping[str, Any]) -> list[str]:
         "",
         "## Failure classification",
         "",
-        f"- Introduced failures: {len(introduced)}",
-        f"- Inherited failures: {len(classification['inherited'])}",
-        f"- Unrun targets: {len(classification['unrun_targets'])} "
-        f"({len(classification['unrun_tests'])} selected tests never executed)",
+        f"{len(introduced)} introduced, {len(classification['inherited'])} "
+        f"inherited, {len(classification['unrun_targets'])} targets unrun "
+        f"({len(classification['unrun_tests'])} selected tests never "
+        f"executed).",
         "",
         f"Baseline: `{baseline['workflow']}` run {baseline['run_id']} at "
         f"`{baseline['head_sha'][:9]}`, recorded {baseline['created_at']}, "
         f"{baseline['commits_behind_candidate_base']} commits behind this "
         f"candidate's base `{baseline['candidate_base_sha'][:9]}`. It executed "
         f"{baseline['observed_cases']} cases, {baseline['failing_cases']} of "
-        f"them failing. A test that went red on the default branch after that "
-        f"commit is reported here as introduced.",
+        f"them failing.",
+        "",
         f"Run link: {baseline['run_url']}",
+        "",
+        "Inherited and introduced are the baseline's verdict at its own "
+        "commit, not at this candidate's base. Over that distance a test that "
+        "went red on the default branch is reported here as introduced, which "
+        "over-reports; and a test that was failing at the baseline, was fixed "
+        "on the default branch since, and is broken again by this candidate is "
+        "reported as inherited, which under-reports. The producer takes the "
+        "newest baseline this candidate's base contains, so that distance is "
+        "as small as a recorded baseline allows.",
     ]
     if absent:
         lines.append(
@@ -4165,7 +4206,7 @@ def _classification_lines(report: Mapping[str, Any]) -> list[str]:
     lines.extend(
         [
             "",
-            "A shard's elapsed time is reported above without a pass or fail "
+            "Each shard's elapsed time is reported without a pass or fail "
             "verdict. The per-shard weight is a longest-processing-time "
             "balancing input derived from serial per-target measurements, "
             "while the executor runs up to sixteen targets of one package in a "
@@ -4249,10 +4290,12 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument(
         "--failure-baseline",
         type=Path,
+        default=Path(DEFAULT_FAILURE_BASELINE),
         help=(
-            "recorded default-branch failure baseline manifest; required by "
-            "the package-expansion lane, which classifies every observed "
-            "failure against it"
+            "recorded default-branch failure baseline manifest, which the "
+            "package-expansion lane classifies every observed failure "
+            "against; defaults to the conventional path its producing step "
+            "writes"
         ),
     )
     report.add_argument("--output", type=Path, required=True)
@@ -4328,7 +4371,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ValueError("change-owned report requires --required")
     if args.lane == "package-expansion" and args.required:
         raise ValueError("package-expansion report must remain informational")
-    if args.lane == "change-owned" and args.failure_baseline is not None:
+    if args.lane == "change-owned" and args.failure_baseline != Path(
+        DEFAULT_FAILURE_BASELINE
+    ):
         raise ValueError(
             "change-owned report is fail-closed and takes no failure baseline"
         )
@@ -4372,9 +4417,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             documents = load_receipt_documents(args.receipts_root)
             failure_baseline = None
             baseline_unavailable = None
-            if args.failure_baseline is None:
-                baseline_unavailable = "no --failure-baseline was supplied"
-            elif not args.failure_baseline.is_file():
+            if not args.failure_baseline.is_file():
                 baseline_unavailable = (
                     f"the baseline manifest is absent at {args.failure_baseline}; "
                     f"its producing step did not leave one"

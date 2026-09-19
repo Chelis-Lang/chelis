@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import re
+import subprocess
 import tempfile
 import unittest
 
@@ -212,6 +213,135 @@ class BaselineSelectionTests(unittest.TestCase):
             )
             manifest = self.prepare(gh, root / "out")
         self.assertEqual(manifest["run_id"], "200")
+
+
+class BaselineBaseContainmentTests(unittest.TestCase):
+    """The consumer refuses a baseline the base does not contain."""
+
+    def runs(self) -> str:
+        return run_listing(
+            [
+                run_row("300", "c" * 40, "2026-09-19T03:31:04Z"),
+                run_row("200", "b" * 40, "2026-09-18T03:31:45Z"),
+                run_row("100", "a" * 40, "2026-09-17T03:32:46Z"),
+            ]
+        )
+
+    def prepare(self, gh: FakeGh, output: Path, **overrides):
+        arguments = {
+            "repository": "owner/name",
+            "workflow": "heavy-e2e.yml",
+            "branch": "main",
+            "artifacts": ARTIFACTS,
+            "search_runs": 5,
+            "output": output,
+            "runner": gh,
+        }
+        arguments.update(overrides)
+        return baseline.prepare(**arguments)
+
+    def test_a_run_the_base_does_not_contain_is_passed_over(self) -> None:
+        """A merge ref is not recomputed, so the newest run is often ahead."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gh = FakeGh(
+                runs=self.runs(),
+                artifacts={
+                    key: artifact_listing(list(ARTIFACTS))
+                    for key in ("100", "200", "300")
+                },
+                root=root,
+            )
+            manifest = self.prepare(
+                gh,
+                root / "out",
+                base_sha="z" * 40,
+                repo=root,
+                contains=lambda repo, commit, base: commit != "c" * 40,
+            )
+        self.assertEqual(manifest["run_id"], "200")
+        self.assertEqual(gh.downloaded, ["200"])
+
+    def test_no_contained_run_names_the_base_in_its_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gh = FakeGh(
+                runs=self.runs(),
+                artifacts={
+                    key: artifact_listing(list(ARTIFACTS))
+                    for key in ("100", "200", "300")
+                },
+                root=root,
+            )
+            with self.assertRaisesRegex(ValueError, "not contained in the candidate base"):
+                self.prepare(
+                    gh,
+                    root / "out",
+                    base_sha="z" * 40,
+                    repo=root,
+                    contains=lambda repo, commit, base: False,
+                )
+
+    def test_without_a_base_the_newest_run_is_still_taken(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gh = FakeGh(
+                runs=self.runs(),
+                artifacts={
+                    key: artifact_listing(list(ARTIFACTS))
+                    for key in ("100", "200", "300")
+                },
+                root=root,
+            )
+            manifest = self.prepare(gh, root / "out")
+        self.assertEqual(manifest["run_id"], "300")
+
+    def test_base_containment_is_measured_on_real_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for command in (
+                ["git", "init", "--quiet", "--initial-branch=main", str(root)],
+                ["git", "-C", str(root), "config", "user.email", "t@example.invalid"],
+                ["git", "-C", str(root), "config", "user.name", "T"],
+            ):
+                subprocess.run(command, check=True, capture_output=True)
+
+            def commit(message: str) -> str:
+                (root / message).write_text(message)
+                subprocess.run(
+                    ["git", "-C", str(root), "add", "-A"],
+                    check=True,
+                    capture_output=True,
+                )
+                subprocess.run(
+                    ["git", "-C", str(root), "commit", "--quiet", "-m", message],
+                    check=True,
+                    capture_output=True,
+                )
+                return subprocess.run(
+                    ["git", "-C", str(root), "rev-parse", "HEAD"],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip()
+
+            first = commit("first")
+            second = commit("second")
+            self.assertTrue(baseline.base_contains(root, first, second))
+            self.assertTrue(baseline.base_contains(root, second, second))
+            self.assertFalse(baseline.base_contains(root, second, first))
+            self.assertFalse(baseline.base_contains(root, "e" * 40, second))
+
+    def test_the_plan_supplies_the_base_and_a_planless_one_is_rejected(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan = Path(tmp) / "plan.json"
+            plan.write_text(json.dumps({"base_sha": "a" * 40}))
+            self.assertEqual(baseline.plan_base_sha(plan), "a" * 40)
+            plan.write_text(json.dumps({}))
+            with self.assertRaisesRegex(ValueError, "no base_sha"):
+                baseline.plan_base_sha(plan)
 
 
 class BaselineArgumentTests(unittest.TestCase):

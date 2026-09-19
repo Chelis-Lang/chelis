@@ -244,10 +244,14 @@ tracker on non-success; a manual branch run cannot close a main-nightly tracker.
 The expansion summary makes that distinction itself rather than leaving it to a
 reader. Before summarizing, the job records a default-branch failure baseline
 with `scripts/ci_failure_baseline.py`: the newest completed `heavy-e2e.yml` run
-on `main` that still retains all four `junit-linux-full-*` artifacts. A red
-nightly qualifies, because the redness is the evidence; a run missing a shard
-does not, because a partial baseline reports that shard's inherited failures as
-introduced. The report then splits every observed failure into **introduced**
+on `main` that still retains all four `junit-linux-full-*` artifacts *and whose
+commit the candidate's own merge base contains*. A red nightly qualifies,
+because the redness is the evidence; a run missing a shard does not, because a
+partial baseline reports that shard's inherited failures as introduced; and a
+run the base does not contain does not, because the report would refuse it.
+That last condition is not hypothetical: GitHub does not recompute a pull
+request's merge ref as `main` advances, so an older candidate's base routinely
+predates the newest nightly. The report then splits every observed failure into **introduced**
 (the baseline ran that test and it passed, or the baseline never ran it, which
 the row records as `absent`) and **inherited** (the baseline ran it and it
 failed), and counts every selected target with no execution evidence as
@@ -261,10 +265,21 @@ leaves the run with no classification at all, which is reported as such and is
 not a clean result. A baseline commit the candidate's own merge base does not
 contain is refused outright, because a baseline ahead of the candidate, or on
 another branch, can report a failure the candidate introduced as one it
-inherited. An *older* baseline only over-reports, so it is accepted and the
-summary states its run, commit, timestamp and distance in commits behind the
-candidate's base; a test that goes red on `main` after that commit is reported
-here as introduced.
+inherited.
+
+Distance behind the base is annotated rather than refused, and it is not
+harmless in one direction only. A test that goes red on `main` after the
+baseline commit is reported here as introduced, which over-reports and is the
+safe error. A test that was *failing* at the baseline, was fixed on `main`
+since, and is broken again by the candidate keeps its identity in the
+baseline's failing set and is therefore reported as inherited, which
+under-reports. Twelve identities moved that way between two nightlies five
+days apart, so the window is real. Selecting the newest baseline the base
+contains makes that window the commits between the baseline and the base and
+no larger; closing it entirely would mean running the suite on the base
+itself. The summary states the baseline's run, commit, timestamp and distance
+in commits so a reader can size the residual, and says which direction each
+error runs in.
 
 There is no soft-budget finding. The per-shard estimate is a
 longest-processing-time balancing weight derived from serial per-target

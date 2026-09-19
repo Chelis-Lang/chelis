@@ -18,6 +18,15 @@ inherited failures as introduced. When no run in the search window qualifies
 the script fails, and the report that consumes the manifest fails with it: a
 report that quietly skips the comparison would call every failure clean.
 
+Newest is not the same as usable. The consumer refuses a baseline the
+candidate's merge base does not contain, and a pull request's merge ref is not
+recomputed as the default branch advances, so the newest nightly is routinely
+ahead of an older candidate's base. Given ``--plan``, this script reads that
+base and takes the newest qualifying run the base actually contains. That both
+finds a usable baseline where the newest one is not, and shrinks the window in
+which a test fixed on the default branch since the baseline can be re-broken by
+the candidate and still read as inherited.
+
 The workflow conclusion is not a selection criterion. The nightly is routinely
 red, and a red nightly is precisely the evidence this baseline exists to carry.
 """
@@ -155,6 +164,38 @@ def download_artifacts(
     return documents
 
 
+def base_contains(repo: Path, commit: str, base_sha: str) -> bool:
+    """Whether the candidate's own merge base contains this baseline commit."""
+    for value in (commit, base_sha):
+        resolved = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", f"{value}^{{commit}}"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if resolved.returncode != 0:
+            return False
+    if commit == base_sha:
+        return True
+    contained = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", commit, base_sha],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return contained.returncode == 0
+
+
+def plan_base_sha(plan: Path) -> str:
+    document = json.loads(plan.read_text())
+    base_sha = document.get("base_sha")
+    if not isinstance(base_sha, str) or not base_sha:
+        raise ValueError(f"plan has no base_sha: {plan}")
+    return base_sha
+
+
 def prepare(
     *,
     repository: str,
@@ -164,6 +205,9 @@ def prepare(
     search_runs: int,
     output: Path,
     runner: Runner = _run,
+    base_sha: str | None = None,
+    repo: Path | None = None,
+    contains: Callable[[Path, str, str], bool] = base_contains,
 ) -> dict[str, Any]:
     candidates = list_candidate_runs(
         repository,
@@ -176,7 +220,15 @@ def prepare(
         raise ValueError(
             f"no completed {workflow} run on {branch} to use as a baseline"
         )
+    skipped_ahead = 0
     for candidate in candidates:
+        if base_sha is not None and not contains(
+            repo or Path("."),
+            candidate["head_sha"],
+            base_sha,
+        ):
+            skipped_ahead += 1
+            continue
         if not run_has_artifacts(
             repository,
             candidate["run_id"],
@@ -205,11 +257,17 @@ def prepare(
             json.dumps(manifest, indent=2, sort_keys=True) + "\n"
         )
         return manifest
+    ahead = (
+        f" ({skipped_ahead} of them are not contained in the candidate base "
+        f"{base_sha})"
+        if skipped_ahead
+        else ""
+    )
     raise ValueError(
         f"none of the {len(candidates)} most recent completed {workflow} runs "
-        f"on {branch} retains every baseline artifact {list(artifacts)}; "
-        f"without a complete baseline the expansion report cannot tell an "
-        f"introduced failure from an inherited one"
+        f"on {branch}{ahead} retains every baseline artifact "
+        f"{list(artifacts)}; without a complete baseline the expansion report "
+        f"cannot tell an introduced failure from an inherited one"
     )
 
 
@@ -229,6 +287,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="expected JUnit artifact name; repeatable",
     )
     parser.add_argument("--search-runs", type=int, default=DEFAULT_SEARCH_RUNS)
+    parser.add_argument(
+        "--plan",
+        type=Path,
+        help=(
+            "candidate plan whose base_sha the baseline must be contained in; "
+            "without it the newest qualifying run is taken, which the report "
+            "may then refuse"
+        ),
+    )
+    parser.add_argument(
+        "--repo-path",
+        type=Path,
+        default=Path("."),
+        help="checkout whose history decides containment",
+    )
     parser.add_argument("--output", type=Path, required=True)
     return parser
 
@@ -246,6 +319,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         artifacts=tuple(args.artifacts or DEFAULT_ARTIFACTS),
         search_runs=args.search_runs,
         output=args.output,
+        base_sha=plan_base_sha(args.plan) if args.plan is not None else None,
+        repo=args.repo_path,
     )
     print(
         f"FAILURE BASELINE: {manifest['workflow']} run {manifest['run_id']} "
