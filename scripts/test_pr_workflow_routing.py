@@ -129,19 +129,28 @@ def assert_backstop_fetches_stay_connected(
 def assert_candidate_deepening_stays_connected(
     test: unittest.TestCase, workflow: dict
 ) -> None:
-    detect = next(
-        step
-        for step in workflow["jobs"]["changes"]["steps"]
-        if step.get("id") == "detect"
-    )
-    body = detect["run"]
-    test.assertIn('git fetch --depth=$((COMMITS + 1)) origin "$HEAD"', body)
-    # The identity step walks from the candidate's first parent, which the
-    # event payload's base does not name once the target has advanced.
-    test.assertIn("git cat-file commit HEAD", body)
-    assert_backstop_fetches_stay_connected(
-        test, body, ('"$BASE"', '"$first_parent"')
-    )
+    """The detector step reads an established clone; it no longer makes one.
+
+    This used to assert the deepen and the two depth-less backstops inside
+    the `detect` step, which is where chelis#2228's repair lived. That work
+    moved into `Establish the candidate clone` and
+    `scripts/ci_establish_candidate_clone.py`, which hold the whole
+    property and more of it: the head deepen runs only against an already
+    shallow clone, no other fetch in the job carries a depth argument, the
+    first parent is read through a graft, and the result is asserted rather
+    than assumed. `scripts/test_ci_establish_candidate_clone.py` owns
+    those. What remains here is that the detector step delegates instead of
+    fetching for itself, because a fetch reappearing here is exactly how
+    the inherited-shape defect comes back.
+    """
+
+    steps = {
+        step.get("id"): step for step in workflow["jobs"]["changes"]["steps"]
+    }
+    test.assertNotIn("git fetch", steps["detect"]["run"])
+    owner = steps["clone"]["run"]
+    test.assertIn("ci_establish_candidate_clone.py", owner)
+    test.assertIn("--commits", owner)
 
 
 def assert_never_cancels_in_progress(
@@ -1036,35 +1045,7 @@ class PullRequestWorkflowRoutingTests(unittest.TestCase):
             ):
                 assertion(self, workflow)
 
-    def test_a_depth_limited_backstop_fetch_is_rejected(self) -> None:
-        for workflow_path, assertion, job, step_key, step_name in (
-            (CI, assert_ci_metadata_routing, "changes", "id", "detect"),
-            (HULL, assert_hull_retarget_dispatch, "changes", "id", "detect"),
-            (
-                CI,
-                assert_ci_metadata_routing,
-                "no-ai-authorship",
-                "name",
-                "Check commits for AI authorship markers",
-            ),
-        ):
-            workflow = copy.deepcopy(yaml.safe_load(workflow_path.read_text()))
-            step = next(
-                candidate
-                for candidate in workflow["jobs"][job]["steps"]
-                if candidate.get(step_key) == step_name
-            )
-            step["run"] = step["run"].replace(
-                'git fetch --no-tags origin "$BASE"',
-                'git fetch --no-tags --depth=1 origin "$BASE"',
-                1,
-            )
-            with self.subTest(
-                workflow=workflow_path.name, job=job
-            ), self.assertRaises(AssertionError):
-                assertion(self, workflow)
-
-    def test_the_first_parent_backstop_cannot_be_dropped(self) -> None:
+    def test_a_fetch_reappearing_in_the_detector_step_is_rejected(self) -> None:
         for workflow_path, assertion in (
             (CI, assert_ci_metadata_routing),
             (HULL, assert_hull_retarget_dispatch),
@@ -1075,10 +1056,25 @@ class PullRequestWorkflowRoutingTests(unittest.TestCase):
                 for step in workflow["jobs"]["changes"]["steps"]
                 if step.get("id") == "detect"
             )
-            detect["run"] = detect["run"].replace(
-                'git fetch --no-tags origin "$first_parent"',
-                "true",
-                1,
+            detect["run"] += '\ngit fetch --depth=1 origin "$BASE" || true\n'
+            with self.subTest(workflow=workflow_path.name), self.assertRaises(
+                AssertionError
+            ):
+                assertion(self, workflow)
+
+    def test_the_detector_step_cannot_stop_delegating(self) -> None:
+        for workflow_path, assertion in (
+            (CI, assert_ci_metadata_routing),
+            (HULL, assert_hull_retarget_dispatch),
+        ):
+            workflow = copy.deepcopy(yaml.safe_load(workflow_path.read_text()))
+            owner = next(
+                step
+                for step in workflow["jobs"]["changes"]["steps"]
+                if step.get("id") == "clone"
+            )
+            owner["run"] = owner["run"].replace(
+                "ci_establish_candidate_clone.py", "true #", 1
             )
             with self.subTest(workflow=workflow_path.name), self.assertRaises(
                 AssertionError

@@ -155,6 +155,47 @@ jobs:
             echo "ci_contract_changed=true" >> "$GITHUB_OUTPUT"
           fi
 
+      # One step owns this clone's shape, and every verifier after it reads
+      # a stated property rather than whatever the previous step's fetches
+      # happened to leave behind. Two defects came from the latter:
+      # chelis#2228, where the base backstop's `--depth=1` grafted the
+      # target snapshot out of the identity step's reach, and chelis#2234,
+      # where the head deepen's own boundary grafted the target tip out of
+      # the classifier's. Both were a verifier depending on execution order.
+      #
+      # An invariant that a later fetch can violate is worse than none,
+      # because it reads as a guarantee. A fetch can only add history, with
+      # one exception: a depth-limited fetch adds a graft. So this step owns
+      # every depth-limited fetch in the job, and
+      # scripts/test_ci_establish_candidate_clone.py fails if another step
+      # acquires one.
+      - name: Establish the candidate clone
+        id: clone
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTION: ${{ github.event.action }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          BEFORE: ${{ github.event.before }}
+          COMMITS: ${{ github.event.pull_request.commits }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        working-directory: candidate
+        run: |
+          current_pr="$RUNNER_TEMP/current-pr.json"
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" > "$current_pr"
+          base_ref=$(jq -er '.base.ref | select(length > 0)' "$current_pr")
+          git fetch --no-tags origin "refs/heads/$base_ref"
+          target_tip=$(git rev-parse FETCH_HEAD)
+          echo "target_tip=$target_tip" >> "$GITHUB_OUTPUT"
+          args=(--base "$BASE" --head "$HEAD" --commits "$COMMITS"
+                --target-tip "$target_tip" --github-output "$GITHUB_OUTPUT")
+          if [ "$ACTION" = "synchronize" ] && [ -n "$BEFORE" ]; then
+            args+=(--before "$BEFORE")
+          fi
+          python3 ../candidate/scripts/ci_establish_candidate_clone.py "${args[@]}"
+
       - name: Compute docs_only
         id: detect
         env:
@@ -174,37 +215,11 @@ jobs:
             echo "non-PR event ($EVENT_NAME): docs_only=false (full suite)"
             exit 0
           fi
-          # Deepen head to the PR commit count + 1 (the +1 reaches the
-          # base tip's parent so base..head resolves), then backstop-fetch
-          # the base commit so it is present as an object even on a stale
-          # count (force-push between the event and the run).
-          if [ "$EVENT_NAME" = "pull_request" ]; then
-            git fetch --depth=$((COMMITS + 1)) origin "$HEAD" 2>/dev/null || true
-          else
-            git fetch origin "$HEAD" "$BASE" 2>/dev/null || true
-          fi
-          # Neither backstop may carry `--depth`. A shallow fetch records
-          # the commit in .git/shallow, and git then ignores that commit's
-          # recorded parents even when the parent objects are already in
-          # the clone; no later ordinary fetch removes the graft. When the
-          # target has advanced past this pull request's branch point, the
-          # graft cuts the one edge `Record immutable candidate identity`
-          # must cross, and its `git merge-base` reports no common ancestor
-          # with an empty stderr (chelis#2228). A depth-less fetch into a
-          # shallow clone stops at the commits already present, so it costs
-          # the gap between the target snapshot and the branch point.
-          git fetch --no-tags origin "$BASE" 2>/dev/null || true
-          # The identity step walks from the candidate's FIRST PARENT, the
-          # target snapshot GitHub actually merged, which differs from the
-          # event payload's base whenever the target advanced after that
-          # payload was built. Read it from the raw commit header: a
-          # shallow graft hides the parents from `rev-parse HEAD^1` but
-          # never from `cat-file`.
-          first_parent="$(git cat-file commit HEAD \
-            | awk '/^parent /{print $2; exit}')"
-          if [ -n "$first_parent" ] && [ "$first_parent" != "$BASE" ]; then
-            git fetch --no-tags origin "$first_parent" 2>/dev/null || true
-          fi
+          # No fetching here. `Establish the candidate clone` owns the
+          # shape of this clone and has already asserted that base and head
+          # are present and comparable, so this step reads a stated
+          # property instead of inheriting whatever ran before it
+          # (chelis#2228, chelis#2234).
           git diff --name-only "$BASE..$HEAD" \
             | python3 scripts/ci_detect_docs_only.py
 
@@ -223,28 +238,19 @@ jobs:
         run: |
           args=(--event "$GITHUB_EVENT_PATH")
           if [ "$EVENT_NAME" = "pull_request" ]; then
+            # No fetching here either. `Establish the candidate clone`
+            # wrote current-pr.json, resolved the target tip and asserted
+            # that this classifier's commits are walkable; this step
+            # consumes that rather than re-deriving it (chelis#2234).
             current_pr="$RUNNER_TEMP/current-pr.json"
             timeline="$RUNNER_TEMP/pr-timeline.json"
-            gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" > "$current_pr"
-            base_ref=$(jq -er '.base.ref | select(length > 0)' "$current_pr")
-            git fetch --no-tags origin "refs/heads/$base_ref"
-            target_tip=$(git rev-parse FETCH_HEAD)
             gh api --paginate --slurp \
               "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/timeline" > "$timeline"
             args+=(
               --current-pr "$current_pr"
-              --target-tip "$target_tip"
+              --target-tip "${{ steps.clone.outputs.target_tip }}"
               --timeline "$timeline"
             )
-          fi
-          if [ "$EVENT_NAME" = "pull_request" ] &&
-             [ "$ACTION" = "synchronize" ]; then
-            # Tolerated, but never silent. `classify_update` needs the
-            # pre-push head, and when it is missing the script now says so
-            # and names git's reason; a `2>/dev/null` here would throw away
-            # the half of that diagnosis git holds (chelis#2229).
-            git fetch origin "$BEFORE" "$HEAD" "$target_tip" ||
-              echo "could not fetch this candidate update's endpoints" >&2
           fi
           python3 scripts/ci_candidate_lifecycle.py "${args[@]}"
 
@@ -338,6 +344,7 @@ jobs:
           --with PyYAML==6.0.3 python -m unittest
           scripts.test_check_agent_skills
           scripts.test_ci_candidate_lifecycle
+          scripts.test_ci_establish_candidate_clone
           scripts.test_ci_candidate_identity
           scripts.test_ci_candidate_receipt
           scripts.test_ci_rebase_reuse
@@ -358,6 +365,12 @@ jobs:
         if: always()
         run: |
           lifecycle="${{ steps.candidate-lifecycle.outcome }}"
+          # The establishing step is `continue-on-error`, so its failure has
+          # to be read here or an unestablishable clone would be ignored,
+          # which is worse than the graft it replaces: every verifier after
+          # it would run against a shape nothing vouched for.
+          clone="${{ steps.clone.outcome }}"
+          clone_invariant="${{ steps.clone.outputs.clone_invariant }}"
           contract="${{ steps.ci-contract.outcome }}"
           detected_contract="${{ steps.detect.outputs.ci_contract_changed }}"
           bootstrap_contract="${{ steps.ci-contract-bootstrap.outputs.ci_contract_changed }}"
@@ -373,7 +386,9 @@ jobs:
             contract_changed=false
           fi
           verdict=success
-          if [ "$lifecycle" != "success" ]; then
+          if [ "$clone" = "failure" ] || [ "$clone_invariant" = "failed" ]; then
+            verdict=failure
+          elif [ "$lifecycle" != "success" ]; then
             verdict=failure
           elif [ "$contract_changed" = "true" ]; then
             if [ "$contract" != "success" ]; then
@@ -384,7 +399,7 @@ jobs:
           fi
           echo "ci_contract_changed=$contract_changed" >> "$GITHUB_OUTPUT"
           echo "candidate_preflight=$verdict" >> "$GITHUB_OUTPUT"
-          echo "candidate lifecycle=$lifecycle, detected CI contract=$detected_contract, bootstrap CI contract=$bootstrap_contract, rebase CI contract=$rebase_contract, combined=$contract_changed, CI contract=$contract, verdict=$verdict"
+          echo "candidate clone=$clone/$clone_invariant, candidate lifecycle=$lifecycle, detected CI contract=$detected_contract, bootstrap CI contract=$bootstrap_contract, rebase CI contract=$rebase_contract, combined=$contract_changed, CI contract=$contract, verdict=$verdict"
 
       - name: Record immutable candidate identity
         if: github.event_name == 'pull_request' && steps.candidate-preflight.outputs.candidate_preflight == 'success'
