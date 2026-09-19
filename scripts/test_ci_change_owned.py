@@ -13,6 +13,7 @@ import unittest
 from unittest import mock
 
 from scripts import ci_change_owned as owned
+from scripts import runtime_representation_oracle
 
 
 OWNER = {
@@ -460,16 +461,13 @@ class SchemaTests(unittest.TestCase):
             owned.Identity("chelis-types", "expand_insert_dispatch_family"),
             owned.Identity("chelis-types", "issue_1294_standard_lowerings"),
         } <= set(config.standing_targets))
-        self.assertEqual(len(config.target_exclusions), 3)
+        self.assertEqual(len(config.target_exclusions), 4)
         self.assertEqual(len(config.test_exclusions), 14)
         self.assertEqual(
             set(config.manual_only_targets),
             {
                 owned.Identity(
                     "chelis-cli", "issue_1417_stdlib_dtype_family_bounds"
-                ),
-                owned.Identity(
-                    "chelis-backend-hip", "logical_comparison_where_gpu"
                 ),
             },
         )
@@ -480,7 +478,7 @@ class SchemaTests(unittest.TestCase):
             (manual_owner.workflow, manual_owner.job, manual_owner.tracking_issue),
             ("ci.yml", "change-owned-shard", "chelis#1824"),
         )
-        hip_manual_owner = config.manual_only_targets[
+        hip_manual_owner = config.target_exclusions[
             owned.Identity("chelis-backend-hip", "logical_comparison_where_gpu")
         ]
         self.assertEqual(
@@ -489,7 +487,11 @@ class SchemaTests(unittest.TestCase):
                 hip_manual_owner.job,
                 hip_manual_owner.tracking_issue,
             ),
-            ("ci.yml", "change-owned-shard", "chelis#1284"),
+            (
+                "heavy-e2e.yml",
+                "runtime-representation-phase0-oracle",
+                "chelis#1284",
+            ),
         )
         self.assertEqual(
             manual_owner.cadence,
@@ -514,7 +516,11 @@ class SchemaTests(unittest.TestCase):
             },
         )
         for owner in (
-            *config.target_exclusions.values(),
+            *(
+                owner
+                for owner in config.target_exclusions.values()
+                if owner.tracking_issue == "chelis#1824"
+            ),
             *(
                 owner
                 for owner in config.test_exclusions.values()
@@ -1629,6 +1635,99 @@ class PlanningTests(unittest.TestCase):
             OWNER,
         )
         self.assertEqual(plan["target_features"]["p::gated"], ["extra"])
+        owned.verify_plan_digest(plan)
+
+    def test_real_hip_target_routes_out_of_ubuntu_lanes_to_manual_oracle(
+        self,
+    ) -> None:
+        identity = owned.Identity(
+            "chelis-backend-hip", "logical_comparison_where_gpu"
+        )
+        source = "crates/chelis-backend-hip/tests/logical_comparison_where_gpu.rs"
+        hip_metadata = metadata(
+            package(
+                "p",
+                [("smoke", "crates/p/tests/smoke.rs", [])],
+            ),
+            package(
+                "chelis-backend-hip",
+                [(identity.target, source, [])],
+            )
+        )
+        repository_config = owned.read_config(
+            Path(__file__).resolve().parents[1] / ".config/ci-test-targets.toml"
+        )
+        config = owned.Config(
+            version=repository_config.version,
+            standing_targets=(owned.Identity("p", "smoke"),),
+            manual_only_targets={
+                identity: repository_config.manual_only_targets[identity]
+                for identity in (identity,)
+                if identity in repository_config.manual_only_targets
+            },
+            target_exclusions={
+                identity: repository_config.target_exclusions[identity]
+                for identity in (identity,)
+                if identity in repository_config.target_exclusions
+            },
+            test_exclusions={},
+            required_package_rules=(),
+            path_rules=(),
+        )
+        plan = owned.make_plan(
+            mode="pull_request",
+            base_sha="a" * 40,
+            candidate_sha="b" * 40,
+            event_pr_head="b" * 40,
+            records=[owned.ChangeRecord("M", source)],
+            base_metadata=hip_metadata,
+            candidate_metadata=hip_metadata,
+            config=config,
+            tracked_paths={source, "crates/p/tests/smoke.rs"},
+            source_reader=lambda path: (
+                "#[test]\nfn ignored_real_hip_tests() {}"
+                if path == source
+                else "#[test]\nfn standing() {}"
+            ),
+        )
+
+        self.assertNotIn(identity.canonical, plan["change_owned"])
+        self.assertNotIn(identity.canonical, plan["package_expansion"])
+        self.assertEqual(
+            plan["path_dispositions"],
+            [
+                {
+                    "path": source,
+                    "status": "M",
+                    "kind": "integration_target_excluded",
+                    "identity": identity.canonical,
+                    "owner": {
+                        "workflow": "heavy-e2e.yml",
+                        "job": "runtime-representation-phase0-oracle",
+                        "cadence": "manual-required on the exact reviewed candidate",
+                        "reason": (
+                            "the runtime-representation hardware manifest "
+                            "registers the exact real-HIP command"
+                        ),
+                        "tracking_issue": "chelis#1284",
+                    },
+                }
+            ],
+        )
+        self.assertTrue(
+            any(
+                probe == {
+                    "lane": "hip-typed-nonnumeric",
+                    "status": "manual-required",
+                    "command": (
+                        "scripts/hip_test.py -p chelis-backend-hip "
+                        "--test logical_comparison_where_gpu "
+                        "-- --ignored --test-threads=1"
+                    ),
+                }
+                for probe in runtime_representation_oracle.hardware_probe_manifest()
+            )
+        )
         owned.verify_plan_digest(plan)
 
     def test_plan_rejects_incomplete_or_malformed_target_features(self) -> None:

@@ -725,13 +725,16 @@ cadence = "pull_request and exact-candidate workflow_dispatch when directly modi
 reason = "the documented published-stdlib acceptance matrix is entirely ignored and must execute explicitly when its target changes"
 tracking_issue = "chelis#1824"
 
-[[manual_only_target]]
+# This target requires a real HIP workstation. Ubuntu change-owned and package
+# expansion workers must preserve the exact manual gate without attempting to
+# execute the ignored hardware matrix themselves.
+[[target_exclusion]]
 package = "chelis-backend-hip"
 name = "logical_comparison_where_gpu"
-workflow = "ci.yml"
-job = "change-owned-shard"
-cadence = "pull_request and exact-candidate workflow_dispatch when directly modified"
-reason = "the complete target is a real-HIP exact-bit matrix and every test is intentionally ignored"
+workflow = "heavy-e2e.yml"
+job = "runtime-representation-phase0-oracle"
+cadence = "manual-required on the exact reviewed candidate"
+reason = "the runtime-representation hardware manifest registers the exact real-HIP command"
 tracking_issue = "chelis#1284"
 
 # The default nextest profile excludes these complete targets. The current

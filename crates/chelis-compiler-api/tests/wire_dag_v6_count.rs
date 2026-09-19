@@ -112,8 +112,8 @@ fn current_wire_dag_rejects_missing_older_and_future_versions_before_op_decode()
             Some(5),
         ),
         (
-            r#"{"schema_version":15,"nodes":[{"id":0,"op":{"kind":"not_an_op"},"inputs":[],"output_type":{"dims":[],"precision":"bool"}}],"roots":[0]}"#,
-            Some(15),
+            r#"{"schema_version":16,"nodes":[{"id":0,"op":{"kind":"not_an_op"},"inputs":[],"output_type":{"dims":[],"precision":"bool"}}],"roots":[0]}"#,
+            Some(16),
         ),
     ];
 
@@ -146,7 +146,7 @@ fn current_wire_dag_rejects_missing_older_and_future_versions_before_op_decode()
         );
     }
 
-    let current_unknown = r#"{"schema_version":14,"nodes":[{"id":0,"shape_deps":[],"span_id":null,"merged_spans":[],"op":{"kind":"not_an_op"},"inputs":[],"output_type":{"dims":[],"precision":"bool"}}],"roots":[0]}"#;
+    let current_unknown = r#"{"schema_version":15,"nodes":[{"id":0,"shape_deps":[],"span_id":null,"merged_spans":[],"op":{"kind":"not_an_op"},"inputs":[],"output_type":{"dims":[],"precision":"bool"}}],"roots":[0]}"#;
     assert!(matches!(
         WireDag::from_validated_json(current_unknown),
         Err(WireDagDecodeError::Parse(_))
