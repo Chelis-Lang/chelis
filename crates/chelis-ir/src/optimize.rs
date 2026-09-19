@@ -98,7 +98,7 @@ pub fn constant_fold(dag: &mut Dag) {
                     RiscOp::Logical(LogicalKind::And | LogicalKind::Or) => Some(
                         lval.as_bool_exact()
                             .zip(rval.as_bool_exact())
-                            .ok_or_else(|| {
+                            .ok_or({
                                 chelis_types::NumericKernelError::Trap(
                                     chelis_types::NumericTrap::Domain {
                                         op: "logical",
