@@ -3051,7 +3051,6 @@ pub enum WireFusedStepOp {
     TruncDiv,
     MaxElem,
     MinElem,
-    CmpLt,
     Neg,
     Recip,
     Exp,

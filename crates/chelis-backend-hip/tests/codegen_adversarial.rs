@@ -4,7 +4,7 @@
 
 use chelis_backend_hip::HipCodegenResult;
 mod support;
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+use chelis_ir::dag::{ComparisonKind, Dag, DimInfo, RiscOp, TensorType};
 use chelis_types::types::Prim;
 use chelis_types::unsupported::{RejectionAuthorityKind, Stage, Unsupported, UnsupportedKind};
 use support::codegen_hip;
@@ -704,8 +704,7 @@ fn rt12b_non_bool_materialization_retains_generic_authority() {
     assert_hip_dtype_rejection(error, "i64", 689);
 }
 
-/// chelis#1360 companion: the retained legacy identity must now route through
-/// the same one-byte result family as direct `Compare(CmpLt)`.
+/// chelis#1360 companion: direct `Compare(CmpLt)` uses one-byte Bool storage.
 #[test]
 fn rt12c_cmplt_to_bool_is_not_emitted_at_operand_width() {
     let mut dag = Dag::new();
@@ -721,7 +720,12 @@ fn rt12c_cmplt_to_bool_is_not_emitted_at_operand_width() {
         vec_f32(4),
         None,
     );
-    let c = dag.add_node(RiscOp::CmpLt, vec![a, b], vec_bool(4), None);
+    let c = dag.add_node(
+        RiscOp::Compare(ComparisonKind::CmpLt),
+        vec![a, b],
+        vec_bool(4),
+        None,
+    );
     dag.add_root(c);
     let source = codegen_hip(&dag, "test_cmplt_bool").unwrap().c_source;
     assert!(source.contains("unsigned char *out"), "{source}");

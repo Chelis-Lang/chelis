@@ -1746,7 +1746,6 @@ impl CEmitter {
             }
             RiscOp::Logical(kind) => self.emit_logical(id, *kind, &node.inputs, &node.output_type),
             RiscOp::Where => self.emit_where(id, &node.inputs, &node.output_type),
-            RiscOp::CmpLt => self.emit_cmplt(id, &node.inputs, &node.output_type, dag),
             RiscOp::Neg => self.emit_unary(id, UnaryEmission::Neg, &node.inputs, &node.output_type),
             RiscOp::Recip => self.emit_recip(id, &node.inputs, &node.output_type),
             RiscOp::Exp => self.emit_unary_func(id, "expf", &node.inputs, &node.output_type),
@@ -3641,18 +3640,6 @@ impl CEmitter {
         self.line("}");
     }
 
-    /// Temporary integration bridge for backend branches that still carry
-    /// the legacy identity. New producers use `Compare(CmpLt)`.
-    fn emit_cmplt(
-        &mut self,
-        id: usize,
-        inputs: &[NodeId],
-        ty: &TensorType,
-        dag: VerifiedDagView<'_>,
-    ) {
-        self.emit_compare(id, ComparisonKind::CmpLt, inputs, ty, dag);
-    }
-
     // ---- Typed logical operations ----
     fn emit_logical(&mut self, id: usize, kind: LogicalKind, inputs: &[NodeId], ty: &TensorType) {
         let left = inputs[0].0;
@@ -4729,7 +4716,6 @@ impl CEmitter {
         // exactly representable in f32. Emit the literal at the chain's
         // own precision.
         let one = if is_f64 { "1.0" } else { "1.0f" };
-        let zero = if is_f64 { "0.0" } else { "0.0f" };
         match op {
             FusedStepOp::Add => {
                 let a = resolve(&inputs[0]);
@@ -4778,11 +4764,6 @@ impl CEmitter {
                 let a = resolve(&inputs[0]);
                 let b = resolve(&inputs[1]);
                 format!("(isnan({a}) || (!isnan({b}) && ({a}) <= ({b})) ? ({a}) : ({b}))")
-            }
-            FusedStepOp::CmpLt => {
-                let a = resolve(&inputs[0]);
-                let b = resolve(&inputs[1]);
-                format!("({a} < {b}) ? {one} : {zero}")
             }
             FusedStepOp::Neg => {
                 let a = resolve(&inputs[0]);
@@ -4903,13 +4884,6 @@ impl CEmitter {
                 let b = resolve(&inputs[1]);
                 format!(
                     "_mm256_blendv_ps({b}, {a}, _mm256_or_ps(_mm256_cmp_ps({a}, {a}, _CMP_UNORD_Q), _mm256_and_ps(_mm256_cmp_ps({b}, {b}, _CMP_ORD_Q), _mm256_cmp_ps({a}, {b}, _CMP_LE_OQ))))"
-                )
-            }
-            FusedStepOp::CmpLt => {
-                let a = resolve(&inputs[0]);
-                let b = resolve(&inputs[1]);
-                format!(
-                    "_mm256_blendv_ps(_mm256_setzero_ps(), _mm256_set1_ps(1.0f), _mm256_cmp_ps({a}, {b}, _CMP_LT_OS))"
                 )
             }
             FusedStepOp::Neg => {
@@ -6766,11 +6740,6 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                     let b = resolve(&step.input_indices[1]);
                     format!("(isnan({a}) || (!isnan({b}) && ({a}) <= ({b})) ? ({a}) : ({b}))")
                 }
-                FusedStepOp::CmpLt => {
-                    let a = resolve(&step.input_indices[0]);
-                    let b = resolve(&step.input_indices[1]);
-                    format!("({a} < {b}) ? 1.0f : 0.0f")
-                }
                 FusedStepOp::Neg => {
                     let a = resolve(&step.input_indices[0]);
                     format!("-{a}")
@@ -7707,7 +7676,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chelis_ir::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
+    use chelis_ir::dag::{ComparisonKind, Dag, DimInfo, RiscOp, RtDim, TensorType};
     use chelis_types::types::Prim;
 
     fn emit_test_dag(dag: &Dag, name: &str) -> Result<String, Unsupported> {
@@ -7964,7 +7933,7 @@ mod tests {
             None,
         );
         dag.add_node(
-            RiscOp::CmpLt,
+            RiscOp::Compare(ComparisonKind::CmpLt),
             vec![a, b],
             TensorType {
                 dims: vec![],
@@ -8803,7 +8772,7 @@ mod tests {
             None,
         );
         dag.add_node(
-            RiscOp::CmpLt,
+            RiscOp::Compare(ComparisonKind::CmpLt),
             vec![a, b],
             TensorType {
                 dims: vec![],

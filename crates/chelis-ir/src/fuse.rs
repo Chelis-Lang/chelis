@@ -89,7 +89,6 @@ fn is_fusible_elementwise(node: &DagNode) -> bool {
             | RiscOp::TruncDiv
             | RiscOp::MaxElem
             | RiscOp::MinElem
-            | RiscOp::CmpLt
             | RiscOp::Neg
             | RiscOp::Recip
             | RiscOp::Exp
@@ -117,7 +116,6 @@ fn to_fused_step_op(op: &RiscOp) -> FusedStepOp {
         RiscOp::TruncDiv => FusedStepOp::TruncDiv,
         RiscOp::MaxElem => FusedStepOp::MaxElem,
         RiscOp::MinElem => FusedStepOp::MinElem,
-        RiscOp::CmpLt => FusedStepOp::CmpLt,
         RiscOp::Neg => FusedStepOp::Neg,
         RiscOp::Recip => FusedStepOp::Recip,
         RiscOp::Exp => FusedStepOp::Exp,

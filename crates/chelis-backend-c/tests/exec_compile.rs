@@ -4768,9 +4768,14 @@ fn run_cmplt_parity(
         vec_prim(n, prim),
         None,
     );
-    let root = dag.add_node(RiscOp::CmpLt, vec![a, b], vec_prim(n, Prim::Bool), None);
+    let root = dag.add_node(
+        RiscOp::Compare(ComparisonKind::CmpLt),
+        vec![a, b],
+        vec_prim(n, Prim::Bool),
+        None,
+    );
 
-    // Evaluator oracle: numeric `a < b` per element (eval.rs CmpLt).
+    // Evaluator oracle: direct numeric `cmplt(a, b)` per element.
     let mut inputs = UnordMap::new();
     inputs.insert(
         "a".to_string(),

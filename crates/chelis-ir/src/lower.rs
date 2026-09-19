@@ -16180,12 +16180,6 @@ impl<'program> LowerCtx<'program> {
                         input2?
                     }
                 }
-                RiscOp::CmpLt => scalar_from_i64(
-                    "fold_static_cond",
-                    Prim::Bool,
-                    i64::from(compare_scalars(CompareOp::Lt, input0?, input1?).ok()?),
-                )
-                .ok()?,
                 RiscOp::MaxElem => {
                     numeric_binop(input0?, input1?, Some(IntBinOp::Max), Some(FloatBinOp::Max))?
                 }

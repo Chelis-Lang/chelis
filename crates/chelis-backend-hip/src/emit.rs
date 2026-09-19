@@ -1391,10 +1391,6 @@ impl HipEmitter {
                 "kernel_relu_adjoint{}",
                 Self::dtype_kernel_suffix(operand_prec())
             )),
-            RiscOp::CmpLt => Some(format!(
-                "kernel_cmplt{}",
-                Self::dtype_kernel_suffix(operand_prec())
-            )),
             RiscOp::Neg => Some(format!("kernel_neg_{}", kind_for_node(node)?.suffix())),
             RiscOp::Recip => Some(format!("kernel_recip_{}", kind_for_node(node)?.suffix())),
             RiscOp::Exp => Some(format!("kernel_exp_{}", kind_for_node(node)?.suffix())),
@@ -1775,19 +1771,6 @@ impl HipEmitter {
                 Prim::Bf16 => kernels::relu_adjoint_reduced(self.kernel_rank, name, 0x7f80, 0x007f),
                 _ => kernels::relu_adjoint(self.kernel_rank, name, elem_for_unary()?),
             },
-            RiscOp::CmpLt => {
-                let precision = operand_prec();
-                let (lhs, rhs) = Self::comparison_value_expressions(precision);
-                kernels::comparison(
-                    self.kernel_rank,
-                    name,
-                    "<",
-                    Self::dtype_c_type(precision),
-                    Self::comparison_value_helpers(precision),
-                    lhs,
-                    rhs,
-                )
-            }
             RiscOp::Neg => kernels::unary_prefix(self.kernel_rank, name, "-", elem_for_unary()?),
             // IEEE reciprocal kernel.
             RiscOp::Recip => kernels::unary_recip(self.kernel_rank, name, elem_for_unary()?),
@@ -2150,12 +2133,6 @@ impl HipEmitter {
                 &node.output_type,
             ),
             RiscOp::ReluAdjoint => self.emit_binary_launch(
-                id,
-                &resolved_kernel_name()?,
-                &node.inputs,
-                &node.output_type,
-            ),
-            RiscOp::CmpLt => self.emit_binary_launch(
                 id,
                 &resolved_kernel_name()?,
                 &node.inputs,
@@ -4518,7 +4495,6 @@ impl HipEmitter {
             | RiscOp::ExtremaAdjoint { .. }
             | RiscOp::Relu
             | RiscOp::ReluAdjoint
-            | RiscOp::CmpLt
             | RiscOp::Neg
             | RiscOp::Recip
             | RiscOp::Exp

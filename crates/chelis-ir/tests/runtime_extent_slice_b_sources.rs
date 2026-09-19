@@ -618,7 +618,7 @@ fn unsupported_but_well_typed_mapping_yields_the_registered_receipt_not_an_ice()
 
 /// The number of `RiscOp` variants the table below must construct. Bumping
 /// it without adding a row makes the coverage assertion fail.
-const RISC_OP_VARIANTS: usize = 66;
+const RISC_OP_VARIANTS: usize = 65;
 
 /// Adding a `RiscOp` variant breaks this match, which is what forces the
 /// table in `every_risc_op_yields_exactly_one_source_per_output_axis` to
@@ -633,7 +633,7 @@ fn variant_index(op: &RiscOp) -> usize {
         RiscOp::Div => 3,
         RiscOp::FloorDiv => 4,
         RiscOp::TruncDiv => 5,
-        RiscOp::CmpLt => 6,
+        RiscOp::Compare(_) => 6,
         RiscOp::MaxElem => 7,
         RiscOp::MinElem => 8,
         RiscOp::ExtremaAdjoint { .. } => 9,
@@ -690,9 +690,8 @@ fn variant_index(op: &RiscOp) -> usize {
         RiscOp::CheckedReshapeExtent { .. } => 60,
         RiscOp::CheckedUnitAxis { .. } => 61,
         RiscOp::Mod => 62,
-        RiscOp::Compare(_) => 63,
-        RiscOp::Logical(_) => 64,
-        RiscOp::Where => 65,
+        RiscOp::Logical(_) => 63,
+        RiscOp::Where => 64,
     }
 }
 
@@ -790,12 +789,6 @@ fn every_risc_op_yields_exactly_one_source_per_output_axis() {
         RiscOp::Mod,
         vec![ints, more_ints],
         ty(vec![DimInfo::Lit(2), DimInfo::Lit(3)], Prim::Int32),
-    ));
-    nodes.push(add(
-        &mut dag,
-        RiscOp::CmpLt,
-        vec![f, g],
-        ty(vec![DimInfo::Lit(2), DimInfo::Lit(3)], Prim::Bool),
     ));
     nodes.push(add(
         &mut dag,

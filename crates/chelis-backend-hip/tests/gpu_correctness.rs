@@ -15,7 +15,7 @@
 
 mod support;
 use chelis_ir::dag::{
-    Dag, DimInfo, ExtremaKind, ExtremaOperand, RiscOp, RtAxis, RtDim, TensorType,
+    ComparisonKind, Dag, DimInfo, ExtremaKind, ExtremaOperand, RiscOp, RtAxis, RtDim, TensorType,
 };
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
 use chelis_ir::fuse::fuse;
@@ -1637,7 +1637,12 @@ fn g3_cmplt_gpu_matches_cpu() {
     let mut dag = Dag::new();
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
     let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], vec_f32(4), None);
-    let out = dag.add_node(RiscOp::CmpLt, vec![x, y], vec_bool(4), None);
+    let out = dag.add_node(
+        RiscOp::Compare(ComparisonKind::CmpLt),
+        vec![x, y],
+        vec_bool(4),
+        None,
+    );
     dag.add_root(out);
     let actual = compile_and_run_single_output_typed_i64(
         &dag,
@@ -2058,7 +2063,12 @@ fn g9_load_mapping() {
         scalar_f32(),
         None,
     );
-    let out = dag.add_node(RiscOp::CmpLt, vec![x, y], bool_scalar(), None);
+    let out = dag.add_node(
+        RiscOp::Compare(ComparisonKind::CmpLt),
+        vec![x, y],
+        bool_scalar(),
+        None,
+    );
     dag.add_root(out);
     assert_gpu_matches_eval(
         &dag,

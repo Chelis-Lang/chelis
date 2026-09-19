@@ -1466,7 +1466,6 @@ fn fused_step_lines(
     use chelis_ir::dag::FusedStepOp;
     let ty = kind.c_type();
     let one = kind.one_lit_bool();
-    let zero = kind.zero_lit_bool();
     let mut step_lines = Vec::new();
     for (si, step) in steps.iter().enumerate() {
         let expr = match step.op {
@@ -1515,11 +1514,6 @@ fn fused_step_lines(
                 let a = resolve_fused_input(&step.input_indices[0]);
                 let b = resolve_fused_input(&step.input_indices[1]);
                 format!("(isnan({a}) || (!isnan({b}) && ({a}) <= ({b})) ? ({a}) : ({b}))")
-            }
-            FusedStepOp::CmpLt => {
-                let a = resolve_fused_input(&step.input_indices[0]);
-                let b = resolve_fused_input(&step.input_indices[1]);
-                format!("({a} < {b}) ? {one} : {zero}")
             }
             FusedStepOp::Neg => {
                 let a = resolve_fused_input(&step.input_indices[0]);

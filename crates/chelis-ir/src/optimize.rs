@@ -140,7 +140,6 @@ pub fn constant_fold(dag: &mut Dag) {
                 let result = match &node.op {
                     RiscOp::Add => Some(lv + rv),
                     RiscOp::Mul => Some(lv * rv),
-                    RiscOp::CmpLt => Some(if lv < rv { 1.0 } else { 0.0 }),
                     _ => None,
                 };
                 if let Some(val) = result

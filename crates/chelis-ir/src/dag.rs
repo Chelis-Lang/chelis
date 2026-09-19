@@ -380,7 +380,6 @@ pub enum FusedStepOp {
     TruncDiv,
     MaxElem,
     MinElem,
-    CmpLt,
     Neg,
     Recip,
     Exp,
@@ -602,10 +601,6 @@ pub enum RiscOp {
     Logical(LogicalKind),
     /// Eager stored-bit conditional selection ([05-OP-53]).
     Where,
-    /// Legacy backend transition identity. New producers must emit
-    /// `Compare(ComparisonKind::CmpLt)`; backend workers remove this variant
-    /// after all target emitters consume the direct vocabulary.
-    CmpLt,
     MaxElem,
     /// Direct element-wise minimum selection. This identity preserves the
     /// selected operand bits and must not be rewritten through negation.
@@ -1247,7 +1242,6 @@ impl RiscOp {
                 LogicalKind::Not => Id::Not,
             }),
             Self::Where => Semantic(Id::Where),
-            Self::CmpLt => Semantic(Id::CmpLt),
             Self::MaxElem => Semantic(Id::MaxElem),
             Self::Neg => Semantic(Id::Neg),
             Self::Exp => Semantic(Id::Exp),
@@ -1537,8 +1531,8 @@ impl RiscOp {
         match self {
             // --- Elementwise arithmetic and comparison ---
             // `Add`, `Mul`, `Div` (with a denominator-excludes-zero
-            // precondition), and `CmpLt` (the branch predicate that
-            // drives branch-and-bound on piecewise definitions such as
+            // precondition), and direct comparisons (the branch predicates that
+            // drive branch-and-bound on piecewise definitions such as
             // the `erf64` sign/small-x folds) all have sound interval /
             // linear-relaxation transformers (beacon_plan.md §3.1, §3.3).
             RiscOp::Add
@@ -1546,7 +1540,6 @@ impl RiscOp {
             | RiscOp::Mul
             | RiscOp::Div
             | RiscOp::Compare(_)
-            | RiscOp::CmpLt
             | RiscOp::MaxElem
             | RiscOp::MinElem => true,
 
@@ -2299,7 +2292,6 @@ fn shape_source_for_axis(dag: &Dag, id: NodeId, axis: usize) -> Option<(String, 
         | RiscOp::Compare(_)
         | RiscOp::Logical(_)
         | RiscOp::Where
-        | RiscOp::CmpLt
         | RiscOp::MaxElem
         | RiscOp::MinElem
         | RiscOp::ExtremaAdjoint { .. }
@@ -3282,7 +3274,6 @@ mod tests {
             RiscOp::Compare(ComparisonKind::Eq),
             RiscOp::Logical(LogicalKind::And),
             RiscOp::Where,
-            RiscOp::CmpLt,
             RiscOp::MaxElem,
             RiscOp::Neg,
             RiscOp::Exp,
@@ -3386,8 +3377,8 @@ mod tests {
         // identities so they cannot inherit a verifier disposition.
         assert_eq!(
             all.len(),
-            59,
-            "one_of_every_risc_op must list all 59 classified samples"
+            58,
+            "one_of_every_risc_op must list all 58 classified samples"
         );
 
         // The classifier returns a definite bool for every variant (no
@@ -3407,7 +3398,7 @@ mod tests {
         // identity/adjoint (2) are excluded (22) until Beacon registers their
         // own transformers.
         assert_eq!(
-            targetable, 35,
+            targetable, 34,
             "targetable op count drifted from the pinned WI-2 subset"
         );
         assert_eq!(
@@ -3420,8 +3411,8 @@ mod tests {
         assert!(RiscOp::Add.is_verifier_targetable());
         assert!(RiscOp::Exp.is_verifier_targetable());
         assert!(
-            RiscOp::CmpLt.is_verifier_targetable(),
-            "CmpLt drives erf64 branch-and-bound; must be targetable"
+            RiscOp::Compare(ComparisonKind::CmpLt).is_verifier_targetable(),
+            "Compare(CmpLt) drives erf64 branch-and-bound; must be targetable"
         );
         assert!(
             RiscOp::Cast {

@@ -232,7 +232,7 @@ fn grad_dag_checked_impl(
                 // operands. Its predicate may control differentiable float
                 // selection, but the arithmetic that formed the predicate is
                 // not itself on the gradient path.
-                RiscOp::Compare(_) | RiscOp::CmpLt => {}
+                RiscOp::Compare(_) => {}
                 _ => {
                     for input in &node.inputs {
                         live[input.0] = true;
@@ -381,7 +381,6 @@ pub fn risc_op_name(op: &RiscOp) -> &'static str {
         RiscOp::Compare(kind) => kind.surf_name(),
         RiscOp::Logical(kind) => kind.surf_name(),
         RiscOp::Where => "where",
-        RiscOp::CmpLt => "cmplt",
         RiscOp::MaxElem => "max_elem",
         RiscOp::MinElem => "min_elem",
         RiscOp::ExtremaAdjoint { .. } => "extrema_adjoint",
@@ -887,7 +886,7 @@ fn compute_adjoints(
             let db = dag.add_node(RiscOp::Neg, vec![g_y_over_b], ty, None);
             Some(vec![(a, da), (b, db)])
         }
-        RiscOp::Compare(_) | RiscOp::CmpLt => {
+        RiscOp::Compare(_) => {
             let a = node.inputs[0];
             let b = node.inputs[1];
             let ty_a = forward.get(a).unwrap().output_type.clone();
@@ -2823,7 +2822,12 @@ mod tests {
             precision: Prim::Bool,
         };
         let (dag, x, _y, out) = build_binary_dag(|dag, a, b, _ty| {
-            dag.add_node(RiscOp::CmpLt, vec![a, b], bool_ty.clone(), None)
+            dag.add_node(
+                RiscOp::Compare(ComparisonKind::CmpLt),
+                vec![a, b],
+                bool_ty.clone(),
+                None,
+            )
         });
         assert!(
             grad_dag(&dag, out, &[x]).is_none(),

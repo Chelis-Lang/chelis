@@ -5611,7 +5611,7 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
             // Exact direct nonnumeric kernels are an admitted HIP capability.
             // Keep this explicit so a future broad rejection cannot silently
             // erase the #1284 target cell.
-            RiscOp::Compare(_) | RiscOp::Logical(_) | RiscOp::Where | RiscOp::CmpLt => {}
+            RiscOp::Compare(_) | RiscOp::Logical(_) | RiscOp::Where => {}
 
             // `pad` / `shrink` are now implemented on the HIP backend
             // (typed per-output-element kernels, GPU==eval verified by the
@@ -6893,9 +6893,6 @@ fn wire_op(op: &RiscOp, precision: Prim) -> WireResult<WireRiscOp> {
             },
         },
         RiscOp::Where => WireRiscOp::Where {},
-        RiscOp::CmpLt => WireRiscOp::Compare {
-            comparison: WireComparisonKind::CmpLt,
-        },
         RiscOp::MaxElem => WireRiscOp::MaxElem,
         RiscOp::MinElem => WireRiscOp::MinElem,
         RiscOp::ExtremaAdjoint { kind, operand } => WireRiscOp::ExtremaAdjoint {
@@ -7132,7 +7129,6 @@ fn wire_op(op: &RiscOp, precision: Prim) -> WireResult<WireRiscOp> {
                         FusedStepOp::TruncDiv => WireFusedStepOp::TruncDiv,
                         FusedStepOp::MaxElem => WireFusedStepOp::MaxElem,
                         FusedStepOp::MinElem => WireFusedStepOp::MinElem,
-                        FusedStepOp::CmpLt => WireFusedStepOp::CmpLt,
                         FusedStepOp::Neg => WireFusedStepOp::Neg,
                         FusedStepOp::Recip => WireFusedStepOp::Recip,
                         FusedStepOp::Exp => WireFusedStepOp::Exp,

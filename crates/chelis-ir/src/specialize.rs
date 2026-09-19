@@ -783,7 +783,6 @@ fn node_has_contiguous_matrix_slices(dag: &Dag, id: NodeId, matrix_rank: usize) 
         | RiscOp::ExtremaAdjoint { .. }
         | RiscOp::Relu
         | RiscOp::ReluAdjoint
-        | RiscOp::CmpLt
         | RiscOp::Neg
         | RiscOp::Recip
         | RiscOp::Exp

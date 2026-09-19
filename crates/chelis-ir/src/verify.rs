@@ -538,7 +538,6 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             | RiscOp::FloorDiv
             | RiscOp::TruncDiv
             | RiscOp::Mod
-            | RiscOp::CmpLt
             | RiscOp::MaxElem
             | RiscOp::MinElem => {
                 if arity != 2 {
@@ -1674,14 +1673,6 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                 }
             }
             _ => {}
-        }
-
-        // C5: legacy CmpLt output must be Bool.
-        if matches!(&node.op, RiscOp::CmpLt) && node.output_type.precision != Prim::Bool {
-            errors.push(format!(
-                "cmplt at node {} has output precision {:?}, expected Bool",
-                node.id.0, node.output_type.precision
-            ));
         }
 
         // C6: Permute validation.
@@ -2991,7 +2982,7 @@ mod tests {
     #[test]
     fn div_arity_one_rejected() {
         // Div is binary; a single-input Div node must surface the
-        // binary-arity diagnostic alongside Add/Mul/CmpLt/MaxElem.
+        // binary-arity diagnostic alongside Add/Mul/Compare/MaxElem.
         let mut dag = Dag::new();
         let a = dag.add_node(
             RiscOp::synth_const(scalar_f32().precision, 1.0),
@@ -3562,7 +3553,7 @@ mod tests {
         );
     }
 
-    // --- C5: CmpLt output must be Bool ---
+    // --- C5: Compare(CmpLt) output must be Bool ---
 
     #[test]
     fn c5_cmplt_non_bool_output_is_error() {
@@ -3580,7 +3571,12 @@ mod tests {
             None,
         );
         // Wrong: output is F32 instead of Bool.
-        dag.add_node(RiscOp::CmpLt, vec![a, b], scalar_f32(), None);
+        dag.add_node(
+            RiscOp::Compare(ComparisonKind::CmpLt),
+            vec![a, b],
+            scalar_f32(),
+            None,
+        );
         let errs = verify(&dag);
         assert!(
             errs.iter()
@@ -3607,7 +3603,12 @@ mod tests {
             dims: vec![],
             precision: Prim::Bool,
         };
-        dag.add_node(RiscOp::CmpLt, vec![a, b], bool_ty, None);
+        dag.add_node(
+            RiscOp::Compare(ComparisonKind::CmpLt),
+            vec![a, b],
+            bool_ty,
+            None,
+        );
         assert!(verify(&dag).is_empty());
     }
 

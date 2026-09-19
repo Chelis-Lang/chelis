@@ -5,7 +5,7 @@
 
 mod support;
 use chelis_ir::dag::{
-    Dag, DimInfo, ExtremaKind, ExtremaOperand, RiscOp, RtAxis, RtDim, TensorType,
+    ComparisonKind, Dag, DimInfo, ExtremaKind, ExtremaOperand, RiscOp, RtAxis, RtDim, TensorType,
 };
 use chelis_ir::fuse::fuse;
 use chelis_types::types::Prim;
@@ -950,7 +950,7 @@ fn s9_cmplt_bool_result_uses_one_byte_output() {
         None,
     );
     let c = dag.add_node(
-        RiscOp::CmpLt,
+        RiscOp::Compare(ComparisonKind::CmpLt),
         vec![a, b],
         TensorType {
             dims: vec![],

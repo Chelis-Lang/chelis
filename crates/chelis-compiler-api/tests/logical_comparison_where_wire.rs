@@ -111,6 +111,16 @@ fn wire_enums_are_closed_and_have_exact_spellings() {
         serde_json::json!({"kind": "compare", "comparison": "ne"}),
         serde_json::json!({"kind": "logical", "logical": "xor"}),
         serde_json::json!({"kind": "where", "comparison": "eq"}),
+        serde_json::json!({
+            "kind": "fused_elem",
+            "ops": [{
+                "op": "cmp_lt",
+                "input_indices": [
+                    {"kind": "external", "index": 0},
+                    {"kind": "external", "index": 1}
+                ]
+            }]
+        }),
     ] {
         assert!(
             serde_json::from_value::<WireRiscOp>(malformed.clone()).is_err(),

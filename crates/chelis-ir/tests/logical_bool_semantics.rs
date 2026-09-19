@@ -114,7 +114,7 @@ fn tier2_preserves_every_comparison_and_logical_identity() {
         assert!(
             dag.nodes()
                 .iter()
-                .all(|node| { !matches!(node.op, RiscOp::Mul | RiscOp::MaxElem | RiscOp::CmpLt) })
+                .all(|node| !matches!(node.op, RiscOp::Mul | RiscOp::MaxElem))
         );
         assert!(verify::verify(&dag).is_empty());
     }

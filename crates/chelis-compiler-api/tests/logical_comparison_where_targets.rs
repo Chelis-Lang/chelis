@@ -121,13 +121,6 @@ fn hip_admits_the_complete_direct_nonnumeric_dtype_matrix() {
         ))
         .unwrap_or_else(|error| panic!("HIP rejected where {}: {error:?}", precision.name()));
     }
-
-    reject_unsupported_hip_ops(&direct_dag(
-        RiscOp::CmpLt,
-        &[Prim::F32, Prim::F32],
-        Prim::Bool,
-    ))
-    .expect("temporary legacy CmpLt remains admitted during integration");
 }
 
 #[test]

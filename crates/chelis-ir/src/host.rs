@@ -15301,7 +15301,6 @@ fn actualize_tensor_helper_types(
             | crate::dag::RiscOp::Div
             | crate::dag::RiscOp::FloorDiv
             | crate::dag::RiscOp::TruncDiv
-            | crate::dag::RiscOp::CmpLt
             | crate::dag::RiscOp::MaxElem
             | crate::dag::RiscOp::MinElem => node
                 .inputs

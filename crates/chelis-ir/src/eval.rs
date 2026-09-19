@@ -3321,11 +3321,6 @@ where
                 &values[&node.inputs[1]],
                 &values[&node.inputs[2]],
             )?,
-            RiscOp::CmpLt => compare_elementwise(
-                CompareOp::Lt,
-                &values[&node.inputs[0]],
-                &values[&node.inputs[1]],
-            )?,
             RiscOp::Sum { axis, accumulator } => reduce(
                 &values[&node.inputs[0]],
                 *axis,
@@ -3539,11 +3534,6 @@ where
                         )?,
                         FusedStepOp::MinElem => binary_elementwise(
                             ElementwiseBinOp::Min,
-                            resolve(&step.input_indices[0]),
-                            resolve(&step.input_indices[1]),
-                        )?,
-                        FusedStepOp::CmpLt => compare_elementwise(
-                            CompareOp::Lt,
                             resolve(&step.input_indices[0]),
                             resolve(&step.input_indices[1]),
                         )?,
@@ -4894,7 +4884,12 @@ mod tests {
         let ty = tensor_ty(&[2], Prim::Int64);
         let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], ty.clone(), None);
         let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], ty, None);
-        let out = dag.add_node(RiscOp::CmpLt, vec![a, b], tensor_ty(&[2], Prim::Bool), None);
+        let out = dag.add_node(
+            RiscOp::Compare(ComparisonKind::CmpLt),
+            vec![a, b],
+            tensor_ty(&[2], Prim::Bool),
+            None,
+        );
         dag.add_root(out);
 
         let mut inputs = UnordMap::new();
