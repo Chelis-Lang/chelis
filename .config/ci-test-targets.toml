@@ -103,7 +103,7 @@ disposition = "owner"
 workflow = "ci.yml"
 job = "ci-fast"
 cadence = "pull_request and push"
-reason = "ci-fast executes the oracle's three standing Rust acceptance targets, while script-unit locks its command roster and fallback guard"
+reason = "ci-fast executes the oracle's four standing Rust acceptance targets, while script-unit locks its command roster and fallback guard"
 tracking_issue = "chelis#1955"
 
 [[path_rule]]
@@ -1268,6 +1268,15 @@ tracking_issue = "chelis#1956"
 prefix = "examples/grad_scalar_extent_claim.ch"
 disposition = "packages"
 packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "examples/grad_selector_provenance.ch"
+disposition = "owner"
+workflow = "ci.yml"
+job = "ci-fast"
+cadence = "pull_request and push"
+reason = "the standing chelis-cli::parity target checks and evaluates this exact callable-provenance example"
+tracking_issue = "chelis#1955"
 
 [[path_rule]]
 prefix = ".cargo/"

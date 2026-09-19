@@ -44,6 +44,19 @@ COMMANDS = (
         "issue_1955_grad_selector_identity",
         "--no-fail-fast",
     ),
+    (
+        "executable provenance example",
+        "cargo",
+        "nextest",
+        "run",
+        "-p",
+        "chelis-cli",
+        "--test",
+        "parity",
+        "-E",
+        "test(parity_grad_selector_provenance)",
+        "--no-fail-fast",
+    ),
 )
 
 

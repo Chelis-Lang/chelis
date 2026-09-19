@@ -59,6 +59,11 @@ parameter in the order listed. Apply the gradient function to get the values:
 (dw, db) = grad(loss_fn, wrt=(w, b))(w, b)
 ```
 
+Named selectors follow the callable's immutable origin through aliases and
+through tuple, ADT constructor, and record patterns. The executable
+`examples/grad_selector_provenance.ch` demonstrates nested constructor and
+record payloads while checking both direct calls and `grad(..., wrt=w)`.
+
 `grad` returns gradients only, not the forward value alongside them. It composes with
 itself for higher derivatives: `grad(grad(f))` is the second derivative.
 

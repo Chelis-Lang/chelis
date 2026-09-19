@@ -457,6 +457,16 @@ fn parity_grad_wrt_order() {
 }
 
 #[test]
+fn parity_grad_selector_provenance() {
+    let path = examples_root().join("grad_selector_provenance.ch");
+    assert_check_clean(&path);
+    assert_eq!(
+        run_eval(&path),
+        b"constructor_direct = 6.0\nconstructor_grad = 2.0\nrecord_direct = 6.0\nrecord_grad = 2.0\n",
+    );
+}
+
+#[test]
 fn parity_grad_extent_claim() {
     let path = examples_root().join("grad_extent_claim.ch");
     drive_parity(&path, true);

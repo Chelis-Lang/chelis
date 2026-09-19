@@ -253,6 +253,14 @@ enum DeepCallableOrigin {
     Unknown,
     NonCallable,
     Tuple(Vec<DeepCallableOrigin>),
+    Constructor {
+        name: String,
+        payloads: Vec<DeepCallableOrigin>,
+    },
+    Record {
+        name: String,
+        fields: BTreeMap<String, DeepCallableOrigin>,
+    },
 }
 
 impl DeepCallableOrigin {
@@ -274,6 +282,48 @@ impl DeepCallableOrigin {
                     .map(|(left, right)| left.alternate(right))
                     .collect(),
             ),
+            (
+                Self::Constructor {
+                    name: left_name,
+                    payloads: left,
+                },
+                Self::Constructor {
+                    name: right_name,
+                    payloads: right,
+                },
+            ) if left_name == right_name && left.len() == right.len() => Self::Constructor {
+                name: left_name.clone(),
+                payloads: left
+                    .iter()
+                    .zip(right)
+                    .map(|(left, right)| left.alternate(right))
+                    .collect(),
+            },
+            (
+                Self::Record {
+                    name: left_name,
+                    fields: left,
+                },
+                Self::Record {
+                    name: right_name,
+                    fields: right,
+                },
+            ) if left_name == right_name && left.keys().eq(right.keys()) => Self::Record {
+                name: left_name.clone(),
+                fields: left
+                    .iter()
+                    .map(|(field, left)| {
+                        (
+                            field.clone(),
+                            left.alternate(
+                                right
+                                    .get(field)
+                                    .expect("equal record key sets contain every left key"),
+                            ),
+                        )
+                    })
+                    .collect(),
+            },
             (Self::NonCallable, Self::NonCallable) => Self::NonCallable,
             _ => Self::Unknown,
         }
@@ -578,26 +628,43 @@ fn bind_deep_match_pattern(
             }
         }
         DeepTag::PatCtor => {
+            let pattern_name = node.children.first().and_then(atom_name);
             for (index, child) in node.children.iter().skip(1).enumerate() {
                 let child_value = match value {
-                    DeepCallableOrigin::Tuple(values) => values
-                        .get(index)
-                        .cloned()
-                        .unwrap_or(DeepCallableOrigin::Unknown),
+                    DeepCallableOrigin::Constructor { name, payloads }
+                        if pattern_name.is_some_and(|pattern_name| pattern_name == name) =>
+                    {
+                        payloads
+                            .get(index)
+                            .cloned()
+                            .unwrap_or(DeepCallableOrigin::Unknown)
+                    }
                     _ => DeepCallableOrigin::Unknown,
                 };
                 bind_deep_match_pattern(child, &child_value, locals);
             }
         }
         DeepTag::PatRecord => {
+            let pattern_name = node.children.first().and_then(atom_name);
             for field in node.children.iter().skip(1) {
                 let Ok(field) = node_ref(field) else {
                     continue;
                 };
                 if field.tag == DeepTag::Kv
-                    && let Some(value_pattern) = field.children.get(1)
+                    && let [field_name, value_pattern] = field.children
                 {
-                    bind_deep_match_pattern(value_pattern, &DeepCallableOrigin::Unknown, locals);
+                    let field_value = match value {
+                        DeepCallableOrigin::Record { name, fields }
+                            if pattern_name.is_some_and(|pattern_name| pattern_name == name) =>
+                        {
+                            atom_name(field_name)
+                                .and_then(|field_name| fields.get(field_name))
+                                .cloned()
+                                .unwrap_or(DeepCallableOrigin::Unknown)
+                        }
+                        _ => DeepCallableOrigin::Unknown,
+                    };
+                    bind_deep_match_pattern(value_pattern, &field_value, locals);
                 }
             }
         }
@@ -640,6 +707,51 @@ fn deep_callable_origin_in_scope(
                 .map(|child| deep_callable_origin_in_scope(child, callables, locals))
                 .collect(),
         ),
+        DeepTag::App
+            if node
+                .children
+                .first()
+                .and_then(variable_name)
+                .is_some_and(is_constructor_name) =>
+        {
+            DeepCallableOrigin::Constructor {
+                name: variable_name(&node.children[0])
+                    .expect("constructor guard established the name")
+                    .to_string(),
+                payloads: node.children[1..]
+                    .iter()
+                    .map(|child| deep_callable_origin_in_scope(child, callables, locals))
+                    .collect(),
+            }
+        }
+        DeepTag::Record if !node.children.is_empty() => {
+            let Some(name) = atom_name(&node.children[0]) else {
+                return DeepCallableOrigin::Unknown;
+            };
+            let mut fields = BTreeMap::new();
+            for field in &node.children[1..] {
+                let Ok(field) = node_ref(field) else {
+                    return DeepCallableOrigin::Unknown;
+                };
+                if field.tag != DeepTag::Kv {
+                    return DeepCallableOrigin::Unknown;
+                }
+                let [field_name, value] = field.children else {
+                    return DeepCallableOrigin::Unknown;
+                };
+                let Some(field_name) = atom_name(field_name) else {
+                    return DeepCallableOrigin::Unknown;
+                };
+                fields.insert(
+                    field_name.to_string(),
+                    deep_callable_origin_in_scope(value, callables, locals),
+                );
+            }
+            DeepCallableOrigin::Record {
+                name: name.to_string(),
+                fields,
+            }
+        }
         DeepTag::TupleGet if node.children.len() == 2 => {
             let tuple = deep_callable_origin_in_scope(&node.children[0], callables, locals);
             match tuple {
@@ -673,7 +785,6 @@ fn deep_callable_origin_in_scope(
             deep_callable_origin_in_scope(&node.children[1], callables, &scoped)
         }
         DeepTag::Lit
-        | DeepTag::Record
         | DeepTag::RecordUpdate
         | DeepTag::Par
         | DeepTag::PatLit
@@ -4368,6 +4479,13 @@ fn at_least(node: &NodeRef<'_>, minimum: usize) -> Result<(), ResugarError> {
 
 fn starts_uppercase(name: &str) -> bool {
     name.chars().next().is_some_and(char::is_uppercase)
+}
+
+fn is_constructor_name(name: &str) -> bool {
+    name.rsplit(['.', '_'])
+        .find(|component| !component.is_empty())
+        .and_then(|component| component.chars().next())
+        .is_some_and(char::is_uppercase)
 }
 
 fn describe_deep(expr: &DeepExpr) -> String {

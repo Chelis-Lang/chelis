@@ -916,6 +916,7 @@ class SchemaTests(unittest.TestCase):
                     "chelis-compiler-api", "issue_1955_grad_selector_pipeline"
                 ),
                 owned.Identity("chelis-cli", "issue_1955_grad_selector_identity"),
+                owned.Identity("chelis-cli", "parity"),
             }
             <= set(config.standing_targets)
         )
@@ -930,6 +931,12 @@ class SchemaTests(unittest.TestCase):
             "scripts/test_grad_selector_identity_oracle.py": (
                 "ci.yml",
                 "script-unit",
+                "pull_request and push",
+                "chelis#1955",
+            ),
+            "examples/grad_selector_provenance.ch": (
+                "ci.yml",
+                "ci-fast",
                 "pull_request and push",
                 "chelis#1955",
             ),

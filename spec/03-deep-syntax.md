@@ -129,7 +129,8 @@ SHALL NOT omit or rewrite either representation to make them agree, including
 when reconstructing Surf from a lone Deep expression. Callable-origin
 resolution follows the language's binding rules: function declarations are
 available to legal forward references under [04-INF-8], and a `match` pattern
-receives the corresponding origin projected from its scrutinee. Textual
+receives the corresponding origin projected from its scrutinee, including
+recursive tuple, ADT constructor payload, and record-field projection. Textual
 declaration order and pattern introduction SHALL NOT erase either origin.
 
 > **[03-META-3]** Producer-specific keys and `span_*` extensions carry opaque

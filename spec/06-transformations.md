@@ -73,12 +73,15 @@ parameter names are retained as repeated result positions. Each name denotes a
 formal parameter of the target callable's immutable lexical origin, so aliases
 and alias chains do not rename or reorder formals. Branches retain that origin
 only when every path has the same exact lexical identity and ordered formals;
-same-signature lambdas or declarations remain distinct. Unknown names and
-targets without a statically established callable origin are rejected.
+same-signature lambdas or declarations remain distinct. Tuple, ADT constructor,
+and record patterns recursively project callable origins from their scrutinee
+payloads. Unknown names and targets without a statically established callable
+origin are rejected.
 
 The executable [`grad_wrt_order.ch`](../examples/grad_wrt_order.ch) example
 distinguishes written target order from declaration order using unequal
-cotangents.
+cotangents. [`grad_selector_provenance.ch`](../examples/grad_selector_provenance.ch)
+checks and evaluates alias-preserving constructor and record pattern projection.
 
 ### 2.3 Algorithm: Reverse-Mode AD
 

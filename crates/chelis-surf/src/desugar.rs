@@ -19,6 +19,7 @@ use chelis_deep::annotations::{
 };
 use chelis_deep::ast as deep;
 use chelis_vocab::EffectKind;
+use std::collections::BTreeMap;
 use thiserror::Error;
 
 use crate::ast::*;
@@ -312,6 +313,14 @@ enum CallableOrigin {
     Unknown,
     NonCallable,
     Tuple(Vec<CallableOrigin>),
+    Constructor {
+        name: String,
+        payloads: Vec<CallableOrigin>,
+    },
+    Record {
+        name: String,
+        fields: BTreeMap<String, CallableOrigin>,
+    },
 }
 
 impl CallableOrigin {
@@ -335,6 +344,48 @@ impl CallableOrigin {
                     .map(|(left, right)| left.alternate(right))
                     .collect(),
             ),
+            (
+                Self::Constructor {
+                    name: left_name,
+                    payloads: left,
+                },
+                Self::Constructor {
+                    name: right_name,
+                    payloads: right,
+                },
+            ) if left_name == right_name && left.len() == right.len() => Self::Constructor {
+                name: left_name.clone(),
+                payloads: left
+                    .iter()
+                    .zip(right)
+                    .map(|(left, right)| left.alternate(right))
+                    .collect(),
+            },
+            (
+                Self::Record {
+                    name: left_name,
+                    fields: left,
+                },
+                Self::Record {
+                    name: right_name,
+                    fields: right,
+                },
+            ) if left_name == right_name && left.keys().eq(right.keys()) => Self::Record {
+                name: left_name.clone(),
+                fields: left
+                    .iter()
+                    .map(|(field, left)| {
+                        (
+                            field.clone(),
+                            left.alternate(
+                                right
+                                    .get(field)
+                                    .expect("equal record key sets contain every left key"),
+                            ),
+                        )
+                    })
+                    .collect(),
+            },
             (Self::NonCallable, Self::NonCallable) => Self::NonCallable,
             _ => Self::Unknown,
         }
@@ -591,10 +642,17 @@ impl GradSelectorResolver {
             Expr::Var(name, _) => scope.lookup(name),
             Expr::Apply(function, arguments, _) => {
                 self.visit_expr(function, scope)?;
-                for argument in arguments {
-                    self.visit_expr(argument, scope)?;
+                let payloads = arguments
+                    .iter()
+                    .map(|argument| self.visit_expr(argument, scope))
+                    .collect::<Result<Vec<_>, _>>()?;
+                match function.as_ref() {
+                    Expr::Constructor(name, _) => CallableOrigin::Constructor {
+                        name: name.clone(),
+                        payloads,
+                    },
+                    _ => CallableOrigin::Unknown,
                 }
-                CallableOrigin::Unknown
             }
             Expr::List(items, _)
             | Expr::Par(items, _)
@@ -615,12 +673,16 @@ impl GradSelectorResolver {
                     CallableOrigin::NonCallable
                 }
             }
-            Expr::Record(_, fields, _) => {
-                for (_, value) in fields {
-                    self.visit_expr(value, scope)?;
-                }
-                CallableOrigin::NonCallable
-            }
+            Expr::Record(name, fields, _) => CallableOrigin::Record {
+                name: name.clone(),
+                fields: fields
+                    .iter()
+                    .map(|(field, value)| {
+                        self.visit_expr(value, scope)
+                            .map(|origin| (field.clone(), origin))
+                    })
+                    .collect::<Result<_, _>>()?,
+            },
             Expr::RecordUpdate(base, fields, _) => {
                 self.visit_expr(base, scope)?;
                 for (_, value) in fields {
@@ -803,6 +865,49 @@ impl GradSelectorResolver {
                     .map(|child| self.deep_callable_origin(child, scope, lexical_name))
                     .collect(),
             ),
+            DeepTag::App
+                if children
+                    .first()
+                    .and_then(deep_variable_name)
+                    .is_some_and(is_constructor_name) =>
+            {
+                CallableOrigin::Constructor {
+                    name: deep_variable_name(&children[0])
+                        .expect("constructor guard established the name")
+                        .to_string(),
+                    payloads: children[1..]
+                        .iter()
+                        .map(|child| self.deep_callable_origin(child, scope, lexical_name))
+                        .collect(),
+                }
+            }
+            DeepTag::Record if !children.is_empty() => {
+                let Some(name) = children.first().and_then(deep_symbol_name) else {
+                    return CallableOrigin::Unknown;
+                };
+                let mut fields = BTreeMap::new();
+                for field in &children[1..] {
+                    let deep::ExprCarrier::DecodedNode(DeepTag::Kv, _, field_children) =
+                        field.carrier()
+                    else {
+                        return CallableOrigin::Unknown;
+                    };
+                    let [field_name, value] = field_children else {
+                        return CallableOrigin::Unknown;
+                    };
+                    let Some(field_name) = deep_symbol_name(field_name) else {
+                        return CallableOrigin::Unknown;
+                    };
+                    fields.insert(
+                        field_name.to_string(),
+                        self.deep_callable_origin(value, scope, lexical_name),
+                    );
+                }
+                CallableOrigin::Record {
+                    name: name.to_string(),
+                    fields,
+                }
+            }
             DeepTag::TupleGet if children.len() == 2 => {
                 let tuple = self.deep_callable_origin(&children[0], scope, lexical_name);
                 match tuple {
@@ -859,12 +964,13 @@ fn resolve_selector_indices(
     } = target
     else {
         return Err(match target {
-            CallableOrigin::NonCallable | CallableOrigin::Tuple(_) => {
-                DesugarError::NonCallableGradTarget {
-                    target: target_name,
-                    span,
-                }
-            }
+            CallableOrigin::NonCallable
+            | CallableOrigin::Tuple(_)
+            | CallableOrigin::Constructor { .. }
+            | CallableOrigin::Record { .. } => DesugarError::NonCallableGradTarget {
+                target: target_name,
+                span,
+            },
             CallableOrigin::Unknown => DesugarError::UnresolvedGradTarget {
                 target: target_name,
                 span,
@@ -911,7 +1017,22 @@ fn bind_match_pattern(pattern: &Pattern, value: &CallableOrigin, scope: &mut Cal
     match pattern {
         Pattern::Wildcard(..) | Pattern::Lit(..) => {}
         Pattern::Var(name, _) => scope.bind(name.clone(), value.clone()),
-        Pattern::Constructor(_, patterns, _) | Pattern::Tuple(patterns, _) => {
+        Pattern::Constructor(name, patterns, _) => {
+            for (index, pattern) in patterns.iter().enumerate() {
+                let value = match value {
+                    CallableOrigin::Constructor {
+                        name: value_name,
+                        payloads,
+                    } if value_name == name => payloads
+                        .get(index)
+                        .cloned()
+                        .unwrap_or(CallableOrigin::Unknown),
+                    _ => CallableOrigin::Unknown,
+                };
+                bind_match_pattern(pattern, &value, scope);
+            }
+        }
+        Pattern::Tuple(patterns, _) => {
             for (index, pattern) in patterns.iter().enumerate() {
                 let value = match value {
                     CallableOrigin::Tuple(values) => values
@@ -923,9 +1044,19 @@ fn bind_match_pattern(pattern: &Pattern, value: &CallableOrigin, scope: &mut Cal
                 bind_match_pattern(pattern, &value, scope);
             }
         }
-        Pattern::Record(_, fields, _) => {
-            for (_, pattern) in fields {
-                bind_match_pattern(pattern, &CallableOrigin::Unknown, scope);
+        Pattern::Record(name, fields, _) => {
+            for (field, pattern) in fields {
+                let field_value = match value {
+                    CallableOrigin::Record {
+                        name: value_name,
+                        fields,
+                    } if value_name == name => fields
+                        .get(field)
+                        .cloned()
+                        .unwrap_or(CallableOrigin::Unknown),
+                    _ => CallableOrigin::Unknown,
+                };
+                bind_match_pattern(pattern, &field_value, scope);
             }
         }
         Pattern::As(name, pattern, _) => {
@@ -940,6 +1071,20 @@ fn deep_symbol_name(expr: &deep::Expr) -> Option<&str> {
         deep::Expr::Atom(deep::Atom::Name(name), _) => Some(name),
         _ => None,
     }
+}
+
+fn deep_variable_name(expr: &deep::Expr) -> Option<&str> {
+    let deep::ExprCarrier::DecodedNode(DeepTag::Var, _, children) = expr.carrier() else {
+        return None;
+    };
+    children.first().and_then(deep_symbol_name)
+}
+
+fn is_constructor_name(name: &str) -> bool {
+    name.rsplit(['.', '_'])
+        .find(|component| !component.is_empty())
+        .and_then(|component| component.chars().next())
+        .is_some_and(char::is_uppercase)
 }
 
 fn deep_parameter_name(expr: &deep::Expr) -> Option<String> {
@@ -1023,26 +1168,43 @@ fn bind_deep_match_pattern(
             }
         }
         DeepTag::PatCtor => {
+            let pattern_name = children.first().and_then(deep_symbol_name);
             for (index, child) in children.iter().skip(1).enumerate() {
                 let child_value = match value {
-                    CallableOrigin::Tuple(values) => values
-                        .get(index)
-                        .cloned()
-                        .unwrap_or(CallableOrigin::Unknown),
+                    CallableOrigin::Constructor { name, payloads }
+                        if pattern_name.is_some_and(|pattern_name| pattern_name == name) =>
+                    {
+                        payloads
+                            .get(index)
+                            .cloned()
+                            .unwrap_or(CallableOrigin::Unknown)
+                    }
                     _ => CallableOrigin::Unknown,
                 };
                 bind_deep_match_pattern(child, &child_value, scope);
             }
         }
         DeepTag::PatRecord => {
+            let pattern_name = children.first().and_then(deep_symbol_name);
             for field in children.iter().skip(1) {
                 let deep::ExprCarrier::DecodedNode(DeepTag::Kv, _, field_children) =
                     field.carrier()
                 else {
                     continue;
                 };
-                if let Some(value_pattern) = field_children.get(1) {
-                    bind_deep_match_pattern(value_pattern, &CallableOrigin::Unknown, scope);
+                if let [field_name, value_pattern] = field_children {
+                    let field_value = match value {
+                        CallableOrigin::Record { name, fields }
+                            if pattern_name.is_some_and(|pattern_name| pattern_name == name) =>
+                        {
+                            deep_symbol_name(field_name)
+                                .and_then(|field_name| fields.get(field_name))
+                                .cloned()
+                                .unwrap_or(CallableOrigin::Unknown)
+                        }
+                        _ => CallableOrigin::Unknown,
+                    };
+                    bind_deep_match_pattern(value_pattern, &field_value, scope);
                 }
             }
         }

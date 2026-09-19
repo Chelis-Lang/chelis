@@ -217,6 +217,89 @@ fn linked_context_projects_match_bound_callable_origins() {
 }
 
 #[test]
+fn linked_context_projects_constructor_and_record_payload_origins() {
+    let library_decls = chelis_surf::parser::parse_str(
+        "type FnBox = | FnBox(f32 -> f32 -> f32)\n\
+         type Outer = | Outer(FnBox)\n\
+         type FnRecord = | FnRecord { callback: f32 -> f32 -> f32 }\n\
+         type OuterRecord = | OuterRecord { payload: FnRecord }\n\
+         def pkg__pair__pair(x: f32, w: f32) -> f32 = mul(x, w)\n\
+         alias = pkg__pair__pair\n\
+         boxed = FnBox(alias)\n\
+         nested_boxed = Outer(boxed)\n\
+         recorded = FnRecord { callback: alias }\n\
+         nested_recorded = OuterRecord { payload: recorded }\n\
+         ctor_match = match boxed with {\n\
+           | FnBox(chosen) => chosen\n\
+         }\n\
+         nested_ctor_match = match nested_boxed with {\n\
+           | Outer(FnBox(chosen)) => chosen\n\
+         }\n\
+         record_match = match recorded with {\n\
+           | FnRecord { callback: chosen } => chosen\n\
+         }\n\
+         nested_record_match = match nested_recorded with {\n\
+           | OuterRecord { payload: FnRecord { callback: chosen } } => chosen\n\
+         }\n",
+    )
+    .expect("aggregate-payload library parses");
+    let library = chelis_surf::desugar::desugar_program(&library_decls).expect("library desugars");
+    let entry = chelis_surf::parser::parse_str(
+        "selected = (\n\
+           grad(ctor_match, wrt=w),\n\
+           grad(nested_ctor_match, wrt=w),\n\
+           grad(record_match, wrt=w),\n\
+           grad(nested_record_match, wrt=w)\n\
+         )\n",
+    )
+    .expect("aggregate-payload entry parses");
+    assert!(prepare_surf_decls_with_context(&entry, &library, None).is_ok());
+}
+
+#[test]
+fn linked_context_rejects_distinct_or_dynamic_constructor_and_record_payloads() {
+    let library_decls = chelis_surf::parser::parse_str(
+        "def pkg__pair__left(x: f32, w: f32) -> f32 = mul(x, w)\n\
+         def pkg__pair__right(x: f32, w: f32) -> f32 = add(x, w)\n\
+         distinct_ctor = match \
+           (if true then FnBox(pkg__pair__left) else FnBox(pkg__pair__right)) with {\n\
+           | FnBox(chosen) => chosen\n\
+         }\n\
+         dynamic_ctor = match candidates with {\n\
+           | FnBox(chosen) => chosen\n\
+         }\n\
+         distinct_record = match \
+           (if true then FnRecord { callback: pkg__pair__left } else FnRecord { callback: pkg__pair__right }) with {\n\
+           | FnRecord { callback: chosen } => chosen\n\
+         }\n\
+         dynamic_record = match candidates with {\n\
+           | FnRecord { callback: chosen } => chosen\n\
+         }\n",
+    )
+    .expect("negative aggregate-payload library parses");
+    let library = chelis_surf::desugar::desugar_program(&library_decls).expect("library desugars");
+
+    for name in [
+        "distinct_ctor",
+        "dynamic_ctor",
+        "distinct_record",
+        "dynamic_record",
+    ] {
+        let entry = chelis_surf::parser::parse_str(&format!("selected = grad({name}, wrt=w)\n"))
+            .expect("negative entry parses");
+        assert!(
+            matches!(
+                prepare_surf_decls_with_context(&entry, &library, None),
+                Err(PreparationError::SurfDesugar(
+                    DesugarError::UnresolvedGradTarget { .. }
+                ))
+            ),
+            "{name}"
+        );
+    }
+}
+
+#[test]
 fn contradictory_deep_selector_is_rejected_without_rewriting() {
     let source = "(def {} pair (fn {} (params {} x w) (app {} (var {} mul) (var {} x) (var {} w))))\n\
                   (def {} selected (grad {wrt: (var {} w)} (var {} pair) \

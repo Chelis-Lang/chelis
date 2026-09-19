@@ -428,6 +428,206 @@ fn deep_resugaring_projects_match_bound_callable_origins() {
 }
 
 #[test]
+fn surf_constructor_and_record_patterns_project_callable_payload_origins() {
+    let actual = deep(
+        r#"
+def pair(x: f32, w: f32) -> f32 = mul(x, w)
+alias = pair
+boxed = FnBox(alias)
+nested_boxed = Outer(boxed)
+recorded = FnRecord { callback: alias }
+nested_recorded = OuterRecord { payload: recorded }
+def probe() -> unit = {
+  direct_ctor = match boxed with {
+    | FnBox(chosen) => chosen
+  }
+  nested_ctor = match nested_boxed with {
+    | Outer(FnBox(chosen)) => chosen
+  }
+  direct_record = match recorded with {
+    | FnRecord { callback: chosen } => chosen
+  }
+  nested_record = match nested_recorded with {
+    | OuterRecord { payload: FnRecord { callback: chosen } } => chosen
+  }
+  drop((
+    grad(direct_ctor, wrt=w),
+    grad(nested_ctor, wrt=w),
+    grad(direct_record, wrt=w),
+    grad(nested_record, wrt=w),
+    direct_ctor(2.0f32, 3.0f32),
+    direct_record(2.0f32, 3.0f32)
+  ))
+}
+"#,
+    );
+    assert_eq!(actual.matches("(grad ").count(), 4, "{actual}");
+    assert_eq!(actual.matches("wrt: (var {} w)").count(), 4, "{actual}");
+    assert_eq!(
+        actual.matches("(lit {type: (t-prim {} i32)} 1)").count(),
+        4,
+        "{actual}"
+    );
+}
+
+#[test]
+fn surf_constructor_and_record_patterns_reject_distinct_or_dynamic_payload_origins() {
+    for (label, source) in [
+        (
+            "distinct constructor payloads",
+            r#"
+def left(x: f32, w: f32) -> f32 = mul(x, w)
+def right(x: f32, w: f32) -> f32 = add(x, w)
+def probe(flag: bool) -> unit = {
+  boxed = if flag then FnBox(left) else FnBox(right)
+  chosen = match boxed with {
+    | FnBox(value) => value
+  }
+  drop(grad(chosen, wrt=w))
+}
+"#,
+        ),
+        (
+            "dynamic constructor payload",
+            r#"
+def probe(candidates: FnBox) -> unit = {
+  chosen = match candidates with {
+    | FnBox(value) => value
+  }
+  drop(grad(chosen, wrt=w))
+}
+"#,
+        ),
+        (
+            "distinct record payloads",
+            r#"
+def left(x: f32, w: f32) -> f32 = mul(x, w)
+def right(x: f32, w: f32) -> f32 = add(x, w)
+def probe(flag: bool) -> unit = {
+  boxed = if flag then FnRecord { callback: left } else FnRecord { callback: right }
+  chosen = match boxed with {
+    | FnRecord { callback: value } => value
+  }
+  drop(grad(chosen, wrt=w))
+}
+"#,
+        ),
+        (
+            "dynamic record payload",
+            r#"
+def probe(candidates: FnRecord) -> unit = {
+  chosen = match candidates with {
+    | FnRecord { callback: value } => value
+  }
+  drop(grad(chosen, wrt=w))
+}
+"#,
+        ),
+    ] {
+        assert!(
+            matches!(error(source), DesugarError::UnresolvedGradTarget { .. }),
+            "{label}"
+        );
+    }
+}
+
+#[test]
+fn deep_resugaring_projects_constructor_and_record_payload_origins() {
+    let matching = chelis_deep::parser::parse_str(
+        "(def {} pair (fn {} (params {} x w) (app {} (var {} mul) (var {} x) (var {} w))))\n\
+         (def {} alias (var {} pair))\n\
+         (def {} boxed (app {} (var {} FnBox) (var {} alias)))\n\
+         (def {} nested_boxed (app {} (var {} Outer) (var {} boxed)))\n\
+         (def {} recorded (record {} FnRecord (kv {} callback (var {} alias))))\n\
+         (def {} nested_recorded (record {} OuterRecord (kv {} payload (var {} recorded))))\n\
+         (def {} selected \
+           (tuple {} \
+             (match {} (var {} boxed) \
+               (arm {} (pat-ctor {} FnBox (pat-var {} chosen)) () \
+                 (grad {wrt: (var {} w)} (var {} chosen) \
+                   (lit {type: (t-prim {} i32)} 1)))) \
+             (match {} (var {} nested_boxed) \
+               (arm {} (pat-ctor {} Outer (pat-ctor {} FnBox (pat-var {} chosen))) () \
+                 (grad {wrt: (var {} w)} (var {} chosen) \
+                   (lit {type: (t-prim {} i32)} 1)))) \
+             (match {} (var {} recorded) \
+               (arm {} (pat-record {} FnRecord (kv {} callback (pat-var {} chosen))) () \
+                 (grad {wrt: (var {} w)} (var {} chosen) \
+                   (lit {type: (t-prim {} i32)} 1)))) \
+             (match {} (var {} nested_recorded) \
+               (arm {} \
+                 (pat-record {} OuterRecord \
+                   (kv {} payload \
+                     (pat-record {} FnRecord (kv {} callback (pat-var {} chosen))))) \
+                 () \
+                 (grad {wrt: (var {} w)} (var {} chosen) \
+                   (lit {type: (t-prim {} i32)} 1))))))",
+    )
+    .expect("aggregate-payload Deep parses");
+    let surf = resugar_program(&matching).expect("aggregate payload origins resugar");
+    desugar_program(&surf).expect("aggregate payload origins round-trip");
+}
+
+#[test]
+fn deep_resugaring_rejects_distinct_or_dynamic_constructor_and_record_payloads() {
+    for (label, source) in [
+        (
+            "distinct constructor payloads",
+            "(def {} left (fn {} (params {} x w) (app {} (var {} mul) (var {} x) (var {} w))))\n\
+             (def {} right (fn {} (params {} x w) (app {} (var {} add) (var {} x) (var {} w))))\n\
+             (def {} selected \
+               (match {} \
+                 (if {} (lit {} true) \
+                   (app {} (var {} FnBox) (var {} left)) \
+                   (app {} (var {} FnBox) (var {} right))) \
+                 (arm {} (pat-ctor {} FnBox (pat-var {} chosen)) () \
+                   (grad {wrt: (var {} w)} (var {} chosen) \
+                     (lit {type: (t-prim {} i32)} 1)))))",
+        ),
+        (
+            "dynamic constructor payload",
+            "(def {} selected \
+               (match {} (var {} candidates) \
+                 (arm {} (pat-ctor {} FnBox (pat-var {} chosen)) () \
+                   (grad {wrt: (var {} w)} (var {} chosen) \
+                     (lit {type: (t-prim {} i32)} 1)))))",
+        ),
+        (
+            "distinct record payloads",
+            "(def {} left (fn {} (params {} x w) (app {} (var {} mul) (var {} x) (var {} w))))\n\
+             (def {} right (fn {} (params {} x w) (app {} (var {} add) (var {} x) (var {} w))))\n\
+             (def {} selected \
+               (match {} \
+                 (if {} (lit {} true) \
+                   (record {} FnRecord (kv {} callback (var {} left))) \
+                   (record {} FnRecord (kv {} callback (var {} right)))) \
+                 (arm {} (pat-record {} FnRecord \
+                   (kv {} callback (pat-var {} chosen))) () \
+                   (grad {wrt: (var {} w)} (var {} chosen) \
+                     (lit {type: (t-prim {} i32)} 1)))))",
+        ),
+        (
+            "dynamic record payload",
+            "(def {} selected \
+               (match {} (var {} candidates) \
+                 (arm {} (pat-record {} FnRecord \
+                   (kv {} callback (pat-var {} chosen))) () \
+                   (grad {wrt: (var {} w)} (var {} chosen) \
+                     (lit {type: (t-prim {} i32)} 1)))))",
+        ),
+    ] {
+        let deep = chelis_deep::parser::parse_str(source).expect("negative Deep parses");
+        assert!(
+            matches!(
+                resugar_program(&deep),
+                Err(chelis_surf::resugar::ResugarError::UnresolvedGradSelectorTarget { .. })
+            ),
+            "{label}"
+        );
+    }
+}
+
+#[test]
 fn expression_resugaring_and_lone_decompilation_reject_unpreservable_selectors() {
     for (label, source) in [
         (
