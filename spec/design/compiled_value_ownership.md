@@ -405,6 +405,29 @@ finalizers release each stored child exactly once. Because child sets cannot be
 mutated after construction, a value cannot be inserted into itself or create a
 cycle through a later update.
 
+That sentence is about values, and the consuming container entry points below
+do not contradict it, but the reason is worth stating because it is the
+argument the whole last-use optimisation rests on and it is not obvious from
+either half.
+
+A consuming entry point mutates an allocation, not a live value. The operand
+it rewrites is one the verifier proved dead at that point, so no value whose
+child set anyone can still read changes, and [05-OP-44]'s premise is intact at
+the level it speaks about. What changes is the allocation, which the emitter
+reuses for the result instead of allocating a second one and copying.
+
+Acyclicity survives that reuse, and not by assumption. Suppose an in-place
+push made a container `X` reachable from the child `c` it just gained. The
+push does not change `c`, so `X` was already reachable from `c` beforehand.
+Every edge in this heap graph is a strong-owner edge, since each stored child
+is retained by its holder and released by its holder's finalizer, so that
+path ends in a heap-resident strong owner of `X`. The moved operand is a
+second owner on top of it, so the strong count is at least two and the
+in-place arm never runs: the entry point clones and releases instead. The
+same argument covers every child a merge adds, and it is why the runtime's
+count test is the whole check rather than one of several. A value still
+cannot be inserted into itself.
+
 ## C5. Target opaque C ownership ABI
 
 The exact ABI is [05-OP-31..33], [05-OP-44], and all four registries:
