@@ -1722,7 +1722,7 @@ impl HipEmitter {
                     self.kernel_rank,
                     name,
                     Self::comparison_operator(*kind),
-                    Self::dtype_c_type(precision),
+                    Self::comparison_c_type(precision),
                     Self::comparison_value_helpers(precision),
                     lhs,
                     rhs,
@@ -4699,16 +4699,33 @@ impl HipEmitter {
         }
     }
 
+    fn comparison_c_type(precision: Prim) -> &'static str {
+        match precision {
+            Prim::F32 => "float",
+            Prim::F64 => "double",
+            Prim::Bool => "unsigned char",
+            Prim::Int8 => "chelis_i8",
+            Prim::Int16 => "chelis_i16",
+            Prim::Int32 => "chelis_i32",
+            Prim::Int64 => "chelis_i64",
+            Prim::F16 | Prim::Bf16 => "chelis_u16",
+            other => panic!(
+                "HIP comparison type not defined for {} (active dtype set per spec/04-type-system.md §1.1)",
+                other.name()
+            ),
+        }
+    }
+
     fn where_storage_c_type(precision: Prim) -> &'static str {
         match precision {
-            Prim::F16 | Prim::Bf16 => "uint16_t",
-            Prim::F32 => "uint32_t",
-            Prim::F64 => "uint64_t",
+            Prim::F16 | Prim::Bf16 => "chelis_u16",
+            Prim::F32 => "chelis_u32",
+            Prim::F64 => "chelis_u64",
             Prim::Bool => "unsigned char",
-            Prim::Int8 => "int8_t",
-            Prim::Int16 => "int16_t",
-            Prim::Int32 => "int32_t",
-            Prim::Int64 => "int64_t",
+            Prim::Int8 => "chelis_i8",
+            Prim::Int16 => "chelis_i16",
+            Prim::Int32 => "chelis_i32",
+            Prim::Int64 => "chelis_i64",
             other => panic!(
                 "HIP where storage type not defined for {} (active dtype set per spec/04-type-system.md §1.1)",
                 other.name()

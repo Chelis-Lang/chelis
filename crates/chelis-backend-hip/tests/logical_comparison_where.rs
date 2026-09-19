@@ -143,14 +143,14 @@ fn logical_kernels_are_eager_bool8_truth_operations() {
 #[test]
 fn where_selects_raw_stored_bits_for_every_admitted_branch_dtype() {
     for (precision, carrier) in [
-        (Prim::F16, "uint16_t"),
-        (Prim::Bf16, "uint16_t"),
-        (Prim::F32, "uint32_t"),
-        (Prim::F64, "uint64_t"),
-        (Prim::Int8, "int8_t"),
-        (Prim::Int16, "int16_t"),
-        (Prim::Int32, "int32_t"),
-        (Prim::Int64, "int64_t"),
+        (Prim::F16, "chelis_u16"),
+        (Prim::Bf16, "chelis_u16"),
+        (Prim::F32, "chelis_u32"),
+        (Prim::F64, "chelis_u64"),
+        (Prim::Int8, "chelis_i8"),
+        (Prim::Int16, "chelis_i16"),
+        (Prim::Int32, "chelis_i32"),
+        (Prim::Int64, "chelis_i64"),
         (Prim::Bool, "unsigned char"),
     ] {
         let mut dag = Dag::new();

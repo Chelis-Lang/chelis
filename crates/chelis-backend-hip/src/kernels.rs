@@ -10,8 +10,14 @@
 
 /// Device-side helper functions included at the top of every kernel source.
 pub const DEVICE_HELPERS: &str = "\
-#include <stdint.h>
-typedef int64_t chelis_device_metadata;
+typedef signed char chelis_i8;
+typedef short chelis_i16;
+typedef int chelis_i32;
+typedef long long chelis_i64;
+typedef unsigned short chelis_u16;
+typedef unsigned int chelis_u32;
+typedef unsigned long long chelis_u64;
+typedef chelis_i64 chelis_device_metadata;
 #if CHELIS_DEBUG_BOUNDS
 __device__ int chelis_gpu_failure = 0;
 __device__ void chelis_record_failure(int code) {
@@ -55,27 +61,27 @@ __device__ chelis_device_metadata chelis_logical_offset(chelis_device_metadata l
 
 /// Value-decoding helpers needed only by semantic f16/bf16 comparisons.
 pub const REDUCED_FLOAT_COMPARISON_HELPERS: &str = "\
-__device__ float chelis_f32_from_storage_bits(uint32_t bits) {
+__device__ float chelis_f32_from_storage_bits(chelis_u32 bits) {
     union {
-        uint32_t bits;
+        chelis_u32 bits;
         float value;
     } decoded;
     decoded.bits = bits;
     return decoded.value;
 }
-__device__ float chelis_bf16_to_f32(uint16_t value) {
-    return chelis_f32_from_storage_bits(((uint32_t)value) << 16);
+__device__ float chelis_bf16_to_f32(chelis_u16 value) {
+    return chelis_f32_from_storage_bits(((chelis_u32)value) << 16);
 }
-__device__ float chelis_f16_to_f32(uint16_t value) {
-    uint32_t sign = ((uint32_t)value & 0x8000u) << 16;
-    uint32_t exponent = ((uint32_t)value >> 10) & 0x1fu;
-    uint32_t fraction = (uint32_t)value & 0x03ffu;
-    uint32_t bits;
+__device__ float chelis_f16_to_f32(chelis_u16 value) {
+    chelis_u32 sign = ((chelis_u32)value & 0x8000u) << 16;
+    chelis_u32 exponent = ((chelis_u32)value >> 10) & 0x1fu;
+    chelis_u32 fraction = (chelis_u32)value & 0x03ffu;
+    chelis_u32 bits;
     if (exponent == 0) {
         if (fraction == 0) {
             bits = sign;
         } else {
-            uint32_t shifts = 0;
+            chelis_u32 shifts = 0;
             while ((fraction & 0x0400u) == 0) {
                 fraction <<= 1;
                 shifts += 1;
@@ -302,8 +308,7 @@ pub fn count(
     let build_out_shapes = build_array(rank, "output_shape", "out", "sh");
 
     format!(
-        r#"#include <stdint.h>
-{DEVICE_HELPERS}
+        r#"{DEVICE_HELPERS}
 __device__ void chelis_count_record_error(int *count_error, int code) {{
   if (code != 0) atomicCAS(count_error, 0, code);
 }}
@@ -2242,6 +2247,10 @@ mod tests {
         let sum = reduce_sum(8, "k", 0, ElemKind::F32, ElemKind::F32);
         let fill_src = fill(8, "k", ElemKind::F32);
         for src in [&add, &neg, &sum, &fill_src] {
+            assert!(
+                !src.contains("#include <stdint.h>"),
+                "HIPRTC supplies device integer typedefs; host stdint conflicts with hiprtc_runtime.h"
+            );
             assert!(src.contains("__device__ void chelis_flat_to_indices"));
             assert!(src.contains("__device__ chelis_device_metadata chelis_indices_to_flat"));
             assert!(src.contains("__device__ int chelis_gpu_failure = 0;"));

@@ -70,7 +70,7 @@ class SourceMutationTests(unittest.TestCase):
     def test_where_storage_carrier_mutation_fails(self) -> None:
         self.mutate(
             "crates/chelis-backend-hip/src/emit.rs",
-            'Prim::F32 => "uint32_t",',
+            'Prim::F32 => "chelis_u32",',
             'Prim::F32 => "float",',
         )
         with self.assertRaisesRegex(oracle.OracleFailure, "HIP stored-bit where"):

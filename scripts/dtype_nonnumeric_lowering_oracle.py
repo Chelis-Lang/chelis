@@ -65,8 +65,8 @@ def source_contracts() -> tuple[SourceContract, ...]:
             "HIP stored-bit where",
             "crates/chelis-backend-hip/src/emit.rs",
             (
-                'Prim::F32 => "uint32_t",',
-                'Prim::F64 => "uint64_t",',
+                'Prim::F32 => "chelis_u32",',
+                'Prim::F64 => "chelis_u64",',
                 "kernels::where_stored(",
             ),
             ("RiscOp::Where => kernels::binary_elementwise",),
