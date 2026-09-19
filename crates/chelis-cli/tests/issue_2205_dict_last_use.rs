@@ -3,14 +3,22 @@
 //! changes what a program means.
 //!
 //! The same two halves as `issue_2205_container_last_use.rs`, which covers
-//! the list rows. The alias controls pin that every program in which the
-//! rewritten dictionary is still observable somewhere else keeps its value on
-//! both lanes and never aborts: a shared seed grown twice, a tuple-held
-//! alias, a list holding the dictionary twice, an `Option`-held source read
-//! after the insert, and a `dict_merge` whose right-hand side aliases the
-//! consumed left-hand side through a branch and through a match arm. Those
-//! are the shapes on which a verified Move meets a strong-owner count above
-//! one, which is why the consuming entry points check uniqueness at run time.
+//! the list rows.
+//!
+//! The alias controls are a sample, not a quantifier. Each pins one shape in
+//! which the rewritten dictionary stays observable somewhere else, and pins
+//! that this program keeps its value on both lanes and does not abort. Ten
+//! shapes: a shared seed grown twice through recursion, a tuple-held alias,
+//! a list holding the dictionary twice, an `Option`-held source read after
+//! the insert, a branch, an `Option`-held source read after a removal, a
+//! `dict_merge` whose right-hand side aliases the consumed left-hand side
+//! through a branch, the same through a match arm, the same through two
+//! list indices, and a string-keyed program that runs the release paths on
+//! refcounted handles. They are the shapes on which a verified Move meets a
+//! strong-owner count above one, which is why the consuming entry points
+//! check uniqueness at run time. Nothing here proves the property for a
+//! shape not in that list; the run-time check is what covers the rest, and
+//! `dict_owned_mutators.rs` is where its arms are pinned directly.
 //!
 //! The counted receipts are the number of cloning `chelis_dict_insert(`,
 //! `chelis_dict_merge(` and `chelis_dict_remove(` calls the C lane emits for
