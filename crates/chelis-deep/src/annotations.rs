@@ -571,10 +571,40 @@ core_inventory! {
     Destructure, destructure, Present, "destructure";
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, PartialEq, Default)]
 struct Storage {
     core: BTreeMap<MetadataKey, MetadataValue>,
     extensions: ExtensionMap,
+}
+
+// Counted receipt for the shared-storage promise (chelis#2117).
+//
+// `Metadata::clone` must not copy annotation storage; only a write through
+// `Arc::make_mut` may. A test build counts every deep copy so
+// `storage_copies_are_independent_of_clone_count` can assert that promise as
+// a ratio instead of a wall clock. Release builds compile the recorder away.
+#[cfg(test)]
+thread_local! {
+    static STORAGE_COPIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn record_storage_copy() {
+    STORAGE_COPIES.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn record_storage_copy() {}
+
+impl Clone for Storage {
+    fn clone(&self) -> Self {
+        record_storage_copy();
+        Self {
+            core: self.core.clone(),
+            extensions: self.extensions.clone(),
+        }
+    }
 }
 
 /// Empty metadata occupies one pointer and allocates nothing.
@@ -614,7 +644,10 @@ struct Storage {
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct Metadata {
-    storage: Option<Box<Storage>>,
+    /// Shared behind a reference count. Cloning a Deep tree copies one
+    /// pointer per node instead of every node's annotation storage; a write
+    /// copies through `Arc::make_mut`, so sharing stays invisible.
+    storage: Option<std::sync::Arc<Storage>>,
 }
 impl PartialEq for Metadata {
     fn eq(&self, other: &Self) -> bool {
@@ -646,7 +679,7 @@ impl Metadata {
             .is_none_or(|s| s.core.is_empty() && s.extensions.is_empty())
     }
     pub fn insert(&mut self, value: MetadataValue) -> Result<(), MetadataError> {
-        let storage = self.storage.get_or_insert_with(Default::default);
+        let storage = std::sync::Arc::make_mut(self.storage.get_or_insert_with(Default::default));
         if storage.core.contains_key(&value.key()) {
             return Err(invalid(
                 value.key().spelling(),
@@ -658,13 +691,13 @@ impl Metadata {
         Ok(())
     }
     pub fn replace(&mut self, value: MetadataValue) -> Option<MetadataValue> {
-        self.storage
-            .get_or_insert_with(Default::default)
-            .core
-            .insert(value.key(), value)
+        let storage = std::sync::Arc::make_mut(self.storage.get_or_insert_with(Default::default));
+        storage.core.insert(value.key(), value)
     }
     pub fn remove(&mut self, key: MetadataKey) -> Option<MetadataValue> {
-        self.storage.as_mut()?.core.remove(&key)
+        std::sync::Arc::make_mut(self.storage.as_mut()?)
+            .core
+            .remove(&key)
     }
     pub fn values(&self) -> impl Iterator<Item = &MetadataValue> {
         self.storage.iter().flat_map(|s| s.core.values())
@@ -676,7 +709,7 @@ impl Metadata {
         self.storage.as_ref().map_or(&EMPTY, |s| &s.extensions)
     }
     pub fn extensions_mut(&mut self) -> &mut ExtensionMap {
-        &mut self.storage.get_or_insert_with(Default::default).extensions
+        &mut std::sync::Arc::make_mut(self.storage.get_or_insert_with(Default::default)).extensions
     }
 
     /// Visit the live expression leaves and annotations of structural payloads.
@@ -847,5 +880,129 @@ impl ExtensionMap {
                 .or_insert_with(|| value.clone());
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod shared_storage_receipt {
+    use super::{Metadata, MetadataKey, MetadataValue, STORAGE_COPIES, Spanned};
+    use crate::tag::DeepTag;
+    use crate::{Atom, Expr, Span};
+
+    fn span() -> Span {
+        Span::new(0, 0)
+    }
+
+    fn copies_since(start: usize) -> usize {
+        STORAGE_COPIES.with(|count| count.get()) - start
+    }
+
+    fn copies_now() -> usize {
+        STORAGE_COPIES.with(|count| count.get())
+    }
+
+    fn annotated() -> Metadata {
+        let mut metadata = Metadata::default();
+        metadata
+            .insert(MetadataValue::Doc(Spanned::new("note".to_string(), span())))
+            .expect("empty metadata accepts one doc annotation");
+        metadata
+    }
+
+    /// A nested `app` chain of `depth` annotated nodes over one annotated
+    /// `var` leaf, so the tree carries exactly `depth + 1` non-empty
+    /// metadata maps.
+    fn annotated_chain(depth: usize) -> Expr {
+        let mut expr = Expr::node(
+            DeepTag::Var,
+            annotated(),
+            vec![Expr::Atom(Atom::Name("f".to_string()), span())],
+            span(),
+        );
+        for _ in 0..depth {
+            expr = Expr::node(
+                DeepTag::App,
+                annotated(),
+                vec![expr, Expr::Atom(Atom::Int(1), span())],
+                span(),
+            );
+        }
+        expr
+    }
+
+    /// chelis#2117: cloning a Deep tree must not copy its annotation
+    /// storage, so the deep-copy count is a property of how many writes
+    /// the clone performs and not of how many annotated nodes it spans.
+    /// Doubling the node count must leave that count unchanged.
+    ///
+    /// Proved failing first. Reverting only the storage handle to
+    /// `Option<Box<Storage>>`, with this counter and both trees unchanged,
+    /// records `8` deep copies for the 8-node tree and `16` for the
+    /// 16-node tree: a ratio of 2.0 against the 1.0 this asserts, because
+    /// a boxed map is copied once per annotated node on every tree clone.
+    /// The twin below fails the same revert with `0` copies where it
+    /// requires `1`, since an unshared box never needs one.
+    #[test]
+    fn storage_copies_are_independent_of_clone_count() {
+        let small = annotated_chain(7);
+        let large = annotated_chain(15);
+
+        let start = copies_now();
+        let small_clone = small.clone();
+        let small_copies = copies_since(start);
+
+        let start = copies_now();
+        let large_clone = large.clone();
+        let large_copies = copies_since(start);
+
+        assert_eq!(
+            small_copies, 0,
+            "cloning an 8-node annotated tree copied annotation storage"
+        );
+        assert_eq!(
+            large_copies, small_copies,
+            "doubling the annotated node count changed the deep-copy count"
+        );
+        assert_eq!(small_clone, small);
+        assert_eq!(large_clone, large);
+    }
+
+    /// The negative twin: sharing must stay invisible. A write through a
+    /// clone copies exactly the one storage it touches and leaves the
+    /// original alone.
+    #[test]
+    fn writing_through_a_clone_copies_once_and_does_not_alias() {
+        let original = annotated();
+        let mut copy = original.clone();
+
+        let start = copies_now();
+        copy.replace(MetadataValue::Doc(Spanned::new(
+            "rewritten".to_string(),
+            span(),
+        )));
+        assert_eq!(
+            copies_since(start),
+            1,
+            "a write through a shared clone must copy exactly one storage"
+        );
+
+        assert_eq!(
+            original.doc().expect("original keeps its doc").value(),
+            "note"
+        );
+        assert_eq!(
+            copy.doc().expect("clone carries the write").value(),
+            "rewritten"
+        );
+
+        let start = copies_now();
+        copy.remove(MetadataKey::Doc);
+        assert_eq!(
+            copies_since(start),
+            0,
+            "a second write to unshared storage must not copy again"
+        );
+        assert!(copy.is_empty());
+        assert!(!original.is_empty());
     }
 }
