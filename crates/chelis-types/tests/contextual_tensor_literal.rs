@@ -29,7 +29,7 @@ use chelis_types::infer::infer_program;
 /// counts.
 fn pipeline(src: &str) -> (Vec<String>, chelis_types::infer::InferResult) {
     let decls = chelis_surf::parser::parse_str(src).expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
     let printed: Vec<String> = exprs
         .iter()
         .map(|e| {

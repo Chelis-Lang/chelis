@@ -5299,7 +5299,7 @@ fn exported_public_numeric_stdlib_def_is_enumerated() {
          def public_numeric(x: i64) -> i64 = x\n",
     )
     .expect("planted stdlib source parses");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
     let mut rows = Vec::new();
     scan_deftypes(&exprs, "planted", &mut rows);
     assert!(
@@ -6113,7 +6113,7 @@ fn an_unresolvable_array_typedef_is_rejected() {
 /// stdlib enumerator over it.
 fn planted_stdlib_rows(label: &str, source: &str) -> Vec<Row> {
     let decls = chelis_surf::parser::parse_str(source).expect("planted module parses");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
     let mut rows = Vec::new();
     scan_deftypes(&exprs, label, &mut rows);
     rows

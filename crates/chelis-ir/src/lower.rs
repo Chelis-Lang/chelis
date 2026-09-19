@@ -19612,7 +19612,8 @@ mod fused_zero_tests {
                 );
                 let declarations = chelis_surf::parser::parse_str(&source).unwrap();
                 let checked = chelis_types::check_typed_program(
-                    &chelis_surf::desugar::desugar_program(&declarations),
+                    &chelis_surf::desugar::desugar_program(&declarations)
+                        .expect("Surf fixture must desugar"),
                 )
                 .unwrap();
                 let checked = chelis_effects::check_program(&checked).unwrap();
@@ -19726,9 +19727,10 @@ mod fused_zero_tests {
     fn fused_zero_consumer_maps_shared_coefficient_gradients() {
         let source = "def loss(x: tensor[rows, f32], y: tensor[rows, f32]) -> f32 = {\n n = shape(x, 0)\n m = shape(y, 0)\n a = insert(mul(sum(x, 0), scalar_to_tensor(cast(n, f32))), 0, add(n, 0i64))\n b = insert(mul(sum(y, 0), scalar_to_tensor(add(cast(m, f32), 2.0f32))), 0, add(m, 0i64))\n tensor_to_scalar(add(sum(a, 0), sum(b, 0)))\n}\n";
         let declarations = chelis_surf::parser::parse_str(source).unwrap();
-        let checked = chelis_types::check_typed_program(&chelis_surf::desugar::desugar_program(
-            &declarations,
-        ))
+        let checked = chelis_types::check_typed_program(
+            &chelis_surf::desugar::desugar_program(&declarations)
+                .expect("Surf fixture must desugar"),
+        )
         .unwrap();
         let mut ctx = LowerCtx::new(
             BTreeMap::new(),
@@ -20792,9 +20794,11 @@ mod tests {
              }\n",
         )
         .expect("Surf local-ascription fixture parses");
-        let checked =
-            chelis_types::check_ir_program(&chelis_surf::desugar::desugar_program(&declarations))
-                .unwrap_or_else(|report| panic!("fixture type check failed: {:?}", report.errors));
+        let checked = chelis_types::check_ir_program(
+            &chelis_surf::desugar::desugar_program(&declarations)
+                .expect("Surf fixture must desugar"),
+        )
+        .unwrap_or_else(|report| panic!("fixture type check failed: {:?}", report.errors));
         let ascription = checked
             .local_tensor_ascriptions()
             .first()
@@ -22228,7 +22232,8 @@ mod tests {
             "#,
         )
         .expect("parse library");
-        let library_exprs = chelis_surf::desugar::desugar_program(&library_decls);
+        let library_exprs = chelis_surf::desugar::desugar_program(&library_decls)
+            .expect("Surf fixture must desugar");
         let (type_env, library_checked) =
             chelis_types::build_compiled_library_context(&library_exprs).expect("library checks");
         let library_checked =
@@ -22244,7 +22249,8 @@ mod tests {
             "#,
         )
         .expect("parse new code");
-        let new_exprs = chelis_surf::desugar::desugar_program(&new_decls);
+        let new_exprs =
+            chelis_surf::desugar::desugar_program(&new_decls).expect("Surf fixture must desugar");
         let new_checked =
             chelis_types::check_ir_with_context(&type_env, &new_exprs).expect("new code checks");
         let new_checked =

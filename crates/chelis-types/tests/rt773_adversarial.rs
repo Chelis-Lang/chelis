@@ -11,7 +11,7 @@ use chelis_types::{InferResult, check_ir_program};
 fn surf_to_deep_macro(source: &str) -> Vec<Expr> {
     let decls = parse_surf(source).expect("surf parse");
     chelis_macros::expand_program(
-        &desugar_program(&decls),
+        &desugar_program(&decls).expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("macro expand")
@@ -129,7 +129,7 @@ fn is_named_def(expr: &Expr, def_name: &str) -> bool {
 
 fn checked_def(src: &str, def_name: &str) -> Expr {
     let decls = parse_surf(src).expect("surf parse");
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     let checked = check_ir_program(&deep).expect("check");
     checked
         .exprs()
@@ -234,7 +234,8 @@ fn fresh_separate_sig_two_builtins_checks_clean() {
     // 4 params sharing precision var `p` and dim vars n/d/h; let-bound
     // intermediates; three distinct builtins (matmul, permute, mul). Must
     // check clean — the var-ID-collision fix must not spuriously error.
-    let deep = desugar_program(&parse_surf(FRESH_SEPARATE_SIG).expect("surf parse"));
+    let deep = desugar_program(&parse_surf(FRESH_SEPARATE_SIG).expect("surf parse"))
+        .expect("Surf fixture must desugar");
     let rep = check_ir_program(&deep);
     assert!(
         rep.is_ok(),

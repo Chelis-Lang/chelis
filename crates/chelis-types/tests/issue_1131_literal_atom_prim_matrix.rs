@@ -80,7 +80,8 @@ fn integer_spelled_float_suffix_is_marked_by_both_producers() {
          def vector() -> tensor[2, f32] = [1, 2]",
     )
     .expect("Surf producer fixture must parse");
-    let program = chelis_surf::desugar::desugar_program(&declarations);
+    let program =
+        chelis_surf::desugar::desugar_program(&declarations).expect("Surf fixture must desugar");
     let errors = match check_typed_program(&program) {
         Ok(_) => Vec::new(),
         Err(result) => result.errors,

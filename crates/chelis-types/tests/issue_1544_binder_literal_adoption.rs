@@ -37,7 +37,7 @@ fn assert_both(program: &[Expr], expected: Option<&str>, label: &str) {
 
 fn assert_surf(source: &str, expected: Option<&str>) {
     assert_both(
-        &desugar_program(&parse_str(source).expect("Surf")),
+        &desugar_program(&parse_str(source).expect("Surf")).expect("Surf fixture must desugar"),
         expected,
         source,
     );

@@ -26,7 +26,9 @@ use chelis_surf::parser::parse_str;
 
 fn deep_of(source: &str) -> String {
     let decls = parse_str(source).expect("parse");
-    chelis_deep::printer::print_canonical(&desugar_program(&decls))
+    chelis_deep::printer::print_canonical(
+        &desugar_program(&decls).expect("Surf fixture must desugar"),
+    )
 }
 
 #[test]

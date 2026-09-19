@@ -804,7 +804,7 @@ mod builtin_selection_tests {
     use chelis_surf::{desugar::desugar_program, parser::parse_str};
 
     fn selections(source: &str) -> Result<Vec<BuiltinCaseSelection>, InferResult> {
-        let deep = desugar_program(&parse_str(source).unwrap());
+        let deep = desugar_program(&parse_str(source).unwrap()).expect("Surf fixture must desugar");
         run_with_metadata(&deep, |sink| {
             Ok(crate::infer::builtin_selection_probe(&deep, sink))
         })

@@ -1966,7 +1966,7 @@ fn cmd_eval_inner(
             // value root, so eval and C disagreed about owed output. Filter
             // by entry-file declaration identity, but take names/topology
             // exclusively from the manifest.
-            let selected_roots = manifest_root_names_from_decls(&entry_decls, &checked, target);
+            let selected_roots = manifest_root_names_from_decls(&entry_decls, &checked, target)?;
             if json {
                 prepare_eval_json(try_eval_result_for_target(
                     SourceKind::Surf,
@@ -3978,7 +3978,7 @@ fn cmd_build(
         lower_build_program_for_cli(&checked_compilation, &root_manifest, target)?;
     let tensor_root_names = checked_compilation.root_metadata().tensor_names().clone();
     let entry_root_names =
-        lowered_root_names_from_decls(&entry_decls, &deep_exprs, checked.type_env());
+        lowered_root_names_from_decls(&entry_decls, &deep_exprs, checked.type_env())?;
     let selected = tensor_root_names
         .iter()
         .enumerate()
@@ -11394,30 +11394,37 @@ fn lowered_root_names_from_decls(
     decls: &[Decl],
     program_exprs: &[DeepExpr],
     type_env: &BTreeMap<String, DeepExpr>,
-) -> Vec<String> {
-    let deep_exprs = chelis_surf::desugar::desugar_program(decls);
-    lowered_root_names_from_selected_exprs(&deep_exprs, program_exprs, type_env)
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let deep_exprs =
+        chelis_surf::desugar::desugar_program(decls).map_err(|error| error.to_string())?;
+    Ok(lowered_root_names_from_selected_exprs(
+        &deep_exprs,
+        program_exprs,
+        type_env,
+    ))
 }
 
 fn manifest_root_names_from_decls(
     decls: &[Decl],
     checked: &chelis_types::CheckedProgram,
     target: chelis_types::types::Target,
-) -> Vec<String> {
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let mut selected_defs = UnordSet::new();
-    for expr in chelis_surf::desugar::desugar_program(decls) {
+    for expr in chelis_surf::desugar::desugar_program(decls).map_err(|error| error.to_string())? {
         collect_manifest_decl_names(&expr, &mut selected_defs);
     }
     let realizability = chelis_effects::realizability::infer_realizability(
         checked,
         chelis_compiler_api::target_capability::tensor_capable_prims(target),
     );
-    chelis_effects::realizability::compute_root_manifest(checked, &realizability)
-        .entries
-        .into_iter()
-        .filter(|entry| selected_defs.contains(entry.def_name.as_str()))
-        .map(|entry| entry.name)
-        .collect()
+    Ok(
+        chelis_effects::realizability::compute_root_manifest(checked, &realizability)
+            .entries
+            .into_iter()
+            .filter(|entry| selected_defs.contains(entry.def_name.as_str()))
+            .map(|entry| entry.name)
+            .collect(),
+    )
 }
 
 fn collect_manifest_decl_names(expr: &DeepExpr, names: &mut UnordSet<String>) {

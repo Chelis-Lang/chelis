@@ -26,7 +26,7 @@ fn parse(source: &str) -> Vec<chelis_deep::Expr> {
 
 fn surf(source: &str) -> Vec<chelis_deep::Expr> {
     let parsed = chelis_surf::parser::parse_str(source).expect("Surf binder fixture must parse");
-    chelis_surf::desugar::desugar_program(&parsed)
+    chelis_surf::desugar::desugar_program(&parsed).expect("Surf fixture must desugar")
 }
 
 fn assert_legal() {

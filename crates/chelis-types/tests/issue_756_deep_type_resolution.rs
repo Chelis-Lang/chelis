@@ -36,7 +36,8 @@ fn assert_accepts(source: &str, label: &str) {
 fn assert_surf_accepts(source: &str, label: &str) {
     let declarations = chelis_surf::parser::parse_str(source)
         .unwrap_or_else(|error| panic!("{label}: Surf fixture must parse: {error}"));
-    let exprs = chelis_surf::desugar::desugar_program(&declarations);
+    let exprs =
+        chelis_surf::desugar::desugar_program(&declarations).expect("Surf fixture must desugar");
     let fitness = chelis_types::check_program(&exprs);
     assert!(
         fitness.errors.is_empty(),

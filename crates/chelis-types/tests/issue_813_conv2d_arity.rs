@@ -18,7 +18,7 @@ use chelis_types::{BUILTIN_NAMES, check_ir_fitness};
 fn surf_to_deep(source: &str) -> Vec<Expr> {
     let decls = parse_surf(source).expect("Surf fixture must parse");
     chelis_macros::expand_program(
-        &desugar_program(&decls),
+        &desugar_program(&decls).expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("Surf fixture must expand")

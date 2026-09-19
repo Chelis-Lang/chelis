@@ -43,7 +43,8 @@ pub fn lowered_host_program(
     chelis_ir::ownership::VerifiedHostProgram,
 ) {
     let declarations = chelis_surf::parser::parse_str(source).expect("parse host source");
-    let deep = chelis_surf::desugar::desugar_program(&declarations);
+    let deep =
+        chelis_surf::desugar::desugar_program(&declarations).expect("Surf fixture must desugar");
     let checked = chelis_types::check_typed_program(&deep)
         .unwrap_or_else(|errors| panic!("check host source: {:?}", errors.errors));
     let checked = chelis_effects::check_program(&checked).expect("effects host source");

@@ -20,7 +20,7 @@ const UNKNOWN_DTYPES: [&str; 7] = [
 
 fn deep(source: &str) -> String {
     let declarations = parse_str(source).expect("Surf fixture must parse");
-    print_canonical_flat(&desugar_program(&declarations))
+    print_canonical_flat(&desugar_program(&declarations).expect("Surf fixture must desugar"))
 }
 
 fn malformed_defsig(children: Vec<DeepExpr>) -> DeepExpr {
@@ -161,7 +161,8 @@ fn body_only_declaration_binders_synthesize_and_round_trip_a_defsig() {
 
         let program = parse_deep(&rendered).expect("desugared Deep must parse");
         let recovered = resugar_program(&program).expect("body-only binder carrier must resugar");
-        let redeep = print_canonical_flat(&desugar_program(&recovered));
+        let redeep =
+            print_canonical_flat(&desugar_program(&recovered).expect("Surf fixture must desugar"));
         assert!(
             redeep.contains(&format!("(defsig {{}} maker ({binder}) "))
                 && redeep.contains(annotation),
@@ -202,7 +203,7 @@ fn polymorphic_value_defsig_resugars_as_a_standalone_signature() {
         format_program(&recovered),
         "sig empty[p]: List[p]\nempty = Nil\n"
     );
-    let redesugared = desugar_program(&recovered);
+    let redesugared = desugar_program(&recovered).expect("Surf fixture must desugar");
     assert_eq!(
         print_canonical_flat(
             &normalize_deep_for_surface_roundtrip(&redesugared)
@@ -251,7 +252,7 @@ fn polymorphic_property_binders_are_structural_and_round_trip() {
         "Surf AST serialization must retain the property binder list"
     );
 
-    let lowered = desugar_program(&parsed);
+    let lowered = desugar_program(&parsed).expect("Surf fixture must desugar");
     let rendered = print_canonical_flat(&lowered);
     assert!(
         rendered.contains("(defsig {} accepts (p) (t-fn {} (t-var {} p) (t-prim {} bool)))")
@@ -264,8 +265,10 @@ fn polymorphic_property_binders_are_structural_and_round_trip() {
     assert_eq!(format_program(&recovered), source);
     assert_eq!(
         print_canonical_flat(
-            &normalize_deep_for_surface_roundtrip(&desugar_program(&recovered))
-                .expect("recovered property must normalize"),
+            &normalize_deep_for_surface_roundtrip(
+                &desugar_program(&recovered).expect("Surf fixture must desugar")
+            )
+            .expect("recovered property must normalize"),
         ),
         print_canonical_flat(
             &normalize_deep_for_surface_roundtrip(&lowered)
@@ -334,7 +337,7 @@ fn nested_module_body_tensor_precision_binders_round_trip() {
                   }\n\
                   def main() -> tensor[2, f32] = f(to_tensor([1.0f32, 2.0f32]))\n";
     let parsed = parse_str(source).expect("nested-module fixture must parse");
-    let lowered = desugar_program(&parsed);
+    let lowered = desugar_program(&parsed).expect("Surf fixture must desugar");
     let rendered = print_canonical_flat(&lowered);
     assert!(
         rendered.contains("(module ")
@@ -346,8 +349,10 @@ fn nested_module_body_tensor_precision_binders_round_trip() {
     let recovered = resugar_program(&lowered).expect("nested module must resugar");
     assert_eq!(
         print_canonical_flat(
-            &normalize_deep_for_surface_roundtrip(&desugar_program(&recovered))
-                .expect("recovered nested module must normalize"),
+            &normalize_deep_for_surface_roundtrip(
+                &desugar_program(&recovered).expect("Surf fixture must desugar")
+            )
+            .expect("recovered nested module must normalize"),
         ),
         print_canonical_flat(
             &normalize_deep_for_surface_roundtrip(&lowered)
@@ -374,7 +379,7 @@ fn nested_module_property_resugaring_preserves_binders() {
         format_program(&recovered),
         "module Demo.Property\n@property accepts[p] forall(x: p):\n  true\n"
     );
-    let redesugared = desugar_program(&recovered);
+    let redesugared = desugar_program(&recovered).expect("Surf fixture must desugar");
     assert_eq!(
         print_canonical_flat(
             &normalize_deep_for_surface_roundtrip(&redesugared)
@@ -392,8 +397,8 @@ fn monomorphic_properties_keep_the_existing_canonical_spelling() {
     let source = "@property accepts forall(x: i32):\n  true\n";
     let parsed = parse_str(source).expect("monomorphic property parses");
     assert_eq!(format_program(&parsed), source);
-    let recovered =
-        resugar_program(&desugar_program(&parsed)).expect("monomorphic property resugars");
+    let recovered = resugar_program(&desugar_program(&parsed).expect("Surf fixture must desugar"))
+        .expect("monomorphic property resugars");
     assert_eq!(format_program(&recovered), source);
 }
 
@@ -620,7 +625,8 @@ fn declared_but_unused_unbounded_binders_are_preserved() {
         );
         let program = parse_deep(&rendered).expect("desugared Deep must parse");
         let recovered = resugar_program(&program).expect("unused unbounded binder must resugar");
-        let redeep = print_canonical_flat(&desugar_program(&recovered));
+        let redeep =
+            print_canonical_flat(&desugar_program(&recovered).expect("Surf fixture must desugar"));
         assert!(
             redeep.contains("(defsig {} constant (a) "),
             "round-trip must preserve the declared binder: {redeep}"

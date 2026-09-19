@@ -16,7 +16,7 @@ const NON_NUMERIC: &[&str] = &["bool"];
 
 fn diagnostics(source: &str) -> Vec<CheckError> {
     let decls = parse_surf(source).expect("Surf fixture must parse");
-    match check_typed_program(&desugar_program(&decls)) {
+    match check_typed_program(&desugar_program(&decls).expect("Surf fixture must desugar")) {
         Ok(_) => Vec::new(),
         Err(report) => report.errors,
     }

@@ -9,6 +9,7 @@ use chelis_surf::{
 
 fn lower(source: &str) -> Vec<Expr> {
     desugar_program(&parse_str(source).expect("parse source fixture"))
+        .expect("Surf fixture must desugar")
 }
 
 #[test]
@@ -133,7 +134,8 @@ fn the_single_owner_form_satisfies_the_round_trip_law() {
          (def {} identity (fn {} (params {} (x {type: (t-var {} _)})) (var {} x)))",
     )
     .expect("parse canonical owner fixture");
-    let restored = desugar_program(&resugar_program(&program).expect("resugar a declared slot"));
+    let restored = desugar_program(&resugar_program(&program).expect("resugar a declared slot"))
+        .expect("Surf fixture must desugar");
     assert_eq!(
         print_canonical_flat(
             &normalize_deep_for_surface_roundtrip(&restored).expect("normalize restored program")

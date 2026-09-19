@@ -52,7 +52,7 @@ def wrap(x: f32, w: f32) -> Pair = Pair { prob: make(x), weight: w }
 /// declarations supply the field tables and invariants).
 fn program_exprs(source: &str) -> Vec<Expr> {
     let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
-    chelis_surf::desugar::desugar_program(&decls)
+    chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar")
 }
 
 /// Evaluate `source` and return the `ExecutionValue` bound to top-level

@@ -7,13 +7,13 @@ use super::*;
 
 fn surf_errors(src: &str) -> Vec<CheckError> {
     let decls = chelis_surf::parser::parse_str(src).expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
     infer_program(&exprs).errors
 }
 
 fn surf_ir_errors(src: &str) -> Vec<CheckError> {
     let decls = chelis_surf::parser::parse_str(src).expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
     match check_ir_program(&exprs) {
         Ok(_) => Vec::new(),
         Err(result) => result.errors,

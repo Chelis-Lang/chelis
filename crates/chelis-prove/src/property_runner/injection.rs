@@ -38,8 +38,7 @@ pub(super) fn property_has_opaque_invariant_binder(
     decls: &[Decl],
     params: &[Param],
 ) -> Result<bool, String> {
-    let exprs =
-        chelis_surf::desugar::try_desugar_program(decls).map_err(|error| error.to_string())?;
+    let exprs = chelis_surf::desugar::desugar_program(decls).map_err(|error| error.to_string())?;
     let invariants = crate::opaque::collect_opaque_invariants(&exprs);
     Ok(params.iter().any(|p| {
         matches!(&p.ty, Some(TypeExpr::Named(name, _))
@@ -60,7 +59,7 @@ pub(super) fn prove_with_injection(
     let seed = options.injection_seed();
     let samples_needed = options.samples;
 
-    let exprs = match chelis_surf::desugar::try_desugar_program(decls) {
+    let exprs = match chelis_surf::desugar::desugar_program(decls) {
         Ok(exprs) => exprs,
         Err(error) => {
             return outcome(
@@ -106,7 +105,7 @@ pub(super) fn prove_with_injection(
         .map(|parameter| parameter.name.clone())
         .collect::<Vec<_>>();
     let body_deep =
-        match chelis_surf::desugar::try_desugar_expr_in_program_scope(decls, body, &bound_names) {
+        match chelis_surf::desugar::desugar_expr_in_program_scope(decls, body, &bound_names) {
             Ok(body) => body,
             Err(error) => {
                 return outcome(
@@ -123,11 +122,7 @@ pub(super) fn prove_with_injection(
     let pre_deep: Vec<Expr> = match preconditions
         .iter()
         .map(|precondition| {
-            chelis_surf::desugar::try_desugar_expr_in_program_scope(
-                decls,
-                precondition,
-                &bound_names,
-            )
+            chelis_surf::desugar::desugar_expr_in_program_scope(decls, precondition, &bound_names)
         })
         .collect::<Result<_, _>>()
     {

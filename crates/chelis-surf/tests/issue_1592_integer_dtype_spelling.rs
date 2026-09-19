@@ -7,7 +7,9 @@ use chelis_surf::parser::parse_str;
 
 fn deep_of(source: &str) -> String {
     let declarations = parse_str(source).expect("Surf parses");
-    chelis_deep::printer::print_canonical(&desugar_program(&declarations))
+    chelis_deep::printer::print_canonical(
+        &desugar_program(&declarations).expect("Surf fixture must desugar"),
+    )
 }
 
 #[test]

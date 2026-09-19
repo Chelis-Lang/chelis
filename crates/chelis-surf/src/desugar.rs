@@ -66,13 +66,13 @@ impl DesugarError {
 /// Desugar parser-validated declarations. Programmatic callers receive the
 /// same typed failure as source callers; Deep is never constructed with a
 /// guessed selector index.
-pub fn try_desugar_program(decls: &[Decl]) -> Result<Vec<deep::Expr>, DesugarError> {
-    try_desugar_program_with_context(decls, &[])
+pub fn desugar_program(decls: &[Decl]) -> Result<Vec<deep::Expr>, DesugarError> {
+    desugar_program_with_context(decls, &[])
 }
 
 /// Desugar declarations with callable origins supplied by an already checked
 /// linked library context.
-pub fn try_desugar_program_with_context(
+pub fn desugar_program_with_context(
     decls: &[Decl],
     context: &[deep::Expr],
 ) -> Result<Vec<deep::Expr>, DesugarError> {
@@ -95,21 +95,11 @@ pub fn try_desugar_program_with_context(
     Ok(normalize_to_lists(&exprs))
 }
 
-/// Desugar a trusted program, panicking only for a programmatic caller that
-/// violates Surf's semantic admission contract.
-pub fn desugar_program(decls: &[Decl]) -> Vec<deep::Expr> {
-    try_desugar_program(decls).expect("trusted Surf declarations must desugar")
+pub fn desugar_decl_only(decl: &Decl) -> Result<Vec<deep::Expr>, DesugarError> {
+    desugar_program(std::slice::from_ref(decl))
 }
 
-pub fn try_desugar_decl_only(decl: &Decl) -> Result<Vec<deep::Expr>, DesugarError> {
-    try_desugar_program(std::slice::from_ref(decl))
-}
-
-pub fn desugar_decl_only(decl: &Decl) -> Vec<deep::Expr> {
-    try_desugar_decl_only(decl).expect("trusted Surf declaration must desugar")
-}
-
-pub fn try_desugar_expr_only(expr: &Expr) -> Result<deep::Expr, DesugarError> {
+pub fn desugar_expr_only(expr: &Expr) -> Result<deep::Expr, DesugarError> {
     let resolved_grad_indices = GradSelectorResolver::resolve_expression(expr)?;
     Ok(normalize_single(
         &DesugarCtx::with_resolved_grad_indices(resolved_grad_indices).desugar_expr(expr),
@@ -118,15 +108,12 @@ pub fn try_desugar_expr_only(expr: &Expr) -> Result<deep::Expr, DesugarError> {
 
 /// Desugar an expression using the declarations that establish its callable
 /// aliases and formal-parameter identities.
-pub fn try_desugar_expr_in_program(
-    decls: &[Decl],
-    expr: &Expr,
-) -> Result<deep::Expr, DesugarError> {
-    try_desugar_expr_in_program_scope(decls, expr, &[])
+pub fn desugar_expr_in_program(decls: &[Decl], expr: &Expr) -> Result<deep::Expr, DesugarError> {
+    desugar_expr_in_program_scope(decls, expr, &[])
 }
 
 /// Desugar an expression using its program and lexical binder context.
-pub fn try_desugar_expr_in_program_scope(
+pub fn desugar_expr_in_program_scope(
     decls: &[Decl],
     expr: &Expr,
     bound_names: &[String],
@@ -141,10 +128,6 @@ pub fn try_desugar_expr_in_program_scope(
     Ok(normalize_single(
         &DesugarCtx::new(decls, resolved_grad_indices).desugar_expr_with_scope(expr, bound_names),
     ))
-}
-
-pub fn desugar_expr_only(expr: &Expr) -> deep::Expr {
-    try_desugar_expr_only(expr).expect("trusted Surf expression must desugar")
 }
 
 fn normalize_to_lists(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
@@ -825,12 +808,12 @@ fn deep_callable_origin(expr: &deep::Expr, scope: &CallableScope) -> CallableOri
 
 #[cfg(test)]
 fn desugar_decl(decl: &Decl) -> Vec<deep::Expr> {
-    desugar_decl_only(decl)
+    desugar_decl_only(decl).expect("internal Surf declaration fixture must desugar")
 }
 
 #[cfg(test)]
 fn desugar_expr(expr: &Expr) -> deep::Expr {
-    desugar_expr_only(expr)
+    desugar_expr_only(expr).expect("internal Surf expression fixture must desugar")
 }
 
 // ---------------------------------------------------------------------------
@@ -3468,7 +3451,7 @@ mod tests {
   with contract = "std.normal_cdf.range"
 "#;
         let decls = crate::parser::parse_str(source).expect("parse");
-        let deep = desugar_program(&decls);
+        let deep = desugar_program(&decls).expect("Surf fixture must desugar");
         let contracts = deep
             .iter()
             .find_map(|expr| match expr {
@@ -4213,7 +4196,7 @@ mod tests {
     fn typealias_desugaring_uses_its_explicit_binder_scope() {
         let declarations = crate::parser::parse_str("type Matrix[p, rows] = tensor[rows, p]")
             .expect("typealias parses");
-        let deep = desugar_program(&declarations);
+        let deep = desugar_program(&declarations).expect("Surf fixture must desugar");
         assert_eq!(
             print_expr(&deep[0]),
             "(typealias {} Matrix (p rows) (t-tensor {} (d-var {} rows) (t-var {} p)))"
@@ -4224,7 +4207,7 @@ mod tests {
     fn zero_parameter_typealias_dimension_is_symbolic_not_implicitly_bound() {
         let declarations =
             crate::parser::parse_str("type Weights = tensor[n, f32]").expect("alias parses");
-        let deep = desugar_program(&declarations);
+        let deep = desugar_program(&declarations).expect("Surf fixture must desugar");
         assert_eq!(
             print_expr(&deep[0]),
             "(typealias {} Weights () (t-tensor {} (d-name {} n) (t-prim {} f32)))"
@@ -4236,7 +4219,7 @@ mod tests {
         let declarations =
             crate::parser::parse_str("type Batch[rows] = | Batch { values: tensor[rows, f32] }")
                 .expect("deftype parses");
-        let deep = desugar_program(&declarations);
+        let deep = desugar_program(&declarations).expect("Surf fixture must desugar");
         assert_eq!(
             print_expr(&deep[0]),
             "(deftype {}\n  Batch\n  (rows)\n  (variant {}\n    Batch\n    (field {} values (t-tensor {} (d-var {} rows) (t-prim {} f32)))))"

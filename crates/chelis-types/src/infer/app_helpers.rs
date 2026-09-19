@@ -408,7 +408,8 @@ mod dimension_observation_tests {
     fn conv_formula_reads_known_constraints_without_inventing_unknown_extents() {
         let source =
             chelis_surf::parser::parse_str("def f() = conv(x,k,[1i64],[(0i64,0i64)])").unwrap();
-        let program = chelis_surf::desugar::desugar_program(&source);
+        let program =
+            chelis_surf::desugar::desugar_program(&source).expect("Surf fixture must desugar");
         fn conv_args(expr: &deep::Expr) -> Option<&[deep::Expr]> {
             let (tag, _, kids) = stamped_parts(expr)?;
             if tag == DeepTag::App

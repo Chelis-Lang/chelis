@@ -721,7 +721,7 @@ fn prove_surf_property(
     let auto_recursive =
         options.tier == "auto" && property_reaches_recursive_model(decls, property);
     if options.tier == "induction-only" || auto_recursive {
-        let deep = match chelis_surf::desugar::try_desugar_program(decls) {
+        let deep = match chelis_surf::desugar::desugar_program(decls) {
             Ok(deep) => deep,
             Err(error) => {
                 return PropertyOutcome::new(

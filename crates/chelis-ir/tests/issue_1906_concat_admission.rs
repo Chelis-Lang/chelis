@@ -5,7 +5,7 @@ use chelis_ir::host::{HostLoweringSession, host_def_kernel};
 fn checked(src: &str) -> chelis_types::CheckedProgram {
     let parsed = chelis_surf::parser::parse_str(src).expect("parse");
     let expanded = chelis_macros::expand_program(
-        &chelis_surf::desugar::desugar_program(&parsed),
+        &chelis_surf::desugar::desugar_program(&parsed).expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("expand")

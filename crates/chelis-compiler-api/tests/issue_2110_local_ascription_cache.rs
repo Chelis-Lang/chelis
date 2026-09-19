@@ -75,7 +75,8 @@ fn stdlib_and_dependency_cache_roundtrips_preserve_composed_local_obligations() 
     let entry = desugar_program(
         &parse_str("def entry(x: tensor[*, f32]) -> tensor[*, f32] = helper(x)\n")
             .expect("entry parses"),
-    );
+    )
+    .expect("Surf fixture must desugar");
     let checked_entry =
         check_ir_with_context(dependency_decoded.type_env(), &entry).expect("entry checks");
     let composed = CheckedProgram::compose(dependency_decoded.library_checked(), &checked_entry)
@@ -113,7 +114,8 @@ fn contextual_lowering_carries_dependency_local_obligations_into_inlined_helpers
     let entry = desugar_program(
         &parse_str("def entry(x: tensor[*, f32]) -> tensor[2, f32] = helper(x)\n")
             .expect("entry parses"),
-    );
+    )
+    .expect("Surf fixture must desugar");
     let checked_entry =
         check_ir_with_context(dependency.type_env(), &entry).expect("entry checks in context");
     let lowering_map = chelis_ir::lower::top_level_lowering_map_with_context(
@@ -174,7 +176,7 @@ fn composed_sources_with_equal_local_names_and_offsets_lower_their_own_identitie
     .expect("application parses");
     let checked_application = check_ir_with_context(
         dependency.type_env(),
-        &desugar_program(&application_declarations),
+        &desugar_program(&application_declarations).expect("Surf fixture must desugar"),
     )
     .expect("application checks");
     let lowered_dependency =

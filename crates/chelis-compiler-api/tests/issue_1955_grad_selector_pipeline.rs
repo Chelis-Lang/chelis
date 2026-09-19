@@ -29,8 +29,7 @@ fn linked_callable_context_resolves_qualified_aliases_before_layered_checking() 
     let library_decls =
         chelis_surf::parser::parse_str("def pkg__pair__pair(x: f32, w: f32) -> f32 = mul(x, w)\n")
             .expect("library parses");
-    let library =
-        chelis_surf::desugar::try_desugar_program(&library_decls).expect("library desugars");
+    let library = chelis_surf::desugar::desugar_program(&library_decls).expect("library desugars");
     let entry =
         chelis_surf::parser::parse_str("alias = pkg__pair__pair\nselected = grad(alias, wrt=w)\n")
             .expect("entry parses");

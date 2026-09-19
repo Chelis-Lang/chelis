@@ -243,7 +243,7 @@ pub fn parse(request: ParseRequest) -> Result<ParseResult> {
 
 pub fn desugar(request: DesugarRequest) -> Result<DesugarResult> {
     let decls = parse_surf(&request.source)?;
-    let deep_exprs = chelis_surf::desugar::try_desugar_program(&decls).map_err(|error| {
+    let deep_exprs = chelis_surf::desugar::desugar_program(&decls).map_err(|error| {
         stage_error_with_span(
             "desugar",
             error.to_string(),
@@ -7359,9 +7359,9 @@ mod tests {
              }\n",
         )
         .unwrap();
-        let checked =
-            chelis_types::check_ir_program(&chelis_surf::desugar::desugar_program(&declarations))
-                .unwrap();
+        let deep = chelis_surf::desugar::desugar_program(&declarations)
+            .expect("Surf fixture must desugar");
+        let checked = chelis_types::check_ir_program(&deep).unwrap();
         let dag = chelis_ir::host::lower_named_tensor_entry_dag(&checked, "f").unwrap();
         let projected = wire_dag(&dag).unwrap();
         let json = serde_json::to_value(&projected).unwrap();
@@ -7390,9 +7390,9 @@ mod tests {
              } else x\n",
         )
         .unwrap();
-        let checked =
-            chelis_types::check_ir_program(&chelis_surf::desugar::desugar_program(&declarations))
-                .unwrap();
+        let deep = chelis_surf::desugar::desugar_program(&declarations)
+            .expect("Surf fixture must desugar");
+        let checked = chelis_types::check_ir_program(&deep).unwrap();
         let dag = chelis_ir::host::lower_named_tensor_entry_dag(&checked, "f").unwrap();
         let projected = wire_dag(&dag).unwrap();
         let claim = projected

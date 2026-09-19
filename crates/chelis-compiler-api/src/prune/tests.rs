@@ -13,7 +13,7 @@ use chelis_macros::ExpansionOptions;
 fn expand(source: &str) -> Vec<DeepExpr> {
     let decls = chelis_surf::parser::parse_str(source).expect("surf parses");
     chelis_macros::expand_program(
-        &chelis_surf::desugar::desugar_program(&decls),
+        &chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar"),
         &ExpansionOptions::default(),
     )
     .expect("expansion succeeds")

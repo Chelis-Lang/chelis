@@ -273,9 +273,9 @@ fn analyze_surf_document(text: &str) -> DocumentAnalysis {
         ),
     };
 
-    let deep_view = Some(chelis_deep::printer::print_canonical(
-        &chelis_surf::desugar::desugar_program(&decls),
-    ));
+    let deep_view = chelis_surf::desugar::desugar_program(&decls)
+        .ok()
+        .map(|deep| chelis_deep::printer::print_canonical(&deep));
 
     DocumentAnalysis {
         source_kind: SourceKind::Surf,

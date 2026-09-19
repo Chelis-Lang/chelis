@@ -2526,7 +2526,8 @@ mod core_transform_fragment_tests {
                       pair = (reduce, 0i32)\n\
                       mapped = pair.0\n";
         let declarations = chelis_surf::parser::parse_str(source).expect("module values parse");
-        let program = chelis_surf::desugar::desugar_program(&declarations);
+        let program = chelis_surf::desugar::desugar_program(&declarations)
+            .expect("Surf fixture must desugar");
         let items = program.iter().collect::<Vec<_>>();
         let top_level_functions = collect_top_level_function_names(&items);
         let module_values = collect_top_level_transform_values(&items, &top_level_functions);
@@ -2792,7 +2793,8 @@ mod core_transform_fragment_tests {
         let bare_type_variable = "out = vmap(fn (v: a) -> v)(to_tensor([[1.0f32]]))\n";
         let declarations =
             chelis_surf::parser::parse_str(bare_type_variable).expect("bare type variable parses");
-        let program = chelis_surf::desugar::desugar_program(&declarations);
+        let program = chelis_surf::desugar::desugar_program(&declarations)
+            .expect("Surf fixture must desugar");
         let result = crate::infer_program(&program);
         assert!(
             result.errors.iter().any(|error| {
@@ -2855,7 +2857,7 @@ mod cancellation_tests {
              conv(x, k, [0i64], [(0i64, 0i64)])\n",
         )
         .expect("the zero-stride Surf fixture must parse");
-        chelis_surf::desugar::desugar_program(&declarations)
+        chelis_surf::desugar::desugar_program(&declarations).expect("Surf fixture must desugar")
     }
 
     fn observe_check(result: Result<CheckedProgram, InferResult>) -> Observation {

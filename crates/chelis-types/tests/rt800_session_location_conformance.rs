@@ -20,9 +20,12 @@ fn deep_errors(source: &str) -> Vec<CheckError> {
 
 fn surf_errors(source: &str) -> Vec<CheckError> {
     let decls = parse_surf(source).expect("Surf fixture must parse");
-    let exprs = expand_program(&desugar_program(&decls), &ExpansionOptions::default())
-        .expect("Surf fixture must macro-expand")
-        .into_exprs();
+    let exprs = expand_program(
+        &desugar_program(&decls).expect("Surf fixture must desugar"),
+        &ExpansionOptions::default(),
+    )
+    .expect("Surf fixture must macro-expand")
+    .into_exprs();
     check_ir_program(&exprs)
         .expect_err("adversarial Surf fixture must be rejected")
         .errors

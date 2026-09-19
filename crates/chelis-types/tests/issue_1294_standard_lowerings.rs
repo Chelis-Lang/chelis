@@ -11,7 +11,7 @@ use chelis_types::check_ir_program;
 fn check(source: &str) -> Result<(), String> {
     let parsed = parse_str(source).expect("valid Surf fixture");
     let expanded = chelis_macros::expand_program(
-        &desugar_program(&parsed),
+        &desugar_program(&parsed).expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("valid macro expansion")

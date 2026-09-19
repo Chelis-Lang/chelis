@@ -46,7 +46,7 @@ const DEFERRED: [&str; 2] = ["complex64", "int4"];
 
 fn deep_of(source: &str) -> String {
     let decls = parse_str(source).expect("parse");
-    print_canonical_flat(&desugar_program(&decls))
+    print_canonical_flat(&desugar_program(&decls).expect("Surf fixture must desugar"))
 }
 
 /// `(t-prim {} name)` and `(t-var {} name)` renderings. The `{} ` prefix makes
@@ -332,7 +332,8 @@ fn the_surf_deep_round_trip_law_holds_for_every_resugarable_type_variable() {
             let deep = deep_of_source(&source);
             let surf = chelis_surf::decompile::try_decompile_program(&deep)
                 .unwrap_or_else(|error| panic!("`{name}` must still resugar: {error}"));
-            let redesugared = desugar_program(&parse_str(&surf).expect("reparse"));
+            let redesugared = desugar_program(&parse_str(&surf).expect("reparse"))
+                .expect("Surf fixture must desugar");
             assert_eq!(
                 print_canonical_flat(
                     &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&deep)

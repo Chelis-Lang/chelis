@@ -8300,19 +8300,18 @@ struct CanonicalExportedType {
 fn exported_function_type(
     checked: &chelis_pipeline_core::CheckedLibrary,
     internal_name: &str,
-    authored_fallback: impl FnOnce() -> Option<String>,
+    authored_fallback: impl FnOnce() -> Result<Option<String>, String>,
 ) -> Result<CanonicalExportedType, String> {
     if let Some(scheme) = checked.type_env().scheme(internal_name) {
         return canonical_shell_scheme(scheme);
     }
 
+    let type_repr = match checked.program().type_env().get(internal_name) {
+        Some(ty) => Some(canonical_shell_type_repr(ty)),
+        None => authored_fallback()?,
+    };
     Ok(CanonicalExportedType {
-        type_repr: checked
-            .program()
-            .type_env()
-            .get(internal_name)
-            .map(canonical_shell_type_repr)
-            .or_else(authored_fallback),
+        type_repr,
         type_variable_restrictions: Vec::new(),
         collection_obligations: Vec::new(),
     })
@@ -8614,13 +8613,12 @@ fn build_shell_package(
             let signature = if kind == SymbolKind::Value {
                 exported_function_type(checked, &internal, || sig_type_repr(module, name))?
             } else {
+                let type_repr = match checked.program().type_env().get(&internal) {
+                    Some(ty) => Some(canonical_shell_type_repr(ty)),
+                    None => sig_type_repr(module, name)?,
+                };
                 CanonicalExportedType {
-                    type_repr: checked
-                        .program()
-                        .type_env()
-                        .get(&internal)
-                        .map(canonical_shell_type_repr)
-                        .or_else(|| sig_type_repr(module, name)),
+                    type_repr,
                     type_variable_restrictions: Vec::new(),
                     collection_obligations: Vec::new(),
                 }
@@ -8662,17 +8660,23 @@ fn build_shell_package(
     })
 }
 
-fn sig_type_repr(module: &ModuleSource, name: &str) -> Option<String> {
-    let decl = module
+fn sig_type_repr(module: &ModuleSource, name: &str) -> Result<Option<String>, String> {
+    let Some(decl) = module
         .decls
         .iter()
-        .find(|decl| matches!(decl, Decl::Sig { name: decl_name, .. } if decl_name == name))?;
-    let deep = chelis_surf::desugar::desugar_program(std::slice::from_ref(decl));
-    let expr = deep.first()?;
-    let chelis_deep::ast::Expr::List(list, _) = expr else {
-        return None;
+        .find(|decl| matches!(decl, Decl::Sig { name: decl_name, .. } if decl_name == name))
+    else {
+        return Ok(None);
     };
-    list.elements.get(3).map(canonical_shell_type_repr)
+    let deep = chelis_surf::desugar::desugar_program(std::slice::from_ref(decl))
+        .map_err(|error| format!("desugaring signature `{name}` failed: {error}"))?;
+    let Some(expr) = deep.first() else {
+        return Ok(None);
+    };
+    let chelis_deep::ast::Expr::List(list, _) = expr else {
+        return Ok(None);
+    };
+    Ok(list.elements.get(3).map(canonical_shell_type_repr))
 }
 
 fn symbol_effects(module: &ModuleSource, name: &str) -> Vec<String> {
@@ -9964,7 +9968,7 @@ fn access_segments(expr: &Expr) -> Option<(Vec<String>, chelis_deep::Span)> {
 }
 
 fn expanded_desugared_program(decls: &[Decl]) -> Result<Vec<chelis_deep::ast::Expr>, String> {
-    let deep = chelis_surf::desugar::try_desugar_program(decls).map_err(|err| err.to_string())?;
+    let deep = chelis_surf::desugar::desugar_program(decls).map_err(|err| err.to_string())?;
     chelis_macros::expand_program(&deep, &chelis_macros::ExpansionOptions::default())
         .map(|expanded| expanded.into_exprs())
         .map_err(|err| err.to_string())

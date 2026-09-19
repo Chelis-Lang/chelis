@@ -352,7 +352,8 @@ mod tests {
     /// Render Surf source to canonical Deep, as `chelis deep` does for `.ch`.
     fn render_deep(surf: &str) -> Vec<Expr> {
         let decls = chelis_surf::parser::parse_str(surf).expect("surf parse");
-        let deep = chelis_surf::desugar::desugar_program(&decls);
+        let deep =
+            chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
         chelis_macros::expand_program(&deep, &chelis_macros::ExpansionOptions::default())
             .expect("macro expand")
             .into_exprs()

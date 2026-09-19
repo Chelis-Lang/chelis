@@ -22,7 +22,7 @@ use chelis_types::{AxisArgumentLayout, BUILTIN_NAMES, BUILTINS, check_typed_prog
 
 fn typecheck_surf(source: &str) -> Vec<CheckError> {
     let decls = parse_surf(source).expect("surf parse should succeed");
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     match check_typed_program(&deep) {
         Ok(_) => Vec::new(),
         Err(prog_errors) => prog_errors.errors,

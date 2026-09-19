@@ -18,7 +18,7 @@ fn scalar_helpers_normalize_without_quadratic_subtree_copying() {
             }
             let declarations = parse_str(&source).unwrap();
             let started = Instant::now();
-            let deep = desugar_program(&declarations);
+            let deep = desugar_program(&declarations).expect("Surf fixture must desugar");
             let elapsed = started.elapsed();
             assert_eq!(chelis_deep::validate::find_raw_vocabulary_tag(&deep), None);
             assert_eq!(deep.len(), 128, "one definition and signature per helper");

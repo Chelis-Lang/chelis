@@ -40,7 +40,7 @@ fn eval_renderer_demangles_reef_linked_ctor() {
 
 fn checked_surf(source: &str) -> CheckedProgram {
     let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
     chelis_types::check_ir_program(&exprs).expect("ir check")
 }
 
@@ -1324,7 +1324,7 @@ y = index(drop([cast(10, i64), cast(20, i64)], cast(1, i64)), cast(0, i64))
 /// no checked form to evaluate.
 fn expect_unbounded_cast_target_rejection(source: &str, binder: &str, owner: &str) {
     let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
     let errors = chelis_types::check_ir_program(&exprs)
         .expect_err("an unbounded binder is not a primitive type position");
     let subject = format!("cast target `{binder}` in `{owner}` does not name an active primitive");
@@ -1418,7 +1418,7 @@ def choose_and_cast[p_int: Int](left: p_int, right: p_int) -> p_int = cast(left,
 value = choose_and_cast(cast(1, i16), cast(2, i64))
 "#;
     let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
     let errors = chelis_types::check_ir_program(&exprs)
         .expect_err("one bounded precision cannot actualize to two concrete dtypes");
     assert!(
@@ -1936,7 +1936,7 @@ fn eval_deep_with_bindings(
 ) -> Result<String, String> {
     let source = format!("probe = {surf_expr}\n");
     let decls = chelis_surf::parser::parse_str(&source).expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
     let Expr::List(def, _) = &exprs[0] else {
         panic!("desugaring a top-level binding yields one def form");
     };
@@ -2333,7 +2333,7 @@ y = div(a, b)
 #[test]
 fn issue_458_div_f32_over_i32_literal_rejected_before_eval_not_folded() {
     let decls = chelis_surf::parser::parse_str("out = div(1.0, 4)").expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
     let err = chelis_types::check_ir_program(&exprs)
         .expect_err("chelis#458: div(1.0, 4) is a mixed (f32, i32) pair and must be a type error");
     assert!(
@@ -3588,9 +3588,12 @@ fn host_runtime_softmax_axis_out_of_bounds_errors() {
 x = to_tensor([cast(1.0, f32), cast(2.0, f32)])
 y = softmax(x, cast(5, i32))
 "#;
-    let res = chelis_types::check_ir_program(&chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str(src).expect("surf parse"),
-    ));
+    let res = chelis_types::check_ir_program(
+        &chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(src).expect("surf parse"),
+        )
+        .expect("Surf fixture must desugar"),
+    );
     let infer_err = res.expect_err("softmax with out-of-bounds axis must fail infer-time check");
     let joined = infer_err
         .errors
@@ -3922,9 +3925,12 @@ fn type_checker_rejects_mixed_narrow_float_binop_per_spec_5_1() {
     let src = r#"
 def main() -> bf16 = add(cast(1.0, bf16), cast(1.0, f16))
 "#;
-    let res = chelis_types::check_ir_program(&chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str(src).expect("surf parse"),
-    ));
+    let res = chelis_types::check_ir_program(
+        &chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(src).expect("surf parse"),
+        )
+        .expect("Surf fixture must desugar"),
+    );
     assert!(
         res.is_err(),
         "spec §5.1 forbids implicit precision promotion; \

@@ -268,7 +268,7 @@ fn first_duplicate_defsig(exprs: &[chelis_deep::ast::Expr]) -> Option<String> {
 pub fn validate_desugared(source: &str) -> Result<(), ValidationError> {
     let decls = chelis_surf::parser::parse_str(source)
         .map_err(|err| ValidationError::Failed(format!("compiler parse failed: {err}")))?;
-    let deep = chelis_surf::desugar::try_desugar_program(&decls)
+    let deep = chelis_surf::desugar::desugar_program(&decls)
         .map_err(|err| ValidationError::Failed(format!("desugaring failed: {err}")))?;
     let deep = chelis_macros::expand_program(&deep, &chelis_macros::ExpansionOptions::default())
         .map_err(|err| ValidationError::Failed(format!("macro expansion failed: {err}")))?
@@ -1353,8 +1353,9 @@ mod tests {
                       sig planted_pick[p: Numeric]: p -> p -> p\n\
                       def planted_pick(a, b) = a\n";
         let decls = chelis_surf::parser::parse_str(source).expect("bounded Surf parses");
-        let printed =
-            chelis_deep::printer::print_canonical(&chelis_surf::desugar::desugar_program(&decls));
+        let printed = chelis_deep::printer::print_canonical(
+            &chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar"),
+        );
         assert!(
             printed.contains("dtype_bounds: {p: numeric}"),
             "the fixture must actually carry a map-valued key: {printed}"

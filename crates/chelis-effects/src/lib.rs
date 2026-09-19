@@ -1430,7 +1430,7 @@ mod tests {
 
     fn surf_checked(src: &str) -> CheckedProgram {
         let decls = parse_surf(src).expect("surf parse");
-        let deep = desugar_program(&decls);
+        let deep = desugar_program(&decls).expect("Surf fixture must desugar");
         let checked = chelis_types::check_ir_program(&deep).expect("type check");
         check_program(&checked).expect("effect check")
     }
@@ -1479,7 +1479,7 @@ mod tests {
             .spawn(move || {
                 let source = issue_1205_source(operations, flat);
                 let decls = parse_surf(&source).expect("#1205 surf fixture parses");
-                let deep = desugar_program(&decls);
+                let deep = desugar_program(&decls).expect("Surf fixture must desugar");
                 let typed =
                     chelis_types::check_ir_program(&deep).expect("#1205 fixture type checks");
                 reset_effect_work_profile();
@@ -1528,7 +1528,7 @@ mod tests {
     #[test]
     fn effect_annotation_reconstruction_preserves_type_context() {
         let decls = parse_surf("def add_one(x: i32) -> i32 = add(x, 1)").expect("surf parse");
-        let deep = desugar_program(&decls);
+        let deep = desugar_program(&decls).expect("Surf fixture must desugar");
         let typed = chelis_types::check_ir_program(&deep).expect("type check");
         let expected_type_env = typed.type_env().clone();
         let expected_signatures = typed.signature_inference().clone();
@@ -2731,7 +2731,7 @@ buckets = partition(keep, xs)
 "#,
         )
         .expect("surf parse");
-        let deep = desugar_program(&decls);
+        let deep = desugar_program(&decls).expect("Surf fixture must desugar");
         let checked = chelis_types::check_ir_program(&deep).expect("type check");
         let errors = check_program(&checked).expect_err("partition should propagate Random effect");
         assert!(
@@ -2775,7 +2775,7 @@ ys = map(step, xs)
 "#,
         )
         .expect("surf parse");
-        let deep = desugar_program(&decls);
+        let deep = desugar_program(&decls).expect("Surf fixture must desugar");
         let checked = chelis_types::check_ir_program(&deep).expect("type check");
         let errors = check_program(&checked).expect_err("map should propagate Random effect");
         assert!(
@@ -2947,7 +2947,7 @@ def g() -> unit ! {} = test_assert(true, "leak")
 "#,
         )
         .expect("surf parse");
-        let deep = desugar_program(&decls);
+        let deep = desugar_program(&decls).expect("Surf fixture must desugar");
         let checked = chelis_types::check_ir_program(&deep).expect("type check");
         let errors = check_program(&checked)
             .expect_err("def with `! {}` that calls test_assert must be rejected");
@@ -2970,7 +2970,7 @@ def g() -> unit ! {} = f()
 "#,
         )
         .expect("surf parse");
-        let deep = desugar_program(&decls);
+        let deep = desugar_program(&decls).expect("Surf fixture must desugar");
         let checked = chelis_types::check_ir_program(&deep).expect("type check");
         let errors =
             check_program(&checked).expect_err("transitive caller with `! {}` must be rejected");
@@ -2993,7 +2993,7 @@ def test_ok() -> unit ! {Test} = test_assert(true, "ok")
 "#,
         )
         .expect("surf parse");
-        let deep = desugar_program(&decls);
+        let deep = desugar_program(&decls).expect("Surf fixture must desugar");
         let checked = chelis_types::check_ir_program(&deep).expect("type check");
         check_program(&checked).expect("declared Test should accept test_assert caller");
     }
@@ -3009,7 +3009,7 @@ def leak() -> unit ! {IO} = test_assert(true, "sneak")
 "#,
         )
         .expect("surf parse");
-        let deep = desugar_program(&decls);
+        let deep = desugar_program(&decls).expect("Surf fixture must desugar");
         let checked = chelis_types::check_ir_program(&deep).expect("type check");
         let errors =
             check_program(&checked).expect_err("IO-declared fn must not silently acquire Test");
@@ -3033,7 +3033,7 @@ def leak() -> unit ! {IO} = test_assert(true, "sneak")
     /// on a `.dp` MODULE), preserving the `(module ...)` wrapper.
     fn typed_module(src: &str) -> CheckedProgram {
         let decls = parse_surf(src).expect("surf parse");
-        let deep = desugar_program(&decls);
+        let deep = desugar_program(&decls).expect("Surf fixture must desugar");
         chelis_types::check_typed_program(&deep).expect("type check")
     }
 

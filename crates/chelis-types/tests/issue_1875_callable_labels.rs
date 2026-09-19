@@ -374,7 +374,7 @@ use chelis_types::{
 };
 
 fn parse(source: &str) -> Vec<chelis_deep::Expr> {
-    desugar_program(&parse_str(source).expect("fixture parses"))
+    desugar_program(&parse_str(source).expect("fixture parses")).expect("Surf fixture must desugar")
 }
 
 #[test]

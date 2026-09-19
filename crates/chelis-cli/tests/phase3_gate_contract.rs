@@ -246,8 +246,9 @@ fn bare_inherited_random_c_deep_entry_rejects_across_public_paths() {
 fn assert_bare_inherited_random_rejects(kind: SourceKind) {
     let source = "def sample(x: tensor[4, f32]) -> tensor[4, f32] = dropout(x, 0.5f32)\n";
     let decls = chelis_surf::parser::parse_str(source).unwrap();
-    let deep =
-        chelis_deep::printer::print_canonical(&chelis_surf::desugar::desugar_program(&decls));
+    let deep = chelis_deep::printer::print_canonical(
+        &chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar"),
+    );
     let text = match kind {
         SourceKind::Surf => source,
         SourceKind::Deep => deep.as_str(),

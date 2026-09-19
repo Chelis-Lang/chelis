@@ -6,16 +6,24 @@ use chelis_deep::printer::print_canonical;
 use chelis_surf::{
     ast::Decl,
     desugar::{
-        DesugarError, try_desugar_expr_in_program, try_desugar_expr_in_program_scope,
-        try_desugar_program,
+        DesugarError, desugar_decl_only, desugar_expr_in_program, desugar_expr_in_program_scope,
+        desugar_expr_only, desugar_program,
     },
     parser::parse_str,
     resugar::resugar_program,
 };
 
+#[test]
+fn canonical_public_desugar_apis_are_fallible() {
+    let _: fn(&[Decl]) -> Result<Vec<chelis_deep::Expr>, DesugarError> = desugar_program;
+    let _: fn(&Decl) -> Result<Vec<chelis_deep::Expr>, DesugarError> = desugar_decl_only;
+    let _: fn(&chelis_surf::ast::Expr) -> Result<chelis_deep::Expr, DesugarError> =
+        desugar_expr_only;
+}
+
 fn deep(source: &str) -> String {
     let declarations = parse_str(source).expect("Surf fixture parses");
-    print_canonical(&try_desugar_program(&declarations).expect("selector resolves"))
+    print_canonical(&desugar_program(&declarations).expect("selector resolves"))
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
@@ -23,7 +31,7 @@ fn deep(source: &str) -> String {
 
 fn error(source: &str) -> DesugarError {
     let declarations = parse_str(source).expect("Surf fixture parses");
-    try_desugar_program(&declarations).expect_err("selector must reject")
+    desugar_program(&declarations).expect_err("selector must reject")
 }
 
 #[test]
@@ -103,12 +111,12 @@ fn cloned_fragments_resolve_against_program_context_and_lexical_shadowing() {
         panic!("selected value binding")
     };
     let cloned = value.clone();
-    let deep = print_canonical(&[try_desugar_expr_in_program(&declarations, &cloned)
+    let deep = print_canonical(&[desugar_expr_in_program(&declarations, &cloned)
         .expect("cloned expression resolves in program context")]);
     assert!(deep.contains("(lit {type: (t-prim {} i32)} 1)"), "{deep}");
 
     assert!(matches!(
-        try_desugar_expr_in_program_scope(&declarations, &cloned, &["alias".to_string()]),
+        desugar_expr_in_program_scope(&declarations, &cloned, &["alias".to_string()]),
         Err(DesugarError::UnresolvedGradTarget { .. })
     ));
 }
@@ -183,7 +191,7 @@ fn matching_deep_round_trips_and_contradictory_metadata_rejects() {
     )
     .expect("matching Deep parses");
     let surf = resugar_program(&matching).expect("matching selector resugars");
-    let redesugared = try_desugar_program(&surf).expect("matching selector redesugars");
+    let redesugared = desugar_program(&surf).expect("matching selector redesugars");
     let original = chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&matching)
         .expect("normalize original");
     let roundtrip = chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&redesugared)

@@ -363,7 +363,7 @@ pub fn prepare_surf_decls_with_context(
     context: &[chelis_deep::Expr],
     entry: Option<&str>,
 ) -> Result<PreparedProgram, PreparationError> {
-    let desugared = chelis_surf::desugar::try_desugar_program_with_context(decls, context)
+    let desugared = chelis_surf::desugar::desugar_program_with_context(decls, context)
         .map_err(PreparationError::SurfDesugar)?;
     let expanded =
         chelis_macros::expand_program(&desugared, &chelis_macros::ExpansionOptions::default())

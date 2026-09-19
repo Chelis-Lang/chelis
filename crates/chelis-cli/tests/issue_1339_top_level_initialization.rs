@@ -152,7 +152,7 @@ const POSITIVE_OUTPUT: &str = "base = 5\n\
 
 fn surf_program(source: &str) -> Vec<chelis_deep::Expr> {
     let declarations = parse_surf(source).expect("Surf fixture must parse");
-    desugar_program(&declarations)
+    desugar_program(&declarations).expect("Surf fixture must desugar")
 }
 
 fn ingress_diagnostics_for(program: &[chelis_deep::Expr]) -> (Diagnostics, Diagnostics) {

@@ -11,7 +11,7 @@ use chelis_types::errors::CheckError;
 
 fn errors(source: &str) -> Vec<CheckError> {
     let decls = parse_surf(source).expect("Surf fixture parses");
-    match check_typed_program(&desugar_program(&decls)) {
+    match check_typed_program(&desugar_program(&decls).expect("Surf fixture must desugar")) {
         Ok(_) => Vec::new(),
         Err(report) => report.errors,
     }

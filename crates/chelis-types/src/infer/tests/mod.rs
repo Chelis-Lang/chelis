@@ -117,7 +117,7 @@ fn check(src: &str) -> InferResult {
 
 fn checked_surf(src: &str) -> CheckedProgram {
     let decls = chelis_surf::parser::parse_str(src).expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
     check_ir_program(&exprs).expect("IR check")
 }
 
@@ -278,7 +278,7 @@ def use_bool() = identity(true)
 /// a specific failure mode end-to-end.
 fn infer_surf(src: &str) -> InferResult {
     let decls = chelis_surf::parser::parse_str(src).expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
     infer_program(&exprs)
 }
 
@@ -1066,7 +1066,7 @@ fn surf_source_accepts_f64_tensor_ascription() {
     let decls =
         chelis_surf::parser::parse_str("y = (to_tensor([1.0, 2.0, 3.0, 4.0]) : tensor[4, f64])")
             .expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
     let result = infer_program(&exprs);
     assert!(
         !result
@@ -1083,7 +1083,7 @@ fn surf_source_accepts_cast_to_f64_tensor() {
     // v0.2.3: exercise the full pipeline for `cast(tensor, f64)`.
     let decls =
         chelis_surf::parser::parse_str("y = cast(to_tensor([1.5]), f64)").expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
     let result = infer_program(&exprs);
     assert!(
         !result
@@ -1770,7 +1770,7 @@ fn typealias_resolves_in_literal_metadata() {
 /// the test's own fixture, not user input under test.
 fn surf_check_errors(src: &str) -> Vec<CheckError> {
     let decls = chelis_surf::parser::parse_str(src).expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
     match check_ir_program(&exprs) {
         Ok(_) => Vec::new(),
         Err(result) => result.errors,

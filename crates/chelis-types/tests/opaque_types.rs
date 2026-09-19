@@ -35,7 +35,7 @@ fn deep_of_surf(sources: &[&str]) -> Vec<chelis_deep::Expr> {
     for src in sources {
         decls.extend(parse_str(src).expect("surf parse should succeed"));
     }
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     chelis_macros::expand_program(&deep, &chelis_macros::ExpansionOptions::default())
         .expect("macro expansion should succeed")
         .into_exprs()

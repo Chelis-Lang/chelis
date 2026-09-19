@@ -35,7 +35,7 @@ use chelis_types::{check_ir_program, check_linearity};
 /// lower on the source and return the resulting summary rejections.
 fn rejections_for_source(source: &str) -> Vec<SummaryRejection> {
     let decls = parse_str(source).expect("parse_str");
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     let checked = check_ir_program(&deep).expect("check_ir_program");
     let checked = chelis_effects::check_program(&checked).expect("effect check");
     let checked = check_linearity(&checked).expect("linearity check");

@@ -20,7 +20,8 @@ use chelis_surf::parser::parse_str as parse_surf;
 fn check_and_take_keys(source: &str) -> Vec<(usize, bool)> {
     let _ = take_post_app_key_log();
     let decls = parse_surf(source).expect("surf parse should succeed");
-    let _ = crate::check_typed_program(&desugar_program(&decls));
+    let _ =
+        crate::check_typed_program(&desugar_program(&decls).expect("Surf fixture must desugar"));
     take_post_app_key_log()
 }
 

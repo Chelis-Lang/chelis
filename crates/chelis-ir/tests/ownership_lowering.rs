@@ -102,7 +102,7 @@ fn fixture_source(name: &str) -> String {
 
 fn front(source: &str) -> Front {
     let declarations = surf_parse(source).unwrap_or_else(|error| panic!("parse: {error:?}"));
-    let deep = desugar_program(&declarations);
+    let deep = desugar_program(&declarations).expect("Surf fixture must desugar");
     let checked = check_typed_program(&deep)
         .unwrap_or_else(|errors| panic!("type check: {:?}", errors.errors));
     let checked = chelis_effects::check_program(&checked)
@@ -659,7 +659,7 @@ fn all_previously_supported_host_combinators_reach_the_verified_boundary() {
 
 fn assert_front_rejects(source: &str) {
     let declarations = surf_parse(source).expect("negative twin still parses");
-    let deep = desugar_program(&declarations);
+    let deep = desugar_program(&declarations).expect("Surf fixture must desugar");
     assert!(
         check_typed_program(&deep).is_err(),
         "negative twin unexpectedly checked"

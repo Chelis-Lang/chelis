@@ -74,7 +74,7 @@ pub(super) fn check_unlinked_decls(
     options: &ProveOptions<'_>,
     totals: &mut Summary,
 ) -> Status {
-    let deep_exprs = match chelis_surf::desugar::try_desugar_program(decls) {
+    let deep_exprs = match chelis_surf::desugar::desugar_program(decls) {
         Ok(deep) => deep,
         Err(error) => {
             emit_check_failure(options, &[error.to_string()], totals);

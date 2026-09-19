@@ -15,7 +15,7 @@ use chelis_types::types::Prim;
 fn surf_to_deep(source: &str) -> Vec<chelis_deep::Expr> {
     let decls = parse_str(source).expect("surf parse");
     chelis_macros::expand_program(
-        &desugar_program(&decls),
+        &desugar_program(&decls).expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("macro expand")
@@ -161,7 +161,7 @@ fn literal_suffix_f32_is_implemented_per_spec_5_5() {
         ),
     };
     let exprs = chelis_macros::expand_program(
-        &desugar_program(&decls),
+        &desugar_program(&decls).expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("macro expand")
@@ -188,7 +188,7 @@ fn literal_suffix_i64_is_implemented_per_spec_5_5() {
         ),
     };
     let exprs = chelis_macros::expand_program(
-        &desugar_program(&decls),
+        &desugar_program(&decls).expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("macro expand")
@@ -211,7 +211,7 @@ fn literal_suffix_f8e4m3_is_lex_error_per_spec_5_5() {
         // else is divergence. If desugar/check don't catch it either,
         // it's silent acceptance — a SPEC-DIVERGENCE finding.
         let exprs = chelis_macros::expand_program(
-            &desugar_program(&decls),
+            &desugar_program(&decls).expect("Surf fixture must desugar"),
             &chelis_macros::ExpansionOptions::default(),
         )
         .expect("macro expand")
@@ -232,7 +232,7 @@ fn literal_suffix_u8_is_lex_error_per_spec_5_5() {
     let src = "def main() -> i32 = 42u8";
     if let Ok(decls) = chelis_surf::parser::parse_str(src) {
         let exprs = chelis_macros::expand_program(
-            &desugar_program(&decls),
+            &desugar_program(&decls).expect("Surf fixture must desugar"),
             &chelis_macros::ExpansionOptions::default(),
         )
         .expect("macro expand")
