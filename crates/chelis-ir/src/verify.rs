@@ -416,9 +416,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                     }
                     let active_numeric = lhs.output_type.precision.is_numeric()
                         && lhs.output_type.precision.is_admissible_active();
-                    if !active_numeric
-                        && lhs.output_type.precision != Prim::Bool
-                    {
+                    if !active_numeric && lhs.output_type.precision != Prim::Bool {
                         errors.push(format!(
                             "comparison {} at node {} requires active numeric or bool operands",
                             kind.surf_name(),

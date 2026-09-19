@@ -2290,13 +2290,11 @@ impl WireDag {
                     );
                     let operand = Prim::parse_interchange_name(&lhs.output_type.precision);
                     let valid_operand = operand.is_some_and(|prim| {
-                        (prim.is_numeric() && prim.is_admissible_active())
-                            || prim == Prim::Bool
+                        (prim.is_numeric() && prim.is_admissible_active()) || prim == Prim::Bool
                     });
                     let valid_ordered_operand = !ordered
-                        || operand.is_some_and(|prim| {
-                            prim.is_numeric() && prim.is_admissible_active()
-                        });
+                        || operand
+                            .is_some_and(|prim| prim.is_numeric() && prim.is_admissible_active());
                     if lhs.output_type.precision != rhs.output_type.precision
                         || !same_shape
                         || !output_shape
