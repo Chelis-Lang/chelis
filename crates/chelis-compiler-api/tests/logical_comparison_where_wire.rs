@@ -2,6 +2,7 @@ use chelis_compiler_api::schema::{
     WIRE_DAG_SCHEMA_VERSION, WireComparisonKind, WireDag, WireDagDecodeError, WireLogicalKind,
     WireRiscOp,
 };
+use chelis_types::types::Prim;
 
 fn payload(op: serde_json::Value, inputs: Vec<u64>, precision: &str) -> String {
     let mut nodes = vec![
@@ -497,6 +498,74 @@ fn wire_v15_rejects_unresolved_anonymous_shape_authority() {
     let mut laundered_logical = producerless_logical;
     laundered_logical["nodes"][2]["shape_deps"] = serde_json::json!([0]);
     assert_contract_error(&laundered_logical, LOGICAL_CONTRACT);
+}
+
+#[test]
+fn wire_v15_rejects_operation_provenance_laundering() {
+    let malformed_add = wire_dag_payload(
+        vec![
+            wire_node(0, "left", named_dims("", None), "f32", vec![]),
+            wire_node(1, "unrelated", named_dims("", None), "f32", vec![]),
+            wire_operation_node(
+                2,
+                serde_json::json!({"kind": "add"}),
+                vec![0, 1],
+                named_dims("", None),
+                "f32",
+            ),
+            serde_json::json!({
+                "id": 3,
+                "op": {"kind": "compare", "comparison": "eq"},
+                "inputs": [2, 0],
+                "shape_deps": [0],
+                "span_id": null,
+                "merged_spans": [],
+                "output_type": {"dims": named_dims("", None), "precision": "bool"}
+            }),
+        ],
+        3,
+    );
+    assert_contract_error(
+        &malformed_add,
+        "WireDag Compare node 3 requires two same-shape, same-precision active numeric or bool operands and a same-shape Bool output; ordered comparisons require active numeric operands",
+    );
+
+    let fill = chelis_types::scalar_from_f64("wire Pad provenance", Prim::F32, 0.0).unwrap();
+    let nonidentity_pad = wire_dag_payload(
+        vec![
+            wire_node(0, "input", named_dims("", None), "f32", vec![]),
+            serde_json::json!({
+                "id": 1,
+                "op": {
+                    "kind": "pad",
+                    "padding": [[
+                        {"bound": "lit", "value": 1},
+                        {"bound": "lit", "value": 0}
+                    ]],
+                    "fill": fill
+                },
+                "inputs": [0],
+                "shape_deps": [0],
+                "span_id": null,
+                "merged_spans": [],
+                "output_type": {"dims": named_dims("", None), "precision": "f32"}
+            }),
+            serde_json::json!({
+                "id": 2,
+                "op": {"kind": "compare", "comparison": "eq"},
+                "inputs": [1, 0],
+                "shape_deps": [0],
+                "span_id": null,
+                "merged_spans": [],
+                "output_type": {"dims": named_dims("", None), "precision": "bool"}
+            }),
+        ],
+        2,
+    );
+    assert_contract_error(
+        &nonidentity_pad,
+        "WireDag Compare node 2 requires two same-shape, same-precision active numeric or bool operands and a same-shape Bool output; ordered comparisons require active numeric operands",
+    );
 }
 
 #[test]

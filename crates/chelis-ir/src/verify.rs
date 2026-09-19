@@ -37,6 +37,22 @@ fn scalar_axis_source(dag: &Dag, value: NodeId) -> Option<(NodeId, usize)> {
     }
 }
 
+fn anonymous_declared_shape_source(
+    dag: &Dag,
+    owner: &crate::dag::DagNode,
+    relevant_shape_sources: &[NodeId],
+) -> Option<NodeId> {
+    if !matches!(owner.op, RiscOp::Const { .. } | RiscOp::ConstTensor { .. }) {
+        return None;
+    }
+    owner.shape_deps.iter().copied().find(|source| {
+        relevant_shape_sources.contains(source)
+            && dag
+                .get(*source)
+                .is_some_and(|source| source.output_type.dims.len() == owner.output_type.dims.len())
+    })
+}
+
 fn semantic_dim_expr(
     dag: &Dag,
     node: NodeId,
@@ -53,13 +69,8 @@ fn semantic_dim_expr(
         dim,
         DimInfo::Named(name, None) if name.is_empty() || name == "*"
     ) {
-        if let Some(source) = owner.shape_deps.iter().find(|source| {
-            relevant_shape_sources.contains(source)
-                && dag.get(**source).is_some_and(|source| {
-                    source.output_type.dims.len() == owner.output_type.dims.len()
-                })
-        }) {
-            return semantic_dim_expr(dag, *source, axis, fuel - 1, relevant_shape_sources);
+        if let Some(source) = anonymous_declared_shape_source(dag, owner, relevant_shape_sources) {
+            return semantic_dim_expr(dag, source, axis, fuel - 1, relevant_shape_sources);
         }
         if matches!(owner.op, RiscOp::Where)
             && let Some(dim) = owner.inputs.iter().skip(1).find_map(|source| {
@@ -92,17 +103,21 @@ fn semantic_axis_origin(
         return None;
     }
     let owner = dag.get(node)?;
+    if let Ok(Some(agreement)) = crate::axis_sources::same_shape_result_agreement(dag, node) {
+        let mut origins = agreement.members().iter().map(|source| {
+            semantic_axis_origin(dag, *source, axis, fuel - 1, relevant_shape_sources)
+        });
+        let first = origins.next()??;
+        return origins
+            .all(|origin| origin.is_some_and(|origin| origin == first))
+            .then_some(first);
+    }
     if matches!(
         owner.output_type.dims.get(axis),
         Some(DimInfo::Named(name, None)) if name.is_empty() || name == "*"
     ) {
-        if let Some(source) = owner.shape_deps.iter().find(|source| {
-            relevant_shape_sources.contains(source)
-                && dag.get(**source).is_some_and(|source| {
-                    source.output_type.dims.len() == owner.output_type.dims.len()
-                })
-        }) {
-            return semantic_axis_origin(dag, *source, axis, fuel - 1, relevant_shape_sources);
+        if let Some(source) = anonymous_declared_shape_source(dag, owner, relevant_shape_sources) {
+            return semantic_axis_origin(dag, source, axis, fuel - 1, relevant_shape_sources);
         }
         if matches!(owner.op, RiscOp::Where)
             && let Some(origin) = owner.inputs.iter().skip(1).find_map(|source| {
@@ -135,17 +150,20 @@ fn static_axis_extent(
         return None;
     }
     let owner = dag.get(node)?;
+    if let Ok(Some(agreement)) = crate::axis_sources::same_shape_result_agreement(dag, node) {
+        let mut extents = agreement
+            .members()
+            .iter()
+            .map(|source| static_axis_extent(dag, *source, axis, fuel - 1, relevant_shape_sources));
+        let first = extents.next()??;
+        return extents.all(|extent| extent == Some(first)).then_some(first);
+    }
     if matches!(
         owner.output_type.dims.get(axis),
         Some(DimInfo::Named(name, None)) if name.is_empty() || name == "*"
     ) {
-        if let Some(source) = owner.shape_deps.iter().find(|source| {
-            relevant_shape_sources.contains(source)
-                && dag.get(**source).is_some_and(|source| {
-                    source.output_type.dims.len() == owner.output_type.dims.len()
-                })
-        }) {
-            return static_axis_extent(dag, *source, axis, fuel - 1, relevant_shape_sources);
+        if let Some(source) = anonymous_declared_shape_source(dag, owner, relevant_shape_sources) {
+            return static_axis_extent(dag, source, axis, fuel - 1, relevant_shape_sources);
         }
         if matches!(owner.op, RiscOp::Where)
             && let Some(extent) = owner.inputs.iter().skip(1).find_map(|source| {

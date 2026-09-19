@@ -5164,19 +5164,22 @@ impl<'a> HostEmitter<'a> {
             "min_elem",
             "max_elem",
         ];
-        // A TENSOR operand reaching these scalar operator arms means the
-        // op has no tensor emission arm (the tensor block above returned
-        // early for every op that has one) - emitting `cos(ptr)` or
-        // `a + b` over `chelis_tensor*` is garbage C that fails (or
-        // corrupts) at the user's compiler. This is the loud terminal the
+        // A TENSOR operand reaching these scalar operator arms normally means
+        // the op has no tensor emission arm (the tensor block above returned
+        // early for every such op). `cmplt` is the one legacy host-capable
+        // exception: its expression arm below calls the dtype-dispatched,
+        // shape-validating `chelis_tensor_cmplt` runtime entry. Emitting
+        // `cos(ptr)` or `a + b` over `chelis_tensor*` is garbage C that fails
+        // (or corrupts) at the user's compiler. This is the loud terminal the
         // section C3 laundering rule requires for the recoverable
-        // `lower_transcendental` raise: the speculative-probe fallback
-        // lands here and errs instead of emitting.
-        if SCALAR_NUMERIC_BUILTINS.contains(&name)
-            && arg_vars
-                .iter()
-                .any(|(_, arg_ty)| matches!(arg_ty, HostType::Tensor(_)))
-        {
+        // `lower_transcendental` raise: the speculative-probe fallback lands
+        // here and errs instead of emitting.
+        let tensor_args = arg_vars
+            .iter()
+            .filter(|(_, arg_ty)| matches!(arg_ty, HostType::Tensor(_)))
+            .count();
+        let admitted_tensor_cmplt = name == "cmplt" && tensor_args == 2 && arg_vars.len() == 2;
+        if SCALAR_NUMERIC_BUILTINS.contains(&name) && tensor_args != 0 && !admitted_tensor_cmplt {
             return Err(Unsupported::new(
                 UnsupportedKind::Builtin(name.to_string()),
                 "tensor operands in `chelis build` host emission (no tensor \

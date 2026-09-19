@@ -1,7 +1,7 @@
 //! Authoritative IR oracle for chelis#1284, chelis#630, and chelis#666.
 
 use chelis_ir::dag::{
-    ComparisonKind, Dag, DimInfo, ExtentWitnessSite, LogicalKind, RiscOp, RtAxis, TensorType,
+    ComparisonKind, Dag, DimInfo, ExtentWitnessSite, LogicalKind, RiscOp, RtAxis, RtDim, TensorType,
 };
 use chelis_ir::eval::{TensorValue, eval_tensor};
 use chelis_ir::fuse::fuse;
@@ -1090,6 +1090,84 @@ fn verifier_rejects_unrelated_shape_authority_and_producerless_anonymous_outputs
             .iter()
             .any(|error| error.contains("exactly matching shape")),
         "an unresolved anonymous input must not launder logical output authority"
+    );
+}
+
+#[test]
+fn verifier_rejects_shape_dependencies_that_override_operation_provenance() {
+    let anonymous = |precision| TensorType {
+        dims: vec![DimInfo::Named(String::new(), None)],
+        precision,
+    };
+
+    let mut add_dag = Dag::new();
+    let left = add_dag.add_node(
+        RiscOp::Load {
+            name: "left".into(),
+        },
+        vec![],
+        anonymous(Prim::F32),
+        None,
+    );
+    let unrelated = add_dag.add_node(
+        RiscOp::Load {
+            name: "unrelated".into(),
+        },
+        vec![],
+        anonymous(Prim::F32),
+        None,
+    );
+    let sum = add_dag.add_node(
+        RiscOp::Add,
+        vec![left, unrelated],
+        anonymous(Prim::F32),
+        None,
+    );
+    let comparison = add_dag.add_node(
+        RiscOp::Compare(ComparisonKind::Eq),
+        vec![sum, left],
+        anonymous(Prim::Bool),
+        None,
+    );
+    add_dag.add_shape_dep(comparison, left);
+    assert!(
+        verify::verify(&add_dag)
+            .iter()
+            .any(|error| error.contains("operand shape")),
+        "a malformed same-shape operation must not inherit only its first input's axis"
+    );
+
+    let mut pad_dag = Dag::new();
+    let input = pad_dag.add_node(
+        RiscOp::Load {
+            name: "input".into(),
+        },
+        vec![],
+        anonymous(Prim::F32),
+        None,
+    );
+    let padded = pad_dag.add_node(
+        RiscOp::Pad {
+            padding: vec![(RtDim::Lit(1), RtDim::Lit(0))],
+            fill: chelis_types::scalar_from_f64("pad provenance", Prim::F32, 0.0).unwrap(),
+        },
+        vec![input],
+        anonymous(Prim::F32),
+        None,
+    );
+    pad_dag.add_shape_dep(padded, input);
+    let comparison = pad_dag.add_node(
+        RiscOp::Compare(ComparisonKind::Eq),
+        vec![padded, input],
+        anonymous(Prim::Bool),
+        None,
+    );
+    pad_dag.add_shape_dep(comparison, input);
+    assert!(
+        verify::verify(&pad_dag)
+            .iter()
+            .any(|error| error.contains("operand shape")),
+        "a nonzero Pad shape dependency must not override its computed axis"
     );
 }
 
