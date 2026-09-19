@@ -13,6 +13,7 @@ import unittest
 from unittest import mock
 
 from scripts import ci_change_owned as owned
+from scripts import ci_detect_docs_only as detect
 
 
 OWNER = {
@@ -3765,6 +3766,105 @@ class ReportTests(unittest.TestCase):
         self.assertFalse(report["success"])
         self.assertFalse(report["observed_success"])
         self.assertTrue(report["failures"])
+
+
+class RoutingInventoryReconciliationTests(unittest.TestCase):
+    """Reconcile the routing rules against the tree instead of copying it.
+
+    `AGENTS.md` § Guard Inventories: "A guard list carries a reviewed
+    disposition per row or is regenerated from the source tree. Do not
+    hand-maintain a second copy of tree membership," and "Regeneration may
+    discover rows; it must never assign reviewed semantic authority."
+
+    The `[[path_rule]]` set names workflow files one by one, so it is a
+    second copy of what is in `.github/workflows/`, and nothing reconciled
+    the two. Sixteen workflows had drifted out of it by 2026-09-19, and the
+    first code-bearing pull request to touch one lost the required
+    `Integration Tests (Linux)` context to `unclassified changed path`
+    (chelis#2232, instances chelis#2225 and chelis#2231).
+
+    These tests are the reconciliation. They discover a path the set does
+    not route and fail naming it; they do not invent its row, because which
+    job owns a file is a reviewed judgement and a generated guess would be
+    the "assign reviewed semantic authority" the contract forbids. A
+    directory-wide default was rejected instead: two matching rules
+    classify as `ambiguous_rule`, so a catch-all prefix would break every
+    workflow that carries a specific row.
+    """
+
+    ROOT = Path(__file__).resolve().parents[1]
+
+    def classify(self, paths):
+        config = owned.read_config(self.ROOT / ".config/ci-test-targets.toml")
+        classified = []
+        for path in paths:
+            # No workspace package can own any path checked here, so the
+            # empty package list is exact rather than an approximation and
+            # keeps the reconciliation free of `cargo metadata`.
+            self.assertFalse(
+                path.startswith("crates/"),
+                f"{path} may be package-owned; classify it with real metadata",
+            )
+            classified.append(
+                (path, owned.static_path_classification(path, (), config)[0])
+            )
+        return classified
+
+    def assert_all_routed(self, paths, *, what):
+        unrouted = [
+            f"{path} ({classification})"
+            for path, classification in self.classify(sorted(paths))
+            if classification not in {"rule", "package"}
+        ]
+        self.assertEqual(
+            unrouted,
+            [],
+            f"{len(unrouted)} {what} have no routing rule in "
+            ".config/ci-test-targets.toml, so the first code-bearing pull "
+            "request to touch one fails the planner with 'unclassified "
+            "changed path' and the required Integration Tests (Linux) "
+            "context cannot report. Add a reviewed [[path_rule]] for each, "
+            "naming the job that actually validates it; do not route it to "
+            "a job that does not.",
+        )
+
+    def test_every_workflow_file_is_routed(self) -> None:
+        workflows = [
+            str(path.relative_to(self.ROOT))
+            for path in (self.ROOT / ".github/workflows").iterdir()
+            if path.suffix in {".yml", ".yaml"} and path.is_file()
+        ]
+
+        self.assertGreater(len(workflows), 20, "workflow discovery found too few")
+        self.assert_all_routed(workflows, what="workflow files")
+
+    def test_every_control_artifact_the_detector_names_is_routed(self) -> None:
+        """The two lists must agree, and something must check that they do.
+
+        chelis#2225 was a document present in the docs-only detector's
+        executable set and absent from the routing rules. Being in that set
+        means `is_docs_only` refuses it, so without a rule it classifies as
+        `unclassified` rather than `docs`; the detector entry is what turns
+        a missing rule into a failed required context.
+        """
+
+        paths = sorted(detect.EXECUTABLE_DOC_PATHS | detect.DIAGNOSTIC_KIND_PATHS)
+        non_package = [path for path in paths if not path.startswith("crates/")]
+
+        self.assertGreater(len(non_package), 10, "detector discovery found too few")
+        self.assert_all_routed(non_package, what="detector control artifacts")
+
+    def test_the_reconciliation_fails_on_an_unrouted_path(self) -> None:
+        """The check must bite: an unrouted path is not silently accepted."""
+
+        with self.assertRaises(AssertionError) as raised:
+            self.assert_all_routed(
+                [".github/workflows/there-is-no-such-workflow.yml"],
+                what="workflow files",
+            )
+
+        self.assertIn("unclassified", str(raised.exception))
+        self.assertIn("no routing rule", str(raised.exception))
 
 
 if __name__ == "__main__":
