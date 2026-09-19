@@ -149,10 +149,8 @@ fn issue_1125_eval_raw_expr(expr: &Expr) -> Result<RuntimeValue, String> {
         declaration_values: UnordMap::new(),
         named_axis_route_cache: UnordMap::new(),
         named_axis_route_visiting: UnordSet::new(),
-        top_level_defs: UnordMap::new(),
-        sorted_defs_snapshot: None,
+        program: ProgramScope::new(UnordMap::new(), UnordMap::new()),
         declared_signatures: UnordMap::new(),
-        type_env: UnordMap::new(),
         adt_fields: UnordMap::new(),
         adt_registry: chelis_types::adt::AdtRegistry::default(),
         tensor_bindings: &empty_tensors,
@@ -239,14 +237,15 @@ fn issue_1125_eval_checked_root(
         declaration_values: UnordMap::new(),
         named_axis_route_cache: UnordMap::new(),
         named_axis_route_visiting: UnordSet::new(),
-        top_level_defs: definitions,
-        sorted_defs_snapshot: None,
+        program: ProgramScope::new(
+            definitions,
+            checked
+                .type_env()
+                .iter()
+                .map(|(name, ty)| (name.clone(), ty.clone()))
+                .collect(),
+        ),
         declared_signatures: signatures,
-        type_env: checked
-            .type_env()
-            .iter()
-            .map(|(name, ty)| (name.clone(), ty.clone()))
-            .collect(),
         adt_fields: UnordMap::new(),
         adt_registry: checked.adt_registry().clone(),
         tensor_bindings: &empty_tensors,
@@ -1053,14 +1052,15 @@ fn dropout_entered_error_prefix_and_nested_handler_unwind_preserve_parent() {
         declaration_values: UnordMap::new(),
         named_axis_route_cache: UnordMap::new(),
         named_axis_route_visiting: UnordSet::new(),
-        top_level_defs: definitions,
-        sorted_defs_snapshot: None,
+        program: ProgramScope::new(
+            definitions,
+            checked
+                .type_env()
+                .iter()
+                .map(|(name, ty)| (name.clone(), ty.clone()))
+                .collect(),
+        ),
         declared_signatures: signatures,
-        type_env: checked
-            .type_env()
-            .iter()
-            .map(|(name, ty)| (name.clone(), ty.clone()))
-            .collect(),
         adt_fields: UnordMap::new(),
         adt_registry: checked.adt_registry().clone(),
         tensor_bindings: &empty_tensors,
@@ -1951,10 +1951,8 @@ fn eval_deep_with_bindings(
         declaration_values: UnordMap::new(),
         named_axis_route_cache: UnordMap::new(),
         named_axis_route_visiting: UnordSet::new(),
-        top_level_defs: UnordMap::new(),
-        sorted_defs_snapshot: None,
+        program: ProgramScope::new(UnordMap::new(), UnordMap::new()),
         declared_signatures: UnordMap::new(),
-        type_env: UnordMap::new(),
         adt_fields: UnordMap::new(),
         adt_registry: chelis_types::adt::AdtRegistry::default(),
         tensor_bindings: &empty_tensors,
@@ -4514,4 +4512,99 @@ fn list_tensor_bridges_require_checked_dtype_and_empty_shape_evidence() {
     assert!(nested_list_to_tensor_data(&[], Prim::String, &[Some(0)]).is_err());
     let value = numeric_scalar(Prim::Int8, 1, 0.0);
     assert!(nested_list_to_tensor_data(&[value], Prim::Int16, &[Some(1)]).is_err());
+}
+
+/// A routed named-axis reduction must not re-fold the whole program.
+///
+/// Preparing a subexpression lowering context folds the pipes in every
+/// definition it admits (chelis#1923). Named-axis routing built one of those
+/// contexts per routed reduction, so a package with `chelis-std` in scope
+/// re-folded all of `chelis-std` on every call (chelis#2207). The context is
+/// now a program-scoped fact of the evaluation context, so the fold is
+/// bounded by the program rather than by the number of lowering ingresses.
+///
+/// The receipt is a count, not a wall clock, so it cannot flake under machine
+/// load. `chelis_ir::lower::program_def_fold_passes` rises once per prepared
+/// context, which is once per whole-program fold.
+///
+/// Failing first, measured on this exact test with only the memo in
+/// `ProgramScope::routing_lowering_context` bypassed so a context is prepared
+/// per ingress as it was before: 1 routed reduction cost 2 whole-program
+/// folds and 40 cost 41, so the assertion below reported "40 routed
+/// reductions cost 41 whole-program definition folds, 1 costs 2". The 39
+/// extra folds for 39 extra reductions are one apiece, which is the defect.
+/// With the memo restored both counts are 2.
+mod issue_2207_routing_lowering_context {
+    use crate::compiler::{eval_selected, wire_values};
+    use crate::schema::{EvalRequest, SourceKind};
+
+    /// A program whose recursion applies one named-axis reduction per step.
+    ///
+    /// `sum(t, rows)` names a *dimension* of the operand rather than a
+    /// runtime value, which is what selects the routing lane; an integer axis
+    /// takes the ordinary host path and exercises none of this.
+    fn source(routed_reductions: u32) -> String {
+        format!(
+            "def rowsum(t: &tensor[rows, f32]) -> f32 = tensor_to_scalar(sum(t, rows))\n\
+             def build() -> tensor[8, f32] = to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32, 1.0f32, 1.0f32, 1.0f32, 1.0f32])\n\
+             def repeat(n: i64, acc: f32) -> f32 = {{\n\
+             t = build()\n\
+             if n <= 0i64 then acc else repeat(n - 1i64, acc + rowsum(&t))\n\
+             }}\n\
+             answer = repeat({routed_reductions}i64, 0.0f32)\n"
+        )
+    }
+
+    /// Evaluate the program and return its whole-program fold passes.
+    ///
+    /// Two other things are asserted. The answer, because a program that
+    /// failed to evaluate would fold nothing and report a flattering zero.
+    /// And the routing count, because the ordinary host path computes the
+    /// same sum: a fixture that stopped reaching the named-axis lane would
+    /// satisfy the bound below without ever exercising it.
+    fn fold_passes_for(routed_reductions: u32) -> u64 {
+        chelis_ir::lower::reset_program_def_fold_passes();
+        super::super::named_axis::reset_named_axis_routes();
+        let result = eval_selected(
+            EvalRequest {
+                source_kind: SourceKind::Surf,
+                source: source(routed_reductions),
+                bindings: Default::default(),
+            },
+            &["answer".to_string()],
+        )
+        .expect("the routed program evaluates");
+        let passes = chelis_ir::lower::program_def_fold_passes();
+        assert_eq!(
+            super::super::named_axis::named_axis_routes(),
+            u64::from(routed_reductions),
+            "the fixture must reach the named-axis routing lane once per reduction"
+        );
+        assert_eq!(
+            serde_json::to_value(&result.roots[0].value).unwrap(),
+            serde_json::to_value(wire_values::scalar_f32(routed_reductions as f32 * 8.0)).unwrap(),
+            "{routed_reductions} routed reductions over a length-8 tensor of ones"
+        );
+        passes
+    }
+
+    #[test]
+    fn routed_named_axis_reductions_fold_the_program_once() {
+        // A recursive fixture in a debug evaluator needs the stack the other
+        // recursion tests here take, without a runner environment flag.
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| {
+                let one = fold_passes_for(1);
+                let many = fold_passes_for(40);
+                eprintln!("whole-program folds: 1 routed reduction = {one}, 40 = {many}");
+                assert_eq!(
+                    many, one,
+                    "40 routed reductions cost {many} whole-program definition folds, 1 costs {one}"
+                );
+            })
+            .expect("spawn the deep-stack evaluator thread")
+            .join()
+            .expect("the deep-stack evaluator thread completes");
+    }
 }

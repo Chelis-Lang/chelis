@@ -14,7 +14,6 @@ use chelis_types::{
 use chelis_vocab::EffectKind;
 use chelis_vocab::EffectKindDecodeError;
 use std::collections::BTreeMap;
-use std::rc::Rc;
 use std::sync::Arc;
 
 use super::host_ops::*;
@@ -40,6 +39,12 @@ thread_local! {
 #[cfg(test)]
 pub(crate) fn execution_profile_defs_snapshots() -> u64 {
     EXECUTION_PROFILE_DEFS_SNAPSHOTS.with(std::cell::Cell::get)
+}
+
+/// Record one snapshot build. `ProgramScope` owns the snapshot itself; the
+/// counter stays here beside the classifier it is a receipt for.
+pub(super) fn record_defs_snapshot_build() {
+    EXECUTION_PROFILE_DEFS_SNAPSHOTS.with(|builds| builds.set(builds.get() + 1));
 }
 
 /// Reset [`execution_profile_defs_snapshots`] for this thread.
@@ -580,6 +585,36 @@ impl<'a> EvalContext<'a> {
         )
     }
 
+    /// [`Self::execution_profile`] over the program's own definitions.
+    ///
+    /// `chelis_ir::lower::evaluation_profile` sorts and deep-clones the whole
+    /// definition table it is handed, so asking it per call costs a program
+    /// copy per ask. Every caller that classifies against the unmodified
+    /// program reads the program-scoped snapshot instead (chelis#2059 built
+    /// that snapshot for the admission path; chelis#2207 routes the remaining
+    /// asks through it). A caller whose definition universe differs from the
+    /// program's, as a transform's captured closures do, still needs
+    /// [`Self::execution_profile`].
+    pub(super) fn execution_profile_over_program(
+        &self,
+        expr: &Expr,
+    ) -> chelis_ir::evaluation::EvaluationProfile {
+        self.execution_exclusion.map_or_else(
+            || self.program_evaluation_profile(expr),
+            chelis_ir::evaluation::EvaluationProfile::Legacy,
+        )
+    }
+
+    /// The unexcluded classification of `expr` against the program's
+    /// definitions, read from the program-scoped snapshot. Callers that
+    /// already test `execution_exclusion` themselves use this directly.
+    pub(super) fn program_evaluation_profile(
+        &self,
+        expr: &Expr,
+    ) -> chelis_ir::evaluation::EvaluationProfile {
+        chelis_ir::lower::evaluation_profile_sorted(expr, &self.program.sorted_defs())
+    }
+
     fn admit_execution_profile(&mut self, expr: &Expr, bound: &[String]) {
         use chelis_ir::evaluation::{EvaluationProfile, LegacyEvaluationReason};
         // An excluded caller already determines every nested dispatch. Avoid
@@ -605,11 +640,11 @@ impl<'a> EvalContext<'a> {
     /// classification itself, taken over the program-scoped sorted-def snapshot
     /// so it does not re-clone every definition on each ask (chelis#2059).
     fn classify_execution_profile_over_program(
-        &mut self,
+        &self,
         expr: &Expr,
         bound: &[String],
     ) -> chelis_ir::evaluation::EvaluationProfile {
-        let snapshot = self.sorted_defs_snapshot();
+        let snapshot = self.program.sorted_defs();
         // A bound parameter shadows a same-named top-level def, so it must not
         // reach the classifier. Collisions are rare (parameters are named
         // `acc`, `x`, ...), so the common path classifies against the shared
@@ -626,25 +661,6 @@ impl<'a> EvalContext<'a> {
         }
     }
 
-    /// The program-scoped sorted snapshot of `top_level_defs`, built on first
-    /// use and reused for the context's lifetime (chelis#2059). The def set is
-    /// fixed after construction, so the sort-and-clone is paid once rather than
-    /// on every closure application.
-    fn sorted_defs_snapshot(&mut self) -> Rc<BTreeMap<String, Expr>> {
-        if let Some(snapshot) = &self.sorted_defs_snapshot {
-            return snapshot.clone();
-        }
-        EXECUTION_PROFILE_DEFS_SNAPSHOTS.with(|builds| builds.set(builds.get() + 1));
-        let snapshot = Rc::new(
-            self.top_level_defs
-                .to_sorted()
-                .into_iter()
-                .map(|(name, expr)| (name.clone(), expr.clone()))
-                .collect::<BTreeMap<String, Expr>>(),
-        );
-        self.sorted_defs_snapshot = Some(snapshot.clone());
-        snapshot
-    }
     /// Resolve a builtin only when ordinary lexical lookup did not select a
     /// runtime binding of the same name (spec/04-type-system.md §8.6,
     /// chelis#1076). Every evaluator builtin fast path goes through this
@@ -684,7 +700,8 @@ impl<'a> EvalContext<'a> {
         // one. Evaluating its bare var as a value thunk would replace that
         // callable with its result before the alias is ever invoked.
         let value = if self
-            .type_env
+            .program
+            .type_env()
             .get(&resolved_name)
             .is_some_and(|ty| ty.tag() == Some(DeepTag::TFn))
             && let Some(alias) = var_name(&expr)
@@ -1053,12 +1070,13 @@ impl<'a> EvalContext<'a> {
     }
 
     pub(super) fn lookup_top_level_def(&self, name: &str) -> Option<(String, Expr)> {
-        self.top_level_defs
+        self.program
+            .defs()
             .get(name)
             .cloned()
             .map(|expr| (name.to_string(), expr))
             .or_else(|| {
-                let sorted = self.top_level_defs.to_sorted();
+                let sorted = self.program.defs().to_sorted();
                 let mut matches = sorted.into_iter().filter_map(|(key, value)| {
                     terminal_name_matches(key, name).then_some((key, value))
                 });
@@ -1604,7 +1622,7 @@ impl<'a> EvalContext<'a> {
         if var_name(func) == Some("dropout")
             && self.active_builtin_symbol("dropout")
             && self.execution_exclusion.is_none()
-            && chelis_ir::lower::evaluation_profile(node.expr, &self.top_level_defs)
+            && self.program_evaluation_profile(node.expr)
                 == chelis_ir::evaluation::EvaluationProfile::FixedControl
         {
             return self.eval_named_axis_reduction_app("dropout", kids);
@@ -1656,7 +1674,7 @@ impl<'a> EvalContext<'a> {
         if self.execution_exclusion.is_none()
             && let Some(callee) = var_name(func)
             && let Some((resolved, def_expr)) = self.lookup_top_level_def(callee)
-            && chelis_ir::lower::evaluation_profile(&def_expr, &self.top_level_defs)
+            && self.program_evaluation_profile(&def_expr)
                 == chelis_ir::evaluation::EvaluationProfile::Legacy(
                     chelis_ir::evaluation::LegacyEvaluationReason::RuntimeRate,
                 )
@@ -1664,13 +1682,13 @@ impl<'a> EvalContext<'a> {
                 matches!(value,
                 RuntimeValue::Closure { def_name: Some(name), .. } if name == &resolved)
             })
-            && let Some(signature) = self.type_env.get(&resolved)
+            && let Some(signature) = self.program.type_env().get(&resolved)
             && !chelis_ir::lower::type_expr_has_rank_var(signature)
             && result_type_expr.as_ref().is_some_and(|ty| {
                 tagged_expr_children(ty).is_some_and(|(tag, _)| tag == DeepTag::TTensor)
             })
             && let source_call = source_call_with_checked_argument_types(node, &arg_type_exprs)
-            && chelis_ir::lower::evaluation_profile(&source_call, &self.top_level_defs)
+            && self.program_evaluation_profile(&source_call)
                 == chelis_ir::evaluation::EvaluationProfile::FixedControl
             // Scalar-staging trials must retain the same checked type evidence
             // as admission, or a data argument can be mistaken for a control
@@ -1787,7 +1805,8 @@ impl<'a> EvalContext<'a> {
             && let Some((resolved, def_expr)) = self.lookup_top_level_def(callee)
             && (def_expr.tag() == Some(DeepTag::Fn)
                 || self
-                    .type_env
+                    .program
+                    .type_env()
                     .get(&resolved)
                     .is_some_and(|ty| ty.tag() == Some(DeepTag::TFn)))
         {
@@ -4565,14 +4584,15 @@ mod legacy_capture_order_tests {
             declaration_values: UnordMap::new(),
             named_axis_route_cache: UnordMap::new(),
             named_axis_route_visiting: UnordSet::new(),
-            top_level_defs: definitions,
-            sorted_defs_snapshot: None,
+            program: ProgramScope::new(
+                definitions,
+                checked
+                    .type_env()
+                    .iter()
+                    .map(|(name, ty)| (name.clone(), ty.clone()))
+                    .collect(),
+            ),
             declared_signatures: signatures,
-            type_env: checked
-                .type_env()
-                .iter()
-                .map(|(name, ty)| (name.clone(), ty.clone()))
-                .collect(),
             adt_fields: collect_adt_ctor_fields(checked.exprs()),
             adt_registry: checked.adt_registry().clone(),
             tensor_bindings: tensors,
@@ -5001,7 +5021,7 @@ mod legacy_capture_order_tests {
                 let mut ctx = context(&library, &tensors);
                 let declaration = ctx.lookup_top_level_def("keep").unwrap().1;
                 assert_eq!(
-                    chelis_ir::lower::evaluation_profile(&declaration, &ctx.top_level_defs),
+                    chelis_ir::lower::evaluation_profile(&declaration, ctx.program.defs()),
                     EvaluationProfile::Legacy(LegacyEvaluationReason::RuntimeRate)
                 );
                 if warm {
@@ -5044,7 +5064,7 @@ mod legacy_capture_order_tests {
     // session and resolver. Caller-only entries model an already-entered
     // lexical frame; none is inserted into the declaration environment.
     fn declaration_caller_frame(ctx: &mut EvalContext<'_>) -> Option<Expr> {
-        let ty = ctx.type_env.get("next_draw").cloned();
+        let ty = ctx.program.type_env().get("next_draw").cloned();
         assert!(ty.is_some());
         ctx.bindings
             .insert("caller_value".into(), RuntimeValue::int_lit(71));
@@ -5268,7 +5288,8 @@ mod legacy_capture_order_tests {
         let tensors = UnordMap::new();
         let mut ctx = context(library, &tensors);
         let identities = ctx
-            .top_level_defs
+            .program
+            .defs()
             .to_sorted()
             .into_iter()
             .filter(|(name, _)| terminal_name_matches(name, "value"))
