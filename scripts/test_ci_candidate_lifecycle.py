@@ -457,45 +457,59 @@ class GitGraphIntegrationTests(unittest.TestCase):
 
 
 
-class AcknowledgementWorkflowFetchTests(unittest.TestCase):
-    """The workflow must hand the classifier the head it needs.
+class LifecycleInvocationTests(unittest.TestCase):
+    """Every invocation must hand the classifier the head it needs.
 
     `pr-contract-acknowledgements.yml` checks out at `fetch-depth: 0`, but a
     full clone holds only what refs reach, and a force-pushed-away head is
-    reachable from none. The step therefore has to fetch it by SHA
-    (chelis#2229).
+    reachable from none, so that step has to fetch it by SHA. The other two
+    invocations already fetch it; what they did was hide the failure. The
+    script now reports an uninspectable pre-push head and repeats git's
+    reason, so a `2>/dev/null` at any call site throws away the half of that
+    diagnosis git holds and leaves the same script diagnosing itself on one
+    path and going quiet on another (chelis#2229).
     """
 
-    WORKFLOW = (
-        Path(__file__).resolve().parents[1]
-        / ".github/workflows/pr-contract-acknowledgements.yml"
-    )
+    WORKFLOWS = Path(__file__).resolve().parents[1] / ".github/workflows"
 
-    def lifecycle_step_body(self) -> str:
-        text = self.WORKFLOW.read_text()
+    def acknowledgement_step(self) -> str:
+        text = (self.WORKFLOWS / "pr-contract-acknowledgements.yml").read_text()
         start = text.index("Require persistent candidate lifecycle declaration")
         end = text.index("- name: Require protected-test acknowledgements")
         return text[start:end]
 
-    def test_the_step_fetches_the_pre_push_head(self) -> None:
-        body = self.lifecycle_step_body()
+    def detector_step(self, workflow: str) -> str:
+        text = (self.WORKFLOWS / workflow).read_text()
+        start = text.index("- name: Validate candidate lifecycle")
+        end = text.index("- name: Select targeted rebase lane")
+        return text[start:end]
 
-        self.assertIn('BEFORE: ${{ github.event.before }}', body)
-        self.assertIn('ACTION: ${{ github.event.action }}', body)
+    def all_steps(self) -> dict[str, str]:
+        return {
+            "pr-contract-acknowledgements.yml": self.acknowledgement_step(),
+            "ci.yml": self.detector_step("ci.yml"),
+            "conformance.yml": self.detector_step("conformance.yml"),
+        }
+
+    def test_the_acknowledgement_step_fetches_the_pre_push_head(self) -> None:
+        body = self.acknowledgement_step()
+
+        self.assertIn("BEFORE: ${{ github.event.before }}", body)
+        self.assertIn("ACTION: ${{ github.event.action }}", body)
         self.assertIn('git fetch --no-tags origin "$BEFORE"', body)
 
-    def test_that_fetch_is_not_silenced(self) -> None:
-        fetches = [
-            line
-            for line in self.lifecycle_step_body().splitlines()
-            if "git fetch" in line and '"$BEFORE"' in line
-        ]
-        self.assertTrue(fetches, "no pre-push head fetch")
-        for line in fetches:
-            # `2>/dev/null || true` is how the sibling invocation hides this
-            # failure, and hiding it is the defect rather than a detail of it.
-            self.assertNotIn("2>/dev/null", line)
-            self.assertNotIn("|| true", line)
+    def test_no_invocation_silences_its_pre_push_head_fetch(self) -> None:
+        for workflow, body in self.all_steps().items():
+            fetches = [
+                line
+                for line in body.splitlines()
+                if "git fetch" in line and '"$BEFORE"' in line
+            ]
+            with self.subTest(workflow=workflow):
+                self.assertTrue(fetches, "no pre-push head fetch")
+                for line in fetches:
+                    self.assertNotIn("2>/dev/null", line)
+                    self.assertNotIn("|| true", line)
 
 
 if __name__ == "__main__":
