@@ -2990,6 +2990,236 @@ fn wire_node_by_id(nodes: &[WireDagNode], id: u64) -> Option<&WireDagNode> {
     nodes.iter().find(|node| node.id == id)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WireSemanticAxisOrigin {
+    Literal(i64),
+    ExternalAxis { load: u64, axis: usize },
+    ScalarInput { value: u64 },
+    OpComputed { op: u64, axis: usize },
+}
+
+fn wire_rt_axis_index(axis: &WireRtAxis) -> Option<usize> {
+    let WireRtAxis::Lit { value } = axis;
+    usize::try_from(*value).ok()
+}
+
+fn wire_rt_dim_origin(
+    nodes: &[WireDagNode],
+    owner: &WireDagNode,
+    dim: &WireRtDim,
+    fuel: usize,
+    relevant_shape_sources: &[u64],
+) -> Option<WireSemanticAxisOrigin> {
+    match dim {
+        WireRtDim::Lit { value } => Some(WireSemanticAxisOrigin::Literal(value.get())),
+        WireRtDim::Node { input } => owner
+            .inputs
+            .get(usize::try_from(*input).ok()?)
+            .copied()
+            .map(|value| WireSemanticAxisOrigin::ScalarInput { value }),
+        WireRtDim::InputAxis { tensor, axis } => {
+            let source =
+                wire_node_by_id(nodes, *owner.inputs.get(usize::try_from(*tensor).ok()?)?)?;
+            wire_semantic_axis_origin(
+                nodes,
+                source,
+                wire_rt_axis_index(axis)?,
+                fuel,
+                relevant_shape_sources,
+            )
+        }
+        WireRtDim::ToEnd | WireRtDim::Sym { .. } => None,
+    }
+}
+
+fn wire_semantic_axis_origin(
+    nodes: &[WireDagNode],
+    node: &WireDagNode,
+    axis: usize,
+    fuel: usize,
+    relevant_shape_sources: &[u64],
+) -> Option<WireSemanticAxisOrigin> {
+    if fuel == 0 {
+        return None;
+    }
+    let dim = node.output_type.dims.get(axis)?;
+    match dim {
+        WireDimInfo::Lit { size }
+        | WireDimInfo::Named {
+            size: Some(size), ..
+        } => {
+            return Some(WireSemanticAxisOrigin::Literal(size.get()));
+        }
+        WireDimInfo::Named { size: None, .. } => {}
+    }
+
+    if let Some(origin) = node.shape_deps.iter().find_map(|source_id| {
+        if !relevant_shape_sources.contains(source_id) && !node.inputs.contains(source_id) {
+            return None;
+        }
+        let source = wire_node_by_id(nodes, *source_id)?;
+        (source.id < node.id && source.output_type.dims.len() == node.output_type.dims.len())
+            .then(|| {
+                wire_semantic_axis_origin(nodes, source, axis, fuel - 1, relevant_shape_sources)
+            })
+            .flatten()
+    }) {
+        return Some(origin);
+    }
+
+    let input_axis = |input: usize, source_axis: usize| {
+        let source = wire_node_by_id(nodes, *node.inputs.get(input)?)?;
+        wire_semantic_axis_origin(nodes, source, source_axis, fuel - 1, relevant_shape_sources)
+    };
+    let first_positive_rank_input = || {
+        node.inputs.iter().find_map(|source_id| {
+            let source = wire_node_by_id(nodes, *source_id)?;
+            (!source.output_type.dims.is_empty()
+                && source.output_type.dims.len() == node.output_type.dims.len())
+            .then(|| {
+                wire_semantic_axis_origin(nodes, source, axis, fuel - 1, relevant_shape_sources)
+            })
+            .flatten()
+        })
+    };
+
+    match &node.op {
+        WireRiscOp::Load { .. } => Some(WireSemanticAxisOrigin::ExternalAxis {
+            load: node.id,
+            axis,
+        }),
+        WireRiscOp::Where { .. } => {
+            let then_value = wire_node_by_id(nodes, *node.inputs.get(1)?)?;
+            let else_value = wire_node_by_id(nodes, *node.inputs.get(2)?)?;
+            let then_origin = (then_value.output_type.dims.len() == node.output_type.dims.len())
+                .then(|| {
+                    wire_semantic_axis_origin(
+                        nodes,
+                        then_value,
+                        axis,
+                        fuel - 1,
+                        relevant_shape_sources,
+                    )
+                })
+                .flatten()?;
+            let else_origin = (else_value.output_type.dims.len() == node.output_type.dims.len())
+                .then(|| {
+                    wire_semantic_axis_origin(
+                        nodes,
+                        else_value,
+                        axis,
+                        fuel - 1,
+                        relevant_shape_sources,
+                    )
+                })
+                .flatten()?;
+            (then_origin == else_origin).then_some(then_origin)
+        }
+        WireRiscOp::Add
+        | WireRiscOp::Sub
+        | WireRiscOp::Mul
+        | WireRiscOp::Div
+        | WireRiscOp::FloorDiv
+        | WireRiscOp::TruncDiv
+        | WireRiscOp::Mod
+        | WireRiscOp::MaxElem
+        | WireRiscOp::MinElem
+        | WireRiscOp::ExtremaAdjoint { .. }
+        | WireRiscOp::Relu
+        | WireRiscOp::ReluAdjoint
+        | WireRiscOp::Neg
+        | WireRiscOp::Recip
+        | WireRiscOp::Exp
+        | WireRiscOp::Log
+        | WireRiscOp::Sin
+        | WireRiscOp::Sqrt
+        | WireRiscOp::Cos
+        | WireRiscOp::Tan
+        | WireRiscOp::Atan
+        | WireRiscOp::Abs
+        | WireRiscOp::Floor
+        | WireRiscOp::Ceil
+        | WireRiscOp::Round
+        | WireRiscOp::UniformLike { .. }
+        | WireRiscOp::Dropout { .. }
+        | WireRiscOp::Store { .. }
+        | WireRiscOp::Copy
+        | WireRiscOp::Drop
+        | WireRiscOp::Realize
+        | WireRiscOp::Cast { .. }
+        | WireRiscOp::CastTrunc { .. }
+        | WireRiscOp::FusedElem { .. }
+        | WireRiscOp::CheckedUnitAxis { .. } => first_positive_rank_input(),
+        WireRiscOp::Permute { axes } => input_axis(0, usize::try_from(*axes.get(axis)?).ok()?),
+        WireRiscOp::Expand {
+            axis: expanded,
+            size,
+        } => {
+            let expanded = usize::try_from(*expanded).ok()?;
+            let operand_rank = wire_node_by_id(nodes, *node.inputs.first()?)?
+                .output_type
+                .dims
+                .len();
+            if axis == expanded {
+                wire_rt_dim_origin(nodes, node, size, fuel - 1, relevant_shape_sources)
+            } else if node.output_type.dims.len() == operand_rank + 1 && axis > expanded {
+                input_axis(0, axis - 1)
+            } else {
+                input_axis(0, axis)
+            }
+        }
+        WireRiscOp::Pad { padding, .. } => {
+            let (before, after) = padding.get(axis)?;
+            if matches!(before, WireRtDim::Lit { value } if value.get() == 0)
+                && matches!(after, WireRtDim::Lit { value } if value.get() == 0)
+            {
+                input_axis(0, axis)
+            } else {
+                Some(WireSemanticAxisOrigin::OpComputed { op: node.id, axis })
+            }
+        }
+        WireRiscOp::Stride { strides } => {
+            if matches!(strides.get(axis)?, WireRtDim::Lit { value } if value.get() == 1) {
+                input_axis(0, axis)
+            } else {
+                Some(WireSemanticAxisOrigin::OpComputed { op: node.id, axis })
+            }
+        }
+        WireRiscOp::Reshape { new_shape } => wire_rt_dim_origin(
+            nodes,
+            node,
+            new_shape.get(axis)?,
+            fuel - 1,
+            relevant_shape_sources,
+        ),
+        WireRiscOp::Shrink { .. }
+        | WireRiscOp::ReduceWindow { .. }
+        | WireRiscOp::BlasMatmul { .. } => {
+            Some(WireSemanticAxisOrigin::OpComputed { op: node.id, axis })
+        }
+        WireRiscOp::Compare { .. }
+        | WireRiscOp::Logical { .. }
+        | WireRiscOp::Const { .. }
+        | WireRiscOp::ConstTensor { .. }
+        | WireRiscOp::Shape { .. }
+        | WireRiscOp::ExtentWitness { .. }
+        | WireRiscOp::CheckedReshapeExtent { .. }
+        | WireRiscOp::Sum { .. }
+        | WireRiscOp::Count { .. }
+        | WireRiscOp::MaxReduce { .. }
+        | WireRiscOp::MinReduce { .. }
+        | WireRiscOp::ProdReduce { .. }
+        | WireRiscOp::ReduceWindowGrad { .. }
+        | WireRiscOp::Argmax { .. }
+        | WireRiscOp::Argmin { .. }
+        | WireRiscOp::OneHot { .. }
+        | WireRiscOp::Gather { .. }
+        | WireRiscOp::ScatterAdd { .. }
+        | WireRiscOp::Scatter { .. }
+        | WireRiscOp::ScatterElements { .. } => None,
+    }
+}
+
 fn wire_semantic_node_dim<'a>(
     nodes: &'a [WireDagNode],
     node: &'a WireDagNode,
@@ -3052,6 +3282,15 @@ fn wire_node_shape_equal(
                     relevant_shape_sources,
                 ))
                 .is_some_and(|(left, right)| wire_semantic_dim_info_equal(left, right))
+                || wire_semantic_axis_origin(nodes, left, axis, nodes.len(), relevant_shape_sources)
+                    .zip(wire_semantic_axis_origin(
+                        nodes,
+                        right,
+                        axis,
+                        nodes.len(),
+                        relevant_shape_sources,
+                    ))
+                    .is_some_and(|(left, right)| left == right)
         })
 }
 
