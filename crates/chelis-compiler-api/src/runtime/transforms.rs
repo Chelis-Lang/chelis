@@ -119,7 +119,7 @@ impl<'a> EvalContext<'a> {
         &mut self,
         kind: TransformKind,
         transform_expr: &Expr,
-        captured_env: UnordMap<String, RuntimeValue>,
+        captured_env: Frame,
         args: Vec<RuntimeValue>,
     ) -> Result<RuntimeValue, String> {
         // Allocate placeholder names for the call's actual arguments. We

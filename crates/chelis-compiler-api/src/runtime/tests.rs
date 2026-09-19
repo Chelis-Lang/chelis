@@ -143,7 +143,7 @@ fn runtime_function_params_reject_nonparameter_carriers_without_filtering() {
 fn issue_1125_eval_raw_expr(expr: &Expr) -> Result<RuntimeValue, String> {
     let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
     let mut ctx = EvalContext {
-        bindings: UnordMap::new(),
+        bindings: Frame::new(),
         binding_types: UnordMap::new(),
         precision_bindings: UnordMap::new(),
         declaration_values: UnordMap::new(),
@@ -233,7 +233,7 @@ fn issue_1125_eval_checked_root(
     let mut signatures = UnordMap::new();
     register_declared_signatures(exprs, &mut signatures);
     let mut ctx = EvalContext {
-        bindings: UnordMap::new(),
+        bindings: Frame::new(),
         binding_types: UnordMap::new(),
         precision_bindings: UnordMap::new(),
         declaration_values: UnordMap::new(),
@@ -483,8 +483,8 @@ fn runtime_pattern_reader_has_complete_successor_and_legacy_parity() {
 
     for (value, successor) in cases {
         let legacy = issue_1125_legacy_carrier(&successor);
-        let mut successor_bindings = UnordMap::new();
-        let mut legacy_bindings = UnordMap::new();
+        let mut successor_bindings = Frame::new();
+        let mut legacy_bindings = Frame::new();
         assert_eq!(
             pattern_matches(&value, &successor, &mut successor_bindings, &adt_fields),
             Ok(true)
@@ -493,7 +493,7 @@ fn runtime_pattern_reader_has_complete_successor_and_legacy_parity() {
             pattern_matches(&value, &legacy, &mut legacy_bindings, &adt_fields),
             Ok(true)
         );
-        let rendered_bindings = |bindings: &UnordMap<String, RuntimeValue>| {
+        let rendered_bindings = |bindings: &Frame| {
             bindings
                 .to_sorted()
                 .into_iter()
@@ -522,7 +522,7 @@ fn runtime_pattern_reader_has_complete_successor_and_legacy_parity() {
             span,
         ),
     ] {
-        let mut bindings = UnordMap::new();
+        let mut bindings = Frame::new();
         assert_eq!(
             pattern_matches(
                 &RuntimeValue::Bool(true),
@@ -626,7 +626,7 @@ fn runtime_nested_owner_readers_reject_malformed_children() {
 
     let mut adt_fields = UnordMap::new();
     adt_fields.insert("Point".to_string(), vec!["x".to_string()]);
-    let mut bindings = UnordMap::new();
+    let mut bindings = Frame::new();
     let malformed_pattern = Expr::node(
         DeepTag::PatRecord,
         Metadata::default(),
@@ -923,8 +923,8 @@ fn issue_2059_execution_profile_defs_snapshot_is_program_scoped() {
 /// Evidentiary status: REGRESSION TEST, proven failing first. With the
 /// counter and this test in place but the frame representation unchanged
 /// (`clone_frame`/`clone_callable` over the by-value `UnordMap` frame), the
-/// receipt read FAIL_SMALL copies at 100 applications and FAIL_LARGE at 400:
-/// two frame copies per element. After the fix both read PASS_COUNT.
+/// receipt read 201 copies at 100 applications and 801 at 400: two frame
+/// copies per element plus the capture. After the fix both read 0.
 ///
 /// The nested-let companion fixture keeps the receipt honest: a block that
 /// shadows an enclosing local must still copy that local when it saves the
@@ -963,8 +963,17 @@ fn issue_2204_frame_copies_do_not_scale_with_closure_applications() {
 
     let (small, small_result) = evaluate(&fold_fixture(100), "result");
     let (large, large_result) = evaluate(&fold_fixture(400), "result");
-    assert_eq!(small_result, "4950", "#2204: 100-element fold must still sum correctly");
-    assert_eq!(large_result, "79800", "#2204: 400-element fold must still sum correctly");
+    eprintln!(
+        "#2204 receipt: 100 applications copied {small} entries, 400 applications copied {large}"
+    );
+    assert_eq!(
+        small_result, "4950",
+        "#2204: 100-element fold must still sum correctly"
+    );
+    assert_eq!(
+        large_result, "79800",
+        "#2204: 400-element fold must still sum correctly"
+    );
     assert!(
         large <= small,
         "#2204: frame copies must not grow with closure applications; 100 applications \
@@ -978,7 +987,10 @@ fn issue_2204_frame_copies_do_not_scale_with_closure_applications() {
         "result = {\n  a = cast(1, i64)\n  b = {\n    c = cast(2, i64)\n    add(a, c)\n  }\n  b\n}\n",
         "result",
     );
-    assert_eq!(nested_result, "3", "#2204: nested-let companion must still compute");
+    assert_eq!(
+        nested_result, "3",
+        "#2204: nested-let companion must still compute"
+    );
     assert!(
         nested >= 1,
         "#2204: the frame-copy counter must observe the nested block's frame save, or this \
@@ -1004,7 +1016,7 @@ fn dropout_entered_error_prefix_and_nested_handler_unwind_preserve_parent() {
     let mut signatures = UnordMap::new();
     register_declared_signatures(checked.exprs(), &mut signatures);
     let mut ctx = EvalContext {
-        bindings: UnordMap::new(),
+        bindings: Frame::new(),
         binding_types: UnordMap::new(),
         precision_bindings: UnordMap::new(),
         declaration_values: UnordMap::new(),
@@ -1071,7 +1083,7 @@ fn dropout_entered_error_prefix_and_nested_handler_unwind_preserve_parent() {
         .apply_transform(
             TransformKind::Grad,
             &gradient,
-            UnordMap::new(),
+            Frame::new(),
             vec![argument.clone()],
         )
         .unwrap_err();
@@ -1902,7 +1914,7 @@ fn eval_deep_with_bindings(
 
     let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
     let mut ctx = EvalContext {
-        bindings: UnordMap::new(),
+        bindings: Frame::new(),
         binding_types: UnordMap::new(),
         precision_bindings: UnordMap::new(),
         declaration_values: UnordMap::new(),
@@ -4342,7 +4354,7 @@ fn fo_diag_bools_strings_and_nonnumeric_controls() {
                 chelis_deep::ast::Atom::Bool(false),
                 chelis_deep::Span::new(0, 0)
             ),
-            env: UnordMap::new(),
+            env: Frame::new(),
             precision_env: UnordMap::new(),
             def_name: None,
         }),
