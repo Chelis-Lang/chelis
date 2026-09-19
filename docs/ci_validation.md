@@ -41,6 +41,20 @@ acknowledgement workflow also runs on later body edits and accepts that recorded
 head only while it remains an ancestor of the current head, so deleting a
 previously required declaration cannot preserve a green required context.
 
+That rerun is expected rather than incidental, since the contract asks for a
+body edit recording the reviewed head immediately before merging. It and the
+`Changelog` check therefore key their concurrency group by head SHA and do not
+cancel in progress: a run for an older head answers about a different commit
+and never races a newer one, while a second event on the same head is a
+metadata change whose rerun would otherwise cancel the in-flight verdict and
+leave a `cancelled` check run that reads as a failure. Both checks take about
+half a minute, so letting both finish costs less than the misreading.
+`Changelog` keeps its `edited` trigger because GitHub delivers a base-branch
+change that way and the check reads `base.sha`. Narrowing that trigger with a
+job-level condition is not available: a skipped required context satisfies this
+repository's branch protection, so a body edit could turn a failing `Changelog`
+into a passing one.
+
 The same first-stage classifier identifies changes to workflows, workflow
 actions, CI ownership, CI scripts and tests, `AGENTS.md`, this document, and the
 PR-author guide. A workflow-native bootstrap applies the same conservative path

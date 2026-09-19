@@ -7,9 +7,21 @@ on:
 permissions:
   contents: read
 
+# Keyed by head SHA, and never cancelling. This check reports per head, so a
+# run for an older head cannot answer for a newer one and there is nothing to
+# gain by killing it; keying by pull request instead made every push cancel the
+# previous head's run. Within one head the extra events are metadata -- a body
+# or title edit, a label change -- and cancelling the in-flight verdict for
+# those leaves a `cancelled` check run that reads as a failure on an otherwise
+# green pull request. The agent contract requires recording review evidence in
+# the body before merging, so that collision is routine rather than rare. The
+# job is roughly 30 seconds, so letting both finish is cheaper than the
+# confusion.
 concurrency:
-  group: changelog-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  group: >-
+    changelog-${{ github.event.pull_request.number }}-${{
+    github.event.pull_request.head.sha }}
+  cancel-in-progress: false
 
 jobs:
   changelog:
