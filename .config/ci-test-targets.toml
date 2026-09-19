@@ -1610,6 +1610,24 @@ reason = "the planner executor and report implementation is directly covered by 
 tracking_issue = "chelis#1824"
 
 [[path_rule]]
+prefix = "scripts/ci_establish_candidate_clone.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit validates the candidate clone's stated invariant and the confinement of its fetches"
+tracking_issue = "chelis#2234"
+
+[[path_rule]]
+prefix = "scripts/test_ci_establish_candidate_clone.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the candidate clone invariant's own tests"
+tracking_issue = "chelis#2234"
+
+[[path_rule]]
 prefix = "scripts/ci_candidate_lifecycle.py"
 disposition = "owner"
 workflow = "ci.yml"

@@ -475,6 +475,106 @@ class GitGraphIntegrationTests(unittest.TestCase):
             )
 
 
+    def test_a_grafted_target_tip_defeats_classification_until_unshallowed(
+        self,
+    ) -> None:
+        """chelis#2234's topology, end to end, in real shallow clones.
+
+        The `Compute docs_only` deepen lands its boundary on the target tip
+        and grafts it. Git then ignores that commit's parents even though
+        they are in the clone, so a clean forward rebase cannot be told from
+        an arbitrary rewrite. Only a deepening fetch removes the graft; the
+        depth-less fetch the step used to run is a no-op on a commit already
+        present, which is why chelis#2230's backstop does not reach it.
+        """
+
+        with tempfile.TemporaryDirectory() as origin_directory:
+            source = Path(origin_directory)
+            self.initialized_repo(source)
+            branch_point = self.commit(source, "base.txt", "base\n")
+            self.git(source, "checkout", "-b", "old-head")
+            before = self.commit(source, "feature.txt", "one\n")
+            self.git(source, "checkout", "main")
+            target = self.commit(source, "target.txt", "target advanced\n")
+            self.git(source, "checkout", "-b", "new-head")
+            head = self.commit(source, "feature.txt", "one\n")
+            self.assertNotEqual(branch_point, target)
+
+            with tempfile.TemporaryDirectory() as clone_directory:
+                clone = Path(clone_directory)
+                self.git(clone, "init", "-b", "main")
+                self.git(clone, "remote", "add", "origin", source.as_uri())
+                # `--depth=$((COMMITS + 1))`: two commits from the head
+                # reaches the target tip and grafts it.
+                self.git(clone, "fetch", "--depth=2", "origin", head)
+                shallow = (clone / ".git" / "shallow").read_text().split()
+                self.assertIn(target, shallow)
+                # chelis#2230's depth-less backstop cannot undo that.
+                self.git(clone, "fetch", "--no-tags", "origin", target)
+                self.assertIn(
+                    target, (clone / ".git" / "shallow").read_text().split()
+                )
+                self.git(clone, "fetch", "origin", before, head, target)
+                self.assertEqual(
+                    self.git(clone, "cat-file", "-t", before), "commit"
+                )
+
+                graph = lifecycle.GitGraph(clone)
+                with self.assertRaises(lifecycle.GraphInspectionError):
+                    lifecycle.classify_update(
+                        before=before, head=head, base=target, graph=graph
+                    )
+
+                # The repair: a deepening fetch, which removes the graft.
+                self.git(
+                    clone, "fetch", "--unshallow", "origin", before, head, target
+                )
+                self.assertFalse((clone / ".git" / "shallow").exists())
+                self.assertEqual(
+                    lifecycle.classify_update(
+                        before=before, head=head, base=target, graph=graph
+                    ),
+                    "base-rebase",
+                )
+
+    def test_unrelated_histories_still_fail_and_not_for_truncation(
+        self,
+    ) -> None:
+        """Negative control, in a complete clone so truncation is excluded."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.initialized_repo(root)
+            base = self.commit(root, "base.txt", "base\n")
+            # Two orphan roots, so `before` is not an ancestor of `head`
+            # either: the classifier must reach merge-base to fail here.
+            self.git(root, "checkout", "--orphan", "one")
+            self.git(root, "rm", "-rf", ".")
+            before = self.commit(root, "one.txt", "one\n")
+            self.git(root, "checkout", "--orphan", "two")
+            self.git(root, "rm", "-rf", ".")
+            head = self.commit(root, "two.txt", "two\n")
+            self.assertNotEqual(
+                self.git(root, "rev-list", "--max-parents=0", before),
+                self.git(root, "rev-list", "--max-parents=0", head),
+            )
+            self.assertEqual(
+                self.git(root, "rev-parse", "--is-shallow-repository"), "false"
+            )
+            graph = lifecycle.GitGraph(root)
+
+            with self.assertRaises(lifecycle.GraphInspectionError) as raised:
+                lifecycle.classify_update(
+                    before=before, head=head, base=base, graph=graph
+                )
+
+        message = str(raised.exception)
+        self.assertIn("cannot find merge base", message)
+        # It must not blame truncation when the clone is complete, and it
+        # must not invent a reason git did not give.
+        self.assertNotIn("shallow", message)
+        self.assertIn("git printed no reason", message)
+
 
 class LifecycleInvocationTests(unittest.TestCase):
     """Every invocation must hand the classifier the head it needs.
@@ -509,6 +609,22 @@ class LifecycleInvocationTests(unittest.TestCase):
             "ci.yml": self.detector_step("ci.yml"),
             "conformance.yml": self.detector_step("conformance.yml"),
         }
+
+    def test_the_detector_steps_delegate_to_the_established_clone(self) -> None:
+        """The detector lanes read a stated shape instead of making one.
+
+        They used to fetch for themselves, which is how each of them ended
+        up depending on what the previous step happened to leave
+        (chelis#2228, chelis#2234). The invariant and its confinement are
+        locked by scripts/test_ci_establish_candidate_clone.py; what this
+        asserts is that these two steps stopped fetching at all.
+        """
+
+        for workflow in ("ci.yml", "conformance.yml"):
+            body = self.detector_step(workflow)
+            with self.subTest(workflow=workflow):
+                self.assertNotIn("git fetch", body)
+                self.assertIn("steps.clone.outputs.target_tip", body)
 
     def test_the_acknowledgement_step_fetches_the_pre_push_head(self) -> None:
         body = self.acknowledgement_step()
@@ -549,6 +665,12 @@ class LifecycleInvocationTests(unittest.TestCase):
     def test_no_invocation_silences_its_pre_push_head_fetch(self) -> None:
         """Assert the property, not a list of the spellings that break it.
 
+        Only the acknowledgement invocation still fetches the pre-push head
+        in YAML. The two detector invocations delegate to
+        `ci_establish_candidate_clone.py`, whose own tests hold the same
+        property in Python, so scanning their steps for a fetch would now
+        assert about a command that is deliberately not there.
+
         Matching `2>/dev/null` as a substring is evaded by a space or by
         `2>&-`, and chasing each spelling adds witnesses rather than
         coverage. The command is normalised first, then two rules decide
@@ -567,7 +689,9 @@ class LifecycleInvocationTests(unittest.TestCase):
         does.
         """
 
-        for workflow, body in self.all_steps().items():
+        for workflow, body in {
+            "pr-contract-acknowledgements.yml": self.acknowledgement_step()
+        }.items():
             with self.subTest(workflow=workflow):
                 # A step-wide silencer would defeat any per-command rule.
                 self.assertNotRegex(body, r"exec\s+2>")

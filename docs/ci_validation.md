@@ -37,15 +37,27 @@ it does not replace review of a conflict resolution or approval for a force
 push. Classifying a force-push needs the pre-push head, which is reachable
 from no ref once it is replaced, so even a `fetch-depth: 0` checkout has to
 fetch that commit by SHA before running the classifier. All three invocations
-now do, and none of them hides the result. Only the acknowledgement
-invocation can classify such an update today: the two detector invocations
-deepen a shallow clone, which grafts the target tip, and a grafted tip
-defeats the comparison even though the pre-push head is present
-(chelis#2234). They therefore still require the history-rewrite declaration
-where the base-update declaration is the accurate one, and the three
-invocations can disagree about the same event. An update that cannot be
-classified fails closed either way, and the failure names that cause rather
-than reporting a missing line as if the author had forgotten to write one.
+do, and none of them hides the result.
+
+In the two detector workflows one step owns that clone's shape. It performs
+the job's fetches and then asserts a stated property: every commit the three
+verifiers read is present, and every pair they compare has a merge base the
+clone can walk to. Verifiers depend on that property rather than on what an
+earlier step's fetches happened to leave, which is what chelis#2228 and
+chelis#2234 both were. A graft is what breaks the property and only a
+deepening fetch removes one, so the escalation when the cheap shape does not
+satisfy the assertion is `--unshallow`; the head deepen runs only against an
+already shallow clone, because against a complete one it would create the
+graft rather than avoid it. An invariant a later step could violate would
+read as a guarantee it no longer gives, so that step owns every fetch in its
+job and a test fails if another acquires one. The rule covers checkouts as
+well as run lines: `actions/checkout` takes a fetch depth as an input and
+re-clones, so it is the command that creates the graft in the first place
+and never appears in a run line at all. A clone that cannot be
+established fails the candidate preflight naming which pair it could not
+resolve. An update that still cannot be classified fails closed, requires the
+history-rewrite declaration, and the failure names that cause rather than
+reporting a missing line as if the author had forgotten to write one.
 The introducing implementation event requires the exact new head. The
 acknowledgement workflow also runs on later body edits and accepts that recorded
 head only while it remains an ancestor of the current head, so deleting a
