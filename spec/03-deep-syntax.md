@@ -126,7 +126,11 @@ A public semantic or resugaring consumer SHALL reject a malformed or absent
 operative selector child, a callable origin it cannot resolve, a contradictory
 name/index pair, an out-of-range index, or unequal metadata/index arity. It
 SHALL NOT omit or rewrite either representation to make them agree, including
-when reconstructing Surf from a lone Deep expression.
+when reconstructing Surf from a lone Deep expression. Callable-origin
+resolution follows the language's binding rules: function declarations are
+available to legal forward references under [04-INF-8], and a `match` pattern
+receives the corresponding origin projected from its scrutinee. Textual
+declaration order and pattern introduction SHALL NOT erase either origin.
 
 > **[03-META-3]** Producer-specific keys and `span_*` extensions carry opaque
 > data. Chelis semantic passes SHALL neither interpret nor rewrite their

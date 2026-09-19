@@ -347,6 +347,87 @@ fn matching_deep_round_trips_and_contradictory_metadata_rejects() {
 }
 
 #[test]
+fn deep_resugaring_preseeds_forward_function_origins_before_aliases() {
+    let forward_alias = chelis_deep::parser::parse_str(
+        "(def {} alias (var {} pair))\n\
+         (def {} pair (fn {} (params {} x w) (app {} (var {} mul) (var {} x) (var {} w))))\n\
+         (def {} selected (grad {wrt: (var {} w)} (var {} alias) \
+           (lit {type: (t-prim {} i32)} 1)))",
+    )
+    .expect("forward-alias Deep parses");
+    let surf = resugar_program(&forward_alias).expect("forward function alias resugars");
+    desugar_program(&surf).expect("forward function alias round-trips");
+
+    let distinct = chelis_deep::parser::parse_str(
+        "(def {} chosen (if {} (lit {} true) (var {} left) (var {} right)))\n\
+         (def {} left (fn {} (params {} x w) (app {} (var {} mul) (var {} x) (var {} w))))\n\
+         (def {} right (fn {} (params {} x w) (app {} (var {} add) (var {} x) (var {} w))))\n\
+         (def {} selected (grad {wrt: (var {} w)} (var {} chosen) \
+           (lit {type: (t-prim {} i32)} 1)))",
+    )
+    .expect("distinct forward-origin Deep parses");
+    assert!(matches!(
+        resugar_program(&distinct),
+        Err(chelis_surf::resugar::ResugarError::UnresolvedGradSelectorTarget { .. })
+    ));
+}
+
+#[test]
+fn deep_resugaring_projects_match_bound_callable_origins() {
+    let matching = chelis_deep::parser::parse_str(
+        "(def {} pair (fn {} (params {} x w) (app {} (var {} mul) (var {} x) (var {} w))))\n\
+         (def {} matched \
+           (match {} (tuple {} (var {} pair)) \
+             (arm {} (pat-tuple {} (pat-var {} chosen)) () (var {} chosen))))\n\
+         (def {} selected \
+           (tuple {} \
+             (grad {wrt: (var {} w)} (var {} matched) \
+               (lit {type: (t-prim {} i32)} 1)) \
+             (match {} (tuple {} (var {} pair)) \
+               (arm {} (pat-tuple {} (pat-var {} chosen)) () \
+                 (grad {wrt: (var {} w)} (var {} chosen) \
+                   (lit {type: (t-prim {} i32)} 1))))))",
+    )
+    .expect("match-bound Deep parses");
+    resugar_program(&matching).expect("match-bound callable origins resugar");
+
+    for (label, source) in [
+        (
+            "distinct tuple element origins",
+            "(def {} left (fn {} (params {} x w) (app {} (var {} mul) (var {} x) (var {} w))))\n\
+             (def {} right (fn {} (params {} x w) (app {} (var {} add) (var {} x) (var {} w))))\n\
+             (def {} selected \
+               (match {} \
+                 (if {} (lit {} true) \
+                   (tuple {} (var {} left)) \
+                   (tuple {} (var {} right))) \
+                 (arm {} (pat-tuple {} (pat-var {} chosen)) () \
+                   (grad {wrt: (var {} w)} (var {} chosen) \
+                     (lit {type: (t-prim {} i32)} 1)))))",
+        ),
+        (
+            "dynamic scrutinee",
+            "(def {} chosen \
+               (fn {} (params {} x w) (app {} (var {} mul) (var {} x) (var {} w))))\n\
+             (def {} selected \
+               (match {} (var {} candidates) \
+                 (arm {} (pat-tuple {} (pat-var {} chosen)) () \
+                   (grad {wrt: (var {} w)} (var {} chosen) \
+                     (lit {type: (t-prim {} i32)} 1)))))",
+        ),
+    ] {
+        let deep = chelis_deep::parser::parse_str(source).expect("negative Deep parses");
+        assert!(
+            matches!(
+                resugar_program(&deep),
+                Err(chelis_surf::resugar::ResugarError::UnresolvedGradSelectorTarget { .. })
+            ),
+            "{label}"
+        );
+    }
+}
+
+#[test]
 fn expression_resugaring_and_lone_decompilation_reject_unpreservable_selectors() {
     for (label, source) in [
         (

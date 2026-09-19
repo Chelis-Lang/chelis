@@ -371,6 +371,7 @@ struct GradSelectorResolver {
     globals: CallableScope,
     resolved: Vec<(usize, Vec<i64>)>,
     next_callable_identity: u64,
+    deep_callable_identities: UnordMap<usize, LexicalCallableId>,
 }
 
 impl GradSelectorResolver {
@@ -385,6 +386,7 @@ impl GradSelectorResolver {
         context: &[deep::Expr],
     ) -> Result<Vec<(usize, Vec<i64>)>, DesugarError> {
         let mut resolver = Self::default();
+        resolver.preseed_deep_function_origins(context);
         resolver.seed_deep_origins(context);
         for decl in decls {
             resolver.seed_function_origins(decl);
@@ -393,6 +395,46 @@ impl GradSelectorResolver {
             resolver.visit_decl(decl)?;
         }
         Ok(resolver.resolved)
+    }
+
+    fn preseed_deep_function_origins(&mut self, exprs: &[deep::Expr]) {
+        for expr in exprs {
+            let deep::ExprCarrier::DecodedNode(tag, _, children) = expr.carrier() else {
+                continue;
+            };
+            match tag {
+                DeepTag::Module => self.preseed_deep_function_origins(&children[1..]),
+                DeepTag::Def if children.len() == 2 => {
+                    let Some(name) = deep_symbol_name(&children[0]) else {
+                        continue;
+                    };
+                    let Some(params) = deep_function_parameters(&children[1]) else {
+                        continue;
+                    };
+                    let identity = self.deep_callable_identity(&children[1]);
+                    self.globals.bind(
+                        name.to_string(),
+                        CallableOrigin::Known {
+                            identity,
+                            display_name: name.to_string(),
+                            params,
+                        },
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn deep_callable_identity(&mut self, expr: &deep::Expr) -> LexicalCallableId {
+        let expr = strip_deep_metadata(expr);
+        let key = expr as *const deep::Expr as usize;
+        if let Some(identity) = self.deep_callable_identities.get(&key) {
+            return *identity;
+        }
+        let identity = self.fresh_callable_identity();
+        self.deep_callable_identities.insert(key, identity);
+        identity
     }
 
     fn seed_deep_origins(&mut self, exprs: &[deep::Expr]) {
@@ -703,9 +745,7 @@ impl GradSelectorResolver {
         scope: &CallableScope,
         lexical_name: &str,
     ) -> CallableOrigin {
-        if let deep::Expr::MetaExpr(meta, _) = expr {
-            return self.deep_callable_origin(&meta.expr, scope, lexical_name);
-        }
+        let expr = strip_deep_metadata(expr);
         let deep::ExprCarrier::DecodedNode(tag, _, children) = expr.carrier() else {
             return CallableOrigin::Unknown;
         };
@@ -724,7 +764,7 @@ impl GradSelectorResolver {
                     return CallableOrigin::Unknown;
                 };
                 CallableOrigin::Known {
-                    identity: self.fresh_callable_identity(),
+                    identity: self.deep_callable_identity(expr),
                     display_name: lexical_name.to_string(),
                     params,
                 }
@@ -735,6 +775,7 @@ impl GradSelectorResolver {
                 consequence.alternate(&alternative)
             }
             DeepTag::Match if children.len() >= 2 => {
+                let scrutinee = self.deep_callable_origin(&children[0], scope, lexical_name);
                 let mut result = None;
                 for arm in &children[1..] {
                     let deep::ExprCarrier::DecodedNode(DeepTag::Arm, _, arm_children) =
@@ -746,7 +787,7 @@ impl GradSelectorResolver {
                         return CallableOrigin::Unknown;
                     }
                     let mut arm_scope = scope.clone();
-                    bind_deep_pattern(&arm_children[0], &mut arm_scope);
+                    bind_deep_match_pattern(&arm_children[0], &scrutinee, &mut arm_scope);
                     let arm_origin =
                         self.deep_callable_origin(&arm_children[2], &arm_scope, lexical_name);
                     result = Some(result.map_or_else(
@@ -918,6 +959,25 @@ fn deep_parameter_name(expr: &deep::Expr) -> Option<String> {
     }
 }
 
+fn deep_function_parameters(expr: &deep::Expr) -> Option<Vec<String>> {
+    let expr = strip_deep_metadata(expr);
+    let deep::ExprCarrier::DecodedNode(DeepTag::Fn, _, children) = expr.carrier() else {
+        return None;
+    };
+    let deep::ExprCarrier::DecodedNode(DeepTag::Params, _, params) = children.first()?.carrier()
+    else {
+        return None;
+    };
+    params.iter().map(deep_parameter_name).collect()
+}
+
+fn strip_deep_metadata(mut expr: &deep::Expr) -> &deep::Expr {
+    while let deep::Expr::MetaExpr(meta, _) = expr {
+        expr = &meta.expr;
+    }
+    expr
+}
+
 fn deep_integer_literal(expr: &deep::Expr) -> Option<i64> {
     let deep::ExprCarrier::DecodedNode(DeepTag::Lit, _, children) = expr.carrier() else {
         return None;
@@ -928,32 +988,50 @@ fn deep_integer_literal(expr: &deep::Expr) -> Option<i64> {
     Some(*value)
 }
 
-fn bind_deep_pattern(pattern: &deep::Expr, scope: &mut CallableScope) {
+fn bind_deep_match_pattern(
+    pattern: &deep::Expr,
+    value: &CallableOrigin,
+    scope: &mut CallableScope,
+) {
     let deep::ExprCarrier::DecodedNode(tag, _, children) = pattern.carrier() else {
         return;
     };
     match tag {
         DeepTag::PatVar => {
             if let Some(name) = children.first().and_then(deep_symbol_name) {
-                scope.bind(name.to_string(), CallableOrigin::Unknown);
+                scope.bind(name.to_string(), value.clone());
             }
         }
         DeepTag::PatAs => {
             if let Some(name) = children.first().and_then(deep_symbol_name) {
-                scope.bind(name.to_string(), CallableOrigin::Unknown);
+                scope.bind(name.to_string(), value.clone());
             }
             if let Some(nested) = children.get(1) {
-                bind_deep_pattern(nested, scope);
+                bind_deep_match_pattern(nested, value, scope);
             }
         }
         DeepTag::PatTuple => {
-            for child in children {
-                bind_deep_pattern(child, scope);
+            for (index, child) in children.iter().enumerate() {
+                let child_value = match value {
+                    CallableOrigin::Tuple(values) => values
+                        .get(index)
+                        .cloned()
+                        .unwrap_or(CallableOrigin::Unknown),
+                    _ => CallableOrigin::Unknown,
+                };
+                bind_deep_match_pattern(child, &child_value, scope);
             }
         }
         DeepTag::PatCtor => {
-            for child in children.iter().skip(1) {
-                bind_deep_pattern(child, scope);
+            for (index, child) in children.iter().skip(1).enumerate() {
+                let child_value = match value {
+                    CallableOrigin::Tuple(values) => values
+                        .get(index)
+                        .cloned()
+                        .unwrap_or(CallableOrigin::Unknown),
+                    _ => CallableOrigin::Unknown,
+                };
+                bind_deep_match_pattern(child, &child_value, scope);
             }
         }
         DeepTag::PatRecord => {
@@ -964,7 +1042,7 @@ fn bind_deep_pattern(pattern: &deep::Expr, scope: &mut CallableScope) {
                     continue;
                 };
                 if let Some(value_pattern) = field_children.get(1) {
-                    bind_deep_pattern(value_pattern, scope);
+                    bind_deep_match_pattern(value_pattern, &CallableOrigin::Unknown, scope);
                 }
             }
         }

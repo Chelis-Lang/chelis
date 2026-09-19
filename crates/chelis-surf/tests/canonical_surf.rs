@@ -487,8 +487,8 @@ fn trailing_separators_parse_and_format_to_a_fixed_point() {
         "import Demo (value,)",
         "export (value,)",
         "result = grad(f,)",
-        "result = grad(f, wrt=x,)",
-        "result = grad(f, wrt=(x, y,))",
+        "result = grad(fn (x: f32) -> x, wrt=x,)",
+        "result = grad(fn (x: f32, y: f32) -> add(x, y), wrt=(x, y,))",
         "result = vmap(f,)",
         "result = vmap(f, axis=1,)",
         "result = cast(x, f64,)",
@@ -538,6 +538,25 @@ fn trailing_separators_parse_and_format_to_a_fixed_point() {
             ),
             "separator removal changed Deep meaning for {source}",
         );
+    }
+}
+
+#[test]
+fn trailing_separator_formatting_preserves_named_grad_rejection() {
+    let source = "result = grad(f, wrt=x,)";
+    let formatted = format_source(source).expect("unresolved selector still formats");
+    assert_eq!(formatted, "result = grad(f, wrt=x)\n");
+    assert_eq!(
+        format_source(&formatted).expect("formatted selector reparses"),
+        formatted
+    );
+
+    for candidate in [source, formatted.as_str()] {
+        let declarations = parse_str(candidate).expect("selector syntax parses");
+        assert!(matches!(
+            desugar_program(&declarations),
+            Err(chelis_surf::desugar::DesugarError::UnresolvedGradTarget { .. })
+        ));
     }
 }
 

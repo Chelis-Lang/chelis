@@ -149,6 +149,74 @@ fn layered_context_preserves_same_origin_structural_joins() {
 }
 
 #[test]
+fn linked_context_preseeds_forward_function_origins_before_aliases() {
+    let library_decls = chelis_surf::parser::parse_str(
+        "alias = pkg__pair__pair\n\
+         def pkg__pair__pair(x: f32, w: f32) -> f32 = mul(x, w)\n",
+    )
+    .expect("forward-alias library parses");
+    let library = chelis_surf::desugar::desugar_program(&library_decls).expect("library desugars");
+    let entry = chelis_surf::parser::parse_str("selected = grad(alias, wrt=w)\n")
+        .expect("forward-alias entry parses");
+    assert!(prepare_surf_decls_with_context(&entry, &library, None).is_ok());
+
+    let distinct_decls = chelis_surf::parser::parse_str(
+        "chosen = if true then pkg__pair__left else pkg__pair__right\n\
+         def pkg__pair__left(x: f32, w: f32) -> f32 = mul(x, w)\n\
+         def pkg__pair__right(x: f32, w: f32) -> f32 = add(x, w)\n",
+    )
+    .expect("distinct forward-origin library parses");
+    let distinct_library =
+        chelis_surf::desugar::desugar_program(&distinct_decls).expect("library desugars");
+    let distinct_entry = chelis_surf::parser::parse_str("selected = grad(chosen, wrt=w)\n")
+        .expect("distinct entry parses");
+    assert!(matches!(
+        prepare_surf_decls_with_context(&distinct_entry, &distinct_library, None),
+        Err(PreparationError::SurfDesugar(
+            DesugarError::UnresolvedGradTarget { .. }
+        ))
+    ));
+}
+
+#[test]
+fn linked_context_projects_match_bound_callable_origins() {
+    let library_decls = chelis_surf::parser::parse_str(
+        "def pkg__pair__left(x: f32, w: f32) -> f32 = mul(x, w)\n\
+         def pkg__pair__right(x: f32, w: f32) -> f32 = add(x, w)\n\
+         matched = match (pkg__pair__left,) with {\n\
+           | (chosen,) => chosen\n\
+         }\n\
+         distinct = match (if true then (pkg__pair__left,) else (pkg__pair__right,)) with {\n\
+           | (chosen,) => chosen\n\
+         }\n\
+         def chosen(x: f32, w: f32) -> f32 = mul(x, w)\n\
+         dynamic = match candidates with {\n\
+           | (chosen,) => chosen\n\
+         }\n",
+    )
+    .expect("match-bound library parses");
+    let library = chelis_surf::desugar::desugar_program(&library_decls).expect("library desugars");
+
+    let matching = chelis_surf::parser::parse_str("selected = grad(matched, wrt=w)\n")
+        .expect("matching entry parses");
+    assert!(prepare_surf_decls_with_context(&matching, &library, None).is_ok());
+
+    for name in ["distinct", "dynamic"] {
+        let entry = chelis_surf::parser::parse_str(&format!("selected = grad({name}, wrt=w)\n"))
+            .expect("negative entry parses");
+        assert!(
+            matches!(
+                prepare_surf_decls_with_context(&entry, &library, None),
+                Err(PreparationError::SurfDesugar(
+                    DesugarError::UnresolvedGradTarget { .. }
+                ))
+            ),
+            "{name}"
+        );
+    }
+}
+
+#[test]
 fn contradictory_deep_selector_is_rejected_without_rewriting() {
     let source = "(def {} pair (fn {} (params {} x w) (app {} (var {} mul) (var {} x) (var {} w))))\n\
                   (def {} selected (grad {wrt: (var {} w)} (var {} pair) \
