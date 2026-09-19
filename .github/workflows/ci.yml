@@ -239,7 +239,12 @@ jobs:
           fi
           if [ "$EVENT_NAME" = "pull_request" ] &&
              [ "$ACTION" = "synchronize" ]; then
-            git fetch origin "$BEFORE" "$HEAD" "$target_tip" 2>/dev/null || true
+            # Tolerated, but never silent. `classify_update` needs the
+            # pre-push head, and when it is missing the script now says so
+            # and names git's reason; a `2>/dev/null` here would throw away
+            # the half of that diagnosis git holds (chelis#2229).
+            git fetch origin "$BEFORE" "$HEAD" "$target_tip" ||
+              echo "could not fetch this candidate update's endpoints" >&2
           fi
           python3 scripts/ci_candidate_lifecycle.py "${args[@]}"
 
