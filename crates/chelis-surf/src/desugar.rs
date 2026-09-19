@@ -304,7 +304,11 @@ impl DesugarCtx {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum CallableOrigin {
-    Known { origin: String, params: Vec<String> },
+    Known {
+        identity: LexicalCallableId,
+        display_name: String,
+        params: Vec<String>,
+    },
     Unknown,
     NonCallable,
     Tuple(Vec<CallableOrigin>),
@@ -312,13 +316,37 @@ enum CallableOrigin {
 
 impl CallableOrigin {
     fn alternate(&self, other: &Self) -> Self {
-        if self == other {
-            self.clone()
-        } else {
-            Self::Unknown
+        match (self, other) {
+            (
+                Self::Known {
+                    identity: left_identity,
+                    params: left_params,
+                    ..
+                },
+                Self::Known {
+                    identity: right_identity,
+                    params: right_params,
+                    ..
+                },
+            ) if left_identity == right_identity && left_params == right_params => self.clone(),
+            (Self::Tuple(left), Self::Tuple(right)) if left.len() == right.len() => Self::Tuple(
+                left.iter()
+                    .zip(right)
+                    .map(|(left, right)| left.alternate(right))
+                    .collect(),
+            ),
+            (Self::NonCallable, Self::NonCallable) => Self::NonCallable,
+            _ => Self::Unknown,
         }
     }
 }
+
+/// Resolver-local identity allocated in deterministic lexical traversal order.
+///
+/// Aliases copy this identity. Distinct declaration or lambda sites receive
+/// distinct identities even when their display labels and formal names match.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LexicalCallableId(u64);
 
 #[derive(Clone, Default)]
 struct CallableScope {
@@ -342,9 +370,16 @@ impl CallableScope {
 struct GradSelectorResolver {
     globals: CallableScope,
     resolved: Vec<(usize, Vec<i64>)>,
+    next_callable_identity: u64,
 }
 
 impl GradSelectorResolver {
+    fn fresh_callable_identity(&mut self) -> LexicalCallableId {
+        let identity = LexicalCallableId(self.next_callable_identity);
+        self.next_callable_identity += 1;
+        identity
+    }
+
     fn resolve_program_with_context(
         decls: &[Decl],
         context: &[deep::Expr],
@@ -371,7 +406,8 @@ impl GradSelectorResolver {
                     let Some(name) = deep_symbol_name(&children[0]) else {
                         continue;
                     };
-                    let value = deep_callable_origin(&children[1], &self.globals);
+                    let scope = self.globals.clone();
+                    let value = self.deep_callable_origin(&children[1], &scope, name);
                     self.globals.bind(name.to_string(), value);
                 }
                 _ => {}
@@ -413,10 +449,12 @@ impl GradSelectorResolver {
                 }
             }
             Decl::FunDef { name, params, .. } | Decl::Property { name, params, .. } => {
+                let identity = self.fresh_callable_identity();
                 self.globals.bind(
                     name.clone(),
                     CallableOrigin::Known {
-                        origin: name.clone(),
+                        identity,
+                        display_name: name.clone(),
                         params: params.iter().map(|param| param.name.clone()).collect(),
                     },
                 );
@@ -438,6 +476,7 @@ impl GradSelectorResolver {
             | Decl::Property {
                 name, params, body, ..
             } => {
+                let callable = self.globals.lookup(name);
                 let mut scope = self.globals.clone();
                 for param in params {
                     scope.bind(param.name.clone(), CallableOrigin::Unknown);
@@ -463,13 +502,7 @@ impl GradSelectorResolver {
                     }
                 }
                 self.visit_expr(body, &scope)?;
-                self.globals.bind(
-                    name.clone(),
-                    CallableOrigin::Known {
-                        origin: name.clone(),
-                        params: params.iter().map(|param| param.name.clone()).collect(),
-                    },
-                );
+                self.globals.bind(name.clone(), callable);
             }
             Decl::LetDef { name, value, .. } => {
                 let scope = self.globals.clone();
@@ -607,6 +640,7 @@ impl GradSelectorResolver {
                 result.unwrap_or(CallableOrigin::Unknown)
             }
             Expr::Lambda(params, body, _) => {
+                let identity = self.fresh_callable_identity();
                 let names = params
                     .iter()
                     .map(|param| param.name.clone())
@@ -617,7 +651,8 @@ impl GradSelectorResolver {
                 }
                 self.visit_expr(body, &body_scope)?;
                 CallableOrigin::Known {
-                    origin: "<inline lambda>".to_string(),
+                    identity,
+                    display_name: "<inline lambda>".to_string(),
                     params: names,
                 }
             }
@@ -661,6 +696,42 @@ impl GradSelectorResolver {
         };
         Ok(ordinary)
     }
+
+    fn deep_callable_origin(
+        &mut self,
+        expr: &deep::Expr,
+        scope: &CallableScope,
+        lexical_name: &str,
+    ) -> CallableOrigin {
+        if let deep::Expr::MetaExpr(meta, _) = expr {
+            return self.deep_callable_origin(&meta.expr, scope, lexical_name);
+        }
+        let deep::ExprCarrier::DecodedNode(tag, _, children) = expr.carrier() else {
+            return CallableOrigin::Unknown;
+        };
+        match tag {
+            DeepTag::Var => children
+                .first()
+                .and_then(deep_symbol_name)
+                .map_or(CallableOrigin::Unknown, |name| scope.lookup(name)),
+            DeepTag::Fn => {
+                let Some(deep::ExprCarrier::DecodedNode(DeepTag::Params, _, params)) =
+                    children.first().map(deep::Expr::carrier)
+                else {
+                    return CallableOrigin::Unknown;
+                };
+                let Some(params) = params.iter().map(deep_parameter_name).collect() else {
+                    return CallableOrigin::Unknown;
+                };
+                CallableOrigin::Known {
+                    identity: self.fresh_callable_identity(),
+                    display_name: lexical_name.to_string(),
+                    params,
+                }
+            }
+            _ => CallableOrigin::Unknown,
+        }
+    }
 }
 
 fn resolve_selector_indices(
@@ -674,7 +745,12 @@ fn resolve_selector_indices(
         Expr::Lambda(..) => "<inline lambda>".to_string(),
         _ => "<dynamic expression>".to_string(),
     };
-    let CallableOrigin::Known { origin, params } = target else {
+    let CallableOrigin::Known {
+        display_name,
+        params,
+        ..
+    } = target
+    else {
         return Err(match target {
             CallableOrigin::NonCallable | CallableOrigin::Tuple(_) => {
                 DesugarError::NonCallableGradTarget {
@@ -696,7 +772,7 @@ fn resolve_selector_indices(
                 .position(|candidate| candidate == parameter)
                 .map(|index| index as i64)
                 .ok_or_else(|| DesugarError::UnknownGradParameter {
-                    callable: origin.clone(),
+                    callable: display_name.clone(),
                     parameter: parameter.clone(),
                     available: params.clone(),
                     span,
@@ -773,36 +849,6 @@ fn deep_parameter_name(expr: &deep::Expr) -> Option<String> {
             .and_then(deep_symbol_name)
             .map(str::to_string),
         _ => None,
-    }
-}
-
-fn deep_callable_origin(expr: &deep::Expr, scope: &CallableScope) -> CallableOrigin {
-    if let deep::Expr::MetaExpr(meta, _) = expr {
-        return deep_callable_origin(&meta.expr, scope);
-    }
-    let deep::ExprCarrier::DecodedNode(tag, _, children) = expr.carrier() else {
-        return CallableOrigin::Unknown;
-    };
-    match tag {
-        DeepTag::Var => children
-            .first()
-            .and_then(deep_symbol_name)
-            .map_or(CallableOrigin::Unknown, |name| scope.lookup(name)),
-        DeepTag::Fn => {
-            let Some(deep::ExprCarrier::DecodedNode(DeepTag::Params, _, params)) =
-                children.first().map(deep::Expr::carrier)
-            else {
-                return CallableOrigin::Unknown;
-            };
-            let Some(params) = params.iter().map(deep_parameter_name).collect() else {
-                return CallableOrigin::Unknown;
-            };
-            CallableOrigin::Known {
-                origin: "<linked callable>".to_string(),
-                params,
-            }
-        }
-        _ => CallableOrigin::Unknown,
     }
 }
 

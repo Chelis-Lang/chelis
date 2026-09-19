@@ -826,10 +826,13 @@ For a named `wrt`, desugaring resolves the target value to its immutable
 callable origin and maps each written selector name to that origin's ordered
 formal parameters. Direct definitions, inline lambdas, and lexical aliases
 retain that identity through alias chains; rebinding or shadowing affects only
-subsequent bindings. Selector order and duplicates are preserved. An unknown
-formal name, a dynamic or non-callable target, or a target whose callable
-origin cannot be established is a desugaring error; no positional fallback is
-permitted.
+subsequent bindings. A branch or aggregate join retains a callable origin only
+when the exact lexical origin identity and ordered formal list agree on every
+contributing path; equal display labels or equal function signatures do not
+make distinct lambdas or declarations the same callable. Selector order and
+duplicates are preserved. An unknown formal name, a dynamic or non-callable
+target, or a target whose callable origin cannot be established is a desugaring
+error; no positional fallback is permitted.
 
 Transforms compose naturally: `jit(grad(loss_fn))` **⟹** `(jit {} (grad {} (var {} loss_fn)))`.
 When `grad` targets one differentiable parameter, the result is that gradient value.

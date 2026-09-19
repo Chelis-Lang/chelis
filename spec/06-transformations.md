@@ -71,8 +71,10 @@ parameters, in the order they appear in `wrt`. One listed parameter returns one
 gradient value directly; multiple listed parameters return a flat tuple. Repeated
 parameter names are retained as repeated result positions. Each name denotes a
 formal parameter of the target callable's immutable lexical origin, so aliases
-and alias chains do not rename or reorder formals. Unknown names and targets
-without a statically established callable origin are rejected.
+and alias chains do not rename or reorder formals. Branches retain that origin
+only when every path has the same exact lexical identity and ordered formals;
+same-signature lambdas or declarations remain distinct. Unknown names and
+targets without a statically established callable origin are rejected.
 
 The executable [`grad_wrt_order.ch`](../examples/grad_wrt_order.ch) example
 distinguishes written target order from declaration order using unequal

@@ -84,6 +84,105 @@ def probe() -> unit = {
 }
 
 #[test]
+fn branch_joins_require_exact_inline_lambda_origin() {
+    for (label, source) in [
+        (
+            "if",
+            r#"
+def probe(flag: bool) -> unit = {
+  chosen = if flag then fn (x: f32, w: f32) -> mul(x, w) else fn (x: f32, w: f32) -> add(x, w)
+  selected = grad(chosen, wrt=w)
+  drop(selected)
+}
+"#,
+        ),
+        (
+            "match",
+            r#"
+def probe(flag: bool) -> unit = {
+  chosen = match flag with {
+    | true => fn (x: f32, w: f32) -> mul(x, w)
+    | false => fn (x: f32, w: f32) -> add(x, w)
+  }
+  selected = grad(chosen, wrt=w)
+  drop(selected)
+}
+"#,
+        ),
+        (
+            "tuple projection",
+            r#"
+def probe(flag: bool) -> unit = {
+  chosen = (if flag then (fn (x: f32, w: f32) -> mul(x, w),) else (fn (x: f32, w: f32) -> add(x, w),)).0
+  selected = grad(chosen, wrt=w)
+  drop(selected)
+}
+"#,
+        ),
+        (
+            "block return",
+            r#"
+def probe(flag: bool) -> unit = {
+  chosen = if flag then {
+    branch = fn (x: f32, w: f32) -> mul(x, w)
+    branch
+  } else {
+    branch = fn (x: f32, w: f32) -> add(x, w)
+    branch
+  }
+  selected = grad(chosen, wrt=w)
+  drop(selected)
+}
+"#,
+        ),
+    ] {
+        assert!(
+            matches!(error(source), DesugarError::UnresolvedGradTarget { .. }),
+            "{label}"
+        );
+    }
+}
+
+#[test]
+fn branch_joins_retain_aliases_of_the_same_callable_origin() {
+    let actual = deep(
+        r#"
+def pair(x: f32, w: f32) -> f32 = mul(x, w)
+def probe(flag: bool) -> unit = {
+  left = pair
+  right = pair
+  if_join = if flag then left else right
+  match_join = match flag with {
+    | true => left
+    | false => right
+  }
+  tuple_join = (if flag then (left,) else (right,)).0
+  mixed_tuple_join = (if flag then
+    (fn (x: f32, w: f32) -> add(x, w), left)
+  else
+    (fn (x: f32, w: f32) -> sub(x, w), right)).1
+  block_join = if flag then {
+    branch = left
+    branch
+  } else {
+    branch = right
+    branch
+  }
+  drop((
+    grad(if_join, wrt=w),
+    grad(match_join, wrt=w),
+    grad(tuple_join, wrt=w),
+    grad(mixed_tuple_join, wrt=w),
+    grad(block_join, wrt=w)
+  ))
+}
+"#,
+    );
+    assert_eq!(actual.matches("(grad ").count(), 5, "{actual}");
+    assert_eq!(actual.matches("wrt: (var {} w)").count(), 5, "{actual}");
+}
+
+#[test]
 fn written_selector_order_and_duplicates_are_preserved() {
     let actual = deep(
         r#"
