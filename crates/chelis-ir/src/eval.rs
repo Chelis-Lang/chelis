@@ -6591,22 +6591,40 @@ mod value_reclamation {
         );
     }
 
+    /// A graph whose penultimate node is a same-shape producer over `x`, so
+    /// an agreement derived from it names `x` while the final node does not
+    /// read `x` through any operand slot.
+    fn agreement_graph() -> (Dag, NodeId, NodeId, NodeId) {
+        let mut dag = Dag::new();
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec3(), None);
+        let a = dag.add_node(RiscOp::Neg, vec![x], vec3(), None);
+        let mix = dag.add_node(RiscOp::Add, vec![x, a], vec3(), None);
+        let late = dag.add_node(RiscOp::Neg, vec![mix], vec3(), None);
+        dag.add_root(late);
+        (dag, x, mix, late)
+    }
+
+    #[test]
+    fn without_an_agreement_the_last_operand_read_ends_the_lifetime() {
+        let (dag, x, mix, late) = agreement_graph();
+        let schedule = schedule_for(&dag, &[late]);
+        assert_eq!(
+            freed_at(&schedule, x),
+            Some(mix.0),
+            "x's last operand reader is the same-shape producer"
+        );
+    }
+
     #[test]
     fn a_same_shape_agreement_member_extends_the_lifetime_it_reads() {
-        // Build the agreement from a real same-shape producer so the members
-        // are the ones the derivation would hand the evaluator.
-        let mut source = Dag::new();
-        let p = source.add_node(RiscOp::Load { name: "p".into() }, vec![], vec3(), None);
-        let q = source.add_node(RiscOp::Load { name: "q".into() }, vec![], vec3(), None);
-        let sum = source.add_node(RiscOp::Add, vec![p, q], vec3(), None);
-        let agreement = crate::axis_sources::same_shape_result_agreement(&source, sum)
+        let (dag, x, mix, late) = agreement_graph();
+        let agreement = crate::axis_sources::same_shape_result_agreement(&dag, mix)
             .expect("a same-shape producer")
             .expect("positive rank");
-        assert_eq!(agreement.members(), &[p, q]);
+        assert_eq!(agreement.members(), &[x, NodeId(1)]);
 
-        let (dag, x, _a, late) = spectator_graph();
-        // `x` and the chain's first link occupy the same ids as `p` and `q`
-        // above, which is what lets the derived agreement address this graph.
+        // The site is the FINAL node, which reads neither member through an
+        // operand slot. Only the agreement keeps them alive that far.
         let schedule = schedule_with_guard(
             &dag,
             late,
@@ -6619,7 +6637,7 @@ mod value_reclamation {
         );
         assert_eq!(
             freed_at(&schedule, x),
-            Some(2),
+            Some(late.0),
             "`same_shape_agreement_extent` compares every member's realized shape"
         );
     }
