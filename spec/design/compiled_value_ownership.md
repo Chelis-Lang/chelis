@@ -405,6 +405,29 @@ finalizers release each stored child exactly once. Because child sets cannot be
 mutated after construction, a value cannot be inserted into itself or create a
 cycle through a later update.
 
+That sentence is about values, and the consuming container entry points below
+do not contradict it, but the reason is worth stating because it is the
+argument the whole last-use optimisation rests on and it is not obvious from
+either half.
+
+A consuming entry point mutates an allocation, not a live value. The operand
+it rewrites is one the verifier proved dead at that point, so no value whose
+child set anyone can still read changes, and [05-OP-44]'s premise is intact at
+the level it speaks about. What changes is the allocation, which the emitter
+reuses for the result instead of allocating a second one and copying.
+
+Acyclicity survives that reuse, and not by assumption. Suppose an in-place
+push made a container `X` reachable from the child `c` it just gained. The
+push does not change `c`, so `X` was already reachable from `c` beforehand.
+Every edge in this heap graph is a strong-owner edge, since each stored child
+is retained by its holder and released by its holder's finalizer, so that
+path ends in a heap-resident strong owner of `X`. The moved operand is a
+second owner on top of it, so the strong count is at least two and the
+in-place arm never runs: the entry point clones and releases instead. The
+same argument covers every child a merge adds, and it is why the runtime's
+count test is the whole check rather than one of several. A value still
+cannot be inserted into itself.
+
 ## C5. Target opaque C ownership ABI
 
 The exact ABI is [05-OP-31..33], [05-OP-44], and all four registries:
@@ -541,26 +564,51 @@ post-dominance, not source scope alone:
   and
 - a manifested root consumes its owner before process teardown.
 
-The consumed operand of a list-producing builtin (a row of the ownership
-IR's `LIST_CONSUMERS` table: `append` and `concat`, matched by label, list
-result class and list operand class, so the tensor `concat` that shares the
-label is not a row) is moved into the builtin when the scheduler places that
-owner's terminal directly after the application: lowering borrows every builtin operand, and the
+The consumed operand of a container-producing builtin (a row of the ownership
+IR's `CONTAINER_CONSUMERS` table: `append` and `concat` at the list kind,
+`dict_insert`, `dict_merge` and `dict_remove` at the dictionary kind) is moved
+into the builtin when the scheduler places that owner's terminal directly
+after the application: lowering borrows every builtin operand, and the
 last-use scheduler upgrades the borrow to a move and drops the terminal, so
 the verifier re-checks the move as it would any other (no live borrow, no
 later use). The move establishes only the borrow half of exclusivity. The
-sharing half is the runtime's: as with tensor reuse in C6, the consuming
-entry point (`chelis_list_append_owned`, `chelis_list_concat_owned`, private to
-the emitter like the accumulator ABI) re-checks the strong-owner count and
-mutates in place only at one, otherwise cloning and releasing the consumed
-input; an rhs that aliases the consumed lhs is such a retained owner and takes
-the same cloning path. A retained alias, whether a tuple, an option, an ADT, or
-a callee that stored the list, therefore never observes a mutation, and no
-static rule
+sharing half is the runtime's: as with tensor reuse in C6, the consuming entry
+point (`chelis_list_append_owned`, `chelis_list_concat_owned`,
+`chelis_dict_insert_owned`, `chelis_dict_merge_owned`,
+`chelis_dict_remove_owned`, private to the emitter like the accumulator ABI)
+re-checks the strong-owner count and mutates in place only at one, otherwise
+cloning and releasing the consumed input; a right-hand side that aliases the
+consumed left-hand side is such a retained owner and takes the same cloning
+path. A retained alias, whether a tuple, an option, an ADT, or a callee that
+stored the container, therefore never observes a mutation, and no static rule
 inside one unit has to prove exclusivity for a parameter whose callers may
 have retained it. A runtime `refcount == 1` test on its own is not this rule:
 without the verified move it cannot exclude an un-retained borrow, which is
 what chelis#943 measured and rejected.
+
+Each row names its own heap kind, and the match requires that kind on both
+the application's result and the named operand. The kind is not read off the
+application, because result-class-equals-operand-class is a weaker test than
+membership: `chunk`, `map`, `flatten`, `zip` and `enumerate` all take a list
+and return a list without being consumers, and a future
+`concat(tensor, tensor) -> tensor` would satisfy it while needing a different
+entry point entirely. Naming the kind keeps the tensor `concat` that shares
+the label `builtin:concat` out of the table by construction rather than by an
+emitter guard firing after the scheduler has already retired the operand's
+terminal. Adding a heap kind to the table is therefore never a row edit
+alone: the kind owes its own consuming entry points, with the same
+in-place-at-count-one and otherwise-clone-and-release behaviour, before any
+row naming it can land.
+
+The dictionary rows carry one obligation the list rows do not. The cloning
+`chelis_dict_insert` releases the value it replaces before cloning the
+incoming one, which is safe because the caller still owns the incoming value.
+The consuming entry point clones first and releases second: the two may be
+the same heap value held exactly once, and releasing first would free it
+before the clone reads it. `chelis_dict_remove_owned` likewise releases the
+removed entry's key and value itself, because the consumed dictionary keeps
+its allocation; the cloning entry point leaves that to the caller's own
+release of the untouched input.
 
 The runtime's test-only allocation ledger records allocation identity, kind,
 size, retain/release events, live owners, and peak live bytes. It is compiled

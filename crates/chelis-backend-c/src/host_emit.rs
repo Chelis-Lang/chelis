@@ -533,14 +533,20 @@ pub(crate) fn emit_host_abi_program(
         "chelis_list *chelis_list_with_capacity(int64_t capacity);".to_string(),
         "void chelis_list_push(chelis_list *list, chelis_value value);".to_string(),
         "void chelis_list_extend(chelis_list *list, const chelis_list *src);".to_string(),
-        // chelis#2205: consuming append/concat for a container operand the
-        // ownership verifier moved at its scheduled last use. The runtime
-        // pushes in place only at strong-owner count one and otherwise clones
-        // and releases the consumed input, so a retained alias is never
-        // mutated. Private for the same reason as the three above.
+        // chelis#2205: the consuming counterparts of the container builtins
+        // that may take a same-kind operand the ownership verifier moved at
+        // its scheduled last use. Each mutates in place only at strong-owner
+        // count one and otherwise clones and releases the consumed input, so
+        // a retained alias is never mutated. Private for the same reason as
+        // the three above.
         "chelis_list *chelis_list_append_owned(chelis_list *list, chelis_value value);".to_string(),
         "chelis_list *chelis_list_concat_owned(chelis_list *lhs, const chelis_list *rhs);"
             .to_string(),
+        "chelis_dict *chelis_dict_insert_owned(chelis_dict *dict, chelis_value key, chelis_value value);"
+            .to_string(),
+        "chelis_dict *chelis_dict_merge_owned(chelis_dict *lhs, const chelis_dict *rhs);"
+            .to_string(),
+        "chelis_dict *chelis_dict_remove_owned(chelis_dict *dict, chelis_value key);".to_string(),
     ]);
     if helper_requirements.needs_blas_header {
         out.push("#include \"chelis_blas.h\"".to_string());
@@ -2946,11 +2952,21 @@ struct HostEmitter<'a> {
 }
 
 /// Whether the verified intrinsic application labelled `label` at this site
-/// takes its container operand (position 0, per
-/// `chelis_ir::ownership` `consuming_container_operand`) by Move (chelis#2205).
-/// The site of a builtin expression carries exactly one intrinsic application
-/// with that label; two would mean the emitter and the ownership sites
-/// disagree about the tree, so that fails closed.
+/// takes its container operand by Move (chelis#2205).
+///
+/// Every call site below hands `arg_vars[0]` to the consuming entry point,
+/// so this answers a question about operand zero specifically, and it
+/// refuses a move anywhere else rather than reporting it as a consumed
+/// container. `chelis_ir::ownership`'s `CONTAINER_CONSUMERS` table chooses
+/// which operand the scheduler upgrades and this crate cannot read it, so a
+/// row naming a different operand is a disagreement only the refusal can
+/// catch. Reporting "some operand moved" instead would route a
+/// still-borrowed operand into an entry point that releases it, which is a
+/// double release; ignoring the move entirely would merely leak. Neither is
+/// acceptable, and the disagreement is a compiler defect, so it fails
+/// closed. The site of a builtin expression carries exactly one intrinsic
+/// application with that label; two would mean the emitter and the
+/// ownership sites disagree about the tree, and that fails closed too.
 fn container_operand_is_moved(
     site: &ProjectedHostSite<'_>,
     label: &str,
@@ -2965,10 +2981,28 @@ fn container_operand_is_moved(
         }) = action
             && *site_label == label
         {
-            let moved = args
-                .first()
-                .is_some_and(|arg| arg.use_() == VerifiedOwnershipUse::Move);
-            if found.replace(moved).is_some() {
+            // Lowering borrows every builtin operand and the scheduler
+            // upgrades at most the one operand its row names. This emitter
+            // consumes operand zero, so exactly one moved operand at
+            // position zero is the consuming shape, no moved operand is the
+            // borrowing shape, and anything else is a disagreement between
+            // the table and this emitter that must not reach generated code.
+            let mut positions = args
+                .iter()
+                .enumerate()
+                .filter(|(_, arg)| arg.use_() == VerifiedOwnershipUse::Move)
+                .map(|(position, _)| position);
+            let moved = positions.next();
+            if positions.next().is_some() || matches!(moved, Some(position) if position != 0) {
+                return Err(invalid_abi_shape(
+                    format!(
+                        "verified `{label}` application moves an operand this emitter \
+                         does not consume; it consumes operand 0 only"
+                    ),
+                    "verified C host ownership emission",
+                ));
+            }
+            if found.replace(moved.is_some()).is_some() {
                 return Err(invalid_abi_shape(
                     format!("verified builtin site carries two `{label}` applications"),
                     "verified C host ownership emission",
@@ -5033,8 +5067,16 @@ impl<'a> HostEmitter<'a> {
                 return Ok(());
             }
             "dict_remove" => {
+                // chelis#2205: a container the verifier moved at its last use
+                // is consumed by the owned entry point; a borrowed one still
+                // goes through the cloning call.
+                let entry = if container_operand_is_moved(site, "builtin:dict_remove")? {
+                    "chelis_dict_remove_owned"
+                } else {
+                    "chelis_dict_remove"
+                };
                 self.lines.push(format!(
-                    "{}{target} = chelis_dict_remove({}, {});",
+                    "{}{target} = {entry}({}, {});",
                     self.indent,
                     arg_vars[0].0,
                     self.box_value_expr(&arg_vars[1].0, &arg_vars[1].1)?
@@ -5042,8 +5084,13 @@ impl<'a> HostEmitter<'a> {
                 return Ok(());
             }
             "dict_insert" => {
+                let entry = if container_operand_is_moved(site, "builtin:dict_insert")? {
+                    "chelis_dict_insert_owned"
+                } else {
+                    "chelis_dict_insert"
+                };
                 self.lines.push(format!(
-                    "{}{target} = chelis_dict_insert({}, {}, {});",
+                    "{}{target} = {entry}({}, {}, {});",
                     self.indent,
                     arg_vars[0].0,
                     self.box_value_expr(&arg_vars[1].0, &arg_vars[1].1)?,
@@ -5052,8 +5099,13 @@ impl<'a> HostEmitter<'a> {
                 return Ok(());
             }
             "dict_merge" => {
+                let entry = if container_operand_is_moved(site, "builtin:dict_merge")? {
+                    "chelis_dict_merge_owned"
+                } else {
+                    "chelis_dict_merge"
+                };
                 self.lines.push(format!(
-                    "{}{target} = chelis_dict_merge({}, {});",
+                    "{}{target} = {entry}({}, {});",
                     self.indent, arg_vars[0].0, arg_vars[1].0
                 ));
                 return Ok(());

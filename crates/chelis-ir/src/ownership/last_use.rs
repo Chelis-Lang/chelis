@@ -4,7 +4,7 @@ use super::error::OwnershipError;
 use super::ir::{
     ApplyKind, Block, BlockId, EdgeId, EdgeTerminal, HostSiteAction, HostSiteMap, Op, OpId,
     Operation, OperationRole, OwnerId, OwnerOrigin, OwnershipProgram, OwnershipUse, ScheduleState,
-    Terminal, Terminator, Unit, UnitId, list_consumer_operand,
+    Terminal, Terminator, Unit, UnitId, container_consumer_operand,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -201,24 +201,25 @@ pub(super) fn schedule(
 
 /// chelis#2205: consume a container at its scheduled last use.
 ///
-/// Lowering borrows every builtin operand, so a list whose last use is
-/// `append` or `concat` was cloned by the runtime and released one operation
-/// later. The scheduler has just placed that release: when a `Drop` terminal
-/// for the consumed operand of a list-producing builtin (a row of
-/// `LIST_CONSUMERS`, matched by label, list result and list operand)
-/// sits directly after the application in the same block, the operand is dead
-/// after the call. Turn the borrow into a move, drop the terminal, and remove
-/// its host-site action, so the emitter sees a moved operand and the
-/// consuming entry point takes ownership. The final `verify` re-checks the
-/// move: an owner that is still borrowed elsewhere in the operation, or read
-/// again later, fails there rather than here.
+/// Lowering borrows every builtin operand, so a container whose last use is
+/// `append`, `concat`, `dict_insert`, `dict_merge` or `dict_remove` was
+/// cloned by the runtime and released one operation later. The scheduler has
+/// just placed that release: when a `Drop` terminal for the consumed operand
+/// of a container-producing builtin (a row of `CONTAINER_CONSUMERS`, matched
+/// by label, by the row's heap kind on the result, and by that same kind on
+/// the named operand) sits directly after the application in the same block,
+/// the operand is dead after the call. Turn the borrow into a move, drop the
+/// terminal, and remove its host-site action, so the emitter sees a moved
+/// operand and the consuming entry point takes ownership. The final `verify`
+/// re-checks the move: an owner that is still borrowed elsewhere in the
+/// operation, or read again later, fails there rather than here.
 ///
-/// Eligibility is deliberately narrow: an `Owned` list-classed owner, the
-/// terminal is a scheduled scope exit, and no other operand of the same
-/// application names the owner. Retained aliases are not the scheduler's
-/// concern: the strong-owner count at run time decides between an in-place
-/// push and a clone, which is why a moved operand can never mutate a view
-/// someone else still holds.
+/// Eligibility is deliberately narrow: an `Owned` owner carrying the row's
+/// heap kind, the terminal is a scheduled scope exit, and no other operand of
+/// the same application names the owner. Retained aliases are not the
+/// scheduler's concern: the strong-owner count at run time decides between an
+/// in-place mutation and a clone, which is why a moved operand can never
+/// mutate a view someone else still holds.
 fn upgrade_container_last_use_moves(
     program: &mut OwnershipProgram,
     sites: &mut HostSiteMap,
@@ -236,7 +237,7 @@ fn upgrade_container_last_use_moves(
                         args,
                         schema,
                         ..
-                    } => list_consumer_operand(label, schema.result, |position| {
+                    } => container_consumer_operand(label, schema.result, |position| {
                         args.get(position)
                             .and_then(|arg| owners.get(&arg.owner))
                             .map(|info| info.class)

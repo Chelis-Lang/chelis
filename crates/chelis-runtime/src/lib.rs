@@ -1297,6 +1297,17 @@ fn resize_list_ledger(list: *mut chelis_list, site: &str) {
     }
 }
 
+fn resize_dict_ledger(dict: *mut chelis_dict, site: &str) {
+    if dict.is_null() {
+        return;
+    }
+    let bytes =
+        unsafe { ((*dict).entries.capacity() as u64).saturating_mul(LEDGER_DICT_ENTRY_BYTES) };
+    if !ownership_ledger::resize(dict.cast(), bytes, site) {
+        runtime_fail!("compiled ownership ledger rejected dict resize at {site}");
+    }
+}
+
 #[repr(C)]
 struct RuntimeString {
     header: HeapHeader,
@@ -5052,6 +5063,147 @@ pub unsafe extern "C" fn chelis_dict_merge(
         }
     }
     new_dict(entries, "chelis_dict_merge")
+}
+
+/// Consuming insert (chelis#2205). Takes ownership of `dict`: when this is
+/// the only strong owner the entry is written in place and the same
+/// dictionary is returned; otherwise a fresh dictionary is built exactly as
+/// `chelis_dict_insert` would, and the consumed input is released. The
+/// caller must have proved that no un-retained reference to `dict` survives
+/// the call (the ownership verifier's Move); the strong-owner count then
+/// decides sharing, which is the half a static rule cannot see across
+/// functions.
+///
+/// The in-place arm over an existing key clones the incoming value before
+/// releasing the one it replaces. The cloning entry point can release first
+/// because the caller still owns the incoming value; here the two may be the
+/// same heap value held once, and releasing first would free it before the
+/// clone reads it.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_dict_insert_owned(
+    dict: *mut chelis_dict,
+    key: chelis_value,
+    value: chelis_value,
+) -> *mut chelis_dict {
+    if dict.is_null() {
+        return chelis_dict_insert(dict, key, value);
+    }
+    validate_dict_key(key, "chelis_dict_insert_owned key");
+    validate_value(value, "chelis_dict_insert_owned value");
+    if (*dict).header.strong.load(Ordering::Relaxed) == 1 {
+        // The clone is hoisted above the branch on purpose: the incoming
+        // value and the one it replaces may be the same heap value held
+        // exactly once, so the replaced value's release must never run
+        // before the incoming one has its own count.
+        let fresh = chelis_value_clone(value);
+        let existing = (*dict)
+            .entries
+            .iter()
+            .position(|entry| value_key_eq(entry.key, key));
+        if let Some(index) = existing {
+            let previous = (*dict).entries[index].value;
+            (*dict).entries[index].value = fresh;
+            chelis_value_release(previous);
+        } else {
+            (*dict).entries.push(chelis_dict_entry {
+                key: chelis_value_clone(key),
+                value: fresh,
+            });
+            resize_dict_ledger(dict, "chelis_dict_insert_owned");
+        }
+        return dict;
+    }
+    let result = chelis_dict_insert(dict, key, value);
+    release_dict_ptr(dict);
+    result
+}
+
+/// Consuming merge (chelis#2205): the in-place counterpart of
+/// `chelis_dict_merge` for a uniquely owned `lhs`, with the same contract as
+/// `chelis_dict_insert_owned`. `rhs` stays borrowed and may not alias `lhs`.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_dict_merge_owned(
+    lhs: *mut chelis_dict,
+    rhs: *const chelis_dict,
+) -> *mut chelis_dict {
+    if lhs.is_null() {
+        return chelis_dict_merge(lhs, rhs);
+    }
+    // An rhs that aliases lhs is a retained second owner of the same
+    // dictionary (the emitter's operand identities are distinct even when the
+    // runtime pointer is one), so it takes the cloning path below like every
+    // other shared input; the in-place arm never reads a dictionary it is
+    // extending.
+    let aliased = std::ptr::eq(lhs as *const chelis_dict, rhs);
+    if !aliased && (*lhs).header.strong.load(Ordering::Relaxed) == 1 {
+        let incoming = if rhs.is_null() {
+            0
+        } else {
+            (*rhs).entries.len()
+        };
+        for position in 0..incoming {
+            let entry = (*rhs).entries[position];
+            let existing = (*lhs)
+                .entries
+                .iter()
+                .position(|held| value_key_eq(held.key, entry.key));
+            if let Some(index) = existing {
+                let fresh = chelis_value_clone(entry.value);
+                let previous = (*lhs).entries[index].value;
+                (*lhs).entries[index].value = fresh;
+                chelis_value_release(previous);
+            } else {
+                (*lhs).entries.push(chelis_dict_entry {
+                    key: chelis_value_clone(entry.key),
+                    value: chelis_value_clone(entry.value),
+                });
+            }
+        }
+        resize_dict_ledger(lhs, "chelis_dict_merge_owned");
+        return lhs;
+    }
+    let result = chelis_dict_merge(lhs, rhs);
+    release_dict_ptr(lhs);
+    result
+}
+
+/// Consuming remove (chelis#2205): the in-place counterpart of
+/// `chelis_dict_remove` for a uniquely owned `dict`, with the same contract
+/// as `chelis_dict_insert_owned`. The consumed dictionary keeps its
+/// allocation, so the removed entry's key and value are released here; the
+/// cloning entry point leaves that to the caller's own release of the
+/// untouched input.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_dict_remove_owned(
+    dict: *mut chelis_dict,
+    key: chelis_value,
+) -> *mut chelis_dict {
+    if dict.is_null() {
+        return chelis_dict_remove(dict, key);
+    }
+    validate_dict_key(key, "chelis_dict_remove_owned key");
+    if (*dict).header.strong.load(Ordering::Relaxed) == 1 {
+        // `retain` rather than a single removal, so a dictionary that somehow
+        // holds one key twice loses exactly the entries `chelis_dict_remove`
+        // would have filtered out.
+        let mut removed: Vec<chelis_dict_entry> = Vec::new();
+        (*dict).entries.retain(|entry| {
+            if value_key_eq(entry.key, key) {
+                removed.push(*entry);
+                false
+            } else {
+                true
+            }
+        });
+        for entry in removed {
+            chelis_value_release(entry.key);
+            chelis_value_release(entry.value);
+        }
+        return dict;
+    }
+    let result = chelis_dict_remove(dict, key);
+    release_dict_ptr(dict);
+    result
 }
 
 #[no_mangle]

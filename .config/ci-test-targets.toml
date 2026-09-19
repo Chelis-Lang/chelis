@@ -673,6 +673,22 @@ name = "expand_insert_dispatch_family"
 package = "chelis-types"
 name = "issue_1294_standard_lowerings"
 
+# chelis#2205: the counted receipts for the container-consumer table. Each
+# asserts that an N-step let-bound chain emits zero cloning calls, which is
+# the only executable evidence that the last-use move reaches the emitter at
+# all; the value-parity rows beside them pass with the table's rows removed,
+# so they cannot substitute. Package expansion is not a substitute either: it
+# is the lane these two were left to, and it does not reliably finish.
+# Registered together because the list file carries the mechanism's original
+# evidence and the dictionary file only extends it.
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_2205_container_last_use"
+
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_2205_dict_last_use"
+
 # All five rows in this published-stdlib acceptance target are intentionally
 # ignored. A direct modification remains required change-owned coverage: the
 # worker lists with ignored tests included, rejects this mode if any active
