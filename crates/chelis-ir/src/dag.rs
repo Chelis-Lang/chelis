@@ -396,6 +396,62 @@ pub enum FusedStepOp {
     Round,
 }
 
+/// Identity-preserving numeric comparison operation.
+///
+/// `CmpLt` and `Lt` intentionally remain distinct source identities even
+/// though both use the same ordered comparison kernel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComparisonKind {
+    CmpLt,
+    Lt,
+    Eq,
+    Neq,
+    Gt,
+    Gte,
+    Lte,
+}
+
+impl ComparisonKind {
+    pub const fn surf_name(self) -> &'static str {
+        match self {
+            Self::CmpLt => "cmplt",
+            Self::Lt => "lt",
+            Self::Eq => "eq",
+            Self::Neq => "neq",
+            Self::Gt => "gt",
+            Self::Gte => "gte",
+            Self::Lte => "lte",
+        }
+    }
+}
+
+/// Bool-only eager logical operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogicalKind {
+    And,
+    Or,
+    Not,
+}
+
+impl LogicalKind {
+    pub const fn surf_name(self) -> &'static str {
+        match self {
+            Self::And => "and",
+            Self::Or => "or",
+            Self::Not => "not",
+        }
+    }
+
+    pub const fn arity(self) -> usize {
+        match self {
+            Self::And | Self::Or => 2,
+            Self::Not => 1,
+        }
+    }
+}
+
 /// Reducer selector for [`RiscOp::ReduceWindow`].
 ///
 /// See `spec/05-risc-primitives.md` §2.3.1 for the full surface
@@ -540,6 +596,15 @@ pub enum RiscOp {
     /// Exact signed remainder, with DivZero traps at the stored width
     /// and dividend-sign semantics under [05-OP-64].
     Mod,
+    /// Identity-preserving comparison with Bool output ([05-OP-36]).
+    Compare(ComparisonKind),
+    /// Bool-only eager logical operation ([05-OP-26..28]).
+    Logical(LogicalKind),
+    /// Eager stored-bit conditional selection ([05-OP-53]).
+    Where,
+    /// Legacy backend transition identity. New producers must emit
+    /// `Compare(ComparisonKind::CmpLt)`; backend workers remove this variant
+    /// after all target emitters consume the direct vocabulary.
     CmpLt,
     MaxElem,
     /// Direct element-wise minimum selection. This identity preserves the
@@ -948,6 +1013,16 @@ pub enum RiscAtomIdentity {
     TruncDiv,
     Mod,
     CmpLt,
+    Lt,
+    Eq,
+    Neq,
+    Gt,
+    Gte,
+    Lte,
+    And,
+    Or,
+    Not,
+    Where,
     MaxElem,
     Neg,
     Exp,
@@ -1006,6 +1081,16 @@ impl RiscAtomIdentity {
         Self::TruncDiv,
         Self::Mod,
         Self::CmpLt,
+        Self::Lt,
+        Self::Eq,
+        Self::Neq,
+        Self::Gt,
+        Self::Gte,
+        Self::Lte,
+        Self::And,
+        Self::Or,
+        Self::Not,
+        Self::Where,
         Self::MaxElem,
         Self::Neg,
         Self::Exp,
@@ -1064,6 +1149,16 @@ impl RiscAtomIdentity {
             Self::TruncDiv => "trunc_div",
             Self::Mod => "mod",
             Self::CmpLt => "cmplt",
+            Self::Lt => "lt",
+            Self::Eq => "eq",
+            Self::Neq => "neq",
+            Self::Gt => "gt",
+            Self::Gte => "gte",
+            Self::Lte => "lte",
+            Self::And => "and",
+            Self::Or => "or",
+            Self::Not => "not",
+            Self::Where => "where",
             Self::MaxElem => "max_elem",
             Self::Neg => "neg",
             Self::Exp => "exp",
@@ -1137,6 +1232,21 @@ impl RiscOp {
             Self::FloorDiv => Semantic(Id::FloorDiv),
             Self::TruncDiv => Semantic(Id::TruncDiv),
             Self::Mod => Semantic(Id::Mod),
+            Self::Compare(kind) => Semantic(match kind {
+                ComparisonKind::CmpLt => Id::CmpLt,
+                ComparisonKind::Lt => Id::Lt,
+                ComparisonKind::Eq => Id::Eq,
+                ComparisonKind::Neq => Id::Neq,
+                ComparisonKind::Gt => Id::Gt,
+                ComparisonKind::Gte => Id::Gte,
+                ComparisonKind::Lte => Id::Lte,
+            }),
+            Self::Logical(kind) => Semantic(match kind {
+                LogicalKind::And => Id::And,
+                LogicalKind::Or => Id::Or,
+                LogicalKind::Not => Id::Not,
+            }),
+            Self::Where => Semantic(Id::Where),
             Self::CmpLt => Semantic(Id::CmpLt),
             Self::MaxElem => Semantic(Id::MaxElem),
             Self::Neg => Semantic(Id::Neg),
@@ -1435,6 +1545,7 @@ impl RiscOp {
             | RiscOp::Sub
             | RiscOp::Mul
             | RiscOp::Div
+            | RiscOp::Compare(_)
             | RiscOp::CmpLt
             | RiscOp::MaxElem
             | RiscOp::MinElem => true,
@@ -1498,6 +1609,10 @@ impl RiscOp {
             RiscOp::Cast { .. } => true,
 
             // --- NOT verifier-targetable (today) ---
+            // Logical/selection nodes are discrete control operators. Beacon
+            // targets the numeric regions around them, not these nodes.
+            RiscOp::Logical(_) | RiscOp::Where => false,
+
             // Stochastic ops have no deterministic value to bound.
             RiscOp::UniformLike { .. } | RiscOp::Dropout { .. } => false,
 
@@ -2181,6 +2296,9 @@ fn shape_source_for_axis(dag: &Dag, id: NodeId, axis: usize) -> Option<(String, 
         RiscOp::Add
         | RiscOp::Sub
         | RiscOp::Mul
+        | RiscOp::Compare(_)
+        | RiscOp::Logical(_)
+        | RiscOp::Where
         | RiscOp::CmpLt
         | RiscOp::MaxElem
         | RiscOp::MinElem
@@ -3161,6 +3279,9 @@ mod tests {
             RiscOp::FloorDiv,
             RiscOp::TruncDiv,
             RiscOp::Mod,
+            RiscOp::Compare(ComparisonKind::Eq),
+            RiscOp::Logical(LogicalKind::And),
+            RiscOp::Where,
             RiscOp::CmpLt,
             RiscOp::MaxElem,
             RiscOp::Neg,
@@ -3265,8 +3386,8 @@ mod tests {
         // identities so they cannot inherit a verifier disposition.
         assert_eq!(
             all.len(),
-            56,
-            "one_of_every_risc_op must list all 56 classified samples"
+            59,
+            "one_of_every_risc_op must list all 59 classified samples"
         );
 
         // The classifier returns a definite bool for every variant (no
@@ -3286,11 +3407,11 @@ mod tests {
         // identity/adjoint (2) are excluded (22) until Beacon registers their
         // own transformers.
         assert_eq!(
-            targetable, 34,
+            targetable, 35,
             "targetable op count drifted from the pinned WI-2 subset"
         );
         assert_eq!(
-            excluded, 22,
+            excluded, 24,
             "excluded op count drifted from the pinned WI-2 subset"
         );
 
@@ -3352,6 +3473,13 @@ mod tests {
                 kind: ExtremaKind::Max,
                 operand: ExtremaOperand::Left,
             },
+            RiscOp::Compare(ComparisonKind::Lt),
+            RiscOp::Compare(ComparisonKind::Neq),
+            RiscOp::Compare(ComparisonKind::Gt),
+            RiscOp::Compare(ComparisonKind::Gte),
+            RiscOp::Compare(ComparisonKind::Lte),
+            RiscOp::Logical(LogicalKind::Or),
+            RiscOp::Logical(LogicalKind::Not),
         ]);
         discovery_cases.extend(
             [

@@ -92,7 +92,9 @@ fn is_same_shape_result_op(op: &WireRiscOp) -> bool {
             | WireRiscOp::FloorDiv
             | WireRiscOp::TruncDiv
             | WireRiscOp::Mod
-            | WireRiscOp::CmpLt
+            | WireRiscOp::Compare { .. }
+            | WireRiscOp::Logical { .. }
+            | WireRiscOp::Where
             | WireRiscOp::MaxElem
             | WireRiscOp::MinElem
             | WireRiscOp::ExtremaAdjoint { .. }

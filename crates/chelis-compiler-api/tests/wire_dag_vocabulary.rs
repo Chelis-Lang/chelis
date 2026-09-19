@@ -42,7 +42,9 @@ fn wire_dag_operation_vocabulary_is_pinned_to_its_schema_version() {
         "div",
         "floor_div",
         "trunc_div",
-        "cmp_lt",
+        "compare",
+        "logical",
+        "where",
         "max_elem",
         "min_elem",
         "extrema_adjoint",
@@ -105,10 +107,10 @@ fn wire_dag_operation_vocabulary_is_pinned_to_its_schema_version() {
     actual.sort();
     expected.sort();
     assert_eq!(
-        WIRE_DAG_SCHEMA_VERSION, 14,
+        WIRE_DAG_SCHEMA_VERSION, 15,
         "review vocabulary and migration history with every version change"
     );
-    assert_eq!(actual.len(), 63);
+    assert_eq!(actual.len(), 65);
     assert_eq!(
         actual, expected,
         "operation changes require a schema-version and migration-history review"

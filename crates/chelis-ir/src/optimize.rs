@@ -2,7 +2,7 @@
 
 use chelis_unord::UnordMap;
 
-use crate::dag::{Dag, NodeId, RiscOp};
+use crate::dag::{ComparisonKind, Dag, LogicalKind, NodeId, RiscOp};
 
 type CseKey = (String, Vec<NodeId>, Vec<NodeId>, Vec<NodeId>);
 
@@ -72,6 +72,53 @@ pub fn constant_fold(dag: &mut Dag) {
                     } else {
                         chelis_types::float_binop(chelis_types::FloatBinOp::Min, *lval, *rval)
                     }),
+                    RiscOp::Compare(kind) => Some(
+                        chelis_types::compare_scalars(
+                            match kind {
+                                ComparisonKind::CmpLt | ComparisonKind::Lt => {
+                                    chelis_types::CompareOp::Lt
+                                }
+                                ComparisonKind::Eq => chelis_types::CompareOp::Eq,
+                                ComparisonKind::Neq => chelis_types::CompareOp::Ne,
+                                ComparisonKind::Gt => chelis_types::CompareOp::Gt,
+                                ComparisonKind::Gte => chelis_types::CompareOp::Gte,
+                                ComparisonKind::Lte => chelis_types::CompareOp::Lte,
+                            },
+                            *lval,
+                            *rval,
+                        )
+                        .and_then(|result| {
+                            Ok(chelis_types::scalar_from_i64(
+                                "const",
+                                chelis_types::types::Prim::Bool,
+                                i64::from(result),
+                            )?)
+                        }),
+                    ),
+                    RiscOp::Logical(LogicalKind::And | LogicalKind::Or) => Some(
+                        lval.as_bool_exact()
+                            .zip(rval.as_bool_exact())
+                            .ok_or_else(|| {
+                                chelis_types::NumericKernelError::Trap(
+                                    chelis_types::NumericTrap::Domain {
+                                        op: "logical",
+                                        prim: node.output_type.precision,
+                                    },
+                                )
+                            })
+                            .and_then(|(lhs, rhs)| {
+                                let result = match node.op {
+                                    RiscOp::Logical(LogicalKind::And) => lhs && rhs,
+                                    RiscOp::Logical(LogicalKind::Or) => lhs || rhs,
+                                    _ => unreachable!(),
+                                };
+                                Ok(chelis_types::scalar_from_i64(
+                                    "const",
+                                    chelis_types::types::Prim::Bool,
+                                    i64::from(result),
+                                )?)
+                            }),
+                    ),
                     _ => None,
                 };
                 if let Some(result) = direct {
@@ -113,6 +160,9 @@ pub fn constant_fold(dag: &mut Dag) {
                 && let Some(v) = wide_image(inner)
             {
                 let result = match &node.op {
+                    RiscOp::Logical(LogicalKind::Not) => {
+                        inner.as_bool_exact().map(|value| i64::from(!value) as f64)
+                    }
                     RiscOp::Neg => Some(-v),
                     RiscOp::Exp => Some(v.exp()),
                     RiscOp::Log => Some(v.ln()),
@@ -135,6 +185,31 @@ pub fn constant_fold(dag: &mut Dag) {
                     replacements.push((node.id, sealed, merge_spans));
                 }
             }
+        }
+        if node.inputs.len() == 3
+            && matches!(node.op, RiscOp::Where)
+            && let (Some(condition), Some(then_value), Some(else_value)) = (
+                dag.get(node.inputs[0]),
+                dag.get(node.inputs[1]),
+                dag.get(node.inputs[2]),
+            )
+            && let (
+                RiscOp::Const {
+                    value: condition_value,
+                },
+                RiscOp::Const { value: then_scalar },
+                RiscOp::Const { value: else_scalar },
+            ) = (&condition.op, &then_value.op, &else_value.op)
+            && let Some(selected) = condition_value.as_bool_exact().map(|condition| {
+                if condition {
+                    *then_scalar
+                } else {
+                    *else_scalar
+                }
+            })
+        {
+            let merge_spans = collect_operand_spans(node, &[condition, then_value, else_value]);
+            replacements.push((node.id, selected, merge_spans));
         }
     }
 

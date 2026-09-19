@@ -2080,7 +2080,10 @@ pub struct WireRecordPatternField {
 /// - `14`: local tensor-ascription claims carry mandatory authored identity,
 ///   binding, claim and axis fields, with exact literal or declaring-witness
 ///   forms and one initializer owner.
-pub const WIRE_DAG_SCHEMA_VERSION: u32 = 14;
+/// - `15`: comparison, logical, and conditional selection preserve their
+///   direct identities as `Compare`, `Logical`, and `Where`; the standalone
+///   `CmpLt` operation spelling is removed.
+pub const WIRE_DAG_SCHEMA_VERSION: u32 = 15;
 
 /// A typed failure from validating a serialized [`WireDag`] against the
 /// supported schema version (WI-2). This is deliberately its own error
@@ -2239,6 +2242,161 @@ impl WireDag {
         dag_domains::validate(self)?;
         for (index, node) in self.nodes.iter().enumerate() {
             match &node.op {
+                WireRiscOp::Compare { comparison } => {
+                    let inputs = node
+                        .inputs
+                        .iter()
+                        .map(|input_id| {
+                            self.nodes[..index]
+                                .iter()
+                                .find(|candidate| candidate.id == *input_id)
+                                .ok_or_else(|| {
+                                    WireDagContractError::new(format!(
+                                        "WireDag Compare node {} input {input_id} does not resolve to an earlier node",
+                                        node.id
+                                    ))
+                                })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    if inputs.len() != 2 {
+                        return Err(WireDagContractError::new(format!(
+                            "WireDag Compare node {} requires exactly two inputs",
+                            node.id
+                        )));
+                    }
+                    let lhs = inputs[0];
+                    let rhs = inputs[1];
+                    let same_shape = lhs.output_type.dims.len() == rhs.output_type.dims.len()
+                        && lhs
+                            .output_type
+                            .dims
+                            .iter()
+                            .zip(&rhs.output_type.dims)
+                            .all(|(lhs, rhs)| wire_dim_info_equal(lhs, rhs));
+                    let output_shape = lhs.output_type.dims.len() == node.output_type.dims.len()
+                        && lhs
+                            .output_type
+                            .dims
+                            .iter()
+                            .zip(&node.output_type.dims)
+                            .all(|(input, output)| wire_dim_info_equal(input, output));
+                    let ordered = matches!(
+                        comparison,
+                        WireComparisonKind::CmpLt
+                            | WireComparisonKind::Lt
+                            | WireComparisonKind::Gt
+                            | WireComparisonKind::Gte
+                            | WireComparisonKind::Lte
+                    );
+                    let operand = Prim::parse_interchange_name(&lhs.output_type.precision);
+                    let valid_operand =
+                        operand.is_some_and(|prim| prim.is_numeric() || prim == Prim::Bool);
+                    let valid_ordered_operand =
+                        !ordered || operand.is_some_and(|prim| prim.is_numeric());
+                    if lhs.output_type.precision != rhs.output_type.precision
+                        || !same_shape
+                        || !output_shape
+                        || node.output_type.precision != Prim::Bool.interchange_name()
+                        || !valid_operand
+                        || !valid_ordered_operand
+                    {
+                        return Err(WireDagContractError::new(format!(
+                            "WireDag Compare node {} requires two same-shape, same-precision numeric or bool operands and a same-shape Bool output; ordered comparisons require numeric operands",
+                            node.id
+                        )));
+                    }
+                }
+                WireRiscOp::Logical { logical } => {
+                    let expected = match logical {
+                        WireLogicalKind::And | WireLogicalKind::Or => 2,
+                        WireLogicalKind::Not => 1,
+                    };
+                    let inputs = node
+                        .inputs
+                        .iter()
+                        .map(|input_id| {
+                            self.nodes[..index]
+                                .iter()
+                                .find(|candidate| candidate.id == *input_id)
+                                .ok_or_else(|| {
+                                    WireDagContractError::new(format!(
+                                        "WireDag Logical node {} input {input_id} does not resolve to an earlier node",
+                                        node.id
+                                    ))
+                                })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let valid_inputs = inputs.iter().all(|input| {
+                        input.output_type.precision == Prim::Bool.interchange_name()
+                            && input.output_type.dims.len() == node.output_type.dims.len()
+                            && input
+                                .output_type
+                                .dims
+                                .iter()
+                                .zip(&node.output_type.dims)
+                                .all(|(input, output)| wire_dim_info_equal(input, output))
+                    });
+                    if inputs.len() != expected
+                        || node.output_type.precision != Prim::Bool.interchange_name()
+                        || !valid_inputs
+                    {
+                        return Err(WireDagContractError::new(format!(
+                            "WireDag Logical node {} requires exactly {expected} same-shape bool input(s) and a Bool output",
+                            node.id
+                        )));
+                    }
+                }
+                WireRiscOp::Where => {
+                    let inputs = node
+                        .inputs
+                        .iter()
+                        .map(|input_id| {
+                            self.nodes[..index]
+                                .iter()
+                                .find(|candidate| candidate.id == *input_id)
+                                .ok_or_else(|| {
+                                    WireDagContractError::new(format!(
+                                        "WireDag Where node {} input {input_id} does not resolve to an earlier node",
+                                        node.id
+                                    ))
+                                })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    if inputs.len() != 3 {
+                        return Err(WireDagContractError::new(format!(
+                            "WireDag Where node {} requires exactly three inputs",
+                            node.id
+                        )));
+                    }
+                    let condition = inputs[0];
+                    let then_value = inputs[1];
+                    let else_value = inputs[2];
+                    let same_type = |lhs: &WireTensorType, rhs: &WireTensorType| {
+                        lhs.precision == rhs.precision
+                            && lhs.dims.len() == rhs.dims.len()
+                            && lhs
+                                .dims
+                                .iter()
+                                .zip(&rhs.dims)
+                                .all(|(lhs, rhs)| wire_dim_info_equal(lhs, rhs))
+                    };
+                    if condition.output_type.precision != Prim::Bool.interchange_name()
+                        || !same_type(&then_value.output_type, &else_value.output_type)
+                        || !same_type(&then_value.output_type, &node.output_type)
+                        || condition.output_type.dims.len() != node.output_type.dims.len()
+                        || !condition
+                            .output_type
+                            .dims
+                            .iter()
+                            .zip(&node.output_type.dims)
+                            .all(|(condition, output)| wire_dim_info_equal(condition, output))
+                    {
+                        return Err(WireDagContractError::new(format!(
+                            "WireDag Where node {} requires a same-shape Bool condition and exactly matching branch/output types",
+                            node.id
+                        )));
+                    }
+                }
                 WireRiscOp::Mod => {
                     if node.inputs.len() != 2
                         || !Prim::parse_interchange_name(&node.output_type.precision)
@@ -2930,6 +3088,26 @@ pub enum WireExtremaOperand {
     Right,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WireComparisonKind {
+    CmpLt,
+    Lt,
+    Eq,
+    Neq,
+    Gt,
+    Gte,
+    Lte,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WireLogicalKind {
+    And,
+    Or,
+    Not,
+}
+
 /// chelis#616: wire form of `chelis_ir::dag::RtDim` for movement-op bounds
 /// and reshape targets. `Node(i)` indexes the owning op's `inputs` (the
 /// rank-0 integer bound scalars); `to_end` is the full-axis sentinel; `sym`
@@ -2990,7 +3168,13 @@ pub enum WireRiscOp {
     FloorDiv,
     TruncDiv,
     Mod,
-    CmpLt,
+    Compare {
+        comparison: WireComparisonKind,
+    },
+    Logical {
+        logical: WireLogicalKind,
+    },
+    Where,
     MaxElem,
     MinElem,
     ExtremaAdjoint {

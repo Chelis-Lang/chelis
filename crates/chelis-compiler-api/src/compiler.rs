@@ -8,8 +8,8 @@ use chelis_backend_c::CodegenResult;
 use chelis_backend_hip::HipCodegenResult;
 use chelis_deep::Expr as DeepExpr;
 use chelis_ir::dag::{
-    Dag, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStepOp, NodeId, RiscOp, RtDim,
-    TensorType,
+    ComparisonKind, Dag, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStepOp,
+    LogicalKind, NodeId, RiscOp, RtDim, TensorType,
 };
 use chelis_ir::eval;
 use chelis_surf::ast::{
@@ -39,13 +39,14 @@ use crate::schema::{
     FitnessComponents, GeneralKind, GeneratedFile, GradRequest, GradResult, LowerRequest,
     LowerResult, ParseRequest, ParseResult, RenameRequest, RenameResult, ReplaceFunctionRequest,
     ReplaceFunctionResult, RootManifestEntryResult, RootManifestResult, SourceKind, Span,
-    ValidateMode, ValidateRequest, ValidateResult, WireBinOp, WireDag, WireDagNode,
-    WireDagSchemaError, WireDimExpr, WireDimInfo, WireExtentWitnessSite, WireExtremaKind,
-    WireExtremaOperand, WireFusedInput, WireFusedStep, WireFusedStepOp, WireImportKind,
-    WireLetBinding, WireLetPattern, WireMatchArm, WireParam, WirePattern, WirePropertyOption,
-    WireRecordExprField, WireRecordPatternField, WireRecordTypeField, WireRiscOp, WireRtAxis,
-    WireRtDim, WireSurfDecl, WireSurfExpr, WireSurfTypeExpr, WireTensorType, WireTypeInvariant,
-    WireUnaryOp, WireVariant, WireVariantFields,
+    ValidateMode, ValidateRequest, ValidateResult, WireBinOp, WireComparisonKind, WireDag,
+    WireDagNode, WireDagSchemaError, WireDimExpr, WireDimInfo, WireExtentWitnessSite,
+    WireExtremaKind, WireExtremaOperand, WireFusedInput, WireFusedStep, WireFusedStepOp,
+    WireImportKind, WireLetBinding, WireLetPattern, WireLogicalKind, WireMatchArm, WireParam,
+    WirePattern, WirePropertyOption, WireRecordExprField, WireRecordPatternField,
+    WireRecordTypeField, WireRiscOp, WireRtAxis, WireRtDim, WireSurfDecl, WireSurfExpr,
+    WireSurfTypeExpr, WireTensorType, WireTypeInvariant, WireUnaryOp, WireVariant,
+    WireVariantFields,
 };
 use crate::schema::{stage_error, stage_error_with_span, unsupported_stage_error};
 use crate::source_wire::{SourceWireResult, wire_deep_expr, wire_literal};
@@ -6846,7 +6847,28 @@ fn wire_op(op: &RiscOp, precision: Prim) -> WireResult<WireRiscOp> {
         RiscOp::FloorDiv => WireRiscOp::FloorDiv,
         RiscOp::TruncDiv => WireRiscOp::TruncDiv,
         RiscOp::Mod => WireRiscOp::Mod,
-        RiscOp::CmpLt => WireRiscOp::CmpLt,
+        RiscOp::Compare(kind) => WireRiscOp::Compare {
+            comparison: match kind {
+                ComparisonKind::CmpLt => WireComparisonKind::CmpLt,
+                ComparisonKind::Lt => WireComparisonKind::Lt,
+                ComparisonKind::Eq => WireComparisonKind::Eq,
+                ComparisonKind::Neq => WireComparisonKind::Neq,
+                ComparisonKind::Gt => WireComparisonKind::Gt,
+                ComparisonKind::Gte => WireComparisonKind::Gte,
+                ComparisonKind::Lte => WireComparisonKind::Lte,
+            },
+        },
+        RiscOp::Logical(kind) => WireRiscOp::Logical {
+            logical: match kind {
+                LogicalKind::And => WireLogicalKind::And,
+                LogicalKind::Or => WireLogicalKind::Or,
+                LogicalKind::Not => WireLogicalKind::Not,
+            },
+        },
+        RiscOp::Where => WireRiscOp::Where,
+        RiscOp::CmpLt => WireRiscOp::Compare {
+            comparison: WireComparisonKind::CmpLt,
+        },
         RiscOp::MaxElem => WireRiscOp::MaxElem,
         RiscOp::MinElem => WireRiscOp::MinElem,
         RiscOp::ExtremaAdjoint { kind, operand } => WireRiscOp::ExtremaAdjoint {

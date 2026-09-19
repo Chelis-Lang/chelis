@@ -633,7 +633,9 @@ use chelis_types::{
 };
 use chelis_vocab::EffectKind;
 
-use crate::dag::{Dag, DimExpr, DimInfo, NodeId, RiscOp, RtAxis, RtDim, TensorType};
+use crate::dag::{
+    ComparisonKind, Dag, DimExpr, DimInfo, LogicalKind, NodeId, RiscOp, RtAxis, RtDim, TensorType,
+};
 use crate::grad::grad_dag_checked;
 use crate::tier2;
 use crate::vmap;
@@ -12943,17 +12945,17 @@ impl<'program> LowerCtx<'program> {
                 );
                 self.attach_reuse_hint(node, app_span, &[a, b])
             }
-            "cmplt" | "lt" if args.len() == 2 => {
+            "cmplt" if args.len() == 2 => {
                 let a = self.lower_expr_node(&args[0], "cmplt lhs");
                 let b = self.lower_expr_node(&args[1], "cmplt rhs");
-                // C5: CmpLt always produces Bool output regardless of input precision.
-                let bool_ty = Self::elementwise_out_ty(&self.dag, a, ty, Some(Prim::Bool));
-                self.dag.add_node(
-                    RiscOp::CmpLt,
-                    vec![a, b],
-                    bool_ty,
-                    self.current_span_id.clone(),
-                )
+                let parent_span = self.current_span_id.clone();
+                tier2::lower_cmplt(&mut self.dag, a, b, ty, parent_span.as_deref())
+            }
+            "lt" if args.len() == 2 => {
+                let a = self.lower_expr_node(&args[0], "lt lhs");
+                let b = self.lower_expr_node(&args[1], "lt rhs");
+                let parent_span = self.current_span_id.clone();
+                tier2::lower_lt(&mut self.dag, a, b, ty, parent_span.as_deref())
             }
             "max_elem" if args.len() == 2 => {
                 let a = self.lower_expr_node(&args[0], "max_elem lhs");
@@ -13577,6 +13579,22 @@ impl<'program> LowerCtx<'program> {
                 let a = self.lower_expr_node(&args[0], "not input");
                 let parent_span = self.current_span_id.clone();
                 tier2::lower_not(&mut self.dag, a, ty, parent_span.as_deref())
+            }
+            "where" if args.len() == 3 => {
+                let condition = self.lower_expr_node(&args[0], "where condition");
+                let then_value = self.lower_expr_node(&args[1], "where then branch");
+                let else_value = self.lower_expr_node(&args[2], "where else branch");
+                let out_ty = self
+                    .dag
+                    .get(then_value)
+                    .map(|node| node.output_type.clone())
+                    .unwrap_or_else(|| ty.clone());
+                self.dag.add_node(
+                    RiscOp::Where,
+                    vec![condition, then_value, else_value],
+                    out_ty,
+                    self.current_span_id.clone(),
+                )
             }
 
             // Tier 1: reductions
@@ -14513,13 +14531,13 @@ impl<'program> LowerCtx<'program> {
                 )
             }
 
-            // chelis#616: `fail(...)` in a DAG-lowered `if` branch. The mask
-            // lowering zeroes the untaken branch, so the placeholder's VALUE
-            // never matters on the taken path; real abort semantics live in
+            // chelis#616: `fail(...)` in a DAG-lowered `if` branch. Direct
+            // selection ignores the untaken branch value, so the placeholder's
+            // VALUE never matters on the taken path; real abort semantics live in
             // the host lane (which owns entry-level `if`/`fail`). The
             // pre-#616 terminal fallback fabricated a rank-0
             // `Load { name: "fail" }` — a phantom input slot that broke the
-            // C lane and mixed ranks in the mask arithmetic. Emit a zero
+            // C lane and mixed ranks in conditional selection. Emit a zero
             // Const at the branch's rank instead, with ANONYMOUS symbolic
             // dims (the checker's symbol may be declared later in program
             // order; `lower_if` ties the placeholder's shape to the sibling
@@ -16032,10 +16050,9 @@ impl<'program> LowerCtx<'program> {
     /// the time `lower_if` runs, inlined-function parameters are already
     /// bound to lowered nodes (`static_size_bindings` is only populated by
     /// `lower_let`, never at param-binding time), and the comparison/boolean
-    /// surface (`gte`/`lte`/`eq`/`and`/`or`/`not`) has already been lowered
-    /// to `CmpLt`/`MaxElem`/`Mul`/`Neg`/`Const` compositions by the tier2
-    /// builtins. Zero-divisor `FloorDiv`/`TruncDiv` refuses the fold rather
-    /// than folding a runtime trap away.
+    /// surface retains direct `Compare` and `Logical` identities.
+    /// Zero-divisor `FloorDiv`/`TruncDiv` refuses the fold rather than folding
+    /// a runtime trap away.
     fn fold_static_cond(&self, cond: NodeId) -> Option<bool> {
         fn numeric_binop(
             lhs: ScalarValue,
@@ -16066,15 +16083,6 @@ impl<'program> LowerCtx<'program> {
             }
         }
 
-        fn bool_binop(
-            lhs: ScalarValue,
-            rhs: ScalarValue,
-            op: impl FnOnce(bool, bool) -> bool,
-        ) -> Option<ScalarValue> {
-            let value = op(lhs.as_bool_exact()?, rhs.as_bool_exact()?);
-            scalar_from_i64("fold_static_cond", Prim::Bool, i64::from(value)).ok()
-        }
-
         let mut memo: UnordMap<NodeId, ScalarValue> = UnordMap::new();
         // Iterative post-order: (node, inputs_pushed).
         let mut stack: Vec<(NodeId, bool)> = vec![(cond, false)];
@@ -16103,6 +16111,11 @@ impl<'program> LowerCtx<'program> {
                 .get(1)
                 .and_then(|input| memo.get(input))
                 .copied();
+            let input2 = node
+                .inputs
+                .get(2)
+                .and_then(|input| memo.get(input))
+                .copied();
             let value = match &node.op {
                 RiscOp::Const { value } => *value,
                 RiscOp::Cast { new_precision } => {
@@ -16115,9 +16128,6 @@ impl<'program> LowerCtx<'program> {
                 }
                 RiscOp::Add => {
                     numeric_binop(input0?, input1?, Some(IntBinOp::Add), Some(FloatBinOp::Add))?
-                }
-                RiscOp::Mul if input0?.prim() == Prim::Bool => {
-                    bool_binop(input0?, input1?, |lhs, rhs| lhs && rhs)?
                 }
                 RiscOp::Mul => {
                     numeric_binop(input0?, input1?, Some(IntBinOp::Mul), Some(FloatBinOp::Mul))?
@@ -16134,15 +16144,48 @@ impl<'program> LowerCtx<'program> {
                 RiscOp::TruncDiv => {
                     numeric_binop(input0?, input1?, Some(IntBinOp::TruncDiv), None)?
                 }
+                RiscOp::Compare(kind) => scalar_from_i64(
+                    "fold_static_cond",
+                    Prim::Bool,
+                    i64::from(
+                        compare_scalars(
+                            match kind {
+                                ComparisonKind::CmpLt | ComparisonKind::Lt => CompareOp::Lt,
+                                ComparisonKind::Eq => CompareOp::Eq,
+                                ComparisonKind::Neq => CompareOp::Ne,
+                                ComparisonKind::Gt => CompareOp::Gt,
+                                ComparisonKind::Gte => CompareOp::Gte,
+                                ComparisonKind::Lte => CompareOp::Lte,
+                            },
+                            input0?,
+                            input1?,
+                        )
+                        .ok()?,
+                    ),
+                )
+                .ok()?,
+                RiscOp::Logical(kind) => {
+                    let lhs = input0?.as_bool_exact()?;
+                    let result = match kind {
+                        LogicalKind::And => lhs && input1?.as_bool_exact()?,
+                        LogicalKind::Or => lhs || input1?.as_bool_exact()?,
+                        LogicalKind::Not => !lhs,
+                    };
+                    scalar_from_i64("fold_static_cond", Prim::Bool, i64::from(result)).ok()?
+                }
+                RiscOp::Where => {
+                    if input0?.as_bool_exact()? {
+                        input1?
+                    } else {
+                        input2?
+                    }
+                }
                 RiscOp::CmpLt => scalar_from_i64(
                     "fold_static_cond",
                     Prim::Bool,
                     i64::from(compare_scalars(CompareOp::Lt, input0?, input1?).ok()?),
                 )
                 .ok()?,
-                RiscOp::MaxElem if input0?.prim() == Prim::Bool => {
-                    bool_binop(input0?, input1?, |lhs, rhs| lhs || rhs)?
-                }
                 RiscOp::MaxElem => {
                     numeric_binop(input0?, input1?, Some(IntBinOp::Max), Some(FloatBinOp::Max))?
                 }
@@ -16156,18 +16199,6 @@ impl<'program> LowerCtx<'program> {
                 }
                 _ => return None,
             };
-            // chelis#620 red-team fix: refuse the fold on any non-finite
-            // intermediate. The comparison surface reaching this walker is
-            // the lowered CmpLt/not composition, whose NaN behavior
-            // (`not(NaN < x)` is true) DISAGREES with the IEEE comparisons
-            // both forward lanes apply (host evaluator `>=`, C backend
-            // `>=`) -- so folding a NaN condition would prune to a branch
-            // the forward pass never takes. Falling to the runtime mask
-            // path keeps the pre-existing (pre-#620) behavior for such
-            // conditions instead of extending it to ADT/list pruning.
-            if value.prim().is_float() && !value.as_f64_lossy().is_finite() {
-                return None;
-            }
             memo.insert(id, value);
         }
         memo.get(&cond).map(|value| {
@@ -18874,7 +18905,7 @@ impl<'program> LowerCtx<'program> {
         // after `lower_if` has entered the arm.
         self.local_ascription_path_condition = Some(match saved_local_path {
             Some(parent_path) => self.dag.add_node(
-                RiscOp::Mul,
+                RiscOp::Logical(LogicalKind::And),
                 vec![parent_path, cond],
                 TensorType {
                     dims: Vec::new(),
@@ -18891,7 +18922,7 @@ impl<'program> LowerCtx<'program> {
                 precision: Prim::Bool,
             };
             let then_path = self.dag.add_node(
-                RiscOp::Mul,
+                RiscOp::Logical(LogicalKind::And),
                 vec![parent_path, cond],
                 path_ty,
                 self.current_span_id.clone(),
@@ -18905,20 +18936,14 @@ impl<'program> LowerCtx<'program> {
                 dims: Vec::new(),
                 precision: Prim::Bool,
             };
-            let one = self.dag.add_node(
-                RiscOp::synth_const(Prim::Bool, 1.0),
-                vec![],
-                path_ty.clone(),
-                self.current_span_id.clone(),
-            );
             let not_cond = self.dag.add_node(
-                RiscOp::CmpLt,
-                vec![cond, one],
+                RiscOp::Logical(LogicalKind::Not),
+                vec![cond],
                 path_ty.clone(),
                 self.current_span_id.clone(),
             );
             let else_path = self.dag.add_node(
-                RiscOp::Mul,
+                RiscOp::Logical(LogicalKind::And),
                 vec![parent_path, not_cond],
                 path_ty,
                 self.current_span_id.clone(),
@@ -18929,21 +18954,15 @@ impl<'program> LowerCtx<'program> {
             dims: Vec::new(),
             precision: Prim::Bool,
         };
-        let one = self.dag.add_node(
-            RiscOp::synth_const(Prim::Bool, 1.0),
-            vec![],
-            path_ty.clone(),
-            self.current_span_id.clone(),
-        );
         let not_cond = self.dag.add_node(
-            RiscOp::CmpLt,
-            vec![cond, one],
+            RiscOp::Logical(LogicalKind::Not),
+            vec![cond],
             path_ty.clone(),
             self.current_span_id.clone(),
         );
         self.local_ascription_path_condition = Some(match saved_local_path {
             Some(parent_path) => self.dag.add_node(
-                RiscOp::Mul,
+                RiscOp::Logical(LogicalKind::And),
                 vec![parent_path, not_cond],
                 path_ty,
                 self.current_span_id.clone(),
@@ -18960,10 +18979,6 @@ impl<'program> LowerCtx<'program> {
             Self::default_type()
         };
         let out_ty = self.actualized_runtime_if_output_type(then_node, else_node, &stamped_out_ty);
-        if !out_ty.precision.is_float() {
-            return self.lower_unrepresentable("if", elems);
-        }
-
         // chelis#616: a leaf-Const branch (the `fail` placeholder) and the
         // mask's `one` Const are shaped like the branch values, but as leaf
         // nodes they have no input edge carrying that relation. Conform the
@@ -18975,41 +18990,10 @@ impl<'program> LowerCtx<'program> {
         // value, and (iii) the extent source stays alive under DCE.
         let then_node = self.conform_branch_placeholder(then_node, &out_ty, else_node);
         let else_node = self.conform_branch_placeholder(else_node, &out_ty, then_node);
-        let mask = self.lower_if_mask(cond, &out_ty, else_node);
-        let one = self.dag.add_node(
-            RiscOp::synth_const(out_ty.precision, 1.0),
-            vec![],
-            out_ty.clone(),
-            self.current_span_id.clone(),
-        );
-        self.dag.add_shape_dep(one, else_node);
-        let neg_mask = self.dag.add_node(
-            RiscOp::Neg,
-            vec![mask],
-            out_ty.clone(),
-            self.current_span_id.clone(),
-        );
-        let inv_mask = self.dag.add_node(
-            RiscOp::Add,
-            vec![one, neg_mask],
-            out_ty.clone(),
-            self.current_span_id.clone(),
-        );
-        let masked_then = self.dag.add_node(
-            RiscOp::Mul,
-            vec![mask, then_node],
-            out_ty.clone(),
-            self.current_span_id.clone(),
-        );
-        let masked_else = self.dag.add_node(
-            RiscOp::Mul,
-            vec![inv_mask, else_node],
-            out_ty.clone(),
-            self.current_span_id.clone(),
-        );
+        let condition = self.lower_if_condition(cond, &out_ty, else_node);
         LoweredValue::Node(self.dag.add_node(
-            RiscOp::Add,
-            vec![masked_then, masked_else],
+            RiscOp::Where,
+            vec![condition, then_node, else_node],
             out_ty,
             self.current_span_id.clone(),
         ))
@@ -19564,7 +19548,7 @@ impl<'program> LowerCtx<'program> {
     /// types `fail` as bottom, which lowers rank-0; a checked program's
     /// branches otherwise agree in rank, so a rank-0 leaf Const under a
     /// tensor-typed `if` is exactly the bottom placeholder. Returns the
-    /// branch node to use in the mask arithmetic: for the bottom
+    /// branch node to use in direct conditional selection: for the bottom
     /// placeholder that is a FRESH conformed Const emitted here — after
     /// both branches — so its shape source (the sibling) precedes it in
     /// evaluation order.
@@ -19622,28 +19606,19 @@ impl<'program> LowerCtx<'program> {
         }
     }
 
-    fn lower_if_mask(&mut self, cond: NodeId, out_ty: &TensorType, shape_source: NodeId) -> NodeId {
-        let mut mask = cond;
+    fn lower_if_condition(
+        &mut self,
+        cond: NodeId,
+        out_ty: &TensorType,
+        shape_source: NodeId,
+    ) -> NodeId {
         let cond_ty = self
             .dag
             .get(cond)
             .map(|node| node.output_type.clone())
             .unwrap_or_else(Self::default_type);
-        if cond_ty.precision != out_ty.precision {
-            mask = self.dag.add_node(
-                RiscOp::Cast {
-                    new_precision: out_ty.precision,
-                },
-                vec![mask],
-                TensorType {
-                    dims: cond_ty.dims.clone(),
-                    precision: out_ty.precision,
-                },
-                self.current_span_id.clone(),
-            );
-        }
         if cond_ty.dims.is_empty() && !out_ty.dims.is_empty() {
-            let mut expanded = mask;
+            let mut expanded = cond;
             let mut dims = Vec::new();
             for (axis, dim) in out_ty.dims.iter().enumerate() {
                 dims.push(dim.clone());
@@ -19663,14 +19638,14 @@ impl<'program> LowerCtx<'program> {
                     },
                     TensorType {
                         dims: dims.clone(),
-                        precision: out_ty.precision,
+                        precision: Prim::Bool,
                     },
                     self.current_span_id.clone(),
                 );
             }
             return expanded;
         }
-        mask
+        cond
     }
 }
 
@@ -22930,55 +22905,53 @@ mod tests {
     // --- H1: Tier 2 comparison ops lowering ---
 
     #[test]
-    fn lower_gt_decomposes() {
+    fn lower_gt_preserves_direct_identity() {
         let src = r#"
             (def {} a (lit {type: (t-tensor {} (t-prim {} f32))} 5.0))
             (def {} b (lit {type: (t-tensor {} (t-prim {} f32))} 3.0))
             (def {} c (app {} (var {} gt) (var {} a) (var {} b)))
         "#;
         let dag = parse_and_lower(src);
-        // a, b, CmpLt(b, a)
         assert_eq!(non_drop_len(&dag), 3);
         let node = dag.get(NodeId(2)).unwrap();
-        assert_eq!(node.op, RiscOp::CmpLt);
-        // Args are swapped: b, a
-        assert_eq!(node.inputs, vec![NodeId(1), NodeId(0)]);
+        assert_eq!(node.op, RiscOp::Compare(ComparisonKind::Gt));
+        assert_eq!(node.inputs, vec![NodeId(0), NodeId(1)]);
     }
 
     #[test]
-    fn lower_gte_decomposes() {
+    fn lower_gte_preserves_direct_identity() {
         let src = r#"
             (def {} a (lit {type: (t-tensor {} (t-prim {} f32))} 5.0))
             (def {} b (lit {type: (t-tensor {} (t-prim {} f32))} 3.0))
             (def {} c (app {} (var {} gte) (var {} a) (var {} b)))
         "#;
         let dag = parse_and_lower(src);
-        // a, b, CmpLt(a,b), Const(1), CmpLt(lt, 1)
-        assert_eq!(non_drop_len(&dag), 5);
-        assert_eq!(root_node(&dag).op, RiscOp::CmpLt);
+        assert_eq!(non_drop_len(&dag), 3);
+        assert_eq!(root_node(&dag).op, RiscOp::Compare(ComparisonKind::Gte));
     }
 
     #[test]
-    fn lower_lte_decomposes() {
+    fn lower_lte_preserves_direct_identity() {
         let src = r#"
             (def {} a (lit {type: (t-tensor {} (t-prim {} f32))} 3.0))
             (def {} b (lit {type: (t-tensor {} (t-prim {} f32))} 5.0))
             (def {} c (app {} (var {} lte) (var {} a) (var {} b)))
         "#;
         let dag = parse_and_lower(src);
-        assert_eq!(non_drop_len(&dag), 5);
+        assert_eq!(non_drop_len(&dag), 3);
+        assert_eq!(root_node(&dag).op, RiscOp::Compare(ComparisonKind::Lte));
     }
 
     #[test]
-    fn lower_eq_decomposes() {
+    fn lower_eq_preserves_direct_identity() {
         let src = r#"
             (def {} a (lit {type: (t-tensor {} (t-prim {} f32))} 3.0))
             (def {} b (lit {type: (t-tensor {} (t-prim {} f32))} 3.0))
             (def {} c (app {} (var {} eq) (var {} a) (var {} b)))
         "#;
         let dag = parse_and_lower(src);
-        // a, b, CmpLt(a,b), CmpLt(b,a), MaxElem, Const(1), CmpLt(or, 1)
-        assert_eq!(non_drop_len(&dag), 7);
+        assert_eq!(non_drop_len(&dag), 3);
+        assert_eq!(root_node(&dag).op, RiscOp::Compare(ComparisonKind::Eq));
     }
 
     // --- Direct Tier-1 MinElem lowering ---
@@ -23000,43 +22973,40 @@ mod tests {
     // --- H2: Boolean operators ---
 
     #[test]
-    fn lower_and_decomposes() {
+    fn lower_and_preserves_direct_identity() {
         let src = r#"
             (def {} a (lit {type: (t-tensor {} (t-prim {} bool))} true))
             (def {} b (lit {type: (t-tensor {} (t-prim {} bool))} false))
             (def {} c (app {} (var {} and) (var {} a) (var {} b)))
         "#;
         let dag = parse_and_lower(src);
-        // a, b, Mul(a, b)
         assert_eq!(non_drop_len(&dag), 3);
         let node = dag.get(NodeId(2)).unwrap();
-        assert_eq!(node.op, RiscOp::Mul);
+        assert_eq!(node.op, RiscOp::Logical(LogicalKind::And));
     }
 
     #[test]
-    fn lower_or_decomposes() {
+    fn lower_or_preserves_direct_identity() {
         let src = r#"
             (def {} a (lit {type: (t-tensor {} (t-prim {} bool))} false))
             (def {} b (lit {type: (t-tensor {} (t-prim {} bool))} true))
             (def {} c (app {} (var {} or) (var {} a) (var {} b)))
         "#;
         let dag = parse_and_lower(src);
-        // a, b, MaxElem(a, b)
         assert_eq!(dag.len(), 3);
         let node = dag.get(NodeId(2)).unwrap();
-        assert_eq!(node.op, RiscOp::MaxElem);
+        assert_eq!(node.op, RiscOp::Logical(LogicalKind::Or));
     }
 
     #[test]
-    fn lower_not_decomposes() {
+    fn lower_not_preserves_direct_identity() {
         let src = r#"
             (def {} a (lit {type: (t-tensor {} (t-prim {} bool))} true))
             (def {} b (app {} (var {} not) (var {} a)))
         "#;
         let dag = parse_and_lower(src);
-        // a, Const(1), CmpLt(a, 1)
-        assert_eq!(non_drop_len(&dag), 3);
-        assert_eq!(root_node(&dag).op, RiscOp::CmpLt);
+        assert_eq!(non_drop_len(&dag), 2);
+        assert_eq!(root_node(&dag).op, RiscOp::Logical(LogicalKind::Not));
     }
 
     // --- H3: Movement op stubs ---
@@ -23531,7 +23501,7 @@ mod tests {
         );
     }
 
-    // --- C5: CmpLt lowering produces Bool ---
+    // --- C5: direct comparison lowering produces Bool ---
 
     #[test]
     fn lower_cmplt_produces_bool_output() {
@@ -23544,8 +23514,8 @@ mod tests {
         let cmplt_node = dag
             .nodes()
             .iter()
-            .find(|n| matches!(n.op, RiscOp::CmpLt))
-            .expect("expected CmpLt node");
+            .find(|n| matches!(n.op, RiscOp::Compare(ComparisonKind::CmpLt)))
+            .expect("expected direct cmplt comparison node");
         assert_eq!(
             cmplt_node.output_type.precision,
             Prim::Bool,
@@ -25366,22 +25336,23 @@ mod regression_tests {
     }
 
     #[test]
-    fn float_if_lowers_via_masked_select() {
+    fn float_if_lowers_via_direct_where() {
         // chelis#620: the condition must be a RUNTIME value (an unbound var
-        // lowers to a Load, which the static fold refuses) so the mask-blend
+        // lowers to a Load, which the static fold refuses) so the direct
+        // selection
         // path stays exercised; a literal condition now prunes statically.
         let dag = parse_and_lower_unchecked("(if {} (var {} c) (lit {} 1.0) (lit {} 0.0))");
         assert!(
             dag.nodes()
                 .iter()
-                .any(|node| matches!(node.op, RiscOp::Mul)),
-            "expected lowered if to synthesize masked multiplications"
+                .any(|node| matches!(node.op, RiscOp::Where)),
+            "expected lowered if to preserve direct conditional selection"
         );
         assert!(
             dag.nodes()
                 .iter()
-                .any(|node| matches!(node.op, RiscOp::Add)),
-            "expected lowered if to synthesize additive select"
+                .all(|node| !matches!(node.op, RiscOp::Mul | RiscOp::Add)),
+            "lowered if must not synthesize numeric mask arithmetic"
         );
     }
 
@@ -25389,7 +25360,7 @@ mod regression_tests {
     fn static_cond_if_prunes_untaken_branch() {
         // chelis#620: a compile-time-resolvable condition selects the taken
         // branch at lowering time; the untaken branch is never lowered and no
-        // mask arithmetic is synthesized. The `if` analogue of
+        // conditional selection is synthesized. The `if` analogue of
         // `static_ctor_scrutinee_match_selects_taken_arm`.
         let dag = parse_and_lower(
             "(if {} (lit {} true) \
@@ -25443,8 +25414,8 @@ mod regression_tests {
 
     #[test]
     fn static_cond_if_folds_int_comparison_chain() {
-        // chelis#620: the fold sees through the lowered comparison
-        // vocabulary (gte lowers to CmpLt + not) and integer arithmetic:
+        // chelis#620: the fold sees through direct comparison vocabulary and
+        // integer arithmetic:
         // gte(add(1, 2), mul(1, 3)) == gte(3, 3) == true.
         let dag = parse_and_lower_unchecked(
             "(if {} (app {} (var {} gte) \
@@ -25470,7 +25441,7 @@ mod regression_tests {
     #[test]
     fn static_cond_fold_refuses_fractional_checked_cast() {
         // A fractional checked cast Domain-traps. Static recognition must
-        // decline so the runtime mask path retains the cast and its trap.
+        // decline so the runtime `Where` path retains the cast and its trap.
         let dag = parse_and_lower_unchecked(
             "(if {} (app {} (var {} gt) \
              (cast {} (lit {} 0.9) i32) (cast {} (lit {} 0) i32)) \
@@ -25480,8 +25451,8 @@ mod regression_tests {
         assert!(
             dag.nodes()
                 .iter()
-                .any(|node| matches!(node.op, RiscOp::Mul)),
-            "fractional checked cast must stay on the runtime mask path: {dag:?}"
+                .any(|node| matches!(node.op, RiscOp::Where)),
+            "fractional checked cast must stay on the runtime Where path: {dag:?}"
         );
     }
 
@@ -25570,8 +25541,8 @@ mod regression_tests {
         assert!(
             dag.nodes()
                 .iter()
-                .any(|node| matches!(node.op, RiscOp::Mul)),
-            "a trapping typed kernel must decline the fold and retain runtime control flow: \
+                .any(|node| matches!(node.op, RiscOp::Where)),
+            "a trapping typed kernel must decline the fold and retain direct runtime control flow: \
              {dag:?}"
         );
     }
@@ -25580,7 +25551,7 @@ mod regression_tests {
     fn static_cond_fold_refuses_zero_divisor() {
         // chelis#620: floor_div by zero traps at runtime (chelis#550); the
         // fold must refuse rather than fold the trap away, leaving the if on
-        // the runtime mask path (Mul nodes present).
+        // the runtime `Where` path.
         let dag = parse_and_lower_unchecked(
             "(if {} (app {} (var {} gt) \
              (app {} (var {} floor_div) (cast {} (lit {} 1) i64) (cast {} (lit {} 0) i64)) \
@@ -25590,18 +25561,15 @@ mod regression_tests {
         assert!(
             dag.nodes()
                 .iter()
-                .any(|node| matches!(node.op, RiscOp::Mul)),
-            "zero-divisor condition must stay on the mask path: {dag:?}"
+                .any(|node| matches!(node.op, RiscOp::Where)),
+            "zero-divisor condition must stay on the runtime Where path: {dag:?}"
         );
     }
 
     #[test]
-    fn static_cond_fold_refuses_non_finite() {
-        // chelis#620 red-team fix: the lowered CmpLt/not comparison chain
-        // evaluates NaN comparisons opposite to the IEEE comparisons both
-        // forward lanes apply, so a non-finite intermediate must refuse
-        // the fold and stay on the runtime mask path (Mul nodes present)
-        // rather than pruning to a branch the forward pass never takes.
+    fn static_cond_fold_uses_direct_nan_comparison_semantics() {
+        // Direct gte preserves IEEE unordered behavior: NaN >= 0 is false,
+        // so the static fold may select the else branch exactly.
         let dag = parse_and_lower_unchecked(
             "(if {} (app {} (var {} gte) \
              (app {} (var {} div) (lit {} 0.0) (lit {} 0.0)) \
@@ -25609,10 +25577,14 @@ mod regression_tests {
              (lit {} 1.0) (lit {} 0.0))",
         );
         assert!(
-            dag.nodes()
+            dag.nodes().iter().any(
+                |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 0.0)
+            )
+        );
+        assert!(
+            !dag.nodes()
                 .iter()
-                .any(|node| matches!(node.op, RiscOp::Mul)),
-            "NaN condition must stay on the mask path: {dag:?}"
+                .any(|node| matches!(node.op, RiscOp::Where))
         );
     }
 
@@ -25705,19 +25677,20 @@ mod regression_tests {
     }
 
     #[test]
-    fn non_float_if_is_rejected_before_lowering() {
+    fn non_float_if_lowers_via_direct_where() {
         // chelis#620: the condition must be a RUNTIME value (a literal
         // condition now prunes statically and lowers any branch type).
-        let err = std::panic::catch_unwind(|| {
-            let _ = parse_and_lower_unchecked(
-                "(if {type: (t-prim {} bool)} \
-                (var {} c) \
-                (lit {type: (t-prim {} bool)} true) \
-                (lit {type: (t-prim {} bool)} false))",
-            );
-        })
-        .expect_err("non-float runtime-cond if should be rejected");
-        assert!(captured_lower_message(err).contains("`if` is not supported by IR evaluation yet"));
+        let dag = parse_and_lower_unchecked(
+            "(if {type: (t-prim {} bool)} \
+             (var {} c) \
+             (lit {type: (t-prim {} bool)} true) \
+             (lit {type: (t-prim {} bool)} false))",
+        );
+        assert!(
+            dag.nodes()
+                .iter()
+                .any(|node| matches!(node.op, RiscOp::Where))
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! DAG structural verification.
 
-use crate::dag::{Dag, DimInfo, ExtentWitnessSite, NodeId, RiscOp, RtAxis, RtDim};
+use crate::dag::{ComparisonKind, Dag, DimInfo, ExtentWitnessSite, NodeId, RiscOp, RtAxis, RtDim};
 #[allow(unused_imports)]
 use chelis_types::types::Prim;
 use chelis_unord::{UnordMap, UnordSet};
@@ -393,6 +393,144 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
         // Check arity.
         let arity = node.inputs.len();
         match &node.op {
+            RiscOp::Compare(kind) => {
+                if arity != 2 {
+                    errors.push(format!(
+                        "comparison at node {} has {} inputs (expected 2)",
+                        node.id.0, arity
+                    ));
+                } else if let (Some(lhs), Some(rhs)) =
+                    (dag.get(node.inputs[0]), dag.get(node.inputs[1]))
+                {
+                    if lhs.output_type.precision != rhs.output_type.precision {
+                        errors.push(format!(
+                            "comparison at node {} has mismatched precision {:?} vs {:?}",
+                            node.id.0, lhs.output_type.precision, rhs.output_type.precision
+                        ));
+                    }
+                    if lhs.output_type.dims != rhs.output_type.dims {
+                        errors.push(format!(
+                            "comparison at node {} requires exactly matching operand shape",
+                            node.id.0
+                        ));
+                    }
+                    if !lhs.output_type.precision.is_numeric()
+                        && lhs.output_type.precision != Prim::Bool
+                    {
+                        errors.push(format!(
+                            "comparison {} at node {} requires numeric or bool operands",
+                            kind.surf_name(),
+                            node.id.0
+                        ));
+                    } else if matches!(
+                        kind,
+                        ComparisonKind::CmpLt
+                            | ComparisonKind::Lt
+                            | ComparisonKind::Gt
+                            | ComparisonKind::Gte
+                            | ComparisonKind::Lte
+                    ) && !lhs.output_type.precision.is_numeric()
+                    {
+                        errors.push(format!(
+                            "ordered comparison {} at node {} requires numeric operands",
+                            kind.surf_name(),
+                            node.id.0
+                        ));
+                    }
+                    if node.output_type.precision != Prim::Bool {
+                        errors.push(format!(
+                            "comparison {} at node {} has output precision {:?}, expected Bool",
+                            kind.surf_name(),
+                            node.id.0,
+                            node.output_type.precision
+                        ));
+                    }
+                    if node.output_type.dims != lhs.output_type.dims {
+                        errors.push(format!(
+                            "comparison at node {} output shape must match its operands",
+                            node.id.0
+                        ));
+                    }
+                }
+            }
+            RiscOp::Logical(kind) => {
+                let expected = kind.arity();
+                if arity != expected {
+                    errors.push(format!(
+                        "logical {} at node {} has {} inputs (expected {})",
+                        kind.surf_name(),
+                        node.id.0,
+                        arity,
+                        expected
+                    ));
+                } else {
+                    let inputs = node
+                        .inputs
+                        .iter()
+                        .filter_map(|input| dag.get(*input))
+                        .collect::<Vec<_>>();
+                    for input in &inputs {
+                        if input.output_type.precision != Prim::Bool {
+                            errors.push(format!(
+                                "logical {} at node {} requires bool operands",
+                                kind.surf_name(),
+                                node.id.0
+                            ));
+                        }
+                        if input.output_type.dims != node.output_type.dims {
+                            errors.push(format!(
+                                "logical {} at node {} requires exactly matching shape",
+                                kind.surf_name(),
+                                node.id.0
+                            ));
+                        }
+                    }
+                    if node.output_type.precision != Prim::Bool {
+                        errors.push(format!(
+                            "logical {} at node {} requires Bool output",
+                            kind.surf_name(),
+                            node.id.0
+                        ));
+                    }
+                }
+            }
+            RiscOp::Where => {
+                if arity != 3 {
+                    errors.push(format!(
+                        "where at node {} has {} inputs (expected 3)",
+                        node.id.0, arity
+                    ));
+                } else if let (Some(condition), Some(then_value), Some(else_value)) = (
+                    dag.get(node.inputs[0]),
+                    dag.get(node.inputs[1]),
+                    dag.get(node.inputs[2]),
+                ) {
+                    if condition.output_type.precision != Prim::Bool {
+                        errors.push(format!(
+                            "where at node {} condition must be Bool",
+                            node.id.0
+                        ));
+                    }
+                    if then_value.output_type != else_value.output_type {
+                        errors.push(format!(
+                            "where at node {} branches must have exactly matching type",
+                            node.id.0
+                        ));
+                    }
+                    if node.output_type != then_value.output_type {
+                        errors.push(format!(
+                            "where at node {} output must match its branches",
+                            node.id.0
+                        ));
+                    }
+                    if condition.output_type.dims != then_value.output_type.dims {
+                        errors.push(format!(
+                            "where at node {} condition and branches must have exactly matching shape",
+                            node.id.0
+                        ));
+                    }
+                }
+            }
             RiscOp::Add
             | RiscOp::Sub
             | RiscOp::Mul
@@ -1538,7 +1676,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             _ => {}
         }
 
-        // C5: CmpLt output must be Bool.
+        // C5: legacy CmpLt output must be Bool.
         if matches!(&node.op, RiscOp::CmpLt) && node.output_type.precision != Prim::Bool {
             errors.push(format!(
                 "cmplt at node {} has output precision {:?}, expected Bool",
