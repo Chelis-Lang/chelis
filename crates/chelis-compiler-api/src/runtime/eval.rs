@@ -1204,7 +1204,7 @@ impl<'a> EvalContext<'a> {
                 Ok(RuntimeValue::Transform {
                     kind: TransformKind::Grad,
                     transform_expr: node.expr.clone(),
-                    captured_env: self.bindings.clone(),
+                    captured_env: self.bindings.capture(),
                     invocation_contracts: Box::default(),
                 })
             }
@@ -1213,7 +1213,7 @@ impl<'a> EvalContext<'a> {
                 Ok(RuntimeValue::Transform {
                     kind: TransformKind::Vmap,
                     transform_expr: node.expr.clone(),
-                    captured_env: self.bindings.clone(),
+                    captured_env: self.bindings.capture(),
                     invocation_contracts: Box::default(),
                 })
             }
@@ -1577,7 +1577,7 @@ impl<'a> EvalContext<'a> {
             body,
             // Named declarations are initialized in an empty lexical frame;
             // an anonymous fn must retain every actual local shadow.
-            env: self.bindings.clone(),
+            env: self.bindings.capture(),
             precision_env: self.precision_bindings.clone(),
             def_name: None,
         })
@@ -2359,7 +2359,7 @@ impl<'a> EvalContext<'a> {
                     self.precision_bindings = saved_precisions;
                     return result;
                 }
-                let saved = self.bindings.clone();
+                let saved = std::mem::take(&mut self.bindings);
                 let saved_types = std::mem::take(&mut self.binding_types);
                 let saved_precisions = std::mem::take(&mut self.precision_bindings);
                 self.bindings = env;
@@ -4559,7 +4559,7 @@ mod legacy_capture_order_tests {
         let mut signatures = UnordMap::new();
         register_declared_signatures(checked.exprs(), &mut signatures);
         EvalContext {
-            bindings: UnordMap::new(),
+            bindings: Frame::new(),
             binding_types: UnordMap::new(),
             precision_bindings: UnordMap::new(),
             declaration_values: UnordMap::new(),
@@ -5059,7 +5059,11 @@ mod legacy_capture_order_tests {
         assert_eq!(ctx.precision_bindings.len(), 1);
         assert_eq!(ctx.precision_bindings.get("p"), Some(&Prim::F64));
         assert_eq!(
-            bits(&ctx.bindings["caller_value"]),
+            bits(
+                ctx.bindings
+                    .get("caller_value")
+                    .expect("caller_value bound")
+            ),
             bits(&RuntimeValue::int_lit(71))
         );
         assert_eq!(
@@ -5169,7 +5173,10 @@ mod legacy_capture_order_tests {
         ctx.bindings.insert("weights".into(), zeros());
         let declared = ctx.resolve_top_level("weights").unwrap();
         assert_eq!(bits(&declared), bits(&expected_draw(17, 0)));
-        assert_eq!(bits(&ctx.bindings["weights"]), bits(&zeros()));
+        assert_eq!(
+            bits(ctx.bindings.get("weights").expect("weights bound")),
+            bits(&zeros())
+        );
         assert_eq!(ctx.transcript, ["initialize"]);
     }
 

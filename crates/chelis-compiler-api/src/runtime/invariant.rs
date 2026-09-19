@@ -811,7 +811,7 @@ pub(crate) fn revalidate_adt_value(
     // resolves it to its value instead of dying on "unknown runtime name".
     let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
     let mut ctx = EvalContext {
-        bindings: UnordMap::new(),
+        bindings: Frame::new(),
         binding_types: UnordMap::new(),
         precision_bindings: UnordMap::new(),
         declaration_values: UnordMap::new(),

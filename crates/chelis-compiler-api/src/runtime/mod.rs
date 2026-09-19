@@ -15,6 +15,8 @@ use crate::schema::{DictEntryValue, ExecutionValue, TensorValue};
 
 mod csv;
 mod eval;
+mod frame;
+pub use frame::Frame;
 mod host_ops;
 mod invariant;
 mod named_axis;
@@ -196,7 +198,7 @@ pub enum RuntimeValue {
         /// invocation contract.
         invocation_contracts: Box<Vec<Expr>>,
         body: Expr,
-        env: UnordMap<String, RuntimeValue>,
+        env: Frame,
         /// Lexically captured concrete precision variables. A call derives a
         /// fresh specialization from checked argument/result types and lets
         /// the callee's own binders shadow same-spelled outer binders.
@@ -218,7 +220,7 @@ pub enum RuntimeValue {
     Transform {
         kind: TransformKind,
         transform_expr: Expr,
-        captured_env: UnordMap<String, RuntimeValue>,
+        captured_env: Frame,
         /// Authored higher-order formal signatures retained at each
         /// specialization boundary, shared with ordinary closures so every
         /// supported runtime callable executes the same invocation protocol.
@@ -607,7 +609,7 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
     }
 
     let mut ctx = EvalContext {
-        bindings: UnordMap::new(),
+        bindings: Frame::new(),
         binding_types: UnordMap::new(),
         precision_bindings: UnordMap::new(),
         declaration_values: UnordMap::new(),
@@ -1018,8 +1020,8 @@ fn descend_manifest_path(value: RuntimeValue, step: RootPathStep) -> Option<Runt
 }
 
 struct EvalContext<'a> {
-    /// Only lexical values; successful declarations never enter this map.
-    bindings: UnordMap<String, RuntimeValue>,
+    /// Only lexical values; successful declarations never enter this frame.
+    bindings: Frame,
     /// Declared/static Deep type expression for names in `bindings`,
     /// maintained in lockstep with `bindings` (saved/swapped/restored at
     /// every frame boundary). Every locally-bound name gets a key here:

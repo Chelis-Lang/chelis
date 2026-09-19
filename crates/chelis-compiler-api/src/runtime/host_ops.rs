@@ -19,7 +19,7 @@ use super::*;
 pub(super) fn pattern_matches(
     value: &RuntimeValue,
     pattern: &Expr,
-    bindings: &mut UnordMap<String, RuntimeValue>,
+    bindings: &mut Frame,
     adt_fields: &UnordMap<String, Vec<String>>,
 ) -> Result<bool, String> {
     let (tag, kids) = match pattern.carrier() {
