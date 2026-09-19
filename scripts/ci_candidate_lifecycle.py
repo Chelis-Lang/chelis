@@ -16,6 +16,18 @@ from typing import Any, Protocol
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 
 
+def _git_detail(stderr: str | None, stdout: str | None, code: int) -> str:
+    """Describe a git failure without inventing a reason it did not give.
+
+    `git merge-base` exits 1 with empty stderr when it finds no common
+    ancestor, so quoting stderr alone produces a message that trails off
+    after a colon and reads as though the reason were withheld.
+    """
+
+    detail = (stderr or "").strip() or (stdout or "").strip()
+    return detail or f"git printed no reason (exit {code})"
+
+
 class GraphInspectionError(ValueError):
     """The event history cannot be inspected from the available Git objects."""
 
@@ -52,18 +64,18 @@ class GitGraph:
             return True
         if completed.returncode == 1:
             return False
-        detail = completed.stderr or completed.stdout
         raise GraphInspectionError(
-            f"cannot compare candidate history {ancestor}..{descendant}: {detail}"
+            f"cannot compare candidate history {ancestor}..{descendant}: "
+            f"{_git_detail(completed.stderr, completed.stdout, completed.returncode)}"
         )
 
     def merge_base(self, left: str, right: str) -> str:
         try:
             completed = self._run("merge-base", left, right)
         except subprocess.CalledProcessError as error:
-            detail = error.stderr or error.stdout
             raise GraphInspectionError(
-                f"cannot find merge base for {left} and {right}: {detail}"
+                f"cannot find merge base for {left} and {right}: "
+                f"{_git_detail(error.stderr, error.stdout, error.returncode)}"
             ) from error
         value = completed.stdout.strip()
         if not SHA.fullmatch(value):
@@ -80,9 +92,9 @@ class GitGraph:
                 "rev-list", "--merges", "--parents", f"{before}..{head}"
             )
         except subprocess.CalledProcessError as error:
-            detail = error.stderr or error.stdout
             raise GraphInspectionError(
-                f"cannot enumerate candidate merges {before}..{head}: {detail}"
+                f"cannot enumerate candidate merges {before}..{head}: "
+                f"{_git_detail(error.stderr, error.stdout, error.returncode)}"
             ) from error
         rows: list[tuple[str, tuple[str, ...]]] = []
         for raw in completed.stdout.splitlines():
@@ -303,8 +315,11 @@ def validate_payload(
         # owes the stricter declaration. Say why, though. Without this the
         # author reads "Candidate-history-rewrite: requires exactly one
         # exact-head line" and concludes they forgot to write one, when the
-        # real state is that this checkout never obtained the pre-push head
-        # (chelis#2229).
+        # real state is that this checkout could not compare the pre-push
+        # head against the current one (chelis#2229). Two states reach here
+        # and the wording covers both: the head absent, and the head present
+        # while the history between it and the target is not walkable
+        # (chelis#2234).
         try:
             _require_acknowledgement(
                 body,
@@ -314,9 +329,9 @@ def validate_payload(
             )
         except ValueError as missing:
             raise ValueError(
-                f"the pre-push head {before} could not be inspected "
-                f"({inspection}), so this update cannot be classified as a "
-                "base update and the stricter declaration is required: "
+                f"this update could not be classified against the pre-push "
+                f"head {before} ({inspection}), so it cannot be recorded as "
+                "a base update and the stricter declaration is required: "
                 f"{missing}"
             ) from inspection
         return "history-rewrite-unverifiable"

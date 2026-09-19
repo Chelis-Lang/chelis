@@ -336,7 +336,6 @@ class CandidateLifecycleTests(unittest.TestCase):
             "history-rewrite-unverifiable",
         )
 
-
     def test_an_uninspectable_pre_push_head_says_so_rather_than_blaming_the_author(
         self,
     ) -> None:
@@ -358,11 +357,30 @@ class CandidateLifecycleTests(unittest.TestCase):
             )
 
         message = str(raised.exception)
-        self.assertIn(f"the pre-push head {BEFORE} could not be inspected", message)
+        self.assertIn(
+            f"could not be classified against the pre-push head {BEFORE}",
+            message,
+        )
         self.assertIn("old force-pushed head is unavailable", message)
-        self.assertIn("cannot be classified as a base update", message)
+        self.assertIn("cannot be recorded as a base update", message)
         # The stricter declaration is still what unblocks it: fail-safe.
         self.assertIn("Candidate-history-rewrite:", message)
+        # Two states reach this path and the wording must fit both, so it
+        # must not assert the head is absent: chelis#2234's shallow lanes
+        # reach it with the head present and its ancestry truncated.
+        self.assertNotIn("could not be inspected", message)
+        self.assertNotIn("could not be fetched", message)
+
+    def test_a_reasonless_git_failure_does_not_promise_a_reason(self) -> None:
+        """`git merge-base` exits 1 with empty stderr; say so (chelis#2234)."""
+
+        detail = lifecycle._git_detail("", "", 1)
+
+        self.assertEqual(detail, "git printed no reason (exit 1)")
+        self.assertEqual(
+            lifecycle._git_detail("  fatal: bad object\n", "", 128),
+            "fatal: bad object",
+        )
 
     def test_empty_or_duplicate_acknowledgements_fail_closed(self) -> None:
         graph = FakeGraph(
@@ -498,11 +516,34 @@ class LifecycleInvocationTests(unittest.TestCase):
         self.assertIn("ACTION: ${{ github.event.action }}", body)
         self.assertIn('git fetch --no-tags origin "$BEFORE"', body)
 
+    @staticmethod
+    def joined_commands(body: str) -> list[str]:
+        """Fold backslash continuations before scanning for a command.
+
+        A line-scoped scan is evaded by the spelling these files already
+        use elsewhere: `git fetch ... \\` on one line and `2>/dev/null ||
+        true` on the next passes a per-line check while restoring exactly
+        what the check exists to forbid.
+        """
+
+        joined: list[str] = []
+        pending = ""
+        for line in body.splitlines():
+            stripped = line.rstrip()
+            if stripped.endswith("\\"):
+                pending += stripped[:-1].rstrip() + " "
+                continue
+            joined.append((pending + stripped.strip()).strip())
+            pending = ""
+        if pending:
+            joined.append(pending.strip())
+        return joined
+
     def test_no_invocation_silences_its_pre_push_head_fetch(self) -> None:
         for workflow, body in self.all_steps().items():
             fetches = [
                 line
-                for line in body.splitlines()
+                for line in self.joined_commands(body)
                 if "git fetch" in line and '"$BEFORE"' in line
             ]
             with self.subTest(workflow=workflow):

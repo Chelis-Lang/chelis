@@ -36,11 +36,16 @@ rewrite. Base updates require one exact
 it does not replace review of a conflict resolution or approval for a force
 push. Classifying a force-push needs the pre-push head, which is reachable
 from no ref once it is replaced, so even a `fetch-depth: 0` checkout has to
-fetch that commit by SHA before running the classifier; both invocations do.
-A pre-push head that still cannot be obtained fails closed and requires the
-explicit history-rewrite declaration, and the failure says the head could not
-be inspected rather than reporting a missing line as if the author had
-forgotten to write one.
+fetch that commit by SHA before running the classifier. All three invocations
+now do, and none of them hides the result. Only the acknowledgement
+invocation can classify such an update today: the two detector invocations
+deepen a shallow clone, which grafts the target tip, and a grafted tip
+defeats the comparison even though the pre-push head is present
+(chelis#2234). They therefore still require the history-rewrite declaration
+where the base-update declaration is the accurate one, and the three
+invocations can disagree about the same event. An update that cannot be
+classified fails closed either way, and the failure names that cause rather
+than reporting a missing line as if the author had forgotten to write one.
 The introducing implementation event requires the exact new head. The
 acknowledgement workflow also runs on later body edits and accepts that recorded
 head only while it remains an ancestor of the current head, so deleting a
