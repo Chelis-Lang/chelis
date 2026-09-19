@@ -579,6 +579,45 @@ fn verifier_compares_resolved_extents_semantically_without_merging_unresolved_sy
         "resolved named and literal extents are the same semantic shape"
     );
 
+    let mut logical = Dag::new();
+    let left = logical.add_node(
+        RiscOp::Load {
+            name: "left".into(),
+        },
+        vec![],
+        TensorType {
+            dims: vec![DimInfo::Lit(2)],
+            precision: Prim::Bool,
+        },
+        None,
+    );
+    let right = logical.add_node(
+        RiscOp::Load {
+            name: "right".into(),
+        },
+        vec![],
+        TensorType {
+            dims: vec![DimInfo::Named("right".into(), Some(2))],
+            precision: Prim::Bool,
+        },
+        None,
+    );
+    let combined = logical.add_node(
+        RiscOp::Logical(LogicalKind::And),
+        vec![left, right],
+        TensorType {
+            dims: vec![DimInfo::Named("output".into(), Some(2))],
+            precision: Prim::Bool,
+        },
+        None,
+    );
+    logical.add_root(combined);
+    assert_eq!(
+        verify::verify(&logical),
+        Vec::<String>::new(),
+        "logical operations must accept equivalent resolved input and output shapes"
+    );
+
     let mut where_dag = Dag::new();
     let condition = where_dag.add_node(
         RiscOp::Load {
@@ -757,6 +796,45 @@ fn verifier_compares_resolved_extents_semantically_without_merging_unresolved_sy
             .iter()
             .any(|error| error.contains("operand shape")),
         "distinct unresolved symbols must not be treated as the same shape"
+    );
+
+    let mut distinct_logical_symbols = Dag::new();
+    let left = distinct_logical_symbols.add_node(
+        RiscOp::Load {
+            name: "left".into(),
+        },
+        vec![],
+        TensorType {
+            dims: vec![DimInfo::Named("batch".into(), None)],
+            precision: Prim::Bool,
+        },
+        None,
+    );
+    let right = distinct_logical_symbols.add_node(
+        RiscOp::Load {
+            name: "right".into(),
+        },
+        vec![],
+        TensorType {
+            dims: vec![DimInfo::Named("sequence".into(), None)],
+            precision: Prim::Bool,
+        },
+        None,
+    );
+    distinct_logical_symbols.add_node(
+        RiscOp::Logical(LogicalKind::And),
+        vec![left, right],
+        TensorType {
+            dims: vec![DimInfo::Named("batch".into(), None)],
+            precision: Prim::Bool,
+        },
+        None,
+    );
+    assert!(
+        verify::verify(&distinct_logical_symbols)
+            .iter()
+            .any(|error| error.contains("exactly matching shape")),
+        "logical operations must reject distinct unresolved shape symbols"
     );
 }
 

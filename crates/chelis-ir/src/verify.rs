@@ -651,7 +651,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                                 node.id.0
                             ));
                         }
-                        if input.output_type.dims != node.output_type.dims {
+                        if !node_shapes_semantically_equivalent(dag, input.id, node.id) {
                             errors.push(format!(
                                 "logical {} at node {} requires exactly matching shape",
                                 kind.surf_name(),

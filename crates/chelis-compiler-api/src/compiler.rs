@@ -7396,6 +7396,61 @@ mod tests {
     }
 
     #[test]
+    fn native_wire_projection_preserves_anonymous_where_shape_producers() {
+        let mut dag = Dag::new();
+        let condition = dag.add_node(
+            RiscOp::Load {
+                name: "condition".into(),
+            },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Named("runtime".into(), None)],
+                precision: Prim::Bool,
+            },
+            None,
+        );
+        let values = dag.add_node(
+            RiscOp::Load {
+                name: "values".into(),
+            },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Named("runtime".into(), None)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let zero = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 0.0),
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Named(String::new(), None)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let selected = dag.add_node(
+            RiscOp::Where,
+            vec![condition, values, zero],
+            TensorType {
+                dims: vec![DimInfo::Named(String::new(), None)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        dag.add_root(selected);
+        assert_eq!(dag.get(zero).unwrap().shape_deps, vec![values]);
+        assert!(chelis_ir::verify::verify(&dag).is_empty());
+
+        let projected = wire_dag(&dag)
+            .expect("WireDag v15 must preserve producer-aware anonymous where shape semantics");
+        let json = serde_json::to_value(&projected).unwrap();
+        assert_eq!(json["nodes"][2]["shape_deps"], serde_json::json!([1]));
+        let decoded = WireDag::from_validated_json(&json.to_string()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), json);
+    }
+
+    #[test]
     fn native_wire_projection_preserves_live_local_ascription_claims() {
         let declarations = chelis_surf::parser::parse_str(
             "def f(x: tensor[*, f32]) -> tensor[*, f32] = {\n  \
