@@ -839,6 +839,199 @@ fn verifier_compares_resolved_extents_semantically_without_merging_unresolved_sy
 }
 
 #[test]
+fn verifier_rejects_unrelated_shape_authority_and_producerless_anonymous_outputs() {
+    let named = |name: &str, precision| TensorType {
+        dims: vec![DimInfo::Named(name.into(), None)],
+        precision,
+    };
+    let anonymous = |precision| TensorType {
+        dims: vec![DimInfo::Named(String::new(), None)],
+        precision,
+    };
+
+    let mut compare = Dag::new();
+    let decoy = compare.add_node(
+        RiscOp::Load {
+            name: "decoy".into(),
+        },
+        vec![],
+        named("runtime", Prim::F32),
+        None,
+    );
+    let left = compare.add_node(
+        RiscOp::Load {
+            name: "left".into(),
+        },
+        vec![],
+        named("runtime", Prim::F32),
+        None,
+    );
+    let right = compare.add_node(
+        RiscOp::synth_const(Prim::F32, 0.0),
+        vec![],
+        anonymous(Prim::F32),
+        None,
+    );
+    compare.add_shape_dep(right, decoy);
+    compare.add_node(
+        RiscOp::Compare(ComparisonKind::Eq),
+        vec![left, right],
+        named("runtime", Prim::Bool),
+        None,
+    );
+    assert!(
+        verify::verify(&compare)
+            .iter()
+            .any(|error| error.contains("operand shape")),
+        "an unrelated shape dependency must not actualize a comparison operand"
+    );
+
+    let mut logical = Dag::new();
+    let decoy = logical.add_node(
+        RiscOp::Load {
+            name: "decoy".into(),
+        },
+        vec![],
+        named("runtime", Prim::Bool),
+        None,
+    );
+    let left = logical.add_node(
+        RiscOp::Load {
+            name: "left".into(),
+        },
+        vec![],
+        named("runtime", Prim::Bool),
+        None,
+    );
+    let right = logical.add_node(
+        RiscOp::Load {
+            name: "right".into(),
+        },
+        vec![],
+        anonymous(Prim::Bool),
+        None,
+    );
+    logical.add_shape_dep(right, decoy);
+    logical.add_node(
+        RiscOp::Logical(LogicalKind::And),
+        vec![left, right],
+        named("runtime", Prim::Bool),
+        None,
+    );
+    assert!(
+        verify::verify(&logical)
+            .iter()
+            .any(|error| error.contains("exactly matching shape")),
+        "an unrelated shape dependency must not actualize a logical operand"
+    );
+
+    let mut where_dag = Dag::new();
+    let decoy = where_dag.add_node(
+        RiscOp::Load {
+            name: "decoy".into(),
+        },
+        vec![],
+        named("runtime", Prim::F32),
+        None,
+    );
+    let condition = where_dag.add_node(
+        RiscOp::Load {
+            name: "condition".into(),
+        },
+        vec![],
+        named("runtime", Prim::Bool),
+        None,
+    );
+    let then_value = where_dag.add_node(
+        RiscOp::Load {
+            name: "then".into(),
+        },
+        vec![],
+        named("runtime", Prim::F32),
+        None,
+    );
+    let else_value = where_dag.add_node(
+        RiscOp::synth_const(Prim::F32, 0.0),
+        vec![],
+        anonymous(Prim::F32),
+        None,
+    );
+    where_dag.add_shape_dep(else_value, decoy);
+    where_dag.add_node(
+        RiscOp::Where,
+        vec![condition, then_value, else_value],
+        named("runtime", Prim::F32),
+        None,
+    );
+    assert!(
+        verify::verify(&where_dag)
+            .iter()
+            .any(|error| error.contains("branches must have exactly matching type")),
+        "an unrelated shape dependency must not actualize a where branch"
+    );
+
+    let mut anonymous_compare_output = Dag::new();
+    let left = anonymous_compare_output.add_node(
+        RiscOp::Load {
+            name: "left".into(),
+        },
+        vec![],
+        named("runtime", Prim::F32),
+        None,
+    );
+    let right = anonymous_compare_output.add_node(
+        RiscOp::Load {
+            name: "right".into(),
+        },
+        vec![],
+        named("runtime", Prim::F32),
+        None,
+    );
+    anonymous_compare_output.add_node(
+        RiscOp::Compare(ComparisonKind::Eq),
+        vec![left, right],
+        anonymous(Prim::Bool),
+        None,
+    );
+    assert!(
+        verify::verify(&anonymous_compare_output)
+            .iter()
+            .any(|error| error.contains("output shape")),
+        "comparison output needs explicit authority for an anonymous dimension"
+    );
+
+    let mut anonymous_logical_output = Dag::new();
+    let left = anonymous_logical_output.add_node(
+        RiscOp::Load {
+            name: "left".into(),
+        },
+        vec![],
+        named("runtime", Prim::Bool),
+        None,
+    );
+    let right = anonymous_logical_output.add_node(
+        RiscOp::Load {
+            name: "right".into(),
+        },
+        vec![],
+        named("runtime", Prim::Bool),
+        None,
+    );
+    anonymous_logical_output.add_node(
+        RiscOp::Logical(LogicalKind::And),
+        vec![left, right],
+        anonymous(Prim::Bool),
+        None,
+    );
+    assert!(
+        verify::verify(&anonymous_logical_output)
+            .iter()
+            .any(|error| error.contains("exactly matching shape")),
+        "logical output needs explicit authority for an anonymous dimension"
+    );
+}
+
+#[test]
 fn comparisons_have_zero_cotangents_logicals_reject_and_where_routes_g() {
     for kind in [
         ComparisonKind::CmpLt,

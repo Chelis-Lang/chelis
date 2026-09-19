@@ -68,6 +68,50 @@ fn assert_contract_error(payload: &serde_json::Value, expected: &str) {
     }
 }
 
+fn wire_node(
+    id: u64,
+    name: &str,
+    dims: serde_json::Value,
+    precision: &str,
+    shape_deps: Vec<u64>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "op": {"kind": "load", "name": name},
+        "inputs": [],
+        "shape_deps": shape_deps,
+        "span_id": null,
+        "merged_spans": [],
+        "output_type": {"dims": dims, "precision": precision}
+    })
+}
+
+fn wire_operation_node(
+    id: u64,
+    op: serde_json::Value,
+    inputs: Vec<u64>,
+    dims: serde_json::Value,
+    precision: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "op": op,
+        "inputs": inputs,
+        "shape_deps": [],
+        "span_id": null,
+        "merged_spans": [],
+        "output_type": {"dims": dims, "precision": precision}
+    })
+}
+
+fn wire_dag_payload(nodes: Vec<serde_json::Value>, root: u64) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": WIRE_DAG_SCHEMA_VERSION,
+        "nodes": nodes,
+        "roots": [root]
+    })
+}
+
 #[test]
 fn wire_v15_round_trips_direct_comparison_logical_and_where_vocabulary() {
     assert_eq!(WIRE_DAG_SCHEMA_VERSION, 15);
@@ -346,6 +390,66 @@ fn wire_v15_where_validation_has_direct_positive_negative_parity() {
         &bad_arity,
         "WireDag Where node 2 requires exactly three inputs",
     );
+}
+
+#[test]
+fn wire_v15_rejects_unrelated_shape_dependency_authority() {
+    const COMPARE_CONTRACT: &str = "WireDag Compare node 3 requires two same-shape, same-precision active numeric or bool operands and a same-shape Bool output; ordered comparisons require active numeric operands";
+    const LOGICAL_CONTRACT: &str =
+        "WireDag Logical node 3 requires exactly 2 same-shape bool input(s) and a Bool output";
+    const WHERE_CONTRACT: &str = "WireDag Where node 4 requires a same-shape Bool condition and exactly matching branch/output types";
+
+    let compare = wire_dag_payload(
+        vec![
+            wire_node(0, "decoy", named_dims("runtime", None), "f32", vec![]),
+            wire_node(1, "left", named_dims("runtime", None), "f32", vec![]),
+            wire_node(2, "right", named_dims("", None), "f32", vec![0]),
+            wire_operation_node(
+                3,
+                serde_json::json!({"kind": "compare", "comparison": "eq"}),
+                vec![1, 2],
+                named_dims("runtime", None),
+                "bool",
+            ),
+        ],
+        3,
+    );
+    assert_contract_error(&compare, COMPARE_CONTRACT);
+
+    let logical = wire_dag_payload(
+        vec![
+            wire_node(0, "decoy", named_dims("runtime", None), "bool", vec![]),
+            wire_node(1, "left", named_dims("runtime", None), "bool", vec![]),
+            wire_node(2, "right", named_dims("", None), "bool", vec![0]),
+            wire_operation_node(
+                3,
+                serde_json::json!({"kind": "logical", "logical": "and"}),
+                vec![1, 2],
+                named_dims("runtime", None),
+                "bool",
+            ),
+        ],
+        3,
+    );
+    assert_contract_error(&logical, LOGICAL_CONTRACT);
+
+    let where_dag = wire_dag_payload(
+        vec![
+            wire_node(0, "decoy", named_dims("runtime", None), "f32", vec![]),
+            wire_node(1, "condition", named_dims("runtime", None), "bool", vec![]),
+            wire_node(2, "then", named_dims("runtime", None), "f32", vec![]),
+            wire_node(3, "else", named_dims("", None), "f32", vec![0]),
+            wire_operation_node(
+                4,
+                serde_json::json!({"kind": "where"}),
+                vec![1, 2, 3],
+                named_dims("runtime", None),
+                "f32",
+            ),
+        ],
+        4,
+    );
+    assert_contract_error(&where_dag, WHERE_CONTRACT);
 }
 
 #[test]

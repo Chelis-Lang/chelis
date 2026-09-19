@@ -2266,8 +2266,11 @@ impl WireDag {
                     }
                     let lhs = inputs[0];
                     let rhs = inputs[1];
-                    let same_shape = wire_node_shape_equal(&self.nodes, lhs, rhs);
-                    let output_shape = wire_node_shape_equal(&self.nodes, lhs, node);
+                    let shape_participants = [lhs.id, rhs.id, node.id];
+                    let same_shape =
+                        wire_node_shape_equal(&self.nodes, lhs, rhs, &shape_participants);
+                    let output_shape =
+                        wire_node_shape_equal(&self.nodes, lhs, node, &shape_participants);
                     let ordered = matches!(
                         comparison,
                         WireComparisonKind::CmpLt
@@ -2316,9 +2319,14 @@ impl WireDag {
                                 })
                         })
                         .collect::<Result<Vec<_>, _>>()?;
+                    let shape_participants = inputs
+                        .iter()
+                        .map(|input| input.id)
+                        .chain(std::iter::once(node.id))
+                        .collect::<Vec<_>>();
                     let valid_inputs = inputs.iter().all(|input| {
                         input.output_type.precision == Prim::Bool.interchange_name()
-                            && wire_node_shape_equal(&self.nodes, input, node)
+                            && wire_node_shape_equal(&self.nodes, input, node, &shape_participants)
                     });
                     if inputs.len() != expected
                         || node.output_type.precision != Prim::Bool.interchange_name()
@@ -2355,12 +2363,28 @@ impl WireDag {
                     let condition = inputs[0];
                     let then_value = inputs[1];
                     let else_value = inputs[2];
+                    let shape_participants = [condition.id, then_value.id, else_value.id, node.id];
                     let branch_precision =
                         Prim::parse_interchange_name(&then_value.output_type.precision);
                     if condition.output_type.precision != Prim::Bool.interchange_name()
-                        || !wire_node_tensor_type_equal(&self.nodes, then_value, else_value)
-                        || !wire_node_tensor_type_equal(&self.nodes, then_value, node)
-                        || !wire_node_shape_equal(&self.nodes, condition, then_value)
+                        || !wire_node_tensor_type_equal(
+                            &self.nodes,
+                            then_value,
+                            else_value,
+                            &shape_participants,
+                        )
+                        || !wire_node_tensor_type_equal(
+                            &self.nodes,
+                            then_value,
+                            node,
+                            &shape_participants,
+                        )
+                        || !wire_node_shape_equal(
+                            &self.nodes,
+                            condition,
+                            then_value,
+                            &shape_participants,
+                        )
                         || !branch_precision.is_some_and(|prim| prim.is_valid_tensor_precision())
                     {
                         return Err(WireDagContractError::new(format!(
@@ -2971,6 +2995,7 @@ fn wire_semantic_node_dim<'a>(
     node: &'a WireDagNode,
     axis: usize,
     fuel: usize,
+    relevant_shape_sources: &[u64],
 ) -> Option<&'a WireDimInfo> {
     if fuel == 0 {
         return None;
@@ -2978,9 +3003,14 @@ fn wire_semantic_node_dim<'a>(
     let dim = node.output_type.dims.get(axis)?;
     if wire_dim_is_anonymous(dim) {
         if let Some(resolved) = node.shape_deps.iter().find_map(|source_id| {
+            if !relevant_shape_sources.contains(source_id) {
+                return None;
+            }
             let source = wire_node_by_id(nodes, *source_id)?;
             (source.id < node.id && source.output_type.dims.len() == node.output_type.dims.len())
-                .then(|| wire_semantic_node_dim(nodes, source, axis, fuel - 1))
+                .then(|| {
+                    wire_semantic_node_dim(nodes, source, axis, fuel - 1, relevant_shape_sources)
+                })
                 .flatten()
                 .filter(|resolved| !wire_dim_is_anonymous(resolved))
         }) {
@@ -2991,7 +3021,9 @@ fn wire_semantic_node_dim<'a>(
                 let source = wire_node_by_id(nodes, *source_id)?;
                 (source.id < node.id
                     && source.output_type.dims.len() == node.output_type.dims.len())
-                .then(|| wire_semantic_node_dim(nodes, source, axis, fuel - 1))
+                .then(|| {
+                    wire_semantic_node_dim(nodes, source, axis, fuel - 1, relevant_shape_sources)
+                })
                 .flatten()
                 .filter(|resolved| !wire_dim_is_anonymous(resolved))
             })
@@ -3002,11 +3034,22 @@ fn wire_semantic_node_dim<'a>(
     Some(dim)
 }
 
-fn wire_node_shape_equal(nodes: &[WireDagNode], left: &WireDagNode, right: &WireDagNode) -> bool {
+fn wire_node_shape_equal(
+    nodes: &[WireDagNode],
+    left: &WireDagNode,
+    right: &WireDagNode,
+    relevant_shape_sources: &[u64],
+) -> bool {
     left.output_type.dims.len() == right.output_type.dims.len()
         && (0..left.output_type.dims.len()).all(|axis| {
-            wire_semantic_node_dim(nodes, left, axis, nodes.len())
-                .zip(wire_semantic_node_dim(nodes, right, axis, nodes.len()))
+            wire_semantic_node_dim(nodes, left, axis, nodes.len(), relevant_shape_sources)
+                .zip(wire_semantic_node_dim(
+                    nodes,
+                    right,
+                    axis,
+                    nodes.len(),
+                    relevant_shape_sources,
+                ))
                 .is_some_and(|(left, right)| wire_semantic_dim_info_equal(left, right))
         })
 }
@@ -3015,9 +3058,10 @@ fn wire_node_tensor_type_equal(
     nodes: &[WireDagNode],
     left: &WireDagNode,
     right: &WireDagNode,
+    relevant_shape_sources: &[u64],
 ) -> bool {
     left.output_type.precision == right.output_type.precision
-        && wire_node_shape_equal(nodes, left, right)
+        && wire_node_shape_equal(nodes, left, right, relevant_shape_sources)
 }
 
 /// Combined failure type for [`WireDag::from_validated_json`]. Parse,
