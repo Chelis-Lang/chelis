@@ -1639,14 +1639,17 @@ fn g3_cmplt_gpu_matches_cpu() {
     let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], vec_f32(4), None);
     let out = dag.add_node(RiscOp::CmpLt, vec![x, y], vec_bool(4), None);
     dag.add_root(out);
-    assert_gpu_matches_eval(
+    let actual = compile_and_run_single_output_typed_i64(
         &dag,
         "g3_cmplt",
         &[
             TestInput::new("x", &[4], &[1.0, 3.0, 5.0, 7.0]),
             TestInput::new("y", &[4], &[2.0, 3.0, 4.0, 8.0]),
         ],
+        "uint8_t",
+        "%lld",
     );
+    assert_eq!(actual, vec![1, 0, 0, 1]);
 }
 
 // ===========================================================================

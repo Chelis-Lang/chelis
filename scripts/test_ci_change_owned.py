@@ -467,7 +467,10 @@ class SchemaTests(unittest.TestCase):
             {
                 owned.Identity(
                     "chelis-cli", "issue_1417_stdlib_dtype_family_bounds"
-                )
+                ),
+                owned.Identity(
+                    "chelis-backend-hip", "logical_comparison_where_gpu"
+                ),
             },
         )
         manual_owner = config.manual_only_targets[
@@ -476,6 +479,17 @@ class SchemaTests(unittest.TestCase):
         self.assertEqual(
             (manual_owner.workflow, manual_owner.job, manual_owner.tracking_issue),
             ("ci.yml", "change-owned-shard", "chelis#1824"),
+        )
+        hip_manual_owner = config.manual_only_targets[
+            owned.Identity("chelis-backend-hip", "logical_comparison_where_gpu")
+        ]
+        self.assertEqual(
+            (
+                hip_manual_owner.workflow,
+                hip_manual_owner.job,
+                hip_manual_owner.tracking_issue,
+            ),
+            ("ci.yml", "change-owned-shard", "chelis#1284"),
         )
         self.assertEqual(
             manual_owner.cadence,

@@ -83,7 +83,7 @@ fn wire_v15_round_trips_direct_comparison_logical_and_where_vocabulary() {
         "f32",
     ))
     .unwrap();
-    assert!(matches!(decoded.nodes[3].op, WireRiscOp::Where));
+    assert!(matches!(decoded.nodes[3].op, WireRiscOp::Where {}));
 }
 
 #[test]
@@ -112,7 +112,10 @@ fn wire_enums_are_closed_and_have_exact_spellings() {
         serde_json::json!({"kind": "logical", "logical": "xor"}),
         serde_json::json!({"kind": "where", "comparison": "eq"}),
     ] {
-        assert!(serde_json::from_value::<WireRiscOp>(malformed).is_err());
+        assert!(
+            serde_json::from_value::<WireRiscOp>(malformed.clone()).is_err(),
+            "malformed WireRiscOp unexpectedly decoded: {malformed}"
+        );
     }
 }
 

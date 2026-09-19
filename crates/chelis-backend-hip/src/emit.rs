@@ -6,7 +6,8 @@
 use std::collections::BTreeMap;
 
 use chelis_ir::dag::{
-    DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, NodeId, RiscOp, RtDim, TensorType,
+    ComparisonKind, DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, LogicalKind, NodeId,
+    RiscOp, RtDim, TensorType,
 };
 use chelis_ir::ownership::{
     HipStorageLane, StoragePlacement, VerifiedDagAction, VerifiedDagView, VerifiedStoragePlan,
@@ -1349,6 +1350,16 @@ impl HipEmitter {
                 "kernel_trunc_div{}",
                 Self::dtype_kernel_suffix(operand_prec())
             )),
+            RiscOp::Compare(kind) => Some(format!(
+                "kernel_compare_{}{}",
+                kind.surf_name(),
+                Self::dtype_kernel_suffix(operand_prec())
+            )),
+            RiscOp::Logical(kind) => Some(format!("kernel_logical_{}", kind.surf_name())),
+            RiscOp::Where => Some(format!(
+                "kernel_where{}",
+                Self::dtype_kernel_suffix(node.output_type.precision)
+            )),
             // WS-A2: float-only kernel templates remain `_<f32|f64>`-suffixed.
             RiscOp::MaxElem => Some(format!(
                 "kernel_max_elem{}",
@@ -1380,14 +1391,10 @@ impl HipEmitter {
                 "kernel_relu_adjoint{}",
                 Self::dtype_kernel_suffix(operand_prec())
             )),
-            RiscOp::CmpLt => {
-                // CmpLt has bool output but operand-precision storage;
-                // dispatch on the operand precision so the kernel name
-                // matches the kernel source emitted in
-                // `kernel_source_for_op`.
-                let operand_kind = Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type)?;
-                Some(format!("kernel_cmplt_{}", operand_kind.suffix()))
-            }
+            RiscOp::CmpLt => Some(format!(
+                "kernel_cmplt{}",
+                Self::dtype_kernel_suffix(operand_prec())
+            )),
             RiscOp::Neg => Some(format!("kernel_neg_{}", kind_for_node(node)?.suffix())),
             RiscOp::Recip => Some(format!("kernel_recip_{}", kind_for_node(node)?.suffix())),
             RiscOp::Exp => Some(format!("kernel_exp_{}", kind_for_node(node)?.suffix())),
@@ -1605,15 +1612,9 @@ impl HipEmitter {
         node: &DagNode,
         dag: VerifiedDagView<'_>,
     ) -> Result<String, Unsupported> {
-        // CmpLt's output type is `bool` (semantically) but the kernel
-        // writes 1.0/0.0 of operand precision to the GPU buffer. Use the
-        // operand precision for kernel emission; the rest of the
-        // floating ops have output_type == operand_type so the more
-        // common path uses output_type below. For Add/Mul/Sum the
-        // output may be a non-float dtype (i32 acc for i8/i16 sum,
-        // i8/i16 for narrow-int Add/Mul), so each of those arms
-        // resolves the right template inline rather than touching the
-        // float-only `elem_kind` shorthand.
+        // Direct comparisons have Bool8 output while their operands retain
+        // their own storage dtype. Each such arm resolves operand storage
+        // explicitly rather than using the output-oriented unary shorthand.
         let elem_for_unary =
             || -> Result<kernels::ElemKind, Unsupported> { Self::elem_kind(&node.output_type) };
         let operand_prec = || dag.get(node.inputs[0]).unwrap().output_type.precision;
@@ -1718,6 +1719,31 @@ impl HipEmitter {
                     Self::dtype_c_type(prec),
                 )
             }
+            RiscOp::Compare(kind) => {
+                let precision = operand_prec();
+                let (lhs, rhs) = Self::comparison_value_expressions(precision);
+                kernels::comparison(
+                    self.kernel_rank,
+                    name,
+                    Self::comparison_operator(*kind),
+                    Self::dtype_c_type(precision),
+                    Self::comparison_value_helpers(precision),
+                    lhs,
+                    rhs,
+                )
+            }
+            RiscOp::Logical(LogicalKind::And) => {
+                kernels::logical_binary(self.kernel_rank, name, "&&")
+            }
+            RiscOp::Logical(LogicalKind::Or) => {
+                kernels::logical_binary(self.kernel_rank, name, "||")
+            }
+            RiscOp::Logical(LogicalKind::Not) => kernels::logical_not(self.kernel_rank, name),
+            RiscOp::Where => kernels::where_stored(
+                self.kernel_rank,
+                name,
+                Self::where_storage_c_type(node.output_type.precision),
+            ),
             RiscOp::MaxElem | RiscOp::MinElem => {
                 let precision = operand_prec();
                 let is_max = matches!(op, RiscOp::MaxElem);
@@ -1750,9 +1776,17 @@ impl HipEmitter {
                 _ => kernels::relu_adjoint(self.kernel_rank, name, elem_for_unary()?),
             },
             RiscOp::CmpLt => {
-                let operand_ty = &dag.get(node.inputs[0]).unwrap().output_type;
-                Self::require_result_width_matches_operand(node, operand_ty)?;
-                kernels::cmplt(self.kernel_rank, name, Self::elem_kind(operand_ty)?)
+                let precision = operand_prec();
+                let (lhs, rhs) = Self::comparison_value_expressions(precision);
+                kernels::comparison(
+                    self.kernel_rank,
+                    name,
+                    "<",
+                    Self::dtype_c_type(precision),
+                    Self::comparison_value_helpers(precision),
+                    lhs,
+                    rhs,
+                )
             }
             RiscOp::Neg => kernels::unary_prefix(self.kernel_rank, name, "-", elem_for_unary()?),
             // IEEE reciprocal kernel.
@@ -2068,6 +2102,30 @@ impl HipEmitter {
             // any other binary elementwise kernel.
             RiscOp::Mod => return Err(Self::remainder_unsupported(node)),
             RiscOp::FloorDiv | RiscOp::TruncDiv => self.emit_binary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
+            RiscOp::Compare(_) => self.emit_binary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
+            RiscOp::Logical(LogicalKind::And | LogicalKind::Or) => self.emit_binary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
+            RiscOp::Logical(LogicalKind::Not) => self.emit_unary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
+            RiscOp::Where => self.emit_ternary_launch(
                 id,
                 &resolved_kernel_name()?,
                 &node.inputs,
@@ -4452,6 +4510,9 @@ impl HipEmitter {
             | RiscOp::FloorDiv
             | RiscOp::TruncDiv
             | RiscOp::Mod
+            | RiscOp::Compare(_)
+            | RiscOp::Logical(_)
+            | RiscOp::Where
             | RiscOp::MaxElem
             | RiscOp::MinElem
             | RiscOp::ExtremaAdjoint { .. }
@@ -4633,57 +4694,50 @@ impl HipEmitter {
         }
     }
 
-    /// Reject a node whose result is stored at a different width than its
-    /// operands.
-    ///
-    /// [`kernels::cmplt`] and its relatives declare **one** element type and
-    /// use it for both the operand pointers and the result pointer, so the
-    /// emitted kernel writes `result_count * operand_width` bytes into a
-    /// buffer the runtime sized at `result_count * result_width`. That is
-    /// only safe when the two widths agree.
-    ///
-    /// chelis#1360 is what it costs when they stop agreeing silently. `cmplt`
-    /// dispatched on its operand dtype alone and never asked about its bool
-    /// result, which was fine while the HIP runtime stored bool as a four-byte
-    /// `1.0f`/`0.0f` payload. chelis#1308's tagged carrier made bool one byte,
-    /// nothing here noticed, and `x < y` began overrunning its device
-    /// allocation by `3N` bytes while decoding the low bytes of the float
-    /// stream on readback.
-    ///
-    /// Both widths come from [`chelis_vocab::Repr`] rather than a local table,
-    /// so this check cannot drift away from what the allocator actually does.
-    fn require_result_width_matches_operand(
-        node: &DagNode,
-        operand_ty: &TensorType,
-    ) -> Result<(), Unsupported> {
-        let width = |ty: &TensorType| {
-            ty.precision
-                .runtime_dtype()
-                .map(|dtype| dtype.byte_width())
-                .ok()
-        };
-        let (Some(result_width), Some(operand_width)) =
-            (width(&node.output_type), width(operand_ty))
-        else {
-            // A dtype with no runtime representation at all is the ordinary
-            // unsupported-dtype path; let `elem_kind` name it.
-            return Ok(());
-        };
-        if result_width == operand_width {
-            return Ok(());
+    fn comparison_operator(kind: ComparisonKind) -> &'static str {
+        match kind {
+            ComparisonKind::CmpLt | ComparisonKind::Lt => "<",
+            ComparisonKind::Eq => "==",
+            ComparisonKind::Neq => "!=",
+            ComparisonKind::Gt => ">",
+            ComparisonKind::Gte => ">=",
+            ComparisonKind::Lte => "<=",
         }
-        Err(Unsupported::new(
-            UnsupportedKind::Dtype(node.output_type.precision.name().to_string()),
-            "a HIP kernel template that stores its result at the operand width",
-            Stage::Codegen("hip"),
-            chelis_types::unimplemented_rejection!(
-                1364,
-                "this kernel writes its result at the operand's element width, and the \
-                 result dtype is stored at a different width; emitting it would overrun \
-                 the result allocation (chelis#1360). A typed kernel family for the \
-                 result dtype is chelis#1364"
+    }
+
+    fn comparison_value_expressions(precision: Prim) -> (&'static str, &'static str) {
+        match precision {
+            Prim::F16 => ("chelis_f16_to_f32(a[idx_a])", "chelis_f16_to_f32(b[idx_b])"),
+            Prim::Bf16 => (
+                "chelis_bf16_to_f32(a[idx_a])",
+                "chelis_bf16_to_f32(b[idx_b])",
             ),
-        ))
+            _ => ("a[idx_a]", "b[idx_b]"),
+        }
+    }
+
+    fn comparison_value_helpers(precision: Prim) -> &'static str {
+        match precision {
+            Prim::F16 | Prim::Bf16 => kernels::REDUCED_FLOAT_COMPARISON_HELPERS,
+            _ => "",
+        }
+    }
+
+    fn where_storage_c_type(precision: Prim) -> &'static str {
+        match precision {
+            Prim::F16 | Prim::Bf16 => "uint16_t",
+            Prim::F32 => "uint32_t",
+            Prim::F64 => "uint64_t",
+            Prim::Bool => "unsigned char",
+            Prim::Int8 => "int8_t",
+            Prim::Int16 => "int16_t",
+            Prim::Int32 => "int32_t",
+            Prim::Int64 => "int64_t",
+            other => panic!(
+                "HIP where storage type not defined for {} (active dtype set per spec/04-type-system.md §1.1)",
+                other.name()
+            ),
+        }
     }
 
     /// Resolve the two arithmetic families used by the materialization

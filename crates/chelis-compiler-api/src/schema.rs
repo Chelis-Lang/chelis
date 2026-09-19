@@ -2346,7 +2346,7 @@ impl WireDag {
                         )));
                     }
                 }
-                WireRiscOp::Where => {
+                WireRiscOp::Where {} => {
                     let inputs = node
                         .inputs
                         .iter()
@@ -3159,7 +3159,7 @@ pub struct WireExtentClaim {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WireRiscOp {
     Add,
     Sub,
@@ -3174,7 +3174,7 @@ pub enum WireRiscOp {
     Logical {
         logical: WireLogicalKind,
     },
-    Where,
+    Where {},
     MaxElem,
     MinElem,
     ExtremaAdjoint {

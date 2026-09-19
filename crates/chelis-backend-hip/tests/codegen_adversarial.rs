@@ -704,11 +704,10 @@ fn rt12b_non_bool_materialization_retains_generic_authority() {
     assert_hip_dtype_rejection(error, "i64", 689);
 }
 
-/// chelis#1360 companion: `cmplt` is the other producer of a bool tensor, and
-/// it reached `kernel_cmplt_f32` the same way. Reproducible from two lines of
-/// Surf (`x < y`), so this is the shape that mattered most in practice.
+/// chelis#1360 companion: the retained legacy identity must now route through
+/// the same one-byte result family as direct `Compare(CmpLt)`.
 #[test]
-fn rt12c_cmplt_to_bool_is_rejected_not_emitted_as_f32() {
+fn rt12c_cmplt_to_bool_is_not_emitted_at_operand_width() {
     let mut dag = Dag::new();
     let a = dag.add_node(
         RiscOp::synth_const(vec_f32(4).precision, 1.0),
@@ -724,14 +723,9 @@ fn rt12c_cmplt_to_bool_is_rejected_not_emitted_as_f32() {
     );
     let c = dag.add_node(RiscOp::CmpLt, vec![a, b], vec_bool(4), None);
     dag.add_root(c);
-    let error = match codegen_hip(&dag, "test_cmplt_bool") {
-        Err(error) => error,
-        Ok(_) => panic!("a bool result has no HIP kernel family (chelis#1364)"),
-    };
-    assert!(
-        format!("{error:?}").contains("bool"),
-        "the rejection must name the offending dtype; got: {error:?}"
-    );
+    let source = codegen_hip(&dag, "test_cmplt_bool").unwrap().c_source;
+    assert!(source.contains("unsigned char *out"), "{source}");
+    assert!(!source.contains("float *out"), "{source}");
 }
 
 // ===========================================================================
