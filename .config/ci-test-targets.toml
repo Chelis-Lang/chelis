@@ -1345,6 +1345,177 @@ reason = "the reviewed target-duration baseline is authenticated and mutation-te
 tracking_issue = "chelis#1824"
 
 [[path_rule]]
+prefix = ".github/workflows/build-cvc5.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the cvc5 build, cache and release helpers and their glibc-231 and hosted-validation contracts are locked by script-unit"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = ".github/workflows/cache-prune.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the gate's permitted-command inventory for this workflow is locked by script-unit"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = ".github/workflows/conformance-nightly.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the nightly Hull cadence and its command inventory are locked by script-unit"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = ".github/workflows/ecosystem-drift.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the drift report, repin helper and their workflow contract are locked by script-unit"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = ".github/workflows/loc-report.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the gate's permitted-command inventory for this workflow is locked by script-unit"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = ".github/workflows/loud-unsupported-nightly.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the loud-unsupported nightly workflow contract is locked by script-unit"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = ".github/workflows/macos-nightly.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the macOS nightly cadence, its configuration-closure inputs and its hosted-validation contract are locked by script-unit"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = ".github/workflows/nix-packages.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the gate's permitted-command inventory for this workflow is locked by script-unit"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = ".github/workflows/openspec-autoland-controller.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the trusted OpenSpec autoland controller boundary is locked by script-unit"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = ".github/workflows/openspec-autoland-signal.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the permissionless OpenSpec autoland signal boundary is locked by script-unit"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = ".github/workflows/openspec-autoland-validate.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the OpenSpec autoland validation and merge-worker contracts are locked by script-unit"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = ".github/workflows/openspec-autoland.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the OpenSpec autoland acceptance boundary and merge worker are locked by script-unit"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = ".github/workflows/openspec-validate.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the pinned OpenSpec validation action and its advisory mode are locked by script-unit"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = ".github/workflows/ownership-hip.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the ownership HIP manual-gate workflow contract is locked by script-unit"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = ".github/workflows/smt-full-prove.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the full SMT prove cadence and its configuration-closure inputs are locked by script-unit"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = "docs/investigations/remediation_status_2026_08_04.md"
+disposition = "owner"
+workflow = "ci.yml"
+job = "docs"
+cadence = "pull_request and push"
+reason = "the required Docs job validates this protected status contract and exact change acknowledgements; the docs-only detector already lists it as a control artifact"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = "spec/11-ffi.md"
+disposition = "owner"
+workflow = "ci.yml"
+job = "docs"
+cadence = "pull_request and push"
+reason = "the required Docs job validates the protected FFI contract and exact change acknowledgements; the docs-only detector already lists it as a control artifact"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = "spec/design/spec_provenance.md"
+disposition = "owner"
+workflow = "ci.yml"
+job = "docs"
+cadence = "pull_request and push"
+reason = "the required Docs job validates the protected provenance contract and exact change acknowledgements; the docs-only detector already lists it as a control artifact"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = "scripts/test_diagnostic_kind_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes this oracle's own test; the docs-only detector separately promotes a change here into the diagnostic-kind mutation oracle"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
 prefix = ".github/workflows/changelog.yml"
 disposition = "owner"
 workflow = "ci.yml"
