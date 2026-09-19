@@ -79,6 +79,11 @@ struct HostWorkProfile {
     program_def_clone_nodes: usize,
     type_env_clone_nodes: usize,
     helper_summary_builds: usize,
+    /// chelis#2181: nodes visited by `substitute_expr`. One inline of a
+    /// callable-parameter callee must not cost 2^(binder count); other
+    /// shapes are legitimately superlinear, so this bounds the growth
+    /// rate rather than asserting linearity.
+    substitution_nodes: usize,
 }
 
 #[cfg(test)]
@@ -13535,6 +13540,7 @@ fn substitute_expr(
     substitutions: &UnordMap<String, Expr>,
     shadowed: &UnordSet<String>,
 ) -> Expr {
+    record_host_work(|profile| profile.substitution_nodes += 1);
     match expr {
         Expr::MetaExpr(meta, span) => Expr::MetaExpr(
             chelis_deep::ast::MetaExpr {
@@ -13701,11 +13707,6 @@ fn substitute_expr(
                     None => next_shadowed.insert(name.clone()),
                 };
             }
-            let elements = list
-                .elements
-                .iter()
-                .map(|child| substitute_expr(child, substitutions, shadowed))
-                .collect();
             if kids.len() >= 2 {
                 let mut rebuilt = list.elements.clone();
                 // A binding's value is evaluated before that name is in
@@ -13759,6 +13760,20 @@ fn substitute_expr(
                 rebuilt[3] = substitute_expr(&body, substitutions, &next_shadowed);
                 Expr::List(List { elements: rebuilt }, *span)
             } else {
+                // A `let` carries exactly two children (`role.rs`'s arity
+                // table: `DeepTag::Let => Fixed(2)`), so this arm is
+                // unreachable for well-formed Deep and is retained only as
+                // the defensive fallback it always was. It matters that the
+                // substitution happens HERE rather than before the branch:
+                // run eagerly, its result was discarded in the ordinary
+                // two-child case, so every nested binder substituted its
+                // subtree twice and one inline cost 2^(binder count)
+                // (chelis#2181).
+                let elements = list
+                    .elements
+                    .iter()
+                    .map(|child| substitute_expr(child, substitutions, shadowed))
+                    .collect();
                 Expr::List(List { elements }, *span)
             }
         }
@@ -20134,6 +20149,28 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
             .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors))
     }
 
+    /// chelis#2181: a callee that takes a function-typed parameter, whose
+    /// body is a chain of `binders` `let` bindings.
+    ///
+    /// The C lane has no function-pointer representation, so this callee is
+    /// inlined at its call site rather than emitted as a C function. That
+    /// makes the inliner's cost, not the emitter's, the quantity under test.
+    fn issue_2181_binder_chain_source(binders: usize) -> String {
+        let mut lines = vec![
+            "module Demo.BinderChain".to_string(),
+            "def sq(x: f32) -> f32 = mul(x, x)".to_string(),
+            "def body(f: f32 -> f32, x: f32) -> f32 = {".to_string(),
+            "  v1 = f(x)".to_string(),
+        ];
+        for index in 2..=binders {
+            lines.push(format!("  v{index} = add(v{prev}, x)", prev = index - 1));
+        }
+        lines.push(format!("  v{binders}"));
+        lines.push("}".to_string());
+        lines.push("def main() -> f32 = body(sq, cast(2.0, f32))".to_string());
+        lines.join("\n") + "\n"
+    }
+
     /// A chain of mutually recursive defs, each calling the next from two
     /// argument positions. The kernel-decision probe expands that call graph
     /// as a tree, so an unmemoized run costs 2^depth summary builds while a
@@ -20211,6 +20248,50 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
             .expect("#1829 probe thread starts")
             .join()
             .expect("#1829 probe thread completes");
+    }
+
+    /// chelis#2181: inlining a callable-parameter callee is not exponential in
+    /// its binder count.
+    ///
+    /// The claim is deliberately "not exponential" rather than "linear":
+    /// substitution work is superlinear for other shapes (a lambda every
+    /// fourth binder measures about 7.4n^2 on this tree), which this test
+    /// does not and should not assert against.
+    ///
+    /// `substitute_expr`'s `let` arm used to substitute every child into a
+    /// `elements` vector, then discard it and redo the work as `rebuilt` for
+    /// the ordinary two-child `let`. Every nested binder therefore substituted
+    /// its own subtree twice, so one inline cost 2^(binders) and a 40-binder
+    /// callee such as nautilus `Roots.brent_rec` never finished.
+    ///
+    /// The assertion is a ratio rather than an absolute count, so it states
+    /// the asymptotic promise directly and needs no machine-specific budget:
+    /// doubling the binder count may at most triple the substitution work.
+    ///
+    /// Evidentiary status: REGRESSION TEST, established by restoring the
+    /// discarded pass on this tree and keeping this counter. Unfixed, 8
+    /// binders cost 6,119 substituted nodes and 16 cost 1,572,839, a ratio of
+    /// 257.0x = 2^8, and this assertion fails. Fixed, the same fixture costs
+    /// a ratio near 2.
+    #[test]
+    fn issue_2181_callable_parameter_inlining_is_not_exponential_in_binder_count() {
+        fn substitution_nodes(binders: usize) -> usize {
+            let checked = surf_check(&issue_2181_binder_chain_source(binders));
+            let lowered = top_level_lowering_map(checked.exprs(), checked.type_env());
+            reset_host_work_profile();
+            lower_host_program(&HostLoweringSession::new(&checked), &lowered)
+                .expect("#2181 fixture must lower");
+            take_host_work_profile().substitution_nodes
+        }
+        let small = substitution_nodes(8);
+        let doubled = substitution_nodes(16);
+        assert!(
+            doubled <= small.saturating_mul(3),
+            "#2181: doubling the binder count must at most triple substitution \
+             work; 8 binders cost {small} nodes and 16 cost {doubled}, a \
+             factor of {factor}. An exponential inliner shows about 2^8 here.",
+            factor = doubled / small.max(1),
+        );
     }
 
     /// chelis#1829 hazard (1), restated for the session. The interpreter holds
