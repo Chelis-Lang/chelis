@@ -119,6 +119,13 @@ performs those checks nor treats a well-shaped annotation as trusted.
 > elements record the original arguments without interpreting or rewriting
 > their contents as annotations or runtime expressions.
 
+For a `grad` node that carries `wrt`, the operative integer selector child and
+the ordered `wrt` variable-reference metadata SHALL identify the same formal
+parameters of the resolved callable target, including repeated parameters.
+A consumer that can resolve the callable origin SHALL reject a contradictory
+name/index pair, an out-of-range index, or unequal metadata/index arity. It
+SHALL NOT rewrite either representation to make them agree.
+
 > **[03-META-3]** Producer-specific keys and `span_*` extensions carry opaque
 > data. Chelis semantic passes SHALL neither interpret nor rewrite their
 > payloads. Producer tools may interpret their own data. Compiler-interpreted

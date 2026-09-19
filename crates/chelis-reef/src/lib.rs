@@ -9964,7 +9964,7 @@ fn access_segments(expr: &Expr) -> Option<(Vec<String>, chelis_deep::Span)> {
 }
 
 fn expanded_desugared_program(decls: &[Decl]) -> Result<Vec<chelis_deep::ast::Expr>, String> {
-    let deep = chelis_surf::desugar::desugar_program(decls);
+    let deep = chelis_surf::desugar::try_desugar_program(decls).map_err(|err| err.to_string())?;
     chelis_macros::expand_program(&deep, &chelis_macros::ExpansionOptions::default())
         .map(|expanded| expanded.into_exprs())
         .map_err(|err| err.to_string())

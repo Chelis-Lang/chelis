@@ -1271,8 +1271,9 @@ fn build_checked_library_layered(
     // (the package's own modules + non-stdlib path-deps). A macro-expansion
     // failure is a real front-end error the monolithic path also surfaces,
     // so hand back `None` for the byte-identical diagnostic.
-    let prepared = match crate::pipeline::prepare_surf_decls(
+    let prepared = match crate::pipeline::prepare_surf_decls_with_context(
         &reef_state.linked_non_stdlib_library_decls,
+        stdlib_ctx.checked_library().program().exprs(),
         None,
     ) {
         Ok(prepared) => prepared,

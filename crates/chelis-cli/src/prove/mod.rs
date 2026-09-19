@@ -546,7 +546,13 @@ fn prove_surf_file(
     // capability builds agree on what is type-broken.
     #[cfg(not(feature = "chelis-prove"))]
     {
-        let deep_exprs = chelis_surf::desugar::desugar_program(&parsed);
+        let deep_exprs = match chelis_surf::desugar::try_desugar_program(&parsed) {
+            Ok(deep) => deep,
+            Err(error) => {
+                emit_module_check_failure(options, &[error.to_string()], totals);
+                return Ok(Status::Error);
+            }
+        };
         if let Err(infer) = chelis_types::check_typed_program(&deep_exprs) {
             let messages = infer
                 .errors

@@ -98,6 +98,32 @@ pub enum ResugarError {
         key: &'static str,
         value: String,
     },
+
+    #[error(
+        "Deep `grad` selector metadata names parameter `{metadata_parameter}`, but index {index} selects parameter `{indexed_parameter}`"
+    )]
+    ContradictoryGradSelector {
+        metadata_parameter: String,
+        index: i64,
+        indexed_parameter: String,
+    },
+
+    #[error(
+        "Deep `grad` selector metadata names {metadata_count} parameter(s), but its index child selects {index_count}"
+    )]
+    GradSelectorArityMismatch {
+        metadata_count: usize,
+        index_count: usize,
+    },
+
+    #[error(
+        "Deep `grad` selector metadata names parameter `{metadata_parameter}`, but index {index} is outside the callable's {parameter_count} parameter(s)"
+    )]
+    InvalidGradSelectorIndex {
+        metadata_parameter: String,
+        index: i64,
+        parameter_count: usize,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -192,12 +218,238 @@ fn resugar_expression_inner(expr: &DeepExpr) -> Result<Expr, ResugarError> {
 /// or a grouped `dim` declaration.
 pub fn resugar_program(exprs: &[DeepExpr]) -> Result<Vec<Decl>, ResugarError> {
     chelis_deep::metadata::validate_metadata(exprs)?;
+    validate_grad_selector_consistency(exprs)?;
     for expr in exprs {
         reject_extensions(expr)?;
     }
     let declarations = resugar_declaration_sequence(exprs)?;
     validate_surface_declarations(&declarations)?;
     Ok(declarations)
+}
+
+pub fn validate_grad_selector_consistency(exprs: &[DeepExpr]) -> Result<(), ResugarError> {
+    let mut callables = BTreeMap::<String, Vec<String>>::new();
+    collect_deep_callable_declarations(exprs, &mut callables);
+    for expr in exprs {
+        walk_grad_selector_consistency(expr, &callables, &BTreeMap::new())?;
+    }
+    Ok(())
+}
+
+fn collect_deep_callable_declarations(
+    exprs: &[DeepExpr],
+    callables: &mut BTreeMap<String, Vec<String>>,
+) {
+    for expr in exprs {
+        let Ok(node) = node_ref(expr) else {
+            continue;
+        };
+        match node.tag {
+            DeepTag::Module => collect_deep_callable_declarations(&node.children[1..], callables),
+            DeepTag::Def if node.children.len() == 2 => {
+                let Some(name) = atom_name(&node.children[0]) else {
+                    continue;
+                };
+                if let Some(params) = deep_callable_params(&node.children[1]) {
+                    callables.insert(name.to_string(), params);
+                } else if let Some(alias) = variable_name(&node.children[1])
+                    && let Some(params) = callables.get(alias).cloned()
+                {
+                    callables.insert(name.to_string(), params);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn deep_callable_params(expr: &DeepExpr) -> Option<Vec<String>> {
+    let function = node_ref(expr).ok()?;
+    if function.tag != DeepTag::Fn {
+        return None;
+    }
+    let params = node_ref(function.children.first()?).ok()?;
+    if params.tag != DeepTag::Params {
+        return None;
+    }
+    params
+        .children
+        .iter()
+        .map(|param| match param {
+            DeepExpr::MetaExpr(meta, _) => atom_name(&meta.expr).map(str::to_string),
+            other => atom_name(other).map(str::to_string),
+        })
+        .collect()
+}
+
+fn walk_grad_selector_consistency(
+    expr: &DeepExpr,
+    callables: &BTreeMap<String, Vec<String>>,
+    locals: &BTreeMap<String, Option<Vec<String>>>,
+) -> Result<(), ResugarError> {
+    let node = match node_ref(expr) {
+        Ok(node) => node,
+        Err(_) => {
+            match expr {
+                DeepExpr::BareList(children, _) => {
+                    for child in children {
+                        walk_grad_selector_consistency(child, callables, locals)?;
+                    }
+                }
+                DeepExpr::Map(metadata, _) => {
+                    let mut result = Ok(());
+                    metadata.visit_syntax(&mut |_, value| {
+                        if result.is_ok() {
+                            result = walk_grad_selector_consistency(value, callables, locals);
+                        }
+                    });
+                    result?;
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+    };
+
+    match node.tag {
+        DeepTag::Fn if node.children.len() == 2 => {
+            let mut scoped = locals.clone();
+            if let Ok(params) = node_ref(&node.children[0])
+                && params.tag == DeepTag::Params
+            {
+                for param in params.children {
+                    if let Some(name) = parameter_name(param) {
+                        scoped.insert(name, None);
+                    }
+                }
+            }
+            walk_grad_selector_consistency(&node.children[1], callables, &scoped)?;
+            return Ok(());
+        }
+        DeepTag::Let if node.children.len() == 2 => {
+            let Ok(bindings) = node_ref(&node.children[0]) else {
+                return Ok(());
+            };
+            if bindings.tag != DeepTag::Bind || !bindings.children.len().is_multiple_of(2) {
+                return Ok(());
+            }
+            let mut scoped = locals.clone();
+            for pair in bindings.children.as_chunks::<2>().0 {
+                walk_grad_selector_consistency(&pair[1], callables, &scoped)?;
+                if let Some(name) = atom_name(&pair[0]) {
+                    let params = deep_callable_params_in_scope(&pair[1], callables, &scoped);
+                    scoped.insert(name.to_string(), params);
+                }
+            }
+            walk_grad_selector_consistency(&node.children[1], callables, &scoped)?;
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    if node.tag == DeepTag::Grad
+        && node.children.len() == 2
+        && let Some(wrt) = node.meta.wrt()
+    {
+        let names = wrt
+            .variables()
+            .map(|variable| variable.name().value().clone())
+            .collect::<Vec<_>>();
+        let indices = grad_selector_indices(&node.children[1]);
+        let params = deep_callable_params_in_scope(&node.children[0], callables, locals);
+        if let (Some(indices), Some(params)) = (indices, params) {
+            if indices.len() != names.len() {
+                return Err(ResugarError::GradSelectorArityMismatch {
+                    metadata_count: names.len(),
+                    index_count: indices.len(),
+                });
+            }
+            for (name, index) in names.into_iter().zip(indices) {
+                let indexed = usize::try_from(index)
+                    .ok()
+                    .and_then(|index| params.get(index));
+                match indexed {
+                    Some(indexed_parameter) if indexed_parameter != &name => {
+                        return Err(ResugarError::ContradictoryGradSelector {
+                            metadata_parameter: name,
+                            index,
+                            indexed_parameter: indexed_parameter.clone(),
+                        });
+                    }
+                    None => {
+                        return Err(ResugarError::InvalidGradSelectorIndex {
+                            metadata_parameter: name,
+                            index,
+                            parameter_count: params.len(),
+                        });
+                    }
+                    Some(_) => {}
+                }
+            }
+        }
+    }
+
+    for child in node.children {
+        walk_grad_selector_consistency(child, callables, locals)?;
+    }
+    Ok(())
+}
+
+fn deep_callable_params_in_scope(
+    expr: &DeepExpr,
+    callables: &BTreeMap<String, Vec<String>>,
+    locals: &BTreeMap<String, Option<Vec<String>>>,
+) -> Option<Vec<String>> {
+    if let Some(name) = variable_name(expr) {
+        return locals
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| callables.get(name).cloned());
+    }
+    if let Some(params) = deep_callable_params(expr) {
+        return Some(params);
+    }
+    let node = node_ref(expr).ok()?;
+    match node.tag {
+        DeepTag::TupleGet if node.children.len() == 2 => {
+            let index =
+                integer_literal(&node.children[1]).and_then(|index| usize::try_from(index).ok())?;
+            let tuple = node_ref(&node.children[0]).ok()?;
+            (tuple.tag == DeepTag::Tuple)
+                .then(|| tuple.children.get(index))
+                .flatten()
+                .and_then(|item| deep_callable_params_in_scope(item, callables, locals))
+        }
+        DeepTag::Block => node
+            .children
+            .last()
+            .and_then(|item| deep_callable_params_in_scope(item, callables, locals)),
+        _ => None,
+    }
+}
+
+fn parameter_name(expr: &DeepExpr) -> Option<String> {
+    match expr {
+        DeepExpr::Atom(Atom::Name(name), _) => Some(name.clone()),
+        DeepExpr::MetaExpr(meta, _) => parameter_name(&meta.expr),
+        DeepExpr::BareList(elements, _) => elements.first().and_then(atom_name).map(str::to_string),
+        DeepExpr::List(list, _) => list
+            .elements
+            .first()
+            .and_then(atom_name)
+            .map(str::to_string),
+        _ => None,
+    }
+}
+
+fn grad_selector_indices(expr: &DeepExpr) -> Option<Vec<i64>> {
+    if let Some(index) = integer_literal(expr) {
+        return Some(vec![index]);
+    }
+    let tuple = node_ref(expr).ok()?;
+    (tuple.tag == DeepTag::Tuple)
+        .then(|| tuple.children.iter().map(integer_literal).collect())
+        .flatten()
 }
 
 // Structural annotation containers can own extensions too. The typed syntax

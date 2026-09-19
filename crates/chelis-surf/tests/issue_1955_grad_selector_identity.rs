@@ -1,0 +1,239 @@
+//! chelis#1955 / chelis#1473: named `grad` selectors are resolved from the
+//! callable value's immutable lexical origin. They are never guessed from
+//! selector position or a same-spelled global.
+
+use chelis_deep::printer::print_canonical;
+use chelis_surf::{
+    ast::Decl,
+    desugar::{
+        DesugarError, try_desugar_expr_in_program, try_desugar_expr_in_program_scope,
+        try_desugar_program,
+    },
+    parser::parse_str,
+    resugar::resugar_program,
+};
+
+fn deep(source: &str) -> String {
+    let declarations = parse_str(source).expect("Surf fixture parses");
+    print_canonical(&try_desugar_program(&declarations).expect("selector resolves"))
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn error(source: &str) -> DesugarError {
+    let declarations = parse_str(source).expect("Surf fixture parses");
+    try_desugar_program(&declarations).expect_err("selector must reject")
+}
+
+#[test]
+fn direct_inline_and_alias_targets_preserve_formal_identity() {
+    let source = r#"
+def pair(x: f32, w: f32) -> f32 = mul(x, w)
+top = pair
+def probe() -> unit = {
+  local = top
+  direct = grad(pair, wrt=w)
+  inline = grad(fn (x: f32, w: f32) -> mul(x, w), wrt=w)
+  aliased = grad(local, wrt=w)
+  drop((direct, inline, aliased))
+}
+"#;
+    let actual = deep(source);
+    assert_eq!(
+        actual.matches("(lit {type: (t-prim {} i32)} 1)").count(),
+        3,
+        "{actual}"
+    );
+}
+
+#[test]
+fn alias_chains_snapshot_the_callable_before_rebinding() {
+    let actual = deep(
+        r#"
+def pair(x: f32, w: f32) -> f32 = mul(x, w)
+def swapped(w: f32, x: f32) -> f32 = mul(x, w)
+def probe() -> unit = {
+  current = pair
+  snapshot = current
+  current = swapped
+  selected = grad(snapshot, wrt=w)
+  drop(selected)
+}
+"#,
+    );
+    assert!(actual.contains("wrt: (var {} w)"), "{actual}");
+    assert_eq!(
+        actual.matches("(lit {type: (t-prim {} i32)} 1)").count(),
+        1,
+        "{actual}"
+    );
+    assert_eq!(
+        actual.matches("(lit {type: (t-prim {} i32)} 0)").count(),
+        0,
+        "{actual}"
+    );
+}
+
+#[test]
+fn written_selector_order_and_duplicates_are_preserved() {
+    let actual = deep(
+        r#"
+def pair(x: f32, w: f32) -> f32 = mul(x, w)
+selected = grad(pair, wrt=(w, x, w))
+"#,
+    );
+    assert!(
+        actual.contains(
+            "(tuple {} (lit {type: (t-prim {} i32)} 1) (lit {type: (t-prim {} i32)} 0) (lit {type: (t-prim {} i32)} 1))"
+        ),
+        "{actual}"
+    );
+}
+
+#[test]
+fn cloned_fragments_resolve_against_program_context_and_lexical_shadowing() {
+    let declarations = parse_str(
+        "def pair(x: f32, w: f32) -> f32 = mul(x, w)\n\
+         alias = pair\n\
+         selected = grad(alias, wrt=w)\n",
+    )
+    .expect("program parses");
+    let Decl::LetDef { value, .. } = &declarations[2] else {
+        panic!("selected value binding")
+    };
+    let cloned = value.clone();
+    let deep = print_canonical(&[try_desugar_expr_in_program(&declarations, &cloned)
+        .expect("cloned expression resolves in program context")]);
+    assert!(deep.contains("(lit {type: (t-prim {} i32)} 1)"), "{deep}");
+
+    assert!(matches!(
+        try_desugar_expr_in_program_scope(&declarations, &cloned, &["alias".to_string()]),
+        Err(DesugarError::UnresolvedGradTarget { .. })
+    ));
+}
+
+#[test]
+fn unknown_direct_inline_and_partially_valid_selectors_reject() {
+    for (label, source, missing) in [
+        (
+            "direct",
+            "def pair(x: f32, w: f32) -> f32 = mul(x, w)\nout = grad(pair, wrt=typo)\n",
+            "typo",
+        ),
+        (
+            "inline",
+            "out = grad(fn (x: f32, w: f32) -> mul(x, w), wrt=typo)\n",
+            "typo",
+        ),
+        (
+            "partial",
+            "def pair(x: f32, w: f32) -> f32 = mul(x, w)\nout = grad(pair, wrt=(w, typo))\n",
+            "typo",
+        ),
+    ] {
+        assert!(
+            matches!(
+                error(source),
+                DesugarError::UnknownGradParameter { parameter, .. } if parameter == missing
+            ),
+            "{label}"
+        );
+    }
+}
+
+#[test]
+fn dynamic_noncallable_and_shadowing_targets_reject() {
+    let dynamic = error(
+        r#"
+def apply(f: f32 -> f32) -> unit = {
+  g = grad(f, wrt=x)
+  drop(g)
+}
+"#,
+    );
+    assert!(matches!(dynamic, DesugarError::UnresolvedGradTarget { .. }));
+
+    let noncallable = error("value = 1.0f32\nout = grad(value, wrt=x)\n");
+    assert!(matches!(
+        noncallable,
+        DesugarError::NonCallableGradTarget { .. }
+    ));
+
+    let shadowed = error(
+        r#"
+def pair(x: f32, w: f32) -> f32 = mul(x, w)
+def apply(pair: f32 -> f32) -> unit = {
+  g = grad(pair, wrt=w)
+  drop(g)
+}
+"#,
+    );
+    assert!(matches!(
+        shadowed,
+        DesugarError::UnresolvedGradTarget { .. }
+    ));
+}
+
+#[test]
+fn matching_deep_round_trips_and_contradictory_metadata_rejects() {
+    let matching = chelis_deep::parser::parse_str(
+        "(def {} pair (fn {} (params {} x w) (app {} (var {} mul) (var {} x) (var {} w))))\n\
+         (def {} selected (grad {wrt: (var {} w)} (var {} pair) (lit {type: (t-prim {} i32)} 1)))",
+    )
+    .expect("matching Deep parses");
+    let surf = resugar_program(&matching).expect("matching selector resugars");
+    let redesugared = try_desugar_program(&surf).expect("matching selector redesugars");
+    let original = chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&matching)
+        .expect("normalize original");
+    let roundtrip = chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&redesugared)
+        .expect("normalize roundtrip");
+    assert_eq!(print_canonical(&roundtrip), print_canonical(&original));
+
+    let contradictory = chelis_deep::parser::parse_str(
+        "(def {} pair (fn {} (params {} x w) (app {} (var {} mul) (var {} x) (var {} w))))\n\
+         (def {} selected (grad {wrt: (var {} w)} (var {} pair) (lit {type: (t-prim {} i32)} 0)))",
+    )
+    .expect("contradictory Deep parses structurally");
+    let error = resugar_program(&contradictory).expect_err("contradiction must reject");
+    assert!(
+        error.to_string().contains("selector metadata")
+            && error.to_string().contains("index 0")
+            && error.to_string().contains("parameter `x`"),
+        "{error}"
+    );
+
+    let local_alias = chelis_deep::parser::parse_str(
+        "(def {} pair (fn {} (params {} x w) (app {} (var {} mul) (var {} x) (var {} w))))\n\
+         (def {} selected (let {} (bind {} local (var {} pair)) \
+           (grad {wrt: (var {} w)} (var {} local) (lit {type: (t-prim {} i32)} 1))))",
+    )
+    .expect("local-alias Deep parses");
+    resugar_program(&local_alias).expect("matching local alias selector resugars");
+
+    let local_contradiction = chelis_deep::parser::parse_str(
+        "(def {} pair (fn {} (params {} x w) (app {} (var {} mul) (var {} x) (var {} w))))\n\
+         (def {} selected (let {} (bind {} local (var {} pair)) \
+           (grad {wrt: (var {} w)} (var {} local) (lit {type: (t-prim {} i32)} 0))))",
+    )
+    .expect("contradictory local-alias Deep parses");
+    assert!(
+        resugar_program(&local_contradiction)
+            .expect_err("local alias contradiction must reject")
+            .to_string()
+            .contains("index 0")
+    );
+
+    let out_of_range = chelis_deep::parser::parse_str(
+        "(def {} pair (fn {} (params {} x w) (app {} (var {} mul) (var {} x) (var {} w))))\n\
+         (def {} selected (grad {wrt: (var {} w)} (var {} pair) \
+           (lit {type: (t-prim {} i32)} 4)))",
+    )
+    .expect("out-of-range Deep parses structurally");
+    assert!(
+        resugar_program(&out_of_range)
+            .expect_err("out-of-range selector must reject")
+            .to_string()
+            .contains("outside")
+    );
+}

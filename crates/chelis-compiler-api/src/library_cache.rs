@@ -542,7 +542,11 @@ pub fn build_library_context(
     // mangled); accept the linker name format while building the context.
     let _linked = chelis_types::install_linked_program_guard();
 
-    let prepared = match crate::pipeline::prepare_surf_decls(dependency_decls, None) {
+    let prepared = match crate::pipeline::prepare_surf_decls_with_context(
+        dependency_decls,
+        stdlib_ctx.checked_library().program().exprs(),
+        None,
+    ) {
         Ok(prepared) => prepared,
         Err(_) => return Ok(None),
     };

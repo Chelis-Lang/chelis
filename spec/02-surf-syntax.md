@@ -822,6 +822,15 @@ Transforms use call syntax in Surf but desugar to dedicated Deep tags. The parse
 | `copy(e)` | `(copy {} e')` | |
 | `&x` | `(borrow {} (var {} x))` | Explicit read-only borrow; usually inferred at call sites |
 
+For a named `wrt`, desugaring resolves the target value to its immutable
+callable origin and maps each written selector name to that origin's ordered
+formal parameters. Direct definitions, inline lambdas, and lexical aliases
+retain that identity through alias chains; rebinding or shadowing affects only
+subsequent bindings. Selector order and duplicates are preserved. An unknown
+formal name, a dynamic or non-callable target, or a target whose callable
+origin cannot be established is a desugaring error; no positional fallback is
+permitted.
+
 Transforms compose naturally: `jit(grad(loss_fn))` **⟹** `(jit {} (grad {} (var {} loss_fn)))`.
 When `grad` targets one differentiable parameter, the result is that gradient value.
 When it targets multiple parameters, the result is a flat tuple of gradients rather than

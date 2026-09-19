@@ -268,7 +268,8 @@ fn first_duplicate_defsig(exprs: &[chelis_deep::ast::Expr]) -> Option<String> {
 pub fn validate_desugared(source: &str) -> Result<(), ValidationError> {
     let decls = chelis_surf::parser::parse_str(source)
         .map_err(|err| ValidationError::Failed(format!("compiler parse failed: {err}")))?;
-    let deep = chelis_surf::desugar::desugar_program(&decls);
+    let deep = chelis_surf::desugar::try_desugar_program(&decls)
+        .map_err(|err| ValidationError::Failed(format!("desugaring failed: {err}")))?;
     let deep = chelis_macros::expand_program(&deep, &chelis_macros::ExpansionOptions::default())
         .map_err(|err| ValidationError::Failed(format!("macro expansion failed: {err}")))?
         .into_exprs();

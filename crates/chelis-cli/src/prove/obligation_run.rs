@@ -74,7 +74,13 @@ pub(super) fn check_unlinked_decls(
     options: &ProveOptions<'_>,
     totals: &mut Summary,
 ) -> Status {
-    let deep_exprs = chelis_surf::desugar::desugar_program(decls);
+    let deep_exprs = match chelis_surf::desugar::try_desugar_program(decls) {
+        Ok(deep) => deep,
+        Err(error) => {
+            emit_check_failure(options, &[error.to_string()], totals);
+            return Status::Error;
+        }
+    };
     let _linked = chelis_types::install_linked_program_guard();
     if let Err(infer) = chelis_types::check_typed_program(&deep_exprs) {
         let messages = infer
