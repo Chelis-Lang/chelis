@@ -998,6 +998,37 @@ fn issue_2204_frame_copies_do_not_scale_with_closure_applications() {
     );
 }
 
+/// chelis#2204: a closure parameter shadows a captured binding of the same
+/// name at the interpreter level, not only inside `Frame`'s own unit tests.
+/// Red-team round 1 on chelis#2208 inverted `Frame::get` to prefer the
+/// outermost scope and the whole crate stayed green except `frame.rs`'s
+/// tests; this fixture is the interpreter-level lock. Under that inversion
+/// `g(3)` returns the captured `n = 7`, giving 77 instead of 37.
+#[test]
+fn issue_2204_closure_parameter_shadows_captured_binding() {
+    let checked = checked_surf(
+        "result = {\n  n = cast(7, i64)\n  g = fn (n: i64) -> n\n  add(mul(g(cast(3, i64)), cast(10, i64)), n)\n}\n",
+    );
+    let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
+    let inputs = HostEvaluationInputs {
+        roots: &empty_tensors,
+        bindings: None,
+    };
+    let outcome =
+        evaluate_host_program_with_library_and_types(&checked, None, None, inputs, None, None)
+            .expect("#2204 shadowing fixture evaluates");
+    let result = outcome
+        .host_bindings
+        .get("result")
+        .map(render_value)
+        .expect("#2204 shadowing fixture binds `result`");
+    assert_eq!(
+        result, "37",
+        "#2204: the closure parameter `n` must shadow the captured `n`; 77 means the captured \
+         scope won the lookup"
+    );
+}
+
 #[test]
 fn dropout_entered_error_prefix_and_nested_handler_unwind_preserve_parent() {
     let checked = checked_surf(

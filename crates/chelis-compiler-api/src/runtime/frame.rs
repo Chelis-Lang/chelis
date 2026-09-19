@@ -196,12 +196,21 @@ mod tests {
         frame.insert("b".to_string(), int(2));
         let mut inner = frame.capture();
         inner.insert("a".to_string(), int(10));
-        let listed: Vec<&String> = inner
+        let listed: Vec<(&String, String)> = inner
             .to_sorted()
             .into_iter()
-            .map(|(name, _)| name)
+            .map(|(name, value)| (name, super::super::host_ops::render_value(value)))
             .collect();
-        assert_eq!(listed, ["a", "b"]);
+        let expected_a = super::super::host_ops::render_value(&int(10));
+        let expected_b = super::super::host_ops::render_value(&int(2));
+        assert_eq!(
+            listed,
+            [
+                (&"a".to_string(), expected_a),
+                (&"b".to_string(), expected_b)
+            ],
+            "the listing carries the innermost definition of a shadowed name"
+        );
         assert_eq!(inner.len(), 2);
         assert_eq!(
             read(&inner, "a"),
