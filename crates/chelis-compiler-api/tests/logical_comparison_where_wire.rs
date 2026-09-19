@@ -151,6 +151,12 @@ fn wire_contract_rejects_bad_arity_domains_shapes_and_outputs() {
             "numeric or bool",
         ),
         (
+            serde_json::json!({"kind": "compare", "comparison": "eq"}),
+            vec![0, 1],
+            "f8e4m3",
+            "active numeric",
+        ),
+        (
             serde_json::json!({"kind": "where"}),
             vec![0, 1],
             "f32",

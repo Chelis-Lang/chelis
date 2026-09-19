@@ -235,12 +235,14 @@ TYPED_NONNUMERIC_BACKEND_FINAL_FORMS = (
     (
         "crates/chelis-backend-hip/src/kernels.rs",
         "backend-element-spelling",
-        "NUMERIC_DEVICE_HELPERS",
+        "REDUCED_FLOAT_COMPARISON_HELPERS",
     ),
+)
+UNIFORM_RANDOM_BACKEND_FINAL_FORMS = (
     (
         "crates/chelis-backend-hip/src/kernels.rs",
         "backend-element-spelling",
-        "REDUCED_FLOAT_COMPARISON_HELPERS",
+        "NUMERIC_DEVICE_HELPERS",
     ),
 )
 UTF8_STRING_FINAL_FORMS = (
@@ -346,6 +348,8 @@ def owner_module_final_form(kind: str, path: str, owner: str) -> bool:
         and (path, owner) in C_INDEX_PROJECTION_OWNERS
     ) or (
         (path, kind, owner) in TYPED_NONNUMERIC_BACKEND_FINAL_FORMS
+    ) or (
+        (path, kind, owner) in UNIFORM_RANDOM_BACKEND_FINAL_FORMS
     ) or (
         (path, kind, owner) in UTF8_STRING_FINAL_FORMS
     ) or (
@@ -726,6 +730,7 @@ def _owner_module_final_forms_manifest() -> dict[str, list[dict[str, str]]]:
         *PHASE2_FINAL_FORMS,
         *((path, "backend-element-spelling", owner) for path, owner in C_INDEX_PROJECTION_OWNERS),
         *TYPED_NONNUMERIC_BACKEND_FINAL_FORMS,
+        *UNIFORM_RANDOM_BACKEND_FINAL_FORMS,
         *UTF8_STRING_FINAL_FORMS,
         *((METADATA_OWNER, "width-arithmetic", owner) for owner in METADATA_FINAL_WIDTH_OWNERS),
         *((ELEMENT_OWNER, "dtype-contract", owner) for owner in ELEMENT_FINAL_CONTRACT_OWNERS),

@@ -416,6 +416,12 @@ fn verifier_rejects_invalid_domains_shapes_outputs_and_arities() {
         ),
         (
             RiscOp::Compare(ComparisonKind::Eq),
+            vec![ty(&[2], Prim::F8e4m3), ty(&[2], Prim::F8e4m3)],
+            ty(&[2], Prim::Bool),
+            "active numeric",
+        ),
+        (
+            RiscOp::Compare(ComparisonKind::Eq),
             vec![ty(&[2], Prim::F32), ty(&[2], Prim::F32)],
             ty(&[2], Prim::F32),
             "Bool",

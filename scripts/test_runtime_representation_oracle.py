@@ -1040,6 +1040,14 @@ class ManifestTests(unittest.TestCase):
     def test_typed_nonnumeric_backend_owners_require_exact_execution_controls(self) -> None:
         manifest = oracle.coverage_manifest()
         forms = manifest["source_inventory"]["owner_module_final_forms"]
+        self.assertNotIn(
+            (
+                "crates/chelis-backend-hip/src/kernels.rs",
+                "backend-element-spelling",
+                "NUMERIC_DEVICE_HELPERS",
+            ),
+            oracle.TYPED_NONNUMERIC_BACKEND_FINAL_FORMS,
+        )
         for path, kind, owner in oracle.TYPED_NONNUMERIC_BACKEND_FINAL_FORMS:
             self.assertTrue(oracle.owner_module_final_form(kind, path, owner))
             self.assertFalse(oracle.owner_module_final_form(kind, path, owner + "_unchecked"))
@@ -1065,6 +1073,19 @@ class ManifestTests(unittest.TestCase):
         self.assertTrue(any(
             "logical_comparison_where_gpu" in probe["command"]
             for probe in hardware
+        ))
+
+    def test_uniform_sampler_helper_keeps_op8_authority_and_gpu_execution(self) -> None:
+        path, kind, owner = oracle.UNIFORM_RANDOM_BACKEND_FINAL_FORMS[0]
+        self.assertEqual(owner, "NUMERIC_DEVICE_HELPERS")
+        self.assertNotIn((path, kind, owner), oracle.TYPED_NONNUMERIC_BACKEND_FINAL_FORMS)
+        self.assertTrue(oracle.owner_module_final_form(kind, path, owner))
+        forms = oracle.coverage_manifest()["source_inventory"]["owner_module_final_forms"]
+        self.assertIn({"kind": kind, "owner": owner}, forms[path])
+        self.assertTrue(any(
+            "gpu_correctness" in probe["command"]
+            for probe in oracle.hardware_probe_manifest()
+            if probe["lane"] == "hip"
         ))
 
     def test_utf8_string_byte_boundaries_are_exact_final_forms(self) -> None:

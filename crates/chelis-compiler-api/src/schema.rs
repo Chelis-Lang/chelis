@@ -2289,10 +2289,14 @@ impl WireDag {
                             | WireComparisonKind::Lte
                     );
                     let operand = Prim::parse_interchange_name(&lhs.output_type.precision);
-                    let valid_operand =
-                        operand.is_some_and(|prim| prim.is_numeric() || prim == Prim::Bool);
-                    let valid_ordered_operand =
-                        !ordered || operand.is_some_and(|prim| prim.is_numeric());
+                    let valid_operand = operand.is_some_and(|prim| {
+                        (prim.is_numeric() && prim.is_admissible_active())
+                            || prim == Prim::Bool
+                    });
+                    let valid_ordered_operand = !ordered
+                        || operand.is_some_and(|prim| {
+                            prim.is_numeric() && prim.is_admissible_active()
+                        });
                     if lhs.output_type.precision != rhs.output_type.precision
                         || !same_shape
                         || !output_shape
@@ -2301,7 +2305,7 @@ impl WireDag {
                         || !valid_ordered_operand
                     {
                         return Err(WireDagContractError::new(format!(
-                            "WireDag Compare node {} requires two same-shape, same-precision numeric or bool operands and a same-shape Bool output; ordered comparisons require numeric operands",
+                            "WireDag Compare node {} requires two same-shape, same-precision active numeric or bool operands and a same-shape Bool output; ordered comparisons require active numeric operands",
                             node.id
                         )));
                     }
