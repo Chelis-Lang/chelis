@@ -470,6 +470,10 @@ class SchemaCases(unittest.TestCase):
         from capacity_census_wire_envelopes import dag_cases
 
         cases = {c.identity: c for c in dag_cases()}
+        current = cases["WireDag/json/empty"]
+        self.assertEqual(current.expected["schema_version"], 15)
+        self.assertIsNone(cases["WireDag/json/version-14"].expected)
+        self.assertIsNone(cases["WireDag/json/version-16"].expected)
         for codec in ("json", "construct", "admit"):
             for owner in ("expand", "reshape", "pad", "shrink", "stride"):
                 prefix = f"WireDag/{codec}/owner-{owner}-"

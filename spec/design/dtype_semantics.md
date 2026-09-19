@@ -597,7 +597,7 @@ The wire census verifies the compiler/Python publication graph, exact carrier
 shapes, codec and admission execution, and the default compiler-api library's
 compiled serialization obligations. The executed baseline's 97 numeric leaves
 have final authority: 80 verified transports and 17 exact numeric-operation
-registrations. WireDag v14 includes the u64 shape-dependency reference, the
+registrations. WireDag v15 includes the u64 shape-dependency reference, the
 opaque u64 local-ascription identity, and the fixed-int64 extent carrier's
 literal-witness requirement role. The wire
 baseline has no frozen cohort or static-descriptor admission path. Every new or
@@ -952,7 +952,7 @@ Deliverables, with phase homes:
    zero grandfather, permanent-disposition, successor-override,
    integer-plumbing, or other transition rows. The wire baseline likewise has
    97 final rows (80 verified transports and 17 numeric operations), with no
-   legacy cohort. Fresh actual verification includes WireDag v14's u64
+   legacy cohort. Fresh actual verification includes WireDag v15's u64
    shape-dependency and local-ascription-identity transports plus the
    fixed-extent literal-witness role.
    Nine binding rows have final nonnumeric authority, seven rows have final
@@ -1632,7 +1632,7 @@ contract; it does not complete binding or runtime obligations.
 
 #### Final wire and binding contract handoff
 
-**Current integration state.** Execution version 3 and WireDag version 14 are
+**Current integration state.** Execution version 3 and WireDag version 15 are
 the source contract for spec/10 §§3.2–3.5. The executed wire baseline contains
 97 distinct numeric leaves: 80 verified transports and 17 numeric operations,
 with zero exception rows. It includes the shape-dependency and opaque

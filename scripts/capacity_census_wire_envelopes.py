@@ -184,16 +184,16 @@ def dag_cases():
                 )
             )
 
-    empty = {"schema_version": 14, "nodes": [], "roots": []}
+    empty = {"schema_version": 15, "nodes": [], "roots": []}
     add("empty", empty, True)
-    for version in (None, 10, 11, 12, 13, 15):
+    for version in (None, 10, 11, 12, 13, 14, 16):
         value = {**empty, "schema_version": version}
         if version is None:
             del value["schema_version"]
         add("version-" + str(version), value, False)
     scalar = {"dtype": "f64", "bits": "8000000000000000"}
     const = {
-        "schema_version": 14,
+        "schema_version": 15,
         "nodes": [
             {
                 "shape_deps": [],
@@ -229,7 +229,7 @@ def dag_cases():
 
     def graph(op):
         return {
-            "schema_version": 14,
+            "schema_version": 15,
             "nodes": [
                 copy.deepcopy(load),
                 {
@@ -298,7 +298,7 @@ def dag_cases():
     witness_node["op"]["name"] = "witness"
     witness_node["output_type"]["dims"] = [{"kind": "lit", "size": 4}]
     reference_graph = {
-        "schema_version": 14,
+        "schema_version": 15,
         "nodes": [
             value_node,
             witness_node,
@@ -401,7 +401,7 @@ def dag_cases():
             add(f"owner-{owner}-to-end", changed, False, "forbids the to_end carrier")
 
     witness = {
-        "schema_version": 14,
+        "schema_version": 15,
         "nodes": [
             copy.deepcopy(load),
             {
@@ -651,7 +651,7 @@ def result_reference_cases():
 
     cases = []
     dag = {
-        "schema_version": 14,
+        "schema_version": 15,
         "nodes": [
             {
                 "shape_deps": [],
@@ -705,7 +705,7 @@ def result_reference_cases():
                             "outside the owning DAG",
                         )
                     )
-        for version in (10, 11, 12, 13, 15):
+        for version in (10, 11, 12, 13, 14, 16):
             bad = copy.deepcopy(good)
             bad["dag"]["schema_version"] = version
             cases.append(
