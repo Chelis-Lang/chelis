@@ -141,6 +141,47 @@ fn fold_stage(stage: &Expr, acc: Expr) -> Expr {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Expression nodes copied by the pipe fold on this thread since the last
+    /// reset (chelis#2207). Counted at the copy, never estimated.
+    static FOLD_COPIED_NODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Copy `expr` for the fold's result, recording the nodes copied.
+fn copied(expr: &Expr) -> Expr {
+    #[cfg(test)]
+    FOLD_COPIED_NODES.with(|nodes| nodes.set(nodes.get() + expr_nodes(expr)));
+    expr.clone()
+}
+
+/// Expression nodes in `expr`, every carrier included; metadata is not
+/// counted.
+#[cfg(test)]
+fn expr_nodes(expr: &Expr) -> usize {
+    1 + match expr {
+        Expr::Atom(_, _) | Expr::Map(_, _) => 0,
+        Expr::MetaExpr(meta, _) => expr_nodes(&meta.expr),
+        Expr::List(list, _) => list.elements.iter().map(expr_nodes).sum(),
+        Expr::Node(node, _) => node.children_slice().iter().map(expr_nodes).sum(),
+        Expr::BareList(elements, _) => elements.iter().map(expr_nodes).sum(),
+        Expr::UnknownForm(data) => data.children.iter().map(expr_nodes).sum(),
+    }
+}
+
+/// Expression nodes copied by the pipe fold on this thread since the last
+/// reset.
+#[cfg(test)]
+pub(crate) fn fold_copied_nodes() -> usize {
+    FOLD_COPIED_NODES.with(std::cell::Cell::get)
+}
+
+/// Reset [`fold_copied_nodes`] for this thread.
+#[cfg(test)]
+pub(crate) fn reset_fold_copied_nodes() {
+    FOLD_COPIED_NODES.with(|nodes| nodes.set(0));
+}
+
 /// Fold every `Pipe` in `expr`, innermost first.
 ///
 /// Bottom-up matters: a stage body may itself contain a pipe, and
@@ -183,12 +224,12 @@ pub fn fold_pipes(expr: &Expr) -> Expr {
         _ => {}
     }
     let Some((tag, meta, kids)) = stamped(expr) else {
-        return expr.clone();
+        return copied(expr);
     };
     let folded: Vec<Expr> = kids.iter().map(fold_pipes).collect();
     let children_moved = folded.iter().zip(kids).any(|(new, old)| new != old);
     if tag != DeepTag::Pipe && !children_moved {
-        return expr.clone();
+        return copied(expr);
     }
     let rebuilt = rebuild(expr, tag, meta, folded);
     if tag != DeepTag::Pipe {
@@ -339,6 +380,58 @@ mod tests {
              (app {} (var {} f) (var {} p) (pipe {} (var {} ys) (var {} g)))))",
         );
         assert!(!folded.contains("pipe"), "{folded}");
+    }
+
+    /// chelis#2207: folding a pipe-free tree must cost work linear in its
+    /// size. The fold used to clone every child subtree, deep-compare the
+    /// clones against the originals to detect movement, and then clone the
+    /// unchanged subtree again at every stamped node, so a nested expression
+    /// cost O(size x depth) and a 2000-element literal took seconds per
+    /// fold.
+    ///
+    /// Counted receipt in the shape of chelis#2181's `substitution_nodes`:
+    /// `fold_copied_nodes` counts expression nodes the fold copies. The
+    /// assertion is a ratio, so it states the asymptotic promise with no
+    /// machine budget: doubling the depth of a pipe-free chain may at most
+    /// triple the nodes copied.
+    ///
+    /// Evidentiary status: REGRESSION TEST, proven failing first. With the
+    /// counter on the unchanged fold, a 64-deep chain copied 6,563 nodes and a
+    /// 128-deep chain 25,411, a ratio of 3.9 (quadratic), and this assertion
+    /// failed.
+    /// After the fix the same chains copy PASS_SMALL and PASS_LARGE: the one
+    /// owned result, and nothing per level.
+    #[test]
+    fn folding_a_pipe_free_chain_copies_linear_work() {
+        fn chain(depth: usize) -> Expr {
+            let mut source = "(var {} x)".to_string();
+            for _ in 0..depth {
+                source = format!("(app {{}} (var {{}} f) {source})");
+            }
+            parse_str(&source).expect("parse").remove(0)
+        }
+        fn copied_nodes(depth: usize) -> (usize, usize) {
+            let expr = chain(depth);
+            let size = expr_nodes(&expr);
+            reset_fold_copied_nodes();
+            let folded = fold_pipes(&expr);
+            assert_eq!(folded, expr, "a pipe-free chain folds to itself");
+            (fold_copied_nodes(), size)
+        }
+        let (small, small_size) = copied_nodes(64);
+        let (large, _) = copied_nodes(128);
+        eprintln!("#2207 receipt: depth 64 copied {small} nodes, depth 128 copied {large}");
+        assert!(
+            small >= small_size,
+            "#2207: the fold returns an owned copy, so it must record at least the \
+             {small_size} nodes of the result; {small} means the counter is not measuring"
+        );
+        assert!(
+            large <= small.saturating_mul(3),
+            "#2207: doubling the chain depth must at most triple the nodes the fold copies; \
+             depth 64 copied {small} and depth 128 copied {large}, a factor of {}",
+            large / small.max(1)
+        );
     }
 
     /// A subtree with no pipe is returned unchanged, carrier included.
