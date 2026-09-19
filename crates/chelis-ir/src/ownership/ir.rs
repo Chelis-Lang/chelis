@@ -147,18 +147,54 @@ pub(crate) struct OperationSchema {
     pub(crate) result: Option<ValueClass>,
 }
 
-/// The builtin operand a consuming container builtin may take by Move at
-/// the operand's scheduled last use (chelis#2205). This table is the single
-/// authority the last-use scheduler consults; every other builtin operand
-/// stays borrowed, and `Some`'s payload keeps its [05-OP-44] constructor
-/// clone. The consuming runtime entry point pushes in place only when the
-/// strong-owner count is one, so a retained alias (a tuple, an option, an ADT
-/// or a callee that stored the list) still sees a clone.
-pub(crate) fn consuming_container_operand(label: &str) -> Option<usize> {
-    match label {
-        "builtin:append" | "builtin:concat" => Some(0),
-        _ => None,
+/// The builtins that build a list from a list operand they may consume
+/// (chelis#2205). This table is the one authority the last-use scheduler
+/// consults, and its key is the callable's shape rather than its label
+/// alone: a `label` matches only when the application's result is the list
+/// class and the named operand is a list. Tensor `concat` shares the label
+/// `builtin:concat` but takes a `List[tensor]` of parts and produces a
+/// tensor, so it is not a row here. Every other builtin operand stays
+/// borrowed, and `Some`'s payload keeps its [05-OP-44] constructor clone.
+/// The consuming runtime entry point pushes in place only when the
+/// strong-owner count is one, so a retained alias (a tuple, an option, an
+/// ADT, or a callee that stored the list) still sees a clone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ListConsumer {
+    /// The application label the ownership lowering assigns.
+    pub(crate) label: &'static str,
+    /// The operand position that may move; the callable's other operands
+    /// are borrowed.
+    pub(crate) operand: usize,
+}
+
+/// Every list-producing builtin that may consume a list operand.
+pub(crate) const LIST_CONSUMERS: &[ListConsumer] = &[
+    ListConsumer {
+        label: "builtin:append",
+        operand: 0,
+    },
+    ListConsumer {
+        label: "builtin:concat",
+        operand: 0,
+    },
+];
+
+/// The operand of `label` that a list-producing builtin may consume, or
+/// `None` when the application is not a row of [`LIST_CONSUMERS`]: the label
+/// is not listed, the result is not the list class, or the operand is not a
+/// list. `operand_class` answers the class of the operand at a position.
+pub(crate) fn list_consumer_operand(
+    label: &str,
+    result: Option<super::classify::ValueClass>,
+    operand_class: impl Fn(usize) -> Option<super::classify::ValueClass>,
+) -> Option<usize> {
+    use super::classify::{HeapKind, ValueClass};
+    let list = ValueClass::Heap(HeapKind::List);
+    if result != Some(list) {
+        return None;
     }
+    let row = LIST_CONSUMERS.iter().find(|row| row.label == label)?;
+    (operand_class(row.operand) == Some(list)).then_some(row.operand)
 }
 
 /// Closed semantic class for an application. A free-form diagnostic label

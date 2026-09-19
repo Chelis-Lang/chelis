@@ -1,11 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::classify::{HeapKind, ValueClass};
 use super::error::OwnershipError;
 use super::ir::{
     ApplyKind, Block, BlockId, EdgeId, EdgeTerminal, HostSiteAction, HostSiteMap, Op, OpId,
     Operation, OperationRole, OwnerId, OwnerOrigin, OwnershipProgram, OwnershipUse, ScheduleState,
-    Terminal, Terminator, Unit, UnitId, consuming_container_operand,
+    Terminal, Terminator, Unit, UnitId, list_consumer_operand,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -205,7 +204,8 @@ pub(super) fn schedule(
 /// Lowering borrows every builtin operand, so a list whose last use is
 /// `append` or `concat` was cloned by the runtime and released one operation
 /// later. The scheduler has just placed that release: when a `Drop` terminal
-/// for the container operand of a consuming builtin (`consuming_container_operand`)
+/// for the consumed operand of a list-producing builtin (a row of
+/// `LIST_CONSUMERS`, matched by label, list result and list operand)
 /// sits directly after the application in the same block, the operand is dead
 /// after the call. Turn the borrow into a move, drop the terminal, and remove
 /// its host-site action, so the emitter sees a moved operand and the
@@ -236,25 +236,21 @@ fn upgrade_container_last_use_moves(
                         args,
                         schema,
                         ..
-                    } => consuming_container_operand(label).and_then(|position| {
-                        // The label alone does not select the list builtin:
-                        // tensor `concat` takes a `List[tensor]` of parts as
-                        // its first operand and produces a tensor, and that
-                        // list is borrowed, never consumed. The result class
-                        // is what tells the two apart (RT-2225 verification).
-                        if schema.result != Some(ValueClass::Heap(HeapKind::List)) {
-                            return None;
-                        }
+                    } => list_consumer_operand(label, schema.result, |position| {
+                        args.get(position)
+                            .and_then(|arg| owners.get(&arg.owner))
+                            .map(|info| info.class)
+                    })
+                    .and_then(|position| {
                         let operand = args.get(position)?;
-                        let list_owner = owners.get(&operand.owner).is_some_and(|info| {
-                            info.origin == OwnerOrigin::Owned
-                                && info.class == ValueClass::Heap(HeapKind::List)
-                        });
+                        let owned = owners
+                            .get(&operand.owner)
+                            .is_some_and(|info| info.origin == OwnerOrigin::Owned);
                         let sole_use = args
                             .iter()
                             .enumerate()
                             .all(|(other, arg)| other == position || arg.owner != operand.owner);
-                        (operand.use_ == OwnershipUse::Borrow && list_owner && sole_use)
+                        (operand.use_ == OwnershipUse::Borrow && owned && sole_use)
                             .then_some((position, operand.owner))
                     }),
                     _ => None,

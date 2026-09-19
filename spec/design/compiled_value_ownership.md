@@ -541,10 +541,11 @@ post-dominance, not source scope alone:
   and
 - a manifested root consumes its owner before process teardown.
 
-A container operand of a consuming builtin (`append` and `concat` on a
-`List`, the table `consuming_container_operand` in the ownership IR) is moved
-into the builtin when the scheduler places that owner's terminal directly
-after the application: lowering borrows every builtin operand, and the
+The consumed operand of a list-producing builtin (a row of the ownership
+IR's `LIST_CONSUMERS` table: `append` and `concat`, matched by label, list
+result class and list operand class, so the tensor `concat` that shares the
+label is not a row) is moved into the builtin when the scheduler places that
+owner's terminal directly after the application: lowering borrows every builtin operand, and the
 last-use scheduler upgrades the borrow to a move and drops the terminal, so
 the verifier re-checks the move as it would any other (no live borrow, no
 later use). The move establishes only the borrow half of exclusivity. The
