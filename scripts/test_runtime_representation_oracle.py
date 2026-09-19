@@ -1062,6 +1062,7 @@ class ManifestTests(unittest.TestCase):
             and "typed_comparison_c_matrix_matches_evaluator_for_every_identity_and_dtype" in command
             and "typed_logical_c_truth_tables_are_bool8" in command
             and "typed_where_c_copies_selected_storage_bits_for_every_admitted_dtype" in command
+            and "typed_nonnumeric_c_permuted_stepped_views_match_evaluator_and_preserve_bits" in command
             for command in commands
         ))
         self.assertTrue(any(

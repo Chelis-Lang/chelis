@@ -44,6 +44,17 @@ class ManifestTests(unittest.TestCase):
             ("/chosen/python", "scripts/test_dtype_nonnumeric_lowering_oracle.py"),
         )
 
+    def test_c_leg_includes_strided_nonnumeric_execution(self) -> None:
+        c_leg = next(
+            leg
+            for leg in oracle.oracle_legs("/chosen/python")
+            if leg.name == "compiled C exact semantics and ownership forms"
+        )
+        self.assertIn(
+            "typed_nonnumeric_c_permuted_stepped_views_match_evaluator_and_preserve_bits",
+            " ".join(c_leg.argv),
+        )
+
 
 class SourceMutationTests(unittest.TestCase):
     def setUp(self) -> None:

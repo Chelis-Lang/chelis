@@ -2211,7 +2211,8 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
                 "--test", "exec_compile", "-E",
                 "test(typed_comparison_c_matrix_matches_evaluator_for_every_identity_and_dtype) | "
                 "test(typed_logical_c_truth_tables_are_bool8) | "
-                "test(typed_where_c_copies_selected_storage_bits_for_every_admitted_dtype)",
+                "test(typed_where_c_copies_selected_storage_bits_for_every_admitted_dtype) | "
+                "test(typed_nonnumeric_c_permuted_stepped_views_match_evaluator_and_preserve_bits)",
             ),
         ),
         OracleLeg(

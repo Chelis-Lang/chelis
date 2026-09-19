@@ -165,6 +165,7 @@ def oracle_legs(python: str) -> tuple[OracleLeg, ...]:
                 "test(typed_comparison_c_matrix_matches_evaluator_for_every_identity_and_dtype) | "
                 "test(typed_logical_c_truth_tables_are_bool8) | "
                 "test(typed_where_c_copies_selected_storage_bits_for_every_admitted_dtype) | "
+                "test(typed_nonnumeric_c_permuted_stepped_views_match_evaluator_and_preserve_bits) | "
                 "test(issue_630_eq_neq_owned_copied_and_borrowed_tensors_match_ieee) | "
                 "test(issue_666_typed_gte_where_forward_and_gradient_match_selected_branch)",
             ),

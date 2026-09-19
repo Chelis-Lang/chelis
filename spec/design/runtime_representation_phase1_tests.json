@@ -697,12 +697,13 @@
         "--test",
         "exec_compile",
         "-E",
-        "(test(typed_comparison_c_matrix_matches_evaluator_for_every_identity_and_dtype) | test(typed_logical_c_truth_tables_are_bool8) | test(typed_where_c_copies_selected_storage_bits_for_every_admitted_dtype)) & (not test(=an_allocation_above_int32_elements_reports_its_true_extent))"
+        "(test(typed_comparison_c_matrix_matches_evaluator_for_every_identity_and_dtype) | test(typed_logical_c_truth_tables_are_bool8) | test(typed_where_c_copies_selected_storage_bits_for_every_admitted_dtype) | test(typed_nonnumeric_c_permuted_stepped_views_match_evaluator_and_preserve_bits)) & (not test(=an_allocation_above_int32_elements_reports_its_true_extent))"
       ],
       "required": [
         "chelis-backend-c::exec_compile::typed_comparison_c_matrix_matches_evaluator_for_every_identity_and_dtype",
         "chelis-backend-c::exec_compile::typed_logical_c_truth_tables_are_bool8",
-        "chelis-backend-c::exec_compile::typed_where_c_copies_selected_storage_bits_for_every_admitted_dtype"
+        "chelis-backend-c::exec_compile::typed_where_c_copies_selected_storage_bits_for_every_admitted_dtype",
+        "chelis-backend-c::exec_compile::typed_nonnumeric_c_permuted_stepped_views_match_evaluator_and_preserve_bits"
       ]
     },
     {
@@ -719,7 +720,8 @@
         "chelis-backend-hip::logical_comparison_where::every_comparison_emits_a_bool8_kernel_for_every_admitted_operand_dtype",
         "chelis-backend-hip::logical_comparison_where::f16_and_bf16_comparison_decode_values_instead_of_ordering_storage_bits",
         "chelis-backend-hip::logical_comparison_where::logical_kernels_are_eager_bool8_truth_operations",
-        "chelis-backend-hip::logical_comparison_where::where_selects_raw_stored_bits_for_every_admitted_branch_dtype"
+        "chelis-backend-hip::logical_comparison_where::where_selects_raw_stored_bits_for_every_admitted_branch_dtype",
+        "chelis-backend-hip::logical_comparison_where::permuted_stepped_views_feed_comparison_logical_and_where_stride_metadata"
       ]
     },
     {
