@@ -1029,6 +1029,68 @@ fn verifier_rejects_unrelated_shape_authority_and_producerless_anonymous_outputs
             .any(|error| error.contains("exactly matching shape")),
         "logical output needs explicit authority for an anonymous dimension"
     );
+
+    let mut unresolved_compare_authority = Dag::new();
+    let left = unresolved_compare_authority.add_node(
+        RiscOp::Load {
+            name: "left".into(),
+        },
+        vec![],
+        anonymous(Prim::F32),
+        None,
+    );
+    let right = unresolved_compare_authority.add_node(
+        RiscOp::Load {
+            name: "right".into(),
+        },
+        vec![],
+        anonymous(Prim::F32),
+        None,
+    );
+    let output = unresolved_compare_authority.add_node(
+        RiscOp::Compare(ComparisonKind::Eq),
+        vec![left, right],
+        anonymous(Prim::Bool),
+        None,
+    );
+    unresolved_compare_authority.add_shape_dep(output, left);
+    assert!(
+        verify::verify(&unresolved_compare_authority)
+            .iter()
+            .any(|error| error.contains("operand shape") || error.contains("output shape")),
+        "an unresolved anonymous input must not launder comparison output authority"
+    );
+
+    let mut unresolved_logical_authority = Dag::new();
+    let left = unresolved_logical_authority.add_node(
+        RiscOp::Load {
+            name: "left".into(),
+        },
+        vec![],
+        anonymous(Prim::Bool),
+        None,
+    );
+    let right = unresolved_logical_authority.add_node(
+        RiscOp::Load {
+            name: "right".into(),
+        },
+        vec![],
+        anonymous(Prim::Bool),
+        None,
+    );
+    let output = unresolved_logical_authority.add_node(
+        RiscOp::Logical(LogicalKind::And),
+        vec![left, right],
+        anonymous(Prim::Bool),
+        None,
+    );
+    unresolved_logical_authority.add_shape_dep(output, left);
+    assert!(
+        verify::verify(&unresolved_logical_authority)
+            .iter()
+            .any(|error| error.contains("exactly matching shape")),
+        "an unresolved anonymous input must not launder logical output authority"
+    );
 }
 
 #[test]

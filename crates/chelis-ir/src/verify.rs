@@ -76,6 +76,7 @@ fn semantic_dim_expr(
         {
             return Some(dim);
         }
+        return None;
     }
     Some(DimExpr::from(dim))
 }
@@ -200,7 +201,14 @@ fn node_shapes_semantically_equivalent(
             .enumerate()
             .all(|(axis, _)| {
                 semantic_dim_expr(dag, left, axis, dag.len(), relevant_shape_sources)
-                    == semantic_dim_expr(dag, right, axis, dag.len(), relevant_shape_sources)
+                    .zip(semantic_dim_expr(
+                        dag,
+                        right,
+                        axis,
+                        dag.len(),
+                        relevant_shape_sources,
+                    ))
+                    .is_some_and(|(left_dim, right_dim)| left_dim == right_dim)
                     || semantic_axis_origin(dag, left, axis, dag.len(), relevant_shape_sources)
                         .zip(semantic_axis_origin(
                             dag,

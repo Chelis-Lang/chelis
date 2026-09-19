@@ -453,6 +453,53 @@ fn wire_v15_rejects_unrelated_shape_dependency_authority() {
 }
 
 #[test]
+fn wire_v15_rejects_unresolved_anonymous_shape_authority() {
+    const COMPARE_CONTRACT: &str = "WireDag Compare node 2 requires two same-shape, same-precision active numeric or bool operands and a same-shape Bool output; ordered comparisons require active numeric operands";
+    const LOGICAL_CONTRACT: &str =
+        "WireDag Logical node 2 requires exactly 2 same-shape bool input(s) and a Bool output";
+
+    let producerless_compare = wire_dag_payload(
+        vec![
+            wire_node(0, "left", named_dims("", None), "f32", vec![]),
+            wire_node(1, "right", named_dims("", None), "f32", vec![]),
+            wire_operation_node(
+                2,
+                serde_json::json!({"kind": "compare", "comparison": "eq"}),
+                vec![0, 1],
+                named_dims("", None),
+                "bool",
+            ),
+        ],
+        2,
+    );
+    assert_contract_error(&producerless_compare, COMPARE_CONTRACT);
+
+    let producerless_logical = wire_dag_payload(
+        vec![
+            wire_node(0, "left", named_dims("", None), "bool", vec![]),
+            wire_node(1, "right", named_dims("", None), "bool", vec![]),
+            wire_operation_node(
+                2,
+                serde_json::json!({"kind": "logical", "logical": "and"}),
+                vec![0, 1],
+                named_dims("", None),
+                "bool",
+            ),
+        ],
+        2,
+    );
+    assert_contract_error(&producerless_logical, LOGICAL_CONTRACT);
+
+    let mut laundered_compare = producerless_compare;
+    laundered_compare["nodes"][2]["shape_deps"] = serde_json::json!([0]);
+    assert_contract_error(&laundered_compare, COMPARE_CONTRACT);
+
+    let mut laundered_logical = producerless_logical;
+    laundered_logical["nodes"][2]["shape_deps"] = serde_json::json!([0]);
+    assert_contract_error(&laundered_logical, LOGICAL_CONTRACT);
+}
+
+#[test]
 fn version_14_rejects_before_inspecting_the_new_operation() {
     let mut encoded: serde_json::Value = serde_json::from_str(&payload(
         serde_json::json!({"kind": "compare", "comparison": "not_a_comparison"}),

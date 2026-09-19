@@ -3030,6 +3030,7 @@ fn wire_semantic_node_dim<'a>(
         {
             return Some(resolved);
         }
+        return None;
     }
     Some(dim)
 }
