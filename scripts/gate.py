@@ -1158,13 +1158,12 @@ def fast_command_list(
     fail on it before a later regeneration could fix it.
 
     The classification is first among the checks because it is the cheapest
-    thing here that can reject a push: `cargo metadata --no-deps --locked`
-    warm is 0.04s, so the whole row runs in well under half a second, and
-    until chelis#2250 an unrouted new file passed every local check and then
-    failed `Plan Changed Integration Tests` in CI. Its path set is derived
-    before the writers run, so a file a regeneration creates is classified by
-    the next run rather than this one; regenerated artifacts land at paths
-    that already carry rules.
+    thing here that can reject a push, and because until chelis#2250 an
+    unrouted new file passed every local check and then failed `Plan Changed
+    Integration Tests` in CI. It derives its own set when it runs rather than
+    taking one built here, so it sees what the writers above it produced.
+    `docs/ci_validation.md` under Measured figures carries its cost with the
+    conditions that produced it.
 
     Never the chelis#908 oracle: minutes of work whose `chelis check`
     timeouts under load are a known false-red source."""

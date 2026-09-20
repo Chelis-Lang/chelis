@@ -323,27 +323,29 @@ The developer's `gate.py --fast`, `--local`, `integration`, and full/manual comm
 
 ### Measured figures for the changed-path classification stage
 
-What the `--fast` changed-path classification costs, with the conditions each
-figure was taken under. A figure here is evidence with a date on it, not a
-constant: re-run the command before relying on one, and correct this table
-rather than the prose that cites it.
-
-Cost is four quantities and not one, so a range across them averages
-different things. `gate.py` sets no `PYTHONDONTWRITEBYTECODE` for its
-children, so a fresh checkout compiles the module and every later run reads
-`scripts/__pycache__`; and by the time this stage runs, `cargo fmt` has
-already warmed cargo. The figure a developer feels is therefore neither the
-cold first invocation nor the fully warm steady state. This fleet creates a
-worktree per pull request and per reviewer, so the fresh-checkout row is the
-common case here rather than an edge one.
+Taken 2026-09-20 against `64a446998` on an Apple-silicon workstation. A figure
+here is evidence with a date on it, not a constant: re-run the command before
+relying on one, and correct this table rather than the prose that cites it.
 
 | figure | conditions | how it was taken |
 |---|---|---|
-| *pending* | cold first invocation, cargo cold and no bytecode cache | measurement in flight |
-| *pending* | warm cargo, fresh interpreter, no bytecode cache: a fresh worktree's first `--fast` | measurement in flight |
-| *pending* | warm cargo, bytecode cached: every `--fast` after the first in a worktree | measurement in flight |
-| *pending* | empty change set, which skips `cargo metadata` entirely | measurement in flight |
+| 0.11-0.13s wall | any non-empty change set, `--from-git` | `/usr/bin/time -p .venv/bin/python scripts/ci_change_owned.py classify-paths --from-git`, five runs |
+| 0.05-0.06s wall | empty change set, which returns before `cargo metadata` | same command on an unchanged tree |
 | `cargo metadata --no-deps --locked` 0.02-0.04s | warm, repeated invocation | the stage's dominant cost; 0.24s with dependencies, which it does not ask for |
+
+**The cost does not split by warmth, and that is the measured result rather
+than an omission.** Cold cargo without a bytecode cache, warm cargo after a
+real `cargo fmt --all` without a bytecode cache, and warm cargo with the
+cache all came out the same to within noise. `gate.py` sets no
+`PYTHONDONTWRITEBYTECODE` for its children and `cargo fmt` runs before this
+stage, so there were four plausibly distinct quantities here and the
+measurement found one. Recorded so the next reader does not re-derive the
+hypothesis: only the empty set differs.
+
+The form does matter, which is the distinction that survived. Passing paths
+as arguments costs about 0.12s of CPU and `--from-git` about 0.18s, the
+difference being two `git diff` forks. `--from-git` is the shipped form and
+the figures above are its.
 
 ## Python execution ownership and timing
 

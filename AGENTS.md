@@ -1143,9 +1143,14 @@ same sentence CI prints. It needs cargo on PATH, because it reads the
 workspace package roots from `cargo metadata --no-deps --locked`, and it costs
 a fraction of a second (see Measured figures in
 [`docs/ci_validation.md`](docs/ci_validation.md) for the exact conditions).
-It derives its set when it runs, so a file a regeneration creates is
-classified in the same run, and it matches the planner's rename handling and
-ignores untracked work, which CI never sees.
+It derives its set when it runs and matches the planner's rename handling,
+classifying both sides of a move. It classifies a path once git knows about
+it: untracked work is excluded, because CI never sees it and nothing can
+route a scratch file, so a file a writer has just created is invisible until
+`git add`. That is not a gap you can push through — an unadded file is not
+part of the change — but it does mean a regeneration's *new* output is caught
+at the next `--fast` after you add it rather than in the run that created it.
+A modified output is caught in the same run.
 
 It is not a proof that CI will agree. It classifies the working tree against
 the same rules, which catches an unrouted path, and that is the case it

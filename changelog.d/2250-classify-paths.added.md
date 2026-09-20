@@ -8,8 +8,11 @@ the same `unclassified changed path: <path>` sentence CI prints, from one
 shared spelling, and reports every unrouted path rather than stopping at the
 first as CI does.
 
-It derives its own changed set when it runs, so a file a regeneration created
-earlier in the same `--fast` is classified in that run. It matches the
+It derives its own changed set when it runs, so a modified artifact is
+classified in the run that changed it. A path is classified once git knows
+about it, so a file a writer has just created is seen at the next `--fast`
+after `git add` rather than in the run that created it; an unadded file is
+not part of the change and cannot be pushed. It matches the
 planner's rename handling, classifying both sides of a move rather than only
 the destination, and it ignores untracked work, which CI never sees and
 nothing can route. It is not a proof that CI will agree: it reads the working
