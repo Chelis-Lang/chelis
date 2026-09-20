@@ -290,11 +290,14 @@ fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
     let (prefix, _params) = signature
         .split_once('(')
         .expect("test signature contains parameter list");
+    let (_return_type, name) = prefix
+        .rsplit_once(' ')
+        .expect("test signature contains a return type and function name");
     // chelis#1820: located by NAME, not by the full signature. chelis#1799
     // added a `chelis_rng_state` parameter to every host body, and the old
     // full-signature needle then missed the definition and failed before this
     // row read anything. The parameter list is not what the row asserts.
-    let name = format!("{prefix}__chelis_owned_body");
+    let name = format!("{}__chelis_owned_body", common::authored_c_symbol(name));
     let rest = common::host_body_definition(source, &name);
     let end = rest
         .find("\n}\n")
@@ -745,7 +748,9 @@ fn module_qualified_constructors_in_one_package_keep_their_own_field_order() {
         "eval must answer 5.0; got:\n{evaluated}"
     );
 
-    if let Some(printed) = built.compile_and_run("pkg__demo__Demo__Main__main") {
+    if let Some(printed) =
+        built.compile_and_run(&common::authored_c_symbol("pkg__demo__Demo__Main__main"))
+    {
         assert_eq!(
             printed, "5.000000",
             "the compiled artifact must agree with eval"

@@ -8,7 +8,7 @@
 //! arithmetic conformance.
 
 mod common;
-use common::{build_and_run, parse_tensor_data};
+use common::{authored_c_symbol, build_and_run, parse_tensor_data};
 
 use std::fs;
 use std::process::Command;
@@ -61,7 +61,12 @@ fn build_and_count(source: &str, name: &str) -> Counts {
         })
         .count();
     let fused = c.matches("parallel for simd").count();
-    let user_helper_defs = c.matches("static void my_mm__tensor_").count();
+    let user_helper_defs = c
+        .matches(&format!(
+            "static void {}__tensor_",
+            authored_c_symbol("my_mm")
+        ))
+        .count();
 
     // Sum bytes across every chelis_alloc(N, (int64_t[]){...}, CHELIS_DTYPE_F32) call.
     let mut total_alloc_bytes = 0usize;

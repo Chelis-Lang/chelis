@@ -133,15 +133,20 @@ the lint is.
 
 ### 1.7 Backend symbol emission
 
-> **[01-CID-1]** C and HIP backend symbol emission SHALL preserve the
-> spelling of a user identifier unless that spelling is reserved by the
-> target language. The C backend SHALL prefix a reserved C spelling with
-> `chelis_user__`; if that mapping collides with another user identifier,
-> the build SHALL reject both names and ask the user to rename one. It SHALL
-> NOT select one definition or emit an ambiguous translation unit.
+> **[01-CID-1]** Every authored C function export other than source-level
+> `main` SHALL use the compiler-owned symbol `chelis_fn_` followed by the
+> lowercase hexadecimal UTF-8 bytes of its exact Chelis name. Source-level
+> `main` SHALL use the module-qualified symbol specified by
+> `spec/08-backends.md` §2. The mapping SHALL be injective for every legal
+> Surf identifier, including C keywords, platform symbols, and names that
+> themselves begin with `chelis_fn_`. The generated header and source SHALL
+> use the same symbol. Downstream C code SHALL consume that generated
+> declaration rather than reconstructing the symbol from source spelling.
 
-No case rewriting is performed. Non-reserved Surf identifiers cross the
-language boundary literally.
+The source identifier itself is unchanged: no case rewriting or source-level
+reservation is introduced. The compiler-owned spelling is the published C ABI
+identity, not a renamed Chelis binding. Other backend-local user identifiers
+remain subject to their target language's identifier rules.
 
 ---
 

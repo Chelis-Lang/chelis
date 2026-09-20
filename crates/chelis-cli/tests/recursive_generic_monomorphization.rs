@@ -439,7 +439,7 @@ fn compile_generated_object(out_dir: &std::path::Path, stem: &str) -> PathBuf {
 fn direct_recursion_at_one_instantiation_compiles_links_and_runs() {
     let (_dir, out_dir) = build_ok(DIRECT_ONE_INSTANTIATION, "direct_one");
     let c_source = read_generated_c(&out_dir, "direct_one");
-    let specialized = identifiers_with_prefix(&c_source, "depth");
+    let specialized = identifiers_with_prefix(&c_source, &common::authored_c_symbol("depth"));
     assert_eq!(
         specialized.len(),
         1,
@@ -458,7 +458,7 @@ fn direct_recursion_at_one_instantiation_compiles_links_and_runs() {
 fn distinct_instantiations_get_distinct_specializations() {
     let (_dir, out_dir) = build_ok(DIRECT_TWO_INSTANTIATIONS, "direct_two");
     let c_source = read_generated_c(&out_dir, "direct_two");
-    let specialized = identifiers_with_prefix(&c_source, "depth");
+    let specialized = identifiers_with_prefix(&c_source, &common::authored_c_symbol("depth"));
     assert_eq!(
         specialized.len(),
         2,
@@ -477,8 +477,8 @@ fn distinct_instantiations_get_distinct_specializations() {
 fn mutual_recursion_specializes_as_a_group() {
     let (_dir, out_dir) = build_ok(MUTUAL_ONE_INSTANTIATION, "mutual_one");
     let c_source = read_generated_c(&out_dir, "mutual_one");
-    let ping = identifiers_with_prefix(&c_source, "ping");
-    let pong = identifiers_with_prefix(&c_source, "pong");
+    let ping = identifiers_with_prefix(&c_source, &common::authored_c_symbol("ping"));
+    let pong = identifiers_with_prefix(&c_source, &common::authored_c_symbol("pong"));
     assert_eq!(
         ping.len(),
         1,
@@ -496,7 +496,7 @@ fn mutual_recursion_specializes_as_a_group() {
 fn memoized_specialization_reuses_one_symbol_across_call_sites() {
     let (_dir, out_dir) = build_ok(DIRECT_TWO_CALL_SITES, "memoized");
     let c_source = read_generated_c(&out_dir, "memoized");
-    let specialized = identifiers_with_prefix(&c_source, "depth");
+    let specialized = identifiers_with_prefix(&c_source, &common::authored_c_symbol("depth"));
     assert_eq!(
         specialized.len(),
         1,
@@ -674,7 +674,7 @@ fn permuted_recursive_instantiation_specializes_per_orbit_member() {
     let eval = eval_first_line(PERMUTED_INSTANTIATION, "permuted_eval");
     let (_dir, out_dir) = build_ok(PERMUTED_INSTANTIATION, "permuted");
     let c_source = read_generated_c(&out_dir, "permuted");
-    let specialized = identifiers_with_prefix(&c_source, "swap");
+    let specialized = identifiers_with_prefix(&c_source, &common::authored_c_symbol("swap"));
     assert_eq!(
         specialized.len(),
         2,
@@ -700,7 +700,7 @@ fn permuted_edge_with_unconstrained_argument_specializes_correctly() {
     let eval = eval_first_line(PERMUTED_WITH_UNCONSTRAINED, "tri_eval");
     let (_dir, out_dir) = build_ok(PERMUTED_WITH_UNCONSTRAINED, "tri");
     let c_source = read_generated_c(&out_dir, "tri");
-    let specialized = identifiers_with_prefix(&c_source, "tri");
+    let specialized = identifiers_with_prefix(&c_source, &common::authored_c_symbol("tri"));
     assert_eq!(
         specialized.len(),
         2,
@@ -748,7 +748,7 @@ fn issue_941_minimized_reproducer_compiles() {
     // in `build_artifacts_link_cleanly_and_match_eval`.
     let (_dir, out_dir) = build_ok(ISSUE_941_REPRODUCER, "issue_941_repro");
     let c_source = read_generated_c(&out_dir, "issue_941_repro");
-    let specialized = identifiers_with_prefix(&c_source, "loop");
+    let specialized = identifiers_with_prefix(&c_source, &common::authored_c_symbol("loop"));
     assert_eq!(
         specialized.len(),
         1,
@@ -791,7 +791,7 @@ fn emitted_c_is_byte_identical_across_repeated_builds() {
         let (_dir, out_dir) = build_ok(PROBE_TRIGGER, "probe_trigger");
         read_generated_c(&out_dir, "probe_trigger")
     };
-    let specialized = identifiers_with_prefix(&first, "depth");
+    let specialized = identifiers_with_prefix(&first, &common::authored_c_symbol("depth"));
     assert_eq!(
         specialized.len(),
         2,
@@ -821,7 +821,7 @@ fn published_header_omits_specialized_symbols() {
          specializations:\n{header}"
     );
     assert!(
-        header.contains("concrete"),
+        header.contains(&common::authored_c_symbol("concrete")),
         "the authored surface stays declared:\n{header}"
     );
     // The `.c` keeps its internal prototypes: it still compiles, links, and
@@ -839,7 +839,9 @@ out = authored__mono_0123456789abcdef(to_tensor([1.0, 2.0]))
     let header = fs::read_to_string(out_dir.join("authored_mono_name.h"))
         .expect("build writes the published header");
     assert!(
-        header.contains("authored__mono_0123456789abcdef"),
+        header.contains(&common::authored_c_symbol(
+            "authored__mono_0123456789abcdef"
+        )),
         "a valid authored name must not be mistaken for compiler provenance:\n{header}"
     );
 }
@@ -923,8 +925,12 @@ fn package_defs_with_one_terminal_name_keep_distinct_specializations() {
         .unwrap_or_default()
         .to_string();
     let c_source = read_generated_c(&out_dir, "main");
-    assert!(c_source.contains("Demo__A__depth__mono_"));
-    assert!(c_source.contains("Demo__B__depth__mono_"));
+    assert!(c_source.contains(&common::authored_c_symbol(
+        "pkg__qualified__collision__Demo__A__depth"
+    )));
+    assert!(c_source.contains(&common::authored_c_symbol(
+        "pkg__qualified__collision__Demo__B__depth"
+    )));
     let compiled = run_first_line(&out_dir, "main");
     assert_eq!(eval, "32");
     assert_eq!(compiled, eval, "native and eval package results must match");
@@ -952,7 +958,7 @@ fn symbolic_dim_payload_specializes_with_eval_parity() {
     let eval = eval_first_line(SYMBOLIC_DIM_PAYLOAD, "symdim_eval");
     let (_dir, out_dir) = build_ok(SYMBOLIC_DIM_PAYLOAD, "symdim");
     let c_source = read_generated_c(&out_dir, "symdim");
-    let specialized = identifiers_with_prefix(&c_source, "depth");
+    let specialized = identifiers_with_prefix(&c_source, &common::authored_c_symbol("depth"));
     assert_eq!(
         specialized.len(),
         1,
@@ -971,8 +977,14 @@ fn symbolic_dim_payload_specializes_with_eval_parity() {
 fn specialized_symbol_set_is_deterministic_across_builds() {
     let (_dir_a, out_a) = build_ok(DIRECT_TWO_INSTANTIATIONS, "golden_a");
     let (_dir_b, out_b) = build_ok(DIRECT_TWO_INSTANTIATIONS, "golden_b");
-    let symbols_a = identifiers_with_prefix(&read_generated_c(&out_a, "golden_a"), "depth");
-    let symbols_b = identifiers_with_prefix(&read_generated_c(&out_b, "golden_b"), "depth");
+    let symbols_a = identifiers_with_prefix(
+        &read_generated_c(&out_a, "golden_a"),
+        &common::authored_c_symbol("depth"),
+    );
+    let symbols_b = identifiers_with_prefix(
+        &read_generated_c(&out_b, "golden_b"),
+        &common::authored_c_symbol("depth"),
+    );
     assert_eq!(
         symbols_a, symbols_b,
         "specialized symbol set must be identical across consecutive builds"
@@ -1035,7 +1047,7 @@ fn recursive_erased_dim_generic_compiles_links_and_runs() {
     let eval = eval_first_line(RECURSIVE_ERASED_DIM, "erased_dim_eval");
     let (_dir, out_dir) = build_ok(RECURSIVE_ERASED_DIM, "erased_dim");
     let c_source = read_generated_c(&out_dir, "erased_dim");
-    let specialized = identifiers_with_prefix(&c_source, "all_eq_len__mono_");
+    let specialized = identifiers_with_prefix(&c_source, &common::authored_c_symbol("all_eq_len"));
     assert!(
         !specialized.is_empty(),
         "the emitted C must contain an `all_eq_len` specialization; the \
