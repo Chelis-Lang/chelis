@@ -4122,13 +4122,32 @@ fn try_deep_tier_b(
     options: &PropertyRunOptions,
     seed: u64,
 ) -> Option<PropertyOutcome> {
+    let grad_diagnostic = RefCell::new(None);
     let ctx = DeepInlineCtx {
         exprs,
         depth: 0,
         max_depth: 3,
         call_stack: vec![],
+        grad_diagnostic: Some(&grad_diagnostic),
     };
-    let postcondition = deep_expr_to_smt(&property.body, &ctx)?;
+    let postcondition = match deep_expr_to_smt(&property.body, &ctx) {
+        Some(postcondition) => postcondition,
+        None if options.tier == "smt-only" => {
+            let reason = grad_diagnostic.borrow().clone()?;
+            return Some(PropertyOutcome::new(
+                property.name.clone(),
+                PropertyStatus::Unsupported,
+                PropertyTier::Smt,
+                0,
+                seed,
+                None,
+                Some(reason),
+                false,
+                Vec::new(),
+            ));
+        }
+        None => return None,
+    };
     let variables: Vec<(String, crate::solver::SmtSort)> = property
         .params
         .iter()
@@ -4316,6 +4335,7 @@ fn deep_constraint_sampling_plan(
         depth: 0,
         max_depth: 3,
         call_stack: vec![],
+        grad_diagnostic: None,
     };
     let preconditions = property
         .preconditions
