@@ -1242,13 +1242,24 @@ fn splice_c_lines(source: &str) -> String {
     let mut spliced = Vec::with_capacity(bytes.len());
     let mut index = 0;
     while index < bytes.len() {
-        if bytes[index] == b'\\' {
-            if bytes.get(index + 1) == Some(&b'\n') {
-                index += 2;
+        let splice_marker_len = if bytes[index] == b'\\' {
+            Some(1)
+        } else if bytes[index..].starts_with(b"??/") {
+            // C replaces trigraphs before removing escaped newlines, so
+            // `??/` is a backslash for the purpose of line splicing.
+            Some(3)
+        } else {
+            None
+        };
+        if let Some(marker_len) = splice_marker_len {
+            if bytes.get(index + marker_len) == Some(&b'\n') {
+                index += marker_len + 1;
                 continue;
             }
-            if bytes.get(index + 1) == Some(&b'\r') && bytes.get(index + 2) == Some(&b'\n') {
-                index += 3;
+            if bytes.get(index + marker_len) == Some(&b'\r')
+                && bytes.get(index + marker_len + 1) == Some(&b'\n')
+            {
+                index += marker_len + 2;
                 continue;
             }
         }
@@ -1933,6 +1944,21 @@ mod tests {
         let source = format!("#define CHELIS_PRIVATE_BIAS 1\n{export}\n");
         seal_generated_artifact("demo", &source, &header)
             .expect("private implementation macros must remain available");
+    }
+
+    #[test]
+    fn sealed_artifact_rejects_trigraph_spliced_signature_macro() {
+        let (header, export) = raw_export(
+            "alpha",
+            "chelis_fn_616c706861",
+            "extern int chelis_fn_616c706861(int x);",
+            "extern int chelis_fn_616c706861(int x) {\n    return x + 1;\n}",
+        );
+        let source = format!("#def??/\nine extern static\n{export}\n");
+        assert!(
+            seal_generated_artifact("demo", &source, &header).is_err(),
+            "C trigraph replacement plus line splicing must not bypass signature-token protection"
+        );
     }
 
     #[test]
