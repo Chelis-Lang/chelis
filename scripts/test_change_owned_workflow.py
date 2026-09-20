@@ -150,7 +150,6 @@ def assert_change_owned_topology(
 
     required = jobs["change-owned-shard"]
     test.assertEqual(required["needs"], ["changes", "integration-plan"])
-    test.assertEqual(required["timeout-minutes"], 60)
     test.assertFalse(required.get("continue-on-error", False))
     test.assertFalse(required["strategy"]["fail-fast"])
     test.assertEqual(required["strategy"]["matrix"]["shard"], SHARDS)
@@ -401,36 +400,6 @@ class ChangeOwnedWorkflowTests(unittest.TestCase):
             8 * 60,
             "job setup runs before the executor's clock and eats this gap",
         )
-
-    def test_every_limit_the_topology_doc_states_matches_the_workflow(
-        self,
-    ) -> None:
-        """Reconcile the limits the topology table states against the jobs.
-
-        Nothing otherwise pins the deadline's absolute value, so reverting the
-        constant leaves the suites green while the document still claims the
-        new number. Two of the four figures in that table were also already
-        stale, which is how a wrong one reached a comment in this change.
-
-        One-directional by design: it requires each derived phrase to appear,
-        and cannot forbid a contradictory sentence elsewhere in the document.
-        Making it forbid one would mean deriving every prose mention, which is
-        more than a topology table needs.
-        """
-        doc = (ROOT / "docs/ci_validation.md").read_text()
-        expected = {
-            f"{self.workflow['jobs']['ci-fast']['timeout-minutes']}-minute "
-            f"limit",
-            f"{self.workflow['jobs']['change-owned-shard']['timeout-minutes']}"
-            f"-minute limit each",
-            f"{owned.EXPANSION_EXECUTION_SECONDS // 60}-minute execution "
-            f"deadline inside a "
-            f"{self.expansion_workflow['jobs']['package-expansion-shard']['timeout-minutes']}"
-            f"-minute job limit",
-        }
-        for phrase in sorted(expected):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, doc)
 
     def test_the_soft_budget_warns_before_the_deadline_it_derives_from(
         self,

@@ -614,8 +614,8 @@ jobs:
     if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.candidate_preflight == 'success' && (needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_run_hull == 'true') || (needs.changes.outputs.rebase_lane == 'ordinary' && needs.changes.outputs.docs_only != 'true')))) }}
     # ~1,500 subprocess calls at ~50-80 ms/call under contention across 2-4
     # cores is ~30-45 s of subprocess wall; the binary build dominates. Allow
-    # generous head room for a cold cargo cache.
-    timeout-minutes: 20
+    # generous head room for a cold cargo cache and 25 minutes for cold Devenv.
+    timeout-minutes: 45
     # Strip debuginfo on the build; debuginfo is the dominant target/
     # disk consumer and the conformance binary needs no symbols
     # (chelis#392). Release defaults to debug=false, but set it explicitly
@@ -654,7 +654,7 @@ jobs:
         uses: ./.github/actions/free-disk-space
 
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@e7b00e437d6dc1aef7eb2093661219b298073c2c
+        uses: Chelis-Lang/ci/actions/setup-devenv@0b5faba5025fade929194b46a9e52e43fec63462
 
       - name: Activate project CI environment
         shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}

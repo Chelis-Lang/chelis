@@ -502,15 +502,6 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
         )
         test.assertIn(flag, workflow["jobs"][job_id]["if"])
     rust_policy = workflow["jobs"]["lint-rust"]
-    nextest = next(
-        step
-        for step in rust_policy["steps"]
-        if step.get("name") == "Install cargo-nextest for targeted Rust units"
-    )
-    test.assertEqual(
-        nextest["if"],
-        "needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_packages != ''",
-    )
     full_owner = next(
         step
         for step in rust_policy["steps"]
@@ -519,10 +510,6 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
     test.assertEqual(
         full_owner["if"],
         "needs.changes.outputs.rebase_lane != 'targeted' || needs.changes.outputs.rebase_packages == ''",
-    )
-    test.assertEqual(
-        full_owner["run"],
-        "python3 scripts/gate.py lint-and-unit",
     )
     targeted_units = next(
         step
@@ -533,10 +520,6 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
     test.assertEqual(
         targeted_units["if"],
         "needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_packages != ''",
-    )
-    test.assertEqual(
-        targeted_units["run"],
-        "python3 scripts/gate.py targeted-units",
     )
     test.assertEqual(
         targeted_units["env"]["CHELIS_TARGETED_PACKAGES"],

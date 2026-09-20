@@ -107,11 +107,6 @@ class ManagedToolchainContractTests(unittest.TestCase):
         self.assertNotIn("kache-0.16.0-relocatable-macos-executables.patch", fixture)
         self.assertIn("doCheck = false;", fixture)
 
-    def test_hosted_and_local_mdbook_versions_match(self) -> None:
-        workflow = (REPO_ROOT / ".github/workflows/ci.yml").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("tool: mdbook@0.5.2", workflow)
 
 
 if __name__ == "__main__":

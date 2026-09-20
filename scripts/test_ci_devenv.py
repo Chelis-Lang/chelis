@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -22,17 +23,29 @@ class ProjectActivationTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.output = self.root / "github-env"
         self.output.write_text("EXISTING=kept\n")
+        self.path_output = self.root / "github-path"
+        self.path_output.write_text("/existing/bin\n")
         self.devenv = self.root / "devenv"
         self.state = self.root / "state"
         self.environment = self.state / "venv"
         venv.EnvBuilder(with_pip=False).create(self.environment)
+        self.command_bin = self.root / "commands/bin"
+        self.command_bin.mkdir(parents=True)
+        self.wrapper = self.command_bin / "chelis-ci-shell"
+        self.wrapper.write_text(
+            "#!/bin/sh\n"
+            f"exec {shlex.quote(str(self.environment / 'bin/python'))} "
+            f"{shlex.quote(str(Path(ci_devenv.__file__)))} \"$@\"\n"
+        )
+        self.wrapper.chmod(0o700)
 
     def activate(self, body):
         shell_environment = (
             f"export DEVENV_DOTFILE={shlex.quote(str(self.state))}\n"
             f"export DEVENV_STATE={shlex.quote(str(self.state))}\n"
             f"export PYO3_PYTHON={shlex.quote(str(self.environment / 'bin/python'))}\n"
-            f"export PATH={shlex.quote(str(self.environment / 'bin'))}:\"$PATH\"\n"
+            f"export PATH={shlex.quote(str(self.environment / 'bin'))}:"
+            f"{shlex.quote(str(self.command_bin))}:\"$PATH\"\n"
             "export LD_LIBRARY_PATH=/project/lib\n"
             "export GITHUB_TOKEN=must-not-publish\n"
         )
@@ -43,7 +56,7 @@ class ProjectActivationTests(unittest.TestCase):
             "    raise SystemExit(0)\n" + body
         )
         self.devenv.chmod(0o700)
-        return ci_devenv.activate(self.root, str(self.devenv), self.output)
+        return ci_devenv.activate(self.root, str(self.devenv), self.output, self.path_output)
 
     def initialize_body(self):
         receipt = self.state / "load-exports"
@@ -64,6 +77,18 @@ class ProjectActivationTests(unittest.TestCase):
         self.assertNotIn("GITHUB_TOKEN", values)
         self.assertNotIn("LD_LIBRARY_PATH", values)
         self.assertIn("/project/lib", values["CHELIS_CI_LIBRARY_PATH"].split(os.pathsep))
+        # Custom-shell lookup sees the runner's path commands before step env.
+        runner_path = os.pathsep.join(reversed(self.path_output.read_text().splitlines()))
+        self.assertEqual(shutil.which("chelis-ci-shell", path=runner_path), str(self.wrapper))
+        command_file = self.root / "managed-python-command"
+        command_file.write_text("python -c 'import sys; print(sys.prefix)'\n")
+        result = subprocess.run(
+            ["chelis-ci-shell", "run", str(command_file)],
+            env={**os.environ, **values, "PATH": runner_path},
+            text=True, capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), str(self.environment))
 
     def test_project_library_path_is_scoped_to_command_and_failure_propagates(self):
         command_file = self.root / "actions-command"
@@ -94,17 +119,20 @@ class ProjectActivationTests(unittest.TestCase):
         result = self.activate(self.initialize_body() + "raise SystemExit(7)\n")
         self.assertEqual(result, 7)
         self.assertEqual(self.output.read_text(), "EXISTING=kept\n")
+        self.assertEqual(self.path_output.read_text(), "/existing/bin\n")
 
     def test_zero_exit_without_payload_never_publishes(self):
         (self.state / "load-exports").write_text("stale completion\n")
         self.assertNotEqual(self.activate("pass\n"), 0)
         self.assertEqual(self.output.read_text(), "EXISTING=kept\n")
+        self.assertEqual(self.path_output.read_text(), "/existing/bin\n")
 
 
     def test_cancelled_child_never_publishes(self):
         result = self.activate("import os, signal; os.kill(os.getpid(), signal.SIGTERM)\n")
         self.assertEqual(result, 143)
         self.assertEqual(self.output.read_text(), "EXISTING=kept\n")
+        self.assertEqual(self.path_output.read_text(), "/existing/bin\n")
 
     def test_capture_preserves_activated_python_identity_and_rejects_mismatch(self):
         state = self.root / "state"

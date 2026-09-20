@@ -37,7 +37,7 @@ def capture(destination: Path) -> None:
     print(CAPTURE_MARKER, flush=True)
 
 
-def activate(root: Path, devenv: str, github_env: Path) -> int:
+def activate(root: Path, devenv: str, github_env: Path, github_path: Path) -> int:
     """Commit the shell environment only after a successful captured entry."""
     with tempfile.TemporaryDirectory(prefix="chelis-ci-entry-") as temporary:
         destination = Path(temporary) / "environment.json"
@@ -78,6 +78,9 @@ exec python "$2" capture "$3"
         # GitHub's native Node actions must keep the host loader's libraries.
         # Only repository command subprocesses consume the Nix runtime path.
         values["CHELIS_CI_LIBRARY_PATH"] = values.pop("LD_LIBRARY_PATH", "")
+        paths = values["PATH"].split(os.pathsep)
+        if any(not path or "\n" in path or "\r" in path for path in paths):
+            raise ValueError("project PATH cannot be represented in GITHUB_PATH")
         lines = []
         for key, value in sorted(values.items()):
             if key in EPHEMERAL or key.startswith(("GITHUB_", "RUNNER_")):
@@ -88,9 +91,12 @@ exec python "$2" capture "$3"
             while delimiter in value.splitlines():
                 delimiter = "CHELIS_ENV_" + uuid.uuid4().hex
             lines.append(f"{key}<<{delimiter}\n{value}\n{delimiter}\n")
-        # Construct the whole payload before touching the Actions command file.
-        with github_env.open("a", encoding="utf-8") as stream:
+        # The runner resolves custom shells through GITHUB_PATH, not GITHUB_ENV.
+        # It prepends entries in reverse order; retain the activated venv first.
+        path_payload = "".join(f"{path}\n" for path in reversed(paths))
+        with github_env.open("a", encoding="utf-8") as stream, github_path.open("a", encoding="utf-8") as path_stream:
             stream.write("".join(lines))
+            path_stream.write(path_payload)
     return 0
 
 
@@ -118,7 +124,10 @@ def main() -> int:
         if args.destination is None:
             parser.error("run requires an Actions command file")
         run_step(args.destination)
-    return activate(ROOT, os.environ["CHELIS_DEVENV_BIN"], Path(os.environ["GITHUB_ENV"]))
+    return activate(
+        ROOT, os.environ["CHELIS_DEVENV_BIN"],
+        Path(os.environ["GITHUB_ENV"]), Path(os.environ["GITHUB_PATH"]),
+    )
 
 
 if __name__ == "__main__":

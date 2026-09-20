@@ -74,7 +74,7 @@ CHELIS_PROVE_TOML = REPO_ROOT / "crates" / "chelis-prove" / "Cargo.toml"
 NIX_PACKAGES_YML = REPO_ROOT / ".github" / "workflows" / "nix-packages.yml"
 DEVENV_SETUP_ACTION = (
     "Chelis-Lang/ci/actions/setup-devenv@"
-    "e7b00e437d6dc1aef7eb2093661219b298073c2c"
+    "0b5faba5025fade929194b46a9e52e43fec63462"
 )
 PORTABLE_DEVENV_SHELL = "devenv-ci bash --noprofile --norc -e -o pipefail {0}"
 WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
@@ -500,7 +500,7 @@ def _nix_workflow_events(workflow: str) -> dict[str, dict[str, str]]:
 
 
 _NIX_REVIEWED_WORKFLOW_SHA256 = (
-    "c93c5227a76a6ce972d72ce094a3f7e1b980a378ec502c51c9c562fb3a60cc51"
+    "9909da5e3eac17857e424cc35c9b6bba6d780fe322d4550284eb023696016c07"
 )
 
 

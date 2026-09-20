@@ -1822,6 +1822,60 @@ reason = "the discovered PR script suite executes the CI activation and command-
 tracking_issue = "chelis#2241"
 
 [[path_rule]]
+prefix = "scripts/capacity_census_native_execution.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "dtype-phase3-oracle"
+cadence = "daily and workflow_dispatch"
+reason = "the dtype oracle executes the native census under the project-owned interpreter"
+tracking_issue = "chelis#2287"
+
+[[path_rule]]
+prefix = "scripts/test_capacity_census_python_environment.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes managed-interpreter admission and foreign-environment rejection controls"
+tracking_issue = "chelis#2287"
+
+[[path_rule]]
+prefix = "scripts/ci_script_tests.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit runs the script selector and its exhaustive cadence-partition controls"
+tracking_issue = "chelis#2287"
+
+[[path_rule]]
+prefix = "scripts/test_ci_script_tests.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit verifies that native execution retains its dedicated owner outside broad PR discovery"
+tracking_issue = "chelis#2287"
+
+[[path_rule]]
+prefix = "scripts/test_managed_toolchain_contract.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the discovered PR script suite executes the managed toolchain contracts"
+tracking_issue = "chelis#2287"
+
+[[path_rule]]
+prefix = "scripts/test_nix_flake_contract.py"
+disposition = "owner"
+workflow = "nix-packages.yml"
+job = "nix-linux-x86-64"
+cadence = "workflow_dispatch and published release"
+reason = "native Nix jobs explicitly run the complete module, including evaluation and package build contracts"
+tracking_issue = "chelis#2287"
+
+[[path_rule]]
 prefix = "scripts/test_devenv_composition.py"
 disposition = "owner"
 workflow = "ci.yml"

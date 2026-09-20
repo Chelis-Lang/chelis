@@ -601,7 +601,8 @@ jobs:
     defaults:
       run:
         shell: chelis-ci-shell run {0}
-    timeout-minutes: 30
+    # Reserve 25 minutes for cold hosted Devenv realization.
+    timeout-minutes: 55
     needs: [changes]
     if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && needs.changes.outputs.rebase_lane != 'docs' && (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_run_diagnostic == 'true') || (needs.changes.outputs.rebase_lane == 'ordinary' && needs.changes.outputs.diagnostic_kind_changed != 'false')) }}
     permissions:
@@ -620,7 +621,7 @@ jobs:
         uses: ./.github/actions/free-disk-space
 
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@e7b00e437d6dc1aef7eb2093661219b298073c2c
+        uses: Chelis-Lang/ci/actions/setup-devenv@0b5faba5025fade929194b46a9e52e43fec63462
 
       - name: Activate project CI environment
         shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
@@ -640,7 +641,8 @@ jobs:
     defaults:
       run:
         shell: chelis-ci-shell run {0}
-    timeout-minutes: 30
+    # Reserve 25 minutes for cold hosted Devenv realization.
+    timeout-minutes: 55
     needs: [changes]
     if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_run_rust == 'true') || (needs.changes.outputs.rebase_lane == 'ordinary' && needs.changes.outputs.docs_only != 'true')) }}
     # Strip debuginfo from the dev/test build. Debuginfo is the dominant
@@ -666,7 +668,7 @@ jobs:
         uses: ./.github/actions/free-disk-space
 
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@e7b00e437d6dc1aef7eb2093661219b298073c2c
+        uses: Chelis-Lang/ci/actions/setup-devenv@0b5faba5025fade929194b46a9e52e43fec63462
 
       - name: Activate project CI environment
         shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
@@ -697,7 +699,8 @@ jobs:
     defaults:
       run:
         shell: chelis-ci-shell run {0}
-    timeout-minutes: 10
+    # Reserve 25 minutes for cold hosted Devenv realization.
+    timeout-minutes: 35
     needs: [changes]
     if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_run_script_unit == 'true') || (needs.changes.outputs.rebase_lane == 'ordinary' && needs.changes.outputs.docs_only != 'true')) }}
     permissions:
@@ -708,7 +711,7 @@ jobs:
           ref: ${{ needs.changes.outputs.candidate_sha }}
 
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@e7b00e437d6dc1aef7eb2093661219b298073c2c
+        uses: Chelis-Lang/ci/actions/setup-devenv@0b5faba5025fade929194b46a9e52e43fec63462
 
       - name: Activate project CI environment
         shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
@@ -791,7 +794,8 @@ jobs:
         shell: chelis-ci-shell run {0}
     # The Nix ABI has its own exact-environment cvc5 cache. The first run
     # builds from source; subsequent runs can restore that complete payload.
-    timeout-minutes: 25
+    # Reserve 25 minutes for cold hosted Devenv realization.
+    timeout-minutes: 50
     # Skip on docs-only PRs (chelis#419); a skipped required job reports
     # success. Runs on every code PR and push.
     needs: [changes]
@@ -815,7 +819,7 @@ jobs:
         uses: ./.github/actions/free-disk-space
 
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@e7b00e437d6dc1aef7eb2093661219b298073c2c
+        uses: Chelis-Lang/ci/actions/setup-devenv@0b5faba5025fade929194b46a9e52e43fec63462
 
       - name: Activate project CI environment
         shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
@@ -1034,7 +1038,8 @@ jobs:
 
   ci-fast:
     name: Fast Tests (Linux)
-    timeout-minutes: 30
+    # Reserve 25 minutes for cold hosted Devenv realization.
+    timeout-minutes: 55
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -1054,7 +1059,7 @@ jobs:
         uses: ./.github/actions/free-disk-space
 
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@e7b00e437d6dc1aef7eb2093661219b298073c2c
+        uses: Chelis-Lang/ci/actions/setup-devenv@0b5faba5025fade929194b46a9e52e43fec63462
 
       - name: Activate project CI environment
         shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
@@ -1152,7 +1157,8 @@ jobs:
 
   change-owned-shard:
     name: Change-Owned Integration Tests (bucket ${{ matrix.shard }})
-    timeout-minutes: 60
+    # Reserve 25 minutes for cold hosted Devenv realization.
+    timeout-minutes: 85
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -1196,7 +1202,7 @@ jobs:
 
       - name: Set up portable Devenv
         if: steps.shard-selection.outputs.has_targets == 'true'
-        uses: Chelis-Lang/ci/actions/setup-devenv@e7b00e437d6dc1aef7eb2093661219b298073c2c
+        uses: Chelis-Lang/ci/actions/setup-devenv@0b5faba5025fade929194b46a9e52e43fec63462
 
       - name: Activate project CI environment
         if: steps.shard-selection.outputs.has_targets == 'true'
@@ -1411,7 +1417,8 @@ jobs:
     defaults:
       run:
         shell: chelis-ci-shell run {0}
-    timeout-minutes: 30
+    # Reserve 25 minutes for cold hosted Devenv realization.
+    timeout-minutes: 55
     # Skip on docs-only PRs (chelis#419); a skipped required job reports
     # success. Runs on every code PR and push.
     needs: [changes]
@@ -1437,7 +1444,7 @@ jobs:
         uses: ./.github/actions/free-disk-space
 
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@e7b00e437d6dc1aef7eb2093661219b298073c2c
+        uses: Chelis-Lang/ci/actions/setup-devenv@0b5faba5025fade929194b46a9e52e43fec63462
 
       - name: Activate project CI environment
         shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
@@ -1591,7 +1598,7 @@ jobs:
         uses: ./.github/actions/free-disk-space
 
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@e7b00e437d6dc1aef7eb2093661219b298073c2c
+        uses: Chelis-Lang/ci/actions/setup-devenv@0b5faba5025fade929194b46a9e52e43fec63462
 
       - name: Activate project CI environment
         shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}

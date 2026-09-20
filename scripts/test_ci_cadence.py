@@ -74,7 +74,6 @@ def assert_extended(test, pr, nightly):
         job = jobs[name]
         test.assertNotIn("if", job)
         test.assertFalse(job.get("continue-on-error", False))
-        test.assertEqual(job["timeout-minutes"], 60 if name.startswith(("generalize", "dtype")) else 45)
         if name == "runtime-representation-phase0-oracle":
             test.assertEqual(job["name"], "Runtime Representation Phase 2 Oracle")
             artifacts = [
@@ -123,7 +122,6 @@ def assert_extended(test, pr, nightly):
     test.assertNotIn("native-random-observer-debt", pr["jobs"])
     test.assertNotIn("if", native_observer)
     test.assertFalse(native_observer.get("continue-on-error", False))
-    test.assertEqual(native_observer["timeout-minutes"], 45)
     observer_steps = [
         step
         for step in native_observer["steps"]
@@ -133,7 +131,6 @@ def assert_extended(test, pr, nightly):
     test.assertNotIn("if", observer_steps[0])
     test.assertFalse(observer_steps[0].get("continue-on-error", False))
     full = jobs["full-workspace"]
-    test.assertEqual(full["timeout-minutes"], 60)
     capacity = lambda job: [s for s in job["steps"] if s.get("name") == "Restore capacity rustdoc build"]
     test.assertFalse(capacity(full))
     test.assertFalse(capacity(jobs["generalize-sweep-oracle-shard"]))

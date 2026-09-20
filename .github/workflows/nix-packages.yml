@@ -13,10 +13,11 @@ permissions:
   contents: read
 
 jobs:
+  # Retain native check budgets plus 25 minutes for cold Devenv realization.
   nix-linux-x86-64:
     name: Nix Packages (x86_64-linux)
     runs-on: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && fromJSON('{"group":"chelis-ci-trusted","labels":"chelis-ci-warm-x64"}') || fromJSON('["ubuntu-latest"]') }}
-    timeout-minutes: 110
+    timeout-minutes: 135
     # Only reviewed manual-main builds use the protected pool. Release tags
     # and branch validation remain hosted; the host independently checks the pin.
     env:
@@ -38,7 +39,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@e7b00e437d6dc1aef7eb2093661219b298073c2c
+        uses: Chelis-Lang/ci/actions/setup-devenv@0b5faba5025fade929194b46a9e52e43fec63462
       - name: Activate the project CI environment
         shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
         run: python scripts/ci_devenv.py
@@ -75,7 +76,7 @@ jobs:
     name: Nix Packages (aarch64-darwin)
     # Keep release and manual coverage native on both supported systems.
     runs-on: macos-latest
-    timeout-minutes: 120
+    timeout-minutes: 145
     env:
       NIX_CONFIG: |
         sandbox = true
@@ -90,7 +91,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@e7b00e437d6dc1aef7eb2093661219b298073c2c
+        uses: Chelis-Lang/ci/actions/setup-devenv@0b5faba5025fade929194b46a9e52e43fec63462
       - name: Activate the project CI environment
         shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
         run: python scripts/ci_devenv.py
