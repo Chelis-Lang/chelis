@@ -534,6 +534,7 @@ fn validate_export_identities(
     declarations: &BTreeMap<String, GeneratedDeclaration>,
     definitions: &BTreeMap<String, SourceDefinition>,
 ) -> Result<(), GeneratedHeaderError> {
+    let mut symbol_owners = BTreeMap::new();
     for (source_name, declaration) in declarations {
         let definition = definitions.get(source_name).ok_or_else(|| {
             GeneratedHeaderError::new(format!(
@@ -550,6 +551,14 @@ fn validate_export_identities(
             )));
         }
         validate_export_symbol(program_identity, definition)?;
+        if let Some(existing_source_name) =
+            symbol_owners.insert(definition.symbol.as_str(), source_name.as_str())
+        {
+            return Err(GeneratedHeaderError::new(format!(
+                "generated exports `{existing_source_name}` and `{source_name}` claim the same external C symbol `{}`",
+                definition.symbol
+            )));
+        }
     }
     if let Some(source_name) = definitions
         .keys()
@@ -760,7 +769,7 @@ fn parse_c_function_definitions(
                 start: node.start_byte(),
                 end: node.end_byte(),
                 symbol,
-                is_static: contains_static_storage(node, projected_source.as_bytes()),
+                is_static: has_static_function_storage(node, projected_source.as_bytes()),
                 signature_tokens: function_signature_tokens(node, projected_source.as_bytes()),
             })
         })
@@ -841,15 +850,17 @@ fn declarator_identifier(node: tree_sitter::Node<'_>, source: &[u8]) -> Option<S
     None
 }
 
-fn contains_static_storage(node: tree_sitter::Node<'_>, source: &[u8]) -> bool {
-    if node.kind() == "storage_class_specifier"
-        && node.utf8_text(source).is_ok_and(|text| text == "static")
-    {
-        return true;
-    }
+fn has_static_function_storage(node: tree_sitter::Node<'_>, source: &[u8]) -> bool {
+    let Some(declarator) = node.child_by_field_name("declarator") else {
+        return false;
+    };
     let mut cursor = node.walk();
     node.children(&mut cursor)
-        .any(|child| contains_static_storage(child, source))
+        .take_while(|child| child.end_byte() <= declarator.start_byte())
+        .any(|child| {
+            child.kind() == "storage_class_specifier"
+                && child.utf8_text(source).is_ok_and(|text| text == "static")
+        })
 }
 
 fn function_signature_tokens(node: tree_sitter::Node<'_>, source: &[u8]) -> Vec<String> {
@@ -1388,8 +1399,9 @@ impl<'a> CDirectiveCursor<'a> {
 mod tests {
     use super::{
         GeneratedHeader, encode_hex, render_authored_export_begin, render_authored_export_end,
-        render_declaration, render_declaration_record, reseal_generated_artifact,
-        seal_generated_artifact, source_digest,
+        render_declaration, render_declaration_record, render_direct_export_begin,
+        render_direct_export_end, reseal_generated_artifact, seal_generated_artifact,
+        source_digest,
     };
 
     fn declaration_record_prefix(source_name: &str) -> String {
@@ -1525,6 +1537,52 @@ mod tests {
             seal_generated_artifact("demo", &noncanonical_source, &noncanonical_header).is_err(),
             "authored exports must use the settled universal ABI, not a caller-selected identity"
         );
+    }
+
+    #[test]
+    fn generated_header_requires_a_bijection_between_exports_and_external_symbols() {
+        let authored_source_name = "alpha";
+        let shared_symbol = "chelis_fn_616c706861";
+        let declaration = "int chelis_fn_616c706861(int x);";
+        let header = format!(
+            "{}\n{}",
+            render_declaration(authored_source_name, shared_symbol, declaration),
+            render_declaration(shared_symbol, shared_symbol, declaration)
+        );
+        let (_, authored) = raw_export(
+            authored_source_name,
+            shared_symbol,
+            declaration,
+            "int chelis_fn_616c706861(int x) {\n    return x + 1;\n}",
+        );
+        let direct = format!(
+            "{}\nint chelis_fn_616c706861(int x) {{\n    return x + 2;\n}}\n{}",
+            render_direct_export_begin(shared_symbol, shared_symbol, declaration),
+            render_direct_export_end(shared_symbol)
+        );
+        assert!(
+            seal_generated_artifact("demo", &format!("{authored}\n{direct}\n"), &header).is_err(),
+            "distinct canonical authored/direct records must not claim one external C symbol"
+        );
+
+        let direct_symbol = "direct_entry";
+        let direct_declaration = "int direct_entry(int x);";
+        let distinct_header = format!(
+            "{}\n{}",
+            render_declaration(authored_source_name, shared_symbol, declaration),
+            render_declaration(direct_symbol, direct_symbol, direct_declaration)
+        );
+        let distinct_direct = format!(
+            "{}\nint direct_entry(int x) {{\n    return x + 2;\n}}\n{}",
+            render_direct_export_begin(direct_symbol, direct_symbol, direct_declaration),
+            render_direct_export_end(direct_symbol)
+        );
+        seal_generated_artifact(
+            "demo",
+            &format!("{authored}\n{distinct_direct}\n"),
+            &distinct_header,
+        )
+        .expect("distinct canonical external symbols remain valid");
     }
 
     #[test]
@@ -1773,6 +1831,29 @@ mod tests {
             .expect("sealed header")
             .validate_source(&source)
             .expect("structural validation accepts equivalent multiline C formatting");
+    }
+
+    #[test]
+    fn sealed_artifact_distinguishes_function_linkage_from_body_local_static_storage() {
+        sealed_fixture(
+            "demo",
+            "alpha",
+            "chelis_fn_616c706861",
+            "int chelis_fn_616c706861(int x);",
+            "int chelis_fn_616c706861(int x) {\n    static int calls;\n    calls += 1;\n    return x + calls;\n}",
+            "",
+        );
+
+        let (internal_header, internal_source) = raw_export(
+            "alpha",
+            "chelis_fn_616c706861",
+            "int chelis_fn_616c706861(int x);",
+            "static int chelis_fn_616c706861(int x) {\n    return x;\n}",
+        );
+        assert!(
+            seal_generated_artifact("demo", &internal_source, &internal_header).is_err(),
+            "function-level static storage must still be rejected as internal linkage"
+        );
     }
 
     #[test]
