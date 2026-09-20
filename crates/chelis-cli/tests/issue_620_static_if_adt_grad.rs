@@ -16,19 +16,20 @@
 //!      "copy input expected a single tensor value" (the issue's Blocker
 //!      2, hit by the curried closure `grad(fn (p) -> loss(p, x, y))`).
 //!
-//! The fix: `lower_if` prunes to the taken branch when the condition
-//! const-folds at lowering time (the `if` analogue of D1's static arm
-//! selection; exact gradient, since a static condition cannot vary under
-//! input perturbation); recursion unrolls under per-name/total depth caps
-//! with a loud diagnostic past the cap; `copy`/`drop` recurse through
-//! tuple/ADT structure; and `concat` handles list values that are only
-//! statically known post-unroll.
+//! The original fix taught `lower_if` to prune the taken branch when the
+//! condition const-folds, unrolled bounded recursion, and carried structural
+//! values through `copy`/`drop`/`concat`. Typed `Compare` and `Where` later
+//! made the scalar runtime branch path direct: IEEE comparisons now preserve
+//! NaN branch selection and discrete scalar branch values differentiate the
+//! executed float consumer with zero cotangent through the condition.
 //!
 //! Negative parity (each pinned with its diagnostic):
 //!   - runtime-condition `if` with ADT branches stays rejected, citing
 //!     the select/blend successor (chelis#618)
 //!   - unbounded recursion errors loudly at the unroll cap
-//!   - runtime-condition non-float `if` stays unrepresentable
+//!
+//! Positive branch parity covers both outcomes of a runtime-condition
+//! non-float scalar `if`.
 
 mod common;
 
@@ -298,18 +299,12 @@ fn issue_620_deep_combining_recursion_within_cap_grads() {
     }
 }
 
-/// Red-team regression (fold/forward NaN divergence): a condition that
-/// folds through a NaN (`gte(div(0,0), 0)`) must NOT be statically
-/// pruned -- the lowered CmpLt/not comparison evaluates NaN opposite to
-/// the IEEE comparison both forward lanes apply, so pruning would select
-/// a branch the forward pass never takes. With the fold refusing
-/// non-finite intermediates, an ADT-branch NaN guard now gets the LOUD
-/// runtime-condition rejection instead of a silent wrong-arm gradient.
-/// (The float-branch case falls to the mask path, whose own NaN
-/// divergence from the IEEE forward lanes is pre-existing, pre-#620
-/// behavior tracked separately.)
+/// Direct typed `gte` preserves IEEE NaN semantics during constant folding:
+/// `NaN >= 0` is false, so the `ModeB` branch must be the one differentiated.
+/// The exact `[6, 8]` gradient is also the negative control against silently
+/// selecting `ModeA`, whose gradient would be `[1, 1]`.
 #[test]
-fn issue_620_nan_condition_adt_branch_rejected_not_mispruned() {
+fn issue_620_nan_condition_adt_branch_uses_ieee_selected_gradient() {
     let source = format!(
         "module Repro.Nan620\n\n\
          type Mode =\n\
@@ -323,14 +318,12 @@ fn issue_620_nan_condition_adt_branch_rejected_not_mispruned() {
          out = grad(fwd)(to_tensor([{}]))\n",
         fmt_f32_list(&[3.0, 4.0]),
     );
-    let (_stdout, stderr, ok) = eval_program(&source);
-    assert!(
-        !ok,
-        "a NaN-folding ADT guard must be rejected, never silently pruned to one arm"
-    );
-    assert!(
-        stderr.contains("expected a single tensor value, got an ADT value"),
-        "diagnostic must be the runtime-condition ADT-branch rejection: {stderr}"
+    let (stdout, stderr, ok) = eval_program(&source);
+    assert!(ok, "typed NaN comparison must lower exactly: {stderr}");
+    assert_eq!(
+        parse_tensor_data(&stdout),
+        vec![6.0, 8.0],
+        "NaN >= 0 is false, so only the squared ModeB branch differentiates"
     );
 }
 
@@ -698,24 +691,29 @@ fn issue_620_unbounded_recursion_errors_at_unroll_cap() {
     );
 }
 
-/// A runtime-condition `if` whose value is non-float stays on the
-/// unrepresentable path (only static conditions changed lanes).
+/// A runtime-condition scalar `if` may select a discrete value consumed by a
+/// differentiable float path. The condition and integer selection carry zero
+/// cotangent; each executed branch contributes its selected constant scale.
+/// Opposite-sign inputs lock both branch outcomes.
 #[test]
-fn issue_620_runtime_cond_nonfloat_if_still_unrepresentable() {
-    let source = format!(
-        "module Repro.Neg620C\n\n\
-         def pick_i(c: f32) -> i32 = if c > 0.0 then cast(1, i32) else cast(2, i32)\n\n\
-         def fwd(x: tensor[2, f32]) -> f32 = {{\n\
-         \x20 scale = cast(pick_i(tensor_to_scalar(sum(&x, cast(0, i32)))), f32)\n\
-         \x20 mul(sum(x, cast(0, i32)) |> tensor_to_scalar, scale)\n\
-         }}\n\n\
-         out = grad(fwd)(to_tensor([{}]))\n",
-        fmt_f32_list(&[1.0, 2.0]),
-    );
-    let (_stdout, stderr, ok) = eval_program(&source);
-    assert!(!ok, "runtime-cond non-float if must stay rejected");
-    assert!(
-        stderr.contains("not supported by IR evaluation"),
-        "diagnostic must stay on the unrepresentable path: {stderr}"
-    );
+fn issue_620_runtime_cond_nonfloat_if_differentiates_executed_branch() {
+    for (input, expected) in [([1.0, 2.0], vec![1.0, 1.0]), ([-1.0, -2.0], vec![2.0, 2.0])] {
+        let source = format!(
+            "module Repro.RuntimeScalar620\n\n\
+             def pick_i(c: f32) -> i32 = if c > 0.0 then cast(1, i32) else cast(2, i32)\n\n\
+             def fwd(x: tensor[2, f32]) -> f32 = {{\n\
+             \x20 scale = cast(pick_i(tensor_to_scalar(sum(&x, cast(0, i32)))), f32)\n\
+             \x20 mul(sum(x, cast(0, i32)) |> tensor_to_scalar, scale)\n\
+             }}\n\n\
+             out = grad(fwd)(to_tensor([{}]))\n",
+            fmt_f32_list(&input),
+        );
+        let (stdout, stderr, ok) = eval_program(&source);
+        assert!(ok, "runtime scalar branch must lower: {stderr}");
+        assert_eq!(
+            parse_tensor_data(&stdout),
+            expected,
+            "gradient must follow the executed integer-scale branch for {input:?}"
+        );
+    }
 }
