@@ -104,11 +104,22 @@ def _summary_files(tmp: str) -> list[Path]:
 
 
 class FastCommandListTests(unittest.TestCase):
-    def test_static_prefix_is_regen_fmt_write_then_lint(self):
-        commands = gate.fast_command_list([], std_changed=False)
+    def test_static_prefix_is_regen_fmt_write_classify_then_lint(self):
+        """Classification is the first check, and every writer precedes it.
+
+        It is the cheapest row that can reject a push, so a developer learns
+        about an unrouted path in well under a second rather than after fmt,
+        lint, clippy and the tripwires.
+        """
+        commands = gate.fast_command_list([], std_changed=False, changed_paths=[])
         self.assertEqual(
-            commands[:3],
-            [gate.REGEN_TIER0_WRITE, gate.FMT_WRITE, gate.CHELIS_LINT_CHECK],
+            commands[:4],
+            [
+                gate.REGEN_TIER0_WRITE,
+                gate.FMT_WRITE,
+                gate.classify_paths_command([]),
+                gate.CHELIS_LINT_CHECK,
+            ],
         )
         self.assertEqual(
             gate.render(gate.REGEN_TIER0_WRITE),
@@ -119,25 +130,25 @@ class FastCommandListTests(unittest.TestCase):
 
     def test_one_clippy_per_changed_crate_precedes_the_tripwire_run(self):
         commands = gate.fast_command_list(
-            ["chelis-cli", "chelis-surf"], std_changed=False
+            ["chelis-cli", "chelis-surf"], std_changed=False, changed_paths=[]
         )
         self.assertEqual(
-            commands[3:5],
+            commands[4:6],
             [
                 ["cargo", "clippy", "-p", "chelis-cli", "--tests", "--", "-D", "warnings"],
                 ["cargo", "clippy", "-p", "chelis-surf", "--tests", "--", "-D", "warnings"],
             ],
         )
-        self.assertEqual(commands[5], gate.FAST_TRIPWIRE_NEXTEST)
-        self.assertEqual(len(commands), 6)
+        self.assertEqual(commands[6], gate.FAST_TRIPWIRE_NEXTEST)
+        self.assertEqual(len(commands), 7)
 
     def test_std_bundle_legs_appear_only_when_std_paths_changed(self):
         self.assertTrue(gate.std_paths_changed(["packages/chelis-std/src/x.ch"]))
         self.assertTrue(gate.std_paths_changed(["crates/chelis-std-bundle/build.rs"]))
         self.assertFalse(gate.std_paths_changed(["crates/chelis-cli/src/main.rs"]))
         self.assertFalse(gate.std_paths_changed([]))
-        without = gate.fast_command_list([], std_changed=False)
-        with_std = gate.fast_command_list(["chelis-std-bundle"], std_changed=True)
+        without = gate.fast_command_list([], std_changed=False, changed_paths=[])
+        with_std = gate.fast_command_list(["chelis-std-bundle"], std_changed=True, changed_paths=[])
         self.assertEqual(without[-1], gate.FAST_TRIPWIRE_NEXTEST)
         self.assertNotIn(gate.REGEN_TIER1_WRITE, without)
         self.assertNotIn(gate.STD_BUNDLE_SELF_CONSISTENCY, without)
@@ -150,6 +161,7 @@ class FastCommandListTests(unittest.TestCase):
                 gate.REGEN_TIER0_WRITE,
                 gate.REGEN_TIER1_WRITE,
                 gate.FMT_WRITE,
+                gate.classify_paths_command([]),
                 gate.CHELIS_LINT_CHECK,
                 ["cargo", "clippy", "-p", "chelis-std-bundle", "--tests", "--", "-D", "warnings"],
                 gate.FAST_TRIPWIRE_NEXTEST,
@@ -164,7 +176,7 @@ class FastCommandListTests(unittest.TestCase):
     def test_fast_excludes_workspace_clippy_fmt_check_doctests_and_both_oracles(self):
         rendered = [
             gate.render(c)
-            for c in gate.fast_command_list(["chelis-cli"], std_changed=True)
+            for c in gate.fast_command_list(["chelis-cli"], std_changed=True, changed_paths=[])
         ]
         for excluded in (
             gate.CLIPPY_WORKSPACE,
@@ -206,7 +218,7 @@ class FastCommandListTests(unittest.TestCase):
         self.assertEqual(gate.STD_BUNDLE_SELF_CONSISTENCY[3:5], ["-p", "chelis-std-bundle"])
 
     def test_fast_list_hands_over_no_oracle_binary(self):
-        commands = gate.fast_command_list(["chelis-cli"], std_changed=True)
+        commands = gate.fast_command_list(["chelis-cli"], std_changed=True, changed_paths=[])
         self.assertIsNone(gate.oracle_binary_handoff(commands, "/t"))
 
     def test_fast_uses_the_managed_python_marker(self):
@@ -510,7 +522,9 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(summary["mode"], "fast")
         self.assertEqual(summary["termination"], "pass")
         self.assertEqual(summary["exit_code"], 0)
-        expected = gate.fast_command_list(["chelis-cli"], std_changed=False)
+        # The same path the run derives, so this also asserts that `--fast`
+        # hands the derived set to the classification rather than an empty one.
+        expected = gate.fast_command_list(["chelis-cli"], std_changed=False, changed_paths=[])
         self.assertEqual(len(launched), len(expected))
         self.assertEqual(len(summary["stages"]), len(expected))
         for index, stage in enumerate(summary["stages"], start=1):
@@ -518,7 +532,14 @@ class SummaryTests(unittest.TestCase):
             self.assertGreaterEqual(stage["seconds"], 0)
             self.assertEqual(stage["returncode"], 0)
             self.assertIsNone(stage["launch_error"])
-        self.assertIn("cargo clippy -p chelis-cli --tests -- -D warnings", summary["stages"][3]["command"])
+        self.assertIn(
+            "cargo clippy -p chelis-cli --tests -- -D warnings",
+            summary["stages"][4]["command"],
+        )
+        self.assertIn(
+            "scripts/ci_change_owned.py classify-paths",
+            summary["stages"][2]["command"],
+        )
         self.assertIsNone(summary["first_failing_stage"])
         self.assertEqual(summary["git"]["head"], CANNED_GIT_FACTS["head"])
         self.assertEqual(summary["git"]["selected_crates"], ["chelis-cli"])
@@ -553,6 +574,27 @@ class SummaryTests(unittest.TestCase):
         self.assertIn("load_average_1m", summary["preflight"]["host"])
         self.assertNotIn("preflight stop", err)
 
+    def test_fast_asks_the_check_to_derive_its_own_set(self):
+        """`--from-git`, not a set captured before the writers ran.
+
+        Its own test rather than an assertion inside
+        `test_summary_written_on_pass`, because that one compares the stage
+        count and is red on Darwin for an unrelated reason (chelis#2255, the
+        preflight exec probe), so an assertion behind it would never run here.
+        """
+        _rc, summary, _launched, _out, _err, _lease = self._run_main(
+            ["--fast"],
+            diff="crates/chelis-cli/src/main.rs\n",
+            status=" M scripts/gate.py\n",
+        )
+        classify = next(
+            stage["command"]
+            for stage in summary["stages"]
+            if "classify-paths" in stage["command"]
+        )
+        self.assertIn("classify-paths --from-git", classify)
+        self.assertNotIn("crates/chelis-cli/src/main.rs", classify)
+
     def test_std_path_change_appends_the_std_legs(self):
         rc, summary, launched, out, _err, _lease = self._run_main(
             ["--fast"], diff="packages/chelis-std/src/time.ch\n"
@@ -563,7 +605,7 @@ class SummaryTests(unittest.TestCase):
         rendered = [" ".join(c) for c in launched]
         self.assertTrue(rendered[1].endswith("scripts/regen_all.py --tier 1"), rendered[1])
         self.assertTrue(rendered[-1].startswith("cargo nextest run -p chelis-std-bundle --lib"))
-        self.assertEqual(len(rendered), 6)
+        self.assertEqual(len(rendered), 7)
         self.assertIn("chelis-std paths changed", out)
         self.assertIn("no crate changes detected", out)
         self.assertIn("per-crate clippy", out)

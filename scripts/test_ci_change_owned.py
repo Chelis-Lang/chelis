@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import io
 import json
 import os
 from pathlib import Path
@@ -4650,6 +4651,201 @@ class RoutingInventoryReconciliationTests(unittest.TestCase):
 
         self.assertIn("unclassified", str(raised.exception))
         self.assertIn("no routing rule", str(raised.exception))
+
+
+def _git_repo(root: Path) -> None:
+    for command in (
+        ["git", "init", "--quiet", "--initial-branch=main", str(root)],
+        ["git", "-C", str(root), "config", "user.email", "t@example.invalid"],
+        ["git", "-C", str(root), "config", "user.name", "T"],
+    ):
+        subprocess.run(command, check=True, capture_output=True)
+
+
+def _git_commit(root: Path, message: str) -> None:
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(root), "commit", "--quiet", "-m", message],
+        check=True,
+        capture_output=True,
+    )
+
+
+class ChangedPathClassificationTests(unittest.TestCase):
+    """chelis#2250: the planner's refusal, reachable before a push.
+
+    `plan` cannot answer this locally. In `pull_request` mode it requires a
+    two-parent synthetic merge and exits before classifying anything, so a new
+    tracked file passed every local check and failed CI on the first
+    unclassified path.
+    """
+
+    def setUp(self) -> None:
+        self.config = owned.read_config(
+            owned.ROOT / ".config/ci-test-targets.toml"
+        )
+        self.packages = (owned.PackageInfo("chelis-cli", "crates/chelis-cli"),)
+
+    def classify(self, paths):
+        return owned.classify_changed_paths(
+            paths,
+            config=self.config,
+            packages=self.packages,
+        )
+
+    def test_a_routed_path_and_a_package_path_are_accepted(self) -> None:
+        self.assertEqual(
+            self.classify(
+                [
+                    "scripts/ci_change_owned.py",
+                    "crates/chelis-cli/src/main.rs",
+                    "docs/ci_validation.md",
+                ]
+            ),
+            [],
+        )
+
+    def test_every_refused_path_is_reported_not_only_the_first(self) -> None:
+        """CI stops at the first; locally there is no reason to.
+
+        chelis#2248's repair added one rule for the path CI named and could
+        have left a second file unrouted behind it.
+        """
+        refused = self.classify(
+            ["scripts/zzz_second.py", "scripts/aaa_first.py"]
+        )
+        self.assertEqual(
+            refused,
+            [
+                ("scripts/aaa_first.py", "unclassified"),
+                ("scripts/zzz_second.py", "unclassified"),
+            ],
+        )
+
+    def test_an_ambiguous_path_is_refused_as_well_as_an_unrouted_one(
+        self,
+    ) -> None:
+        """A path two packages claim is as unplannable as one none claims."""
+        overlapping = (
+            owned.PackageInfo("chelis-cli", "crates/shared"),
+            owned.PackageInfo("chelis-surf", "crates/shared"),
+        )
+        refused = owned.classify_changed_paths(
+            ["crates/shared/src/main.rs"],
+            config=self.config,
+            packages=overlapping,
+        )
+        self.assertEqual(
+            refused, [("crates/shared/src/main.rs", "ambiguous_package")]
+        )
+
+    def test_a_rename_classifies_both_sides_as_the_planner_does(self) -> None:
+        """`--name-only` collapses a rename; `diff_at` does not.
+
+        Moving an unrouted file into a package root reads clean if only the
+        destination is classified, while the planner refuses the source. The
+        derivation uses `--find-renames` and keeps both sides for that reason.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _git_repo(root)
+            (root / "spec").mkdir()
+            (root / "spec" / "thing.json").write_text("{}")
+            _git_commit(root, "base")
+            subprocess.run(
+                ["git", "-C", str(root), "branch", "base"],
+                check=True,
+                capture_output=True,
+            )
+            (root / "crates").mkdir()
+            subprocess.run(
+                ["git", "-C", str(root), "mv", "spec/thing.json", "crates/thing.json"],
+                check=True,
+                capture_output=True,
+            )
+            _git_commit(root, "move it")
+            paths = owned.working_tree_changed_paths(root, base="base")
+        self.assertIn("spec/thing.json", paths)
+        self.assertIn("crates/thing.json", paths)
+
+    def test_untracked_work_is_not_in_the_changed_set(self) -> None:
+        """CI never sees it, and nothing can route a scratch file.
+
+        Including it produces a local failure with no hosted counterpart whose
+        printed remedy is to add a junk row to a reviewed manifest.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _git_repo(root)
+            (root / "tracked.txt").write_text("x")
+            _git_commit(root, "base")
+            subprocess.run(
+                ["git", "-C", str(root), "branch", "base"],
+                check=True,
+                capture_output=True,
+            )
+            (root / "tracked.txt").write_text("y")
+            (root / "repro_scratch.txt").write_text("junk")
+            (root / "probe_dir").mkdir()
+            paths = owned.working_tree_changed_paths(root, base="base")
+        self.assertEqual(paths, ["tracked.txt"])
+
+    def test_an_unchanged_tree_derives_an_empty_set(self) -> None:
+        """An empty diff is legitimate locally, unlike for a candidate."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _git_repo(root)
+            (root / "a.txt").write_text("x")
+            _git_commit(root, "base")
+            subprocess.run(
+                ["git", "-C", str(root), "branch", "base"],
+                check=True,
+                capture_output=True,
+            )
+            self.assertEqual(
+                owned.working_tree_changed_paths(root, base="base"), []
+            )
+
+    def test_an_empty_change_set_does_not_pay_for_cargo_metadata(self) -> None:
+        with mock.patch.object(
+            owned,
+            "_metadata_in",
+            side_effect=AssertionError("cargo metadata must not run"),
+        ):
+            self.assertEqual(owned.classify_changed_paths([]), [])
+
+    def test_the_local_refusal_is_the_planner_sentence_verbatim(self) -> None:
+        """One spelling, so the local and hosted failures read alike."""
+        for classification in ("unclassified", "ambiguous_rule"):
+            with self.subTest(classification=classification):
+                message = owned.refused_path_message(classification, "a/b.py")
+                self.assertIn("changed path: a/b.py", message)
+        self.assertEqual(
+            owned.refused_path_message("unclassified", "a/b.py"),
+            "unclassified changed path: a/b.py",
+        )
+        self.assertEqual(
+            owned.refused_path_message("ambiguous_rule", "a/b.py"),
+            "ambiguous changed path: a/b.py",
+        )
+
+    def test_the_cli_exits_non_zero_and_names_each_path(self) -> None:
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            code = owned.main(
+                ["classify-paths", "scripts/one_new.py", "scripts/two_new.py"]
+            )
+        printed = stderr.getvalue()
+        self.assertEqual(code, 1)
+        self.assertIn("unclassified changed path: scripts/one_new.py", printed)
+        self.assertIn("unclassified changed path: scripts/two_new.py", printed)
+
+    def test_the_cli_accepts_a_routed_set(self) -> None:
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            code = owned.main(["classify-paths", "scripts/gate.py"])
+        self.assertEqual(code, 0)
+        self.assertIn("PASS", stdout.getvalue())
 
 
 class JunitOutcomeTests(unittest.TestCase):

@@ -354,6 +354,39 @@ Use `gh workflow run heavy-e2e.yml --ref BRANCH` or `gh workflow run macos-night
 
 The developer's `gate.py --fast`, `--local`, `integration`, and full/manual commands retain their previous selections. The separate `gate.py ci-fast` stage owns the fixed standing hosted selection on pull requests and `main`. The required change-owned lane runs only for PR candidates and trusted exact-candidate dispatches; package expansion runs only through its explicit PR dispatch. A title or description edit reruns the dedicated acknowledgement check and changelog policy without entering compiler or Hull workflows, so the unchanged candidate's implementation contexts are neither cancelled nor replaced. A base retarget creates a required pending head receipt, validates the open PR's exact head/base and the checked-out two-parent merge, dispatches CI and Hull from the trusted new base, and closes the receipt only after both runs succeed. Run the owning phase oracle on the candidate when claiming phase completion.
 
+### Measured figures for the changed-path classification stage
+
+Taken 2026-09-20 against `64a446998` and `5e361bbc7` on an Apple-silicon
+workstation. A figure here is evidence with a date on it, not a constant:
+re-run the command before relying on one, and correct this table rather than
+the prose that cites it.
+
+| figure | conditions | how it was taken |
+|---|---|---|
+| 0.11-0.13s wall | any realistic change set, `--from-git` | `/usr/bin/time -p .venv/bin/python scripts/ci_change_owned.py classify-paths --from-git`, five runs. One path and fifty paths measure the same end to end in the argv form, which is the more size-sensitive of the two and showed no growth either |
+| about 13 microseconds per path | the only part that grows with the change set | classification alone, in process, with config and packages preloaded: 0.1 ms at 8 paths, 6.7 ms at 500, 57.6 ms at all 4358, against a fixed floor of roughly 50 ms interpreter plus 30 ms `cargo metadata` |
+| 0.05-0.06s wall | empty change set, which returns before `cargo metadata` | same command on an unchanged tree |
+| `cargo metadata --no-deps --locked` 0.02-0.04s | warm, repeated invocation | the stage's dominant cost; 0.24s with dependencies, which it does not ask for |
+
+The argv form is the one that grows visibly, and the shipped form does not
+pay it: passing all 4358 paths as arguments costs about 0.36s wall, of which
+only ~0.058s is classification and the rest is marshalling that many
+arguments through `exec`. `--from-git` passes none.
+
+**The cost does not split by warmth, and that is the measured result rather
+than an omission.** Cold cargo without a bytecode cache, warm cargo after a
+real `cargo fmt --all` without a bytecode cache, and warm cargo with the
+cache all came out the same to within noise. `gate.py` sets no
+`PYTHONDONTWRITEBYTECODE` for its children and `cargo fmt` runs before this
+stage, so there were four plausibly distinct quantities here and the
+measurement found one. Recorded so the next reader does not re-derive the
+hypothesis: only the empty set differs.
+
+The form does matter, which is the distinction that survived. Passing paths
+as arguments costs about 0.12s of CPU and `--from-git` about 0.18s, the
+difference being two `git diff` forks. `--from-git` is the shipped form and
+the figures above are its.
+
 ## Python execution ownership and timing
 
 `python scripts/ci_script_tests.py pr` runs the cheap discovered tests; `nightly`

@@ -622,6 +622,22 @@ REGEN_TIER0_WRITE: list[str] = [
 REGEN_TIER1_WRITE: list[str] = [
     MANAGED_PYTHON, "scripts/regen_all.py", "--tier", "1",
 ]
+
+
+def classify_paths_command(changed_paths: list[str]) -> list[str]:
+    """Reject a changed path the change-owned planner would refuse.
+
+    The planner itself cannot run here: in `pull_request` mode it requires a
+    two-parent synthetic merge, so against a working tree it exits before
+    classifying anything. This calls the same
+    `static_path_classification` the planner uses, and prints the same
+    `unclassified changed path: <path>` sentence CI prints, so the local and
+    hosted failures read alike (chelis#2250).
+    """
+    return [
+        MANAGED_PYTHON, "scripts/ci_change_owned.py", "classify-paths",
+        "--from-git",
+    ]
 # The bundle crate's in-crate `archive_self_consistency` test: the compile-time
 # counterpart of the std-bundle regeneration check. It cannot join
 # FAST_TRIPWIRE_NEXTEST because `--lib` would apply to every `-p` there and
@@ -1130,21 +1146,35 @@ def std_paths_changed(paths: list[str]) -> bool:
 
 
 def fast_command_list(
-    crates: list[str], *, std_changed: bool
+    crates: list[str], *, std_changed: bool, changed_paths: list[str]
 ) -> list[list[str]]:
     """The `--fast` command list: fix-in-place regeneration and fmt, the
-    lint row (which also builds `chelis`), `cargo clippy -p <crate> --tests`
-    per changed crate, one nextest run over the drift tripwires, and, when a
-    std path changed, the tier-1 regeneration before the checks and the
-    bundle self-consistency test after them. Every writer precedes every
-    check: a changed `.ch` source makes the embedded bundle stale, and the
-    `bundled_chelis_std_loader` tripwire would fail on it before a later
-    regeneration could fix it. Never the chelis#908 oracle: minutes of work
-    whose `chelis check` timeouts under load are a known false-red source."""
+    changed-path classification, the lint row (which also builds `chelis`),
+    `cargo clippy -p <crate> --tests` per changed crate, one nextest run over
+    the drift tripwires, and, when a std path changed, the tier-1
+    regeneration before the checks and the bundle self-consistency test after
+    them. Every writer precedes every check: a changed `.ch` source makes the
+    embedded bundle stale, and the `bundled_chelis_std_loader` tripwire would
+    fail on it before a later regeneration could fix it.
+
+    The classification is first among the checks because it is the cheapest
+    thing here that can reject a push, and because until chelis#2250 an
+    unrouted new file passed every local check and then failed `Plan Changed
+    Integration Tests` in CI. It derives its own set when it runs rather than
+    taking one built here; `AGENTS.md`'s `--fast` paragraph states once what
+    that set covers and what it does not, and this docstring deliberately
+    does not restate it.
+    `docs/ci_validation.md` under Measured figures carries its cost with the
+    conditions that produced it.
+
+    Never the chelis#908 oracle: minutes of work whose `chelis check`
+    timeouts under load are a known false-red source."""
     commands = [REGEN_TIER0_WRITE]
     if std_changed:
         commands.append(REGEN_TIER1_WRITE)
-    commands.extend([FMT_WRITE, CHELIS_LINT_CHECK])
+    commands.append(FMT_WRITE)
+    commands.append(classify_paths_command(changed_paths))
+    commands.append(CHELIS_LINT_CHECK)
     for crate in crates:
         commands.append(
             ["cargo", "clippy", "-p", crate, "--tests", "--", "-D", "warnings"]
@@ -2522,7 +2552,9 @@ def run_fast(
     state["lease"] = None
     before = _porcelain_hashes()
     code = run_commands(
-        fast_command_list(crates, std_changed=std_changed),
+        fast_command_list(
+            crates, std_changed=std_changed, changed_paths=paths
+        ),
         stage_label="fast",
         environ=environment,
         executable=executable,
