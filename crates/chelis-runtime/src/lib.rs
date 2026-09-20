@@ -1330,14 +1330,24 @@ struct RuntimeString {
     /// `chelis_string_data` remains available to legacy C consumers whose
     /// inputs exclude embedded NUL. Length-aware construction and observation
     /// use `value` and never treat this terminator as string content.
+    ///
+    /// A mutator maintains this beside `value`, and the pointer
+    /// `chelis_string_data` last returned does not survive a growth that
+    /// reallocates this buffer.
     nul_terminated: Vec<u8>,
     /// Unicode scalar values in `value`, counted once at construction.
     ///
     /// `chelis_string_len` is character-indexed, so serving it from
     /// `value.chars().count()` made every length query O(bytes) and any loop
     /// that tests `string_len` in its condition quadratic in time. This field
-    /// is not a cache that can go stale: `RuntimeString` is immutable after
-    /// `new_runtime_string` builds it.
+    /// must be maintained by every mutator, not recomputed by readers.
+    /// `RuntimeString` was immutable after `new_runtime_string` built it
+    /// until chelis#2205 added `chelis_string_concat_owned`, which appends in
+    /// place when it holds the only strong owner. Any further mutator owes
+    /// this field and `nul_terminated` the same update in the same place: a
+    /// stale count is invisible to every ASCII input, because ASCII makes
+    /// bytes and characters agree, and it corrupts both `chelis_string_len`
+    /// and the slicing strategy below.
     ///
     /// It also decides the slicing strategy. A UTF-8 char occupies one byte
     /// exactly when it is ASCII, so `char_count == value.len()` is an O(1)
@@ -3972,8 +3982,14 @@ pub unsafe extern "C" fn chelis_string_concat_owned(
                 .extend_from_slice((*rhs.handle).value.as_bytes());
             (*lhs.handle).nul_terminated.push(0);
             (*lhs.handle).char_count = (*lhs.handle).char_count.saturating_add(characters);
-            resize_string_ledger(lhs.handle, "chelis_string_concat_owned");
         }
+        // Record the in-place arm unconditionally, including the empty
+        // right-hand side that changes no byte. The ledger is the only
+        // instrument that distinguishes this arm from the cloning one, and
+        // recording only growths made a zero count ambiguous: it meant
+        // "cloned, or appended nothing". Now a resize at this site means the
+        // in-place arm ran, and its absence means the cloning arm did.
+        resize_string_ledger(lhs.handle, "chelis_string_concat_owned");
         return lhs;
     }
     let result = chelis_string_concat(lhs, rhs);

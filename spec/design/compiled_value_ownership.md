@@ -604,12 +604,19 @@ row naming it can land, and it owes an answer for any derived state or
 interior pointer its representation publishes.
 
 Membership is narrower than "produces its own kind". A row is for a callable
-that returns a grown copy of its operand, where reusing the allocation turns a
-copy into an append. A callable that returns a sub-range of its operand is
-not one: `take` and `drop` for lists, and `string_slice` and `string_trim` for
-strings, would each become a move of the remainder rather than an amortised
-append, and none of them is an accumulation shape. chelis#943 recorded that
-disposition for `drop` and it holds for the rest.
+whose result is its operand with an edit applied, so that reusing the
+allocation replaces a copy of the whole operand with the edit alone. The edit
+need not grow the container: `append`, `concat`, `dict_insert`, `dict_merge`
+and `string_concat` add, and `dict_remove` deletes, but in each the surviving
+content is carried over in place rather than rebuilt.
+
+A callable whose result is a positional sub-range of its operand is not a row
+today. `take` and `drop` for lists, and `string_slice` and `string_trim` for
+strings, would each have to relocate the surviving range rather than apply a
+point edit, which is the same order of work as the copy it would replace, and
+none of them is an accumulation shape. chelis#943 recorded that disposition
+for `drop`. It is a disposition rather than a derivation: those four could be
+revisited on their own evidence, and until they are, they are not rows.
 
 The string row carries an obligation neither of the other kinds has, and it
 is the reason a heap kind is not interchangeable here. `RuntimeString` stores
@@ -627,12 +634,36 @@ tests that cover it are multibyte by construction.
 
 The interior pointer is the one published surface this optimisation can
 invalidate. `chelis_string_data` returns a pointer into `nul_terminated`,
-which an in-place growth may reallocate. That is the same invalidation the
-cloning path already causes by releasing the consumed input, the consuming
-entry point is private to the emitter so no published-ABI caller can reach it,
-and generated code never holds a data pointer across a statement. A kind whose
-public surface hands out an interior pointer that outlives a statement would
-need a different answer before it could take a row here.
+which an in-place growth may reallocate.
+
+The safe condition is not that generated code never holds such a pointer
+across a statement, because it does. `chelis_json_compare_strings`, emitted
+verbatim by `append_json_canonical_object_helpers`, binds two of them and
+reads both across a `while` loop and the statements after it. The condition
+that actually holds is narrower: no interior pointer in generated code is
+derived from an operand a `CONTAINER_CONSUMERS` row can move. Those two point
+into single-character slices the helper allocates and releases itself, which
+no `string_concat` can consume, so nothing can grow the buffer under them.
+
+An in-place growth invalidates such a pointer exactly as the cloning path
+already does by releasing the consumed input, and the consuming entry point
+is private to the emitter, so no published-ABI caller can reach it. A new
+emitted call site owes this check: if it derives an interior pointer from a
+value that a row's operand position can name, that pointer must not outlive
+the consuming call. A kind whose public surface hands out an interior pointer
+with a longer contract would need a different answer before it could take a
+row here.
+
+Reading the allocation ledger as an oracle for these rows needs one caution.
+A `resize` event at a consuming entry point's site is the only signal that
+separates the in-place arm from the cloning one; allocation counts cannot,
+because the cloning arm's extra allocation is indistinguishable from any
+other. `chelis_string_concat_owned` therefore records that event on every
+in-place return, including an empty right-hand side that changes no byte, so
+for strings the absence of the event means the cloning arm ran. The
+dictionary entry points do not yet record on every in-place return, so a zero
+count there still means "cloned, or edited nothing"; chelis#2252 owns closing
+that.
 
 The dictionary rows carry one obligation the list rows do not. The cloning
 `chelis_dict_insert` releases the value it replaces before cloning the

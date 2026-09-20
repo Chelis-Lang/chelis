@@ -30,8 +30,12 @@
 //!
 //! These tests link a runtime built without the `ownership-ledger` feature,
 //! so they prove printed values, cross-lane agreement, the absence of an
-//! abort, and which entry point the emitter selected. They do not prove
-//! ownership balance; that is proven separately with a ledger-enabled build.
+//! abort, and which entry point the emitter **selected**. They do not prove
+//! which arm that entry point then **took**: it re-checks the strong-owner
+//! count and clones silently above one, so a receipt of zero cloning call
+//! sites is consistent with every step still copying. Nor do they prove
+//! ownership balance. Both need a ledger-enabled runtime, which chelis#2252
+//! owns giving a committed home.
 #![allow(clippy::uninlined_format_args)]
 use assert_cmd::Command;
 use tempfile::tempdir;
