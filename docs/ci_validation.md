@@ -323,13 +323,16 @@ The developer's `gate.py --fast`, `--local`, `integration`, and full/manual comm
 
 ### Measured figures for the changed-path classification stage
 
-Taken 2026-09-20 against `64a446998` on an Apple-silicon workstation. A figure
-here is evidence with a date on it, not a constant: re-run the command before
-relying on one, and correct this table rather than the prose that cites it.
+Taken 2026-09-20 against `64a446998` and `5e361bbc7` on an Apple-silicon
+workstation. A figure here is evidence with a date on it, not a constant:
+re-run the command before relying on one, and correct this table rather than
+the prose that cites it. Cost scales with the size of the change set, so the
+rows bracket it rather than asserting one number.
 
 | figure | conditions | how it was taken |
 |---|---|---|
-| 0.11-0.13s wall | any non-empty change set, `--from-git` | `/usr/bin/time -p .venv/bin/python scripts/ci_change_owned.py classify-paths --from-git`, five runs |
+| 0.11-0.13s wall | a change set of eight paths, this pull request's own, `--from-git` | `/usr/bin/time -p .venv/bin/python scripts/ci_change_owned.py classify-paths --from-git`, five runs |
+| 0.36-0.38s wall, 0.14-0.15s user | all 4358 tracked files, the upper bound rather than a realistic change set | same command with every tracked path, three runs |
 | 0.05-0.06s wall | empty change set, which returns before `cargo metadata` | same command on an unchanged tree |
 | `cargo metadata --no-deps --locked` 0.02-0.04s | warm, repeated invocation | the stage's dominant cost; 0.24s with dependencies, which it does not ask for |
 
