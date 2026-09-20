@@ -1362,10 +1362,9 @@ fn validate_generated_pragmas(source: &str) -> Result<(), GeneratedHeaderError> 
         }
     }
     for line in preprocessor_logical_lines(source) {
-        if preprocessor_directive_name(&line).as_deref() != Some("pragma") {
+        let Some(payload) = preprocessor_directive_payload(&line, "pragma") else {
             continue;
-        }
-        let payload = preprocessor_directive_payload(&line, "pragma").unwrap_or_default();
+        };
         let allowed_openmp = matches!(payload, "omp parallel for" | "omp parallel for simd")
             || (payload.starts_with("omp parallel for reduction(") && payload.ends_with(')'));
         if !allowed_openmp
