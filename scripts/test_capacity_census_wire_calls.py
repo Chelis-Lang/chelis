@@ -183,6 +183,10 @@ class CargoOriginControls(unittest.TestCase):
         )
         self.addCleanup(self.scratch.cleanup)
         self.root = Path(self.scratch.name)
+        (self.root / "Cargo.toml").write_text(
+            '[workspace]\n[workspace.package]\nversion = "0.18.10"\n'
+        )
+        (self.root / "crates/chelis-compiler-api").mkdir(parents=True)
         (self.root / "Cargo.lock").write_text(
             """version = 4
 
@@ -233,13 +237,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
                 require_registry_origin=True,
             )
 
-    def resolve_construction(self, name, stable_id, artifacts, artifact_ids):
+    def resolve_construction(
+        self, name, stable_id, artifacts, artifact_ids, artifact_id_calls=None
+    ):
         from capacity_census_wire_calls import _construction_dependency_artifact
 
         invocation_target = self.root / "target/compiler-json-invocations/cargo"
+
+        def artifact_id(path, _root):
+            if artifact_id_calls is not None:
+                artifact_id_calls.append(Path(path))
+            return artifact_ids[Path(path).name]
+
         with patch(
             "capacity_census_wire_calls._artifact_id",
-            side_effect=lambda path, _root: artifact_ids[Path(path).name],
+            side_effect=artifact_id,
         ):
             return _construction_dependency_artifact(
                 self.root,
@@ -513,6 +525,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
             ("parent traversal", traversal, "6" * 16),
             ("symlink", symlink, "7" * 16),
         ):
+            artifact_id_calls = []
             with (
                 self.subTest(reason=reason),
                 self.assertRaisesRegex(
@@ -524,7 +537,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
                     artifact_id,
                     [artifact],
                     {Path(artifact["filenames"][0]).name: artifact_id},
+                    artifact_id_calls,
                 )
+            self.assertEqual(artifact_id_calls, [])
 
     def test_construction_dependency_rejects_target_symlink_outside_root(self):
         invocation_target = self.root / "target/compiler-json-invocations/cargo"
@@ -556,6 +571,75 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
                 invocation_target,
             )
         artifact_id.assert_not_called()
+
+    def test_construction_dependency_requires_exact_compiler_api_package(self):
+        from capacity_census_wire_calls import _construction_dependency_artifact
+
+        invocation_target = self.root / "target/compiler-json-invocations/cargo"
+        expected = self.artifact(
+            "chelis-compiler-api@0.18.10",
+            "chelis_compiler_api",
+            "libchelis_compiler_api.rlib",
+            directory=invocation_target,
+        )
+        expected["package_id"] = (
+            f"path+{(self.root / 'crates/chelis-compiler-api').as_uri()}#0.18.10"
+        )
+        impostor = self.artifact(
+            "evil-provider@0.1.0",
+            "chelis_compiler_api",
+            "libchelis_compiler_api-evil.rlib",
+            directory=invocation_target,
+        )
+        impostor["package_id"] = (
+            f"path+{(self.root / 'evil-provider').as_uri()}#0.1.0"
+        )
+
+        for definitions, message in (
+            ([], "missing exact construction dependency chelis_compiler_api"),
+            (
+                [
+                    {
+                        "crate": "chelis_compiler_api",
+                        "stable_crate_id": "a" * 16,
+                    }
+                ],
+                "unresolved defining chelis_compiler_api Cargo origin",
+            ),
+        ):
+            with (
+                self.subTest(definitions=definitions),
+                patch(
+                    "capacity_census_wire_calls._artifact_id"
+                ) as artifact_id,
+                self.assertRaisesRegex(ValueError, message),
+            ):
+                _construction_dependency_artifact(
+                    self.root,
+                    "chelis_compiler_api",
+                    definitions,
+                    [impostor],
+                    invocation_target,
+                )
+            artifact_id.assert_not_called()
+
+        with patch(
+            "capacity_census_wire_calls._artifact_id",
+            return_value="a" * 16,
+        ):
+            selected = _construction_dependency_artifact(
+                self.root,
+                "chelis_compiler_api",
+                [
+                    {
+                        "crate": "chelis_compiler_api",
+                        "stable_crate_id": "a" * 16,
+                    }
+                ],
+                [impostor, expected],
+                invocation_target,
+            )
+        self.assertEqual(selected, Path(expected["filenames"][0]))
 
 
 class InvocationControls(unittest.TestCase):

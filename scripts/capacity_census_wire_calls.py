@@ -639,6 +639,20 @@ def _locked_registry_package(root: Path, name: str, package_id: str) -> bool:
     )
 
 
+def _workspace_compiler_api_package(root: Path, package_id: str) -> bool:
+    workspace = tomllib.loads((root / "Cargo.toml").read_text())["workspace"]
+    source = (root / "crates/chelis-compiler-api").resolve(strict=True).as_uri()
+    return package_id == f"path+{source}#{workspace['package']['version']}"
+
+
+def _construction_dependency_package(
+    root: Path, name: str, package_id: str
+) -> bool:
+    if name == "chelis_compiler_api":
+        return _workspace_compiler_api_package(root, package_id)
+    return _locked_registry_package(root, name, package_id)
+
+
 def _resolve_defining_artifact(
     root: Path,
     name: str,
@@ -696,7 +710,10 @@ def _construction_dependency_artifact(
     if not resolved_target.is_relative_to(resolved_root):
         raise ValueError(f"missing owned construction artifact {name}")
     candidates = [
-        artifact for artifact in artifacts if artifact["target"]["name"] == name
+        artifact
+        for artifact in artifacts
+        if artifact["target"]["name"] == name
+        and _construction_dependency_package(root, name, artifact["package_id"])
     ]
     for artifact in candidates:
         paths = [Path(path) for path in artifact["filenames"] if path.endswith(".rlib")]
@@ -719,8 +736,8 @@ def _construction_dependency_artifact(
             root,
             name,
             compiler_definitions,
-            artifacts,
-            require_registry_origin=name != "chelis_compiler_api",
+            candidates,
+            require_registry_origin=False,
         )
     else:
         if len(candidates) != 1:
@@ -733,10 +750,6 @@ def _construction_dependency_artifact(
         if len(paths) != 1:
             raise ValueError(f"missing owned construction artifact {name}")
         path = paths[0]
-        if name != "chelis_compiler_api" and not _locked_registry_package(
-            root, name, candidates[0]["package_id"]
-        ):
-            raise ValueError(f"missing exact construction dependency {name}")
         _artifact_id(path, root)
     return path
 
