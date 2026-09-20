@@ -43,6 +43,17 @@ fn stamped_selector_program(index: i64) -> Vec<Expr> {
         .expect("selector fixture must stamp")
 }
 
+fn stamped_nested_selector_program() -> Vec<Expr> {
+    let declarations = parse_surf(
+        "def square(x: f32) -> f32 = mul(x, x)\n\
+         selected = grad(grad(square, wrt=x), wrt=x)\n",
+    )
+    .expect("nested selector fixture Surf must parse");
+    let deep = desugar_program(&declarations).expect("nested selector fixture must desugar");
+    chelis_deep::parse_and_stamp_file(&print_canonical(&deep))
+        .expect("nested selector fixture must stamp")
+}
+
 fn checked_pair_context() -> (TypeEnv, CheckedProgram) {
     let mut pair = selector_program(1);
     pair.pop()
@@ -93,6 +104,12 @@ fn check_ir_program_rejects_contradictory_grad_selector_identity() {
 fn check_typed_program_accepts_consistent_grad_selector_identity() {
     check_typed_program(&stamped_selector_program(1))
         .expect("index 1 selects the metadata parameter `w`");
+}
+
+#[test]
+fn check_typed_program_accepts_consistent_nested_grad_selector_identity() {
+    check_typed_program(&stamped_nested_selector_program())
+        .expect("a transformed callable retains the target parameter identity");
 }
 
 #[test]

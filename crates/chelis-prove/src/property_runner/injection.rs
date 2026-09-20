@@ -36,14 +36,38 @@ use super::{PropertyOutcome, PropertyRunOptions, PropertyStatus, PropertyTier};
 /// invariant-carrying opaque type? If so, the injection path owns it.
 pub(super) fn property_has_opaque_invariant_binder(
     decls: &[Decl],
+    property_path: &[usize],
     params: &[Param],
 ) -> Result<bool, String> {
+    validate_property_path(decls, property_path)?;
     let exprs = chelis_surf::desugar::desugar_program(decls).map_err(|error| error.to_string())?;
     let invariants = crate::opaque::collect_opaque_invariants(&exprs);
     Ok(params.iter().any(|p| {
         matches!(&p.ty, Some(TypeExpr::Named(name, _))
             if invariants.iter().any(|inv| &inv.type_name == name))
     }))
+}
+
+fn validate_property_path(decls: &[Decl], property_path: &[usize]) -> Result<(), String> {
+    let Some((&selected_index, nested_path)) = property_path.split_first() else {
+        return Err("property declaration path is empty".to_string());
+    };
+    let Some(decl) = decls.get(selected_index) else {
+        return Err(format!(
+            "property declaration path index {selected_index} is out of bounds"
+        ));
+    };
+    if nested_path.is_empty() {
+        if matches!(decl, Decl::Property { .. }) {
+            return Ok(());
+        }
+        return Err("property declaration path does not select a property".to_string());
+    }
+
+    let Decl::Module { decls, .. } = decl else {
+        return Err("property declaration path descends through a non-module".to_string());
+    };
+    validate_property_path(decls, nested_path)
 }
 
 /// Run a user property that has an invariant-carrying opaque binder
@@ -767,6 +791,70 @@ fn strip_invariant_meta(expr: &Expr) -> Expr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parsed_module_property(
+        source: &str,
+        property_name: &str,
+    ) -> (Vec<Decl>, Vec<usize>, Vec<Param>) {
+        let parsed =
+            chelis_surf::parser::parse_str(source).expect("parse injection routing fixture");
+        let module_decls = parsed
+            .iter()
+            .find_map(|decl| match decl {
+                Decl::Module { decls, .. } => Some(decls.clone()),
+                _ => None,
+            })
+            .expect("fixture has a module");
+        let (property_index, params) = module_decls
+            .iter()
+            .enumerate()
+            .find_map(|decl| match decl {
+                (index, Decl::Property { name, params, .. }) if name == property_name => {
+                    Some((index, params.clone()))
+                }
+                _ => None,
+            })
+            .expect("fixture has the requested property");
+        (module_decls, vec![property_index], params)
+    }
+
+    #[test]
+    fn valid_plain_scalar_property_is_checked_without_selecting_injection() {
+        let (decls, property_path, params) = parsed_module_property(
+            "module M
+@property nested_grad forall(x: f32):
+  (grad(grad(fn (xx: f32) -> xx * xx, wrt=xx), wrt=xx)(x) >= 0.0)
+",
+            "nested_grad",
+        );
+
+        assert_eq!(
+            property_has_opaque_invariant_binder(&decls, &property_path, &params),
+            Ok(false),
+            "a valid property without an opaque binder is not injection-owned"
+        );
+    }
+
+    #[test]
+    fn opaque_invariant_binder_still_selects_injection() {
+        let (decls, property_path, params) = parsed_module_property(
+            "module M
+@opaque
+@invariant(p) p.value >= 0.0
+type Probability =
+  | Probability { value: f32 }
+@property bounded forall(p: Probability):
+  (p.value >= 0.0)
+",
+            "bounded",
+        );
+
+        assert_eq!(
+            property_has_opaque_invariant_binder(&decls, &property_path, &params),
+            Ok(true),
+            "an invariant-carrying opaque binder must remain injection-owned"
+        );
+    }
 
     #[test]
     fn module_search_rejects_unknown_form_but_keeps_legacy_name_head_recursion() {

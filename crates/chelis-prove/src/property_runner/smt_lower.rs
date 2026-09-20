@@ -24,6 +24,8 @@ use crate::contracts::{
 };
 use crate::solver::{ArithOp, CmpOp, SmtExpr, SmtSort};
 
+const NESTED_GRAD_SMT_BOUNDARY: &str = "scalar grad SMT lowering does not support nested gradients";
+
 pub(super) struct InlineCtx<'a> {
     pub(super) decls: &'a [Decl],
     pub(super) depth: usize,
@@ -40,6 +42,9 @@ pub(super) struct DeepInlineCtx<'a> {
     pub(super) depth: usize,
     pub(super) max_depth: usize,
     pub(super) call_stack: Vec<String>,
+    /// First structured capability boundary encountered while lowering a
+    /// canonical Deep scalar `grad` application.
+    pub(super) grad_diagnostic: Option<&'a RefCell<Option<String>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -571,6 +576,10 @@ pub(super) fn deep_expr_to_smt(
 
 fn deep_arith(expr: &DeepExpr, ctx: &DeepInlineCtx) -> Option<crate::solver::SmtExpr> {
     use crate::solver::{ArithOp as SA, SmtExpr};
+    if let Some(reason) = deep_grad_capability_reason(expr, ctx) {
+        record_deep_grad_diagnostic(ctx, reason);
+        return None;
+    }
     if let Some(name) = deep_var_name(expr) {
         return Some(SmtExpr::Var(name.to_string()));
     }
@@ -621,6 +630,7 @@ fn deep_arith(expr: &DeepExpr, ctx: &DeepInlineCtx) -> Option<crate::solver::Smt
                     stack.push(name.to_string());
                     stack
                 },
+                grad_diagnostic: ctx.grad_diagnostic,
             };
             return deep_arith_subst(body, &subst, &deeper);
         }
@@ -646,6 +656,10 @@ fn deep_arith_subst(
     ctx: &DeepInlineCtx,
 ) -> Option<crate::solver::SmtExpr> {
     use crate::solver::{ArithOp as SA, SmtExpr};
+    if let Some(reason) = deep_grad_capability_reason(expr, ctx) {
+        record_deep_grad_diagnostic(ctx, reason);
+        return None;
+    }
     if let Some(name) = deep_var_name(expr) {
         return subst
             .get(name)
@@ -702,6 +716,7 @@ fn deep_arith_subst(
                     stack.push(name.to_string());
                     stack
                 },
+                grad_diagnostic: ctx.grad_diagnostic,
             };
             return deep_arith_subst(body, &inner_subst, &deeper);
         }
@@ -987,6 +1002,34 @@ fn record_grad_diagnostic(ctx: &InlineCtx, reason: String) {
     }
 }
 
+fn record_deep_grad_diagnostic(ctx: &DeepInlineCtx, reason: String) {
+    if let Some(diagnostic) = ctx.grad_diagnostic {
+        let mut diagnostic = diagnostic.borrow_mut();
+        if diagnostic.is_none() {
+            *diagnostic = Some(reason);
+        }
+    }
+}
+
+fn deep_grad_capability_reason(expr: &DeepExpr, ctx: &DeepInlineCtx) -> Option<String> {
+    let (DeepTag::App, app_children) = deep_node_parts(expr)? else {
+        return None;
+    };
+    let (DeepTag::Grad, grad_children) = deep_node_parts(app_children.first()?)? else {
+        return None;
+    };
+    let target = grad_children.first()?;
+    match deep_tag(target) {
+        Some(DeepTag::Grad) => Some(NESTED_GRAD_SMT_BOUNDARY.to_string()),
+        _ => {
+            let name = deep_var_name(target)?;
+            lookup_deep_fun_body(ctx.exprs, name)
+                .is_none()
+                .then(|| format!("scalar grad SMT lowering cannot resolve function `{name}`"))
+        }
+    }
+}
+
 fn scalar_param(param: &Param) -> bool {
     matches!(
         param.ty.as_ref(),
@@ -1105,7 +1148,7 @@ fn scalar_grad_application(
             (params, body, Some(name.as_str()), ret_ty)
         }
         Expr::Grad(_, _, _) => {
-            return Err("scalar grad SMT lowering does not support nested gradients".to_string());
+            return Err(NESTED_GRAD_SMT_BOUNDARY.to_string());
         }
         Expr::Vmap(_, _, _) => {
             return Err("scalar grad SMT lowering does not support nested `vmap`".to_string());
@@ -1395,9 +1438,7 @@ fn scalar_dual(
             "scalar grad SMT lowering does not support casts in differentiated bodies".to_string(),
         ),
         Expr::Annotate(inner, _, _) => scalar_dual(inner, env, ctx),
-        Expr::Grad(_, _, _) => {
-            Err("scalar grad SMT lowering does not support nested gradients".to_string())
-        }
+        Expr::Grad(_, _, _) => Err(NESTED_GRAD_SMT_BOUNDARY.to_string()),
         Expr::Vmap(_, _, _) => Err("scalar grad SMT lowering does not support `vmap`".to_string()),
         Expr::Jit(_, _) => Err("scalar grad SMT lowering does not support `jit`".to_string()),
         _ => Err("scalar grad SMT lowering encountered a non-scalar operation".to_string()),

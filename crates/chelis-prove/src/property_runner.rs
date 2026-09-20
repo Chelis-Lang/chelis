@@ -546,7 +546,7 @@ pub fn run_surf_decls_properties_with_contract_decls(
     trusted_contract_decls: &[Decl],
     options: &PropertyRunOptions,
 ) -> Result<PropertyRunResult, String> {
-    let properties = collect_surf_properties(entry_decls, options.only.as_deref());
+    let properties = collect_surf_properties(entry_decls, module_decls, options.only.as_deref())?;
     let mut out = Vec::new();
     for property in &properties {
         // chelis#436: the discharged proposition travels with the record,
@@ -605,6 +605,7 @@ pub fn run_deep_source_properties(
 #[derive(Debug, Clone)]
 struct Property {
     name: String,
+    decl_path: Vec<usize>,
     params: Vec<Param>,
     preconditions: Vec<Expr>,
     body: Expr,
@@ -624,33 +625,83 @@ fn flatten_module_decls(decls: &[Decl]) -> Vec<Decl> {
     out
 }
 
-/// Discover every `@property` declaration in flattened Surf decls (no
-/// hardcoded name; the `only` filter narrows by name pattern). This is the
-/// SAME discovery the CLI uses (it was relocated here so both surfaces share
-/// it, U4).
-fn collect_surf_properties(decls: &[Decl], only: Option<&str>) -> Vec<Property> {
-    decls
-        .iter()
-        .filter_map(|decl| match decl {
-            Decl::Property {
-                name,
-                params,
-                preconditions,
-                body,
-                options,
-                ..
-            } if matches_filter(name, only) => Some(Property {
-                name: name.clone(),
-                params: params.clone(),
-                preconditions: preconditions.clone(),
-                body: body.clone(),
-                samples: property_samples(options),
-                seed: property_seed(options),
-                contracts: property_contracts(options),
-            }),
-            _ => None,
-        })
-        .collect()
+/// Discover every entry `@property` and attach its exact declaration path in
+/// the declaration tree used for whole-program injection validation. Linked
+/// entry declarations are a subset of that tree, while direct source entry
+/// declarations are flattened clones, so discovery matches the complete
+/// declaration structurally and consumes each occurrence exactly once.
+fn collect_surf_properties(
+    entry_decls: &[Decl],
+    module_decls: &[Decl],
+    only: Option<&str>,
+) -> Result<Vec<Property>, String> {
+    let mut entry_properties = Vec::new();
+    collect_property_decls(entry_decls, only, &mut Vec::new(), &mut entry_properties);
+
+    let mut module_properties = Vec::new();
+    collect_property_decls(module_decls, None, &mut Vec::new(), &mut module_properties);
+    let mut used = vec![false; module_properties.len()];
+    let mut properties = Vec::with_capacity(entry_properties.len());
+
+    for (_, entry_decl) in entry_properties {
+        let Some((index, (decl_path, module_decl))) = module_properties
+            .iter()
+            .enumerate()
+            .find(|(index, (_, module_decl))| !used[*index] && *module_decl == entry_decl)
+        else {
+            let name = match entry_decl {
+                Decl::Property { name, .. } => name.as_str(),
+                _ => unreachable!("property discovery returns only property declarations"),
+            };
+            return Err(format!(
+                "entry property `{name}` is absent from the validation declaration tree"
+            ));
+        };
+        used[index] = true;
+
+        let Decl::Property {
+            name,
+            params,
+            preconditions,
+            body,
+            options,
+            ..
+        } = module_decl
+        else {
+            unreachable!("property discovery returns only property declarations");
+        };
+        properties.push(Property {
+            name: name.clone(),
+            decl_path: decl_path.clone(),
+            params: params.clone(),
+            preconditions: preconditions.clone(),
+            body: body.clone(),
+            samples: property_samples(options),
+            seed: property_seed(options),
+            contracts: property_contracts(options),
+        });
+    }
+
+    Ok(properties)
+}
+
+fn collect_property_decls<'a>(
+    decls: &'a [Decl],
+    only: Option<&str>,
+    path: &mut Vec<usize>,
+    out: &mut Vec<(Vec<usize>, &'a Decl)>,
+) {
+    for (index, decl) in decls.iter().enumerate() {
+        path.push(index);
+        match decl {
+            Decl::Module { decls, .. } => collect_property_decls(decls, only, path, out),
+            Decl::Property { name, .. } if matches_filter(name, only) => {
+                out.push((path.clone(), decl));
+            }
+            _ => {}
+        }
+        path.pop();
+    }
 }
 
 fn property_samples(options: &[PropertyOption]) -> Option<usize> {
@@ -766,23 +817,26 @@ fn prove_surf_property(
     // Assumption injection (RFC D-INJECT): a property with an
     // invariant-carrying opaque binder is verified ONLY over
     // invariant-satisfying binder values; the injection path owns it.
-    let has_injected_binder =
-        match injection::property_has_opaque_invariant_binder(module_decls, &property.params) {
-            Ok(has_injected_binder) => has_injected_binder,
-            Err(error) => {
-                return PropertyOutcome::new(
-                    property.name.clone(),
-                    PropertyStatus::Error,
-                    PropertyTier::None,
-                    0,
-                    seed,
-                    None,
-                    Some(error),
-                    false,
-                    Vec::new(),
-                );
-            }
-        };
+    let has_injected_binder = match injection::property_has_opaque_invariant_binder(
+        module_decls,
+        &property.decl_path,
+        &property.params,
+    ) {
+        Ok(has_injected_binder) => has_injected_binder,
+        Err(error) => {
+            return PropertyOutcome::new(
+                property.name.clone(),
+                PropertyStatus::Error,
+                PropertyTier::None,
+                0,
+                seed,
+                None,
+                Some(error),
+                false,
+                Vec::new(),
+            );
+        }
+    };
     if has_injected_binder {
         let mut outcome = injection::prove_with_injection(
             module_decls,
@@ -4068,13 +4122,32 @@ fn try_deep_tier_b(
     options: &PropertyRunOptions,
     seed: u64,
 ) -> Option<PropertyOutcome> {
+    let grad_diagnostic = RefCell::new(None);
     let ctx = DeepInlineCtx {
         exprs,
         depth: 0,
         max_depth: 3,
         call_stack: vec![],
+        grad_diagnostic: Some(&grad_diagnostic),
     };
-    let postcondition = deep_expr_to_smt(&property.body, &ctx)?;
+    let postcondition = match deep_expr_to_smt(&property.body, &ctx) {
+        Some(postcondition) => postcondition,
+        None if options.tier == "smt-only" => {
+            let reason = grad_diagnostic.borrow().clone()?;
+            return Some(PropertyOutcome::new(
+                property.name.clone(),
+                PropertyStatus::Unsupported,
+                PropertyTier::Smt,
+                0,
+                seed,
+                None,
+                Some(reason),
+                false,
+                Vec::new(),
+            ));
+        }
+        None => return None,
+    };
     let variables: Vec<(String, crate::solver::SmtSort)> = property
         .params
         .iter()
@@ -4262,6 +4335,7 @@ fn deep_constraint_sampling_plan(
         depth: 0,
         max_depth: 3,
         call_stack: vec![],
+        grad_diagnostic: None,
     };
     let preconditions = property
         .preconditions
@@ -4727,7 +4801,7 @@ pub fn property_dependency_edges(
             _ => None,
         })
         .collect();
-    let properties = collect_surf_properties(&flat, None);
+    let properties = collect_surf_properties(&flat, &flat, None)?;
     let mut edges = Vec::new();
     for property in &properties {
         let param_names: std::collections::BTreeSet<&str> =

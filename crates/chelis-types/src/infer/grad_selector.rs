@@ -800,6 +800,13 @@ fn selector_callable_origin(
                 _ => SelectorCallableOrigin::Unknown,
             }
         }
+        DeepTag::Grad if !children.is_empty() => {
+            // `grad` transforms a callable without changing its formal
+            // parameter identity. Preserve the target origin so an outer
+            // `grad(..., wrt=...)` validates its operative selector against
+            // the same parameter list.
+            selector_callable_origin(&children[0], callables, locals, identities)
+        }
         DeepTag::Block => children
             .last()
             .map(|item| selector_callable_origin(item, callables, locals, identities))
