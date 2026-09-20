@@ -409,6 +409,14 @@ fn load_if_fresh_rejects_a_torn_write_in_the_identity_region() {
             | CacheError::Reef(_),
         ) => { /* acceptable: any "do not use these bytes" signal */ }
         Err(CacheError::Encode(e)) => panic!("encode error is impossible on the load path: {e}"),
+        // The disk-cache load path has no out-of-band digest to compare
+        // against -- that absence is the whole reason it re-derives
+        // (chelis#2211) -- so this variant arriving here would mean the two
+        // routes had been merged without anyone deciding to.
+        Err(CacheError::HandoffDigestMismatch { expected, actual }) => panic!(
+            "the disk-cache load path must not report a handoff digest mismatch: \
+             expected={expected} actual={actual}"
+        ),
     }
 }
 

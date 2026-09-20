@@ -385,10 +385,54 @@ Serialization note: the typecheck cache serializes `Type`, so serde is the one
 accepted non-constructor witness mint. Production writers only receive
 successful `TypeEnv`/`CheckedProgram` values: non-empty checker errors prevent
 context construction, and the totality invariant forbids `Type::Error` in a
-successful result. Cache envelopes verify format/build identity and byte
-integrity, but deserialization does not rerun semantic checking; cache bytes
-are a trusted internal artifact. This boundary is documented in the witness,
-type-context, and compiler-api cache module docs.
+successful result. Every cache envelope verifies format and build identity and
+its own byte integrity before decoding. What happens after that decode differs
+by route, and the difference is not a preference (chelis#2211).
+
+An **on-disk cache entry** -- `CompiledContext::load_if_fresh`, and the
+`LibraryContext` and `StdLibContext` caches -- reruns the effect and linearity
+checkers over the decoded program, re-lowers it, and compares the result
+against the transmitted lowered payload. The envelope's embedded digest cannot
+stand in for that, because anyone who rewrote the payload rewrote the digest
+with it;
+`cache_wire_compatibility.rs`'s
+`cache_reconstruction_rejects_changed_numeric_bits_after_checksum_recomputed`
+is the control that demonstrates it. The reason this route keeps the
+re-derivation is that nothing else is available to it: a cache entry outlives
+the process that wrote it, so there is no second channel on which the producer
+could have said what the bytes should be.
+
+A **parent-to-worker handoff** -- `CompiledContext::encode_for_handoff` and
+`decode_authenticated`, which `chelis test` uses -- does have that channel. The
+parent writes the bytes to a tempfile and passes their digest in the worker's
+environment, so the worker can establish that the bytes on disk are the ones
+the parent wrote, and does not rerun the checkers. This is not a weaker
+posture: the out-of-band digest rejects a payload rewritten after the parent
+wrote it, which the embedded digest and the re-derivation both accept. Note
+what it does not claim. A same-user process can read another's environment, so
+this is not same-user isolation and is not attempting it; anyone who can set
+the worker's environment or replace the `chelis` binary already runs chosen
+code as this user. What the digest defends is the gap the file's `0600` mode
+leaves open, which is a `TMPDIR` other users can write to, the ordinary shape
+of a shared build machine.
+
+Skipping the reruns is sound only while rerunning them reproduces the program
+they were handed. `chelis-compiler-api`'s
+`compiled_context_authenticated_handoff.rs` reconstructs one real payload
+through both routes and requires byte-identical results, so a normalizing pass
+added to either checker fails there rather than making a worker's library
+quietly differ from its parent's.
+
+Until chelis#2211 this section read "deserialization does not rerun semantic
+checking; cache bytes are a trusted internal artifact", while both routes were
+in fact rerunning the checkers. The doc was wrong in the permissive direction:
+read as permission, it would have licensed removing the disk route's
+re-derivation on the strength of a sentence, which is the escalation
+`AGENTS.md` warns about under "permission-to-mandate". The disk route keeps its
+re-derivation for the reason above, not because no document said to remove it.
+
+This boundary is documented in the witness, type-context, and compiler-api
+cache module docs.
 
 ### C3.1 Deep type/dimension resolution boundary (chelis#756)
 
