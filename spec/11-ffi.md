@@ -193,9 +193,12 @@ including after Reef/package qualification, so a downstream C or C++ driver
 can define its own process entry `main(void)`. Every other authored function
 uses the universal `chelis_fn_<lowercase-hex-UTF-8>` symbol. The generated
 header and source carry the versioned program-identity/export-block envelope
-and exact source digest required by [01-CID-1]. Native callers validate and
-consume that declaration association rather than applying a separate
-name-mapping algorithm or reparsing C definitions.
+and exact source digest required by [01-CID-1]. Each public declaration is
+structurally bound to one externally linked source definition and its exact
+definition/preprocessing commitment; no other externally linked helper
+definition is permitted apart from the generated process `main`. Native callers
+validate and consume that association rather than applying a separate
+name-mapping algorithm or using C substring heuristics.
 
 ## 3. Embedding the Compiler
 

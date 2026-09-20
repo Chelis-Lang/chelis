@@ -4,6 +4,7 @@ mod common;
 
 use assert_cmd::Command;
 use chelis_backend_c::GeneratedHeader;
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command as NativeCommand;
@@ -135,7 +136,7 @@ fn run_native_probe(out: &Path) {
 fn wrap_export_definition_with_macro(source: &str, symbol: &str, replacement: &str) -> String {
     let signature = format!("\nint32_t {symbol}(int32_t x) {{");
     let start = source
-        .find(&signature)
+        .rfind(&signature)
         .unwrap_or_else(|| panic!("generated source has no wrapper definition for `{symbol}`"));
     let mut wrapped = source.to_string();
     wrapped.insert_str(start + 1, &format!("#define {symbol} {replacement}\n"));
@@ -147,16 +148,65 @@ fn wrap_export_definition_with_macro(source: &str, symbol: &str, replacement: &s
     wrapped
 }
 
+fn swap_export_bodies(source: &str, first: &str, second: &str) -> String {
+    let first_call =
+        format!("int32_t __result = {first}__chelis_owned_body(x, __chelis_rng, NULL);");
+    let second_call =
+        format!("int32_t __result = {second}__chelis_owned_body(x, __chelis_rng, NULL);");
+    source
+        .replacen(&first_call, "__SWAPPED_PUBLIC_BODY_TARGET__", 1)
+        .replacen(&second_call, &first_call, 1)
+        .replacen("__SWAPPED_PUBLIC_BODY_TARGET__", &second_call, 1)
+}
+
+fn replace_public_definition_signature(source: &str, symbol: &str, replacement: &str) -> String {
+    let signature = format!("int32_t {symbol}(");
+    let mut changed = source.to_string();
+    let start = changed
+        .rfind(&signature)
+        .unwrap_or_else(|| panic!("generated source has no definition for `{symbol}`"));
+    changed.replace_range(start..start + signature.len(), replacement);
+    changed
+}
+
+fn indirect_macro_swap(source: &str, first: &str, second: &str) -> String {
+    let signature = format!("int32_t {first}(");
+    let start = source.rfind(&signature).expect("first public definition");
+    let mut aliased = source.to_string();
+    aliased.insert_str(
+        start,
+        &format!("#define {first}__chelis_owned_body {second}__chelis_owned_body\n"),
+    );
+    aliased
+}
+
 fn hex_metadata(value: &str) -> String {
     value.bytes().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn declaration_record(source_name: &str, symbol: &str, declaration: &str) -> String {
+fn declaration_record(
+    source_name: &str,
+    symbol: &str,
+    declaration: &str,
+    definition_digest: &str,
+) -> String {
     format!(
-        "/* chelis-declaration: {} {} {} */\n{declaration}",
+        "/* chelis-declaration: {} {} {} {definition_digest} */\n{declaration}",
         hex_metadata(source_name),
         hex_metadata(symbol),
         hex_metadata(declaration)
+    )
+}
+
+fn rewrite_source_digest(header: &str, source: &str) -> String {
+    let mut lines = header.lines();
+    let version = lines.next().expect("generated header version");
+    let identity = lines.next().expect("generated header identity");
+    let _old_digest = lines.next().expect("generated source digest");
+    format!(
+        "{version}\n{identity}\n/* chelis-source-sha256: {:x} */\n{}",
+        Sha256::digest(source.as_bytes()),
+        lines.collect::<Vec<_>>().join("\n")
     )
 }
 
@@ -267,7 +317,8 @@ fn missing_partial_stale_disagreeing_and_swapped_headers_are_rejected() {
         declaration_record(
             lookalike.source_name(),
             lookalike.symbol(),
-            lookalike.declaration()
+            lookalike.declaration(),
+            lookalike.definition_digest(),
         )
     );
     let partial_header = built.header.replacen(&lookalike_block, "", 1);
@@ -282,11 +333,17 @@ fn missing_partial_stale_disagreeing_and_swapped_headers_are_rejected() {
         .declaration()
         .replace(main.symbol(), "pkg__demo__Demo__Main__stale");
     let stale_header = built.header.replacen(
-        &declaration_record(main.source_name(), main.symbol(), main.declaration()),
+        &declaration_record(
+            main.source_name(),
+            main.symbol(),
+            main.declaration(),
+            main.definition_digest(),
+        ),
         &declaration_record(
             main.source_name(),
             "pkg__demo__Demo__Main__stale",
             &stale_declaration,
+            main.definition_digest(),
         ),
         1,
     );
@@ -299,8 +356,18 @@ fn missing_partial_stale_disagreeing_and_swapped_headers_are_rejected() {
 
     let disagreeing_declaration = "double pkg__demo__Demo__Main__main(int32_t x);";
     let disagreeing_header = built.header.replacen(
-        &declaration_record(main.source_name(), main.symbol(), main.declaration()),
-        &declaration_record(main.source_name(), main.symbol(), disagreeing_declaration),
+        &declaration_record(
+            main.source_name(),
+            main.symbol(),
+            main.declaration(),
+            main.definition_digest(),
+        ),
+        &declaration_record(
+            main.source_name(),
+            main.symbol(),
+            disagreeing_declaration,
+            main.definition_digest(),
+        ),
         1,
     );
     let disagreeing =
@@ -421,5 +488,105 @@ fn source_macro_alias_swap_is_rejected_before_native_wrong_call() {
             String::from_utf8_lossy(&bypassed.stderr)
         );
         run_native_probe(&built.out);
+    }
+}
+
+#[test]
+fn exact_definition_binding_rejects_all_five_resealed_bypasses() {
+    let built = build_package();
+    let generated = GeneratedHeader::parse(&built.header).expect("generated declaration metadata");
+    let call = generated
+        .declaration(QUALIFIED_CALL)
+        .expect("ordinary call declaration");
+    let prefix = generated
+        .declaration(QUALIFIED_PREFIX_NAME)
+        .expect("prefix-shaped declaration");
+
+    let body_swap = swap_export_bodies(&built.source, call.symbol(), prefix.symbol());
+    assert_ne!(
+        body_swap, built.source,
+        "body-swap control must mutate source"
+    );
+    let indirect_swap = indirect_macro_swap(&built.source, call.symbol(), prefix.symbol());
+    let wrong_declaration = call
+        .declaration()
+        .replace(call.symbol(), "metadata_does_not_name_this_symbol");
+    let declaration_spoofed_source = built.source.replace(
+        &hex_metadata(call.declaration()),
+        &hex_metadata(&wrong_declaration),
+    );
+    let declaration_spoofed_header = rewrite_source_digest(
+        &built
+            .header
+            .replace(
+                &hex_metadata(call.declaration()),
+                &hex_metadata(&wrong_declaration),
+            )
+            .replace(call.declaration(), &wrong_declaration),
+        &declaration_spoofed_source,
+    );
+    let internalized = replace_public_definition_signature(
+        &built.source,
+        call.symbol(),
+        &format!("static int32_t {}(", call.symbol()),
+    );
+    let unregistered = format!(
+        "{}\nint32_t external_helper(int32_t x) {{\n    return x - 1;\n}}\n",
+        built.source
+    );
+
+    let body_swap_header = rewrite_source_digest(&built.header, &body_swap);
+    let indirect_swap_header = rewrite_source_digest(&built.header, &indirect_swap);
+    let internalized_header = rewrite_source_digest(&built.header, &internalized);
+    let unregistered_header = rewrite_source_digest(&built.header, &unregistered);
+    for (label, source, header) in [
+        ("exchanged definition bodies", &body_swap, &body_swap_header),
+        (
+            "indirect macro aliases",
+            &indirect_swap,
+            &indirect_swap_header,
+        ),
+        (
+            "canonical metadata with a declaration naming another symbol",
+            &declaration_spoofed_source,
+            &declaration_spoofed_header,
+        ),
+        (
+            "public metadata over a static definition",
+            &internalized,
+            &internalized_header,
+        ),
+        (
+            "an unregistered external helper",
+            &unregistered,
+            &unregistered_header,
+        ),
+    ] {
+        let resealed = GeneratedHeader::parse(header).expect("whole-source digest reseal");
+        assert!(
+            resealed.validate_source(source).is_err(),
+            "{label} must remain invalid after recomputing the whole-source digest"
+        );
+    }
+
+    generated
+        .validate_source(&built.source)
+        .expect("unmodified compiler output remains the exact positive control");
+
+    if common::gcc_available() {
+        for (label, source) in [
+            ("exchanged definition bodies", &body_swap),
+            ("indirect macro aliases", &indirect_swap),
+        ] {
+            common::write_file(&built.out.join("main.c"), source);
+            let bypassed = compile_driver_for_symbol(&built.out, "main.h", call.symbol(), 44)
+                .expect("compile validation-bypass control");
+            assert!(
+                bypassed.status.success(),
+                "{label} must compile when validation is bypassed to prove the wrong native output:\n{}",
+                String::from_utf8_lossy(&bypassed.stderr)
+            );
+            run_native_probe(&built.out);
+        }
     }
 }

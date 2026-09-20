@@ -62,8 +62,12 @@ impl CodegenResult {
         &mut self,
         program_identity: &str,
     ) -> Result<(), chelis_types::unsupported::Unsupported> {
-        let (source, header) =
-            seal_generated_artifact(program_identity, &self.c_source, &self.h_header)?;
+        let (source, header) = generated_header::reseal_generated_artifact(
+            program_identity,
+            &self.c_source,
+            &self.h_header,
+        )
+        .map_err(generated_artifact_error)?;
         self.c_source = source;
         self.h_header = header;
         Ok(())
@@ -352,19 +356,24 @@ fn seal_generated_artifact(
     source: &str,
     header: &str,
 ) -> Result<(String, String), chelis_types::unsupported::Unsupported> {
-    generated_header::seal_generated_artifact(program_identity, source, header).map_err(|error| {
-        chelis_types::unsupported::Unsupported::new(
-            chelis_types::unsupported::UnsupportedKind::Construct(
-                "generated C artifact contract".to_string(),
-            ),
-            error.to_string(),
-            chelis_types::unsupported::Stage::Codegen("c"),
-            chelis_types::deliberate_rejection!(
-                "[01-CID-1]",
-                "generated C source and header must carry one exact program/export artifact envelope"
-            ),
-        )
-    })
+    generated_header::seal_generated_artifact(program_identity, source, header)
+        .map_err(generated_artifact_error)
+}
+
+fn generated_artifact_error(
+    error: generated_header::GeneratedHeaderError,
+) -> chelis_types::unsupported::Unsupported {
+    chelis_types::unsupported::Unsupported::new(
+        chelis_types::unsupported::UnsupportedKind::Construct(
+            "generated C artifact contract".to_string(),
+        ),
+        error.to_string(),
+        chelis_types::unsupported::Stage::Codegen("c"),
+        chelis_types::deliberate_rejection!(
+            "[01-CID-1]",
+            "generated C source and header must carry one exact program/export artifact envelope"
+        ),
+    )
 }
 
 /// Apply the C backend's payload-selection rewrites before ownership lowering.

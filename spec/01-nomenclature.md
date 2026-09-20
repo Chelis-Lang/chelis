@@ -150,20 +150,30 @@ the lint is.
 > canonical C symbol, and canonical C declaration in lowercase-hex UTF-8,
 > followed by declaration bytes that match the record exactly even when the
 > declaration is multiline. Its source export block carries the export kind
-> plus the same source identity, symbol, and declaration; the C definition
-> between the block markers is opaque payload, not text a validator reparses
-> with C substring heuristics. Downstream C code SHALL
+> plus the same source identity, symbol, declaration, and a canonical
+> definition commitment. That commitment hashes the exact enclosed C function
+> definition bytes together with the translation unit's canonical source-local
+> preprocessing-directive sequence. Validation SHALL parse the C
+> translation unit structurally and prove that each block encloses exactly one
+> externally linked function definition whose declarator and signature match
+> the recorded symbol and declaration and whose exact definition bytes and
+> preprocessing context match the recorded commitment. This structural parse,
+> rather than C substring
+> heuristics, determines definition boundaries and linkage. Downstream C code SHALL
 > consume the generated declaration, and tooling that needs the Chelis-to-C
 > association SHALL consume the envelope rather than reconstructing the
 > symbol from source spelling. The declaration records and source export
 > blocks SHALL form an exact set in program identity, source identity,
-> canonical symbol, and declaration. The header digest SHALL bind every
+> canonical symbol, declaration, linkage, and exact definition. The header digest SHALL bind every
 > source byte, so a partial header, an unmarked addition, a formatting or type
-> mutation, or a source-name/symbol reassociation is invalid before native
-> execution. Generated source SHALL NOT define or undefine a macro whose name
-> is a published C symbol. Translation-unit-private `static` helpers and the
-> generated process entry `main` are opaque source outside the public export
-> blocks and SHALL NOT enter that set.
+> mutation, or a source-name/symbol/definition reassociation is invalid before
+> native execution. Recomputing the whole-source digest SHALL NOT authorize a
+> changed public definition. Generated source SHALL NOT use direct or indirect
+> preprocessor aliases to change a published definition's symbol or body.
+> Every externally linked function definition other than the generated process
+> entry `main` SHALL have exactly one export record. Translation-unit-private
+> `static` helpers, including comment-separated multiline declarations, remain
+> valid outside that set.
 
 The source identifier itself is unchanged: no case rewriting or source-level
 reservation is introduced. The compiler-owned spelling is the published C ABI

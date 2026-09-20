@@ -8,9 +8,14 @@ fn hex_metadata(value: &str) -> String {
     value.bytes().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn declaration_record(source_name: &str, symbol: &str, declaration: &str) -> String {
+fn declaration_record(
+    source_name: &str,
+    symbol: &str,
+    declaration: &str,
+    definition_digest: &str,
+) -> String {
     format!(
-        "/* chelis-declaration: {} {} {} */\n{declaration}",
+        "/* chelis-declaration: {} {} {} {definition_digest} */\n{declaration}",
         hex_metadata(source_name),
         hex_metadata(symbol),
         hex_metadata(declaration)
@@ -41,6 +46,7 @@ fn missing_stale_and_disagreeing_compiler_api_headers_fail_closed() {
     let program = emit("def entry(x: f32) -> f32 = add(x, 1.0f32)", "entry");
     let declaration = program.declaration("entry");
     let symbol = program.symbol("entry");
+    let definition_digest = program.definition_digest("entry");
 
     assert!(
         program.with_header(String::new()).is_err(),
@@ -49,8 +55,13 @@ fn missing_stale_and_disagreeing_compiler_api_headers_fail_closed() {
 
     let stale_declaration = declaration.replace(symbol, "stale_entry");
     let stale_header = program.header().replacen(
-        &declaration_record("entry", symbol, declaration),
-        &declaration_record("entry", "stale_entry", &stale_declaration),
+        &declaration_record("entry", symbol, declaration, definition_digest),
+        &declaration_record(
+            "entry",
+            "stale_entry",
+            &stale_declaration,
+            definition_digest,
+        ),
         1,
     );
     let stale = program
@@ -63,8 +74,8 @@ fn missing_stale_and_disagreeing_compiler_api_headers_fail_closed() {
 
     let disagreeing_declaration = declaration.replace("(float x)", "(double x)");
     let disagreeing_header = program.header().replacen(
-        &declaration_record("entry", symbol, declaration),
-        &declaration_record("entry", symbol, &disagreeing_declaration),
+        &declaration_record("entry", symbol, declaration, definition_digest),
+        &declaration_record("entry", symbol, &disagreeing_declaration, definition_digest),
         1,
     );
     let disagreeing = program

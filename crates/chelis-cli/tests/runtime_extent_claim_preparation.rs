@@ -9,6 +9,7 @@
 //! The oracle command and remaining owners live in runtime_extents.md C5.
 mod common;
 
+use chelis_backend_c::GeneratedHeader;
 use common::{gcc_available, link_generated};
 use serde_json::{Value, json};
 use std::{fs, path::Path, process::Command};
@@ -393,8 +394,12 @@ fn driver(inputs: &[Input], header: &str) -> (String, Vec<String>) {
         // A single pure tensor definition is exported through the named
         // kernel ABI. Exercise that public entry rather than inventing a
         // host wrapper which the compiler did not emit.
+        let generated = GeneratedHeader::parse(header).expect("generated fixture header");
+        let fixture = generated
+            .declaration("fixture")
+            .expect("named-kernel fixture declaration");
         assert_eq!(
-            header.trim(),
+            fixture.declaration(),
             "void fixture(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);",
             "unknown exported fixture ABI"
         );
