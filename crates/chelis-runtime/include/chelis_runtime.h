@@ -112,6 +112,10 @@ static inline int64_t chelis_int_abs_guard(int64_t value, int bits,
         default:
             fprintf(stderr, "chelis internal error: invalid integer abs width %d\n", bits);
             chelis_flush_and_abort();
+            /* Keep the published header warning-clean even when a C/C++
+             * compiler does not infer abort's non-returning contract through
+             * this inline wrapper. The return is unreachable. */
+            return value;
     }
     if (value == minimum) {
         fprintf(stderr, "%s\n", trap_message);

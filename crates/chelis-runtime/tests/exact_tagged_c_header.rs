@@ -241,6 +241,7 @@ fn published_runtime_header_compiles_as_c11_and_cxx17() {
             .arg("-Wall")
             .arg("-Wextra")
             .arg("-Werror")
+            .arg("-pedantic-errors")
             .arg("-I")
             .arg(include_dir())
             .arg("-fsyntax-only")
@@ -289,7 +290,7 @@ fn cxx_header_probe_rejects_the_c_only_noreturn_spelling() {
         .expect("write C++ negative-control probe");
     let compiler = std::env::var("CXX").unwrap_or_else(|_| "c++".to_string());
     let compile = Command::new(&compiler)
-        .args(["-std=c++17", "-fsyntax-only", "-I"])
+        .args(["-std=c++17", "-pedantic-errors", "-fsyntax-only", "-I"])
         .arg(&temp.0)
         .arg(&source)
         .output()
