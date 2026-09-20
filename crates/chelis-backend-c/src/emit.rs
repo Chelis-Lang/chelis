@@ -680,6 +680,11 @@ impl CEmitter {
         } else {
             String::new()
         };
+        if !options.static_entry {
+            e.line(&crate::generated_header::render_direct_export_marker(
+                func_name,
+            ));
+        }
         e.line(&format!(
             "{linkage}void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out{random_param}) {{"
         ));

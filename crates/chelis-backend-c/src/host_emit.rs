@@ -1923,6 +1923,11 @@ fn append_unreachable_fn_abort_stub(
     } else {
         params
     };
+    if !internal_linkage {
+        out.push(crate::generated_header::render_authored_export_marker(
+            &function.name,
+        ));
+    }
     out.push(format!(
         "{prefix}{} {}({}) {{",
         c_type(&function.ret_ty)?,
@@ -2320,6 +2325,9 @@ fn emit_function(
             .map(|param| c_decl(&param.ty, &param.name))
             .collect::<Result<Vec<_>, _>>()?
             .join(", ");
+        out.push(crate::generated_header::render_authored_export_marker(
+            &function.name,
+        ));
         out.push(format!(
             "{} {}({}) {{",
             c_type(&function.ret_ty)?,

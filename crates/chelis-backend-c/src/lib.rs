@@ -656,6 +656,10 @@ mod tests {
         let result = codegen(&dag, "my_func").unwrap();
         assert!(result.c_source.contains("void my_func("));
         assert!(result.h_header.contains("void my_func("));
+        GeneratedHeader::parse(&result.h_header)
+            .expect("generated direct declaration")
+            .validate_source(&result.c_source)
+            .expect("direct source/header export sets agree");
         assert_eq!(
             result.requirements,
             toolchain::CodegenRequirements {

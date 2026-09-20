@@ -59,8 +59,14 @@ does not erase that exception when the decoded source binding is exactly `main`.
 ordinary authored identifier ending in `__main` is not source-level `main` and uses the
 universal mapping. Each generated declaration is
 preceded by the exact `/* chelis-source-name: <Chelis-name> */` association metadata.
-Downstream C code SHALL call the declarations in the generated header, and tooling SHALL
-consume that metadata rather than reconstructing symbols from Chelis source spellings.
+Each externally linked authored definition is preceded by matching
+`/* chelis-authored-export: <Chelis-name> */` metadata. The two sets SHALL be exactly
+bijective in source name, canonical symbol, and declaration; partial headers, extra
+authored definitions, and reassociated metadata SHALL fail before native execution.
+Translation-unit-private `static` helpers and the generated process entry `main` are
+outside this published set. Downstream C code SHALL call the declarations in the
+generated header, and tooling SHALL consume the generated associations rather than
+reconstructing symbols from Chelis source spellings.
 
 Current design points:
 

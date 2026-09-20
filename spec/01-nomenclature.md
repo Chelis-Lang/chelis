@@ -147,7 +147,14 @@ the lint is.
 > `/* chelis-source-name: <Chelis-name> */` metadata. Downstream C code SHALL
 > consume the generated declaration, and tooling that needs the Chelis-to-C
 > association SHALL consume that metadata rather than reconstructing the
-> symbol from source spelling.
+> symbol from source spelling. The header declarations and externally linked
+> authored definitions SHALL form an exact set: an omitted declaration, an
+> extra authored export, or a source-name/symbol reassociation is invalid.
+> Generated source SHALL precede each externally linked authored definition
+> with exact `/* chelis-authored-export: <Chelis-name> */` metadata so this
+> bijection can be checked before native execution. Translation-unit-private
+> `static` helpers and the generated process entry `main` are not authored
+> exports and SHALL NOT enter that set.
 
 The source identifier itself is unchanged: no case rewriting or source-level
 reservation is introduced. The compiler-owned spelling is the published C ABI
