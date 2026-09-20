@@ -2,9 +2,12 @@
 
 from pathlib import Path
 import importlib.util
+import io
+import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 def _load_module():
@@ -239,6 +242,39 @@ class PreparationTests(unittest.TestCase):
                     run=lambda _command: None,
                 )
 
+    def test_authenticated_checkout_failure_is_classified_as_setup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            shell = root / "shell"
+            shell.mkdir()
+            (shell / "reef.toml").write_text(
+                self._manifest("consumer", "0.1.0"),
+                encoding="utf-8",
+            )
+
+            def clone(_repo: str, _commit: str, _destination: Path) -> None:
+                raise subprocess.CalledProcessError(
+                    128,
+                    ["gh", "repo", "clone"],
+                )
+
+            with self.assertRaisesRegex(
+                dpd.DependencySetupError,
+                "authenticated exact-source checkout failed",
+            ):
+                dpd.prepare_dependencies(
+                    workspace=root / "deps",
+                    shell=shell,
+                    compiler_version="0.18.10",
+                    encoded_specs=(
+                        "Chelis-Lang/nautilus@v0.7.45"
+                        f"#{SOURCE_COMMITS['nautilus']}",
+                    ),
+                    clone=clone,
+                    head=lambda _destination: SOURCE_COMMITS["nautilus"],
+                    run=lambda _command: None,
+                )
+
     def test_moved_tag_with_same_manifest_version_is_rejected_by_head_sha(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -257,7 +293,10 @@ class PreparationTests(unittest.TestCase):
                 )
 
             moved_commit = "a" * 40
-            with self.assertRaisesRegex(ValueError, "checked out.*expected"):
+            with self.assertRaisesRegex(
+                dpd.DependencySetupError,
+                "checked out.*expected",
+            ):
                 dpd.prepare_dependencies(
                     workspace=root / "deps",
                     shell=shell,
@@ -281,6 +320,107 @@ class PreparationTests(unittest.TestCase):
             with self.subTest(encoded=encoded):
                 with self.assertRaisesRegex(ValueError, "expected.*SHA"):
                     dpd.parse_dependency_spec(encoded)
+
+
+class CloneContractTests(unittest.TestCase):
+    def test_authenticated_full_clone_is_followed_by_exact_checkout(self):
+        destination = Path("/tmp/nautilus")
+        commit = SOURCE_COMMITS["nautilus"]
+        with mock.patch.object(dpd.subprocess, "run") as run:
+            dpd._clone_repo("Chelis-Lang/nautilus", commit, destination)
+
+        self.assertEqual(
+            run.call_args_list,
+            [
+                mock.call(
+                    [
+                        "gh",
+                        "repo",
+                        "clone",
+                        "Chelis-Lang/nautilus",
+                        str(destination),
+                        "--",
+                        "--no-checkout",
+                    ],
+                    check=True,
+                ),
+                mock.call(
+                    [
+                        "git",
+                        "-C",
+                        str(destination),
+                        "checkout",
+                        "--detach",
+                        commit,
+                    ],
+                    check=True,
+                ),
+            ],
+        )
+
+    def test_clone_contract_has_no_plain_unauthenticated_fetch(self):
+        destination = Path("/tmp/nautilus")
+        with mock.patch.object(dpd.subprocess, "run") as run:
+            dpd._clone_repo(
+                "Chelis-Lang/nautilus",
+                SOURCE_COMMITS["nautilus"],
+                destination,
+            )
+
+        commands = [call.args[0] for call in run.call_args_list]
+        self.assertFalse(
+            any(command[0] == "git" and "fetch" in command for command in commands),
+            "exact private sources must not use a plain unauthenticated git fetch",
+        )
+
+
+class MainTests(unittest.TestCase):
+    ARGV = [
+        "drift_prepare_dependencies.py",
+        "--workspace",
+        "/tmp/deps",
+        "--shell",
+        "/tmp/shell",
+        "--compiler-version",
+        "0.18.10",
+        (
+            "Chelis-Lang/nautilus@v0.7.45"
+            f"#{SOURCE_COMMITS['nautilus']}"
+        ),
+    ]
+
+    def test_setup_failure_uses_distinct_exit_status(self):
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(
+                dpd,
+                "prepare_dependencies",
+                side_effect=dpd.DependencySetupError("auth failed"),
+            ),
+            mock.patch("sys.stderr", stderr),
+        ):
+            status = dpd.main(self.ARGV)
+
+        self.assertEqual(status, dpd.DEPENDENCY_SETUP_FAILURE)
+        self.assertIn("dependency setup failed: auth failed", stderr.getvalue())
+
+    def test_source_drift_failure_keeps_general_failure_status(self):
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(
+                dpd,
+                "prepare_dependencies",
+                side_effect=ValueError("source no longer builds"),
+            ),
+            mock.patch("sys.stderr", stderr),
+        ):
+            status = dpd.main(self.ARGV)
+
+        self.assertEqual(status, 1)
+        self.assertIn(
+            "dependency preparation failed: source no longer builds",
+            stderr.getvalue(),
+        )
 
 
 if __name__ == "__main__":
