@@ -175,6 +175,149 @@ class DriverRuntimeControls(unittest.TestCase):
             self.assertEqual(seen["LD_LIBRARY_PATH"], "/pinned/lib")
 
 
+class CargoOriginControls(unittest.TestCase):
+    def setUp(self):
+        self.scratch = tempfile.TemporaryDirectory(
+            prefix="cargo-origin-", dir=ROOT / "target"
+        )
+        self.addCleanup(self.scratch.cleanup)
+        self.root = Path(self.scratch.name)
+        (self.root / "Cargo.lock").write_text(
+            """version = 4
+
+[[package]]
+name = "serde_core"
+version = "1.0.228"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "serde_json"
+version = "1.0.149"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+"""
+        )
+
+    def artifact(self, package, target, filename, *, features=()):
+        path = self.root / filename
+        path.write_bytes(filename.encode())
+        return {
+            "reason": "compiler-artifact",
+            "package_id": (
+                "registry+https://github.com/rust-lang/crates.io-index#"
+                + package
+            ),
+            "target": {"kind": ["lib"], "name": target},
+            "features": list(features),
+            "filenames": [str(path), str(path.with_suffix(".rmeta"))],
+        }
+
+    def resolve(self, name, stable_id, artifacts, artifact_ids):
+        from capacity_census_wire_calls import _resolve_defining_artifact
+
+        with patch(
+            "capacity_census_wire_calls._artifact_id",
+            side_effect=lambda path, _root: artifact_ids[Path(path).name],
+        ):
+            return _resolve_defining_artifact(
+                self.root,
+                name,
+                [{"crate": name, "stable_crate_id": stable_id}],
+                artifacts,
+                require_registry_origin=True,
+            )
+
+    def test_split_serde_artifacts_resolve_by_locked_package_and_stable_crate_id(self):
+        serde_core_old = self.artifact(
+            "serde_core@1.0.228",
+            "serde_core",
+            "libserde_core-old.rlib",
+            features=("rc", "result", "std"),
+        )
+        serde_core_current = self.artifact(
+            "serde_core@1.0.228",
+            "serde_core",
+            "libserde_core-current.rlib",
+            features=("std",),
+        )
+        serde_json_old = self.artifact(
+            "serde_json@1.0.149",
+            "serde_json",
+            "libserde_json-old.rlib",
+            features=("default", "float_roundtrip", "raw_value", "std"),
+        )
+        serde_json_current = self.artifact(
+            "serde_json@1.0.149",
+            "serde_json",
+            "libserde_json-current.rlib",
+            features=("default", "indexmap", "preserve_order", "std"),
+        )
+        artifacts = [
+            serde_core_old,
+            serde_core_current,
+            serde_json_old,
+            serde_json_current,
+        ]
+        artifact_ids = {
+            "libserde_core-old.rlib": "1" * 16,
+            "libserde_core-current.rlib": "2" * 16,
+            "libserde_json-old.rlib": "1" * 16,
+            "libserde_json-current.rlib": "3" * 16,
+        }
+
+        core = self.resolve("serde_core", "2" * 16, artifacts, artifact_ids)
+        json_origin = self.resolve("serde_json", "3" * 16, artifacts, artifact_ids)
+
+        self.assertEqual(core[0], serde_core_current)
+        self.assertEqual(core[1].name, "libserde_core-current.rlib")
+        self.assertEqual(core[2], "2" * 16)
+        self.assertEqual(json_origin[0], serde_json_current)
+
+    def test_defining_artifact_rejects_absent_ambiguous_unlocked_and_mismatched_evidence(
+        self,
+    ):
+        locked = self.artifact(
+            "serde_json@1.0.149", "serde_json", "libserde_json-locked.rlib"
+        )
+        duplicate = self.artifact(
+            "serde_json@1.0.149", "serde_json", "libserde_json-duplicate.rlib"
+        )
+        unlocked = self.artifact(
+            "serde_json@0.0.0", "serde_json", "libserde_json-unlocked.rlib"
+        )
+        ids = {
+            "libserde_json-locked.rlib": "4" * 16,
+            "libserde_json-duplicate.rlib": "4" * 16,
+            "libserde_json-unlocked.rlib": "4" * 16,
+        }
+        cases = (
+            ("absent", [], ids, "unresolved defining serde_json Cargo origin"),
+            (
+                "ambiguous",
+                [locked, duplicate],
+                ids,
+                "unresolved defining serde_json Cargo origin",
+            ),
+            (
+                "unlocked",
+                [unlocked],
+                ids,
+                "unresolved defining serde_json Cargo origin",
+            ),
+            (
+                "mismatched",
+                [locked],
+                {**ids, "libserde_json-locked.rlib": "5" * 16},
+                "compiler/Cargo serde_json identity mismatch",
+            ),
+        )
+        for reason, artifacts, artifact_ids, message in cases:
+            with (
+                self.subTest(reason=reason),
+                self.assertRaisesRegex(ValueError, message),
+            ):
+                self.resolve("serde_json", "4" * 16, artifacts, artifact_ids)
+
+
 class InvocationControls(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
