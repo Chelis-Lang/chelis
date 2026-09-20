@@ -228,6 +228,16 @@ fn grad_dag_checked_impl(
                         live[updates.0] = true;
                     }
                 }
+                // UniformLike's optional second input is the scalar Bool
+                // activation for path-sensitive handled Random execution.
+                // Its adjoint routes zero only to the numeric template, so
+                // the control edge must not pull logical predicate producers
+                // into structural rejection analysis.
+                RiscOp::UniformLike { .. } => {
+                    if let Some(template) = node.inputs.first() {
+                        live[template.0] = true;
+                    }
+                }
                 // A comparison contributes an exact zero cotangent to both
                 // operands. Its predicate may control differentiable float
                 // selection, but the arithmetic that formed the predicate is
