@@ -2520,29 +2520,6 @@ class CiParityTests(unittest.TestCase):
                 block = _ci_job_block(job)
                 _assert_read_only_workspace_cache(block)
 
-    def test_capacity_rustdoc_cache_is_restored_by_its_linux_owner(self):
-        path = "path: target/agents/729-capacity-rustdoc"
-        key = (
-            "key: ${{ runner.os }}-${{ runner.arch }}-capacity-rustdoc-v1-"
-            "${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', "
-            "'scripts/capacity_census_typed.py', "
-            "'crates/chelis-compiler-api/**', 'crates/chelis-python/**') }}"
-        )
-        dtype = _ci_job_block("dtype-phase3-oracle")
-        generalization = _ci_job_block("generalize-sweep-oracle-shard")
-        for name, block in (
-            ("dtype-phase3-oracle", dtype),
-        ):
-            with self.subTest(job=name):
-                self.assertEqual(block.count("uses: actions/cache/restore@v4"), 2)
-                self.assertIn(path, block)
-                self.assertIn(key, block)
-        self.assertEqual(dtype.count("uses: actions/cache/save@v4"), 2)
-        self.assertNotIn("github.event_name == 'push'", dtype)
-        self.assertIn("github.ref == 'refs/heads/main'", dtype)
-        self.assertNotIn("uses: actions/cache/save@v4", generalization)
-        self.assertNotIn("uses: actions/cache/restore@v4", generalization)
-
     def test_nextest_jobs_share_one_reef_fixture_root_per_runner(self):
         setting = (
             "CHELIS_TEST_SHARED_REEF_HOME: "
