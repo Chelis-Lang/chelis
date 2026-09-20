@@ -1720,6 +1720,143 @@ cadence = "pull_request and push"
 reason = "the release workflow's job graph, build targets, header manifests, glibc lane, canary wiring, and release-notes extraction are locked by script-unit"
 tracking_issue = "chelis#2027"
 
+# The project runtime is activated by script-unit before its discovered tests.
+# Native flake execution and protected cache publication retain their manual owners.
+[[path_rule]]
+prefix = "devenv.lock"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit activates the locked project runtime and executes the Devenv version and lock-parity contracts"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "devenv.nix"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit evaluates the project entry point during activation and executes the Devenv composition contracts"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "devenv.yaml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit activates the declared Devenv inputs and checks the CLI version and lock parity"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "devenv/ci.nix"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit evaluates and activates the CI profile before running its Python suite"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "devenv/commands.nix"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit runs through the managed project command launcher and exercises its environment handoff contracts"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "devenv/toolchains.nix"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit realizes the project toolchain during activation and checks the Devenv version and composition contracts"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "nix/checks.nix"
+disposition = "owner"
+workflow = "nix-packages.yml"
+job = "nix-linux-x86-64"
+cadence = "workflow_dispatch and published release"
+reason = "the native Nix job executes the complete flake check set, including the generated launcher's Bash syntax and shellcheck derivation"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "scripts/ci_devenv.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit performs real CI activation and runs the positive and negative environment-publication and command-execution contracts"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "scripts/ci_nix_cache_roots.py"
+disposition = "owner"
+workflow = "nix-packages.yml"
+job = "nix-linux-x86-64"
+cadence = "workflow_dispatch on main after protected cache restoration"
+reason = "the protected native Nix job declares the activated profile and completed native check roots before verified cache publication"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "scripts/devenv_entry_regression.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the entry-result classifier's success, failed-task, missing-export, and missing-payload contracts"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "scripts/test_ci_devenv.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the discovered PR script suite executes the CI activation and command-handoff regression cases"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "scripts/test_devenv_composition.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the discovered PR script suite executes the Devenv module-composition contracts"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "scripts/test_devenv_entry_regression.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the discovered PR script suite executes the concurrent-entry result classification regressions"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "scripts/test_devenv_version.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the discovered PR script suite executes the CLI version, module pin, and Kache version contracts"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "scripts/test_gate_parity_adversarial.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the discovered PR script suite executes adversarial canonical-gate and hosted-workflow parity checks"
+tracking_issue = "chelis#2241"
+
 [[path_rule]]
 prefix = "scripts/ci_change_owned.py"
 disposition = "owner"
