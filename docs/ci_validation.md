@@ -10,7 +10,7 @@ Ordinary PRs and main pushes use Linux. Passing required PR checks is **not a ph
 | `ci.yml` / `conformance.yml` candidate preflight | Every PR implementation event; CI-contract tests only when their path classifier fires | Rejects undeclared base merges, base-changing rebases and other history rewrites; runs bootstrap-light workflow/routing tests before expensive build fan-out |
 | `ci.yml` `ci-fast` | Ordinary PR and main push, with the existing docs-only skip; accepted targeted rebases use the interaction frontier instead | Every default-feature library/binary unit target and the reviewed `standing_target` identities in `.config/ci-test-targets.toml`; 20-minute limit |
 | `ci.yml` change-owned shards and report | Ordinary PR and trusted exact-candidate workflow dispatch, with the existing docs-only skip; accepted targeted rebases run only when their package frontier selects integration coverage | Every integration target added or directly modified by the candidate, with its Cargo-declared required features activated, or its exact reviewed alternative owner; targeted rebases require every eligible target in affected packages and their reverse workspace dependents; four deterministic shards with a 20-minute limit each |
-| `pr-package-expansion.yml` | Manual dispatch after review repairs, parallel with final required checks, using an open PR number and exact expected head SHA | Other integration targets in directly selected packages, with their Cargo-declared required features activated and exact reviewed target/test rows excluded; four informational shards with a 20-minute hard limit and a separate summary |
+| `pr-package-expansion.yml` | Manual dispatch after review repairs, parallel with final required checks, using an open PR number and exact expected head SHA | Other integration targets in directly selected packages, with their Cargo-declared required features activated and exact reviewed target/test rows excluded; four informational shards with a 20-minute hard limit and a separate summary that classifies every observed failure as introduced or inherited against the nightly default-branch baseline and counts unrun coverage on its own |
 | `pr-contract-acknowledgements.yml` | PR open, synchronize, reopen, title/body edit or base retarget | Dedicated required validation of persistent candidate-lifecycle, protected-test and frozen-contract acknowledgement lines; no compiler build |
 | `pr-base-retarget.yml` | PR open/synchronize/reopen plus base-retarget coordination | Required head receipt. Ordinary candidates defer to the normal required implementation contexts. A base retarget holds the head pending while trusted-base coordination dispatches exact-head/exact-base CI and Hull runs against the new synthetic merge |
 | `pr-candidate-receipt.yml` | Completion of any workflow that can finish the required PR check set | Default-branch-owned receipt binding the exact PR head, synthetic candidate, patch identity, required check runs and their workflow/job provenance; eligible receipts can authorize the guarded targeted-rebase lane |
@@ -220,9 +220,10 @@ records the exact synthetic merge SHA and target branch name; every worker and
 the summary check out that frozen SHA. The final validator requires the same PR
 head and target branch name and verifies the frozen merge's exact planned
 parents. Later movement of that same target branch therefore does not invalidate
-the run, while a changed head or target retarget does. Failures, missing shards,
-exclusions, and timing-budget overruns are recorded by `Manual Package Expansion
-Summary`; neither that summary nor its workers feed `Integration Tests (Linux)`.
+the run, while a changed head or target retarget does. Classified failures,
+unrun coverage, missing shards and exclusions are recorded by `Manual Package
+Expansion Summary`; neither that summary nor its workers feed `Integration Tests
+(Linux)`.
 Once review repairs have fixed the intended content, agents start it alongside
 the final required implementation checks; there is no dependency between their
 verdicts. Inspect both before merging and record the reviewed SHA and run link.
@@ -240,7 +241,58 @@ named explicitly. Nightly JUnit reports stay in their producing workflow.
 The Linux nightly report inspects every execution worker and opens a failure
 tracker on non-success; a manual branch run cannot close a main-nightly tracker.
 
-The expansion executor splits ordinary targets into bounded exact-package groups, then issues one list command and one run command per group. The grouping limit changes command boundaries only: every selected target remains required in the informational receipt. Manual-only targets and targets with exact test exclusions remain singleton commands so ignored-test mode and filters cannot affect siblings. An ordinary expansion target whose listing contains no applicable non-ignored test is recorded as inspected and not applicable; an entirely inapplicable group does not launch a guaranteed-empty nextest run. Required change-owned targets remain fail-closed when no active test applies. Listings and JUnit are decomposed back into exact `package::target::test` evidence; a missing applicable result leaves that target incomplete and the shard unsuccessful. The executor stops after a shared 16-minute build/list/test budget and writes an unsuccessful receipt containing completed-group evidence and the complete selected-target list. It terminates the active command's process group and starts no further command. Unfinished coverage remains a failure in the informational summary. The 15-minute soft-budget report and 20-minute job limit remain; the intervening time allows upload after executor expiry. Setup delays, external cancellation or runner loss can still prevent a receipt. Required change-owned execution retains its existing limit.
+The expansion summary makes that distinction itself rather than leaving it to a
+reader. Before summarizing, the job records a default-branch failure baseline
+with `scripts/ci_failure_baseline.py`: the newest completed `heavy-e2e.yml` run
+on `main` that still retains all four `junit-linux-full-*` artifacts *and whose
+commit the candidate's own merge base contains*. A red nightly qualifies,
+because the redness is the evidence; a run missing a shard does not, because a
+partial baseline reports that shard's inherited failures as introduced; and a
+run the base does not contain does not, because the report would refuse it.
+That last condition is not hypothetical: GitHub does not recompute a pull
+request's merge ref as `main` advances, so an older candidate's base routinely
+predates the newest nightly. The report then splits every observed failure into **introduced**
+(the baseline ran that test and it passed, or the baseline never ran it, which
+the row records as `absent`) and **inherited** (the baseline ran it and it
+failed), and counts every selected target with no execution evidence as
+**unrun**. The three counts are disjoint and none absorbs another: coverage the
+lane could not reach is never reported as inherited. The report is clean when
+nothing was introduced.
+
+Two conditions fail the report loudly rather than differencing against the
+wrong tree. A baseline that is absent, unreadable, or records no executed case
+leaves the run with no classification at all, which is reported as such and is
+not a clean result. A baseline commit the candidate's own merge base does not
+contain is refused outright, because a baseline ahead of the candidate, or on
+another branch, can report a failure the candidate introduced as one it
+inherited.
+
+Distance behind the base is annotated rather than refused, and it is not
+harmless in one direction only. A test that goes red on `main` after the
+baseline commit is reported here as introduced, which over-reports and is the
+safe error. A test that was *failing* at the baseline, was fixed on `main`
+since, and is broken again by the candidate keeps its identity in the
+baseline's failing set and is therefore reported as inherited, which
+under-reports. Twelve identities moved that way between two nightlies five
+days apart, so the window is real. Selecting the newest baseline the base
+contains makes that window the commits between the baseline and the base and
+no larger; closing it entirely would mean running the suite on the base
+itself. The summary states the baseline's run, commit, timestamp and distance
+in commits so a reader can size the residual, and says which direction each
+error runs in.
+
+There is no soft-budget finding. The per-shard estimate is a
+longest-processing-time balancing weight derived from serial per-target
+measurements, while the executor runs up to sixteen targets of one package in a
+single command, so it overstates a completed shard and understates one the
+deadline cut. Measured over every dispatch since the lane existed, every shard
+that exhausted the hard deadline had also exceeded the soft budget, and every
+shard that exceeded the budget without the deadline had executed its complete
+selection, so the comparison never reported a defect of its own. The summary
+prints each shard's elapsed time and its balancing weight, and attaches no
+verdict to either.
+
+The expansion executor splits ordinary targets into bounded exact-package groups, then issues one list command and one run command per group. The grouping limit changes command boundaries only: every selected target remains required in the informational receipt. Manual-only targets and targets with exact test exclusions remain singleton commands so ignored-test mode and filters cannot affect siblings. An ordinary expansion target whose listing contains no applicable non-ignored test is recorded as inspected and not applicable; an entirely inapplicable group does not launch a guaranteed-empty nextest run. Required change-owned targets remain fail-closed when no active test applies. Listings and JUnit are decomposed back into exact `package::target::test` evidence; a missing applicable result leaves that target incomplete and the shard unsuccessful. The executor stops after a shared 16-minute build/list/test budget and writes an unsuccessful receipt containing completed-group evidence and the complete selected-target list. It terminates the active command's process group and starts no further command. Unfinished coverage is reported as the informational summary's unrun count rather than as a finding. The 20-minute job limit remains; the intervening time allows upload after executor expiry. The receipt still records `soft_budget_exceeded` as a measurement, and nothing reads it as a verdict. Setup delays, external cancellation or runner loss can still prevent a receipt. Required change-owned execution retains its existing limit and remains fail-closed on incomplete coverage.
 
 Use `gh workflow run heavy-e2e.yml --ref BRANCH` or `gh workflow run macos-nightly.yml --ref BRANCH` for candidate validation. Full Linux execution shards, dtype, script integrations and generalization shards have 60-minute timeouts; other extended Linux workers have 45 minutes, and Darwin SMT has 60. Dtype previously exhausted 45 minutes; its 60-minute allowance preserves complete execution while census work is removed from the other Linux workers. Existing ignored/manual gates still require their documented prerequisite and explicit invocation. The stdlib self-test corpus remains explicitly invoked nightly. Existing nightly failures must be recorded against a baseline, never treated as passing evidence.
 

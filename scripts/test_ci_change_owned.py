@@ -1,6 +1,7 @@
 """Change-owned CI planning, execution, schema, and receipt controls."""
 from __future__ import annotations
 
+import contextlib
 import copy
 import json
 import os
@@ -3502,6 +3503,68 @@ class BoundedCommandTests(unittest.TestCase):
             self.assertFalse(marker.exists(), "the timed-out command left its child alive")
 
 
+_UNSET = object()
+
+
+class _ExpansionFixture:
+    """A package-expansion selection whose JUnit and baseline a test writes."""
+
+    def __init__(self, *, plan, receipts, duration_baseline, root: Path) -> None:
+        self.plan = plan
+        self.receipts = receipts
+        self.duration_baseline = duration_baseline
+        self.root = root
+        self.junit_documents: dict[int, Path] = {}
+        self.baseline_failures: set[str] = set()
+        self.baseline_observed: set[str] = set()
+
+    def write_junit(
+        self,
+        shard: int,
+        *,
+        failing: list[str] = (),
+        passing: list[str] = (),
+    ) -> Path:
+        """Write one shard's merged JUnit, naming tests of its own targets."""
+        target = self.receipts[shard]["selected_targets"][0]
+        cases = [
+            f'<testcase classname="{target}" name="{name}">'
+            f"<failure message=\"boom\">boom</failure></testcase>"
+            for name in failing
+        ] + [
+            f'<testcase classname="{target}" name="{name}"/>'
+            for name in passing
+        ]
+        document = self.root / f"shard-{shard}.xml"
+        document.write_text(
+            "<testsuites><testsuite>" + "".join(cases) + "</testsuite></testsuites>"
+        )
+        self.junit_documents[shard] = document
+        return document
+
+    def baseline(self) -> owned.FailureBaseline:
+        return owned.FailureBaseline(
+            workflow="heavy-e2e.yml",
+            run_id="12345",
+            run_url="https://example.invalid/runs/12345",
+            head_sha="d" * 40,
+            created_at="2026-09-19T03:31:04Z",
+            observed=frozenset(self.baseline_observed | self.baseline_failures),
+            failed=frozenset(self.baseline_failures),
+        )
+
+    def summarize(self, *, baseline=_UNSET, distance=None) -> dict:
+        resolved = self.baseline() if baseline is _UNSET else baseline
+        return owned.summarize_package_expansion(
+            self.plan,
+            self.receipts,
+            duration_baseline=self.duration_baseline,
+            junit_documents=self.junit_documents,
+            failure_baseline=resolved,
+            ancestor_distance=distance or (lambda repo, ancestor, head: 3),
+        )
+
+
 class ReportTests(unittest.TestCase):
     def setUp(self) -> None:
         self.plan = {
@@ -3675,6 +3738,26 @@ class ReportTests(unittest.TestCase):
                 coverage,
             )
 
+    @contextlib.contextmanager
+    def expansion_fixture(self):
+        """One informational selection with writable JUnit and a baseline.
+
+        The ancestry probe is injected so a unit test states the relation it
+        means; `AncestorDistanceTests` exercises the real git one.
+        """
+        fixture_baseline = set_package_expansion(
+            self.plan,
+            [owned.Identity("p", "default_gated")],
+        )
+        owned.attach_plan_digest(self.plan)
+        with tempfile.TemporaryDirectory() as tmp:
+            yield _ExpansionFixture(
+                plan=self.plan,
+                receipts=self.receipts(surface="package_expansion"),
+                duration_baseline=fixture_baseline,
+                root=Path(tmp),
+            )
+
     def test_informational_summary_records_failures_but_does_not_raise(self) -> None:
         fixture_baseline = set_package_expansion(
             self.plan,
@@ -3695,25 +3778,236 @@ class ReportTests(unittest.TestCase):
         self.assertFalse(summary["required"])
         self.assertTrue(summary["failures"])
 
-    def test_informational_summary_records_soft_budget_overrun(self) -> None:
-        fixture_baseline = set_package_expansion(
-            self.plan,
-            [owned.Identity("p", "default_gated")],
+    def test_informational_summary_does_not_fault_a_soft_budget_overrun(
+        self,
+    ) -> None:
+        """A shard that ran long but covered everything is not a finding.
+
+        The per-shard weight is a serial longest-processing-time input, while
+        the executor batches a package's targets into one command, so the
+        elapsed time a budget is compared against measures something the
+        estimate never predicted. Every measured shard that exhausted the hard
+        deadline also exceeded this budget, and every shard that exceeded it
+        without the deadline had executed its complete selection, so the
+        comparison reported no defect either way.
+        """
+        with self.expansion_fixture() as fixture:
+            fixture.receipts[0]["elapsed_seconds"] = 901.0
+            fixture.receipts[0]["soft_budget_exceeded"] = True
+            owned.attach_receipt_digest(fixture.receipts[0])
+            summary = fixture.summarize()
+        self.assertTrue(summary["observed_success"])
+        self.assertEqual(summary["failures"], [])
+        self.assertNotIn("soft budget", json.dumps(summary))
+
+    def test_informational_summary_splits_introduced_from_inherited(
+        self,
+    ) -> None:
+        with self.expansion_fixture() as fixture:
+            fixture.write_junit(0, failing=["fast_case"])
+            fixture.baseline_failures = {"p::default_gated::other_case"}
+            fixture.baseline_observed = {
+                "p::default_gated::fast_case",
+                "p::default_gated::other_case",
+            }
+            summary = fixture.summarize()
+        classification = summary["failure_classification"]
+        self.assertEqual(
+            classification["introduced"],
+            [{"test": "p::default_gated::fast_case", "baseline": "passed"}],
         )
-        owned.attach_plan_digest(self.plan)
-        receipts = self.receipts(surface="package_expansion")
-        receipts[0]["elapsed_seconds"] = 901.0
-        receipts[0]["soft_budget_exceeded"] = True
-        owned.attach_receipt_digest(receipts[0])
-        summary = owned.summarize_package_expansion(
-            self.plan,
-            receipts,
-            duration_baseline=fixture_baseline,
+        self.assertEqual(classification["inherited"], [])
+        self.assertFalse(summary["observed_success"])
+
+    def test_informational_summary_is_clean_when_every_failure_is_inherited(
+        self,
+    ) -> None:
+        with self.expansion_fixture() as fixture:
+            fixture.write_junit(0, failing=["fast_case"])
+            fixture.baseline_failures = {"p::default_gated::fast_case"}
+            fixture.baseline_observed = {"p::default_gated::fast_case"}
+            summary = fixture.summarize()
+        classification = summary["failure_classification"]
+        self.assertEqual(classification["introduced"], [])
+        self.assertEqual(
+            classification["inherited"],
+            ["p::default_gated::fast_case"],
+        )
+        self.assertTrue(summary["observed_success"])
+
+    def test_a_failure_the_baseline_never_ran_is_introduced_and_says_so(
+        self,
+    ) -> None:
+        """An absent baseline verdict is not evidence of prior breakage."""
+        with self.expansion_fixture() as fixture:
+            fixture.write_junit(0, failing=["fast_case"])
+            fixture.baseline_failures = set()
+            fixture.baseline_observed = {"p::other::unrelated_case"}
+            summary = fixture.summarize()
+        classification = summary["failure_classification"]
+        self.assertEqual(
+            classification["introduced"],
+            [{"test": "p::default_gated::fast_case", "baseline": "absent"}],
         )
         self.assertFalse(summary["observed_success"])
-        self.assertTrue(
-            any("soft budget" in finding for finding in summary["failures"])
+
+    def test_unrun_targets_are_counted_and_never_reported_as_inherited(
+        self,
+    ) -> None:
+        with self.expansion_fixture() as fixture:
+            unreached = list(fixture.receipts[0]["selected_targets"])
+            fixture.receipts[0]["executed_targets"] = []
+            fixture.receipts[0]["executed_tests"] = []
+            fixture.receipts[0]["success"] = False
+            fixture.receipts[0]["failures"] = [
+                "package-expansion execution deadline exhausted; "
+                "unfinished selected coverage remains unsuccessful"
+            ]
+            owned.attach_receipt_digest(fixture.receipts[0])
+            summary = fixture.summarize()
+        classification = summary["failure_classification"]
+        self.assertEqual(classification["unrun_targets"], unreached)
+        self.assertEqual(classification["inherited"], [])
+        self.assertEqual(classification["introduced"], [])
+        self.assertEqual(summary["failures"], [])
+        self.assertTrue(summary["observed_success"])
+
+    def test_a_shard_that_only_failed_tests_needs_no_unrun_row(self) -> None:
+        """The commonest real shape: complete coverage, failing tests.
+
+        Nothing else in this class exercises it, so without this the
+        classified-failure half of the unexplained-shard net can be deleted
+        and the suite stays green.
+        """
+        with self.expansion_fixture() as fixture:
+            fixture.write_junit(0, failing=["fast_case"])
+            fixture.receipts[0]["success"] = False
+            fixture.receipts[0]["failures"] = [
+                f"{fixture.receipts[0]['selected_targets'][0]}: "
+                f"test run failed with 100"
+            ]
+            owned.attach_receipt_digest(fixture.receipts[0])
+            fixture.baseline_failures = {"p::default_gated::fast_case"}
+            fixture.baseline_observed = {"p::default_gated::fast_case"}
+            summary = fixture.summarize()
+        self.assertEqual(summary["failure_classification"]["unrun_targets"], [])
+        self.assertEqual(
+            summary["failure_classification"]["inherited"],
+            ["p::default_gated::fast_case"],
         )
+        self.assertEqual(summary["failures"], [])
+        self.assertTrue(summary["observed_success"])
+
+    def test_the_ancestry_probe_is_asked_baseline_then_base(self) -> None:
+        """Argument order is the whole rule, so bind it rather than stub it."""
+        asked: list[tuple[str, str]] = []
+
+        def record(repo, ancestor, descendant):
+            asked.append((ancestor, descendant))
+            return 1
+
+        with self.expansion_fixture() as fixture:
+            expected_base = fixture.plan["base_sha"]
+            expected_baseline = fixture.baseline().head_sha
+            fixture.summarize(distance=record)
+        self.assertEqual(asked, [(expected_baseline, expected_base)])
+        self.assertNotEqual(expected_baseline, expected_base)
+
+    def test_the_required_lane_keeps_its_coverage_findings(self) -> None:
+        """`classifies_coverage` must not reach the fail-closed lane.
+
+        The informational lane suppresses three findings because it reports
+        the same facts as counts. The change-owned lane has no such counts, so
+        the same switch there would silently accept incomplete coverage.
+        """
+        receipts = self.receipts()
+        executing = next(row for row in receipts if row["selected_targets"])
+        executing["executed_targets"] = []
+        executing["executed_tests"] = []
+        executing["success"] = False
+        executing["failures"] = ["timeout"]
+        owned.attach_receipt_digest(executing)
+        findings = owned._report_findings(self.plan, receipts, "change-owned")
+        self.assertTrue(
+            any("did not succeed" in finding for finding in findings)
+        )
+        self.assertTrue(
+            any(
+                "executed target coverage mismatch" in finding
+                for finding in findings
+            )
+        )
+        self.assertTrue(
+            any(
+                "selected test coverage mismatch" in finding
+                for finding in findings
+            )
+        )
+        with self.assertRaises(ValueError):
+            owned.validate_change_owned_report(
+                self.plan,
+                receipts,
+                self.standing_coverage(),
+            )
+
+    def test_a_shard_failure_no_count_explains_is_reported(self) -> None:
+        """The three counts are derived, so an unexplained shard fails loudly."""
+        with self.expansion_fixture() as fixture:
+            fixture.receipts[0]["success"] = False
+            fixture.receipts[0]["failures"] = ["something nobody modelled"]
+            owned.attach_receipt_digest(fixture.receipts[0])
+            summary = fixture.summarize()
+        self.assertFalse(summary["observed_success"])
+        self.assertTrue(
+            any(
+                "no introduced, inherited or unrun row accounts for" in finding
+                for finding in summary["failures"]
+            )
+        )
+
+    def test_a_missing_baseline_is_loud_rather_than_clean(self) -> None:
+        with self.expansion_fixture() as fixture:
+            fixture.write_junit(0, failing=["fast_case"])
+            summary = fixture.summarize(baseline=None)
+        self.assertFalse(summary["observed_success"])
+        self.assertIsNone(summary["failure_classification"])
+        self.assertTrue(
+            any(
+                "no usable default-branch failure baseline" in finding
+                for finding in summary["failures"]
+            )
+        )
+
+    def test_a_baseline_outside_the_candidate_history_is_refused(self) -> None:
+        """A baseline the base does not contain could absolve the candidate."""
+        with self.expansion_fixture() as fixture:
+            fixture.write_junit(0, failing=["fast_case"])
+            fixture.baseline_failures = {"p::default_gated::fast_case"}
+            fixture.baseline_observed = {"p::default_gated::fast_case"}
+            summary = fixture.summarize(distance=lambda repo, a, b: None)
+        self.assertFalse(summary["observed_success"])
+        self.assertIsNone(summary["failure_classification"])
+        self.assertTrue(
+            any(
+                "is not an ancestor of" in finding
+                for finding in summary["failures"]
+            )
+        )
+
+    def test_summary_markdown_leads_with_the_three_counts(self) -> None:
+        with self.expansion_fixture() as fixture:
+            fixture.write_junit(0, failing=["fast_case"])
+            fixture.baseline_failures = {"p::default_gated::fast_case"}
+            fixture.baseline_observed = {"p::default_gated::fast_case"}
+            summary = fixture.summarize()
+            output = fixture.root / "summary-output"
+            owned._write_report_files(output, summary)
+            rendered = (output / "summary.md").read_text()
+        self.assertIn("- Introduced failures: 0", rendered)
+        self.assertIn("- Inherited failures: 1", rendered)
+        self.assertIn("- Unrun targets: 0", rendered)
+        self.assertIn("commits behind this", rendered)
+        self.assertIn("no soft-budget finding", rendered)
 
     def test_load_receipts_rejects_missing_or_modified_sidecars(self) -> None:
         receipt = self.receipts()[0]
@@ -3733,6 +4027,170 @@ class ReportTests(unittest.TestCase):
             (shard / "commands.json").write_text("modified")
             with self.assertRaisesRegex(ValueError, "sidecar digest"):
                 owned.load_receipts(root)
+
+    def test_informational_cli_differences_a_baseline_end_to_end(self) -> None:
+        """The CLI reaches each shard's JUnit through its own sidecar digest."""
+        fixture_baseline = set_package_expansion(
+            self.plan,
+            [owned.Identity("p", "default_gated")],
+        )
+        owned.attach_plan_digest(self.plan)
+        receipts = self.receipts(surface="package_expansion")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan_path = root / "plan.json"
+            plan_path.write_bytes(owned.canonical_json(self.plan))
+            receipt_root = root / "receipts"
+            for receipt in receipts:
+                shard = receipt_root / f"shard-{receipt['shard']}"
+                shard.mkdir(parents=True)
+                failing = receipt["selected_targets"]
+                cases = "".join(
+                    f'<testcase classname="{identity}" name="fast_case">'
+                    f"<failure/></testcase>"
+                    for identity in failing
+                )
+                bodies = {
+                    "commands.json": b"[]",
+                    "timings.json": b"{}",
+                    "test-list.json": b"{}",
+                    "junit.xml": (
+                        f"<testsuites><testsuite>{cases}</testsuite>"
+                        f"</testsuites>"
+                    ).encode(),
+                }
+                for name, body in bodies.items():
+                    (shard / name).write_bytes(body)
+                    receipt["sidecars"][name] = owned.sha256_bytes(body)
+                owned.attach_receipt_digest(receipt)
+                (shard / "receipt.json").write_bytes(owned.canonical_json(receipt))
+            baseline_root = root / "baseline"
+            baseline_root.mkdir()
+            (baseline_root / "junit.xml").write_text(
+                '<testsuites><testsuite><testcase '
+                'classname="p::default_gated" name="fast_case">'
+                "<failure/></testcase></testsuite></testsuites>"
+            )
+            (baseline_root / "baseline.json").write_text(
+                json.dumps(
+                    {
+                        "version": owned.FAILURE_BASELINE_VERSION,
+                        "workflow": "heavy-e2e.yml",
+                        "run_id": "77",
+                        "run_url": "https://example.invalid/77",
+                        "head_sha": "d" * 40,
+                        "created_at": "2026-09-19T03:31:04Z",
+                        "documents": ["junit.xml"],
+                    }
+                )
+            )
+            output = root / "report"
+            with mock.patch.object(
+                owned,
+                "_ancestor_distance",
+                lambda repo, ancestor, head: 2,
+            ), mock.patch.object(
+                owned,
+                "load_duration_baseline",
+                lambda: fixture_baseline,
+            ):
+                result = owned.main(
+                    [
+                        "report",
+                        "--plan",
+                        str(plan_path),
+                        "--lane",
+                        "package-expansion",
+                        "--receipts-root",
+                        str(receipt_root),
+                        "--failure-baseline",
+                        str(baseline_root / "baseline.json"),
+                        "--output",
+                        str(output),
+                    ]
+                )
+            report = json.loads((output / "report.json").read_text())
+        self.assertEqual(result, 0)
+        self.assertTrue(report["observed_success"])
+        classification = report["failure_classification"]
+        self.assertEqual(classification["introduced"], [])
+        self.assertEqual(
+            classification["inherited"],
+            ["p::default_gated::fast_case"],
+        )
+        self.assertEqual(classification["baseline"]["run_id"], "77")
+
+    def test_the_fail_closed_lane_takes_no_failure_baseline(self) -> None:
+        """Including the conventional path, which is not a special spelling.
+
+        An argparse default would make exactly one path acceptable in the lane
+        that accepts none, so the informational branch resolves the default
+        and absence stays absence here.
+        """
+        for spelling in (
+            "somewhere/baseline.json",
+            str(owned.DEFAULT_FAILURE_BASELINE),
+        ):
+            with self.subTest(spelling=spelling):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    plan_path = root / "plan.json"
+                    plan_path.write_bytes(owned.canonical_json(self.plan))
+                    with self.assertRaisesRegex(
+                        ValueError, "takes no failure baseline"
+                    ):
+                        owned.main(
+                            [
+                                "report",
+                                "--plan",
+                                str(plan_path),
+                                "--lane",
+                                "change-owned",
+                                "--required",
+                                "--receipts-root",
+                                str(root),
+                                "--failure-baseline",
+                                spelling,
+                                "--output",
+                                str(root / "report"),
+                            ]
+                        )
+
+    def test_the_conventional_baseline_path_is_read_without_a_flag(self) -> None:
+        """The report runs candidate-side, so it must add no argument there."""
+        set_package_expansion(
+            self.plan,
+            [owned.Identity("p", "default_gated")],
+        )
+        owned.attach_plan_digest(self.plan)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan_path = root / "plan.json"
+            plan_path.write_bytes(owned.canonical_json(self.plan))
+            (root / "receipts").mkdir()
+            result = owned.main(
+                [
+                    "report",
+                    "--plan",
+                    str(plan_path),
+                    "--lane",
+                    "package-expansion",
+                    "--receipts-root",
+                    str(root / "receipts"),
+                    "--output",
+                    str(root / "report"),
+                ]
+            )
+            report = json.loads((root / "report" / "report.json").read_text())
+        self.assertEqual(result, 1)
+        self.assertFalse(report["observed_success"])
+        self.assertTrue(
+            any(
+                str(owned.DEFAULT_FAILURE_BASELINE) in finding
+                for finding in report["failures"]
+            ),
+            report["failures"],
+        )
 
     def test_informational_cli_records_malformed_receipts_and_fails_run(self) -> None:
         set_package_expansion(
@@ -3865,6 +4323,166 @@ class RoutingInventoryReconciliationTests(unittest.TestCase):
 
         self.assertIn("unclassified", str(raised.exception))
         self.assertIn("no routing rule", str(raised.exception))
+
+
+class JunitOutcomeTests(unittest.TestCase):
+    def outcomes(self, body: str) -> tuple[set[str], set[str]]:
+        with tempfile.TemporaryDirectory() as tmp:
+            document = Path(tmp) / "junit.xml"
+            document.write_text(
+                f"<testsuites><testsuite>{body}</testsuite></testsuites>"
+            )
+            return owned.junit_case_outcomes(document)
+
+    def test_failure_and_error_both_count_as_failing(self) -> None:
+        observed, failed = self.outcomes(
+            '<testcase classname="p::t" name="a"><failure/></testcase>'
+            '<testcase classname="p::t" name="b"><error/></testcase>'
+            '<testcase classname="p::t" name="c"/>'
+        )
+        self.assertEqual(observed, {"p::t::a", "p::t::b", "p::t::c"})
+        self.assertEqual(failed, {"p::t::a", "p::t::b"})
+
+    def test_a_skipped_case_is_neither_observed_nor_failing(self) -> None:
+        """A skipped baseline case records no verdict to difference against."""
+        observed, failed = self.outcomes(
+            '<testcase classname="p::t" name="a"><skipped/></testcase>'
+        )
+        self.assertEqual(observed, set())
+        self.assertEqual(failed, set())
+
+    def test_a_case_without_an_identity_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "no identity"):
+            self.outcomes('<testcase name="a"/>')
+
+
+class FailureBaselineLoadingTests(unittest.TestCase):
+    def manifest(self, **overrides) -> dict:
+        document = {
+            "version": owned.FAILURE_BASELINE_VERSION,
+            "workflow": "heavy-e2e.yml",
+            "run_id": "1",
+            "run_url": "https://example.invalid/1",
+            "head_sha": "d" * 40,
+            "created_at": "2026-09-19T03:31:04Z",
+            "documents": ["shard-1/junit.xml"],
+        }
+        document.update(overrides)
+        return document
+
+    def write(
+        self,
+        manifest: dict,
+        root: Path,
+        *,
+        cases: str | None = None,
+    ) -> Path:
+        path = root / "baseline.json"
+        path.write_text(json.dumps(manifest))
+        if cases is not None:
+            document = root / "shard-1" / "junit.xml"
+            document.parent.mkdir(parents=True, exist_ok=True)
+            document.write_text(
+                f"<testsuites><testsuite>{cases}</testsuite></testsuites>"
+            )
+        return path
+
+    def test_a_complete_manifest_loads_its_outcomes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self.write(
+                self.manifest(),
+                Path(tmp),
+                cases=(
+                    '<testcase classname="p::t" name="a"><failure/></testcase>'
+                    '<testcase classname="p::t" name="b"/>'
+                ),
+            )
+            baseline = owned.load_failure_baseline(path)
+        self.assertEqual(baseline.failed, frozenset({"p::t::a"}))
+        self.assertEqual(baseline.observed, frozenset({"p::t::a", "p::t::b"}))
+        self.assertEqual(baseline.provenance()["failing_cases"], 1)
+
+    def test_an_unusable_manifest_is_rejected(self) -> None:
+        cases = '<testcase classname="p::t" name="a"/>'
+        mutations = {
+            "keys mismatch": (self.manifest(extra=1), cases),
+            "version must be": (self.manifest(version=99), cases),
+            "must be a commit": (self.manifest(head_sha="nope"), cases),
+            "must be a string": (self.manifest(run_id=""), cases),
+            "documents must be named": (self.manifest(documents=[]), cases),
+            "escapes its root": (
+                self.manifest(documents=["../outside/junit.xml"]),
+                cases,
+            ),
+            "missing failure baseline document": (self.manifest(), None),
+            "recorded no executed test cases": (
+                self.manifest(),
+                '<testcase classname="p::t" name="a"><skipped/></testcase>',
+            ),
+        }
+        for expected, (manifest, body) in mutations.items():
+            with self.subTest(expected=expected):
+                with tempfile.TemporaryDirectory() as tmp:
+                    path = self.write(manifest, Path(tmp), cases=body)
+                    with self.assertRaisesRegex(ValueError, expected):
+                        owned.load_failure_baseline(path)
+
+
+class AncestorDistanceTests(unittest.TestCase):
+    """The real git probe behind the injected one the report tests use."""
+
+    def repo(self, root: Path) -> None:
+        for command in (
+            ["git", "init", "--quiet", "--initial-branch=main", str(root)],
+            ["git", "-C", str(root), "config", "user.email", "t@example.invalid"],
+            ["git", "-C", str(root), "config", "user.name", "T"],
+        ):
+            subprocess.run(command, check=True, capture_output=True)
+
+    def commit(self, root: Path, message: str) -> str:
+        (root / message).write_text(message)
+        subprocess.run(
+            ["git", "-C", str(root), "add", "-A"],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(root), "commit", "--quiet", "-m", message],
+            check=True,
+            capture_output=True,
+        )
+        return subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    def test_an_ancestor_reports_its_distance_and_a_sibling_reports_none(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.repo(root)
+            first = self.commit(root, "first")
+            second = self.commit(root, "second")
+            self.assertEqual(owned._ancestor_distance(root, first, second), 1)
+            self.assertEqual(owned._ancestor_distance(root, second, second), 0)
+            subprocess.run(
+                ["git", "-C", str(root), "checkout", "--quiet", "-b", "side", first],
+                check=True,
+                capture_output=True,
+            )
+            sibling = self.commit(root, "sibling")
+            self.assertIsNone(owned._ancestor_distance(root, sibling, second))
+
+    def test_a_commit_absent_from_the_clone_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.repo(root)
+            head = self.commit(root, "first")
+            with self.assertRaisesRegex(ValueError, "not present in this clone"):
+                owned._ancestor_distance(root, "e" * 40, head)
 
 
 if __name__ == "__main__":

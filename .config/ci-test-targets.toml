@@ -1626,6 +1626,15 @@ reason = "the planner executor and report implementation is directly covered by 
 tracking_issue = "chelis#1824"
 
 [[path_rule]]
+prefix = "scripts/ci_failure_baseline.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit validates default-branch baseline run selection, base containment and manifest issuance"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
 prefix = "scripts/ci_establish_candidate_clone.py"
 disposition = "owner"
 workflow = "ci.yml"
@@ -1704,6 +1713,15 @@ workflow = "ci.yml"
 job = "script-unit"
 cadence = "pull_request and push"
 reason = "the planner executor and report mutation suite runs in script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_ci_failure_baseline.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "baseline selection, containment and manifest controls execute in script-unit"
 tracking_issue = "chelis#1824"
 
 [[path_rule]]
