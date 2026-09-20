@@ -400,12 +400,17 @@ class ChangeOwnedWorkflowTests(unittest.TestCase):
     def test_every_limit_the_topology_doc_states_matches_the_workflow(
         self,
     ) -> None:
-        """Reconcile the documented limits against the jobs, both ways.
+        """Reconcile the limits the topology table states against the jobs.
 
         Nothing otherwise pins the deadline's absolute value, so reverting the
         constant leaves the suites green while the document still claims the
-        new number. Three of the four figures in that table were also already
+        new number. Two of the four figures in that table were also already
         stale, which is how a wrong one reached a comment in this change.
+
+        One-directional by design: it requires each derived phrase to appear,
+        and cannot forbid a contradictory sentence elsewhere in the document.
+        Making it forbid one would mean deriving every prose mention, which is
+        more than a topology table needs.
         """
         doc = (ROOT / "docs/ci_validation.md").read_text()
         expected = {

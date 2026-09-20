@@ -104,8 +104,22 @@ SIDECAR_NAMES = ("commands.json", "timings.json", "test-list.json", "junit.xml")
 EXPANSION_EXECUTION_SECONDS = 80 * 60
 # Reporting only since chelis#2248 removed its finding: an early warning that
 # a shard came close to the wall. Derived rather than set independently, so the
-# pair cannot drift apart; the bounds the tests enforce are what keep the
-# warning window from degenerating at either end.
+# pair cannot drift apart; the bounds the tests enforce keep the warning window
+# from degenerating at either end.
+#
+# Ten minutes rather than the permitted floor, for a reason the bounds cannot
+# express. `soft_budget_exceeded` is computed once from total elapsed, so a
+# shard the deadline cut always warns whatever the margin; the flag only
+# discriminates among shards that finished, separating "finished inside the
+# last margin seconds" from "finished comfortably". Elapsed time advances in
+# whole commands, so a window narrower than one command is jumped over rather
+# than landed in, and the flag decays into a synonym for `not success`. The
+# longest single command observed to date is about 593s, the
+# `runtime_extent_claim_preparation` run that caused chelis#2251's cut, so 600s
+# clears it by seven seconds. That is thin, and one slower command would make
+# it thinner; the floor is deliberately not anchored to that measurement,
+# because a maximum committed into the repository goes stale the first time a
+# slower target lands.
 EXPANSION_SOFT_BUDGET_MARGIN_SECONDS = 10 * 60
 SOFT_BUDGET_SECONDS = (
     EXPANSION_EXECUTION_SECONDS - EXPANSION_SOFT_BUDGET_MARGIN_SECONDS

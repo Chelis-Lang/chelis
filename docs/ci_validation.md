@@ -315,7 +315,12 @@ elapsed time and its balancing weight, and attaches no verdict to either.
 The soft budget survives as an early warning and nothing more: it is derived as
 ten minutes below the execution deadline rather than set independently, so a
 receipt records `soft_budget_exceeded` exactly when that shard came within ten
-minutes of being cut. The measurement that removed the finding was taken when
+minutes of being cut. The flag is computed once from total elapsed, so a shard
+the deadline cut always sets it; its only discriminating power is over shards
+that finished. The window is ten minutes rather than the permitted minimum
+because elapsed time advances in whole commands, and a window narrower than one
+command is jumped over rather than landed in: the longest single command
+observed to date is about 593s, so 600s clears it by seven seconds. The measurement that removed the finding was taken when
 the two were fifteen and sixteen minutes, a minute apart, where every shard reaching the
 deadline had also exceeded the budget and every shard exceeding the budget
 without the deadline had finished its complete selection; that reading describes
