@@ -662,6 +662,8 @@ jobs:
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}
 
       # The conformance runner needs the chelis binary by ABSOLUTE path (never a
       # bare PATH name). A release build matches the Hull campaign profile (a

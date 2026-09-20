@@ -56,6 +56,7 @@ jobs:
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}
           shared-key: linux-workspace
           save-if: ${{ github.ref == 'refs/heads/main' && matrix.shard == 1 }}
 
@@ -114,6 +115,7 @@ jobs:
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}
           shared-key: linux-workspace
           save-if: false
 
@@ -173,6 +175,7 @@ jobs:
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}
           shared-key: linux-script-nightly
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
@@ -252,6 +255,7 @@ jobs:
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}
           shared-key: linux-workspace
           save-if: false
 
@@ -348,6 +352,7 @@ jobs:
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}
           shared-key: linux-workspace
           save-if: false
 
@@ -385,6 +390,7 @@ jobs:
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}
           shared-key: linux-workspace
           save-if: false
 
@@ -423,6 +429,7 @@ jobs:
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}
           shared-key: linux-workspace
           save-if: false
 
@@ -476,6 +483,7 @@ jobs:
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}
           shared-key: linux-workspace
           save-if: false
 
@@ -522,6 +530,7 @@ jobs:
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}
           shared-key: linux-workspace
           save-if: false
 
@@ -593,6 +602,7 @@ jobs:
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}
           shared-key: linux-workspace
           save-if: false
 

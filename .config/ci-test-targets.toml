@@ -1720,6 +1720,15 @@ cadence = "pull_request and push"
 reason = "the release workflow's job graph, build targets, header manifests, glibc lane, canary wiring, and release-notes extraction are locked by script-unit"
 tracking_issue = "chelis#2027"
 
+[[path_rule]]
+prefix = ".kache.toml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "ci-fast"
+cadence = "pull_request and push"
+reason = "the fast lane compiles and runs executable and runtime contracts through the checked-in Kache policy"
+tracking_issue = "chelis#2241"
+
 # The project runtime is activated by script-unit before its discovered tests.
 # Native flake execution and protected cache publication retain their manual owners.
 [[path_rule]]

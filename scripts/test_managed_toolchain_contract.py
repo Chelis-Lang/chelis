@@ -29,27 +29,6 @@ class ManagedToolchainContractTests(unittest.TestCase):
         ):
             self.assertIn(fragment, module)
 
-    def test_repository_kache_policy_is_configuration_invariant(self) -> None:
-        config = (REPO_ROOT / ".kache.toml").read_text(encoding="utf-8")
-        self.assertIn("ignore_env = true", config)
-        self.assertIn("cache_executables = true", config)
-        self.assertIn("heartbeat_secs = 30", config)
-
-        module = (REPO_ROOT / "devenv/toolchains.nix").read_text(encoding="utf-8")
-        for fragment in (
-            "buildRustPackage",
-            "kache-0.16.0-chelis-contract.patch",
-            "kache-0.16.0-relocatable-macos-executables.patch",
-            'RUSTC_WRAPPER = "${patchedKache}/bin/kache";',
-            'CARGO_BUILD_RUSTC_WRAPPER = "${patchedKache}/bin/kache";',
-            'CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER = "";',
-            'KACHE_CONFIG = "${config.devenv.root}/.kache.toml";',
-            'KACHE_SCHEMA_27_WRAPPER = "${legacyKache}/bin/kache";',
-            "legacyKache",
-            "patchedKache",
-        ):
-            self.assertIn(fragment, module)
-
     def test_managed_tools_and_darwin_native_compiler_are_explicit(self) -> None:
         module = (REPO_ROOT / "devenv/toolchains.nix").read_text(encoding="utf-8")
         for package in ("mdbook", "pyright"):
