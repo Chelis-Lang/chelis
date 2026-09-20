@@ -93,11 +93,25 @@ impl Built {
             .ok()
     }
 
-    /// Link the emitted unit against a driver that calls `entry_symbol`
+    /// Link the emitted unit against a driver that calls `entry_source_name`
     /// and prints its `f32` result, run it, and return stdout. `None`
     /// when no host compiler is available.
-    fn compile_and_run(&self, entry_symbol: &str) -> Option<String> {
+    fn compile_and_run(&self, entry_source_name: &str) -> Option<String> {
         let source = self.source();
+        let unit_header = self.unit.replace(".c", ".h");
+        let header = fs::read_to_string(self.out_dir.join(&unit_header))
+            .expect("generated declaration header");
+        let declarations =
+            chelis_backend_c::GeneratedHeader::parse(&header).expect("generated header metadata");
+        declarations
+            .validate_source(source)
+            .expect("generated header must agree with generated source");
+        let entry_symbol = declarations
+            .declaration(entry_source_name)
+            .unwrap_or_else(|| {
+                panic!("generated header has no declaration for `{entry_source_name}`")
+            })
+            .symbol();
         let toolchain = chelis_backend_c::toolchain::runtime_toolchain(
             chelis_backend_c::toolchain::CodegenRequirements {
                 wants_openmp: true,
@@ -118,7 +132,6 @@ impl Built {
             )
             .expect("rename generated observation driver for the ABI probe");
         }
-        let unit_header = self.unit.replace(".c", ".h");
         write_file(
             &self.out_dir.join("driver.c"),
             &format!(
@@ -748,9 +761,7 @@ fn module_qualified_constructors_in_one_package_keep_their_own_field_order() {
         "eval must answer 5.0; got:\n{evaluated}"
     );
 
-    if let Some(printed) =
-        built.compile_and_run(&common::authored_c_symbol("pkg__demo__Demo__Main__main"))
-    {
+    if let Some(printed) = built.compile_and_run("pkg__demo__Demo__Main__main") {
         assert_eq!(
             printed, "5.000000",
             "the compiled artifact must agree with eval"

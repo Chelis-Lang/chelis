@@ -54,9 +54,13 @@ retain the source stem; an explicit output filename does not change the module s
 Each authored C function export, except source-level `main`, SHALL use the
 compiler-reserved `chelis_fn_` prefix followed by the lowercase hexadecimal UTF-8 bytes
 of its Chelis name. Source-level `main` uses the module-qualified `<module>__main`
-symbol so a downstream C driver can retain its own `main`. Downstream C code SHALL call
-the declarations in the generated header rather than reconstructing symbols from Chelis
-source spellings.
+symbol so a downstream C driver can retain its own `main`; Reef/package qualification
+does not erase that exception when the decoded source binding is exactly `main`. An
+ordinary authored identifier ending in `__main` is not source-level `main` and uses the
+universal mapping. Each generated declaration is
+preceded by the exact `/* chelis-source-name: <Chelis-name> */` association metadata.
+Downstream C code SHALL call the declarations in the generated header, and tooling SHALL
+consume that metadata rather than reconstructing symbols from Chelis source spellings.
 
 Current design points:
 

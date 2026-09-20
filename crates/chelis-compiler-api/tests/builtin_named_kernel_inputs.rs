@@ -1,5 +1,4 @@
 //! Spec/04 section 8.6: lexical inputs retain precedence over builtin names.
-#[allow(dead_code)]
 mod ownership_support;
 use chelis_compiler_api::compiler::eval_selected;
 use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind};

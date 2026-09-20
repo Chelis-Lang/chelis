@@ -3,6 +3,7 @@
 pub mod blas;
 mod emit;
 mod emitted_expr;
+mod generated_header;
 mod host_abi;
 mod host_emit;
 pub mod memory;
@@ -12,6 +13,8 @@ mod random_observer;
 #[path = "../../../tests/support/runtime_archive.rs"]
 mod test_runtime_archive;
 pub mod toolchain;
+
+pub use generated_header::{GeneratedDeclaration, GeneratedHeader, GeneratedHeaderError};
 
 /// Primitive types the C backend's tensor-DAG path can realize.
 /// A def whose declared return type or intermediates use a prim NOT in this
@@ -240,8 +243,11 @@ pub fn codegen_with_options(
     func_name: &str,
     options: CodegenOptions,
 ) -> Result<CodegenResult, chelis_types::unsupported::Unsupported> {
-    let h_header = format!(
-        "void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);"
+    let h_header = generated_header::render_declaration(
+        func_name,
+        &format!(
+            "void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);"
+        ),
     );
     let (needs_blas, input_labels, output_labels, symbolic_dims) = {
         let emission = dag.emission();
@@ -299,7 +305,10 @@ pub fn codegen_evaluation_with_options(
         let c_source = emit::CEmitter::emit_evaluation(dag, execution, func_name, options)?;
         Ok(CodegenResult {
             c_source,
-            h_header: format!("void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);"),
+            h_header: generated_header::render_declaration(
+                func_name,
+                &format!("void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);"),
+            ),
             requirements: toolchain::CodegenRequirements { wants_openmp: true, needs_blas: false },
             input_labels, output_labels, symbolic_dims,
         })

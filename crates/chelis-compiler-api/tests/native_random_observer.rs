@@ -1,7 +1,6 @@
 //! Feature-only compile/run observations of actual generated-C Random locals.
 #![cfg(feature = "native-random-observer")]
 
-#[allow(dead_code)]
 mod ownership_support;
 
 use serde_json::{Value, json};
@@ -19,7 +18,7 @@ def run(x: tensor[4, f32]) -> (tensor[4, f32], tensor[4, f32], tensor[4, f32]) =
 }
 "#;
 
-fn observed_source() -> String {
+fn observed_source() -> ownership_support::GeneratedProgram {
     ownership_support::emit_selected(OBSERVED_SOURCE, "run")
 }
 
@@ -48,12 +47,12 @@ fn host_source_identity_qualifies_nested_and_following_helper_occurrences() {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
-    assert_eq!(rows, expected_rows());
+    assert_eq!(rows, expected_rows(source.symbol("run")));
 }
 
 // Retained compiler metadata is the association authority, never a C label or
 // a guessed Resource offset. This is deliberately not a second RNG machine.
-fn with_source_metadata(source: &str) -> (String, Value) {
+fn with_source_metadata(source: &str) -> (ownership_support::GeneratedProgram, Value) {
     use chelis_compiler_api::compiler::compile_for_execution_with_observer;
     use chelis_compiler_api::emission_observer::SelectedEmission;
     use chelis_compiler_api::schema::{CompileRequest, CompileTarget, SourceKind};
@@ -103,11 +102,23 @@ fn with_source_metadata(source: &str) -> (String, Value) {
     let c = artifact
         .compile_result
         .files
-        .into_iter()
+        .iter()
         .find(|f| f.path.ends_with(".c"))
         .unwrap()
-        .contents;
-    (c, Value::Object(metadata))
+        .contents
+        .clone();
+    let header = artifact
+        .compile_result
+        .files
+        .iter()
+        .find(|f| f.path.ends_with(".h"))
+        .unwrap()
+        .contents
+        .clone();
+    (
+        ownership_support::GeneratedProgram::new(c, header),
+        Value::Object(metadata),
+    )
 }
 
 const SOURCE_SINK: &str = r#"
@@ -131,12 +142,16 @@ static int source_sink(void *context, const __chelis_random_observer_event *even
 }
 "#;
 
-fn source_rows(c: &str, repeat: bool) -> Vec<(Value, Value)> {
+fn source_rows(c: &ownership_support::GeneratedProgram, repeat: bool) -> Vec<(Value, Value)> {
     let observed_entry = selected_observed_entry(c, "run");
     source_rows_with_entry(c, &observed_entry, repeat)
 }
 
-fn source_rows_with_entry(c: &str, observed_entry: &str, repeat: bool) -> Vec<(Value, Value)> {
+fn source_rows_with_entry(
+    c: &ownership_support::GeneratedProgram,
+    observed_entry: &str,
+    repeat: bool,
+) -> Vec<(Value, Value)> {
     assert!(
         c.contains(&format!("static chelis_tuple* {observed_entry}(")),
         "missing selected observed entry {observed_entry}"
@@ -172,22 +187,13 @@ int main(void) {{
         .collect()
 }
 
-fn selected_observed_entry(c: &str, entry: &str) -> String {
-    let candidates = [
-        format!("__chelis_observed_{entry}"),
-        format!(
-            "__chelis_observed_{}",
-            ownership_support::authored_c_symbol(entry)
-        ),
-    ];
-    let observed_entries = candidates
-        .into_iter()
-        .filter(|symbol| c.contains(&format!("static chelis_tuple* {symbol}(")))
-        .collect::<Vec<_>>();
-    let [observed_entry] = observed_entries.as_slice() else {
-        panic!("expected one selected `{entry}` observer entry, got {observed_entries:?}");
-    };
-    observed_entry.clone()
+fn selected_observed_entry(c: &ownership_support::GeneratedProgram, entry: &str) -> String {
+    let observed_entry = format!("__chelis_observed_{}", c.symbol(entry));
+    assert!(
+        c.contains(&format!("static chelis_tuple* {observed_entry}(")),
+        "missing selected observed entry {observed_entry}"
+    );
+    observed_entry
 }
 
 fn associations_match(rows: &[(Value, Value)], metadata: &Value) -> bool {
@@ -354,7 +360,7 @@ fn retained_full_source_ids_survive_resource_offsets_and_reject_association_muta
         ),
     );
     ownership_support::run_expect_failure(
-        &mutant,
+        &c.with_source(mutant),
         &driver_for(
             &observed_entry,
             17,
@@ -428,9 +434,9 @@ def run(x: tensor[4, f32]) -> ((tensor[4, f32], tensor[4, f32]), (tensor[4, f32]
         "__chelis_random_push_function(__chelis_observer, 999ULL,",
     );
     ownership_support::run_expect_failure(
-        &wrong_callee,
+        &c.with_source(wrong_callee.clone()),
         &driver(
-            &wrong_callee,
+            &c.with_source(wrong_callee),
             17,
             "assert(event->kind == __CHELIS_RANDOM_OBSERVER_INVOCATION_INIT || event->source_certified); return json_sink(context, event);",
         ),
@@ -474,7 +480,7 @@ def run(x: f32) -> f32 = add(add(victim(x), victim__chelis_observed(x)), add(che
 "#,
         "run",
     );
-    let public_entry = ownership_support::authored_c_symbol("run");
+    let public_entry = source.symbol("run");
     let observed_entry = format!("__chelis_observed_{public_entry}");
     assert!(source.contains(&format!("float {public_entry}(float x)")));
     assert!(source.contains(&format!("static float {observed_entry}(")));
@@ -496,7 +502,7 @@ int main(void) {
     return 0;
 }
 "#
-    .replace("PUBLIC_ENTRY", &public_entry)
+    .replace("PUBLIC_ENTRY", public_entry)
     .replace("OBSERVED_ENTRY", &observed_entry);
     ownership_support::balanced(&ownership_support::run(&source, &driver));
 }
@@ -565,7 +571,7 @@ static int json_sink(void *context, const __chelis_random_observer_event *event)
 }
 "#;
 
-fn driver(c: &str, invocation: u64, sink: &str) -> String {
+fn driver(c: &ownership_support::GeneratedProgram, invocation: u64, sink: &str) -> String {
     let observed_entry = selected_observed_entry(c, "run");
     driver_for(&observed_entry, invocation, sink)
 }
@@ -619,8 +625,7 @@ fn row(sequence: u64, event: &str, identity: &str, state_value: Value, saved: Ve
     })
 }
 
-fn expected_rows() -> Vec<Value> {
-    let run_symbol = ownership_support::authored_c_symbol("run");
+fn expected_rows(run_symbol: &str) -> Vec<Value> {
     let inactive = state(None);
     let outer_saved = vec![inactive.clone()];
     let mut rows = vec![
@@ -758,7 +763,7 @@ fn nested_host_and_fixed_frames_record_actual_forward_replay_and_restoration() {
         .filter(|row| row["identity"] == "fixed")
         .map(|row| row["producer"].as_str().expect("fixed producer identity"))
         .collect::<Vec<_>>();
-    let run_symbol = ownership_support::authored_c_symbol("run");
+    let run_symbol = c.symbol("run");
     assert_eq!(
         fixed_producers,
         [
@@ -781,7 +786,7 @@ fn nested_host_and_fixed_frames_record_actual_forward_replay_and_restoration() {
             .filter(|row| row["identity"] != "fixed")
             .all(|row| row["producer"].is_null())
     );
-    assert_eq!(actual, expected_rows());
+    assert_eq!(actual, expected_rows(run_symbol));
 }
 
 #[test]
@@ -836,7 +841,7 @@ int main(void) {{
 #[test]
 fn feature_on_ordinary_public_call_emits_no_observation() {
     let c = observed_source();
-    let public_entry = ownership_support::authored_c_symbol("run");
+    let public_entry = c.symbol("run");
     let observed_entry = selected_observed_entry(&c, "run");
     assert!(c.contains(&format!("chelis_tuple* {public_entry}(chelis_tensor* x)")));
     assert!(c.contains(&format!("static chelis_tuple* {observed_entry}(")));
@@ -863,7 +868,8 @@ int main(void) {{
 
 #[test]
 fn independent_expectation_rejects_missing_saved_preincrement_and_replay_advance_mutants() {
-    let expected = expected_rows();
+    let c = observed_source();
+    let expected = expected_rows(c.symbol("run"));
     let mut missing_saved = expected.clone();
     missing_saved[3]["saved"].as_array_mut().unwrap().pop();
     assert_ne!(missing_saved, expected);

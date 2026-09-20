@@ -646,6 +646,10 @@ pub(crate) fn concrete_tensor_helper_codegen(
 fn emitted_function_name(program_name: &str, function_name: &str) -> String {
     if function_name == "main" {
         format!("{program_name}__main")
+    } else if chelis_types::is_linker_format_name(function_name)
+        && chelis_types::demangle_ident(function_name) == "main"
+    {
+        function_name.to_string()
     } else {
         // Authored Chelis definitions are exported through the generated
         // header, but in a compiler-reserved C namespace rather than under a
@@ -1665,11 +1669,15 @@ fn emit_host_declarations(
             } else {
                 params
             };
-            Ok(format!(
+            let declaration = format!(
                 "{prefix}{} {}({});",
                 c_type(&function.ret_ty)?,
                 emitted_name,
                 params
+            );
+            Ok(crate::generated_header::render_declaration(
+                &function.name,
+                &declaration,
             ))
         })
         .collect::<Result<Vec<_>, Unsupported>>()
@@ -9361,6 +9369,19 @@ fn sparse_symbol_expr(
 #[cfg(test)]
 mod expression_dispatch_tests {
     use super::*;
+
+    #[test]
+    fn source_main_keeps_its_module_abi_after_linker_qualification() {
+        assert_eq!(emitted_function_name("demo", "main"), "demo__main");
+        assert_eq!(
+            emitted_function_name("ignored", "pkg__demo__Demo__Main__main"),
+            "pkg__demo__Demo__Main__main"
+        );
+        assert_eq!(
+            emitted_function_name("ignored", "pkg__demo__Demo__Main__almost__main"),
+            "chelis_fn_706b675f5f64656d6f5f5f44656d6f5f5f4d61696e5f5f616c6d6f73745f5f6d61696e"
+        );
+    }
 
     #[test]
     fn verified_clone_and_drop_formatters_cover_all_eight_public_heap_payloads() {

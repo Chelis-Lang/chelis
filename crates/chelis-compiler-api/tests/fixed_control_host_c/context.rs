@@ -49,13 +49,23 @@ fn native(artifact: &CompiledExecutionArtifact, dims: &[usize], expected: &[f32]
             assert_eq!(serde_json::to_value(actual).unwrap()["size"], *expected);
         }
     }
-    let c = &artifact
+    let c = artifact
         .compile_result
         .files
         .iter()
         .find(|file| file.path == "chelis_main.c")
         .unwrap()
-        .contents;
+        .contents
+        .clone();
+    let header = artifact
+        .compile_result
+        .files
+        .iter()
+        .find(|file| file.path == "chelis_main.h")
+        .unwrap()
+        .contents
+        .clone();
+    let generated = ownership_support::GeneratedProgram::new(c, header);
     let shape = dims
         .iter()
         .map(usize::to_string)
@@ -109,7 +119,7 @@ int main(void) {{
         count = expected.len(),
         storage = expected.len().max(1)
     );
-    ownership_support::balanced(&ownership_support::run(c, &driver));
+    ownership_support::balanced(&ownership_support::run(&generated, &driver));
 }
 
 #[test]

@@ -140,8 +140,14 @@ the lint is.
 > `spec/08-backends.md` §2. The mapping SHALL be injective for every legal
 > Surf identifier, including C keywords, platform symbols, and names that
 > themselves begin with `chelis_fn_`. The generated header and source SHALL
-> use the same symbol. Downstream C code SHALL consume that generated
-> declaration rather than reconstructing the symbol from source spelling.
+> use the same symbol. A Reef linker identity whose decoded source binding is
+> exactly `main` retains that source-level exception; an ordinary authored
+> identifier that merely ends in `__main` does not. The generated header
+> SHALL precede each declaration with exact
+> `/* chelis-source-name: <Chelis-name> */` metadata. Downstream C code SHALL
+> consume the generated declaration, and tooling that needs the Chelis-to-C
+> association SHALL consume that metadata rather than reconstructing the
+> symbol from source spelling.
 
 The source identifier itself is unchanged: no case rewriting or source-level
 reservation is introduced. The compiler-owned spelling is the published C ABI
