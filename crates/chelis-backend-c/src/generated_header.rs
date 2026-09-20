@@ -1366,9 +1366,12 @@ fn validate_generated_pragmas(source: &str) -> Result<(), GeneratedHeaderError> 
             continue;
         }
         let payload = preprocessor_directive_payload(&line, "pragma").unwrap_or_default();
-        if !["omp ", "clang diagnostic ", "GCC diagnostic "]
-            .into_iter()
-            .any(|prefix| payload.starts_with(prefix))
+        let allowed_openmp = matches!(payload, "omp parallel for" | "omp parallel for simd")
+            || (payload.starts_with("omp parallel for reduction(") && payload.ends_with(')'));
+        if !allowed_openmp
+            && !["clang diagnostic ", "GCC diagnostic "]
+                .into_iter()
+                .any(|prefix| payload.starts_with(prefix))
         {
             return Err(GeneratedHeaderError::new(format!(
                 "generated source uses unsupported pragma `{payload}`"
@@ -2204,6 +2207,7 @@ mod tests {
             format!("#if 0\n{export}\n#endif\n"),
             format!("#include \"unsealed_external_helper.h\"\n{export}\n"),
             format!("#pragma weak external_alias = chelis_fn_616c706861\n{export}\n"),
+            format!("#pragma omp declare simd\n{export}\n"),
             format!("_Pragma(\"weak external_alias = chelis_fn_616c706861\")\n{export}\n"),
             format!(
                 "extern int external_alias(int) __attribute__((alias(\"chelis_fn_616c706861\")));\n{export}\n"
