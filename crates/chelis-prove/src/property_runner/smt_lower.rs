@@ -576,7 +576,7 @@ pub(super) fn deep_expr_to_smt(
 
 fn deep_arith(expr: &DeepExpr, ctx: &DeepInlineCtx) -> Option<crate::solver::SmtExpr> {
     use crate::solver::{ArithOp as SA, SmtExpr};
-    if let Some(reason) = deep_nested_grad_reason(expr) {
+    if let Some(reason) = deep_grad_capability_reason(expr, ctx) {
         record_deep_grad_diagnostic(ctx, reason);
         return None;
     }
@@ -656,7 +656,7 @@ fn deep_arith_subst(
     ctx: &DeepInlineCtx,
 ) -> Option<crate::solver::SmtExpr> {
     use crate::solver::{ArithOp as SA, SmtExpr};
-    if let Some(reason) = deep_nested_grad_reason(expr) {
+    if let Some(reason) = deep_grad_capability_reason(expr, ctx) {
         record_deep_grad_diagnostic(ctx, reason);
         return None;
     }
@@ -1011,15 +1011,23 @@ fn record_deep_grad_diagnostic(ctx: &DeepInlineCtx, reason: String) {
     }
 }
 
-fn deep_nested_grad_reason(expr: &DeepExpr) -> Option<String> {
+fn deep_grad_capability_reason(expr: &DeepExpr, ctx: &DeepInlineCtx) -> Option<String> {
     let (DeepTag::App, app_children) = deep_node_parts(expr)? else {
         return None;
     };
     let (DeepTag::Grad, grad_children) = deep_node_parts(app_children.first()?)? else {
         return None;
     };
-    (deep_tag(grad_children.first()?) == Some(DeepTag::Grad))
-        .then(|| NESTED_GRAD_SMT_BOUNDARY.to_string())
+    let target = grad_children.first()?;
+    match deep_tag(target) {
+        Some(DeepTag::Grad) => Some(NESTED_GRAD_SMT_BOUNDARY.to_string()),
+        _ => {
+            let name = deep_var_name(target)?;
+            lookup_deep_fun_body(ctx.exprs, name)
+                .is_none()
+                .then(|| format!("scalar grad SMT lowering cannot resolve function `{name}`"))
+        }
+    }
 }
 
 fn scalar_param(param: &Param) -> bool {

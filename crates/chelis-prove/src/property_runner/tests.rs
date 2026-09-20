@@ -534,6 +534,98 @@ fn only_selected_nested_grad_ignores_valid_unsupported_sibling() {
 
 #[cfg(feature = "smt")]
 #[test]
+fn aliased_nested_grad_reason_matches_generated_deep_without_mislabeling_ordinary_calls() {
+    const ALIAS_REASON: &str = "scalar grad SMT lowering cannot resolve function `inner`";
+    const GENERIC_REASON: &str = "property does not lower to Tier B (smt-only)";
+
+    let surf = "module M
+def square(xx: f32) -> f32 = xx * xx
+inner = grad(square, wrt=xx)
+@property alias_nested forall(x: f32):
+  (grad(inner, wrt=xx)(x) >= 0.0)
+@property ordinary_alias_call forall(x: f32):
+  (inner(x) >= 0.0)
+";
+    let declarations = chelis_surf::parser::parse_str(surf).expect("alias fixture parses");
+    let deep = chelis_deep::printer::print_canonical(
+        &chelis_surf::desugar::desugar_program(&declarations).expect("alias fixture desugars"),
+    );
+    let all = [
+        ("alias_nested", ALIAS_REASON),
+        ("ordinary_alias_call", GENERIC_REASON),
+    ];
+    let alias_only = [("alias_nested", ALIAS_REASON)];
+    let ordinary_only = [("ordinary_alias_call", GENERIC_REASON)];
+    let cases = [
+        ("surf-all", surf, false, None, all.as_slice()),
+        (
+            "surf-alias-only",
+            surf,
+            false,
+            Some("alias_nested"),
+            alias_only.as_slice(),
+        ),
+        (
+            "surf-ordinary-only",
+            surf,
+            false,
+            Some("ordinary_alias_call"),
+            ordinary_only.as_slice(),
+        ),
+        ("deep-all", deep.as_str(), true, None, all.as_slice()),
+        (
+            "deep-alias-only",
+            deep.as_str(),
+            true,
+            Some("alias_nested"),
+            alias_only.as_slice(),
+        ),
+        (
+            "deep-ordinary-only",
+            deep.as_str(),
+            true,
+            Some("ordinary_alias_call"),
+            ordinary_only.as_slice(),
+        ),
+    ];
+
+    for (case, source, is_deep, only, expected) in cases {
+        let options = PropertyRunOptions {
+            tier: "smt-only".to_string(),
+            only: only.map(str::to_string),
+            ..Default::default()
+        };
+        let result = if is_deep {
+            run_deep_source_properties(source, &options)
+        } else {
+            run_surf_source_properties(source, &options)
+        };
+        let PropertyRunResult::Ran(outcomes) = result.expect("run alias fixture");
+
+        assert_eq!(outcomes.len(), expected.len(), "{case}: {outcomes:#?}");
+        for (outcome, (expected_name, expected_reason)) in outcomes.iter().zip(expected) {
+            assert_eq!(outcome.name, *expected_name, "{case}: {outcome:#?}");
+            assert_eq!(
+                outcome.status,
+                PropertyStatus::Unsupported,
+                "{case}: {outcome:#?}"
+            );
+            assert_eq!(
+                outcome.proof_tier,
+                PropertyTier::Smt,
+                "{case}: {outcome:#?}"
+            );
+            assert_eq!(
+                outcome.reason.as_deref(),
+                Some(*expected_reason),
+                "{case}: {outcome:#?}"
+            );
+        }
+    }
+}
+
+#[cfg(feature = "smt")]
+#[test]
 fn selected_nested_grad_with_unknown_outer_wrt_is_an_error() {
     let outcomes = run_surf(
         "module M
