@@ -440,6 +440,43 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
                 invocation_target,
             )
 
+    def test_construction_dependency_rejects_physical_target_escapes(self):
+        invocation_target = self.root / "target/compiler-json-invocations/cargo"
+        traversal = self.artifact(
+            "serde_json@1.0.149",
+            "serde_json",
+            "../libserde_json-traversal.rlib",
+            directory=invocation_target,
+        )
+        outside = self.root / "outside"
+        outside.mkdir()
+        linked = invocation_target / "linked"
+        linked.parent.mkdir(parents=True, exist_ok=True)
+        linked.symlink_to(outside, target_is_directory=True)
+        symlink = self.artifact(
+            "serde_json@1.0.149",
+            "serde_json",
+            "libserde_json-symlink.rlib",
+            directory=linked,
+        )
+
+        for reason, artifact, artifact_id in (
+            ("parent traversal", traversal, "6" * 16),
+            ("symlink", symlink, "7" * 16),
+        ):
+            with (
+                self.subTest(reason=reason),
+                self.assertRaisesRegex(
+                    ValueError, "missing owned construction artifact serde_json"
+                ),
+            ):
+                self.resolve_construction(
+                    "serde_json",
+                    artifact_id,
+                    [artifact],
+                    {Path(artifact["filenames"][0]).name: artifact_id},
+                )
+
 
 class InvocationControls(unittest.TestCase):
     @classmethod

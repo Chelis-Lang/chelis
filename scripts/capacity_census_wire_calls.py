@@ -688,6 +688,23 @@ def _construction_dependency_artifact(
     artifacts: list[dict],
     invocation_target: Path,
 ) -> Path:
+    resolved_target = invocation_target.resolve(strict=True)
+    candidates = [
+        artifact for artifact in artifacts if artifact["target"]["name"] == name
+    ]
+    for artifact in candidates:
+        paths = [Path(path) for path in artifact["filenames"] if path.endswith(".rlib")]
+        if len(paths) != 1:
+            raise ValueError(f"missing owned construction artifact {name}")
+        try:
+            resolved_path = paths[0].resolve(strict=True)
+        except OSError as error:
+            raise ValueError(
+                f"missing owned construction artifact {name}"
+            ) from error
+        if not resolved_path.is_relative_to(resolved_target):
+            raise ValueError(f"missing owned construction artifact {name}")
+
     compiler_definitions = [
         definition for definition in definitions if definition["crate"] == name
     ]
@@ -700,9 +717,6 @@ def _construction_dependency_artifact(
             require_registry_origin=name != "chelis_compiler_api",
         )
     else:
-        candidates = [
-            artifact for artifact in artifacts if artifact["target"]["name"] == name
-        ]
         if len(candidates) != 1:
             raise ValueError(f"missing exact construction dependency {name}")
         paths = [
@@ -713,8 +727,6 @@ def _construction_dependency_artifact(
         if len(paths) != 1:
             raise ValueError(f"missing owned construction artifact {name}")
         path = paths[0]
-    if not path.is_relative_to(invocation_target):
-        raise ValueError(f"missing owned construction artifact {name}")
     return path
 
 
