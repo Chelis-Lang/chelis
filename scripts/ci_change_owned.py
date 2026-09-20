@@ -85,8 +85,27 @@ TEST_FUNCTION = re.compile(
 )
 OWNER_FIELDS = {"workflow", "job", "cadence", "reason", "tracking_issue"}
 SIDECAR_NAMES = ("commands.json", "timings.json", "test-list.json", "junit.xml")
-SOFT_BUDGET_SECONDS = 15 * 60
-EXPANSION_EXECUTION_SECONDS = 16 * 60
+# The informational lane's deadline is a backstop against a hung command, not
+# a schedule. Sized at 85 minutes it cuts none of the 38 dispatches measured
+# under the current planner, whose longest shard projects to a median of 1580s
+# and a maximum of 4410s; 45 minutes would still cut six of them and 60 would
+# still cut one. It is deliberately not sized to the plan's per-shard estimate,
+# which is a longest-processing-time balancing weight rather than a predicted
+# duration and runs a median 3.73x over on shards that finish.
+#
+# `timeout-minutes` on the worker job in `pr-package-expansion.yml` is the
+# limit that actually binds, and this one sits under it by enough for the
+# shard to write its partial receipt and upload before GitHub kills the job.
+# Raising this alone would move the failure from "partial report written" to
+# "no report at all", so the two move together.
+EXPANSION_EXECUTION_SECONDS = 85 * 60
+# Reporting only since chelis#2248 removed its finding: an early warning that
+# a shard came close to the wall. Derived rather than independent so the two
+# cannot drift into a budget that every shard exceeds and none is warned by.
+EXPANSION_SOFT_BUDGET_MARGIN_SECONDS = 10 * 60
+SOFT_BUDGET_SECONDS = (
+    EXPANSION_EXECUTION_SECONDS - EXPANSION_SOFT_BUDGET_MARGIN_SECONDS
+)
 EXPANSION_REPORT_VERSION = 2
 FAILURE_BASELINE_VERSION = 1
 # The report runs from the candidate checkout, so a new flag in its own

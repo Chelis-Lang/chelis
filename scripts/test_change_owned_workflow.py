@@ -8,6 +8,8 @@ import unittest
 
 import yaml
 
+from scripts import ci_change_owned as owned
+
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/ci.yml"
@@ -254,7 +256,7 @@ def assert_change_owned_topology(
     test.assertEqual(
         expansion["needs"], ["integration-plan"]
     )
-    test.assertEqual(expansion["timeout-minutes"], 20)
+    test.assertEqual(expansion["timeout-minutes"], 90)
     test.assertEqual(expansion["env"]["CC"], "clang")
     test.assertEqual(expansion["env"]["CXX"], "clang++")
     test.assertEqual(expansion["env"]["CHELIS_TEST_CC"], "clang")
@@ -362,6 +364,48 @@ class ChangeOwnedWorkflowTests(unittest.TestCase):
     def test_required_lane_and_informational_trial_are_isolated(self) -> None:
         assert_change_owned_topology(
             self, self.workflow, self.expansion_workflow
+        )
+
+    def test_the_executor_deadline_stays_under_the_job_that_kills_it(
+        self,
+    ) -> None:
+        """The job limit binds; the script's deadline must leave room.
+
+        A shard that reaches `EXPANSION_EXECUTION_SECONDS` still writes its
+        partial receipt and uploads it. A shard that reaches the job's
+        `timeout-minutes` is killed with no receipt at all, so the report
+        loses the completed-group evidence rather than reporting it as unrun.
+        The two numbers therefore move together, and nothing else pins them:
+        the executor's own deadline test patches the constant rather than
+        asserting its value.
+        """
+        job = self.expansion_workflow["jobs"]["package-expansion-shard"]
+        job_seconds = job["timeout-minutes"] * 60
+        self.assertLess(owned.EXPANSION_EXECUTION_SECONDS, job_seconds)
+        self.assertGreaterEqual(
+            job_seconds - owned.EXPANSION_EXECUTION_SECONDS,
+            4 * 60,
+            "receipt finalization and artifact upload need their margin",
+        )
+
+    def test_the_soft_budget_warns_before_the_deadline_it_derives_from(
+        self,
+    ) -> None:
+        """An independent budget drifts into warning about nothing.
+
+        Since chelis#2248 removed its finding the soft budget is an early
+        warning and nothing else, so it is worthless both when every shard
+        exceeds it and when no shard can reach it. Deriving it from the
+        deadline keeps it strictly between the two.
+        """
+        self.assertLess(
+            owned.SOFT_BUDGET_SECONDS,
+            owned.EXPANSION_EXECUTION_SECONDS,
+        )
+        self.assertGreater(owned.SOFT_BUDGET_SECONDS, 0)
+        self.assertEqual(
+            owned.EXPANSION_EXECUTION_SECONDS - owned.SOFT_BUDGET_SECONDS,
+            owned.EXPANSION_SOFT_BUDGET_MARGIN_SECONDS,
         )
 
     def test_missing_managed_python_setup_or_system_invocation_is_rejected(self) -> None:
