@@ -150,6 +150,15 @@ def reef_build_command_rows(workflow: str) -> list[tuple[int, str]]:
     return commands
 
 
+def named_step(workflow: str, name: str) -> str:
+    marker = f"      - name: {name}\n"
+    self_index = workflow.index(marker)
+    next_index = workflow.find("\n      - name:", self_index + len(marker))
+    if next_index == -1:
+        return workflow[self_index:]
+    return workflow[self_index:next_index]
+
+
 class EcosystemDriftWorkflowTests(unittest.TestCase):
     def assert_runtime_header_manifest(self, workflow: str) -> None:
         public = public_runtime_headers()
@@ -177,6 +186,48 @@ class EcosystemDriftWorkflowTests(unittest.TestCase):
             missing,
             [],
             "every workflow reef build must disable auto-fetch",
+        )
+
+    def assert_docker_failure_attribution(self, workflow: str) -> None:
+        dependencies = named_step(
+            workflow,
+            "Build and install exact Docker dependency sources",
+        )
+        report = named_step(workflow, "File/update drift tracking issue")
+        language = named_step(workflow, "Fail Docker language drift")
+        infrastructure = named_step(workflow, "Fail Docker infrastructure")
+
+        self.assertIn('if [ "$status" -eq 2 ]; then', dependencies)
+        self.assertIn("failure_kind=setup", dependencies)
+        self.assertIn("failure_kind=drift", dependencies)
+        self.assertIn('exit "$status"', dependencies)
+        drift_guard = (
+            r"steps\.docker_dependencies\.outcome == 'failure'\s*&&\s*"
+            r"steps\.docker_dependencies\.outputs\.failure_kind == 'drift'"
+        )
+        self.assertRegex(
+            report,
+            drift_guard,
+            "only dependency source drift may open or update a drift issue",
+        )
+        self.assertRegex(language, drift_guard)
+        self.assertEqual(
+            report.count("steps.docker_dependencies.outcome == 'failure'"),
+            2,
+            "the report condition and status may each classify dependency drift once",
+        )
+        self.assertEqual(
+            language.count("steps.docker_dependencies.outcome == 'failure'"),
+            1,
+            "language drift must have exactly one guarded dependency-failure path",
+        )
+        self.assertNotIn("failure_kind == 'setup'", report)
+        self.assertNotIn("failure_kind == 'setup'", language)
+        self.assertIn("steps.docker_gate.outcome == 'failure'", language)
+        self.assertIn(
+            "steps.docker_dependencies.outputs.failure_kind != 'drift'",
+            infrastructure,
+            "dependency setup failures must be attributed to infrastructure",
         )
 
     def test_head_toolchain_stages_the_public_runtime_header_closure(self) -> None:
@@ -346,6 +397,63 @@ class EcosystemDriftWorkflowTests(unittest.TestCase):
                     "every workflow reef build must disable auto-fetch",
                 ):
                     self.assert_reef_builds_disable_autofetch(mutated)
+
+    def test_docker_dependency_setup_is_not_reported_as_source_drift(self) -> None:
+        self.assert_docker_failure_attribution(
+            WORKFLOW.read_text(encoding="utf-8")
+        )
+
+    def test_relabeling_docker_dependency_failure_as_drift_is_rejected(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        language = named_step(workflow, "Fail Docker language drift")
+        marker = (
+            "          ((steps.docker_dependencies.outcome == 'failure' &&\n"
+            "            steps.docker_dependencies.outputs.failure_kind == 'drift') ||\n"
+        )
+        mutated_language = language.replace(
+            marker,
+            "          (steps.docker_dependencies.outcome == 'failure' ||\n",
+            1,
+        )
+        self.assertNotEqual(mutated_language, language)
+        mutated = workflow.replace(language, mutated_language, 1)
+        self.assertNotEqual(mutated, workflow)
+        with self.assertRaisesRegex(
+            AssertionError,
+            "Regex didn't match",
+        ):
+            self.assert_docker_failure_attribution(mutated)
+
+    def test_removing_dependency_failure_from_infrastructure_is_rejected(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        mutated = workflow.replace(
+            "           steps.docker_dependencies.outputs.failure_kind != 'drift')",
+            "           steps.docker_dependencies.outputs.failure_kind == 'drift')",
+            1,
+        )
+        self.assertNotEqual(mutated, workflow)
+        with self.assertRaisesRegex(
+            AssertionError,
+            "dependency setup failures must be attributed to infrastructure",
+        ):
+            self.assert_docker_failure_attribution(mutated)
+
+    def test_adding_an_unguarded_dependency_drift_report_is_rejected(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        report = named_step(workflow, "File/update drift tracking issue")
+        mutated_report = report.replace(
+            "            matrix.type != 'docker' ||\n",
+            "            matrix.type != 'docker' ||\n"
+            "            steps.docker_dependencies.outcome == 'failure' ||\n",
+            1,
+        )
+        self.assertNotEqual(mutated_report, report)
+        mutated = workflow.replace(report, mutated_report, 1)
+        with self.assertRaisesRegex(
+            AssertionError,
+            "report condition and status",
+        ):
+            self.assert_docker_failure_attribution(mutated)
 
 
 if __name__ == "__main__":

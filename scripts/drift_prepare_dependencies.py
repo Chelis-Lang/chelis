@@ -27,6 +27,7 @@ import drift_repin_compiler
 ECOSYSTEM_PACKAGES = frozenset(
     {"nautilus", "coral", "shoals", "school", "octant", "c-earchin"}
 )
+DEPENDENCY_SETUP_FAILURE = 2
 _SPEC_RE = re.compile(
     r"^(?P<repo>[A-Za-z0-9_.-]+/(?P<name>[A-Za-z0-9_.-]+))"
     r"@(?P<tag>v(?P<version>\d+\.\d+\.\d+))"
@@ -58,6 +59,10 @@ class Package:
     version: str
     dependencies: frozenset[str]
     source_roots: tuple[str, ...]
+
+
+class DependencySetupError(RuntimeError):
+    """The exact dependency source could not be acquired or verified."""
 
 
 def parse_dependency_spec(encoded: str) -> DependencySpec:
@@ -249,21 +254,6 @@ def _clone_repo(repo: str, commit: str, destination: Path) -> None:
             str(destination),
             "--",
             "--no-checkout",
-            "--depth",
-            "1",
-        ],
-        check=True,
-    )
-    subprocess.run(
-        [
-            "git",
-            "-C",
-            str(destination),
-            "fetch",
-            "--depth",
-            "1",
-            "origin",
-            commit,
         ],
         check=True,
     )
@@ -317,10 +307,16 @@ def prepare_dependencies(
     packages: dict[str, tuple[DependencySpec, Path, Package]] = {}
     for spec in specs:
         package_root = packages_root / spec.name
-        clone(spec.repo, spec.commit, package_root)
-        checked_out = head(package_root)
+        try:
+            clone(spec.repo, spec.commit, package_root)
+            checked_out = head(package_root)
+        except (OSError, subprocess.CalledProcessError) as error:
+            raise DependencySetupError(
+                f"{spec.repo}@{spec.tag}: authenticated exact-source "
+                f"checkout failed: {error}"
+            ) from error
         if checked_out != spec.commit:
-            raise ValueError(
+            raise DependencySetupError(
                 f"{spec.repo}@{spec.tag}: checked out `{checked_out}`, "
                 f"expected reviewed commit `{spec.commit}`"
             )
@@ -401,6 +397,9 @@ def main(argv: Sequence[str]) -> int:
             compiler_version=args.compiler_version,
             encoded_specs=args.dependencies,
         )
+    except DependencySetupError as error:
+        print(f"dependency setup failed: {error}", file=sys.stderr)
+        return DEPENDENCY_SETUP_FAILURE
     except (OSError, ValueError, subprocess.CalledProcessError) as error:
         print(f"dependency preparation failed: {error}", file=sys.stderr)
         return 1
