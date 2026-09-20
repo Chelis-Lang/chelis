@@ -823,7 +823,19 @@ fn normalize_manifest_digests_for_c_parse(source: &str) -> String {
         }
         offset += line_with_ending.len();
     }
+    mask_cxx_linkage_specs_for_c_parse(source, &mut projected);
     projected
+}
+
+fn mask_cxx_linkage_specs_for_c_parse(source: &str, projected: &mut String) {
+    let mut offset = 0;
+    for line_with_ending in source.split_inclusive('\n') {
+        let line = trim_line_ending(line_with_ending);
+        if line.trim() == "extern \"C\"" {
+            projected.replace_range(offset..offset + line.len(), &" ".repeat(line.len()));
+        }
+        offset += line_with_ending.len();
+    }
 }
 
 fn collect_c_errors<'tree>(
@@ -1227,6 +1239,18 @@ fn reject_export_macro_aliases<'a>(
     definitions: impl Iterator<Item = &'a SourceDefinition>,
 ) -> Result<(), GeneratedHeaderError> {
     let mut protected_tokens = std::collections::BTreeSet::new();
+    protected_tokens.extend(
+        [
+            "_Noreturn",
+            "_Thread_local",
+            "extern",
+            "inline",
+            "static",
+            "typedef",
+        ]
+        .into_iter()
+        .map(str::to_string),
+    );
     for definition in definitions {
         protected_tokens.insert(definition.symbol.clone());
         protected_tokens.extend(parse_c_declaration_tokens(&definition.declaration)?);
@@ -2064,6 +2088,7 @@ mod tests {
         for helper in [
             "#define EMIT_EXTERNAL_HELPER int external_helper(int x) { return x - 1; }\nEMIT_EXTERNAL_HELPER",
             "#define EXTERNAL_HELPER_DECL int external_helper(int x)\nEXTERNAL_HELPER_DECL { return x - 1; }",
+            "#define static\nstatic int external_helper(int x) { return x - 1; }",
         ] {
             let source = format!("{helper}\n{export}\n");
             assert!(
