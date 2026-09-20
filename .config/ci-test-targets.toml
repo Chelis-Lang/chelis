@@ -2026,14 +2026,17 @@ tracking_issue = "chelis#1824"
 # nightly. That is the honest disposition rather than a gap being closed: no
 # per-pull-request job re-derives any of them, so a stale one is caught the
 # next morning. Each names the job that goes red when the artifact is wrong,
-# not the job that tests the generator which produced it.
+# not the job that tests the generator which produced it. Read the first
+# row's cadence carefully: its workflow accepts workflow_dispatch, but the
+# job pins `ref: main`, so dispatching it is not a way to check a candidate.
+# chelis#2261 tracks promoting these to per-pull-request coverage.
 [[path_rule]]
 prefix = "spec/design/loud_unsupported_issue_manifest.json"
 disposition = "owner"
 workflow = "loud-unsupported-nightly.yml"
 job = "standing-rejection-liveness"
 cadence = "daily 06:17 UTC and workflow_dispatch"
-reason = "validate_rejection_issue_manifest.py re-derives this manifest from production sources and fails when the checked-in rows disagree"
+reason = "validate_rejection_issue_manifest.py re-derives this manifest from production sources and fails when the checked-in rows disagree; the job checks out main, so a workflow_dispatch validates main rather than the candidate that changed it"
 tracking_issue = "chelis#2250"
 
 [[path_rule]]
