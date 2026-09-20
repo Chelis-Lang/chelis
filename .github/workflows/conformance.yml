@@ -428,7 +428,15 @@ jobs:
       # candidate; the verdict below adds what this gate then permitted.
       #
       # Every step in this job is `continue-on-error`, so the job always
-      # completes and always emits its outputs. That is the point: a hard
+      # completes and always emits its outputs. Job setup is the exception
+      # that no step condition reaches: an unresolvable `uses:` or a lost
+      # runner still fails the job, and the required Docs context reports
+      # that case.
+      #
+      # The reason names the first failure in THIS list's order, which is
+      # not step order. With two steps failing it names whichever this
+      # checks first, which is deliberate: one stated cause beats a
+      # concatenation, and the job log has the rest. That is the point: a hard
       # failure here used to leave required contexts with no check run at
       # all, which cannot be waited out, re-run into existence or
       # overridden (chelis#2228). Tolerating a step must not make its
@@ -593,8 +601,12 @@ jobs:
     name: Hull Conformance Gate (Linux)
     runs-on: ubuntu-latest
     # Skip on docs-only PRs (chelis#419); a skipped required job reports
-    # success, and the `if` fails safe (runs when the changes job did not
-    # succeed) so a broken detector never skips the gate on a code PR.
+    # success. The `if` still fails safe for a changes job that did not
+    # succeed, but that is now reachable only through job setup or a lost
+    # runner: every step in it is tolerated, so a broken detector produces
+    # a failed verdict rather than a failed job, and this gate skips. The
+    # required Docs context is what reports that case, together with the
+    # two aggregators below it.
     needs: [changes]
     if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.candidate_preflight == 'success' && (needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_run_hull == 'true') || (needs.changes.outputs.rebase_lane == 'ordinary' && needs.changes.outputs.docs_only != 'true')))) }}
     # ~1,500 subprocess calls at ~50-80 ms/call under contention across 2-4
@@ -608,12 +620,20 @@ jobs:
     env:
       CARGO_PROFILE_RELEASE_DEBUG: 0
     steps:
+      # Reached only through the fail-safe branch below, where the
+      # detector job itself did not succeed, so the verdict may be empty.
+      # It still states what it knows rather than a bare suppression
+      # notice, which is also what keeps `preflight_reason` a consumed
+      # output here rather than a declared one nothing reads.
       - name: Require candidate lifecycle and CI contract preflight
         env:
           CANDIDATE_PREFLIGHT: ${{ needs.changes.outputs.candidate_preflight }}
+          PREFLIGHT_REASON: ${{ needs.changes.outputs.preflight_reason }}
         run: |
           if [ "$CANDIDATE_PREFLIGHT" != "success" ]; then
-            echo "candidate preflight failed; expensive Hull CI was suppressed" >&2
+            echo "this candidate could not be evaluated, so Hull CI was" \
+              "suppressed." >&2
+            echo "reason: ${PREFLIGHT_REASON:-the detector job did not report}" >&2
             exit 1
           fi
 

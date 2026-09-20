@@ -84,14 +84,23 @@ boundary independently, so narrowing the candidate-controlled classifier still
 runs its contract tests. Those changes run the cheap routing, lifecycle,
 change-owned topology and hosted-coverage unit suites in the detector job. A
 failure is recorded as `candidate_preflight=failure` with a stated reason, and
-the required Docs context is the single carrier: it fails, names what could
-not be evaluated, and every other job skips. A skipped required context
-satisfies branch protection here, so that one context is what stops an
-unevaluable candidate merging; failing more of them told a reader nothing.
-Hull still runs when the detector job itself did not succeed, so a broken
-detector cannot skip the gate on a code pull request.
+the required Docs context states it: it fails naming what could not be
+evaluated. On a code pull request two more required contexts go red with it,
+`Lint and Unit Tests (Linux)` and `Integration Tests (Linux)`. Those two are
+aggregators that do not gate on the verdict; their workers skip, and
+`ci_require_success.py` fails on a skipped dependency, so they report the
+dependency rather than the cause. Only on a documentation-only pull request,
+where those workers are already out of scope, is Docs the only red context.
 
-No step in that job can fail it. A hard failure there used to leave required
+Three red contexts rather than one is more than a reader needs, and it is
+deliberately not reduced further: making the aggregators skip would leave
+Docs alone, and a skipped required context satisfies branch protection here,
+so the count is also the margin. Hull is the one that was reduced, because
+its red said nothing the others did not.
+
+No step in that job can fail it, job setup aside: an unresolvable action
+reference or a lost runner still fails it, and the required Docs context
+reports that case. A hard failure there used to leave required
 contexts with no check run at all, which cannot be waited out, re-run into
 existence or overridden, and that is what made a pull request unmergeable
 rather than merely red. The job therefore always completes and always emits

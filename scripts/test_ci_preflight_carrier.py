@@ -34,12 +34,23 @@ class AlwaysCompletesTests(unittest.TestCase):
     """
 
     def test_no_step_can_fail_the_changes_job(self) -> None:
+        """Literal `true`, because anything else is not decidable here.
+
+        `step.get("continue-on-error")` is truthy for any non-empty string,
+        so a quoted `'false'` and an expression that evaluates to false at
+        run time both satisfy a truthiness check while leaving the step
+        able to fail the job. The same reason this file rejects an
+        expression in a concurrency field: only a literal is verifiable
+        without evaluating something this test cannot see.
+        """
+
         for name in DETECTOR_WORKFLOWS:
             with self.subTest(workflow=name):
                 intolerant = [
-                    step.get("name") or step.get("uses")
+                    f"{step.get('name') or step.get('uses')} "
+                    f"({step.get('continue-on-error')!r})"
                     for step in changes_steps(name)
-                    if not step.get("continue-on-error")
+                    if step.get("continue-on-error") is not True
                 ]
                 self.assertEqual(intolerant, [])
 
@@ -104,8 +115,29 @@ class ToleratedStepsAreReadTests(unittest.TestCase):
                     continue
                 if step_id in self.EXEMPT:
                     continue
-                if f"steps.{step_id}.outcome" not in body:
+                read = re.search(
+                    r"(\w+)=\"\$\{\{ steps\." + re.escape(step_id)
+                    + r"\.outcome \}\}\"",
+                    body,
+                )
+                if read is None:
                     unread.append(f"{step_id} is tolerated but never read")
+                    continue
+                # A read that is never compared is a dead read. Deleting
+                # the branch and leaving the assignment kept this green
+                # until review mutated it, which is the difference between
+                # proving the variable exists and proving it decides
+                # something.
+                variable = read.group(1)
+                if not re.search(
+                    r"\[ \"\$" + re.escape(variable)
+                    + r"\" (?:=|!=) \"(?:failure|success)\" \]",
+                    body,
+                ):
+                    unread.append(
+                        f"{step_id} is read into ${variable} and never "
+                        "compared, so its failure changes nothing"
+                    )
             with self.subTest(workflow=name):
                 self.assertEqual(unread, [])
 

@@ -423,7 +423,15 @@ jobs:
       # candidate; the verdict below adds what this gate then permitted.
       #
       # Every step in this job is `continue-on-error`, so the job always
-      # completes and always emits its outputs. That is the point: a hard
+      # completes and always emits its outputs. Job setup is the exception
+      # that no step condition reaches: an unresolvable `uses:` or a lost
+      # runner still fails the job, and the required Docs context reports
+      # that case.
+      #
+      # The reason names the first failure in THIS list's order, which is
+      # not step order. With two steps failing it names whichever this
+      # checks first, which is deliberate: one stated cause beats a
+      # concatenation, and the job log has the rest. That is the point: a hard
       # failure here used to leave required contexts with no check run at
       # all, which cannot be waited out, re-run into existence or
       # overridden (chelis#2228). Tolerating a step must not make its
