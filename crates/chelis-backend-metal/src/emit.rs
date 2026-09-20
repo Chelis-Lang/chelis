@@ -276,6 +276,7 @@ pub(crate) fn emit_verified_dag(
     func_name: &str,
 ) -> Result<EmitResult, Unsupported> {
     let dag = plan.dag();
+    reject_direct_nonnumeric(dag)?;
     reject_f64(dag)?;
     dag.check_axis_sources(Stage::Codegen("metal"))?;
     reject_integer_abs(dag)?;
@@ -287,6 +288,26 @@ pub(crate) fn emit_verified_dag(
         mm_source: e.into_source(),
         peak_device_bytes,
     })
+}
+
+fn reject_direct_nonnumeric(dag: VerifiedDagView<'_>) -> Result<(), Unsupported> {
+    let Some(node) = dag.nodes().iter().find(|node| {
+        matches!(
+            &node.op,
+            RiscOp::Compare(_) | RiscOp::Logical(_) | RiscOp::Where
+        )
+    }) else {
+        return Ok(());
+    };
+    Err(Unsupported::new(
+        UnsupportedKind::Op("direct nonnumeric".to_string()),
+        format!("a Metal DAG value at node {}", node.id.0),
+        Stage::Codegen("metal"),
+        chelis_types::unimplemented_rejection!(
+            1284,
+            "the Metal exact comparison, Bool8 logical, and raw stored-bit where kernels are not implemented; use `--target c` or `--target hip`"
+        ),
+    ))
 }
 
 fn reject_f64(dag: VerifiedDagView<'_>) -> Result<(), Unsupported> {
@@ -872,6 +893,10 @@ impl<'plan> Emitter<'plan> {
 
             // Binary elementwise (M2 first cut: add, mul).
             RiscOp::Add | RiscOp::Mul | RiscOp::ReluAdjoint => self.emit_binary(dag, node),
+
+            RiscOp::Compare(_) | RiscOp::Logical(_) | RiscOp::Where => Err(format!(
+                "Metal direct nonnumeric node {id} reached emission after the #1284 typed capability rejection"
+            )),
 
             // chelis#1306: these identities are rejected by the shared typed
             // Metal capability gate. Keep explicit backend arms so no new

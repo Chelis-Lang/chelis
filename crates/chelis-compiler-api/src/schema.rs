@@ -2080,7 +2080,10 @@ pub struct WireRecordPatternField {
 /// - `14`: local tensor-ascription claims carry mandatory authored identity,
 ///   binding, claim and axis fields, with exact literal or declaring-witness
 ///   forms and one initializer owner.
-pub const WIRE_DAG_SCHEMA_VERSION: u32 = 14;
+/// - `15`: comparison, logical, and conditional selection preserve their
+///   direct identities as `Compare`, `Logical`, and `Where`; the standalone
+///   `CmpLt` operation spelling is removed.
+pub const WIRE_DAG_SCHEMA_VERSION: u32 = 15;
 
 /// A typed failure from validating a serialized [`WireDag`] against the
 /// supported schema version (WI-2). This is deliberately its own error
@@ -2239,6 +2242,157 @@ impl WireDag {
         dag_domains::validate(self)?;
         for (index, node) in self.nodes.iter().enumerate() {
             match &node.op {
+                WireRiscOp::Compare { comparison } => {
+                    let inputs = node
+                        .inputs
+                        .iter()
+                        .map(|input_id| {
+                            self.nodes[..index]
+                                .iter()
+                                .find(|candidate| candidate.id == *input_id)
+                                .ok_or_else(|| {
+                                    WireDagContractError::new(format!(
+                                        "WireDag Compare node {} input {input_id} does not resolve to an earlier node",
+                                        node.id
+                                    ))
+                                })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    if inputs.len() != 2 {
+                        return Err(WireDagContractError::new(format!(
+                            "WireDag Compare node {} requires exactly two inputs",
+                            node.id
+                        )));
+                    }
+                    let lhs = inputs[0];
+                    let rhs = inputs[1];
+                    let shape_participants = [lhs.id, rhs.id, node.id];
+                    let same_shape =
+                        wire_node_shape_equal(&self.nodes, lhs, rhs, &shape_participants);
+                    let output_shape =
+                        wire_node_shape_equal(&self.nodes, lhs, node, &shape_participants);
+                    let ordered = matches!(
+                        comparison,
+                        WireComparisonKind::CmpLt
+                            | WireComparisonKind::Lt
+                            | WireComparisonKind::Gt
+                            | WireComparisonKind::Gte
+                            | WireComparisonKind::Lte
+                    );
+                    let operand = Prim::parse_interchange_name(&lhs.output_type.precision);
+                    let valid_operand = operand.is_some_and(|prim| {
+                        (prim.is_numeric() && prim.is_admissible_active()) || prim == Prim::Bool
+                    });
+                    let valid_ordered_operand = !ordered
+                        || operand
+                            .is_some_and(|prim| prim.is_numeric() && prim.is_admissible_active());
+                    if lhs.output_type.precision != rhs.output_type.precision
+                        || !same_shape
+                        || !output_shape
+                        || node.output_type.precision != Prim::Bool.interchange_name()
+                        || !valid_operand
+                        || !valid_ordered_operand
+                    {
+                        return Err(WireDagContractError::new(format!(
+                            "WireDag Compare node {} requires two same-shape, same-precision active numeric or bool operands and a same-shape Bool output; ordered comparisons require active numeric operands",
+                            node.id
+                        )));
+                    }
+                }
+                WireRiscOp::Logical { logical } => {
+                    let expected = match logical {
+                        WireLogicalKind::And | WireLogicalKind::Or => 2,
+                        WireLogicalKind::Not => 1,
+                    };
+                    let inputs = node
+                        .inputs
+                        .iter()
+                        .map(|input_id| {
+                            self.nodes[..index]
+                                .iter()
+                                .find(|candidate| candidate.id == *input_id)
+                                .ok_or_else(|| {
+                                    WireDagContractError::new(format!(
+                                        "WireDag Logical node {} input {input_id} does not resolve to an earlier node",
+                                        node.id
+                                    ))
+                                })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let shape_participants = inputs
+                        .iter()
+                        .map(|input| input.id)
+                        .chain(std::iter::once(node.id))
+                        .collect::<Vec<_>>();
+                    let valid_inputs = inputs.iter().all(|input| {
+                        input.output_type.precision == Prim::Bool.interchange_name()
+                            && wire_node_shape_equal(&self.nodes, input, node, &shape_participants)
+                    });
+                    if inputs.len() != expected
+                        || node.output_type.precision != Prim::Bool.interchange_name()
+                        || !valid_inputs
+                    {
+                        return Err(WireDagContractError::new(format!(
+                            "WireDag Logical node {} requires exactly {expected} same-shape bool input(s) and a Bool output",
+                            node.id
+                        )));
+                    }
+                }
+                WireRiscOp::Where {} => {
+                    let inputs = node
+                        .inputs
+                        .iter()
+                        .map(|input_id| {
+                            self.nodes[..index]
+                                .iter()
+                                .find(|candidate| candidate.id == *input_id)
+                                .ok_or_else(|| {
+                                    WireDagContractError::new(format!(
+                                        "WireDag Where node {} input {input_id} does not resolve to an earlier node",
+                                        node.id
+                                    ))
+                                })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    if inputs.len() != 3 {
+                        return Err(WireDagContractError::new(format!(
+                            "WireDag Where node {} requires exactly three inputs",
+                            node.id
+                        )));
+                    }
+                    let condition = inputs[0];
+                    let then_value = inputs[1];
+                    let else_value = inputs[2];
+                    let shape_participants = [condition.id, then_value.id, else_value.id, node.id];
+                    let branch_precision =
+                        Prim::parse_interchange_name(&then_value.output_type.precision);
+                    if condition.output_type.precision != Prim::Bool.interchange_name()
+                        || !wire_node_tensor_type_equal(
+                            &self.nodes,
+                            then_value,
+                            else_value,
+                            &shape_participants,
+                        )
+                        || !wire_node_tensor_type_equal(
+                            &self.nodes,
+                            then_value,
+                            node,
+                            &shape_participants,
+                        )
+                        || !wire_node_shape_equal(
+                            &self.nodes,
+                            condition,
+                            then_value,
+                            &shape_participants,
+                        )
+                        || !branch_precision.is_some_and(|prim| prim.is_valid_tensor_precision())
+                    {
+                        return Err(WireDagContractError::new(format!(
+                            "WireDag Where node {} requires a same-shape Bool condition and exactly matching branch/output types",
+                            node.id
+                        )));
+                    }
+                }
                 WireRiscOp::Mod => {
                     if node.inputs.len() != 2
                         || !Prim::parse_interchange_name(&node.output_type.precision)
@@ -2788,6 +2942,537 @@ fn wire_dim_info_equal(left: &WireDimInfo, right: &WireDimInfo) -> bool {
     }
 }
 
+fn wire_semantic_dim_info_equal(left: &WireDimInfo, right: &WireDimInfo) -> bool {
+    match (left, right) {
+        (WireDimInfo::Lit { size: left }, WireDimInfo::Lit { size: right }) => left == right,
+        (
+            WireDimInfo::Lit { size: left },
+            WireDimInfo::Named {
+                size: Some(right), ..
+            },
+        )
+        | (
+            WireDimInfo::Named {
+                size: Some(left), ..
+            },
+            WireDimInfo::Lit { size: right },
+        )
+        | (
+            WireDimInfo::Named {
+                size: Some(left), ..
+            },
+            WireDimInfo::Named {
+                size: Some(right), ..
+            },
+        ) => left == right,
+        (
+            WireDimInfo::Named {
+                name: left_name,
+                size: None,
+            },
+            WireDimInfo::Named {
+                name: right_name,
+                size: None,
+            },
+        ) => left_name == right_name,
+        _ => false,
+    }
+}
+
+fn wire_dim_is_anonymous(dim: &WireDimInfo) -> bool {
+    matches!(
+        dim,
+        WireDimInfo::Named { name, size: None } if name.is_empty() || name == "*"
+    )
+}
+
+fn wire_node_by_id(nodes: &[WireDagNode], id: u64) -> Option<&WireDagNode> {
+    nodes.iter().find(|node| node.id == id)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WireSemanticAxisOrigin {
+    Literal(i64),
+    ExternalAxis { load: u64, axis: usize },
+    ScalarInput { value: u64 },
+    OpComputed { op: u64, axis: usize },
+}
+
+fn wire_rt_axis_index(axis: &WireRtAxis) -> Option<usize> {
+    let WireRtAxis::Lit { value } = axis;
+    usize::try_from(*value).ok()
+}
+
+fn wire_rt_dim_origin(
+    nodes: &[WireDagNode],
+    owner: &WireDagNode,
+    dim: &WireRtDim,
+    fuel: usize,
+    relevant_shape_sources: &[u64],
+) -> Option<WireSemanticAxisOrigin> {
+    match dim {
+        WireRtDim::Lit { value } => Some(WireSemanticAxisOrigin::Literal(value.get())),
+        WireRtDim::Node { input } => owner
+            .inputs
+            .get(usize::try_from(*input).ok()?)
+            .copied()
+            .map(|value| WireSemanticAxisOrigin::ScalarInput { value }),
+        WireRtDim::InputAxis { tensor, axis } => {
+            let source =
+                wire_node_by_id(nodes, *owner.inputs.get(usize::try_from(*tensor).ok()?)?)?;
+            wire_axis_origin(
+                nodes,
+                source,
+                wire_rt_axis_index(axis)?,
+                fuel,
+                relevant_shape_sources,
+                true,
+            )
+        }
+        WireRtDim::ToEnd | WireRtDim::Sym { .. } => None,
+    }
+}
+
+fn wire_witnessed_origin_equal(
+    nodes: &[WireDagNode],
+    left: WireSemanticAxisOrigin,
+    right: WireSemanticAxisOrigin,
+    relevant_shape_sources: &[u64],
+    require_witness: bool,
+) -> bool {
+    if left == right && !require_witness {
+        return true;
+    }
+    let cutoff = relevant_shape_sources
+        .iter()
+        .copied()
+        .max()
+        .unwrap_or_else(|| u64::try_from(nodes.len()).unwrap_or(u64::MAX));
+    let observed = |witness: &WireDagNode| {
+        let WireRiscOp::ExtentWitness {
+            axis: WireRtAxis::Lit { value: axis },
+            ..
+        } = witness.op
+        else {
+            return None;
+        };
+        let source = wire_node_by_id(nodes, *witness.inputs.first()?)?;
+        wire_axis_origin(
+            nodes,
+            source,
+            usize::try_from(axis).ok()?,
+            nodes.len(),
+            relevant_shape_sources,
+            false,
+        )
+    };
+    let mut edges = Vec::new();
+    for node in nodes.iter().filter(|node| node.id < cutoff) {
+        let WireRiscOp::ExtentWitness { claims, .. } = &node.op else {
+            continue;
+        };
+        let Some(here) = observed(node) else {
+            continue;
+        };
+        for requirement in node.inputs.iter().skip(1).take(claims.len()) {
+            if *requirement >= node.id {
+                continue;
+            }
+            if let Some(there) = wire_node_by_id(nodes, *requirement).and_then(observed) {
+                edges.push((here, there));
+            }
+        }
+    }
+    let mut pending = vec![(left, false)];
+    let mut seen = Vec::new();
+    while let Some((origin, used_witness)) = pending.pop() {
+        if origin == right && (!require_witness || used_witness) {
+            return true;
+        }
+        if seen.contains(&(origin, used_witness)) {
+            continue;
+        }
+        seen.push((origin, used_witness));
+        for (a, b) in &edges {
+            if *a == origin {
+                pending.push((*b, true));
+            } else if *b == origin {
+                pending.push((*a, true));
+            }
+        }
+    }
+    false
+}
+
+fn wire_axis_origin(
+    nodes: &[WireDagNode],
+    node: &WireDagNode,
+    axis: usize,
+    fuel: usize,
+    relevant_shape_sources: &[u64],
+    require_input_agreement: bool,
+) -> Option<WireSemanticAxisOrigin> {
+    if fuel == 0 {
+        return None;
+    }
+    let dim = node.output_type.dims.get(axis)?;
+    match dim {
+        WireDimInfo::Lit { size }
+        | WireDimInfo::Named {
+            size: Some(size), ..
+        } => {
+            return Some(WireSemanticAxisOrigin::Literal(size.get()));
+        }
+        WireDimInfo::Named { size: None, .. } => {}
+    }
+
+    let input_axis = |input: usize, source_axis: usize| {
+        let source = wire_node_by_id(nodes, *node.inputs.get(input)?)?;
+        wire_axis_origin(
+            nodes,
+            source,
+            source_axis,
+            fuel - 1,
+            relevant_shape_sources,
+            require_input_agreement,
+        )
+    };
+    let same_shape_input_origin = || {
+        let mut origins = node.inputs.iter().filter_map(|source_id| {
+            let source = wire_node_by_id(nodes, *source_id)?;
+            (!source.output_type.dims.is_empty()).then_some(source)
+        });
+        let first_source = origins.next()?;
+        if first_source.output_type.dims.len() != node.output_type.dims.len() {
+            return None;
+        }
+        let first = wire_axis_origin(
+            nodes,
+            first_source,
+            axis,
+            fuel - 1,
+            relevant_shape_sources,
+            require_input_agreement,
+        )?;
+        if !require_input_agreement {
+            return Some(first);
+        }
+        origins
+            .all(|source| {
+                source.output_type.dims.len() == node.output_type.dims.len()
+                    && wire_axis_origin(
+                        nodes,
+                        source,
+                        axis,
+                        fuel - 1,
+                        relevant_shape_sources,
+                        require_input_agreement,
+                    )
+                    .is_some_and(|origin| {
+                        wire_witnessed_origin_equal(
+                            nodes,
+                            first,
+                            origin,
+                            relevant_shape_sources,
+                            false,
+                        )
+                    })
+            })
+            .then_some(first)
+    };
+
+    match &node.op {
+        WireRiscOp::Load { .. } => Some(WireSemanticAxisOrigin::ExternalAxis {
+            load: node.id,
+            axis,
+        }),
+        WireRiscOp::Where { .. } => {
+            let then_value = wire_node_by_id(nodes, *node.inputs.get(1)?)?;
+            let else_value = wire_node_by_id(nodes, *node.inputs.get(2)?)?;
+            let then_origin = (then_value.output_type.dims.len() == node.output_type.dims.len())
+                .then(|| {
+                    wire_axis_origin(
+                        nodes,
+                        then_value,
+                        axis,
+                        fuel - 1,
+                        relevant_shape_sources,
+                        require_input_agreement,
+                    )
+                })
+                .flatten()?;
+            let else_origin = (else_value.output_type.dims.len() == node.output_type.dims.len())
+                .then(|| {
+                    wire_axis_origin(
+                        nodes,
+                        else_value,
+                        axis,
+                        fuel - 1,
+                        relevant_shape_sources,
+                        require_input_agreement,
+                    )
+                })
+                .flatten()?;
+            (then_origin == else_origin).then_some(then_origin)
+        }
+        WireRiscOp::Add
+        | WireRiscOp::Sub
+        | WireRiscOp::Mul
+        | WireRiscOp::Div
+        | WireRiscOp::FloorDiv
+        | WireRiscOp::TruncDiv
+        | WireRiscOp::Mod
+        | WireRiscOp::MaxElem
+        | WireRiscOp::MinElem
+        | WireRiscOp::ExtremaAdjoint { .. }
+        | WireRiscOp::Relu
+        | WireRiscOp::ReluAdjoint
+        | WireRiscOp::Neg
+        | WireRiscOp::Recip
+        | WireRiscOp::Exp
+        | WireRiscOp::Log
+        | WireRiscOp::Sin
+        | WireRiscOp::Sqrt
+        | WireRiscOp::Cos
+        | WireRiscOp::Tan
+        | WireRiscOp::Atan
+        | WireRiscOp::Abs
+        | WireRiscOp::Floor
+        | WireRiscOp::Ceil
+        | WireRiscOp::Round
+        | WireRiscOp::UniformLike { .. }
+        | WireRiscOp::Dropout { .. }
+        | WireRiscOp::Store { .. }
+        | WireRiscOp::Copy
+        | WireRiscOp::Drop
+        | WireRiscOp::Realize
+        | WireRiscOp::Cast { .. }
+        | WireRiscOp::CastTrunc { .. }
+        | WireRiscOp::FusedElem { .. }
+        | WireRiscOp::CheckedUnitAxis { .. } => same_shape_input_origin(),
+        WireRiscOp::Permute { axes } => input_axis(0, usize::try_from(*axes.get(axis)?).ok()?),
+        WireRiscOp::Expand {
+            axis: expanded,
+            size,
+        } => {
+            let expanded = usize::try_from(*expanded).ok()?;
+            let operand_rank = wire_node_by_id(nodes, *node.inputs.first()?)?
+                .output_type
+                .dims
+                .len();
+            if axis == expanded {
+                wire_rt_dim_origin(nodes, node, size, fuel - 1, relevant_shape_sources)
+            } else if node.output_type.dims.len() == operand_rank + 1 && axis > expanded {
+                input_axis(0, axis - 1)
+            } else {
+                input_axis(0, axis)
+            }
+        }
+        WireRiscOp::Pad { padding, .. } => {
+            let (before, after) = padding.get(axis)?;
+            if matches!(before, WireRtDim::Lit { value } if value.get() == 0)
+                && matches!(after, WireRtDim::Lit { value } if value.get() == 0)
+            {
+                input_axis(0, axis)
+            } else {
+                Some(WireSemanticAxisOrigin::OpComputed { op: node.id, axis })
+            }
+        }
+        WireRiscOp::Stride { strides } => {
+            if matches!(strides.get(axis)?, WireRtDim::Lit { value } if value.get() == 1) {
+                input_axis(0, axis)
+            } else {
+                Some(WireSemanticAxisOrigin::OpComputed { op: node.id, axis })
+            }
+        }
+        WireRiscOp::Reshape { new_shape } => wire_rt_dim_origin(
+            nodes,
+            node,
+            new_shape.get(axis)?,
+            fuel - 1,
+            relevant_shape_sources,
+        ),
+        WireRiscOp::Shrink { .. }
+        | WireRiscOp::ReduceWindow { .. }
+        | WireRiscOp::BlasMatmul { .. } => {
+            Some(WireSemanticAxisOrigin::OpComputed { op: node.id, axis })
+        }
+        WireRiscOp::Compare { .. } | WireRiscOp::Logical { .. } => {
+            if require_input_agreement {
+                node.shape_deps
+                    .iter()
+                    .any(|source| {
+                        node.inputs.contains(source)
+                            && wire_node_by_id(nodes, *source).is_some_and(|source| {
+                                source.output_type.dims.len() == node.output_type.dims.len()
+                            })
+                    })
+                    .then(same_shape_input_origin)
+                    .flatten()
+            } else {
+                same_shape_input_origin()
+            }
+        }
+        WireRiscOp::Const { .. } | WireRiscOp::ConstTensor { .. } => node
+            .shape_deps
+            .iter()
+            .filter(|source| relevant_shape_sources.contains(source))
+            .find_map(|source| {
+                let source = wire_node_by_id(nodes, *source)?;
+                (source.id < node.id
+                    && source.output_type.dims.len() == node.output_type.dims.len())
+                .then(|| {
+                    wire_axis_origin(
+                        nodes,
+                        source,
+                        axis,
+                        fuel - 1,
+                        relevant_shape_sources,
+                        require_input_agreement,
+                    )
+                })
+                .flatten()
+            }),
+        WireRiscOp::Shape { .. }
+        | WireRiscOp::ExtentWitness { .. }
+        | WireRiscOp::CheckedReshapeExtent { .. }
+        | WireRiscOp::Sum { .. }
+        | WireRiscOp::Count { .. }
+        | WireRiscOp::MaxReduce { .. }
+        | WireRiscOp::MinReduce { .. }
+        | WireRiscOp::ProdReduce { .. }
+        | WireRiscOp::ReduceWindowGrad { .. }
+        | WireRiscOp::Argmax { .. }
+        | WireRiscOp::Argmin { .. }
+        | WireRiscOp::OneHot { .. }
+        | WireRiscOp::Gather { .. }
+        | WireRiscOp::ScatterAdd { .. }
+        | WireRiscOp::Scatter { .. }
+        | WireRiscOp::ScatterElements { .. } => None,
+    }
+}
+
+fn wire_semantic_axis_origin(
+    nodes: &[WireDagNode],
+    node: &WireDagNode,
+    axis: usize,
+    fuel: usize,
+    relevant_shape_sources: &[u64],
+) -> Option<WireSemanticAxisOrigin> {
+    wire_axis_origin(nodes, node, axis, fuel, relevant_shape_sources, true)
+}
+
+fn wire_semantic_node_dim<'a>(
+    nodes: &'a [WireDagNode],
+    node: &'a WireDagNode,
+    axis: usize,
+    fuel: usize,
+    relevant_shape_sources: &[u64],
+) -> Option<&'a WireDimInfo> {
+    if fuel == 0 {
+        return None;
+    }
+    let dim = node.output_type.dims.get(axis)?;
+    if wire_dim_is_anonymous(dim) {
+        if let Some(resolved) = node.shape_deps.iter().find_map(|source_id| {
+            if !relevant_shape_sources.contains(source_id) {
+                return None;
+            }
+            let source = wire_node_by_id(nodes, *source_id)?;
+            (source.id < node.id && source.output_type.dims.len() == node.output_type.dims.len())
+                .then(|| {
+                    wire_semantic_node_dim(nodes, source, axis, fuel - 1, relevant_shape_sources)
+                })
+                .flatten()
+                .filter(|resolved| !wire_dim_is_anonymous(resolved))
+        }) {
+            return Some(resolved);
+        }
+        if matches!(node.op, WireRiscOp::Where { .. })
+            && let Some(resolved) = node.inputs.iter().skip(1).find_map(|source_id| {
+                let source = wire_node_by_id(nodes, *source_id)?;
+                (source.id < node.id
+                    && source.output_type.dims.len() == node.output_type.dims.len())
+                .then(|| {
+                    wire_semantic_node_dim(nodes, source, axis, fuel - 1, relevant_shape_sources)
+                })
+                .flatten()
+                .filter(|resolved| !wire_dim_is_anonymous(resolved))
+            })
+        {
+            return Some(resolved);
+        }
+        return None;
+    }
+    Some(dim)
+}
+
+fn wire_node_shape_equal(
+    nodes: &[WireDagNode],
+    left: &WireDagNode,
+    right: &WireDagNode,
+    relevant_shape_sources: &[u64],
+) -> bool {
+    left.output_type.dims.len() == right.output_type.dims.len()
+        && (0..left.output_type.dims.len()).all(|axis| {
+            wire_semantic_node_dim(nodes, left, axis, nodes.len(), relevant_shape_sources)
+                .zip(wire_semantic_node_dim(
+                    nodes,
+                    right,
+                    axis,
+                    nodes.len(),
+                    relevant_shape_sources,
+                ))
+                .is_some_and(|(left, right)| wire_semantic_dim_info_equal(left, right))
+                || wire_semantic_axis_origin(nodes, left, axis, nodes.len(), relevant_shape_sources)
+                    .zip(wire_semantic_axis_origin(
+                        nodes,
+                        right,
+                        axis,
+                        nodes.len(),
+                        relevant_shape_sources,
+                    ))
+                    .is_some_and(|(left, right)| {
+                        wire_witnessed_origin_equal(
+                            nodes,
+                            left,
+                            right,
+                            relevant_shape_sources,
+                            false,
+                        )
+                    })
+                || wire_axis_origin(
+                    nodes,
+                    left,
+                    axis,
+                    nodes.len(),
+                    relevant_shape_sources,
+                    false,
+                )
+                .zip(wire_axis_origin(
+                    nodes,
+                    right,
+                    axis,
+                    nodes.len(),
+                    relevant_shape_sources,
+                    false,
+                ))
+                .is_some_and(|(left, right)| {
+                    wire_witnessed_origin_equal(nodes, left, right, relevant_shape_sources, true)
+                })
+        })
+}
+
+fn wire_node_tensor_type_equal(
+    nodes: &[WireDagNode],
+    left: &WireDagNode,
+    right: &WireDagNode,
+    relevant_shape_sources: &[u64],
+) -> bool {
+    left.output_type.precision == right.output_type.precision
+        && wire_node_shape_equal(nodes, left, right, relevant_shape_sources)
+}
+
 /// Combined failure type for [`WireDag::from_validated_json`]. Parse,
 /// exact-version, and cross-node contract failures remain distinct.
 #[derive(Debug)]
@@ -2893,7 +3578,6 @@ pub enum WireFusedStepOp {
     TruncDiv,
     MaxElem,
     MinElem,
-    CmpLt,
     Neg,
     Recip,
     Exp,
@@ -2928,6 +3612,26 @@ pub enum WireExtremaKind {
 pub enum WireExtremaOperand {
     Left,
     Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WireComparisonKind {
+    CmpLt,
+    Lt,
+    Eq,
+    Neq,
+    Gt,
+    Gte,
+    Lte,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WireLogicalKind {
+    And,
+    Or,
+    Not,
 }
 
 /// chelis#616: wire form of `chelis_ir::dag::RtDim` for movement-op bounds
@@ -2981,7 +3685,7 @@ pub struct WireExtentClaim {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WireRiscOp {
     Add,
     Sub,
@@ -2990,7 +3694,13 @@ pub enum WireRiscOp {
     FloorDiv,
     TruncDiv,
     Mod,
-    CmpLt,
+    Compare {
+        comparison: WireComparisonKind,
+    },
+    Logical {
+        logical: WireLogicalKind,
+    },
+    Where {},
     MaxElem,
     MinElem,
     ExtremaAdjoint {

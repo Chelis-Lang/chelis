@@ -1,6 +1,33 @@
 //! [04-LIN-4,7]: helper result owners transfer into the retaining tuple once.
 mod ownership_support;
-use ownership_support::{balanced, emit, emit_selected, run};
+use ownership_support::{authored_c_symbol, balanced, emit, emit_selected, run};
+
+fn assert_selected_symbol_contract(c: &str, authored_name: &str) {
+    let symbol = authored_c_symbol(authored_name);
+    assert!(
+        c.contains(&format!("{symbol}(")),
+        "selected host execution must expose the injective authored symbol"
+    );
+    assert!(
+        !c.lines()
+            .any(|line| line.contains(&format!(" {authored_name}("))),
+        "strict selected execution must not expose the raw authored name"
+    );
+}
+
+fn assert_legacy_symbol_contract(c: &str, authored_names: &[&str]) {
+    for name in authored_names {
+        let symbol = authored_c_symbol(name);
+        assert!(
+            c.contains(&format!("{symbol}(")),
+            "legacy whole-program C must expose the injective authored symbol for `{name}`"
+        );
+        assert!(
+            !c.lines().any(|line| line.contains(&format!(" {name}("))),
+            "legacy whole-program C must not expose the raw authored name `{name}`"
+        );
+    }
+}
 
 fn product_gradient(n: usize, m: usize) {
     let source = format!("\
@@ -8,6 +35,8 @@ def loss(x: tensor[{n}, f32], y: tensor[{m}, f32]) -> f32 = tensor_to_scalar(sum
 def derivative(x: tensor[{n}, f32], y: tensor[{m}, f32]) -> (tensor[{n}, f32], tensor[{m}, f32]) = grad(loss)(x, y)
 ");
     let c = emit_selected(&source, "derivative");
+    assert_selected_symbol_contract(&c, "derivative");
+    let derivative = authored_c_symbol("derivative");
     let driver = format!(
         r#"
 int main(void) {{
@@ -20,7 +49,7 @@ int main(void) {{
     for (int i = 0; i < {n}; ++i) dx[i] = sy;
     for (int i = 0; i < {m}; ++i) dy[i] = sx;
     for (int i = 0; i < 16; ++i) {{
-        chelis_tuple *result = derivative(x, y);
+        chelis_tuple *result = {derivative}(x, y);
         assert(chelis_tuple_len(result) == 2);
         chelis_value a = chelis_tuple_get(result, 0);
         chelis_value b = chelis_tuple_get(result, 1);
@@ -64,14 +93,13 @@ def derivative(x: tensor[2, f32], y: tensor[2, f32]) -> (tensor[2, f32], tensor[
 "#,
         "derivative",
     );
-    balanced(&run(
-        &c,
-        r#"
+    assert_selected_symbol_contract(&c, "derivative");
+    let driver = r#"
 int main(void) {
     chelis_tensor *x = input(2);
     const float original[2] = {-3, -1}, ones[2] = {1, 1};
     for (int i = 0; i < 16; ++i) {
-        chelis_tuple *result = derivative(x, x);
+        chelis_tuple *result = DERIVATIVE_ENTRY(x, x);
         assert(chelis_tuple_len(result) == 2);
         chelis_value a = chelis_tuple_get(result, 0);
         chelis_value b = chelis_tuple_get(result, 1);
@@ -85,8 +113,9 @@ int main(void) {
     chelis_tensor_release(x);
     return 0;
 }
-"#,
-    ));
+"#
+    .replace("DERIVATIVE_ENTRY", &authored_c_symbol("derivative"));
+    balanced(&run(&c, &driver));
 }
 
 #[test]
@@ -98,6 +127,7 @@ def derivative(x: tensor[2, f32], y: tensor[2, f32]) -> (tensor[2, f32], tensor[
 "#,
         "derivative",
     );
+    assert_selected_symbol_contract(&c, "derivative");
     let driver = r#"
 int main(void) {
     chelis_tensor *x = input(2), *y = input(2);
@@ -107,7 +137,7 @@ int main(void) {
     memcpy(chelis_tensor_write_view(gy).data, yv, sizeof(yv));
     chelis_tensor_end_write(gx); chelis_tensor_end_write(gy);
     for (int i = 0; i < 16; ++i) {
-        chelis_tuple *result = derivative(x, y);
+        chelis_tuple *result = DERIVATIVE_ENTRY(x, y);
         assert(chelis_tuple_len(result) == 2);
         chelis_value a = chelis_tuple_get(result, 0), b = chelis_tuple_get(result, 1);
         tensor_bits(chelis_tensor_borrow_value(a), 2, yv);
@@ -119,8 +149,9 @@ int main(void) {
     chelis_tensor_release(x); chelis_tensor_release(y);
     return 0;
 }
-"#;
-    balanced(&run(&c, driver));
+"#
+    .replace("DERIVATIVE_ENTRY", &authored_c_symbol("derivative"));
+    balanced(&run(&c, &driver));
     let mut removed = 0;
     let mutated = c
         .lines()
@@ -136,7 +167,7 @@ int main(void) {
         .collect::<Vec<_>>()
         .join("\n");
     assert_eq!(removed, 2, "only the two helper output temporaries");
-    let summary = run(&mutated, driver);
+    let summary = run(&mutated, &driver);
     assert_eq!(summary["live_owners"], 64, "{summary}");
     assert_eq!(summary["live_bytes"], 256, "{summary}");
 }
@@ -151,17 +182,16 @@ def pair(x: tensor[2, f32]) -> (tensor[2, f32], tensor[2, f32]) = (x, x)
 "#,
         "derivative",
     );
-    balanced(&run(
-        &c,
-        r#"
+    assert_legacy_symbol_contract(&c, &["derivative", "pair"]);
+    let driver = r#"
 int main(void) {
     chelis_tensor *x = input(2);
     const float original[2] = {-3, -1};
     for (int i = 0; i < 16; ++i) {
-        chelis_tensor *dx = derivative(x, x);
+        chelis_tensor *dx = DERIVATIVE_ENTRY(x, x);
         tensor_bits(dx, 2, original);
         chelis_tensor_release(dx);
-        chelis_tuple *result = pair(x);
+        chelis_tuple *result = PAIR_ENTRY(x);
         assert(chelis_tuple_len(result) == 2);
         for (int j = 0; j < 2; ++j) {
             chelis_value value = chelis_tuple_get(result, j);
@@ -174,6 +204,8 @@ int main(void) {
     chelis_tensor_release(x);
     return 0;
 }
-"#,
-    ));
+"#
+    .replace("DERIVATIVE_ENTRY", &authored_c_symbol("derivative"))
+    .replace("PAIR_ENTRY", &authored_c_symbol("pair"));
+    balanced(&run(&c, &driver));
 }

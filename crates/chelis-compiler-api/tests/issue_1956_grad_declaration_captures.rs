@@ -143,8 +143,13 @@ fn frozen_named_transform_does_not_follow_later_target_or_value_shadows() {
 
 #[test]
 fn frozen_same_name_target_retains_its_existing_public_gradient() {
-    let source =
-        format!("{LOSS}out = {{ loss = loss\n grad(loss)(to_tensor([1.0f32, 2.0f32])) }}\n");
+    // Freeze the direct declaration target before installing the same-name
+    // alias. Alias-target admission remains behind the temporary 0.19 core
+    // fence, but a transform already created from the declaration retains its
+    // target identity and declaration capture.
+    let source = format!(
+        "{LOSS}out = {{ derivative = grad(loss)\n loss = loss\n derivative(to_tensor([1.0f32, 2.0f32])) }}\n"
+    );
     for selected in [false, true] {
         let result = evaluate(&source, selected);
         assert_observation(&result, selected, &["out"], &[]);

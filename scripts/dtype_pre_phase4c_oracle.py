@@ -77,7 +77,12 @@ def prerequisites(python: str) -> tuple[ChildOracle | MissingOracle, ...]:
         MissingOracle("host-rendering", (1059,), "complete compiled Tensor/List rendering oracle pending"),
         MissingOracle("reductions", (1281,), "complete reduction/window extrema oracle pending"),
         MissingOracle("to-string", (1282,), "complete recursive to_string domain oracle pending"),
-        MissingOracle("nonnumeric-lowering", (1284,), "typed logical/comparison/where oracle pending"),
+        ChildOracle(
+            "nonnumeric-lowering",
+            (1284,),
+            (python, "scripts/dtype_nonnumeric_lowering_oracle.py"),
+            "DTYPE NONNUMERIC LOWERING ORACLE: PASS",
+        ),
         ChildOracle("count", (1287,), (python, "scripts/dtype_count_oracle.py"),
                     "DTYPE COUNT ORACLE: PASS"),
         MissingOracle("capacity", (1288,),

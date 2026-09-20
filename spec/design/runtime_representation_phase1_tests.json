@@ -649,6 +649,82 @@
       ]
     },
     {
+      "name": "typed nonnumeric IR semantics, verifier, optimizer, vmap, and AD",
+      "args": [
+        "-p",
+        "chelis-ir",
+        "--test",
+        "logical_bool_semantics",
+        "-E",
+        "not test(=an_allocation_above_int32_elements_reports_its_true_extent)"
+      ],
+      "required": [
+        "chelis-ir::logical_bool_semantics::comparison_logical_and_where_are_fusion_barriers_and_vmap_shape_preserving",
+        "chelis-ir::logical_bool_semantics::comparisons_have_zero_cotangents_logicals_reject_and_where_routes_g",
+        "chelis-ir::logical_bool_semantics::evaluator_implements_ieee_comparisons_for_every_active_numeric_dtype",
+        "chelis-ir::logical_bool_semantics::evaluator_logical_truth_tables_are_bool_only_and_non_short_circuiting",
+        "chelis-ir::logical_bool_semantics::tier2_preserves_every_comparison_and_logical_identity",
+        "chelis-ir::logical_bool_semantics::verifier_rejects_invalid_domains_shapes_outputs_and_arities",
+        "chelis-ir::logical_bool_semantics::where_selects_stored_bits_and_evaluates_both_branches_first"
+      ]
+    },
+    {
+      "name": "typed nonnumeric IR release semantics and AD",
+      "args": [
+        "--release",
+        "-p",
+        "chelis-ir",
+        "--test",
+        "logical_bool_semantics",
+        "-E",
+        "not test(=an_allocation_above_int32_elements_reports_its_true_extent)"
+      ],
+      "required": [
+        "chelis-ir::logical_bool_semantics::comparison_logical_and_where_are_fusion_barriers_and_vmap_shape_preserving",
+        "chelis-ir::logical_bool_semantics::comparisons_have_zero_cotangents_logicals_reject_and_where_routes_g",
+        "chelis-ir::logical_bool_semantics::evaluator_implements_ieee_comparisons_for_every_active_numeric_dtype",
+        "chelis-ir::logical_bool_semantics::evaluator_logical_truth_tables_are_bool_only_and_non_short_circuiting",
+        "chelis-ir::logical_bool_semantics::tier2_preserves_every_comparison_and_logical_identity",
+        "chelis-ir::logical_bool_semantics::verifier_rejects_invalid_domains_shapes_outputs_and_arities",
+        "chelis-ir::logical_bool_semantics::where_selects_stored_bits_and_evaluates_both_branches_first"
+      ]
+    },
+    {
+      "name": "typed nonnumeric C exact dtype and stored-bit execution",
+      "args": [
+        "-p",
+        "chelis-backend-c",
+        "--test",
+        "exec_compile",
+        "-E",
+        "(test(typed_comparison_c_matrix_matches_evaluator_for_every_identity_and_dtype) | test(typed_logical_c_truth_tables_are_bool8) | test(typed_where_c_copies_selected_storage_bits_for_every_admitted_dtype) | test(typed_nonnumeric_c_permuted_stepped_views_match_evaluator_and_preserve_bits)) & (not test(=an_allocation_above_int32_elements_reports_its_true_extent))"
+      ],
+      "required": [
+        "chelis-backend-c::exec_compile::typed_comparison_c_matrix_matches_evaluator_for_every_identity_and_dtype",
+        "chelis-backend-c::exec_compile::typed_logical_c_truth_tables_are_bool8",
+        "chelis-backend-c::exec_compile::typed_nonnumeric_c_permuted_stepped_views_match_evaluator_and_preserve_bits",
+        "chelis-backend-c::exec_compile::typed_where_c_copies_selected_storage_bits_for_every_admitted_dtype"
+      ]
+    },
+    {
+      "name": "typed nonnumeric HIP source and dtype admission controls",
+      "args": [
+        "-p",
+        "chelis-backend-hip",
+        "--test",
+        "logical_comparison_where",
+        "-E",
+        "not test(=an_allocation_above_int32_elements_reports_its_true_extent)"
+      ],
+      "required": [
+        "chelis-backend-hip::logical_comparison_where::every_comparison_emits_a_bool8_kernel_for_every_admitted_operand_dtype",
+        "chelis-backend-hip::logical_comparison_where::f16_and_bf16_comparison_decode_values_instead_of_ordering_storage_bits",
+        "chelis-backend-hip::logical_comparison_where::logical_kernels_are_eager_bool8_truth_operations",
+        "chelis-backend-hip::logical_comparison_where::permuted_stepped_views_feed_comparison_logical_and_where_stride_metadata",
+        "chelis-backend-hip::logical_comparison_where::where_selects_raw_stored_bits_for_every_admitted_branch_dtype"
+      ]
+    },
+    {
       "name": "checked C shared indexing optimized sanitizer execution",
       "args": [
         "-p",

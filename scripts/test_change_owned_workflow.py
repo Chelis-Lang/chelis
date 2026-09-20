@@ -255,6 +255,9 @@ def assert_change_owned_topology(
         expansion["needs"], ["integration-plan"]
     )
     test.assertEqual(expansion["timeout-minutes"], 20)
+    test.assertEqual(expansion["env"]["CC"], "clang")
+    test.assertEqual(expansion["env"]["CXX"], "clang++")
+    test.assertEqual(expansion["env"]["CHELIS_TEST_CC"], "clang")
     test.assertFalse(expansion.get("continue-on-error", False))
     test.assertFalse(expansion["strategy"]["fail-fast"])
     test.assertEqual(expansion["strategy"]["matrix"]["shard"], SHARDS)

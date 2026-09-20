@@ -464,7 +464,7 @@ numeric data, whether or not you have read that document:
   them). It retains no grandfather, successor-override, permanent-disposition,
   integer-plumbing, or other transition rows. The wire baseline has 97 final
   numeric leaves: 80 verified transports and 17 exact numeric operations.
-  WireDag v14 includes the `WireDagNode.shape_deps: u64` and opaque
+  WireDag v15 includes the `WireDagNode.shape_deps: u64` and opaque
   local-ascription-identity transports plus the fixed `NonnegativeExtent`
   carrier's literal-witness requirement role. Its
   private verifier requires current graph, codec/admission, cache, publication

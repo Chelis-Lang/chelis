@@ -8,8 +8,8 @@ use chelis_backend_c::CodegenResult;
 use chelis_backend_hip::HipCodegenResult;
 use chelis_deep::Expr as DeepExpr;
 use chelis_ir::dag::{
-    Dag, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStepOp, NodeId, RiscOp, RtDim,
-    TensorType,
+    ComparisonKind, Dag, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStepOp,
+    LogicalKind, NodeId, RiscOp, RtDim, TensorType,
 };
 use chelis_ir::eval;
 use chelis_surf::ast::{
@@ -39,13 +39,14 @@ use crate::schema::{
     FitnessComponents, GeneralKind, GeneratedFile, GradRequest, GradResult, LowerRequest,
     LowerResult, ParseRequest, ParseResult, RenameRequest, RenameResult, ReplaceFunctionRequest,
     ReplaceFunctionResult, RootManifestEntryResult, RootManifestResult, SourceKind, Span,
-    ValidateMode, ValidateRequest, ValidateResult, WireBinOp, WireDag, WireDagNode,
-    WireDagSchemaError, WireDimExpr, WireDimInfo, WireExtentWitnessSite, WireExtremaKind,
-    WireExtremaOperand, WireFusedInput, WireFusedStep, WireFusedStepOp, WireImportKind,
-    WireLetBinding, WireLetPattern, WireMatchArm, WireParam, WirePattern, WirePropertyOption,
-    WireRecordExprField, WireRecordPatternField, WireRecordTypeField, WireRiscOp, WireRtAxis,
-    WireRtDim, WireSurfDecl, WireSurfExpr, WireSurfTypeExpr, WireTensorType, WireTypeInvariant,
-    WireUnaryOp, WireVariant, WireVariantFields,
+    ValidateMode, ValidateRequest, ValidateResult, WireBinOp, WireComparisonKind, WireDag,
+    WireDagNode, WireDagSchemaError, WireDimExpr, WireDimInfo, WireExtentWitnessSite,
+    WireExtremaKind, WireExtremaOperand, WireFusedInput, WireFusedStep, WireFusedStepOp,
+    WireImportKind, WireLetBinding, WireLetPattern, WireLogicalKind, WireMatchArm, WireParam,
+    WirePattern, WirePropertyOption, WireRecordExprField, WireRecordPatternField,
+    WireRecordTypeField, WireRiscOp, WireRtAxis, WireRtDim, WireSurfDecl, WireSurfExpr,
+    WireSurfTypeExpr, WireTensorType, WireTypeInvariant, WireUnaryOp, WireVariant,
+    WireVariantFields,
 };
 use crate::schema::{stage_error, stage_error_with_span, unsupported_stage_error};
 use crate::source_wire::{SourceWireResult, wire_deep_expr, wire_literal};
@@ -5165,6 +5166,26 @@ pub fn reject_unsupported_metal_ops_in_host_program(
 /// copies to drift.
 pub fn reject_unsupported_metal_ops(dag: &Dag) -> std::result::Result<(), CompilerError> {
     for node in dag.nodes() {
+        let direct_nonnumeric = match &node.op {
+            RiscOp::Compare(kind) => Some(format!("comparison `{}`", kind.surf_name())),
+            RiscOp::Logical(kind) => Some(format!("logical `{}`", kind.surf_name())),
+            RiscOp::Where => Some("where".to_string()),
+            _ => None,
+        };
+        if let Some(op) = direct_nonnumeric {
+            return Err(unsupported_gate_error(
+                format!(
+                    "`chelis build --target metal` does not yet support exact direct nonnumeric `{op}` at lowered node {}; use `--target c` or `--target hip`",
+                    node.id.0
+                ),
+                "metal",
+                chelis_types::unimplemented_rejection!(
+                    1284,
+                    "the Metal exact comparison, Bool8 logical, and raw stored-bit where kernels are not implemented; use `--target c` or `--target hip`"
+                ),
+            ));
+        }
+
         let direct_arithmetic = match &node.op {
             RiscOp::Sub => Some("sub"),
             RiscOp::MaxElem => Some("max_elem"),
@@ -5587,6 +5608,11 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
         }
 
         match &node.op {
+            // Exact direct nonnumeric kernels are an admitted HIP capability.
+            // Keep this explicit so a future broad rejection cannot silently
+            // erase the #1284 target cell.
+            RiscOp::Compare(_) | RiscOp::Logical(_) | RiscOp::Where => {}
+
             // `pad` / `shrink` are now implemented on the HIP backend
             // (typed per-output-element kernels, GPU==eval verified by the
             // `gpu_correctness` manual oracle). No reject arm: they fall
@@ -5909,8 +5935,9 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
     // The shared gate follows the backend's exact dtype surface. f64 and
     // the integer family have typed kernel templates. bf16/f16 are narrower:
     // storage, exact-bit Realize copies, hipBLAS matmul, and [05-OP-43]'s
-    // dedicated ReLU identities have shipped kernels. Other compute nodes
-    // still reach an unsupported narrow-float path.
+    // dedicated ReLU identities, and raw stored-bit Where selection have
+    // shipped kernels. Other compute nodes still reach an unsupported
+    // narrow-float path.
     let narrow_float_admissible: UnordSet<NodeId> = dag
         .nodes()
         .iter()
@@ -5926,7 +5953,8 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
             | RiscOp::BlasMatmul { .. }
             | RiscOp::Realize
             | RiscOp::Relu
-            | RiscOp::ReluAdjoint => Some(node.id),
+            | RiscOp::ReluAdjoint
+            | RiscOp::Where => Some(node.id),
             _ => None,
         })
         .collect();
@@ -6846,7 +6874,25 @@ fn wire_op(op: &RiscOp, precision: Prim) -> WireResult<WireRiscOp> {
         RiscOp::FloorDiv => WireRiscOp::FloorDiv,
         RiscOp::TruncDiv => WireRiscOp::TruncDiv,
         RiscOp::Mod => WireRiscOp::Mod,
-        RiscOp::CmpLt => WireRiscOp::CmpLt,
+        RiscOp::Compare(kind) => WireRiscOp::Compare {
+            comparison: match kind {
+                ComparisonKind::CmpLt => WireComparisonKind::CmpLt,
+                ComparisonKind::Lt => WireComparisonKind::Lt,
+                ComparisonKind::Eq => WireComparisonKind::Eq,
+                ComparisonKind::Neq => WireComparisonKind::Neq,
+                ComparisonKind::Gt => WireComparisonKind::Gt,
+                ComparisonKind::Gte => WireComparisonKind::Gte,
+                ComparisonKind::Lte => WireComparisonKind::Lte,
+            },
+        },
+        RiscOp::Logical(kind) => WireRiscOp::Logical {
+            logical: match kind {
+                LogicalKind::And => WireLogicalKind::And,
+                LogicalKind::Or => WireLogicalKind::Or,
+                LogicalKind::Not => WireLogicalKind::Not,
+            },
+        },
+        RiscOp::Where => WireRiscOp::Where {},
         RiscOp::MaxElem => WireRiscOp::MaxElem,
         RiscOp::MinElem => WireRiscOp::MinElem,
         RiscOp::ExtremaAdjoint { kind, operand } => WireRiscOp::ExtremaAdjoint {
@@ -7083,7 +7129,6 @@ fn wire_op(op: &RiscOp, precision: Prim) -> WireResult<WireRiscOp> {
                         FusedStepOp::TruncDiv => WireFusedStepOp::TruncDiv,
                         FusedStepOp::MaxElem => WireFusedStepOp::MaxElem,
                         FusedStepOp::MinElem => WireFusedStepOp::MinElem,
-                        FusedStepOp::CmpLt => WireFusedStepOp::CmpLt,
                         FusedStepOp::Neg => WireFusedStepOp::Neg,
                         FusedStepOp::Recip => WireFusedStepOp::Recip,
                         FusedStepOp::Exp => WireFusedStepOp::Exp,
@@ -7346,6 +7391,61 @@ mod tests {
         );
         assert_eq!(json["nodes"][2]["shape_deps"], serde_json::json!([1]));
         assert_eq!(json["nodes"][2]["span_id"], serde_json::Value::Null);
+        let decoded = WireDag::from_validated_json(&json.to_string()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), json);
+    }
+
+    #[test]
+    fn native_wire_projection_preserves_anonymous_where_shape_producers() {
+        let mut dag = Dag::new();
+        let condition = dag.add_node(
+            RiscOp::Load {
+                name: "condition".into(),
+            },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Named("runtime".into(), None)],
+                precision: Prim::Bool,
+            },
+            None,
+        );
+        let values = dag.add_node(
+            RiscOp::Load {
+                name: "values".into(),
+            },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Named("runtime".into(), None)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let zero = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 0.0),
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Named(String::new(), None)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let selected = dag.add_node(
+            RiscOp::Where,
+            vec![condition, values, zero],
+            TensorType {
+                dims: vec![DimInfo::Named(String::new(), None)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        dag.add_root(selected);
+        assert_eq!(dag.get(zero).unwrap().shape_deps, vec![values]);
+        assert!(chelis_ir::verify::verify(&dag).is_empty());
+
+        let projected = wire_dag(&dag)
+            .expect("WireDag v15 must preserve producer-aware anonymous where shape semantics");
+        let json = serde_json::to_value(&projected).unwrap();
+        assert_eq!(json["nodes"][2]["shape_deps"], serde_json::json!([1]));
         let decoded = WireDag::from_validated_json(&json.to_string()).unwrap();
         assert_eq!(serde_json::to_value(decoded).unwrap(), json);
     }

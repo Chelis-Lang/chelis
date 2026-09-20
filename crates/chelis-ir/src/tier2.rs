@@ -20,7 +20,9 @@
 
 use chelis_types::types::Prim;
 
-use crate::dag::{Dag, DimExpr, DimInfo, NodeId, RiscOp, RtAxis, RtDim, TensorType};
+use crate::dag::{
+    ComparisonKind, Dag, DimExpr, DimInfo, LogicalKind, NodeId, RiscOp, RtAxis, RtDim, TensorType,
+};
 
 /// Canonical synthesized marker for Tier 2 decomposition sub-nodes when
 /// the parent op had no source span. Locked by spec/03-deep-syntax.md
@@ -265,7 +267,49 @@ pub fn lower_trunc_div(
     add_synth(dag, RiscOp::TruncDiv, vec![a, b], ty.clone(), parent_span)
 }
 
-/// H1: `gt(a, b)` = `cmplt(b, a)` (swap args)
+fn lower_comparison(
+    dag: &mut Dag,
+    kind: ComparisonKind,
+    a: NodeId,
+    b: NodeId,
+    ty: &TensorType,
+    parent_span: Option<&str>,
+) -> NodeId {
+    // Comparison is elementwise and the checker has already required both
+    // operands to have exactly the same shape. Preserve that proven operand
+    // surface instead of copying result metadata, which may contain an
+    // internal fresh dimension name after helper inlining.
+    let dims = dag
+        .get(a)
+        .map(|node| node.output_type.dims.clone())
+        .unwrap_or_else(|| ty.dims.clone());
+    let bool_ty = TensorType {
+        dims,
+        precision: Prim::Bool,
+    };
+    add_synth(dag, RiscOp::Compare(kind), vec![a, b], bool_ty, parent_span)
+}
+
+pub fn lower_cmplt(
+    dag: &mut Dag,
+    a: NodeId,
+    b: NodeId,
+    ty: &TensorType,
+    parent_span: Option<&str>,
+) -> NodeId {
+    lower_comparison(dag, ComparisonKind::CmpLt, a, b, ty, parent_span)
+}
+
+pub fn lower_lt(
+    dag: &mut Dag,
+    a: NodeId,
+    b: NodeId,
+    ty: &TensorType,
+    parent_span: Option<&str>,
+) -> NodeId {
+    lower_comparison(dag, ComparisonKind::Lt, a, b, ty, parent_span)
+}
+
 pub fn lower_gt(
     dag: &mut Dag,
     a: NodeId,
@@ -273,15 +317,9 @@ pub fn lower_gt(
     ty: &TensorType,
     parent_span: Option<&str>,
 ) -> NodeId {
-    let bool_ty = TensorType {
-        dims: ty.dims.clone(),
-        precision: Prim::Bool,
-    };
-    add_synth(dag, RiscOp::CmpLt, vec![b, a], bool_ty, parent_span)
+    lower_comparison(dag, ComparisonKind::Gt, a, b, ty, parent_span)
 }
 
-/// H1: `gte(a, b)` = `neg(cmplt(a, b))` — not (a < b)
-/// Per spec §3.2: gte uses neg on bool (0/1 convention).
 pub fn lower_gte(
     dag: &mut Dag,
     a: NodeId,
@@ -289,23 +327,9 @@ pub fn lower_gte(
     ty: &TensorType,
     parent_span: Option<&str>,
 ) -> NodeId {
-    let bool_ty = TensorType {
-        dims: ty.dims.clone(),
-        precision: Prim::Bool,
-    };
-    let lt = add_synth(dag, RiscOp::CmpLt, vec![a, b], bool_ty.clone(), parent_span);
-    // not(lt): cmplt(lt, const(1)) — if lt==0 then 0<1=true, if lt==1 then 1<1=false
-    let one = add_synth(
-        dag,
-        RiscOp::synth_const(bool_ty.precision, 1.0),
-        vec![],
-        bool_ty.clone(),
-        parent_span,
-    );
-    add_synth(dag, RiscOp::CmpLt, vec![lt, one], bool_ty, parent_span)
+    lower_comparison(dag, ComparisonKind::Gte, a, b, ty, parent_span)
 }
 
-/// H1: `lte(a, b)` = `neg(cmplt(b, a))` — not (b < a)
 pub fn lower_lte(
     dag: &mut Dag,
     a: NodeId,
@@ -313,23 +337,9 @@ pub fn lower_lte(
     ty: &TensorType,
     parent_span: Option<&str>,
 ) -> NodeId {
-    let bool_ty = TensorType {
-        dims: ty.dims.clone(),
-        precision: Prim::Bool,
-    };
-    let lt = add_synth(dag, RiscOp::CmpLt, vec![b, a], bool_ty.clone(), parent_span);
-    let one = add_synth(
-        dag,
-        RiscOp::synth_const(bool_ty.precision, 1.0),
-        vec![],
-        bool_ty.clone(),
-        parent_span,
-    );
-    add_synth(dag, RiscOp::CmpLt, vec![lt, one], bool_ty, parent_span)
+    lower_comparison(dag, ComparisonKind::Lte, a, b, ty, parent_span)
 }
 
-/// H1: `eq(a, b)` = not(or(cmplt(a,b), cmplt(b,a)))
-/// `or` on bools = `max_elem`, `not` = `cmplt(x, const(1))`
 pub fn lower_eq(
     dag: &mut Dag,
     a: NodeId,
@@ -337,30 +347,9 @@ pub fn lower_eq(
     ty: &TensorType,
     parent_span: Option<&str>,
 ) -> NodeId {
-    let bool_ty = TensorType {
-        dims: ty.dims.clone(),
-        precision: Prim::Bool,
-    };
-    let lt_ab = add_synth(dag, RiscOp::CmpLt, vec![a, b], bool_ty.clone(), parent_span);
-    let lt_ba = add_synth(dag, RiscOp::CmpLt, vec![b, a], bool_ty.clone(), parent_span);
-    let or = add_synth(
-        dag,
-        RiscOp::MaxElem,
-        vec![lt_ab, lt_ba],
-        bool_ty.clone(),
-        parent_span,
-    );
-    let one = add_synth(
-        dag,
-        RiscOp::synth_const(bool_ty.precision, 1.0),
-        vec![],
-        bool_ty.clone(),
-        parent_span,
-    );
-    add_synth(dag, RiscOp::CmpLt, vec![or, one], bool_ty, parent_span)
+    lower_comparison(dag, ComparisonKind::Eq, a, b, ty, parent_span)
 }
 
-/// H1: `neq(a, b)` = `or(cmplt(a,b), cmplt(b,a))`
 pub fn lower_neq(
     dag: &mut Dag,
     a: NodeId,
@@ -368,19 +357,7 @@ pub fn lower_neq(
     ty: &TensorType,
     parent_span: Option<&str>,
 ) -> NodeId {
-    let bool_ty = TensorType {
-        dims: ty.dims.clone(),
-        precision: Prim::Bool,
-    };
-    let lt_ab = add_synth(dag, RiscOp::CmpLt, vec![a, b], bool_ty.clone(), parent_span);
-    let lt_ba = add_synth(dag, RiscOp::CmpLt, vec![b, a], bool_ty.clone(), parent_span);
-    add_synth(
-        dag,
-        RiscOp::MaxElem,
-        vec![lt_ab, lt_ba],
-        bool_ty,
-        parent_span,
-    )
+    lower_comparison(dag, ComparisonKind::Neq, a, b, ty, parent_span)
 }
 
 /// Direct stored-bit `min_elem(a, b)` selection identity ([05-OP-40]).
@@ -394,7 +371,6 @@ pub fn lower_min_elem(
     add_synth(dag, RiscOp::MinElem, vec![a, b], ty.clone(), parent_span)
 }
 
-/// H2: `and(a, b)` on bools = `mul(a, b)`
 pub fn lower_and(
     dag: &mut Dag,
     a: NodeId,
@@ -406,10 +382,15 @@ pub fn lower_and(
         dims: ty.dims.clone(),
         precision: Prim::Bool,
     };
-    add_synth(dag, RiscOp::Mul, vec![a, b], bool_ty, parent_span)
+    add_synth(
+        dag,
+        RiscOp::Logical(LogicalKind::And),
+        vec![a, b],
+        bool_ty,
+        parent_span,
+    )
 }
 
-/// H2: `or(a, b)` on bools = `max_elem(a, b)`
 pub fn lower_or(
     dag: &mut Dag,
     a: NodeId,
@@ -421,23 +402,27 @@ pub fn lower_or(
         dims: ty.dims.clone(),
         precision: Prim::Bool,
     };
-    add_synth(dag, RiscOp::MaxElem, vec![a, b], bool_ty, parent_span)
+    add_synth(
+        dag,
+        RiscOp::Logical(LogicalKind::Or),
+        vec![a, b],
+        bool_ty,
+        parent_span,
+    )
 }
 
-/// H2: `not(a)` on bools = `cmplt(a, const(1))` — flips 0->1, 1->0
 pub fn lower_not(dag: &mut Dag, a: NodeId, ty: &TensorType, parent_span: Option<&str>) -> NodeId {
     let bool_ty = TensorType {
         dims: ty.dims.clone(),
         precision: Prim::Bool,
     };
-    let one = add_synth(
+    add_synth(
         dag,
-        RiscOp::synth_const(bool_ty.precision, 1.0),
-        vec![],
-        bool_ty.clone(),
+        RiscOp::Logical(LogicalKind::Not),
+        vec![a],
+        bool_ty,
         parent_span,
-    );
-    add_synth(dag, RiscOp::CmpLt, vec![a, one], bool_ty, parent_span)
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1458,7 +1443,7 @@ mod tests {
         );
     }
 
-    // --- H1: Tier 2 comparison decompositions ---
+    // --- H1: identity-preserving comparison lowering ---
 
     fn scalar_bool() -> TensorType {
         TensorType {
@@ -1468,7 +1453,7 @@ mod tests {
     }
 
     #[test]
-    fn gt_swaps_args_to_cmplt() {
+    fn gt_preserves_direct_identity_and_argument_order() {
         let mut dag = Dag::new();
         let a = dag.add_node(
             RiscOp::synth_const(scalar_f32().precision, 5.0),
@@ -1485,14 +1470,13 @@ mod tests {
         let result = lower_gt(&mut dag, a, b, &scalar_f32(), None);
 
         let node = dag.get(result).unwrap();
-        assert_eq!(node.op, RiscOp::CmpLt);
-        // b, a order (swapped).
-        assert_eq!(node.inputs, vec![b, a]);
+        assert_eq!(node.op, RiscOp::Compare(ComparisonKind::Gt));
+        assert_eq!(node.inputs, vec![a, b]);
         assert_eq!(node.output_type.precision, Prim::Bool);
     }
 
     #[test]
-    fn gte_produces_not_cmplt() {
+    fn gte_preserves_direct_identity() {
         let mut dag = Dag::new();
         let a = dag.add_node(
             RiscOp::synth_const(scalar_f32().precision, 5.0),
@@ -1508,15 +1492,14 @@ mod tests {
         );
         let result = lower_gte(&mut dag, a, b, &scalar_f32(), None);
 
-        // a, b, CmpLt(a,b), Const(1), CmpLt(lt, 1)
-        assert_eq!(dag.len(), 5);
+        assert_eq!(dag.len(), 3);
         let node = dag.get(result).unwrap();
-        assert_eq!(node.op, RiscOp::CmpLt);
+        assert_eq!(node.op, RiscOp::Compare(ComparisonKind::Gte));
         assert_eq!(node.output_type.precision, Prim::Bool);
     }
 
     #[test]
-    fn lte_produces_not_cmplt_ba() {
+    fn lte_preserves_direct_identity() {
         let mut dag = Dag::new();
         let a = dag.add_node(
             RiscOp::synth_const(scalar_f32().precision, 3.0),
@@ -1532,14 +1515,14 @@ mod tests {
         );
         let result = lower_lte(&mut dag, a, b, &scalar_f32(), None);
 
-        assert_eq!(dag.len(), 5);
+        assert_eq!(dag.len(), 3);
         let node = dag.get(result).unwrap();
-        assert_eq!(node.op, RiscOp::CmpLt);
+        assert_eq!(node.op, RiscOp::Compare(ComparisonKind::Lte));
         assert_eq!(node.output_type.precision, Prim::Bool);
     }
 
     #[test]
-    fn eq_produces_not_or_cmplt() {
+    fn eq_preserves_direct_identity() {
         let mut dag = Dag::new();
         let a = dag.add_node(
             RiscOp::synth_const(scalar_f32().precision, 3.0),
@@ -1555,15 +1538,14 @@ mod tests {
         );
         let result = lower_eq(&mut dag, a, b, &scalar_f32(), None);
 
-        // a, b, CmpLt(a,b), CmpLt(b,a), MaxElem, Const(1), CmpLt(or, 1)
-        assert_eq!(dag.len(), 7);
+        assert_eq!(dag.len(), 3);
         let node = dag.get(result).unwrap();
-        assert_eq!(node.op, RiscOp::CmpLt);
+        assert_eq!(node.op, RiscOp::Compare(ComparisonKind::Eq));
         assert_eq!(node.output_type.precision, Prim::Bool);
     }
 
     #[test]
-    fn neq_produces_or_cmplt() {
+    fn neq_preserves_direct_identity() {
         let mut dag = Dag::new();
         let a = dag.add_node(
             RiscOp::synth_const(scalar_f32().precision, 3.0),
@@ -1579,10 +1561,9 @@ mod tests {
         );
         let result = lower_neq(&mut dag, a, b, &scalar_f32(), None);
 
-        // a, b, CmpLt(a,b), CmpLt(b,a), MaxElem
-        assert_eq!(dag.len(), 5);
+        assert_eq!(dag.len(), 3);
         let node = dag.get(result).unwrap();
-        assert_eq!(node.op, RiscOp::MaxElem);
+        assert_eq!(node.op, RiscOp::Compare(ComparisonKind::Neq));
         assert_eq!(node.output_type.precision, Prim::Bool);
     }
 
@@ -1613,7 +1594,7 @@ mod tests {
     // --- H2: Boolean operators ---
 
     #[test]
-    fn and_produces_mul() {
+    fn and_preserves_direct_identity() {
         let mut dag = Dag::new();
         let a = dag.add_node(
             RiscOp::synth_const(scalar_bool().precision, 1.0),
@@ -1630,12 +1611,12 @@ mod tests {
         let result = lower_and(&mut dag, a, b, &scalar_bool(), None);
 
         let node = dag.get(result).unwrap();
-        assert_eq!(node.op, RiscOp::Mul);
+        assert_eq!(node.op, RiscOp::Logical(LogicalKind::And));
         assert_eq!(node.output_type.precision, Prim::Bool);
     }
 
     #[test]
-    fn or_produces_max_elem() {
+    fn or_preserves_direct_identity() {
         let mut dag = Dag::new();
         let a = dag.add_node(
             RiscOp::synth_const(scalar_bool().precision, 0.0),
@@ -1652,12 +1633,12 @@ mod tests {
         let result = lower_or(&mut dag, a, b, &scalar_bool(), None);
 
         let node = dag.get(result).unwrap();
-        assert_eq!(node.op, RiscOp::MaxElem);
+        assert_eq!(node.op, RiscOp::Logical(LogicalKind::Or));
         assert_eq!(node.output_type.precision, Prim::Bool);
     }
 
     #[test]
-    fn not_produces_cmplt_with_one() {
+    fn not_preserves_direct_identity() {
         let mut dag = Dag::new();
         let a = dag.add_node(
             RiscOp::synth_const(scalar_bool().precision, 1.0),
@@ -1667,10 +1648,9 @@ mod tests {
         );
         let result = lower_not(&mut dag, a, &scalar_bool(), None);
 
-        // a, Const(1), CmpLt(a, 1)
-        assert_eq!(dag.len(), 3);
+        assert_eq!(dag.len(), 2);
         let node = dag.get(result).unwrap();
-        assert_eq!(node.op, RiscOp::CmpLt);
+        assert_eq!(node.op, RiscOp::Logical(LogicalKind::Not));
         assert_eq!(node.output_type.precision, Prim::Bool);
     }
 

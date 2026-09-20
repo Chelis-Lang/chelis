@@ -344,33 +344,9 @@ fn lower_one_hot_node(out: &mut Dag, indices: NodeId, source: &DagNode, vocab: u
             indices_ty.clone(),
             source.span_id.clone(),
         );
-        let lt_l = out.add_node(
-            RiscOp::CmpLt,
-            vec![indices, class_id],
-            bool_ty.clone(),
-            source.span_id.clone(),
-        );
-        let lt_r = out.add_node(
-            RiscOp::CmpLt,
-            vec![class_id, indices],
-            bool_ty.clone(),
-            source.span_id.clone(),
-        );
-        let neq = out.add_node(
-            RiscOp::MaxElem,
-            vec![lt_l, lt_r],
-            bool_ty.clone(),
-            source.span_id.clone(),
-        );
-        let one = out.add_node(
-            RiscOp::synth_const(bool_ty.precision, 1.0),
-            vec![],
-            bool_ty.clone(),
-            source.span_id.clone(),
-        );
         let eq_bool = out.add_node(
-            RiscOp::CmpLt,
-            vec![neq, one],
+            RiscOp::Compare(crate::dag::ComparisonKind::Eq),
+            vec![indices, class_id],
             bool_ty.clone(),
             source.span_id.clone(),
         );
@@ -799,12 +775,14 @@ fn node_has_contiguous_matrix_slices(dag: &Dag, id: NodeId, matrix_rank: usize) 
         | RiscOp::FloorDiv
         | RiscOp::TruncDiv
         | RiscOp::Mod
+        | RiscOp::Compare(_)
+        | RiscOp::Logical(_)
+        | RiscOp::Where
         | RiscOp::MaxElem
         | RiscOp::MinElem
         | RiscOp::ExtremaAdjoint { .. }
         | RiscOp::Relu
         | RiscOp::ReluAdjoint
-        | RiscOp::CmpLt
         | RiscOp::Neg
         | RiscOp::Recip
         | RiscOp::Exp

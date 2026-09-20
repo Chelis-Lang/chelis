@@ -665,7 +665,9 @@ fn classify_nodes(
                 | RiscOp::FloorDiv
                 | RiscOp::TruncDiv
                 | RiscOp::Mod
-                | RiscOp::CmpLt
+                | RiscOp::Compare(_)
+                | RiscOp::Logical(_)
+                | RiscOp::Where
                 | RiscOp::MaxElem
                 | RiscOp::MinElem
                 | RiscOp::ExtremaAdjoint { .. }

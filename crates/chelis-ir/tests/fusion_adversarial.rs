@@ -1,7 +1,7 @@
 //! Adversarial fusion tests — red team Phase 1b.
 //! These are NOT committed to the repo; they exist to probe for bugs.
 
-use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
+use chelis_ir::dag::{ComparisonKind, Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
 use chelis_ir::fuse::fuse;
 use chelis_types::ElementRef;
@@ -357,10 +357,10 @@ fn adv8_cast_not_fusible() {
 }
 
 // ============================================================================
-// ADV-9: CmpLt inside a fused chain preserves sealed bool storage
+// ADV-9: Direct comparisons are non-fusible and preserve sealed bool storage
 // ============================================================================
 #[test]
-fn adv9_cmplt_in_fused_chain_produces_bool() {
+fn adv9_comparison_is_non_fusible_and_produces_bool() {
     let mut dag = Dag::new();
     let x = load(&mut dag, "x", vec_f32(4));
     let y = load(&mut dag, "y", vec_f32(4));
@@ -368,15 +368,13 @@ fn adv9_cmplt_in_fused_chain_produces_bool() {
         dims: vec![DimInfo::Lit(4)],
         precision: Prim::Bool,
     };
-    let cmp = dag.add_node(RiscOp::CmpLt, vec![x, y], bool_ty.clone(), None);
-    let false_value = dag.add_node(
-        RiscOp::synth_const(Prim::Bool, 0.0),
-        vec![],
-        bool_ty.clone(),
+    let cmp = dag.add_node(
+        RiscOp::Compare(ComparisonKind::CmpLt),
+        vec![x, y],
+        bool_ty,
         None,
     );
-    let result = dag.add_node(RiscOp::MaxElem, vec![cmp, false_value], bool_ty, None);
-    dag.add_root(result);
+    dag.add_root(cmp);
 
     let fused = fuse(&dag);
 
@@ -395,14 +393,27 @@ fn adv9_cmplt_in_fused_chain_produces_bool() {
 
     let orig = eval_dag(&dag, &inputs);
     let fuse_out = eval_dag(&fused, &inputs);
-    assert_close(&orig, &fuse_out, 1e-6, "ADV-9: cmplt→bool-or");
+    assert_close(&orig, &fuse_out, 1e-6, "ADV-9: direct comparison");
+    assert!(
+        fused
+            .nodes()
+            .iter()
+            .any(|node| matches!(node.op, RiscOp::Compare(ComparisonKind::CmpLt))),
+        "direct comparisons must remain materialized across fusion"
+    );
+    assert!(
+        fused
+            .nodes()
+            .iter()
+            .all(|node| !matches!(node.op, RiscOp::FusedElem { .. })),
+        "a comparison-only graph must not synthesize a fused numeric kernel"
+    );
 
-    // Check exact values: x<y = [true,false,true,true], and OR false
-    // preserves them without reopening a float representation.
+    // Check exact values: x<y = [true,false,true,true].
     assert_eq!(
         fuse_out[0].storage().to_i64_exact_vec(),
         Some(vec![1, 0, 1, 1]),
-        "CmpLt in a fused chain must preserve sealed bool storage"
+        "direct comparison must preserve sealed bool storage"
     );
 }
 

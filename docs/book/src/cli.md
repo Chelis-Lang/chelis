@@ -219,6 +219,9 @@ grouping, not argument evaluation.
 Anonymous gradients retain creation-time captures. This narrow rule does not
 extend target resolution to aliases or captured target bindings; those paths
 retain their existing admission and behavior.
+A gradient created from a direct declaration before a later same-name alias
+retains its frozen target and declaration captures; this does not admit the
+alias itself as a new transform target.
 The [direct-gradient regression tests](../../../crates/chelis-compiler-api/tests/issue_1956_grad_declaration_captures.rs)
 exercise this scope boundary, frozen gradients, initialization reuse and errors.
 

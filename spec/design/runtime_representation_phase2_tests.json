@@ -141,7 +141,7 @@
         "chelis-backend-hip::codegen_structure::s8a_pad_f64_uses_dtype_suffix",
         "chelis-backend-hip::codegen_structure::s8a_shrink_emits_kernel_and_launch_not_view",
         "chelis-backend-hip::codegen_structure::s8a_shrink_i32_uses_dtype_suffix",
-        "chelis-backend-hip::codegen_structure::s9_cmplt_bool_result_is_rejected",
+        "chelis-backend-hip::codegen_structure::s9_cmplt_bool_result_uses_one_byte_output",
         "chelis-backend-hip::codegen_structure::sf1_fused_elem_single_kernel_launch",
         "chelis-backend-hip::codegen_structure::sf2_fused_kernel_chained_computation",
         "chelis-backend-hip::codegen_structure::sf3_no_intermediate_alloc_in_fused_chain",

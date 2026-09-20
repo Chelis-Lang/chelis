@@ -6,8 +6,8 @@ use chelis_ir::axis_sources::{
     resolve_axis_extent, unresolved_dim_names,
 };
 use chelis_ir::dag::{
-    Dag, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStep, FusedStepOp, NodeId,
-    ReduceWindowKind, RiscOp, RtAxis, RtDim, TensorType,
+    ComparisonKind, Dag, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStep,
+    FusedStepOp, LogicalKind, NodeId, ReduceWindowKind, RiscOp, RtAxis, RtDim, TensorType,
 };
 use chelis_types::types::Prim;
 use chelis_types::unsupported::Stage;
@@ -618,7 +618,7 @@ fn unsupported_but_well_typed_mapping_yields_the_registered_receipt_not_an_ice()
 
 /// The number of `RiscOp` variants the table below must construct. Bumping
 /// it without adding a row makes the coverage assertion fail.
-const RISC_OP_VARIANTS: usize = 63;
+const RISC_OP_VARIANTS: usize = 65;
 
 /// Adding a `RiscOp` variant breaks this match, which is what forces the
 /// table in `every_risc_op_yields_exactly_one_source_per_output_axis` to
@@ -633,7 +633,7 @@ fn variant_index(op: &RiscOp) -> usize {
         RiscOp::Div => 3,
         RiscOp::FloorDiv => 4,
         RiscOp::TruncDiv => 5,
-        RiscOp::CmpLt => 6,
+        RiscOp::Compare(_) => 6,
         RiscOp::MaxElem => 7,
         RiscOp::MinElem => 8,
         RiscOp::ExtremaAdjoint { .. } => 9,
@@ -690,6 +690,8 @@ fn variant_index(op: &RiscOp) -> usize {
         RiscOp::CheckedReshapeExtent { .. } => 60,
         RiscOp::CheckedUnitAxis { .. } => 61,
         RiscOp::Mod => 62,
+        RiscOp::Logical(_) => 63,
+        RiscOp::Where => 64,
     }
 }
 
@@ -790,10 +792,17 @@ fn every_risc_op_yields_exactly_one_source_per_output_axis() {
     ));
     nodes.push(add(
         &mut dag,
-        RiscOp::CmpLt,
+        RiscOp::Compare(ComparisonKind::Eq),
         vec![f, g],
         ty(vec![DimInfo::Lit(2), DimInfo::Lit(3)], Prim::Bool),
     ));
+    nodes.push(add(
+        &mut dag,
+        RiscOp::Logical(LogicalKind::Not),
+        vec![flags],
+        ty(vec![DimInfo::Lit(2), DimInfo::Lit(3)], Prim::Bool),
+    ));
+    nodes.push(add(&mut dag, RiscOp::Where, vec![flags, f, g], f32_23()));
     nodes.push(add(
         &mut dag,
         RiscOp::ExtremaAdjoint {

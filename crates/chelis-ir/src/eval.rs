@@ -19,8 +19,9 @@ use chelis_unord::{UnordMap, UnordSet};
 use std::borrow::Cow;
 
 use crate::dag::{
-    Dag, DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStepOp, NodeId,
-    ReduceWindowKind, RiscOp, RtAxis, RtDim, SHRINK_TO_END, TensorType, bind_symbolic_dims,
+    ComparisonKind, Dag, DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, FusedInput,
+    FusedStepOp, LogicalKind, NodeId, ReduceWindowKind, RiscOp, RtAxis, RtDim, SHRINK_TO_END,
+    TensorType, bind_symbolic_dims,
 };
 use chelis_types::dtype_semantics::{
     ArgReduceOp, CheckedCastPlan, CompareOp, ExtremaOperand as KernelExtremaOperand, FloatBinOp,
@@ -595,37 +596,11 @@ fn binary_elementwise(
 ) -> Result<TensorValue, String> {
     let (lhs, rhs) = broadcast_rank0_operands(lhs, rhs)?;
     let (lhs, rhs) = (&*lhs, &*rhs);
-    let storage = if lhs.prim() == Prim::Bool && rhs.prim() == Prim::Bool {
-        let lhs_values = lhs
-            .storage()
-            .to_i64_exact_vec()
-            .expect("sealed bool storage has an exact integer view");
-        let rhs_values = rhs
-            .storage()
-            .to_i64_exact_vec()
-            .expect("sealed bool storage has an exact integer view");
-        let values = match op {
-            // Tier-2 lowers `and` and `or` to these two RISC operations.
-            // They remain logical operations over sealed bool storage; no
-            // numeric-family kernel or raw closure is involved.
-            ElementwiseBinOp::Mul => lhs_values
-                .into_iter()
-                .zip(rhs_values)
-                .map(|(lhs, rhs)| i64::from(lhs != 0 && rhs != 0))
-                .collect(),
-            ElementwiseBinOp::Max => lhs_values
-                .into_iter()
-                .zip(rhs_values)
-                .map(|(lhs, rhs)| i64::from(lhs != 0 || rhs != 0))
-                .collect(),
-            _ => {
-                return Err(format!(
-                    "{}: bool storage cannot enter a numeric IR kernel",
-                    op.name()
-                ));
-            }
-        };
-        return finalize_wide_int(op.name(), Prim::Bool, lhs.shape.clone(), values);
+    let storage = if lhs.prim() == Prim::Bool || rhs.prim() == Prim::Bool {
+        return Err(format!(
+            "{}: bool storage cannot enter a numeric IR kernel",
+            op.name()
+        ));
     } else if lhs.prim().is_integer() {
         let kernel = op.int_op().ok_or_else(|| {
             format!(
@@ -758,6 +733,94 @@ fn compare_elementwise(
     let storage =
         compare_tensors(op, lhs.storage(), rhs.storage()).map_err(|error| error.to_string())?;
     Ok(TensorValue::from_storage(lhs.shape.clone(), storage))
+}
+
+fn comparison_kernel(kind: ComparisonKind) -> CompareOp {
+    match kind {
+        ComparisonKind::CmpLt | ComparisonKind::Lt => CompareOp::Lt,
+        ComparisonKind::Eq => CompareOp::Eq,
+        ComparisonKind::Neq => CompareOp::Ne,
+        ComparisonKind::Gt => CompareOp::Gt,
+        ComparisonKind::Gte => CompareOp::Gte,
+        ComparisonKind::Lte => CompareOp::Lte,
+    }
+}
+
+fn logical_elementwise(
+    kind: LogicalKind,
+    lhs: &TensorValue,
+    rhs: Option<&TensorValue>,
+) -> Result<TensorValue, String> {
+    if lhs.prim() != Prim::Bool {
+        return Err(format!(
+            "{}: logical operands must have bool storage",
+            kind.surf_name()
+        ));
+    }
+    let lhs_values = lhs
+        .storage()
+        .to_i64_exact_vec()
+        .expect("sealed bool storage has an exact integer view");
+    let values = match kind {
+        LogicalKind::Not => lhs_values
+            .into_iter()
+            .map(|value| i64::from(value == 0))
+            .collect(),
+        LogicalKind::And | LogicalKind::Or => {
+            let rhs = rhs.ok_or_else(|| format!("{} requires two operands", kind.surf_name()))?;
+            if rhs.prim() != Prim::Bool {
+                return Err(format!(
+                    "{}: logical operands must have bool storage",
+                    kind.surf_name()
+                ));
+            }
+            require_matching_comparison_shapes(lhs, rhs)?;
+            let rhs_values = rhs
+                .storage()
+                .to_i64_exact_vec()
+                .expect("sealed bool storage has an exact integer view");
+            lhs_values
+                .into_iter()
+                .zip(rhs_values)
+                .map(|(lhs, rhs)| match kind {
+                    LogicalKind::And => i64::from(lhs != 0 && rhs != 0),
+                    LogicalKind::Or => i64::from(lhs != 0 || rhs != 0),
+                    LogicalKind::Not => unreachable!(),
+                })
+                .collect()
+        }
+    };
+    finalize_wide_int(kind.surf_name(), Prim::Bool, lhs.shape.clone(), values)
+}
+
+fn where_elementwise(
+    condition: &TensorValue,
+    then_value: &TensorValue,
+    else_value: &TensorValue,
+) -> Result<TensorValue, String> {
+    if condition.prim() != Prim::Bool {
+        return Err("where: condition must have bool storage".into());
+    }
+    if condition.shape != then_value.shape || then_value.shape != else_value.shape {
+        return Err("where: condition and branch shapes must match exactly".into());
+    }
+    if then_value.prim() != else_value.prim() {
+        return Err("where: branch dtypes must match exactly".into());
+    }
+    let condition_values = condition
+        .storage()
+        .to_i64_exact_vec()
+        .expect("sealed bool storage has an exact integer view");
+    let writes = condition_values
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, selected)| (selected != 0).then_some((index, index)));
+    Ok(TensorValue::from_storage(
+        then_value.shape.clone(),
+        else_value
+            .storage()
+            .reuse_overwrite(then_value.storage(), writes),
+    ))
 }
 
 fn matmul(lhs: &TensorValue, rhs: &TensorValue, prim: Prim) -> Result<TensorValue, String> {
@@ -3243,10 +3306,20 @@ where
                     .map_err(|error| error.to_string())?;
                 TensorValue::from_storage(input.shape.clone(), storage)
             }
-            RiscOp::CmpLt => compare_elementwise(
-                CompareOp::Lt,
+            RiscOp::Compare(kind) => compare_elementwise(
+                comparison_kernel(*kind),
                 &values[&node.inputs[0]],
                 &values[&node.inputs[1]],
+            )?,
+            RiscOp::Logical(kind) => logical_elementwise(
+                *kind,
+                &values[&node.inputs[0]],
+                node.inputs.get(1).map(|input| &values[input]),
+            )?,
+            RiscOp::Where => where_elementwise(
+                &values[&node.inputs[0]],
+                &values[&node.inputs[1]],
+                &values[&node.inputs[2]],
             )?,
             RiscOp::Sum { axis, accumulator } => reduce(
                 &values[&node.inputs[0]],
@@ -3461,11 +3534,6 @@ where
                         )?,
                         FusedStepOp::MinElem => binary_elementwise(
                             ElementwiseBinOp::Min,
-                            resolve(&step.input_indices[0]),
-                            resolve(&step.input_indices[1]),
-                        )?,
-                        FusedStepOp::CmpLt => compare_elementwise(
-                            CompareOp::Lt,
                             resolve(&step.input_indices[0]),
                             resolve(&step.input_indices[1]),
                         )?,
@@ -4816,7 +4884,12 @@ mod tests {
         let ty = tensor_ty(&[2], Prim::Int64);
         let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], ty.clone(), None);
         let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], ty, None);
-        let out = dag.add_node(RiscOp::CmpLt, vec![a, b], tensor_ty(&[2], Prim::Bool), None);
+        let out = dag.add_node(
+            RiscOp::Compare(ComparisonKind::CmpLt),
+            vec![a, b],
+            tensor_ty(&[2], Prim::Bool),
+            None,
+        );
         dag.add_root(out);
 
         let mut inputs = UnordMap::new();

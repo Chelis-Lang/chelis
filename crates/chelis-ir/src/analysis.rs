@@ -13,9 +13,7 @@ use crate::dag::{Dag, DimInfo, FusedInput, FusedStepOp, NodeId, RiscOp, TensorTy
 ///
 /// Phase 2's evaluator supports that exact typed kernel, while compiled
 /// backends do not until Phase 3. Keeping the fused-step dtype walk here gives
-/// every backend one classification rather than three output-dtype heuristics;
-/// importantly, it still finds `abs(int) -> cmplt(...)` when the fused node's
-/// final output dtype is `bool`.
+/// every backend one classification rather than three output-dtype heuristics.
 pub fn first_integer_abs_node(dag: &Dag) -> Option<NodeId> {
     for node in dag.nodes() {
         if matches!(node.op, RiscOp::Abs)
@@ -70,11 +68,7 @@ fn fused_node_applies_integer_abs(dag: &Dag, node_id: NodeId) -> bool {
         {
             return true;
         }
-        step_precisions.push(if step.op == FusedStepOp::CmpLt {
-            Some(Prim::Bool)
-        } else {
-            input_precision
-        });
+        step_precisions.push(input_precision);
     }
     false
 }
@@ -266,9 +260,8 @@ mod tests {
     }
 
     #[test]
-    fn integer_abs_analysis_sees_direct_and_bool_output_fused_forms() {
+    fn integer_abs_analysis_sees_direct_and_fused_forms() {
         let int_ty = tensor(vec![DimInfo::Lit(1)], Prim::Int64);
-        let bool_ty = tensor(vec![DimInfo::Lit(1)], Prim::Bool);
 
         let mut direct = Dag::new();
         let x = direct.add_node(
@@ -288,7 +281,7 @@ mod tests {
             None,
         );
         let y = fused.add_node(RiscOp::Load { name: "y".into() }, vec![], int_ty, None);
-        let fused_abs_then_compare = fused.add_node(
+        let fused_abs_then_add = fused.add_node(
             RiscOp::FusedElem {
                 ops: vec![
                     FusedStep {
@@ -296,19 +289,19 @@ mod tests {
                         input_indices: vec![FusedInput::External(0)],
                     },
                     FusedStep {
-                        op: FusedStepOp::CmpLt,
+                        op: FusedStepOp::Add,
                         input_indices: vec![FusedInput::PreviousStep(0), FusedInput::External(1)],
                     },
                 ],
             },
             vec![x, y],
-            bool_ty,
+            tensor(vec![DimInfo::Lit(1)], Prim::Int64),
             None,
         );
-        assert_eq!(first_integer_abs_node(&fused), Some(fused_abs_then_compare));
+        assert_eq!(first_integer_abs_node(&fused), Some(fused_abs_then_add));
         assert_eq!(
             first_fused_integer_abs_node(&fused),
-            Some(fused_abs_then_compare)
+            Some(fused_abs_then_add)
         );
         assert_eq!(first_fused_integer_abs_node(&direct), None);
     }

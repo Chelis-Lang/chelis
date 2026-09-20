@@ -218,7 +218,9 @@ fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
             | WireRiscOp::FloorDiv
             | WireRiscOp::TruncDiv
             | WireRiscOp::Mod
-            | WireRiscOp::CmpLt
+            | WireRiscOp::Compare { .. }
+            | WireRiscOp::Logical { .. }
+            | WireRiscOp::Where {}
             | WireRiscOp::MaxElem
             | WireRiscOp::MinElem
             | WireRiscOp::ExtremaAdjoint { .. }
@@ -561,8 +563,10 @@ const _: () = {
     // refused by the existing shape-dependency boundary above.
     // Version 13 adds a literal-result witness role. Version 14 adds the
     // discrete authored local-ascription identity and binding provenance.
-    // Both remain obligations outside this float-envelope extraction boundary.
-    assert!(WIRE_DAG_SCHEMA_VERSION == 14);
+    // Version 15 adds direct comparison, logical, and where identities with
+    // no embedded numeric payload. All remain obligations outside this
+    // float-envelope extraction boundary.
+    assert!(WIRE_DAG_SCHEMA_VERSION == 15);
 };
 
 #[cfg(test)]

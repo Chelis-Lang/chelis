@@ -13,11 +13,13 @@ For the remaining 0.19 core-transform fence, write `vmap` targets and
 unshadowed top-level function declaration, such as `grad(loss)` or
 `vmap(process)`. Those forms reject aliases of a top-level function at either
 module or local scope, and a local binding that shadows a top-level target,
-rather than silently selecting a different callable. An explicit named
-`grad(..., wrt=...)` selector instead follows the callable-origin contract
-described below. An inline or locally bound `vmap` lambda remains supported
-when every parameter has explicit structure wherever `vmap` inserts the
-mapped axis. A whole type hole such as `_`, a type hole
+rather than silently selecting a different callable. The normative named
+`grad(..., wrt=...)` selector follows the callable-origin contract described
+below, but the current core fence still rejects an alias target before selector
+processing; named selectors are currently admitted on direct, unshadowed
+declarations and the other supported target forms. An inline or locally bound
+`vmap` lambda remains supported when every parameter has explicit structure
+wherever `vmap` inserts the mapped axis. A whole type hole such as `_`, a type hole
 nested through a reference or tuple, and a Deep rank hole are not explicit
 mapped structure: they could bind to the unsliced input rather than the mapped
 slice. Fixed-rank tensor dimension and precision variables remain supported

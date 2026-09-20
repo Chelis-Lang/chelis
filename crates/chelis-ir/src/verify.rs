@@ -1,6 +1,8 @@
 //! DAG structural verification.
 
-use crate::dag::{Dag, DimInfo, ExtentWitnessSite, NodeId, RiscOp, RtAxis, RtDim};
+use crate::dag::{
+    ComparisonKind, Dag, DimExpr, DimInfo, ExtentWitnessSite, NodeId, RiscOp, RtAxis, RtDim,
+};
 #[allow(unused_imports)]
 use chelis_types::types::Prim;
 use chelis_unord::{UnordMap, UnordSet};
@@ -21,6 +23,338 @@ pub fn verify(dag: &Dag) -> Vec<String> {
 /// identical to [`verify`].
 pub(crate) fn verify_ownership_input(dag: &Dag) -> Vec<String> {
     verify_with_dangling_policy(dag, false)
+}
+
+fn scalar_axis_source(dag: &Dag, value: NodeId) -> Option<(NodeId, usize)> {
+    let scalar = dag.get(value)?;
+    match &scalar.op {
+        RiscOp::Shape { axis } => Some((*scalar.inputs.first()?, *axis)),
+        RiscOp::ExtentWitness {
+            axis: RtAxis::Lit(axis),
+            ..
+        } => Some((*scalar.inputs.first()?, usize::try_from(*axis).ok()?)),
+        _ => None,
+    }
+}
+
+fn anonymous_declared_shape_source(
+    dag: &Dag,
+    owner: &crate::dag::DagNode,
+    relevant_shape_sources: &[NodeId],
+) -> Option<NodeId> {
+    if !matches!(owner.op, RiscOp::Const { .. } | RiscOp::ConstTensor { .. }) {
+        return None;
+    }
+    owner.shape_deps.iter().copied().find(|source| {
+        relevant_shape_sources.contains(source)
+            && dag
+                .get(*source)
+                .is_some_and(|source| source.output_type.dims.len() == owner.output_type.dims.len())
+    })
+}
+
+fn witnessed_extent_origin_equal(
+    dag: &Dag,
+    left: &crate::axis_sources::ExtentOrigin,
+    right: &crate::axis_sources::ExtentOrigin,
+    relevant_shape_sources: &[NodeId],
+) -> bool {
+    if left == right {
+        return true;
+    }
+    let cutoff = relevant_shape_sources
+        .iter()
+        .map(|node| node.0)
+        .max()
+        .unwrap_or(dag.len());
+    let observed = |witness: NodeId| {
+        let node = dag.get(witness)?;
+        let RiscOp::ExtentWitness {
+            axis: RtAxis::Lit(axis),
+            ..
+        } = node.op
+        else {
+            return None;
+        };
+        crate::axis_sources::resolve_axis_extent(
+            dag,
+            *node.inputs.first()?,
+            usize::try_from(axis).ok()?,
+        )
+    };
+    let mut edges = Vec::new();
+    for node in dag.nodes().iter().take(cutoff) {
+        let RiscOp::ExtentWitness { claims, .. } = &node.op else {
+            continue;
+        };
+        let Some(here) = observed(node.id) else {
+            continue;
+        };
+        for requirement in node.inputs.iter().skip(1).take(claims.len()) {
+            if requirement.0 >= node.id.0 {
+                continue;
+            }
+            if let Some(there) = observed(*requirement) {
+                edges.push((here.clone(), there));
+            }
+        }
+    }
+    let mut pending = vec![left.clone()];
+    let mut seen = Vec::new();
+    while let Some(origin) = pending.pop() {
+        if &origin == right {
+            return true;
+        }
+        if seen.contains(&origin) {
+            continue;
+        }
+        seen.push(origin.clone());
+        for (a, b) in &edges {
+            if a == &origin {
+                pending.push(b.clone());
+            } else if b == &origin {
+                pending.push(a.clone());
+            }
+        }
+    }
+    false
+}
+
+fn semantic_dim_expr(
+    dag: &Dag,
+    node: NodeId,
+    axis: usize,
+    fuel: usize,
+    relevant_shape_sources: &[NodeId],
+) -> Option<DimExpr> {
+    if fuel == 0 {
+        return None;
+    }
+    let owner = dag.get(node)?;
+    let dim = owner.output_type.dims.get(axis)?;
+    if matches!(
+        dim,
+        DimInfo::Named(name, None) if name.is_empty() || name == "*"
+    ) {
+        if let Some(source) = anonymous_declared_shape_source(dag, owner, relevant_shape_sources) {
+            return semantic_dim_expr(dag, source, axis, fuel - 1, relevant_shape_sources);
+        }
+        if matches!(owner.op, RiscOp::Where)
+            && let Some(dim) = owner.inputs.iter().skip(1).find_map(|source| {
+                let source = dag.get(*source)?;
+                (source.output_type.dims.len() == owner.output_type.dims.len())
+                    .then(|| {
+                        semantic_dim_expr(dag, source.id, axis, fuel - 1, relevant_shape_sources)
+                    })
+                    .flatten()
+                    .filter(
+                        |dim| !matches!(dim, DimExpr::Sym(name) if name.is_empty() || name == "*"),
+                    )
+            })
+        {
+            return Some(dim);
+        }
+        return None;
+    }
+    Some(DimExpr::from(dim))
+}
+
+fn semantic_axis_origin(
+    dag: &Dag,
+    node: NodeId,
+    axis: usize,
+    fuel: usize,
+    relevant_shape_sources: &[NodeId],
+) -> Option<crate::axis_sources::ExtentOrigin> {
+    if fuel == 0 {
+        return None;
+    }
+    let owner = dag.get(node)?;
+    if let Ok(Some(agreement)) = crate::axis_sources::same_shape_result_agreement(dag, node) {
+        let mut origins = agreement.members().iter().map(|source| {
+            semantic_axis_origin(dag, *source, axis, fuel - 1, relevant_shape_sources)
+        });
+        let first = origins.next()??;
+        return origins
+            .all(|origin| {
+                origin.is_some_and(|origin| {
+                    witnessed_extent_origin_equal(dag, &first, &origin, relevant_shape_sources)
+                })
+            })
+            .then_some(first);
+    }
+    if matches!(
+        owner.output_type.dims.get(axis),
+        Some(DimInfo::Named(name, None)) if name.is_empty() || name == "*"
+    ) {
+        if let Some(source) = anonymous_declared_shape_source(dag, owner, relevant_shape_sources) {
+            return semantic_axis_origin(dag, source, axis, fuel - 1, relevant_shape_sources);
+        }
+        if matches!(owner.op, RiscOp::Where)
+            && let Some(origin) = owner.inputs.iter().skip(1).find_map(|source| {
+                semantic_axis_origin(dag, *source, axis, fuel - 1, relevant_shape_sources)
+            })
+        {
+            return Some(origin);
+        }
+    }
+    let origin = crate::axis_sources::resolve_axis_extent(dag, node, axis)?;
+    match origin {
+        crate::axis_sources::ExtentOrigin::ScalarInput { value, at, axis } => {
+            let Some((source, read_axis)) = scalar_axis_source(dag, value) else {
+                return Some(crate::axis_sources::ExtentOrigin::ScalarInput { value, at, axis });
+            };
+            semantic_axis_origin(dag, source, read_axis, fuel - 1, relevant_shape_sources)
+        }
+        other => Some(other),
+    }
+}
+
+fn static_axis_extent(
+    dag: &Dag,
+    node: NodeId,
+    axis: usize,
+    fuel: usize,
+    relevant_shape_sources: &[NodeId],
+) -> Option<usize> {
+    if fuel == 0 {
+        return None;
+    }
+    let owner = dag.get(node)?;
+    if let Ok(Some(agreement)) = crate::axis_sources::same_shape_result_agreement(dag, node) {
+        let mut extents = agreement
+            .members()
+            .iter()
+            .map(|source| static_axis_extent(dag, *source, axis, fuel - 1, relevant_shape_sources));
+        let first = extents.next()??;
+        return extents.all(|extent| extent == Some(first)).then_some(first);
+    }
+    if matches!(
+        owner.output_type.dims.get(axis),
+        Some(DimInfo::Named(name, None)) if name.is_empty() || name == "*"
+    ) {
+        if let Some(source) = anonymous_declared_shape_source(dag, owner, relevant_shape_sources) {
+            return static_axis_extent(dag, source, axis, fuel - 1, relevant_shape_sources);
+        }
+        if matches!(owner.op, RiscOp::Where)
+            && let Some(extent) = owner.inputs.iter().skip(1).find_map(|source| {
+                static_axis_extent(dag, *source, axis, fuel - 1, relevant_shape_sources)
+            })
+        {
+            return Some(extent);
+        }
+    }
+    if let Some(extent) = owner
+        .output_type
+        .dims
+        .get(axis)
+        .map(DimExpr::from)
+        .and_then(|dim| dim.as_concrete())
+    {
+        return Some(extent);
+    }
+    match crate::axis_sources::resolve_axis_extent(dag, node, axis)? {
+        crate::axis_sources::ExtentOrigin::Literal(extent) => usize::try_from(extent).ok(),
+        crate::axis_sources::ExtentOrigin::ExternalAxis { load, axis } => dag
+            .get(load)?
+            .output_type
+            .dims
+            .get(axis)
+            .map(DimExpr::from)
+            .and_then(|dim| dim.as_concrete()),
+        crate::axis_sources::ExtentOrigin::ScalarInput { value, .. } => {
+            let (source, read_axis) = scalar_axis_source(dag, value)?;
+            static_axis_extent(dag, source, read_axis, fuel - 1, relevant_shape_sources)
+        }
+        crate::axis_sources::ExtentOrigin::OpComputed { op, axis } => {
+            crate::axis_sources::static_op_computed_axis_extent(dag, op, axis)
+        }
+    }
+}
+
+fn node_shapes_semantically_equivalent(
+    dag: &Dag,
+    left: NodeId,
+    right: NodeId,
+    relevant_shape_sources: &[NodeId],
+) -> bool {
+    let (Some(left_node), Some(right_node)) = (dag.get(left), dag.get(right)) else {
+        return false;
+    };
+    left_node.output_type.dims.len() == right_node.output_type.dims.len()
+        && left_node
+            .output_type
+            .dims
+            .iter()
+            .zip(&right_node.output_type.dims)
+            .enumerate()
+            .all(|(axis, _)| {
+                semantic_dim_expr(dag, left, axis, dag.len(), relevant_shape_sources)
+                    .zip(semantic_dim_expr(
+                        dag,
+                        right,
+                        axis,
+                        dag.len(),
+                        relevant_shape_sources,
+                    ))
+                    .is_some_and(|(left_dim, right_dim)| left_dim == right_dim)
+                    || semantic_axis_origin(dag, left, axis, dag.len(), relevant_shape_sources)
+                        .zip(semantic_axis_origin(
+                            dag,
+                            right,
+                            axis,
+                            dag.len(),
+                            relevant_shape_sources,
+                        ))
+                        .is_some_and(|(left_origin, right_origin)| {
+                            witnessed_extent_origin_equal(
+                                dag,
+                                &left_origin,
+                                &right_origin,
+                                relevant_shape_sources,
+                            )
+                        })
+                    || static_axis_extent(dag, left, axis, dag.len(), relevant_shape_sources)
+                        .zip(static_axis_extent(
+                            dag,
+                            right,
+                            axis,
+                            dag.len(),
+                            relevant_shape_sources,
+                        ))
+                        .is_some_and(|(left_extent, right_extent)| left_extent == right_extent)
+            })
+}
+
+fn node_types_semantically_equivalent(
+    dag: &Dag,
+    left: NodeId,
+    right: NodeId,
+    relevant_shape_sources: &[NodeId],
+) -> bool {
+    dag.get(left)
+        .zip(dag.get(right))
+        .is_some_and(|(left_node, right_node)| {
+            left_node.output_type.precision == right_node.output_type.precision
+                && node_shapes_semantically_equivalent(dag, left, right, relevant_shape_sources)
+        })
+}
+
+fn has_anonymous_dims(node: &crate::dag::DagNode) -> bool {
+    node.output_type
+        .dims
+        .iter()
+        .any(|dim| matches!(dim, DimInfo::Named(name, None) if name.is_empty() || name == "*"))
+}
+
+fn anonymous_output_has_input_authority(dag: &Dag, node: &crate::dag::DagNode) -> bool {
+    !has_anonymous_dims(node)
+        || node.shape_deps.iter().any(|source| {
+            node.inputs.contains(source)
+                && dag.get(*source).is_some_and(|source| {
+                    source.output_type.dims.len() == node.output_type.dims.len()
+                })
+        })
 }
 
 /// Complete correspondence required before a mapped gradient may leave
@@ -393,6 +727,193 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
         // Check arity.
         let arity = node.inputs.len();
         match &node.op {
+            RiscOp::Compare(kind) => {
+                if arity != 2 {
+                    errors.push(format!(
+                        "comparison at node {} has {} inputs (expected 2)",
+                        node.id.0, arity
+                    ));
+                } else if let (Some(lhs), Some(rhs)) =
+                    (dag.get(node.inputs[0]), dag.get(node.inputs[1]))
+                {
+                    let shape_participants = [node.inputs[0], node.inputs[1], node.id];
+                    if lhs.output_type.precision != rhs.output_type.precision {
+                        errors.push(format!(
+                            "comparison at node {} has mismatched precision {:?} vs {:?}",
+                            node.id.0, lhs.output_type.precision, rhs.output_type.precision
+                        ));
+                    }
+                    if !node_shapes_semantically_equivalent(
+                        dag,
+                        node.inputs[0],
+                        node.inputs[1],
+                        &shape_participants,
+                    ) {
+                        errors.push(format!(
+                            "comparison at node {} requires exactly matching operand shape",
+                            node.id.0
+                        ));
+                    }
+                    let active_numeric = lhs.output_type.precision.is_numeric()
+                        && lhs.output_type.precision.is_admissible_active();
+                    if !active_numeric && lhs.output_type.precision != Prim::Bool {
+                        errors.push(format!(
+                            "comparison {} at node {} requires active numeric or bool operands",
+                            kind.surf_name(),
+                            node.id.0
+                        ));
+                    } else if matches!(
+                        kind,
+                        ComparisonKind::CmpLt
+                            | ComparisonKind::Lt
+                            | ComparisonKind::Gt
+                            | ComparisonKind::Gte
+                            | ComparisonKind::Lte
+                    ) && !active_numeric
+                    {
+                        errors.push(format!(
+                            "ordered comparison {} at node {} requires active numeric operands",
+                            kind.surf_name(),
+                            node.id.0
+                        ));
+                    }
+                    if node.output_type.precision != Prim::Bool {
+                        errors.push(format!(
+                            "comparison {} at node {} has output precision {:?}, expected Bool",
+                            kind.surf_name(),
+                            node.id.0,
+                            node.output_type.precision
+                        ));
+                    }
+                    if !anonymous_output_has_input_authority(dag, node)
+                        || !node_shapes_semantically_equivalent(
+                            dag,
+                            node.id,
+                            node.inputs[0],
+                            &shape_participants,
+                        )
+                    {
+                        errors.push(format!(
+                            "comparison at node {} output shape must match its operands",
+                            node.id.0
+                        ));
+                    }
+                }
+            }
+            RiscOp::Logical(kind) => {
+                let expected = kind.arity();
+                if arity != expected {
+                    errors.push(format!(
+                        "logical {} at node {} has {} inputs (expected {})",
+                        kind.surf_name(),
+                        node.id.0,
+                        arity,
+                        expected
+                    ));
+                } else {
+                    let shape_participants = node
+                        .inputs
+                        .iter()
+                        .copied()
+                        .chain(std::iter::once(node.id))
+                        .collect::<Vec<_>>();
+                    let inputs = node
+                        .inputs
+                        .iter()
+                        .filter_map(|input| dag.get(*input))
+                        .collect::<Vec<_>>();
+                    for input in &inputs {
+                        if input.output_type.precision != Prim::Bool {
+                            errors.push(format!(
+                                "logical {} at node {} requires bool operands",
+                                kind.surf_name(),
+                                node.id.0
+                            ));
+                        }
+                        if !anonymous_output_has_input_authority(dag, node)
+                            || !node_shapes_semantically_equivalent(
+                                dag,
+                                input.id,
+                                node.id,
+                                &shape_participants,
+                            )
+                        {
+                            errors.push(format!(
+                                "logical {} at node {} requires exactly matching shape",
+                                kind.surf_name(),
+                                node.id.0
+                            ));
+                        }
+                    }
+                    if node.output_type.precision != Prim::Bool {
+                        errors.push(format!(
+                            "logical {} at node {} requires Bool output",
+                            kind.surf_name(),
+                            node.id.0
+                        ));
+                    }
+                }
+            }
+            RiscOp::Where => {
+                if arity != 3 {
+                    errors.push(format!(
+                        "where at node {} has {} inputs (expected 3)",
+                        node.id.0, arity
+                    ));
+                } else if let (Some(condition), Some(then_value), Some(_)) = (
+                    dag.get(node.inputs[0]),
+                    dag.get(node.inputs[1]),
+                    dag.get(node.inputs[2]),
+                ) {
+                    let shape_participants =
+                        [node.inputs[0], node.inputs[1], node.inputs[2], node.id];
+                    if condition.output_type.precision != Prim::Bool {
+                        errors.push(format!(
+                            "where at node {} condition must be Bool",
+                            node.id.0
+                        ));
+                    }
+                    if !node_types_semantically_equivalent(
+                        dag,
+                        node.inputs[1],
+                        node.inputs[2],
+                        &shape_participants,
+                    ) {
+                        errors.push(format!(
+                            "where at node {} branches must have exactly matching type",
+                            node.id.0
+                        ));
+                    }
+                    if !node_types_semantically_equivalent(
+                        dag,
+                        node.id,
+                        node.inputs[1],
+                        &shape_participants,
+                    ) {
+                        errors.push(format!(
+                            "where at node {} output must match its branches",
+                            node.id.0
+                        ));
+                    }
+                    if !node_shapes_semantically_equivalent(
+                        dag,
+                        node.inputs[0],
+                        node.inputs[1],
+                        &shape_participants,
+                    ) {
+                        errors.push(format!(
+                            "where at node {} condition and branches must have exactly matching shape",
+                            node.id.0
+                        ));
+                    }
+                    if !then_value.output_type.precision.is_valid_tensor_precision() {
+                        errors.push(format!(
+                            "where at node {} branches must use an active tensor element dtype",
+                            node.id.0
+                        ));
+                    }
+                }
+            }
             RiscOp::Add
             | RiscOp::Sub
             | RiscOp::Mul
@@ -400,7 +921,6 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             | RiscOp::FloorDiv
             | RiscOp::TruncDiv
             | RiscOp::Mod
-            | RiscOp::CmpLt
             | RiscOp::MaxElem
             | RiscOp::MinElem => {
                 if arity != 2 {
@@ -1536,14 +2056,6 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                 }
             }
             _ => {}
-        }
-
-        // C5: CmpLt output must be Bool.
-        if matches!(&node.op, RiscOp::CmpLt) && node.output_type.precision != Prim::Bool {
-            errors.push(format!(
-                "cmplt at node {} has output precision {:?}, expected Bool",
-                node.id.0, node.output_type.precision
-            ));
         }
 
         // C6: Permute validation.
@@ -2853,7 +3365,7 @@ mod tests {
     #[test]
     fn div_arity_one_rejected() {
         // Div is binary; a single-input Div node must surface the
-        // binary-arity diagnostic alongside Add/Mul/CmpLt/MaxElem.
+        // binary-arity diagnostic alongside Add/Mul/Compare/MaxElem.
         let mut dag = Dag::new();
         let a = dag.add_node(
             RiscOp::synth_const(scalar_f32().precision, 1.0),
@@ -3424,7 +3936,7 @@ mod tests {
         );
     }
 
-    // --- C5: CmpLt output must be Bool ---
+    // --- C5: Compare(CmpLt) output must be Bool ---
 
     #[test]
     fn c5_cmplt_non_bool_output_is_error() {
@@ -3442,7 +3954,12 @@ mod tests {
             None,
         );
         // Wrong: output is F32 instead of Bool.
-        dag.add_node(RiscOp::CmpLt, vec![a, b], scalar_f32(), None);
+        dag.add_node(
+            RiscOp::Compare(ComparisonKind::CmpLt),
+            vec![a, b],
+            scalar_f32(),
+            None,
+        );
         let errs = verify(&dag);
         assert!(
             errs.iter()
@@ -3469,7 +3986,12 @@ mod tests {
             dims: vec![],
             precision: Prim::Bool,
         };
-        dag.add_node(RiscOp::CmpLt, vec![a, b], bool_ty, None);
+        dag.add_node(
+            RiscOp::Compare(ComparisonKind::CmpLt),
+            vec![a, b],
+            bool_ty,
+            None,
+        );
         assert!(verify(&dag).is_empty());
     }
 

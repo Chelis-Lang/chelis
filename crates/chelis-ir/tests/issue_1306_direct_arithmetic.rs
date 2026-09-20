@@ -1,6 +1,6 @@
 use chelis_unord::UnordMap;
 
-use chelis_ir::dag::{Dag, ExtremaKind, ExtremaOperand, RiscOp, TensorType};
+use chelis_ir::dag::{ComparisonKind, Dag, ExtremaKind, ExtremaOperand, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor};
 use chelis_ir::grad::{AdError, AdRejectionReason, grad_dag_checked};
 use chelis_ir::{tier2, verify};
@@ -147,7 +147,7 @@ fn extrema_adjoint_routes_ties_and_nan_cotangents_to_the_forward_selected_operan
                 .dag
                 .nodes()
                 .iter()
-                .all(|node| !matches!(node.op, RiscOp::CmpLt)),
+                .all(|node| !matches!(node.op, RiscOp::Compare(_))),
             "NaN selection cannot be reconstructed from ordered comparison"
         );
 
@@ -334,7 +334,7 @@ fn integer_extrema_used_only_to_form_a_predicate_do_not_poison_float_ad() {
     let maximum = dag.add_node(RiscOp::MaxElem, vec![left, right], int_ty.clone(), None);
     let zero = dag.add_node(RiscOp::synth_const(Prim::Int64, 0.0), vec![], int_ty, None);
     let predicate = dag.add_node(
-        RiscOp::CmpLt,
+        RiscOp::Compare(ComparisonKind::CmpLt),
         vec![maximum, zero],
         scalar_at(Prim::Bool),
         None,

@@ -413,7 +413,7 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chelis_ir::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
+    use chelis_ir::dag::{ComparisonKind, Dag, DimInfo, RiscOp, RtDim, TensorType};
     use chelis_ir::tier2;
     use chelis_types::types::Prim;
     use std::io::Write;
@@ -1826,7 +1826,7 @@ int main(void) {{
             None,
         );
         dag.add_node(
-            RiscOp::CmpLt,
+            RiscOp::Compare(ComparisonKind::CmpLt),
             vec![a, b],
             TensorType {
                 dims: vec![],
@@ -1854,7 +1854,7 @@ int main(void) {{
             None,
         );
         dag.add_node(
-            RiscOp::CmpLt,
+            RiscOp::Compare(ComparisonKind::CmpLt),
             vec![a, b],
             TensorType {
                 dims: vec![],

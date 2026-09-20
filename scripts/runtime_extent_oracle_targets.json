@@ -731,7 +731,7 @@
         "local_ascription_owner_rejects_multiple_runtime_branch_activations",
         "local_ascription_site_roundtrips_exact_identity_and_rejects_missing_or_unknown_fields"
       ],
-      "note": "WireDag v14 requires the exact local-ascription identity and preserves one exact scalar Bool runtime-branch activation; missing, hybrid, empty, unknown or multiply activated representations reject."
+      "note": "WireDag v15 requires the exact local-ascription identity and preserves one exact scalar Bool runtime-branch activation; missing, hybrid, empty, unknown or multiply activated representations reject."
     },
     {
       "phase": "b",
@@ -746,7 +746,7 @@
         "compiler::tests::native_wire_projection_preserves_live_local_ascription_claims",
         "compiler::tests::native_wire_projection_preserves_local_claim_runtime_branch_activation"
       ],
-      "note": "Live checker and lowering output projects its exact local-ascription role and one scalar Bool runtime-branch activation into WireDag v14, then validates both on decode."
+      "note": "Live checker and lowering output projects its exact local-ascription role and one scalar Bool runtime-branch activation into WireDag v15, then validates both on decode."
     },
     {
       "phase": "b",

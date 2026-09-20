@@ -1,13 +1,15 @@
 //! Bounded shared-indexing adoption control; native execution lives in
 //! exec_compile::checked_c_indexing_* and the existing dtype/cast/reuse suites.
 
-const DAG_METHODS: [&str; 18] = [
+const DAG_METHODS: [&str; 20] = [
     "emit_binary",
     "emit_floor_div",
     "emit_floor_div_reduced_f",
     "emit_binary_reduced_f",
     "emit_binary_func",
-    "emit_cmplt",
+    "emit_compare",
+    "emit_logical",
+    "emit_where",
     "emit_unary",
     "emit_integer_abs",
     "emit_recip",

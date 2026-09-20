@@ -306,6 +306,58 @@ class InvocationOwnership(unittest.TestCase):
                     ):
                         _local_binary_owner(changed)
 
+    def test_lowered_library_comparison_owns_only_exact_local_ascription_slice(self):
+        from capacity_census_wire_invocation_owners import binary_call_owner
+
+        caller = (
+            "chelis_compiler_api::cache_envelope::"
+            "lowered_library_payload_matches"
+        )
+        ascription = nominal(
+            "chelis_types::infer::checked::CheckedLocalTensorAscription"
+        )
+        payload = {"tag": "slice", "element": ascription}
+        self.assertEqual(
+            binary_call_owner(caller, (payload,)),
+            "native-lowered-payload-comparison",
+        )
+
+        for mutation, changed_caller, changed_payload in (
+            ("caller", "other::lowered_library_payload_matches", payload),
+            ("numeric", caller, primitive("f64")),
+            (
+                "vector",
+                caller,
+                nominal(
+                    "alloc::vec::Vec",
+                    ascription,
+                    nominal("alloc::alloc::Global"),
+                ),
+            ),
+            (
+                "type",
+                caller,
+                {
+                    "tag": "slice",
+                    "element": nominal(
+                        "chelis_types::infer::checked::LocalAscriptionId"
+                    ),
+                },
+            ),
+            (
+                "crate",
+                caller,
+                {
+                    "tag": "slice",
+                    "element": nominal(
+                        "lookalike::infer::checked::CheckedLocalTensorAscription"
+                    ),
+                },
+            ),
+        ):
+            with self.subTest(mutation=mutation), self.assertRaises(GraphError):
+                binary_call_owner(changed_caller, (changed_payload,))
+
     def test_known_carrier_and_container_do_not_authorize_arbitrary_numeric_payload(
         self,
     ):

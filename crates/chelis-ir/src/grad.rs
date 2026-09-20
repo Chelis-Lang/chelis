@@ -7,7 +7,8 @@ use chelis_unord::UnordMap;
 use std::fmt;
 
 use crate::dag::{
-    Dag, DagNode, DimInfo, ExtremaKind, ExtremaOperand, NodeId, RiscOp, RtDim, TensorType,
+    ComparisonKind, Dag, DagNode, DimInfo, ExtremaKind, ExtremaOperand, NodeId, RiscOp, RtDim,
+    TensorType,
 };
 use crate::tier2;
 use chelis_types::types::Prim;
@@ -44,6 +45,9 @@ pub enum AdRejectionReason {
     /// almost everywhere and undefined at the breakpoints (e.g.
     /// `Floor`, `Ceil`).
     PiecewiseConstant,
+    /// Bool logical operations are control predicates, not numeric
+    /// arithmetic, and have no reverse-mode adjoint.
+    LogicalOperation,
     /// The op is non-deterministic over duplicate target indices, so
     /// no well-defined reverse-mode adjoint exists. This is the
     /// fail-closed contract for replace-scatter (`Scatter`): when two
@@ -114,6 +118,11 @@ impl fmt::Display for AdError {
                 AdRejectionReason::PiecewiseConstant => write!(
                     f,
                     "grad: {op} is non-differentiable (piecewise constant); \
+                     remove it from the gradient path or wrap it in a stop-gradient"
+                ),
+                AdRejectionReason::LogicalOperation => write!(
+                    f,
+                    "grad: {op} is non-differentiable (logical operation); \
                      remove it from the gradient path or wrap it in a stop-gradient"
                 ),
                 AdRejectionReason::NonDeterministicAtDuplicateIndices => write!(
@@ -223,7 +232,7 @@ fn grad_dag_checked_impl(
                 // operands. Its predicate may control differentiable float
                 // selection, but the arithmetic that formed the predicate is
                 // not itself on the gradient path.
-                RiscOp::CmpLt => {}
+                RiscOp::Compare(_) => {}
                 _ => {
                     for input in &node.inputs {
                         live[input.0] = true;
@@ -237,6 +246,12 @@ fn grad_dag_checked_impl(
             continue;
         }
         match &node.op {
+            RiscOp::Logical(kind) => {
+                return Err(AdError::NotSupported {
+                    op: kind.surf_name(),
+                    reason: AdRejectionReason::LogicalOperation,
+                });
+            }
             RiscOp::Sub | RiscOp::MaxElem | RiscOp::MinElem
                 if node.output_type.precision.is_integer() =>
             {
@@ -363,7 +378,9 @@ pub fn risc_op_name(op: &RiscOp) -> &'static str {
         RiscOp::FloorDiv => "floor_div",
         RiscOp::TruncDiv => "trunc_div",
         RiscOp::Mod => "mod",
-        RiscOp::CmpLt => "cmplt",
+        RiscOp::Compare(kind) => kind.surf_name(),
+        RiscOp::Logical(kind) => kind.surf_name(),
+        RiscOp::Where => "where",
         RiscOp::MaxElem => "max_elem",
         RiscOp::MinElem => "min_elem",
         RiscOp::ExtremaAdjoint { .. } => "extrema_adjoint",
@@ -869,7 +886,7 @@ fn compute_adjoints(
             let db = dag.add_node(RiscOp::Neg, vec![g_y_over_b], ty, None);
             Some(vec![(a, da), (b, db)])
         }
-        RiscOp::CmpLt => {
+        RiscOp::Compare(_) => {
             let a = node.inputs[0];
             let b = node.inputs[1];
             let ty_a = forward.get(a).unwrap().output_type.clone();
@@ -877,6 +894,43 @@ fn compute_adjoints(
             let za = dag.add_node(RiscOp::synth_const(ty_a.precision, 0.0), vec![], ty_a, None);
             let zb = dag.add_node(RiscOp::synth_const(ty_b.precision, 0.0), vec![], ty_b, None);
             Some(vec![(a, za), (b, zb)])
+        }
+        RiscOp::Logical(_) => None,
+        RiscOp::Where => {
+            let condition = node.inputs[0];
+            let then_value = node.inputs[1];
+            let else_value = node.inputs[2];
+            let condition_ty = forward.get(condition).unwrap().output_type.clone();
+            let branch_ty = forward.get(then_value).unwrap().output_type.clone();
+            let zero_condition = dag.add_node(
+                RiscOp::synth_const(condition_ty.precision, 0.0),
+                vec![],
+                condition_ty,
+                None,
+            );
+            let zero_branch = dag.add_node(
+                RiscOp::synth_const(branch_ty.precision, 0.0),
+                vec![],
+                branch_ty.clone(),
+                None,
+            );
+            let then_grad = dag.add_node(
+                RiscOp::Where,
+                vec![condition, g, zero_branch],
+                branch_ty.clone(),
+                None,
+            );
+            let else_grad = dag.add_node(
+                RiscOp::Where,
+                vec![condition, zero_branch, g],
+                branch_ty,
+                None,
+            );
+            Some(vec![
+                (condition, zero_condition),
+                (then_value, then_grad),
+                (else_value, else_grad),
+            ])
         }
         RiscOp::MaxElem | RiscOp::MinElem => {
             let a = node.inputs[0];
@@ -1052,7 +1106,12 @@ fn compute_adjoints(
                 None,
             );
             // positive mask: x > 0  i.e. cmplt(0, x)
-            let pos_bool = dag.add_node(RiscOp::CmpLt, vec![zero, x], bool_ty.clone(), None);
+            let pos_bool = dag.add_node(
+                RiscOp::Compare(ComparisonKind::CmpLt),
+                vec![zero, x],
+                bool_ty.clone(),
+                None,
+            );
             let pos = dag.add_node(
                 RiscOp::Cast {
                     new_precision: ty.precision,
@@ -1062,7 +1121,12 @@ fn compute_adjoints(
                 None,
             );
             // negative mask: x < 0  i.e. cmplt(x, 0)
-            let neg_bool = dag.add_node(RiscOp::CmpLt, vec![x, zero], bool_ty, None);
+            let neg_bool = dag.add_node(
+                RiscOp::Compare(ComparisonKind::CmpLt),
+                vec![x, zero],
+                bool_ty,
+                None,
+            );
             let neg_cast = dag.add_node(
                 RiscOp::Cast {
                     new_precision: ty.precision,
@@ -2758,7 +2822,12 @@ mod tests {
             precision: Prim::Bool,
         };
         let (dag, x, _y, out) = build_binary_dag(|dag, a, b, _ty| {
-            dag.add_node(RiscOp::CmpLt, vec![a, b], bool_ty.clone(), None)
+            dag.add_node(
+                RiscOp::Compare(ComparisonKind::CmpLt),
+                vec![a, b],
+                bool_ty.clone(),
+                None,
+            )
         });
         assert!(
             grad_dag(&dag, out, &[x]).is_none(),

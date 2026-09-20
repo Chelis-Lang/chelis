@@ -190,6 +190,24 @@ reason = "the Phase 1 selection and receipt unit contracts execute in the PR scr
 tracking_issue = "chelis#893"
 
 [[path_rule]]
+prefix = "scripts/runtime_representation_phase2.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "runtime-representation-phase0-oracle"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "the representation gate executes this Phase 2 selection, receipt, binding, and native-control driver"
+tracking_issue = "chelis#893"
+
+[[path_rule]]
+prefix = "scripts/test_runtime_representation_phase2.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the Phase 2 selection and receipt unit contracts execute in the PR script-unit discovery"
+tracking_issue = "chelis#893"
+
+[[path_rule]]
 prefix = "spec/design/runtime_representation_phase0_inventory.json"
 disposition = "owner"
 workflow = "heavy-e2e.yml"
@@ -205,6 +223,15 @@ workflow = "heavy-e2e.yml"
 job = "runtime-representation-phase0-oracle"
 cadence = "daily 03:17 UTC and workflow_dispatch"
 reason = "the Phase 2 representation gate validates and executes this frozen Phase 1 test selection"
+tracking_issue = "chelis#893"
+
+[[path_rule]]
+prefix = "spec/design/runtime_representation_phase2_tests.json"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "runtime-representation-phase0-oracle"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "the representation gate validates and executes this frozen Phase 2 test selection"
 tracking_issue = "chelis#893"
 
 [[path_rule]]
@@ -522,6 +549,18 @@ package = "chelis-backend-hip"
 name = "hip_count_codegen"
 
 [[standing_target]]
+package = "chelis-backend-hip"
+name = "logical_comparison_where"
+
+[[standing_target]]
+package = "chelis-backend-metal"
+name = "logical_comparison_where_rejection"
+
+[[standing_target]]
+package = "chelis-compiler-api"
+name = "logical_comparison_where_targets"
+
+[[standing_target]]
 package = "chelis-backend-metal"
 name = "metal_count_codegen"
 
@@ -705,6 +744,18 @@ job = "change-owned-shard"
 cadence = "pull_request and exact-candidate workflow_dispatch when directly modified"
 reason = "the documented published-stdlib acceptance matrix is entirely ignored and must execute explicitly when its target changes"
 tracking_issue = "chelis#1824"
+
+# This target requires a real HIP workstation. Ubuntu change-owned and package
+# expansion workers must preserve the exact manual gate without attempting to
+# execute the ignored hardware matrix themselves.
+[[target_exclusion]]
+package = "chelis-backend-hip"
+name = "logical_comparison_where_gpu"
+workflow = "heavy-e2e.yml"
+job = "runtime-representation-phase0-oracle"
+cadence = "manual-required on the exact reviewed candidate"
+reason = "the runtime-representation hardware manifest registers the exact real-HIP command"
+tracking_issue = "chelis#1284"
 
 # The default nextest profile excludes these complete targets. The current
 # unfiltered four-shard Linux workspace job is their exact alternative owner.
@@ -1984,6 +2035,15 @@ reason = "the Phase 4B freeze and per-file contract acknowledgement run in the r
 tracking_issue = "chelis#1870"
 
 [[path_rule]]
+prefix = "spec/design/loud_unsupported_issue_manifest.json"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the checked-in rejection registry agreement and offline authority-admission controls execute in script-unit; complete live issue-state validation runs in the daily/manual standing workflow"
+tracking_issue = "chelis#1870"
+
+[[path_rule]]
 prefix = "scripts/generate_rejection_registries.py"
 disposition = "owner"
 workflow = "ci.yml"
@@ -2339,12 +2399,30 @@ reason = "the dtype oracle executes the exact wire mutation and consumer selecti
 tracking_issue = "chelis#2048"
 
 [[path_rule]]
+prefix = "scripts/capacity_census_wire_invocation_owners.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "dtype-phase3-oracle"
+cadence = "daily and workflow_dispatch"
+reason = "the authoritative wire census executes the exact invocation-owner enumerator"
+tracking_issue = "chelis#2048"
+
+[[path_rule]]
 prefix = "scripts/test_capacity_census_wire_schema.py"
 disposition = "owner"
 workflow = "heavy-e2e.yml"
 job = "script-nightly"
 cadence = "daily and workflow_dispatch"
 reason = "the compiler-backed ActualSchemaCodec class executes in script-nightly; lightweight paired controls also execute in PR script-unit and the wire census"
+tracking_issue = "chelis#2048"
+
+[[path_rule]]
+prefix = "scripts/test_capacity_census_wire_invocation_owners.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the invocation-owner positive and mutation controls execute in PR script-unit"
 tracking_issue = "chelis#2048"
 
 # Shared nextest configuration can affect every workspace package.
@@ -2396,6 +2474,24 @@ reason = "the completion oracle executes current wire graph, codec and admission
 tracking_issue = "chelis#729"
 
 [[path_rule]]
+prefix = "scripts/dtype_pre_phase4c_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the composite prerequisite manifest and receipt framework are imported and exercised by the PR script-unit suite"
+tracking_issue = "chelis#1296"
+
+[[path_rule]]
+prefix = "scripts/test_dtype_pre_phase4c_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the composite prerequisite manifest and receipt positive, negative, and mutation controls execute in the PR script-unit suite"
+tracking_issue = "chelis#1296"
+
+[[path_rule]]
 prefix = "scripts/dtype_direct_arithmetic_oracle.py"
 disposition = "owner"
 workflow = "ci.yml"
@@ -2412,6 +2508,24 @@ job = "script-unit"
 cadence = "pull_request and push"
 reason = "direct arithmetic oracle mutation controls execute in the script unit suite"
 tracking_issue = "chelis#1306"
+
+[[path_rule]]
+prefix = "scripts/dtype_nonnumeric_lowering_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the #1284 completion oracle command and source-contract manifest execute in the script unit suite"
+tracking_issue = "chelis#1284"
+
+[[path_rule]]
+prefix = "scripts/test_dtype_nonnumeric_lowering_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the #1284 oracle standing mutations and runner contracts execute in the script unit suite"
+tracking_issue = "chelis#1284"
 
 [[path_rule]]
 prefix = "scripts/test_timing_baseline.json"

@@ -15,6 +15,7 @@ from unittest import mock
 
 from scripts import ci_change_owned as owned
 from scripts import ci_detect_docs_only as detect
+from scripts import runtime_representation_oracle
 
 
 OWNER = {
@@ -24,6 +25,17 @@ OWNER = {
     "reason": "real build path is nightly-owned",
     "tracking_issue": "chelis#1824",
 }
+
+
+def successful_product_build(command, kwargs):
+    """Mirror the runtime archive produced by a successful workspace build."""
+    cargo_target = Path(os.environ.get("CARGO_TARGET_DIR", "target"))
+    if not cargo_target.is_absolute():
+        cargo_target = Path(kwargs["cwd"]) / cargo_target
+    runtime = cargo_target / "debug/libchelis_runtime.a"
+    runtime.parent.mkdir(parents=True, exist_ok=True)
+    runtime.write_bytes(b"exact-head-runtime")
+    return subprocess.CompletedProcess(command, 0, "", "")
 
 
 def package(
@@ -462,14 +474,14 @@ class SchemaTests(unittest.TestCase):
             owned.Identity("chelis-types", "expand_insert_dispatch_family"),
             owned.Identity("chelis-types", "issue_1294_standard_lowerings"),
         } <= set(config.standing_targets))
-        self.assertEqual(len(config.target_exclusions), 3)
+        self.assertEqual(len(config.target_exclusions), 4)
         self.assertEqual(len(config.test_exclusions), 14)
         self.assertEqual(
             set(config.manual_only_targets),
             {
                 owned.Identity(
                     "chelis-cli", "issue_1417_stdlib_dtype_family_bounds"
-                )
+                ),
             },
         )
         manual_owner = config.manual_only_targets[
@@ -478,6 +490,21 @@ class SchemaTests(unittest.TestCase):
         self.assertEqual(
             (manual_owner.workflow, manual_owner.job, manual_owner.tracking_issue),
             ("ci.yml", "change-owned-shard", "chelis#1824"),
+        )
+        hip_manual_owner = config.target_exclusions[
+            owned.Identity("chelis-backend-hip", "logical_comparison_where_gpu")
+        ]
+        self.assertEqual(
+            (
+                hip_manual_owner.workflow,
+                hip_manual_owner.job,
+                hip_manual_owner.tracking_issue,
+            ),
+            (
+                "heavy-e2e.yml",
+                "runtime-representation-phase0-oracle",
+                "chelis#1284",
+            ),
         )
         self.assertEqual(
             manual_owner.cadence,
@@ -502,7 +529,11 @@ class SchemaTests(unittest.TestCase):
             },
         )
         for owner in (
-            *config.target_exclusions.values(),
+            *(
+                owner
+                for owner in config.target_exclusions.values()
+                if owner.tracking_issue == "chelis#1824"
+            ),
             *(
                 owner
                 for owner in config.test_exclusions.values()
@@ -983,6 +1014,18 @@ class SchemaTests(unittest.TestCase):
                 "pull_request and push",
                 "chelis#893",
             ),
+            "scripts/runtime_representation_phase2.py": (
+                "heavy-e2e.yml",
+                "runtime-representation-phase0-oracle",
+                "daily 03:17 UTC and workflow_dispatch",
+                "chelis#893",
+            ),
+            "scripts/test_runtime_representation_phase2.py": (
+                "ci.yml",
+                "script-unit",
+                "pull_request and push",
+                "chelis#893",
+            ),
             "scripts/test_unrepresentable_domain_oracle.py": (
                 "ci.yml",
                 "script-unit",
@@ -996,6 +1039,12 @@ class SchemaTests(unittest.TestCase):
                 "chelis#908",
             ),
             "spec/design/runtime_representation_phase1_tests.json": (
+                "heavy-e2e.yml",
+                "runtime-representation-phase0-oracle",
+                "daily 03:17 UTC and workflow_dispatch",
+                "chelis#893",
+            ),
+            "spec/design/runtime_representation_phase2_tests.json": (
                 "heavy-e2e.yml",
                 "runtime-representation-phase0-oracle",
                 "daily 03:17 UTC and workflow_dispatch",
@@ -1026,9 +1075,12 @@ class SchemaTests(unittest.TestCase):
         for neighbor in (
             "scripts/runtime_representation_phase1_extra.py",
             "scripts/test_runtime_representation_phase1_extra.py",
+            "scripts/runtime_representation_phase2_extra.py",
+            "scripts/test_runtime_representation_phase2_extra.py",
             "scripts/test_unrepresentable_domain_oracle_extra.py",
             "scripts/unrepresentable_domain_oracle_extra.py",
             "spec/design/runtime_representation_phase1_tests_extra.json",
+            "spec/design/runtime_representation_phase2_tests_extra.json",
         ):
             with self.subTest(neighbor=neighbor):
                 self.assertFalse(
@@ -1124,6 +1176,117 @@ class SchemaTests(unittest.TestCase):
         ):
             with self.subTest(neighbor=neighbor):
                 self.assertFalse(any(rule.matches(neighbor) for rule in rules))
+
+    def test_wire_invocation_owner_scripts_have_exact_automated_owners(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        config = owned.read_config(root / ".config/ci-test-targets.toml")
+        expected = {
+            "scripts/capacity_census_wire_invocation_owners.py": (
+                "heavy-e2e.yml",
+                "dtype-phase3-oracle",
+                "daily and workflow_dispatch",
+                "chelis#2048",
+            ),
+            "scripts/test_capacity_census_wire_invocation_owners.py": (
+                "ci.yml",
+                "script-unit",
+                "pull_request and push",
+                "chelis#2048",
+            ),
+        }
+        rules = {
+            rule.prefix: rule
+            for rule in config.path_rules
+            if rule.prefix in expected
+        }
+        self.assertEqual(set(rules), set(expected))
+        for path, owner_identity in expected.items():
+            with self.subTest(path=path):
+                rule = rules[path]
+                self.assertEqual(rule.prefix, path)
+                self.assertEqual(rule.disposition, "owner")
+                self.assertIsNotNone(rule.owner)
+                self.assertEqual(
+                    (
+                        rule.owner.workflow,
+                        rule.owner.job,
+                        rule.owner.cadence,
+                        rule.owner.tracking_issue,
+                    ),
+                    owner_identity,
+                )
+        for neighbor in (
+            "scripts/capacity_census_wire_invocation_owners_extra.py",
+            "scripts/test_capacity_census_wire_invocation_owners_extra.py",
+        ):
+            with self.subTest(neighbor=neighbor):
+                self.assertFalse(any(rule.matches(neighbor) for rule in rules.values()))
+
+    def test_pre_phase4c_composite_scripts_have_exact_script_unit_owners(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        config = owned.read_config(root / ".config/ci-test-targets.toml")
+        expected = {
+            "scripts/dtype_pre_phase4c_oracle.py",
+            "scripts/test_dtype_pre_phase4c_oracle.py",
+        }
+        rules = {
+            rule.prefix: rule
+            for rule in config.path_rules
+            if rule.prefix in expected
+        }
+        self.assertEqual(set(rules), expected)
+        for path, rule in rules.items():
+            with self.subTest(path=path):
+                self.assertEqual(rule.disposition, "owner")
+                self.assertIsNotNone(rule.owner)
+                self.assertEqual(
+                    (
+                        rule.owner.workflow,
+                        rule.owner.job,
+                        rule.owner.cadence,
+                        rule.owner.tracking_issue,
+                    ),
+                    (
+                        "ci.yml",
+                        "script-unit",
+                        "pull_request and push",
+                        "chelis#1296",
+                    ),
+                )
+        for neighbor in (
+            "scripts/dtype_pre_phase4c_oracle_extra.py",
+            "scripts/test_dtype_pre_phase4c_oracle_extra.py",
+        ):
+            with self.subTest(neighbor=neighbor):
+                self.assertFalse(any(rule.matches(neighbor) for rule in rules.values()))
+
+    def test_rejection_issue_manifest_has_an_exact_script_unit_owner(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        config = owned.read_config(root / ".config/ci-test-targets.toml")
+        path = "spec/design/loud_unsupported_issue_manifest.json"
+        rules = [rule for rule in config.path_rules if rule.matches(path)]
+        self.assertEqual(len(rules), 1)
+        rule = rules[0]
+        self.assertEqual(rule.prefix, path)
+        self.assertEqual(rule.disposition, "owner")
+        self.assertIsNotNone(rule.owner)
+        self.assertEqual(
+            (
+                rule.owner.workflow,
+                rule.owner.job,
+                rule.owner.cadence,
+                rule.owner.tracking_issue,
+            ),
+            (
+                "ci.yml",
+                "script-unit",
+                "pull_request and push",
+                "chelis#1870",
+            ),
+        )
+        self.assertFalse(
+            rule.matches("spec/design/loud_unsupported_issue_manifest_extra.json")
+        )
 
     def test_path_rules_cannot_override_existing_docs_only_policy(self) -> None:
         for path in ("README.md", "spec/05-risc-primitives.md", "new-tools/new.py"):
@@ -1485,6 +1648,99 @@ class PlanningTests(unittest.TestCase):
             OWNER,
         )
         self.assertEqual(plan["target_features"]["p::gated"], ["extra"])
+        owned.verify_plan_digest(plan)
+
+    def test_real_hip_target_routes_out_of_ubuntu_lanes_to_manual_oracle(
+        self,
+    ) -> None:
+        identity = owned.Identity(
+            "chelis-backend-hip", "logical_comparison_where_gpu"
+        )
+        source = "crates/chelis-backend-hip/tests/logical_comparison_where_gpu.rs"
+        hip_metadata = metadata(
+            package(
+                "p",
+                [("smoke", "crates/p/tests/smoke.rs", [])],
+            ),
+            package(
+                "chelis-backend-hip",
+                [(identity.target, source, [])],
+            )
+        )
+        repository_config = owned.read_config(
+            Path(__file__).resolve().parents[1] / ".config/ci-test-targets.toml"
+        )
+        config = owned.Config(
+            version=repository_config.version,
+            standing_targets=(owned.Identity("p", "smoke"),),
+            manual_only_targets={
+                identity: repository_config.manual_only_targets[identity]
+                for identity in (identity,)
+                if identity in repository_config.manual_only_targets
+            },
+            target_exclusions={
+                identity: repository_config.target_exclusions[identity]
+                for identity in (identity,)
+                if identity in repository_config.target_exclusions
+            },
+            test_exclusions={},
+            required_package_rules=(),
+            path_rules=(),
+        )
+        plan = owned.make_plan(
+            mode="pull_request",
+            base_sha="a" * 40,
+            candidate_sha="b" * 40,
+            event_pr_head="b" * 40,
+            records=[owned.ChangeRecord("M", source)],
+            base_metadata=hip_metadata,
+            candidate_metadata=hip_metadata,
+            config=config,
+            tracked_paths={source, "crates/p/tests/smoke.rs"},
+            source_reader=lambda path: (
+                "#[test]\nfn ignored_real_hip_tests() {}"
+                if path == source
+                else "#[test]\nfn standing() {}"
+            ),
+        )
+
+        self.assertNotIn(identity.canonical, plan["change_owned"])
+        self.assertNotIn(identity.canonical, plan["package_expansion"])
+        self.assertEqual(
+            plan["path_dispositions"],
+            [
+                {
+                    "path": source,
+                    "status": "M",
+                    "kind": "integration_target_excluded",
+                    "identity": identity.canonical,
+                    "owner": {
+                        "workflow": "heavy-e2e.yml",
+                        "job": "runtime-representation-phase0-oracle",
+                        "cadence": "manual-required on the exact reviewed candidate",
+                        "reason": (
+                            "the runtime-representation hardware manifest "
+                            "registers the exact real-HIP command"
+                        ),
+                        "tracking_issue": "chelis#1284",
+                    },
+                }
+            ],
+        )
+        self.assertTrue(
+            any(
+                probe == {
+                    "lane": "hip-typed-nonnumeric",
+                    "status": "manual-required",
+                    "command": (
+                        "scripts/hip_test.py -p chelis-backend-hip "
+                        "--test logical_comparison_where_gpu "
+                        "-- --ignored --test-threads=1"
+                    ),
+                }
+                for probe in runtime_representation_oracle.hardware_probe_manifest()
+            )
+        )
         owned.verify_plan_digest(plan)
 
     def test_plan_rejects_incomplete_or_malformed_target_features(self) -> None:
@@ -2128,7 +2384,7 @@ class ShardingAndExecutionTests(unittest.TestCase):
                             output=b"partial stdout", stderr=b"partial stderr",
                         )
                     if command[1] == "build":
-                        return subprocess.CompletedProcess(command, 0, "", "")
+                        return successful_product_build(command, kwargs)
                     package = command[command.index("-p") + 1]
                     name = command[command.index("--test") + 1]
                     if command[2] == "list":
@@ -2159,7 +2415,12 @@ class ShardingAndExecutionTests(unittest.TestCase):
                 self.assertEqual(receipt["success"], expired_call is None)
                 self.assertEqual(len(calls), 5 if expired_call is None else expired_call + 1)
                 timeouts = [kwargs["timeout"] for _, kwargs in calls]
-                self.assertTrue(all(0 < value <= 960 for value in timeouts))
+                self.assertTrue(
+                    all(
+                        0 < value <= owned.EXPANSION_EXECUTION_SECONDS
+                        for value in timeouts
+                    )
+                )
                 self.assertEqual(timeouts, sorted(timeouts, reverse=True))
                 if expired_call is not None:
                     self.assertIn("execution deadline", " ".join(receipt["failures"]))
@@ -2191,7 +2452,9 @@ class ShardingAndExecutionTests(unittest.TestCase):
 
         def run(command, **kwargs):
             calls.append(command)
-            current_time[0] += 961
+            current_time[0] += owned.EXPANSION_EXECUTION_SECONDS + 1
+            if command[1] == "build":
+                successful_product_build(command, kwargs)
             return subprocess.CompletedProcess(command, 0, "", "")
 
         with tempfile.TemporaryDirectory() as tmp, (
@@ -2223,8 +2486,8 @@ class ShardingAndExecutionTests(unittest.TestCase):
         def run(command, **kwargs):
             calls.append(command)
             if command[1] == "build":
-                return subprocess.CompletedProcess(command, 0, "", "")
-            current_time[0] += 961
+                return successful_product_build(command, kwargs)
+            current_time[0] += owned.EXPANSION_EXECUTION_SECONDS + 1
             payload = {"rust-suites": {"p::smoke": {"testcases": {
                 "fast_case": {"ignored": False, "filter-match": {"status": "matches"}},
                 "slow_case": {"ignored": False, "filter-match": {"status": "mismatch"}},
@@ -2592,7 +2855,7 @@ class ShardingAndExecutionTests(unittest.TestCase):
         def run(command, **kwargs):
             calls.append(command)
             if command[1] == "build":
-                return subprocess.CompletedProcess(command, 0, "", "")
+                return successful_product_build(command, kwargs)
             target = command[command.index("--test") + 1]
             if command[2] == "list":
                 payload = {
@@ -2682,7 +2945,7 @@ class ShardingAndExecutionTests(unittest.TestCase):
                 def run(command, **kwargs):
                     calls.append(command)
                     if command[1] == "build":
-                        return subprocess.CompletedProcess(command, 0, "", "")
+                        return successful_product_build(command, kwargs)
                     names = [
                         command[index + 1]
                         for index, value in enumerate(command)
@@ -2913,6 +3176,13 @@ class ShardingAndExecutionTests(unittest.TestCase):
             def run(command, **kwargs):
                 self.assertNotIn("timeout", kwargs)
                 calls.append(command)
+                if command[1] == "build":
+                    successful_product_build(command, kwargs)
+                else:
+                    self.assertEqual(
+                        kwargs["env"]["CHELIS_RUNTIME_LIB"],
+                        str(target / "debug/libchelis_runtime.a"),
+                    )
                 if command[1:3] == ["nextest", "list"]:
                     payload = {
                         "rust-suites": {
@@ -2981,6 +3251,8 @@ class ShardingAndExecutionTests(unittest.TestCase):
 
             def run(command, **kwargs):
                 calls.append(command)
+                if command[1] == "build":
+                    return successful_product_build(command, kwargs)
                 if command[1:3] == ["nextest", "list"]:
                     payload = {
                         "rust-suites": {
@@ -3047,7 +3319,7 @@ class ShardingAndExecutionTests(unittest.TestCase):
             def run(command, **kwargs):
                 calls.append(command)
                 if command[1] == "build":
-                    return subprocess.CompletedProcess(command, 0, "", "")
+                    return successful_product_build(command, kwargs)
                 self.assertEqual(command[1:3], ["nextest", "list"])
                 return subprocess.CompletedProcess(
                     command,
@@ -3116,7 +3388,7 @@ class ShardingAndExecutionTests(unittest.TestCase):
 
             def run(command, **kwargs):
                 if command[1] == "build":
-                    return subprocess.CompletedProcess(command, 0, "", "")
+                    return successful_product_build(command, kwargs)
                 if command[2] == "list":
                     return subprocess.CompletedProcess(
                         command,
@@ -3428,10 +3700,15 @@ class BoundedCommandTests(unittest.TestCase):
                 cargo = root / "cargo"
                 cargo.write_text(
                     f"#!{sys.executable}\n"
-                    "import json,sys,time\n"
+                    "import json,os,pathlib,sys,time\n"
                     f"if {stage!r} in sys.argv[1:3]:\n"
                     " print('deadline output', flush=True)\n"
                     " time.sleep(30)\n"
+                    "if 'build' in sys.argv[1:3]:\n"
+                    " runtime = pathlib.Path(os.environ['CARGO_TARGET_DIR']) / "
+                    "'debug/libchelis_runtime.a'\n"
+                    " runtime.parent.mkdir(parents=True, exist_ok=True)\n"
+                    " runtime.write_bytes(b'exact-head-runtime')\n"
                     "if 'list' in sys.argv[1:3]:\n"
                     " print(json.dumps({'rust-suites': {'p::smoke': {'testcases': {"
                     "'fast_case': {'ignored': False, 'filter-match': {'status': 'matches'}},"
@@ -3637,7 +3914,9 @@ class ReportTests(unittest.TestCase):
                 "finished_at": "2026-09-13T00:00:01Z",
                 "elapsed_seconds": 1.0,
                 "soft_budget_seconds": (
-                    900 if surface == "package_expansion" else None
+                    owned.SOFT_BUDGET_SECONDS
+                    if surface == "package_expansion"
+                    else None
                 ),
                 "soft_budget_exceeded": False,
                 "sidecars": {

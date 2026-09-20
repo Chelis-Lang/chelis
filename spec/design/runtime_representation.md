@@ -1047,6 +1047,26 @@ from the active ledger, leaving 244 active Phase 3/4 rows. Generated-layout
 freshness, metadata/device execution, binding execution, and the backend-header
 capacity census are the executable authority for these final forms.
 
+Typed comparison, bool-only logical operations, and stored-bit `where` add six
+closed backend scanner owners as final typed-lane forms rather than transition
+debt: the element-spelling owners
+`CEmitter::{emit_compare,emit_logical,emit_where}`,
+the `emit_where` load/store template, `HipEmitter::comparison_c_type`,
+and `REDUCED_FLOAT_COMPARISON_HELPERS`. Comparison element spelling and reduced
+float decoding are governed by [05-OP-36], bool-only logical spelling by
+[05-OP-26..28], and stored-bit selection by [05-OP-33]. No owner accepts a bare
+runtime dtype id or creates a public numeric carrier. The Phase 0 manifest binds
+these exact owner identities to the IR semantic/AD suite, compiled C all-dtype
+execution, HIP structural admission, and the ignored real-HIP exact-bit matrix.
+A renamed or additional owner remains unclassified until it independently
+supplies the same final-form authority and execution contract.
+
+`NUMERIC_DEVICE_HELPERS` is a separate numeric final-form owner for the
+`uniform_like` sampler governed by [05-OP-8]. Splitting it from the common HIP
+device helpers does not transfer it into the typed-nonnumeric cohort. Its exact
+affine and per-dtype rounding remain bound to the existing ignored real-HIP
+`gpu_correctness` execution lane.
+
 ## C4. Validated typed tensor access
 
 The runtime moves the raw descriptor into a `tensor_storage` module. Its fields,

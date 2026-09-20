@@ -161,6 +161,9 @@ _API = "chelis_compiler_api::"
 _NODE = _nominal("chelis_ir::dag::NodeId")
 _TYPE = _nominal("chelis_ir::dag::TensorType")
 _DEEP = _nominal("chelis_deep::ast::Expr")
+_LOCAL_TENSOR_ASCRIPTION = _nominal(
+    "chelis_types::infer::checked::CheckedLocalTensorAscription"
+)
 _BOOL = ("primitive", "bool")
 _CHECK_REPORT = _nominal(CHECK_REPORT_PROTOCOL.producer_owner)
 _CHECK_REPORT_SERIALIZE = "serde_core::ser::Serialize::serialize"
@@ -214,7 +217,12 @@ _BINARY_CALLS = {
     ),
     _API + "cache_envelope::lowered_library_payload_matches": (
         "native-lowered-payload-comparison",
-        {_nominal("chelis_ir::dag::Dag")},
+        {
+            # Comparison-only native codec uses. The cache publication proof
+            # owns compatibility; neither payload acquires wire authority.
+            _nominal("chelis_ir::dag::Dag"),
+            ("slice", _LOCAL_TENSOR_ASCRIPTION),
+        },
     ),
 }
 

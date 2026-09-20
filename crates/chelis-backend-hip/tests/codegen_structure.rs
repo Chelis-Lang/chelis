@@ -5,7 +5,7 @@
 
 mod support;
 use chelis_ir::dag::{
-    Dag, DimInfo, ExtremaKind, ExtremaOperand, RiscOp, RtAxis, RtDim, TensorType,
+    ComparisonKind, Dag, DimInfo, ExtremaKind, ExtremaOperand, RiscOp, RtAxis, RtDim, TensorType,
 };
 use chelis_ir::fuse::fuse;
 use chelis_types::types::Prim;
@@ -94,10 +94,14 @@ fn cpu_runtime_include_dir() -> PathBuf {
 
 fn cpu_runtime_library_path() -> PathBuf {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let candidates = [
-        manifest_dir.join("../../target/debug/deps"),
-        manifest_dir.join("../../target/release/deps"),
-    ];
+    let mut candidates = Vec::new();
+    if let Ok(target) = env::var("CARGO_TARGET_DIR") {
+        let target = PathBuf::from(target);
+        candidates.push(target.join("debug/deps"));
+        candidates.push(target.join("release/deps"));
+    }
+    candidates.push(manifest_dir.join("../../target/debug/deps"));
+    candidates.push(manifest_dir.join("../../target/release/deps"));
     if let Ok(dir) = env::var("CHELIS_RUNTIME_DIR") {
         let candidate_dir = PathBuf::from(dir);
         if let Some(path) = fs::read_dir(&candidate_dir).ok().and_then(|entries| {
@@ -927,23 +931,11 @@ fn s8_duplicate_load_single_slot() {
 }
 
 // ===========================================================================
-// S9: cmplt over a bool result is rejected, not emitted at the operand width
+// S9: legacy cmplt uses the exact Bool8 comparison family
 // ===========================================================================
 
-/// chelis#1360. This test used to assert the opposite: that the `cmplt` kernel
-/// "must produce float `1.0f`/`0.0f`, not integer bool". That was correct
-/// while the HIP runtime stored a bool tensor as a four-byte binary32 payload,
-/// and `chelis_gpu_dtype_size(CHELIS_DTYPE_BOOL)` returned 4 to match.
-///
-/// chelis#1308 replaced that payload with the tagged carrier's one-byte
-/// `Repr::Bool8`. The kernel side did not follow, so the assertion above went
-/// on holding - `1.0f` and `0.0f` were still in the emitted source - while the
-/// emitted program wrote `N * 4` bytes into an `N * 1` byte `hipMalloc` and
-/// read back the low bytes of the float stream. Both halves of the assertion
-/// were true and the program was corrupt, which is why the test is now the
-/// rejection rather than the spelling.
 #[test]
-fn s9_cmplt_bool_result_is_rejected() {
+fn s9_cmplt_bool_result_uses_one_byte_output() {
     let mut dag = Dag::new();
     let a = dag.add_node(
         RiscOp::synth_const(scalar_f32().precision, 1.0),
@@ -958,7 +950,7 @@ fn s9_cmplt_bool_result_is_rejected() {
         None,
     );
     let c = dag.add_node(
-        RiscOp::CmpLt,
+        RiscOp::Compare(ComparisonKind::CmpLt),
         vec![a, b],
         TensorType {
             dims: vec![],
@@ -967,17 +959,10 @@ fn s9_cmplt_bool_result_is_rejected() {
         None,
     );
     dag.add_root(c);
-    let error = match codegen_hip(&dag, "test_cmplt") {
-        Err(error) => error,
-        Ok(_) => panic!(
-            "a bool result is one byte and the cmplt template writes at the \
-             operand width; emitting it overruns the allocation (chelis#1360)"
-        ),
-    };
-    assert!(
-        format!("{error:?}").contains("bool"),
-        "the rejection must name the offending dtype; got: {error:?}"
-    );
+    let source = codegen_hip(&dag, "test_cmplt").unwrap().c_source;
+    assert!(source.contains("unsigned char *out"), "{source}");
+    assert!(source.contains("out[i] = (unsigned char)("), "{source}");
+    assert!(!source.contains("float *out"), "{source}");
 }
 
 // ===========================================================================

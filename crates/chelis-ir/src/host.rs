@@ -9357,6 +9357,20 @@ fn should_keep_tensor_expr_in_host_lane(expr: &Expr) -> bool {
         return false;
     }
     let name = children(callee).first().and_then(symbol_name);
+    if name == Some("cmplt")
+        && children(list)
+            .iter()
+            .skip(1)
+            .any(should_keep_tensor_expr_in_host_lane)
+    {
+        // A host-only descendant is evaluated before the surrounding tensor
+        // comparison. Keep this legacy host-capable identity on the same lane
+        // so `chelis_tensor_cmplt` performs its exact runtime shape check.
+        // Extracting only the outer op into a helper would turn the descendant
+        // result and its source sibling into unrelated wildcard Loads, losing
+        // the checker-proven relation at the partition boundary.
+        return true;
+    }
     matches!(
         name,
         Some(
@@ -15301,7 +15315,6 @@ fn actualize_tensor_helper_types(
             | crate::dag::RiscOp::Div
             | crate::dag::RiscOp::FloorDiv
             | crate::dag::RiscOp::TruncDiv
-            | crate::dag::RiscOp::CmpLt
             | crate::dag::RiscOp::MaxElem
             | crate::dag::RiscOp::MinElem => node
                 .inputs

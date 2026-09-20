@@ -52,6 +52,15 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(available["count"].success_line, "DTYPE COUNT ORACLE: PASS")
         self.assertEqual(available["direct-arithmetic"].issues, (1306,))
         self.assertEqual(available["relu"].issues, (1313,))
+        self.assertEqual(available["nonnumeric-lowering"].issues, (1284,))
+        self.assertEqual(
+            available["nonnumeric-lowering"].argv,
+            (sys.executable, "scripts/dtype_nonnumeric_lowering_oracle.py"),
+        )
+        self.assertEqual(
+            available["nonnumeric-lowering"].success_line,
+            "DTYPE NONNUMERIC LOWERING ORACLE: PASS",
+        )
         self.assertEqual(available["builtin-closure"].issues, (1294,))
         self.assertEqual(available["builtin-closure"].argv,
                          (sys.executable, "scripts/dtype_builtin_atom_closure_oracle.py"))
