@@ -745,6 +745,19 @@ cadence = "pull_request and exact-candidate workflow_dispatch when directly modi
 reason = "the documented published-stdlib acceptance matrix is entirely ignored and must execute explicitly when its target changes"
 tracking_issue = "chelis#1824"
 
+# All six CPU-fixture rows require an exact-head runtime archive and are
+# intentionally ignored in ordinary workspace runs. Direct modifications must
+# execute the complete ignored suite through the change-owned worker rather
+# than being rejected as an empty active target.
+[[manual_only_target]]
+package = "chelis-backend-hip"
+name = "device_entry_execution"
+workflow = "ci.yml"
+job = "change-owned-shard"
+cadence = "pull_request and exact-candidate workflow_dispatch when directly modified"
+reason = "the runtime-dependent HIP CPU-fixture suite is entirely ignored and must execute explicitly against the exact-head runtime archive when its target changes"
+tracking_issue = "chelis#1863"
+
 # This target requires a real HIP workstation. Ubuntu change-owned and package
 # expansion workers must preserve the exact manual gate without attempting to
 # execute the ignored hardware matrix themselves.
