@@ -1161,8 +1161,9 @@ def fast_command_list(
     thing here that can reject a push, and because until chelis#2250 an
     unrouted new file passed every local check and then failed `Plan Changed
     Integration Tests` in CI. It derives its own set when it runs rather than
-    taking one built here; `AGENTS.md` states once what that set covers and
-    what it does not, and this docstring deliberately does not restate it.
+    taking one built here; `AGENTS.md`'s `--fast` paragraph states once what
+    that set covers and what it does not, and this docstring deliberately
+    does not restate it.
     `docs/ci_validation.md` under Measured figures carries its cost with the
     conditions that produced it.
 

@@ -326,15 +326,19 @@ The developer's `gate.py --fast`, `--local`, `integration`, and full/manual comm
 Taken 2026-09-20 against `64a446998` and `5e361bbc7` on an Apple-silicon
 workstation. A figure here is evidence with a date on it, not a constant:
 re-run the command before relying on one, and correct this table rather than
-the prose that cites it. Cost scales with the size of the change set, so the
-rows bracket it rather than asserting one number.
+the prose that cites it.
 
 | figure | conditions | how it was taken |
 |---|---|---|
-| 0.11-0.13s wall | a change set of eight paths, this pull request's own, `--from-git` | `/usr/bin/time -p .venv/bin/python scripts/ci_change_owned.py classify-paths --from-git`, five runs |
-| 0.36-0.38s wall, 0.14-0.15s user | all 4358 tracked files, the upper bound rather than a realistic change set | same command with every tracked path, three runs |
+| 0.11-0.13s wall | any realistic change set, `--from-git` | `/usr/bin/time -p .venv/bin/python scripts/ci_change_owned.py classify-paths --from-git`, five runs. One path and fifty paths measure the same end to end |
+| about 13 microseconds per path | the only part that grows with the change set | classification alone, in process, with config and packages preloaded: 0.1 ms at 8 paths, 6.7 ms at 500, 57.6 ms at all 4358, against a fixed floor of roughly 50 ms interpreter plus 30 ms `cargo metadata` |
 | 0.05-0.06s wall | empty change set, which returns before `cargo metadata` | same command on an unchanged tree |
 | `cargo metadata --no-deps --locked` 0.02-0.04s | warm, repeated invocation | the stage's dominant cost; 0.24s with dependencies, which it does not ask for |
+
+The argv form is the one that grows visibly, and the shipped form does not
+pay it: passing all 4358 paths as arguments costs about 0.36s wall, of which
+only ~0.058s is classification and the rest is marshalling that many
+arguments through `exec`. `--from-git` passes none.
 
 **The cost does not split by warmth, and that is the measured result rather
 than an omission.** Cold cargo without a bytecode cache, warm cargo after a

@@ -1159,7 +1159,8 @@ itself: CI composes base and candidate Cargo metadata inside the synthetic
 merge, while this reads only the working tree, so an in-place crate rename can
 be ambiguous to the planner and clean here. Treat a local pass as "no unrouted
 path in my tree", not as "CI will accept this". It
-exits non-zero for any failing stage (fmt, regeneration, lint, per-crate clippy, the
+exits non-zero for any failing stage (fmt, regeneration, path classification,
+lint, per-crate clippy, the
 tripwire run, or the std-bundle self-test) and never for a file it fixed; a regenerated
 `dist/` or `reef.lock` is reported as a changed file to commit, never as a failure.
 Changed files are reported from content
