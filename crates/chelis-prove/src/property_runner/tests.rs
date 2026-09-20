@@ -477,6 +477,81 @@ fn scalar_grad_nested_transform_fails_closed_with_specific_reason() {
 
 #[cfg(feature = "smt")]
 #[test]
+fn unrelated_invalid_grad_declaration_fails_closed_before_scalar_smt_property() {
+    let outcomes = run_surf(
+        "module M
+def pair(x: f32) -> (f32, f32) = (x, x)
+bad = grad(pair, wrt=missing)
+@property reflexive forall(x: f32):
+  (x == x)
+",
+        "smt-only",
+    );
+    assert_eq!(outcomes.len(), 1);
+    let outcome = &outcomes[0];
+    assert_eq!(outcome.status, PropertyStatus::Error, "{outcome:?}");
+    assert_eq!(outcome.proof_tier, PropertyTier::None, "{outcome:?}");
+    assert!(!outcome.is_pass(), "{outcome:?}");
+    let reason = outcome.reason.as_deref().unwrap_or_default();
+    assert!(
+        reason.contains("grad") && reason.contains("missing"),
+        "the unrelated desugar failure must remain visible: {outcome:?}"
+    );
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn colliding_property_spans_preserve_invalid_nested_sibling_during_smt_routing() {
+    fn collide_property_spans(decls: &mut [Decl]) {
+        for decl in decls {
+            match decl {
+                Decl::Module { decls, .. } => collide_property_spans(decls),
+                Decl::Property { span, .. } => *span = chelis_deep::Span::new(0, 0),
+                _ => {}
+            }
+        }
+    }
+
+    let parsed = chelis_surf::parser::parse_str(
+        "module Inner
+def pair(x: f32) -> (f32, f32) = (x, x)
+@property invalid_sibling forall(x: f32):
+  (grad(pair, wrt=missing)(x) == x)
+@property reflexive forall(x: f32):
+  (x == x)
+",
+    )
+    .expect("parse collision fixture");
+    let mut module_decls = vec![Decl::Module {
+        name: "Outer".to_string(),
+        decls: parsed,
+        span: chelis_deep::Span::new(0, 0),
+    }];
+    collide_property_spans(&mut module_decls);
+    let flat = flatten_module_decls(&module_decls);
+    let options = PropertyRunOptions {
+        tier: "smt-only".to_string(),
+        only: Some("reflexive".to_string()),
+        ..Default::default()
+    };
+
+    let PropertyRunResult::Ran(outcomes) =
+        run_surf_decls_properties(&flat, &flat, &module_decls, &options)
+            .expect("run collision fixture");
+    assert_eq!(outcomes.len(), 1);
+    let outcome = &outcomes[0];
+    assert_eq!(outcome.status, PropertyStatus::Error, "{outcome:?}");
+    assert_eq!(outcome.proof_tier, PropertyTier::None, "{outcome:?}");
+    assert!(!outcome.is_pass(), "{outcome:?}");
+    let reason = outcome.reason.as_deref().unwrap_or_default();
+    assert!(
+        reason.contains("grad") && reason.contains("missing"),
+        "the colliding invalid sibling must remain visible: {outcome:?}"
+    );
+}
+
+#[cfg(feature = "smt")]
+#[test]
 fn scalar_grad_helper_depth_overflow_fails_closed_with_specific_reason() {
     let outcomes = run_surf(
         "module M
