@@ -566,10 +566,10 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      # The single carrier's input. `preflight_reason` is what the required
-      # Docs context prints, so an unevaluable candidate produces one red
-      # check that says what could not be evaluated, instead of a job that
-      # never reported.
+      # The stated reason, which this workflow's Hull gate prints. An unevaluable
+      # candidate produces a red check saying what could not be evaluated,
+      # instead of a job that never reported at all, which is the shape
+      # that made a pull request unmergeable rather than merely red.
       - name: Record candidate preflight verdict
         id: candidate-preflight
         if: always()

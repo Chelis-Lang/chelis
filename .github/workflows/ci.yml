@@ -561,10 +561,10 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      # The single carrier's input. `preflight_reason` is what the required
-      # Docs context prints, so an unevaluable candidate produces one red
-      # check that says what could not be evaluated, instead of a job that
-      # never reported.
+      # The stated reason, which the required Docs context prints. An unevaluable
+      # candidate produces a red check saying what could not be evaluated,
+      # instead of a job that never reported at all, which is the shape
+      # that made a pull request unmergeable rather than merely red.
       - name: Record candidate preflight verdict
         id: candidate-preflight
         if: always()
@@ -1627,19 +1627,21 @@ jobs:
           ref: ${{ needs.changes.outputs.candidate_sha }}
           fetch-depth: 0
 
-      # The single carrier. Every other job skips on a failed preflight,
-      # and a skipped required context satisfies branch protection here, so
-      # this one context is what stops an unevaluable candidate merging and
-      # is the only place the reason is stated. Failing more contexts told
-      # a reader nothing; failing none would let the candidate through.
+      # Where the reason is stated. Not the only red context on a code
+      # pull request: the two required aggregators go red too, reporting a
+      # skipped worker rather than the cause. This step states the cause
+      # and says nothing about what happened to other jobs, deliberately.
+      # That consequence list is what went stale twice, and a check whose
+      # message describes jobs it cannot see has to be kept in sync with
+      # them forever; the job log already shows what ran.
       - name: Require candidate lifecycle and CI contract preflight
         env:
           CANDIDATE_PREFLIGHT: ${{ needs.changes.outputs.candidate_preflight }}
           PREFLIGHT_REASON: ${{ needs.changes.outputs.preflight_reason }}
         run: |
           if [ "$CANDIDATE_PREFLIGHT" != "success" ]; then
-            echo "this candidate could not be evaluated, so expensive CI" \
-              "was suppressed and every other job skipped." >&2
+            echo "this candidate could not be evaluated, which is why this" \
+              "check is red." >&2
             echo "reason: ${PREFLIGHT_REASON:-the candidate preflight did not report}" >&2
             echo "See the Detect docs-only changes job for the step that" \
               "reported it." >&2

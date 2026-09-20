@@ -213,12 +213,17 @@ class IdentityStepOrderingTests(unittest.TestCase):
 
 
 class SingleCarrierTests(unittest.TestCase):
-    """One context fails and says why; the rest skip.
+    """One context states the reason; Hull stops adding a silent red.
 
-    A skipped required context satisfies branch protection here, so the
-    carrier is the only thing stopping an unevaluable candidate. Failing
-    more contexts told a reader nothing, and failing none would let the
-    candidate through.
+    Not "the rest skip": on a code pull request the two required
+    aggregators go red as well, because they do not gate on the verdict
+    and `ci_require_success.py` fails on a skipped dependency. They report
+    the dependency, this one reports the cause. Hull is the one removed,
+    because its red said nothing the aggregators did not.
+
+    The count is also the margin. A skipped required context satisfies
+    branch protection here, so reducing the reds to one would leave a
+    single context standing between an unevaluable candidate and a merge.
     """
 
     def test_docs_carries_the_reason(self) -> None:

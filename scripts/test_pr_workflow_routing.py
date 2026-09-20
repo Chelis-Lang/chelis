@@ -746,11 +746,11 @@ def assert_hull_retarget_dispatch(test: unittest.TestCase, workflow: dict) -> No
     test.assertEqual(upload["with"]["name"], "candidate-identity-hull")
     test.assertEqual(upload["with"]["if-no-files-found"], "error")
     conformance = workflow["jobs"]["conformance"]
-    # Hull skips a failed verdict, because the required Docs context is
-    # the single carrier that states the reason and a second red context
-    # told a reader nothing. It still runs when the `changes` job itself
-    # did not succeed, so a broken detector can never skip the gate on a
-    # code pull request. `scripts/test_ci_preflight_carrier.py` owns the
+    # Hull skips a failed verdict, because the required Docs context
+    # states the reason and Hull's red added nothing the two required
+    # aggregators did not already say. It still runs when the `changes`
+    # job itself did not succeed, which after this change is reachable
+    # only through job setup, since every step in that job is tolerated. `scripts/test_ci_preflight_carrier.py` owns the
     # carrier property; this pins the exact expression.
     test.assertEqual(
         conformance["if"],
