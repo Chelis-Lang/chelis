@@ -681,6 +681,43 @@ def _resolve_defining_artifact(
     return matches[0]
 
 
+def _construction_dependency_artifact(
+    root: Path,
+    name: str,
+    definitions: list[dict],
+    artifacts: list[dict],
+    invocation_target: Path,
+) -> Path:
+    compiler_definitions = [
+        definition for definition in definitions if definition["crate"] == name
+    ]
+    if compiler_definitions:
+        _, path, _ = _resolve_defining_artifact(
+            root,
+            name,
+            compiler_definitions,
+            artifacts,
+            require_registry_origin=name != "chelis_compiler_api",
+        )
+    else:
+        candidates = [
+            artifact for artifact in artifacts if artifact["target"]["name"] == name
+        ]
+        if len(candidates) != 1:
+            raise ValueError(f"missing exact construction dependency {name}")
+        paths = [
+            Path(path)
+            for path in candidates[0]["filenames"]
+            if path.endswith(".rlib")
+        ]
+        if len(paths) != 1:
+            raise ValueError(f"missing owned construction artifact {name}")
+        path = paths[0]
+    if not path.is_relative_to(invocation_target):
+        raise ValueError(f"missing owned construction artifact {name}")
+    return path
+
+
 def _compiler_definitions(value):
     """Yield every compiler definition record nested in a native receipt."""
     if isinstance(value, dict):
@@ -870,15 +907,20 @@ def collect_library(root: Path, target: Path, driver: Path, *, rustc_args=(), sc
             # emitted by this same Cargo invocation, never a filesystem glob.
             externs = []
             for name in ("chelis_compiler_api", "pyo3", "serde_json"):
-                artifacts = [item for line in stream.splitlines()
-                             if (item := json.loads(line)).get("reason") == "compiler-artifact"
-                             and item["target"]["name"] == name]
-                if len(artifacts) != 1:
-                    raise ValueError(f"missing exact construction dependency {name}")
-                paths = [Path(path) for path in artifacts[0]["filenames"] if path.endswith(".rlib")]
-                if len(paths) != 1 or not paths[0].is_relative_to(invocation_target):
-                    raise ValueError(f"missing owned construction artifact {name}")
-                externs.append({"name": name, "artifact": str(paths[0]), "sha256": _sha256(paths[0])})
+                path = _construction_dependency_artifact(
+                    root,
+                    name,
+                    definitions,
+                    cargo_artifacts,
+                    invocation_target,
+                )
+                externs.append(
+                    {
+                        "name": name,
+                        "artifact": str(path),
+                        "sha256": _sha256(path),
+                    }
+                )
             collected["fixture_externs"] = externs
             collected["process"] = json.loads((invocation_target.parent / "compiler-json-cargo.json").read_text())
         elif scope == "native-bindings":
