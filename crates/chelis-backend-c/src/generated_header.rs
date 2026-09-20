@@ -1345,10 +1345,21 @@ fn validate_generated_include_set(source: &str) -> Result<(), GeneratedHeaderErr
 }
 
 fn validate_generated_pragmas(source: &str) -> Result<(), GeneratedHeaderError> {
-    if strip_c_comments(&splice_c_lines(source)).contains("_Pragma") {
-        return Err(GeneratedHeaderError::new(
-            "generated source uses unsupported `_Pragma` preprocessing",
-        ));
+    let stripped = strip_c_comments(&splice_c_lines(source));
+    for forbidden in [
+        "_Pragma",
+        "__attribute",
+        "__attribute__",
+        "__declspec",
+        "__asm",
+        "__asm__",
+        "asm",
+    ] {
+        if contains_unquoted_c_identifier(&stripped, forbidden) {
+            return Err(GeneratedHeaderError::new(format!(
+                "generated source uses unsupported compiler extension `{forbidden}`"
+            )));
+        }
     }
     for line in preprocessor_logical_lines(source) {
         if preprocessor_directive_name(&line).as_deref() != Some("pragma") {
@@ -1365,6 +1376,45 @@ fn validate_generated_pragmas(source: &str) -> Result<(), GeneratedHeaderError> 
         }
     }
     Ok(())
+}
+
+fn contains_unquoted_c_identifier(source: &str, expected: &str) -> bool {
+    let bytes = source.as_bytes();
+    let mut index = 0;
+    let mut quote = None;
+    while index < bytes.len() {
+        if let Some(delimiter) = quote {
+            if bytes[index] == b'\\' {
+                index = (index + 2).min(bytes.len());
+                continue;
+            }
+            if bytes[index] == delimiter {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        if matches!(bytes[index], b'\'' | b'"') {
+            quote = Some(bytes[index]);
+            index += 1;
+            continue;
+        }
+        if bytes[index] == b'_' || bytes[index].is_ascii_alphabetic() {
+            let start = index;
+            index += 1;
+            while index < bytes.len()
+                && (bytes[index] == b'_' || bytes[index].is_ascii_alphanumeric())
+            {
+                index += 1;
+            }
+            if &source[start..index] == expected {
+                return true;
+            }
+            continue;
+        }
+        index += 1;
+    }
+    false
 }
 
 fn preprocessor_directive_payload<'a>(line: &'a str, expected: &str) -> Option<&'a str> {
@@ -2111,6 +2161,10 @@ mod tests {
         let source = format!("#define CHELIS_PRIVATE_BIAS 1\n{export}\n");
         seal_generated_artifact("demo", &source, &header)
             .expect("private implementation macros must remain available");
+        let source =
+            format!("static const char *private_text(void) {{ return \"_Pragma\"; }}\n{export}\n");
+        seal_generated_artifact("demo", &source, &header)
+            .expect("ordinary string contents must not be classified as preprocessing");
     }
 
     #[test]
@@ -2151,6 +2205,9 @@ mod tests {
             format!("#include \"unsealed_external_helper.h\"\n{export}\n"),
             format!("#pragma weak external_alias = chelis_fn_616c706861\n{export}\n"),
             format!("_Pragma(\"weak external_alias = chelis_fn_616c706861\")\n{export}\n"),
+            format!(
+                "extern int external_alias(int) __attribute__((alias(\"chelis_fn_616c706861\")));\n{export}\n"
+            ),
         ] {
             assert!(
                 seal_generated_artifact("demo", &source, &header).is_err(),
