@@ -1246,6 +1246,7 @@ fn reject_export_macro_aliases<'a>(
             "_Thread_local",
             "extern",
             "inline",
+            "main",
             "static",
             "typedef",
         ]
@@ -2127,6 +2128,7 @@ mod tests {
             "#define JOIN_INNER(a, b) a ## b\n#define JOIN(a, b) JOIN_INNER(a, b)\n#define LBRACE JOIN(<, %)\n#define RBRACE JOIN(%, >)\n#define EMIT_EXTERNAL int external_helper(int x) LBRACE return x - 1; RBRACE\nEMIT_EXTERNAL;",
             "#define JOIN_INNER(a, b) a %:%: b\n#define JOIN(a, b) JOIN_INNER(a, b)\n#define LBRACE JOIN(<, %)\n#define RBRACE JOIN(%, >)\n#define EMIT_EXTERNAL int external_helper(int x) LBRACE return x - 1; RBRACE\nEMIT_EXTERNAL;",
             "#define JOIN_INNER(a, b) a ??=??= b\n#define JOIN(a, b) JOIN_INNER(a, b)\n#define LBRACE JOIN(<, %)\n#define RBRACE JOIN(%, >)\n#define EMIT_EXTERNAL int external_helper(int x) LBRACE return x - 1; RBRACE\nEMIT_EXTERNAL;",
+            "#define main injected_external\nint main(void) { return 0; }",
         ] {
             let source = format!("{helper}\n{export}\n");
             assert!(
