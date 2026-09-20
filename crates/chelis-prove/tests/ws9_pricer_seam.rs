@@ -5,11 +5,14 @@
 
 mod support;
 
-use chelis_compiler_api::schema::{SourceKind, WIRE_DAG_SCHEMA_VERSION};
+use chelis_compiler_api::schema::{SourceKind, WIRE_DAG_SCHEMA_VERSION, WireDag, WireRiscOp};
 use chelis_prove::WireDagByteStore;
 use chelis_prove::discharge::{IntervalBox, IrHandle, OutputRange};
-use chelis_prove::graph_extract::box_range_goal_from_source_entry;
+use chelis_prove::graph_extract::{
+    GraphExtractError, box_range_goal_from_source_entry, box_range_goal_from_wire_dag,
+};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 
 /// The vectorized BS pricer source (pure-tensor-DAG, no vmap/host ops).
 const BS_VEC_SOURCE: &str = include_str!("fixtures/bs_vec.ch");
@@ -89,10 +92,80 @@ fn bs_call_vec_is_wire_dag_root() {
             .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
         "dag_hash must be lowercase hex"
     );
+    let wire: WireDag =
+        serde_json::from_slice(&extracted.wire_dag_bytes).expect("valid WireDag JSON");
+    let comparisons = wire
+        .nodes
+        .iter()
+        .filter(|node| matches!(node.op, WireRiscOp::Compare { .. }))
+        .collect::<Vec<_>>();
+    assert!(
+        comparisons.len() >= 6,
+        "both d1/d2 CDF paths must retain their authored comparisons"
+    );
+    assert!(
+        comparisons.iter().all(|node| {
+            let lhs = wire
+                .nodes
+                .iter()
+                .find(|candidate| Some(&candidate.id) == node.inputs.first());
+            let rhs = wire
+                .nodes
+                .iter()
+                .find(|candidate| Some(&candidate.id) == node.inputs.get(1));
+            lhs.zip(rhs).is_some_and(|(lhs, rhs)| {
+                let output_dims = serde_json::to_value(&node.output_type.dims).ok();
+                let lhs_dims = serde_json::to_value(&lhs.output_type.dims).ok();
+                node.output_type.precision == "bool"
+                    && output_dims == lhs_dims
+                    && node.output_type.dims.len() == rhs.output_type.dims.len()
+                    && node.shape_deps.is_empty()
+            })
+        }),
+        "every symbolic comparison must retain its checker-proven operand surface without an authored shape claim"
+    );
     eprintln!(
         "bs_call_vec WireDag: {} bytes, hash {}...",
         extracted.wire_dag_bytes.len(),
         &extracted.dag_hash[..16]
+    );
+}
+
+/// The byte seam must reject a comparison whose Bool result no longer has
+/// the operand surface, even when the rest of the pricer DAG is unchanged.
+#[test]
+fn bs_call_vec_rejects_mismatched_comparison_result_shape() {
+    crate::support::isolate();
+    let extracted = box_range_goal_from_source_entry(
+        BS_VEC_SOURCE,
+        SourceKind::Surf,
+        "bs_call_vec",
+        make_input_box(),
+        make_output(),
+    )
+    .expect("baseline pricer must lower");
+    let mut wire: WireDag =
+        serde_json::from_slice(&extracted.wire_dag_bytes).expect("valid WireDag JSON");
+    let comparison = wire
+        .nodes
+        .iter_mut()
+        .find(|node| matches!(node.op, WireRiscOp::Compare { .. }))
+        .expect("pricer contains a comparison");
+    comparison.output_type.dims.clear();
+
+    let root = extracted.goal.ir.root_index().expect("root index");
+    let named_roots = BTreeMap::from([("bs_call_vec".to_string(), root)]);
+    let error = box_range_goal_from_wire_dag(&wire, &named_roots, make_input_box(), make_output())
+        .expect_err("shape-mismatched comparison must fail closed");
+    assert!(
+        matches!(
+            error,
+            GraphExtractError::WireContractRejected(ref cause)
+                if cause.to_string().contains(
+                    "requires two same-shape, same-precision active numeric or bool operands"
+                )
+        ),
+        "unexpected rejection: {error:?}"
     );
 }
 

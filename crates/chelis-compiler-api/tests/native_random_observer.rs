@@ -27,6 +27,7 @@ fn observed_source() -> String {
 fn host_source_identity_qualifies_nested_and_following_helper_occurrences() {
     let source = observed_source();
     let driver = driver(
+        &source,
         17,
         r#"
     if (event->kind != __CHELIS_RANDOM_OBSERVER_INVOCATION_INIT) {
@@ -131,7 +132,8 @@ static int source_sink(void *context, const __chelis_random_observer_event *even
 "#;
 
 fn source_rows(c: &str, repeat: bool) -> Vec<(Value, Value)> {
-    source_rows_with_entry(c, "__chelis_observed_run", repeat)
+    let observed_entry = selected_observed_entry(c, "run");
+    source_rows_with_entry(c, &observed_entry, repeat)
 }
 
 fn source_rows_with_entry(c: &str, observed_entry: &str, repeat: bool) -> Vec<(Value, Value)> {
@@ -428,6 +430,7 @@ def run(x: tensor[4, f32]) -> ((tensor[4, f32], tensor[4, f32]), (tensor[4, f32]
     ownership_support::run_expect_failure(
         &wrong_callee,
         &driver(
+            &wrong_callee,
             17,
             "assert(event->kind == __CHELIS_RANDOM_OBSERVER_INVOCATION_INIT || event->source_certified); return json_sink(context, event);",
         ),
@@ -471,6 +474,12 @@ def run(x: f32) -> f32 = add(add(victim(x), victim__chelis_observed(x)), add(che
 "#,
         "run",
     );
+    let public_entry = ownership_support::authored_c_symbol("run");
+    let observed_entry = format!("__chelis_observed_{public_entry}");
+    assert!(source.contains(&format!("float {public_entry}(float x)")));
+    assert!(source.contains(&format!("static float {observed_entry}(")));
+    assert!(!source.contains("float run(float x)"));
+    assert!(!source.contains("static float __chelis_observed_run("));
     let driver = r#"
 static int count_event(void *context, const __chelis_random_observer_event *event) {
     assert(event->kind == __CHELIS_RANDOM_OBSERVER_INVOCATION_INIT);
@@ -480,14 +489,16 @@ static int count_event(void *context, const __chelis_random_observer_event *even
 int main(void) {
     chelis_tensor *receipt = input(1);
     int count = 0;
-    assert(run(2.0f) == 10.0f);
-    assert(__chelis_observed_run(2.0f, count_event, &count, 11ULL) == 10.0f);
+    assert(PUBLIC_ENTRY(2.0f) == 10.0f);
+    assert(OBSERVED_ENTRY(2.0f, count_event, &count, 11ULL) == 10.0f);
     assert(count == 1);
     chelis_tensor_release(receipt);
     return 0;
 }
-"#;
-    ownership_support::balanced(&ownership_support::run(&source, driver));
+"#
+    .replace("PUBLIC_ENTRY", &public_entry)
+    .replace("OBSERVED_ENTRY", &observed_entry);
+    ownership_support::balanced(&ownership_support::run(&source, &driver));
 }
 
 const JSON_SINK: &str = r#"
@@ -554,8 +565,9 @@ static int json_sink(void *context, const __chelis_random_observer_event *event)
 }
 "#;
 
-fn driver(invocation: u64, sink: &str) -> String {
-    driver_for("__chelis_observed_run", invocation, sink)
+fn driver(c: &str, invocation: u64, sink: &str) -> String {
+    let observed_entry = selected_observed_entry(c, "run");
+    driver_for(&observed_entry, invocation, sink)
 }
 
 fn driver_for(observed_entry: &str, invocation: u64, sink: &str) -> String {
@@ -608,6 +620,7 @@ fn row(sequence: u64, event: &str, identity: &str, state_value: Value, saved: Ve
 }
 
 fn expected_rows() -> Vec<Value> {
+    let run_symbol = ownership_support::authored_c_symbol("run");
     let inactive = state(None);
     let outer_saved = vec![inactive.clone()];
     let mut rows = vec![
@@ -718,19 +731,23 @@ fn expected_rows() -> Vec<Value> {
         }
     }
     for row in &mut rows[2..6] {
-        row["producer"] = json!("run__tensor_0__with_rng");
+        row["producer"] = json!(format!("{run_symbol}__tensor_0__with_rng"));
     }
-    rows[7]["producer"] = json!("run__tensor_1__with_rng");
-    rows[9]["producer"] = json!("run__tensor_2__with_rng");
+    rows[7]["producer"] = json!(format!("{run_symbol}__tensor_1__with_rng"));
+    rows[9]["producer"] = json!(format!("{run_symbol}__tensor_2__with_rng"));
     rows
 }
 
 #[test]
 fn nested_host_and_fixed_frames_record_actual_forward_replay_and_restoration() {
     let c = observed_source();
-    assert!(c.contains("static chelis_tuple* __chelis_observed_run("));
-    let (summary, stdout) =
-        ownership_support::run_with_stdout(&c, &driver(17, "return json_sink(context, event);"));
+    let observed_entry = selected_observed_entry(&c, "run");
+    assert!(c.contains(&format!("static chelis_tuple* {observed_entry}(")));
+    assert!(!c.contains("static chelis_tuple* __chelis_observed_run("));
+    let (summary, stdout) = ownership_support::run_with_stdout(
+        &c,
+        &driver(&c, 17, "return json_sink(context, event);"),
+    );
     ownership_support::balanced(&summary);
     let actual = stdout
         .lines()
@@ -741,16 +758,22 @@ fn nested_host_and_fixed_frames_record_actual_forward_replay_and_restoration() {
         .filter(|row| row["identity"] == "fixed")
         .map(|row| row["producer"].as_str().expect("fixed producer identity"))
         .collect::<Vec<_>>();
+    let run_symbol = ownership_support::authored_c_symbol("run");
     assert_eq!(
         fixed_producers,
         [
-            "run__tensor_0__with_rng",
-            "run__tensor_0__with_rng",
-            "run__tensor_0__with_rng",
-            "run__tensor_0__with_rng",
-            "run__tensor_1__with_rng",
-            "run__tensor_2__with_rng",
+            format!("{run_symbol}__tensor_0__with_rng"),
+            format!("{run_symbol}__tensor_0__with_rng"),
+            format!("{run_symbol}__tensor_0__with_rng"),
+            format!("{run_symbol}__tensor_0__with_rng"),
+            format!("{run_symbol}__tensor_1__with_rng"),
+            format!("{run_symbol}__tensor_2__with_rng"),
         ]
+    );
+    assert!(
+        fixed_producers
+            .iter()
+            .all(|producer| !producer.starts_with("run__tensor_"))
     );
     assert!(
         actual
@@ -764,6 +787,7 @@ fn nested_host_and_fixed_frames_record_actual_forward_replay_and_restoration() {
 #[test]
 fn repeated_observed_calls_restart_sequence_and_keep_invocation_identity() {
     let c = observed_source();
+    let observed_entry = selected_observed_entry(&c, "run");
     let driver = format!(
         r#"
 #include <pthread.h>
@@ -772,7 +796,7 @@ typedef struct {{ FILE *stream; uint64_t invocation; }} observer_task;
 static void *run_observed(void *raw) {{
     observer_task *task = (observer_task *)raw;
     chelis_tensor *x = input(4);
-    chelis_tuple *result = __chelis_observed_run(x, json_sink, task->stream, task->invocation);
+    chelis_tuple *result = {observed_entry}(x, json_sink, task->stream, task->invocation);
     chelis_tuple_release(result);
     chelis_tensor_release(x);
     return NULL;
@@ -812,18 +836,24 @@ int main(void) {{
 #[test]
 fn feature_on_ordinary_public_call_emits_no_observation() {
     let c = observed_source();
-    assert!(c.contains("chelis_tuple* run(chelis_tensor* x)"));
-    assert!(c.contains("static chelis_tuple* __chelis_observed_run("));
-    let driver = r#"
-int main(void) {
+    let public_entry = ownership_support::authored_c_symbol("run");
+    let observed_entry = selected_observed_entry(&c, "run");
+    assert!(c.contains(&format!("chelis_tuple* {public_entry}(chelis_tensor* x)")));
+    assert!(c.contains(&format!("static chelis_tuple* {observed_entry}(")));
+    assert!(!c.contains("chelis_tuple* run(chelis_tensor* x)"));
+    assert!(!c.contains("static chelis_tuple* __chelis_observed_run("));
+    let driver = format!(
+        r#"
+int main(void) {{
     chelis_tensor *x = input(4);
-    chelis_tuple *result = run(x);
+    chelis_tuple *result = {public_entry}(x);
     chelis_tuple_release(result);
     chelis_tensor_release(x);
     return 0;
-}
-"#;
-    let (summary, stdout) = ownership_support::run_with_stdout(&c, driver);
+}}
+"#
+    );
+    let (summary, stdout) = ownership_support::run_with_stdout(&c, &driver);
     ownership_support::balanced(&summary);
     assert!(
         stdout.is_empty(),
@@ -850,7 +880,7 @@ fn sink_error_is_not_silent_success() {
     let c = observed_source();
     ownership_support::run_expect_failure(
         &c,
-        &driver(17, "(void)context; (void)event; return -1;"),
+        &driver(&c, 17, "(void)context; (void)event; return -1;"),
     );
 }
 

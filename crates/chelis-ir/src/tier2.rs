@@ -275,8 +275,16 @@ fn lower_comparison(
     ty: &TensorType,
     parent_span: Option<&str>,
 ) -> NodeId {
+    // Comparison is elementwise and the checker has already required both
+    // operands to have exactly the same shape. Preserve that proven operand
+    // surface instead of copying result metadata, which may contain an
+    // internal fresh dimension name after helper inlining.
+    let dims = dag
+        .get(a)
+        .map(|node| node.output_type.dims.clone())
+        .unwrap_or_else(|| ty.dims.clone());
     let bool_ty = TensorType {
-        dims: ty.dims.clone(),
+        dims,
         precision: Prim::Bool,
     };
     add_synth(dag, RiscOp::Compare(kind), vec![a, b], bool_ty, parent_span)

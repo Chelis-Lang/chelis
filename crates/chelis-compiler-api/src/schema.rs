@@ -3020,24 +3020,97 @@ fn wire_rt_dim_origin(
         WireRtDim::InputAxis { tensor, axis } => {
             let source =
                 wire_node_by_id(nodes, *owner.inputs.get(usize::try_from(*tensor).ok()?)?)?;
-            wire_semantic_axis_origin(
+            wire_axis_origin(
                 nodes,
                 source,
                 wire_rt_axis_index(axis)?,
                 fuel,
                 relevant_shape_sources,
+                true,
             )
         }
         WireRtDim::ToEnd | WireRtDim::Sym { .. } => None,
     }
 }
 
-fn wire_semantic_axis_origin(
+fn wire_witnessed_origin_equal(
+    nodes: &[WireDagNode],
+    left: WireSemanticAxisOrigin,
+    right: WireSemanticAxisOrigin,
+    relevant_shape_sources: &[u64],
+    require_witness: bool,
+) -> bool {
+    if left == right && !require_witness {
+        return true;
+    }
+    let cutoff = relevant_shape_sources
+        .iter()
+        .copied()
+        .max()
+        .unwrap_or_else(|| u64::try_from(nodes.len()).unwrap_or(u64::MAX));
+    let observed = |witness: &WireDagNode| {
+        let WireRiscOp::ExtentWitness {
+            axis: WireRtAxis::Lit { value: axis },
+            ..
+        } = witness.op
+        else {
+            return None;
+        };
+        let source = wire_node_by_id(nodes, *witness.inputs.first()?)?;
+        wire_axis_origin(
+            nodes,
+            source,
+            usize::try_from(axis).ok()?,
+            nodes.len(),
+            relevant_shape_sources,
+            false,
+        )
+    };
+    let mut edges = Vec::new();
+    for node in nodes.iter().filter(|node| node.id < cutoff) {
+        let WireRiscOp::ExtentWitness { claims, .. } = &node.op else {
+            continue;
+        };
+        let Some(here) = observed(node) else {
+            continue;
+        };
+        for requirement in node.inputs.iter().skip(1).take(claims.len()) {
+            if *requirement >= node.id {
+                continue;
+            }
+            if let Some(there) = wire_node_by_id(nodes, *requirement).and_then(observed) {
+                edges.push((here, there));
+            }
+        }
+    }
+    let mut pending = vec![(left, false)];
+    let mut seen = Vec::new();
+    while let Some((origin, used_witness)) = pending.pop() {
+        if origin == right && (!require_witness || used_witness) {
+            return true;
+        }
+        if seen.contains(&(origin, used_witness)) {
+            continue;
+        }
+        seen.push((origin, used_witness));
+        for (a, b) in &edges {
+            if *a == origin {
+                pending.push((*b, true));
+            } else if *b == origin {
+                pending.push((*a, true));
+            }
+        }
+    }
+    false
+}
+
+fn wire_axis_origin(
     nodes: &[WireDagNode],
     node: &WireDagNode,
     axis: usize,
     fuel: usize,
     relevant_shape_sources: &[u64],
+    require_input_agreement: bool,
 ) -> Option<WireSemanticAxisOrigin> {
     if fuel == 0 {
         return None;
@@ -3055,7 +3128,14 @@ fn wire_semantic_axis_origin(
 
     let input_axis = |input: usize, source_axis: usize| {
         let source = wire_node_by_id(nodes, *node.inputs.get(input)?)?;
-        wire_semantic_axis_origin(nodes, source, source_axis, fuel - 1, relevant_shape_sources)
+        wire_axis_origin(
+            nodes,
+            source,
+            source_axis,
+            fuel - 1,
+            relevant_shape_sources,
+            require_input_agreement,
+        )
     };
     let same_shape_input_origin = || {
         let mut origins = node.inputs.iter().filter_map(|source_id| {
@@ -3066,18 +3146,37 @@ fn wire_semantic_axis_origin(
         if first_source.output_type.dims.len() != node.output_type.dims.len() {
             return None;
         }
-        let first =
-            wire_semantic_axis_origin(nodes, first_source, axis, fuel - 1, relevant_shape_sources)?;
+        let first = wire_axis_origin(
+            nodes,
+            first_source,
+            axis,
+            fuel - 1,
+            relevant_shape_sources,
+            require_input_agreement,
+        )?;
+        if !require_input_agreement {
+            return Some(first);
+        }
         origins
             .all(|source| {
                 source.output_type.dims.len() == node.output_type.dims.len()
-                    && wire_semantic_axis_origin(
+                    && wire_axis_origin(
                         nodes,
                         source,
                         axis,
                         fuel - 1,
                         relevant_shape_sources,
-                    ) == Some(first)
+                        require_input_agreement,
+                    )
+                    .is_some_and(|origin| {
+                        wire_witnessed_origin_equal(
+                            nodes,
+                            first,
+                            origin,
+                            relevant_shape_sources,
+                            false,
+                        )
+                    })
             })
             .then_some(first)
     };
@@ -3092,23 +3191,25 @@ fn wire_semantic_axis_origin(
             let else_value = wire_node_by_id(nodes, *node.inputs.get(2)?)?;
             let then_origin = (then_value.output_type.dims.len() == node.output_type.dims.len())
                 .then(|| {
-                    wire_semantic_axis_origin(
+                    wire_axis_origin(
                         nodes,
                         then_value,
                         axis,
                         fuel - 1,
                         relevant_shape_sources,
+                        require_input_agreement,
                     )
                 })
                 .flatten()?;
             let else_origin = (else_value.output_type.dims.len() == node.output_type.dims.len())
                 .then(|| {
-                    wire_semantic_axis_origin(
+                    wire_axis_origin(
                         nodes,
                         else_value,
                         axis,
                         fuel - 1,
                         relevant_shape_sources,
+                        require_input_agreement,
                     )
                 })
                 .flatten()?;
@@ -3196,17 +3297,22 @@ fn wire_semantic_axis_origin(
         | WireRiscOp::BlasMatmul { .. } => {
             Some(WireSemanticAxisOrigin::OpComputed { op: node.id, axis })
         }
-        WireRiscOp::Compare { .. } | WireRiscOp::Logical { .. } => node
-            .shape_deps
-            .iter()
-            .any(|source| {
-                node.inputs.contains(source)
-                    && wire_node_by_id(nodes, *source).is_some_and(|source| {
-                        source.output_type.dims.len() == node.output_type.dims.len()
+        WireRiscOp::Compare { .. } | WireRiscOp::Logical { .. } => {
+            if require_input_agreement {
+                node.shape_deps
+                    .iter()
+                    .any(|source| {
+                        node.inputs.contains(source)
+                            && wire_node_by_id(nodes, *source).is_some_and(|source| {
+                                source.output_type.dims.len() == node.output_type.dims.len()
+                            })
                     })
-            })
-            .then(same_shape_input_origin)
-            .flatten(),
+                    .then(same_shape_input_origin)
+                    .flatten()
+            } else {
+                same_shape_input_origin()
+            }
+        }
         WireRiscOp::Const { .. } | WireRiscOp::ConstTensor { .. } => node
             .shape_deps
             .iter()
@@ -3216,7 +3322,14 @@ fn wire_semantic_axis_origin(
                 (source.id < node.id
                     && source.output_type.dims.len() == node.output_type.dims.len())
                 .then(|| {
-                    wire_semantic_axis_origin(nodes, source, axis, fuel - 1, relevant_shape_sources)
+                    wire_axis_origin(
+                        nodes,
+                        source,
+                        axis,
+                        fuel - 1,
+                        relevant_shape_sources,
+                        require_input_agreement,
+                    )
                 })
                 .flatten()
             }),
@@ -3237,6 +3350,16 @@ fn wire_semantic_axis_origin(
         | WireRiscOp::Scatter { .. }
         | WireRiscOp::ScatterElements { .. } => None,
     }
+}
+
+fn wire_semantic_axis_origin(
+    nodes: &[WireDagNode],
+    node: &WireDagNode,
+    axis: usize,
+    fuel: usize,
+    relevant_shape_sources: &[u64],
+) -> Option<WireSemanticAxisOrigin> {
+    wire_axis_origin(nodes, node, axis, fuel, relevant_shape_sources, true)
 }
 
 fn wire_semantic_node_dim<'a>(
@@ -3309,7 +3432,34 @@ fn wire_node_shape_equal(
                         nodes.len(),
                         relevant_shape_sources,
                     ))
-                    .is_some_and(|(left, right)| left == right)
+                    .is_some_and(|(left, right)| {
+                        wire_witnessed_origin_equal(
+                            nodes,
+                            left,
+                            right,
+                            relevant_shape_sources,
+                            false,
+                        )
+                    })
+                || wire_axis_origin(
+                    nodes,
+                    left,
+                    axis,
+                    nodes.len(),
+                    relevant_shape_sources,
+                    false,
+                )
+                .zip(wire_axis_origin(
+                    nodes,
+                    right,
+                    axis,
+                    nodes.len(),
+                    relevant_shape_sources,
+                    false,
+                ))
+                .is_some_and(|(left, right)| {
+                    wire_witnessed_origin_equal(nodes, left, right, relevant_shape_sources, true)
+                })
         })
 }
 

@@ -13,10 +13,11 @@ Phase 1d ships inside the HIP backend code generator and runtime header:
 - staged partial buffers are allocated/freed inline in generated host code and are **not**
   routed through the Phase 1c slot planner
 - the HIP peak-memory reporting includes the worst single staged scratch chain
-- contiguous `f32` matmul subgraphs with rank ≥ 2 specialize to hipBLAS-backed helpers:
-  rank-2 uses `chelis_hipblas_sgemm_row_major(...)`; uniformly strided batched
-  matmul uses `chelis_hipblas_sgemm_strided_batched_row_major(...)`; ineligible
-  batched/symbolic matmul falls back to `chelis_hipblas_sgemm_batched_row_major(...)`
+- supported matmul subgraphs with rank ≥ 2 specialize to hipBLAS-backed helpers:
+  rank-2 uses the typed row-major GEMM helper for `f32`, `f64`, `bf16`, and `f16`;
+  HIP preparation materializes each BLAS operand into owned contiguous storage;
+  eligible `f32`/`f64` batched matmul then uses the typed strided-batched helper;
+  remaining batched/symbolic forms fall back to the typed per-batch helper loop
 - non-contiguous matmul-shaped DAGs fall back to the generic reduction path
 
 Phase 1d still does **not** implement flattening for irregular nested parallelism, autotuned
@@ -38,16 +39,19 @@ The staged scratch-chain path is used only for safe scalar contiguous reductions
 other multi-output reductions stay on the segmented path.
 
 **hipBLAS specialization is deliberately constrained.**
-Only operands with contiguous trailing matrix slices take the hipBLAS path. Rank ≥ 3
-batched matmul defaults to `hipblasSgemmStridedBatched` whenever the leading batch
-strides are uniform and statically computable (Perf-F1, shipped). The per-batch helper
-loop `chelis_hipblas_sgemm_batched_row_major` is retained only as a fallback for batched
-layouts where strided-batched is unsound — broadcasted leading axes (`Expand` on the
-batch dim, producing stride-0 columns) and non-uniform leading strides. Non-contiguous
-matmul-shaped DAGs remain correct via the generic reduction fallback. The
-strided-batched-default invariant is locked by
-`crates/chelis-backend-hip/tests/perf_f1_strided_batched_default.rs` (default workspace
-test pass) and validated numerically by the HIP `gpu_correctness` manual gate.
+Recognized BLAS matmul operands are explicitly materialized before ownership lowering.
+The shared storage planner therefore accounts for their temporary bytes and gives the
+emitter dense owned descriptors even when the source was a broadcast or another
+non-contiguous view. Rank ≥ 3 `f32`/`f64` batched matmul uses the typed
+`hipblasSgemmStridedBatched` helper when matrix dimensions are concrete, batch dimensions
+are simple runtime dimensions, and the prepared operand/result shapes match the matmul
+contract. The per-batch helper loop remains the fallback for forms outside that plan,
+including symbolic matrix dimensions. A non-contiguous decomposed matmul shape that is
+not recognized as `BlasMatmul` remains correct via the generic reduction path. The
+realize-then-strided invariant is locked by
+`crates/chelis-backend-hip/tests/strided_batched_dispatch.rs` and
+`crates/chelis-backend-hip/tests/codegen_structure.rs`, with numerical BLAS coverage in
+the HIP `gpu_correctness` manual gate.
 
 **Runtime-sized BLAS dimensions.**
 Symbolic dimensions are not required to be compile-time constants for BLAS. Generated
@@ -61,10 +65,10 @@ The runtime guard is a stride comparison on the trailing matrix slice:
 `stride[-1] == 1` and `stride[-2] == trailing_column_count`. The check is emitted once
 per specialized matmul callsite, before any C batch loop. On the C backend a failed
 operand check materializes a contiguous copy with `chelis_contiguous(...)` and then
-continues through BLAS. On the HIP backend the current helper expects specialization to
-have proved contiguous matrix slices; a failed runtime check aborts rather than silently
-launching the generic lowering. This keeps the HIP ABI narrow until a GPU make-contiguous
-fallback is designed.
+continues through BLAS. On the HIP backend `prepare_dag_for_codegen` inserts explicit
+`Realize` operations before ownership lowering; generated materialization kernels copy
+logical element order into planned dense device slots, and BLAS receives those prepared
+descriptors rather than the original view descriptors.
 
 ### Acceptance Oracle
 
@@ -76,6 +80,7 @@ cargo test -p chelis-backend-hip --test gpu_correctness -- --ignored --test-thre
 
 Supporting evidence:
 
+- `cargo test -p chelis-backend-hip --test strided_batched_dispatch`
 - `cargo test -p chelis-backend-hip --test codegen_structure`
 - `cargo test -p chelis-backend-hip --test codegen_adversarial`
 - `cargo test -p chelis-cli --test cli`
@@ -84,8 +89,8 @@ Supporting evidence:
 
 - [x] tiny/small/large segmented kernels are selected for the expected axis-size ranges
 - [x] staged scalar reductions emit inline scratch buffers and extend the peak-memory estimate
-- [x] contiguous rank-2 and batched/symbolic matmul patterns emit hipBLAS helper calls
-  and surface `-lhipblas`
+- [x] recognized rank-2 and batched/symbolic matmul patterns materialize HIP BLAS
+  operands, emit the eligible typed helper calls, and surface `-lhipblas`
 - [x] non-contiguous matmul-shaped DAGs stay on the generic reduction path
 - [x] manual GPU correctness covers segmented reductions, staged scalar reduction, hipBLAS matmul, and the non-contiguous fallback
 

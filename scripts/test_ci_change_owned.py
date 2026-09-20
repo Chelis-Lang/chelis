@@ -25,6 +25,17 @@ OWNER = {
 }
 
 
+def successful_product_build(command, kwargs):
+    """Mirror the runtime archive produced by a successful workspace build."""
+    cargo_target = Path(os.environ.get("CARGO_TARGET_DIR", "target"))
+    if not cargo_target.is_absolute():
+        cargo_target = Path(kwargs["cwd"]) / cargo_target
+    runtime = cargo_target / "debug/libchelis_runtime.a"
+    runtime.parent.mkdir(parents=True, exist_ok=True)
+    runtime.write_bytes(b"exact-head-runtime")
+    return subprocess.CompletedProcess(command, 0, "", "")
+
+
 def package(
     name: str,
     targets: list[tuple[str, str, list[str]]],
@@ -2340,6 +2351,16 @@ packages = ["chelis-cli", "chelis-e2e"]
 
 
 class ShardingAndExecutionTests(unittest.TestCase):
+    def test_package_expansion_budget_covers_the_reviewed_large_shard_envelope(
+        self,
+    ) -> None:
+        self.assertEqual(owned.SOFT_BUDGET_SECONDS, 40 * 60)
+        self.assertEqual(owned.EXPANSION_EXECUTION_SECONDS, 45 * 60)
+        self.assertLess(
+            owned.SOFT_BUDGET_SECONDS,
+            owned.EXPANSION_EXECUTION_SECONDS,
+        )
+
     def test_expansion_deadline_preserves_receipts_at_every_command_boundary(self) -> None:
         identity = owned.Identity("p", "smoke")
         later = owned.Identity("q", "later")
@@ -2371,7 +2392,7 @@ class ShardingAndExecutionTests(unittest.TestCase):
                             output=b"partial stdout", stderr=b"partial stderr",
                         )
                     if command[1] == "build":
-                        return subprocess.CompletedProcess(command, 0, "", "")
+                        return successful_product_build(command, kwargs)
                     package = command[command.index("-p") + 1]
                     name = command[command.index("--test") + 1]
                     if command[2] == "list":
@@ -2402,7 +2423,12 @@ class ShardingAndExecutionTests(unittest.TestCase):
                 self.assertEqual(receipt["success"], expired_call is None)
                 self.assertEqual(len(calls), 5 if expired_call is None else expired_call + 1)
                 timeouts = [kwargs["timeout"] for _, kwargs in calls]
-                self.assertTrue(all(0 < value <= 960 for value in timeouts))
+                self.assertTrue(
+                    all(
+                        0 < value <= owned.EXPANSION_EXECUTION_SECONDS
+                        for value in timeouts
+                    )
+                )
                 self.assertEqual(timeouts, sorted(timeouts, reverse=True))
                 if expired_call is not None:
                     self.assertIn("execution deadline", " ".join(receipt["failures"]))
@@ -2434,7 +2460,9 @@ class ShardingAndExecutionTests(unittest.TestCase):
 
         def run(command, **kwargs):
             calls.append(command)
-            current_time[0] += 961
+            current_time[0] += owned.EXPANSION_EXECUTION_SECONDS + 1
+            if command[1] == "build":
+                successful_product_build(command, kwargs)
             return subprocess.CompletedProcess(command, 0, "", "")
 
         with tempfile.TemporaryDirectory() as tmp, (
@@ -2466,8 +2494,8 @@ class ShardingAndExecutionTests(unittest.TestCase):
         def run(command, **kwargs):
             calls.append(command)
             if command[1] == "build":
-                return subprocess.CompletedProcess(command, 0, "", "")
-            current_time[0] += 961
+                return successful_product_build(command, kwargs)
+            current_time[0] += owned.EXPANSION_EXECUTION_SECONDS + 1
             payload = {"rust-suites": {"p::smoke": {"testcases": {
                 "fast_case": {"ignored": False, "filter-match": {"status": "matches"}},
                 "slow_case": {"ignored": False, "filter-match": {"status": "mismatch"}},
@@ -2835,7 +2863,7 @@ class ShardingAndExecutionTests(unittest.TestCase):
         def run(command, **kwargs):
             calls.append(command)
             if command[1] == "build":
-                return subprocess.CompletedProcess(command, 0, "", "")
+                return successful_product_build(command, kwargs)
             target = command[command.index("--test") + 1]
             if command[2] == "list":
                 payload = {
@@ -2925,7 +2953,7 @@ class ShardingAndExecutionTests(unittest.TestCase):
                 def run(command, **kwargs):
                     calls.append(command)
                     if command[1] == "build":
-                        return subprocess.CompletedProcess(command, 0, "", "")
+                        return successful_product_build(command, kwargs)
                     names = [
                         command[index + 1]
                         for index, value in enumerate(command)
@@ -3156,6 +3184,13 @@ class ShardingAndExecutionTests(unittest.TestCase):
             def run(command, **kwargs):
                 self.assertNotIn("timeout", kwargs)
                 calls.append(command)
+                if command[1] == "build":
+                    successful_product_build(command, kwargs)
+                else:
+                    self.assertEqual(
+                        kwargs["env"]["CHELIS_RUNTIME_LIB"],
+                        str(target / "debug/libchelis_runtime.a"),
+                    )
                 if command[1:3] == ["nextest", "list"]:
                     payload = {
                         "rust-suites": {
@@ -3224,6 +3259,8 @@ class ShardingAndExecutionTests(unittest.TestCase):
 
             def run(command, **kwargs):
                 calls.append(command)
+                if command[1] == "build":
+                    return successful_product_build(command, kwargs)
                 if command[1:3] == ["nextest", "list"]:
                     payload = {
                         "rust-suites": {
@@ -3290,7 +3327,7 @@ class ShardingAndExecutionTests(unittest.TestCase):
             def run(command, **kwargs):
                 calls.append(command)
                 if command[1] == "build":
-                    return subprocess.CompletedProcess(command, 0, "", "")
+                    return successful_product_build(command, kwargs)
                 self.assertEqual(command[1:3], ["nextest", "list"])
                 return subprocess.CompletedProcess(
                     command,
@@ -3359,7 +3396,7 @@ class ShardingAndExecutionTests(unittest.TestCase):
 
             def run(command, **kwargs):
                 if command[1] == "build":
-                    return subprocess.CompletedProcess(command, 0, "", "")
+                    return successful_product_build(command, kwargs)
                 if command[2] == "list":
                     return subprocess.CompletedProcess(
                         command,
@@ -3671,10 +3708,15 @@ class BoundedCommandTests(unittest.TestCase):
                 cargo = root / "cargo"
                 cargo.write_text(
                     f"#!{sys.executable}\n"
-                    "import json,sys,time\n"
+                    "import json,os,pathlib,sys,time\n"
                     f"if {stage!r} in sys.argv[1:3]:\n"
                     " print('deadline output', flush=True)\n"
                     " time.sleep(30)\n"
+                    "if 'build' in sys.argv[1:3]:\n"
+                    " runtime = pathlib.Path(os.environ['CARGO_TARGET_DIR']) / "
+                    "'debug/libchelis_runtime.a'\n"
+                    " runtime.parent.mkdir(parents=True, exist_ok=True)\n"
+                    " runtime.write_bytes(b'exact-head-runtime')\n"
                     "if 'list' in sys.argv[1:3]:\n"
                     " print(json.dumps({'rust-suites': {'p::smoke': {'testcases': {"
                     "'fast_case': {'ignored': False, 'filter-match': {'status': 'matches'}},"
@@ -3818,7 +3860,9 @@ class ReportTests(unittest.TestCase):
                 "finished_at": "2026-09-13T00:00:01Z",
                 "elapsed_seconds": 1.0,
                 "soft_budget_seconds": (
-                    900 if surface == "package_expansion" else None
+                    owned.SOFT_BUDGET_SECONDS
+                    if surface == "package_expansion"
+                    else None
                 ),
                 "soft_budget_exceeded": False,
                 "sidecars": {
@@ -3946,7 +3990,7 @@ class ReportTests(unittest.TestCase):
         )
         owned.attach_plan_digest(self.plan)
         receipts = self.receipts(surface="package_expansion")
-        receipts[0]["elapsed_seconds"] = 901.0
+        receipts[0]["elapsed_seconds"] = owned.SOFT_BUDGET_SECONDS + 1.0
         receipts[0]["soft_budget_exceeded"] = True
         owned.attach_receipt_digest(receipts[0])
         summary = owned.summarize_package_expansion(

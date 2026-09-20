@@ -1,7 +1,8 @@
 //! Authoritative IR oracle for chelis#1284, chelis#630, and chelis#666.
 
 use chelis_ir::dag::{
-    ComparisonKind, Dag, DimInfo, ExtentWitnessSite, LogicalKind, RiscOp, RtAxis, RtDim, TensorType,
+    ComparisonKind, Dag, DimInfo, ExtentClaim, ExtentWitnessSite, LogicalKind, RiscOp, RtAxis,
+    RtDim, TensorType,
 };
 use chelis_ir::eval::{TensorValue, eval_tensor};
 use chelis_ir::fuse::fuse;
@@ -120,6 +121,126 @@ fn tier2_preserves_every_comparison_and_logical_identity() {
         );
         assert!(verify::verify(&dag).is_empty());
     }
+}
+
+#[test]
+fn symbolic_comparison_inherits_proven_operand_shape_without_authored_claims() {
+    let symbolic = |name: &str, precision| TensorType {
+        dims: vec![DimInfo::Named(name.into(), None)],
+        precision,
+    };
+    let inferred_result = symbolic("d44", Prim::Bool);
+
+    let mut valid = Dag::new();
+    let left = valid.add_node(
+        RiscOp::Load {
+            name: "left".into(),
+        },
+        vec![],
+        symbolic("n", Prim::F32),
+        None,
+    );
+    let right = valid.add_node(
+        RiscOp::Load {
+            name: "right".into(),
+        },
+        vec![],
+        symbolic("n", Prim::F32),
+        None,
+    );
+    let comparison = tier2::lower_lt(&mut valid, left, right, &inferred_result, None);
+    assert_eq!(
+        valid.get(comparison).unwrap().output_type,
+        symbolic("n", Prim::Bool),
+        "the direct comparison must project the checker-proven operand shape"
+    );
+    assert!(
+        valid.get(comparison).unwrap().shape_deps.is_empty(),
+        "same-shaped symbolic operands do not require an authored shape claim"
+    );
+    assert!(verify::verify(&valid).is_empty());
+
+    let mut witnessed = Dag::new();
+    let left = witnessed.add_node(
+        RiscOp::Load {
+            name: "left".into(),
+        },
+        vec![],
+        symbolic("d44", Prim::F32),
+        None,
+    );
+    let right = witnessed.add_node(
+        RiscOp::Load {
+            name: "right".into(),
+        },
+        vec![],
+        symbolic("n", Prim::F32),
+        None,
+    );
+    let witness_ty = TensorType {
+        dims: vec![],
+        precision: Prim::Int64,
+    };
+    let declaration = witnessed.add_node(
+        RiscOp::ExtentWitness {
+            site: ExtentWitnessSite::Caller,
+            parameter: "left".into(),
+            axis: RtAxis::Lit(0),
+            requirements: vec![],
+            claims: vec![],
+        },
+        vec![left],
+        witness_ty.clone(),
+        None,
+    );
+    let equality = witnessed.add_node(
+        RiscOp::ExtentWitness {
+            site: ExtentWitnessSite::Caller,
+            parameter: "right".into(),
+            axis: RtAxis::Lit(0),
+            requirements: vec![],
+            claims: vec![ExtentClaim {
+                claim: "n".into(),
+                requirement_declares: true,
+            }],
+        },
+        vec![right, declaration],
+        witness_ty,
+        None,
+    );
+    let comparison = tier2::lower_lt(&mut witnessed, left, right, &inferred_result, None);
+    witnessed.add_shape_dep(comparison, equality);
+    witnessed.add_root(comparison);
+    assert!(
+        verify::verify(&witnessed).is_empty(),
+        "an earlier exact extent witness transports the checker's symbolic equality: {:?}",
+        verify::verify(&witnessed)
+    );
+
+    let mut invalid = Dag::new();
+    let left = invalid.add_node(
+        RiscOp::Load {
+            name: "left".into(),
+        },
+        vec![],
+        symbolic("n", Prim::F32),
+        None,
+    );
+    let right = invalid.add_node(
+        RiscOp::Load {
+            name: "right".into(),
+        },
+        vec![],
+        symbolic("m", Prim::F32),
+        None,
+    );
+    tier2::lower_lt(&mut invalid, left, right, &inferred_result, None);
+    assert!(
+        verify::verify(&invalid)
+            .iter()
+            .any(|error| error.contains("exactly matching operand shape")),
+        "distinct unresolved symbols must still fail closed"
+    );
 }
 
 #[test]

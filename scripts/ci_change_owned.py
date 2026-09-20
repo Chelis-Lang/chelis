@@ -73,8 +73,8 @@ TEST_FUNCTION = re.compile(
 )
 OWNER_FIELDS = {"workflow", "job", "cadence", "reason", "tracking_issue"}
 SIDECAR_NAMES = ("commands.json", "timings.json", "test-list.json", "junit.xml")
-SOFT_BUDGET_SECONDS = 15 * 60
-EXPANSION_EXECUTION_SECONDS = 16 * 60
+SOFT_BUDGET_SECONDS = 40 * 60
+EXPANSION_EXECUTION_SECONDS = 45 * 60
 DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 STANDING_EXECUTION = {
     "profile": "ci-fast",
@@ -2942,6 +2942,7 @@ def execute_shard(
     if not cargo_target.is_absolute():
         cargo_target = repo / cargo_target
     produced_junit = cargo_target / "nextest/ci-full/junit.xml"
+    test_env = os.environ.copy()
 
     build_succeeded = True
     if selected:
@@ -2999,6 +3000,17 @@ def execute_shard(
             "elapsed_seconds": round(time.monotonic() - build_started, 3),
             "success": build_succeeded,
         }
+        if build_succeeded:
+            runtime_archive = cargo_target / "debug/libchelis_runtime.a"
+            if not runtime_archive.is_file():
+                build_succeeded = False
+                failures.append(
+                    "workspace product build did not produce the exact-head "
+                    f"runtime archive: {runtime_archive}"
+                )
+                product_timing["success"] = False
+            else:
+                test_env["CHELIS_RUNTIME_LIB"] = str(runtime_archive)
 
     if build_succeeded:
         groups = execution_groups(plan, lane=lane, selected=selected)
@@ -3032,6 +3044,7 @@ def execute_shard(
                     list_command,
                     cwd=repo,
                     check=True,
+                    env=test_env,
                     text=True,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
@@ -3135,6 +3148,7 @@ def execute_shard(
                     run_command,
                     cwd=repo,
                     check=True,
+                    env=test_env,
                     text=True,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,

@@ -53,6 +53,73 @@ fn anonymous_declared_shape_source(
     })
 }
 
+fn witnessed_extent_origin_equal(
+    dag: &Dag,
+    left: &crate::axis_sources::ExtentOrigin,
+    right: &crate::axis_sources::ExtentOrigin,
+    relevant_shape_sources: &[NodeId],
+) -> bool {
+    if left == right {
+        return true;
+    }
+    let cutoff = relevant_shape_sources
+        .iter()
+        .map(|node| node.0)
+        .max()
+        .unwrap_or(dag.len());
+    let observed = |witness: NodeId| {
+        let node = dag.get(witness)?;
+        let RiscOp::ExtentWitness {
+            axis: RtAxis::Lit(axis),
+            ..
+        } = node.op
+        else {
+            return None;
+        };
+        crate::axis_sources::resolve_axis_extent(
+            dag,
+            *node.inputs.first()?,
+            usize::try_from(axis).ok()?,
+        )
+    };
+    let mut edges = Vec::new();
+    for node in dag.nodes().iter().take(cutoff) {
+        let RiscOp::ExtentWitness { claims, .. } = &node.op else {
+            continue;
+        };
+        let Some(here) = observed(node.id) else {
+            continue;
+        };
+        for requirement in node.inputs.iter().skip(1).take(claims.len()) {
+            if requirement.0 >= node.id.0 {
+                continue;
+            }
+            if let Some(there) = observed(*requirement) {
+                edges.push((here.clone(), there));
+            }
+        }
+    }
+    let mut pending = vec![left.clone()];
+    let mut seen = Vec::new();
+    while let Some(origin) = pending.pop() {
+        if &origin == right {
+            return true;
+        }
+        if seen.contains(&origin) {
+            continue;
+        }
+        seen.push(origin.clone());
+        for (a, b) in &edges {
+            if a == &origin {
+                pending.push(b.clone());
+            } else if b == &origin {
+                pending.push(a.clone());
+            }
+        }
+    }
+    false
+}
+
 fn semantic_dim_expr(
     dag: &Dag,
     node: NodeId,
@@ -109,7 +176,11 @@ fn semantic_axis_origin(
         });
         let first = origins.next()??;
         return origins
-            .all(|origin| origin.is_some_and(|origin| origin == first))
+            .all(|origin| {
+                origin.is_some_and(|origin| {
+                    witnessed_extent_origin_equal(dag, &first, &origin, relevant_shape_sources)
+                })
+            })
             .then_some(first);
     }
     if matches!(
@@ -235,7 +306,14 @@ fn node_shapes_semantically_equivalent(
                             dag.len(),
                             relevant_shape_sources,
                         ))
-                        .is_some_and(|(left_origin, right_origin)| left_origin == right_origin)
+                        .is_some_and(|(left_origin, right_origin)| {
+                            witnessed_extent_origin_equal(
+                                dag,
+                                &left_origin,
+                                &right_origin,
+                                relevant_shape_sources,
+                            )
+                        })
                     || static_axis_extent(dag, left, axis, dag.len(), relevant_shape_sources)
                         .zip(static_axis_extent(
                             dag,
