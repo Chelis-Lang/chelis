@@ -188,8 +188,10 @@ fn int8_overflow_condition_traps_in_both_lanes() {
 /// An effectful branch (`fail`) keeps the def in the host lane: no fold,
 /// both branches present in the emitted C, and the compiled i64 comparison
 /// is EXACT - `lt(2^53, 2^53 + 1)` is true, so the binary must trap with the
-/// fail message. It does. (eval takes the wrong branch on the same program -
-/// that is chelis#680's known f64 comparison bug, asserted nowhere here.)
+/// fail message. The generated C escapes user string bytes, so branch presence
+/// is asserted structurally while the executed binary checks the exact payload.
+/// (eval takes the wrong branch on the same program - that is chelis#680's
+/// known f64 comparison bug, asserted nowhere here.)
 #[test]
 fn host_lane_fail_branch_survives_and_c_comparison_is_exact() {
     if !c_toolchain_available() {
@@ -200,12 +202,45 @@ fn host_lane_fail_branch_survives_and_c_comparison_is_exact() {
                    then fail(\"i64 invariant violated\") else 222.0\nout = print(pick())\n";
     let (emitted, _, stderr, ok) = build_and_run_c(program, "fold_fail").expect("C lane");
     assert!(
-        emitted.contains("i64 invariant violated"),
+        emitted.contains("chelis_fail("),
         "the fail branch must survive lowering (host lane, no fold)"
+    );
+    assert!(
+        emitted.to_lowercase().contains(BITS_222),
+        "the 222 branch (0x435e0000) must survive lowering"
     );
     assert!(
         !ok && stderr.contains("i64 invariant violated"),
         "2^53 < 2^53 + 1 is true in exact integers; the compiled host lane \
          must take the fail branch. got ok={ok}, stderr: {stderr}"
+    );
+}
+
+/// Negative control for the same host-lane branch: reversing the exact i64
+/// comparison must keep the `fail` arm in the generated control flow without
+/// executing it. This distinguishes "both branches survived" from a test that
+/// passes only because the positive row happened to trap.
+#[test]
+fn host_lane_fail_branch_survives_when_exact_condition_is_false() {
+    if !c_toolchain_available() {
+        eprintln!("skipping: no host C toolchain");
+        return;
+    }
+    let program = "def pick() -> f32 = if lt(9007199254740993i64, 9007199254740992i64) \
+                   then fail(\"i64 invariant violated\") else 222.0\nout = print(pick())\n";
+    let (emitted, stdout, stderr, ok) =
+        build_and_run_c(program, "fold_fail_false").expect("C lane");
+    assert!(
+        emitted.contains("chelis_fail("),
+        "the untaken fail branch must survive lowering (host lane, no fold)"
+    );
+    assert!(
+        emitted.to_lowercase().contains(BITS_222),
+        "the 222 branch (0x435e0000) must survive lowering"
+    );
+    assert!(
+        ok && stderr.is_empty() && stdout.lines().next().unwrap_or("").trim() == "222.0",
+        "the reversed exact comparison must take the non-failing branch; \
+         got ok={ok}, stdout `{stdout}`, stderr `{stderr}`"
     );
 }
