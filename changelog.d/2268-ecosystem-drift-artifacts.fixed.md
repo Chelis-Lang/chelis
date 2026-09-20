@@ -1,1 +1,1 @@
-Pin the ecosystem drift canary to current-format released shell artifacts so predecessor envelopes no longer mask source and API drift.
+Rebuild the ecosystem drift canary's selected release source graph with HEAD into strictly verified current-format artifacts, preventing predecessor envelopes or auto-fetch from masking source and API drift.

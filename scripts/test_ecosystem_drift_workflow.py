@@ -41,12 +41,11 @@ EXPECTED_REEF_DEPENDENCIES = {
         "Chelis-Lang/school@v0.1.13",
     ),
 }
-EXPECTED_HELLO_BUILD_ARGS = {
-    "CORAL_VERSION": "0.7.42",
-    "NAUTILUS_VERSION": "0.7.45",
-    "OCTANT_VERSION": "0.13.0",
-    "C_EARCHIN_VERSION": "0.3.3",
-    "SCHOOL_VERSION": "0.1.13",
+EXPECTED_TOOL_DEPENDENCIES = {
+    "hello-chelis": (
+        "Chelis-Lang/octant@v0.13.0",
+        "Chelis-Lang/c-earchin@v0.3.3",
+    ),
 }
 
 
@@ -82,19 +81,17 @@ def matrix_reef_dependencies(workflow: str) -> dict[str, tuple[str, ...]]:
     return dependencies
 
 
-def hello_build_args(workflow: str) -> dict[str, str]:
-    step = workflow.split(
-        "- name: Build hello-chelis base image (release-pinned chelis)", 1
-    )[1].split("- name: Overlay HEAD chelis toolchain onto the image", 1)[0]
-    args = step.split("build-args: |", 1)[1].split("secrets: |", 1)[0]
-    return {
-        key.strip(): value.strip()
-        for key, value in (
-            line.strip().split("=", 1)
-            for line in args.splitlines()
-            if "=" in line
-        )
-    }
+def matrix_tool_dependencies(workflow: str) -> dict[str, tuple[str, ...]]:
+    dependencies: dict[str, tuple[str, ...]] = {}
+    current_repo: str | None = None
+    for line in workflow.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("- repo:"):
+            current_repo = stripped.split(":", 1)[1].strip()
+        elif current_repo is not None and stripped.startswith("tool_deps:"):
+            encoded = stripped.split(":", 1)[1].strip().strip('"')
+            dependencies[current_repo] = tuple(encoded.split())
+    return dependencies
 
 
 class EcosystemDriftWorkflowTests(unittest.TestCase):
@@ -160,9 +157,9 @@ class EcosystemDriftWorkflowTests(unittest.TestCase):
             "the ecosystem canary must pin the reviewed current-format Reef graph",
         )
         self.assertEqual(
-            hello_build_args(workflow),
-            EXPECTED_HELLO_BUILD_ARGS,
-            "the Docker leg must pin its Reef and tool-package releases",
+            matrix_tool_dependencies(workflow),
+            EXPECTED_TOOL_DEPENDENCIES,
+            "the Docker leg must pin its non-Reef tool-package releases",
         )
 
     def test_dependency_matrix_pins_current_format_releases(self) -> None:
@@ -174,9 +171,9 @@ class EcosystemDriftWorkflowTests(unittest.TestCase):
             ("Chelis-Lang/nautilus@v0.7.45", "Chelis-Lang/nautilus@v0.7.34"),
             ("Chelis-Lang/coral@v0.7.42", "Chelis-Lang/coral@v0.7.32"),
             ("Chelis-Lang/shoals@v0.24.12", "Chelis-Lang/shoals@v0.20.1"),
-            ("SCHOOL_VERSION=0.1.13", "SCHOOL_VERSION=0.1.12"),
-            ("OCTANT_VERSION=0.13.0", "OCTANT_VERSION=0.10.1"),
-            ("C_EARCHIN_VERSION=0.3.3", "C_EARCHIN_VERSION=0.3.2"),
+            ("Chelis-Lang/school@v0.1.13", "Chelis-Lang/school@v0.1.12"),
+            ("Chelis-Lang/octant@v0.13.0", "Chelis-Lang/octant@v0.10.1"),
+            ("Chelis-Lang/c-earchin@v0.3.3", "Chelis-Lang/c-earchin@v0.3.2"),
         )
         for current, predecessor in mutations:
             with self.subTest(predecessor=predecessor):
@@ -184,6 +181,48 @@ class EcosystemDriftWorkflowTests(unittest.TestCase):
                 self.assertNotEqual(mutated, workflow)
                 with self.assertRaises(AssertionError):
                     self.assert_current_artifact_matrix(mutated)
+
+    def test_dependencies_are_rebuilt_and_verified_by_head(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn(
+            "cp scripts/drift_prepare_dependencies.py",
+            workflow,
+        )
+        self.assertIn(
+            'python3 "$CHELIS_TOOLCHAIN/scripts/drift_prepare_dependencies.py"',
+            workflow,
+        )
+        self.assertNotIn('chelis reef install --from-github "$dep"', workflow)
+        self.assertNotIn("CORAL_VERSION=0.7.42", workflow)
+        self.assertNotIn("NAUTILUS_VERSION=0.7.45", workflow)
+        self.assertIn(
+            "chelis reef install --from-monorepo "
+            "/opt/chelis-head/dependencies",
+            workflow,
+        )
+        self.assertIn(
+            "mv /root/.chelis/reef /root/.chelis/reef-release-bootstrap",
+            workflow,
+        )
+
+    def test_shell_builds_disable_dependency_autofetch(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        drift_job = workflow.split("\n  drift:\n", 1)[1]
+        unsafe = [
+            line
+            for line in drift_job.splitlines()
+            if line.strip() == "chelis reef build"
+            or line.strip() == "run: chelis reef build"
+        ]
+        self.assertEqual(
+            unsafe,
+            [],
+            "every shell build must use --no-auto-fetch after exact local seeding",
+        )
+        self.assertGreaterEqual(
+            drift_job.count("chelis reef build --no-auto-fetch"),
+            5,
+        )
 
 
 if __name__ == "__main__":
