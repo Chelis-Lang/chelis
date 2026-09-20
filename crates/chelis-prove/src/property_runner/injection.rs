@@ -39,9 +39,8 @@ pub(super) fn property_has_opaque_invariant_binder(
     property_path: &[usize],
     params: &[Param],
 ) -> Result<bool, String> {
-    let validation_decls = without_property_at_path(decls, property_path)?;
-    let exprs = chelis_surf::desugar::desugar_program(&validation_decls)
-        .map_err(|error| error.to_string())?;
+    validate_property_path(decls, property_path)?;
+    let exprs = chelis_surf::desugar::desugar_program(decls).map_err(|error| error.to_string())?;
     let invariants = crate::opaque::collect_opaque_invariants(&exprs);
     Ok(params.iter().any(|p| {
         matches!(&p.ty, Some(TypeExpr::Named(name, _))
@@ -49,40 +48,26 @@ pub(super) fn property_has_opaque_invariant_binder(
     }))
 }
 
-fn without_property_at_path(decls: &[Decl], property_path: &[usize]) -> Result<Vec<Decl>, String> {
+fn validate_property_path(decls: &[Decl], property_path: &[usize]) -> Result<(), String> {
     let Some((&selected_index, nested_path)) = property_path.split_first() else {
         return Err("property declaration path is empty".to_string());
     };
-    if selected_index >= decls.len() {
+    let Some(decl) = decls.get(selected_index) else {
         return Err(format!(
             "property declaration path index {selected_index} is out of bounds"
         ));
+    };
+    if nested_path.is_empty() {
+        if matches!(decl, Decl::Property { .. }) {
+            return Ok(());
+        }
+        return Err("property declaration path does not select a property".to_string());
     }
 
-    let mut retained = Vec::with_capacity(decls.len());
-    for (index, decl) in decls.iter().enumerate() {
-        if index != selected_index {
-            retained.push(decl.clone());
-            continue;
-        }
-
-        if nested_path.is_empty() {
-            if matches!(decl, Decl::Property { .. }) {
-                continue;
-            }
-            return Err("property declaration path does not select a property".to_string());
-        }
-
-        let Decl::Module { name, decls, span } = decl else {
-            return Err("property declaration path descends through a non-module".to_string());
-        };
-        retained.push(Decl::Module {
-            name: name.clone(),
-            decls: without_property_at_path(decls, nested_path)?,
-            span: *span,
-        });
-    }
-    Ok(retained)
+    let Decl::Module { decls, .. } = decl else {
+        return Err("property declaration path descends through a non-module".to_string());
+    };
+    validate_property_path(decls, nested_path)
 }
 
 /// Run a user property that has an invariant-carrying opaque binder
@@ -834,7 +819,7 @@ mod tests {
     }
 
     #[test]
-    fn current_plain_scalar_property_is_excluded_from_injection_desugaring() {
+    fn valid_plain_scalar_property_is_checked_without_selecting_injection() {
         let (decls, property_path, params) = parsed_module_property(
             "module M
 @property nested_grad forall(x: f32):
@@ -846,7 +831,7 @@ mod tests {
         assert_eq!(
             property_has_opaque_invariant_binder(&decls, &property_path, &params),
             Ok(false),
-            "the property runner, not injection routing, owns the current property body"
+            "a valid property without an opaque binder is not injection-owned"
         );
     }
 

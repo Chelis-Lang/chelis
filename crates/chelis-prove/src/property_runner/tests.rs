@@ -534,6 +534,29 @@ fn only_selected_nested_grad_ignores_valid_unsupported_sibling() {
 
 #[cfg(feature = "smt")]
 #[test]
+fn selected_nested_grad_with_unknown_outer_wrt_is_an_error() {
+    let outcomes = run_surf(
+        "module M
+@property invalid_nested_grad forall(x: f32):
+  (grad(grad(fn (xx: f32) -> xx * xx, wrt=xx), wrt=missing)(x) >= 0.0)
+",
+        "smt-only",
+    );
+
+    assert_eq!(outcomes.len(), 1, "{outcomes:#?}");
+    let outcome = &outcomes[0];
+    assert_eq!(outcome.status, PropertyStatus::Error, "{outcome:?}");
+    assert_eq!(outcome.proof_tier, PropertyTier::None, "{outcome:?}");
+    assert!(
+        outcome.reason.as_deref().is_some_and(|reason| {
+            reason.contains("unknown `grad` parameter") && reason.contains("missing")
+        }),
+        "{outcome:?}"
+    );
+}
+
+#[cfg(feature = "smt")]
+#[test]
 fn unrelated_invalid_grad_declaration_fails_closed_before_scalar_smt_property() {
     let outcomes = run_surf(
         "module M
