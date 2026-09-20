@@ -36,7 +36,7 @@ fn direct_dag(op: RiscOp, input_prims: &[Prim], output: Prim) -> Dag {
 }
 
 #[test]
-fn metal_emitter_rejects_direct_nonnumeric_nodes_with_issue_1284_authority() {
+fn metal_emitter_rejects_direct_nonnumeric_nodes_with_issue_2266_authority() {
     let cases = [
         direct_dag(
             RiscOp::Compare(ComparisonKind::Eq),
@@ -65,7 +65,7 @@ fn metal_emitter_rejects_direct_nonnumeric_nodes_with_issue_1284_authority() {
             RejectionAuthorityKind::Unimplemented
         );
         let message = error.to_string();
-        assert!(message.contains("chelis#1284"), "{message}");
+        assert!(message.contains("chelis#2266"), "{message}");
         assert!(message.contains("direct nonnumeric"), "{message}");
     }
 }

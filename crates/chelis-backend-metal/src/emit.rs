@@ -304,7 +304,7 @@ fn reject_direct_nonnumeric(dag: VerifiedDagView<'_>) -> Result<(), Unsupported>
         format!("a Metal DAG value at node {}", node.id.0),
         Stage::Codegen("metal"),
         chelis_types::unimplemented_rejection!(
-            1284,
+            2266,
             "the Metal exact comparison, Bool8 logical, and raw stored-bit where kernels are not implemented; use `--target c` or `--target hip`"
         ),
     ))
@@ -895,7 +895,7 @@ impl<'plan> Emitter<'plan> {
             RiscOp::Add | RiscOp::Mul | RiscOp::ReluAdjoint => self.emit_binary(dag, node),
 
             RiscOp::Compare(_) | RiscOp::Logical(_) | RiscOp::Where => Err(format!(
-                "Metal direct nonnumeric node {id} reached emission after the #1284 typed capability rejection"
+                "Metal direct nonnumeric node {id} reached emission after the #2266 typed capability rejection"
             )),
 
             // chelis#1306: these identities are rejected by the shared typed

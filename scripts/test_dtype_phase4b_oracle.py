@@ -3554,7 +3554,7 @@ class ContractValidationTests(unittest.TestCase):
     def test_logical_rows_cannot_cite_the_tracking_hub(self) -> None:
         self.replace(
             Path("spec/design/capability_table.md"),
-            "Unimplemented { issue: #1284, diagnostic_kind: UnsupportedFeature }",
+            "Unimplemented { issue: #2266, diagnostic_kind: UnsupportedFeature }",
             "Unimplemented { issue: #729, diagnostic_kind: UnsupportedFeature }",
         )
         self.assert_contract_fails("logical implementation owner")

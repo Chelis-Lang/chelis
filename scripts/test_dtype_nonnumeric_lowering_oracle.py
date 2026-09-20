@@ -99,7 +99,7 @@ class SourceMutationTests(unittest.TestCase):
     def test_metal_issue_authority_mutation_fails(self) -> None:
         self.mutate(
             "crates/chelis-compiler-api/src/compiler.rs",
-            "chelis_types::unimplemented_rejection!(\n                    1284,",
+            "chelis_types::unimplemented_rejection!(\n                    2266,",
             "chelis_types::unimplemented_rejection!(\n                    9999,",
         )
         with self.assertRaisesRegex(oracle.OracleFailure, "Metal target disposition"):

@@ -33,13 +33,13 @@ fn direct_dag(op: RiscOp, input_prims: &[Prim], output: Prim) -> Dag {
     dag
 }
 
-fn asserted_metal_1284_rejection(dag: &Dag) {
+fn asserted_metal_2266_rejection(dag: &Dag) {
     let error = reject_unsupported_metal_ops(dag)
         .expect_err("Metal must reject direct nonnumeric operations at the typed gate");
     assert_eq!(error.stage, "compile");
     assert_eq!(error.errors[0].kind(), DiagnosticKind::UnsupportedFeature);
     let message = &error.errors[0].message;
-    assert!(message.contains("unimplemented chelis#1284"), "{message}");
+    assert!(message.contains("unimplemented chelis#2266"), "{message}");
     assert!(message.contains("--target c"), "{message}");
     assert!(message.contains("--target hip"), "{message}");
 }
@@ -124,7 +124,7 @@ fn hip_admits_the_complete_direct_nonnumeric_dtype_matrix() {
 }
 
 #[test]
-fn metal_rejects_every_direct_nonnumeric_identity_with_stable_typed_1284_authority() {
+fn metal_rejects_every_direct_nonnumeric_identity_with_stable_typed_2266_authority() {
     for kind in [
         ComparisonKind::CmpLt,
         ComparisonKind::Lt,
@@ -134,25 +134,25 @@ fn metal_rejects_every_direct_nonnumeric_identity_with_stable_typed_1284_authori
         ComparisonKind::Gte,
         ComparisonKind::Lte,
     ] {
-        asserted_metal_1284_rejection(&direct_dag(
+        asserted_metal_2266_rejection(&direct_dag(
             RiscOp::Compare(kind),
             &[Prim::F32, Prim::F32],
             Prim::Bool,
         ));
     }
     for kind in [LogicalKind::And, LogicalKind::Or] {
-        asserted_metal_1284_rejection(&direct_dag(
+        asserted_metal_2266_rejection(&direct_dag(
             RiscOp::Logical(kind),
             &[Prim::Bool, Prim::Bool],
             Prim::Bool,
         ));
     }
-    asserted_metal_1284_rejection(&direct_dag(
+    asserted_metal_2266_rejection(&direct_dag(
         RiscOp::Logical(LogicalKind::Not),
         &[Prim::Bool],
         Prim::Bool,
     ));
-    asserted_metal_1284_rejection(&direct_dag(
+    asserted_metal_2266_rejection(&direct_dag(
         RiscOp::Where,
         &[Prim::Bool, Prim::F32, Prim::F32],
         Prim::F32,
