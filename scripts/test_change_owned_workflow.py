@@ -378,15 +378,49 @@ class ChangeOwnedWorkflowTests(unittest.TestCase):
         The two numbers therefore move together, and nothing else pins them:
         the executor's own deadline test patches the constant rather than
         asserting its value.
+
+        The gap is consumed by job setup, not by finalization. `timeout-minutes`
+        runs from job start while the executor's clock starts at `run-shard`,
+        so checkout, apt, the toolchain, uv, the cache restore and nextest are
+        subtracted first: a measured median of 118s and a maximum of 211s over
+        the last 30 dispatches, against finalization that merges and digests
+        even a 98 MB JUnit in under two seconds. The floor is set well above
+        that observed maximum so one added setup step does not silently return
+        the lane to "job limit kills it, no receipt".
         """
         job = self.expansion_workflow["jobs"]["package-expansion-shard"]
         job_seconds = job["timeout-minutes"] * 60
         self.assertLess(owned.EXPANSION_EXECUTION_SECONDS, job_seconds)
         self.assertGreaterEqual(
             job_seconds - owned.EXPANSION_EXECUTION_SECONDS,
-            4 * 60,
-            "receipt finalization and artifact upload need their margin",
+            8 * 60,
+            "job setup runs before the executor's clock and eats this gap",
         )
+
+    def test_every_limit_the_topology_doc_states_matches_the_workflow(
+        self,
+    ) -> None:
+        """Reconcile the documented limits against the jobs, both ways.
+
+        Nothing otherwise pins the deadline's absolute value, so reverting the
+        constant leaves the suites green while the document still claims the
+        new number. Three of the four figures in that table were also already
+        stale, which is how a wrong one reached a comment in this change.
+        """
+        doc = (ROOT / "docs/ci_validation.md").read_text()
+        expected = {
+            f"{self.workflow['jobs']['ci-fast']['timeout-minutes']}-minute "
+            f"limit",
+            f"{self.workflow['jobs']['change-owned-shard']['timeout-minutes']}"
+            f"-minute limit each",
+            f"{owned.EXPANSION_EXECUTION_SECONDS // 60}-minute execution "
+            f"deadline inside a "
+            f"{self.expansion_workflow['jobs']['package-expansion-shard']['timeout-minutes']}"
+            f"-minute job limit",
+        }
+        for phrase in sorted(expected):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, doc)
 
     def test_the_soft_budget_warns_before_the_deadline_it_derives_from(
         self,
@@ -396,16 +430,25 @@ class ChangeOwnedWorkflowTests(unittest.TestCase):
         Since chelis#2248 removed its finding the soft budget is an early
         warning and nothing else, so it is worthless both when every shard
         exceeds it and when no shard can reach it. Deriving it from the
-        deadline keeps it strictly between the two.
+        deadline ties the two together, but derivation alone excludes neither
+        degeneracy: a margin approaching the whole deadline warns on every
+        shard, and a margin of one second warns on none. The warning window is
+        therefore bounded as a fraction of the deadline as well.
         """
-        self.assertLess(
-            owned.SOFT_BUDGET_SECONDS,
-            owned.EXPANSION_EXECUTION_SECONDS,
-        )
+        deadline = owned.EXPANSION_EXECUTION_SECONDS
+        margin = owned.EXPANSION_SOFT_BUDGET_MARGIN_SECONDS
+        self.assertLess(owned.SOFT_BUDGET_SECONDS, deadline)
         self.assertGreater(owned.SOFT_BUDGET_SECONDS, 0)
-        self.assertEqual(
-            owned.EXPANSION_EXECUTION_SECONDS - owned.SOFT_BUDGET_SECONDS,
-            owned.EXPANSION_SOFT_BUDGET_MARGIN_SECONDS,
+        self.assertEqual(deadline - owned.SOFT_BUDGET_SECONDS, margin)
+        self.assertGreaterEqual(
+            margin,
+            0.05 * deadline,
+            "a window this narrow warns too late to be an early warning",
+        )
+        self.assertLessEqual(
+            margin,
+            0.5 * deadline,
+            "a window over half the run warns on shards that are fine",
         )
 
     def test_missing_managed_python_setup_or_system_invocation_is_rejected(self) -> None:
