@@ -321,6 +321,30 @@ Use `gh workflow run heavy-e2e.yml --ref BRANCH` or `gh workflow run macos-night
 
 The developer's `gate.py --fast`, `--local`, `integration`, and full/manual commands retain their previous selections. The separate `gate.py ci-fast` stage owns the fixed standing hosted selection on pull requests and `main`. The required change-owned lane runs only for PR candidates and trusted exact-candidate dispatches; package expansion runs only through its explicit PR dispatch. A title or description edit reruns the dedicated acknowledgement check and changelog policy without entering compiler or Hull workflows, so the unchanged candidate's implementation contexts are neither cancelled nor replaced. A base retarget creates a required pending head receipt, validates the open PR's exact head/base and the checked-out two-parent merge, dispatches CI and Hull from the trusted new base, and closes the receipt only after both runs succeed. Run the owning phase oracle on the candidate when claiming phase completion.
 
+### Measured figures for the changed-path classification stage
+
+What the `--fast` changed-path classification costs, with the conditions each
+figure was taken under. A figure here is evidence with a date on it, not a
+constant: re-run the command before relying on one, and correct this table
+rather than the prose that cites it.
+
+Cost is four quantities and not one, so a range across them averages
+different things. `gate.py` sets no `PYTHONDONTWRITEBYTECODE` for its
+children, so a fresh checkout compiles the module and every later run reads
+`scripts/__pycache__`; and by the time this stage runs, `cargo fmt` has
+already warmed cargo. The figure a developer feels is therefore neither the
+cold first invocation nor the fully warm steady state. This fleet creates a
+worktree per pull request and per reviewer, so the fresh-checkout row is the
+common case here rather than an edge one.
+
+| figure | conditions | how it was taken |
+|---|---|---|
+| *pending* | cold first invocation, cargo cold and no bytecode cache | measurement in flight |
+| *pending* | warm cargo, fresh interpreter, no bytecode cache: a fresh worktree's first `--fast` | measurement in flight |
+| *pending* | warm cargo, bytecode cached: every `--fast` after the first in a worktree | measurement in flight |
+| *pending* | empty change set, which skips `cargo metadata` entirely | measurement in flight |
+| `cargo metadata --no-deps --locked` 0.02-0.04s | warm, repeated invocation | the stage's dominant cost; 0.24s with dependencies, which it does not ask for |
+
 ## Python execution ownership and timing
 
 `python scripts/ci_script_tests.py pr` runs the cheap discovered tests; `nightly`

@@ -864,6 +864,17 @@ def _matching_packages(path: str, packages: Sequence[PackageInfo]) -> list[str]:
     return matches
 
 
+def refused_path_message(classification: str, path: str) -> str:
+    """The one spelling of a refusal, shared by the planner and `--fast`.
+
+    A developer who hits this locally and a developer who reads a failed
+    `Plan Changed Integration Tests` log should be reading the same sentence,
+    which is only true if there is one of it.
+    """
+    qualifier = "ambiguous" if classification != "unclassified" else "unclassified"
+    return f"{qualifier} changed path: {path}"
+
+
 def static_path_classification(
     path: str,
     packages: Sequence[PackageInfo],
@@ -1193,10 +1204,7 @@ def make_plan(
             dispositions.append({"path": path, "status": status, "kind": "docs_only"})
             continue
         if classification != "rule":
-            qualifier = (
-                "ambiguous" if classification == "ambiguous_rule" else "unclassified"
-            )
-            raise ValueError(f"{qualifier} changed path: {path}")
+            raise ValueError(refused_path_message(classification, path))
         rule = matching_rules[0]
         disposition: dict[str, Any] = {
             "path": path,
@@ -3585,6 +3593,88 @@ def classify_expansion_failures(
     }
 
 
+def working_tree_changed_paths(repo: Path = ROOT, base: str = "origin/main") -> list[str]:
+    """The changed set the local classification reads, derived live.
+
+    Derived here rather than handed in, so the set is taken when the check
+    runs. `--fast` regenerates before it checks, and a set captured before
+    those writers cannot see a file they created.
+
+    Three deliberate differences from a naive `git diff --name-only` plus
+    `git status`:
+
+    * `--find-renames` and both sides of a rename, matching `diff_at`, which
+      is what CI classifies. A bare `--name-only` collapses a rename to its
+      destination, so moving an unrouted file into a package root reads clean
+      locally while the planner refuses the source path.
+    * committed and unstaged work, because both reach the candidate.
+    * **not** untracked entries. CI never sees them, nothing can route a
+      scratch file or a directory, and including them produces a local
+      failure with no hosted counterpart whose printed remedy is to add a
+      junk row to a reviewed manifest.
+    """
+    paths: set[str] = set()
+    for revisions in ([base, "HEAD"], ["HEAD"]):
+        # `parse_name_status_z` rejects an empty diff, because a candidate
+        # always has one. A working tree legitimately may not, so emptiness is
+        # handled here rather than by loosening the parser CI shares.
+        raw = git_output(
+            repo, ["diff", "--name-status", "-z", "--find-renames", *revisions]
+        )
+        if not raw:
+            continue
+        for record in parse_name_status_z(raw):
+            paths.add(record.path)
+            if record.old_path:
+                paths.add(record.old_path)
+    return sorted(paths)
+
+
+def classify_changed_paths(
+    paths: Sequence[str],
+    *,
+    repo: Path = ROOT,
+    config: Config | None = None,
+    packages: Sequence[PackageInfo] | None = None,
+) -> list[tuple[str, str]]:
+    """Every path the planner would refuse, as (path, disposition) pairs.
+
+    This is the planner's own `static_path_classification` and nothing else.
+    The `plan` subcommand cannot answer the question locally: in
+    `pull_request` mode it requires a two-parent synthetic merge and exits
+    before classifying anything, so a new tracked file could pass a clean
+    `--fast` and a green contract suite and still fail `Plan Changed
+    Integration Tests` on the first unclassified path (chelis#2250).
+
+    Every offending path is returned rather than the first. CI stops at the
+    first, which is how chelis#2248's repair could have left a second one
+    behind; locally there is no reason to make a developer find them one push
+    at a time.
+    """
+    if not paths:
+        # Nothing to classify, so do not pay for `cargo metadata`.
+        return []
+    if config is None:
+        config = read_config(repo / ".config/ci-test-targets.toml")
+    if packages is None:
+        try:
+            packages = package_infos(_metadata_in(repo))
+        except FileNotFoundError as error:
+            # This is the gate's first check, so it is the one that reports a
+            # missing toolchain. A bare errno there reads as a defect in the
+            # check rather than an absent cargo.
+            raise ValueError(
+                f"classifying changed paths needs cargo on PATH to read the "
+                f"workspace package roots: {error}"
+            ) from error
+    refused = []
+    for path in sorted(set(paths)):
+        disposition, _, _ = static_path_classification(path, packages, config)
+        if disposition in {"unclassified", "ambiguous_rule", "ambiguous_package"}:
+            refused.append((path, disposition))
+    return refused
+
+
 def _report_findings(
     plan: Mapping[str, Any],
     receipts: Sequence[Mapping[str, Any]],
@@ -4296,6 +4386,30 @@ def build_parser() -> argparse.ArgumentParser:
         "--github-output", type=Path, required=True
     )
 
+    classify = subparsers.add_parser(
+        "classify-paths",
+        help="reject any changed path the planner would refuse",
+    )
+    classify.add_argument(
+        "paths",
+        nargs="*",
+        help="repo-relative changed paths; none means nothing to classify",
+    )
+    classify.add_argument(
+        "--from-git",
+        action="store_true",
+        help=(
+            "derive the changed set from the working tree when the check "
+            "runs, rather than taking it on the command line"
+        ),
+    )
+    classify.add_argument("--base", default="origin/main")
+    classify.add_argument(
+        "--config",
+        type=Path,
+        default=ROOT / ".config/ci-test-targets.toml",
+    )
+
     report = subparsers.add_parser("report", help="validate or summarize receipts")
     report.add_argument("--plan", type=Path, required=True)
     report.add_argument("--lane", choices=tuple(LANE_KEYS), required=True)
@@ -4379,6 +4493,34 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         disposition = "EMPTY" if receipt is not None else "SELECTED"
         print(f"{args.lane.upper()} SHARD {args.shard}: {disposition}")
+        return 0
+    if args.command == "classify-paths":
+        if args.from_git and args.paths:
+            raise ValueError("--from-git derives the set; pass no paths with it")
+        paths = (
+            working_tree_changed_paths(base=args.base)
+            if args.from_git
+            else list(args.paths)
+        )
+        refused = classify_changed_paths(
+            paths,
+            config=read_config(args.config),
+        )
+        for path, disposition in refused:
+            print(
+                f"CHANGE-OWNED CI: FAIL: "
+                f"{refused_path_message(disposition, path)}",
+                file=sys.stderr,
+            )
+        if refused:
+            print(
+                f"CLASSIFY PATHS: {len(refused)} path(s) that no rule routes. "
+                f"Add a [[path_rule]] row in .config/ci-test-targets.toml, or "
+                f"move the file under a package root.",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"CLASSIFY PATHS: PASS ({len(paths)} path(s))")
         return 0
     if args.lane == "change-owned" and not args.required:
         raise ValueError("change-owned report requires --required")

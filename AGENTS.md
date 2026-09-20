@@ -1125,7 +1125,8 @@ has the runs behind the evidence and invocation rules.
 `--fast` is the inner-loop pass. It fixes in place and prints what it changed:
 `scripts/regen_all.py --tier 0` (the rejection registry, the embedded conformance
 skill assets, and the opaque-invariants corpus) and `cargo fmt --all`, then
-`chelis lint --check .`, `cargo clippy -p <crate> --tests -- -D warnings` for each
+`ci_change_owned.py classify-paths` over the changed set, `chelis lint --check .`,
+`cargo clippy -p <crate> --tests -- -D warnings` for each
 changed crate, one `cargo nextest run` over the drift tripwires (atom partition,
 generated dtype header, compiler pins, opaque corpus, loud-unsupported, payload census,
 bundled std loader, conformance manifest, asset drift, skill-set uniformity, phase-3
@@ -1133,7 +1134,26 @@ gate inventory, stack-guard coverage, runtime-extent target manifest), and, when
 a `packages/chelis-std/` or `crates/chelis-std-bundle/` path changed,
 `regen_all.py --tier 1` right after tier 0 (so every check sees the regenerated
 bundle) and `cargo nextest run -p chelis-std-bundle --lib` after the tripwires.
-Every writer runs before every check. It
+Every writer runs before every check, and the path classification is the first
+check because it is the cheapest row that can reject a push: it is the planner's
+own rule lookup, and a new tracked file that no `[[path_rule]]` routes fails
+`Plan Changed Integration Tests` in CI, which nothing local could see before
+chelis#2250. It reports every unrouted path rather than the first, prints the
+same sentence CI prints. It needs cargo on PATH, because it reads the
+workspace package roots from `cargo metadata --no-deps --locked`, and it costs
+a fraction of a second (see Measured figures in
+[`docs/ci_validation.md`](docs/ci_validation.md) for the exact conditions).
+It derives its set when it runs, so a file a regeneration creates is
+classified in the same run, and it matches the planner's rename handling and
+ignores untracked work, which CI never sees.
+
+It is not a proof that CI will agree. It classifies the working tree against
+the same rules, which catches an unrouted path, and that is the case it
+exists for. It cannot see a divergence that comes from the package set
+itself: CI composes base and candidate Cargo metadata inside the synthetic
+merge, while this reads only the working tree, so an in-place crate rename can
+be ambiguous to the planner and clean here. Treat a local pass as "no unrouted
+path in my tree", not as "CI will accept this". It
 exits non-zero for any failing stage (fmt, regeneration, lint, per-crate clippy, the
 tripwire run, or the std-bundle self-test) and never for a file it fixed; a regenerated
 `dist/` or `reef.lock` is reported as a changed file to commit, never as a failure.

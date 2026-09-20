@@ -2013,6 +2013,47 @@ cadence = "pull_request and push"
 reason = "gate-owned workflow and cache invariants run in script-unit"
 tracking_issue = "chelis#1824"
 
+[[path_rule]]
+prefix = "scripts/test_gate_fast.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the exact --fast stage list, its ordering and its summary run in script-unit"
+tracking_issue = "chelis#1824"
+
+# The three rows below own generated artifacts whose only consumer runs
+# nightly. That is the honest disposition rather than a gap being closed: no
+# per-pull-request job re-derives any of them, so a stale one is caught the
+# next morning. Each names the job that goes red when the artifact is wrong,
+# not the job that tests the generator which produced it.
+[[path_rule]]
+prefix = "spec/design/loud_unsupported_issue_manifest.json"
+disposition = "owner"
+workflow = "loud-unsupported-nightly.yml"
+job = "standing-rejection-liveness"
+cadence = "daily 06:17 UTC and workflow_dispatch"
+reason = "validate_rejection_issue_manifest.py re-derives this manifest from production sources and fails when the checked-in rows disagree"
+tracking_issue = "chelis#2250"
+
+[[path_rule]]
+prefix = "tests/corpus/opaque_invariants/manifest.json"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "full-workspace"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "opaque_corpus_gate runs each check-lane corpus program named here against the live binary and holds it to its pinned exit code"
+tracking_issue = "chelis#2250"
+
+[[path_rule]]
+prefix = "tests/corpus/opaque_invariants/programs/"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "full-workspace"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "opaque_corpus_gate executes every generated corpus program here on the checked lane"
+tracking_issue = "chelis#2250"
+
 # These exact paths use the existing chelis#1824 ownership mechanism.
 # Script-unit owns the portable contracts, not live cache acceptance.
 [[path_rule]]
@@ -2600,5 +2641,10 @@ packages = ["chelis-cli"]
 # what a scanner or grammar edit must re-run.
 [[path_rule]]
 prefix = "grammars/tree-sitter-chelis-surf/"
+disposition = "packages"
+packages = ["tree-sitter-chelis"]
+
+[[path_rule]]
+prefix = "grammars/tree-sitter-chelis-deep/"
 disposition = "packages"
 packages = ["tree-sitter-chelis"]
