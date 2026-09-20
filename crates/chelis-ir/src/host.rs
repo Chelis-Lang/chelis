@@ -5759,6 +5759,16 @@ fn try_lower_tensor_helper_call_inner(
         });
         return None;
     }
+    // A load-only helper is an identity, so its root type must already be
+    // the checked type requested by this host expression. An imported
+    // runtime List selector can otherwise degrade to a free scalar load
+    // named after its index parameter; later type conformance then retags
+    // that rank-zero helper as the selected tensor. Reject that malformed
+    // partition and let the ordinary host call preserve List selection.
+    if !identity_tensor_helper_matches_expected(&product.dag, &expected, scope) {
+        record_host_work(|profile| profile.tensor_helper_fallbacks += 1);
+        return None;
+    }
     record_host_work(|profile| profile.tensor_helper_successes += 1);
     Some(finish_tensor_helper_product(
         product.dag,
@@ -5769,6 +5779,28 @@ fn try_lower_tensor_helper_call_inner(
         tensor_helpers,
         expected,
     ))
+}
+
+fn identity_tensor_helper_matches_expected(
+    dag: &crate::Dag,
+    expected: &TensorType,
+    scope: &UnordMap<String, HostTypeTerm>,
+) -> bool {
+    let [root] = dag.roots() else {
+        return true;
+    };
+    let Some(node) = dag.get(*root) else {
+        return false;
+    };
+    if node.output_type == *expected {
+        return true;
+    }
+    let RiscOp::Load { name } = &node.op else {
+        return true;
+    };
+    scope
+        .get(name.as_str())
+        .is_none_or(|actual| actual == &HostTypeTerm::Tensor(node.output_type.clone()))
 }
 
 /// A tensor-typed field projection lifted out of a tensor-helper subtree
@@ -19495,6 +19527,45 @@ mod tests {
         ));
         assert!(!top_level_fn_transfers_literal_result_claims(
             &session, "random"
+        ));
+    }
+
+    #[test]
+    fn identity_tensor_helper_requires_its_checked_result_type() {
+        let scalar = TensorType::scalar_f32();
+        let vector = TensorType {
+            dims: vec![DimInfo::Lit(2)],
+            precision: Prim::F32,
+        };
+        let mut dag = crate::Dag::new();
+        let root = dag.add_node(
+            RiscOp::Load {
+                name: "index".into(),
+            },
+            vec![],
+            scalar.clone(),
+            None,
+        );
+        dag.add_root(root);
+
+        let scalar_scope = UnordMap::from([(
+            "index".to_string(),
+            HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int64)),
+        )]);
+        assert!(identity_tensor_helper_matches_expected(
+            &dag,
+            &scalar,
+            &scalar_scope
+        ));
+        assert!(!identity_tensor_helper_matches_expected(
+            &dag,
+            &vector,
+            &scalar_scope
+        ));
+        assert!(identity_tensor_helper_matches_expected(
+            &dag,
+            &vector,
+            &UnordMap::new()
         ));
     }
 
