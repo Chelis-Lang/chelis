@@ -612,7 +612,7 @@ class RetainedMutationTests(unittest.TestCase):
 
 
 class WorkflowTests(unittest.TestCase):
-    command = '.venv/bin/python scripts/phase4b_change_report.py --base "$BASE_REF" --pr-head "$PR_HEAD" --output target/phase4b-contract-changes.json'
+    command = 'scripts/phase4b_change_report.py --base "$BASE_REF" --pr-head "$PR_HEAD" --output target/phase4b-contract-changes.json'
 
     def workflow(self):
         return yaml.safe_load((Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml").read_text())
@@ -633,7 +633,9 @@ class WorkflowTests(unittest.TestCase):
         reports = [s for s in steps if "phase4b_change_report.py" in s.get("run", "")]
         self.assertEqual(len(reports), 1)
         step = reports[0]
-        self.assertEqual(step["run"], self.command)
+        interpreter, arguments = step["run"].split(" ", 1)
+        self.assertIn(Path(interpreter).name, ("python", "python3"))
+        self.assertEqual(arguments, self.command)
         self.assertEqual(
             step["env"],
             {

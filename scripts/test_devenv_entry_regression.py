@@ -14,7 +14,7 @@ from devenv_entry_regression import EntryResult, classify_entry
 
 class ConcurrentEntryClassificationTests(unittest.TestCase):
     def test_successful_payload_is_accepted(self) -> None:
-        result = EntryResult(0, "tasks complete\nPAYLOAD_3\n", "PAYLOAD_3")
+        result = EntryResult(0, "Running tasks in 21.4s\nPAYLOAD_3\n", "PAYLOAD_3")
         self.assertIsNone(classify_entry(result))
 
     def test_failed_entry_must_not_run_payload(self) -> None:
@@ -27,6 +27,10 @@ class ConcurrentEntryClassificationTests(unittest.TestCase):
             "devenv:enterShell failed\nPAYLOAD_3\n",
             "PAYLOAD_3",
         )
+        self.assertIn("fail-open", classify_entry(result) or "")
+
+    def test_failed_task_summary_cannot_be_mistaken_for_success(self) -> None:
+        result = EntryResult(0, "Running tasks in 2s (failed)\nPAYLOAD_3\n", "PAYLOAD_3")
         self.assertIn("fail-open", classify_entry(result) or "")
 
     def test_zero_without_payload_is_rejected(self) -> None:

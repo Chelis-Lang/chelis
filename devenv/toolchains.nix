@@ -72,6 +72,8 @@ let
     checkFlags = lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
       "--skip=store::tests::test_exclude_from_indexing_sets_tmutil_xattr"
     ];
+    # Upstream tests bind loopback mock servers; keep the sandbox enabled.
+    __darwinAllowLocalNetworking = true;
     preCheck = ''
       ulimit -n 4096 2>/dev/null || true
     '';
@@ -81,11 +83,6 @@ let
   };
 in
 {
-  # The v2.2.2 modules accidentally retain `latest-version = 2.2.1`. Correct
-  # that release metadata locally so the reviewed 2.2.0-through-2.2.2 CLI
-  # range still reports the pinned module release as its update target.
-  devenv.latestVersion = "2.2.2";
-
   languages = {
     rust = {
       enable = true;

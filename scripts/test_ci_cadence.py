@@ -17,10 +17,10 @@ PROFILE_CALL = re.compile(r"--profile[\"',\s=]+([a-z][a-z0-9-]*)")
 # means a job that starts using it cannot arrive without one.
 ALWAYS_UNATTENDED = {"nightly"}
 MOVED = {
-    "dtype-phase3-oracle": ".venv/bin/python scripts/dtype_phase3_oracle.py",
-    "faithful-observation-phase2-oracle": ".venv/bin/python scripts/faithful_observation_phase2_oracle.py",
-    "compiled-value-ownership-phase0-oracle": ".venv/bin/python scripts/compiled_value_ownership_oracle.py --phase 2",
-    "runtime-representation-phase0-oracle": "python3 scripts/gate.py runtime-representation",
+    "dtype-phase3-oracle": "python scripts/dtype_phase3_oracle.py",
+    "faithful-observation-phase2-oracle": "python scripts/faithful_observation_phase2_oracle.py",
+    "compiled-value-ownership-phase0-oracle": "python scripts/compiled_value_ownership_oracle.py --phase 2",
+    "runtime-representation-phase0-oracle": "chelis-gate runtime-representation",
     "generalize-sweep-oracle-shard": "cargo nextest run --workspace --profile ci-full --ignore-default-filter --features chelis-types/generalize-sweep-oracle",
 }
 NATIVE_OBSERVER_DEBT_TESTS = (
@@ -100,7 +100,7 @@ def assert_extended(test, pr, nightly):
         test.assertNotIn("if", job)
         test.assertFalse(job.get("continue-on-error", False))
         for step in job["steps"]:
-            if step.get("run", "").startswith(("cargo ", "python3 scripts/gate.py")):
+            if step.get("run", "").startswith(("cargo ", "chelis-gate")):
                 test.assertFalse(step.get("continue-on-error", False))
                 if "--ignored" in step["run"]:
                     # `always()` keeps a manual gate running after an earlier
@@ -147,7 +147,7 @@ def assert_extended(test, pr, nightly):
     test.assertIn("cargo build --workspace --lib --bins", commands)
     test.assertIn(workspace_suite, commands)
     assert_complete_hash_partition(test, full, workspace_suite)
-    test.assertIn(".venv/bin/python scripts/ci_script_tests.py nightly", [s.get("run") for s in jobs["script-nightly"]["steps"]])
+    test.assertIn("python scripts/ci_script_tests.py nightly", [s.get("run") for s in jobs["script-nightly"]["steps"]])
     script_cache_steps = [
         step
         for step in jobs["script-nightly"]["steps"]
@@ -165,7 +165,7 @@ def assert_extended(test, pr, nightly):
     test.assertIn("cargo test -p chelis-backend-c", [s.get("run") for s in jobs["backend-sanitizers-full"]["steps"]])
     support = jobs["integration-support"]
     test.assertEqual(support["strategy"]["matrix"]["slice"], ["frontend", "domain"])
-    test.assertIn("python3 scripts/gate.py integration --support-only --support-slice ${{ matrix.slice }}", [s.get("run") for s in support["steps"]])
+    test.assertIn("chelis-gate integration --support-only --support-slice ${{ matrix.slice }}", [s.get("run") for s in support["steps"]])
     test.assertNotIn("--support-only", str(pr))
     test.assertNotIn("ProfilePartitionTests", str(pr))
     test.assertIn("ProfilePartitionTests", str(full))
@@ -192,7 +192,7 @@ def assert_extended(test, pr, nightly):
             for command in extent_commands
             if "runtime_extent_oracle.py" in command
         ],
-        [".venv/bin/python scripts/runtime_extent_oracle.py --phase final"],
+        ["python scripts/runtime_extent_oracle.py --phase final"],
     )
     # The equality already rejects every spelling that names the oracle
     # script, appended flag included, and the negative twin below measures
@@ -204,7 +204,8 @@ def assert_extended(test, pr, nightly):
         "the nightly extent oracle may not excuse a row shortfall",
     )
     for step in extents["steps"]:
-        test.assertNotIn("if", step)
+        if "runtime_extent_oracle.py" in step.get("run", ""):
+            test.assertNotIn("if", step)
         test.assertFalse(step.get("continue-on-error", False))
     report = jobs["report"]
     test.assertEqual(

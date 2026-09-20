@@ -201,7 +201,7 @@ class TargetSelectionTests(unittest.TestCase):
         self.assertNotIn("strategy", worker)
         self.assertEqual(worker["timeout-minutes"], 30)
         commands = [s.get("run", "") for s in worker["steps"]]
-        self.assertIn("python3 scripts/gate.py ci-fast", commands)
+        self.assertIn("chelis-gate ci-fast", commands)
         self.assertNotIn("cargo nextest run --workspace", str(jobs))
         self.assertEqual(
             jobs["integration"]["needs"],

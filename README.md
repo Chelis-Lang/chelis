@@ -219,10 +219,10 @@ After Nix is available, run these steps.
 1. Install the Devenv release that this repository pins:
 
    ```sh
-   nix --extra-experimental-features 'nix-command flakes' profile install github:cachix/devenv/v2.2.2
+   nix --extra-experimental-features 'nix-command flakes' profile install github:cachix/devenv/360b5eb1397291383d10845a63a0247981bd5598
    ```
 
-2. Make sure that Devenv reports version `2.2.2`:
+2. Make sure that Devenv reports version `2.2.3`:
 
    ```sh
    devenv --version
@@ -302,18 +302,22 @@ with:
 
 #### Shell behavior
 
-The repository pins the Devenv modules and update target to release `v2.2.2`.
-Use Devenv 2.2.2 locally when possible. The closed, reviewed CLI range is
-2.2.0 through 2.2.2 so the immutable shared CI action remains supported while
-the repository-owned atomic load-export task removes the concurrency race in
-those versions. CLIs outside that range are rejected before Nix evaluation.
+The repository pins the Devenv CLI and modules to 2.2.3. Other CLI versions
+are rejected before Nix evaluation. The shell's atomic load-export task
+retains concurrent-entry safety.
 
-The upstream `v2.2.2` tag builds a 2.2.2 CLI but its module metadata still
-advertises 2.2.1. Chelis overrides that stale metadata to 2.2.2 so every
-accepted CLI reports the right update target.
-
-`devenv.nix` imports six local configuration modules. `devenv.yaml` defines
+`devenv.nix` imports seven local configuration modules. `devenv.yaml` defines
 the inputs and CLI options.
+
+GitHub acceptance jobs activate the `ci` profile once, require a fresh shell
+initialization receipt, and run subsequent command files with `chelis-ci-shell run`.
+This reuses the project toolchain without repeated shell entry and scopes Nix
+runtime libraries to repository commands rather than native GitHub actions.
+The Linux Nix package job uses the protected runner group only for manual
+dispatch on `main`; release and branch runs stay hosted. Its shared cache
+finalizer publishes declared, realized check outputs and verifies signed
+readback. Protected runner admission and source-pin publication remain
+separate operator-controlled steps.
 
 `devenv.yaml` pins the shared `nixpkgs` and `rust-overlay` inputs to exact
 revisions. Therefore, `devenv update` cannot change them.

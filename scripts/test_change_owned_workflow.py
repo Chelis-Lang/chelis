@@ -69,16 +69,19 @@ def _assert_empty_shard_skips_preparation(
         "rust-toolchain",
         "setup-uv",
         "ci_setup_uv_python.py",
+        "setup-devenv",
+        "ci_devenv.py",
         "rust-cache",
         "uv pip install",
         "install-action@nextest",
     )
     for step in job["steps"]:
         if any(marker in str(step) for marker in heavy_markers):
-            test.assertEqual(
-                step.get("if"),
-                "steps.shard-selection.outputs.has_targets == 'true'",
+            condition = step.get("if", "")
+            test.assertIn(
+                "steps.shard-selection.outputs.has_targets == 'true'", condition
             )
+            test.assertNotIn("||", condition)
     executor = next(
         step
         for step in job["steps"]
@@ -102,7 +105,9 @@ def assert_change_owned_topology(
     test.assertLessEqual(expected, set(jobs))
     test.assertNotIn("package-expansion-shard", jobs)
     test.assertNotIn("package-expansion-summary", jobs)
-    for name in expected:
+    # Native planner/reporters still need their checkout venv. The project
+    # shard's runtime identity is exercised by test_ci_devenv instead.
+    for name in expected - {"change-owned-shard"}:
         steps = jobs[name]["steps"]
         invoke = next(
             (

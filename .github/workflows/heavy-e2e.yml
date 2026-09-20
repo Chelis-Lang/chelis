@@ -31,6 +31,9 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4]
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: chelis-ci-shell run {0}
     timeout-minutes: 60
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
@@ -39,19 +42,15 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Free disk space (Ubuntu)
+        if: runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      - name: Install C dependencies
-        run: python3 scripts/ci_apt_get.py gcc clang libopenblas-dev libasan8 libubsan1
+      - name: Set up portable Devenv
+        uses: Chelis-Lang/ci/actions/setup-devenv@e7b00e437d6dc1aef7eb2093661219b298073c2c
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
-
-      - name: Create uv-managed venv + wire libpython rpath
-        run: python3 scripts/ci_setup_uv_python.py
+      - name: Activate project CI environment
+        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
+        run: python scripts/ci_devenv.py
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
@@ -59,11 +58,8 @@ jobs:
           shared-key: linux-workspace
           save-if: ${{ github.ref == 'refs/heads/main' && matrix.shard == 1 }}
 
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
-
       - name: Install Python binding dependencies
-        run: uv pip install --python .venv/bin/python -r bindings/python/pyproject.toml
+        run: uv pip install --python "$PYO3_PYTHON" -r bindings/python/pyproject.toml
 
       - name: Build product prerequisites
         run: cargo build --workspace --lib --bins
@@ -75,7 +71,7 @@ jobs:
 
       - name: Verify nextest profile coverage
         if: matrix.shard == 1
-        run: .venv/bin/python -m unittest scripts.test_nextest_profile_partition.ProfilePartitionTests
+        run: python -m unittest scripts.test_nextest_profile_partition.ProfilePartitionTests
 
       - name: Upload full workspace JUnit
         if: always()
@@ -93,6 +89,9 @@ jobs:
   native-random-observer-debt:
     name: Native Random Observer Debt
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: chelis-ci-shell run {0}
     timeout-minutes: 45
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
@@ -101,28 +100,21 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Free disk space (Ubuntu)
+        if: runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      - name: Install C dependencies
-        run: python3 scripts/ci_apt_get.py gcc clang libopenblas-dev libasan8 libubsan1
+      - name: Set up portable Devenv
+        uses: Chelis-Lang/ci/actions/setup-devenv@e7b00e437d6dc1aef7eb2093661219b298073c2c
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
-
-      - name: Create uv-managed venv + wire libpython rpath
-        run: python3 scripts/ci_setup_uv_python.py
+      - name: Activate project CI environment
+        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
+        run: python scripts/ci_devenv.py
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: linux-workspace
           save-if: false
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
 
       - name: Build product prerequisites
         run: cargo build --workspace --lib --bins
@@ -156,6 +148,9 @@ jobs:
   script-nightly:
     name: Script Integration Tests (Linux)
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: chelis-ci-shell run {0}
     timeout-minutes: 60
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
@@ -164,19 +159,15 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Free disk space (Ubuntu)
+        if: runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      - name: Install C dependencies
-        run: python3 scripts/ci_apt_get.py gcc clang libopenblas-dev libasan8 libubsan1
+      - name: Set up portable Devenv
+        uses: Chelis-Lang/ci/actions/setup-devenv@e7b00e437d6dc1aef7eb2093661219b298073c2c
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
-
-      - name: Create uv-managed venv + wire libpython rpath
-        run: python3 scripts/ci_setup_uv_python.py
+      - name: Activate project CI environment
+        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
+        run: python scripts/ci_devenv.py
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
@@ -185,10 +176,10 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install Python binding dependencies
-        run: uv pip install --python .venv/bin/python -r bindings/python/pyproject.toml
+        run: uv pip install --python "$PYO3_PYTHON" -r bindings/python/pyproject.toml
 
       - name: Install shared-skill validator dependency
-        run: uv pip install --python .venv/bin/python PyYAML==6.0.3
+        run: uv pip install --python "$PYO3_PYTHON" PyYAML==6.0.3
 
       - name: Restore script compiler builds
         uses: actions/cache/restore@v4
@@ -203,7 +194,7 @@ jobs:
           restore-keys: ${{ runner.os }}-${{ runner.arch }}-script-execution-v1-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
 
       - name: Run script integration tests
-        run: .venv/bin/python scripts/ci_script_tests.py nightly
+        run: python scripts/ci_script_tests.py nightly
 
       - name: Save script compiler builds
         if: ${{ success() && github.ref == 'refs/heads/main' }}
@@ -229,6 +220,9 @@ jobs:
   dtype-phase3-oracle:
     name: Dtype Phase 0-3 Oracle
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: chelis-ci-shell run {0}
     timeout-minutes: 60
     permissions:
       contents: read
@@ -241,22 +235,18 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Free disk space (Ubuntu)
+        if: runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      - name: Install C dependencies
-        run: python3 scripts/ci_apt_get.py gcc libopenblas-dev libasan8 libubsan1
+      - name: Set up portable Devenv
+        uses: Chelis-Lang/ci/actions/setup-devenv@e7b00e437d6dc1aef7eb2093661219b298073c2c
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
-
-      - name: Create uv-managed venv + wire libpython rpath
-        run: python3 scripts/ci_setup_uv_python.py
+      - name: Activate project CI environment
+        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
+        run: python scripts/ci_devenv.py
 
       - name: Install Python binding dependencies
-        run: uv pip install --python .venv/bin/python -r bindings/python/pyproject.toml
+        run: uv pip install --python "$PYO3_PYTHON" -r bindings/python/pyproject.toml
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
@@ -281,18 +271,15 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-census-controls-v1-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
           restore-keys: ${{ runner.os }}-${{ runner.arch }}-census-controls-v1-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
 
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
-
       - name: Dtype Phase 0-3 oracle
         env:
           GH_TOKEN: ${{ github.token }}
           CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
-        run: .venv/bin/python scripts/dtype_phase3_oracle.py
+        run: python scripts/dtype_phase3_oracle.py
 
       - name: Validate and report test timing
         run: >-
-          .venv/bin/python scripts/test_timing_check.py
+          python scripts/test_timing_check.py
           --junit target/nextest/ci-full/junit.xml
           --informational
 
@@ -334,6 +321,9 @@ jobs:
   faithful-observation-phase2-oracle:
     name: Faithful Observation Phase 2 Oracle
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: chelis-ci-shell run {0}
     timeout-minutes: 45
     permissions:
       contents: read
@@ -344,19 +334,15 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Free disk space (Ubuntu)
+        if: runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      - name: Install C dependencies
-        run: python3 scripts/ci_apt_get.py gcc libopenblas-dev libasan8 libubsan1
+      - name: Set up portable Devenv
+        uses: Chelis-Lang/ci/actions/setup-devenv@e7b00e437d6dc1aef7eb2093661219b298073c2c
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
-
-      - name: Create uv-managed venv + wire libpython rpath
-        run: python3 scripts/ci_setup_uv_python.py
+      - name: Activate project CI environment
+        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
+        run: python scripts/ci_devenv.py
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
@@ -364,17 +350,17 @@ jobs:
           shared-key: linux-workspace
           save-if: false
 
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
-
       - name: Faithful observation Phase 2 oracle
         env:
           CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
-        run: .venv/bin/python scripts/faithful_observation_phase2_oracle.py
+        run: python scripts/faithful_observation_phase2_oracle.py
 
   compiled-value-ownership-phase0-oracle:
     name: Compiled Value Ownership Phase 2 Oracle
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: chelis-ci-shell run {0}
     timeout-minutes: 45
     permissions:
       contents: read
@@ -385,19 +371,15 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Free disk space (Ubuntu)
+        if: runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      - name: Install C dependencies
-        run: python3 scripts/ci_apt_get.py gcc libopenblas-dev libasan8 libubsan1
+      - name: Set up portable Devenv
+        uses: Chelis-Lang/ci/actions/setup-devenv@e7b00e437d6dc1aef7eb2093661219b298073c2c
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
-
-      - name: Create uv-managed venv + wire libpython rpath
-        run: python3 scripts/ci_setup_uv_python.py
+      - name: Activate project CI environment
+        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
+        run: python scripts/ci_devenv.py
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
@@ -406,14 +388,17 @@ jobs:
           save-if: false
 
       - name: Compiled value ownership Phase 2 oracle
-        run: .venv/bin/python scripts/compiled_value_ownership_oracle.py --phase 2
+        run: python scripts/compiled_value_ownership_oracle.py --phase 2
 
       - name: Compiled value ownership launch subset
-        run: .venv/bin/python scripts/compiled_value_ownership_oracle.py --phase launch
+        run: python scripts/compiled_value_ownership_oracle.py --phase launch
 
   runtime-representation-phase0-oracle:
     name: Runtime Representation Phase 2 Oracle
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: chelis-ci-shell run {0}
     timeout-minutes: 45
     permissions:
       contents: read
@@ -424,19 +409,15 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Free disk space (Ubuntu)
+        if: runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      - name: Install C dependencies
-        run: python3 scripts/ci_apt_get.py gcc clang libopenblas-dev libasan8 libubsan1
+      - name: Set up portable Devenv
+        uses: Chelis-Lang/ci/actions/setup-devenv@e7b00e437d6dc1aef7eb2093661219b298073c2c
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
-
-      - name: Create uv-managed venv + wire libpython rpath
-        run: python3 scripts/ci_setup_uv_python.py
+      - name: Activate project CI environment
+        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
+        run: python scripts/ci_devenv.py
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
@@ -444,11 +425,8 @@ jobs:
           shared-key: linux-workspace
           save-if: false
 
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
-
       - name: Gate (runtime representation stage)
-        run: python3 scripts/gate.py runtime-representation
+        run: chelis-gate runtime-representation
 
       - name: Upload runtime representation execution receipts
         if: always()
@@ -464,6 +442,9 @@ jobs:
   runtime-extent-oracle:
     name: Runtime Extent Oracle (chelis#1277)
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: chelis-ci-shell run {0}
     timeout-minutes: 90
     permissions:
       contents: read
@@ -474,26 +455,22 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Free disk space (Ubuntu)
+        if: runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      - name: Install C dependencies
-        run: python3 scripts/ci_apt_get.py gcc clang libopenblas-dev libasan8 libubsan1
+      - name: Set up portable Devenv
+        uses: Chelis-Lang/ci/actions/setup-devenv@e7b00e437d6dc1aef7eb2093661219b298073c2c
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
-
-      - name: Create uv-managed venv + wire libpython rpath
-        run: python3 scripts/ci_setup_uv_python.py
+      - name: Activate project CI environment
+        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
+        run: python scripts/ci_devenv.py
 
       # Phase A's wire capacity leg executes the Python binding facade, so the
       # venv needs that facade's declared dependencies. Reading them from the
       # bindings' own pyproject.toml keeps one source of truth; pinning them
       # here would be a second place to forget.
       - name: Install the Python binding facade dependencies
-        run: uv pip install --python .venv/bin/python -r bindings/python/pyproject.toml
+        run: uv pip install --python "$PYO3_PYTHON" -r bindings/python/pyproject.toml
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
@@ -506,7 +483,7 @@ jobs:
       # `--allow-shortfall` outright, and prints each phase's corpus digest
       # beside the combined one.
       - name: Runtime extent oracle (completion)
-        run: .venv/bin/python scripts/runtime_extent_oracle.py --phase final
+        run: python scripts/runtime_extent_oracle.py --phase final
 
   generalize-sweep-oracle-shard:
     name: Typecheck Level Generalization Oracle (shard ${{ matrix.shard }}/4)
@@ -515,6 +492,9 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4]
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: chelis-ci-shell run {0}
     timeout-minutes: 60
     permissions:
       contents: read
@@ -525,31 +505,24 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Free disk space (Ubuntu)
+        if: runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      - name: Install C dependencies
-        run: python3 scripts/ci_apt_get.py gcc libopenblas-dev libasan8 libubsan1
+      - name: Set up portable Devenv
+        uses: Chelis-Lang/ci/actions/setup-devenv@e7b00e437d6dc1aef7eb2093661219b298073c2c
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
-
-      - name: Create uv-managed venv + wire libpython rpath
-        run: python3 scripts/ci_setup_uv_python.py
+      - name: Activate project CI environment
+        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
+        run: python scripts/ci_devenv.py
 
       - name: Install Python binding dependencies
-        run: uv pip install --python .venv/bin/python -r bindings/python/pyproject.toml
+        run: uv pip install --python "$PYO3_PYTHON" -r bindings/python/pyproject.toml
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: linux-workspace
           save-if: false
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
 
       - name: Typecheck level generalization oracle
         env:
@@ -558,11 +531,11 @@ jobs:
 
       - name: Verify generalization lane selection
         if: matrix.shard == 1
-        run: .venv/bin/python -m unittest scripts.test_nextest_profile_partition.GeneralizationPartitionTests
+        run: python -m unittest scripts.test_nextest_profile_partition.GeneralizationPartitionTests
 
       - name: Validate and report test timing
         run: >-
-          .venv/bin/python scripts/test_timing_check.py
+          python scripts/test_timing_check.py
           --junit target/nextest/ci-full/junit.xml
           --informational
 
@@ -595,6 +568,9 @@ jobs:
       matrix:
         slice: [frontend, domain]
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: chelis-ci-shell run {0}
     timeout-minutes: 45
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
@@ -603,19 +579,15 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Free disk space (Ubuntu)
+        if: runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      - name: Install C dependencies
-        run: python3 scripts/ci_apt_get.py gcc clang libopenblas-dev libasan8 libubsan1
+      - name: Set up portable Devenv
+        uses: Chelis-Lang/ci/actions/setup-devenv@e7b00e437d6dc1aef7eb2093661219b298073c2c
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
-
-      - name: Create uv-managed venv + wire libpython rpath
-        run: python3 scripts/ci_setup_uv_python.py
+      - name: Activate project CI environment
+        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
+        run: python scripts/ci_devenv.py
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
@@ -624,20 +596,20 @@ jobs:
           save-if: false
 
       - name: Install Python binding dependencies
-        run: uv pip install --python .venv/bin/python -r bindings/python/pyproject.toml
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
+        run: uv pip install --python "$PYO3_PYTHON" -r bindings/python/pyproject.toml
 
       - name: Build product prerequisites
         run: cargo build --workspace --lib --bins
 
       - name: Gate (integration support subset)
-        run: python3 scripts/gate.py integration --support-only --support-slice ${{ matrix.slice }}
+        run: chelis-gate integration --support-only --support-slice ${{ matrix.slice }}
 
   backend-sanitizers-full:
     name: Backend Sanitizers (Full)
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: chelis-ci-shell run {0}
     timeout-minutes: 45
     env:
       CHELIS_C_TEST_EXTRA_FLAGS: -fsanitize=address,undefined -fno-omit-frame-pointer
@@ -649,13 +621,15 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Free disk space (Ubuntu)
+        if: runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      - name: Install C dependencies
-        run: python3 scripts/ci_apt_get.py gcc libopenblas-dev libasan8 libubsan1
+      - name: Set up portable Devenv
+        uses: Chelis-Lang/ci/actions/setup-devenv@e7b00e437d6dc1aef7eb2093661219b298073c2c
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Activate project CI environment
+        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
+        run: python scripts/ci_devenv.py
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import re
 import shutil
 import subprocess
 import tempfile
@@ -16,7 +17,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 FAILURE_MARKERS = (
     "devenv:entershell failed",
     "dependency failed",
-    "running tasks in",
 )
 
 
@@ -34,7 +34,9 @@ def classify_entry(result: EntryResult) -> str | None:
         "no such file" in lowered or "cannot access" in lowered
     ):
         return "shared load-exports race returned"
-    task_failure = any(marker in lowered for marker in FAILURE_MARKERS)
+    task_failure = any(marker in lowered for marker in FAILURE_MARKERS) or (
+        re.search(r"running tasks in[^\n]*\(failed\)", lowered) is not None
+    )
     if payload_ran and (result.returncode != 0 or task_failure):
         return "fail-open: payload ran after an entry-task failure"
     if result.returncode == 0 and not payload_ran:
