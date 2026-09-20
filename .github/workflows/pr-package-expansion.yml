@@ -96,7 +96,15 @@ jobs:
 
   package-expansion-shard:
     name: Manual Package Expansion (bucket ${{ matrix.shard }})
-    timeout-minutes: 20
+    # This is the limit that binds. `EXPANSION_EXECUTION_SECONDS` in
+    # scripts/ci_change_owned.py sits ten minutes under it so a shard that
+    # reaches its deadline still writes and uploads a partial receipt; raising
+    # only the script constant would replace a partial report with no report.
+    # Most of that gap is job setup, which runs before the executor's clock
+    # starts: a measured median of 118s and maximum of 211s across the last 30
+    # dispatches. The two move together. Only this informational lane changes:
+    # `ci.yml`'s required change-owned shards keep their own 60-minute limit.
+    timeout-minutes: 90
     runs-on: ubuntu-latest
     permissions:
       contents: read

@@ -85,8 +85,45 @@ TEST_FUNCTION = re.compile(
 )
 OWNER_FIELDS = {"workflow", "job", "cadence", "reason", "tracking_issue"}
 SIDECAR_NAMES = ("commands.json", "timings.json", "test-list.json", "junit.xml")
-SOFT_BUDGET_SECONDS = 15 * 60
-EXPANSION_EXECUTION_SECONDS = 16 * 60
+# The informational lane's deadline is a backstop against a hung command, not
+# a schedule. Sized at 80 minutes it cuts none of the 38 dispatches measured
+# under the current planner, whose longest shard projects to a median of 1580s
+# and a maximum of 4410s; 45 minutes would still cut six of them and 60 would
+# still cut one. It is deliberately not sized to the plan's per-shard estimate,
+# which is a longest-processing-time balancing weight rather than a predicted
+# duration and runs a median 3.73x over on shards that finish.
+#
+# `timeout-minutes` on the worker job in `pr-package-expansion.yml` is the
+# limit that actually binds, and this one sits ten minutes under it. That gap
+# is consumed by job setup rather than by finalization: checkout, apt, the
+# toolchain, uv, the cache restore and nextest take a measured median of 118s
+# and a maximum of 211s across the last 30 dispatches, and they run before the
+# executor's clock starts, while merging and digesting even a 98 MB JUnit takes
+# under two seconds. Raising this constant alone would move the failure from
+# "partial report written" to "no report at all", so the two move together.
+EXPANSION_EXECUTION_SECONDS = 80 * 60
+# Reporting only since chelis#2248 removed its finding: an early warning that
+# a shard came close to the wall. Derived rather than set independently, so the
+# pair cannot drift apart; the bounds the tests enforce keep the warning window
+# from degenerating at either end.
+#
+# Ten minutes rather than the permitted floor, for a reason the bounds cannot
+# express. `soft_budget_exceeded` is computed once from total elapsed, so a
+# shard the deadline cut always warns whatever the margin; the flag only
+# discriminates among shards that finished, separating "finished inside the
+# last margin seconds" from "finished comfortably". Elapsed time advances in
+# whole commands, so a window narrower than one command is jumped over rather
+# than landed in, and the flag decays into a synonym for `not success`. The
+# longest single command observed to date is about 593s, the
+# `runtime_extent_claim_preparation` run that caused chelis#2251's cut, so 600s
+# clears it by seven seconds. That is thin, and one slower command would make
+# it thinner; the floor is deliberately not anchored to that measurement,
+# because a maximum committed into the repository goes stale the first time a
+# slower target lands.
+EXPANSION_SOFT_BUDGET_MARGIN_SECONDS = 10 * 60
+SOFT_BUDGET_SECONDS = (
+    EXPANSION_EXECUTION_SECONDS - EXPANSION_SOFT_BUDGET_MARGIN_SECONDS
+)
 EXPANSION_REPORT_VERSION = 2
 FAILURE_BASELINE_VERSION = 1
 # The report runs from the candidate checkout, so a new flag in its own

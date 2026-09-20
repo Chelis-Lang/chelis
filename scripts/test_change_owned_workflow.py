@@ -8,6 +8,8 @@ import unittest
 
 import yaml
 
+from scripts import ci_change_owned as owned
+
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/ci.yml"
@@ -254,7 +256,7 @@ def assert_change_owned_topology(
     test.assertEqual(
         expansion["needs"], ["integration-plan"]
     )
-    test.assertEqual(expansion["timeout-minutes"], 20)
+    test.assertEqual(expansion["timeout-minutes"], 90)
     test.assertEqual(expansion["env"]["CC"], "clang")
     test.assertEqual(expansion["env"]["CXX"], "clang++")
     test.assertEqual(expansion["env"]["CHELIS_TEST_CC"], "clang")
@@ -362,6 +364,96 @@ class ChangeOwnedWorkflowTests(unittest.TestCase):
     def test_required_lane_and_informational_trial_are_isolated(self) -> None:
         assert_change_owned_topology(
             self, self.workflow, self.expansion_workflow
+        )
+
+    def test_the_executor_deadline_stays_under_the_job_that_kills_it(
+        self,
+    ) -> None:
+        """The job limit binds; the script's deadline must leave room.
+
+        A shard that reaches `EXPANSION_EXECUTION_SECONDS` still writes its
+        partial receipt and uploads it. A shard that reaches the job's
+        `timeout-minutes` is killed with no receipt at all, so the report
+        loses the completed-group evidence rather than reporting it as unrun.
+        The two numbers therefore move together, and nothing else pins them:
+        the executor's own deadline test patches the constant rather than
+        asserting its value.
+
+        The gap is consumed by job setup, not by finalization. `timeout-minutes`
+        runs from job start while the executor's clock starts at `run-shard`,
+        so checkout, apt, the toolchain, uv, the cache restore and nextest are
+        subtracted first: a measured median of 118s and a maximum of 211s over
+        the last 30 dispatches, against finalization that merges and digests
+        even a 98 MB JUnit in under two seconds. The floor is set well above
+        that observed maximum so one added setup step does not silently return
+        the lane to "job limit kills it, no receipt".
+        """
+        job = self.expansion_workflow["jobs"]["package-expansion-shard"]
+        job_seconds = job["timeout-minutes"] * 60
+        self.assertLess(owned.EXPANSION_EXECUTION_SECONDS, job_seconds)
+        self.assertGreaterEqual(
+            job_seconds - owned.EXPANSION_EXECUTION_SECONDS,
+            8 * 60,
+            "job setup runs before the executor's clock and eats this gap",
+        )
+
+    def test_every_limit_the_topology_doc_states_matches_the_workflow(
+        self,
+    ) -> None:
+        """Reconcile the limits the topology table states against the jobs.
+
+        Nothing otherwise pins the deadline's absolute value, so reverting the
+        constant leaves the suites green while the document still claims the
+        new number. Two of the four figures in that table were also already
+        stale, which is how a wrong one reached a comment in this change.
+
+        One-directional by design: it requires each derived phrase to appear,
+        and cannot forbid a contradictory sentence elsewhere in the document.
+        Making it forbid one would mean deriving every prose mention, which is
+        more than a topology table needs.
+        """
+        doc = (ROOT / "docs/ci_validation.md").read_text()
+        expected = {
+            f"{self.workflow['jobs']['ci-fast']['timeout-minutes']}-minute "
+            f"limit",
+            f"{self.workflow['jobs']['change-owned-shard']['timeout-minutes']}"
+            f"-minute limit each",
+            f"{owned.EXPANSION_EXECUTION_SECONDS // 60}-minute execution "
+            f"deadline inside a "
+            f"{self.expansion_workflow['jobs']['package-expansion-shard']['timeout-minutes']}"
+            f"-minute job limit",
+        }
+        for phrase in sorted(expected):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, doc)
+
+    def test_the_soft_budget_warns_before_the_deadline_it_derives_from(
+        self,
+    ) -> None:
+        """An independent budget drifts into warning about nothing.
+
+        Since chelis#2248 removed its finding the soft budget is an early
+        warning and nothing else, so it is worthless both when every shard
+        exceeds it and when no shard can reach it. Deriving it from the
+        deadline ties the two together, but derivation alone excludes neither
+        degeneracy: a margin approaching the whole deadline warns on every
+        shard, and a margin of one second warns on none. The warning window is
+        therefore bounded as a fraction of the deadline as well.
+        """
+        deadline = owned.EXPANSION_EXECUTION_SECONDS
+        margin = owned.EXPANSION_SOFT_BUDGET_MARGIN_SECONDS
+        self.assertLess(owned.SOFT_BUDGET_SECONDS, deadline)
+        self.assertGreater(owned.SOFT_BUDGET_SECONDS, 0)
+        self.assertEqual(deadline - owned.SOFT_BUDGET_SECONDS, margin)
+        self.assertGreaterEqual(
+            margin,
+            0.05 * deadline,
+            "a window this narrow warns too late to be an early warning",
+        )
+        self.assertLessEqual(
+            margin,
+            0.5 * deadline,
+            "a window over half the run warns on shards that are fine",
         )
 
     def test_missing_managed_python_setup_or_system_invocation_is_rejected(self) -> None:

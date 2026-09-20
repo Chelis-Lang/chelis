@@ -4111,13 +4111,15 @@ class ReportTests(unittest.TestCase):
         The per-shard weight is a serial longest-processing-time input, while
         the executor batches a package's targets into one command, so the
         elapsed time a budget is compared against measures something the
-        estimate never predicted. Every measured shard that exhausted the hard
-        deadline also exceeded this budget, and every shard that exceeded it
-        without the deadline had executed its complete selection, so the
-        comparison reported no defect either way.
+        estimate never predicted. The budget is now derived as a margin below
+        the deadline, so this fixture is a shard inside that margin: it came
+        close to being cut and still covered its whole selection, which is a
+        measurement and not a defect.
         """
         with self.expansion_fixture() as fixture:
-            fixture.receipts[0]["elapsed_seconds"] = 901.0
+            fixture.receipts[0]["elapsed_seconds"] = (
+                owned.SOFT_BUDGET_SECONDS + 1.0
+            )
             fixture.receipts[0]["soft_budget_exceeded"] = True
             owned.attach_receipt_digest(fixture.receipts[0])
             summary = fixture.summarize()
