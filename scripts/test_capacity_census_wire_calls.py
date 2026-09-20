@@ -7,6 +7,7 @@ are hidden in this suite. Each accepted discovery still owes a codec owner.
 
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -182,6 +183,10 @@ class CargoOriginControls(unittest.TestCase):
         )
         self.addCleanup(self.scratch.cleanup)
         self.root = Path(self.scratch.name)
+        (self.root / "Cargo.toml").write_text(
+            '[workspace]\n[workspace.package]\nversion = "0.18.10"\n'
+        )
+        (self.root / "crates/chelis-compiler-api").mkdir(parents=True)
         (self.root / "Cargo.lock").write_text(
             """version = 4
 
@@ -194,11 +199,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 name = "serde_json"
 version = "1.0.149"
 source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "pyo3"
+version = "0.24.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
 """
         )
 
-    def artifact(self, package, target, filename, *, features=()):
-        path = self.root / filename
+    def artifact(self, package, target, filename, *, features=(), directory=None):
+        path = (directory or self.root) / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(filename.encode())
         return {
             "reason": "compiler-artifact",
@@ -224,6 +235,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
                 [{"crate": name, "stable_crate_id": stable_id}],
                 artifacts,
                 require_registry_origin=True,
+            )
+
+    def resolve_construction(
+        self, name, stable_id, artifacts, artifact_ids, artifact_id_calls=None
+    ):
+        from capacity_census_wire_calls import _construction_dependency_artifact
+
+        invocation_target = self.root / "target/compiler-json-invocations/cargo"
+
+        def artifact_id(path, _root):
+            if artifact_id_calls is not None:
+                artifact_id_calls.append(Path(path))
+            return artifact_ids[Path(path).name]
+
+        with patch(
+            "capacity_census_wire_calls._artifact_id",
+            side_effect=artifact_id,
+        ):
+            return _construction_dependency_artifact(
+                self.root,
+                name,
+                [{"crate": name, "stable_crate_id": stable_id}],
+                artifacts,
+                invocation_target,
             )
 
     def test_split_serde_artifacts_resolve_by_locked_package_and_stable_crate_id(self):
@@ -316,6 +351,295 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
                 self.assertRaisesRegex(ValueError, message),
             ):
                 self.resolve("serde_json", "4" * 16, artifacts, artifact_ids)
+
+    def test_construction_dependency_uses_the_compiler_selected_serde_json_artifact(
+        self,
+    ):
+        invocation_target = self.root / "target/compiler-json-invocations/cargo"
+        old = self.artifact(
+            "serde_json@1.0.149",
+            "serde_json",
+            "libserde_json-old.rlib",
+            features=("default", "raw_value", "std"),
+            directory=invocation_target,
+        )
+        current = self.artifact(
+            "serde_json@1.0.149",
+            "serde_json",
+            "libserde_json-current.rlib",
+            features=("default", "preserve_order", "std"),
+            directory=invocation_target,
+        )
+        artifact_ids = {
+            "libserde_json-old.rlib": "1" * 16,
+            "libserde_json-current.rlib": "3" * 16,
+        }
+
+        selected = self.resolve_construction(
+            "serde_json",
+            "3" * 16,
+            [old, current],
+            artifact_ids,
+        )
+        self.assertEqual(selected, Path(current["filenames"][0]))
+
+        for reason, artifacts, ids, message in (
+            (
+                "absent",
+                [],
+                artifact_ids,
+                "unresolved defining serde_json Cargo origin",
+            ),
+            (
+                "ambiguous",
+                [current, {**current}],
+                artifact_ids,
+                "unresolved defining serde_json Cargo origin",
+            ),
+            (
+                "mismatched",
+                [old],
+                artifact_ids,
+                "compiler/Cargo serde_json identity mismatch",
+            ),
+            (
+                "outside invocation target",
+                [
+                    self.artifact(
+                        "serde_json@1.0.149",
+                        "serde_json",
+                        "libserde_json-outside.rlib",
+                    )
+                ],
+                {"libserde_json-outside.rlib": "3" * 16},
+                "missing owned construction artifact serde_json",
+            ),
+        ):
+            with (
+                self.subTest(reason=reason),
+                self.assertRaisesRegex(ValueError, message),
+            ):
+                self.resolve_construction(
+                    "serde_json",
+                    "3" * 16,
+                    artifacts,
+                    ids,
+                )
+
+    def test_construction_dependency_without_compiler_identity_stays_exact(
+        self,
+    ):
+        from capacity_census_wire_calls import _construction_dependency_artifact
+
+        invocation_target = self.root / "target/compiler-json-invocations/cargo"
+        pyo3 = self.artifact(
+            "pyo3@0.24.2",
+            "pyo3",
+            "libpyo3-current.rlib",
+            directory=invocation_target,
+        )
+        with patch(
+            "capacity_census_wire_calls._artifact_id",
+            return_value="8" * 16,
+        ) as artifact_id:
+            selected = _construction_dependency_artifact(
+                self.root,
+                "pyo3",
+                [],
+                [pyo3],
+                invocation_target,
+            )
+        self.assertEqual(selected, Path(pyo3["filenames"][0]))
+        artifact_id.assert_called_once_with(selected, self.root)
+
+        with self.assertRaisesRegex(
+            ValueError, "missing exact construction dependency pyo3"
+        ):
+            _construction_dependency_artifact(
+                self.root,
+                "pyo3",
+                [],
+                [pyo3, {**pyo3}],
+                invocation_target,
+            )
+
+        for name, artifact in (
+            (
+                "pyo3",
+                self.artifact(
+                    "pyo3@0.0.0",
+                    "pyo3",
+                    "libpyo3-unlocked.rlib",
+                    directory=invocation_target,
+                ),
+            ),
+            (
+                "serde_json",
+                self.artifact(
+                    "serde_json@0.0.0",
+                    "serde_json",
+                    "libserde_json-unlocked-construction.rlib",
+                    directory=invocation_target,
+                ),
+            ),
+        ):
+            with (
+                self.subTest(name=name),
+                patch(
+                    "capacity_census_wire_calls._artifact_id"
+                ) as artifact_id,
+                self.assertRaisesRegex(
+                    ValueError, f"missing exact construction dependency {name}"
+                ),
+            ):
+                _construction_dependency_artifact(
+                    self.root,
+                    name,
+                    [],
+                    [artifact],
+                    invocation_target,
+                )
+            artifact_id.assert_not_called()
+
+    def test_construction_dependency_rejects_physical_target_escapes(self):
+        invocation_target = self.root / "target/compiler-json-invocations/cargo"
+        traversal = self.artifact(
+            "serde_json@1.0.149",
+            "serde_json",
+            "../libserde_json-traversal.rlib",
+            directory=invocation_target,
+        )
+        outside = self.root / "outside"
+        outside.mkdir()
+        linked = invocation_target / "linked"
+        linked.parent.mkdir(parents=True, exist_ok=True)
+        linked.symlink_to(outside, target_is_directory=True)
+        symlink = self.artifact(
+            "serde_json@1.0.149",
+            "serde_json",
+            "libserde_json-symlink.rlib",
+            directory=linked,
+        )
+
+        for reason, artifact, artifact_id in (
+            ("parent traversal", traversal, "6" * 16),
+            ("symlink", symlink, "7" * 16),
+        ):
+            artifact_id_calls = []
+            with (
+                self.subTest(reason=reason),
+                self.assertRaisesRegex(
+                    ValueError, "missing owned construction artifact serde_json"
+                ),
+            ):
+                self.resolve_construction(
+                    "serde_json",
+                    artifact_id,
+                    [artifact],
+                    {Path(artifact["filenames"][0]).name: artifact_id},
+                    artifact_id_calls,
+                )
+            self.assertEqual(artifact_id_calls, [])
+
+    def test_construction_dependency_rejects_target_symlink_outside_root(self):
+        invocation_target = self.root / "target/compiler-json-invocations/cargo"
+        outside = self.root.parent / f"{self.root.name}-outside-target"
+        outside.mkdir()
+        self.addCleanup(shutil.rmtree, outside)
+        invocation_target.parent.mkdir(parents=True)
+        invocation_target.symlink_to(outside, target_is_directory=True)
+        artifact = self.artifact(
+            "serde_json@1.0.149",
+            "serde_json",
+            "libserde_json-outside-target.rlib",
+            directory=invocation_target,
+        )
+
+        with (
+            patch("capacity_census_wire_calls._artifact_id") as artifact_id,
+            self.assertRaisesRegex(
+                ValueError, "missing owned construction artifact serde_json"
+            ),
+        ):
+            from capacity_census_wire_calls import _construction_dependency_artifact
+
+            _construction_dependency_artifact(
+                self.root,
+                "serde_json",
+                [{"crate": "serde_json", "stable_crate_id": "9" * 16}],
+                [artifact],
+                invocation_target,
+            )
+        artifact_id.assert_not_called()
+
+    def test_construction_dependency_requires_exact_compiler_api_package(self):
+        from capacity_census_wire_calls import _construction_dependency_artifact
+
+        invocation_target = self.root / "target/compiler-json-invocations/cargo"
+        expected = self.artifact(
+            "chelis-compiler-api@0.18.10",
+            "chelis_compiler_api",
+            "libchelis_compiler_api.rlib",
+            directory=invocation_target,
+        )
+        expected["package_id"] = (
+            f"path+{(self.root / 'crates/chelis-compiler-api').as_uri()}#0.18.10"
+        )
+        impostor = self.artifact(
+            "evil-provider@0.1.0",
+            "chelis_compiler_api",
+            "libchelis_compiler_api-evil.rlib",
+            directory=invocation_target,
+        )
+        impostor["package_id"] = (
+            f"path+{(self.root / 'evil-provider').as_uri()}#0.1.0"
+        )
+
+        for definitions, message in (
+            ([], "missing exact construction dependency chelis_compiler_api"),
+            (
+                [
+                    {
+                        "crate": "chelis_compiler_api",
+                        "stable_crate_id": "a" * 16,
+                    }
+                ],
+                "unresolved defining chelis_compiler_api Cargo origin",
+            ),
+        ):
+            with (
+                self.subTest(definitions=definitions),
+                patch(
+                    "capacity_census_wire_calls._artifact_id"
+                ) as artifact_id,
+                self.assertRaisesRegex(ValueError, message),
+            ):
+                _construction_dependency_artifact(
+                    self.root,
+                    "chelis_compiler_api",
+                    definitions,
+                    [impostor],
+                    invocation_target,
+                )
+            artifact_id.assert_not_called()
+
+        with patch(
+            "capacity_census_wire_calls._artifact_id",
+            return_value="a" * 16,
+        ):
+            selected = _construction_dependency_artifact(
+                self.root,
+                "chelis_compiler_api",
+                [
+                    {
+                        "crate": "chelis_compiler_api",
+                        "stable_crate_id": "a" * 16,
+                    }
+                ],
+                [impostor, expected],
+                invocation_target,
+            )
+        self.assertEqual(selected, Path(expected["filenames"][0]))
 
 
 class InvocationControls(unittest.TestCase):
