@@ -2022,22 +2022,16 @@ cadence = "pull_request and push"
 reason = "the exact --fast stage list, its ordering and its summary run in script-unit"
 tracking_issue = "chelis#1824"
 
-# The rows below own generated artifacts whose only CI consumer runs nightly.
-# That is the honest disposition rather than a gap being closed: no
-# per-pull-request job re-derives any of them, so a stale one is caught the
-# next morning. Each names the job that goes red when the artifact is wrong,
-# not the job that tests the generator which produced it. One of them cannot
-# be dispatched against a candidate at all; its own reason says which and
-# why. chelis#2261 tracks promoting these to per-pull-request coverage.
-[[path_rule]]
-prefix = "spec/design/loud_unsupported_issue_manifest.json"
-disposition = "owner"
-workflow = "loud-unsupported-nightly.yml"
-job = "standing-rejection-liveness"
-cadence = "daily 06:17 UTC and workflow_dispatch"
-reason = "validate_rejection_issue_manifest.py re-derives this manifest from production sources and fails when the checked-in rows disagree; the job checks out main, so a workflow_dispatch validates main rather than the candidate that changed it"
-tracking_issue = "chelis#2250"
-
+# The rows below own the opaque-invariants corpus, whose only CI consumer
+# runs nightly: `chelis-cli::opaque_corpus_gate` runs each committed program
+# against the live binary, and it is not a standing_target, so it reaches CI
+# only through the nightly full workspace. `scripts/test_regen_all.py` does
+# run per pull request, but its corpus tests exercise
+# `regen_all.compare_corpus_trees` against synthetic trees rather than the
+# committed one, so they defend the comparison and not the artifact. That
+# distinction is the rule for these rows: name the job that goes red when the
+# artifact is wrong, not the job that tests the generator or the checker.
+# chelis#2261 tracks promoting them to per-pull-request coverage.
 [[path_rule]]
 prefix = "tests/corpus/opaque_invariants/manifest.json"
 disposition = "owner"
