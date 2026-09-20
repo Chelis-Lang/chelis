@@ -5180,7 +5180,7 @@ pub fn reject_unsupported_metal_ops(dag: &Dag) -> std::result::Result<(), Compil
                 ),
                 "metal",
                 chelis_types::unimplemented_rejection!(
-                    1284,
+                    2266,
                     "the Metal exact comparison, Bool8 logical, and raw stored-bit where kernels are not implemented; use `--target c` or `--target hip`"
                 ),
             ));

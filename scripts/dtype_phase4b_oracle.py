@@ -3197,7 +3197,7 @@ def validate_schema_and_consumers(
                 "product implementation owner",
             ),
             (
-                "Unimplemented { issue: #1284, diagnostic_kind: UnsupportedFeature }",
+                "Unimplemented { issue: #2266, diagnostic_kind: UnsupportedFeature }",
                 "logical implementation owner",
             ),
             (

@@ -86,7 +86,7 @@ def source_contracts() -> tuple[SourceContract, ...]:
             "crates/chelis-compiler-api/src/compiler.rs",
             (
                 "RiscOp::Compare(kind) => Some(format!",
-                "chelis_types::unimplemented_rejection!(\n                    1284,",
+                "chelis_types::unimplemented_rejection!(\n                    2266,",
                 "use `--target c` or `--target hip`",
             ),
         ),
@@ -95,7 +95,7 @@ def source_contracts() -> tuple[SourceContract, ...]:
             "crates/chelis-backend-metal/src/emit.rs",
             (
                 "reject_direct_nonnumeric(dag)?;",
-                "Metal direct nonnumeric node {id} reached emission after the #1284 typed capability rejection",
+                "Metal direct nonnumeric node {id} reached emission after the #2266 typed capability rejection",
             ),
         ),
         SourceContract(
