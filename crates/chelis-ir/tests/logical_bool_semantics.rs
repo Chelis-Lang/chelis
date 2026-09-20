@@ -1432,6 +1432,69 @@ fn comparisons_have_zero_cotangents_logicals_reject_and_where_routes_g() {
 }
 
 #[test]
+fn logical_random_activation_is_control_only_during_grad() {
+    let mut dag = Dag::new();
+    let scalar_bool = ty(&[], Prim::Bool);
+    let scalar_f64 = ty(&[], Prim::F64);
+    let left = dag.add_node(
+        RiscOp::Load {
+            name: "left".into(),
+        },
+        vec![],
+        scalar_bool.clone(),
+        None,
+    );
+    let right = dag.add_node(
+        RiscOp::Load {
+            name: "right".into(),
+        },
+        vec![],
+        scalar_bool.clone(),
+        None,
+    );
+    let activation = dag.add_node(
+        RiscOp::Logical(LogicalKind::And),
+        vec![left, right],
+        scalar_bool,
+        None,
+    );
+    let template = dag.add_node(
+        RiscOp::Load {
+            name: "template".into(),
+        },
+        vec![],
+        scalar_f64.clone(),
+        None,
+    );
+    let output = dag.add_node(
+        RiscOp::UniformLike {
+            low: -1.0,
+            high: 1.0,
+            seed: 17,
+        },
+        vec![template, activation],
+        scalar_f64,
+        None,
+    );
+
+    let differentiated = grad_dag_checked(&dag, output, &[template])
+        .unwrap_or_else(|error| panic!("random path activation leaked into float AD: {error}"));
+    let values = eval_tensor(
+        &differentiated.dag,
+        &UnordMap::from([
+            ("left".into(), bool_value(vec![], vec![1])),
+            ("right".into(), bool_value(vec![], vec![1])),
+            ("template".into(), value(Prim::F64, vec![], vec![5.0])),
+        ]),
+    )
+    .unwrap();
+    assert_eq!(
+        values[&differentiated.grad_nodes[&template]].to_f64_lossy_vec(),
+        vec![0.0]
+    );
+}
+
+#[test]
 fn comparison_logical_and_where_are_fusion_barriers_and_vmap_shape_preserving() {
     let mut dag = Dag::new();
     let data_ty = ty(&[2], Prim::F32);

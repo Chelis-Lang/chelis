@@ -561,7 +561,10 @@ jobs:
       # ----------------------------------------------------------------------
       # Keep reef.toml dependencies distinct from image tool packages in the
       # matrix, but build and verify one exact source bundle for the image.
-      # A failure here is genuine source/API drift and is reported as such.
+      # The helper returns status 2 when authenticated source acquisition or
+      # exact-SHA verification fails; that is infrastructure, not language
+      # drift. Failures after source verification remain genuine source/API
+      # drift and keep the normal tracking-issue path.
       - name: Build and install exact Docker dependency sources
         id: docker_dependencies
         if: matrix.type == 'docker'
@@ -571,12 +574,24 @@ jobs:
         run: |
           set -euo pipefail
           deps_root="$RUNNER_TEMP/drift-dependencies-${{ matrix.repo }}"
+          status=0
+          set +e
           python3 "$CHELIS_TOOLCHAIN/scripts/drift_prepare_dependencies.py" \
             --workspace "$deps_root" \
             --shell shell \
             --compiler-version "${{ needs.build-chelis.outputs.chelis_version }}" \
             ${{ matrix.reef_deps }} ${{ matrix.tool_deps }}
-          echo "DRIFT_DEPENDENCIES=$deps_root" >> "$GITHUB_ENV"
+          status=$?
+          set -e
+          if [ "$status" -eq 2 ]; then
+            echo "failure_kind=setup" >> "$GITHUB_OUTPUT"
+          elif [ "$status" -ne 0 ]; then
+            echo "failure_kind=drift" >> "$GITHUB_OUTPUT"
+          else
+            echo "failure_kind=none" >> "$GITHUB_OUTPUT"
+            echo "DRIFT_DEPENDENCIES=$deps_root" >> "$GITHUB_ENV"
+          fi
+          exit "$status"
 
       # Image assembly is infrastructure-only. It contains no release Chelis
       # compiler and executes no hello-chelis source. A failure is withheld
@@ -706,7 +721,8 @@ jobs:
         if: >-
           always() && (
             matrix.type != 'docker' ||
-            steps.docker_dependencies.outcome == 'failure' ||
+            (steps.docker_dependencies.outcome == 'failure' &&
+             steps.docker_dependencies.outputs.failure_kind == 'drift') ||
             steps.docker_gate.outcome == 'success' ||
             steps.docker_gate.outcome == 'failure'
           )
@@ -715,7 +731,8 @@ jobs:
           SHELL_REPO: ${{ matrix.repo }}
           JOB_STATUS: >-
             ${{ matrix.type == 'docker' &&
-                (steps.docker_dependencies.outcome == 'failure' ||
+                ((steps.docker_dependencies.outcome == 'failure' &&
+                  steps.docker_dependencies.outputs.failure_kind == 'drift') ||
                  steps.docker_gate.outcome == 'failure') &&
                 'failure' || job.status }}
           HEAD_VERSION: ${{ needs.build-chelis.outputs.chelis_version }}
@@ -726,7 +743,8 @@ jobs:
       - name: Fail Docker language drift
         if: >-
           always() && matrix.type == 'docker' &&
-          (steps.docker_dependencies.outcome == 'failure' ||
+          ((steps.docker_dependencies.outcome == 'failure' &&
+            steps.docker_dependencies.outputs.failure_kind == 'drift') ||
            steps.docker_gate.outcome == 'failure')
         run: |
           echo "::error::hello-chelis has source/API drift against Chelis HEAD"
@@ -735,10 +753,14 @@ jobs:
       - name: Fail Docker infrastructure
         if: >-
           always() && matrix.type == 'docker' &&
-          steps.docker_dependencies.outcome != 'failure' &&
-          (steps.docker_image.outcome != 'success' ||
-           steps.docker_gate.outcome == 'skipped' ||
-           steps.docker_gate.outcome == 'cancelled')
+          ((steps.docker_dependencies.outcome == 'failure' &&
+            steps.docker_dependencies.outputs.failure_kind != 'drift') ||
+           steps.docker_dependencies.outcome == 'skipped' ||
+           steps.docker_dependencies.outcome == 'cancelled' ||
+           (steps.docker_dependencies.outcome == 'success' &&
+            (steps.docker_image.outcome != 'success' ||
+             steps.docker_gate.outcome == 'skipped' ||
+             steps.docker_gate.outcome == 'cancelled')))
         run: |
           echo "::error::neutral HEAD Docker setup failed before a drift verdict"
           exit 1

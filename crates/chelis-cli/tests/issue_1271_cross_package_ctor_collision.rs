@@ -93,11 +93,25 @@ impl Built {
             .ok()
     }
 
-    /// Link the emitted unit against a driver that calls `entry_symbol`
+    /// Link the emitted unit against a driver that calls `entry_source_name`
     /// and prints its `f32` result, run it, and return stdout. `None`
     /// when no host compiler is available.
-    fn compile_and_run(&self, entry_symbol: &str) -> Option<String> {
+    fn compile_and_run(&self, entry_source_name: &str) -> Option<String> {
         let source = self.source();
+        let unit_header = self.unit.replace(".c", ".h");
+        let header = fs::read_to_string(self.out_dir.join(&unit_header))
+            .expect("generated declaration header");
+        let declarations =
+            chelis_backend_c::GeneratedHeader::parse(&header).expect("generated header metadata");
+        declarations
+            .validate_source(source)
+            .expect("generated header must agree with generated source");
+        let entry_symbol = declarations
+            .declaration(entry_source_name)
+            .unwrap_or_else(|| {
+                panic!("generated header has no declaration for `{entry_source_name}`")
+            })
+            .symbol();
         let toolchain = chelis_backend_c::toolchain::runtime_toolchain(
             chelis_backend_c::toolchain::CodegenRequirements {
                 wants_openmp: true,
@@ -118,7 +132,6 @@ impl Built {
             )
             .expect("rename generated observation driver for the ABI probe");
         }
-        let unit_header = self.unit.replace(".c", ".h");
         write_file(
             &self.out_dir.join("driver.c"),
             &format!(
@@ -290,11 +303,14 @@ fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
     let (prefix, _params) = signature
         .split_once('(')
         .expect("test signature contains parameter list");
+    let (_return_type, name) = prefix
+        .rsplit_once(' ')
+        .expect("test signature contains a return type and function name");
     // chelis#1820: located by NAME, not by the full signature. chelis#1799
     // added a `chelis_rng_state` parameter to every host body, and the old
     // full-signature needle then missed the definition and failed before this
     // row read anything. The parameter list is not what the row asserts.
-    let name = format!("{prefix}__chelis_owned_body");
+    let name = format!("{}__chelis_owned_body", common::authored_c_symbol(name));
     let rest = common::host_body_definition(source, &name);
     let end = rest
         .find("\n}\n")

@@ -173,7 +173,7 @@ fn emitted_function<'a>(emitted: &'a str, signature: &str) -> &'a str {
     // added a `chelis_rng_state` parameter to every host body, and the old
     // full-signature needle then missed the definition and failed before this
     // row counted anything. The parameter list is not what the row asserts.
-    let rest = common::host_body_definition(emitted, &format!("{name}__chelis_owned_body"));
+    let rest = common::authored_host_body_definition(emitted, name);
     let end = rest.find("\n}").expect("function is closed");
     &rest[..end]
 }

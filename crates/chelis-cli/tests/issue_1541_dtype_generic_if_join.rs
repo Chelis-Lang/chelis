@@ -36,7 +36,10 @@ use tempfile::tempdir;
 
 #[path = "common/mod.rs"]
 mod common;
-use common::{build_and_run, gcc_available, parse_tensor_data, write_file};
+use common::{
+    authored_c_symbol, build_and_run, gcc_available, host_body_definition, parse_tensor_data,
+    write_file,
+};
 
 /// The reproducer exactly as chelis#1541 reports it: an unbounded binder `p`
 /// in the precision slot, joined through `if`/`then`/`else`.
@@ -235,12 +238,16 @@ fn the_polymorphic_definition_is_not_emitted_standalone() {
 
     let emitted =
         std::fs::read_to_string(out_dir.join("issue_1541_emission.c")).expect("emitted C source");
-    // The strong form: the generic callee's name must not appear anywhere in
-    // the emitted translation unit. An earlier version of this test scanned for
-    // two specific spellings of a definition line, and no line in the output
-    // could ever match either, so it passed without testing anything.
+    // The generic callee's public compiler-owned symbol must not appear in the
+    // emitted translation unit. Its concrete monomorphizations use distinct
+    // internal names derived from the same authored stem.
+    let generic_symbol = authored_c_symbol("pick");
     assert!(
-        !emitted.contains("pick"),
+        !emitted.lines().any(|line| {
+            let line = line.trim_start();
+            line.contains(&format!("{generic_symbol}("))
+                || line.contains(&format!("{generic_symbol}__chelis_owned_body("))
+        }),
         "the polymorphic callee `pick` reached codegen; it must be monomorphized \
          into each concrete caller, not emitted standalone"
     );
@@ -248,11 +255,10 @@ fn the_polymorphic_definition_is_not_emitted_standalone() {
     // And the concrete entries must be present as C *definitions*, not merely
     // as substrings of a printf format string.
     for entry in ["doubled_then_f32", "doubled_else_f64"] {
-        let defined = emitted
-            .lines()
-            .any(|line| line.contains(&format!("{entry}(")) && line.contains("chelis_tensor"));
+        let body = format!("{}__chelis_owned_body", authored_c_symbol(entry));
+        let definition = host_body_definition(&emitted, &body);
         assert!(
-            defined,
+            definition.contains("chelis_tensor"),
             "emitted C has no `chelis_tensor`-returning definition for `{entry}`"
         );
     }

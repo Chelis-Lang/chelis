@@ -3133,7 +3133,7 @@ _DENSE_GATHER_REGION_BARRIER_REMOVED = """\
 _LOCAL_ASCRIPTION_PROVENANCE_SOURCE = REPO_ROOT / "crates/chelis-surf/src/desugar.rs"
 _LOCAL_ASCRIPTION_PROVENANCE = """\
                         let value = with_metadata_value(
-                            inject_type_metadata(value, desugar_type(ty)),
+                            inject_type_metadata(value, self.desugar_body_annotation_type(ty)),
                             M::SurfBindingType(Spanned::new(
                                 BindingTypeOrigin::Explicit,
                                 type_expr_span(ty),
@@ -3142,7 +3142,7 @@ _LOCAL_ASCRIPTION_PROVENANCE = """\
 """
 _LOCAL_ASCRIPTION_PROVENANCE_REMOVED = """\
                         let value = with_metadata_value(
-                            inject_type_metadata(value, desugar_type(ty)),
+                            inject_type_metadata(value, self.desugar_body_annotation_type(ty)),
                             M::SurfBindingType(Spanned::new(
                                 BindingTypeOrigin::Inferred,
                                 type_expr_span(ty),

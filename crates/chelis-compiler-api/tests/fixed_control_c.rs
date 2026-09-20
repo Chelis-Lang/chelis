@@ -1,6 +1,5 @@
 //! Native execution of the sealed, unfused fixed-control backend entry.
 //! These are not compiler-API source admission or certificate-transport tests.
-#[allow(dead_code)]
 mod ownership_support;
 
 use chelis_ir::dag::{DimInfo, TensorType};
@@ -140,6 +139,7 @@ fn native_empty_and_zero_rate_calls_consume_one_ordinal_before_the_next_draw() {
                 )
                 .unwrap();
                 assert_eq!(artifact.input_labels, ["prefix", "x"]);
+                let generated = ownership_support::GeneratedProgram::from_codegen(&artifact);
                 let driver = format!(
                     r#"
 int main(void) {{
@@ -168,7 +168,7 @@ int main(void) {{
 }}
 "#
                 );
-                ownership_support::balanced(&ownership_support::run(&artifact.c_source, &driver));
+                ownership_support::balanced(&ownership_support::run(&generated, &driver));
             }
         }
     }
@@ -232,6 +232,7 @@ fn sealed_native_dropout_matches_evaluator_and_restarts_each_public_invocation()
                 Default::default(),
             )
             .unwrap();
+            let generated = ownership_support::GeneratedProgram::from_codegen(&artifact);
             let driver = format!(
                 r#"
 int main(void) {{
@@ -260,14 +261,14 @@ int main(void) {{
 "#,
                 capacity = count.max(1),
             );
-            ownership_support::balanced(&ownership_support::run(&artifact.c_source, &driver));
+            ownership_support::balanced(&ownership_support::run(&generated, &driver));
             if prim == Prim::F32 && count == 32 {
                 let reciprocal = artifact.c_source.replace(
                     " / chelis_f32_from_bits(0x3f666666u)",
                     " * (1.0f / chelis_f32_from_bits(0x3f666666u))",
                 );
                 assert_ne!(reciprocal, artifact.c_source);
-                assert_native_value_failure(&reciprocal, &driver);
+                assert_native_value_failure(generated.with_source(reciprocal), &driver);
             }
         }
     }
@@ -330,6 +331,7 @@ fn native_replay_nested_restore_and_next_uniform_follow_source_steps() {
             Default::default(),
         )
         .unwrap();
+        let generated = ownership_support::GeneratedProgram::from_codegen(&artifact);
         let driver = format!(
             r#"
 int main(void) {{
@@ -352,7 +354,7 @@ int main(void) {{
 }}
 "#
         );
-        ownership_support::balanced(&ownership_support::run(&artifact.c_source, &driver));
+        ownership_support::balanced(&ownership_support::run(&generated, &driver));
         // These native corruptions must be caught by complete value comparison
         // and by the existing ownership ledger, not by emitted-text assertions.
         if body.contains("dead =") {
@@ -361,21 +363,21 @@ int main(void) {{
                 "(__chelis_fixed_counter++ + 1ULL)",
             );
             assert_ne!(wrong_draw, artifact.c_source);
-            assert_native_value_failure(&wrong_draw, &driver);
+            assert_native_value_failure(generated.with_source(wrong_draw), &driver);
             let release = artifact
                 .c_source
                 .lines()
                 .find(|line| line.contains("chelis_tensor_release(t"))
                 .expect("actual owned intermediate cleanup");
             let missing_cleanup = artifact.c_source.replacen(release, "", 1);
-            let leaked = ownership_support::run(&missing_cleanup, &driver);
+            let leaked = ownership_support::run(&generated.with_source(missing_cleanup), &driver);
             assert!(leaked["live_owners"].as_u64().unwrap() > 0);
         }
     }
 }
 
-fn assert_native_value_failure(source: &str, driver: &str) {
-    let failure = std::panic::catch_unwind(|| ownership_support::run(source, driver))
+fn assert_native_value_failure(source: ownership_support::GeneratedProgram, driver: &str) {
+    let failure = std::panic::catch_unwind(|| ownership_support::run(&source, driver))
         .expect_err("mutation must fail the executed C value assertion");
     let message = failure
         .downcast_ref::<String>()
@@ -614,6 +616,7 @@ fn native_source_ad_replays_signed_and_nonfinite_stored_words() {
             Default::default(),
         )
         .unwrap();
+        let generated = ownership_support::GeneratedProgram::from_codegen(&artifact);
         let mut labels = artifact.input_labels.clone();
         labels.sort();
         assert_eq!(labels, ["weights", "x"]);
@@ -624,7 +627,7 @@ fn native_source_ad_replays_signed_and_nonfinite_stored_words() {
             [0, if class == 0 { 0 } else { words.doubled[class] }, 0, 0]
         });
         let driver = special_word_driver(&words, &artifact.input_labels, expected);
-        ownership_support::balanced(&ownership_support::run(&artifact.c_source, &driver));
+        ownership_support::balanced(&ownership_support::run(&generated, &driver));
         let value = if matches!(words.prim, Prim::F16 | Prim::Bf16) {
             "__av".into()
         } else {
@@ -638,7 +641,7 @@ fn native_source_ad_replays_signed_and_nonfinite_stored_words() {
         let mutant = corrupt_contiguous_dropout(&artifact.c_source, replay, |line| {
             line.replace(&format!("({value}) /"), &format!("{abs}({value}) /"))
         });
-        assert_native_value_failure(&mutant, &driver);
+        assert_native_value_failure(generated.with_source(mutant), &driver);
     }
 }
 
@@ -660,6 +663,7 @@ fn native_special_words_reject_mask_sign_and_nan_corruption() {
                 Default::default(),
             )
             .unwrap();
+            let generated = ownership_support::GeneratedProgram::from_codegen(&artifact);
             assert_eq!(artifact.input_labels, ["x"]);
             let expected = std::array::from_fn(|offset| {
                 std::array::from_fn(|i| {
@@ -673,7 +677,7 @@ fn native_special_words_reject_mask_sign_and_nan_corruption() {
                 })
             });
             let driver = special_word_driver(&words, &artifact.input_labels, expected);
-            ownership_support::balanced(&ownership_support::run(&artifact.c_source, &driver));
+            ownership_support::balanced(&ownership_support::run(&generated, &driver));
             if rate == "0.5" {
                 let value = if matches!(words.prim, Prim::F16 | Prim::Bf16) {
                     "__av".into()
@@ -690,14 +694,14 @@ fn native_special_words_reject_mask_sign_and_nan_corruption() {
                 let masked = corrupt_contiguous_dropout(&artifact.c_source, node, |line| {
                     line.replace("? 0 :", &format!("? {abs}(0.0f * ({value})) :"))
                 });
-                assert_native_value_failure(&masked, &driver);
+                assert_native_value_failure(generated.with_source(masked), &driver);
                 let sign = corrupt_contiguous_dropout(&artifact.c_source, node, |line| {
                     line.replace(
                         &format!("({value}) /"),
                         &format!("(({value}) == 0 ? 0 : ({value})) /"),
                     )
                 });
-                assert_native_value_failure(&sign, &driver);
+                assert_native_value_failure(generated.with_source(sign), &driver);
                 let nan = corrupt_contiguous_dropout(&artifact.c_source, node, |line| {
                     format!(
                         "{line}\n{{ {ctype} bits; memcpy(&bits, &__out_{id}[i], sizeof(bits)); if (bits == UINT64_C(0x{canonical:x})) {{ bits ^= 1; memcpy(&__out_{id}[i], &bits, sizeof(bits)); }} }}",
@@ -706,7 +710,7 @@ fn native_special_words_reject_mask_sign_and_nan_corruption() {
                         canonical = words.input[5]
                     )
                 });
-                assert_native_value_failure(&nan, &driver);
+                assert_native_value_failure(generated.with_source(nan), &driver);
             }
         }
     }
@@ -783,18 +787,19 @@ fn native_source_ad_replay_finalizes_nonbinary_rate_division() {
             Default::default(),
         )
         .unwrap();
+        let generated = ownership_support::GeneratedProgram::from_codegen(&artifact);
         let mut labels = artifact.input_labels.clone();
         labels.sort();
         assert_eq!(labels, ["weights", "x"]);
         let driver = native_word_driver(&words, &artifact.input_labels, &input, &expected);
-        ownership_support::balanced(&ownership_support::run(&artifact.c_source, &driver));
+        ownership_support::balanced(&ownership_support::run(&generated, &driver));
 
         let denominator = literal(denominator);
         let reciprocal = literal(reciprocal);
         let multiplied = corrupt_contiguous_dropout(&artifact.c_source, replay, |line| {
             line.replace(&format!(" / {denominator}"), &format!(" * {reciprocal}"))
         });
-        assert_native_value_failure(&multiplied, &driver);
+        assert_native_value_failure(generated.with_source(multiplied), &driver);
 
         let wrong_divisor = match words.prim {
             // Omit the required f16/bf16 denominator storage finalization.
@@ -808,7 +813,7 @@ fn native_source_ad_replay_finalizes_nonbinary_rate_division() {
         let divisor = corrupt_contiguous_dropout(&artifact.c_source, replay, |line| {
             line.replace(&format!(" / {denominator}"), &format!(" / {wrong_divisor}"))
         });
-        assert_native_value_failure(&divisor, &driver);
+        assert_native_value_failure(generated.with_source(divisor), &driver);
     }
 }
 
@@ -857,6 +862,7 @@ fn native_mask_threshold_uses_arithmetic_width_and_strict_less_than() {
                 Default::default(),
             )
             .unwrap();
+            let generated = ownership_support::GeneratedProgram::from_codegen(&artifact);
             assert_eq!(artifact.input_labels, ["x"]);
             let mask = if words.prim == Prim::F64 {
                 wide_mask
@@ -872,12 +878,12 @@ fn native_mask_threshold_uses_arithmetic_width_and_strict_less_than() {
                 }
             })];
             let driver = native_word_driver(&words, &artifact.input_labels, &input, &expected);
-            ownership_support::balanced(&ownership_support::run(&artifact.c_source, &driver));
+            ownership_support::balanced(&ownership_support::run(&generated, &driver));
             if case == 1 {
                 let inclusive = corrupt_contiguous_dropout(&artifact.c_source, node, |line| {
                     line.replace(" < ", " <= ")
                 });
-                assert_native_value_failure(&inclusive, &driver);
+                assert_native_value_failure(generated.with_source(inclusive), &driver);
             }
             if case == 0 {
                 let (from, to) = if words.prim == Prim::F64 {
@@ -888,7 +894,7 @@ fn native_mask_threshold_uses_arithmetic_width_and_strict_less_than() {
                 let width = corrupt_contiguous_dropout(&artifact.c_source, node, |line| {
                     line.replace(from, to)
                 });
-                assert_native_value_failure(&width, &driver);
+                assert_native_value_failure(generated.with_source(width), &driver);
             }
             if case == 3 && matches!(words.prim, Prim::F16 | Prim::Bf16) {
                 let unit =
@@ -897,7 +903,7 @@ fn native_mask_threshold_uses_arithmetic_width_and_strict_less_than() {
                 let storage = corrupt_contiguous_dropout(&artifact.c_source, node, |line| {
                     line.replace(unit, &rounded)
                 });
-                assert_native_value_failure(&storage, &driver);
+                assert_native_value_failure(generated.with_source(storage), &driver);
             }
         }
     }
@@ -961,6 +967,7 @@ fn native_dropout_preserves_signed_zero_and_nonfinite_classes() {
             Default::default(),
         )
         .unwrap();
+        let generated = ownership_support::GeneratedProgram::from_codegen(&artifact);
         let bits = |values: &[f32]| {
             values
                 .iter()
@@ -1002,7 +1009,7 @@ int main(void) {{
             input = bits(&input),
             expected = bits(&expected),
         );
-        ownership_support::balanced(&ownership_support::run(&artifact.c_source, &driver));
+        ownership_support::balanced(&ownership_support::run(&generated, &driver));
     }
 }
 

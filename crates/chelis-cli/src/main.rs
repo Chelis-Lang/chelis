@@ -10334,6 +10334,7 @@ fn cmd_build_c(
         result
             .c_source
             .push_str(&tensor_manifest_observation_driver(func_name, &root_names));
+        result.reseal_artifact(func_name)?;
     }
     cmd_build_c_result(result, c_name, output, &symbolic_dims, requires_main)
 }

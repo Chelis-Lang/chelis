@@ -165,8 +165,18 @@ Other stems become `chelis_file_` followed by the hexadecimal filename bytes.
 For external calls, use the generated header's declaration. Authored function
 definitions use compiler-reserved `chelis_fn_` symbols followed by their lowercase
 UTF-8 bytes in hexadecimal (except source-level `main`, which is module-qualified);
-their source spelling is not a C linker name. These encodings keep `a-b.ch`, `a_b.ch`,
-and a literal `chelis_file_612d62.ch` distinct.
+their source spelling is not a C linker name. Generated header declarations and
+externally linked authored definitions carry a versioned program-identity and export
+envelope. Structural header records bind each source identity, canonical symbol, exact
+declaration bytes, external linkage, and one AST-identified function definition,
+including multiline and comment-separated formatting. Each definition commitment
+covers its exact bytes plus the source-local preprocessing context, so adding an
+indirect macro alias cannot retarget its body. The header separately binds the complete
+generated source digest. Missing, added, reformatted, macro-rebound, internally linked,
+or reassociated exports fail validation before native execution; every other external
+function is rejected, while `static` helpers remain private. These encodings keep
+`a-b.ch`, `a_b.ch`, and a literal
+`chelis_file_612d62.ch` distinct.
 
 When the compiled C program hits a runtime arithmetic trap, output from
 preceding effects is retained even when redirected to a pipe or file. The

@@ -19,6 +19,7 @@ NIGHTLY_CLASSES = frozenset({
     "test_capacity_census_graph.ActualRustdoc",
     "test_capacity_census_wire_adapters.ConstGenericGraph",
     "test_capacity_census_wire_adapters.ActualCanonicalCodec",
+    "test_capacity_census_wire_calls.CargoOriginControls",
     "test_capacity_census_wire_calls.DriverBuildControls",
     "test_capacity_census_wire_calls.InvocationControls",
     "test_capacity_census_wire_local.LocalPublicationControls",

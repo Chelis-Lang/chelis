@@ -733,6 +733,51 @@ class SchemaTests(unittest.TestCase):
         wire_census = by_path["spec/design/capacity_census_wire.json"]
         self.assertEqual(wire_census.disposition, "packages")
         self.assertEqual(wire_census.packages, ("chelis-compiler-api",))
+        census_owner_paths = (
+            "scripts/capacity_census_wire_calls.py",
+            "scripts/test_capacity_census_wire_calls.py",
+        )
+        census_owner_rules = [by_path[path] for path in census_owner_paths]
+        for path, rule in zip(census_owner_paths, census_owner_rules, strict=True):
+            with self.subTest(path=path):
+                self.assertEqual(rule.disposition, "owner")
+                self.assertEqual(
+                    (
+                        rule.owner.workflow,
+                        rule.owner.job,
+                        rule.owner.cadence,
+                        rule.owner.tracking_issue,
+                    ),
+                    (
+                        "heavy-e2e.yml",
+                        "dtype-phase3-oracle",
+                        "daily and workflow_dispatch",
+                        "chelis#2048",
+                    ),
+                )
+        script_runner = by_path["scripts/ci_script_tests.py"]
+        self.assertEqual(
+            (
+                script_runner.owner.workflow,
+                script_runner.owner.job,
+                script_runner.owner.cadence,
+                script_runner.owner.tracking_issue,
+            ),
+            ("ci.yml", "script-unit", "pull_request and push", "chelis#1824"),
+        )
+        for neighbor in (
+            "scripts/capacity_census_wire_calls_extra.py",
+            "scripts/test_capacity_census_wire_calls_extra.py",
+            "scripts/ci_script_tests_extra.py",
+        ):
+            with self.subTest(neighbor=neighbor):
+                self.assertFalse(
+                    any(
+                        rule.matches(neighbor)
+                        for rule in (*census_owner_rules, script_runner)
+                    ),
+                    f"{neighbor} inherited an exact CI owner",
+                )
         timing_baseline = by_path["scripts/test_timing_baseline.json"]
         self.assertEqual(timing_baseline.prefix, "scripts/test_timing_baseline.json")
         self.assertEqual(timing_baseline.disposition, "owner")

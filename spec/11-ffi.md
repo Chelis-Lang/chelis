@@ -187,13 +187,18 @@ gaps of the legacy symbol mapping, accepted on the C-source surface where the
 caller owns the symbol choice; the strict callable surface is immune because it
 always emits `chelis_main`.
 
-The `chelis build` object-mode lane is a separate emitter with its own symbol
-rule, unchanged by the above: when object-mode host emission exports a
-source-level `def main(...)`, the generated C symbol is renamed to the
-file-stem-derived `<program>__main` so downstream C or C++ drivers can still
-define their own process entry `main(void)`; other def names route through the
-chelis#840 `c_ident` mapping (`emitted_function_name` in
-`chelis-backend-c/src/host_emit.rs`).
+The `chelis build` object-mode lane follows [01-CID-1] and spec/08 §2.
+Source-level `def main(...)` uses the module-qualified `<module>__main` symbol,
+including after Reef/package qualification, so a downstream C or C++ driver
+can define its own process entry `main(void)`. Every other authored function
+uses the universal `chelis_fn_<lowercase-hex-UTF-8>` symbol. The generated
+header and source carry the versioned program-identity/export-block envelope
+and exact source digest required by [01-CID-1]. Each public declaration is
+structurally bound to one externally linked source definition and its exact
+definition/preprocessing commitment; no other externally linked helper
+definition is permitted apart from the generated process `main`. Native callers
+validate and consume that association rather than applying a separate
+name-mapping algorithm or using C substring heuristics.
 
 ## 3. Embedding the Compiler
 

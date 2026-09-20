@@ -18,7 +18,7 @@ use tempfile::tempdir;
 #[path = "common/mod.rs"]
 mod common;
 
-use common::write_file;
+use common::{authored_c_symbol, write_file};
 
 fn c_toolchain_available() -> bool {
     std::process::Command::new("cc")
@@ -88,9 +88,17 @@ fn a_def_named_call_builds_and_runs() {
         "def_named_call",
     )
     .expect("a def named `call` is a legal identifier, not a marker");
+    let symbol = authored_c_symbol("call");
     assert!(
-        source.contains("call("),
-        "the def must be declared and referenced:\n{source}"
+        source.contains(&format!("{symbol}(")),
+        "the legal def must be declared and referenced through its compiler-owned ABI symbol:\n{source}"
+    );
+    assert!(
+        !source.lines().any(|line| {
+            let line = line.trim_start();
+            line.starts_with("int32_t call(") || line.starts_with("static int32_t call(")
+        }),
+        "the source spelling must not leak as a bare external C function:\n{source}"
     );
     if c_toolchain_available() {
         assert_eq!(link_and_run(&out_dir, "def_named_call"), "6");

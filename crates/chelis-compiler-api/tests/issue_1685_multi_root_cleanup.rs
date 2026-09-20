@@ -1,9 +1,9 @@
 //! [04-LIN-4,7]: helper result owners transfer into the retaining tuple once.
 mod ownership_support;
-use ownership_support::{authored_c_symbol, balanced, emit, emit_selected, run};
+use ownership_support::{GeneratedProgram, balanced, emit, emit_selected, run};
 
-fn assert_selected_symbol_contract(c: &str, authored_name: &str) {
-    let symbol = authored_c_symbol(authored_name);
+fn assert_selected_symbol_contract(c: &GeneratedProgram, authored_name: &str) {
+    let symbol = c.symbol(authored_name);
     assert!(
         c.contains(&format!("{symbol}(")),
         "selected host execution must expose the injective authored symbol"
@@ -15,9 +15,9 @@ fn assert_selected_symbol_contract(c: &str, authored_name: &str) {
     );
 }
 
-fn assert_legacy_symbol_contract(c: &str, authored_names: &[&str]) {
+fn assert_legacy_symbol_contract(c: &GeneratedProgram, authored_names: &[&str]) {
     for name in authored_names {
-        let symbol = authored_c_symbol(name);
+        let symbol = c.symbol(name);
         assert!(
             c.contains(&format!("{symbol}(")),
             "legacy whole-program C must expose the injective authored symbol for `{name}`"
@@ -36,7 +36,7 @@ def derivative(x: tensor[{n}, f32], y: tensor[{m}, f32]) -> (tensor[{n}, f32], t
 ");
     let c = emit_selected(&source, "derivative");
     assert_selected_symbol_contract(&c, "derivative");
-    let derivative = authored_c_symbol("derivative");
+    let derivative = c.symbol("derivative").to_string();
     let driver = format!(
         r#"
 int main(void) {{
@@ -94,6 +94,7 @@ def derivative(x: tensor[2, f32], y: tensor[2, f32]) -> (tensor[2, f32], tensor[
         "derivative",
     );
     assert_selected_symbol_contract(&c, "derivative");
+    let derivative = c.symbol("derivative");
     let driver = r#"
 int main(void) {
     chelis_tensor *x = input(2);
@@ -114,7 +115,7 @@ int main(void) {
     return 0;
 }
 "#
-    .replace("DERIVATIVE_ENTRY", &authored_c_symbol("derivative"));
+    .replace("DERIVATIVE_ENTRY", derivative);
     balanced(&run(&c, &driver));
 }
 
@@ -128,6 +129,7 @@ def derivative(x: tensor[2, f32], y: tensor[2, f32]) -> (tensor[2, f32], tensor[
         "derivative",
     );
     assert_selected_symbol_contract(&c, "derivative");
+    let derivative = c.symbol("derivative");
     let driver = r#"
 int main(void) {
     chelis_tensor *x = input(2), *y = input(2);
@@ -150,7 +152,7 @@ int main(void) {
     return 0;
 }
 "#
-    .replace("DERIVATIVE_ENTRY", &authored_c_symbol("derivative"));
+    .replace("DERIVATIVE_ENTRY", derivative);
     balanced(&run(&c, &driver));
     let mut removed = 0;
     let mutated = c
@@ -167,7 +169,7 @@ int main(void) {
         .collect::<Vec<_>>()
         .join("\n");
     assert_eq!(removed, 2, "only the two helper output temporaries");
-    let summary = run(&mutated, &driver);
+    let summary = run(&c.with_source(mutated), &driver);
     assert_eq!(summary["live_owners"], 64, "{summary}");
     assert_eq!(summary["live_bytes"], 256, "{summary}");
 }
@@ -183,6 +185,8 @@ def pair(x: tensor[2, f32]) -> (tensor[2, f32], tensor[2, f32]) = (x, x)
         "derivative",
     );
     assert_legacy_symbol_contract(&c, &["derivative", "pair"]);
+    let derivative = c.symbol("derivative");
+    let pair = c.symbol("pair");
     let driver = r#"
 int main(void) {
     chelis_tensor *x = input(2);
@@ -205,7 +209,7 @@ int main(void) {
     return 0;
 }
 "#
-    .replace("DERIVATIVE_ENTRY", &authored_c_symbol("derivative"))
-    .replace("PAIR_ENTRY", &authored_c_symbol("pair"));
+    .replace("DERIVATIVE_ENTRY", derivative)
+    .replace("PAIR_ENTRY", pair);
     balanced(&run(&c, &driver));
 }
