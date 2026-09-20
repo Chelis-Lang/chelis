@@ -441,9 +441,9 @@ point for the *untrusted* route -- `cache_wire_compatibility.rs`'s
 `current_compiled_disk_and_worker_preserve_scalar_storage_bits_and_reconstruct`
 compares `decode`'s output against the producer's -- so a normalizing pass in
 either checker would be caught somewhere regardless. What is specific to this
-test is the authenticated route: every other use of `decode_authenticated` in
-the tree is a negative one, so this is the only place that compares what that
-route produces against anything.
+test is the authenticated route: every other use of `decode_authenticated`
+asserts only acceptance or rejection, so this is the only place that compares
+what that route produces against anything.
 
 Until chelis#2211 this section read "deserialization does not rerun semantic
 checking; cache bytes are a trusted internal artifact", while both routes were

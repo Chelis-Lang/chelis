@@ -5969,10 +5969,11 @@ impl CompiledContextTempfile {
 }
 
 // `tempfile::NamedTempFile` already removes the underlying file on Drop;
-// no explicit impl needed. The wrapper exists so the parent has a single
-// owner and so the tempfile path can be used by every spawned worker
-// without leaking the file handle into worker subprocesses (workers
-// reopen the path themselves).
+// no explicit impl needed. The wrapper exists so the guard is a value the
+// handoff below can own -- shared through an `Arc`, so the file outlives
+// every worker that could still open it -- and so the tempfile path can be
+// used by every spawned worker without leaking the file handle into worker
+// subprocesses (workers reopen the path themselves).
 
 /// Env var naming the tempfile a `chelis test` parent wrote for its workers.
 const COMPILED_CONTEXT_PATH_ENV: &str = "CHELIS_TEST_COMPILED_CONTEXT";
