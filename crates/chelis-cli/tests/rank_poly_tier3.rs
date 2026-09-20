@@ -2989,15 +2989,16 @@ fn form3_arith_over_shape_expand_size_builds_and_matches_backend() {
 /// (`inputs[0]`/`inputs[1]`) build-to-build — a codegen-determinism-invariant
 /// violation the `bias_broadcast` oracle could otherwise never assert
 /// "byte-identical". Sorting the pre-creation by name makes the kernel ABI
-/// stable. Two independent subprocess builds (each a fresh UnordMap seed) must
-/// emit identical `.c`.
+/// stable. Two independent subprocess builds (each a fresh UnordMap seed) use
+/// the same program basename so the intentional program-identity marker is
+/// held constant; their emitted `.c` must otherwise be identical.
 #[test]
 fn form3_bias_broadcast_c_is_byte_deterministic() {
     let source = "def bias_broadcast[n](x: &tensor[n, 4, f32], b: &tensor[4, f32]) -> tensor[n, 4, f32] = insert(b, 0, shape(x, cast(0, i32)))\n\
         xs = to_tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]])\n\
         out = bias_broadcast(xs, to_tensor([10.0, 20.0, 30.0, 40.0]))\n";
-    let first = build_c_source(source, "issue_469_determinism_a");
-    let second = build_c_source(source, "issue_469_determinism_b");
+    let first = build_c_source(source, "issue_469_determinism");
+    let second = build_c_source(source, "issue_469_determinism");
     assert_eq!(
         first, second,
         "Form-3 shape-sourced expand C must be byte-identical across builds"
