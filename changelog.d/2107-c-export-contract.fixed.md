@@ -11,8 +11,9 @@ identity, source digest, source identities, canonical symbols, exact declaration
 bytes, external linkage, and one AST-identified C definition per export. Each
 definition commitment covers its exact bytes and source-local preprocessing
 context, so whole-source resealing cannot authorize exchanged bodies, indirect
-macro retargeting, declaration/symbol or linkage spoofing, or unregistered
-external definitions. Multiline declarations and comment-separated `static
+macro retargeting, preprocessor rewrites of exported declaration tokens,
+declaration/symbol or linkage spoofing, or unregistered external definitions.
+Multiline declarations and comment-separated `static
 inline` helpers remain valid, and translation-unit-private helpers stay outside
 the published set. See
 [#2107](https://github.com/Chelis-Lang/chelis/issues/2107).

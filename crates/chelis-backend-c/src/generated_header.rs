@@ -522,10 +522,7 @@ fn validate_export_records(
     definitions: &BTreeMap<String, SourceDefinition>,
 ) -> Result<(), GeneratedHeaderError> {
     validate_export_identities(program_identity, declarations, definitions)?;
-    reject_export_macro_aliases(
-        source,
-        definitions.values().map(|item| item.symbol.as_str()),
-    )?;
+    reject_export_macro_aliases(source, definitions.values())?;
     validate_c_definitions(source, declarations, definitions)
 }
 
@@ -999,10 +996,7 @@ pub(crate) fn seal_generated_artifact(
         parse_source_manifest(&raw_enveloped_source, ManifestMode::Raw)?;
     debug_assert_eq!(source_identity, program_identity);
     validate_export_identities(program_identity, &declarations, &definitions)?;
-    reject_export_macro_aliases(
-        &raw_enveloped_source,
-        definitions.values().map(|item| item.symbol.as_str()),
-    )?;
+    reject_export_macro_aliases(&raw_enveloped_source, definitions.values())?;
     let placeholder_digests = definitions
         .keys()
         .map(|source_name| (source_name.clone(), PLACEHOLDER_DIGEST.to_string()))
@@ -1211,16 +1205,20 @@ fn decode_hex(value: &str) -> Result<String, GeneratedHeaderError> {
 
 fn reject_export_macro_aliases<'a>(
     source: &str,
-    symbols: impl Iterator<Item = &'a str>,
+    definitions: impl Iterator<Item = &'a SourceDefinition>,
 ) -> Result<(), GeneratedHeaderError> {
-    let symbols = symbols.collect::<std::collections::BTreeSet<_>>();
+    let mut protected_tokens = std::collections::BTreeSet::new();
+    for definition in definitions {
+        protected_tokens.insert(definition.symbol.clone());
+        protected_tokens.extend(parse_c_declaration_tokens(&definition.declaration)?);
+    }
     for logical_line in preprocessor_logical_lines(source) {
         let Some(name) = macro_definition_name(&logical_line) else {
             continue;
         };
-        if symbols.contains(name.as_str()) {
+        if protected_tokens.contains(&name) {
             return Err(GeneratedHeaderError::new(format!(
-                "generated source preprocessor-rebinds exported symbol `{name}`"
+                "generated source preprocessor-rebinds exported declaration token `{name}`"
             )));
         }
     }
@@ -1907,6 +1905,34 @@ mod tests {
                 "preprocessing-token spelling `{disguised_directive}` must not hide an export alias"
             );
         }
+    }
+
+    #[test]
+    fn sealed_artifact_rejects_macro_rebound_export_signature_tokens() {
+        let (header, export) = raw_export(
+            "alpha",
+            "chelis_fn_616c706861",
+            "extern int chelis_fn_616c706861(int x);",
+            "extern int chelis_fn_616c706861(int x) {\n    return x + 1;\n}",
+        );
+        let source = format!("#define extern static\n{export}\n");
+        assert!(
+            seal_generated_artifact("demo", &source, &header).is_err(),
+            "a source macro must not change an advertised external definition into internal linkage"
+        );
+    }
+
+    #[test]
+    fn sealed_artifact_allows_macros_unrelated_to_export_signatures() {
+        let (header, export) = raw_export(
+            "alpha",
+            "chelis_fn_616c706861",
+            "int chelis_fn_616c706861(int x);",
+            "int chelis_fn_616c706861(int x) {\n    return x + CHELIS_PRIVATE_BIAS;\n}",
+        );
+        let source = format!("#define CHELIS_PRIVATE_BIAS 1\n{export}\n");
+        seal_generated_artifact("demo", &source, &header)
+            .expect("private implementation macros must remain available");
     }
 
     #[test]
