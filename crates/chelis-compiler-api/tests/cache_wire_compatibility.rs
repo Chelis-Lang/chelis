@@ -479,7 +479,7 @@ fn cache_reconstruction_rejects_changed_numeric_bits_after_checksum_recomputed()
     migrate_historical_package_for_current_compiler(&package);
     let reef_home = directory.path().join("reef-home");
     let compiled = chelis_compiler_api::compile_reef_context(&reef_home, &package).unwrap();
-    let compiled_bytes = compiled.encode().unwrap();
+    let (compiled_bytes, compiled_digest) = compiled.encode_for_handoff().unwrap();
     let compiled_path = directory.path().join("numeric.ctx");
     for storage in [false, true] {
         let std_magic = b"CHELIS_CACHE_ENV_V1\n";
@@ -515,5 +515,15 @@ fn cache_reconstruction_rejects_changed_numeric_bits_after_checksum_recomputed()
             matches!(error,CacheError::Decode(ref message) if message.contains("lowered library payload")),
             "{error}"
         );
+        // chelis#2211: the same rewrite, against the authenticated route. That
+        // route does not re-derive, so it has to catch this some other way, and
+        // it does: the producer's digest names the original payload and never
+        // travelled with these bytes, so resealing the envelope buys nothing.
+        let error = CompiledContext::decode_authenticated(&changed, &compiled_digest).unwrap_err();
+        assert!(error.contains("digest its producer delivered"), "{error}");
+        // And the untouched bytes still authenticate, so the assertion above is
+        // detecting the rewrite rather than rejecting everything.
+        CompiledContext::decode_authenticated(&compiled_bytes, &compiled_digest)
+            .expect("the producer's own bytes must authenticate");
     }
 }

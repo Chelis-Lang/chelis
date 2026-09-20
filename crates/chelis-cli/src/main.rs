@@ -5969,10 +5969,66 @@ impl CompiledContextTempfile {
 }
 
 // `tempfile::NamedTempFile` already removes the underlying file on Drop;
-// no explicit impl needed. The wrapper exists so the parent has a single
-// owner and so the tempfile path can be used by every spawned worker
-// without leaking the file handle into worker subprocesses (workers
-// reopen the path themselves).
+// no explicit impl needed. The wrapper exists so the guard is a value the
+// handoff below can own -- shared through an `Arc`, so the file outlives
+// every worker that could still open it -- and so the tempfile path can be
+// used by every spawned worker without leaking the file handle into worker
+// subprocesses (workers reopen the path themselves).
+
+/// Env var naming the tempfile a `chelis test` parent wrote for its workers.
+const COMPILED_CONTEXT_PATH_ENV: &str = "CHELIS_TEST_COMPILED_CONTEXT";
+
+/// Env var carrying that tempfile's payload digest.
+///
+/// The digest is what makes the handoff authentic, and it is only evidence
+/// because it arrives on a different channel from the bytes. A process that can
+/// replace the tempfile between the parent's `sync_all` and the worker's `open`
+/// -- which file mode `0600` does not prevent when `TMPDIR` names a directory
+/// other users can write, the ordinary shape of a shared build machine --
+/// cannot also reach into the environment of a child the parent already
+/// spawned.
+const COMPILED_CONTEXT_DIGEST_ENV: &str = "CHELIS_TEST_COMPILED_CONTEXT_SHA256";
+
+/// The complete parent-to-worker handoff: the file holding the bytes, and the
+/// digest that says they are still the bytes the parent wrote.
+///
+/// These two travel together in this process and apart between processes, which
+/// is the whole point. Keeping them in one value means a spawn site cannot pass
+/// the path and forget the digest.
+///
+/// It owns the tempfile guard through an `Arc` rather than borrowing its path.
+/// Worker threads need `'static`, so a borrow could not have reached them, and
+/// a bare `PathBuf` would leave "the file still exists when the worker opens
+/// it" resting on the order two locals happen to be declared in. Every clone
+/// handed to a thread keeps the guard alive, so the file outlives the last
+/// worker that could read it by construction.
+#[derive(Clone)]
+struct CompiledContextHandoff {
+    tempfile: Arc<CompiledContextTempfile>,
+    digest_hex: String,
+}
+
+impl CompiledContextHandoff {
+    fn new(tempfile: CompiledContextTempfile, digest: &chelis_compiler_api::HandoffDigest) -> Self {
+        Self {
+            tempfile: Arc::new(tempfile),
+            digest_hex: digest.to_hex(),
+        }
+    }
+
+    fn apply_to(&self, cmd: &mut std::process::Command) {
+        cmd.env(COMPILED_CONTEXT_PATH_ENV, self.tempfile.path())
+            .env(COMPILED_CONTEXT_DIGEST_ENV, &self.digest_hex);
+    }
+
+    /// Clear both variables when this parent has no context to hand over, so an
+    /// inherited pair from the outer environment cannot stand in for one the
+    /// parent did not produce.
+    fn clear_from(cmd: &mut std::process::Command) {
+        cmd.env_remove(COMPILED_CONTEXT_PATH_ENV)
+            .env_remove(COMPILED_CONTEXT_DIGEST_ENV);
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 enum TestJobs {
@@ -7118,9 +7174,12 @@ fn cmd_test(
                 ));
             }
         };
-    let context_bytes = context.encode()?;
+    let (context_bytes, context_digest) = context.encode_for_handoff()?;
     drop(context);
-    let context_tempfile = CompiledContextTempfile::write(&context_bytes)?;
+    let context_handoff = CompiledContextHandoff::new(
+        CompiledContextTempfile::write(&context_bytes)?,
+        &context_digest,
+    );
     drop(context_bytes);
 
     let mut passed: usize = 0;
@@ -7157,7 +7216,7 @@ fn cmd_test(
             &test_jobs,
             jobs,
             timeout_secs,
-            context_tempfile.path(),
+            &context_handoff,
             json,
             &mut out,
         );
@@ -7180,7 +7239,7 @@ fn cmd_test(
                 worker_count,
                 filter,
                 timeout_secs,
-                context_tempfile.path(),
+                &context_handoff,
                 json,
                 &mut out,
                 &mut passed,
@@ -7195,7 +7254,7 @@ fn cmd_test(
                 jobs,
                 filter,
                 timeout_secs,
-                context_tempfile.path(),
+                &context_handoff,
                 json,
                 &mut out,
                 &mut passed,
@@ -7247,7 +7306,7 @@ fn run_expect(
     test_jobs: &[TestFileJob],
     jobs: TestJobs,
     timeout_secs: u64,
-    context_path: &Path,
+    context_handoff: &CompiledContextHandoff,
     json: bool,
     out: &mut impl Write,
 ) -> Result<i32, String> {
@@ -7262,7 +7321,7 @@ fn run_expect(
         None,
         timeout_secs,
         TestFileWorkerOptions {
-            compiled_context_path: Some(context_path),
+            compiled_context_handoff: Some(context_handoff),
             expect_file_diagnostic: true,
         },
     )?;
@@ -7514,7 +7573,7 @@ fn run_test_jobs_auto(
     jobs: TestJobs,
     filter: Option<&str>,
     timeout_secs: u64,
-    compiled_context_path: &Path,
+    compiled_context_handoff: &CompiledContextHandoff,
     json: bool,
     out: &mut impl Write,
     passed: &mut usize,
@@ -7532,7 +7591,7 @@ fn run_test_jobs_auto(
             cwd,
             &classified.batch_jobs,
             timeout_secs,
-            compiled_context_path,
+            compiled_context_handoff,
             progress_file,
         )? {
             BatchSubprocessOutcome::Rows(rows) => {
@@ -7560,7 +7619,7 @@ fn run_test_jobs_auto(
             filter,
             timeout_secs,
             TestFileWorkerOptions {
-                compiled_context_path: Some(compiled_context_path),
+                compiled_context_handoff: Some(compiled_context_handoff),
                 expect_file_diagnostic: false,
             },
         )?);
@@ -7951,7 +8010,7 @@ fn run_test_batch_subprocess(
     cwd: &Path,
     batch_jobs: &[TestBatchManifestFile],
     timeout_secs: u64,
-    compiled_context_path: &Path,
+    compiled_context_handoff: &CompiledContextHandoff,
     progress_file: Option<&Path>,
 ) -> Result<BatchSubprocessOutcome, String> {
     let manifest = TestBatchManifest {
@@ -7965,8 +8024,8 @@ fn run_test_batch_subprocess(
         .arg(manifest_tempfile.path())
         .arg("--timeout")
         .arg(timeout_secs.to_string())
-        .current_dir(cwd)
-        .env("CHELIS_TEST_COMPILED_CONTEXT", compiled_context_path);
+        .current_dir(cwd);
+    compiled_context_handoff.apply_to(&mut cmd);
 
     let mut progress = progress_file
         .map(|path| {
@@ -8110,7 +8169,7 @@ fn collect_test_file_jobs(
     let self_path = self_path.to_path_buf();
     let cwd = cwd.to_path_buf();
     let filter = filter.map(str::to_string);
-    let compiled_context_path = worker_options.compiled_context_path.map(Path::to_path_buf);
+    let compiled_context_handoff = worker_options.compiled_context_handoff.cloned();
     let expect_file_diagnostic = worker_options.expect_file_diagnostic;
     let mut handles = Vec::new();
 
@@ -8121,7 +8180,7 @@ fn collect_test_file_jobs(
         let self_path = self_path.clone();
         let cwd = cwd.clone();
         let filter = filter.clone();
-        let compiled_context_path = compiled_context_path.clone();
+        let compiled_context_handoff = compiled_context_handoff.clone();
         handles.push(thread::spawn(move || {
             loop {
                 let index = next_index.fetch_add(1, Ordering::SeqCst);
@@ -8137,7 +8196,7 @@ fn collect_test_file_jobs(
                         filter.as_deref(),
                         timeout_secs,
                         TestFileWorkerOptions {
-                            compiled_context_path: compiled_context_path.as_deref(),
+                            compiled_context_handoff: compiled_context_handoff.as_ref(),
                             expect_file_diagnostic,
                         },
                     )
@@ -8186,7 +8245,7 @@ fn run_test_file_jobs(
     worker_count: usize,
     filter: Option<&str>,
     timeout_secs: u64,
-    compiled_context_path: &Path,
+    compiled_context_handoff: &CompiledContextHandoff,
     json: bool,
     out: &mut impl Write,
     passed: &mut usize,
@@ -8202,7 +8261,7 @@ fn run_test_file_jobs(
                 filter,
                 timeout_secs,
                 TestFileWorkerOptions {
-                    compiled_context_path: Some(compiled_context_path),
+                    compiled_context_handoff: Some(compiled_context_handoff),
                     expect_file_diagnostic: false,
                 },
             );
@@ -8217,7 +8276,7 @@ fn run_test_file_jobs(
     let self_path = self_path.to_path_buf();
     let cwd = cwd.to_path_buf();
     let filter = filter.map(str::to_string);
-    let compiled_context_path = compiled_context_path.to_path_buf();
+    let compiled_context_handoff = compiled_context_handoff.clone();
     let mut handles = Vec::new();
 
     for _ in 0..worker_count {
@@ -8227,7 +8286,7 @@ fn run_test_file_jobs(
         let self_path = self_path.clone();
         let cwd = cwd.clone();
         let filter = filter.clone();
-        let compiled_context_path = compiled_context_path.clone();
+        let compiled_context_handoff = compiled_context_handoff.clone();
         handles.push(thread::spawn(move || {
             loop {
                 let index = next_index.fetch_add(1, Ordering::SeqCst);
@@ -8243,7 +8302,7 @@ fn run_test_file_jobs(
                         filter.as_deref(),
                         timeout_secs,
                         TestFileWorkerOptions {
-                            compiled_context_path: Some(&compiled_context_path),
+                            compiled_context_handoff: Some(&compiled_context_handoff),
                             expect_file_diagnostic: false,
                         },
                     )
@@ -9031,7 +9090,7 @@ fn estimate_selected_test_count(file: &Path, filter: Option<&str>, rel_display: 
 /// the parent attributes the loss as a file-level worker crash and moves on.
 #[derive(Clone, Copy)]
 struct TestFileWorkerOptions<'a> {
-    compiled_context_path: Option<&'a Path>,
+    compiled_context_handoff: Option<&'a CompiledContextHandoff>,
     expect_file_diagnostic: bool,
 }
 
@@ -9055,20 +9114,19 @@ fn run_test_file_subprocess(
     if worker_options.expect_file_diagnostic {
         cmd.arg("--expect-file-diagnostic");
     }
-    if let Some(path) = worker_options.compiled_context_path {
+    match worker_options.compiled_context_handoff {
         // Phase H: hand the bincode-encoded `CompiledContext` to the
         // worker via env var so the worker can deserialize the library
         // snapshot instead of re-running `prepare_reef_graph` per file.
         // Absent on packages whose deps are LocalRegistry-resolved
         // (`compile_reef_context` cannot hash those yet); the worker's
         // own fallback then runs the legacy reef-graph path.
-        cmd.env("CHELIS_TEST_COMPILED_CONTEXT", path);
-    } else {
+        Some(handoff) => handoff.apply_to(&mut cmd),
         // Belt-and-suspenders: never let an inherited env var from the
         // outer environment shadow our "no context available" decision.
         // If the parent could not build a context, the worker MUST take
         // the legacy path on its own.
-        cmd.env_remove("CHELIS_TEST_COMPILED_CONTEXT");
+        None => CompiledContextHandoff::clear_from(&mut cmd),
     }
     if let Some(needle) = filter {
         cmd.arg("--filter").arg(needle);
@@ -9298,13 +9356,35 @@ fn load_test_execution_context() -> Result<TestExecutionContext, String> {
     // result through. If the env var is missing (e.g., the worker is
     // invoked directly without going through `chelis test`), we fall
     // back to the reef-graph path so the worker still works standalone.
-    let compiled_context_env = env::var("CHELIS_TEST_COMPILED_CONTEXT").ok();
+    //
+    // chelis#2211: the parent also passes the payload's digest, in a second
+    // variable, so the worker can establish that the bytes on disk are still
+    // the ones the parent wrote. A path with no digest beside it is refused
+    // rather than decoded the slow way. The slow route does not prove
+    // authenticity -- it proves the payload's parts agree with each other --
+    // so falling back to it would accept an unauthenticated handoff while
+    // looking careful.
+    let compiled_context_env = env::var(COMPILED_CONTEXT_PATH_ENV).ok();
     match compiled_context_env.as_deref() {
         Some(path) if !path.is_empty() => {
             let bytes = fs::read(path)
-                .map_err(|e| format!("read CHELIS_TEST_COMPILED_CONTEXT tempfile `{path}`: {e}"))?;
-            let ctx = chelis_compiler_api::CompiledContext::decode(&bytes)
-                .map_err(|e| format!("decode CHELIS_TEST_COMPILED_CONTEXT: {e}"))?;
+                .map_err(|e| format!("read {COMPILED_CONTEXT_PATH_ENV} tempfile `{path}`: {e}"))?;
+            let digest_hex = env::var(COMPILED_CONTEXT_DIGEST_ENV)
+                .ok()
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    format!(
+                        "{COMPILED_CONTEXT_PATH_ENV} is set but {COMPILED_CONTEXT_DIGEST_ENV} is \
+                         not; refusing to decode a compiled context this worker cannot \
+                         authenticate"
+                    )
+                })?;
+            let digest =
+                chelis_compiler_api::HandoffDigest::from_hex(&digest_hex).map_err(|e| {
+                    format!("{COMPILED_CONTEXT_DIGEST_ENV} is not a usable digest: {e}")
+                })?;
+            let ctx = chelis_compiler_api::CompiledContext::decode_authenticated(&bytes, &digest)
+                .map_err(|e| format!("decode {COMPILED_CONTEXT_PATH_ENV}: {e}"))?;
             let cwd = env::current_dir().map_err(|e| format!("failed to read cwd: {e}"))?;
             let ctx_root = ctx
                 .reef_state()
@@ -9314,8 +9394,8 @@ fn load_test_execution_context() -> Result<TestExecutionContext, String> {
             let cwd_canon = cwd.canonicalize().unwrap_or_else(|_| cwd.clone());
             if ctx_root != cwd_canon {
                 return Err(format!(
-                    "CHELIS_TEST_COMPILED_CONTEXT package_root `{}` does not match worker cwd `{}`; \
-                     refusing to run tests with a mismatched library context",
+                    "{COMPILED_CONTEXT_PATH_ENV} package_root `{}` does not match worker cwd \
+                     `{}`; refusing to run tests with a mismatched library context",
                     ctx_root.display(),
                     cwd_canon.display()
                 ));

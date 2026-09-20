@@ -202,6 +202,39 @@ impl Serialize for CompiledContext {
     }
 }
 
+impl CompiledContextWire {
+    /// Rebuild the producer's context from a payload the caller authenticated.
+    ///
+    /// The precondition is [`CompiledContext::decode_authenticated`]'s: the
+    /// bytes were compared against a digest that did not travel with them. Under
+    /// it, this reconstructs the producer's exact value. The transmitted
+    /// `CheckedProgram` is already the output of the effect and linearity
+    /// checkers, and rerunning them over it reproduces it byte for byte, so the
+    /// reruns `Deserialize` performs would establish nothing here. The lowered
+    /// library is re-derived rather than adopted, which keeps
+    /// `chelis_pipeline_core::LoweredLibrary`'s rule that only `lower_library`
+    /// can construct one, and leaves this route trusting a single transmitted
+    /// artifact instead of two.
+    fn into_authenticated_context(self) -> Result<CompiledContext, String> {
+        let _linked = chelis_types::install_linked_program_guard();
+        let library =
+            chelis_pipeline_core::adopt_authenticated_library(self.type_env, self.library_checked)
+                .map_err(|rejection| rejection.to_string())?;
+        if self.library_dag.library_proof_id() != library.program().library_proof_id() {
+            return Err("the lowered library does not match the checked library".to_string());
+        }
+        let library_dag = crate::pipeline::lower_library(&library).map_err(|e| e.to_string())?;
+        Ok(CompiledContext {
+            source_hash: self.source_hash,
+            identity: self.identity,
+            reef_state: self.reef_state,
+            library,
+            library_dag,
+            evaluation_library: Arc::new(OnceLock::new()),
+        })
+    }
+}
+
 impl<'de> Deserialize<'de> for CompiledContext {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -269,25 +302,73 @@ impl CompiledContext {
     /// Encode the same compatibility envelope used by the disk cache.
     /// Workers must check its format and build identity before decoding the
     /// positional checked-context payload.
+    ///
+    /// The bytes carry their own payload digest, which detects a torn write but
+    /// not a deliberate rewrite, because whoever rewrote the payload rewrote the
+    /// digest with it. A producer that can reach its reader over a second
+    /// channel should use [`Self::encode_for_handoff`] instead.
     pub fn encode(&self) -> Result<Vec<u8>, String> {
+        self.envelope_bytes()
+            .map(|(bytes, _)| bytes)
+            .map_err(|e| format!("encode CompiledContext: {e}"))
+    }
+
+    /// Encode for a reader that authenticates the payload out of band.
+    ///
+    /// Returns the same envelope bytes as [`Self::encode`] together with the
+    /// payload digest the envelope embeds. Deliver that digest to the reader
+    /// over a channel this process controls and the bytes do not travel on --
+    /// `chelis test` puts it in the worker's environment while the bytes go to a
+    /// tempfile -- and the reader can then use [`Self::decode_authenticated`].
+    pub fn encode_for_handoff(&self) -> Result<(Vec<u8>, HandoffDigest), String> {
         self.envelope_bytes()
             .map_err(|e| format!("encode CompiledContext: {e}"))
     }
 
+    /// Reconstruct from bytes of unknown provenance.
+    ///
+    /// Every integrity claim available here comes out of the same bytes, so this
+    /// route re-derives the library from the decoded `CheckedProgram` and
+    /// compares the result against the transmitted lowered payload. That detects
+    /// a payload whose parts no longer agree with each other. It cannot detect a
+    /// payload that is internally consistent but was never produced from the
+    /// sources it claims; nothing carried inside the bytes can.
     pub fn decode(bytes: &[u8]) -> Result<Self, String> {
         CacheEnvelope::from_bytes(bytes)
             .and_then(CacheEnvelope::into_context)
             .map_err(|e| format!("decode CompiledContext: {e}"))
     }
 
-    fn envelope_bytes(&self) -> Result<Vec<u8>, CacheError> {
+    /// Reconstruct from bytes authenticated against a digest delivered out of
+    /// band by [`Self::encode_for_handoff`].
+    ///
+    /// `expected` did not travel with `bytes`, so this rejects every payload
+    /// but the producer's. [`Self::decode`] rejects one whose parts stopped
+    /// agreeing with each other, which covers a rewrite of a few bytes and is
+    /// what `cache_reconstruction_rejects_changed_numeric_bits_after_checksum_recomputed`
+    /// demonstrates; it accepts a whole substituted payload that some other
+    /// compilation by the same build produced, because that one is internally
+    /// consistent (chelis#2257). This route rejects both.
+    ///
+    /// Given that, the effect and linearity reruns and the lowered-payload
+    /// comparison have nothing left to establish here: they recompute a value
+    /// equal to the transmitted one, as
+    /// `both_decode_routes_reconstruct_identical_contexts` requires.
+    pub fn decode_authenticated(bytes: &[u8], expected: &HandoffDigest) -> Result<Self, String> {
+        CacheEnvelope::from_bytes(bytes)
+            .and_then(|envelope| envelope.into_authenticated_context(expected))
+            .map_err(|e| format!("decode CompiledContext: {e}"))
+    }
+
+    fn envelope_bytes(&self) -> Result<(Vec<u8>, HandoffDigest), CacheError> {
         let payload =
             bincode::serialize(self).map_err(|e| CacheError::Encode(format!("payload: {e}")))?;
+        let payload_sha256: [u8; 32] = Sha256::digest(&payload).into();
         let envelope = CacheEnvelope {
             version: CACHE_FORMAT_VERSION,
             source_hash: self.source_hash,
             identity: self.identity.clone(),
-            payload_sha256: Sha256::digest(&payload).into(),
+            payload_sha256,
             payload,
         };
         let envelope_bytes = bincode::serialize(&envelope)
@@ -295,7 +376,7 @@ impl CompiledContext {
         let mut bytes = Vec::with_capacity(CACHE_MAGIC.len() + envelope_bytes.len());
         bytes.extend_from_slice(CACHE_MAGIC);
         bytes.extend_from_slice(&envelope_bytes);
-        Ok(bytes)
+        Ok((bytes, HandoffDigest(payload_sha256)))
     }
 
     /// Phase I — atomically persist this context to `path`.
@@ -316,7 +397,7 @@ impl CompiledContext {
     /// a `.tmp.<pid>` orphan but never a half-written final file. Parent
     /// directories are created lazily.
     pub fn save(&self, path: &Path) -> Result<(), CacheError> {
-        let bytes = self.envelope_bytes()?;
+        let (bytes, _) = self.envelope_bytes()?;
 
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
@@ -861,7 +942,14 @@ impl CacheEnvelope {
             .map_err(|e| CacheError::Corrupt(format!("envelope decode: {e}")))
     }
 
-    fn into_context(self) -> Result<CompiledContext, CacheError> {
+    /// Checks every route runs before it looks at the payload's contents:
+    /// the compiler build the payload was produced by, and the payload's own
+    /// embedded digest.
+    ///
+    /// The embedded digest catches a torn or truncated write. It cannot catch a
+    /// deliberate rewrite, because it lives in the same bytes the rewriter
+    /// controls; `into_authenticated_context` adds the check that does.
+    fn check_build_and_embedded_digest(&self) -> Result<[u8; 32], CacheError> {
         if self.identity.compiler_version != crate::build_fingerprint() {
             return Err(CacheError::Corrupt(
                 "compiled context belongs to an incompatible compiler build".to_string(),
@@ -873,11 +961,13 @@ impl CacheEnvelope {
                 "payload sha256 does not match envelope".to_string(),
             ));
         }
-        let context: CompiledContext = bincode::deserialize(&self.payload).map_err(|e| {
-            CacheError::Decode(format!(
-                "CompiledContext decode (envelope/version match but inner shape changed): {e}"
-            ))
-        })?;
+        Ok(actual_payload_sha)
+    }
+
+    /// Checks every route runs after reconstructing the context: the envelope's
+    /// outer copies of the source hash and identity must agree with the inner
+    /// ones, so a spliced envelope header cannot relabel a payload.
+    fn check_envelope_agreement(&self, context: &CompiledContext) -> Result<(), CacheError> {
         if context.source_hash != self.source_hash {
             return Err(CacheError::HashMismatch {
                 envelope: self.source_hash,
@@ -886,11 +976,115 @@ impl CacheEnvelope {
         }
         if context.identity != self.identity {
             return Err(CacheError::IdentityMismatch {
-                envelope: self.identity,
+                envelope: self.identity.clone(),
                 inner: context.identity.clone(),
             });
         }
+        Ok(())
+    }
+
+    fn into_context(self) -> Result<CompiledContext, CacheError> {
+        self.check_build_and_embedded_digest()?;
+        let context: CompiledContext = bincode::deserialize(&self.payload).map_err(|e| {
+            CacheError::Decode(format!(
+                "CompiledContext decode (envelope/version match but inner shape changed): {e}"
+            ))
+        })?;
+        self.check_envelope_agreement(&context)?;
         Ok(context)
+    }
+
+    /// Reconstruct a payload authenticated against a digest that did not travel
+    /// with the bytes.
+    ///
+    /// `expected` is the authentication. The embedded digest checked above only
+    /// says the bytes are self-consistent; this one says they are the bytes the
+    /// producer wrote, because a rewriter who recomputed the embedded digest
+    /// cannot also reach into the channel `expected` arrived on. Given that, the
+    /// wire is deserialized straight into its context: the effect and linearity
+    /// reruns `into_context` performs would recompute a value equal to the one
+    /// transmitted, which is what
+    /// `both_decode_routes_reconstruct_identical_contexts` locks.
+    fn into_authenticated_context(
+        self,
+        expected: &HandoffDigest,
+    ) -> Result<CompiledContext, CacheError> {
+        let actual_payload_sha = self.check_build_and_embedded_digest()?;
+        if actual_payload_sha != expected.0 {
+            return Err(CacheError::HandoffDigestMismatch {
+                expected: hex_prefix(&expected.0, 32),
+                actual: hex_prefix(&actual_payload_sha, 32),
+            });
+        }
+        let wire: CompiledContextWire = bincode::deserialize(&self.payload).map_err(|e| {
+            CacheError::Decode(format!(
+                "CompiledContext decode (envelope/version match but inner shape changed): {e}"
+            ))
+        })?;
+        let context = wire
+            .into_authenticated_context()
+            .map_err(CacheError::Decode)?;
+        self.check_envelope_agreement(&context)?;
+        Ok(context)
+    }
+}
+
+/// SHA-256 of a [`CompiledContext`] handoff payload, carried to the reader
+/// separately from the bytes it authenticates.
+///
+/// A digest is only evidence when it reaches the reader by a route the bytes did
+/// not take. `chelis test` mints one with
+/// [`CompiledContext::encode_for_handoff`], writes the bytes to a tempfile, and
+/// puts the digest in the worker process's environment, so an agent that can
+/// replace the tempfile between the parent's write and the worker's read cannot
+/// also replace the digest in an already-spawned child.
+///
+/// What that does not claim: the environment of a process is readable by other
+/// processes of the same user, so this is not same-user isolation and does not
+/// try to be. Anyone who can set the worker's environment or replace the
+/// `chelis` binary already runs chosen code as this user, and the handoff is not
+/// the weak point in that situation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HandoffDigest([u8; 32]);
+
+impl HandoffDigest {
+    /// Lower-case hex, the form that crosses a process boundary.
+    pub fn to_hex(&self) -> String {
+        hex_prefix(&self.0, 32)
+    }
+
+    /// Parse the [`Self::to_hex`] form.
+    ///
+    /// Rejects any other spelling rather than accepting a prefix: a short or
+    /// mixed-case digest is a producer that did not follow the protocol, and
+    /// silently repairing it would let a truncated value authenticate bytes it
+    /// does not cover.
+    pub fn from_hex(text: &str) -> Result<Self, String> {
+        if text.len() != 64 {
+            return Err(format!(
+                "handoff digest must be 64 lower-case hex characters, got {} characters",
+                text.len()
+            ));
+        }
+        // The length check above makes the remainder empty, so every input
+        // byte reaches `hex_nibble` and no prefix can be silently accepted.
+        let (pairs, remainder) = text.as_bytes().as_chunks::<2>();
+        debug_assert!(remainder.is_empty(), "64 is even");
+        let mut bytes = [0u8; 32];
+        for (index, [high, low]) in pairs.iter().enumerate() {
+            bytes[index] = (hex_nibble(*high)? << 4) | hex_nibble(*low)?;
+        }
+        Ok(Self(bytes))
+    }
+}
+
+fn hex_nibble(byte: u8) -> Result<u8, String> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        _ => Err(format!(
+            "handoff digest must be 64 lower-case hex characters, found byte {byte:#04x}"
+        )),
     }
 }
 
@@ -921,6 +1115,11 @@ pub enum CacheError {
     /// Envelope decoded but the on-disk format version is not the one
     /// the running binary supports.
     UnsupportedVersion { stored: u32, expected: u32 },
+    /// The payload's digest does not match the one the producer delivered out
+    /// of band. The bytes are internally consistent — the embedded digest and
+    /// the build identity both passed — so this is a payload that was replaced
+    /// or rewritten after the producer wrote it, not a torn write.
+    HandoffDigestMismatch { expected: String, actual: String },
     /// Outer envelope's `source_hash` and the inner `CompiledContext`'s
     /// `source_hash` disagree — bytes were tampered with between encode
     /// and decode.
@@ -957,6 +1156,11 @@ impl fmt::Display for CacheError {
             CacheError::UnsupportedVersion { stored, expected } => write!(
                 f,
                 "cache file format version {stored} not supported by this binary (expects {expected})"
+            ),
+            CacheError::HandoffDigestMismatch { expected, actual } => write!(
+                f,
+                "compiled context payload does not match the digest its producer delivered: \
+                 expected={expected} actual={actual}"
             ),
             CacheError::HashMismatch { envelope, inner } => write!(
                 f,

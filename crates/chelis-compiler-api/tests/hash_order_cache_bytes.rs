@@ -38,6 +38,7 @@ enum Artifact {
     CompiledEncode,
     CompiledSave,
     CliWorkerHandoff,
+    CliWorkerHandoffDigest,
     CompiledCacheKey,
     CompiledCacheKeyInputs,
     PreparedGraphEncode,
@@ -47,7 +48,7 @@ enum Artifact {
     PreparedGraphStdlibSourceDigest,
 }
 
-const ALL_ARTIFACTS: [Artifact; 16] = [
+const ALL_ARTIFACTS: [Artifact; 17] = [
     Artifact::StdlibKey,
     Artifact::StdlibCacheKeyInputs,
     Artifact::LibraryKey,
@@ -57,6 +58,7 @@ const ALL_ARTIFACTS: [Artifact; 16] = [
     Artifact::CompiledEncode,
     Artifact::CompiledSave,
     Artifact::CliWorkerHandoff,
+    Artifact::CliWorkerHandoffDigest,
     Artifact::CompiledCacheKey,
     Artifact::CompiledCacheKeyInputs,
     Artifact::PreparedGraphEncode,
@@ -78,6 +80,7 @@ impl Artifact {
             Self::CompiledEncode => "compiled_encode.bin",
             Self::CompiledSave => "compiled_save.bin",
             Self::CliWorkerHandoff => "cli_worker_handoff.bin",
+            Self::CliWorkerHandoffDigest => "cli_worker_handoff_digest.txt",
             Self::CompiledCacheKey => "compiled_cache_key.bin",
             Self::CompiledCacheKeyInputs => "compiled_cache_key_inputs.bin",
             Self::PreparedGraphEncode => "prepared_graph_encode.bin",
@@ -301,10 +304,27 @@ fn write_worker_artifacts(package_root: &Path, reef_home: &Path, result_dir: &Pa
     let encoded = context.encode().expect("encode compiled context");
     artifacts.write(Artifact::CompiledEncode, &encoded);
 
-    // The CLI parent writes `CompiledContext::encode()` directly to the worker
-    // tempfile. This artifact locks that public handoff root under its product
-    // name while making the intentional byte identity explicit.
-    artifacts.write(Artifact::CliWorkerHandoff, &encoded);
+    // The CLI parent writes `CompiledContext::encode_for_handoff()` directly to
+    // the worker tempfile and passes the digest it returns in the worker's
+    // environment (chelis#2211). Both entry points build the same envelope, so
+    // this artifact locks that public handoff root under its product name while
+    // making the intentional byte identity explicit; the assertion below is
+    // what says the two really are the same bytes.
+    let (handoff, handoff_digest) = context
+        .encode_for_handoff()
+        .expect("encode compiled context for handoff");
+    assert!(
+        handoff == encoded,
+        "the handoff and disk-cache encoders must build the same envelope"
+    );
+    artifacts.write(Artifact::CliWorkerHandoff, &handoff);
+    // The digest is a function of those bytes, so pinning it beside them
+    // extends this oracle's hash-state independence to the exact value the
+    // parent puts in the worker's environment.
+    artifacts.write(
+        Artifact::CliWorkerHandoffDigest,
+        handoff_digest.to_hex().as_bytes(),
+    );
 
     let compiled_save = result_dir.join("compiled-save-producer.tmp");
     context

@@ -47,8 +47,9 @@ pub use compiler::{
 };
 pub use compiler::{add_function, replace_function_body};
 pub use context::{
-    CacheError, CacheIdentity, CompiledContext, ContextHash, ContextLoadPath, compile_reef_context,
-    load_or_compile_for_package, load_or_compile_with_local_registry_fallback,
+    CacheError, CacheIdentity, CompiledContext, ContextHash, ContextLoadPath, HandoffDigest,
+    compile_reef_context, load_or_compile_for_package,
+    load_or_compile_with_local_registry_fallback,
 };
 /// Experimental decode chokepoint for opaque-type invariant revalidation
 /// (RFC `opaque_invariants_rfc.md` D-DECODE). No production codec consumes

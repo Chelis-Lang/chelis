@@ -90,6 +90,42 @@ pub fn validate_cached_library(
     })
 }
 
+/// Adopt cached library products whose bytes the caller already authenticated.
+///
+/// This is the counterpart of [`validate_cached_library`] for a payload whose
+/// integrity was established outside the payload itself. The caller MUST have
+/// compared the payload against a digest delivered over a channel the payload's
+/// writer does not control. A digest carried inside the same bytes does not
+/// satisfy that precondition: whoever rewrote the payload rewrote the digest
+/// with it, which is exactly what
+/// `cache_reconstruction_rejects_changed_numeric_bits_after_checksum_recomputed`
+/// demonstrates.
+///
+/// Under that precondition the effect and linearity reruns in
+/// [`validate_cached_library`] recompute a value equal to the one they were
+/// handed, so adopting the cached `CheckedProgram` reconstructs the producer's
+/// exact library rather than an approximation of it. That equality is enforced,
+/// not assumed: `chelis-compiler-api`'s route-equivalence test reconstructs one
+/// real payload through both functions and requires byte-identical results, so a
+/// future normalizing pass in either checker fails there instead of diverging
+/// silently here.
+///
+/// The cheap structural agreement between the type environment and the program
+/// still runs. It is a fraction of a percent of the work the reruns cost, and it
+/// is what rejects a forged pairing of two individually well-formed halves.
+pub fn adopt_authenticated_library(
+    authenticated_type_env: TypeEnv,
+    authenticated_program: CheckedProgram,
+) -> Result<CheckedLibrary, LibraryRejection> {
+    if !authenticated_type_env.matches_checked_program(&authenticated_program) {
+        return Err(LibraryRejection::ContextMismatch);
+    }
+    Ok(CheckedLibrary {
+        type_env: authenticated_type_env,
+        program: authenticated_program,
+    })
+}
+
 /// Analyze prepared Deep against a reusable library type context.
 fn analyze_prepared_with_context(
     prepared: PreparedProgram,
