@@ -434,6 +434,30 @@ class RuntimeExtentOracleTests(unittest.TestCase):
                 ):
                     mutate("no contract")
 
+    def test_local_ascription_provenance_mutation_matches_production_source(
+        self,
+    ) -> None:
+        source = ORACLE._LOCAL_ASCRIPTION_PROVENANCE_SOURCE.read_text()
+        mutated = ORACLE.remove_local_ascription_provenance(source)
+        self.assertNotEqual(mutated, source)
+        self.assertNotIn(ORACLE._LOCAL_ASCRIPTION_PROVENANCE, mutated)
+        self.assertEqual(
+            mutated.count(ORACLE._LOCAL_ASCRIPTION_PROVENANCE_REMOVED),
+            1,
+        )
+
+        missing = source.replace(ORACLE._LOCAL_ASCRIPTION_PROVENANCE, "", 1)
+        with self.assertRaisesRegex(
+            ORACLE.OracleFailure, "mutation anchor is missing or ambiguous"
+        ):
+            ORACLE.remove_local_ascription_provenance(missing)
+
+        duplicate = source + ORACLE._LOCAL_ASCRIPTION_PROVENANCE
+        with self.assertRaisesRegex(
+            ORACLE.OracleFailure, "mutation anchor is missing or ambiguous"
+        ):
+            ORACLE.remove_local_ascription_provenance(duplicate)
+
     def test_specializer_region_mutations_remove_only_the_selected_barrier(
         self,
     ) -> None:
