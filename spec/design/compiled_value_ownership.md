@@ -612,10 +612,8 @@ content is carried over in place rather than rebuilt.
 
 A callable whose result is a positional sub-range of its operand is not a row
 today. `take` and `drop` for lists, and `string_slice` and `string_trim` for
-strings, would each have to relocate the surviving range rather than apply a
-point edit, which is the same order of work as the copy it would replace, and
-none of them is an accumulation shape. chelis#943 recorded that disposition
-for `drop`. It is a disposition rather than a derivation: those four could be
+strings, each carry over only part of the operand, and none of them is an
+accumulation shape. chelis#943 recorded that disposition for `drop`. It is a disposition rather than a derivation: those four could be
 revisited on their own evidence, and until they are, they are not rows.
 
 The string row carries an obligation neither of the other kinds has, and it
@@ -660,10 +658,14 @@ separates the in-place arm from the cloning one; allocation counts cannot,
 because the cloning arm's extra allocation is indistinguishable from any
 other. `chelis_string_concat_owned` therefore records that event on every
 in-place return, including an empty right-hand side that changes no byte, so
-for strings the absence of the event means the cloning arm ran. The
-dictionary entry points do not yet record on every in-place return, so a zero
-count there still means "cloned, or edited nothing"; chelis#2252 owns closing
-that.
+for strings the absence of the event means the cloning arm ran.
+
+The dictionary entry points are uneven on this, so the same reading does not
+carry to them. `chelis_dict_merge_owned` records on every in-place return;
+`chelis_dict_insert_owned` records only when it pushes, not when it replaces
+an existing key; and `chelis_dict_remove_owned` never records. For those two,
+a zero count still means "cloned, or edited nothing". chelis#2252 owns
+closing the gap.
 
 The dictionary rows carry one obligation the list rows do not. The cloning
 `chelis_dict_insert` releases the value it replaces before cloning the
