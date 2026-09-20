@@ -547,6 +547,8 @@ pub(crate) fn emit_host_abi_program(
         "chelis_dict *chelis_dict_merge_owned(chelis_dict *lhs, const chelis_dict *rhs);"
             .to_string(),
         "chelis_dict *chelis_dict_remove_owned(chelis_dict *dict, chelis_value key);".to_string(),
+        "chelis_string chelis_string_concat_owned(chelis_string lhs, chelis_string rhs);"
+            .to_string(),
     ]);
     if helper_requirements.needs_blas_header {
         out.push("#include \"chelis_blas.h\"".to_string());
@@ -5540,7 +5542,15 @@ impl<'a> HostEmitter<'a> {
                     finalize_scalar_expr(unary(UnaryOperator::Negate, numeric_arg(0)), ty)
                 }
                 CExpressionBuiltin::StringConcat => {
-                    EmittedExpr::call("chelis_string_concat", [arg(0), arg(1)])
+                    // chelis#2205: a string the verifier moved at its last
+                    // use is consumed by the owned entry point; a borrowed
+                    // one still goes through the cloning call.
+                    let entry = if container_operand_is_moved(site, "builtin:string_concat")? {
+                        "chelis_string_concat_owned"
+                    } else {
+                        "chelis_string_concat"
+                    };
+                    EmittedExpr::call(entry, [arg(0), arg(1)])
                 }
                 CExpressionBuiltin::StringTrim => EmittedExpr::call("chelis_string_trim", [arg(0)]),
                 CExpressionBuiltin::Reshape => {

@@ -1348,6 +1348,7 @@ fn build_c_runs_iter_foundation_and_matches_eval_output() {
         "chelis_dict_insert_owned",
         "chelis_dict_merge_owned",
         "chelis_dict_remove_owned",
+        "chelis_string_concat_owned",
     ] {
         assert!(
             !runtime_header.contains(symbol),
@@ -1364,6 +1365,7 @@ fn build_c_runs_iter_foundation_and_matches_eval_output() {
         "chelis_dict *chelis_dict_insert_owned(chelis_dict *dict, chelis_value key, chelis_value value);",
         "chelis_dict *chelis_dict_merge_owned(chelis_dict *lhs, const chelis_dict *rhs);",
         "chelis_dict *chelis_dict_remove_owned(chelis_dict *dict, chelis_value key);",
+        "chelis_string chelis_string_concat_owned(chelis_string lhs, chelis_string rhs);",
     ] {
         assert!(
             generated.contains(declaration),
