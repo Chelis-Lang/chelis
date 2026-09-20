@@ -3390,6 +3390,7 @@ fn a_consumer_row_matches_only_its_own_heap_kind() {
     let list = ValueClass::Heap(HeapKind::List);
     let dict = ValueClass::Heap(HeapKind::Dict);
     let tensor = ValueClass::Heap(HeapKind::Tensor);
+    let string = ValueClass::Heap(HeapKind::String);
 
     for (label, class) in [
         ("builtin:append", list),
@@ -3397,6 +3398,7 @@ fn a_consumer_row_matches_only_its_own_heap_kind() {
         ("builtin:dict_insert", dict),
         ("builtin:dict_merge", dict),
         ("builtin:dict_remove", dict),
+        ("builtin:string_concat", string),
     ] {
         assert_eq!(
             container_consumer_operand(label, Some(class), |_| Some(class)),
@@ -3431,6 +3433,22 @@ fn a_consumer_row_matches_only_its_own_heap_kind() {
         None,
         "tensor `concat` shares the label and is still not a row"
     );
+    // Rejected by the result comparison: the row's kind is String. A list
+    // `concat` and a string `concat` are different labels, but a reader who
+    // dropped the kind would have `builtin:string_concat` accept a list and
+    // route it to `chelis_string_concat_owned`.
+    assert_eq!(
+        container_consumer_operand("builtin:string_concat", Some(list), |_| Some(list)),
+        None,
+        "a list application never matches the string-kinded `string_concat` row"
+    );
+    // Rejected by the result comparison: the row's kind is List, and a string
+    // is the operand class `string_concat` shares with nothing else here.
+    assert_eq!(
+        container_consumer_operand("builtin:append", Some(string), |_| Some(string)),
+        None,
+        "a string application never matches the list-kinded `append` row"
+    );
     // Rejected by the label lookup: kind agreement alone is not membership.
     // `chunk`, `map`, `flatten`, `zip` and `enumerate` all take a list and
     // return a list.
@@ -3446,6 +3464,18 @@ fn a_consumer_row_matches_only_its_own_heap_kind() {
             container_consumer_operand(label, Some(list), |_| Some(list)),
             None,
             "{label} is not a row, however well its classes agree"
+        );
+    }
+    // The two string builtins that produce a substring of their operand are
+    // deliberately not rows: they return a sub-range rather than a grown
+    // copy, so in-place is a memmove of the remainder rather than an
+    // amortised append, and neither is an accumulation shape. This is the
+    // same disposition `drop` and `take` carry for lists under chelis#943.
+    for label in ["builtin:string_slice", "builtin:string_trim"] {
+        assert_eq!(
+            container_consumer_operand(label, Some(string), |_| Some(string)),
+            None,
+            "{label} produces a substring and is not a consumer row"
         );
     }
     // Rejected by the result comparison: a non-heap result cannot carry a

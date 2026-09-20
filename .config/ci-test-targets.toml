@@ -689,6 +689,10 @@ name = "issue_2205_container_last_use"
 package = "chelis-cli"
 name = "issue_2205_dict_last_use"
 
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_2205_string_last_use"
+
 # All five rows in this published-stdlib acceptance target are intentionally
 # ignored. A direct modification remains required change-owned coverage: the
 # worker lists with ignored tests included, rejects this mode if any active

@@ -1297,6 +1297,19 @@ fn resize_list_ledger(list: *mut chelis_list, site: &str) {
     }
 }
 
+fn resize_string_ledger(handle: *mut RuntimeString, site: &str) {
+    if handle.is_null() {
+        return;
+    }
+    // `new_runtime_string` records the exact UTF-8 bytes plus the one
+    // compatibility NUL, so an in-place growth reports the same quantity
+    // rather than the `Vec` capacities behind it.
+    let bytes = unsafe { (*handle).value.len().saturating_add(1) as u64 };
+    if !ownership_ledger::resize(handle.cast(), bytes, site) {
+        runtime_fail!("compiled ownership ledger rejected string resize at {site}");
+    }
+}
+
 fn resize_dict_ledger(dict: *mut chelis_dict, site: &str) {
     if dict.is_null() {
         return;
@@ -3896,6 +3909,76 @@ pub unsafe extern "C" fn chelis_string_concat(
     let mut out = string_value(lhs).value.clone();
     out.push_str(&string_value(rhs).value);
     new_runtime_string(out)
+}
+
+/// Consuming concatenation (chelis#2205). Takes ownership of `lhs`: when this
+/// is the only strong owner and `rhs` is a different string, the right-hand
+/// bytes are appended in place and the same handle is returned; otherwise a
+/// fresh string is built exactly as `chelis_string_concat` would, and the
+/// consumed input is released. The caller must have proved that no
+/// un-retained reference to `lhs` survives the call (the ownership verifier's
+/// Move); the strong-owner count then decides sharing, which is the half a
+/// static rule cannot see across functions.
+///
+/// `RuntimeString` is the first heap kind this optimisation mutates that
+/// carries derived state, so the in-place arm maintains all three fields
+/// together. `value` gains the bytes; `nul_terminated` loses its terminator,
+/// gains the same bytes and regains one; and `char_count` gains the
+/// right-hand side's count, which is exact because concatenating two UTF-8
+/// sequences concatenates their scalar sequences and creates no new scalar at
+/// the seam. Leaving `char_count` stale would make the character-indexed
+/// `chelis_string_len` and `chelis_string_slice` read a length the string
+/// does not have.
+///
+/// `chelis_string_data` hands out an interior pointer into `nul_terminated`,
+/// which an in-place growth may reallocate. That pointer is invalidated here
+/// exactly as it would be by the release the cloning path performs instead,
+/// and this entry point is private to the emitter, so no published-ABI caller
+/// can reach it. Generated code never holds a data pointer across a
+/// statement.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_string_concat_owned(
+    lhs: chelis_string,
+    rhs: chelis_string,
+) -> chelis_string {
+    // An rhs that aliases the consumed lhs is a retained second owner of the
+    // same string (the emitter's operand identities are distinct even when
+    // the runtime handle is one), so it takes the cloning path below like
+    // every other shared input; the in-place arm never reads a string it is
+    // extending.
+    let aliased = std::ptr::eq(lhs.handle.cast_const(), rhs.handle.cast_const());
+    if !aliased
+        && !lhs.handle.is_null()
+        && string_value(lhs).header.strong.load(Ordering::Relaxed) == 1
+    {
+        // Validate the borrowed operand the same way every other reader
+        // does, then read its three facts through the raw handle so no
+        // reference into `rhs` is alive while `lhs` is mutated. The two are
+        // distinct allocations here, because the aliasing case took the
+        // cloning path above.
+        string_value(rhs);
+        let appended = (*rhs.handle).value.len();
+        let characters = (*rhs.handle).char_count;
+        if appended != 0 {
+            (*lhs.handle).value.push_str(&(*rhs.handle).value);
+            // The stored buffer is the exact bytes plus one compatibility
+            // terminator, so the terminator comes off, the new bytes go on,
+            // and it goes back. Every `RuntimeString` is built with the
+            // terminator present, so the pop cannot empty a well-formed
+            // buffer.
+            (*lhs.handle).nul_terminated.pop();
+            (*lhs.handle)
+                .nul_terminated
+                .extend_from_slice((*rhs.handle).value.as_bytes());
+            (*lhs.handle).nul_terminated.push(0);
+            (*lhs.handle).char_count = (*lhs.handle).char_count.saturating_add(characters);
+            resize_string_ledger(lhs.handle, "chelis_string_concat_owned");
+        }
+        return lhs;
+    }
+    let result = chelis_string_concat(lhs, rhs);
+    release_string_handle(lhs.handle);
+    result
 }
 
 #[no_mangle]

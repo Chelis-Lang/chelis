@@ -566,7 +566,8 @@ post-dominance, not source scope alone:
 
 The consumed operand of a container-producing builtin (a row of the ownership
 IR's `CONTAINER_CONSUMERS` table: `append` and `concat` at the list kind,
-`dict_insert`, `dict_merge` and `dict_remove` at the dictionary kind) is moved
+`dict_insert`, `dict_merge` and `dict_remove` at the dictionary kind, and
+`string_concat` at the string kind) is moved
 into the builtin when the scheduler places that owner's terminal directly
 after the application: lowering borrows every builtin operand, and the
 last-use scheduler upgrades the borrow to a move and drops the terminal, so
@@ -575,7 +576,8 @@ later use). The move establishes only the borrow half of exclusivity. The
 sharing half is the runtime's: as with tensor reuse in C6, the consuming entry
 point (`chelis_list_append_owned`, `chelis_list_concat_owned`,
 `chelis_dict_insert_owned`, `chelis_dict_merge_owned`,
-`chelis_dict_remove_owned`, private to the emitter like the accumulator ABI)
+`chelis_dict_remove_owned`, `chelis_string_concat_owned`, private to the
+emitter like the accumulator ABI)
 re-checks the strong-owner count and mutates in place only at one, otherwise
 cloning and releasing the consumed input; a right-hand side that aliases the
 consumed left-hand side is such a retained owner and takes the same cloning
@@ -598,7 +600,39 @@ emitter guard firing after the scheduler has already retired the operand's
 terminal. Adding a heap kind to the table is therefore never a row edit
 alone: the kind owes its own consuming entry points, with the same
 in-place-at-count-one and otherwise-clone-and-release behaviour, before any
-row naming it can land.
+row naming it can land, and it owes an answer for any derived state or
+interior pointer its representation publishes.
+
+Membership is narrower than "produces its own kind". A row is for a callable
+that returns a grown copy of its operand, where reusing the allocation turns a
+copy into an append. A callable that returns a sub-range of its operand is
+not one: `take` and `drop` for lists, and `string_slice` and `string_trim` for
+strings, would each become a move of the remainder rather than an amortised
+append, and none of them is an accumulation shape. chelis#943 recorded that
+disposition for `drop` and it holds for the rest.
+
+The string row carries an obligation neither of the other kinds has, and it
+is the reason a heap kind is not interchangeable here. `RuntimeString` stores
+derived state beside its bytes: `nul_terminated`, which `chelis_string_data`
+serves as an interior pointer, and `char_count`, which the character-indexed
+`chelis_string_len` returns and which `chelis_string_slice` reads to decide
+whether byte indices are character indices. A list or a dictionary has no such
+field, so appending to one is a single mutation, while
+`chelis_string_concat_owned` maintains all three together or leaves the string
+describing itself wrongly. `char_count` gains the right-hand side's count,
+which is exact because concatenating two UTF-8 sequences concatenates their
+scalar sequences and creates no scalar at the seam. A stale count is invisible
+to any ASCII fixture, because ASCII makes bytes and characters agree, so the
+tests that cover it are multibyte by construction.
+
+The interior pointer is the one published surface this optimisation can
+invalidate. `chelis_string_data` returns a pointer into `nul_terminated`,
+which an in-place growth may reallocate. That is the same invalidation the
+cloning path already causes by releasing the consumed input, the consuming
+entry point is private to the emitter so no published-ABI caller can reach it,
+and generated code never holds a data pointer across a statement. A kind whose
+public surface hands out an interior pointer that outlives a statement would
+need a different answer before it could take a row here.
 
 The dictionary rows carry one obligation the list rows do not. The cloning
 `chelis_dict_insert` releases the value it replaces before cloning the

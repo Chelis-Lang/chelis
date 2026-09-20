@@ -1655,3 +1655,126 @@ fn dict_insert_at_last_use_moves_even_when_an_aggregate_holds_the_dict() {
         "the insert is `d`'s last use and moves it: {text}"
     );
 }
+
+/// chelis#2205: a string whose scheduled last use is `string_concat` moves
+/// into the builtin, exactly as a list does into `append`.
+///
+/// Counted receipt, asserted as a ratio: for an N-step let-bound concat chain
+/// the number of `builtin:string_concat` applications that still BORROW their
+/// operand must not grow with N. Evidentiary status: REGRESSION TEST, proven
+/// failing first: without the string row in `CONTAINER_CONSUMERS` the 8-step
+/// chain renders 8 borrowing concats and the 16-step chain 16 (no step
+/// moves); with it both render 0.
+#[test]
+fn string_concat_at_a_strings_last_use_moves_and_the_chain_stops_borrowing() {
+    fn chain(steps: usize) -> String {
+        let mut source = String::from("def build() -> i64 = {\n  s0 = \"\"\n");
+        for step in 1..=steps {
+            source.push_str(&format!(
+                "  s{step} = string_concat(s{}, \"x\")\n",
+                step - 1
+            ));
+        }
+        source.push_str(&format!("  string_len(s{steps})\n}}\nbuilt = build()\n"));
+        source
+    }
+    fn dispositions(steps: usize) -> (usize, usize) {
+        let text = unit_text(&verified_source(&chain(steps)), "build");
+        (
+            count(&text, "builtin:string_concat(borrow"),
+            count(&text, "builtin:string_concat(move"),
+        )
+    }
+    let (small_borrow, small_move) = dispositions(8);
+    let (large_borrow, large_move) = dispositions(16);
+    eprintln!(
+        "#2205 string receipt: 8-step chain borrows {small_borrow} / moves {small_move}; \
+         16-step chain borrows {large_borrow} / moves {large_move}"
+    );
+    assert_eq!(
+        small_borrow + small_move,
+        8,
+        "every concat in the 8-step chain is rendered exactly once"
+    );
+    assert!(
+        large_borrow <= small_borrow,
+        "#2205: borrowing concats must not grow with the chain; 8 steps borrowed \
+         {small_borrow}, 16 steps borrowed {large_borrow}"
+    );
+    assert_eq!(
+        (small_borrow, large_borrow, small_move, large_move),
+        (0, 0, 8, 16),
+        "#2205: every concat in a let-bound chain is its string's last use and moves; \
+         a count of rendered applications carries no machine budget, so the exact figure is \
+         locked too"
+    );
+}
+
+/// chelis#2205 negative half for the string kind: a string read after the
+/// concat is not moved into it, and one read twice moves only at the second,
+/// final concat.
+///
+/// This is also the executable answer to chelis#2205's own secondary
+/// observation, written before the scheduler landed, that "the last-use path
+/// does not fire at all once a value has more than one use". It fires on the
+/// last use; only the earlier use retains.
+#[test]
+fn string_concat_before_a_later_read_keeps_borrowing() {
+    let text = unit_text(
+        &verified_source(
+            "def twice() -> i64 = {\n  a = string_concat(\"a\", \"b\")\n  b = string_concat(a, \"1\")\n  c = string_concat(a, \"2\")\n  add(string_len(b), string_len(c))\n}\nresult = twice()\n",
+        ),
+        "twice",
+    );
+    let lines: Vec<&str> = text.lines().collect();
+    let sites: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.contains("builtin:string_concat("))
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(sites.len(), 3, "three concats are rendered: {text}");
+    assert!(
+        lines[sites[1]].contains("builtin:string_concat(borrow"),
+        "the concat reading `a` that is read again still borrows it: {text}"
+    );
+    assert!(
+        lines[sites[2]].contains("builtin:string_concat(move"),
+        "the last concat is `a`'s last use and moves it: {text}"
+    );
+}
+
+/// chelis#2205: `string_slice` and `string_trim` return a substring of their
+/// operand and are deliberately not rows, so neither is ever upgraded even
+/// when its operand is dead immediately afterwards.
+#[test]
+fn string_slice_and_string_trim_never_consume_their_operand() {
+    let sliced = unit_text(
+        &verified_source(
+            "def cut() -> i64 = {\n  a = string_concat(\"abc\", \"def\")\n  b = string_slice(a, cast(1, i64), cast(2, i64))\n  string_len(b)\n}\nresult = cut()\n",
+        ),
+        "cut",
+    );
+    assert!(
+        sliced.contains("builtin:string_slice(borrow"),
+        "`string_slice` keeps its operand borrowed: {sliced}"
+    );
+    assert!(
+        !sliced.contains("builtin:string_slice(move"),
+        "`string_slice` is not a consumer row: {sliced}"
+    );
+    let trimmed = unit_text(
+        &verified_source(
+            "def tidy() -> i64 = {\n  a = string_concat(\" ab \", \"cd \")\n  b = string_trim(a)\n  string_len(b)\n}\nresult = tidy()\n",
+        ),
+        "tidy",
+    );
+    assert!(
+        trimmed.contains("builtin:string_trim(borrow"),
+        "`string_trim` keeps its operand borrowed: {trimmed}"
+    );
+    assert!(
+        !trimmed.contains("builtin:string_trim(move"),
+        "`string_trim` is not a consumer row: {trimmed}"
+    );
+}

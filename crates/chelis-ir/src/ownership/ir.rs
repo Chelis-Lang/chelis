@@ -207,6 +207,11 @@ pub(crate) const CONTAINER_CONSUMERS: &[ContainerConsumer] = &[
         kind: HeapKind::Dict,
         operand: 0,
     },
+    ContainerConsumer {
+        label: "builtin:string_concat",
+        kind: HeapKind::String,
+        operand: 0,
+    },
 ];
 
 /// The operand a container-producing builtin may consume, or `None` when the
