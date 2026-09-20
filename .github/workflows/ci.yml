@@ -66,6 +66,7 @@ jobs:
       diagnostic_kind_changed: ${{ steps.detect.outputs.diagnostic_kind_changed }}
       ci_contract_changed: ${{ steps.candidate-preflight.outputs.ci_contract_changed }}
       candidate_preflight: ${{ steps.candidate-preflight.outputs.candidate_preflight }}
+      preflight_reason: ${{ steps.candidate-preflight.outputs.preflight_reason }}
       rebase_lane: ${{ steps.rebase-reuse.outputs.rebase_lane }}
       rebase_before: ${{ steps.rebase-reuse.outputs.rebase_before }}
       rebase_contract_changed: ${{ steps.rebase-reuse.outputs.rebase_contract_changed }}
@@ -79,6 +80,8 @@ jobs:
       rebase_packages: ${{ steps.rebase-reuse.outputs.rebase_packages }}
     steps:
       - name: Checkout trusted retarget validator
+        id: checkout-trusted-retarget
+        continue-on-error: true
         if: github.event_name == 'workflow_dispatch'
         uses: actions/checkout@v6
         with:
@@ -90,6 +93,8 @@ jobs:
       # commit range. A retarget dispatch fetches the exact synthetic merge
       # with full parents so the trusted validator can bind both sides.
       - name: Checkout exact candidate
+        id: checkout-candidate
+        continue-on-error: true
         uses: actions/checkout@v6
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/pull/{0}/merge', inputs.pr_number) || github.sha }}
@@ -97,6 +102,8 @@ jobs:
           fetch-depth: ${{ github.event_name == 'workflow_dispatch' && 0 || 1 }}
 
       - name: Checkout trusted rebase reuse verifier
+        id: checkout-trusted-rebase
+        continue-on-error: true
         if: github.event_name == 'pull_request' && github.event.action == 'synchronize'
         uses: actions/checkout@v6
         with:
@@ -105,6 +112,8 @@ jobs:
           fetch-depth: 1
 
       - name: Validate exact retarget candidate
+        id: validate-retarget
+        continue-on-error: true
         if: github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -119,6 +128,7 @@ jobs:
 
       - name: Record exact candidate
         id: candidate
+        continue-on-error: true
         working-directory: candidate
         run: |
           candidate="$(git rev-parse HEAD)"
@@ -126,6 +136,7 @@ jobs:
 
       - name: Bootstrap CI contract preflight selection
         id: ci-contract-bootstrap
+        continue-on-error: true
         if: always()
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -155,8 +166,89 @@ jobs:
             echo "ci_contract_changed=true" >> "$GITHUB_OUTPUT"
           fi
 
+      # One step owns this clone's shape, and every verifier after it reads
+      # a stated property rather than whatever the previous step's fetches
+      # happened to leave behind. Two defects came from the latter:
+      # chelis#2228, where the base backstop's `--depth=1` grafted the
+      # target snapshot out of the identity step's reach, and chelis#2234,
+      # where the head deepen's own boundary grafted the target tip out of
+      # the classifier's. Both were a verifier depending on execution order.
+      #
+      # An invariant that a later fetch can violate is worse than none,
+      # because it reads as a guarantee. A fetch can only add history, with
+      # one exception: a depth-limited fetch adds a graft. So this step owns
+      # every depth-limited fetch in the job, and
+      # scripts/test_ci_establish_candidate_clone.py fails if another step
+      # acquires one.
+      - name: Establish the candidate clone
+        id: clone
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTION: ${{ github.event.action }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          BEFORE: ${{ github.event.before }}
+          COMMITS: ${{ github.event.pull_request.commits }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        working-directory: candidate
+        run: |
+          # Every command in this preamble is guarded. Under errexit an
+          # unguarded one exits the step, and this step's outcome now gates
+          # the candidate preflight, so a transient `gh` blip would close
+          # required contexts with nothing said about the candidate. Worse,
+          # `Compute docs_only` reads the clone this step establishes and
+          # cannot tolerate a failure of its own, so dying here would fail
+          # the whole job and leave required contexts with no check run at
+          # all, which is chelis#2228's unmergeable shape. The module below
+          # already fails closed *with information*; this preamble has to
+          # do the same rather than fail closed with none.
+          current_pr="$RUNNER_TEMP/current-pr.json"
+          target_tip=""
+          if gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" > "$current_pr"; then
+            # A bare assignment is not a guard. `// ""` defaults a null
+            # field; it does not survive a malformed document, and jq exits
+            # 5 on an array or on non-JSON written under a zero exit code,
+            # and 127 when it is absent. The same applies to the rev-parse
+            # below, which is reachable after a successful fetch.
+            if ! base_ref=$(jq -r '.base.ref // ""' "$current_pr"); then
+              base_ref=""
+            fi
+            # Pre-existing and unguarded until now: a base branch renamed
+            # upstream leaves `refs/heads/$base_ref` gone (chelis#2240).
+            if [ -n "$base_ref" ] &&
+               git fetch --no-tags origin "refs/heads/$base_ref" &&
+               target_tip=$(git rev-parse FETCH_HEAD); then
+              :
+            else
+              target_tip=""
+              echo "could not resolve the target tip for base ref" \
+                "'${base_ref:-<unreadable>}'; the clone is established" \
+                "without it and the classifier will fail safe" >&2
+            fi
+          else
+            echo "could not read the live pull request; the target tip is" \
+              "unresolved and the clone is established without it" >&2
+          fi
+          echo "target_tip=$target_tip" >> "$GITHUB_OUTPUT"
+          args=(--base "$BASE" --head "$HEAD" --commits "$COMMITS"
+                --github-output "$GITHUB_OUTPUT")
+          # Named explicitly, and not redundantly: `--unshallow`
+          # un-truncates what the refspec reaches rather than discovering
+          # commits, so a pre-push head unreachable from any live ref after
+          # a force-push stays absent unless it is asked for by name.
+          if [ "$ACTION" = "synchronize" ] && [ -n "$BEFORE" ]; then
+            args+=(--before "$BEFORE")
+          fi
+          if [ -n "$target_tip" ]; then
+            args+=(--target-tip "$target_tip")
+          fi
+          python3 ../candidate/scripts/ci_establish_candidate_clone.py "${args[@]}"
+
       - name: Compute docs_only
         id: detect
+        continue-on-error: true
         env:
           EVENT_NAME: ${{ github.event_name }}
           BASE: ${{ inputs.expected_base_sha || github.event.pull_request.base.sha }}
@@ -174,16 +266,11 @@ jobs:
             echo "non-PR event ($EVENT_NAME): docs_only=false (full suite)"
             exit 0
           fi
-          # Deepen head to the PR commit count + 1 (the +1 reaches the
-          # base tip's parent so base..head resolves), then backstop-fetch
-          # the base commit so it is present as an object even on a stale
-          # count (force-push between the event and the run).
-          if [ "$EVENT_NAME" = "pull_request" ]; then
-            git fetch --depth=$((COMMITS + 1)) origin "$HEAD" 2>/dev/null || true
-          else
-            git fetch origin "$HEAD" "$BASE" 2>/dev/null || true
-          fi
-          git fetch --depth=1 origin "$BASE" 2>/dev/null || true
+          # No fetching here. `Establish the candidate clone` owns the
+          # shape of this clone and has already asserted that base and head
+          # are present and comparable, so this step reads a stated
+          # property instead of inheriting whatever ran before it
+          # (chelis#2228, chelis#2234).
           git diff --name-only "$BASE..$HEAD" \
             | python3 scripts/ci_detect_docs_only.py
 
@@ -202,28 +289,25 @@ jobs:
         run: |
           args=(--event "$GITHUB_EVENT_PATH")
           if [ "$EVENT_NAME" = "pull_request" ]; then
+            # No fetching here either. `Establish the candidate clone`
+            # wrote current-pr.json, resolved the target tip and asserted
+            # that this classifier's commits are walkable; this step
+            # consumes that rather than re-deriving it (chelis#2234).
             current_pr="$RUNNER_TEMP/current-pr.json"
             timeline="$RUNNER_TEMP/pr-timeline.json"
-            gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" > "$current_pr"
-            base_ref=$(jq -er '.base.ref | select(length > 0)' "$current_pr")
-            git fetch --no-tags origin "refs/heads/$base_ref"
-            target_tip=$(git rev-parse FETCH_HEAD)
             gh api --paginate --slurp \
               "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/timeline" > "$timeline"
             args+=(
               --current-pr "$current_pr"
-              --target-tip "$target_tip"
+              --target-tip "${{ steps.clone.outputs.target_tip }}"
               --timeline "$timeline"
             )
-          fi
-          if [ "$EVENT_NAME" = "pull_request" ] &&
-             [ "$ACTION" = "synchronize" ]; then
-            git fetch origin "$BEFORE" "$HEAD" "$target_tip" 2>/dev/null || true
           fi
           python3 scripts/ci_candidate_lifecycle.py "${args[@]}"
 
       - name: Select targeted rebase lane
         id: rebase-reuse
+        continue-on-error: true
         if: always()
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -285,6 +369,8 @@ jobs:
           fi
 
       - name: Publish targeted rebase decision for review
+        id: publish-rebase-decision
+        continue-on-error: true
         if: always()
         run: |
           decision="$RUNNER_TEMP/rebase-reuse/decision.json"
@@ -299,6 +385,8 @@ jobs:
           fi
 
       - name: Install uv for CI contract preflight
+        id: install-uv
+        continue-on-error: true
         if: ${{ always() && (steps.detect.outputs.ci_contract_changed == 'true' || steps.ci-contract-bootstrap.outputs.ci_contract_changed == 'true' || steps.rebase-reuse.outputs.rebase_contract_changed == 'true') }}
         uses: astral-sh/setup-uv@v8.1.0
 
@@ -312,6 +400,8 @@ jobs:
           --with PyYAML==6.0.3 python -m unittest
           scripts.test_check_agent_skills
           scripts.test_ci_candidate_lifecycle
+          scripts.test_ci_establish_candidate_clone
+          scripts.test_ci_preflight_carrier
           scripts.test_ci_candidate_identity
           scripts.test_ci_candidate_receipt
           scripts.test_ci_rebase_reuse
@@ -327,12 +417,47 @@ jobs:
           scripts.test_gate.CiParityTests
           scripts.test_gate.RejectionAuthorityPrBoundaryTests
 
-      - name: Record candidate preflight verdict
-        id: candidate-preflight
+      # Split from the verdict so the identity step can sit between them:
+      # it needs a gate to run behind, and the verdict needs its outcome.
+      # This half covers everything that establishes and classifies the
+      # candidate; the verdict below adds what this gate then permitted.
+      #
+      # Every step in this job is `continue-on-error`, so the job always
+      # completes and always emits its outputs. Job setup is the exception
+      # that no step condition reaches: an unresolvable `uses:` or a lost
+      # runner still fails the job, and the required Docs context reports
+      # that case.
+      #
+      # The reason names the first failure in THIS list's order, which is
+      # not step order. With two steps failing it names whichever this
+      # checks first, which is deliberate: one stated cause beats a
+      # concatenation, and the job log has the rest. That is the point: a hard
+      # failure here used to leave required contexts with no check run at
+      # all, which cannot be waited out, re-run into existence or
+      # overridden (chelis#2228). Tolerating a step must not make its
+      # failure ignorable, so every one of them is read below, and
+      # scripts/test_ci_preflight_carrier.py fails if a tolerated step is
+      # missing from this list.
+      - name: Compute the candidate preflight gate
+        id: preflight-gate
         if: always()
+        continue-on-error: true
         run: |
+          checkout="${{ steps.checkout-candidate.outcome }}"
+          candidate="${{ steps.candidate.outcome }}"
+          candidate_sha="${{ steps.candidate.outputs.candidate_sha }}"
+          clone="${{ steps.clone.outcome }}"
+          clone_invariant="${{ steps.clone.outputs.clone_invariant }}"
+          bootstrap="${{ steps.ci-contract-bootstrap.outcome }}"
+          detect_outcome="${{ steps.detect.outcome }}"
           lifecycle="${{ steps.candidate-lifecycle.outcome }}"
+          rebase="${{ steps.rebase-reuse.outcome }}"
+          publish="${{ steps.publish-rebase-decision.outcome }}"
+          install_uv="${{ steps.install-uv.outcome }}"
           contract="${{ steps.ci-contract.outcome }}"
+          retarget_checkout="${{ steps.checkout-trusted-retarget.outcome }}"
+          retarget_validate="${{ steps.validate-retarget.outcome }}"
+          rebase_checkout="${{ steps.checkout-trusted-rebase.outcome }}"
           detected_contract="${{ steps.detect.outputs.ci_contract_changed }}"
           bootstrap_contract="${{ steps.ci-contract-bootstrap.outputs.ci_contract_changed }}"
           rebase_contract="${{ steps.rebase-reuse.outputs.rebase_contract_changed }}"
@@ -346,22 +471,72 @@ jobs:
                { [ "$rebase_contract" = "false" ] || [ -z "$rebase_contract" ]; }; then
             contract_changed=false
           fi
-          verdict=success
+          gate=success
+          reason=""
+          fail() {
+            gate=failure
+            if [ -z "$reason" ]; then
+              reason="$1"
+            fi
+          }
+          if [ "$checkout" = "failure" ]; then
+            fail "the candidate could not be checked out"
+          fi
+          if [ "$candidate" = "failure" ] || [ -z "$candidate_sha" ]; then
+            fail "the exact candidate commit could not be recorded"
+          fi
+          if [ "$retarget_checkout" = "failure" ]; then
+            fail "the trusted retarget validator could not be checked out"
+          fi
+          if [ "$retarget_validate" = "failure" ]; then
+            fail "the retargeted candidate did not validate"
+          fi
+          if [ "$rebase_checkout" = "failure" ]; then
+            fail "the trusted rebase verifier could not be checked out"
+          fi
+          if [ "$clone" = "failure" ] || [ "$clone_invariant" = "failed" ]; then
+            fail "the candidate clone could not be established"
+          fi
+          if [ "$bootstrap" = "failure" ]; then
+            fail "the CI contract bootstrap selection failed"
+          fi
+          if [ "$detect_outcome" = "failure" ]; then
+            fail "the docs-only detector failed"
+          fi
           if [ "$lifecycle" != "success" ]; then
-            verdict=failure
-          elif [ "$contract_changed" = "true" ]; then
+            fail "the candidate update could not be classified"
+          fi
+          if [ "$rebase" = "failure" ]; then
+            fail "the targeted rebase lane could not be selected"
+          fi
+          if [ "$publish" = "failure" ]; then
+            fail "the targeted rebase decision could not be published"
+          fi
+          if [ "$install_uv" = "failure" ]; then
+            fail "uv could not be installed for the CI contract suite"
+          fi
+          if [ "$contract_changed" = "true" ]; then
             if [ "$contract" != "success" ]; then
-              verdict=failure
+              fail "the changed CI contracts did not validate"
             fi
           elif [ "$contract_changed" != "false" ]; then
-            verdict=failure
+            fail "whether the CI contracts changed could not be determined"
           fi
           echo "ci_contract_changed=$contract_changed" >> "$GITHUB_OUTPUT"
-          echo "candidate_preflight=$verdict" >> "$GITHUB_OUTPUT"
-          echo "candidate lifecycle=$lifecycle, detected CI contract=$detected_contract, bootstrap CI contract=$bootstrap_contract, rebase CI contract=$rebase_contract, combined=$contract_changed, CI contract=$contract, verdict=$verdict"
+          echo "gate=$gate" >> "$GITHUB_OUTPUT"
+          echo "gate_reason=$reason" >> "$GITHUB_OUTPUT"
+          echo "preflight gate=$gate${reason:+ ($reason)}; combined CI contract=$contract_changed"
 
+      # Ahead of the verdict, so its outcome can reach it. Its gate is the
+      # same condition it had when it sat after the verdict -- an
+      # established clone, a classified lifecycle and a satisfied CI
+      # contract -- computed from the step outcomes rather than from the
+      # verdict it now precedes. Moving it must not make it run on a
+      # candidate the verdict would have stopped.
       - name: Record immutable candidate identity
-        if: github.event_name == 'pull_request' && steps.candidate-preflight.outputs.candidate_preflight == 'success'
+        id: identity
+        continue-on-error: true
+        if: ${{ github.event_name == 'pull_request' && steps.preflight-gate.outputs.gate == 'success' }}
         working-directory: candidate
         run: >-
           python3 scripts/ci_candidate_identity.py
@@ -376,13 +551,46 @@ jobs:
           --output "$RUNNER_TEMP/candidate-identity/candidate-identity.json"
 
       - name: Upload immutable candidate identity
-        if: github.event_name == 'pull_request' && steps.candidate-preflight.outputs.candidate_preflight == 'success'
+        continue-on-error: true
+        id: upload-identity
+        if: ${{ github.event_name == 'pull_request' && steps.identity.outcome == 'success' }}
         uses: actions/upload-artifact@v7
         with:
           name: candidate-identity-ci
           path: ${{ runner.temp }}/candidate-identity/candidate-identity.json
           if-no-files-found: error
           retention-days: 30
+
+      # The stated reason, which the required Docs context prints. An unevaluable
+      # candidate produces a red check saying what could not be evaluated,
+      # instead of a job that never reported at all, which is the shape
+      # that made a pull request unmergeable rather than merely red.
+      - name: Record candidate preflight verdict
+        id: candidate-preflight
+        if: always()
+        continue-on-error: true
+        run: |
+          gate="${{ steps.preflight-gate.outputs.gate }}"
+          reason="${{ steps.preflight-gate.outputs.gate_reason }}"
+          identity="${{ steps.identity.outcome }}"
+          upload="${{ steps.upload-identity.outcome }}"
+          verdict="$gate"
+          if [ "$verdict" = "success" ] && [ "$identity" = "failure" ]; then
+            verdict=failure
+            reason="the candidate identity could not be recorded"
+          fi
+          if [ "$verdict" = "success" ] && [ "$upload" = "failure" ]; then
+            verdict=failure
+            reason="the candidate identity could not be uploaded"
+          fi
+          if [ -z "$verdict" ]; then
+            verdict=failure
+            reason="the candidate preflight gate did not report"
+          fi
+          echo "ci_contract_changed=${{ steps.preflight-gate.outputs.ci_contract_changed }}" >> "$GITHUB_OUTPUT"
+          echo "candidate_preflight=$verdict" >> "$GITHUB_OUTPUT"
+          echo "preflight_reason=$reason" >> "$GITHUB_OUTPUT"
+          echo "candidate preflight=$verdict${reason:+: $reason}"
 
   # C2.2's producer seal depends on same-crate privacy, which an external
   # compile-fail doctest cannot distinguish from pub(crate). Run the actual
@@ -1341,13 +1549,18 @@ jobs:
              [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             # Deepen head to the PR commit range, then backstop-fetch the
             # base commit so `base..head` resolves at the shallow boundary
-            # (both no-ops if already present).
+            # (both no-ops if already present). The backstop is depth-less
+            # for the reason given in the `changes` job: `--depth=1` grafts
+            # the base in .git/shallow, and `$BASE..$HEAD` then stops
+            # excluding the base's ancestors, so this scan reads commits
+            # that merged into the target long before the pull request
+            # existed (chelis#2228).
             if [ "$EVENT_NAME" = "pull_request" ]; then
               git fetch --depth=$((COMMITS + 1)) origin "$HEAD" 2>/dev/null || true
             else
               git fetch origin "$HEAD" "$BASE" 2>/dev/null || true
             fi
-            git fetch --depth=1 origin "$BASE" 2>/dev/null || true
+            git fetch --no-tags origin "$BASE" 2>/dev/null || true
             RANGE="$BASE..$HEAD"
           else
             git fetch --depth=2 origin "$GITHUB_SHA" 2>/dev/null || true
@@ -1414,12 +1627,24 @@ jobs:
           ref: ${{ needs.changes.outputs.candidate_sha }}
           fetch-depth: 0
 
+      # Where the reason is stated. Not the only red context on a code
+      # pull request: the two required aggregators go red too, reporting a
+      # skipped worker rather than the cause. This step states the cause
+      # and says nothing about what happened to other jobs, deliberately.
+      # That consequence list is what went stale twice, and a check whose
+      # message describes jobs it cannot see has to be kept in sync with
+      # them forever; the job log already shows what ran.
       - name: Require candidate lifecycle and CI contract preflight
         env:
           CANDIDATE_PREFLIGHT: ${{ needs.changes.outputs.candidate_preflight }}
+          PREFLIGHT_REASON: ${{ needs.changes.outputs.preflight_reason }}
         run: |
           if [ "$CANDIDATE_PREFLIGHT" != "success" ]; then
-            echo "candidate preflight failed; expensive CI was suppressed" >&2
+            echo "this candidate could not be evaluated, which is why this" \
+              "check is red." >&2
+            echo "reason: ${PREFLIGHT_REASON:-the candidate preflight did not report}" >&2
+            echo "See the Detect docs-only changes job for the step that" \
+              "reported it." >&2
             exit 1
           fi
 

@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::host_type_state::ConcreteHostType;
 
-use super::classify::{Placement, ValueClass};
+use super::classify::{HeapKind, Placement, ValueClass};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct OwnerId(pub(crate) u32);
@@ -145,6 +145,91 @@ pub(crate) struct BlockParam {
 pub(crate) struct OperationSchema {
     pub(crate) operands: Vec<OwnershipUse>,
     pub(crate) result: Option<ValueClass>,
+}
+
+/// The builtins that build a container from a container operand of the same
+/// heap kind, which they may consume (chelis#2205). This table is the one
+/// authority the last-use scheduler consults, and its key is the callable's
+/// shape rather than its label alone: a row matches only when the
+/// application's result carries the row's heap kind and the named operand
+/// carries it too. Tensor `concat` shares the label `builtin:concat` but
+/// takes a `List[tensor]` of parts and produces a tensor, so it is not a row
+/// here. Every other builtin operand stays borrowed, and `Some`'s payload
+/// keeps its [05-OP-44] constructor clone. The consuming runtime entry point
+/// mutates in place only when the strong-owner count is one, so a retained
+/// alias (a tuple, an option, an ADT, or a callee that stored the container)
+/// still sees a clone.
+///
+/// The kind belongs to the row rather than being read off the application.
+/// Result-class-equals-operand-class alone is satisfied by callables that
+/// are nothing like `append`: `chunk`, `map`, `flatten`, `zip` and
+/// `enumerate` each take a list and return a list. Naming the kind keeps
+/// membership a reviewed decision, and it keeps a future
+/// `concat(tensor, tensor) -> tensor` out of the `builtin:concat` row by
+/// construction rather than by an emitter guard firing after the scheduler
+/// has already retired the operand's terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ContainerConsumer {
+    /// The application label the ownership lowering assigns.
+    pub(crate) label: &'static str,
+    /// The heap kind this row governs. Both the application's result and
+    /// the named operand must carry it.
+    pub(crate) kind: HeapKind,
+    /// The operand position that may move; the callable's other operands
+    /// are borrowed.
+    pub(crate) operand: usize,
+}
+
+/// Every container-producing builtin that may consume a same-kind operand.
+pub(crate) const CONTAINER_CONSUMERS: &[ContainerConsumer] = &[
+    ContainerConsumer {
+        label: "builtin:append",
+        kind: HeapKind::List,
+        operand: 0,
+    },
+    ContainerConsumer {
+        label: "builtin:concat",
+        kind: HeapKind::List,
+        operand: 0,
+    },
+    ContainerConsumer {
+        label: "builtin:dict_insert",
+        kind: HeapKind::Dict,
+        operand: 0,
+    },
+    ContainerConsumer {
+        label: "builtin:dict_merge",
+        kind: HeapKind::Dict,
+        operand: 0,
+    },
+    ContainerConsumer {
+        label: "builtin:dict_remove",
+        kind: HeapKind::Dict,
+        operand: 0,
+    },
+    ContainerConsumer {
+        label: "builtin:string_concat",
+        kind: HeapKind::String,
+        operand: 0,
+    },
+];
+
+/// The operand a container-producing builtin may consume, or `None` when the
+/// application is not a row of [`CONTAINER_CONSUMERS`]: the label is not
+/// listed, the result does not carry the row's heap kind, or the named
+/// operand does not carry it. `operand_class` answers the class of the
+/// operand at a position.
+pub(crate) fn container_consumer_operand(
+    label: &str,
+    result: Option<ValueClass>,
+    operand_class: impl Fn(usize) -> Option<ValueClass>,
+) -> Option<usize> {
+    let row = CONTAINER_CONSUMERS.iter().find(|row| row.label == label)?;
+    let class = ValueClass::Heap(row.kind);
+    if result != Some(class) {
+        return None;
+    }
+    (operand_class(row.operand) == Some(class)).then_some(row.operand)
 }
 
 /// Closed semantic class for an application. A free-form diagnostic label

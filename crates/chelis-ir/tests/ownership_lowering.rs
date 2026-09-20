@@ -613,6 +613,134 @@ length = length_after_wrap()
     assert!(named.contains("builtin:Some(move"), "{named}");
 }
 
+/// chelis#2205: a list whose scheduled last use is `append` moves into the
+/// builtin; one that is read again afterwards stays borrowed.
+///
+/// Counted receipt, asserted as a ratio: for an N-step let-bound append chain
+/// the number of `builtin:append` applications that still BORROW their
+/// container must not grow with N. Evidentiary status: REGRESSION TEST,
+/// proven failing first: on `main` (`1b7e9fcd7`) the 8-step chain rendered 8
+/// borrowing appends and the 16-step chain 16 (no step moved); after the
+/// last-use upgrade both render 0, and every step moves.
+#[test]
+fn append_at_a_lists_last_use_moves_and_the_chain_stops_borrowing() {
+    fn chain(steps: usize) -> String {
+        let mut source = String::from("def build() -> i64 = {\n  x0: List[i64] = []\n");
+        for step in 1..=steps {
+            source.push_str(&format!(
+                "  x{step} = append(x{}, cast({step}, i64))\n",
+                step - 1
+            ));
+        }
+        source.push_str(&format!("  len(x{steps})\n}}\nbuilt = build()\n"));
+        source
+    }
+    fn borrowing_appends(steps: usize) -> (usize, usize) {
+        let text = unit_text(&verified_source(&chain(steps)), "build");
+        (
+            count(&text, "builtin:append(borrow"),
+            count(&text, "builtin:append(move"),
+        )
+    }
+    let (small_borrow, small_move) = borrowing_appends(8);
+    let (large_borrow, large_move) = borrowing_appends(16);
+    eprintln!(
+        "#2205 receipt: 8-step chain borrows {small_borrow} / moves {small_move}; \
+         16-step chain borrows {large_borrow} / moves {large_move}"
+    );
+    assert_eq!(
+        small_borrow + small_move,
+        8,
+        "every append in the 8-step chain is rendered exactly once"
+    );
+    assert!(
+        large_borrow <= small_borrow,
+        "#2205: borrowing appends must not grow with the chain; 8 steps borrowed \
+         {small_borrow}, 16 steps borrowed {large_borrow}"
+    );
+    assert_eq!(
+        (small_borrow, large_borrow, small_move, large_move),
+        (0, 0, 8, 16),
+        "#2205: every append in a let-bound chain is its container's last use and moves; \
+         a count of rendered applications carries no machine budget, so the exact figure is \
+         locked too"
+    );
+}
+
+/// chelis#2205 negative half: a list read after the append is not moved into
+/// it, and a list read twice moves only at the second, final append.
+#[test]
+fn append_before_a_later_read_keeps_borrowing() {
+    let text = unit_text(
+        &verified_source(
+            "def twice() -> i64 = {\n  a = [cast(1, i64)]\n  b = append(a, cast(4, i64))\n  c = append(a, cast(5, i64))\n  add(len(b), len(c))\n}\nresult = twice()\n",
+        ),
+        "twice",
+    );
+    let first = line_index(&text, "builtin:append(");
+    let second = text
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| line.contains("builtin:append("))
+        .nth(1)
+        .map(|(index, _)| index)
+        .expect("two appends");
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(
+        lines[first].contains("builtin:append(borrow"),
+        "the first append still borrows `a`, which is read again: {text}"
+    );
+    assert!(
+        lines[second].contains("builtin:append(move"),
+        "the second append is `a`'s last use and moves it: {text}"
+    );
+}
+
+/// RT-2225 verification P0: tensor `concat` takes a `List[tensor]` of parts as
+/// its first operand and produces a tensor. That list is borrowed by the
+/// runtime and released after the call; it must never be upgraded to a move,
+/// or the release disappears (a leak on the round-1 head) and the emitter's
+/// fail-closed check refuses the program (the repair head). The result class
+/// keeps the two `concat`s apart.
+#[test]
+fn tensor_concat_keeps_its_parts_list_borrowed() {
+    let text = unit_text(
+        &verified_source(
+            "def join(a: tensor[2, f32], b: tensor[2, f32]) -> tensor[4, f32] = concat([a, b], 0)\n",
+        ),
+        "join",
+    );
+    assert!(
+        text.contains("builtin:concat(borrow"),
+        "the parts list of a tensor concat stays borrowed: {text}"
+    );
+    assert!(
+        !text.contains("builtin:concat(move"),
+        "a tensor concat never consumes its parts list: {text}"
+    );
+}
+
+/// chelis#2205: a tuple-held alias retains the list, so the append at the
+/// binding's last use is still a verified Move (the strong-owner count, not
+/// the IR, decides whether the runtime pushes in place).
+#[test]
+fn append_at_last_use_moves_even_when_an_aggregate_holds_the_list() {
+    let text = unit_text(
+        &verified_source(
+            "def held() -> i64 = {\n  xs = [cast(1, i64), cast(2, i64)]\n  held = (xs, cast(9, i64))\n  zs = append(xs, cast(3, i64))\n  add(len(zs), len(held.0))\n}\nresult = held()\n",
+        ),
+        "held",
+    );
+    assert!(
+        text.contains("= copy clone"),
+        "the tuple retains `xs`: {text}"
+    );
+    assert!(
+        text.contains("builtin:append(move"),
+        "the append is `xs`'s last use and moves it: {text}"
+    );
+}
+
 #[test]
 fn fold_accumulator_is_one_owned_block_parameter_on_both_paths() {
     let alias = unit_text(&verified_fixture("issue_1346_fold_alias"), "roots");
@@ -1393,4 +1521,260 @@ fn signature_entry_requires_tensor_observations_and_preserves_borrows() {
             );
         }
     }
+}
+
+/// chelis#2205: a dictionary whose scheduled last use is `dict_insert` moves
+/// into the builtin, exactly as a list does into `append`.
+///
+/// Counted receipt, asserted as a ratio: for an N-step let-bound insert chain
+/// the number of `builtin:dict_insert` applications that still BORROW their
+/// container must not grow with N. Evidentiary status: REGRESSION TEST,
+/// proven failing first: without the dictionary rows in
+/// `CONTAINER_CONSUMERS` the 8-step chain renders 8 borrowing inserts and the
+/// 16-step chain 16 (no step moves); with them both render 0.
+#[test]
+fn dict_insert_at_a_dicts_last_use_moves_and_the_chain_stops_borrowing() {
+    fn chain(steps: usize) -> String {
+        let mut source =
+            String::from("def build() -> i64 = {\n  d0 = dict_of([] : List[(i64, i64)])\n");
+        for step in 1..=steps {
+            source.push_str(&format!(
+                "  d{step} = dict_insert(d{}, cast({step}, i64), cast({step}, i64))\n",
+                step - 1
+            ));
+        }
+        source.push_str(&format!("  len(d{steps})\n}}\nbuilt = build()\n"));
+        source
+    }
+    fn dispositions(steps: usize) -> (usize, usize) {
+        let text = unit_text(&verified_source(&chain(steps)), "build");
+        (
+            count(&text, "builtin:dict_insert(borrow"),
+            count(&text, "builtin:dict_insert(move"),
+        )
+    }
+    let (small_borrow, small_move) = dispositions(8);
+    let (large_borrow, large_move) = dispositions(16);
+    eprintln!(
+        "#2205 dict receipt: 8-step chain borrows {small_borrow} / moves {small_move}; \
+         16-step chain borrows {large_borrow} / moves {large_move}"
+    );
+    assert_eq!(
+        small_borrow + small_move,
+        8,
+        "every insert in the 8-step chain is rendered exactly once"
+    );
+    assert!(
+        large_borrow <= small_borrow,
+        "#2205: borrowing inserts must not grow with the chain; 8 steps borrowed \
+         {small_borrow}, 16 steps borrowed {large_borrow}"
+    );
+    assert_eq!(
+        (small_borrow, large_borrow, small_move, large_move),
+        (0, 0, 8, 16),
+        "#2205: every insert in a let-bound chain is its dictionary's last use and moves; \
+         a count of rendered applications carries no machine budget, so the exact figure is \
+         locked too"
+    );
+}
+
+/// chelis#2205: `dict_merge` and `dict_remove` move their consumed operand at
+/// its last use too, so the dictionary kind is covered by its whole table
+/// row set rather than by `dict_insert` alone.
+#[test]
+fn dict_merge_and_dict_remove_move_at_their_last_use() {
+    let merged = unit_text(
+        &verified_source(
+            "def fold_two() -> i64 = {\n  a = dict_insert(dict_of([] : List[(i64, i64)]), cast(1, i64), cast(1, i64))\n  b = dict_insert(dict_of([] : List[(i64, i64)]), cast(2, i64), cast(2, i64))\n  joined = dict_merge(a, b)\n  len(joined)\n}\nresult = fold_two()\n",
+        ),
+        "fold_two",
+    );
+    assert!(
+        merged.contains("builtin:dict_merge(move"),
+        "the merge is `a`'s last use and moves it: {merged}"
+    );
+    let removed = unit_text(
+        &verified_source(
+            "def shrink_dict() -> i64 = {\n  a = dict_insert(dict_of([] : List[(i64, i64)]), cast(1, i64), cast(1, i64))\n  smaller = dict_remove(a, cast(1, i64))\n  len(smaller)\n}\nresult = shrink_dict()\n",
+        ),
+        "shrink_dict",
+    );
+    assert!(
+        removed.contains("builtin:dict_remove(move"),
+        "the removal is `a`'s last use and moves it: {removed}"
+    );
+}
+
+/// chelis#2205 negative half for the dictionary kind: a dictionary read after
+/// the insert is not moved into it, and one read twice moves only at the
+/// second, final insert.
+#[test]
+fn dict_insert_before_a_later_read_keeps_borrowing() {
+    let text = unit_text(
+        &verified_source(
+            "def twice() -> i64 = {\n  a = dict_insert(dict_of([] : List[(i64, i64)]), cast(1, i64), cast(1, i64))\n  b = dict_insert(a, cast(4, i64), cast(4, i64))\n  c = dict_insert(a, cast(5, i64), cast(5, i64))\n  add(len(b), len(c))\n}\nresult = twice()\n",
+        ),
+        "twice",
+    );
+    let lines: Vec<&str> = text.lines().collect();
+    let sites: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.contains("builtin:dict_insert("))
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(sites.len(), 3, "three inserts are rendered: {text}");
+    assert!(
+        lines[sites[1]].contains("builtin:dict_insert(borrow"),
+        "the insert into `a` that is read again still borrows it: {text}"
+    );
+    assert!(
+        lines[sites[2]].contains("builtin:dict_insert(move"),
+        "the last insert is `a`'s last use and moves it: {text}"
+    );
+}
+
+/// chelis#2205: an aggregate that retains the dictionary does not stop the
+/// insert at the binding's last use from being a verified Move; the
+/// strong-owner count, not the IR, decides whether the runtime rewrites in
+/// place.
+#[test]
+fn dict_insert_at_last_use_moves_even_when_an_aggregate_holds_the_dict() {
+    let text = unit_text(
+        &verified_source(
+            "def held() -> i64 = {\n  d = dict_insert(dict_of([] : List[(i64, i64)]), cast(1, i64), cast(1, i64))\n  kept = (d, cast(9, i64))\n  grown = dict_insert(d, cast(2, i64), cast(2, i64))\n  add(len(grown), len(kept.0))\n}\nresult = held()\n",
+        ),
+        "held",
+    );
+    assert!(
+        text.contains("= copy clone"),
+        "the tuple retains `d`: {text}"
+    );
+    assert!(
+        text.contains("builtin:dict_insert(move"),
+        "the insert is `d`'s last use and moves it: {text}"
+    );
+}
+
+/// chelis#2205: a string whose scheduled last use is `string_concat` moves
+/// into the builtin, exactly as a list does into `append`.
+///
+/// Counted receipt, asserted as a ratio: for an N-step let-bound concat chain
+/// the number of `builtin:string_concat` applications that still BORROW their
+/// operand must not grow with N. Evidentiary status: REGRESSION TEST, proven
+/// failing first: without the string row in `CONTAINER_CONSUMERS` the 8-step
+/// chain renders 8 borrowing concats and the 16-step chain 16 (no step
+/// moves); with it both render 0.
+#[test]
+fn string_concat_at_a_strings_last_use_moves_and_the_chain_stops_borrowing() {
+    fn chain(steps: usize) -> String {
+        let mut source = String::from("def build() -> i64 = {\n  s0 = \"\"\n");
+        for step in 1..=steps {
+            source.push_str(&format!(
+                "  s{step} = string_concat(s{}, \"x\")\n",
+                step - 1
+            ));
+        }
+        source.push_str(&format!("  string_len(s{steps})\n}}\nbuilt = build()\n"));
+        source
+    }
+    fn dispositions(steps: usize) -> (usize, usize) {
+        let text = unit_text(&verified_source(&chain(steps)), "build");
+        (
+            count(&text, "builtin:string_concat(borrow"),
+            count(&text, "builtin:string_concat(move"),
+        )
+    }
+    let (small_borrow, small_move) = dispositions(8);
+    let (large_borrow, large_move) = dispositions(16);
+    eprintln!(
+        "#2205 string receipt: 8-step chain borrows {small_borrow} / moves {small_move}; \
+         16-step chain borrows {large_borrow} / moves {large_move}"
+    );
+    assert_eq!(
+        small_borrow + small_move,
+        8,
+        "every concat in the 8-step chain is rendered exactly once"
+    );
+    assert!(
+        large_borrow <= small_borrow,
+        "#2205: borrowing concats must not grow with the chain; 8 steps borrowed \
+         {small_borrow}, 16 steps borrowed {large_borrow}"
+    );
+    assert_eq!(
+        (small_borrow, large_borrow, small_move, large_move),
+        (0, 0, 8, 16),
+        "#2205: every concat in a let-bound chain is its string's last use and moves; \
+         a count of rendered applications carries no machine budget, so the exact figure is \
+         locked too"
+    );
+}
+
+/// chelis#2205 negative half for the string kind: a string read after the
+/// concat is not moved into it, and one read twice moves only at the second,
+/// final concat.
+///
+/// This is also the executable answer to chelis#2205's own secondary
+/// observation, written before the scheduler landed, that "the last-use path
+/// does not fire at all once a value has more than one use". It fires on the
+/// last use; only the earlier use retains.
+#[test]
+fn string_concat_before_a_later_read_keeps_borrowing() {
+    let text = unit_text(
+        &verified_source(
+            "def twice() -> i64 = {\n  a = string_concat(\"a\", \"b\")\n  b = string_concat(a, \"1\")\n  c = string_concat(a, \"2\")\n  add(string_len(b), string_len(c))\n}\nresult = twice()\n",
+        ),
+        "twice",
+    );
+    let lines: Vec<&str> = text.lines().collect();
+    let sites: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.contains("builtin:string_concat("))
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(sites.len(), 3, "three concats are rendered: {text}");
+    assert!(
+        lines[sites[1]].contains("builtin:string_concat(borrow"),
+        "the concat reading `a` that is read again still borrows it: {text}"
+    );
+    assert!(
+        lines[sites[2]].contains("builtin:string_concat(move"),
+        "the last concat is `a`'s last use and moves it: {text}"
+    );
+}
+
+/// chelis#2205: `string_slice` and `string_trim` return a substring of their
+/// operand and are deliberately not rows, so neither is ever upgraded even
+/// when its operand is dead immediately afterwards.
+#[test]
+fn string_slice_and_string_trim_never_consume_their_operand() {
+    let sliced = unit_text(
+        &verified_source(
+            "def cut() -> i64 = {\n  a = string_concat(\"abc\", \"def\")\n  b = string_slice(a, cast(1, i64), cast(2, i64))\n  string_len(b)\n}\nresult = cut()\n",
+        ),
+        "cut",
+    );
+    assert!(
+        sliced.contains("builtin:string_slice(borrow"),
+        "`string_slice` keeps its operand borrowed: {sliced}"
+    );
+    assert!(
+        !sliced.contains("builtin:string_slice(move"),
+        "`string_slice` is not a consumer row: {sliced}"
+    );
+    let trimmed = unit_text(
+        &verified_source(
+            "def tidy() -> i64 = {\n  a = string_concat(\" ab \", \"cd \")\n  b = string_trim(a)\n  string_len(b)\n}\nresult = tidy()\n",
+        ),
+        "tidy",
+    );
+    assert!(
+        trimmed.contains("builtin:string_trim(borrow"),
+        "`string_trim` keeps its operand borrowed: {trimmed}"
+    );
+    assert!(
+        !trimmed.contains("builtin:string_trim(move"),
+        "`string_trim` is not a consumer row: {trimmed}"
+    );
 }

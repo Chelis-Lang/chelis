@@ -18,6 +18,7 @@ ACKNOWLEDGEMENTS = ROOT / ".github/workflows/pr-contract-acknowledgements.yml"
 EXPANSION = ROOT / ".github/workflows/pr-package-expansion.yml"
 RETARGET = ROOT / ".github/workflows/pr-base-retarget.yml"
 RECEIPT = ROOT / ".github/workflows/pr-candidate-receipt.yml"
+CHANGELOG = ROOT / ".github/workflows/changelog.yml"
 HULL = ROOT / ".github/workflows/conformance.yml"
 AGENTS = ROOT / "AGENTS.md"
 AUTHOR_GUIDE = ROOT / "docs/guard_changes_for_pr_authors.md"
@@ -96,8 +97,167 @@ def run_rebase_selector(
         )
 
 
+def assert_backstop_fetches_stay_connected(
+    test: unittest.TestCase, body: str, targets: tuple[str, ...]
+) -> None:
+    """No backstop fetch of `targets` may carry a depth limit.
+
+    `git fetch --depth=N` records the fetched commit in `.git/shallow`, and
+    git then ignores the parents that commit records even when those parent
+    objects are already in the clone. No later ordinary fetch removes the
+    graft. Grafting the target snapshot cuts the one edge
+    `ci_candidate_identity.py` crosses to reach the branch point, and its
+    `git merge-base` then reports no common ancestor with an empty stderr
+    (chelis#2228).
+    """
+
+    for target in targets:
+        fetches = [
+            line
+            for line in body.splitlines()
+            if "git fetch" in line and f"origin {target}" in line
+        ]
+        test.assertTrue(fetches, f"no backstop fetch of {target}")
+        for line in fetches:
+            test.assertNotIn(
+                "--depth",
+                line,
+                f"the {target} backstop grafts the commit it fetches",
+            )
+
+
+def assert_candidate_deepening_stays_connected(
+    test: unittest.TestCase, workflow: dict
+) -> None:
+    """The detector step reads an established clone; it no longer makes one.
+
+    This used to assert the deepen and the two depth-less backstops inside
+    the `detect` step, which is where chelis#2228's repair lived. That work
+    moved into `Establish the candidate clone` and
+    `scripts/ci_establish_candidate_clone.py`, which hold the whole
+    property and more of it: the head deepen runs only against an already
+    shallow clone, no other fetch in the job carries a depth argument, the
+    first parent is read through a graft, and the result is asserted rather
+    than assumed. `scripts/test_ci_establish_candidate_clone.py` owns
+    those. What remains here is that the detector step delegates instead of
+    fetching for itself, because a fetch reappearing here is exactly how
+    the inherited-shape defect comes back.
+    """
+
+    steps = {
+        step.get("id"): step for step in workflow["jobs"]["changes"]["steps"]
+    }
+    test.assertNotIn("git fetch", steps["detect"]["run"])
+    owner = steps["clone"]["run"]
+    test.assertIn("ci_establish_candidate_clone.py", owner)
+    test.assertIn("--commits", owner)
+
+
+def assert_never_cancels_in_progress(
+    test: unittest.TestCase, scope: dict, label: str
+) -> None:
+    """No concurrency block governing these checks may cancel in progress.
+
+    A bare string group is accepted: GitHub defaults `cancel-in-progress` to
+    false for it. Anything else must say `false` literally, so neither a
+    quoted string nor an expression can smuggle the cancellation back.
+    """
+
+    concurrency = scope.get("concurrency")
+    if not isinstance(concurrency, dict):
+        return
+    # The key is matched case-insensitively as normalisation, not as a defence
+    # against a known bypass: GitHub either rejects a workflow whose key it
+    # does not recognise, which is loud, or ignores it and falls back to
+    # false, which is harmless, so `Cancel-In-Progress: true` is a typo rather
+    # than an evasion. Folding the case here is the same principle that makes
+    # this guard reject a `${{ }}` expression in that field. A guard should
+    # answer its own question rather than depend on how something it cannot
+    # see is parsed.
+    declared = [
+        value
+        for key, value in concurrency.items()
+        if isinstance(key, str) and key.lower() == "cancel-in-progress"
+    ]
+    for value in declared or [False]:
+        test.assertIs(
+            value,
+            False,
+            f"{label} cancels a run already in progress",
+        )
+
+
+def assert_per_head_metadata_concurrency(
+    test: unittest.TestCase, workflow: dict, prefix: str
+) -> None:
+    """A per-head check must not cancel its own in-flight run.
+
+    Both of these checks are rerun by a pull-request body edit, and the agent
+    contract asks for exactly that edit -- recording the reviewed head and its
+    CI evidence -- immediately before merging. Cancelling the run already in
+    flight for the same head leaves a `cancelled` check run that reads as a
+    failure on a green pull request. Runs for different heads answer about
+    different commits and never race, so keying the group by head SHA is what
+    makes not cancelling safe as well as cheap.
+    """
+
+    concurrency = workflow["concurrency"]
+    group = concurrency["group"]
+    test.assertTrue(group.startswith(prefix), group)
+    test.assertIn("github.event.pull_request.number", group)
+    test.assertIn("github.event.pull_request.head.sha", group)
+    assert_never_cancels_in_progress(test, workflow, "the workflow")
+    # A job-level `concurrency` block does not replace the workflow-level one;
+    # it adds a second group the job also belongs to, so `cancel-in-progress:
+    # true` there restores exactly the cancellation this contract removes while
+    # leaving the workflow-level block untouched. The idiom is in use here
+    # (`pr-base-retarget.yml` gives its coordinator one), so reading only the
+    # workflow level would leave the contract open to a plausible refactor.
+    for job_id, job in workflow["jobs"].items():
+        assert_never_cancels_in_progress(test, job, f"job {job_id}")
+
+
+def assert_changelog_workflow(test: unittest.TestCase, workflow: dict) -> None:
+    events = actions_events(workflow)
+    # `edited` stays: GitHub delivers a base-branch change as an `edited`
+    # event, and this check reads `base.sha`. A body-only or title-only edit
+    # also arrives that way, which is wasteful but harmless; narrowing it with
+    # a job-level `if` is not available, because a skipped required context
+    # satisfies branch protection here and would let an edit turn a failing
+    # Changelog green. `labeled`/`unlabeled` carry the `no-changelog` label.
+    test.assertEqual(
+        set(events["pull_request"]["types"]),
+        {
+            "opened",
+            "synchronize",
+            "reopened",
+            "edited",
+            "labeled",
+            "unlabeled",
+        },
+    )
+    test.assertEqual(workflow["permissions"], {"contents": "read"})
+    job = workflow["jobs"]["changelog"]
+    test.assertEqual(job["name"], "Changelog")
+    text = str(job)
+    test.assertIn("scripts.test_changelog", text)
+    test.assertIn("changelog.py check-pr", text)
+    assert_per_head_metadata_concurrency(test, workflow, "changelog-")
+
+
 def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
     test.assertEqual(workflow["permissions"], {"contents": "read"})
+    assert_candidate_deepening_stays_connected(test, workflow)
+    authorship = next(
+        step
+        for step in workflow["jobs"]["no-ai-authorship"]["steps"]
+        if step.get("name") == "Check commits for AI authorship markers"
+    )
+    # A grafted base stops excluding its own ancestors from `$BASE..$HEAD`,
+    # so this scan would read commits that merged before the pull request.
+    assert_backstop_fetches_stay_connected(
+        test, authorship["run"], ('"$BASE"',)
+    )
     events = actions_events(workflow)
     test.assertEqual(
         set(events["pull_request"]["types"]),
@@ -264,6 +424,14 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
     test.assertLess(
         changes["steps"].index(bootstrap), changes["steps"].index(detect)
     )
+    # The verdict is split in two so the identity step can sit between
+    # them: it needs a gate to run behind, and the verdict needs its
+    # outcome. `scripts/test_ci_preflight_carrier.py` owns the always-
+    # completes and single-carrier properties; what is checked here is
+    # that the routing inputs still reach the pair.
+    gate = next(
+        step for step in changes["steps"] if step.get("id") == "preflight-gate"
+    )
     record = next(
         step
         for step in changes["steps"]
@@ -271,18 +439,24 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
     )
     test.assertIn("candidate_preflight=", record["run"])
     test.assertIn("ci_contract_changed=", record["run"])
-    test.assertIn('if [ "$lifecycle" != "success" ]', record["run"])
-    test.assertIn('if [ "$detected_contract" = "true" ]', record["run"])
-    test.assertIn('[ "$bootstrap_contract" = "true" ]', record["run"])
-    test.assertIn('[ "$rebase_contract" = "true" ]', record["run"])
+    test.assertIn('if [ "$lifecycle" != "success" ]', gate["run"])
+    test.assertIn('if [ "$detected_contract" = "true" ]', gate["run"])
+    test.assertIn('[ "$bootstrap_contract" = "true" ]', gate["run"])
+    test.assertIn('[ "$rebase_contract" = "true" ]', gate["run"])
     identity = next(
         step
         for step in changes["steps"]
         if step.get("name") == "Record immutable candidate identity"
     )
-    test.assertEqual(
-        identity["if"],
-        "github.event_name == 'pull_request' && steps.candidate-preflight.outputs.candidate_preflight == 'success'",
+    test.assertIn(
+        "steps.preflight-gate.outputs.gate == 'success'", identity["if"]
+    )
+    test.assertIn("github.event_name == 'pull_request'", identity["if"])
+    test.assertLess(
+        changes["steps"].index(gate), changes["steps"].index(identity)
+    )
+    test.assertLess(
+        changes["steps"].index(identity), changes["steps"].index(record)
     )
     test.assertEqual(identity["working-directory"], "candidate")
     test.assertIn("scripts/ci_candidate_identity.py", identity["run"])
@@ -296,11 +470,13 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
         for step in changes["steps"]
         if step.get("name") == "Upload immutable candidate identity"
     )
-    test.assertEqual(upload["if"], identity["if"])
+    # The upload now follows the identity it uploads rather than sharing
+    # its condition, so an unrecorded identity is never published.
+    test.assertIn("steps.identity.outcome == 'success'", upload["if"])
     test.assertEqual(upload["with"]["name"], "candidate-identity-ci")
     test.assertEqual(upload["with"]["if-no-files-found"], "error")
     test.assertIn("candidate-identity.json", upload["with"]["path"])
-    test.assertIn('if [ "$contract_changed" = "true" ]', record["run"])
+    test.assertIn('if [ "$contract_changed" = "true" ]', gate["run"])
     docs = workflow["jobs"]["docs"]
     test.assertIn("candidate_preflight", str(docs["steps"]))
     for job_id in PREFLIGHT_GATED_JOBS:
@@ -448,6 +624,7 @@ def assert_retarget_workflow(test: unittest.TestCase, workflow: dict) -> None:
 
 
 def assert_hull_retarget_dispatch(test: unittest.TestCase, workflow: dict) -> None:
+    assert_candidate_deepening_stays_connected(test, workflow)
     events = actions_events(workflow)
     test.assertEqual(
         set(events["pull_request"]["types"]),
@@ -532,15 +709,24 @@ def assert_hull_retarget_dispatch(test: unittest.TestCase, workflow: dict) -> No
         for step in changes["steps"]
         if step.get("id") == "candidate-preflight"
     )
-    test.assertIn('[ "$rebase_contract" = "true" ]', record["run"])
+    gate = next(
+        step for step in changes["steps"] if step.get("id") == "preflight-gate"
+    )
+    test.assertIn('[ "$rebase_contract" = "true" ]', gate["run"])
     identity = next(
         step
         for step in changes["steps"]
         if step.get("name") == "Record immutable candidate identity"
     )
-    test.assertEqual(
-        identity["if"],
-        "github.event_name == 'pull_request' && steps.candidate-preflight.outputs.candidate_preflight == 'success'",
+    test.assertIn(
+        "steps.preflight-gate.outputs.gate == 'success'", identity["if"]
+    )
+    test.assertIn("github.event_name == 'pull_request'", identity["if"])
+    test.assertLess(
+        changes["steps"].index(gate), changes["steps"].index(identity)
+    )
+    test.assertLess(
+        changes["steps"].index(identity), changes["steps"].index(record)
     )
     test.assertEqual(identity["working-directory"], "candidate")
     test.assertIn("scripts/ci_candidate_identity.py", identity["run"])
@@ -554,20 +740,28 @@ def assert_hull_retarget_dispatch(test: unittest.TestCase, workflow: dict) -> No
         for step in changes["steps"]
         if step.get("name") == "Upload immutable candidate identity"
     )
-    test.assertEqual(upload["if"], identity["if"])
+    # The upload now follows the identity it uploads rather than sharing
+    # its condition, so an unrecorded identity is never published.
+    test.assertIn("steps.identity.outcome == 'success'", upload["if"])
     test.assertEqual(upload["with"]["name"], "candidate-identity-hull")
     test.assertEqual(upload["with"]["if-no-files-found"], "error")
     conformance = workflow["jobs"]["conformance"]
+    # Hull skips a failed verdict, because the required Docs context
+    # states the reason and Hull's red added nothing the two required
+    # aggregators did not already say. It still runs when the `changes`
+    # job itself did not succeed, which after this change is reachable
+    # only through job setup, since every step in that job is tolerated. `scripts/test_ci_preflight_carrier.py` owns the
+    # carrier property; this pins the exact expression.
     test.assertEqual(
         conformance["if"],
         "${{ !cancelled() && "
-        "(needs.changes.outputs.candidate_preflight != 'success' || "
-        "needs.changes.result != 'success' || "
-        "needs.changes.outputs.rebase_lane == 'full' || "
+        "(needs.changes.result != 'success' || "
+        "(needs.changes.outputs.candidate_preflight == 'success' && "
+        "(needs.changes.outputs.rebase_lane == 'full' || "
         "(needs.changes.outputs.rebase_lane == 'targeted' && "
         "needs.changes.outputs.rebase_run_hull == 'true') || "
         "(needs.changes.outputs.rebase_lane == 'ordinary' && "
-        "needs.changes.outputs.docs_only != 'true')) }}",
+        "needs.changes.outputs.docs_only != 'true')))) }}",
     )
     preflight = conformance["steps"][0]
     test.assertEqual(
@@ -592,7 +786,9 @@ def assert_acknowledgement_workflow(test: unittest.TestCase, workflow: dict) -> 
         set(events["pull_request"]["types"]),
         {"opened", "synchronize", "reopened", "edited"},
     )
-    test.assertIn("pull_request.number", str(workflow["concurrency"]))
+    assert_per_head_metadata_concurrency(
+        test, workflow, "pr-contract-acknowledgements-"
+    )
     job = workflow["jobs"]["acknowledgements"]
     test.assertEqual(job["name"], "PR Contract Acknowledgements")
     test.assertEqual(
@@ -838,6 +1034,7 @@ class PullRequestWorkflowRoutingTests(unittest.TestCase):
         assert_candidate_receipt_workflow(
             self, yaml.safe_load(RECEIPT.read_text())
         )
+        assert_changelog_workflow(self, yaml.safe_load(CHANGELOG.read_text()))
         assert_author_machine_tokens(self)
 
     def test_body_edits_cannot_reenter_compiler_ci(self) -> None:
@@ -880,6 +1077,92 @@ class PullRequestWorkflowRoutingTests(unittest.TestCase):
                 AssertionError
             ):
                 assertion(self, workflow)
+
+    def test_a_fetch_reappearing_in_the_detector_step_is_rejected(self) -> None:
+        for workflow_path, assertion in (
+            (CI, assert_ci_metadata_routing),
+            (HULL, assert_hull_retarget_dispatch),
+        ):
+            workflow = copy.deepcopy(yaml.safe_load(workflow_path.read_text()))
+            detect = next(
+                step
+                for step in workflow["jobs"]["changes"]["steps"]
+                if step.get("id") == "detect"
+            )
+            detect["run"] += '\ngit fetch --depth=1 origin "$BASE" || true\n'
+            with self.subTest(workflow=workflow_path.name), self.assertRaises(
+                AssertionError
+            ):
+                assertion(self, workflow)
+
+    def test_the_detector_step_cannot_stop_delegating(self) -> None:
+        for workflow_path, assertion in (
+            (CI, assert_ci_metadata_routing),
+            (HULL, assert_hull_retarget_dispatch),
+        ):
+            workflow = copy.deepcopy(yaml.safe_load(workflow_path.read_text()))
+            owner = next(
+                step
+                for step in workflow["jobs"]["changes"]["steps"]
+                if step.get("id") == "clone"
+            )
+            owner["run"] = owner["run"].replace(
+                "ci_establish_candidate_clone.py", "true #", 1
+            )
+            with self.subTest(workflow=workflow_path.name), self.assertRaises(
+                AssertionError
+            ):
+                assertion(self, workflow)
+
+    def test_a_metadata_check_may_not_cancel_its_own_head(self) -> None:
+        for workflow_path, assertion in (
+            (CHANGELOG, assert_changelog_workflow),
+            (ACKNOWLEDGEMENTS, assert_acknowledgement_workflow),
+        ):
+            for change in (
+                "cancel",
+                "group",
+                "job-level",
+                "quoted",
+                "mixed-case",
+            ):
+                workflow = copy.deepcopy(
+                    yaml.safe_load(workflow_path.read_text())
+                )
+                if change == "cancel":
+                    workflow["concurrency"]["cancel-in-progress"] = True
+                elif change == "quoted":
+                    workflow["concurrency"]["cancel-in-progress"] = "true"
+                elif change == "mixed-case":
+                    del workflow["concurrency"]["cancel-in-progress"]
+                    workflow["concurrency"]["Cancel-In-Progress"] = True
+                elif change == "job-level":
+                    job = next(iter(workflow["jobs"].values()))
+                    job["concurrency"] = {
+                        "group": "sneak-${{ github.event.pull_request.number }}",
+                        "cancel-in-progress": True,
+                    }
+                else:
+                    workflow["concurrency"]["group"] = workflow["concurrency"][
+                        "group"
+                    ].replace(
+                        "-${{ github.event.pull_request.head.sha }}", ""
+                    )
+                with self.subTest(
+                    workflow=workflow_path.name, change=change
+                ), self.assertRaises(AssertionError):
+                    assertion(self, workflow)
+
+    def test_the_changelog_check_keeps_its_base_change_and_label_triggers(
+        self,
+    ) -> None:
+        for dropped in ("edited", "labeled", "unlabeled"):
+            workflow = copy.deepcopy(yaml.safe_load(CHANGELOG.read_text()))
+            actions_events(workflow)["pull_request"]["types"].remove(dropped)
+            with self.subTest(dropped=dropped), self.assertRaises(
+                AssertionError
+            ):
+                assert_changelog_workflow(self, workflow)
 
     def test_trusted_classifier_cannot_reuse_candidate_writable_paths(self) -> None:
         for workflow_path, assertion in (

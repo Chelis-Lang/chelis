@@ -96,7 +96,7 @@ jobs:
 
   package-expansion-shard:
     name: Manual Package Expansion (bucket ${{ matrix.shard }})
-    timeout-minutes: 55
+    timeout-minutes: 20
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -200,6 +200,7 @@ jobs:
     name: Manual Package Expansion Summary
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: read
       pull-requests: read
     needs: [integration-plan, package-expansion-shard]
@@ -238,6 +239,19 @@ jobs:
         with:
           pattern: integration-package-expansion-*
           path: candidate/target/integration-change/receipts/package-expansion
+
+      - name: Record the default-branch failure baseline
+        id: failure-baseline
+        continue-on-error: true
+        working-directory: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: >-
+          python3 ../trusted/scripts/ci_failure_baseline.py
+          --plan target/integration-change/plan.json
+          --repo-path .
+          --output target/integration-change/failure-baseline
 
       - name: Summarize the informational package expansion
         working-directory: candidate

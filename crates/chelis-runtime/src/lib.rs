@@ -1297,6 +1297,30 @@ fn resize_list_ledger(list: *mut chelis_list, site: &str) {
     }
 }
 
+fn resize_string_ledger(handle: *mut RuntimeString, site: &str) {
+    if handle.is_null() {
+        return;
+    }
+    // `new_runtime_string` records the exact UTF-8 bytes plus the one
+    // compatibility NUL, so an in-place growth reports the same quantity
+    // rather than the `Vec` capacities behind it.
+    let bytes = unsafe { (*handle).value.len().saturating_add(1) as u64 };
+    if !ownership_ledger::resize(handle.cast(), bytes, site) {
+        runtime_fail!("compiled ownership ledger rejected string resize at {site}");
+    }
+}
+
+fn resize_dict_ledger(dict: *mut chelis_dict, site: &str) {
+    if dict.is_null() {
+        return;
+    }
+    let bytes =
+        unsafe { ((*dict).entries.capacity() as u64).saturating_mul(LEDGER_DICT_ENTRY_BYTES) };
+    if !ownership_ledger::resize(dict.cast(), bytes, site) {
+        runtime_fail!("compiled ownership ledger rejected dict resize at {site}");
+    }
+}
+
 #[repr(C)]
 struct RuntimeString {
     header: HeapHeader,
@@ -1306,14 +1330,24 @@ struct RuntimeString {
     /// `chelis_string_data` remains available to legacy C consumers whose
     /// inputs exclude embedded NUL. Length-aware construction and observation
     /// use `value` and never treat this terminator as string content.
+    ///
+    /// A mutator maintains this beside `value`, and the pointer
+    /// `chelis_string_data` last returned does not survive a growth that
+    /// reallocates this buffer.
     nul_terminated: Vec<u8>,
     /// Unicode scalar values in `value`, counted once at construction.
     ///
     /// `chelis_string_len` is character-indexed, so serving it from
     /// `value.chars().count()` made every length query O(bytes) and any loop
     /// that tests `string_len` in its condition quadratic in time. This field
-    /// is not a cache that can go stale: `RuntimeString` is immutable after
-    /// `new_runtime_string` builds it.
+    /// must be maintained by every mutator, not recomputed by readers.
+    /// `RuntimeString` was immutable after `new_runtime_string` built it
+    /// until chelis#2205 added `chelis_string_concat_owned`, which appends in
+    /// place when it holds the only strong owner. Any further mutator owes
+    /// this field and `nul_terminated` the same update in the same place: a
+    /// stale count is invisible to every ASCII input, because ASCII makes
+    /// bytes and characters agree, and it corrupts both `chelis_string_len`
+    /// and the slicing strategy below.
     ///
     /// It also decides the slicing strategy. A UTF-8 char occupies one byte
     /// exactly when it is ASCII, so `char_count == value.len()` is an O(1)
@@ -3887,6 +3921,82 @@ pub unsafe extern "C" fn chelis_string_concat(
     new_runtime_string(out)
 }
 
+/// Consuming concatenation (chelis#2205). Takes ownership of `lhs`: when this
+/// is the only strong owner and `rhs` is a different string, the right-hand
+/// bytes are appended in place and the same handle is returned; otherwise a
+/// fresh string is built exactly as `chelis_string_concat` would, and the
+/// consumed input is released. The caller must have proved that no
+/// un-retained reference to `lhs` survives the call (the ownership verifier's
+/// Move); the strong-owner count then decides sharing, which is the half a
+/// static rule cannot see across functions.
+///
+/// `RuntimeString` is the first heap kind this optimisation mutates that
+/// carries derived state, so the in-place arm maintains all three fields
+/// together. `value` gains the bytes; `nul_terminated` loses its terminator,
+/// gains the same bytes and regains one; and `char_count` gains the
+/// right-hand side's count, which is exact because concatenating two UTF-8
+/// sequences concatenates their scalar sequences and creates no new scalar at
+/// the seam. Leaving `char_count` stale would make the character-indexed
+/// `chelis_string_len` and `chelis_string_slice` read a length the string
+/// does not have.
+///
+/// `chelis_string_data` hands out an interior pointer into `nul_terminated`,
+/// which an in-place growth may reallocate. That pointer is invalidated here
+/// exactly as it would be by the release the cloning path performs instead,
+/// and this entry point is private to the emitter, so no published-ABI caller
+/// can reach it. Generated code never holds a data pointer across a
+/// statement.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_string_concat_owned(
+    lhs: chelis_string,
+    rhs: chelis_string,
+) -> chelis_string {
+    // An rhs that aliases the consumed lhs is a retained second owner of the
+    // same string (the emitter's operand identities are distinct even when
+    // the runtime handle is one), so it takes the cloning path below like
+    // every other shared input; the in-place arm never reads a string it is
+    // extending.
+    let aliased = std::ptr::eq(lhs.handle.cast_const(), rhs.handle.cast_const());
+    if !aliased
+        && !lhs.handle.is_null()
+        && string_value(lhs).header.strong.load(Ordering::Relaxed) == 1
+    {
+        // Validate the borrowed operand the same way every other reader
+        // does, then read its three facts through the raw handle so no
+        // reference into `rhs` is alive while `lhs` is mutated. The two are
+        // distinct allocations here, because the aliasing case took the
+        // cloning path above.
+        string_value(rhs);
+        let appended = (*rhs.handle).value.len();
+        let characters = (*rhs.handle).char_count;
+        if appended != 0 {
+            (*lhs.handle).value.push_str(&(*rhs.handle).value);
+            // The stored buffer is the exact bytes plus one compatibility
+            // terminator, so the terminator comes off, the new bytes go on,
+            // and it goes back. Every `RuntimeString` is built with the
+            // terminator present, so the pop cannot empty a well-formed
+            // buffer.
+            (*lhs.handle).nul_terminated.pop();
+            (*lhs.handle)
+                .nul_terminated
+                .extend_from_slice((*rhs.handle).value.as_bytes());
+            (*lhs.handle).nul_terminated.push(0);
+            (*lhs.handle).char_count = (*lhs.handle).char_count.saturating_add(characters);
+        }
+        // Record the in-place arm unconditionally, including the empty
+        // right-hand side that changes no byte. The ledger is the only
+        // instrument that distinguishes this arm from the cloning one, and
+        // recording only growths made a zero count ambiguous: it meant
+        // "cloned, or appended nothing". Now a resize at this site means the
+        // in-place arm ran, and its absence means the cloning arm did.
+        resize_string_ledger(lhs.handle, "chelis_string_concat_owned");
+        return lhs;
+    }
+    let result = chelis_string_concat(lhs, rhs);
+    release_string_handle(lhs.handle);
+    result
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn chelis_string_trim(value: chelis_string) -> chelis_string {
     new_runtime_string(string_value(value).value.trim().to_owned())
@@ -4678,6 +4788,61 @@ pub unsafe extern "C" fn chelis_list_extend(list: *mut chelis_list, src: *const 
     resize_list_ledger(list, "chelis_list_extend");
 }
 
+/// Consuming append (chelis#2205). Takes ownership of `list`: when this is
+/// the only strong owner the value is pushed in place and the same list is
+/// returned; otherwise a fresh list is built exactly as `chelis_list_append`
+/// would, and the consumed input is released. The caller must have proved
+/// that no un-retained reference to `list` survives the call (the ownership
+/// verifier's Move); the strong-owner count then decides sharing, which is
+/// the half a static rule cannot see across functions.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_list_append_owned(
+    list: *mut chelis_list,
+    value: chelis_value,
+) -> *mut chelis_list {
+    if list.is_null() {
+        return chelis_list_append(list, value);
+    }
+    if (*list).header.strong.load(Ordering::Relaxed) == 1 {
+        (*list).items.push(chelis_value_clone(value));
+        resize_list_ledger(list, "chelis_list_append_owned");
+        return list;
+    }
+    let result = chelis_list_append(list, value);
+    release_list_ptr(list);
+    result
+}
+
+/// Consuming concat (chelis#2205): the in-place counterpart of
+/// `chelis_list_concat` for a uniquely owned `lhs`, with the same contract as
+/// `chelis_list_append_owned`. `rhs` stays borrowed and may not alias `lhs`.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_list_concat_owned(
+    lhs: *mut chelis_list,
+    rhs: *const chelis_list,
+) -> *mut chelis_list {
+    if lhs.is_null() {
+        return chelis_list_concat(lhs, rhs);
+    }
+    // An rhs that aliases lhs is a retained second owner of the same list
+    // (the emitter's operand identities are distinct even when the runtime
+    // pointer is one), so it takes the cloning path below like every other
+    // shared input; the in-place arm never reads a list it is extending.
+    let aliased = std::ptr::eq(lhs as *const chelis_list, rhs);
+    if !aliased && (*lhs).header.strong.load(Ordering::Relaxed) == 1 {
+        if !rhs.is_null() {
+            for &value in &(*rhs).items {
+                (*lhs).items.push(chelis_value_clone(value));
+            }
+        }
+        resize_list_ledger(lhs, "chelis_list_concat_owned");
+        return lhs;
+    }
+    let result = chelis_list_concat(lhs, rhs);
+    release_list_ptr(lhs);
+    result
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn chelis_list_concat(
     lhs: *const chelis_list,
@@ -4997,6 +5162,147 @@ pub unsafe extern "C" fn chelis_dict_merge(
         }
     }
     new_dict(entries, "chelis_dict_merge")
+}
+
+/// Consuming insert (chelis#2205). Takes ownership of `dict`: when this is
+/// the only strong owner the entry is written in place and the same
+/// dictionary is returned; otherwise a fresh dictionary is built exactly as
+/// `chelis_dict_insert` would, and the consumed input is released. The
+/// caller must have proved that no un-retained reference to `dict` survives
+/// the call (the ownership verifier's Move); the strong-owner count then
+/// decides sharing, which is the half a static rule cannot see across
+/// functions.
+///
+/// The in-place arm over an existing key clones the incoming value before
+/// releasing the one it replaces. The cloning entry point can release first
+/// because the caller still owns the incoming value; here the two may be the
+/// same heap value held once, and releasing first would free it before the
+/// clone reads it.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_dict_insert_owned(
+    dict: *mut chelis_dict,
+    key: chelis_value,
+    value: chelis_value,
+) -> *mut chelis_dict {
+    if dict.is_null() {
+        return chelis_dict_insert(dict, key, value);
+    }
+    validate_dict_key(key, "chelis_dict_insert_owned key");
+    validate_value(value, "chelis_dict_insert_owned value");
+    if (*dict).header.strong.load(Ordering::Relaxed) == 1 {
+        // The clone is hoisted above the branch on purpose: the incoming
+        // value and the one it replaces may be the same heap value held
+        // exactly once, so the replaced value's release must never run
+        // before the incoming one has its own count.
+        let fresh = chelis_value_clone(value);
+        let existing = (*dict)
+            .entries
+            .iter()
+            .position(|entry| value_key_eq(entry.key, key));
+        if let Some(index) = existing {
+            let previous = (*dict).entries[index].value;
+            (*dict).entries[index].value = fresh;
+            chelis_value_release(previous);
+        } else {
+            (*dict).entries.push(chelis_dict_entry {
+                key: chelis_value_clone(key),
+                value: fresh,
+            });
+            resize_dict_ledger(dict, "chelis_dict_insert_owned");
+        }
+        return dict;
+    }
+    let result = chelis_dict_insert(dict, key, value);
+    release_dict_ptr(dict);
+    result
+}
+
+/// Consuming merge (chelis#2205): the in-place counterpart of
+/// `chelis_dict_merge` for a uniquely owned `lhs`, with the same contract as
+/// `chelis_dict_insert_owned`. `rhs` stays borrowed and may not alias `lhs`.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_dict_merge_owned(
+    lhs: *mut chelis_dict,
+    rhs: *const chelis_dict,
+) -> *mut chelis_dict {
+    if lhs.is_null() {
+        return chelis_dict_merge(lhs, rhs);
+    }
+    // An rhs that aliases lhs is a retained second owner of the same
+    // dictionary (the emitter's operand identities are distinct even when the
+    // runtime pointer is one), so it takes the cloning path below like every
+    // other shared input; the in-place arm never reads a dictionary it is
+    // extending.
+    let aliased = std::ptr::eq(lhs as *const chelis_dict, rhs);
+    if !aliased && (*lhs).header.strong.load(Ordering::Relaxed) == 1 {
+        let incoming = if rhs.is_null() {
+            0
+        } else {
+            (*rhs).entries.len()
+        };
+        for position in 0..incoming {
+            let entry = (*rhs).entries[position];
+            let existing = (*lhs)
+                .entries
+                .iter()
+                .position(|held| value_key_eq(held.key, entry.key));
+            if let Some(index) = existing {
+                let fresh = chelis_value_clone(entry.value);
+                let previous = (*lhs).entries[index].value;
+                (*lhs).entries[index].value = fresh;
+                chelis_value_release(previous);
+            } else {
+                (*lhs).entries.push(chelis_dict_entry {
+                    key: chelis_value_clone(entry.key),
+                    value: chelis_value_clone(entry.value),
+                });
+            }
+        }
+        resize_dict_ledger(lhs, "chelis_dict_merge_owned");
+        return lhs;
+    }
+    let result = chelis_dict_merge(lhs, rhs);
+    release_dict_ptr(lhs);
+    result
+}
+
+/// Consuming remove (chelis#2205): the in-place counterpart of
+/// `chelis_dict_remove` for a uniquely owned `dict`, with the same contract
+/// as `chelis_dict_insert_owned`. The consumed dictionary keeps its
+/// allocation, so the removed entry's key and value are released here; the
+/// cloning entry point leaves that to the caller's own release of the
+/// untouched input.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_dict_remove_owned(
+    dict: *mut chelis_dict,
+    key: chelis_value,
+) -> *mut chelis_dict {
+    if dict.is_null() {
+        return chelis_dict_remove(dict, key);
+    }
+    validate_dict_key(key, "chelis_dict_remove_owned key");
+    if (*dict).header.strong.load(Ordering::Relaxed) == 1 {
+        // `retain` rather than a single removal, so a dictionary that somehow
+        // holds one key twice loses exactly the entries `chelis_dict_remove`
+        // would have filtered out.
+        let mut removed: Vec<chelis_dict_entry> = Vec::new();
+        (*dict).entries.retain(|entry| {
+            if value_key_eq(entry.key, key) {
+                removed.push(*entry);
+                false
+            } else {
+                true
+            }
+        });
+        for entry in removed {
+            chelis_value_release(entry.key);
+            chelis_value_release(entry.value);
+        }
+        return dict;
+    }
+    let result = chelis_dict_remove(dict, key);
+    release_dict_ptr(dict);
+    result
 }
 
 #[no_mangle]

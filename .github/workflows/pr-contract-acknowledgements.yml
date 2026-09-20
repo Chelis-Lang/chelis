@@ -4,9 +4,17 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, edited]
 
+# Keyed by head SHA, and never cancelling, for the reason recorded in
+# changelog.yml. This check exists to be rerun by a body edit, and the edit
+# that reruns it is the one the agent contract asks for immediately before
+# merging, so cancelling the in-flight run for the same head is the common
+# case rather than the exception. Runs for different heads answer different
+# questions and never race.
 concurrency:
-  group: pr-contract-acknowledgements-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  group: >-
+    pr-contract-acknowledgements-${{ github.event.pull_request.number }}-${{
+    github.event.pull_request.head.sha }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -37,6 +45,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          ACTION: ${{ github.event.action }}
+          BEFORE: ${{ github.event.before }}
         run: |
           current_pr="$RUNNER_TEMP/current-pr.json"
           timeline="$RUNNER_TEMP/pr-timeline.json"
@@ -44,6 +54,21 @@ jobs:
           base_ref=$(jq -er '.base.ref | select(length > 0)' "$current_pr")
           git fetch --no-tags origin "refs/heads/$base_ref"
           target_tip=$(git rev-parse FETCH_HEAD)
+          # `classify_update` compares the pre-push head against the new one to
+          # tell a forward rebase from an arbitrary rewrite. This checkout is
+          # `fetch-depth: 0`, but a full clone holds what refs reach, and after
+          # a force-push the old head is reachable from no ref, so it is simply
+          # absent. Fetch it by SHA; GitHub serves the unadvertised object.
+          # Deliberately not `2>/dev/null || true`: a fetch that fails must say
+          # so here, because swallowing it is what turned a clean forward
+          # rebase into an unexplained demand for the history-rewrite
+          # declaration (chelis#2229). The failure is reported and tolerated,
+          # not hidden -- the classifier then fails safe and names this as the
+          # cause.
+          if [ "$ACTION" = "synchronize" ] && [ -n "$BEFORE" ]; then
+            git fetch --no-tags origin "$BEFORE" ||
+              echo "could not fetch the pre-push head $BEFORE" >&2
+          fi
           gh api --paginate --slurp \
             "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/timeline" > "$timeline"
           .venv/bin/python scripts/ci_candidate_lifecycle.py \

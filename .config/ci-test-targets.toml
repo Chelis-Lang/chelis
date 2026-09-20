@@ -712,6 +712,26 @@ name = "expand_insert_dispatch_family"
 package = "chelis-types"
 name = "issue_1294_standard_lowerings"
 
+# chelis#2205: the counted receipts for the container-consumer table. Each
+# asserts that an N-step let-bound chain emits zero cloning calls, which is
+# the only executable evidence that the last-use move reaches the emitter at
+# all; the value-parity rows beside them pass with the table's rows removed,
+# so they cannot substitute. Package expansion is not a substitute either: it
+# is the lane these two were left to, and it does not reliably finish.
+# Registered together because the list file carries the mechanism's original
+# evidence and the dictionary file only extends it.
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_2205_container_last_use"
+
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_2205_dict_last_use"
+
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_2205_string_last_use"
+
 # All five rows in this published-stdlib acceptance target are intentionally
 # ignored. A direct modification remains required change-owned coverage: the
 # worker lists with ignored tests included, rejects this mode if any active
@@ -1396,6 +1416,186 @@ reason = "the reviewed target-duration baseline is authenticated and mutation-te
 tracking_issue = "chelis#1824"
 
 [[path_rule]]
+prefix = ".github/workflows/build-cvc5.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the cvc5 build, cache and release helpers and their glibc-231 and hosted-validation contracts are locked by script-unit"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = ".github/workflows/cache-prune.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit holds this workflow's reviewed registration as running no command the per-PR gate owns; it validates that membership, not a command inventory"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = ".github/workflows/conformance-nightly.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the nightly Hull cadence and its command inventory are locked by script-unit"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = ".github/workflows/ecosystem-drift.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the drift report, repin helper and their workflow contract are locked by script-unit"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = ".github/workflows/loc-report.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit holds this workflow's reviewed registration as running no command the per-PR gate owns; it validates that membership, not a command inventory"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = ".github/workflows/loud-unsupported-nightly.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the loud-unsupported nightly workflow contract is locked by script-unit"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = ".github/workflows/macos-nightly.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the macOS nightly cadence, its configuration-closure inputs and its hosted-validation contract are locked by script-unit"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = ".github/workflows/nix-packages.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit validates this workflow's flake-package contract and its reviewed registration as running no command the per-PR gate owns"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = ".github/workflows/openspec-autoland-controller.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the trusted OpenSpec autoland controller boundary is locked by script-unit"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = ".github/workflows/openspec-autoland-signal.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the permissionless OpenSpec autoland signal boundary is locked by script-unit"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = ".github/workflows/openspec-autoland-validate.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the OpenSpec autoland validation and merge-worker contracts are locked by script-unit"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = ".github/workflows/openspec-autoland.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the OpenSpec autoland acceptance boundary and merge worker are locked by script-unit"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = ".github/workflows/openspec-validate.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the pinned OpenSpec validation action and its advisory mode are locked by script-unit"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = ".github/workflows/ownership-hip.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the ownership HIP manual-gate workflow contract is locked by script-unit"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = ".github/workflows/smt-full-prove.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the full SMT prove cadence and its configuration-closure inputs are locked by script-unit"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = "docs/investigations/remediation_status_2026_08_04.md"
+disposition = "owner"
+workflow = "ci.yml"
+job = "docs"
+cadence = "pull_request and push"
+reason = "the required Docs job validates this protected status contract and exact change acknowledgements; the docs-only detector already lists it as a control artifact"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = "spec/11-ffi.md"
+disposition = "owner"
+workflow = "ci.yml"
+job = "docs"
+cadence = "pull_request and push"
+reason = "the required Docs job validates the protected FFI contract and exact change acknowledgements; the docs-only detector already lists it as a control artifact"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = "spec/design/spec_provenance.md"
+disposition = "owner"
+workflow = "ci.yml"
+job = "docs"
+cadence = "pull_request and push"
+reason = "the required Docs job validates the protected provenance contract and exact change acknowledgements; the docs-only detector already lists it as a control artifact"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = "scripts/test_diagnostic_kind_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes this oracle's own test; the docs-only detector separately promotes a change here into the diagnostic-kind mutation oracle"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = ".github/workflows/changelog.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the required Changelog check's trigger set and per-head concurrency contract are locked by script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
 prefix = ".github/workflows/ci.yml"
 disposition = "owner"
 workflow = "ci.yml"
@@ -1481,6 +1681,42 @@ reason = "the planner executor and report implementation is directly covered by 
 tracking_issue = "chelis#1824"
 
 [[path_rule]]
+prefix = "scripts/ci_failure_baseline.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit validates default-branch baseline run selection, base containment and manifest issuance"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_ci_preflight_carrier.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the always-completes and single-carrier contract's own tests"
+tracking_issue = "chelis#2228"
+
+[[path_rule]]
+prefix = "scripts/ci_establish_candidate_clone.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit validates the candidate clone's stated invariant and the confinement of its fetches"
+tracking_issue = "chelis#2234"
+
+[[path_rule]]
+prefix = "scripts/test_ci_establish_candidate_clone.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the candidate clone invariant's own tests"
+tracking_issue = "chelis#2234"
+
+[[path_rule]]
 prefix = "scripts/ci_candidate_lifecycle.py"
 disposition = "owner"
 workflow = "ci.yml"
@@ -1541,6 +1777,15 @@ workflow = "ci.yml"
 job = "script-unit"
 cadence = "pull_request and push"
 reason = "the planner executor and report mutation suite runs in script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_ci_failure_baseline.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "baseline selection, containment and manifest controls execute in script-unit"
 tracking_issue = "chelis#1824"
 
 [[path_rule]]
@@ -2115,6 +2360,15 @@ workflow = "ci.yml"
 job = "docs"
 cadence = "pull_request and push"
 reason = "the required Docs job validates the protected dtype contract and exact change acknowledgements"
+tracking_issue = "chelis#1868"
+
+[[path_rule]]
+prefix = "spec/design/compiled_value_ownership.md"
+disposition = "owner"
+workflow = "ci.yml"
+job = "docs"
+cadence = "pull_request and push"
+reason = "the required Docs job validates the protected compiled-value-ownership contract and exact change acknowledgements; the docs-only detector already lists the document as a control artifact"
 tracking_issue = "chelis#1868"
 
 [[path_rule]]

@@ -12,8 +12,20 @@ metadata, and emits two disjoint four-shard selections:
 
 Every persisted plan and shard receipt is content-digested. Reports reject
 missing, duplicate, mismatched, excluded, uncovered, or unsuccessful required
-execution. The informational report records the same defects without returning
-failure.
+execution.
+
+The informational package-expansion report answers a different question, so it
+classifies rather than repeating the required lane's verdict. Each observed test
+failure is differenced against a recorded default-branch failure baseline and
+reported as *introduced* or *inherited*, and each selected target with no
+execution evidence is reported as *unrun*. Those three counts are disjoint and
+none absorbs another: a target the lane could not reach is never reported as
+inherited. The report is clean when nothing was introduced. Inherited failures
+and unrun coverage are reported as the numbers they are, because a lane whose
+verdict is decided by the state of the default branch cannot say anything about
+the candidate. A missing baseline, or one the candidate's own history does not
+contain, fails the report loudly instead of differencing against the wrong
+tree.
 """
 from __future__ import annotations
 
@@ -73,8 +85,17 @@ TEST_FUNCTION = re.compile(
 )
 OWNER_FIELDS = {"workflow", "job", "cadence", "reason", "tracking_issue"}
 SIDECAR_NAMES = ("commands.json", "timings.json", "test-list.json", "junit.xml")
-SOFT_BUDGET_SECONDS = 40 * 60
-EXPANSION_EXECUTION_SECONDS = 45 * 60
+SOFT_BUDGET_SECONDS = 15 * 60
+EXPANSION_EXECUTION_SECONDS = 16 * 60
+EXPANSION_REPORT_VERSION = 2
+FAILURE_BASELINE_VERSION = 1
+# The report runs from the candidate checkout, so a new flag in its own
+# invocation is rejected outright by a candidate whose base predates this
+# change. A conventional path costs that candidate nothing: its parser never
+# sees the argument, and it reports exactly as it does today.
+DEFAULT_FAILURE_BASELINE = PurePosixPath(
+    "target/integration-change/failure-baseline/baseline.json"
+)
 DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 STANDING_EXECUTION = {
     "profile": "ci-fast",
@@ -3342,12 +3363,243 @@ def prepare_shard(
     )
 
 
+@dataclass(frozen=True)
+class FailureBaseline:
+    """Recorded default-branch test outcomes the expansion differences against."""
+
+    workflow: str
+    run_id: str
+    run_url: str
+    head_sha: str
+    created_at: str
+    observed: frozenset[str]
+    failed: frozenset[str]
+
+    def provenance(self) -> dict[str, Any]:
+        return {
+            "workflow": self.workflow,
+            "run_id": self.run_id,
+            "run_url": self.run_url,
+            "head_sha": self.head_sha,
+            "created_at": self.created_at,
+            "observed_cases": len(self.observed),
+            "failing_cases": len(self.failed),
+        }
+
+
+def junit_case_outcomes(path: Path) -> tuple[set[str], set[str]]:
+    """Return the executed and failing ``package::target::test`` identities."""
+    observed: set[str] = set()
+    failed: set[str] = set()
+    for case in ET.parse(path).iter("testcase"):
+        classname = case.get("classname")
+        name = case.get("name")
+        if not classname or not name:
+            raise ValueError(f"JUnit testcase has no identity: {path}")
+        if case.find("skipped") is not None:
+            continue
+        identity = f"{classname}::{name}"
+        observed.add(identity)
+        if case.find("failure") is not None or case.find("error") is not None:
+            failed.add(identity)
+    return observed, failed
+
+
+def load_failure_baseline(path: Path) -> FailureBaseline:
+    """Read a recorded default-branch baseline, rejecting an unusable one."""
+    manifest = load_json(path)
+    expected_keys = {
+        "version",
+        "workflow",
+        "run_id",
+        "run_url",
+        "head_sha",
+        "created_at",
+        "documents",
+    }
+    if set(manifest) != expected_keys:
+        raise ValueError(
+            f"failure baseline manifest keys mismatch: "
+            f"missing={sorted(expected_keys - set(manifest))}, "
+            f"extra={sorted(set(manifest) - expected_keys)}"
+        )
+    if manifest["version"] != FAILURE_BASELINE_VERSION:
+        raise ValueError(
+            f"failure baseline manifest version must be {FAILURE_BASELINE_VERSION}"
+        )
+    for key in ("workflow", "run_id", "run_url", "created_at"):
+        if not isinstance(manifest[key], str) or not manifest[key]:
+            raise ValueError(f"failure baseline manifest {key} must be a string")
+    head_sha = manifest["head_sha"]
+    if not isinstance(head_sha, str) or not SHA.fullmatch(head_sha):
+        raise ValueError("failure baseline manifest head_sha must be a commit")
+    documents = manifest["documents"]
+    if (
+        not isinstance(documents, list)
+        or not documents
+        or any(not isinstance(row, str) or not row for row in documents)
+    ):
+        raise ValueError("failure baseline manifest documents must be named")
+    observed: set[str] = set()
+    failed: set[str] = set()
+    for relative in documents:
+        parts = PurePosixPath(relative).parts
+        if PurePosixPath(relative).is_absolute() or ".." in parts:
+            raise ValueError(f"failure baseline document escapes its root: {relative}")
+        document = path.parent / PurePosixPath(relative)
+        if not document.is_file():
+            raise ValueError(f"missing failure baseline document: {document}")
+        document_observed, document_failed = junit_case_outcomes(document)
+        observed |= document_observed
+        failed |= document_failed
+    if not observed:
+        raise ValueError("failure baseline recorded no executed test cases")
+    return FailureBaseline(
+        workflow=manifest["workflow"],
+        run_id=manifest["run_id"],
+        run_url=manifest["run_url"],
+        head_sha=head_sha,
+        created_at=manifest["created_at"],
+        observed=frozenset(observed),
+        failed=frozenset(failed),
+    )
+
+
+def _ancestor_distance(repo: Path, ancestor: str, descendant: str) -> int | None:
+    """Commits between two reachable commits, or None when unrelated."""
+    for commit in (ancestor, descendant):
+        resolved = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", f"{commit}^{{commit}}"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if resolved.returncode != 0:
+            raise ValueError(f"commit is not present in this clone: {commit}")
+    if ancestor == descendant:
+        return 0
+    contained = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", ancestor, descendant],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if contained.returncode == 1:
+        return None
+    if contained.returncode != 0:
+        raise ValueError(
+            f"could not compare {ancestor} against {descendant}: "
+            f"{contained.stderr.strip()}"
+        )
+    counted = subprocess.run(
+        ["git", "rev-list", "--count", f"{ancestor}..{descendant}"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return int(counted.stdout.strip())
+
+
+def baseline_provenance(
+    plan: Mapping[str, Any],
+    baseline: FailureBaseline,
+    repo: Path,
+    *,
+    distance: Callable[[Path, str, str], int | None] | None = None,
+) -> dict[str, Any]:
+    """Bind a baseline to the candidate's own history, or refuse it.
+
+    A baseline the candidate's merge base does not contain describes a
+    different tree, and differencing against it would report a failure the
+    candidate introduced as one it inherited. That is refused outright.
+
+    Distance behind the base is annotated rather than refused, but it is not
+    harmless in one direction only. A test green at the baseline and broken by
+    the candidate is correctly introduced, and a test broken on the default
+    branch after the baseline is over-reported as introduced, which is the safe
+    error. The unsafe case is a test that was failing at the baseline, was
+    fixed on the default branch since, and is broken again by the candidate:
+    its identity is still in ``baseline.failed``, so it reports as inherited.
+    Twelve identities moved that way between two nightlies five days apart, so
+    the window is real rather than theoretical. The producer therefore selects
+    the newest baseline the candidate's base contains, which makes the window
+    the commits between that baseline and the base and no larger, and the
+    report states the distance so a reader can size what is left.
+    """
+    base_sha = plan["base_sha"]
+    measure = distance or _ancestor_distance
+    behind = measure(repo, baseline.head_sha, base_sha)
+    if behind is None:
+        raise ValueError(
+            f"failure baseline commit {baseline.head_sha} is not an ancestor of "
+            f"the candidate base {base_sha}; differencing against it could "
+            f"report an introduced failure as inherited"
+        )
+    provenance = baseline.provenance()
+    provenance["candidate_base_sha"] = base_sha
+    provenance["commits_behind_candidate_base"] = behind
+    return provenance
+
+
+def classify_expansion_failures(
+    documents: Sequence[tuple[Mapping[str, Any], Path | None]],
+    baseline: FailureBaseline,
+) -> dict[str, Any]:
+    """Split observed failures into introduced and inherited, and count unrun.
+
+    ``introduced`` carries the baseline's own verdict per row. A failure the
+    baseline never executed is introduced rather than inherited, because an
+    absent verdict is not evidence of prior breakage; the row says ``absent``
+    so a reader is not told the baseline confirmed anything.
+    """
+    observed_failures: set[str] = set()
+    unrun_targets: set[str] = set()
+    unrun_tests: set[str] = set()
+    for receipt, junit in documents:
+        selected = receipt.get("selected_targets")
+        executed = receipt.get("executed_targets")
+        if isinstance(selected, list) and isinstance(executed, list):
+            unrun_targets |= set(selected) - set(executed)
+        selected_tests = receipt.get("selected_tests")
+        executed_tests = receipt.get("executed_tests")
+        if isinstance(selected_tests, list) and isinstance(executed_tests, list):
+            unrun_tests |= set(selected_tests) - set(executed_tests)
+        if junit is not None and junit.is_file():
+            _, failed = junit_case_outcomes(junit)
+            observed_failures |= failed
+    introduced = sorted(observed_failures - baseline.failed)
+    return {
+        "introduced": [
+            {
+                "test": test,
+                "baseline": "passed" if test in baseline.observed else "absent",
+            }
+            for test in introduced
+        ],
+        "inherited": sorted(observed_failures & baseline.failed),
+        "unrun_targets": sorted(unrun_targets),
+        "unrun_tests": sorted(unrun_tests),
+    }
+
+
 def _report_findings(
     plan: Mapping[str, Any],
     receipts: Sequence[Mapping[str, Any]],
     lane: str,
     duration_baseline: DurationBaseline | None = None,
+    *,
+    classifies_coverage: bool = False,
 ) -> list[str]:
+    """Structural findings shared by both lanes.
+
+    ``classifies_coverage`` belongs to a caller that reports incomplete
+    execution as its own count. It suppresses exactly the rows that count would
+    otherwise duplicate, and nothing that describes a defect in the receipts
+    themselves.
+    """
     if duration_baseline is None:
         duration_baseline = load_duration_baseline()
     verify_plan_digest(plan, duration_baseline=duration_baseline)
@@ -3404,14 +3656,14 @@ def _report_findings(
         all_executed_targets.extend(executed)
         all_selected_tests.extend(selected_tests)
         all_executed_tests.extend(executed_tests)
-        if receipt.get("success") is not True:
+        # The informational lane reports an unsuccessful shard through the
+        # introduced/inherited/unrun counts, which are derived from the shard's
+        # own JUnit and target lists rather than from its prose.
+        # `summarize_package_expansion` still fails loudly on a shard whose
+        # recorded failures none of those three counts can account for.
+        if not classifies_coverage and receipt.get("success") is not True:
             findings.append(
                 f"shard {shard} did not succeed: {receipt.get('failures', [])}"
-            )
-        if lane == "package-expansion" and receipt["soft_budget_exceeded"]:
-            findings.append(
-                f"shard {shard} exceeded the {SOFT_BUDGET_SECONDS}s soft budget: "
-                f"{receipt['elapsed_seconds']}s"
             )
 
     expected_targets = sorted(
@@ -3424,7 +3676,7 @@ def _report_findings(
             "selected target coverage mismatch: "
             f"expected={expected_targets}, got={sorted(all_selected_targets)}"
         )
-    if sorted(all_executed_targets) != expected_targets:
+    if not classifies_coverage and sorted(all_executed_targets) != expected_targets:
         findings.append(
             "executed target coverage mismatch: "
             f"expected={expected_targets}, got={sorted(all_executed_targets)}"
@@ -3433,7 +3685,9 @@ def _report_findings(
         findings.append("duplicate target execution")
     if len(all_executed_tests) != len(set(all_executed_tests)):
         findings.append("duplicate test execution")
-    if sorted(all_selected_tests) != sorted(all_executed_tests):
+    if not classifies_coverage and sorted(all_selected_tests) != sorted(
+        all_executed_tests
+    ):
         findings.append(
             "selected test coverage mismatch: "
             f"selected={sorted(all_selected_tests)}, "
@@ -3522,24 +3776,101 @@ def shard_durations(
     ]
 
 
+def _unclassified_shard_findings(
+    documents: Sequence[tuple[Mapping[str, Any], Path | None]],
+    classification: Mapping[str, Any],
+) -> list[str]:
+    """Refuse to drop a shard defect the three counts cannot account for.
+
+    Every failure `execute_shard` records implies either a failing test in the
+    shard's JUnit or a selected target with no execution evidence. That
+    enumeration is an argument about the executor, not a guarantee, so a shard
+    that reports failure while contributing to neither count is reported rather
+    than assumed benign.
+    """
+    accounted = {
+        row["test"] for row in classification["introduced"]
+    } | set(classification["inherited"])
+    unrun = set(classification["unrun_targets"])
+    findings: list[str] = []
+    for receipt, _ in documents:
+        if receipt.get("success") is not True:
+            shard = receipt.get("shard")
+            selected = receipt.get("selected_targets")
+            selected = selected if isinstance(selected, list) else []
+            prefixes = tuple(f"{canonical}::" for canonical in selected)
+            explained = unrun & set(selected) or any(
+                test.startswith(prefixes) for test in accounted
+            )
+            if not explained:
+                findings.append(
+                    f"shard {shard} recorded failures that no introduced, "
+                    f"inherited or unrun row accounts for: "
+                    f"{receipt.get('failures', [])}"
+                )
+    return findings
+
+
 def summarize_package_expansion(
     plan: Mapping[str, Any],
     receipts: Sequence[Mapping[str, Any]],
     *,
     duration_baseline: DurationBaseline | None = None,
+    junit_documents: Mapping[int, Path] | None = None,
+    failure_baseline: FailureBaseline | None = None,
+    baseline_unavailable: str | None = None,
+    repo: Path = ROOT,
+    ancestor_distance: Callable[[Path, str, str], int | None] | None = None,
 ) -> dict[str, Any]:
     findings = _report_findings(
         plan,
         receipts,
         "package-expansion",
         duration_baseline,
+        classifies_coverage=True,
     )
+    junit_documents = junit_documents or {}
+    documents: list[tuple[Mapping[str, Any], Path | None]] = [
+        (receipt, junit_documents.get(receipt.get("shard")))
+        for receipt in receipts
+    ]
+    classification: dict[str, Any] | None = None
+    if failure_baseline is None:
+        reason = baseline_unavailable or "no failure baseline was supplied"
+        findings.append(
+            f"no usable default-branch failure baseline ({reason}), so no "
+            f"observed failure can be reported as introduced or inherited"
+        )
+    else:
+        try:
+            provenance = baseline_provenance(
+                plan,
+                failure_baseline,
+                repo,
+                distance=ancestor_distance,
+            )
+        except ValueError as error:
+            findings.append(
+                f"no usable default-branch failure baseline ({error}), so no "
+                f"observed failure can be reported as introduced or inherited"
+            )
+        else:
+            classification = classify_expansion_failures(
+                documents,
+                failure_baseline,
+            )
+            classification["baseline"] = provenance
+            findings.extend(
+                _unclassified_shard_findings(documents, classification)
+            )
+    introduced = classification["introduced"] if classification else []
+    observed_success = not findings and not introduced
     return {
-        "version": 1,
+        "version": EXPANSION_REPORT_VERSION,
         "lane": "package-expansion",
         "required": False,
-        "success": not findings,
-        "observed_success": not findings,
+        "success": observed_success,
+        "observed_success": observed_success,
         "plan_digest": plan["plan_digest"],
         "covered_targets": sorted(plan["package_expansion"]),
         "standing_reused_targets": [],
@@ -3548,6 +3879,7 @@ def summarize_package_expansion(
             receipts,
             lane="package-expansion",
         ),
+        "failure_classification": classification,
         "failures": findings,
     }
 
@@ -3575,9 +3907,17 @@ def _load_receipt_at(path: Path) -> dict[str, Any]:
     return receipt
 
 
+def load_receipt_documents(root: Path) -> list[tuple[dict[str, Any], Path]]:
+    """Each verified receipt beside the JUnit its own sidecar digest binds."""
+    documents = []
+    for path in sorted(root.rglob("receipt.json")):
+        receipt = _load_receipt_at(path)
+        documents.append((receipt, path.parent / receipt["junit_file"]))
+    return documents
+
+
 def load_receipts(root: Path) -> list[dict[str, Any]]:
-    paths = sorted(root.rglob("receipt.json"))
-    return [_load_receipt_at(path) for path in paths]
+    return [receipt for receipt, _ in load_receipt_documents(root)]
 
 
 def _verify_duration_sample_plan(plan: Mapping[str, Any]) -> None:
@@ -3784,17 +4124,113 @@ def _write_report_files(output: Path, report: Mapping[str, Any]) -> None:
         f"{len(report.get('standing_reused_targets', []))}",
         f"- Findings: {len(report['failures'])}",
     ]
+    lines.extend(_classification_counts(report))
     for row in report.get("shard_durations", []):
-        estimated = row["estimated_milliseconds"] / 1000
+        weight = row["estimated_milliseconds"] / 1000
         actual = row["actual_milliseconds"]
         actual_text = "unavailable" if actual is None else f"{actual / 1000:.3f}s"
         lines.append(
-            f"- Shard {row['shard']}: estimated {estimated:.3f}s, "
-            f"actual {actual_text}"
+            f"- Shard {row['shard']}: took {actual_text} "
+            f"(balancing weight {weight:.3f}s)"
         )
     for finding in report["failures"]:
         lines.append(f"  - {finding}")
+    lines.extend(_classification_lines(report))
     (output / "summary.md").write_text("\n".join(lines) + "\n")
+
+
+def _classification_counts(report: Mapping[str, Any]) -> list[str]:
+    """The three disjoint counts, beside the header the reader sees first."""
+    if report.get("lane") != "package-expansion":
+        return []
+    classification = report.get("failure_classification")
+    if classification is None:
+        return ["- Failure classification: unavailable, see below"]
+    return [
+        f"- Introduced failures: {len(classification['introduced'])}",
+        f"- Inherited failures: {len(classification['inherited'])}",
+        f"- Unrun targets: {len(classification['unrun_targets'])}",
+    ]
+
+
+def _classification_lines(report: Mapping[str, Any]) -> list[str]:
+    """Render the three disjoint counts, or say why there are none."""
+    if report.get("lane") != "package-expansion":
+        return []
+    classification = report.get("failure_classification")
+    if classification is None:
+        return [
+            "",
+            "## Failure classification",
+            "",
+            "Unavailable: no usable default-branch baseline, so this run "
+            "reports no introduced or inherited count. Absence of a count is "
+            "not a clean result.",
+        ]
+    baseline = classification["baseline"]
+    introduced = classification["introduced"]
+    absent = [row["test"] for row in introduced if row["baseline"] == "absent"]
+    lines = [
+        "",
+        "## Failure classification",
+        "",
+        f"{len(introduced)} introduced, {len(classification['inherited'])} "
+        f"inherited, {len(classification['unrun_targets'])} targets unrun "
+        f"({len(classification['unrun_tests'])} selected tests never "
+        f"executed).",
+        "",
+        f"Baseline: `{baseline['workflow']}` run {baseline['run_id']} at "
+        f"`{baseline['head_sha'][:9]}`, recorded {baseline['created_at']}, "
+        f"{baseline['commits_behind_candidate_base']} commits behind this "
+        f"candidate's base `{baseline['candidate_base_sha'][:9]}`. It executed "
+        f"{baseline['observed_cases']} cases, {baseline['failing_cases']} of "
+        f"them failing.",
+        "",
+        f"Run link: {baseline['run_url']}",
+        "",
+        "Inherited and introduced are the baseline's verdict at its own "
+        "commit, not at this candidate's base. Over that distance a test that "
+        "went red on the default branch is reported here as introduced, which "
+        "over-reports; and a test that was failing at the baseline, was fixed "
+        "on the default branch since, and is broken again by this candidate is "
+        "reported as inherited, which under-reports. The producer takes the "
+        "newest baseline this candidate's base contains, so that distance is "
+        "as small as a recorded baseline allows.",
+    ]
+    if absent:
+        lines.append(
+            f"{len(absent)} introduced row(s) are absent from the baseline "
+            f"rather than green in it, so the baseline confirms nothing about "
+            f"them."
+        )
+    if introduced:
+        lines.extend(["", "### Introduced", ""])
+        lines.extend(
+            f"- `{row['test']}` (baseline: {row['baseline']})"
+            for row in introduced
+        )
+    if classification["unrun_targets"]:
+        lines.extend(["", "### Unrun targets", ""])
+        lines.extend(
+            f"- `{identity}`" for identity in classification["unrun_targets"]
+        )
+    if classification["inherited"]:
+        lines.extend(["", "### Inherited", ""])
+        lines.extend(f"- `{test}`" for test in classification["inherited"])
+    lines.extend(
+        [
+            "",
+            "Each shard's elapsed time is reported without a pass or fail "
+            "verdict. The per-shard weight is a longest-processing-time "
+            "balancing input derived from serial per-target measurements, "
+            "while the executor runs up to sixteen targets of one package in a "
+            "single command, so the weight overstates a completed shard and "
+            "understates one the deadline cut. Comparing it against a budget "
+            "carries no information, which is why no soft-budget finding "
+            "exists.",
+        ]
+    )
+    return lines
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -3865,6 +4301,16 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--lane", choices=tuple(LANE_KEYS), required=True)
     report.add_argument("--receipts-root", type=Path, required=True)
     report.add_argument("--standing-coverage", type=Path)
+    report.add_argument(
+        "--failure-baseline",
+        type=Path,
+        help=(
+            "recorded default-branch failure baseline manifest, which the "
+            "package-expansion lane classifies every observed failure "
+            "against; the conventional path its producing step writes is "
+            "read when this is omitted"
+        ),
+    )
     report.add_argument("--output", type=Path, required=True)
     report.add_argument("--required", action="store_true")
 
@@ -3938,6 +4384,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ValueError("change-owned report requires --required")
     if args.lane == "package-expansion" and args.required:
         raise ValueError("package-expansion report must remain informational")
+    if args.lane == "change-owned" and args.failure_baseline is not None:
+        # An argparse default would make the exact conventional path the one
+        # spelling this fail-closed lane accepts, so the default is resolved
+        # in the informational branch instead and absence stays absence here.
+        raise ValueError(
+            "change-owned report is fail-closed and takes no failure baseline"
+        )
     plan = load_json(args.plan)
     if args.lane == "change-owned":
         try:
@@ -3975,8 +4428,30 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 1
     else:
         try:
-            receipts = load_receipts(args.receipts_root)
-            result = summarize_package_expansion(plan, receipts)
+            documents = load_receipt_documents(args.receipts_root)
+            failure_baseline = None
+            baseline_unavailable = None
+            manifest = (
+                args.failure_baseline
+                if args.failure_baseline is not None
+                else Path(DEFAULT_FAILURE_BASELINE)
+            )
+            if not manifest.is_file():
+                baseline_unavailable = (
+                    f"the baseline manifest is absent at {manifest}; "
+                    f"its producing step did not leave one"
+                )
+            else:
+                failure_baseline = load_failure_baseline(manifest)
+            result = summarize_package_expansion(
+                plan,
+                [receipt for receipt, _ in documents],
+                junit_documents={
+                    receipt["shard"]: junit for receipt, junit in documents
+                },
+                failure_baseline=failure_baseline,
+                baseline_unavailable=baseline_unavailable,
+            )
         except (
             ValueError,
             KeyError,
@@ -3985,7 +4460,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             ET.ParseError,
         ) as error:
             result = {
-                "version": 1,
+                "version": EXPANSION_REPORT_VERSION,
                 "lane": "package-expansion",
                 "required": False,
                 "success": False,
@@ -3993,6 +4468,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "plan_digest": plan.get("plan_digest"),
                 "covered_targets": [],
                 "standing_reused_targets": [],
+                "failure_classification": None,
                 "failures": [f"informational report validation failed: {error}"],
             }
     _write_report_files(args.output, result)

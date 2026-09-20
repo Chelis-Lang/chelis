@@ -405,6 +405,29 @@ finalizers release each stored child exactly once. Because child sets cannot be
 mutated after construction, a value cannot be inserted into itself or create a
 cycle through a later update.
 
+That sentence is about values, and the consuming container entry points below
+do not contradict it, but the reason is worth stating because it is the
+argument the whole last-use optimisation rests on and it is not obvious from
+either half.
+
+A consuming entry point mutates an allocation, not a live value. The operand
+it rewrites is one the verifier proved dead at that point, so no value whose
+child set anyone can still read changes, and [05-OP-44]'s premise is intact at
+the level it speaks about. What changes is the allocation, which the emitter
+reuses for the result instead of allocating a second one and copying.
+
+Acyclicity survives that reuse, and not by assumption. Suppose an in-place
+push made a container `X` reachable from the child `c` it just gained. The
+push does not change `c`, so `X` was already reachable from `c` beforehand.
+Every edge in this heap graph is a strong-owner edge, since each stored child
+is retained by its holder and released by its holder's finalizer, so that
+path ends in a heap-resident strong owner of `X`. The moved operand is a
+second owner on top of it, so the strong count is at least two and the
+in-place arm never runs: the entry point clones and releases instead. The
+same argument covers every child a merge adds, and it is why the runtime's
+count test is the whole check rather than one of several. A value still
+cannot be inserted into itself.
+
 ## C5. Target opaque C ownership ABI
 
 The exact ABI is [05-OP-31..33], [05-OP-44], and all four registries:
@@ -540,6 +563,119 @@ post-dominance, not source scope alone:
 - a tail call happens only after all non-argument frame owners are terminated;
   and
 - a manifested root consumes its owner before process teardown.
+
+The consumed operand of a container-producing builtin (a row of the ownership
+IR's `CONTAINER_CONSUMERS` table: `append` and `concat` at the list kind,
+`dict_insert`, `dict_merge` and `dict_remove` at the dictionary kind, and
+`string_concat` at the string kind) is moved
+into the builtin when the scheduler places that owner's terminal directly
+after the application: lowering borrows every builtin operand, and the
+last-use scheduler upgrades the borrow to a move and drops the terminal, so
+the verifier re-checks the move as it would any other (no live borrow, no
+later use). The move establishes only the borrow half of exclusivity. The
+sharing half is the runtime's: as with tensor reuse in C6, the consuming entry
+point (`chelis_list_append_owned`, `chelis_list_concat_owned`,
+`chelis_dict_insert_owned`, `chelis_dict_merge_owned`,
+`chelis_dict_remove_owned`, `chelis_string_concat_owned`, private to the
+emitter like the accumulator ABI)
+re-checks the strong-owner count and mutates in place only at one, otherwise
+cloning and releasing the consumed input; a right-hand side that aliases the
+consumed left-hand side is such a retained owner and takes the same cloning
+path. A retained alias, whether a tuple, an option, an ADT, or a callee that
+stored the container, therefore never observes a mutation, and no static rule
+inside one unit has to prove exclusivity for a parameter whose callers may
+have retained it. A runtime `refcount == 1` test on its own is not this rule:
+without the verified move it cannot exclude an un-retained borrow, which is
+what chelis#943 measured and rejected.
+
+Each row names its own heap kind, and the match requires that kind on both
+the application's result and the named operand. The kind is not read off the
+application, because result-class-equals-operand-class is a weaker test than
+membership: `chunk`, `map`, `flatten`, `zip` and `enumerate` all take a list
+and return a list without being consumers, and a future
+`concat(tensor, tensor) -> tensor` would satisfy it while needing a different
+entry point entirely. Naming the kind keeps the tensor `concat` that shares
+the label `builtin:concat` out of the table by construction rather than by an
+emitter guard firing after the scheduler has already retired the operand's
+terminal. Adding a heap kind to the table is therefore never a row edit
+alone: the kind owes its own consuming entry points, with the same
+in-place-at-count-one and otherwise-clone-and-release behaviour, before any
+row naming it can land, and it owes an answer for any derived state or
+interior pointer its representation publishes.
+
+Membership is narrower than "produces its own kind". A row is for a callable
+whose result is its operand with an edit applied, so that reusing the
+allocation replaces a copy of the whole operand with the edit alone. The edit
+need not grow the container: `append`, `concat`, `dict_insert`, `dict_merge`
+and `string_concat` add, and `dict_remove` deletes, but in each the surviving
+content is carried over in place rather than rebuilt.
+
+A callable whose result is a positional sub-range of its operand is not a row
+today. `take` and `drop` for lists, and `string_slice` and `string_trim` for
+strings, each carry over only part of the operand, and none of them is an
+accumulation shape. chelis#943 recorded that disposition for `drop`. It is a disposition rather than a derivation: those four could be
+revisited on their own evidence, and until they are, they are not rows.
+
+The string row carries an obligation neither of the other kinds has, and it
+is the reason a heap kind is not interchangeable here. `RuntimeString` stores
+derived state beside its bytes: `nul_terminated`, which `chelis_string_data`
+serves as an interior pointer, and `char_count`, which the character-indexed
+`chelis_string_len` returns and which `chelis_string_slice` reads to decide
+whether byte indices are character indices. A list or a dictionary has no such
+field, so appending to one is a single mutation, while
+`chelis_string_concat_owned` maintains all three together or leaves the string
+describing itself wrongly. `char_count` gains the right-hand side's count,
+which is exact because concatenating two UTF-8 sequences concatenates their
+scalar sequences and creates no scalar at the seam. A stale count is invisible
+to any ASCII fixture, because ASCII makes bytes and characters agree, so the
+tests that cover it are multibyte by construction.
+
+The interior pointer is the one published surface this optimisation can
+invalidate. `chelis_string_data` returns a pointer into `nul_terminated`,
+which an in-place growth may reallocate.
+
+The safe condition is not that generated code never holds such a pointer
+across a statement, because it does. `chelis_json_compare_strings`, emitted
+verbatim by `append_json_canonical_object_helpers`, binds two of them and
+reads both across a `while` loop and the statements after it. The condition
+that actually holds is narrower: no interior pointer in generated code is
+derived from an operand a `CONTAINER_CONSUMERS` row can move. Those two point
+into single-character slices the helper allocates and releases itself, which
+no `string_concat` can consume, so nothing can grow the buffer under them.
+
+An in-place growth invalidates such a pointer exactly as the cloning path
+already does by releasing the consumed input, and the consuming entry point
+is private to the emitter, so no published-ABI caller can reach it. A new
+emitted call site owes this check: if it derives an interior pointer from a
+value that a row's operand position can name, that pointer must not outlive
+the consuming call. A kind whose public surface hands out an interior pointer
+with a longer contract would need a different answer before it could take a
+row here.
+
+Reading the allocation ledger as an oracle for these rows needs one caution.
+A `resize` event at a consuming entry point's site is the only signal that
+separates the in-place arm from the cloning one; allocation counts cannot,
+because the cloning arm's extra allocation is indistinguishable from any
+other. `chelis_string_concat_owned` therefore records that event on every
+in-place return, including an empty right-hand side that changes no byte, so
+for strings the absence of the event means the cloning arm ran.
+
+The dictionary entry points are uneven on this, so the same reading does not
+carry to them. `chelis_dict_merge_owned` records on every in-place return;
+`chelis_dict_insert_owned` records only when it pushes, not when it replaces
+an existing key; and `chelis_dict_remove_owned` never records. For those two,
+a zero count still means "cloned, or edited nothing". chelis#2252 owns
+closing the gap.
+
+The dictionary rows carry one obligation the list rows do not. The cloning
+`chelis_dict_insert` releases the value it replaces before cloning the
+incoming one, which is safe because the caller still owns the incoming value.
+The consuming entry point clones first and releases second: the two may be
+the same heap value held exactly once, and releasing first would free it
+before the clone reads it. `chelis_dict_remove_owned` likewise releases the
+removed entry's key and value itself, because the consumed dictionary keeps
+its allocation; the cloning entry point leaves that to the caller's own
+release of the untouched input.
 
 The runtime's test-only allocation ledger records allocation identity, kind,
 size, retain/release events, live owners, and peak live bytes. It is compiled
