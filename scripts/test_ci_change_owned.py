@@ -1177,6 +1177,40 @@ class SchemaTests(unittest.TestCase):
             with self.subTest(neighbor=neighbor):
                 self.assertFalse(any(rule.matches(neighbor) for rule in rules))
 
+    def test_ecosystem_drift_helpers_have_exact_script_unit_owners(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        config = owned.read_config(root / ".config/ci-test-targets.toml")
+        expected = {
+            "scripts/drift_prepare_dependencies.py",
+            "scripts/test_drift_prepare_dependencies.py",
+            "scripts/test_ecosystem_drift_workflow.py",
+        }
+        rules = {
+            rule.prefix: rule
+            for rule in config.path_rules
+            if rule.prefix in expected
+        }
+        self.assertEqual(set(rules), expected)
+        for path, rule in rules.items():
+            with self.subTest(path=path):
+                self.assertEqual(rule.disposition, "owner")
+                self.assertEqual(
+                    (
+                        rule.owner.workflow,
+                        rule.owner.job,
+                        rule.owner.cadence,
+                        rule.owner.tracking_issue,
+                    ),
+                    ("ci.yml", "script-unit", "pull_request and push", "chelis#2268"),
+                )
+        for neighbor in (
+            "scripts/drift_prepare_dependencies_extra.py",
+            "scripts/test_drift_prepare_dependencies_extra.py",
+            "scripts/test_ecosystem_drift_workflow_extra.py",
+        ):
+            with self.subTest(neighbor=neighbor):
+                self.assertFalse(any(rule.matches(neighbor) for rule in rules.values()))
+
     def test_wire_invocation_owner_scripts_have_exact_automated_owners(self) -> None:
         root = Path(__file__).resolve().parents[1]
         config = owned.read_config(root / ".config/ci-test-targets.toml")
