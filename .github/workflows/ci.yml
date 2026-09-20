@@ -710,6 +710,10 @@ jobs:
         with:
           ref: ${{ needs.changes.outputs.candidate_sha }}
 
+      - name: Free disk space (Ubuntu)
+        if: runner.environment == 'github-hosted'
+        uses: ./.github/actions/free-disk-space
+
       - name: Set up portable Devenv
         uses: Chelis-Lang/ci/actions/setup-devenv@0b5faba5025fade929194b46a9e52e43fec63462
 

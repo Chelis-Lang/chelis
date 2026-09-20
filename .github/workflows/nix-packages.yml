@@ -13,7 +13,7 @@ permissions:
   contents: read
 
 jobs:
-  # Retain native check budgets plus 25 minutes for cold Devenv realization.
+  # Reserve headroom for cold Devenv realization before native checks.
   nix-linux-x86-64:
     name: Nix Packages (x86_64-linux)
     runs-on: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && fromJSON('{"group":"chelis-ci-trusted","labels":"chelis-ci-warm-x64"}') || fromJSON('["ubuntu-latest"]') }}
