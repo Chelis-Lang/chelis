@@ -477,6 +477,63 @@ fn scalar_grad_nested_transform_fails_closed_with_specific_reason() {
 
 #[cfg(feature = "smt")]
 #[test]
+fn valid_nested_grad_properties_reach_their_own_smt_boundary() {
+    let outcomes = run_surf(
+        "module M
+@property nested_grad_left forall(x: f32):
+  (grad(grad(fn (xx: f32) -> xx * xx, wrt=xx), wrt=xx)(x) >= 0.0)
+@property nested_grad_right forall(x: f32):
+  (grad(grad(fn (xx: f32) -> xx + xx, wrt=xx), wrt=xx)(x) >= 0.0)
+",
+        "smt-only",
+    );
+
+    assert_eq!(outcomes.len(), 2, "{outcomes:#?}");
+    for outcome in outcomes {
+        assert_eq!(outcome.status, PropertyStatus::Unsupported, "{outcome:?}");
+        assert_eq!(outcome.proof_tier, PropertyTier::Smt, "{outcome:?}");
+        assert_eq!(
+            outcome.reason.as_deref(),
+            Some("scalar grad SMT lowering does not support nested gradients"),
+            "{outcome:?}"
+        );
+    }
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn only_selected_nested_grad_ignores_valid_unsupported_sibling() {
+    let source = "module M
+@property nested_grad_left forall(x: f32):
+  (grad(grad(fn (xx: f32) -> xx * xx, wrt=xx), wrt=xx)(x) >= 0.0)
+@property nested_grad_right forall(x: f32):
+  (grad(grad(fn (xx: f32) -> xx + xx, wrt=xx), wrt=xx)(x) >= 0.0)
+";
+    let options = PropertyRunOptions {
+        tier: "smt-only".to_string(),
+        only: Some("nested_grad_left".to_string()),
+        ..Default::default()
+    };
+    let PropertyRunResult::Ran(outcomes) =
+        run_surf_source_properties(source, &options).expect("run filtered nested gradients");
+
+    assert_eq!(outcomes.len(), 1, "{outcomes:#?}");
+    let outcome = &outcomes[0];
+    assert_eq!(
+        outcome.name, "nested_grad_left",
+        "filter chose the wrong property"
+    );
+    assert_eq!(outcome.status, PropertyStatus::Unsupported, "{outcome:?}");
+    assert_eq!(outcome.proof_tier, PropertyTier::Smt, "{outcome:?}");
+    assert_eq!(
+        outcome.reason.as_deref(),
+        Some("scalar grad SMT lowering does not support nested gradients"),
+        "{outcome:?}"
+    );
+}
+
+#[cfg(feature = "smt")]
+#[test]
 fn unrelated_invalid_grad_declaration_fails_closed_before_scalar_smt_property() {
     let outcomes = run_surf(
         "module M

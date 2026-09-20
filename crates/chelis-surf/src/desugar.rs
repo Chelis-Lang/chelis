@@ -771,7 +771,12 @@ impl GradSelectorResolver {
                     self.resolved
                         .push((function.as_ref() as *const Expr as usize, indices));
                 }
-                CallableOrigin::Unknown
+                // `grad` returns a callable with the target's parameter
+                // identity. Preserve that identity so a surrounding
+                // `grad(..., wrt=...)` can validate its selector instead of
+                // treating the nested transform as an unresolved dynamic
+                // expression.
+                target
             }
             Expr::Vmap(function, _, _)
             | Expr::Jit(function, _)
