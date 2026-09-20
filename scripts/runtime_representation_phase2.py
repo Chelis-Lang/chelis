@@ -19,7 +19,7 @@ from scripts.dtype_builtin_atom_closure_oracle import source_identity
 ROOT = phase1.ROOT
 OracleFailure = phase1.OracleFailure
 MANIFEST = ROOT / "spec/design/runtime_representation_phase2_tests.json"
-MANIFEST_SHA256 = "af67d72b6946f03aec3ed42a07ff2b2071ec09b06745aed3efb1e6427a8532b8"
+MANIFEST_SHA256 = "85f36b8b5244b89856ee55dbf378504fa2e1424dae6d74c5e29a75165730c0c9"
 
 PYTHON_BOUNDARY_BINARIES = (
     "binding_payloads",
@@ -84,7 +84,7 @@ def phase2_legs():
             ),
         ),
         (
-            "HIP descriptor and device-owner contracts",
+            "HIP descriptor contracts",
             (
                 "-p",
                 "chelis-backend-hip",
@@ -92,10 +92,30 @@ def phase2_legs():
                 "codegen_structure",
                 "--test",
                 "device_entry_contract",
+            ),
+        ),
+        (
+            "HIP published owner header contract",
+            (
+                "-p",
+                "chelis-backend-hip",
+                "--test",
+                "device_owner_contract",
+                "-E",
+                "test(published_owner_is_opaque_and_packet_observation_cannot_be_mutated)",
+            ),
+        ),
+        (
+            "HIP pinned-runtime CPU execution contracts",
+            (
+                "-p",
+                "chelis-backend-hip",
                 "--test",
                 "device_entry_execution",
                 "--test",
                 "device_owner_contract",
+                "--run-ignored",
+                "only",
             ),
         ),
         (
@@ -185,7 +205,12 @@ def execute_leg(name, args, required, directory):
         directory,
         "list",
     )
-    selected, artifacts = phase1.selection(phase1.load_json(listed), ROOT)
+    include_ignored = args[-2:] == ("--run-ignored", "only")
+    selected, artifacts = phase1.selection(
+        phase1.load_json(listed),
+        ROOT,
+        include_ignored=include_ignored,
+    )
     additions = phase1.require_frozen_selection(selected, required)
     if additions:
         print(f"+ {name}: execute {len(additions)} added tests", flush=True)

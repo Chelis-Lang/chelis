@@ -479,10 +479,22 @@ class SchemaTests(unittest.TestCase):
         self.assertEqual(
             set(config.manual_only_targets),
             {
+                owned.Identity("chelis-backend-hip", "device_entry_execution"),
                 owned.Identity(
                     "chelis-cli", "issue_1417_stdlib_dtype_family_bounds"
                 ),
             },
+        )
+        device_entry_owner = config.manual_only_targets[
+            owned.Identity("chelis-backend-hip", "device_entry_execution")
+        ]
+        self.assertEqual(
+            (
+                device_entry_owner.workflow,
+                device_entry_owner.job,
+                device_entry_owner.tracking_issue,
+            ),
+            ("ci.yml", "change-owned-shard", "chelis#1863"),
         )
         manual_owner = config.manual_only_targets[
             owned.Identity("chelis-cli", "issue_1417_stdlib_dtype_family_bounds")

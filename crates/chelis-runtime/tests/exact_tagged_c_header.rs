@@ -224,6 +224,85 @@ fn repository_runtime_consumer_compiles_against_the_published_header() {
 }
 
 #[test]
+fn published_runtime_header_compiles_as_c11_and_cxx17() {
+    let temp = TempDir::new();
+    let cxx = std::env::var("CXX").unwrap_or_else(|_| "c++".to_string());
+    for (extension, compiler, standard) in
+        [("c", "cc", "-std=c11"), ("cpp", cxx.as_str(), "-std=c++17")]
+    {
+        let source = temp.0.join(format!("runtime-header.{extension}"));
+        fs::write(
+            &source,
+            "#include \"chelis_runtime.h\"\nvoid probe(void) {}\n",
+        )
+        .expect("write dual-language runtime-header probe");
+        let compile = Command::new(compiler)
+            .arg(standard)
+            .arg("-Wall")
+            .arg("-Wextra")
+            .arg("-Werror")
+            .arg("-pedantic-errors")
+            .arg("-I")
+            .arg(include_dir())
+            .arg("-fsyntax-only")
+            .arg(&source)
+            .output()
+            .unwrap_or_else(|error| panic!("start {compiler} for {standard}: {error}"));
+        assert!(
+            compile.status.success(),
+            "published runtime header failed under {standard}:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+    }
+}
+
+#[test]
+fn cxx_header_probe_rejects_the_c_only_noreturn_spelling() {
+    let temp = TempDir::new();
+    for name in [
+        "chelis_runtime.h",
+        "chelis_runtime_dtype.h",
+        "chelis_runtime_views.h",
+        "chelis_simd.h",
+    ] {
+        let source = include_dir().join(name);
+        let contents = fs::read_to_string(&source)
+            .unwrap_or_else(|error| panic!("read published header {}: {error}", source.display()));
+        let mutated = if name == "chelis_runtime.h" {
+            let inline = contents.replace(
+                "static inline void chelis_flush_and_abort(void)",
+                "static inline _Noreturn void chelis_flush_and_abort(void)",
+            );
+            let mutated = inline.replace(
+                "void chelis_fail(chelis_string message);",
+                "_Noreturn void chelis_fail(chelis_string message);",
+            );
+            assert_ne!(mutated, contents, "runtime header mutation did not fire");
+            mutated
+        } else {
+            contents
+        };
+        fs::write(temp.0.join(name), mutated)
+            .unwrap_or_else(|error| panic!("write mutated published header {name}: {error}"));
+    }
+    let source = temp.0.join("c-only-noreturn.cpp");
+    fs::write(&source, "#include \"chelis_runtime.h\"\n")
+        .expect("write C++ negative-control probe");
+    let compiler = std::env::var("CXX").unwrap_or_else(|_| "c++".to_string());
+    let compile = Command::new(&compiler)
+        .args(["-std=c++17", "-pedantic-errors", "-fsyntax-only", "-I"])
+        .arg(&temp.0)
+        .arg(&source)
+        .output()
+        .unwrap_or_else(|error| panic!("start {compiler} for negative control: {error}"));
+    assert!(
+        !compile.status.success() && String::from_utf8_lossy(&compile.stderr).contains("_Noreturn"),
+        "the C-only spelling must fail for its own reason under C++17:\n{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+}
+
+#[test]
 fn repository_runtime_consumer_cannot_regress_to_the_removed_free_api() {
     let temp = TempDir::new();
     let source = repository_root().join("nix/tests/runtime-consumer.c");

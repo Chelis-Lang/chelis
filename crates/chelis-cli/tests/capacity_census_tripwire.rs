@@ -303,7 +303,7 @@ const FINAL_NONNUMERIC_ROWS: &[StaticSurfaceDescriptor] = &[
     StaticSurfaceDescriptor::new(
         PRIMARY_CENSUS_FAMILY,
         "header-export",
-        "chelis_runtime.h: _Noreturn void chelis_fail ( chelis_string message ) ;",
+        "chelis_runtime.h: void chelis_fail ( chelis_string message ) ;",
         &[],
     ),
     StaticSurfaceDescriptor::new(

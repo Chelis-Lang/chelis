@@ -385,6 +385,7 @@ fn run(executable: &Executable, mode: &str, success: bool) {
 }
 
 #[test]
+#[ignore = "requires CHELIS_RUNTIME_LIB pinned by runtime representation Phase 2"]
 fn generated_entry_executes_strided_inputs_scalar_empty_and_dynamic_rank_with_owned_escapes() {
     for rank in [0, 1, 8, 9, 33] {
         let executable = compile(rank, false, None);
@@ -401,6 +402,7 @@ fn generated_entry_executes_strided_inputs_scalar_empty_and_dynamic_rank_with_ow
 }
 
 #[test]
+#[ignore = "requires CHELIS_RUNTIME_LIB pinned by runtime representation Phase 2"]
 fn generated_sparse_entries_preserve_supplied_strides_and_duplicate_update_order() {
     for operation in 0..4 {
         for precision in [Prim::Int32, Prim::Int64] {
@@ -420,6 +422,7 @@ fn generated_sparse_entries_preserve_supplied_strides_and_duplicate_update_order
 }
 
 #[test]
+#[ignore = "requires CHELIS_RUNTIME_LIB pinned by runtime representation Phase 2"]
 fn generated_sparse_mutations_cannot_flatten_indices_or_target_initialization() {
     for mutation in ["flat-sparse-indices", "flat-sparse-initialization"] {
         run(
@@ -436,6 +439,7 @@ fn generated_sparse_mutations_cannot_flatten_indices_or_target_initialization() 
 }
 
 #[test]
+#[ignore = "requires CHELIS_RUNTIME_LIB pinned by runtime representation Phase 2"]
 fn generated_blas_preparation_materializes_both_strided_operands_in_planned_storage() {
     let executable = compile_source(blas_model(), "blas_main.cpp", &[], None);
     run(&executable, "positive", true);
@@ -453,6 +457,7 @@ fn generated_blas_preparation_materializes_both_strided_operands_in_planned_stor
 }
 
 #[test]
+#[ignore = "requires CHELIS_RUNTIME_LIB pinned by runtime representation Phase 2"]
 fn empty_escapes_still_complete_nonempty_intermediate_work_before_teardown() {
     let defines = [
         "-DTEST_RANK=1".into(),
@@ -477,6 +482,7 @@ fn empty_escapes_still_complete_nonempty_intermediate_work_before_teardown() {
 }
 
 #[test]
+#[ignore = "requires CHELIS_RUNTIME_LIB pinned by runtime representation Phase 2"]
 fn generated_entry_mutations_cannot_return_borrows_or_truncate_kernel_coordinate_arrays() {
     run(
         &compile(33, false, Some("return-borrow")),

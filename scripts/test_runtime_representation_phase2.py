@@ -19,21 +19,32 @@ class ContractTests(unittest.TestCase):
             [
                 "canonical ABI metadata and generated layouts",
                 "opaque C metadata-plan adapter",
-                "HIP descriptor and device-owner contracts",
+                "HIP descriptor contracts",
+                "HIP published owner header contract",
+                "HIP pinned-runtime CPU execution contracts",
                 "Python host device and DLPack boundaries",
                 "backend runtime-header capacity census",
             ],
         )
-        hip = dict(oracle.phase2_legs())["HIP descriptor and device-owner contracts"]
+        hip = dict(oracle.phase2_legs())["HIP descriptor contracts"]
         self.assertEqual(
             [hip[index + 1] for index, value in enumerate(hip) if value == "--test"],
             [
                 "codegen_structure",
                 "device_entry_contract",
+            ],
+        )
+        runtime = dict(oracle.phase2_legs())[
+            "HIP pinned-runtime CPU execution contracts"
+        ]
+        self.assertEqual(
+            [runtime[index + 1] for index, value in enumerate(runtime) if value == "--test"],
+            [
                 "device_entry_execution",
                 "device_owner_contract",
             ],
         )
+        self.assertEqual(runtime[-2:], ("--run-ignored", "only"))
 
     def test_phase_two_rejects_development_shortcuts(self):
         for argv in (

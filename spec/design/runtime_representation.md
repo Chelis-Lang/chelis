@@ -1691,6 +1691,13 @@ supporting evidence until candidate-head hosted acceptance and a compliant fresh
 review pass. #888/#889 closure requires those receipts; this change does not
 close #893 or Phases 2–5.
 
+The CPU HIP entry and owner execution rows require the exact-head runtime archive
+that the Phase 2 runner pins. They are ignored in an ordinary workspace run and
+executed as a complete ignored-only selection inside the Phase 2 oracle; the
+header-only owner contract remains active in the ordinary suite. The equivalent
+developer commands and expected outcomes are registered in
+`docs/manual_gates.md`.
+
 ## Phase 2 — canonical ABI descriptors
 
 **Requires:** Phase 1.
