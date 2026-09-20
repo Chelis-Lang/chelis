@@ -6,11 +6,12 @@ name: Ecosystem Drift Canary
 # pain (e.g. nautilus #11, noticed ~40 days late after a release lag).
 #
 # This canary closes that gap: it builds the chelis toolchain from THIS
-# repo's HEAD and, for each downstream shell, checks out the shell at
-# `main` and runs the shell's own core gate (`chelis reef build` +
-# `chelis test tests/`, or the cargo gate for the Rust shells) against the
-# HEAD toolchain. A break surfaces within a day, at the offending chelis
-# commit, instead of weeks later in a shell user's bug report.
+# repo's HEAD and, for each downstream shell, checks out its canary source
+# (`main`, except hello-chelis's reviewed immutable commit) and runs the
+# shell's own core gate (`chelis reef build` + `chelis test tests/`, or the
+# cargo gate for the Rust shells) against the HEAD toolchain. A break surfaces
+# within a day, at the offending chelis commit, instead of weeks later in a
+# shell user's bug report.
 #
 # A failing shell leg files/updates a tracking issue IN THAT SHELL'S repo
 # (open-on-fail / close-on-pass), mirroring the heavy-e2e.yml report
@@ -89,7 +90,7 @@ jobs:
       # that breaks chelis-std's own lowering — a nautilus-#11-class bug).
       # Emits packages/chelis-std/dist/chelis-std-<ver>.{chb,tar.zst}.
       - name: Rebuild HEAD chelis-std bundle
-        run: ./target/release/chelis reef build packages/chelis-std
+        run: ./target/release/chelis reef build --no-auto-fetch packages/chelis-std
 
       - name: Record HEAD chelis version
         id: version
@@ -157,11 +158,13 @@ jobs:
       matrix:
         include:
           # ---- Pure-Chelis / reef shells (toolchain-binary consumers).
-          # `reef_deps` is a space-separated list of immutable source tags.
-          # Each tag is cloned, repinned and migrated in its throwaway
-          # checkout, built by HEAD with auto-fetch disabled, verified as a
-          # strict current-format artifact, and installed locally. chelis-std
-          # is NOT listed — it comes from the HEAD toolchain. Mind the dep
+          # `reef_deps` entries retain a human release tag/version but end in
+          # the reviewed peeled commit SHA that is the source authority. Each
+          # exact commit is checked out, verified, repinned and migrated in its
+          # throwaway checkout, built by HEAD with auto-fetch disabled,
+          # verified as a strict current-format artifact, and installed
+          # locally. chelis-std is NOT listed — it comes from the HEAD
+          # toolchain. Mind the dep
           # graph: coral->nautilus, shoals->nautilus+coral, whale->shoals
           # (transitively nautilus+coral), hello-chelis->coral+nautilus+school
           # (the leaf). Each leg lists the TRANSITIVE closure so the source
@@ -172,7 +175,7 @@ jobs:
           #
           # `token_repos` is the newline-separated set of repos the minted
           # App token must read: the shell ITSELF (checkout) PLUS every
-          # sibling source repo cloned at an exact release tag. Scoping the
+          # sibling source repo cloned at an exact reviewed commit. Scoping the
           # token to only `repo` would 403/404 on the dep checkout, and the
           # if:always() report step would then
           # misattribute that infra failure as language drift (a false
@@ -184,13 +187,13 @@ jobs:
             token_repos: nautilus
           - repo: coral
             type: reef
-            reef_deps: "Chelis-Lang/nautilus@v0.7.45"
+            reef_deps: "Chelis-Lang/nautilus@v0.7.45#563f2737c2988eaa05ca1e6ce4e941cf86c296b8"
             token_repos: |-
               coral
               nautilus
           - repo: shoals
             type: reef
-            reef_deps: "Chelis-Lang/nautilus@v0.7.45 Chelis-Lang/coral@v0.7.42"
+            reef_deps: "Chelis-Lang/nautilus@v0.7.45#563f2737c2988eaa05ca1e6ce4e941cf86c296b8 Chelis-Lang/coral@v0.7.42#bdb92de243c2c911c0c2a2b83bff29673186476b"
             token_repos: |-
               shoals
               nautilus
@@ -205,7 +208,7 @@ jobs:
             token_repos: hull
           - repo: whale
             type: reef
-            reef_deps: "Chelis-Lang/nautilus@v0.7.45 Chelis-Lang/coral@v0.7.42 Chelis-Lang/shoals@v0.24.12"
+            reef_deps: "Chelis-Lang/nautilus@v0.7.45#563f2737c2988eaa05ca1e6ce4e941cf86c296b8 Chelis-Lang/coral@v0.7.42#bdb92de243c2c911c0c2a2b83bff29673186476b Chelis-Lang/shoals@v0.24.12#502fbac05ef1c2c4fc5e8d97611b8b9c192a9707"
             token_repos: |-
               whale
               nautilus
@@ -232,7 +235,7 @@ jobs:
           #      own per-PR CI asks, but against HEAD chelis.
           #
           # `reef_deps` and `token_repos` follow the reef-leg rules: the token
-          # covers the shell checkout + every exact-tag source clone.
+          # covers the shell checkout + every exact-commit source clone.
           #
           # c-earchin has NO chelis Cargo path dep (it is a pure toolchain-
           # binary consumer with a Rust workspace of its own), so its
@@ -242,7 +245,7 @@ jobs:
           - repo: octant
             type: cargo
             needs_chelis_sibling: true
-            reef_deps: "Chelis-Lang/nautilus@v0.7.45"
+            reef_deps: "Chelis-Lang/nautilus@v0.7.45#563f2737c2988eaa05ca1e6ce4e941cf86c296b8"
             token_repos: |-
               octant
               nautilus
@@ -255,7 +258,7 @@ jobs:
           - repo: calcify
             type: cargo
             needs_chelis_sibling: true
-            reef_deps: "Chelis-Lang/nautilus@v0.7.45 Chelis-Lang/coral@v0.7.42"
+            reef_deps: "Chelis-Lang/nautilus@v0.7.45#563f2737c2988eaa05ca1e6ce4e941cf86c296b8 Chelis-Lang/coral@v0.7.42#bdb92de243c2c911c0c2a2b83bff29673186476b"
             token_repos: |-
               calcify
               nautilus
@@ -314,27 +317,26 @@ jobs:
               cargo fmt -p hydronnx -- --check
               chelis lint --check .
 
-          # ---- Docker shell (hello-chelis). Its CI builds an Ubuntu image
-          # that installs the chelis toolchain from a RELEASE tarball
-          # (docker/Dockerfile `ARG CHELIS_VERSION`), then runs `chelis check`
-          # / `chelis test` / the C-backend pytest inside the image. There is
-          # no HEAD release tarball, so the canary cannot point the ARG at a
-          # release tag. Instead it injects the HEAD toolchain artifact into
-          # the build context and overrides the image's `/usr/local/bin/chelis`
-          # (+ runtime staticlib + headers) with the HEAD-built ones via a thin
-          # overlay Dockerfile that `FROM`s the freshly built hello-chelis
-          # image — see the `type: docker` steps. token_repos must cover every
-          # exact-tag source clone plus the Octant CLI release download.
+          # ---- Docker shell (hello-chelis). Its release CI image first runs
+          # a release compiler and predecessor dependency graph, so it cannot
+          # be a prerequisite for deciding HEAD drift. This canary pins the
+          # hello-chelis source commit, builds every dependency from a reviewed
+          # peeled commit with HEAD, then assembles a neutral Ubuntu image
+          # directly from those bytes and the HEAD toolchain. token_repos must
+          # cover every exact-commit source clone plus the Octant CLI release
+          # download.
           #
           # `reef_deps` is hello-chelis's real manifest graph. `tool_deps`
           # records Octant and c-earchin, which the image installs as tools
           # rather than reef.toml dependencies. Both lists are rebuilt from
-          # exact source tags under HEAD; keeping the categories separate
+          # exact source commits under HEAD; keeping the categories separate
           # preserves the shell graph while pinning the complete image input.
           - repo: hello-chelis
             type: docker
-            reef_deps: "Chelis-Lang/coral@v0.7.42 Chelis-Lang/nautilus@v0.7.45 Chelis-Lang/school@v0.1.13"
-            tool_deps: "Chelis-Lang/octant@v0.13.0 Chelis-Lang/c-earchin@v0.3.3"
+            source_sha: "4d9796b15f00a075c3aabffd629fecfe3daac200"
+            reef_deps: "Chelis-Lang/coral@v0.7.42#bdb92de243c2c911c0c2a2b83bff29673186476b Chelis-Lang/nautilus@v0.7.45#563f2737c2988eaa05ca1e6ce4e941cf86c296b8 Chelis-Lang/school@v0.1.13#7904a31ff6de4b9eec82507687097cc486f2baf7"
+            tool_deps: "Chelis-Lang/octant@v0.13.0#ebd2a22150647f6252f2bb5be02b5016ff069249 Chelis-Lang/c-earchin@v0.3.3#70720831641ba325b217427d52cf47fcba4f0b27"
+            octant_cli_sha256: "74c46fbe5cbddf489295b9df7db308bc838c7c9c8669740197cbb1dfcddd48b0"
             token_repos: |-
               hello-chelis
               chelis
@@ -351,20 +353,25 @@ jobs:
           app-id: ${{ vars.CI_APP_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
           owner: Chelis-Lang
-          # contents:read for the shell checkout + every exact-tag dependency
+          # contents:read for the shell checkout + every exact-commit dependency
           # source clone and release-tool download;
           # issues:write for the per-shell tracking issue. `token_repos`
           # carries the full set (shell + dep repos) so a scoped token
           # never 403s on a dep and triggers a false-positive drift issue.
           repositories: ${{ matrix.token_repos }}
 
-      - name: Checkout ${{ matrix.repo }} at main
+      - name: Checkout ${{ matrix.repo }} at reviewed source
         uses: actions/checkout@v6
         with:
           repository: Chelis-Lang/${{ matrix.repo }}
-          ref: main
+          ref: ${{ matrix.source_sha || 'main' }}
           token: ${{ steps.token.outputs.token }}
           path: shell
+
+      - name: Verify immutable shell source checkout
+        if: matrix.source_sha != ''
+        working-directory: shell
+        run: test "$(git rev-parse HEAD)" = "${{ matrix.source_sha }}"
 
       # The HEAD toolchain tarball is needed by every leg type: reef + cargo
       # extract it onto PATH; docker injects it into the image build context.
@@ -413,12 +420,13 @@ jobs:
         if: matrix.type == 'reef' || matrix.type == 'cargo' || matrix.type == 'docker'
         run: chelis reef install --from-monorepo "$CHELIS_TOOLCHAIN" chelis-std
 
-      # Release artifacts from these tags predate strict CHB v5. Use the tags
-      # only as immutable source identities: repin the complete throwaway
-      # graph, run the supported source migration, build with HEAD and
-      # auto-fetch disabled, verify the exact current-format output, then
-      # install those bytes locally. The helper also rewrites the consumer's
-      # direct dependency versions to this graph.
+      # Release artifacts from these tags predate strict CHB v5. Retain each
+      # tag/version as human metadata, but use its reviewed peeled commit SHA
+      # as source authority. Repin the complete throwaway graph, run the
+      # supported source migration, build with HEAD and auto-fetch disabled,
+      # verify the exact current-format output, then install those bytes
+      # locally. The helper also rewrites the consumer's direct dependency
+      # versions to this graph.
       - name: Build and install exact dependency sources
         if: (matrix.type == 'reef' || matrix.type == 'cargo') && matrix.reef_deps != ''
         env:
@@ -546,38 +554,18 @@ jobs:
           ${{ matrix.cargo_recipe }}
 
       # ----------------------------------------------------------------------
-      # docker leg only (hello-chelis): build its image but swap the
-      # release-tarball chelis for the HEAD toolchain, then run its CI gates
-      # inside the image.
+      # docker leg only (hello-chelis): assemble a neutral Ubuntu image from
+      # the HEAD toolchain and exact source-built dependency graph, then run
+      # the checked-out hello-chelis gates inside it. No release compiler or
+      # predecessor dependency install/check is on this path.
       # ----------------------------------------------------------------------
-      - name: Set up Docker Buildx
-        if: matrix.type == 'docker'
-        uses: docker/setup-buildx-action@v3
-
-      # Build the hello-chelis image exactly as its own main branch does, then
-      # overlay a thin image that replaces the toolchain and dependency
-      # registry with the HEAD-built strict-v5 graph. The release-installed
-      # layer is only a self-consistent bootstrap; it is never consumed by the
-      # HEAD gates below.
-      # This is the faithful "chelis ARG pointed at a HEAD-built toolchain"
-      # the canary can express without a HEAD release tarball to download.
-      - name: Build hello-chelis base image (release-pinned chelis)
-        if: matrix.type == 'docker'
-        uses: docker/build-push-action@v5
-        with:
-          context: shell
-          file: shell/docker/Dockerfile
-          tags: hello-chelis:base
-          load: true
-          secrets: |
-            github_token=${{ steps.token.outputs.token }}
-
       # Keep reef.toml dependencies distinct from image tool packages in the
-      # matrix, but build and verify one exact source bundle for the overlay.
-      # This runs after the base build because the helper also repins the
-      # throwaway hello-chelis checkout to HEAD.
+      # matrix, but build and verify one exact source bundle for the image.
+      # A failure here is genuine source/API drift and is reported as such.
       - name: Build and install exact Docker dependency sources
+        id: docker_dependencies
         if: matrix.type == 'docker'
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ steps.token.outputs.token }}
         run: |
@@ -590,8 +578,14 @@ jobs:
             ${{ matrix.reef_deps }} ${{ matrix.tool_deps }}
           echo "DRIFT_DEPENDENCIES=$deps_root" >> "$GITHUB_ENV"
 
-      - name: Overlay HEAD chelis toolchain onto the image
-        if: matrix.type == 'docker'
+      # Image assembly is infrastructure-only. It contains no release Chelis
+      # compiler and executes no hello-chelis source. A failure is withheld
+      # from drift reporting and converted back to a job failure after the
+      # reporting step.
+      - name: Assemble neutral HEAD Docker image
+        id: docker_image
+        if: matrix.type == 'docker' && steps.docker_dependencies.outcome == 'success'
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ steps.token.outputs.token }}
         run: |
@@ -601,58 +595,74 @@ jobs:
           cp "$tdir/bin/chelis" "$ctx/chelis"
           cp "$tdir/lib/libchelis_runtime.a" "$ctx/libchelis_runtime.a"
           cp "$tdir"/include/*.h "$ctx/"
-          # Copy the HEAD chelis-std monorepo subset so we can reinstall it
-          # over the release chelis-std the base image's reef registry holds.
           cp -R "$tdir/packages" "$ctx/packages"
           cp -R "$DRIFT_DEPENDENCIES/packages" "$ctx/dependencies"
+          cp -R shell "$ctx/workspace"
+          rm -rf "$ctx/workspace/.git"
+          asset="octant-v0.13.0-linux-x86_64.tar.gz"
+          gh release download v0.13.0 \
+            --repo Chelis-Lang/octant \
+            --pattern "$asset" \
+            --dir "$ctx"
+          (
+            cd "$ctx"
+            echo "${{ matrix.octant_cli_sha256 }}  ${asset}" | sha256sum -c -
+          )
+          mkdir -p "$ctx/octant-toolchain"
+          tar -xzf "$ctx/$asset" \
+            -C "$ctx/octant-toolchain" \
+            --strip-components=1
+          cp "$ctx/octant-toolchain/bin/octant" "$ctx/octant"
           cat > "$ctx/Dockerfile" <<'DOCKER'
-          # syntax=docker/dockerfile:1.7
-          FROM hello-chelis:base
-          ARG OCTANT_VERSION=0.13.0
+          FROM ubuntu:24.04
+          ENV DEBIAN_FRONTEND=noninteractive \
+              LANG=C.UTF-8 \
+              LC_ALL=C.UTF-8 \
+              PATH=/usr/local/bin:/usr/bin:/bin
+          SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+          RUN apt-get update && apt-get install -y --no-install-recommends \
+                  ca-certificates \
+                  gcc \
+                  g++ \
+                  make \
+                  libopenblas-dev \
+                  libgomp1 \
+                  valgrind \
+                  git \
+                  python3 \
+                  python3-pip \
+                  python3-venv \
+              && rm -rf /var/lib/apt/lists/*
           COPY chelis /usr/local/bin/chelis
+          COPY octant /usr/local/bin/octant
           COPY libchelis_runtime.a /usr/local/lib/libchelis_runtime.a
           COPY *.h /usr/local/include/
           COPY packages /opt/chelis-head/packages
           COPY dependencies /opt/chelis-head/dependencies/packages
-          # Move the release compiler's bootstrap registry out of the active
-          # resolver path. The HEAD gates can then see only HEAD chelis-std and
-          # the exact source tags rebuilt and verified by HEAD.
-          RUN mv /root/.chelis/reef /root/.chelis/reef-release-bootstrap \
-              && chelis reef install --from-monorepo /opt/chelis-head chelis-std \
+          COPY workspace /workspace
+          RUN chelis reef install --from-monorepo /opt/chelis-head chelis-std \
               && chelis reef install --from-monorepo /opt/chelis-head/dependencies
-          # Octant is also a CLI in this image. Pin that executable to the
-          # same selected release identity as its rebuilt Reef package.
-          RUN --mount=type=secret,id=github_token \
-              token="$(cat /run/secrets/github_token 2>/dev/null || true)" \
-              && export GITHUB_TOKEN="$token" \
-              && asset="octant-v${OCTANT_VERSION}-linux-x86_64.tar.gz" \
-              && download-github-release-asset Chelis-Lang/octant \
-                   "v${OCTANT_VERSION}" "$asset" "/tmp/${asset}" \
-              && rm -rf /tmp/octant-head \
-              && mkdir -p /tmp/octant-head \
-              && tar -xzf "/tmp/${asset}" -C /tmp/octant-head --strip-components=1 \
-              && cp /tmp/octant-head/bin/octant /usr/local/bin/octant \
-              && octant version
-          RUN chelis --version
+          RUN chelis --version && octant version
+          WORKDIR /workspace
           DOCKER
-          docker build \
-            --secret id=github_token,env=GH_TOKEN \
-            -t hello-chelis:head "$ctx"
+          docker build -t hello-chelis:head "$ctx"
           echo "HEAD chelis version in image:"
           docker run --rm hello-chelis:head chelis --version
 
-      # Exercise hello-chelis semantics inside the HEAD-overlaid image.
+      # Exercise hello-chelis semantics inside the neutral HEAD image.
       # Release-pinned hello-chelis CI owns byte-for-byte Deep sidecar drift;
       # regenerating with a different compiler version is expected to change
       # serialization and is not an ecosystem-compatibility signal.
-      # `-v "$PWD/shell:/workspace"` mounts the checked-out corpus so `chelis
-      # check` / `chelis test` / pytest see the source tree.
+      # The exact reviewed, throwaway-repinned checkout is copied into the
+      # image before this gate, so no mutable host source is mounted at runtime.
       - name: hello-chelis check + test + C-backend (vs HEAD)
-        if: matrix.type == 'docker'
+        id: docker_gate
+        if: matrix.type == 'docker' && steps.docker_image.outcome == 'success'
+        continue-on-error: true
         run: |
           set -euo pipefail
           img=hello-chelis:head
-          run() { docker run --rm -v "$PWD/shell:/workspace" -w /workspace "$img" "$@"; }
+          run() { docker run --rm -w /workspace "$img" "$@"; }
           echo "::group::chelis reef build"
           run chelis reef build --no-auto-fetch
           echo "::endgroup::"
@@ -693,12 +703,42 @@ jobs:
       # runs whether the gate above passed or failed; `job.status` is the
       # aggregate result of the preceding steps in this matrix leg.
       - name: File/update drift tracking issue
-        if: always()
+        if: >-
+          always() && (
+            matrix.type != 'docker' ||
+            steps.docker_dependencies.outcome == 'failure' ||
+            steps.docker_gate.outcome == 'success' ||
+            steps.docker_gate.outcome == 'failure'
+          )
         env:
           GH_TOKEN: ${{ steps.token.outputs.token }}
           SHELL_REPO: ${{ matrix.repo }}
-          JOB_STATUS: ${{ job.status }}
+          JOB_STATUS: >-
+            ${{ matrix.type == 'docker' &&
+                (steps.docker_dependencies.outcome == 'failure' ||
+                 steps.docker_gate.outcome == 'failure') &&
+                'failure' || job.status }}
           HEAD_VERSION: ${{ needs.build-chelis.outputs.chelis_version }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           CHELIS_SHA: ${{ github.sha }}
         run: python3 "$CHELIS_TOOLCHAIN/scripts/drift_report_issue.py"
+
+      - name: Fail Docker language drift
+        if: >-
+          always() && matrix.type == 'docker' &&
+          (steps.docker_dependencies.outcome == 'failure' ||
+           steps.docker_gate.outcome == 'failure')
+        run: |
+          echo "::error::hello-chelis has source/API drift against Chelis HEAD"
+          exit 1
+
+      - name: Fail Docker infrastructure
+        if: >-
+          always() && matrix.type == 'docker' &&
+          steps.docker_dependencies.outcome != 'failure' &&
+          (steps.docker_image.outcome != 'success' ||
+           steps.docker_gate.outcome == 'skipped' ||
+           steps.docker_gate.outcome == 'cancelled')
+        run: |
+          echo "::error::neutral HEAD Docker setup failed before a drift verdict"
+          exit 1

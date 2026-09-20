@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Rebuild exact shell dependency tags with the ecosystem canary's HEAD compiler.
+"""Rebuild exact shell dependency commits with the canary's HEAD compiler.
 
 Published predecessor CHB envelopes are deliberately not accepted by current
-Chelis. The drift canary still uses release tags as immutable source identities,
-but checks those tags out, repins their throwaway manifests to HEAD, applies the
-supported v0.18-to-v0.19 source migration, builds with auto-fetch disabled,
-verifies the resulting current-format artifacts, and installs those exact bytes
-into the local Reef registry.
+Chelis. The drift canary keeps release tags and versions as human metadata, but
+uses reviewed peeled commit SHAs as source authority. It checks out each exact
+commit, verifies HEAD before touching the tree, repins the throwaway manifests
+to HEAD, applies the supported v0.18-to-v0.19 source migration, builds with
+auto-fetch disabled, verifies the resulting current-format artifacts, and
+installs those exact bytes into the local Reef registry.
 """
 
 from __future__ import annotations
@@ -28,7 +29,8 @@ ECOSYSTEM_PACKAGES = frozenset(
 )
 _SPEC_RE = re.compile(
     r"^(?P<repo>[A-Za-z0-9_.-]+/(?P<name>[A-Za-z0-9_.-]+))"
-    r"@(?P<tag>v(?P<version>\d+\.\d+\.\d+))$"
+    r"@(?P<tag>v(?P<version>\d+\.\d+\.\d+))"
+    r"#(?P<commit>[0-9a-f]{40})$"
 )
 _DEPENDENCY_LINE_RE = re.compile(
     r"^(?P<prefix>[ \t]*(?P<name>[A-Za-z0-9_.-]+)[ \t]*=[ \t]*\{)"
@@ -47,6 +49,7 @@ class DependencySpec:
     name: str
     tag: str
     version: str
+    commit: str
 
 
 @dataclass(frozen=True)
@@ -61,13 +64,15 @@ def parse_dependency_spec(encoded: str) -> DependencySpec:
     match = _SPEC_RE.fullmatch(encoded)
     if match is None:
         raise ValueError(
-            f"invalid dependency source `{encoded}`; expected ORG/REPO@vX.Y.Z"
+            f"invalid dependency source `{encoded}`; expected "
+            "ORG/REPO@vX.Y.Z#<40-character peeled commit SHA>"
         )
     return DependencySpec(
         repo=match.group("repo"),
         name=match.group("name"),
         tag=match.group("tag"),
         version=match.group("version"),
+        commit=match.group("commit"),
     )
 
 
@@ -234,7 +239,7 @@ def _dependency_order(
     return order
 
 
-def _clone_repo(repo: str, tag: str, destination: Path) -> None:
+def _clone_repo(repo: str, commit: str, destination: Path) -> None:
     subprocess.run(
         [
             "gh",
@@ -243,14 +248,38 @@ def _clone_repo(repo: str, tag: str, destination: Path) -> None:
             repo,
             str(destination),
             "--",
-            "--branch",
-            tag,
+            "--no-checkout",
             "--depth",
             "1",
-            "--single-branch",
         ],
         check=True,
     )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(destination),
+            "fetch",
+            "--depth",
+            "1",
+            "origin",
+            commit,
+        ],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(destination), "checkout", "--detach", commit],
+        check=True,
+    )
+
+
+def _git_head(destination: Path) -> str:
+    return subprocess.run(
+        ["git", "-C", str(destination), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
 
 
 def _run(command: list[str]) -> None:
@@ -273,6 +302,7 @@ def prepare_dependencies(
     compiler_version: str,
     encoded_specs: Sequence[str],
     clone: Callable[[str, str, Path], None] = _clone_repo,
+    head: Callable[[Path], str] = _git_head,
     run: Callable[[list[str]], None] = _run,
     chelis: str = "chelis",
 ) -> None:
@@ -287,7 +317,13 @@ def prepare_dependencies(
     packages: dict[str, tuple[DependencySpec, Path, Package]] = {}
     for spec in specs:
         package_root = packages_root / spec.name
-        clone(spec.repo, spec.tag, package_root)
+        clone(spec.repo, spec.commit, package_root)
+        checked_out = head(package_root)
+        if checked_out != spec.commit:
+            raise ValueError(
+                f"{spec.repo}@{spec.tag}: checked out `{checked_out}`, "
+                f"expected reviewed commit `{spec.commit}`"
+            )
         _rewrite_tree(package_root, compiler_version, selected_versions)
         package = read_package(package_root / "reef.toml")
         if package.name != spec.name:

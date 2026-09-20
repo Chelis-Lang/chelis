@@ -14,37 +14,71 @@ COPY_HEADER = re.compile(
     r"cp crates/chelis-runtime/include/(chelis_[^\s/]+\.h) "
     r'"\$staging/include/"'
 )
+REEF_BUILD_COMMAND = re.compile(
+    r"^\s*(?:run:\s+|run\s+)?"
+    r"(?P<command>(?:\./target/release/)?chelis reef build(?:\s.*)?)$"
+)
+SOURCE_PINS = {
+    "nautilus": (
+        "Chelis-Lang/nautilus@v0.7.45"
+        "#563f2737c2988eaa05ca1e6ce4e941cf86c296b8"
+    ),
+    "coral": (
+        "Chelis-Lang/coral@v0.7.42"
+        "#bdb92de243c2c911c0c2a2b83bff29673186476b"
+    ),
+    "shoals": (
+        "Chelis-Lang/shoals@v0.24.12"
+        "#502fbac05ef1c2c4fc5e8d97611b8b9c192a9707"
+    ),
+    "school": (
+        "Chelis-Lang/school@v0.1.13"
+        "#7904a31ff6de4b9eec82507687097cc486f2baf7"
+    ),
+    "octant": (
+        "Chelis-Lang/octant@v0.13.0"
+        "#ebd2a22150647f6252f2bb5be02b5016ff069249"
+    ),
+    "c-earchin": (
+        "Chelis-Lang/c-earchin@v0.3.3"
+        "#70720831641ba325b217427d52cf47fcba4f0b27"
+    ),
+}
+HELLO_SOURCE_SHA = "4d9796b15f00a075c3aabffd629fecfe3daac200"
+OCTANT_CLI_SHA256 = (
+    "74c46fbe5cbddf489295b9df7db308bc838c7c9c8669740197cbb1dfcddd48b0"
+)
 EXPECTED_REEF_DEPENDENCIES = {
     "nautilus": (),
-    "coral": ("Chelis-Lang/nautilus@v0.7.45",),
+    "coral": (SOURCE_PINS["nautilus"],),
     "shoals": (
-        "Chelis-Lang/nautilus@v0.7.45",
-        "Chelis-Lang/coral@v0.7.42",
+        SOURCE_PINS["nautilus"],
+        SOURCE_PINS["coral"],
     ),
     "school": (),
     "hull": (),
     "whale": (
-        "Chelis-Lang/nautilus@v0.7.45",
-        "Chelis-Lang/coral@v0.7.42",
-        "Chelis-Lang/shoals@v0.24.12",
+        SOURCE_PINS["nautilus"],
+        SOURCE_PINS["coral"],
+        SOURCE_PINS["shoals"],
     ),
-    "octant": ("Chelis-Lang/nautilus@v0.7.45",),
+    "octant": (SOURCE_PINS["nautilus"],),
     "calcify": (
-        "Chelis-Lang/nautilus@v0.7.45",
-        "Chelis-Lang/coral@v0.7.42",
+        SOURCE_PINS["nautilus"],
+        SOURCE_PINS["coral"],
     ),
     "c-earchin": (),
     "hydronnx": (),
     "hello-chelis": (
-        "Chelis-Lang/coral@v0.7.42",
-        "Chelis-Lang/nautilus@v0.7.45",
-        "Chelis-Lang/school@v0.1.13",
+        SOURCE_PINS["coral"],
+        SOURCE_PINS["nautilus"],
+        SOURCE_PINS["school"],
     ),
 }
 EXPECTED_TOOL_DEPENDENCIES = {
     "hello-chelis": (
-        "Chelis-Lang/octant@v0.13.0",
-        "Chelis-Lang/c-earchin@v0.3.3",
+        SOURCE_PINS["octant"],
+        SOURCE_PINS["c-earchin"],
     ),
 }
 
@@ -94,6 +128,28 @@ def matrix_tool_dependencies(workflow: str) -> dict[str, tuple[str, ...]]:
     return dependencies
 
 
+def matrix_scalar(workflow: str, key: str) -> dict[str, str]:
+    values: dict[str, str] = {}
+    current_repo: str | None = None
+    for line in workflow.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("- repo:"):
+            current_repo = stripped.split(":", 1)[1].strip()
+        elif current_repo is not None and stripped.startswith(f"{key}:"):
+            values[current_repo] = stripped.split(":", 1)[1].strip().strip('"')
+    return values
+
+
+def reef_build_command_rows(workflow: str) -> list[tuple[int, str]]:
+    lines = workflow.splitlines()
+    commands: list[tuple[int, str]] = []
+    for index in range(len(lines)):
+        match = REEF_BUILD_COMMAND.fullmatch(lines[index])
+        if match is not None:
+            commands.append((index, match.group("command")))
+    return commands
+
+
 class EcosystemDriftWorkflowTests(unittest.TestCase):
     def assert_runtime_header_manifest(self, workflow: str) -> None:
         public = public_runtime_headers()
@@ -107,6 +163,20 @@ class EcosystemDriftWorkflowTests(unittest.TestCase):
             set(COPY_HEADER.findall(workflow)),
             required,
             "the ecosystem toolchain omits a contracted runtime header",
+        )
+
+    def assert_reef_builds_disable_autofetch(self, workflow: str) -> None:
+        commands = reef_build_command_rows(workflow)
+        self.assertGreaterEqual(len(commands), 5)
+        missing = [
+            f"line {index + 1}: {command}"
+            for index, command in commands
+            if "--no-auto-fetch" not in command.split()
+        ]
+        self.assertEqual(
+            missing,
+            [],
+            "every workflow reef build must disable auto-fetch",
         )
 
     def test_head_toolchain_stages_the_public_runtime_header_closure(self) -> None:
@@ -161,6 +231,16 @@ class EcosystemDriftWorkflowTests(unittest.TestCase):
             EXPECTED_TOOL_DEPENDENCIES,
             "the Docker leg must pin its non-Reef tool-package releases",
         )
+        self.assertEqual(
+            matrix_scalar(workflow, "source_sha").get("hello-chelis"),
+            HELLO_SOURCE_SHA,
+            "hello-chelis must be checked out at the reviewed immutable source",
+        )
+        self.assertEqual(
+            matrix_scalar(workflow, "octant_cli_sha256").get("hello-chelis"),
+            OCTANT_CLI_SHA256,
+            "the Docker tool binary must have an immutable content identity",
+        )
 
     def test_dependency_matrix_pins_current_format_releases(self) -> None:
         self.assert_current_artifact_matrix(WORKFLOW.read_text(encoding="utf-8"))
@@ -182,6 +262,26 @@ class EcosystemDriftWorkflowTests(unittest.TestCase):
                 with self.assertRaises(AssertionError):
                     self.assert_current_artifact_matrix(mutated)
 
+    def test_wrong_source_shas_are_rejected(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        for name, source in SOURCE_PINS.items():
+            expected_sha = source.rsplit("#", 1)[1]
+            wrong_sha = ("0" if expected_sha[0] != "0" else "1") + expected_sha[1:]
+            with self.subTest(name=name):
+                mutated = workflow.replace(expected_sha, wrong_sha, 1)
+                self.assertNotEqual(mutated, workflow)
+                with self.assertRaises(AssertionError):
+                    self.assert_current_artifact_matrix(mutated)
+
+        wrong_hello = (
+            ("0" if HELLO_SOURCE_SHA[0] != "0" else "1")
+            + HELLO_SOURCE_SHA[1:]
+        )
+        mutated = workflow.replace(HELLO_SOURCE_SHA, wrong_hello, 1)
+        self.assertNotEqual(mutated, workflow)
+        with self.assertRaises(AssertionError):
+            self.assert_current_artifact_matrix(mutated)
+
     def test_dependencies_are_rebuilt_and_verified_by_head(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn(
@@ -200,29 +300,52 @@ class EcosystemDriftWorkflowTests(unittest.TestCase):
             "/opt/chelis-head/dependencies",
             workflow,
         )
+        self.assertNotIn("Build hello-chelis base image", workflow)
+        self.assertNotIn("shell/docker/Dockerfile", workflow)
+        self.assertNotIn("FROM hello-chelis:base", workflow)
+        self.assertIn("FROM ubuntu:24.04", workflow)
+        self.assertIn("COPY chelis /usr/local/bin/chelis", workflow)
+        self.assertIn('cp -R shell "$ctx/workspace"', workflow)
+        self.assertIn("COPY workspace /workspace", workflow)
+        self.assertNotIn('-v "$PWD/shell:/workspace"', workflow)
+        self.assertIn("id: docker_image", workflow)
+        self.assertIn("continue-on-error: true", workflow)
+        self.assertIn("steps.docker_image.outcome", workflow)
         self.assertIn(
-            "mv /root/.chelis/reef /root/.chelis/reef-release-bootstrap",
+            'test "$(git rev-parse HEAD)" = "${{ matrix.source_sha }}"',
             workflow,
         )
 
+        dependency_step = workflow.index(
+            "- name: Build and install exact Docker dependency sources"
+        )
+        image_step = workflow.index("- name: Assemble neutral HEAD Docker image")
+        self.assertLess(dependency_step, image_step)
+
     def test_shell_builds_disable_dependency_autofetch(self) -> None:
+        self.assert_reef_builds_disable_autofetch(
+            WORKFLOW.read_text(encoding="utf-8")
+        )
+
+    def test_removing_no_auto_fetch_from_each_build_is_rejected(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
-        drift_job = workflow.split("\n  drift:\n", 1)[1]
-        unsafe = [
-            line
-            for line in drift_job.splitlines()
-            if line.strip() == "chelis reef build"
-            or line.strip() == "run: chelis reef build"
-        ]
-        self.assertEqual(
-            unsafe,
-            [],
-            "every shell build must use --no-auto-fetch after exact local seeding",
-        )
-        self.assertGreaterEqual(
-            drift_job.count("chelis reef build --no-auto-fetch"),
-            5,
-        )
+        original_rows = reef_build_command_rows(workflow)
+        self.assertGreaterEqual(len(original_rows), 5)
+        for line_index, command in original_rows:
+            with self.subTest(line=line_index + 1, command=command):
+                mutated_lines = workflow.splitlines(keepends=True)
+                mutated_lines[line_index] = mutated_lines[line_index].replace(
+                    "--no-auto-fetch",
+                    "",
+                    1,
+                )
+                mutated = "".join(mutated_lines)
+                self.assertNotEqual(mutated, workflow)
+                with self.assertRaisesRegex(
+                    AssertionError,
+                    "every workflow reef build must disable auto-fetch",
+                ):
+                    self.assert_reef_builds_disable_autofetch(mutated)
 
 
 if __name__ == "__main__":

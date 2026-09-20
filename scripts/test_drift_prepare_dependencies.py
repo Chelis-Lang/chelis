@@ -24,6 +24,12 @@ def _load_module():
 
 dpd = _load_module()
 
+SOURCE_COMMITS = {
+    "nautilus": "563f2737c2988eaa05ca1e6ce4e941cf86c296b8",
+    "coral": "bdb92de243c2c911c0c2a2b83bff29673186476b",
+    "shoals": "502fbac05ef1c2c4fc5e8d97611b8b9c192a9707",
+}
+
 
 class ManifestRewriteTests(unittest.TestCase):
     def test_rewrites_compiler_and_selected_direct_dependencies_only(self):
@@ -90,7 +96,7 @@ class PreparationTests(unittest.TestCase):
             f"{dependencies}"
         )
 
-    def test_exact_tags_build_verify_install_and_repin_the_shell(self):
+    def test_exact_commits_build_verify_install_and_repin_the_shell(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             shell = root / "shell"
@@ -120,8 +126,8 @@ class PreparationTests(unittest.TestCase):
             clones: list[tuple[str, str, Path]] = []
             commands: list[list[str]] = []
 
-            def clone(repo: str, tag: str, destination: Path) -> None:
-                clones.append((repo, tag, destination))
+            def clone(repo: str, commit: str, destination: Path) -> None:
+                clones.append((repo, commit, destination))
                 destination.mkdir(parents=True)
                 name = destination.name
                 (destination / "reef.toml").write_text(
@@ -140,6 +146,9 @@ class PreparationTests(unittest.TestCase):
                     destination / "dist" / f"{name}-{version}.tar.zst"
                 ).write_bytes(b"archive")
 
+            def head(destination: Path) -> str:
+                return SOURCE_COMMITS[destination.name]
+
             def run(command: list[str]) -> None:
                 commands.append(command)
 
@@ -148,20 +157,24 @@ class PreparationTests(unittest.TestCase):
                 shell=shell,
                 compiler_version="0.18.10",
                 encoded_specs=(
-                    "Chelis-Lang/nautilus@v0.7.45",
-                    "Chelis-Lang/coral@v0.7.42",
-                    "Chelis-Lang/shoals@v0.24.12",
+                    "Chelis-Lang/nautilus@v0.7.45"
+                    f"#{SOURCE_COMMITS['nautilus']}",
+                    "Chelis-Lang/coral@v0.7.42"
+                    f"#{SOURCE_COMMITS['coral']}",
+                    "Chelis-Lang/shoals@v0.24.12"
+                    f"#{SOURCE_COMMITS['shoals']}",
                 ),
                 clone=clone,
+                head=head,
                 run=run,
             )
 
             self.assertEqual(
-                [(repo, tag) for repo, tag, _ in clones],
+                [(repo, commit) for repo, commit, _ in clones],
                 [
-                    ("Chelis-Lang/nautilus", "v0.7.45"),
-                    ("Chelis-Lang/coral", "v0.7.42"),
-                    ("Chelis-Lang/shoals", "v0.24.12"),
+                    ("Chelis-Lang/nautilus", SOURCE_COMMITS["nautilus"]),
+                    ("Chelis-Lang/coral", SOURCE_COMMITS["coral"]),
+                    ("Chelis-Lang/shoals", SOURCE_COMMITS["shoals"]),
                 ],
             )
             build_names = [
@@ -205,7 +218,7 @@ class PreparationTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            def clone(_repo: str, _tag: str, destination: Path) -> None:
+            def clone(_repo: str, _commit: str, destination: Path) -> None:
                 destination.mkdir(parents=True)
                 (destination / "reef.toml").write_text(
                     self._manifest("nautilus", "0.7.44"),
@@ -217,10 +230,57 @@ class PreparationTests(unittest.TestCase):
                     workspace=root / "deps",
                     shell=shell,
                     compiler_version="0.18.10",
-                    encoded_specs=("Chelis-Lang/nautilus@v0.7.45",),
+                    encoded_specs=(
+                        "Chelis-Lang/nautilus@v0.7.45"
+                        f"#{SOURCE_COMMITS['nautilus']}",
+                    ),
                     clone=clone,
+                    head=lambda _destination: SOURCE_COMMITS["nautilus"],
                     run=lambda _command: None,
                 )
+
+    def test_moved_tag_with_same_manifest_version_is_rejected_by_head_sha(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            shell = root / "shell"
+            shell.mkdir()
+            (shell / "reef.toml").write_text(
+                self._manifest("consumer", "0.1.0"),
+                encoding="utf-8",
+            )
+
+            def clone(_repo: str, _commit: str, destination: Path) -> None:
+                destination.mkdir(parents=True)
+                (destination / "reef.toml").write_text(
+                    self._manifest("nautilus", "0.7.45"),
+                    encoding="utf-8",
+                )
+
+            moved_commit = "a" * 40
+            with self.assertRaisesRegex(ValueError, "checked out.*expected"):
+                dpd.prepare_dependencies(
+                    workspace=root / "deps",
+                    shell=shell,
+                    compiler_version="0.18.10",
+                    encoded_specs=(
+                        "Chelis-Lang/nautilus@v0.7.45"
+                        f"#{SOURCE_COMMITS['nautilus']}",
+                    ),
+                    clone=clone,
+                    head=lambda _destination: moved_commit,
+                    run=lambda _command: None,
+                )
+
+    def test_source_spec_requires_full_commit_sha(self):
+        invalid = (
+            "Chelis-Lang/nautilus@v0.7.45",
+            "Chelis-Lang/nautilus@v0.7.45#563f273",
+            "Chelis-Lang/nautilus@v0.7.45#" + "g" * 40,
+        )
+        for encoded in invalid:
+            with self.subTest(encoded=encoded):
+                with self.assertRaisesRegex(ValueError, "expected.*SHA"):
+                    dpd.parse_dependency_spec(encoded)
 
 
 if __name__ == "__main__":
