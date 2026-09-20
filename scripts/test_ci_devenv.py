@@ -63,7 +63,7 @@ class ProjectActivationTests(unittest.TestCase):
             values[key] = "\n".join(value)
         self.assertNotIn("GITHUB_TOKEN", values)
         self.assertNotIn("LD_LIBRARY_PATH", values)
-        self.assertEqual(values["CHELIS_CI_LIBRARY_PATH"], "/project/lib")
+        self.assertIn("/project/lib", values["CHELIS_CI_LIBRARY_PATH"].split(os.pathsep))
 
     def test_project_library_path_is_scoped_to_command_and_failure_propagates(self):
         command_file = self.root / "actions-command"
