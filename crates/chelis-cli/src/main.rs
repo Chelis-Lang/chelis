@@ -5988,21 +5988,35 @@ const COMPILED_CONTEXT_PATH_ENV: &str = "CHELIS_TEST_COMPILED_CONTEXT";
 /// spawned.
 const COMPILED_CONTEXT_DIGEST_ENV: &str = "CHELIS_TEST_COMPILED_CONTEXT_SHA256";
 
-/// The complete parent-to-worker handoff: where the bytes are, and the digest
-/// that says they are still the bytes the parent wrote.
+/// The complete parent-to-worker handoff: the file holding the bytes, and the
+/// digest that says they are still the bytes the parent wrote.
 ///
 /// These two travel together in this process and apart between processes, which
 /// is the whole point. Keeping them in one value means a spawn site cannot pass
 /// the path and forget the digest.
-#[derive(Debug, Clone)]
+///
+/// It owns the tempfile guard through an `Arc` rather than borrowing its path.
+/// Worker threads need `'static`, so a borrow could not have reached them, and
+/// a bare `PathBuf` would leave "the file still exists when the worker opens
+/// it" resting on the order two locals happen to be declared in. Every clone
+/// handed to a thread keeps the guard alive, so the file outlives the last
+/// worker that could read it by construction.
+#[derive(Clone)]
 struct CompiledContextHandoff {
-    path: PathBuf,
+    tempfile: Arc<CompiledContextTempfile>,
     digest_hex: String,
 }
 
 impl CompiledContextHandoff {
+    fn new(tempfile: CompiledContextTempfile, digest: &chelis_compiler_api::HandoffDigest) -> Self {
+        Self {
+            tempfile: Arc::new(tempfile),
+            digest_hex: digest.to_hex(),
+        }
+    }
+
     fn apply_to(&self, cmd: &mut std::process::Command) {
-        cmd.env(COMPILED_CONTEXT_PATH_ENV, &self.path)
+        cmd.env(COMPILED_CONTEXT_PATH_ENV, self.tempfile.path())
             .env(COMPILED_CONTEXT_DIGEST_ENV, &self.digest_hex);
     }
 
@@ -7161,12 +7175,11 @@ fn cmd_test(
         };
     let (context_bytes, context_digest) = context.encode_for_handoff()?;
     drop(context);
-    let context_tempfile = CompiledContextTempfile::write(&context_bytes)?;
+    let context_handoff = CompiledContextHandoff::new(
+        CompiledContextTempfile::write(&context_bytes)?,
+        &context_digest,
+    );
     drop(context_bytes);
-    let context_handoff = CompiledContextHandoff {
-        path: context_tempfile.path().to_path_buf(),
-        digest_hex: context_digest.to_hex(),
-    };
 
     let mut passed: usize = 0;
     let mut failed: usize = 0;

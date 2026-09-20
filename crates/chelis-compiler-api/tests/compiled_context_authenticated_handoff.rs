@@ -21,9 +21,18 @@ use chelis_compiler_api::{COMPILER_VERSION, CompiledContext, HandoffDigest, comp
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
-/// A tempdir-backed reef package with a path dependency, so the compiled
-/// context carries a real multi-package library rather than a single module.
-fn library_fixture() -> (TempDir, PathBuf) {
+/// A tempdir-backed reef package with a path dependency and the bundled
+/// standard library, so the compiled context is the shape a real handoff has.
+///
+/// chelis#2258 review: the first version of this fixture depended on neither,
+/// and encoded 34,569 bytes against 6,763,585 for a real package. Almost all of
+/// that difference is chelis-std, which every real context carries, so pulling
+/// it in is what makes the route-equivalence comparison run over a
+/// representative payload rather than a toy one.
+///
+/// `body` lets a caller ask for a second, genuinely different library. Two
+/// copies of the same one would make a swapped type environment a no-op.
+fn library_fixture(body: &str) -> (TempDir, PathBuf) {
     let dir = TempDir::new().expect("tempdir");
     let root = dir.path().join("myapp");
     fs::create_dir_all(root.join("src")).expect("mkdir src");
@@ -32,7 +41,7 @@ fn library_fixture() -> (TempDir, PathBuf) {
     fs::write(
         root.join("reef.toml"),
         format!(
-            "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"App\"\n\n[dependencies]\nmylib = {{ path = \"./mylib\" }}\n",
+            "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"App\"\n\n[dependencies]\nmylib = {{ path = \"./mylib\" }}\nchelis-std = {{ version = \"0.4.0\" }}\n",
         ),
     )
     .expect("write app reef.toml");
@@ -48,19 +57,7 @@ fn library_fixture() -> (TempDir, PathBuf) {
         ),
     )
     .expect("write mylib reef.toml");
-    // Enough shape that the library exercises linearity and effects rather
-    // than a single arithmetic definition: a list consumer, a tensor
-    // parameter, and a float constant the lowered payload carries verbatim.
-    fs::write(
-        root.join("mylib/src/math.ch"),
-        "module Mylib.Math\nexport (add, square, host_len, decay, bias)\n\n\
-         def add(x: i32, y: i32) -> i32 = x + y\n\
-         def square(x: i32) -> i32 = x * x\n\
-         def host_len[n](xs: tensor[n, f32]) -> i64 = len(to_list(xs))\n\
-         def decay[n](xs: tensor[n, f32]) -> tensor[n, f32] = exp(xs)\n\
-         def bias() -> f32 = 0.0\n",
-    )
-    .expect("write math.ch");
+    fs::write(root.join("mylib/src/math.ch"), body).expect("write math.ch");
     fs::write(
         root.join("reef.lock"),
         format!(
@@ -71,14 +68,74 @@ fn library_fixture() -> (TempDir, PathBuf) {
     (dir, root)
 }
 
-fn encoded_fixture() -> (TempDir, Vec<u8>, HandoffDigest) {
-    let (dir, root) = library_fixture();
+/// The fixture library: a fixed head that exercises linearity and effects --
+/// a list consumer, a tensor parameter, and a float constant the lowered
+/// payload carries verbatim -- followed by `bulk` generated definitions.
+///
+/// The bulk is what makes the payload representative. A real handoff runs to
+/// several megabytes and is dominated by the package's own definitions, so a
+/// handful of them compares the two routes over a payload nothing like the one
+/// they carry in production.
+fn primary_library(bulk: usize) -> String {
+    let mut names: Vec<String> = ["add", "square", "host_len", "decay", "bias"]
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect();
+    names.extend((0..bulk).map(|index| format!("bulk_{index}")));
+    let mut source = format!("module Mylib.Math\nexport ({})\n\n", names.join(", "));
+    source.push_str(
+        "def add(x: i32, y: i32) -> i32 = x + y\n\
+         def square(x: i32) -> i32 = x * x\n\
+         def host_len[n](xs: tensor[n, f32]) -> i64 = len(to_list(xs))\n\
+         def decay[n](xs: tensor[n, f32]) -> tensor[n, f32] = exp(xs)\n\
+         def bias() -> f32 = 0.0\n",
+    );
+    for index in 0..bulk {
+        let scale = index % 7 + 1;
+        let shift = index % 3;
+        source.push_str(&format!(
+            "def bulk_{index}(x: f32) -> f32 = {{\n  a = x * {scale}.5\n  \
+             b = a + {shift}.25\n  b - exp(-b * 0.125) * 0.5\n}}\n"
+        ));
+    }
+    source
+}
+
+/// How many generated definitions the fixture carries. Sized so the payload
+/// stays in the megabytes while the compile stays around a second; the test
+/// asserts the resulting floor rather than trusting this number.
+const FIXTURE_BULK_DEFINITIONS: usize = 150;
+
+/// The payload must not silently shrink back to a toy. chelis#2258 review found
+/// the first version of this fixture at 34,569 bytes against 6,763,585 for a
+/// real package, and a tripwire watching 0.5% of its surface is not a tripwire.
+const FIXTURE_MINIMUM_BYTES: usize = 1_000_000;
+
+/// A library with different names and signatures, so its type environment
+/// genuinely disagrees with [`PRIMARY_LIBRARY`]'s checked program.
+const FOREIGN_LIBRARY: &str = "module Mylib.Math\nexport (triple, offset)\n\n\
+     def triple(x: i64) -> i64 = x + x + x\n\
+     def offset(x: f32, y: f32) -> f32 = x - y\n";
+
+fn encoded_fixture_from(body: &str) -> (TempDir, Vec<u8>, HandoffDigest) {
+    let (dir, root) = library_fixture(body);
     let context = compile_reef_context(Path::new("/tmp/chelis-2211-unused-reef-home"), &root)
         .expect("the fixture package must compile");
     let (bytes, digest) = context
         .encode_for_handoff()
         .expect("a compiled context must encode");
     (dir, bytes, digest)
+}
+
+fn encoded_fixture() -> (TempDir, Vec<u8>, HandoffDigest) {
+    let fixture = encoded_fixture_from(&primary_library(FIXTURE_BULK_DEFINITIONS));
+    assert!(
+        fixture.1.len() >= FIXTURE_MINIMUM_BYTES,
+        "the route-equivalence fixture encodes {} bytes, below the {FIXTURE_MINIMUM_BYTES}-byte \
+         floor this comparison is supposed to cover",
+        fixture.1.len()
+    );
+    fixture
 }
 
 /// The property the authenticated route depends on.
@@ -181,7 +238,7 @@ fn authenticated_decode_rejects_a_payload_rewritten_after_encode() {
 #[test]
 fn authenticated_decode_rejects_a_digest_minted_for_other_bytes() {
     let (_dir, bytes, _digest) = encoded_fixture();
-    let (_other_dir, _other_bytes, other_digest) = encoded_fixture();
+    let (_other_dir, _other_bytes, other_digest) = encoded_fixture_from(FOREIGN_LIBRARY);
 
     let error = CompiledContext::decode_authenticated(&bytes, &other_digest)
         .expect_err("another payload's digest must not authenticate these bytes");
@@ -237,6 +294,97 @@ fn handoff_digest_rejects_every_spelling_but_the_canonical_one() {
             "the {label} rejection must say what was expected: {error}"
         );
     }
+}
+
+/// The fast route's one remaining semantic check, locked.
+///
+/// chelis#2258 review, P2-3: `adopt_authenticated_library`'s
+/// `matches_checked_program` is the only semantic check
+/// `decode_authenticated` still runs, and
+/// `every_cached_library_decoder_rejects_forged_selector_callable_metadata`
+/// does not reach it -- that test covers the three `Deserialize`-based
+/// decoders, and this route does not go through `CompiledContext`'s
+/// `Deserialize`. So the check was present, correct, and untested, which is
+/// the state a later optimiser deletes things from, especially since the
+/// function's own documentation calls it "a fraction of a percent of the
+/// work".
+///
+/// The forgery pairs one library's checked program with a different library's
+/// type environment and then reseals the envelope **and mints a digest over
+/// the forged payload**, so the authentication passes and nothing but the
+/// semantic check can reject it.
+#[test]
+fn authenticated_decode_rejects_a_type_environment_from_another_library() {
+    let (_dir, bytes, _digest) = encoded_fixture();
+    let (_foreign_dir, foreign_bytes, _foreign_digest) = encoded_fixture_from(FOREIGN_LIBRARY);
+
+    let honest = wire_of(&bytes);
+    let foreign = wire_of(&foreign_bytes);
+    assert_ne!(
+        bincode::serialize(&honest.type_env).expect("encode type env"),
+        bincode::serialize(&foreign.type_env).expect("encode type env"),
+        "the two fixtures must have genuinely different type environments, or this test \
+         forges nothing"
+    );
+
+    // Positive control first. Taking the payload apart and putting it back
+    // together must produce something the route accepts, otherwise the
+    // rejection below would prove only that the rebuild is lossy.
+    let (rebuilt, rebuilt_digest) = reseal_wire(&bytes, &honest);
+    CompiledContext::decode_authenticated(&rebuilt, &rebuilt_digest)
+        .expect("an unmodified rebuild must still authenticate and reconstruct");
+
+    let forged = WireMirror {
+        type_env: foreign.type_env,
+        ..honest
+    };
+    let (forged_bytes, forged_digest) = reseal_wire(&bytes, &forged);
+    // The authentication cannot be what rejects this: the digest was minted
+    // over these exact bytes.
+    let error = CompiledContext::decode_authenticated(&forged_bytes, &forged_digest)
+        .expect_err("a type environment from another library must not reconstruct");
+    assert!(
+        error.contains("the type environment does not match the checked library"),
+        "the rejection must name the type-environment disagreement, not the digest: {error}"
+    );
+}
+
+/// Mirror of the private `CompiledContextWire`, positionally identical because
+/// bincode is positional. If the real wire gains, loses or reorders a field,
+/// `wire_of` fails to decode and the tests above fail loudly rather than
+/// quietly testing a different shape.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct WireMirror {
+    source_hash: chelis_compiler_api::ContextHash,
+    identity: chelis_compiler_api::CacheIdentity,
+    reef_state: chelis_reef::PreparedReefGraph,
+    type_env: chelis_types::TypeEnv,
+    library_checked: chelis_types::CheckedProgram,
+    library_dag: chelis_ir::lower::LoweredLibrary,
+}
+
+fn wire_of(bytes: &[u8]) -> WireMirror {
+    let envelope: ContextFixtureEnvelope =
+        bincode::deserialize(&bytes[magic_len(bytes)..]).expect("the fixture envelope must decode");
+    bincode::deserialize(&envelope.payload)
+        .expect("the payload must decode as the wire this test mirrors")
+}
+
+/// Rebuild a self-consistent envelope around `wire` and mint the digest a
+/// producer of those bytes would have delivered.
+fn reseal_wire(original: &[u8], wire: &WireMirror) -> (Vec<u8>, HandoffDigest) {
+    let magic = magic_len(original);
+    let mut envelope: ContextFixtureEnvelope =
+        bincode::deserialize(&original[magic..]).expect("the fixture envelope must decode");
+    envelope.payload = bincode::serialize(wire).expect("the forged wire must encode");
+    envelope.payload_sha256 = Sha256::digest(&envelope.payload).into();
+    envelope.source_hash = wire.source_hash;
+    envelope.identity = wire.identity.clone();
+    let digest = HandoffDigest::from_hex(&format!("{:x}", Sha256::digest(&envelope.payload)))
+        .expect("a freshly computed digest must parse");
+    let mut bytes = original[..magic].to_vec();
+    bytes.extend(bincode::serialize(&envelope).expect("the resealed envelope must encode"));
+    (bytes, digest)
 }
 
 /// Nothing that ships calls the unauthenticated route.

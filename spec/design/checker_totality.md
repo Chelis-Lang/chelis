@@ -389,39 +389,61 @@ successful result. Every cache envelope verifies format and build identity and
 its own byte integrity before decoding. What happens after that decode differs
 by route, and the difference is not a preference (chelis#2211).
 
-An **on-disk cache entry** -- `CompiledContext::load_if_fresh`, and the
-`LibraryContext` and `StdLibContext` caches -- reruns the effect and linearity
-checkers over the decoded program, re-lowers it, and compares the result
-against the transmitted lowered payload. The envelope's embedded digest cannot
-stand in for that, because anyone who rewrote the payload rewrote the digest
-with it;
+Every **on-disk cache entry** reruns the effect and linearity checkers over the
+decoded program, because the entry outlives the process that wrote it and there
+is no second channel on which its producer could have said what the bytes ought
+to be. How much more each route does varies with what its wire carries, and the
+three are not interchangeable:
+
+- `CompiledContext::load_if_fresh` also re-lowers and compares the result
+  against the transmitted lowered payload, since its wire always carries one.
+- `StdLibContext` carries an optional lowered payload and performs that
+  comparison only when one is present.
+- `LibraryContext` carries none (`LibraryContextWire`, `library_cache.rs`), so
+  the checker rerun and the type-environment agreement are its whole
+  post-decode check.
+
+Where the comparison does run, it catches a payload whose parts stopped
+agreeing with each other, and the envelope's embedded digest cannot stand in
+for it, because whoever rewrote the payload recomputed that digest;
 `cache_wire_compatibility.rs`'s
 `cache_reconstruction_rejects_changed_numeric_bits_after_checksum_recomputed`
-is the control that demonstrates it. The reason this route keeps the
-re-derivation is that nothing else is available to it: a cache entry outlives
-the process that wrote it, so there is no second channel on which the producer
-could have said what the bytes should be.
+is the control that demonstrates exactly that. What the rerun and the
+comparison cannot do is establish provenance. A *substituted* payload -- a
+different library, compiled by the same build, carrying the victim's
+`source_hash` and `identity` -- is internally consistent by construction, so
+it passes every one of these checks (chelis#2257).
 
 A **parent-to-worker handoff** -- `CompiledContext::encode_for_handoff` and
-`decode_authenticated`, which `chelis test` uses -- does have that channel. The
-parent writes the bytes to a tempfile and passes their digest in the worker's
-environment, so the worker can establish that the bytes on disk are the ones
-the parent wrote, and does not rerun the checkers. This is not a weaker
-posture: the out-of-band digest rejects a payload rewritten after the parent
-wrote it, which the embedded digest and the re-derivation both accept. Note
-what it does not claim. A same-user process can read another's environment, so
-this is not same-user isolation and is not attempting it; anyone who can set
-the worker's environment or replace the `chelis` binary already runs chosen
-code as this user. What the digest defends is the gap the file's `0600` mode
-leaves open, which is a `TMPDIR` other users can write to, the ordinary shape
-of a shared build machine.
+`decode_authenticated`, which `chelis test` uses -- does have a second channel.
+The parent writes the bytes to a tempfile and passes their digest in the
+worker's environment, so the worker can establish that the bytes on disk are
+the ones the parent wrote, and does not rerun the checkers. That is a different
+question from the one the comparison answers, and a strictly harder one to
+defeat: the digest rejects every payload but the parent's, the substituted
+well-formed one included, which is the case the re-derivation accepts. It was
+executed rather than argued, in the chelis#2258 review: a library compiled from
+rewritten sources at the same package root was accepted by `decode` and refused
+by `decode_authenticated`.
+
+Note what the channel does not claim. A same-user process can read another's
+environment, so this is not same-user isolation and is not attempting it;
+anyone who can set the worker's environment or replace the `chelis` binary
+already runs chosen code as this user. What the digest defends is the gap the
+file's `0600` mode leaves open, which is a `TMPDIR` other users can write to,
+the ordinary shape of a shared build machine.
 
 Skipping the reruns is sound only while rerunning them reproduces the program
 they were handed. `chelis-compiler-api`'s
-`compiled_context_authenticated_handoff.rs` reconstructs one real payload
-through both routes and requires byte-identical results, so a normalizing pass
-added to either checker fails there rather than making a worker's library
-quietly differ from its parent's.
+`compiled_context_authenticated_handoff.rs` reconstructs one payload through
+both routes and requires byte-identical results. Other tests assert that fixed
+point for the *untrusted* route -- `cache_wire_compatibility.rs`'s
+`current_compiled_disk_and_worker_preserve_scalar_storage_bits_and_reconstruct`
+compares `decode`'s output against the producer's -- so a normalizing pass in
+either checker would be caught somewhere regardless. What is specific to this
+test is the authenticated route: every other use of `decode_authenticated` in
+the tree is a negative one, so this is the only place that compares what that
+route produces against anything.
 
 Until chelis#2211 this section read "deserialization does not rerun semantic
 checking; cache bytes are a trusted internal artifact", while both routes were

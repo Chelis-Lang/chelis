@@ -342,12 +342,17 @@ impl CompiledContext {
     /// Reconstruct from bytes authenticated against a digest delivered out of
     /// band by [`Self::encode_for_handoff`].
     ///
-    /// `expected` did not travel with `bytes`, so an agent that rewrote `bytes`
-    /// after the producer wrote them -- recomputing the embedded digest so the
-    /// envelope stays self-consistent -- is rejected here, which is more than
-    /// [`Self::decode`] can do. Given that, the effect and linearity reruns and
-    /// the lowered-payload comparison have nothing left to establish: they
-    /// recompute a value equal to the transmitted one, as
+    /// `expected` did not travel with `bytes`, so this rejects every payload
+    /// but the producer's. [`Self::decode`] rejects one whose parts stopped
+    /// agreeing with each other, which covers a rewrite of a few bytes and is
+    /// what `cache_reconstruction_rejects_changed_numeric_bits_after_checksum_recomputed`
+    /// demonstrates; it accepts a whole substituted payload that some other
+    /// compilation by the same build produced, because that one is internally
+    /// consistent (chelis#2257). This route rejects both.
+    ///
+    /// Given that, the effect and linearity reruns and the lowered-payload
+    /// comparison have nothing left to establish here: they recompute a value
+    /// equal to the transmitted one, as
     /// `both_decode_routes_reconstruct_identical_contexts` requires.
     pub fn decode_authenticated(bytes: &[u8], expected: &HandoffDigest) -> Result<Self, String> {
         CacheEnvelope::from_bytes(bytes)
