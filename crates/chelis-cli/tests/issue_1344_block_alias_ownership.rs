@@ -132,7 +132,10 @@ fn emitted_function<'a>(emitted: &'a str, signature: &str) -> &'a str {
     // added a `chelis_rng_state` parameter to every host body, and the old
     // full-signature needle then missed the definition and failed before this
     // row counted anything. The parameter list is not what the row asserts.
-    let rest = common::host_body_definition(emitted, &format!("{name}__chelis_owned_body"));
+    let rest = common::host_body_definition(
+        emitted,
+        &format!("{}__chelis_owned_body", common::authored_c_symbol(name)),
+    );
     let end = rest.find("\n}").expect("function is closed");
     &rest[..end]
 }
@@ -341,9 +344,29 @@ fn fresh_binding_takes_no_alias_retain() {
         "the block releases its fresh binding exactly once:\n{body}"
     );
     assert_eq!(
+        count_in(body, "chelis_string_concat_owned("),
+        1,
+        "the uniquely owned lhs literal must move into concat:\n{body}"
+    );
+    assert_eq!(
+        count_in(body, "chelis_string_concat("),
+        0,
+        "falling back to the cloning concat would hide a stale ownership oracle:\n{body}"
+    );
+    assert_eq!(
+        count_in(body, "chelis_string_release(__arg0_1);"),
+        0,
+        "the lhs literal owner is consumed by concat and must not be released again:\n{body}"
+    );
+    assert_eq!(
+        count_in(body, "chelis_string_release(__arg1_2);"),
+        1,
+        "the borrowed rhs literal remains independently owned and releases once:\n{body}"
+    );
+    assert_eq!(
         count_in(body, "chelis_string_release("),
-        3,
-        "the owned literal arguments and the fresh binding are each released once:\n{body}"
+        2,
+        "only the rhs literal and the fresh result owner release independently:\n{body}"
     );
 }
 
@@ -406,13 +429,33 @@ fn binding_mediated_parameter_return_composes_exactly_once() {
             count_in(g2_body, &format!("chelis_string_release({owner});")),
             1,
             "the caller releases `{label}` exactly once through its verified \
-             expression owner `{owner}`:\n{g2_body}"
+            expression owner `{owner}`:\n{g2_body}"
         );
     }
     assert_eq!(
+        count_in(g2_body, "chelis_string_concat_owned("),
+        1,
+        "the uniquely owned lhs literal must move into concat:\n{g2_body}"
+    );
+    assert_eq!(
+        count_in(g2_body, "chelis_string_concat("),
+        0,
+        "falling back to the cloning concat would hide a stale ownership oracle:\n{g2_body}"
+    );
+    assert_eq!(
+        count_in(g2_body, "chelis_string_release(__arg0_1);"),
+        0,
+        "the lhs literal owner is consumed by concat and must not be released again:\n{g2_body}"
+    );
+    assert_eq!(
+        count_in(g2_body, "chelis_string_release(__arg1_2);"),
+        1,
+        "the borrowed rhs literal remains independently owned and releases once:\n{g2_body}"
+    );
+    assert_eq!(
         count_in(g2_body, "chelis_string_release("),
-        4,
-        "the two literal argument owners plus `out` and `raw` are each released once:\n{g2_body}"
+        3,
+        "only the rhs literal plus `out` and `raw` release independently:\n{g2_body}"
     );
 }
 
