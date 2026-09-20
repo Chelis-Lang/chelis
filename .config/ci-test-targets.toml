@@ -1452,6 +1452,33 @@ reason = "the drift report, repin helper and their workflow contract are locked 
 tracking_issue = "chelis#2232"
 
 [[path_rule]]
+prefix = "scripts/drift_prepare_dependencies.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the immutable dependency preparation and its exact source, checksum, and failure contracts"
+tracking_issue = "chelis#2268"
+
+[[path_rule]]
+prefix = "scripts/test_drift_prepare_dependencies.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the dependency preparation's positive and controlled-mutation tests"
+tracking_issue = "chelis#2268"
+
+[[path_rule]]
+prefix = "scripts/test_ecosystem_drift_workflow.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit locks the ecosystem workflow's immutable inputs, strict source builds, and no-auto-fetch commands"
+tracking_issue = "chelis#2268"
+
+[[path_rule]]
 prefix = ".github/workflows/loc-report.yml"
 disposition = "owner"
 workflow = "ci.yml"
