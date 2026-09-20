@@ -1265,10 +1265,10 @@ fn reject_export_macro_aliases<'a>(
             )));
         }
         if macro_definition_replacement(&logical_line)
-            .is_some_and(macro_replacement_can_define_compound_statement)
+            .is_some_and(macro_replacement_can_change_declaration_structure)
         {
             return Err(GeneratedHeaderError::new(format!(
-                "generated source macro `{name}` can manufacture a compound statement"
+                "generated source macro `{name}` can manufacture declaration structure"
             )));
         }
     }
@@ -1480,8 +1480,8 @@ fn macro_definition_replacement(line: &str) -> Option<&str> {
     Some(cursor.remaining.trim_start())
 }
 
-fn macro_replacement_can_define_compound_statement(replacement: &str) -> bool {
-    ["{", "}", "<%", "%>", "??<", "??>"]
+fn macro_replacement_can_change_declaration_structure(replacement: &str) -> bool {
+    ["{", "}", "<%", "%>", "??<", "??>", "##"]
         .into_iter()
         .any(|token| replacement.contains(token))
 }
@@ -2089,6 +2089,7 @@ mod tests {
             "#define EMIT_EXTERNAL_HELPER int external_helper(int x) { return x - 1; }\nEMIT_EXTERNAL_HELPER",
             "#define EXTERNAL_HELPER_DECL int external_helper(int x)\nEXTERNAL_HELPER_DECL { return x - 1; }",
             "#define static\nstatic int external_helper(int x) { return x - 1; }",
+            "#define JOIN_INNER(a, b) a ## b\n#define JOIN(a, b) JOIN_INNER(a, b)\n#define LBRACE JOIN(<, %)\n#define RBRACE JOIN(%, >)\n#define EMIT_EXTERNAL int external_helper(int x) LBRACE return x - 1; RBRACE\nEMIT_EXTERNAL;",
         ] {
             let source = format!("{helper}\n{export}\n");
             assert!(
