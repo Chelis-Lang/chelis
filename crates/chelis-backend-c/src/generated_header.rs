@@ -47,7 +47,8 @@ impl GeneratedDeclaration {
         &self.declaration
     }
 
-    /// SHA-256 of the exact compiler-emitted C function definition bytes.
+    /// SHA-256 commitment to the exact definition bytes and source-local
+    /// preprocessing context.
     pub fn definition_digest(&self) -> &str {
         &self.definition_digest
     }
@@ -748,6 +749,11 @@ fn parse_c_function_definitions(
     let tree = parser
         .parse(projected_source, None)
         .ok_or_else(|| GeneratedHeaderError::new("generated C parser returned no syntax tree"))?;
+    if tree.root_node().has_error() {
+        return Err(GeneratedHeaderError::new(
+            "generated C source is not structurally parseable before preprocessing",
+        ));
+    }
     let mut nodes = Vec::new();
     collect_function_nodes(tree.root_node(), &mut nodes);
     let functions = nodes
@@ -1221,6 +1227,13 @@ fn reject_export_macro_aliases<'a>(
                 "generated source preprocessor-rebinds exported declaration token `{name}`"
             )));
         }
+        if macro_definition_replacement(&logical_line)
+            .is_some_and(macro_replacement_can_define_compound_statement)
+        {
+            return Err(GeneratedHeaderError::new(format!(
+                "generated source macro `{name}` can manufacture a compound statement"
+            )));
+        }
     }
     Ok(())
 }
@@ -1353,6 +1366,25 @@ fn macro_definition_name(line: &str) -> Option<String> {
     }
     cursor.skip_trivia()?;
     cursor.identifier()
+}
+
+fn macro_definition_replacement(line: &str) -> Option<&str> {
+    let mut cursor = CDirectiveCursor::new(line);
+    cursor.skip_trivia()?;
+    cursor.take_directive_introducer()?;
+    cursor.skip_trivia()?;
+    if cursor.identifier()? != "define" {
+        return None;
+    }
+    cursor.skip_trivia()?;
+    cursor.identifier()?;
+    Some(cursor.remaining.trim_start())
+}
+
+fn macro_replacement_can_define_compound_statement(replacement: &str) -> bool {
+    ["{", "}", "<%", "%>", "??<", "??>"]
+        .into_iter()
+        .any(|token| replacement.contains(token))
 }
 
 struct CDirectiveCursor<'a> {
@@ -1944,6 +1976,26 @@ mod tests {
         let source = format!("#define CHELIS_PRIVATE_BIAS 1\n{export}\n");
         seal_generated_artifact("demo", &source, &header)
             .expect("private implementation macros must remain available");
+    }
+
+    #[test]
+    fn sealed_artifact_rejects_macro_generated_external_definitions() {
+        let (header, export) = raw_export(
+            "alpha",
+            "chelis_fn_616c706861",
+            "int chelis_fn_616c706861(int x);",
+            "int chelis_fn_616c706861(int x) {\n    return x + 1;\n}",
+        );
+        for helper in [
+            "#define EMIT_EXTERNAL_HELPER int external_helper(int x) { return x - 1; }\nEMIT_EXTERNAL_HELPER",
+            "#define EXTERNAL_HELPER_DECL int external_helper(int x)\nEXTERNAL_HELPER_DECL { return x - 1; }",
+        ] {
+            let source = format!("{helper}\n{export}\n");
+            assert!(
+                seal_generated_artifact("demo", &source, &header).is_err(),
+                "preprocessing must not add an external definition outside the sealed export set"
+            );
+        }
     }
 
     #[test]
