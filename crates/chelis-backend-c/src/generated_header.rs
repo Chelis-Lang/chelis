@@ -1481,7 +1481,7 @@ fn macro_definition_replacement(line: &str) -> Option<&str> {
 }
 
 fn macro_replacement_can_change_declaration_structure(replacement: &str) -> bool {
-    ["{", "}", "<%", "%>", "??<", "??>", "##"]
+    ["{", "}", "<%", "%>", "??<", "??>", "##", "%:%:", "??=??="]
         .into_iter()
         .any(|token| replacement.contains(token))
 }
@@ -2090,6 +2090,8 @@ mod tests {
             "#define EXTERNAL_HELPER_DECL int external_helper(int x)\nEXTERNAL_HELPER_DECL { return x - 1; }",
             "#define static\nstatic int external_helper(int x) { return x - 1; }",
             "#define JOIN_INNER(a, b) a ## b\n#define JOIN(a, b) JOIN_INNER(a, b)\n#define LBRACE JOIN(<, %)\n#define RBRACE JOIN(%, >)\n#define EMIT_EXTERNAL int external_helper(int x) LBRACE return x - 1; RBRACE\nEMIT_EXTERNAL;",
+            "#define JOIN_INNER(a, b) a %:%: b\n#define JOIN(a, b) JOIN_INNER(a, b)\n#define LBRACE JOIN(<, %)\n#define RBRACE JOIN(%, >)\n#define EMIT_EXTERNAL int external_helper(int x) LBRACE return x - 1; RBRACE\nEMIT_EXTERNAL;",
+            "#define JOIN_INNER(a, b) a ??=??= b\n#define JOIN(a, b) JOIN_INNER(a, b)\n#define LBRACE JOIN(<, %)\n#define RBRACE JOIN(%, >)\n#define EMIT_EXTERNAL int external_helper(int x) LBRACE return x - 1; RBRACE\nEMIT_EXTERNAL;",
         ] {
             let source = format!("{helper}\n{export}\n");
             assert!(
