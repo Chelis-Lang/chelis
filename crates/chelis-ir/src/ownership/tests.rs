@@ -481,6 +481,81 @@ fn edge_terminals_are_closed_path_local_consumes() {
     ));
 }
 
+/// chelis#2122: a join mismatch has to say WHICH owner the two paths disagree
+/// about, and what it is called in source. Two owner-id sets alone are not
+/// actionable.
+#[test]
+fn join_mismatch_names_the_owners_the_paths_disagree_about() {
+    let make = |named: bool| {
+        let mut second = info(Prim::Int64, OwnerOrigin::Owned);
+        if named {
+            second.names = vec!["carry".into()];
+        }
+        let mut first = info(Prim::String, OwnerOrigin::Owned);
+        if named {
+            first.names = vec!["text".into()];
+        }
+        roots(
+            vec![
+                block(
+                    0,
+                    vec![BlockParam {
+                        owner: OwnerId(0),
+                        mode: ParamMode::EntryBorrow,
+                    }],
+                    vec![define(1), define(2)],
+                    Terminator::Branch {
+                        condition: Operand::borrow(OwnerId(0)),
+                        then_edge: Edge {
+                            id: EdgeId::UNASSIGNED,
+                            target: BlockId(1),
+                            args: Vec::new(),
+                            terminals: vec![
+                                edge_terminal(90, Terminal::Drop(OwnerId(1))),
+                                edge_terminal(91, Terminal::Discard(OwnerId(2))),
+                            ],
+                        },
+                        else_edge: Edge {
+                            id: EdgeId::UNASSIGNED,
+                            target: BlockId(1),
+                            args: Vec::new(),
+                            terminals: vec![edge_terminal(92, Terminal::Drop(OwnerId(1)))],
+                        },
+                    },
+                ),
+                block(1, vec![], vec![], Terminator::Exit),
+            ],
+            BTreeMap::from([
+                (OwnerId(0), info(Prim::Bool, OwnerOrigin::ExternalBorrow)),
+                (OwnerId(1), first),
+                (OwnerId(2), second),
+            ]),
+        )
+    };
+
+    let named = verify_raw(make(true)).unwrap_err().to_string();
+    assert!(
+        named.contains("%2[carry]"),
+        "the disagreeing owner is named with its source binding: {named}"
+    );
+    assert!(
+        named.contains("b1") && named.contains("`roots`"),
+        "the block and unit stay in the message: {named}"
+    );
+    assert!(
+        !named.contains("%1[text]"),
+        "owners both paths agree on are not reported as the disagreement: {named}"
+    );
+
+    // Negative parity: with no source names, the message still identifies the
+    // owner by id and prints no empty bracket.
+    let anonymous = verify_raw(make(false)).unwrap_err().to_string();
+    assert!(
+        anonymous.contains("%2") && !anonymous.contains("[]"),
+        "an unnamed owner is identified by id alone: {anonymous}"
+    );
+}
+
 #[test]
 fn edge_arguments_are_transferred_before_path_local_terminals() {
     let program = roots(
