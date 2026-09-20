@@ -158,11 +158,18 @@ def add_hundred(x: f64) -> f64 = add(x, 100.0f64)
 out = apply_n(add_hundred, 1.0f64)
 ";
 
-const INVALID_BUILTIN_CONV2D: &str = "\
+const INVALID_BUILTIN_CONV2D_STRIDE_DTYPE: &str = "\
 def bad_conv(
   x: tensor[1, 1, 3, 3, f32],
   k: tensor[1, 1, 1, 1, f32]
 ) -> tensor[1, 1, 3, 3, f32] = conv(x, k, [1.0f64, 1.0f64], [(0i64, 0i64), (0i64, 0i64)])
+";
+
+const INVALID_BUILTIN_CONV2D_ZERO_STRIDE: &str = "\
+def bad_conv(
+  x: tensor[1, 1, 3, 3, f32],
+  k: tensor[1, 1, 1, 1, f32]
+) -> tensor[1, 1, 3, 3, f32] = conv(x, k, [0i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
 ";
 
 const PRELUDE_COLLISION: &str = "\
@@ -382,18 +389,47 @@ fn applied_uppercase_head_without_a_declared_constructor_rejects() {
 fn real_shape_sensitive_builtin_keeps_its_validation() {
     let dir = tempdir().expect("tempdir");
     let source = dir.path().join("invalid_builtin_conv.ch");
-    write_file(&source, INVALID_BUILTIN_CONV2D);
+    write_file(&source, INVALID_BUILTIN_CONV2D_ZERO_STRIDE);
 
     let output = chelis()
         .args(["check", source.to_str().unwrap()])
         .output()
         .expect("run check");
     assert_eq!(output.status.code(), Some(2));
+    let report: Value = serde_json::from_slice(&output.stdout).expect("check JSON");
     assert!(
-        String::from_utf8_lossy(&output.stdout)
-            .contains("IR builtin `conv` requires literal per-axis stride and padding metadata"),
-        "stdout: {}",
-        String::from_utf8_lossy(&output.stdout)
+        report["errors"].as_array().is_some_and(|errors| {
+            errors.iter().any(|error| {
+                error["kind"] == "DimensionMismatch"
+                    && error["message"].as_str().is_some_and(|message| {
+                        message.contains("conv requires a positive stride, got 0 (spatial axis 0)")
+                    })
+            })
+        }),
+        "check report: {report}"
+    );
+}
+
+#[test]
+fn real_shape_sensitive_builtin_keeps_its_stride_dtype() {
+    let dir = tempdir().expect("tempdir");
+    let source = dir.path().join("invalid_builtin_conv_stride_dtype.ch");
+    write_file(&source, INVALID_BUILTIN_CONV2D_STRIDE_DTYPE);
+
+    let output = chelis()
+        .args(["check", source.to_str().unwrap()])
+        .output()
+        .expect("run check");
+    assert_eq!(output.status.code(), Some(2));
+    let report: Value = serde_json::from_slice(&output.stdout).expect("check JSON");
+    assert!(
+        report["errors"].as_array().is_some_and(|errors| {
+            errors.iter().any(|error| {
+                error["kind"] == "PrecisionMismatch"
+                    && error["message"] == "precision mismatch: expected i64, got f64"
+            })
+        }),
+        "check report: {report}"
     );
 }
 
