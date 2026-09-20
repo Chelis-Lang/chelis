@@ -1065,11 +1065,12 @@ impl Env {
     /// It is a reference for *which variables the environment leaves free*, not
     /// for which of those may be quantified. Two exclusions are therefore
     /// mirrored here deliberately rather than inherited: a recursive group's
-    /// instantiation variables (`tvar_pinned`) and, since chelis#1489, a
-    /// pending operand gate's result variables. Both are properties of the
-    /// inference state that no environment sweep can observe, so omitting
-    /// either here would make the oracle disagree with a correct production
-    /// path. Keep the two sets of exclusions in step.
+    /// instantiation variables (`tvar_pinned`), a pending operand gate's
+    /// result variables, and an authored dimension binder still owned by the
+    /// active declaration level. These are properties of inference state that
+    /// no environment sweep can observe, so omitting one here would make the
+    /// oracle disagree with a correct production path. Keep the exclusions in
+    /// step with their production owners.
     #[cfg(feature = "generalize-sweep-oracle")]
     fn generalize_by_sweep(
         &self,
@@ -1081,13 +1082,33 @@ impl Env {
         let env_tvars = self.free_tvars(subst);
         let env_dvars = self.free_dvars(subst);
         let env_rvars = self.free_rvars(subst);
+        let active_tvars = self
+            .type_resolution_binders()
+            .into_iter()
+            .flat_map(|binders| binders.type_vars.to_sorted())
+            .map(|(_, var)| *var)
+            .collect::<UnordSet<_>>();
+        let active_dvars = self
+            .type_resolution_binders()
+            .into_iter()
+            .flat_map(|binders| binders.dim_vars.to_sorted())
+            .map(|(_, var)| *var)
+            .collect::<UnordSet<_>>();
+        let active_rvars = self
+            .type_resolution_binders()
+            .into_iter()
+            .flat_map(|binders| binders.rank_vars.to_sorted())
+            .map(|(_, var)| *var)
+            .collect::<UnordSet<_>>();
         // chelis#1489: the same exclusion as `generalize_by_levels`, so the
         // parity assertion in `generalize` keeps comparing like with like.
         let (pending_t, pending_d, pending_r) = subst.pending_gate_result_vars();
+        let current_level = subst.current_level();
         let generalizable = |v: TypeVar| {
             !env_tvars.contains(&v)
                 && !crate::infer::recursion::tvar_pinned(v)
                 && !pending_t.contains(&v)
+                && !(active_tvars.contains(&v) && subst.level_of_tvar(v) <= current_level)
         };
         let ty_tvars = free_tvars(&ty);
         let mut tvars = ty_tvars
@@ -1122,12 +1143,19 @@ impl Env {
                     .filter(|v| {
                         !env_dvars.contains(v)
                             && !pending_d.contains(v)
+                            && !(active_dvars.contains(v)
+                                && subst.level_of_dvar(*v) <= current_level)
                             && matches!(subst.constraint_dim(&Dim::Var(*v)), Dim::Var(_))
                     })
                     .collect(),
                 rvars: free_rvars(&ty)
                     .into_iter()
-                    .filter(|v| !env_rvars.contains(v) && !pending_r.contains(v))
+                    .filter(|v| {
+                        !env_rvars.contains(v)
+                            && !pending_r.contains(v)
+                            && !(active_rvars.contains(v)
+                                && subst.level_of_rvar(*v) <= current_level)
+                    })
                     .collect(),
                 constraints,
                 body: ty,
@@ -1305,6 +1333,67 @@ mod module_scope_tests {
             subst.pending_collection_contracts().is_empty(),
             "each sibling must consume exactly its own contract instance"
         );
+    }
+
+    #[test]
+    fn authored_binders_stay_monomorphic_inside_their_declaration_then_generalize_at_boundary() {
+        let mut env = Env::new();
+        let mut var_gen = VarGen::default();
+        let mut subst = Subst::new();
+
+        let declaration = subst.enter_level(&var_gen);
+        let authored_type = var_gen.fresh_tvar();
+        let authored = var_gen.fresh_dvar();
+        let authored_rank = var_gen.fresh_rvar();
+        let mut identities = DeclarationBinderIdentities::default();
+        identities
+            .type_vars
+            .insert("element".to_string(), authored_type);
+        identities.dim_vars.insert("extent".to_string(), authored);
+        identities
+            .rank_vars
+            .insert("shape".to_string(), authored_rank);
+        env.set_type_resolution_scope(Some(&identities), None);
+        let ty = Type::Tuple(vec![
+            Type::Var(authored_type),
+            Type::Tensor(
+                vec![Dim::Var(authored), Dim::Rank(authored_rank)],
+                TensorPrec::Concrete(Prim::F32),
+            ),
+        ]);
+
+        let nested = subst.enter_level(&var_gen);
+        let nested_type = var_gen.fresh_tvar();
+        let nested_local = var_gen.fresh_dvar();
+        let nested_rank = var_gen.fresh_rvar();
+        subst.leave_level(nested, &var_gen);
+        let nested_ty = Type::Tuple(vec![
+            ty.clone(),
+            Type::Var(nested_type),
+            Type::Tensor(
+                vec![Dim::Var(nested_local), Dim::Rank(nested_rank)],
+                TensorPrec::Concrete(Prim::F32),
+            ),
+        ]);
+        let nested_scheme = env.generalize(&nested_ty, &subst);
+        assert_eq!(nested_scheme.tvars, vec![nested_type]);
+        assert_eq!(
+            nested_scheme.dvars,
+            vec![nested_local],
+            "a nested let may generalize its own dimension but not its declaration's authored binder"
+        );
+        assert_eq!(nested_scheme.rvars, vec![nested_rank]);
+
+        subst.leave_level(declaration, &var_gen);
+        env.set_type_resolution_scope(None, None);
+        let declaration_scheme = env.generalize(&ty, &subst);
+        assert_eq!(declaration_scheme.tvars, vec![authored_type]);
+        assert_eq!(
+            declaration_scheme.dvars,
+            vec![authored],
+            "the authored dimension becomes a quantifier only at its declaration boundary"
+        );
+        assert_eq!(declaration_scheme.rvars, vec![authored_rank]);
     }
 }
 
