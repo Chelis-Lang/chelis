@@ -54,8 +54,46 @@ retain the source stem; an explicit output filename does not change the module s
 Each authored C function export, except source-level `main`, SHALL use the
 compiler-reserved `chelis_fn_` prefix followed by the lowercase hexadecimal UTF-8 bytes
 of its Chelis name. Source-level `main` uses the module-qualified `<module>__main`
-symbol so a downstream C driver can retain its own `main`. Downstream C code SHALL call
-the declarations in the generated header rather than reconstructing symbols from Chelis
+symbol so a downstream C driver can retain its own `main`; Reef/package qualification
+does not erase that exception when the decoded source binding is exactly `main`. An
+ordinary authored identifier ending in `__main` is not source-level `main` and uses the
+universal mapping. For an unqualified source identity exactly equal to `main`, the
+symbol SHALL be the exact generated program identity followed by `__main`; accepting
+an arbitrary suffix-shaped symbol is not conforming.
+
+The generated header begins with exact artifact version, lowercase-hex UTF-8 program
+identity, and lowercase source SHA-256 metadata. Each declaration is preceded by an
+exact `chelis-declaration` record carrying lowercase-hex UTF-8 source identity,
+canonical C symbol, canonical declaration, and canonical SHA-256 definition
+commitment; the commitment covers the exact source function-definition bytes and the
+translation unit's canonical source-local preprocessing-directive sequence. The
+following declaration bytes SHALL
+equal the decoded declaration exactly, including multiline formatting. The generated
+source begins with the matching version and program identity. Every public definition
+is enclosed by exact `chelis-export-begin` / `chelis-export-end` comment records; the
+begin record carries `authored` or `direct`, then the same lowercase-hex UTF-8 source
+identity, symbol, declaration, and definition commitment. Validators SHALL parse the C
+translation unit structurally, not with substring or line-layout heuristics, and bind
+each block to exactly one enclosed function definition. Its declarator and structural
+signature SHALL match the record, it SHALL have external linkage, and its exact AST
+definition byte range plus source-local preprocessing context SHALL hash to the
+recorded commitment. Whitespace, comments,
+multiline formatting, and comment-separated storage specifiers are interpreted by
+that structural parse.
+
+The declaration records and source export blocks SHALL be exactly bijective in program
+identity, source identity, canonical symbol, declaration, external linkage, and exact
+definition commitment. The header's source digest additionally binds the complete source
+bytes, but resealing that digest SHALL preserve and revalidate the compiler-emitted
+per-definition commitments rather than deriving new commitments from arbitrary changed
+source. Thus partial headers, unmarked additions, reformatted or type-changed
+definitions, and reassociated metadata or bodies SHALL fail before native execution.
+Generated source SHALL NOT use direct or indirect preprocessor aliases to reassociate
+a public definition. Every externally linked function definition except the generated
+process entry `main` SHALL be registered by exactly one public export block.
+Translation-unit-private `static` helpers remain outside the public blocks and valid.
+Downstream C code SHALL call declarations from the generated header, and tooling SHALL
+consume the generated associations rather than reconstructing symbols from Chelis
 source spellings.
 
 Current design points:

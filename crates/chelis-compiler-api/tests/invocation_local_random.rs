@@ -1,8 +1,7 @@
 //! Invocation-local legacy C Random state, including actual reentrant and
 //! interleaved calls. These are transport tests, not fixed-control Dropout tests.
-#[allow(dead_code)]
 mod ownership_support;
-use ownership_support::{authored_c_symbol, balanced, emit, run, run_with_peers};
+use ownership_support::{GeneratedProgram, balanced, emit, run, run_with_peers};
 
 const SOURCE: &str = r#"
 def draw(x: tensor[2, f32]) -> tensor[2, f32] ! { Random } = uniform_like(x, 0.0f32, 1.0f32)
@@ -63,7 +62,7 @@ def nested(x: tensor[2, {dtype}]) -> (tensor[2, {dtype}], tensor[2, {dtype}], te
 "#
         );
         let c = emit(&source, "nested");
-        let nested = authored_c_symbol("nested");
+        let nested = c.symbol("nested").to_string();
         let driver = format!(
             r#"
 int main(void) {{
@@ -107,7 +106,7 @@ def mapped(x: f32) -> tensor[2, f32] = with seed(42i64) { to_tensor(map(sample_s
     );
     let first = bits(42, 0).split(',').next().unwrap().to_string();
     let next = bits(42, 1).split(',').next().unwrap().to_string();
-    let mapped = authored_c_symbol("mapped");
+    let mapped = c.symbol("mapped").to_string();
     let driver = format!(
         r#"
 {CHECK}
@@ -170,8 +169,8 @@ def mutual_entry(x: tensor[2, f32]) -> tensor[2, f32] = with seed(42i64) {{ ping
     );
     let c = emit(&source, "recursive_entry");
     let expected = bits(42, 3);
-    let recursive_entry = authored_c_symbol("recursive_entry");
-    let mutual_entry = authored_c_symbol("mutual_entry");
+    let recursive_entry = c.symbol("recursive_entry").to_string();
+    let mutual_entry = c.symbol("mutual_entry").to_string();
     balanced(&run(
         &c,
         &format!(
@@ -229,14 +228,13 @@ fn external_tensor_helpers_keep_their_four_argument_abi() {
         &verified, "fixture", &names,
     )
     .unwrap();
+    let host = GeneratedProgram::new(host.c_source, host.h_header);
     assert!(
-        !host.h_header.contains("rng"),
+        !host.header().contains("rng"),
         "public header acquired private state"
     );
-    assert!(
-        host.h_header
-            .contains(&format!("{}(chelis_tensor* x)", authored_c_symbol("total")))
-    );
+    assert!(host.declaration("total").contains("(chelis_tensor* x)"));
+    let total = host.symbol("total").to_string();
     let peers =
         helpers
             .into_iter()
@@ -255,7 +253,7 @@ fn external_tensor_helpers_keep_their_four_argument_abi() {
             })
             .collect::<Vec<_>>();
     balanced(&run_with_peers(
-        &host.c_source,
+        &host,
         &peers,
         &format!(
             r#"
@@ -268,8 +266,8 @@ int main(void) {{
     return 0;
 }}
 "#,
-            host.h_header,
-            authored_c_symbol("total")
+            host.header(),
+            total
         ),
     ));
 }
@@ -283,17 +281,17 @@ static void check_bits(chelis_tensor *value, const uint32_t *expected) {
 }
 "#;
 
-fn hooked(c: &str) -> String {
-    format!(
+fn hooked(c: &GeneratedProgram) -> GeneratedProgram {
+    c.with_source(format!(
         "#include \"chelis_runtime.h\"\nstatic chelis_tensor_write *intercept_write(chelis_tensor *);\n#define chelis_tensor_begin_write intercept_write\n{c}\n#undef chelis_tensor_begin_write\n"
-    )
+    ))
 }
 
 #[test]
 fn reentrant_public_entry_starts_its_own_context() {
     let c = emit(SOURCE, "seeded");
-    let draw = authored_c_symbol("draw");
-    let seeded = authored_c_symbol("seeded");
+    let draw = c.symbol("draw").to_string();
+    let seeded = c.symbol("seeded").to_string();
     let driver = format!(
         r#"
 {CHECK}
@@ -330,8 +328,8 @@ int main(void) {{
 #[test]
 fn concurrent_public_entries_keep_independent_seed_frames() {
     let c = emit(SOURCE, "seeded");
-    let seeded = authored_c_symbol("seeded");
-    let other = authored_c_symbol("other");
+    let seeded = c.symbol("seeded").to_string();
+    let other = c.symbol("other").to_string();
     let driver = format!(
         r#"
 #include <pthread.h>

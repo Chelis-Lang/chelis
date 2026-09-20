@@ -1,7 +1,6 @@
 //! Source/API/native acceptance for [05-OP-37] and [05-RNG-1] through a host helper.
 #[path = "fixed_control_host_c/context.rs"]
 mod context;
-#[allow(dead_code)]
 mod ownership_support;
 
 use chelis_compiler_api::compiler::compile_for_execution;
@@ -30,8 +29,9 @@ fn signed_int64_host_boundaries_compile_without_literal_overflow() {
              #elif defined(__GNUC__)\n#pragma GCC diagnostic error \"-Woverflow\"\n#endif\n\
              #define main unused_generated_main\n{generated}\n#undef main\n"
         );
-        let boundary = ownership_support::authored_c_symbol("boundary");
-        let sample = ownership_support::authored_c_symbol("sample");
+        let strict = generated.with_source(strict);
+        let boundary = generated.symbol("boundary");
+        let sample = generated.symbol("sample");
         let driver = format!(
             r#"
 int main(void) {{
@@ -332,7 +332,7 @@ def derivative(x: tensor[4, f32]) -> tensor[4, f32] = grad(loss)(x)
 "#,
         "derivative",
     );
-    let derivative = ownership_support::authored_c_symbol("derivative");
+    let derivative = c.symbol("derivative");
     let driver = format!(
         r#"
 int main(void) {{

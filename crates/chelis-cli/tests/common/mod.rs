@@ -83,6 +83,19 @@ pub fn authored_c_symbol(name: &str) -> String {
     symbol
 }
 
+/// Locate the owned implementation body for an authored Chelis definition.
+///
+/// `host_body_definition` intentionally accepts an exact C symbol so its
+/// synthetic parser controls remain independent of ABI policy. Generated-C
+/// tests should use this wrapper instead of reconstructing the owned-body
+/// symbol from the source spelling.
+pub fn authored_host_body_definition<'a>(emitted: &'a str, name: &str) -> &'a str {
+    host_body_definition(
+        emitted,
+        &format!("{}__chelis_owned_body", authored_c_symbol(name)),
+    )
+}
+
 pub fn package_std() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../packages/chelis-std")

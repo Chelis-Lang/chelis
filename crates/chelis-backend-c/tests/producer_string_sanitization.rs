@@ -55,6 +55,18 @@ fn dirty_name(s: &str) -> LoadStoreName {
         .expect("LoadStoreName deserialize is transparent (no re-validation)")
 }
 
+fn codegen_with_invalid_test_entry(dag: &Dag, name: &str) -> chelis_backend_c::CodegenResult {
+    codegen_with_options(
+        dag,
+        name,
+        CodegenOptions {
+            static_entry: true,
+            ..CodegenOptions::default()
+        },
+    )
+    .expect("the source-only sanitizer probe bypasses public artifact sealing")
+}
+
 #[test]
 fn c_fprintf_format_string_escapes_percent_in_func_name() {
     // The orchestrator's reproduction recipe: a `%` in the func_name
@@ -69,7 +81,7 @@ fn c_fprintf_format_string_escapes_percent_in_func_name() {
     // consume an argument that isn't there. The CLI never produces this
     // shape, but downstream tooling could; the sanitizer is the seat
     // belt.
-    let result = codegen(&dag, "f%spct").unwrap();
+    let result = codegen_with_invalid_test_entry(&dag, "f%spct");
     let src = &result.c_source;
 
     // The format string itself must contain the escaped form `%%s`.
@@ -122,7 +134,7 @@ fn c_fprintf_format_string_escapes_newline_in_func_name() {
     let n = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
     dag.add_root(n);
 
-    let result = codegen(&dag, "f\nINJECT").unwrap();
+    let result = codegen_with_invalid_test_entry(&dag, "f\nINJECT");
     let src = &result.c_source;
 
     // Escape: `\n` inside the C string literal becomes the two-character
@@ -150,7 +162,7 @@ fn c_fprintf_format_string_escapes_double_quote_in_func_name() {
     let n = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
     dag.add_root(n);
 
-    let result = codegen(&dag, "fn\"injected").unwrap();
+    let result = codegen_with_invalid_test_entry(&dag, "fn\"injected");
     let src = &result.c_source;
 
     assert!(

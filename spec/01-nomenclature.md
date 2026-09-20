@@ -133,15 +133,52 @@ the lint is.
 
 ### 1.7 Backend symbol emission
 
-> **[01-CID-1]** C and HIP backend symbol emission SHALL preserve the
-> spelling of a user identifier unless that spelling is reserved by the
-> target language. The C backend SHALL prefix a reserved C spelling with
-> `chelis_user__`; if that mapping collides with another user identifier,
-> the build SHALL reject both names and ask the user to rename one. It SHALL
-> NOT select one definition or emit an ambiguous translation unit.
+> **[01-CID-1]** Every authored C function export other than source-level
+> `main` SHALL use the compiler-owned symbol `chelis_fn_` followed by the
+> lowercase hexadecimal UTF-8 bytes of its exact Chelis name. Source-level
+> `main` SHALL use the module-qualified symbol specified by
+> `spec/08-backends.md` §2. The mapping SHALL be injective for every legal
+> Surf identifier, including C keywords, platform symbols, and names that
+> themselves begin with `chelis_fn_`. The generated header and source SHALL
+> use the same symbol. A Reef linker identity whose decoded source binding is
+> exactly `main` retains that source-level exception; an ordinary authored
+> identifier that merely ends in `__main` does not. The generated header
+> and source SHALL carry the same versioned artifact envelope. The envelope
+> binds the lowercase-hex UTF-8 program identity, the exact generated-source
+> SHA-256 digest, and one declaration/export-block record per public
+> definition. A declaration record carries the exact Chelis source identity,
+> canonical C symbol, and canonical C declaration in lowercase-hex UTF-8,
+> followed by declaration bytes that match the record exactly even when the
+> declaration is multiline. Its source export block carries the export kind
+> plus the same source identity, symbol, declaration, and a canonical
+> definition commitment. That commitment hashes the exact enclosed C function
+> definition bytes together with the translation unit's canonical source-local
+> preprocessing-directive sequence. Validation SHALL parse the C
+> translation unit structurally and prove that each block encloses exactly one
+> externally linked function definition whose declarator and signature match
+> the recorded symbol and declaration and whose exact definition bytes and
+> preprocessing context match the recorded commitment. This structural parse,
+> rather than C substring
+> heuristics, determines definition boundaries and linkage. Downstream C code SHALL
+> consume the generated declaration, and tooling that needs the Chelis-to-C
+> association SHALL consume the envelope rather than reconstructing the
+> symbol from source spelling. The declaration records and source export
+> blocks SHALL form an exact set in program identity, source identity,
+> canonical symbol, declaration, linkage, and exact definition. The header digest SHALL bind every
+> source byte, so a partial header, an unmarked addition, a formatting or type
+> mutation, or a source-name/symbol/definition reassociation is invalid before
+> native execution. Recomputing the whole-source digest SHALL NOT authorize a
+> changed public definition. Generated source SHALL NOT use direct or indirect
+> preprocessor aliases to change a published definition's symbol or body.
+> Every externally linked function definition other than the generated process
+> entry `main` SHALL have exactly one export record. Translation-unit-private
+> `static` helpers, including comment-separated multiline declarations, remain
+> valid outside that set.
 
-No case rewriting is performed. Non-reserved Surf identifiers cross the
-language boundary literally.
+The source identifier itself is unchanged: no case rewriting or source-level
+reservation is introduced. The compiler-owned spelling is the published C ABI
+identity, not a renamed Chelis binding. Other backend-local user identifiers
+remain subject to their target language's identifier rules.
 
 ---
 

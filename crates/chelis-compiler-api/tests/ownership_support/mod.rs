@@ -1,9 +1,12 @@
 //! Compile the real selected C artifact against an exactly identified ledger runtime.
+#![allow(dead_code)]
 
 use chelis_compiler_api::compiler::{compile, compile_for_execution};
 use chelis_compiler_api::schema::{CompileRequest, CompileTarget, SourceKind};
 use serde_json::Value;
+use std::fmt;
 use std::fs;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
@@ -12,17 +15,98 @@ fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-/// Authored Chelis definitions use an injective compiler namespace in C.
-#[allow(
-    dead_code,
-    reason = "integration-test binaries share this helper module but use distinct helpers"
-)]
-pub fn authored_c_symbol(name: &str) -> String {
-    let mut symbol = "chelis_fn_".to_string();
-    for byte in name.bytes() {
-        symbol.push_str(&format!("{byte:02x}"));
+#[derive(Clone)]
+pub struct GeneratedProgram {
+    source: String,
+    header: String,
+    declarations: chelis_backend_c::GeneratedHeader,
+    validate_before_compile: bool,
+}
+
+impl GeneratedProgram {
+    pub fn new(source: String, header: String) -> Self {
+        let declarations = chelis_backend_c::GeneratedHeader::parse(&header)
+            .expect("compiler API must return generated declaration metadata");
+        Self {
+            source,
+            header,
+            declarations,
+            validate_before_compile: true,
+        }
     }
-    symbol
+
+    pub fn from_codegen(artifact: &chelis_backend_c::CodegenResult) -> Self {
+        Self::new(artifact.c_source.clone(), artifact.h_header.clone())
+    }
+
+    pub fn symbol(&self, source_name: &str) -> &str {
+        self.declarations
+            .declaration(source_name)
+            .unwrap_or_else(|| panic!("generated header has no declaration for `{source_name}`"))
+            .symbol()
+    }
+
+    #[allow(dead_code)]
+    pub fn declaration(&self, source_name: &str) -> &str {
+        self.declarations
+            .declaration(source_name)
+            .unwrap_or_else(|| panic!("generated header has no declaration for `{source_name}`"))
+            .declaration()
+    }
+
+    #[allow(dead_code)]
+    pub fn definition_digest(&self, source_name: &str) -> &str {
+        self.declarations
+            .declaration(source_name)
+            .unwrap_or_else(|| panic!("generated header has no declaration for `{source_name}`"))
+            .definition_digest()
+    }
+
+    pub fn header(&self) -> &str {
+        &self.header
+    }
+
+    pub fn with_source(&self, source: String) -> Self {
+        Self {
+            source,
+            header: self.header.clone(),
+            declarations: self.declarations.clone(),
+            validate_before_compile: false,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn with_header(
+        &self,
+        header: String,
+    ) -> Result<Self, chelis_backend_c::GeneratedHeaderError> {
+        let declarations = chelis_backend_c::GeneratedHeader::parse(&header)?;
+        Ok(Self {
+            source: self.source.clone(),
+            header,
+            declarations,
+            validate_before_compile: true,
+        })
+    }
+
+    #[allow(dead_code)]
+    pub fn validate(&self) -> Result<(), chelis_backend_c::GeneratedHeaderError> {
+        self.declarations.validate_source(&self.source)
+    }
+}
+
+impl Deref for GeneratedProgram {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.source
+    }
+}
+
+impl fmt::Display for GeneratedProgram {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.source)
+    }
 }
 
 fn runtime() -> &'static Path {
@@ -79,7 +163,7 @@ fn runtime() -> &'static Path {
     })
 }
 
-pub fn emit(source: &str, entry: &str) -> String {
+pub fn emit(source: &str, entry: &str) -> GeneratedProgram {
     // Keep otherwise DAG-only constant functions in an authored host module.
     // This additional function is emitted, never invoked by the C driver.
     let host_anchor = "\ndef host_loss(t: tensor[1, f32]) -> f32 = tensor_to_scalar(sum(t, 0))\ndef host_grad(t: tensor[1, f32]) -> tensor[1, f32] = grad(host_loss)(t)\n";
@@ -90,15 +174,24 @@ pub fn emit(source: &str, entry: &str) -> String {
         entry_name: Some("fixture".into()),
     })
     .unwrap_or_else(|e| panic!("{entry}: {e:?}"));
-    artifact
+    let source = artifact
         .files
-        .into_iter()
+        .iter()
         .find(|f| f.path == "fixture.c")
         .expect("generated C file")
         .contents
+        .clone();
+    let header = artifact
+        .files
+        .iter()
+        .find(|f| f.path == "fixture.h")
+        .expect("generated C header")
+        .contents
+        .clone();
+    GeneratedProgram::new(source, header)
 }
 
-pub fn emit_selected(source: &str, entry: &str) -> String {
+pub fn emit_selected(source: &str, entry: &str) -> GeneratedProgram {
     let artifact = compile_for_execution(CompileRequest {
         source_kind: SourceKind::Surf,
         source: source.into(),
@@ -107,37 +200,47 @@ pub fn emit_selected(source: &str, entry: &str) -> String {
     })
     .unwrap_or_else(|e| panic!("{entry}: {e:?}"));
     let generated_path = format!("{}.c", artifact.compile_result.entry_name);
-    artifact
+    let source = artifact
         .compile_result
         .files
-        .into_iter()
+        .iter()
         .find(|f| f.path == generated_path)
         .expect("selected C file")
         .contents
+        .clone();
+    let generated_path = format!("{}.h", artifact.compile_result.entry_name);
+    let header = artifact
+        .compile_result
+        .files
+        .iter()
+        .find(|f| f.path == generated_path)
+        .expect("selected C header")
+        .contents
+        .clone();
+    GeneratedProgram::new(source, header)
 }
 
-pub fn run(source: &str, driver: &str) -> Value {
+pub fn run(source: &GeneratedProgram, driver: &str) -> Value {
     run_with_peers(source, &[], driver)
 }
 
 #[allow(dead_code)]
-pub fn run_program(source: &str) -> (Value, String) {
-    execute_program(source, &[])
+pub fn run_program(source: &GeneratedProgram) -> (Value, String) {
+    execute_program(source, &[], "")
 }
 
-pub fn run_with_peers(source: &str, peers: &[String], driver: &str) -> Value {
-    execute_program(&format!("{source}\n{PRELUDE}\n{driver}"), peers).0
-}
-
-#[allow(dead_code)]
-pub fn run_with_stdout(source: &str, driver: &str) -> (Value, String) {
-    execute_program(&format!("{source}\n{PRELUDE}\n{driver}"), &[])
+pub fn run_with_peers(source: &GeneratedProgram, peers: &[String], driver: &str) -> Value {
+    execute_program(source, peers, driver).0
 }
 
 #[allow(dead_code)]
-pub fn run_expect_failure(source: &str, driver: &str) {
-    let source = format!("{source}\n{PRELUDE}\n{driver}");
-    let (_dir, binary) = compile_program(&source, &[]);
+pub fn run_with_stdout(source: &GeneratedProgram, driver: &str) -> (Value, String) {
+    execute_program(source, &[], driver)
+}
+
+#[allow(dead_code)]
+pub fn run_expect_failure(source: &GeneratedProgram, driver: &str) {
+    let (_dir, binary) = compile_program(source, &[], driver);
     let output = Command::new(binary).output().expect("execute failing C");
     assert!(
         !output.status.success(),
@@ -147,8 +250,8 @@ pub fn run_expect_failure(source: &str, driver: &str) {
     );
 }
 
-fn execute_program(source: &str, peers: &[String]) -> (Value, String) {
-    let (_dir, binary) = compile_program(source, peers);
+fn execute_program(source: &GeneratedProgram, peers: &[String], driver: &str) -> (Value, String) {
+    let (_dir, binary) = compile_program(source, peers, driver);
     let ledger = binary.with_file_name("ledger.jsonl");
     let output = Command::new(binary)
         .env("CHELIS_OWNERSHIP_LEDGER_PATH", &ledger)
@@ -176,10 +279,27 @@ fn execute_program(source: &str, peers: &[String]) -> (Value, String) {
     )
 }
 
-fn compile_program(source: &str, peers: &[String]) -> (tempfile::TempDir, PathBuf) {
+fn compile_program(
+    source: &GeneratedProgram,
+    peers: &[String],
+    driver: &str,
+) -> (tempfile::TempDir, PathBuf) {
+    if source.validate_before_compile {
+        source
+            .validate()
+            .expect("generated header and source must agree before native compilation");
+    }
     let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("generated.h"), source.header()).unwrap();
     let c = dir.path().join("probe.c");
-    fs::write(&c, source).unwrap();
+    fs::write(
+        &c,
+        format!(
+            "#include \"chelis_runtime.h\"\n#include \"generated.h\"\n{}\n{PRELUDE}\n{driver}",
+            &**source
+        ),
+    )
+    .unwrap();
     let binary = dir.path().join("probe");
     let mut cc = Command::new("cc");
     cc.args(["-std=c11", "-O0"])

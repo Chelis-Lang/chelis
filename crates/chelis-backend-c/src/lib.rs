@@ -3,6 +3,7 @@
 pub mod blas;
 mod emit;
 mod emitted_expr;
+mod generated_header;
 mod host_abi;
 mod host_emit;
 pub mod memory;
@@ -12,6 +13,8 @@ mod random_observer;
 #[path = "../../../tests/support/runtime_archive.rs"]
 mod test_runtime_archive;
 pub mod toolchain;
+
+pub use generated_header::{GeneratedDeclaration, GeneratedHeader, GeneratedHeaderError};
 
 /// Primitive types the C backend's tensor-DAG path can realize.
 /// A def whose declared return type or intermediates use a prim NOT in this
@@ -47,6 +50,28 @@ pub struct CodegenResult {
     pub output_labels: Vec<String>,
     /// Unresolved symbolic dimensions that the generated function binds from input metadata.
     pub symbolic_dims: Vec<String>,
+}
+
+impl CodegenResult {
+    /// Rebind the generated header to the current exact source bytes.
+    ///
+    /// Artifact assemblers call this after appending compiler-owned source such
+    /// as the optional observation `main`; callers must not edit generated C
+    /// without resealing the paired header.
+    pub fn reseal_artifact(
+        &mut self,
+        program_identity: &str,
+    ) -> Result<(), chelis_types::unsupported::Unsupported> {
+        let (source, header) = generated_header::reseal_generated_artifact(
+            program_identity,
+            &self.c_source,
+            &self.h_header,
+        )
+        .map_err(generated_artifact_error)?;
+        self.c_source = source;
+        self.h_header = header;
+        Ok(())
+    }
 }
 
 /// A tensor-helper DAG and the symbol a peer translation unit must define.
@@ -188,6 +213,7 @@ pub fn codegen_host_program_with_external_tensor_helpers(
         .collect::<chelis_unord::UnordSet<_>>();
     let c_source = host_emit::emit_host_abi_program(&abi_program, func_name, &external_helpers)?;
     let h_header = host_emit::emit_host_abi_header(&abi_program, func_name)?;
+    let (c_source, h_header) = seal_generated_artifact(func_name, &c_source, &h_header)?;
     let needs_blas = c_source.contains("#include \"chelis_blas.h\"")
         || c_source.contains("cblas_sgemm(")
         || c_source.contains("cblas_dgemm(")
@@ -240,8 +266,12 @@ pub fn codegen_with_options(
     func_name: &str,
     options: CodegenOptions,
 ) -> Result<CodegenResult, chelis_types::unsupported::Unsupported> {
-    let h_header = format!(
-        "void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);"
+    let h_header = generated_header::render_declaration(
+        func_name,
+        func_name,
+        &format!(
+            "void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);"
+        ),
     );
     let (needs_blas, input_labels, output_labels, symbolic_dims) = {
         let emission = dag.emission();
@@ -256,6 +286,11 @@ pub fn codegen_with_options(
         )
     };
     let c_source = emit::CEmitter::emit_dag_with_options(dag, func_name, options)?;
+    let (c_source, h_header) = if options.static_entry {
+        (c_source, String::new())
+    } else {
+        seal_generated_artifact(func_name, &c_source, &h_header)?
+    };
     Ok(CodegenResult {
         c_source,
         h_header,
@@ -297,13 +332,48 @@ pub fn codegen_evaluation_with_options(
         let output_labels = emit::CEmitter::output_labels(emission);
         let symbolic_dims = emission.symbolic_params();
         let c_source = emit::CEmitter::emit_evaluation(dag, execution, func_name, options)?;
+        let h_header = generated_header::render_declaration(
+            func_name,
+            func_name,
+            &format!("void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);"),
+        );
+        let (c_source, h_header) = if options.static_entry {
+            (c_source, String::new())
+        } else {
+            seal_generated_artifact(func_name, &c_source, &h_header)?
+        };
         Ok(CodegenResult {
             c_source,
-            h_header: format!("void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);"),
+            h_header,
             requirements: toolchain::CodegenRequirements { wants_openmp: true, needs_blas: false },
             input_labels, output_labels, symbolic_dims,
         })
     })
+}
+
+fn seal_generated_artifact(
+    program_identity: &str,
+    source: &str,
+    header: &str,
+) -> Result<(String, String), chelis_types::unsupported::Unsupported> {
+    generated_header::seal_generated_artifact(program_identity, source, header)
+        .map_err(generated_artifact_error)
+}
+
+fn generated_artifact_error(
+    error: generated_header::GeneratedHeaderError,
+) -> chelis_types::unsupported::Unsupported {
+    chelis_types::unsupported::Unsupported::new(
+        chelis_types::unsupported::UnsupportedKind::Construct(
+            "generated C artifact contract".to_string(),
+        ),
+        error.to_string(),
+        chelis_types::unsupported::Stage::Codegen("c"),
+        chelis_types::deliberate_rejection!(
+            "[01-CID-1]",
+            "generated C source and header must carry one exact program/export artifact envelope"
+        ),
+    )
 }
 
 /// Apply the C backend's payload-selection rewrites before ownership lowering.
@@ -647,6 +717,10 @@ mod tests {
         let result = codegen(&dag, "my_func").unwrap();
         assert!(result.c_source.contains("void my_func("));
         assert!(result.h_header.contains("void my_func("));
+        GeneratedHeader::parse(&result.h_header)
+            .expect("generated direct declaration")
+            .validate_source(&result.c_source)
+            .expect("direct source/header export sets agree");
         assert_eq!(
             result.requirements,
             toolchain::CodegenRequirements {

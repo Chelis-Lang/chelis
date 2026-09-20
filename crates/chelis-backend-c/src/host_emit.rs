@@ -646,6 +646,10 @@ pub(crate) fn concrete_tensor_helper_codegen(
 fn emitted_function_name(program_name: &str, function_name: &str) -> String {
     if function_name == "main" {
         format!("{program_name}__main")
+    } else if chelis_types::is_linker_format_name(function_name)
+        && chelis_types::demangle_ident(function_name) == "main"
+    {
+        function_name.to_string()
     } else {
         // Authored Chelis definitions are exported through the generated
         // header, but in a compiler-reserved C namespace rather than under a
@@ -1665,11 +1669,16 @@ fn emit_host_declarations(
             } else {
                 params
             };
-            Ok(format!(
+            let declaration = format!(
                 "{prefix}{} {}({});",
                 c_type(&function.ret_ty)?,
                 emitted_name,
                 params
+            );
+            Ok(crate::generated_header::render_declaration(
+                &function.name,
+                &emitted_name,
+                &declaration,
             ))
         })
         .collect::<Result<Vec<_>, Unsupported>>()
@@ -1915,17 +1924,29 @@ fn append_unreachable_fn_abort_stub(
     } else {
         params
     };
-    out.push(format!(
-        "{prefix}{} {}({}) {{",
+    let declaration = format!(
+        "{prefix}{} {}({params});",
         c_type(&function.ret_ty)?,
         emitted_name,
-        params
-    ));
+    );
+    if !internal_linkage {
+        out.push(crate::generated_header::render_authored_export_begin(
+            &function.name,
+            emitted_name,
+            &declaration,
+        ));
+    }
+    out.push(format!("{} {{", declaration.trim_end_matches(';')));
     let rendered = unsupported.to_string();
     let safe = chelis_ir::span_sanitize::sanitize_for_format_string(&rendered);
     out.push(format!("    fprintf(stderr, \"%s\\n\", \"{safe}\");"));
     out.push("    abort();".to_string());
     out.push("}".to_string());
+    if !internal_linkage {
+        out.push(crate::generated_header::render_authored_export_end(
+            &function.name,
+        ));
+    }
     Ok(())
 }
 
@@ -2312,12 +2333,17 @@ fn emit_function(
             .map(|param| c_decl(&param.ty, &param.name))
             .collect::<Result<Vec<_>, _>>()?
             .join(", ");
-        out.push(format!(
-            "{} {}({}) {{",
+        let declaration = format!(
+            "{} {}({wrapper_params});",
             c_type(&function.ret_ty)?,
             emitted_name,
-            wrapper_params
+        );
+        out.push(crate::generated_header::render_authored_export_begin(
+            &function.name,
+            emitted_name,
+            &declaration,
         ));
+        out.push(format!("{} {{", declaration.trim_end_matches(';')));
         append_invocation_random_context(out);
         let mut args = Vec::with_capacity(function.params.len());
         for (index, (param, use_)) in function.params.iter().zip(&entry_uses).enumerate() {
@@ -2348,6 +2374,9 @@ fn emit_function(
         ));
         out.push("    return __result;".to_string());
         out.push("}".to_string());
+        out.push(crate::generated_header::render_authored_export_end(
+            &function.name,
+        ));
 
         #[cfg(feature = "native-random-observer")]
         {
@@ -9361,6 +9390,19 @@ fn sparse_symbol_expr(
 #[cfg(test)]
 mod expression_dispatch_tests {
     use super::*;
+
+    #[test]
+    fn source_main_keeps_its_module_abi_after_linker_qualification() {
+        assert_eq!(emitted_function_name("demo", "main"), "demo__main");
+        assert_eq!(
+            emitted_function_name("ignored", "pkg__demo__Demo__Main__main"),
+            "pkg__demo__Demo__Main__main"
+        );
+        assert_eq!(
+            emitted_function_name("ignored", "pkg__demo__Demo__Main__almost__main"),
+            "chelis_fn_706b675f5f64656d6f5f5f44656d6f5f5f4d61696e5f5f616c6d6f73745f5f6d61696e"
+        );
+    }
 
     #[test]
     fn verified_clone_and_drop_formatters_cover_all_eight_public_heap_payloads() {

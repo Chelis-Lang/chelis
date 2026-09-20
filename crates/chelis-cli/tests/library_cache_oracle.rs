@@ -62,6 +62,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::{TempDir, tempdir};
 
+#[path = "common/mod.rs"]
+mod common;
+
 /// Pinned compiler version string for fixture manifests.
 const COMPILER_VERSION: &str = chelis_compiler_api::COMPILER_VERSION;
 
@@ -358,17 +361,18 @@ fn pruning_fires_monolithic_vs_layered_build_c_identical() {
     );
 
     // Confirm pruning ACTUALLY fired: `az_unused` is unreachable from the
-    // entry, so its symbol must be absent from the compiled C. The emitted C
-    // carries the un-mangled def name (`az_add` appears), so `az_unused` would
-    // too if pruning had not dropped it — i.e. this fixture genuinely exercises
+    // entry, so its compiler-owned symbol must be absent from the compiled C.
+    // The reachable `az_add` symbol proves this fixture genuinely exercises
     // `pruned_deep_exprs.len() != full_deep_exprs.len()`.
     let layered_c = String::from_utf8_lossy(&layered.0);
+    let reachable = common::authored_c_symbol("pkg__azdep__Azdep__Math__az_add");
+    let unreachable = common::authored_c_symbol("pkg__azdep__Azdep__Math__az_unused");
     assert!(
-        layered_c.contains("az_add"),
+        layered_c.contains(&reachable),
         "sanity: the reachable dependency def must appear in the emitted C"
     );
     assert!(
-        !layered_c.contains("az_unused"),
+        !layered_c.contains(&unreachable),
         "pruning must drop the unused dependency def `az_unused`: this fixture \
          must exercise the pruning-fires path"
     );

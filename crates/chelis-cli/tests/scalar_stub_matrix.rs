@@ -242,7 +242,7 @@ fn assert_activation_width_matrix(op: &str) {
         // added a `chelis_rng_state` parameter to every host body, and the old
         // `run__chelis_owned_body() {` needle then missed the definition and
         // failed before this row inspected any call site.
-        let run_body = common::host_body_definition(&emitted, "run__chelis_owned_body");
+        let run_body = common::authored_host_body_definition(&emitted, "run");
         let reduced_relu = op == "relu" && matches!(dtype, "f16" | "bf16");
         if reduced_relu {
             assert_reduced_relu_raw_selection(run_body, dtype, &name);
