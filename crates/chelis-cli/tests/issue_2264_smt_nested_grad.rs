@@ -1,8 +1,6 @@
 //! chelis#2264: CLI precheck and property filtering must preserve the typed
 //! SMT boundary for valid nested gradients without hiding malformed siblings.
 
-#![cfg(feature = "smt")]
-
 use assert_cmd::Command;
 use serde_json::Value;
 use tempfile::tempdir;
