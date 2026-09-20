@@ -52,6 +52,24 @@ pub struct CodegenResult {
     pub symbolic_dims: Vec<String>,
 }
 
+impl CodegenResult {
+    /// Rebind the generated header to the current exact source bytes.
+    ///
+    /// Artifact assemblers call this after appending compiler-owned source such
+    /// as the optional observation `main`; callers must not edit generated C
+    /// without resealing the paired header.
+    pub fn reseal_artifact(
+        &mut self,
+        program_identity: &str,
+    ) -> Result<(), chelis_types::unsupported::Unsupported> {
+        let (source, header) =
+            seal_generated_artifact(program_identity, &self.c_source, &self.h_header)?;
+        self.c_source = source;
+        self.h_header = header;
+        Ok(())
+    }
+}
+
 /// A tensor-helper DAG and the symbol a peer translation unit must define.
 /// The generated host calls it through a private context adapter.
 ///
@@ -191,6 +209,7 @@ pub fn codegen_host_program_with_external_tensor_helpers(
         .collect::<chelis_unord::UnordSet<_>>();
     let c_source = host_emit::emit_host_abi_program(&abi_program, func_name, &external_helpers)?;
     let h_header = host_emit::emit_host_abi_header(&abi_program, func_name)?;
+    let (c_source, h_header) = seal_generated_artifact(func_name, &c_source, &h_header)?;
     let needs_blas = c_source.contains("#include \"chelis_blas.h\"")
         || c_source.contains("cblas_sgemm(")
         || c_source.contains("cblas_dgemm(")
@@ -245,6 +264,7 @@ pub fn codegen_with_options(
 ) -> Result<CodegenResult, chelis_types::unsupported::Unsupported> {
     let h_header = generated_header::render_declaration(
         func_name,
+        func_name,
         &format!(
             "void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);"
         ),
@@ -262,6 +282,11 @@ pub fn codegen_with_options(
         )
     };
     let c_source = emit::CEmitter::emit_dag_with_options(dag, func_name, options)?;
+    let (c_source, h_header) = if options.static_entry {
+        (c_source, String::new())
+    } else {
+        seal_generated_artifact(func_name, &c_source, &h_header)?
+    };
     Ok(CodegenResult {
         c_source,
         h_header,
@@ -303,15 +328,42 @@ pub fn codegen_evaluation_with_options(
         let output_labels = emit::CEmitter::output_labels(emission);
         let symbolic_dims = emission.symbolic_params();
         let c_source = emit::CEmitter::emit_evaluation(dag, execution, func_name, options)?;
+        let h_header = generated_header::render_declaration(
+            func_name,
+            func_name,
+            &format!("void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);"),
+        );
+        let (c_source, h_header) = if options.static_entry {
+            (c_source, String::new())
+        } else {
+            seal_generated_artifact(func_name, &c_source, &h_header)?
+        };
         Ok(CodegenResult {
             c_source,
-            h_header: generated_header::render_declaration(
-                func_name,
-                &format!("void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);"),
-            ),
+            h_header,
             requirements: toolchain::CodegenRequirements { wants_openmp: true, needs_blas: false },
             input_labels, output_labels, symbolic_dims,
         })
+    })
+}
+
+fn seal_generated_artifact(
+    program_identity: &str,
+    source: &str,
+    header: &str,
+) -> Result<(String, String), chelis_types::unsupported::Unsupported> {
+    generated_header::seal_generated_artifact(program_identity, source, header).map_err(|error| {
+        chelis_types::unsupported::Unsupported::new(
+            chelis_types::unsupported::UnsupportedKind::Construct(
+                "generated C artifact contract".to_string(),
+            ),
+            error.to_string(),
+            chelis_types::unsupported::Stage::Codegen("c"),
+            chelis_types::deliberate_rejection!(
+                "[01-CID-1]",
+                "generated C source and header must carry one exact program/export artifact envelope"
+            ),
+        )
     })
 }
 

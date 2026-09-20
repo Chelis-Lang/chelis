@@ -57,14 +57,29 @@ of its Chelis name. Source-level `main` uses the module-qualified `<module>__mai
 symbol so a downstream C driver can retain its own `main`; Reef/package qualification
 does not erase that exception when the decoded source binding is exactly `main`. An
 ordinary authored identifier ending in `__main` is not source-level `main` and uses the
-universal mapping. Each generated declaration is
-preceded by the exact `/* chelis-source-name: <Chelis-name> */` association metadata.
-Each externally linked authored definition is preceded by matching
-`/* chelis-authored-export: <Chelis-name> */` metadata. The two sets SHALL be exactly
-bijective in source name, canonical symbol, and declaration; partial headers, extra
-authored definitions, and reassociated metadata SHALL fail before native execution.
-Translation-unit-private `static` helpers and the generated process entry `main` are
-outside this published set. Downstream C code SHALL call the declarations in the
+universal mapping. For an unqualified source identity exactly equal to `main`, the
+symbol SHALL be the exact generated program identity followed by `__main`; accepting
+an arbitrary suffix-shaped symbol is not conforming.
+
+The generated header begins with exact artifact version, lowercase-hex UTF-8 program
+identity, and lowercase source SHA-256 metadata. Each declaration is preceded by an
+exact `chelis-declaration` record carrying lowercase-hex UTF-8 source identity,
+canonical C symbol, and canonical declaration; the following declaration bytes SHALL
+equal the decoded declaration exactly, including multiline formatting. The generated
+source begins with the matching version and program identity. Every public definition
+is enclosed by exact `chelis-export-begin` / `chelis-export-end` comment records; the
+begin record carries `authored` or `direct`, then the same lowercase-hex UTF-8 source
+identity, symbol, and declaration. Validators parse those records and treat the
+enclosed C definition as opaque payload. They SHALL NOT infer linkage from C whitespace,
+comments, braces, or declaration layout.
+
+The declaration records and source export blocks SHALL be exactly bijective in program
+identity, source identity, canonical symbol, and declaration. The header's source
+digest binds the complete source bytes, so partial headers, unmarked additions,
+reformatted or type-changed definitions, and reassociated metadata SHALL fail before
+native execution. Generated source SHALL NOT `#define` or `#undef` a published symbol.
+Translation-unit-private `static` helpers and the generated process entry `main` remain
+outside the public export blocks. Downstream C code SHALL call declarations from the
 generated header, and tooling SHALL consume the generated associations rather than
 reconstructing symbols from Chelis source spellings.
 

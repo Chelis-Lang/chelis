@@ -166,9 +166,14 @@ For external calls, use the generated header's declaration. Authored function
 definitions use compiler-reserved `chelis_fn_` symbols followed by their lowercase
 UTF-8 bytes in hexadecimal (except source-level `main`, which is module-qualified);
 their source spelling is not a C linker name. Generated header declarations and
-externally linked authored definitions carry matching source-name metadata and must
-form an exact set before native execution; `static` helpers are deliberately outside
-that published set. These encodings keep `a-b.ch`, `a_b.ch`, and a literal
+externally linked authored definitions carry a versioned program-identity and export
+envelope. Structural header records bind each source identity, canonical symbol, and
+exact declaration bytes, including multiline formatting. The header also binds the
+exact generated source digest, while explicit source export blocks repeat those fields
+without trying to parse arbitrary C definitions. Missing, added, reformatted,
+macro-rebound, or reassociated exports fail validation before native execution;
+`static` helpers are deliberately outside that published set. These encodings keep
+`a-b.ch`, `a_b.ch`, and a literal
 `chelis_file_612d62.ch` distinct.
 
 When the compiled C program hits a runtime arithmetic trap, output from

@@ -132,10 +132,43 @@ fn run_native_probe(out: &Path) {
     );
 }
 
+fn wrap_export_definition_with_macro(source: &str, symbol: &str, replacement: &str) -> String {
+    let signature = format!("\nint32_t {symbol}(int32_t x) {{");
+    let start = source
+        .find(&signature)
+        .unwrap_or_else(|| panic!("generated source has no wrapper definition for `{symbol}`"));
+    let mut wrapped = source.to_string();
+    wrapped.insert_str(start + 1, &format!("#define {symbol} {replacement}\n"));
+    let end = wrapped[start..]
+        .find("\n/* chelis-export-end: ")
+        .map(|offset| start + offset + 1)
+        .unwrap_or_else(|| panic!("generated export block for `{symbol}` has no end marker"));
+    wrapped.insert_str(end, &format!("#undef {symbol}\n"));
+    wrapped
+}
+
+fn hex_metadata(value: &str) -> String {
+    value.bytes().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn declaration_record(source_name: &str, symbol: &str, declaration: &str) -> String {
+    format!(
+        "/* chelis-declaration: {} {} {} */\n{declaration}",
+        hex_metadata(source_name),
+        hex_metadata(symbol),
+        hex_metadata(declaration)
+    )
+}
+
+fn declaration_record_prefix(source_name: &str) -> String {
+    format!("/* chelis-declaration: {} ", hex_metadata(source_name))
+}
+
 #[test]
 fn package_qualified_main_keeps_the_normative_module_abi_and_links() {
     let built = build_package();
     let generated = GeneratedHeader::parse(&built.header).expect("generated declaration metadata");
+    assert_eq!(generated.program_identity(), "chelis_file_6d61696e");
     generated
         .validate_source(&built.source)
         .expect("header and source agree");
@@ -230,9 +263,12 @@ fn missing_partial_stale_disagreeing_and_swapped_headers_are_rejected() {
     );
 
     let lookalike_block = format!(
-        "/* chelis-source-name: {} */\n{}",
-        lookalike.source_name(),
-        lookalike.declaration()
+        "{}\n",
+        declaration_record(
+            lookalike.source_name(),
+            lookalike.symbol(),
+            lookalike.declaration()
+        )
     );
     let partial_header = built.header.replacen(&lookalike_block, "", 1);
     let partial = GeneratedHeader::parse(&partial_header).expect("partial header is syntactic");
@@ -245,9 +281,15 @@ fn missing_partial_stale_disagreeing_and_swapped_headers_are_rejected() {
     let stale_declaration = main
         .declaration()
         .replace(main.symbol(), "pkg__demo__Demo__Main__stale");
-    let stale_header = built
-        .header
-        .replacen(main.declaration(), &stale_declaration, 1);
+    let stale_header = built.header.replacen(
+        &declaration_record(main.source_name(), main.symbol(), main.declaration()),
+        &declaration_record(
+            main.source_name(),
+            "pkg__demo__Demo__Main__stale",
+            &stale_declaration,
+        ),
+        1,
+    );
     let stale = GeneratedHeader::parse(&stale_header).expect("stale header remains syntactic");
     assert!(
         stale.validate_source(&built.source).is_err(),
@@ -255,9 +297,10 @@ fn missing_partial_stale_disagreeing_and_swapped_headers_are_rejected() {
     );
     common::write_file(&built.out.join("stale.h"), &stale_header);
 
+    let disagreeing_declaration = "double pkg__demo__Demo__Main__main(int32_t x);";
     let disagreeing_header = built.header.replacen(
-        main.declaration(),
-        "double pkg__demo__Demo__Main__main(int32_t x);",
+        &declaration_record(main.source_name(), main.symbol(), main.declaration()),
+        &declaration_record(main.source_name(), main.symbol(), disagreeing_declaration),
         1,
     );
     let disagreeing =
@@ -268,21 +311,14 @@ fn missing_partial_stale_disagreeing_and_swapped_headers_are_rejected() {
     );
     common::write_file(&built.out.join("disagreeing.h"), &disagreeing_header);
 
-    let main_metadata = format!("/* chelis-source-name: {} */", main.source_name());
-    let lookalike_metadata = format!("/* chelis-source-name: {} */", lookalike.source_name());
+    let main_metadata = declaration_record_prefix(main.source_name());
+    let lookalike_metadata = declaration_record_prefix(lookalike.source_name());
+    let swap_metadata = declaration_record_prefix("__swap_pending");
     let swapped_header = built
         .header
-        .replacen(
-            &main_metadata,
-            "/* chelis-source-name: __swap_pending */",
-            1,
-        )
+        .replacen(&main_metadata, &swap_metadata, 1)
         .replacen(&lookalike_metadata, &main_metadata, 1)
-        .replacen(
-            "/* chelis-source-name: __swap_pending */",
-            &lookalike_metadata,
-            1,
-        );
+        .replacen(&swap_metadata, &lookalike_metadata, 1);
     let swapped =
         GeneratedHeader::parse(&swapped_header).expect("swapped metadata remains syntactic");
     assert!(
@@ -292,21 +328,26 @@ fn missing_partial_stale_disagreeing_and_swapped_headers_are_rejected() {
     common::write_file(&built.out.join("swapped.h"), &swapped_header);
 
     let extra_source = format!(
-        "{}\n/* chelis-authored-export: synthetic_extra */\nint32_t chelis_fn_73796e7468657469635f6578747261(int32_t x) {{\n    return x;\n}}\n",
+        "{}\nint32_t synthetic_extra(int32_t x)\n{{\n    return x;\n}}\n",
         built.source
     );
     assert!(
         generated.validate_source(&extra_source).is_err(),
-        "an extra external source definition absent from the header must fail exact-set validation"
+        "an unmarked multiline external definition must fail exact-source validation"
     );
 
-    let source_with_private_helper = format!(
-        "{}\nstatic int32_t chelis_private_test_helper(int32_t x) {{\n    return x;\n}}\n",
+    let comment_spoofed_source = format!(
+        "{}\nint32_t /* static */ synthetic_extra(int32_t x) {{\n    return x;\n}}\n",
         built.source
     );
+    assert!(
+        generated.validate_source(&comment_spoofed_source).is_err(),
+        "a comment containing `static` must not hide an unmarked external definition"
+    );
+
     generated
-        .validate_source(&source_with_private_helper)
-        .expect("static/private helpers are outside the published export set");
+        .validate_source(&built.source)
+        .expect("compiler-emitted static/private helpers remain outside the published export set");
 
     if common::gcc_available() {
         assert!(
@@ -344,6 +385,39 @@ fn missing_partial_stale_disagreeing_and_swapped_headers_are_rejected() {
         assert!(
             bypassed.status.success(),
             "the swapped header would compile if validation were bypassed:\n{}",
+            String::from_utf8_lossy(&bypassed.stderr)
+        );
+        run_native_probe(&built.out);
+    }
+}
+
+#[test]
+fn source_macro_alias_swap_is_rejected_before_native_wrong_call() {
+    let built = build_package();
+    let generated = GeneratedHeader::parse(&built.header).expect("generated declaration metadata");
+    let call = generated
+        .declaration(QUALIFIED_CALL)
+        .expect("ordinary call declaration");
+    let prefix = generated
+        .declaration(QUALIFIED_PREFIX_NAME)
+        .expect("prefix-shaped declaration");
+    let swapped = wrap_export_definition_with_macro(
+        &wrap_export_definition_with_macro(&built.source, call.symbol(), prefix.symbol()),
+        prefix.symbol(),
+        call.symbol(),
+    );
+    assert!(
+        generated.validate_source(&swapped).is_err(),
+        "a source-side macro reassociation must fail before native compilation"
+    );
+
+    if common::gcc_available() {
+        common::write_file(&built.out.join("main.c"), &swapped);
+        let bypassed = compile_driver_for_symbol(&built.out, "main.h", call.symbol(), 44)
+            .expect("compile validation-bypass control");
+        assert!(
+            bypassed.status.success(),
+            "the reassociated source should demonstrate wrong native selection when validation is bypassed:\n{}",
             String::from_utf8_lossy(&bypassed.stderr)
         );
         run_native_probe(&built.out);

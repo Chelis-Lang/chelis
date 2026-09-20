@@ -1677,6 +1677,7 @@ fn emit_host_declarations(
             );
             Ok(crate::generated_header::render_declaration(
                 &function.name,
+                &emitted_name,
                 &declaration,
             ))
         })
@@ -1923,22 +1924,29 @@ fn append_unreachable_fn_abort_stub(
     } else {
         params
     };
-    if !internal_linkage {
-        out.push(crate::generated_header::render_authored_export_marker(
-            &function.name,
-        ));
-    }
-    out.push(format!(
-        "{prefix}{} {}({}) {{",
+    let declaration = format!(
+        "{prefix}{} {}({params});",
         c_type(&function.ret_ty)?,
         emitted_name,
-        params
-    ));
+    );
+    if !internal_linkage {
+        out.push(crate::generated_header::render_authored_export_begin(
+            &function.name,
+            emitted_name,
+            &declaration,
+        ));
+    }
+    out.push(format!("{} {{", declaration.trim_end_matches(';')));
     let rendered = unsupported.to_string();
     let safe = chelis_ir::span_sanitize::sanitize_for_format_string(&rendered);
     out.push(format!("    fprintf(stderr, \"%s\\n\", \"{safe}\");"));
     out.push("    abort();".to_string());
     out.push("}".to_string());
+    if !internal_linkage {
+        out.push(crate::generated_header::render_authored_export_end(
+            &function.name,
+        ));
+    }
     Ok(())
 }
 
@@ -2325,15 +2333,17 @@ fn emit_function(
             .map(|param| c_decl(&param.ty, &param.name))
             .collect::<Result<Vec<_>, _>>()?
             .join(", ");
-        out.push(crate::generated_header::render_authored_export_marker(
-            &function.name,
-        ));
-        out.push(format!(
-            "{} {}({}) {{",
+        let declaration = format!(
+            "{} {}({wrapper_params});",
             c_type(&function.ret_ty)?,
             emitted_name,
-            wrapper_params
+        );
+        out.push(crate::generated_header::render_authored_export_begin(
+            &function.name,
+            emitted_name,
+            &declaration,
         ));
+        out.push(format!("{} {{", declaration.trim_end_matches(';')));
         append_invocation_random_context(out);
         let mut args = Vec::with_capacity(function.params.len());
         for (index, (param, use_)) in function.params.iter().zip(&entry_uses).enumerate() {
@@ -2364,6 +2374,9 @@ fn emit_function(
         ));
         out.push("    return __result;".to_string());
         out.push("}".to_string());
+        out.push(crate::generated_header::render_authored_export_end(
+            &function.name,
+        ));
 
         #[cfg(feature = "native-random-observer")]
         {

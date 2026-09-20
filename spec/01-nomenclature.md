@@ -143,18 +143,27 @@ the lint is.
 > use the same symbol. A Reef linker identity whose decoded source binding is
 > exactly `main` retains that source-level exception; an ordinary authored
 > identifier that merely ends in `__main` does not. The generated header
-> SHALL precede each declaration with exact
-> `/* chelis-source-name: <Chelis-name> */` metadata. Downstream C code SHALL
+> and source SHALL carry the same versioned artifact envelope. The envelope
+> binds the lowercase-hex UTF-8 program identity, the exact generated-source
+> SHA-256 digest, and one declaration/export-block record per public
+> definition. A declaration record carries the exact Chelis source identity,
+> canonical C symbol, and canonical C declaration in lowercase-hex UTF-8,
+> followed by declaration bytes that match the record exactly even when the
+> declaration is multiline. Its source export block carries the export kind
+> plus the same source identity, symbol, and declaration; the C definition
+> between the block markers is opaque payload, not text a validator reparses
+> with C substring heuristics. Downstream C code SHALL
 > consume the generated declaration, and tooling that needs the Chelis-to-C
-> association SHALL consume that metadata rather than reconstructing the
-> symbol from source spelling. The header declarations and externally linked
-> authored definitions SHALL form an exact set: an omitted declaration, an
-> extra authored export, or a source-name/symbol reassociation is invalid.
-> Generated source SHALL precede each externally linked authored definition
-> with exact `/* chelis-authored-export: <Chelis-name> */` metadata so this
-> bijection can be checked before native execution. Translation-unit-private
-> `static` helpers and the generated process entry `main` are not authored
-> exports and SHALL NOT enter that set.
+> association SHALL consume the envelope rather than reconstructing the
+> symbol from source spelling. The declaration records and source export
+> blocks SHALL form an exact set in program identity, source identity,
+> canonical symbol, and declaration. The header digest SHALL bind every
+> source byte, so a partial header, an unmarked addition, a formatting or type
+> mutation, or a source-name/symbol reassociation is invalid before native
+> execution. Generated source SHALL NOT define or undefine a macro whose name
+> is a published C symbol. Translation-unit-private `static` helpers and the
+> generated process entry `main` are opaque source outside the public export
+> blocks and SHALL NOT enter that set.
 
 The source identifier itself is unchanged: no case rewriting or source-level
 reservation is introduced. The compiler-owned spelling is the published C ABI

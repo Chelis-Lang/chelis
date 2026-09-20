@@ -21,6 +21,7 @@ chelis-vocab.workspace = true
 # corpus. Production Const emission uses chelis-types' canonical one-rounding
 # conversion and stamps the resulting exact two-byte pattern.
 half = { workspace = true }
+sha2 = "0.10"
 
 [build-dependencies]
 pkg-config = "0.3"

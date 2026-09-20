@@ -680,13 +680,19 @@ impl CEmitter {
         } else {
             String::new()
         };
+        let declaration = format!(
+            "void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out{random_param});"
+        );
         if !options.static_entry {
-            e.line(&crate::generated_header::render_direct_export_marker(
+            e.line(&crate::generated_header::render_direct_export_begin(
                 func_name,
+                func_name,
+                &declaration,
             ));
         }
         e.line(&format!(
-            "{linkage}void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out{random_param}) {{"
+            "{linkage}{} {{",
+            declaration.trim_end_matches(';')
         ));
         e.indent = 1;
 
@@ -1038,6 +1044,11 @@ impl CEmitter {
         }
         e.indent = 0;
         e.line("}");
+        if !options.static_entry {
+            e.line(&crate::generated_header::render_direct_export_end(
+                func_name,
+            ));
+        }
         // chelis#665: `declared_dim_names` used to be written and never read.
         // Make it the executable invariant it was always shaped like: every
         // name this emitter can render as a C identifier ends the function

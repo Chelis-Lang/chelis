@@ -192,9 +192,10 @@ Source-level `def main(...)` uses the module-qualified `<module>__main` symbol,
 including after Reef/package qualification, so a downstream C or C++ driver
 can define its own process entry `main(void)`. Every other authored function
 uses the universal `chelis_fn_<lowercase-hex-UTF-8>` symbol. The generated
-header carries the exact Chelis-name association beside each declaration;
-native callers consume that declaration and association rather than applying a
-separate name-mapping algorithm.
+header and source carry the versioned program-identity/export-block envelope
+and exact source digest required by [01-CID-1]. Native callers validate and
+consume that declaration association rather than applying a separate
+name-mapping algorithm or reparsing C definitions.
 
 ## 3. Embedding the Compiler
 

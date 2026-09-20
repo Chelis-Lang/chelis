@@ -4,6 +4,19 @@ mod ownership_support;
 
 use ownership_support::{balanced, emit, run};
 
+fn hex_metadata(value: &str) -> String {
+    value.bytes().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn declaration_record(source_name: &str, symbol: &str, declaration: &str) -> String {
+    format!(
+        "/* chelis-declaration: {} {} {} */\n{declaration}",
+        hex_metadata(source_name),
+        hex_metadata(symbol),
+        hex_metadata(declaration)
+    )
+}
+
 #[test]
 fn native_probe_uses_the_generated_header_symbol() {
     let program = emit("def entry(x: f32) -> f32 = add(x, 1.0f32)", "entry");
@@ -35,9 +48,11 @@ fn missing_stale_and_disagreeing_compiler_api_headers_fail_closed() {
     );
 
     let stale_declaration = declaration.replace(symbol, "stale_entry");
-    let stale_header = program
-        .header()
-        .replacen(declaration, &stale_declaration, 1);
+    let stale_header = program.header().replacen(
+        &declaration_record("entry", symbol, declaration),
+        &declaration_record("entry", "stale_entry", &stale_declaration),
+        1,
+    );
     let stale = program
         .with_header(stale_header)
         .expect("stale header remains syntactic");
@@ -47,9 +62,11 @@ fn missing_stale_and_disagreeing_compiler_api_headers_fail_closed() {
     );
 
     let disagreeing_declaration = declaration.replace("(float x)", "(double x)");
-    let disagreeing_header = program
-        .header()
-        .replacen(declaration, &disagreeing_declaration, 1);
+    let disagreeing_header = program.header().replacen(
+        &declaration_record("entry", symbol, declaration),
+        &declaration_record("entry", symbol, &disagreeing_declaration),
+        1,
+    );
     let disagreeing = program
         .with_header(disagreeing_header)
         .expect("disagreeing header remains syntactic");

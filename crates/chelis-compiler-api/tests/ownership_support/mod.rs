@@ -4,6 +4,7 @@
 use chelis_compiler_api::compiler::{compile, compile_for_execution};
 use chelis_compiler_api::schema::{CompileRequest, CompileTarget, SourceKind};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::fmt;
 use std::fs;
 use std::ops::Deref;
@@ -57,11 +58,29 @@ impl GeneratedProgram {
     }
 
     pub fn with_source(&self, source: String) -> Self {
-        Self {
-            source,
-            header: self.header.clone(),
-            declarations: self.declarations.clone(),
-        }
+        let raw_source = source
+            .strip_prefix("/* chelis-generated-source: 1 */\n")
+            .and_then(|source| source.split_once('\n').map(|(_, source)| source))
+            .unwrap_or(&source);
+        let program_identity = self.declarations.program_identity();
+        let encoded_identity = program_identity
+            .bytes()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let source = format!(
+            "/* chelis-generated-source: 1 */\n\
+             /* chelis-program-identity: {encoded_identity} */\n\
+             {raw_source}"
+        );
+        let digest = format!("{:x}", Sha256::digest(source.as_bytes()));
+        let mut header_lines = self.header.lines();
+        let version = header_lines.next().expect("generated header version");
+        let identity = header_lines.next().expect("generated header identity");
+        let _old_digest = header_lines.next().expect("generated header digest");
+        let declarations = header_lines.collect::<Vec<_>>().join("\n");
+        let header =
+            format!("{version}\n{identity}\n/* chelis-source-sha256: {digest} */\n{declarations}");
+        Self::new(source, header)
     }
 
     #[allow(dead_code)]

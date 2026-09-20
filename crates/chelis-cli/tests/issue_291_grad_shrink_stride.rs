@@ -135,10 +135,9 @@ fn assert_exact_f_export(kernel_c: &Path) {
     );
 
     let stale_header = header.replace("chelis_fn_66", "f");
-    let stale = GeneratedHeader::parse(&stale_header).expect("stale header remains syntactic");
     assert!(
-        stale.validate_source(&emitted).is_err(),
-        "the old bare-name declaration must fail agreement"
+        GeneratedHeader::parse(&stale_header).is_err(),
+        "tampering with declaration bytes without its structural record must fail parsing"
     );
     let stale_source = emitted.replace("chelis_fn_66(", "f(");
     assert!(
