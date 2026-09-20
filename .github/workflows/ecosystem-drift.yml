@@ -196,13 +196,13 @@ jobs:
             token_repos: nautilus
           - repo: coral
             type: reef
-            reef_deps: "Chelis-Lang/nautilus@v0.7.26"
+            reef_deps: "Chelis-Lang/nautilus@v0.7.45"
             token_repos: |-
               coral
               nautilus
           - repo: shoals
             type: reef
-            reef_deps: "Chelis-Lang/nautilus@v0.7.26 Chelis-Lang/coral@v0.7.25"
+            reef_deps: "Chelis-Lang/nautilus@v0.7.45 Chelis-Lang/coral@v0.7.42"
             token_repos: |-
               shoals
               nautilus
@@ -217,7 +217,7 @@ jobs:
             token_repos: hull
           - repo: whale
             type: reef
-            reef_deps: "Chelis-Lang/nautilus@v0.7.26 Chelis-Lang/coral@v0.7.25 Chelis-Lang/shoals@v0.20.1"
+            reef_deps: "Chelis-Lang/nautilus@v0.7.45 Chelis-Lang/coral@v0.7.42 Chelis-Lang/shoals@v0.24.12"
             token_repos: |-
               whale
               nautilus
@@ -256,7 +256,7 @@ jobs:
           - repo: octant
             type: cargo
             needs_chelis_sibling: true
-            reef_deps: "Chelis-Lang/nautilus@v0.7.34"
+            reef_deps: "Chelis-Lang/nautilus@v0.7.45"
             token_repos: |-
               octant
               nautilus
@@ -269,7 +269,7 @@ jobs:
           - repo: calcify
             type: cargo
             needs_chelis_sibling: true
-            reef_deps: "Chelis-Lang/nautilus@v0.7.26 Chelis-Lang/coral@v0.7.25"
+            reef_deps: "Chelis-Lang/nautilus@v0.7.45 Chelis-Lang/coral@v0.7.42"
             token_repos: |-
               calcify
               nautilus
@@ -356,7 +356,7 @@ jobs:
           # `token_repos` alone.
           - repo: hello-chelis
             type: docker
-            reef_deps: "Chelis-Lang/coral@v0.7.32 Chelis-Lang/nautilus@v0.7.35 Chelis-Lang/school@v0.1.12"
+            reef_deps: "Chelis-Lang/coral@v0.7.42 Chelis-Lang/nautilus@v0.7.45 Chelis-Lang/school@v0.1.13"
             token_repos: |-
               hello-chelis
               chelis
@@ -585,9 +585,11 @@ jobs:
       # Build the hello-chelis image normally (its Dockerfile installs the
       # pinned RELEASE chelis), then overlay a thin image that replaces the
       # toolchain with the HEAD build. The release-installed toolchain layer
-      # is only used to bootstrap the shell-release reef installs + octant CLI
-      # inside the image; the HEAD overlay overrides the `chelis` binary,
-      # runtime staticlib, and headers so every gate below runs HEAD chelis.
+      # is only used to bootstrap the reviewed current-format shell releases
+      # + octant CLI inside the image; explicit build arguments keep this
+      # canary independent of hello-chelis's own release cadence. The HEAD
+      # overlay overrides the `chelis` binary, runtime staticlib, and headers
+      # so every gate below runs HEAD chelis.
       # This is the faithful "chelis ARG pointed at a HEAD-built toolchain"
       # the canary can express without a HEAD release tarball to download.
       - name: Build hello-chelis base image (release-pinned chelis)
@@ -598,6 +600,12 @@ jobs:
           file: shell/docker/Dockerfile
           tags: hello-chelis:base
           load: true
+          build-args: |
+            CORAL_VERSION=0.7.42
+            NAUTILUS_VERSION=0.7.45
+            OCTANT_VERSION=0.13.0
+            C_EARCHIN_VERSION=0.3.3
+            SCHOOL_VERSION=0.1.13
           secrets: |
             github_token=${{ steps.token.outputs.token }}
 

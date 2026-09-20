@@ -14,6 +14,40 @@ COPY_HEADER = re.compile(
     r"cp crates/chelis-runtime/include/(chelis_[^\s/]+\.h) "
     r'"\$staging/include/"'
 )
+EXPECTED_REEF_DEPENDENCIES = {
+    "nautilus": (),
+    "coral": ("Chelis-Lang/nautilus@v0.7.45",),
+    "shoals": (
+        "Chelis-Lang/nautilus@v0.7.45",
+        "Chelis-Lang/coral@v0.7.42",
+    ),
+    "school": (),
+    "hull": (),
+    "whale": (
+        "Chelis-Lang/nautilus@v0.7.45",
+        "Chelis-Lang/coral@v0.7.42",
+        "Chelis-Lang/shoals@v0.24.12",
+    ),
+    "octant": ("Chelis-Lang/nautilus@v0.7.45",),
+    "calcify": (
+        "Chelis-Lang/nautilus@v0.7.45",
+        "Chelis-Lang/coral@v0.7.42",
+    ),
+    "c-earchin": (),
+    "hydronnx": (),
+    "hello-chelis": (
+        "Chelis-Lang/coral@v0.7.42",
+        "Chelis-Lang/nautilus@v0.7.45",
+        "Chelis-Lang/school@v0.1.13",
+    ),
+}
+EXPECTED_HELLO_BUILD_ARGS = {
+    "CORAL_VERSION": "0.7.42",
+    "NAUTILUS_VERSION": "0.7.45",
+    "OCTANT_VERSION": "0.13.0",
+    "C_EARCHIN_VERSION": "0.3.3",
+    "SCHOOL_VERSION": "0.1.13",
+}
 
 
 def public_runtime_headers() -> set[str]:
@@ -33,6 +67,34 @@ def local_dependency_closure(headers: set[str]) -> set[str]:
                 closure.add(dependency)
                 pending.append(dependency)
     return closure
+
+
+def matrix_reef_dependencies(workflow: str) -> dict[str, tuple[str, ...]]:
+    dependencies: dict[str, tuple[str, ...]] = {}
+    current_repo: str | None = None
+    for line in workflow.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("- repo:"):
+            current_repo = stripped.split(":", 1)[1].strip()
+        elif current_repo is not None and stripped.startswith("reef_deps:"):
+            encoded = stripped.split(":", 1)[1].strip().strip('"')
+            dependencies[current_repo] = tuple(encoded.split())
+    return dependencies
+
+
+def hello_build_args(workflow: str) -> dict[str, str]:
+    step = workflow.split(
+        "- name: Build hello-chelis base image (release-pinned chelis)", 1
+    )[1].split("- name: Overlay HEAD chelis toolchain onto the image", 1)[0]
+    args = step.split("build-args: |", 1)[1].split("secrets: |", 1)[0]
+    return {
+        key.strip(): value.strip()
+        for key, value in (
+            line.strip().split("=", 1)
+            for line in args.splitlines()
+            if "=" in line
+        )
+    }
 
 
 class EcosystemDriftWorkflowTests(unittest.TestCase):
@@ -90,6 +152,38 @@ class EcosystemDriftWorkflowTests(unittest.TestCase):
         self.assertIn("run timeout 900s chelis test", hello_step)
         self.assertIn("tests/test_c_backend.py", hello_step)
         self.assertNotIn("regen_deep.py", hello_step)
+
+    def assert_current_artifact_matrix(self, workflow: str) -> None:
+        self.assertEqual(
+            matrix_reef_dependencies(workflow),
+            EXPECTED_REEF_DEPENDENCIES,
+            "the ecosystem canary must pin the reviewed current-format Reef graph",
+        )
+        self.assertEqual(
+            hello_build_args(workflow),
+            EXPECTED_HELLO_BUILD_ARGS,
+            "the Docker leg must pin its Reef and tool-package releases",
+        )
+
+    def test_dependency_matrix_pins_current_format_releases(self) -> None:
+        self.assert_current_artifact_matrix(WORKFLOW.read_text(encoding="utf-8"))
+
+    def test_predecessor_artifact_tags_are_rejected(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        mutations = (
+            ("Chelis-Lang/nautilus@v0.7.45", "Chelis-Lang/nautilus@v0.7.34"),
+            ("Chelis-Lang/coral@v0.7.42", "Chelis-Lang/coral@v0.7.32"),
+            ("Chelis-Lang/shoals@v0.24.12", "Chelis-Lang/shoals@v0.20.1"),
+            ("SCHOOL_VERSION=0.1.13", "SCHOOL_VERSION=0.1.12"),
+            ("OCTANT_VERSION=0.13.0", "OCTANT_VERSION=0.10.1"),
+            ("C_EARCHIN_VERSION=0.3.3", "C_EARCHIN_VERSION=0.3.2"),
+        )
+        for current, predecessor in mutations:
+            with self.subTest(predecessor=predecessor):
+                mutated = workflow.replace(current, predecessor, 1)
+                self.assertNotEqual(mutated, workflow)
+                with self.assertRaises(AssertionError):
+                    self.assert_current_artifact_matrix(mutated)
 
 
 if __name__ == "__main__":
