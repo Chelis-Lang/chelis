@@ -639,6 +639,48 @@ def _locked_registry_package(root: Path, name: str, package_id: str) -> bool:
     )
 
 
+def _resolve_defining_artifact(
+    root: Path,
+    name: str,
+    definitions: list[dict],
+    artifacts: list[dict],
+    *,
+    require_registry_origin: bool,
+) -> tuple[dict, Path, str]:
+    expected_ids = {
+        definition["stable_crate_id"]
+        for definition in definitions
+        if definition["crate"] == name
+    }
+    if len(expected_ids) != 1:
+        raise ValueError(f"compiler/Cargo {name} identity mismatch")
+    expected_id = next(iter(expected_ids))
+    candidates = [
+        artifact
+        for artifact in artifacts
+        if artifact["target"]["name"] == name
+        and (
+            not require_registry_origin
+            or _locked_registry_package(root, name, artifact["package_id"])
+        )
+    ]
+    if not candidates:
+        raise ValueError(f"unresolved defining {name} Cargo origin")
+    matches = []
+    for artifact in candidates:
+        paths = [Path(path) for path in artifact["filenames"] if path.endswith(".rlib")]
+        if len(paths) != 1:
+            raise ValueError(f"missing defining {name} artifact")
+        stable_id = _artifact_id(paths[0], root)
+        if stable_id == expected_id:
+            matches.append((artifact, paths[0], stable_id))
+    if not matches:
+        raise ValueError(f"compiler/Cargo {name} identity mismatch")
+    if len(matches) != 1:
+        raise ValueError(f"unresolved defining {name} Cargo origin")
+    return matches[0]
+
+
 def _compiler_definitions(value):
     """Yield every compiler definition record nested in a native receipt."""
     if isinstance(value, dict):
@@ -792,33 +834,24 @@ def collect_library(root: Path, target: Path, driver: Path, *, rustc_args=(), sc
                 for call in evidence.raw["calls"]
                 if call["callee"]["crate"] == "bincode"
             )
+        cargo_artifacts = [
+            artifact
+            for line in stream.splitlines()
+            if (artifact := json.loads(line)).get("reason") == "compiler-artifact"
+        ]
         for name in sorted({d["crate"] for d in definitions}):
-            artifacts = [
-                a
-                for line in stream.splitlines()
-                if (a := json.loads(line)).get("reason") == "compiler-artifact"
-                and a["target"]["name"] == name
-            ]
-            if len(artifacts) != 1 or (
-                scope != "native-bindings"
-                and not _locked_registry_package(root, name, artifacts[0]["package_id"])
-            ):
-                raise ValueError(f"unresolved defining {name} Cargo origin")
-            paths = [Path(p) for p in artifacts[0]["filenames"] if p.endswith(".rlib")]
-            if len(paths) != 1:
-                raise ValueError(f"missing defining {name} artifact")
-            stable_id = _artifact_id(paths[0], root)
-            if any(
-                d["stable_crate_id"] != stable_id
-                for d in definitions
-                if d["crate"] == name
-            ):
-                raise ValueError(f"compiler/Cargo {name} identity mismatch")
+            artifact, path, stable_id = _resolve_defining_artifact(
+                root,
+                name,
+                definitions,
+                cargo_artifacts,
+                require_registry_origin=scope != "native-bindings",
+            )
             provenance.append(
                 {
-                    "package": artifacts[0]["package_id"],
-                    "artifact": str(paths[0]),
-                    "sha256": hashlib.sha256(paths[0].read_bytes()).hexdigest(),
+                    "package": artifact["package_id"],
+                    "artifact": str(path),
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
                     "stable_crate_id": stable_id,
                 }
             )

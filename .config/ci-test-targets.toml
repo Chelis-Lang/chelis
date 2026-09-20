@@ -1730,6 +1730,15 @@ reason = "the planner executor and report implementation is directly covered by 
 tracking_issue = "chelis#1824"
 
 [[path_rule]]
+prefix = "scripts/ci_script_tests.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the required script-unit job executes the changed partitioner and validates its complete disjoint selection"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
 prefix = "scripts/ci_failure_baseline.py"
 disposition = "owner"
 workflow = "ci.yml"
@@ -2485,12 +2494,30 @@ reason = "the dtype oracle executes the exact wire mutation and consumer selecti
 tracking_issue = "chelis#2048"
 
 [[path_rule]]
+prefix = "scripts/capacity_census_wire_calls.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "dtype-phase3-oracle"
+cadence = "daily and workflow_dispatch"
+reason = "the dtype oracle executes the exact compiler-call inventory and Cargo-origin provenance controls through capacity_census_wire"
+tracking_issue = "chelis#2048"
+
+[[path_rule]]
 prefix = "scripts/capacity_census_wire_invocation_owners.py"
 disposition = "owner"
 workflow = "heavy-e2e.yml"
 job = "dtype-phase3-oracle"
 cadence = "daily and workflow_dispatch"
 reason = "the authoritative wire census executes the exact invocation-owner enumerator"
+tracking_issue = "chelis#2048"
+
+[[path_rule]]
+prefix = "scripts/test_capacity_census_wire_calls.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "dtype-phase3-oracle"
+cadence = "daily and workflow_dispatch"
+reason = "the dtype oracle executes the compiler-call Cargo-origin positive and rejection controls selected by capacity_census_wire"
 tracking_issue = "chelis#2048"
 
 [[path_rule]]
