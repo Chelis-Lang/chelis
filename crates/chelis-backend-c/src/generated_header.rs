@@ -647,6 +647,7 @@ fn bind_c_definitions(
     enforce_digest: bool,
 ) -> Result<BTreeMap<String, String>, GeneratedHeaderError> {
     validate_generated_include_set(source)?;
+    validate_generated_pragmas(source)?;
     if preprocessor_conditional_depth(source)? != 0 {
         return Err(GeneratedHeaderError::new(
             "generated source has an unclosed preprocessor conditional",
@@ -1340,6 +1341,40 @@ fn validate_generated_include_set(source: &str) -> Result<(), GeneratedHeaderErr
         }
     }
     Ok(())
+}
+
+fn validate_generated_pragmas(source: &str) -> Result<(), GeneratedHeaderError> {
+    if strip_c_comments(&splice_c_lines(source)).contains("_Pragma") {
+        return Err(GeneratedHeaderError::new(
+            "generated source uses unsupported `_Pragma` preprocessing",
+        ));
+    }
+    for line in preprocessor_logical_lines(source) {
+        if preprocessor_directive_name(&line).as_deref() != Some("pragma") {
+            continue;
+        }
+        let payload = preprocessor_directive_payload(&line, "pragma").unwrap_or_default();
+        if !["omp ", "clang diagnostic ", "GCC diagnostic "]
+            .into_iter()
+            .any(|prefix| payload.starts_with(prefix))
+        {
+            return Err(GeneratedHeaderError::new(format!(
+                "generated source uses unsupported pragma `{payload}`"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn preprocessor_directive_payload<'a>(line: &'a str, expected: &str) -> Option<&'a str> {
+    let mut cursor = CDirectiveCursor::new(line);
+    cursor.skip_trivia()?;
+    cursor.take_directive_introducer()?;
+    cursor.skip_trivia()?;
+    if cursor.identifier()? != expected {
+        return None;
+    }
+    Some(cursor.remaining.trim())
 }
 
 fn preprocessor_logical_lines(source: &str) -> Vec<String> {
@@ -2112,6 +2147,8 @@ mod tests {
         for source in [
             format!("#if 0\n{export}\n#endif\n"),
             format!("#include \"unsealed_external_helper.h\"\n{export}\n"),
+            format!("#pragma weak external_alias = chelis_fn_616c706861\n{export}\n"),
+            format!("_Pragma(\"weak external_alias = chelis_fn_616c706861\")\n{export}\n"),
         ] {
             assert!(
                 seal_generated_artifact("demo", &source, &header).is_err(),
