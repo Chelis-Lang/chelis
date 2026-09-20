@@ -7,6 +7,7 @@ are hidden in this suite. Each accepted discovery still owes a codec owner.
 
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -193,6 +194,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 [[package]]
 name = "serde_json"
 version = "1.0.149"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "pyo3"
+version = "0.24.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 """
         )
@@ -420,14 +426,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
             "libpyo3-current.rlib",
             directory=invocation_target,
         )
-        selected = _construction_dependency_artifact(
-            self.root,
-            "pyo3",
-            [],
-            [pyo3],
-            invocation_target,
-        )
+        with patch(
+            "capacity_census_wire_calls._artifact_id",
+            return_value="8" * 16,
+        ) as artifact_id:
+            selected = _construction_dependency_artifact(
+                self.root,
+                "pyo3",
+                [],
+                [pyo3],
+                invocation_target,
+            )
         self.assertEqual(selected, Path(pyo3["filenames"][0]))
+        artifact_id.assert_called_once_with(selected, self.root)
 
         with self.assertRaisesRegex(
             ValueError, "missing exact construction dependency pyo3"
@@ -439,6 +450,44 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
                 [pyo3, {**pyo3}],
                 invocation_target,
             )
+
+        for name, artifact in (
+            (
+                "pyo3",
+                self.artifact(
+                    "pyo3@0.0.0",
+                    "pyo3",
+                    "libpyo3-unlocked.rlib",
+                    directory=invocation_target,
+                ),
+            ),
+            (
+                "serde_json",
+                self.artifact(
+                    "serde_json@0.0.0",
+                    "serde_json",
+                    "libserde_json-unlocked-construction.rlib",
+                    directory=invocation_target,
+                ),
+            ),
+        ):
+            with (
+                self.subTest(name=name),
+                patch(
+                    "capacity_census_wire_calls._artifact_id"
+                ) as artifact_id,
+                self.assertRaisesRegex(
+                    ValueError, f"missing exact construction dependency {name}"
+                ),
+            ):
+                _construction_dependency_artifact(
+                    self.root,
+                    name,
+                    [],
+                    [artifact],
+                    invocation_target,
+                )
+            artifact_id.assert_not_called()
 
     def test_construction_dependency_rejects_physical_target_escapes(self):
         invocation_target = self.root / "target/compiler-json-invocations/cargo"
@@ -476,6 +525,37 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
                     [artifact],
                     {Path(artifact["filenames"][0]).name: artifact_id},
                 )
+
+    def test_construction_dependency_rejects_target_symlink_outside_root(self):
+        invocation_target = self.root / "target/compiler-json-invocations/cargo"
+        outside = self.root.parent / f"{self.root.name}-outside-target"
+        outside.mkdir()
+        self.addCleanup(shutil.rmtree, outside)
+        invocation_target.parent.mkdir(parents=True)
+        invocation_target.symlink_to(outside, target_is_directory=True)
+        artifact = self.artifact(
+            "serde_json@1.0.149",
+            "serde_json",
+            "libserde_json-outside-target.rlib",
+            directory=invocation_target,
+        )
+
+        with (
+            patch("capacity_census_wire_calls._artifact_id") as artifact_id,
+            self.assertRaisesRegex(
+                ValueError, "missing owned construction artifact serde_json"
+            ),
+        ):
+            from capacity_census_wire_calls import _construction_dependency_artifact
+
+            _construction_dependency_artifact(
+                self.root,
+                "serde_json",
+                [{"crate": "serde_json", "stable_crate_id": "9" * 16}],
+                [artifact],
+                invocation_target,
+            )
+        artifact_id.assert_not_called()
 
 
 class InvocationControls(unittest.TestCase):
