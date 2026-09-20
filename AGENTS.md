@@ -1146,11 +1146,11 @@ a fraction of a second (see Measured figures in
 It derives its set when it runs and matches the planner's rename handling,
 classifying both sides of a move. It classifies a path once git knows about
 it: untracked work is excluded, because CI never sees it and nothing can
-route a scratch file, so a file a writer has just created is invisible until
-`git add`. That is not a gap you can push through — an unadded file is not
-part of the change — but it does mean a regeneration's *new* output is caught
-at the next `--fast` after you add it rather than in the run that created it.
-A modified output is caught in the same run.
+route a scratch file. A modified artifact is therefore classified in the run
+that changed it, and one a writer has just created is classified by the next
+`--fast` after the artifact is staged. Running `--fast` before every push, as
+written above, runs it before that staging, so the create case needs a second
+run that nothing requires; chelis#2262 has the fix and why it is not here.
 
 It is not a proof that CI will agree. It classifies the working tree against
 the same rules, which catches an unrouted path, and that is the case it

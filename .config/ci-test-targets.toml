@@ -2022,14 +2022,13 @@ cadence = "pull_request and push"
 reason = "the exact --fast stage list, its ordering and its summary run in script-unit"
 tracking_issue = "chelis#1824"
 
-# The three rows below own generated artifacts whose only consumer runs
-# nightly. That is the honest disposition rather than a gap being closed: no
+# The rows below own generated artifacts whose only CI consumer runs nightly.
+# That is the honest disposition rather than a gap being closed: no
 # per-pull-request job re-derives any of them, so a stale one is caught the
 # next morning. Each names the job that goes red when the artifact is wrong,
-# not the job that tests the generator which produced it. Read the first
-# row's cadence carefully: its workflow accepts workflow_dispatch, but the
-# job pins `ref: main`, so dispatching it is not a way to check a candidate.
-# chelis#2261 tracks promoting these to per-pull-request coverage.
+# not the job that tests the generator which produced it. One of them cannot
+# be dispatched against a candidate at all; its own reason says which and
+# why. chelis#2261 tracks promoting these to per-pull-request coverage.
 [[path_rule]]
 prefix = "spec/design/loud_unsupported_issue_manifest.json"
 disposition = "owner"
