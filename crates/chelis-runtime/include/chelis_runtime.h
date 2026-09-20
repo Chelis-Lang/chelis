@@ -84,7 +84,7 @@ static inline double chelis_f64_from_bits(uint64_t bits) {
 /* spec/04 section 4.7: output from preceding effects survives a later trap.
  * abort() need not flush C streams (notably on glibc). Preserve the original
  * failure even if a stream itself cannot be flushed. */
-static inline _Noreturn void chelis_flush_and_abort(void) {
+static inline void chelis_flush_and_abort(void) {
     (void)fflush(stdout);
     (void)fflush(stderr);
     abort();
@@ -553,7 +553,7 @@ void chelis_print_list(const chelis_list *list);
 void chelis_print_tuple(const chelis_tuple *tuple);
 void chelis_print_dict(const chelis_dict *dict);
 void chelis_print_adt(const chelis_adt *adt);
-_Noreturn void chelis_fail(chelis_string message);
+void chelis_fail(chelis_string message);
 chelis_string chelis_read_file(chelis_string path);
 void chelis_write_file(chelis_string path, chelis_string contents);
 chelis_list *chelis_read_lines(chelis_string path);

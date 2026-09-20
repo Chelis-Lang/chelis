@@ -147,7 +147,7 @@
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: _Noreturn void chelis_fail ( chelis_string message ) ;",
+      "id": "chelis_runtime.h: void chelis_fail ( chelis_string message ) ;",
       "flags": []
     },
     {

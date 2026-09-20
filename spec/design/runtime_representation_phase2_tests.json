@@ -72,18 +72,14 @@
       ]
     },
     {
-      "name": "HIP descriptor and device-owner contracts",
+      "name": "HIP descriptor contracts",
       "args": [
         "-p",
         "chelis-backend-hip",
         "--test",
         "codegen_structure",
         "--test",
-        "device_entry_contract",
-        "--test",
-        "device_entry_execution",
-        "--test",
-        "device_owner_contract"
+        "device_entry_contract"
       ],
       "required": [
         "chelis-backend-hip::codegen_structure::dedicated_relu_and_adjoint_emit_strict_bit_preserving_kernels",
@@ -155,7 +151,36 @@
         "chelis-backend-hip::device_entry_contract::input_device_preflight_precedes_projection_and_modules_belong_to_the_invocation",
         "chelis-backend-hip::device_entry_contract::kernel_marshaling_uses_checked_program_rank_and_int64_geometry",
         "chelis-backend-hip::device_entry_contract::movement_views_are_complete_before_publication_and_released_before_slots",
-        "chelis-backend-hip::device_entry_contract::support_root_exposes_generated_packet_and_official_sdk_without_owner_definition",
+        "chelis-backend-hip::device_entry_contract::support_root_exposes_generated_packet_and_official_sdk_without_owner_definition"
+      ]
+    },
+    {
+      "name": "HIP published owner header contract",
+      "args": [
+        "-p",
+        "chelis-backend-hip",
+        "--test",
+        "device_owner_contract",
+        "-E",
+        "test(published_owner_is_opaque_and_packet_observation_cannot_be_mutated)"
+      ],
+      "required": [
+        "chelis-backend-hip::device_owner_contract::published_owner_is_opaque_and_packet_observation_cannot_be_mutated"
+      ]
+    },
+    {
+      "name": "HIP pinned-runtime CPU execution contracts",
+      "args": [
+        "-p",
+        "chelis-backend-hip",
+        "--test",
+        "device_entry_execution",
+        "--test",
+        "device_owner_contract",
+        "--run-ignored",
+        "only"
+      ],
+      "required": [
         "chelis-backend-hip::device_entry_execution::empty_escapes_still_complete_nonempty_intermediate_work_before_teardown",
         "chelis-backend-hip::device_entry_execution::generated_blas_preparation_materializes_both_strided_operands_in_planned_storage",
         "chelis-backend-hip::device_entry_execution::generated_entry_executes_strided_inputs_scalar_empty_and_dynamic_rank_with_owned_escapes",
@@ -163,8 +188,7 @@
         "chelis-backend-hip::device_entry_execution::generated_sparse_entries_preserve_supplied_strides_and_duplicate_update_order",
         "chelis-backend-hip::device_entry_execution::generated_sparse_mutations_cannot_flatten_indices_or_target_initialization",
         "chelis-backend-hip::device_owner_contract::checked_owner_materializes_exact_strided_bits_and_releases_only_owned_storage",
-        "chelis-backend-hip::device_owner_contract::malformed_packet_capacity_and_transfer_requests_trap_before_copy",
-        "chelis-backend-hip::device_owner_contract::published_owner_is_opaque_and_packet_observation_cannot_be_mutated"
+        "chelis-backend-hip::device_owner_contract::malformed_packet_capacity_and_transfer_requests_trap_before_copy"
       ]
     },
     {

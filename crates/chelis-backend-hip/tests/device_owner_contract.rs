@@ -41,6 +41,7 @@ fn fixture() -> &'static Fixture {
 }
 
 #[test]
+#[ignore = "requires CHELIS_RUNTIME_LIB pinned by runtime representation Phase 2"]
 fn checked_owner_materializes_exact_strided_bits_and_releases_only_owned_storage() {
     for case in [
         "logical-order",
@@ -58,6 +59,7 @@ fn checked_owner_materializes_exact_strided_bits_and_releases_only_owned_storage
 }
 
 #[test]
+#[ignore = "requires CHELIS_RUNTIME_LIB pinned by runtime representation Phase 2"]
 fn malformed_packet_capacity_and_transfer_requests_trap_before_copy() {
     for case in [
         "reserved",

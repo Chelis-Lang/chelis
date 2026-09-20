@@ -204,7 +204,7 @@ def runtime_pin(directory):
             os.environ['CHELIS_RUNTIME_LIB'] = old_library
 
 
-def selection(packet, root: Path, expected=None):
+def selection(packet, root: Path, expected=None, *, include_ignored=False):
     selected, binaries = [], []
     target = Path(os.environ.get('CARGO_TARGET_DIR', root / 'target')).resolve()
     try:
@@ -223,8 +223,11 @@ def selection(packet, root: Path, expected=None):
             for name, case in suite['testcases'].items():
                 if case['filter-match']['status'] != 'matches':
                     continue
-                if case['ignored'] is not False:
-                    raise OracleFailure(f'ignored test selected: {identity}::{name}')
+                if case['ignored'] is not include_ignored:
+                    expected_kind = 'ignored' if include_ignored else 'active'
+                    raise OracleFailure(
+                        f'non-{expected_kind} test selected: {identity}::{name}'
+                    )
                 selected.append(f'{identity}::{name}')
                 used = True
             if used:

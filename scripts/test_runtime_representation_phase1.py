@@ -429,6 +429,45 @@ class ReceiptTests(unittest.TestCase):
                 with self.subTest(change=change), self.assertRaises(oracle.OracleFailure):
                     oracle.selection(changed, root, expected)
 
+    def test_selection_accepts_only_ignored_rows_when_explicitly_requested(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary = root / 'target/debug/deps/contract'
+            binary.parent.mkdir(parents=True)
+            binary.write_bytes(b'compiled fixture')
+            packet = {
+                'rust-build-meta': {'target-directory': str(root / 'target')},
+                'rust-suites': {
+                    'p::contract': {
+                        'binary-id': 'p::contract',
+                        'binary-path': str(binary),
+                        'package-name': 'p',
+                        'cwd': str(root / 'crates/p'),
+                        'status': 'listed',
+                        'testcases': {
+                            'ignored': {
+                                'ignored': True,
+                                'filter-match': {'status': 'matches'},
+                            },
+                            'active': {
+                                'ignored': False,
+                                'filter-match': {'status': 'mismatch'},
+                            },
+                        },
+                    },
+                },
+            }
+            expected = ['p::contract::ignored']
+            self.assertEqual(
+                oracle.selection(
+                    packet,
+                    root,
+                    expected,
+                    include_ignored=True,
+                )[0],
+                expected,
+            )
+
     def test_execution_requires_one_passing_framework_case_per_selection(self):
         selected = ['p::contract::negative', 'p::contract::positive']
         valid = '<testsuites><testsuite name="p::contract"><testcase name="positive"/><testcase name="negative"/></testsuite></testsuites>'
