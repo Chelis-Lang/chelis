@@ -94,10 +94,37 @@ fn eval_first_line(program: &str) -> Result<String, String> {
         .to_string())
 }
 
+/// Return only the emitted implementation body for the authored `pick`
+/// definition. The translation unit also contains runtime support and every
+/// other authored definition, none of which may satisfy `pick`'s structural
+/// branch-presence assertions.
+fn emitted_pick_body(emitted: &str) -> &str {
+    let name = format!("{}__chelis_owned_body", common::authored_c_symbol("pick"));
+    let definition = common::host_body_definition(emitted, &name);
+    let open = definition
+        .find('{')
+        .unwrap_or_else(|| panic!("`{name}` definition has no body:\n{definition}"));
+    let mut depth = 0usize;
+    for (offset, byte) in definition[open..].bytes().enumerate() {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &definition[open + 1..open + offset];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("`{name}` definition is unterminated:\n{definition}")
+}
+
 /// f32 bit pattern of the 222.0 branch payload as it appears in emitted
 /// `chelis_fill_scalar` calls (111.0 is 0x42de0000; the broken rows assert on
 /// the DELETED branch's bits, which is 222.0's).
 const BITS_222: &str = "435e0000";
+const TAKEN_FAIL_STDERR: &str = "i64 invariant violated\n";
 
 // ===========================================================================
 // chelis#720 - the Cast arm deletes the IEEE-correct branch
@@ -201,18 +228,23 @@ fn host_lane_fail_branch_survives_and_c_comparison_is_exact() {
     let program = "def pick() -> f32 = if lt(9007199254740992i64, 9007199254740993i64) \
                    then fail(\"i64 invariant violated\") else 222.0\nout = print(pick())\n";
     let (emitted, _, stderr, ok) = build_and_run_c(program, "fold_fail").expect("C lane");
+    let pick = emitted_pick_body(&emitted);
     assert!(
-        emitted.contains("chelis_fail("),
+        pick.contains("chelis_fail("),
         "the fail branch must survive lowering (host lane, no fold)"
     );
     assert!(
-        emitted.to_lowercase().contains(BITS_222),
+        pick.to_lowercase().contains(BITS_222),
         "the 222 branch (0x435e0000) must survive lowering"
     );
     assert!(
-        !ok && stderr.contains("i64 invariant violated"),
+        !ok,
         "2^53 < 2^53 + 1 is true in exact integers; the compiled host lane \
          must take the fail branch. got ok={ok}, stderr: {stderr}"
+    );
+    assert_eq!(
+        stderr, TAKEN_FAIL_STDERR,
+        "the taken fail branch must emit only its exact payload"
     );
 }
 
@@ -230,17 +262,61 @@ fn host_lane_fail_branch_survives_when_exact_condition_is_false() {
                    then fail(\"i64 invariant violated\") else 222.0\nout = print(pick())\n";
     let (emitted, stdout, stderr, ok) =
         build_and_run_c(program, "fold_fail_false").expect("C lane");
+    let pick = emitted_pick_body(&emitted);
     assert!(
-        emitted.contains("chelis_fail("),
+        pick.contains("chelis_fail("),
         "the untaken fail branch must survive lowering (host lane, no fold)"
     );
     assert!(
-        emitted.to_lowercase().contains(BITS_222),
+        pick.to_lowercase().contains(BITS_222),
         "the 222 branch (0x435e0000) must survive lowering"
     );
     assert!(
-        ok && stderr.is_empty() && stdout.lines().next().unwrap_or("").trim() == "222.0",
+        ok && stdout.lines().next().unwrap_or("").trim() == "222.0",
         "the reversed exact comparison must take the non-failing branch; \
          got ok={ok}, stdout `{stdout}`, stderr `{stderr}`"
     );
+    assert_eq!(
+        stderr, "",
+        "the untaken fail branch must emit no stderr bytes"
+    );
+}
+
+/// Negative-parity probe for the structural controls above: unused functions
+/// deliberately supply both searched markers to the translation unit, while
+/// `pick` supplies neither. Whole-file assertions would pass for the wrong
+/// reason; body-scoped assertions must reject both decoys.
+#[test]
+fn structural_controls_ignore_unused_decoy_functions() {
+    if !c_toolchain_available() {
+        eprintln!("skipping: no host C toolchain");
+        return;
+    }
+    let program = "def decoy_fail(_flag: bool) -> f32 = fail(\"unused decoy\")\n\
+                   def decoy_bits(_flag: bool) -> f32 = 222.0\n\
+                   def pick() -> f32 = 111.0\n\
+                   out = print(pick())\n";
+    let (emitted, stdout, stderr, ok) =
+        build_and_run_c(program, "fold_fail_decoys").expect("C lane");
+    assert!(
+        emitted.contains("chelis_fail("),
+        "probe setup requires the unused fail decoy in the translation unit"
+    );
+    assert!(
+        emitted.to_lowercase().contains(BITS_222),
+        "probe setup requires the unused 222 decoy in the translation unit"
+    );
+
+    let pick = emitted_pick_body(&emitted);
+    assert!(
+        !pick.contains("chelis_fail("),
+        "the unused fail decoy must not satisfy a pick-body assertion"
+    );
+    assert!(
+        !pick.to_lowercase().contains(BITS_222),
+        "the unused 222 decoy must not satisfy a pick-body assertion"
+    );
+    assert!(ok, "the decoy probe must execute successfully: {stderr}");
+    assert_eq!(stdout.lines().next(), Some("111.0"));
+    assert_eq!(stderr, "");
 }
