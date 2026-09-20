@@ -646,6 +646,12 @@ fn bind_c_definitions(
     definitions: &BTreeMap<String, SourceDefinition>,
     enforce_digest: bool,
 ) -> Result<BTreeMap<String, String>, GeneratedHeaderError> {
+    validate_generated_include_set(source)?;
+    if preprocessor_conditional_depth(source)? != 0 {
+        return Err(GeneratedHeaderError::new(
+            "generated source has an unclosed preprocessor conditional",
+        ));
+    }
     let parsed = parse_c_function_definitions(source)?;
     let functions = &parsed.functions;
     let mut claimed = vec![false; functions.len()];
@@ -666,6 +672,13 @@ fn bind_c_definitions(
             )));
         }
         let (index, function) = enclosed[0];
+        if preprocessor_conditional_depth(&source[..function.start])? != 0
+            || preprocessor_conditional_depth(&source[..function.end])? != 0
+        {
+            return Err(GeneratedHeaderError::new(format!(
+                "generated export `{source_name}` is conditionally included"
+            )));
+        }
         claimed[index] = true;
         if function.is_static {
             return Err(GeneratedHeaderError::new(format!(
@@ -1239,8 +1252,70 @@ fn reject_export_macro_aliases<'a>(
 }
 
 fn is_preprocessor_directive(line: &str) -> bool {
+    preprocessor_directive_name(line).is_some()
+}
+
+fn preprocessor_directive_name(line: &str) -> Option<String> {
     let mut cursor = CDirectiveCursor::new(line);
-    cursor.skip_trivia().is_some() && cursor.take_directive_introducer().is_some()
+    cursor.skip_trivia()?;
+    cursor.take_directive_introducer()?;
+    cursor.skip_trivia()?;
+    cursor.identifier()
+}
+
+fn preprocessor_conditional_depth(source: &str) -> Result<usize, GeneratedHeaderError> {
+    let mut depth = 0usize;
+    for line in preprocessor_logical_lines(source) {
+        match preprocessor_directive_name(&line).as_deref() {
+            Some("if" | "ifdef" | "ifndef") => depth += 1,
+            Some("elif" | "else") if depth == 0 => {
+                return Err(GeneratedHeaderError::new(
+                    "generated source has a preprocessor branch without an opening conditional",
+                ));
+            }
+            Some("endif") => {
+                depth = depth.checked_sub(1).ok_or_else(|| {
+                    GeneratedHeaderError::new(
+                        "generated source has a preprocessor end without an opening conditional",
+                    )
+                })?;
+            }
+            _ => {}
+        }
+    }
+    Ok(depth)
+}
+
+fn validate_generated_include_set(source: &str) -> Result<(), GeneratedHeaderError> {
+    const ALLOWED_INCLUDES: &[&str] = &[
+        "\"chelis_blas.h\"",
+        "\"chelis_math.h\"",
+        "\"chelis_runtime.h\"",
+        "<assert.h>",
+        "<inttypes.h>",
+        "<math.h>",
+        "<pthread.h>",
+        "<stdio.h>",
+        "<stdlib.h>",
+        "<string.h>",
+    ];
+    for line in preprocessor_logical_lines(source) {
+        if preprocessor_directive_name(&line).as_deref() != Some("include") {
+            continue;
+        }
+        let mut cursor = CDirectiveCursor::new(&line);
+        cursor.skip_trivia();
+        cursor.take_directive_introducer();
+        cursor.skip_trivia();
+        cursor.identifier();
+        let target = cursor.remaining.trim();
+        if !ALLOWED_INCLUDES.contains(&target) {
+            return Err(GeneratedHeaderError::new(format!(
+                "generated source includes unrecognized header `{target}`"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn preprocessor_logical_lines(source: &str) -> Vec<String> {
@@ -1994,6 +2069,25 @@ mod tests {
             assert!(
                 seal_generated_artifact("demo", &source, &header).is_err(),
                 "preprocessing must not add an external definition outside the sealed export set"
+            );
+        }
+    }
+
+    #[test]
+    fn sealed_artifact_rejects_conditionally_erased_exports_and_unknown_includes() {
+        let (header, export) = raw_export(
+            "alpha",
+            "chelis_fn_616c706861",
+            "int chelis_fn_616c706861(int x);",
+            "int chelis_fn_616c706861(int x) {\n    return x + 1;\n}",
+        );
+        for source in [
+            format!("#if 0\n{export}\n#endif\n"),
+            format!("#include \"unsealed_external_helper.h\"\n{export}\n"),
+        ] {
+            assert!(
+                seal_generated_artifact("demo", &source, &header).is_err(),
+                "preprocessing must not erase a sealed export or add definitions from an unknown header"
             );
         }
     }
