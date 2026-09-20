@@ -330,7 +330,7 @@ the prose that cites it.
 
 | figure | conditions | how it was taken |
 |---|---|---|
-| 0.11-0.13s wall | any realistic change set, `--from-git` | `/usr/bin/time -p .venv/bin/python scripts/ci_change_owned.py classify-paths --from-git`, five runs. One path and fifty paths measure the same end to end |
+| 0.11-0.13s wall | any realistic change set, `--from-git` | `/usr/bin/time -p .venv/bin/python scripts/ci_change_owned.py classify-paths --from-git`, five runs. One path and fifty paths measure the same end to end in the argv form, which is the more size-sensitive of the two and showed no growth either |
 | about 13 microseconds per path | the only part that grows with the change set | classification alone, in process, with config and packages preloaded: 0.1 ms at 8 paths, 6.7 ms at 500, 57.6 ms at all 4358, against a fixed floor of roughly 50 ms interpreter plus 30 ms `cargo metadata` |
 | 0.05-0.06s wall | empty change set, which returns before `cargo metadata` | same command on an unchanged tree |
 | `cargo metadata --no-deps --locked` 0.02-0.04s | warm, repeated invocation | the stage's dominant cost; 0.24s with dependencies, which it does not ask for |
