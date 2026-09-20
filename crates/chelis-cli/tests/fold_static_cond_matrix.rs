@@ -256,49 +256,70 @@ fn emitted_pick_body(emitted: &str) -> Result<&str, String> {
     }
 }
 
-#[derive(Clone, Copy)]
-struct MarkerPresence {
-    fail_call: bool,
-    bits_222: bool,
-}
-
-fn marker_presence(tokens: &[CToken<'_>]) -> MarkerPresence {
-    let fail_call = tokens
-        .windows(2)
-        .any(|pair| pair[0].text == "chelis_fail" && pair[1].text == "(");
-    let bits_222 = tokens.iter().any(|token| {
-        let lower = token.text.to_ascii_lowercase();
-        let Some(hex) = lower.strip_prefix("0x") else {
-            return false;
-        };
-        let digits = hex.bytes().take_while(u8::is_ascii_hexdigit).count();
-        if digits == 0
-            || !hex[digits..]
-                .bytes()
-                .all(|byte| matches!(byte, b'u' | b'l'))
-        {
-            return false;
-        }
-        u64::from_str_radix(&hex[..digits], 16) == Ok(BITS_222_VALUE)
-    });
-    MarkerPresence {
-        fail_call,
-        bits_222,
+fn c_unsigned_integer(token: &str) -> Option<u64> {
+    let lower = token.to_ascii_lowercase();
+    let (digits_and_suffix, radix) = lower
+        .strip_prefix("0x")
+        .map_or((lower.as_str(), 10), |hex| (hex, 16));
+    let digits = digits_and_suffix
+        .bytes()
+        .take_while(|byte| byte.is_ascii_digit() || (radix == 16 && byte.is_ascii_hexdigit()))
+        .count();
+    if digits == 0
+        || !digits_and_suffix[digits..]
+            .bytes()
+            .all(|byte| matches!(byte, b'u' | b'l'))
+    {
+        return None;
     }
+    u64::from_str_radix(&digits_and_suffix[..digits], radix).ok()
 }
 
-fn emitted_pick_marker_presence(emitted: &str) -> Result<MarkerPresence, String> {
-    let pick = emitted_pick_body(emitted)?;
-    Ok(marker_presence(&c_tokens(pick)?))
+fn direct_call_count(tokens: &[CToken<'_>], function: &str) -> Result<usize, String> {
+    let mut count = 0usize;
+    for (index, token) in tokens.iter().enumerate() {
+        if token.text != function || tokens.get(index + 1).map(|next| next.text) != Some("(") {
+            continue;
+        }
+        let close = closing_token(tokens, index + 1, "(", ")")?;
+        let starts_statement = index == 0 || matches!(tokens[index - 1].text, ";" | "{" | "}");
+        if starts_statement && tokens.get(close + 1).map(|next| next.text) == Some(";") {
+            count += 1;
+        }
+    }
+    Ok(count)
 }
 
 #[derive(Clone, Copy)]
-struct ConditionalArmRanges {
+struct MarkerCounts {
+    fail_invocations: usize,
+    bits_222: usize,
+}
+
+fn marker_counts(tokens: &[CToken<'_>]) -> Result<MarkerCounts, String> {
+    Ok(MarkerCounts {
+        fail_invocations: direct_call_count(tokens, "chelis_fail")?,
+        bits_222: tokens
+            .iter()
+            .filter(|token| c_unsigned_integer(token.text) == Some(BITS_222_VALUE))
+            .count(),
+    })
+}
+
+fn emitted_pick_marker_counts(emitted: &str) -> Result<MarkerCounts, String> {
+    let pick = emitted_pick_body(emitted)?;
+    marker_counts(&c_tokens(pick)?)
+}
+
+#[derive(Clone, Copy)]
+struct ConditionalStructure {
+    if_token: usize,
+    condition: (usize, usize),
     then_arm: (usize, usize),
     else_arm: (usize, usize),
 }
 
-fn pick_conditional_arm_ranges(tokens: &[CToken<'_>]) -> Result<ConditionalArmRanges, String> {
+fn pick_conditional_structure(tokens: &[CToken<'_>]) -> Result<ConditionalStructure, String> {
     let mut candidates = Vec::new();
     let mut brace_depth = 0usize;
     for (index, token) in tokens.iter().enumerate() {
@@ -326,12 +347,14 @@ fn pick_conditional_arm_ranges(tokens: &[CToken<'_>]) -> Result<ConditionalArmRa
             let else_close = closing_token(tokens, else_open, "{", "}")?;
             let then_range = (then_open + 1, then_close);
             let else_range = (else_open + 1, else_close);
-            let then_markers = marker_presence(&tokens[then_range.0..then_range.1]);
-            let else_markers = marker_presence(&tokens[else_range.0..else_range.1]);
-            if (then_markers.fail_call || else_markers.fail_call)
-                && (then_markers.bits_222 || else_markers.bits_222)
+            let then_markers = marker_counts(&tokens[then_range.0..then_range.1])?;
+            let else_markers = marker_counts(&tokens[else_range.0..else_range.1])?;
+            if (then_markers.fail_invocations + else_markers.fail_invocations > 0)
+                && (then_markers.bits_222 + else_markers.bits_222 > 0)
             {
-                candidates.push(ConditionalArmRanges {
+                candidates.push(ConditionalStructure {
+                    if_token: index,
+                    condition: (index + 2, close_condition),
                     then_arm: then_range,
                     else_arm: else_range,
                 });
@@ -344,7 +367,7 @@ fn pick_conditional_arm_ranges(tokens: &[CToken<'_>]) -> Result<ConditionalArmRa
     match candidates.as_slice() {
         [candidate] => Ok(*candidate),
         [] => Err(
-            "no top-level generated `if/else` contains both the fail call and 222.0 bits"
+            "no top-level generated `if/else` contains both an invoked fail and 222.0 bits"
                 .to_string(),
         ),
         _ => Err(format!(
@@ -354,23 +377,160 @@ fn pick_conditional_arm_ranges(tokens: &[CToken<'_>]) -> Result<ConditionalArmRa
     }
 }
 
-fn pick_has_expected_branch_markers(emitted: &str) -> Result<(), String> {
+fn strip_outer_parens<'a>(mut tokens: &'a [CToken<'a>]) -> Result<&'a [CToken<'a>], String> {
+    while tokens.first().map(|token| token.text) == Some("(")
+        && tokens.last().map(|token| token.text) == Some(")")
+        && closing_token(tokens, 0, "(", ")")? == tokens.len() - 1
+    {
+        tokens = &tokens[1..tokens.len() - 1];
+    }
+    Ok(tokens)
+}
+
+fn top_level_statement_ranges(tokens: &[CToken<'_>]) -> Result<Vec<(usize, usize)>, String> {
+    let mut ranges = Vec::new();
+    let mut start = 0usize;
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut brace_depth = 0usize;
+    for (index, token) in tokens.iter().enumerate() {
+        match token.text {
+            "(" => paren_depth += 1,
+            ")" => {
+                paren_depth = paren_depth
+                    .checked_sub(1)
+                    .ok_or_else(|| format!("unmatched `)` at token {index}"))?;
+            }
+            "[" => bracket_depth += 1,
+            "]" => {
+                bracket_depth = bracket_depth
+                    .checked_sub(1)
+                    .ok_or_else(|| format!("unmatched `]` at token {index}"))?;
+            }
+            "{" => brace_depth += 1,
+            "}" => {
+                brace_depth = brace_depth
+                    .checked_sub(1)
+                    .ok_or_else(|| format!("unmatched `}}` at token {index}"))?;
+            }
+            ";" if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => {
+                if start < index {
+                    ranges.push((start, index));
+                }
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    if paren_depth != 0 || bracket_depth != 0 || brace_depth != 0 {
+        return Err("unterminated delimiter before generated `if`".to_string());
+    }
+    if start != tokens.len() {
+        return Err("unterminated statement before generated `if`".to_string());
+    }
+    Ok(ranges)
+}
+
+fn assignment_rhs<'a>(statement: &'a [CToken<'a>], target: &str) -> Option<&'a [CToken<'a>]> {
+    (statement.first().map(|token| token.text) == Some(target)
+        && statement.get(1).map(|token| token.text) == Some("="))
+    .then_some(&statement[2..])
+}
+
+fn exact_initializer(
+    statements: &[&[CToken<'_>]],
+    target: &str,
+    expected: u64,
+) -> Result<(), String> {
+    let values: Vec<_> = statements
+        .iter()
+        .filter_map(|statement| assignment_rhs(statement, target))
+        .collect();
+    let [value] = values.as_slice() else {
+        return Err(format!(
+            "expected one initializer for comparator operand `{target}`, found {}",
+            values.len()
+        ));
+    };
+    let value = strip_outer_parens(value)?;
+    if value.len() != 1 || c_unsigned_integer(value[0].text) != Some(expected) {
+        return Err(format!(
+            "comparator operand `{target}` is not initialized to exact integer {expected}"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_exact_lt_condition(
+    tokens: &[CToken<'_>],
+    structure: ConditionalStructure,
+    expected_lhs: u64,
+    expected_rhs: u64,
+) -> Result<(), String> {
+    let condition = strip_outer_parens(&tokens[structure.condition.0..structure.condition.1])?;
+    let [condition_var] = condition else {
+        return Err("generated `if` condition is not one exact temporary identifier".to_string());
+    };
+    let statement_ranges = top_level_statement_ranges(&tokens[..structure.if_token])?;
+    let statements: Vec<_> = statement_ranges
+        .iter()
+        .map(|(start, end)| &tokens[*start..*end])
+        .collect();
+    let producers: Vec<_> = statements
+        .iter()
+        .enumerate()
+        .filter_map(|(index, statement)| {
+            assignment_rhs(statement, condition_var.text).map(|rhs| (index, rhs))
+        })
+        .collect();
+    let [(producer_index, producer)] = producers.as_slice() else {
+        return Err(format!(
+            "expected one assignment producing condition `{}`, found {}",
+            condition_var.text,
+            producers.len()
+        ));
+    };
+    let producer = strip_outer_parens(producer)?;
+    let [lhs, operator, rhs] = producer else {
+        return Err(format!(
+            "condition `{}` is not one binary comparator",
+            condition_var.text
+        ));
+    };
+    if operator.text != "<" {
+        return Err(format!(
+            "condition `{}` must be produced by exact `<`, found `{}`",
+            condition_var.text, operator.text
+        ));
+    }
+    let prior_statements = &statements[..*producer_index];
+    exact_initializer(prior_statements, lhs.text, expected_lhs)?;
+    exact_initializer(prior_statements, rhs.text, expected_rhs)?;
+    Ok(())
+}
+
+fn pick_has_expected_control(
+    emitted: &str,
+    expected_lhs: u64,
+    expected_rhs: u64,
+) -> Result<(), String> {
     let pick = emitted_pick_body(emitted)?;
     let tokens = c_tokens(pick)?;
-    let ranges = pick_conditional_arm_ranges(&tokens)?;
-    let then_markers = marker_presence(&tokens[ranges.then_arm.0..ranges.then_arm.1]);
-    let else_markers = marker_presence(&tokens[ranges.else_arm.0..ranges.else_arm.1]);
-    if !then_markers.fail_call
-        || then_markers.bits_222
-        || else_markers.fail_call
-        || !else_markers.bits_222
+    let structure = pick_conditional_structure(&tokens)?;
+    validate_exact_lt_condition(&tokens, structure, expected_lhs, expected_rhs)?;
+    let then_markers = marker_counts(&tokens[structure.then_arm.0..structure.then_arm.1])?;
+    let else_markers = marker_counts(&tokens[structure.else_arm.0..structure.else_arm.1])?;
+    if then_markers.fail_invocations != 1
+        || then_markers.bits_222 != 0
+        || else_markers.fail_invocations != 0
+        || else_markers.bits_222 != 1
     {
         return Err(format!(
-            "expected fail-only `then` and 222.0-only `else`; got \
+            "expected exactly one fail invocation in `then` and one 222.0 marker in `else`; got \
              then(fail={}, bits_222={}), else(fail={}, bits_222={})",
-            then_markers.fail_call,
+            then_markers.fail_invocations,
             then_markers.bits_222,
-            else_markers.fail_call,
+            else_markers.fail_invocations,
             else_markers.bits_222
         ));
     }
@@ -381,7 +541,30 @@ fn pick_has_expected_branch_markers(emitted: &str) -> Result<(), String> {
 /// `chelis_fill_scalar` calls (111.0 is 0x42de0000; the broken rows assert on
 /// the DELETED branch's bits, which is 222.0's).
 const BITS_222_VALUE: u64 = 0x435e0000;
+const I64_EXACT_LOW: u64 = 9007199254740992;
+const I64_EXACT_HIGH: u64 = 9007199254740993;
 const TAKEN_FAIL_STDERR: &str = "i64 invariant violated\n";
+
+fn synthetic_control_c(comparator: &str, then_arm: &str, else_arm: &str) -> String {
+    let name = format!("{}__chelis_owned_body", common::authored_c_symbol("pick"));
+    format!(
+        r#"
+void {name}(void) {{
+    int64_t left;
+    left = {I64_EXACT_LOW};
+    int64_t right;
+    right = {I64_EXACT_HIGH};
+    bool condition;
+    condition = (left {comparator} right);
+    if (condition) {{
+        {then_arm}
+    }} else {{
+        {else_arm}
+    }}
+}}
+"#
+    )
+}
 
 // ===========================================================================
 // chelis#720 - the Cast arm deletes the IEEE-correct branch
@@ -407,9 +590,10 @@ fn f16_cast_condition_folds_with_f16_semantics() {
     let (emitted, stdout, _, ok) = build_and_run_c(program, "fold_f16").expect("C lane");
     assert!(ok);
     assert!(
-        emitted_pick_marker_presence(&emitted)
+        emitted_pick_marker_counts(&emitted)
             .expect("extract exact `pick` definition")
-            .bits_222,
+            .bits_222
+            == 1,
         "the 222 branch (0x435e0000) must exist in the emitted C; it was deleted"
     );
     assert!(
@@ -430,9 +614,10 @@ fn bf16_cast_condition_folds_with_bf16_semantics() {
     let (emitted, stdout, _, ok) = build_and_run_c(program, "fold_bf16").expect("C lane");
     assert!(ok);
     assert!(
-        emitted_pick_marker_presence(&emitted)
+        emitted_pick_marker_counts(&emitted)
             .expect("extract exact `pick` definition")
-            .bits_222,
+            .bits_222
+            == 1,
         "the 222 branch (0x435e0000) must exist in the emitted C; it was deleted"
     );
     assert!(
@@ -489,7 +674,7 @@ fn host_lane_fail_branch_survives_and_c_comparison_is_exact() {
     let program = "def pick() -> f32 = if lt(9007199254740992i64, 9007199254740993i64) \
                    then fail(\"i64 invariant violated\") else 222.0\nout = print(pick())\n";
     let (emitted, _, stderr, ok) = build_and_run_c(program, "fold_fail").expect("C lane");
-    pick_has_expected_branch_markers(&emitted)
+    pick_has_expected_control(&emitted, I64_EXACT_LOW, I64_EXACT_HIGH)
         .unwrap_or_else(|error| panic!("the host-lane branch structure is wrong: {error}"));
     assert!(
         !ok,
@@ -516,7 +701,7 @@ fn host_lane_fail_branch_survives_when_exact_condition_is_false() {
                    then fail(\"i64 invariant violated\") else 222.0\nout = print(pick())\n";
     let (emitted, stdout, stderr, ok) =
         build_and_run_c(program, "fold_fail_false").expect("C lane");
-    pick_has_expected_branch_markers(&emitted)
+    pick_has_expected_control(&emitted, I64_EXACT_HIGH, I64_EXACT_LOW)
         .unwrap_or_else(|error| panic!("the host-lane branch structure is wrong: {error}"));
     assert!(
         ok && stdout.lines().next().unwrap_or("").trim() == "222.0",
@@ -526,6 +711,47 @@ fn host_lane_fail_branch_survives_when_exact_condition_is_false() {
     assert_eq!(
         stderr, "",
         "the untaken fail branch must emit no stderr bytes"
+    );
+}
+
+/// Comparator negative parity for the taken control. `lte` has the same
+/// runtime result for these operands, so only structural condition validation
+/// can distinguish it from the required exact `lt`.
+#[test]
+fn structural_controls_reject_lte_in_taken_condition() {
+    if !c_toolchain_available() {
+        eprintln!("skipping: no host C toolchain");
+        return;
+    }
+    let program = "def pick() -> f32 = if lte(9007199254740992i64, 9007199254740993i64) \
+                   then fail(\"i64 invariant violated\") else 222.0\nout = print(pick())\n";
+    let (emitted, _, stderr, ok) = build_and_run_c(program, "fold_fail_lte_taken").expect("C lane");
+    assert!(!ok, "probe setup must still take its failing arm");
+    assert_eq!(stderr, TAKEN_FAIL_STDERR);
+    assert!(
+        pick_has_expected_control(&emitted, I64_EXACT_LOW, I64_EXACT_HIGH).is_err(),
+        "the structural oracle must reject `lte` even when runtime branch selection is unchanged"
+    );
+}
+
+/// Comparator negative parity for the untaken control. Reversed operands keep
+/// both `lt` and `lte` false, so runtime output alone cannot catch the mutation.
+#[test]
+fn structural_controls_reject_lte_in_untaken_condition() {
+    if !c_toolchain_available() {
+        eprintln!("skipping: no host C toolchain");
+        return;
+    }
+    let program = "def pick() -> f32 = if lte(9007199254740993i64, 9007199254740992i64) \
+                   then fail(\"i64 invariant violated\") else 222.0\nout = print(pick())\n";
+    let (emitted, stdout, stderr, ok) =
+        build_and_run_c(program, "fold_fail_lte_untaken").expect("C lane");
+    assert!(ok, "probe setup must leave its failing arm untaken");
+    assert_eq!(stdout.lines().next(), Some("222.0"));
+    assert_eq!(stderr, "");
+    assert!(
+        pick_has_expected_control(&emitted, I64_EXACT_HIGH, I64_EXACT_LOW).is_err(),
+        "the structural oracle must reject reversed-operand `lte` despite identical execution"
     );
 }
 
@@ -546,7 +772,7 @@ fn structural_controls_reject_both_markers_in_then_arm() {
     assert!(!ok, "probe setup must execute its failing `then` arm");
     assert_eq!(stderr, TAKEN_FAIL_STDERR);
     assert!(
-        pick_has_expected_branch_markers(&emitted).is_err(),
+        pick_has_expected_control(&emitted, I64_EXACT_LOW, I64_EXACT_HIGH).is_err(),
         "the structural oracle must reject fail and 222.0 co-located in the `then` arm"
     );
 }
@@ -568,8 +794,53 @@ fn structural_controls_reject_both_markers_in_else_arm() {
     assert_eq!(stdout.lines().next(), Some("111.0"));
     assert_eq!(stderr, "");
     assert!(
-        pick_has_expected_branch_markers(&emitted).is_err(),
+        pick_has_expected_control(&emitted, I64_EXACT_LOW, I64_EXACT_HIGH).is_err(),
         "the structural oracle must reject fail and 222.0 co-located in the `else` arm"
+    );
+}
+
+/// A declaration has the same identifier-plus-parenthesis prefix as a call,
+/// but it does not execute. The fail marker must require an invocation.
+#[test]
+fn structural_controls_reject_fail_prototype_instead_of_invocation() {
+    let emitted = synthetic_control_c(
+        "<",
+        "void chelis_fail(void);",
+        "unsigned value = UINT32_C(0x435e0000);",
+    );
+    assert!(
+        pick_has_expected_control(&emitted, I64_EXACT_LOW, I64_EXACT_HIGH).is_err(),
+        "a `chelis_fail` prototype must not satisfy the invocation contract"
+    );
+}
+
+/// Marker multiplicity is exact: a second fail invocation in the failing arm
+/// is not equivalent to the one required invocation.
+#[test]
+fn structural_controls_reject_duplicate_fail_invocations() {
+    let emitted = synthetic_control_c(
+        "<",
+        "chelis_fail();\n        chelis_fail();",
+        "unsigned value = UINT32_C(0x435e0000);",
+    );
+    assert!(
+        pick_has_expected_control(&emitted, I64_EXACT_LOW, I64_EXACT_HIGH).is_err(),
+        "duplicate fail invocations must be rejected"
+    );
+}
+
+/// Symmetric marker-multiplicity control for the surviving value arm.
+#[test]
+fn structural_controls_reject_duplicate_222_markers() {
+    let emitted = synthetic_control_c(
+        "<",
+        "chelis_fail();",
+        "unsigned first = UINT32_C(0x435e0000);\n\
+         unsigned second = UINT32_C(0X435E0000UL);",
+    );
+    assert!(
+        pick_has_expected_control(&emitted, I64_EXACT_LOW, I64_EXACT_HIGH).is_err(),
+        "duplicate 222.0 bit markers must be rejected independent of spelling"
     );
 }
 
@@ -590,24 +861,43 @@ void {name}
     void
 )
 {{
+    int64_t left;
+    left = 9007199254740992;
+    int64_t right;
+    right = 9007199254740993;
+    bool condition;
+    condition
+        =
+        (
+            left
+            <
+            right
+        );
     if
     (
-        1
+        condition
     )
     {{
         if (0) {{ helper(); }} else {{ helper(); }}
         /* 0x435e0000 belongs to no arm marker. */
-        chelis_fail();
+        void chelis_fail(void);
+        chelis_fail
+        (
+        );
     }}
     else
     {{
+        void chelis_fail
+        (
+            void
+        );
         const char *not_a_call = "chelis_fail(";
         unsigned value = UINT32_C(0x435e0000);
     }}
 }}
 "#
     );
-    pick_has_expected_branch_markers(&emitted).unwrap_or_else(|error| {
+    pick_has_expected_control(&emitted, I64_EXACT_LOW, I64_EXACT_HIGH).unwrap_or_else(|error| {
         panic!("exact-definition parser rejected valid structure: {error}")
     });
 }
@@ -629,25 +919,26 @@ fn structural_controls_ignore_unused_decoy_functions() {
     let (emitted, stdout, stderr, ok) =
         build_and_run_c(program, "fold_fail_decoys").expect("C lane");
     let emitted_markers =
-        marker_presence(&c_tokens(&emitted).expect("tokenize emitted translation unit"));
+        marker_counts(&c_tokens(&emitted).expect("tokenize emitted translation unit"))
+            .expect("count emitted markers");
     assert!(
-        emitted_markers.fail_call,
+        emitted_markers.fail_invocations > 0,
         "probe setup requires the unused fail decoy in the translation unit"
     );
     assert!(
-        emitted_markers.bits_222,
+        emitted_markers.bits_222 > 0,
         "probe setup requires the unused 222 decoy in the translation unit"
     );
 
     let pick = emitted_pick_body(&emitted).expect("extract exact `pick` definition");
     let pick_tokens = c_tokens(pick).expect("tokenize `pick` body");
-    let pick_markers = marker_presence(&pick_tokens);
+    let pick_markers = marker_counts(&pick_tokens).expect("count `pick` markers");
     assert!(
-        !pick_markers.fail_call,
+        pick_markers.fail_invocations == 0,
         "the unused fail decoy must not satisfy a pick-body assertion"
     );
     assert!(
-        !pick_markers.bits_222,
+        pick_markers.bits_222 == 0,
         "the unused 222 decoy must not satisfy a pick-body assertion"
     );
     assert!(ok, "the decoy probe must execute successfully: {stderr}");
