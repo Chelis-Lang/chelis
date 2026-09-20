@@ -94,36 +94,293 @@ fn eval_first_line(program: &str) -> Result<String, String> {
         .to_string())
 }
 
-/// Return only the emitted implementation body for the authored `pick`
-/// definition. The translation unit also contains runtime support and every
-/// other authored definition, none of which may satisfy `pick`'s structural
-/// branch-presence assertions.
-fn emitted_pick_body(emitted: &str) -> &str {
-    let name = format!("{}__chelis_owned_body", common::authored_c_symbol("pick"));
-    let definition = common::host_body_definition(emitted, &name);
-    let open = definition
-        .find('{')
-        .unwrap_or_else(|| panic!("`{name}` definition has no body:\n{definition}"));
-    let mut depth = 0usize;
-    for (offset, byte) in definition[open..].bytes().enumerate() {
-        match byte {
-            b'{' => depth += 1,
-            b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return &definition[open + 1..open + offset];
+#[derive(Clone, Copy)]
+struct CToken<'a> {
+    text: &'a str,
+    start: usize,
+    end: usize,
+}
+
+/// Tokenize enough C to recover generated function and statement structure.
+/// Comments, strings, and character literals are skipped so braces, marker
+/// spellings, and alternate symbol occurrences inside them cannot affect the
+/// oracle.
+fn c_tokens(source: &str) -> Result<Vec<CToken<'_>>, String> {
+    let bytes = source.as_bytes();
+    let mut tokens = Vec::new();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index].is_ascii_whitespace() {
+            index += 1;
+            continue;
+        }
+        if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'/') {
+            index += 2;
+            while index < bytes.len() && bytes[index] != b'\n' {
+                index += 1;
+            }
+            continue;
+        }
+        if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'*') {
+            let comment_start = index;
+            index += 2;
+            while index + 1 < bytes.len() && !(bytes[index] == b'*' && bytes[index + 1] == b'/') {
+                index += 1;
+            }
+            if index + 1 == bytes.len() {
+                return Err(format!(
+                    "unterminated block comment at byte {comment_start}"
+                ));
+            }
+            index += 2;
+            continue;
+        }
+        if matches!(bytes[index], b'"' | b'\'') {
+            let literal_start = index;
+            let quote = bytes[index];
+            index += 1;
+            let mut closed = false;
+            while index < bytes.len() {
+                match bytes[index] {
+                    b'\\' => {
+                        index += 1;
+                        if index < bytes.len() {
+                            let escaped =
+                                source[index..].chars().next().expect("index is in bounds");
+                            index += escaped.len_utf8();
+                        }
+                    }
+                    byte if byte == quote => {
+                        index += 1;
+                        closed = true;
+                        break;
+                    }
+                    _ => {
+                        let character = source[index..].chars().next().expect("index is in bounds");
+                        index += character.len_utf8();
+                    }
                 }
             }
-            _ => {}
+            if !closed {
+                return Err(format!("unterminated C literal at byte {literal_start}"));
+            }
+            continue;
+        }
+
+        let start = index;
+        if bytes[index].is_ascii_alphabetic() || bytes[index] == b'_' {
+            index += 1;
+            while index < bytes.len()
+                && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
+            {
+                index += 1;
+            }
+        } else if bytes[index].is_ascii_digit() {
+            index += 1;
+            while index < bytes.len()
+                && (bytes[index].is_ascii_alphanumeric() || matches!(bytes[index], b'_' | b'.'))
+            {
+                index += 1;
+            }
+        } else {
+            let character = source[index..].chars().next().expect("index is in bounds");
+            index += character.len_utf8();
+        }
+        tokens.push(CToken {
+            text: &source[start..index],
+            start,
+            end: index,
+        });
+    }
+    Ok(tokens)
+}
+
+fn closing_token(
+    tokens: &[CToken<'_>],
+    open: usize,
+    open_text: &str,
+    close_text: &str,
+) -> Result<usize, String> {
+    if tokens.get(open).map(|token| token.text) != Some(open_text) {
+        return Err(format!(
+            "expected `{open_text}` at token {open}, found `{}`",
+            tokens.get(open).map_or("<end>", |token| token.text)
+        ));
+    }
+    let mut depth = 0usize;
+    for (index, token) in tokens.iter().enumerate().skip(open) {
+        if token.text == open_text {
+            depth += 1;
+        } else if token.text == close_text {
+            depth = depth
+                .checked_sub(1)
+                .ok_or_else(|| format!("unmatched `{close_text}` at token {index}"))?;
+            if depth == 0 {
+                return Ok(index);
+            }
         }
     }
-    panic!("`{name}` definition is unterminated:\n{definition}")
+    Err(format!(
+        "unterminated `{open_text}` beginning at token {open}"
+    ))
+}
+
+/// Return only the emitted implementation body for the exact authored `pick`
+/// definition. Token matching rejects forward declarations, calls, suffixed
+/// identifiers, and lookalike occurrences in comments or literals.
+fn emitted_pick_body(emitted: &str) -> Result<&str, String> {
+    let name = format!("{}__chelis_owned_body", common::authored_c_symbol("pick"));
+    let tokens = c_tokens(emitted)?;
+    let mut bodies = Vec::new();
+    for (index, token) in tokens.iter().enumerate() {
+        if token.text != name || tokens.get(index + 1).map(|next| next.text) != Some("(") {
+            continue;
+        }
+        let close_params = closing_token(&tokens, index + 1, "(", ")")?;
+        let Some(open_body) = tokens.get(close_params + 1) else {
+            continue;
+        };
+        if open_body.text != "{" {
+            continue;
+        }
+        let close_body = closing_token(&tokens, close_params + 1, "{", "}")?;
+        bodies.push((open_body.end, tokens[close_body].start));
+    }
+    match bodies.as_slice() {
+        [(start, end)] => Ok(&emitted[*start..*end]),
+        [] => Err(format!("no definition of exact generated symbol `{name}`")),
+        _ => Err(format!(
+            "ambiguous generated C: found {} definitions of exact symbol `{name}`",
+            bodies.len()
+        )),
+    }
+}
+
+#[derive(Clone, Copy)]
+struct MarkerPresence {
+    fail_call: bool,
+    bits_222: bool,
+}
+
+fn marker_presence(tokens: &[CToken<'_>]) -> MarkerPresence {
+    let fail_call = tokens
+        .windows(2)
+        .any(|pair| pair[0].text == "chelis_fail" && pair[1].text == "(");
+    let bits_222 = tokens.iter().any(|token| {
+        let lower = token.text.to_ascii_lowercase();
+        let Some(hex) = lower.strip_prefix("0x") else {
+            return false;
+        };
+        let digits = hex.bytes().take_while(u8::is_ascii_hexdigit).count();
+        if digits == 0
+            || !hex[digits..]
+                .bytes()
+                .all(|byte| matches!(byte, b'u' | b'l'))
+        {
+            return false;
+        }
+        u64::from_str_radix(&hex[..digits], 16) == Ok(BITS_222_VALUE)
+    });
+    MarkerPresence {
+        fail_call,
+        bits_222,
+    }
+}
+
+fn emitted_pick_marker_presence(emitted: &str) -> Result<MarkerPresence, String> {
+    let pick = emitted_pick_body(emitted)?;
+    Ok(marker_presence(&c_tokens(pick)?))
+}
+
+#[derive(Clone, Copy)]
+struct ConditionalArmRanges {
+    then_arm: (usize, usize),
+    else_arm: (usize, usize),
+}
+
+fn pick_conditional_arm_ranges(tokens: &[CToken<'_>]) -> Result<ConditionalArmRanges, String> {
+    let mut candidates = Vec::new();
+    let mut brace_depth = 0usize;
+    for (index, token) in tokens.iter().enumerate() {
+        if token.text == "}" {
+            brace_depth = brace_depth
+                .checked_sub(1)
+                .ok_or_else(|| format!("unmatched `}}` at token {index} in `pick`"))?;
+        }
+        if brace_depth == 0
+            && token.text == "if"
+            && tokens.get(index + 1).map(|next| next.text) == Some("(")
+        {
+            let close_condition = closing_token(tokens, index + 1, "(", ")")?;
+            let then_open = close_condition + 1;
+            if tokens.get(then_open).map(|next| next.text) != Some("{") {
+                return Err("generated top-level `if` has no braced `then` arm".to_string());
+            }
+            let then_close = closing_token(tokens, then_open, "{", "}")?;
+            if tokens.get(then_close + 1).map(|next| next.text) != Some("else")
+                || tokens.get(then_close + 2).map(|next| next.text) != Some("{")
+            {
+                return Err("generated top-level `if` has no braced `else` arm".to_string());
+            }
+            let else_open = then_close + 2;
+            let else_close = closing_token(tokens, else_open, "{", "}")?;
+            let then_range = (then_open + 1, then_close);
+            let else_range = (else_open + 1, else_close);
+            let then_markers = marker_presence(&tokens[then_range.0..then_range.1]);
+            let else_markers = marker_presence(&tokens[else_range.0..else_range.1]);
+            if (then_markers.fail_call || else_markers.fail_call)
+                && (then_markers.bits_222 || else_markers.bits_222)
+            {
+                candidates.push(ConditionalArmRanges {
+                    then_arm: then_range,
+                    else_arm: else_range,
+                });
+            }
+        }
+        if token.text == "{" {
+            brace_depth += 1;
+        }
+    }
+    match candidates.as_slice() {
+        [candidate] => Ok(*candidate),
+        [] => Err(
+            "no top-level generated `if/else` contains both the fail call and 222.0 bits"
+                .to_string(),
+        ),
+        _ => Err(format!(
+            "ambiguous `pick` structure: {} top-level conditionals contain both markers",
+            candidates.len()
+        )),
+    }
+}
+
+fn pick_has_expected_branch_markers(emitted: &str) -> Result<(), String> {
+    let pick = emitted_pick_body(emitted)?;
+    let tokens = c_tokens(pick)?;
+    let ranges = pick_conditional_arm_ranges(&tokens)?;
+    let then_markers = marker_presence(&tokens[ranges.then_arm.0..ranges.then_arm.1]);
+    let else_markers = marker_presence(&tokens[ranges.else_arm.0..ranges.else_arm.1]);
+    if !then_markers.fail_call
+        || then_markers.bits_222
+        || else_markers.fail_call
+        || !else_markers.bits_222
+    {
+        return Err(format!(
+            "expected fail-only `then` and 222.0-only `else`; got \
+             then(fail={}, bits_222={}), else(fail={}, bits_222={})",
+            then_markers.fail_call,
+            then_markers.bits_222,
+            else_markers.fail_call,
+            else_markers.bits_222
+        ));
+    }
+    Ok(())
 }
 
 /// f32 bit pattern of the 222.0 branch payload as it appears in emitted
 /// `chelis_fill_scalar` calls (111.0 is 0x42de0000; the broken rows assert on
 /// the DELETED branch's bits, which is 222.0's).
-const BITS_222: &str = "435e0000";
+const BITS_222_VALUE: u64 = 0x435e0000;
 const TAKEN_FAIL_STDERR: &str = "i64 invariant violated\n";
 
 // ===========================================================================
@@ -150,7 +407,9 @@ fn f16_cast_condition_folds_with_f16_semantics() {
     let (emitted, stdout, _, ok) = build_and_run_c(program, "fold_f16").expect("C lane");
     assert!(ok);
     assert!(
-        emitted.to_lowercase().contains(BITS_222),
+        emitted_pick_marker_presence(&emitted)
+            .expect("extract exact `pick` definition")
+            .bits_222,
         "the 222 branch (0x435e0000) must exist in the emitted C; it was deleted"
     );
     assert!(
@@ -171,7 +430,9 @@ fn bf16_cast_condition_folds_with_bf16_semantics() {
     let (emitted, stdout, _, ok) = build_and_run_c(program, "fold_bf16").expect("C lane");
     assert!(ok);
     assert!(
-        emitted.to_lowercase().contains(BITS_222),
+        emitted_pick_marker_presence(&emitted)
+            .expect("extract exact `pick` definition")
+            .bits_222,
         "the 222 branch (0x435e0000) must exist in the emitted C; it was deleted"
     );
     assert!(
@@ -228,15 +489,8 @@ fn host_lane_fail_branch_survives_and_c_comparison_is_exact() {
     let program = "def pick() -> f32 = if lt(9007199254740992i64, 9007199254740993i64) \
                    then fail(\"i64 invariant violated\") else 222.0\nout = print(pick())\n";
     let (emitted, _, stderr, ok) = build_and_run_c(program, "fold_fail").expect("C lane");
-    let pick = emitted_pick_body(&emitted);
-    assert!(
-        pick.contains("chelis_fail("),
-        "the fail branch must survive lowering (host lane, no fold)"
-    );
-    assert!(
-        pick.to_lowercase().contains(BITS_222),
-        "the 222 branch (0x435e0000) must survive lowering"
-    );
+    pick_has_expected_branch_markers(&emitted)
+        .unwrap_or_else(|error| panic!("the host-lane branch structure is wrong: {error}"));
     assert!(
         !ok,
         "2^53 < 2^53 + 1 is true in exact integers; the compiled host lane \
@@ -262,15 +516,8 @@ fn host_lane_fail_branch_survives_when_exact_condition_is_false() {
                    then fail(\"i64 invariant violated\") else 222.0\nout = print(pick())\n";
     let (emitted, stdout, stderr, ok) =
         build_and_run_c(program, "fold_fail_false").expect("C lane");
-    let pick = emitted_pick_body(&emitted);
-    assert!(
-        pick.contains("chelis_fail("),
-        "the untaken fail branch must survive lowering (host lane, no fold)"
-    );
-    assert!(
-        pick.to_lowercase().contains(BITS_222),
-        "the 222 branch (0x435e0000) must survive lowering"
-    );
+    pick_has_expected_branch_markers(&emitted)
+        .unwrap_or_else(|error| panic!("the host-lane branch structure is wrong: {error}"));
     assert!(
         ok && stdout.lines().next().unwrap_or("").trim() == "222.0",
         "the reversed exact comparison must take the non-failing branch; \
@@ -280,6 +527,89 @@ fn host_lane_fail_branch_survives_when_exact_condition_is_false() {
         stderr, "",
         "the untaken fail branch must emit no stderr bytes"
     );
+}
+
+/// Negative parity for marker placement within `pick`: both searched markers
+/// are deliberately emitted in the failing `then` arm. A body-wide search
+/// accepts this malformed shape even though the surviving `else` arm is
+/// 111.0, not 222.0.
+#[test]
+fn structural_controls_reject_both_markers_in_then_arm() {
+    if !c_toolchain_available() {
+        eprintln!("skipping: no host C toolchain");
+        return;
+    }
+    let program = "def pick() -> f32 = if lt(9007199254740992i64, 9007199254740993i64) \
+                   then add(222.0, fail(\"i64 invariant violated\")) else 111.0\n\
+                   out = print(pick())\n";
+    let (emitted, _, stderr, ok) = build_and_run_c(program, "fold_fail_same_then").expect("C lane");
+    assert!(!ok, "probe setup must execute its failing `then` arm");
+    assert_eq!(stderr, TAKEN_FAIL_STDERR);
+    assert!(
+        pick_has_expected_branch_markers(&emitted).is_err(),
+        "the structural oracle must reject fail and 222.0 co-located in the `then` arm"
+    );
+}
+
+/// Symmetric marker-placement mutation: both markers are in the untaken
+/// `else` arm while the taken `then` arm survives as 111.0.
+#[test]
+fn structural_controls_reject_both_markers_in_else_arm() {
+    if !c_toolchain_available() {
+        eprintln!("skipping: no host C toolchain");
+        return;
+    }
+    let program = "def pick() -> f32 = if lt(9007199254740992i64, 9007199254740993i64) \
+                   then 111.0 else add(222.0, fail(\"i64 invariant violated\"))\n\
+                   out = print(pick())\n";
+    let (emitted, stdout, stderr, ok) =
+        build_and_run_c(program, "fold_fail_same_else").expect("C lane");
+    assert!(ok, "probe setup must leave its failing `else` arm untaken");
+    assert_eq!(stdout.lines().next(), Some("111.0"));
+    assert_eq!(stderr, "");
+    assert!(
+        pick_has_expected_branch_markers(&emitted).is_err(),
+        "the structural oracle must reject fail and 222.0 co-located in the `else` arm"
+    );
+}
+
+/// Extraction and tokenization control: only the exact generated definition
+/// counts. Forward declarations, symbol lookalikes, comments, literals, and a
+/// nested conditional must not create markers or confuse arm boundaries.
+#[test]
+fn structural_controls_parse_exact_pick_definition() {
+    let name = format!("{}__chelis_owned_body", common::authored_c_symbol("pick"));
+    let emitted = format!(
+        r#"
+void {name}(void);
+const char *fake = "{name}(void) {{ chelis_fail(); 0x435e0000; }}";
+void prefix_{name}(void) {{ chelis_fail(); }}
+/* void {name}(void) {{ chelis_fail(); 0x435e0000; }} */
+void {name}
+(
+    void
+)
+{{
+    if
+    (
+        1
+    )
+    {{
+        if (0) {{ helper(); }} else {{ helper(); }}
+        /* 0x435e0000 belongs to no arm marker. */
+        chelis_fail();
+    }}
+    else
+    {{
+        const char *not_a_call = "chelis_fail(";
+        unsigned value = UINT32_C(0x435e0000);
+    }}
+}}
+"#
+    );
+    pick_has_expected_branch_markers(&emitted).unwrap_or_else(|error| {
+        panic!("exact-definition parser rejected valid structure: {error}")
+    });
 }
 
 /// Negative-parity probe for the structural controls above: unused functions
@@ -298,22 +628,26 @@ fn structural_controls_ignore_unused_decoy_functions() {
                    out = print(pick())\n";
     let (emitted, stdout, stderr, ok) =
         build_and_run_c(program, "fold_fail_decoys").expect("C lane");
+    let emitted_markers =
+        marker_presence(&c_tokens(&emitted).expect("tokenize emitted translation unit"));
     assert!(
-        emitted.contains("chelis_fail("),
+        emitted_markers.fail_call,
         "probe setup requires the unused fail decoy in the translation unit"
     );
     assert!(
-        emitted.to_lowercase().contains(BITS_222),
+        emitted_markers.bits_222,
         "probe setup requires the unused 222 decoy in the translation unit"
     );
 
-    let pick = emitted_pick_body(&emitted);
+    let pick = emitted_pick_body(&emitted).expect("extract exact `pick` definition");
+    let pick_tokens = c_tokens(pick).expect("tokenize `pick` body");
+    let pick_markers = marker_presence(&pick_tokens);
     assert!(
-        !pick.contains("chelis_fail("),
+        !pick_markers.fail_call,
         "the unused fail decoy must not satisfy a pick-body assertion"
     );
     assert!(
-        !pick.to_lowercase().contains(BITS_222),
+        !pick_markers.bits_222,
         "the unused 222 decoy must not satisfy a pick-body assertion"
     );
     assert!(ok, "the decoy probe must execute successfully: {stderr}");
