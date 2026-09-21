@@ -1384,9 +1384,9 @@ it points to an admitted file inside the root.
 ### 12.3 Recursive list cursor
 
 `recursive-list-cursor` is advisory. It reports a self-recursive
-definition whose recursive call passes `skip(p, k)` in the argument
-position that `p` itself occupies in the parameter list, where `p` is a
-parameter of that definition.
+definition whose recursive call advances one of that definition's own
+parameters `p` through `skip`, in the argument position `p` itself
+occupies in the parameter list.
 
 That shape is a cursor walking a List one step at a time, and `skip`
 returns a new List rather than a view into the old one, so the walk
@@ -1396,20 +1396,46 @@ visits each element once. `Std.Io.Csv`'s row parser records the
 rewrite; the general shape is to carry a scalar accumulator in a `fold`
 and produce the result List with a single `map`.
 
+The recursive argument advances `p` in either of two spellings. It may
+be `skip(p, k)` written in the argument position itself, or it may be a
+bare name that a local binding in scope at the call binds to
+`skip(p, k)`:
+
+```chelis
+def walk(xs: List[i64], out: List[i64]) -> List[i64] = {
+  rest = skip(xs, 1i64)
+  if eq(len(xs), 0i64) then out
+  else walk(rest, append(out, index(xs, 0i64)))
+}
+```
+
+Both spellings are one defect and both are reported. Substitution is
+one level deep and purely syntactic: the bound value must itself be a
+direct `skip` of a parameter, so a name bound to another name resolves
+no further. A binding is in scope for the bindings that follow it and
+for its own block's body, and nowhere else.
+
 The rule is deliberately narrow, and reports neither of these:
 
 - `skip(xs, k)` outside a self-recursive call, including the single
   tail pass `fold(f, index(xs, 0), skip(xs, 1))` and a `skip` handed to
   a *different* function. One `skip` copies one List once.
 - a self-recursive call whose cursor reaches the recursive argument
-  through a local binding or a nested call rather than the argument
-  position itself.
+  through a call to another function, as in
+  `apply_all(merge_once(tokens, skip(tokens, 1)), rules)`.
 
-The second exclusion is an under-report, not a judgement that the shape
-is linear. A quadratic cursor written through a local binding is the
-same defect; the rule is syntactic and local, so it sees only the
-direct form. Advisory severity follows from the same limit: a
-ten-element List is not a defect, and the rule cannot know the length.
+The second exclusion is permanent rather than an accepted under-report.
+Whether that call advances a cursor depends on whether `merge_once`
+returns a suffix of its argument, and that is an interprocedural
+question no rule reading one definition's syntax can decide.
+
+The rule also stays silent wherever its own reading would be a guess: a
+definition that rebinds a cursor parameter anywhere in its body is
+skipped entirely, and a name the body binds more than once is never
+substituted. Both cases err toward silence, which is the right
+direction for an advisory rule. Advisory severity follows from a
+further limit: a ten-element List is not a defect, and the rule cannot
+know the length.
 
 `skip` is [05-OP-54]'s prefix removal. The one-argument `drop` is
 [05-OP-67]'s linearity consume and is never this rule's subject.
