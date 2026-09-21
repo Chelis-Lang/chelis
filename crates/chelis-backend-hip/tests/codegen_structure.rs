@@ -398,8 +398,53 @@ fn direct_extrema_and_adjoint_emit_bit_preserving_kernels() {
     }
     assert!(source.contains("bool select_left = isnan(av) || (!isnan(bv) && av >= bv);"));
     assert!(source.contains("bool select_left = isnan(av) || (!isnan(bv) && av <= bv);"));
+    assert!(
+        source.contains(
+            "out[i] = isnan(a[idx_a] - b[idx_b]) ? __int_as_float(0x7fc00000) : a[idx_a] - b[idx_b];"
+        ),
+        "f32 subtraction must canonicalize NaNs: {source}"
+    );
     assert!(!source.contains("fmaxf(av, bv)"), "{source}");
     assert!(!source.contains("fminf(av, bv)"), "{source}");
+}
+
+#[test]
+fn direct_and_fused_wide_float_subtraction_emit_canonical_nan_finalization() {
+    for (precision, suffix, canonical) in [
+        (Prim::F32, "f32", "__int_as_float(0x7fc00000)"),
+        (
+            Prim::F64,
+            "f64",
+            "__longlong_as_double(0x7ff8000000000000LL)",
+        ),
+    ] {
+        let ty = vec_of(4, precision);
+        let mut direct = Dag::new();
+        let a = direct.add_node(RiscOp::Load { name: "a".into() }, vec![], ty.clone(), None);
+        let b = direct.add_node(RiscOp::Load { name: "b".into() }, vec![], ty.clone(), None);
+        let out = direct.add_node(RiscOp::Sub, vec![a, b], ty.clone(), None);
+        direct.add_root(out);
+        let source = codegen_hip(&direct, &format!("canonical_sub_{suffix}"))
+            .expect("wide direct subtraction must codegen")
+            .c_source;
+        assert!(source.contains(&format!("? {canonical} :")), "{source}");
+
+        let mut fused = Dag::new();
+        let a = fused.add_node(RiscOp::Load { name: "a".into() }, vec![], ty.clone(), None);
+        let b = fused.add_node(RiscOp::Load { name: "b".into() }, vec![], ty.clone(), None);
+        let c = fused.add_node(RiscOp::Load { name: "c".into() }, vec![], ty.clone(), None);
+        let difference = fused.add_node(RiscOp::Sub, vec![a, b], ty.clone(), None);
+        let result = fused.add_node(RiscOp::MinElem, vec![difference, c], ty, None);
+        fused.add_root(result);
+        let fused = fuse(&fused);
+        let source = codegen_hip(&fused, &format!("canonical_fused_sub_{suffix}"))
+            .expect("wide fused subtraction must codegen")
+            .c_source;
+        assert!(
+            source.contains(&format!("? {canonical} :")),
+            "fused {suffix} subtraction must canonicalize each arithmetic step: {source}"
+        );
+    }
 }
 
 #[test]

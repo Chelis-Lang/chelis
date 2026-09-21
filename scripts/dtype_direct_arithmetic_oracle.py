@@ -64,11 +64,33 @@ def source_contracts() -> tuple[SourceContract, ...]:
             ),
         ),
         SourceContract(
+            "evaluator canonical arithmetic NaNs",
+            "crates/chelis-types/src/dtype_semantics.rs",
+            (
+                "fn canonicalize_arithmetic_f32(value: f32) -> f32 {",
+                "f32::from_bits(0x7fc0_0000)",
+                "fn canonicalize_arithmetic_f64(value: f64) -> f64 {",
+                "f64::from_bits(0x7ff8_0000_0000_0000)",
+                "_ => canonicalize_arithmetic_f32(value),",
+                "_ => canonicalize_arithmetic_f64(value),",
+            ),
+        ),
+        SourceContract(
             "C checked subtraction",
             "crates/chelis-backend-c/src/emit.rs",
             (
                 "chelis_int_checked_sub",
                 '"-" => "sub",',
+            ),
+        ),
+        SourceContract(
+            "C wide subtraction canonical NaNs",
+            "crates/chelis-backend-c/src/emit.rs",
+            (
+                'Prim::F32 => Some("chelis_f32_from_bits(UINT32_C(0x7fc00000))"),',
+                'Prim::F64 => Some("chelis_f64_from_bits(UINT64_C(0x7ff8000000000000))"),',
+                "isnan({raw}) ? {canonical_nan} : {raw}",
+                "_mm256_set1_ps(chelis_f32_from_bits(UINT32_C(0x7fc00000)))",
             ),
         ),
         SourceContract(
@@ -138,6 +160,23 @@ def source_contracts() -> tuple[SourceContract, ...]:
                 "chelis_u32 round_bit = 0x00001000u;",
                 "return (chelis_u16)((bits >> 16) | 0x0040u);",
                 "chelis_u32 nan_bit = mantissa == 0 ? 0u : 0x0200u;",
+            ),
+        ),
+        SourceContract(
+            "HIP wide subtraction canonical NaNs",
+            "crates/chelis-backend-hip/src/kernels.rs",
+            (
+                '("-", "float")',
+                "__int_as_float(0x7fc00000)",
+                "__longlong_as_double(0x7ff8000000000000LL)",
+                "isnan({raw}) ? {canonical} : {raw}",
+            ),
+        ),
+        SourceContract(
+            "HIP reduced-float target matrix",
+            "spec/04-type-system.md",
+            (
+                "[05-OP-40] `max_elem`/`min_elem` and their adjoints, [05-OP-41] `sub`",
             ),
         ),
         SourceContract(

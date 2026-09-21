@@ -267,6 +267,11 @@ DIRECT_ARITHMETIC_BACKEND_FINAL_FORMS = (
     (
         "crates/chelis-backend-hip/src/kernels.rs",
         "backend-element-spelling",
+        "binary_elementwise_typed",
+    ),
+    (
+        "crates/chelis-backend-hip/src/kernels.rs",
+        "backend-element-spelling",
         "fused_reduced_step_lines",
     ),
     (
@@ -2268,7 +2273,8 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
                 "test(direct_extrema_and_adjoint_emit_bit_preserving_kernels) | "
                 "test(direct_checked_signed_sub_emits_exact_always_on_trap_channel) | "
                 "test(direct_narrow_float_arithmetic_emits_f32_compute_and_raw_selection) | "
-                "test(direct_signed_integer_extrema_chains_stay_on_typed_hip_kernels)",
+                "test(direct_signed_integer_extrema_chains_stay_on_typed_hip_kernels) | "
+                "test(direct_and_fused_wide_float_subtraction_emit_canonical_nan_finalization)",
             ),
         ),
         OracleLeg(

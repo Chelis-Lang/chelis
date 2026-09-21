@@ -1103,6 +1103,7 @@ class ManifestTests(unittest.TestCase):
             and "direct_extrema_and_adjoint_emit_bit_preserving_kernels" in command
             and "direct_checked_signed_sub_emits_exact_always_on_trap_channel" in command
             and "direct_narrow_float_arithmetic_emits_f32_compute_and_raw_selection" in command
+            and "direct_and_fused_wide_float_subtraction_emit_canonical_nan_finalization" in command
             for command in commands
         ))
         self.assertTrue(any(

@@ -128,6 +128,28 @@ class SourceContractMutationTests(unittest.TestCase):
         with self.assertRaisesRegex(oracle.OracleFailure, "C checked subtraction"):
             oracle.validate_source_contracts(self.repo)
 
+    def test_evaluator_canonical_nan_removal_fails(self) -> None:
+        self.mutate(
+            "crates/chelis-types/src/dtype_semantics.rs",
+            "fn canonicalize_arithmetic_f32(value: f32) -> f32 {",
+            "fn preserve_arithmetic_f32_nan(value: f32) -> f32 {",
+        )
+        with self.assertRaisesRegex(
+            oracle.OracleFailure, "evaluator canonical arithmetic NaNs"
+        ):
+            oracle.validate_source_contracts(self.repo)
+
+    def test_c_wide_nan_canonicalization_removal_fails(self) -> None:
+        self.mutate(
+            "crates/chelis-backend-c/src/emit.rs",
+            'Prim::F32 => Some("chelis_f32_from_bits(UINT32_C(0x7fc00000))"),',
+            "Prim::F32 => None,",
+        )
+        with self.assertRaisesRegex(
+            oracle.OracleFailure, "C wide subtraction canonical NaNs"
+        ):
+            oracle.validate_source_contracts(self.repo)
+
     def test_c_first_operand_extrema_mutation_fails(self) -> None:
         self.mutate(
             "crates/chelis-backend-c/src/emit.rs",
@@ -185,6 +207,30 @@ class SourceContractMutationTests(unittest.TestCase):
             "return (chelis_u16)((sign >> 16) | 0x7c00u | 0x0200u | (mantissa >> 13));",
         )
         with self.assertRaisesRegex(oracle.OracleFailure, "HIP narrow direct arithmetic"):
+            oracle.validate_source_contracts(self.repo)
+
+    def test_hip_wide_nan_canonicalization_removal_fails(self) -> None:
+        self.mutate(
+            "crates/chelis-backend-hip/src/kernels.rs",
+            "__int_as_float(0x7fc00000)",
+            "a[idx_a] - b[idx_b]",
+            all_matches=True,
+        )
+        with self.assertRaisesRegex(
+            oracle.OracleFailure, "HIP wide subtraction canonical NaNs"
+        ):
+            oracle.validate_source_contracts(self.repo)
+
+    def test_hip_reduced_float_matrix_admission_removal_fails(self) -> None:
+        self.mutate(
+            "spec/04-type-system.md",
+            "[05-OP-40] `max_elem`/`min_elem` and their adjoints, [05-OP-41] `sub`",
+            "[05-OP-43] `Relu`/`ReluAdjoint`",
+            all_matches=True,
+        )
+        with self.assertRaisesRegex(
+            oracle.OracleFailure, "HIP reduced-float target matrix"
+        ):
             oracle.validate_source_contracts(self.repo)
 
     def test_target_authority_mutation_fails(self) -> None:

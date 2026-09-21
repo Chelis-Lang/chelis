@@ -1,1 +1,1 @@
-HIP now implements exact checked signed-integer subtraction plus f16/bf16 direct subtraction and extrema arithmetic, including canonical positive quiet-NaN finalization; the remaining Metal work is tracked by #2338.
+Direct subtraction now finalizes floating NaNs canonically in eval, compiled C, and HIP; HIP also implements exact checked signed-integer subtraction plus f16/bf16 direct subtraction and extrema arithmetic. The remaining Metal work is tracked by #2338.

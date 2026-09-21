@@ -547,6 +547,17 @@ pub fn binary_elementwise_typed(
     op: &str,
     elem_c_ty: &str,
 ) -> String {
+    let expression = match (op, elem_c_ty) {
+        ("-", "float") => {
+            "isnan(a[idx_a] - b[idx_b]) ? __int_as_float(0x7fc00000) : a[idx_a] - b[idx_b]"
+                .to_string()
+        }
+        ("-", "double") => {
+            "isnan(a[idx_a] - b[idx_b]) ? __longlong_as_double(0x7ff8000000000000LL) : a[idx_a] - b[idx_b]"
+                .to_string()
+        }
+        _ => format!("a[idx_a] {op} b[idx_b]"),
+    };
     format!(
         "{DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}(
@@ -562,7 +573,7 @@ extern \"C\" __global__ void {kernel_name}(
   chelis_flat_to_indices(i, out_sh, out_ndim, indices);
   chelis_device_metadata idx_a = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
   chelis_device_metadata idx_b = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, b_s, b_ndim), b_size, 1);
-  out[i] = a[idx_a] {op} b[idx_b];
+  out[i] = {expression};
 }}
 ",
         a_strides = stride_params(rank, "a"),
@@ -1741,7 +1752,12 @@ fn fused_step_lines(
             FusedStepOp::Sub => {
                 let a = resolve_fused_input(&step.input_indices[0]);
                 let b = resolve_fused_input(&step.input_indices[1]);
-                format!("{a} - {b}")
+                let canonical = match kind {
+                    ElemKind::F32 => "__int_as_float(0x7fc00000)",
+                    ElemKind::F64 => "__longlong_as_double(0x7ff8000000000000LL)",
+                };
+                let raw = format!("({a} - {b})");
+                format!("isnan({raw}) ? {canonical} : {raw}")
             }
             FusedStepOp::Mul => {
                 let a = resolve_fused_input(&step.input_indices[0]);
