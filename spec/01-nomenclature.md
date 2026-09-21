@@ -1481,4 +1481,4 @@ the blocking registry:
 - `crates/chelis-lint/`: lint implementation.
 - `docs/archive/snapshots/ecosystem_naming_snapshot.md`: empirical snapshot of the
   May 2026 ecosystem state and the cleanup inventory.
-- `AGENTS.md` / `CLAUDE.md` Surf Style Guide: Surf code-style guidance.
+- the `example-corpus` skill (`agent-skills/example-corpus/SKILL.md`) §Writing Surf: Surf code-style guidance.

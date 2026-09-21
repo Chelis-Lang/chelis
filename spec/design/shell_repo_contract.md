@@ -4,7 +4,7 @@
 [`chelis_canonical_reference.md`](chelis_canonical_reference.md) §Shell
 Ecosystem table (`nautilus`, `coral`, `shoals`, `octant`, `school`, `darwin`,
 `hull`, `hydrostatic`, `beacon`, and any future shell). Made binding by `AGENTS.md`
-§Downstream Shell Contract. Changes to this contract land in the monorepo
+§Pointers, Downstream shells. Changes to this contract land in the monorepo
 first and propagate to every shell per §10.
 
 **Key words** MUST / SHOULD / MAY are RFC-2119. Conditional requirements
@@ -400,7 +400,7 @@ toolchain selected explicitly, then audit every item below:
 - `.claude/skills` and `.codex/skills` are **symlinks** to `agent-skills/`;
   `.claude/commands/` and `.codex/commands/` wrappers stay mirrored; the
   `red-team` alias stays wired to `redteam-exec` (per monorepo `AGENTS.md`
-  §Shared Local Skills). `conform sync` wires the skill-dir symlinks.
+  §Pointers, Shared skills). `conform sync` wires the skill-dir symlinks.
 - Because the set is materialized from the pinned toolchain, it is always in
   lockstep with the monorepo at the shell's pin after applying the shell's
   declared additions, whole-skill exclusions, and section selectors — a shell

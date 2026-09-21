@@ -276,9 +276,13 @@ make your change pass is never the fix.
 - Published C ABI is configuration-invariant and every declaration is attributable: no
   preprocessor-varying public declarations, no `#line` directives, every published
   header reachable from a declared root. A built-in arithmetic type, bare `int`
-  included, makes a callable `numeric-op`; an arithmetic spelling the census does not
-  recognize is a build failure, and so is an unclassified new `chelis_types::Prim`
-  variant.
+  included, makes a callable `numeric-op`; names and parameter-name heuristics never
+  turn a callable into plumbing; extents, allocation sizes, indices, and dtype
+  selectors are numeric operations, and raw dtype selectors are forbidden. A
+  conditional macro definition taints its whole connected local-include component.
+  An arithmetic spelling the census does not recognize is a build failure, and so is
+  an unclassified new `chelis_types::Prim` variant. PR #956's negative controls lock
+  these rules; weakening one changes this contract and those controls together.
 - An exported stdlib `def` declares its signature via `defsig`, or stops being exported.
 
 ### Public-Surface Change Rule
@@ -519,9 +523,9 @@ AST contract. `spec/02-surf-syntax.md` §0.1 is the authority.
 ## The Chelis-Lang Repositories
 
 One line each, as of 2026-09-21; `gh repo list Chelis-Lang` is the live set, and the
-conformance `REGISTRY` in `crates/chelis-conformance` is the authority on which are
-shells. Every shell is a reef package layered on the compiler-bundled `chelis-std`
-runtime and bound by the shell contract.
+conformance `REGISTRY` in `crates/chelis-conformance` is the authority on which shells
+the conformance tooling binds. Every shell is a reef package layered on the
+compiler-bundled `chelis-std` runtime and bound by the shell contract.
 
 | Repository | Contains |
 |---|---|
@@ -537,7 +541,7 @@ runtime and bound by the shell contract.
 | `whale` | Shell: reusable betting models. |
 | `hull` | Shell: the executable language specification, a self-hosted reference checker and evaluator differential-tested against the compiler. |
 | `hello-chelis` | Example programs; the smallest conforming shell. |
-| `beacon` | Shell, early: sound bound-propagation verification over lowered RISC DAGs. |
+| `beacon` | Shell, early and not yet registered: sound bound-propagation verification over lowered RISC DAGs. |
 | `LaCaDiLE` | Lean development of the typing rules: tensor derivatives, ownership, randomness and resource protocols. Supports the soundness work; does not certify the compiler. |
 | `buoy` | Rust tracer from normative requirement atoms to evidence, models, proofs, and implementation sites. |
 | `sonar` | Neural-network verification in C Note: reconnaissance, corpus, decision briefs. |

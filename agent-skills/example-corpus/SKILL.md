@@ -41,6 +41,9 @@ These rules apply to every `.ch` you write in this repository: examples,
 fixtures, and probes alike. The authority is `spec/02-surf-syntax.md` §0.1
 (canonical forms and the bidirectional contract); §P10-P12 define the wider
 set of input spellings the parser still accepts but the formatter rewrites.
+`spec/01-nomenclature.md` is the rule spec behind `chelis lint`, and
+`crates/chelis-lint/src/rules/` is its executable enforcement; the canonical
+formatter is `chelis_surf::format` for `.ch` and `chelis_deep::printer` for `.dp`.
 Run `chelis fmt --inplace <file>` and `chelis lint --check` before pushing.
 
 Spellings that are hard errors, not style:
