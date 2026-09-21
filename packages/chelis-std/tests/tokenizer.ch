@@ -124,10 +124,16 @@ def test_try_load_tokenizer_keeps_the_last_duplicate_vocab_key() -> unit ! { Tes
     | None => fail("a duplicate vocab key is well-formed JSON and must load")
   }
 }
-def test_try_load_tokenizer_keeps_the_first_rank_for_a_duplicate_merge() -> unit ! { Test, IO } = {
-  path = written("/tmp/chelis_std_test_tokenizer_dupmerge.json", bpe_json("{\"<unk>\":0,\"a\":1,\"b\":2,\"ab\":3}", "[\"a b\",\"a b\"]"))
+-- [05-OP-56]: later entries win an equal-key conflict, so the duplicate's
+-- SECOND rank is the one that survives. One distinct key cannot show that --
+-- the merge applies whichever rank won -- so a third merge is ranked between
+-- the duplicate's two occurrences and the two orders disagree on the result.
+-- "b c" at rank 1 beats "a b" at rank 2 and yields ["a", "bc"] = 1,5; had the
+-- first occurrence won, "a b" at rank 0 would beat it and yield ["ab", "c"].
+def test_try_load_tokenizer_keeps_the_last_rank_for_a_duplicate_merge() -> unit ! { Test, IO } = {
+  path = written("/tmp/chelis_std_test_tokenizer_dupmerge.json", bpe_json("{\"<unk>\":0,\"a\":1,\"b\":2,\"c\":3,\"ab\":4,\"bc\":5}", "[\"a b\",\"b c\",\"a b\"]"))
   match try_load_tokenizer(path) with {
-    | Some(tok) => assert_eq(encode_csv(tok, "ab"), "3", "a repeated merge line still merges once")
+    | Some(tok) => assert_eq(encode_csv(tok, "abc"), "1,5", "the duplicate merge takes its later rank, so the rank-1 merge runs first")
     | None => fail("a duplicate merge line is well-formed and must load")
   }
 }
