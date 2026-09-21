@@ -156,6 +156,30 @@ fn delayed_selection_source(form: &str, select_second: bool, selected_agrees: bo
     )
 }
 
+fn composed_delayed_selection_source(select_second: bool, selected_agrees: bool) -> String {
+    let chosen = if selected_agrees {
+        THREE_BY_FOUR
+    } else {
+        TWO_BY_FOUR
+    };
+    let unchosen = if selected_agrees {
+        TWO_BY_FOUR
+    } else {
+        THREE_BY_FOUR
+    };
+    let (x, y) = if select_second {
+        (unchosen, chosen)
+    } else {
+        (chosen, unchosen)
+    };
+    format!(
+        "def decide(flag: bool) -> bool ! {{ IO }} = {{\n _ = print(\"selector-ran\")\n flag\n}}\n\
+         def produce[n](x: tensor[n, 4, f32], summed: bool) -> tensor[*, f32] ! {{ IO }} = if summed then {{\n _ = print(\"cumsum-producer\")\n cumsum(diagonal(x, 0i32, 1i32), 0i32)\n }} else {{\n _ = print(\"diagonal-producer\")\n diagonal(x, 0i32, 1i32)\n }}\n\
+         def choose[n, m](x: tensor[n, 4, f32], y: tensor[m, 4, f32], second: bool) -> tensor[3, f32] ! {{ IO }} = {{\n first = produce(x, false)\n saved = first\n first = produce(y, true)\n selected = if decide(second) then {{ _ = drop(saved)\n first }} else {{ _ = drop(first)\n saved }}\n alias = selected\n _ = print(\"selection-after\")\n alias\n}}\n\
+         out = choose(to_tensor({x}), to_tensor({y}), {select_second})\n"
+    )
+}
+
 fn assert_delayed_selection(native: bool) {
     for form in ["if", "match"] {
         for select_second in [false, true] {
@@ -198,6 +222,35 @@ fn assert_delayed_selection(native: bool) {
                         "{output}"
                     );
                 }
+            }
+        }
+    }
+    for select_second in [false, true] {
+        for selected_agrees in [true, false] {
+            let source = composed_delayed_selection_source(select_second, selected_agrees);
+            let (ok, output) = run(&source, native);
+            assert_eq!(ok, selected_agrees, "{source}\n{output}");
+            for effect in ["diagonal-producer", "cumsum-producer", "selector-ran"] {
+                assert_eq!(output.matches(effect).count(), 1, "{effect}: {output}");
+            }
+            assert_eq!(
+                output.matches("selection-after").count(),
+                usize::from(selected_agrees),
+                "{output}"
+            );
+            let selected_op = if select_second { "cumsum" } else { "diagonal" };
+            if selected_agrees {
+                let values = if select_second {
+                    "[1.0, 7.0, 18.0]"
+                } else {
+                    "[1.0, 6.0, 11.0]"
+                };
+                assert!(
+                    output.contains(&format!("out = tensor(shape=[3], data={values})")),
+                    "{output}"
+                );
+            } else {
+                assert_claim(&output, selected_op, 2);
             }
         }
     }
