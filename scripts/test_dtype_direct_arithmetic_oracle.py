@@ -159,6 +159,16 @@ class SourceContractMutationTests(unittest.TestCase):
         with self.assertRaisesRegex(oracle.OracleFailure, "HIP stored-bit extrema"):
             oracle.validate_source_contracts(self.repo)
 
+    def test_hip_ties_away_rounding_restoration_fails(self) -> None:
+        path = "crates/chelis-backend-hip/src/kernels.rs"
+        target = self.repo / path
+        target.write_text(
+            target.read_text()
+            + "\n// obsolete: chelis_u32 round_bit = 0x00008000u;\n"
+        )
+        with self.assertRaisesRegex(oracle.OracleFailure, "HIP narrow direct arithmetic"):
+            oracle.validate_source_contracts(self.repo)
+
     def test_target_authority_mutation_fails(self) -> None:
         self.mutate(
             "crates/chelis-compiler-api/src/compiler.rs",

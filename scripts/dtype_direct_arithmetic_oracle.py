@@ -128,6 +128,12 @@ def source_contracts() -> tuple[SourceContract, ...]:
                 "pub fn binary_extrema_reduced(",
                 "pub fn extrema_adjoint_reduced(",
                 "pub fn fused_elementwise_reduced(",
+                "chelis_round_shift_right_even(mantissa, shift)",
+                "0x00007fffu + ((bits >> 16) & 1u)",
+            ),
+            (
+                "chelis_u32 round_bit = 0x00008000u;",
+                "chelis_u32 round_bit = 0x00001000u;",
             ),
         ),
         SourceContract(
