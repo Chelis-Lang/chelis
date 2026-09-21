@@ -1112,7 +1112,7 @@ fn emitted_guards(c_source: &str) -> Vec<(String, String, String, String)> {
             .strip_prefix("__chelis_check_host_result_claims(__chelis_result_claims, ")
             .and_then(|rest| rest.split_once(", ").map(|(target, _)| target))
             .or_else(|| {
-                line.ends_with(", __chelis_result_claims);")
+                (line.contains(", __chelis_result_claims, &") && line.ends_with(");"))
                     .then(|| line.split_once(" = "))
                     .flatten()
                     .and_then(|(lhs, _)| lhs.split_whitespace().last())
@@ -1647,7 +1647,7 @@ fn the_census_reader_finds_the_guard_a_block_tail_moved() {
         vec![("d".into(), "__result".into(), "0".into(), "3".into())],
         "the caller's declaration remains visible when its frame is forwarded"
     );
-    let no_forwarding = call_source.replace(", __chelis_result_claims);", ", NULL);");
+    let no_forwarding = call_source.replace(", __chelis_result_claims, &", ", NULL, &");
     assert!(
         emitted_guards(&no_forwarding).is_empty(),
         "an unused frame declaration must not certify a forwarded guard"

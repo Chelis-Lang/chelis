@@ -2130,6 +2130,98 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             EXECUTES,
             "cli_result_pure_helper.c_inherited_result_claim_enters_pure_helpers",
         ),
+        # #1771/#1945 final callback and delayed-selection matrix. Eval
+        # already transported the caller's claim through named/literal
+        # callbacks and isolated repeated invocations; generated C silently
+        # accepted each denying claim. Both lanes silently accepted a denying
+        # identity-callback result after evaluating its actual, and silently
+        # accepted denying claims after selecting an already-produced value.
+        # Selection before production and rank-zero/no-claim cases were
+        # conforming controls on the baseline and remain explicit receipts.
+        _row(
+            "return.callback.inherited.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_result_callable_selection.eval_inherited_claim_reaches_named_and_literal_callbacks",
+        ),
+        _row(
+            "return.callback.inherited.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_result_callable_selection.c_inherited_claim_reaches_named_and_literal_callbacks",
+        ),
+        _row(
+            "return.callback.identity.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_result_callable_selection.eval_identity_callback_checks_claim_after_actual_preparation",
+        ),
+        _row(
+            "return.callback.identity.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_result_callable_selection.c_identity_callback_checks_claim_after_actual_preparation",
+        ),
+        _row(
+            "return.callback.shared.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_result_callable_selection.eval_shared_callback_claims_are_invocation_local",
+        ),
+        _row(
+            "return.callback.shared.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_result_callable_selection.c_shared_callback_claims_are_invocation_local",
+        ),
+        _row(
+            "return.selected.delayed.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_result_callable_selection.eval_delayed_selection_guards_only_the_selected_value",
+        ),
+        _row(
+            "return.selected.delayed.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_result_callable_selection.c_delayed_selection_guards_only_the_selected_value",
+        ),
+        _row(
+            "return.selected.before_production.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_result_callable_selection.eval_selection_before_production_forwards_only_to_the_selected_arm",
+        ),
+        _row(
+            "return.selected.before_production.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_result_callable_selection.c_selection_before_production_forwards_only_to_the_selected_arm",
+        ),
+        _row(
+            "return.selected.tuple_projection.eval",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_result_callable_selection.eval_tuple_projection_retains_only_the_selected_producer",
+        ),
+        _row(
+            "return.callback.aggregate_interface.eval",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_result_callable_selection.eval_aggregate_interface_ingress_stamps_each_tensor_field_as_load",
+        ),
+        _row(
+            "return.callback.rank_zero.no_claim.eval_c",
+            EXECUTES,
+            EXECUTES,
+            "cli_result_callable_selection.rank_zero_identity_without_a_result_claim_executes_both_lanes",
+        ),
+        _row(
+            "return.callback.rank_zero.host_effect.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_result_callable_selection.c_rank_zero_host_identity_without_a_claim_preserves_value_and_effects",
+        ),
         # chelis#1923 and chelis#1791: pipe application semantics.
         # `spec/02-surf-syntax.md` section 0.1 says a pipe IS first-argument
         # insertion, and every consumer that met a `pipe` node reconstructed

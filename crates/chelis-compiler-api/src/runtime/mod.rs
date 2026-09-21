@@ -17,6 +17,7 @@ mod csv;
 mod eval;
 mod frame;
 pub use frame::Frame;
+use frame::ResultProducer;
 mod host_ops;
 mod invariant;
 mod named_axis;
@@ -612,6 +613,7 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
 
     let mut ctx = EvalContext {
         bindings: Frame::new(),
+        result_producer: None,
         binding_types: UnordMap::new(),
         precision_bindings: UnordMap::new(),
         declaration_values: UnordMap::new(),
@@ -1022,6 +1024,10 @@ fn descend_manifest_path(value: RuntimeValue, step: RootPathStep) -> Option<Runt
 struct EvalContext<'a> {
     /// Only lexical values; successful declarations never enter this frame.
     bindings: Frame,
+    /// Canonical producer of the tensor returned by the expression currently
+    /// completing. Expression entry clears it, and only a producer or
+    /// transparent value route may set it.
+    result_producer: Option<ResultProducer>,
     /// Declared/static Deep type expression for names in `bindings`,
     /// maintained in lockstep with `bindings` (saved/swapped/restored at
     /// every frame boundary). Every locally-bound name gets a key here:
