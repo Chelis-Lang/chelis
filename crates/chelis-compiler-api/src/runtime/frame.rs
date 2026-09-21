@@ -21,6 +21,12 @@ use chelis_unord::UnordMap;
 
 use super::RuntimeValue;
 
+#[derive(Debug, Clone)]
+struct Binding {
+    value: RuntimeValue,
+    result_producer: Option<String>,
+}
+
 thread_local! {
     /// Binding entries deep-copied by frame clones on this thread since the
     /// last reset. Counted at the copy, never estimated.
@@ -55,7 +61,7 @@ pub(crate) fn reset_frame_value_copies() {
 #[derive(Debug, Default)]
 pub struct Frame {
     /// Bindings made in this scope since it was last captured.
-    locals: UnordMap<String, RuntimeValue>,
+    locals: UnordMap<String, Binding>,
     /// Every scope captured below this one, innermost first. Shared with the
     /// closures that captured it and never mutated after freezing.
     captured: Option<Arc<Frame>>,
@@ -81,8 +87,20 @@ impl Frame {
     pub(crate) fn get(&self, name: &str) -> Option<&RuntimeValue> {
         let mut frame = self;
         loop {
-            if let Some(value) = frame.locals.get(name) {
-                return Some(value);
+            if let Some(binding) = frame.locals.get(name) {
+                return Some(&binding.value);
+            }
+            frame = frame.captured.as_deref()?;
+        }
+    }
+
+    /// Producer provenance retained beside a lexical value. It is private
+    /// execution metadata, not part of the value or its public representation.
+    pub(crate) fn result_producer(&self, name: &str) -> Option<&str> {
+        let mut frame = self;
+        loop {
+            if let Some(binding) = frame.locals.get(name) {
+                return binding.result_producer.as_deref();
             }
             frame = frame.captured.as_deref()?;
         }
@@ -95,7 +113,27 @@ impl Frame {
     /// Bind `name` in the innermost scope, shadowing any captured binding.
     /// Returns the value this scope previously bound to `name`, if any.
     pub(crate) fn insert(&mut self, name: String, value: RuntimeValue) -> Option<RuntimeValue> {
-        self.locals.insert(name, value)
+        self.insert_with_result_producer(name, value, None)
+    }
+
+    /// Bind a value and the operation that produced this exact tensor result.
+    /// Shadowing replaces both together, so an alias captured before a later
+    /// same-named binding retains its original producer.
+    pub(crate) fn insert_with_result_producer(
+        &mut self,
+        name: String,
+        value: RuntimeValue,
+        result_producer: Option<String>,
+    ) -> Option<RuntimeValue> {
+        self.locals
+            .insert(
+                name,
+                Binding {
+                    value,
+                    result_producer,
+                },
+            )
+            .map(|binding| binding.value)
     }
 
     /// Whether no scope binds anything. Test-only receipt support.
@@ -128,8 +166,8 @@ impl Frame {
         let mut merged: BTreeMap<&String, &RuntimeValue> = BTreeMap::new();
         // Outermost first, so an inner scope's binding overwrites an outer one.
         for frame in chain.into_iter().rev() {
-            for (name, value) in frame.locals.to_sorted() {
-                merged.insert(name, value);
+            for (name, binding) in frame.locals.to_sorted() {
+                merged.insert(name, &binding.value);
             }
         }
         merged.into_iter().collect()
@@ -241,6 +279,20 @@ mod tests {
         frame.insert("w".to_string(), int(9));
         let _copied = frame.clone();
         assert_eq!(frame_value_copies(), 1, "only the new local is copied");
+    }
+
+    #[test]
+    fn captured_alias_producer_survives_later_same_name_shadowing() {
+        let mut frame = Frame::new();
+        frame.insert_with_result_producer(
+            "value".to_string(),
+            int(1),
+            Some("diagonal".to_string()),
+        );
+        let captured = frame.capture();
+        frame.insert_with_result_producer("value".to_string(), int(2), Some("cumsum".to_string()));
+        assert_eq!(captured.result_producer("value"), Some("diagonal"));
+        assert_eq!(frame.result_producer("value"), Some("cumsum"));
     }
 
     impl Frame {

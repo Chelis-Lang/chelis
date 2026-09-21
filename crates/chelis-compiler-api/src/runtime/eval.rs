@@ -853,6 +853,13 @@ impl<'a> EvalContext<'a> {
                 "host runtime: kernel `{name}` lowering produced no roots"
             ));
         }
+        let result_producer = (roots.len() == 1)
+            .then(|| kernel.dag.get(roots[0]))
+            .flatten()
+            .and_then(|node| match &node.op {
+                RiscOp::Load { .. } | RiscOp::Store { .. } => None,
+                _ => Some(chelis_ir::grad::risc_op_name(&node.op).to_string()),
+            });
         let result_claims = inherited_claims
             .iter()
             .map(|claim| {
@@ -902,7 +909,9 @@ impl<'a> EvalContext<'a> {
                 },
             );
             self.random_counter = context.state().counter;
-            return pack_dag_roots(&kernel.dag, &roots, &result?, name);
+            let value = pack_dag_roots(&kernel.dag, &roots, &result?, name)?;
+            self.result_producer = result_producer;
+            return Ok(value);
         }
         let (values, executed_counter) = chelis_ir::eval::eval_tensor_roots_with_result_claims(
             &kernel.dag,
@@ -927,7 +936,9 @@ impl<'a> EvalContext<'a> {
                 kernel.next_random_counter.unwrap_or(executed_counter)
             };
         }
-        pack_dag_roots(&kernel.dag, &roots, &values, name)
+        let value = pack_dag_roots(&kernel.dag, &roots, &values, name)?;
+        self.result_producer = result_producer;
+        Ok(value)
     }
 
     fn apply_staged_host_plan(
@@ -1103,6 +1114,19 @@ impl<'a> EvalContext<'a> {
     }
 
     pub(super) fn eval_expr(&mut self, expr: &Expr) -> Result<RuntimeValue, String> {
+        // Provenance describes this expression's result, never whichever
+        // tensor an argument, selector, or preceding effect happened to
+        // evaluate last. Recursive calls establish their own result and the
+        // outer form either replaces it or transparently returns it.
+        self.result_producer = None;
+        let value = self.eval_expr_inner(expr)?;
+        if !matches!(value, RuntimeValue::Tensor(_)) {
+            self.result_producer = None;
+        }
+        Ok(value)
+    }
+
+    fn eval_expr_inner(&mut self, expr: &Expr) -> Result<RuntimeValue, String> {
         // chelis#914: cooperative cancellation. Every node visit passes
         // through here — including each element of a fold/map, which reach
         // `eval_expr` via `apply_resolved_callable_with_arg_types` — so this
@@ -1502,8 +1526,9 @@ impl<'a> EvalContext<'a> {
             .first()
             .and_then(symbol_name)
             .ok_or_else(|| "var missing name".to_string())?;
-        if let Some(value) = self.bindings.get(name) {
-            return Ok(value.clone());
+        if let Some(value) = self.bindings.get(name).cloned() {
+            self.result_producer = self.bindings.result_producer(name).map(str::to_string);
+            return Ok(value);
         }
         if let Some(value) = self.tensor_bindings.get(name) {
             return Ok(RuntimeValue::Tensor(value.clone()));
@@ -1761,6 +1786,8 @@ impl<'a> EvalContext<'a> {
         if let Some(name) = self.active_builtin_name(func) {
             let value =
                 self.eval_builtin(name, &args, &arg_type_exprs, result_type_expr.as_ref())?;
+            self.result_producer =
+                matches!(value, RuntimeValue::Tensor(_)).then(|| name.to_string());
             for claim in claims {
                 claim.verdict(&value, name)?;
             }
@@ -1901,7 +1928,13 @@ impl<'a> EvalContext<'a> {
             | ExprCarrier::MetadataExpression(_)
             | ExprCarrier::MalformedLegacyList(_) => {}
         }
-        self.eval_expr(expr)
+        let value = self.eval_expr(expr)?;
+        if let Some(producer) = self.result_producer.clone() {
+            for claim in claims {
+                claim.verdict(&value, &producer)?;
+            }
+        }
+        Ok(value)
     }
 
     /// [`Self::eval_let`], forwarding a declared-result claim to the binding
@@ -1980,8 +2013,10 @@ impl<'a> EvalContext<'a> {
                 } else {
                     self.eval_expr(&bind_kids[index + 1])?
                 };
+                let result_producer = self.result_producer.take();
                 self.binding_types.insert(name.to_string(), static_ty);
-                self.bindings.insert(name.to_string(), value);
+                self.bindings
+                    .insert_with_result_producer(name.to_string(), value, result_producer);
                 index += 2;
             }
             if guarded.is_some() {
@@ -2095,6 +2130,7 @@ impl<'a> EvalContext<'a> {
         for claim in inherited_result_claims {
             claim.verdict(&value, producer_operation)?;
         }
+        self.result_producer = Some(producer_operation.to_string());
         Ok(value)
     }
 
@@ -2167,8 +2203,10 @@ impl<'a> EvalContext<'a> {
                     )?,
                     None => self.eval_expr(&bind_kids[index + 1])?,
                 };
+                let result_producer = self.result_producer.take();
                 self.binding_types.insert(name.to_string(), static_ty);
-                self.bindings.insert(name.to_string(), value);
+                self.bindings
+                    .insert_with_result_producer(name.to_string(), value, result_producer);
                 index += 2;
             }
             self.eval_expr(kids.get(1).ok_or_else(|| "let missing body".to_string())?)
@@ -4588,6 +4626,7 @@ mod legacy_capture_order_tests {
         register_declared_signatures(checked.exprs(), &mut signatures);
         EvalContext {
             bindings: Frame::new(),
+            result_producer: None,
             binding_types: UnordMap::new(),
             precision_bindings: UnordMap::new(),
             declaration_values: UnordMap::new(),
