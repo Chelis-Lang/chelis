@@ -7,6 +7,39 @@ document that owns the detail, and put the explanation in that document, not her
 `CLAUDE.md` is a symlink to this file so Claude-style and Codex-style entry points do
 not drift.
 
+## What Chelis Is
+
+Chelis is a functional language for AI research, built for a workflow where a coding
+agent is the primary author and a human is the supervisor, and where the programs are
+themselves AI systems: models, training pipelines, learned functions.
+`spec/00-context.md` and `spec/design/chelis_canonical_reference.md` own the full
+statement; their specifics may lag, their intent does not. When a tradeoff appears,
+these tenets decide it, in this order:
+
+1. **Unambiguity over ergonomics.** The author is an agent, so the friction a human
+   feels spelling out every type, effect, dtype, and dimension is not a cost worth
+   trading for a reading the compiler has to guess at. Explicit spelling wins over
+   contextual inference wherever the spec leaves a choice.
+2. **Explicit over implicit.** No implicit broadcasting (`expand` only), no implicit
+   precision promotion, no implicit currying or partial application, no silent
+   narrowing at ingress, no hidden effects. Where the compiler would have to infer an
+   intent it cannot determine uniquely, it rejects.
+3. **Machine generation first.** Deep is the canonical, machine-facing representation;
+   Surf is additive sugar over it, and the two are bound by executable round-trip laws.
+   A convenience that exists only for a human typist is not a reason to add syntax.
+4. **Composition over special cases, and a small language with a big library.** The
+   compiler knows only the closed RISC primitive set and its derived built-ins;
+   everything else is a library, and a new capability composes existing primitives
+   before it earns a new one.
+5. **Inference over annotation where inference is total.** The checker fills in what it
+   can determine uniquely, so intermediates carry no ascription, and the author spells
+   everything it cannot.
+6. **Determinism.** For fixed program text, compiler build, target, and declared inputs,
+   every check, evaluation, and build result is a function of those inputs; feedback
+   that varies between identical runs is a defect.
+7. **The compiler is training signal.** Structured diagnostics, fitness scores, and
+   repair suggestions are product surface, because an agent repairs from them.
+
 ## Quality Standards
 
 ### Spec-First Development
@@ -37,10 +70,18 @@ It carries the brief shape, the worktree-reuse rules, and the verify mode.
 - Red team against the spec, the code, the tests, the examples, and the CLI behavior.
   Execute tests and commands; source inspection is not proof.
 - Every pull request, documentation-only work included, gets at least one round before
-  merge. A round is a fresh local subagent reviewing from an inline brief. After its
-  report, the reviewer stays alive: the author fixes, the reviewer verifies the repair
-  and looks for similar issues, and this repeats until the reviewer is satisfied. That
-  whole loop is one round.
+  merge. A round is the whole live back-and-forth between one reviewer and the author,
+  not a single review pass:
+  1. A fresh local subagent reviews the exact head from an inline brief and reports
+     its findings.
+  2. The reviewer stays alive. The author repairs the findings in the worktree.
+  3. The author hands the repair back, and the same reviewer verifies it and looks for
+     similar issues the repair may have missed or introduced.
+  4. Any further finding goes back to the author, and steps 2 and 3 repeat.
+  5. The round ends only when that reviewer states it is satisfied.
+  A reviewer that has reported is not finished; it is waiting for the fix. Ending the
+  loop after the first report, or verifying a repair with a different reviewer, is not
+  a round.
 - A pull request gets at most three fresh rounds; a fourth needs the user's explicit
   approval. A prose-only pull request gets one, and a second needs the same approval.
   The pull request's round record is the counter. Verification by the standing reviewer
