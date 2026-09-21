@@ -2250,13 +2250,15 @@ fn emit_function(
         emitted_name,
         internal_names.clone(),
         function_specializations.clone(),
-        &function.tensor_helpers,
-        helper_output_counts,
-        verified_helpers
-            .iter()
-            .copied()
-            .map(verified_helper_result_origin)
-            .collect::<Result<Vec<_>, _>>()?,
+        HostTensorHelpers {
+            helpers: &function.tensor_helpers,
+            output_counts: helper_output_counts,
+            result_origins: verified_helpers
+                .iter()
+                .copied()
+                .map(verified_helper_result_origin)
+                .collect::<Result<Vec<_>, _>>()?,
+        },
         ownership_sites,
     );
     emitter.entry_projection = entry::helper_coverage_with_verified(function, verified_helpers);
@@ -2546,9 +2548,11 @@ fn emit_main(
         &format!("{program_name}__global"),
         internal_names.clone(),
         function_specializations(program),
-        &program.global_tensor_helpers,
-        helper_output_counts,
-        helper_result_origins,
+        HostTensorHelpers {
+            helpers: &program.global_tensor_helpers,
+            output_counts: helper_output_counts,
+            result_origins: helper_result_origins,
+        },
         ownership_sites,
     );
     emitter.entry_projection = entry::global_helper_coverage(program);
@@ -3074,6 +3078,12 @@ struct HostEmitter<'a> {
     claim_on_spine: bool,
 }
 
+struct HostTensorHelpers<'a> {
+    helpers: &'a [HostTensorHelper],
+    output_counts: &'a [usize],
+    result_origins: Vec<Option<String>>,
+}
+
 /// Whether the verified intrinsic application labelled `label` at this site
 /// takes its container operand by Move (chelis#2205).
 ///
@@ -3179,9 +3189,7 @@ impl<'a> HostEmitter<'a> {
         helper_prefix: &str,
         emitted_names: UnordMap<String, String>,
         function_specializations: UnordMap<String, HostFunctionSpecialization>,
-        tensor_helpers: &'a [HostTensorHelper],
-        tensor_helper_output_counts: &'a [usize],
-        tensor_helper_result_origins: Vec<Option<String>>,
+        tensor_helpers: HostTensorHelpers<'a>,
         ownership_sites: &[ProjectedHostSite<'a>],
     ) -> Self {
         Self {
@@ -3190,9 +3198,9 @@ impl<'a> HostEmitter<'a> {
             helper_prefix: helper_prefix.to_string(),
             emitted_names,
             function_specializations,
-            tensor_helpers,
-            tensor_helper_output_counts,
-            tensor_helper_result_origins,
+            tensor_helpers: tensor_helpers.helpers,
+            tensor_helper_output_counts: tensor_helpers.output_counts,
+            tensor_helper_result_origins: tensor_helpers.result_origins,
             expression_sites: ownership_sites
                 .iter()
                 .filter(|site| site.kind == chelis_ir::ownership::HostSiteKind::Expression)
@@ -10043,9 +10051,11 @@ mod expression_dispatch_tests {
             "manifest",
             UnordMap::new(),
             UnordMap::new(),
-            &[],
-            &[],
-            Vec::new(),
+            HostTensorHelpers {
+                helpers: &[],
+                output_counts: &[],
+                result_origins: Vec::new(),
+            },
             &[],
         );
         emitter.emit_labeled_boxed_root("root", "boxed");
