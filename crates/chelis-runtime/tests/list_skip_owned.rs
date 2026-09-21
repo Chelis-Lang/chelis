@@ -313,6 +313,8 @@ const LEDGER_MODE_ENV: &str = "CHELIS_LIST_SKIP_OWNED_LEDGER_MODE";
 const LEDGER_PATH_ENV: &str = "CHELIS_OWNERSHIP_LEDGER_PATH";
 #[cfg(feature = "ownership-ledger")]
 const WALK: i64 = 64;
+#[cfg(feature = "ownership-ledger")]
+const LARGE: i64 = 4096;
 
 /// The child half of the ledger rows. Each arm builds a cursor walk and
 /// releases everything it made, so a clean summary is the expected
@@ -350,14 +352,30 @@ fn skip_owned_ledger_child() {
                 chelis_list_release(cursor);
             }
             "partial" => {
-                // One element retired, three live: below the compaction
-                // threshold, so the list reaches its finalizer still
-                // holding the retired slot. This is the only shape in
+                // One element retired, sixty-three live: far below the
+                // compaction threshold, so the list reaches its
+                // finalizer still holding the retired slot. This is the only shape in
                 // which the finalizer's choice of window is observable,
                 // and a walk to the end is not it -- the last
                 // compaction leaves that list empty.
                 let cursor = chelis_list_drop_owned(seed, 1);
                 chelis_list_release(cursor);
+            }
+            "large-skip" => {
+                // Red-team round 1's witness, through the public entry
+                // point: a single large skip whose result is retained.
+                // The elements are scalars, so the only allocation that
+                // matters is the list's own buffer.
+                let big = chelis_list_empty();
+                for value in 0..LARGE {
+                    let boxed = int_value(value);
+                    chelis_list_push(big, boxed);
+                    chelis_value_release(boxed);
+                }
+                let tail = chelis_list_drop_owned(big, LARGE - 1);
+                assert_eq!(chelis_list_len(tail), 1);
+                chelis_list_release(tail);
+                chelis_list_release(seed);
             }
             other => panic!("unknown ledger mode {other}"),
         }
@@ -475,4 +493,47 @@ fn a_list_finalized_with_a_retired_prefix_releases_each_child_once() {
             "a finalize over a retired prefix left {required:?} unsatisfied:\n{ledger}"
         );
     }
+}
+
+/// A single large skip gives the retired capacity back.
+///
+/// Red-team round 1 measured the shape this locks: before the
+/// compaction rebuilt its buffer, `skip(n - 1)` on a 1,000,000-element
+/// list left a one-element list holding the whole 1,000,000-slot
+/// allocation, 24 MB by the ledger's own formula, where the cloning
+/// path it replaces allocated the suffix and freed the operand. The
+/// bound was stated over the allocation and enforced over the length.
+///
+/// The ledger is the instrument because `buffer_capacity()` is private
+/// to the runtime: the consuming skip records a `resize` on every
+/// in-place return, so the last one for the list carries the figure the
+/// allocation actually ends at.
+///
+/// Evidentiary status: REGRESSION TEST. With `Vec::drain` in place of
+/// the rebuild, `bytes_after` is `24 * LARGE` and this row is red.
+#[cfg(feature = "ownership-ledger")]
+#[test]
+fn a_large_skip_gives_the_retired_capacity_back() {
+    let ledger = run_ledger_child("large-skip");
+    let resizes: Vec<u64> = ledger
+        .lines()
+        .filter(|line| line.contains(r#""event":"resize""#) && line.contains(r#""kind":"List""#))
+        .filter_map(|line| {
+            let tail = line.split(r#""bytes_after":"#).nth(1)?;
+            tail.split(|c: char| !c.is_ascii_digit())
+                .next()?
+                .parse::<u64>()
+                .ok()
+        })
+        .collect();
+    let last = *resizes
+        .last()
+        .unwrap_or_else(|| panic!("no list resize recorded:\n{ledger}"));
+    // 24 bytes a slot. One live element, so one slot, and the pushes
+    // that built the list resized upward before it.
+    assert_eq!(
+        last, 24,
+        "a one-element result must not retain the {LARGE}-slot buffer; \
+         the last recorded list resize was {last} bytes:\n{ledger}"
+    );
 }

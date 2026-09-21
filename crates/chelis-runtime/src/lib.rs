@@ -4947,13 +4947,14 @@ pub unsafe extern "C" fn chelis_list_drop_owned(
         }
         (*list).advance_head(retired);
         (*list).compact_retired_prefix();
-        // The byte count this records is usually unchanged, because a skip
-        // frees nothing and a compaction's `drain` keeps the buffer. The
-        // event is still owed on every in-place return: a `resize` at a
-        // consuming entry point's site is the ledger's only per-call signal
-        // that the in-place arm ran rather than the cloning one, and
-        // `chelis_string_concat_owned` already records it for an empty
-        // right-hand side that changes no byte for exactly that reason.
+        // Owed on every in-place return: a `resize` at a consuming entry
+        // point's site is the ledger's only per-call signal that the
+        // in-place arm ran rather than the cloning one, which is why
+        // `chelis_string_concat_owned` records one even for an empty
+        // right-hand side that changes no byte. A skip alone frees
+        // nothing, so most of these record the figure they already had;
+        // a compaction rebuilds the buffer at the live length, and that
+        // one records a real shrink.
         resize_list_ledger(list, "chelis_list_drop_owned");
         return list;
     }

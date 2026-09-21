@@ -634,8 +634,12 @@ one buffer and the clobber above cannot arise. Its result is the operand's
 suffix, so the surviving content needs no move at all, which is what makes the
 call O(count) where the cloning path is O(length). A retired prefix would
 otherwise stay allocated until the list dies, so the entry point compacts once
-the prefix exceeds the live window, capping the waste at the live length for an
-amortised O(1) per skipped element. [#2334] delivered it.
+the prefix exceeds the live window, rebuilding the buffer at the live length.
+That bounds the waste over the **allocation** rather than the length, which
+matters because the allocation is what the ledger reports: a compaction that
+drained in place would keep the original capacity and leave a one-element list
+holding the buffer of the list it was skipped from. The cost is amortised O(1)
+per skipped element. [#2334] delivered it.
 
 `take` is not a row and does not need to be: its result is a prefix, so the
 in-place form is a truncation with no offset involved, and its callers are one
@@ -697,10 +701,10 @@ other. `chelis_string_concat_owned` therefore records that event on every
 in-place return, including an empty right-hand side that changes no byte, so
 for strings the absence of the event means the cloning arm ran.
 
-`chelis_list_drop_owned` records on the same rule and for the same reason,
-though its byte count is almost always unchanged: a skip frees nothing, and a
-compaction's `drain` keeps the buffer. The event is the arm signal, not a
-report of a size change.
+`chelis_list_drop_owned` records on the same rule and for the same reason. A
+skip on its own frees nothing, so most of its events repeat the figure the list
+already had and are purely the arm signal; the compaction rebuilds the buffer at
+the live length, and that one records a real shrink.
 
 A cursor gives a second reading the per-call caution does not forbid. Over a
 whole walk the consuming arm allocates no list at all while the cloning arm

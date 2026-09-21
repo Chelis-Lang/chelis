@@ -107,35 +107,46 @@ impl chelis_list {
     /// [05-OP-32]'s "a count above length yields the empty List"
     /// arrives here.
     pub(crate) fn advance_head(&mut self, count: usize) {
+        debug_assert!(self.head <= self.items.len(), "head past the allocation");
         self.head += count.min(self.items.len() - self.head);
     }
 
     /// Reclaim the retired prefix once it is larger than the live
     /// window.
     ///
-    /// This is what bounds the waste an offset would otherwise leave:
-    /// without it, `skip(xs, n - 1)` kept alive holds `n` slots to
-    /// serve one element. With it the dead prefix never exceeds the
-    /// live length, so a list's allocation is at most twice what it
-    /// shows.
+    /// This is what bounds the waste an offset would otherwise leave.
+    /// Without it, `skip(xs, n - 1)` kept alive holds `n` slots to
+    /// serve one element, which the cloning path it replaces did not:
+    /// that path allocated the suffix and freed the operand.
     ///
-    /// The cost is amortised O(1) per skipped element. A compaction
-    /// moves `live_len` slots and resets `head` to zero, and `head`
-    /// must then grow past the *new* live length before another can
-    /// run, so a cursor walking to the end moves O(n) slots in total
-    /// rather than O(n) per step.
+    /// The bound is over the **allocation**, not merely the length,
+    /// which is why this rebuilds the buffer at the live length rather
+    /// than draining in place. `Vec::drain` keeps capacity, so a
+    /// compaction that drained would leave `buffer_capacity()` at the
+    /// original figure for ever, and that is the exact quantity the
+    /// ownership ledger multiplies by `LEDGER_VALUE_SLOT_BYTES`. The
+    /// claim would then be false of the number the instrument reports:
+    /// a one-element list would hold a million slots and the ledger
+    /// would say so.
     ///
-    /// `drain` keeps the buffer, so `buffer_capacity()` does not
-    /// change and the ledger's byte count is unaffected: nothing was
-    /// freed, the allocation is simply holding fewer dead slots.
+    /// The cost is a reallocation where a drain would memmove, both of
+    /// the live length, and the amortisation is unchanged. A
+    /// compaction copies `live_len` slots and resets `head` to zero,
+    /// and `head` must then grow past the *new* live length before
+    /// another can run, so a cursor walking to the end copies O(n)
+    /// slots in total rather than O(n) per step.
+    ///
     /// Returns whether it moved anything, which is what makes the
     /// amortisation above testable rather than argued.
     pub(crate) fn compact_retired_prefix(&mut self) -> bool {
+        debug_assert!(self.head <= self.items.len(), "head past the allocation");
         let live_len = self.items.len() - self.head;
         if self.head <= live_len {
             return false;
         }
-        self.items.drain(..self.head);
+        // Exactly the live length, matching the exact-capacity
+        // discipline `chelis_list_append` already keeps.
+        self.items = self.items[self.head..].to_vec();
         self.head = 0;
         true
     }
@@ -190,15 +201,40 @@ mod tests {
         assert_eq!(list.live().len(), 1);
     }
 
-    /// The buffer survives a compaction, so the ledger's byte count is
-    /// unchanged by one. A `drain` that reallocated would make the
-    /// consuming skip's `resize` record a shrink that never happened.
+    /// A compaction gives the retired capacity back, so the bound this
+    /// module claims is true of the allocation and not merely of the
+    /// length.
+    ///
+    /// Evidentiary status: REGRESSION TEST, and it replaces an earlier
+    /// assertion that pinned the defect. That one asserted the capacity
+    /// was **unchanged** across a compaction, which is what
+    /// `Vec::drain` does, so it would have gone green on the wrong
+    /// behaviour and red on this one. Red-team round 1 measured what it
+    /// was protecting: `skip(n - 1)` on a 1,000,000-element list left a
+    /// one-element list holding a 1,000,000-slot buffer, 24 MB by the
+    /// ledger's own formula, where the cloning path freed it.
     #[test]
-    fn compaction_keeps_the_allocation() {
+    fn compaction_releases_the_retired_capacity() {
         let mut list = list_of(8);
-        let before = list.buffer_capacity();
+        assert!(list.buffer_capacity() >= 8);
         list.advance_head(7);
         assert!(list.compact_retired_prefix());
+        assert_eq!(list.live().len(), 1);
+        assert_eq!(
+            list.buffer_capacity(),
+            1,
+            "the allocation is the live length, not the original"
+        );
+    }
+
+    /// The negative half: a compaction that does not fire must not
+    /// reallocate, or every skip below the threshold would pay for one.
+    #[test]
+    fn a_compaction_that_does_not_fire_keeps_the_allocation() {
+        let mut list = list_of(8);
+        let before = list.buffer_capacity();
+        list.advance_head(2);
+        assert!(!list.compact_retired_prefix());
         assert_eq!(list.buffer_capacity(), before);
     }
 
