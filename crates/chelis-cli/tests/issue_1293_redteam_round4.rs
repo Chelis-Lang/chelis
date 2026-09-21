@@ -260,7 +260,7 @@ out = grad(loss, wrt=xs)(
 "#,
     );
 
-    assert_eval_and_c_diagnostic(&reef_home, &app_pkg, "drop requires non-negative count");
+    assert_eval_and_c_diagnostic(&reef_home, &app_pkg, "skip requires non-negative count");
 }
 
 #[test]

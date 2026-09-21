@@ -521,9 +521,9 @@ fn compiled_runtime_list_take_and_drop_adjoints_match_eval_errors() {
         "take requires non-negative count",
     );
     assert_runtime_list_count_grad_error_parity(
-        "issue-1293-list-adjoints-runtime-negative-drop",
+        "issue-1293-list-adjoints-runtime-negative-skip",
         "skip_list",
-        "drop requires non-negative count",
+        "skip requires non-negative count",
     );
 }
 
@@ -557,7 +557,7 @@ bad = grad(loss, wrt=xs)(values, cast(-1, i64))"#,
         "take requires non-negative count",
     );
     assert_list_selection_grad_rejects(
-        "issue-1293-list-adjoints-negative-drop",
+        "issue-1293-list-adjoints-negative-skip",
         "skip_list, list_index",
         r#"def loss(xs: List[f32], count: i64) -> f32 = {
   ys = skip_list(xs, count)
@@ -565,7 +565,7 @@ bad = grad(loss, wrt=xs)(values, cast(-1, i64))"#,
 }
 values: List[f32] = [cast(2.0, f32), cast(3.0, f32)]
 bad = grad(loss, wrt=xs)(values, cast(-1, i64))"#,
-        "drop requires non-negative count",
+        "skip requires non-negative count",
     );
 }
 
