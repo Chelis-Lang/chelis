@@ -1470,7 +1470,19 @@ fn direct_extrema_gpu_bit_case(prim: Prim, lhs: &[u64; 6], rhs: &[u64; 6], gradi
 
 #[test]
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
-fn direct_extrema_and_adjoints_preserve_exact_f32_and_f64_bits_on_gpu() {
+fn direct_extrema_and_adjoints_preserve_exact_bits_at_every_float_width_on_gpu() {
+    direct_extrema_gpu_bit_case(
+        Prim::F16,
+        &[0x7e11, 0x3c00, 0, 0x8000, 0x4000, 0x3c00],
+        &[0x4000, 0xfe22, 0x8000, 0, 0x3c00, 0x4000],
+        &[0x7e33, 0xbc00, 0x3c00, 0x8000, 0x4200, 0xc400],
+    );
+    direct_extrema_gpu_bit_case(
+        Prim::Bf16,
+        &[0x7fc1, 0x3f80, 0, 0x8000, 0x4000, 0x3f80],
+        &[0x4000, 0xffc2, 0x8000, 0, 0x3f80, 0x4000],
+        &[0x7fc3, 0xbf80, 0x3f80, 0x8000, 0x4040, 0xc080],
+    );
     direct_extrema_gpu_bit_case(
         Prim::F32,
         &[
@@ -1601,6 +1613,98 @@ fn direct_relu_and_adjoint_preserve_exact_bits_at_every_float_width_on_gpu() {
 #[test]
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn direct_sub_gpu_matches_own_width_evaluator() {
+    for (prim, lhs, rhs, expected) in [
+        (
+            Prim::F16,
+            [0x3c00, 0x8000, 0x7bff, 0xc450, 0xfe01, 0x3c00],
+            [0x4000, 0, 0x7bff, 0x4480, 0x3c00, 0x7d01],
+            [
+                u64::from(
+                    half::f16::from_f32(
+                        half::f16::from_bits(0x3c00).to_f32()
+                            - half::f16::from_bits(0x4000).to_f32(),
+                    )
+                    .to_bits(),
+                ),
+                u64::from(
+                    half::f16::from_f32(
+                        half::f16::from_bits(0x8000).to_f32() - half::f16::from_bits(0).to_f32(),
+                    )
+                    .to_bits(),
+                ),
+                u64::from(
+                    half::f16::from_f32(
+                        half::f16::from_bits(0x7bff).to_f32()
+                            - half::f16::from_bits(0x7bff).to_f32(),
+                    )
+                    .to_bits(),
+                ),
+                u64::from(
+                    half::f16::from_f32(
+                        half::f16::from_bits(0xc450).to_f32()
+                            - half::f16::from_bits(0x4480).to_f32(),
+                    )
+                    .to_bits(),
+                ),
+                0x7e00,
+                0x7e00,
+            ],
+        ),
+        (
+            Prim::Bf16,
+            [0x3f80, 0x8000, 0x7f7f, 0xc10a, 0xffc1, 0x3f80],
+            [0x4000, 0, 0x7f7f, 0x4090, 0x3f80, 0x7f81],
+            [
+                u64::from(
+                    half::bf16::from_f32(
+                        half::bf16::from_bits(0x3f80).to_f32()
+                            - half::bf16::from_bits(0x4000).to_f32(),
+                    )
+                    .to_bits(),
+                ),
+                u64::from(
+                    half::bf16::from_f32(
+                        half::bf16::from_bits(0x8000).to_f32() - half::bf16::from_bits(0).to_f32(),
+                    )
+                    .to_bits(),
+                ),
+                u64::from(
+                    half::bf16::from_f32(
+                        half::bf16::from_bits(0x7f7f).to_f32()
+                            - half::bf16::from_bits(0x7f7f).to_f32(),
+                    )
+                    .to_bits(),
+                ),
+                u64::from(
+                    half::bf16::from_f32(
+                        half::bf16::from_bits(0xc10a).to_f32()
+                            - half::bf16::from_bits(0x4090).to_f32(),
+                    )
+                    .to_bits(),
+                ),
+                0x7fc0,
+                0x7fc0,
+            ],
+        ),
+    ] {
+        let ty = TensorType {
+            dims: vec![DimInfo::Lit(lhs.len())],
+            precision: prim,
+        };
+        let mut dag = Dag::new();
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+        let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], ty.clone(), None);
+        let out = dag.add_node(RiscOp::Sub, vec![x, y], ty, None);
+        dag.add_root(out);
+        let actual = compile_and_run_float_output_bits(
+            &dag,
+            &format!("direct_sub_{}", prim.name()),
+            prim,
+            &[("x", &lhs), ("y", &rhs)],
+        );
+        assert_eq!(actual, vec![expected.to_vec()]);
+    }
+
     let mut f32_dag = Dag::new();
     let x = f32_dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
     let y = f32_dag.add_node(RiscOp::Load { name: "y".into() }, vec![], vec_f32(4), None);
@@ -1628,6 +1732,57 @@ fn direct_sub_gpu_matches_own_width_evaluator() {
             TestInputF64::f64("y", &[4], &[2.0, 0.0, f64::MAX, 4.5]),
         ],
         0.0,
+    );
+}
+
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn direct_checked_signed_sub_reports_exact_device_overflow_trap() {
+    let ty = TensorType {
+        dims: vec![DimInfo::Lit(2)],
+        precision: Prim::Int8,
+    };
+    let mut dag = Dag::new();
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], ty.clone(), None);
+    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], ty.clone(), None);
+    let out = dag.add_node(RiscOp::Sub, vec![a, b], ty, None);
+    dag.add_root(out);
+
+    let exact = compile_and_run_single_output_typed_i64(
+        &dag,
+        "direct_checked_sub_i8_exact",
+        &[
+            TestInput::int8("a", &[2], &[-128, 127]),
+            TestInput::int8("b", &[2], &[0, 1]),
+        ],
+        "int8_t",
+        "%lld",
+    );
+    assert_eq!(exact, vec![-128, 126]);
+
+    let panic = std::panic::catch_unwind(|| {
+        compile_and_run_single_output_typed_i64(
+            &dag,
+            "direct_checked_sub_i8_overflow",
+            &[
+                TestInput::int8("a", &[2], &[0, -128]),
+                TestInput::int8("b", &[2], &[0, 1]),
+            ],
+            "int8_t",
+            "%lld",
+        )
+    })
+    .expect_err("true signed subtraction overflow must trap after device dispatch");
+    let message = if let Some(message) = panic.downcast_ref::<String>() {
+        message.as_str()
+    } else if let Some(message) = panic.downcast_ref::<&str>() {
+        message
+    } else {
+        panic!("unexpected non-string panic from HIP overflow harness");
+    };
+    assert!(
+        message.contains("numeric trap: overflow in sub at i8"),
+        "{message}"
     );
 }
 

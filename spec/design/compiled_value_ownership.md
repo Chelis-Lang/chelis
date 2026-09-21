@@ -613,8 +613,24 @@ content is carried over in place rather than rebuilt.
 A callable whose result is a positional sub-range of its operand is not a row
 today. `take` and `drop` for lists, and `string_slice` and `string_trim` for
 strings, each carry over only part of the operand, and none of them is an
-accumulation shape. chelis#943 recorded that disposition for `drop`. It is a disposition rather than a derivation: those four could be
-revisited on their own evidence, and until they are, they are not rows.
+accumulation shape. Two distinct facts hold them out, and only one is
+normative.
+
+The normative one is [05-OP-44]'s closed heap-kind universe. A sub-range that
+shares its operand's buffer needs a private storage kind behind the handle, as
+`TensorStorage` already is behind a `Tensor` descriptor, so it is an amendment
+to that atom and to `spec/registry/c_heap_lifetime.md` before it is a row here.
+It is also unsound against the rows that already exist: `ys = take(xs, 3)`
+sharing `xs`'s buffer stands at its own strong count of one, so
+`chelis_list_append_owned(ys, v)` takes the in-place arm, writes slot 3, and
+clobbers `xs[3]`.
+
+The other is sequencing. An exclusive offset carried inside the single
+allocation, reached only through a `drop` consumer row, needs no new heap kind
+and conflicts with nothing normative. It is reserved rather than proposed
+because the callers measured in this repository were rewritten onto `fold`
+rather than repaired, so nothing here exercises it. Revisit it when a caller
+does; the remaining work is tracked as [#2334].
 
 The string row carries an obligation neither of the other kinds has, and it
 is the reason a heap kind is not interchangeable here. `RuntimeString` stores
@@ -1160,3 +1176,4 @@ the future oracle, or make a child reproducer green. Its PR body says
 [#1352]: https://github.com/Chelis-Lang/chelis/issues/1352
 [#1356]: https://github.com/Chelis-Lang/chelis/issues/1356
 [#1362]: https://github.com/Chelis-Lang/chelis/issues/1362
+[#2334]: https://github.com/Chelis-Lang/chelis/issues/2334

@@ -3164,6 +3164,11 @@ impl CEmitter {
         // the evaluator emits. Float `/` is IEEE-754 (`1.0/0.0 == inf`) and
         // is never guarded; `+`/`*`/`fmaxf` never divide.
         let checked_int = ty.precision.is_integer() && matches!(op, "+" | "-" | "*" | "/" | "%");
+        let canonical_nan = match ty.precision {
+            Prim::F32 => Some("chelis_f32_from_bits(UINT32_C(0x7fc00000))"),
+            Prim::F64 => Some("chelis_f64_from_bits(UINT64_C(0x7ff8000000000000))"),
+            _ => None,
+        };
         let elem_expr = |lhs: String, rhs: String| -> String {
             if is_relu_adjoint {
                 // [05-OP-43]: select g only for +0 < x. Selection preserves
@@ -3172,6 +3177,12 @@ impl CEmitter {
                 return format!("{zero} < ({lhs}) ? ({rhs}) : {zero}");
             }
             if !checked_int {
+                if op == "-"
+                    && let Some(canonical_nan) = canonical_nan
+                {
+                    let raw = format!("(({lhs}) - ({rhs}))");
+                    return format!("isnan({raw}) ? {canonical_nan} : {raw}");
+                }
                 return format!("{lhs} {op} {rhs}");
             }
             let bits = Self::integer_width(ty.precision);
@@ -3416,11 +3427,19 @@ impl CEmitter {
         let load = Self::reduced_to_f32_fn(ty.precision);
         let store = Self::f32_to_reduced_fn(ty.precision);
         let is_relu_adjoint = op == "chelis_relu_adjoint";
+        let canonical_nan = match ty.precision {
+            Prim::F16 => "UINT16_C(0x7e00)",
+            Prim::Bf16 => "UINT16_C(0x7fc0)",
+            _ => unreachable!("reduced-float emitter requires f16 or bf16"),
+        };
         let elem_expr = |g_raw: String| -> String {
             if is_relu_adjoint {
                 // Decode x only for the predicate and select the original
                 // f16/bf16 cotangent storage word unchanged.
                 format!("0.0f < __av ? {g_raw} : UINT16_C(0)")
+            } else if op == "-" {
+                let raw = "(__av - __bv)";
+                format!("isnan({raw}) ? {canonical_nan} : {store}({raw})")
             } else {
                 format!("{store}(__av {op} __bv)")
             }
@@ -4735,7 +4754,13 @@ impl CEmitter {
             FusedStepOp::Sub => {
                 let a = resolve(&inputs[0]);
                 let b = resolve(&inputs[1]);
-                format!("{a} - {b}")
+                let raw = format!("(({a}) - ({b}))");
+                let canonical_nan = if is_f64 {
+                    "chelis_f64_from_bits(UINT64_C(0x7ff8000000000000))"
+                } else {
+                    "chelis_f32_from_bits(UINT32_C(0x7fc00000))"
+                };
+                format!("isnan({raw}) ? {canonical_nan} : {raw}")
             }
             FusedStepOp::Mul => {
                 let a = resolve(&inputs[0]);
@@ -4856,7 +4881,10 @@ impl CEmitter {
             FusedStepOp::Sub => {
                 let a = resolve(&inputs[0]);
                 let b = resolve(&inputs[1]);
-                format!("_mm256_sub_ps({a}, {b})")
+                let raw = format!("_mm256_sub_ps({a}, {b})");
+                format!(
+                    "_mm256_blendv_ps({raw}, _mm256_set1_ps(chelis_f32_from_bits(UINT32_C(0x7fc00000))), _mm256_cmp_ps({raw}, {raw}, _CMP_UNORD_Q))"
+                )
             }
             FusedStepOp::Mul => {
                 let a = resolve(&inputs[0]);
@@ -6950,7 +6978,8 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                 FusedStepOp::Sub => {
                     let a = resolve(&step.input_indices[0]);
                     let b = resolve(&step.input_indices[1]);
-                    format!("{a} - {b}")
+                    let raw = format!("(({a}) - ({b}))");
+                    format!("isnan({raw}) ? chelis_f32_from_bits(UINT32_C(0x7fc00000)) : {raw}")
                 }
                 FusedStepOp::Mul => {
                     let a = resolve(&step.input_indices[0]);

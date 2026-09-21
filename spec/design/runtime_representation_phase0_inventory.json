@@ -2058,7 +2058,7 @@
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_binary_reduced_f",
-      "sample": "uint16_t* restrict __out_{id} = (uint16_t*)t{id}_data;"
+      "sample": "reduced-float emitter requires f16 or bf16"
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_cast",

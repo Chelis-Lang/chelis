@@ -10529,7 +10529,7 @@ fn build_c_grad_program_has_zero_definitely_lost_under_valgrind() {
 // and the other five #406-era oracles still self-skip and report a false
 // PASS; converting them is out of scope here and tracked separately.
 #[test]
-#[ignore = "requires valgrind + gcc; registered in docs/manual_gates.md (chelis#943)"]
+#[ignore = "requires valgrind + gcc; registered in docs/manual_gates.md (chelis#2333)"]
 #[cfg(unix)]
 fn build_c_list_combinator_program_has_zero_definitely_lost_under_valgrind() {
     fn tool_available(tool: &str) -> bool {

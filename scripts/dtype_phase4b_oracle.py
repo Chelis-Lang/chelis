@@ -3207,16 +3207,16 @@ def validate_schema_and_consumers(
             ("[05-OP-29], [#1287], [#1291]", "count capability owner"),
             (
                 "`max_elem`/`min_elem` x Scalar/Tensor x active numeric dtypes "
-                "([05-OP-40], [#715], [#1306])",
+                "([05-OP-40], [#715], [#1306], [#2338])",
                 "extrema capability owner",
             ),
             (
                 "`sub` x Scalar/Tensor x active numeric dtypes "
-                "([05-OP-41], [#1306])",
+                "([05-OP-41], [#1306], [#2338])",
                 "sub capability owner",
             ),
             (
-                "Unimplemented { issue: #1306, diagnostic_kind: "
+                "Unimplemented { issue: #2338, diagnostic_kind: "
                 "UnsupportedFeature }",
                 "direct arithmetic implementation owner",
             ),
