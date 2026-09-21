@@ -88,7 +88,8 @@ pub(super) fn unify_checked_call_contract(
 
 /// Implicit-copy fan-out v3 Shape A relaxation: when a def's body's
 /// tail-position expression resolves to a borrowed function parameter
-/// (possibly through a direct `let` alias and wrapped in
+/// (possibly through a direct `let` alias or a `match` binder that denotes
+/// the whole scrutinee, and wrapped in
 /// `let`, `if`, or `match` structures whose sibling branches
 /// all return the same parameter identity) and the body's inferred return type is
 /// `Ref(R)` while the declared return is owned `R`, return a relaxed
@@ -174,12 +175,58 @@ fn borrowed_parameter_roots(
     Some(roots)
 }
 
-fn direct_tail_parameter(expr: &deep::Expr, roots: &BTreeMap<String, String>) -> Option<String> {
-    let deep::ExprCarrier::DecodedNode(DeepTag::Var, _, children) = expr.carrier() else {
-        return None;
+/// Collect the names a pattern binds to the *whole* scrutinee value.
+///
+/// A binder denotes the whole scrutinee iff **every step on the path from the
+/// pattern root down to it preserves the whole value**. The predicate is
+/// therefore path-recursive, not tag-keyed, and this walker implements it by
+/// traversing exactly the edges that preserve the value: a `pat-as`'s inner
+/// slot, and nothing else.
+///
+/// The seven-row `pat-*` table in `spec/03-deep-syntax.md` supplies the edges.
+/// `pat-var` is "Bind to name" and `pat-as` is "Bind name, then match", so a
+/// `pat-as`'s inner pattern is matched against the *same* value the outer name
+/// just bound. Every other sub-pattern position -- the children of `pat-ctor`,
+/// `pat-tuple` and `pat-record` -- names a projection out of the scrutinee,
+/// and a projection is a different value.
+///
+/// Two shapes show why one level of `pat-as` handling is not enough.
+/// `(pat-as {} a (pat-as {} b (pat-var {} c)))` binds all three names to the
+/// scrutinee, because every edge on each path preserves the value.
+/// `(pat-as {} a (pat-ctor {} Some (pat-as {} b (pat-var {} c))))` binds only
+/// `a`: the `pat-ctor` edge breaks both other paths, and `b` and `c` are
+/// projections wearing a `pat-as`. A reader who keeps only the tag list will
+/// re-derive the second case wrongly, which is why the path property is
+/// written down here rather than the list of tags it happens to select.
+///
+/// Keying on the tag instead would read the `pat-var` inside
+/// `(pat-ctor {} Some (pat-var {} x))` as a whole-scrutinee binder and hand
+/// `x` a provenance it does not have. That is the unsound direction: the def
+/// would be relaxed into returning a borrow the caller never supplied, rather
+/// than the caller's own parameter. A binder this walker omits merely fails
+/// the relaxation and reports, so an unrecognized form contributing nothing
+/// refuses rather than accepts.
+fn whole_scrutinee_binders(pattern: &deep::Expr, out: &mut Vec<String>) {
+    stack_guard!("whole_scrutinee_binders", pattern);
+    let deep::ExprCarrier::DecodedNode(tag, _, children) = pattern.carrier() else {
+        return;
     };
-    let name = children.first().and_then(symbol_name)?;
-    roots.get(name).cloned()
+    match tag {
+        DeepTag::PatVar => {
+            if let Some(name) = children.first().and_then(symbol_name) {
+                out.push(name.to_string());
+            }
+        }
+        DeepTag::PatAs => {
+            if let Some(name) = children.first().and_then(symbol_name) {
+                out.push(name.to_string());
+            }
+            if let Some(inner) = children.get(1) {
+                whole_scrutinee_binders(inner, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Descend through `let`, `if`, and `match` to a tail-position reference
@@ -190,23 +237,37 @@ fn direct_tail_parameter(expr: &deep::Expr, roots: &BTreeMap<String, String>) ->
 /// `Linearity-ShapeABroadReturn-F1`.  The rules:
 ///
 /// - `(var x)` returns the borrowed parameter identity currently bound to `x`.
-/// - `(let bind body)` forwards only direct aliases of an eligible parameter;
-///   every other binding shadows the spelling without acquiring provenance.
+/// - `(let bind body)` forwards a binding whose right-hand side itself
+///   resolves to an eligible parameter; every other binding shadows the
+///   spelling without acquiring provenance.
 /// - `(if cond then_e else_e)` recurses into both branches; both must
 ///   resolve to the same parameter identity.
 /// - `(match scrutinee arm ...)` recurses into every arm body (the
 ///   third child of each `(arm pattern guard body)` triple); all arms
-///   must resolve to the same parameter identity, and pattern binders shadow
-///   outer names in their arm.
+///   must resolve to the same parameter identity. Every pattern binder
+///   shadows the outer spelling, and a binder that denotes the whole
+///   scrutinee then inherits whatever the scrutinee itself resolved to.
 /// - Otherwise returns `None`.
 ///
 /// The descent is type-agnostic; the surrounding logic in
 /// `shape_a_relaxed_return` already verifies that the body's inferred
 /// return type is `Ref(R)` and the declared return is `R` structurally.
 ///
-/// Comparing lexical roots rather than source names enforces [04-LIN-1] and
-/// [04-LIN-4]: a same-spelled local or selected arm cannot manufacture an
-/// owned result from a borrow whose lifetime the caller did not provide.
+/// Comparing binding identity rather than source names follows [04-LIN-1]:
+/// ownership facts attach to the binding, never to the name, so a local that
+/// reuses a parameter's spelling does not acquire that parameter's
+/// provenance. Rejecting a borrow constructed inside the function stands on
+/// its own ground rather than on either atom: that borrow points at a
+/// function-local owner, so no caller lifetime covers it.
+///
+/// Requiring *one* root across siblings is narrower than either atom
+/// demands, and that is a scope decision rather than a spec obligation.
+/// Two distinct parameters are both caller-supplied borrows live for the
+/// whole call, so the lifetime argument is the same for two as for one;
+/// [04-LIN-4]'s prohibition on inferring a returned owner from a source name
+/// or a selected return arm bears equally on the same-parameter `match` this
+/// descent accepts. The single-root requirement is PR #91's deliberate v3
+/// scope boundary. Widening it needs a coercion story, not an amendment.
 fn descend_to_tail_parameter(
     expr: &deep::Expr,
     roots: &BTreeMap<String, String>,
@@ -222,7 +283,16 @@ fn descend_to_tail_parameter(
         | deep::ExprCarrier::MalformedLegacyList(_) => return None,
     };
     match tag {
-        DeepTag::Var => direct_tail_parameter(expr, roots),
+        // The leaf. This is deliberately not a separate reader: every other
+        // position below asks the same question through this function, and a
+        // second, narrower "is this a bare name bound to a parameter" helper
+        // is the thing that gets reached for in a new position and silently
+        // refuses expressions that resolve perfectly well. Three positions in
+        // this walker have already been repaired from exactly that mistake.
+        DeepTag::Var => {
+            let name = children.first().and_then(symbol_name)?;
+            roots.get(name).cloned()
+        }
         DeepTag::Let => {
             let bind = children.first()?;
             let body = children.get(1)?;
@@ -237,7 +307,7 @@ fn descend_to_tail_parameter(
             let mut nested = roots.clone();
             for pair in pairs {
                 let name = symbol_name(&pair[0])?.to_string();
-                if let Some(root) = direct_tail_parameter(&pair[1], &nested) {
+                if let Some(root) = descend_to_tail_parameter(&pair[1], &nested) {
                     nested.insert(name, root);
                 } else {
                     nested.remove(&name);
@@ -257,12 +327,19 @@ fn descend_to_tail_parameter(
             }
         }
         DeepTag::Match => {
-            // Skip the scrutinee (first child); every remaining child is
+            // The first child is the scrutinee; every remaining child is
             // expected to be an `(arm pattern guard body)` triple.
+            let scrutinee = children.first()?;
             let arms = children.get(1..)?;
             if arms.is_empty() {
                 return None;
             }
+            // An arm binder can inherit only what the scrutinee itself
+            // resolves to, and the scrutinee is evaluated outside the arms'
+            // scope, so this is computed once against the outer roots. `None`
+            // is not a failure here: the arms simply inherit nothing, which
+            // is what keeps a locally constructed borrow out of the relaxation.
+            let scrutinee_root = descend_to_tail_parameter(scrutinee, roots);
             let mut name: Option<String> = None;
             for arm in arms {
                 let arm_children = match arm.carrier() {
@@ -275,9 +352,30 @@ fn descend_to_tail_parameter(
                     | deep::ExprCarrier::MetadataExpression(_)
                     | deep::ExprCarrier::MalformedLegacyList(_) => return None,
                 };
+                let pattern = arm_children.first()?;
                 let mut arm_roots = roots.clone();
-                for binder in chelis_deep::pattern_binder_names(&arm_children[0]) {
+                // Every binder shadows the outer spelling first. Dropping a
+                // name that was eligible can only refuse a program, so
+                // `pattern_binder_names` is exactly right for this half even
+                // though it flattens a `pat-as`'s outer name together with
+                // its inner pattern's binders and cannot tell them apart.
+                for binder in chelis_deep::pattern_binder_names(pattern) {
                     arm_roots.remove(&binder);
+                }
+                // Then give the provenance back to the binders that denote
+                // the whole scrutinee, bound to the scrutinee's own root
+                // rather than to whatever their spelling meant outside the
+                // arm. `(match (var x) (arm (pat-ctor Some (pat-var x)) ...))`
+                // falls out of that order without a special case: the removal
+                // drops the parameter's spelling and nothing is put back, so
+                // the projection cannot reach the parameter through a shared
+                // name.
+                if let Some(root) = &scrutinee_root {
+                    let mut inheriting = Vec::new();
+                    whole_scrutinee_binders(pattern, &mut inheriting);
+                    for binder in inheriting {
+                        arm_roots.insert(binder, root.clone());
+                    }
                 }
                 let arm_body = arm_children.get(2)?;
                 let arm_root = descend_to_tail_parameter(arm_body, &arm_roots)?;
