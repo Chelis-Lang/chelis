@@ -3136,21 +3136,28 @@ impl<'a> HostEmitter<'a> {
     ///    once, into a temporary, and never inside the element loop.
     /// 2. **Bounds are re-folded from the structural `args`, not read from
     ///    `arg_vars`.** The checker already guarantees static literal bounds
-    ///    (`infer::app_operand_dtype`, the chelis#776 gate), and both the
-    ///    evaluator and the DAG lane truncate them to f32 BEFORE sampling.
-    ///    Passing the lowered C variables instead would skip that truncation
-    ///    and diverge for any bound not exactly representable in f32.
+    ///    (`infer::app_operand_dtype`, the chelis#776 gate), and this bakes
+    ///    the same exact bit pattern the DAG lane bakes, so a template that
+    ///    folds and one that does not sample identically.
+    ///
+    ///    This fold is value-based and does NOT model an intermediate
+    ///    rounding: a bound spelled `cast(cast(x, f16), f32)` type-checks,
+    ///    and the evaluator applies both roundings while `static_float_bound`
+    ///    applies neither. The DAG lane's `lower::extract_f64_value` has the
+    ///    identical behavior, so the two compiled lanes agree with each other
+    ///    and both differ from `eval` on that spelling. That is a
+    ///    pre-existing class owned outside this change (chelis#2316), not a
+    ///    property introduced here; do not "fix" it in one lane alone.
     ///
     /// The template's element values are never read — only its shape and
     /// dtype reach the output through `chelis_host_alloc_like` — which is
     /// [05-OP-8]'s "the template values are not observed" made structural
     /// rather than incidental.
     ///
-    /// Only the f32 and f64 arms are emitted. The host lane's dtype
-    /// dispatch (`DtypeArm`) has no reduced-float representation, so f16 and
-    /// bf16 land on the loud default arm rather than being silently
-    /// double-rounded through a `double` intermediate; the DAG lane still
-    /// serves them.
+    /// Every active float dtype gets an arm. A runtime-derived template is
+    /// exactly the case the DAG lane does NOT serve, so leaving f16/bf16 on
+    /// the default arm would have built a program that aborts at run time
+    /// where the previous rejection at least failed at build time.
     fn assign_uniform_like(
         &mut self,
         target: &str,
@@ -3199,11 +3206,13 @@ impl<'a> HostEmitter<'a> {
             f64::from(high_f32).to_bits()
         );
 
-        // An unhandled `Random` is a hard check error, so an inactive scope
-        // here is an internal desync. Say so and abort rather than let
-        // `chelis_effective_uniform_seed` silently return the baked operand
-        // without advancing the counter (which would desync every later draw
-        // in the scope as well as returning the wrong value).
+        // An inactive scope is reachable, not an internal desync: a
+        // top-level binding with an unhandled `Random` is a hard check error,
+        // but an exported `def` carrying one is not, and its generated
+        // wrapper initializes `__chelis_rng` inactive. Abort there rather
+        // than let `chelis_effective_uniform_seed` silently return the baked
+        // operand without advancing the counter, which would both return the
+        // wrong value and desync every later draw in the scope.
         let seed = self.next_temp("uniform_seed");
         self.lines.push(format!(
             "{}if (__chelis_rng == NULL || !__chelis_rng->active) {{",
@@ -3227,24 +3236,42 @@ impl<'a> HostEmitter<'a> {
         let (guard, view) = self.begin_tensor_write(target);
         self.lines
             .push(format!("{}switch ({view}.dtype) {{", self.indent));
-        for (arm, elem_t, sampler, low_expr, high_expr) in [
+        // One arm per active float dtype in [05-OP-8], which "admits every
+        // active float template dtype `p`". f32 and f64 sample at their own
+        // width. f16 and bf16 widen the stored bounds to f32, execute the one
+        // fused multiply-add in f32, and narrow exactly once at the store —
+        // the same shape `emit::emit_uniform_like` gives the DAG lane, so a
+        // template that folds and one that does not agree element for
+        // element. `chelis_f32_to_f16`/`_bf16` are `static inline` in
+        // `chelis_runtime.h`, which every emitted translation unit includes.
+        let sample_f32 = format!(
+            "chelis_uniform_sample_f32({seed}, (uint64_t)i, {low_f32_expr}, {high_f32_expr})"
+        );
+        for (macro_name, elem_t, sampled) in [
             (
-                DtypeArm::F32,
+                chelis_vocab::RuntimeDType::F32.c_macro(),
                 "float",
-                "chelis_uniform_sample_f32",
-                &low_f32_expr,
-                &high_f32_expr,
+                sample_f32.clone(),
             ),
             (
-                DtypeArm::F64,
+                chelis_vocab::RuntimeDType::F64.c_macro(),
                 "double",
-                "chelis_uniform_sample_f64",
-                &low_f64_expr,
-                &high_f64_expr,
+                format!(
+                    "chelis_uniform_sample_f64({seed}, (uint64_t)i, {low_f64_expr}, {high_f64_expr})"
+                ),
+            ),
+            (
+                chelis_vocab::RuntimeDType::F16.c_macro(),
+                "uint16_t",
+                format!("chelis_f32_to_f16({sample_f32})"),
+            ),
+            (
+                chelis_vocab::RuntimeDType::Bf16.c_macro(),
+                "uint16_t",
+                format!("chelis_f32_to_bf16({sample_f32})"),
             ),
         ] {
             let ind = &self.indent;
-            let macro_name = arm.dtype_macro();
             self.lines.push(format!("{ind}    case {macro_name}: {{"));
             self.lines.push(format!(
                 "{ind}        {elem_t} *__target_data = ({elem_t}*){view}.data;"
@@ -3252,9 +3279,8 @@ impl<'a> HostEmitter<'a> {
             self.lines.push(format!(
                 "{ind}        for (int64_t i = 0; i < {view}.count; i++) {{"
             ));
-            self.lines.push(format!(
-                "{ind}            __target_data[i] = {sampler}({seed}, (uint64_t)i, {low_expr}, {high_expr});"
-            ));
+            self.lines
+                .push(format!("{ind}            __target_data[i] = {sampled};"));
             self.lines.push(format!("{ind}        }}"));
             self.lines.push(format!("{ind}        break;"));
             self.lines.push(format!("{ind}    }}"));

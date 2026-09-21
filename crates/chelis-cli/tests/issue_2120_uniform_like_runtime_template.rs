@@ -45,15 +45,23 @@
 //!
 //! ## Evidentiary status, per assertion
 //!
-//! * `runtime_derived_template_builds_and_matches_eval`,
-//!   `expand_inside_parameterised_def_matches_eval` and
-//!   `template_values_do_not_affect_the_draw` are REGRESSION TESTS: `chelis
-//!   build` exits 1 on the base sha (122b55ab8) with the message above.
+//! * REGRESSION TESTS — `chelis build` exits 1 on the base sha (122b55ab8)
+//!   with the message above, verified by running this file against a
+//!   base-sha `chelis`:
+//!   `runtime_derived_template_builds_and_matches_eval`,
+//!   `expand_inside_parameterised_def_matches_eval`,
+//!   `template_values_do_not_affect_the_draw`,
+//!   `two_draws_in_one_scope_consume_distinct_ordinals`,
+//!   `host_and_dag_draws_share_one_rng_scope_consistently`, and
+//!   `every_active_float_dtype_matches_eval_with_a_runtime_template`.
+//!   The last one is red twice over: on the base sha the build is refused,
+//!   and with only f32/f64 arms its f16 and bf16 rows built successfully and
+//!   then aborted at run time.
 //! * `constant_foldable_template_still_matches_eval` is a DISPOSITION LOCK:
 //!   green before and after. It proves the fix did not perturb the path that
 //!   already worked.
-//! * `different_seeds_produce_different_draws_with_runtime_template` is a
-//!   non-triviality control, so the parity oracle cannot pass vacuously.
+//! * `different_seeds_produce_different_draws_with_runtime_template` is an
+//!   EVALUATOR-ONLY non-triviality control; it does not drive the C lane.
 //! * `runtime_computed_bounds_remain_rejected_in_both_lanes` is NEGATIVE
 //!   PARITY: the separate chelis#776 bounds gate is a CHECKER rejection and
 //!   must stay closed in both lanes. This fix widens the template contract
@@ -325,7 +333,41 @@ fn host_and_dag_draws_share_one_rng_scope_consistently() {
     );
 }
 
-/// Non-triviality control: the parity oracle must not be trivially always-equal.
+/// [05-OP-8] "admits every active float template dtype `p`". A runtime-derived
+/// template is precisely the case the DAG lane does not serve, so each dtype
+/// must be served here or the program builds and then aborts. f16/bf16 sample
+/// in f32 and narrow exactly once at the store, per the atom.
+///
+/// Before the f16/bf16 arms existed, `chelis build` exited 0 on these and the
+/// compiled binary died with `uniform_like unsupported dtype 6` (f16) / `5`
+/// (bf16) — strictly worse than the build-time refusal on the base sha.
+#[test]
+fn every_active_float_dtype_matches_eval_with_a_runtime_template() {
+    if !gcc_available() {
+        eprintln!("skipping: no host C compiler");
+        return;
+    }
+    for (dtype, label) in [
+        ("f32", "f32"),
+        ("f64", "f64"),
+        ("f16", "f16"),
+        ("bf16", "bf16"),
+    ] {
+        let src = format!(
+            "def bc(c: {dtype}) -> tensor[4, {dtype}] = to_tensor([c, c, c, c])\n\
+             sampled = with seed(42i64) \
+             {{ uniform_like(bc(cast(0.5, {dtype})), 2.0f32, 5.0f32) }}\n"
+        );
+        let eval = eval_sampled(&src);
+        let c = c_sampled(&src, &format!("u2120_dtype_{label}"));
+        assert_f32_bit_parity(&eval, &c, &format!("runtime template at {label}"));
+    }
+}
+
+/// Non-triviality control, on the EVALUATOR lane only: two seeds must give
+/// different draws, so a parity oracle cannot pass by every value being equal.
+/// The cross-lane non-vacuity proof is elsewhere — the two all-zero assertions
+/// in the ordinal tests, and the compiled-lane comparisons above.
 /// Mirrors chelis#770's `different_seeds_produce_different_draws`.
 #[test]
 fn different_seeds_produce_different_draws_with_runtime_template() {
