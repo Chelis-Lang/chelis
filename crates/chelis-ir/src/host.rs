@@ -10201,7 +10201,10 @@ fn compile_host_pattern(
                         display_roots: Vec::new(),
                         ty: list_ty.clone(),
                         value: HostExpr::new(HostExprKind::Builtin {
-                            name: "drop".to_string(),
+                            // The tail is [05-OP-54]'s List slice, `skip`.
+                            // `drop` is [05-OP-67]'s one-argument linearity
+                            // consume and would bind the tail to unit.
+                            name: "skip".to_string(),
                             args: vec![value.clone(), HostExpr::new(HostExprKind::Int(1))],
                             ty: list_ty.clone(),
                         }),

@@ -5030,6 +5030,19 @@ impl<'a> HostEmitter<'a> {
                 return Ok(());
             }
             "drop" => {
+                // Same reason as the interpreter's arm: a lowering can
+                // synthesize this node below the checker, and emitting `0`
+                // for a two-argument call binds a null list tail that only
+                // the runtime's own null check catches.
+                if arg_vars.len() != 1 {
+                    return Err(invalid_abi_shape(
+                        format!(
+                            "drop reached C emission with {} arguments; [05-OP-67] takes exactly one and the List slice is `skip` ([05-OP-54])",
+                            arg_vars.len()
+                        ),
+                        "linearity consume emission",
+                    ));
+                }
                 self.lines.push(format!("{}{target} = 0;", self.indent));
                 return Ok(());
             }
