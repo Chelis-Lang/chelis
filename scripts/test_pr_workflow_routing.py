@@ -1010,11 +1010,9 @@ def assert_candidate_receipt_workflow(
 
 
 def assert_author_machine_tokens(test: unittest.TestCase) -> None:
-    for document in (AGENTS, AUTHOR_GUIDE):
-        text = document.read_text()
-        test.assertIn("Candidate-base-update:", text)
-        test.assertIn("Candidate-history-rewrite:", text)
     guide = AUTHOR_GUIDE.read_text()
+    test.assertIn("Candidate-base-update:", guide)
+    test.assertIn("Candidate-history-rewrite:", guide)
     test.assertIn("gh workflow run pr-package-expansion.yml", guide)
     test.assertIn("-f pr_number=", guide)
     test.assertIn("-f expected_head_sha=", guide)

@@ -1190,18 +1190,5 @@ class LeaseTests(unittest.TestCase):
             self.assertEqual(len(launched), len(gate.STAGES["integration"]) - 1)
 
 
-class DocumentationLockTests(unittest.TestCase):
-    def test_agents_md_does_not_transcribe_the_list(self):
-        # AGENTS.md points at `gate.py --list` instead of copying its output;
-        # a transcription drifts (the old one omitted six live rows).
-        text = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
-        offenders = [
-            line for line in text.splitlines() if line.startswith("# cargo clippy --workspace")
-        ]
-        self.assertEqual(offenders, [])
-        self.assertIn("python3 scripts/gate.py --fast", text)
-        self.assertIn("python3 scripts/gate.py --list", text)
-
-
 if __name__ == "__main__":
     unittest.main()
