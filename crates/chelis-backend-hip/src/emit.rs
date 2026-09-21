@@ -6,8 +6,8 @@
 use std::collections::BTreeMap;
 
 use chelis_ir::dag::{
-    ComparisonKind, DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, LogicalKind, NodeId,
-    RiscOp, RtDim, TensorType,
+    ComparisonKind, DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, FusedStepOp,
+    LogicalKind, NodeId, RiscOp, RtDim, TensorType,
 };
 use chelis_ir::ownership::{
     HipStorageLane, StoragePlacement, VerifiedDagAction, VerifiedDagView, VerifiedStoragePlan,
@@ -1329,7 +1329,7 @@ impl HipEmitter {
                 "kernel_add{}",
                 Self::dtype_kernel_suffix(operand_prec())
             )),
-            RiscOp::Sub => Some(format!("kernel_sub_{}", kind_for_node(node)?.suffix())),
+            RiscOp::Sub => Some(format!("kernel_sub_{}", operand_prec().name())),
             RiscOp::Mul => Some(format!(
                 "kernel_mul{}",
                 Self::dtype_kernel_suffix(operand_prec())
@@ -1380,7 +1380,7 @@ impl HipEmitter {
                 };
                 Some(format!(
                     "kernel_{extrema}_adjoint_{selected}_{}",
-                    kind_for_node(node)?.suffix()
+                    operand_prec().name()
                 ))
             }
             RiscOp::Relu => Some(format!(
@@ -1637,12 +1637,28 @@ impl HipEmitter {
                     )
                 }
             }
-            RiscOp::Sub => kernels::binary_elementwise(
-                self.kernel_rank,
-                name,
-                "-",
-                Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type)?,
-            ),
+            RiscOp::Sub => {
+                let precision = operand_prec();
+                if precision.is_integer() {
+                    let (minimum, maximum) = Self::signed_integer_bounds(precision);
+                    kernels::binary_checked_sub_integer(
+                        self.kernel_rank,
+                        name,
+                        Self::dtype_c_type(precision),
+                        minimum,
+                        maximum,
+                    )
+                } else if let Some(kind) = Self::reduced_float_kind(precision) {
+                    kernels::binary_sub_reduced(self.kernel_rank, name, kind)
+                } else {
+                    kernels::binary_elementwise(
+                        self.kernel_rank,
+                        name,
+                        "-",
+                        Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type)?,
+                    )
+                }
+            }
             RiscOp::Mul => {
                 let prec = operand_prec();
                 if matches!(prec, Prim::F32 | Prim::F64) {
@@ -1750,17 +1766,32 @@ impl HipEmitter {
                         is_max,
                         Self::dtype_c_type(precision),
                     )
+                } else if let Some(kind) = Self::reduced_float_kind(precision) {
+                    kernels::binary_extrema_reduced(self.kernel_rank, name, is_max, kind)
                 } else {
                     kernels::binary_extrema(self.kernel_rank, name, is_max, elem_for_unary()?)
                 }
             }
-            RiscOp::ExtremaAdjoint { kind, operand } => kernels::extrema_adjoint(
-                self.kernel_rank,
-                name,
-                matches!(kind, ExtremaKind::Max),
-                matches!(operand, ExtremaOperand::Left),
-                elem_for_unary()?,
-            ),
+            RiscOp::ExtremaAdjoint { kind, operand } => {
+                let precision = operand_prec();
+                if let Some(reduced) = Self::reduced_float_kind(precision) {
+                    kernels::extrema_adjoint_reduced(
+                        self.kernel_rank,
+                        name,
+                        matches!(kind, ExtremaKind::Max),
+                        matches!(operand, ExtremaOperand::Left),
+                        reduced,
+                    )
+                } else {
+                    kernels::extrema_adjoint(
+                        self.kernel_rank,
+                        name,
+                        matches!(kind, ExtremaKind::Max),
+                        matches!(operand, ExtremaOperand::Left),
+                        elem_for_unary()?,
+                    )
+                }
+            }
             RiscOp::Relu => match operand_prec() {
                 Prim::F16 => kernels::relu_reduced(self.kernel_rank, name, 0x7c00, 0x03ff),
                 Prim::Bf16 => kernels::relu_reduced(self.kernel_rank, name, 0x7f80, 0x007f),
@@ -1908,14 +1939,44 @@ impl HipEmitter {
                         .position(|&input| input == reusable)
                         .expect("reusable input must appear in node inputs")
                 });
-                kernels::fused_elementwise(
-                    self.kernel_rank,
-                    name,
-                    ops,
-                    node.inputs.len(),
-                    aliased_ext,
-                    elem_for_unary()?,
-                )
+                if let Some(kind) = Self::reduced_float_kind(node.output_type.precision) {
+                    if !ops.iter().all(|step| {
+                        matches!(
+                            step.op,
+                            FusedStepOp::Sub | FusedStepOp::MaxElem | FusedStepOp::MinElem
+                        )
+                    }) {
+                        return Err(Unsupported::new(
+                            UnsupportedKind::Dtype(node.output_type.precision.name().to_string()),
+                            format!(
+                                "HIP narrow-float fused kernel at node {} contains an operation outside sub/max_elem/min_elem",
+                                node.id.0
+                            ),
+                            Stage::Codegen("hip"),
+                            chelis_types::unimplemented_rejection!(
+                                729,
+                                "this narrow-float fused chain has no complete typed HIP kernel"
+                            ),
+                        ));
+                    }
+                    kernels::fused_elementwise_reduced(
+                        self.kernel_rank,
+                        name,
+                        ops,
+                        node.inputs.len(),
+                        aliased_ext,
+                        kind,
+                    )
+                } else {
+                    kernels::fused_elementwise(
+                        self.kernel_rank,
+                        name,
+                        ops,
+                        node.inputs.len(),
+                        aliased_ext,
+                        elem_for_unary()?,
+                    )
+                }
             }
             RiscOp::Gather { .. } => {
                 let indices_ty = &dag.get(node.inputs[1]).unwrap().output_type;
@@ -2062,24 +2123,36 @@ impl HipEmitter {
                 &resolved_kernel_name()?,
                 &node.inputs,
                 &node.output_type,
+                None,
             ),
-            RiscOp::Sub => self.emit_binary_launch(
-                id,
-                &resolved_kernel_name()?,
-                &node.inputs,
-                &node.output_type,
-            ),
+            RiscOp::Sub => {
+                let trap = node.output_type.precision.is_integer().then(|| {
+                    format!(
+                        "numeric trap: overflow in sub at {}",
+                        node.output_type.precision.name()
+                    )
+                });
+                self.emit_binary_launch(
+                    id,
+                    &resolved_kernel_name()?,
+                    &node.inputs,
+                    &node.output_type,
+                    trap.as_deref(),
+                )
+            }
             RiscOp::Mul => self.emit_binary_launch(
                 id,
                 &resolved_kernel_name()?,
                 &node.inputs,
                 &node.output_type,
+                None,
             ),
             RiscOp::Div => self.emit_binary_launch(
                 id,
                 &resolved_kernel_name()?,
                 &node.inputs,
                 &node.output_type,
+                None,
             ),
             // chelis#178: floor / truncating integer division launch like
             // any other binary elementwise kernel.
@@ -2089,18 +2162,21 @@ impl HipEmitter {
                 &resolved_kernel_name()?,
                 &node.inputs,
                 &node.output_type,
+                None,
             ),
             RiscOp::Compare(_) => self.emit_binary_launch(
                 id,
                 &resolved_kernel_name()?,
                 &node.inputs,
                 &node.output_type,
+                None,
             ),
             RiscOp::Logical(LogicalKind::And | LogicalKind::Or) => self.emit_binary_launch(
                 id,
                 &resolved_kernel_name()?,
                 &node.inputs,
                 &node.output_type,
+                None,
             ),
             RiscOp::Logical(LogicalKind::Not) => self.emit_unary_launch(
                 id,
@@ -2119,6 +2195,7 @@ impl HipEmitter {
                 &resolved_kernel_name()?,
                 &node.inputs,
                 &node.output_type,
+                None,
             ),
             RiscOp::ExtremaAdjoint { .. } => self.emit_ternary_launch(
                 id,
@@ -2137,6 +2214,7 @@ impl HipEmitter {
                 &resolved_kernel_name()?,
                 &node.inputs,
                 &node.output_type,
+                None,
             ),
             RiscOp::Neg => self.emit_unary_launch(
                 id,
@@ -2764,6 +2842,7 @@ impl HipEmitter {
         kernel_name: &str,
         inputs: &[NodeId],
         ty: &TensorType,
+        numeric_trap: Option<&str>,
     ) {
         let a = inputs[0].0;
         let b = inputs[1].0;
@@ -2803,13 +2882,20 @@ impl HipEmitter {
             b_stride_refs = self.stride_arg_refs(id, "b"),
             out_shape_refs = self.shape_arg_refs(id, "out"),
         ));
-        self.emit_kernel_launch_expr(
-            &format!("mod_{kernel_name}"),
-            kernel_name,
-            &format!("t{id}_size / 256 + (t{id}_size % 256 != 0)"),
-            "256",
-            "args",
-        );
+        let module = format!("mod_{kernel_name}");
+        let grid = format!("t{id}_size / 256 + (t{id}_size % 256 != 0)");
+        if let Some(message) = numeric_trap {
+            self.emit_numeric_trap_kernel_launch_expr(
+                &module,
+                kernel_name,
+                &grid,
+                "256",
+                "args",
+                message,
+            );
+        } else {
+            self.emit_kernel_launch_expr(&module, kernel_name, &grid, "256", "args");
+        }
         self.indent -= 1;
         self.line("}");
     }
@@ -4283,6 +4369,44 @@ impl HipEmitter {
         ));
     }
 
+    fn emit_numeric_trap_kernel_launch_expr(
+        &mut self,
+        module_var: &str,
+        kernel_name: &str,
+        grid_expr: &str,
+        block_expr: &str,
+        args_var: &str,
+        trap_message: &str,
+    ) {
+        self.line("{");
+        self.indent += 1;
+        self.line("hipDeviceptr_t chelis_numeric_flag_symbol;");
+        self.line("hipDeviceptr_t chelis_numeric_index_symbol;");
+        self.line("size_t chelis_numeric_flag_size = 0;");
+        self.line("size_t chelis_numeric_index_size = 0;");
+        self.line(&format!(
+            "CHELIS_HIP_CHECK(hipModuleGetGlobal(&chelis_numeric_flag_symbol, &chelis_numeric_flag_size, {module_var}, \"chelis_numeric_failure_flag\"));"
+        ));
+        self.line(&format!(
+            "CHELIS_HIP_CHECK(hipModuleGetGlobal(&chelis_numeric_index_symbol, &chelis_numeric_index_size, {module_var}, \"chelis_numeric_failure_index\"));"
+        ));
+        self.line("if (chelis_numeric_flag_size < sizeof(unsigned int) || chelis_numeric_index_size < sizeof(unsigned long long)) { fprintf(stderr, \"HIP error: numeric trap symbols have unexpected size\\n\"); abort(); }");
+        self.line("unsigned int chelis_numeric_flag = 0;");
+        self.line("unsigned long long chelis_numeric_index = ~0ULL;");
+        self.line("CHELIS_HIP_CHECK(hipMemcpyHtoD(chelis_numeric_flag_symbol, &chelis_numeric_flag, sizeof(chelis_numeric_flag)));");
+        self.line("CHELIS_HIP_CHECK(hipMemcpyHtoD(chelis_numeric_index_symbol, &chelis_numeric_index, sizeof(chelis_numeric_index)));");
+        self.emit_kernel_launch_expr(module_var, kernel_name, grid_expr, block_expr, args_var);
+        self.line("CHELIS_HIP_CHECK(hipDeviceSynchronize());");
+        self.line("CHELIS_HIP_CHECK(hipMemcpyDtoH(&chelis_numeric_flag, chelis_numeric_flag_symbol, sizeof(chelis_numeric_flag)));");
+        self.line("CHELIS_HIP_CHECK(hipMemcpyDtoH(&chelis_numeric_index, chelis_numeric_index_symbol, sizeof(chelis_numeric_index)));");
+        self.line("if ((chelis_numeric_flag == 0) != (chelis_numeric_index == ~0ULL)) { fprintf(stderr, \"HIP error: inconsistent numeric trap record\\n\"); abort(); }");
+        self.line(&format!(
+            "if (chelis_numeric_flag != 0) chelis_numeric_trap(\"{trap_message}\");"
+        ));
+        self.indent -= 1;
+        self.line("}");
+    }
+
     fn reduction_kernel_name(
         kind: kernels::ReduceKind,
         axis: usize,
@@ -4849,6 +4973,27 @@ impl HipEmitter {
             other => panic!(
                 "HIP element type not defined for {} (active dtype set per spec/04-type-system.md §1.1)",
                 other.name()
+            ),
+        }
+    }
+
+    fn reduced_float_kind(p: Prim) -> Option<kernels::ReducedFloatKind> {
+        match p {
+            Prim::F16 => Some(kernels::ReducedFloatKind::F16),
+            Prim::Bf16 => Some(kernels::ReducedFloatKind::Bf16),
+            _ => None,
+        }
+    }
+
+    fn signed_integer_bounds(p: Prim) -> (&'static str, &'static str) {
+        match p {
+            Prim::Int8 => ("(-127 - 1)", "127"),
+            Prim::Int16 => ("(-32767 - 1)", "32767"),
+            Prim::Int32 => ("(-2147483647 - 1)", "2147483647"),
+            Prim::Int64 => ("(-9223372036854775807LL - 1LL)", "9223372036854775807LL"),
+            _ => panic!(
+                "checked HIP subtraction bounds requested for non-integer dtype {}",
+                p.name()
             ),
         }
     }

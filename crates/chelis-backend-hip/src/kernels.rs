@@ -18,6 +18,18 @@ typedef unsigned short chelis_u16;
 typedef unsigned int chelis_u32;
 typedef unsigned long long chelis_u64;
 typedef chelis_i64 chelis_device_metadata;
+__device__ unsigned int chelis_numeric_failure_flag = 0;
+__device__ unsigned long long chelis_numeric_failure_index = ~0ULL;
+__device__ void chelis_record_numeric_failure(unsigned long long index) {
+    unsigned long long observed = chelis_numeric_failure_index;
+    while (index < observed) {
+        unsigned long long prior =
+            atomicCAS(&chelis_numeric_failure_index, observed, index);
+        if (prior == observed) break;
+        observed = prior;
+    }
+    atomicExch(&chelis_numeric_failure_flag, 1u);
+}
 #if CHELIS_DEBUG_BOUNDS
 __device__ int chelis_gpu_failure = 0;
 __device__ void chelis_record_failure(int code) {
@@ -69,6 +81,14 @@ __device__ float chelis_f32_from_storage_bits(chelis_u32 bits) {
     decoded.bits = bits;
     return decoded.value;
 }
+__device__ chelis_u32 chelis_f32_to_storage_bits(float value) {
+    union {
+        chelis_u32 bits;
+        float value;
+    } encoded;
+    encoded.value = value;
+    return encoded.bits;
+}
 __device__ float chelis_bf16_to_f32(chelis_u16 value) {
     return chelis_f32_from_storage_bits(((chelis_u32)value) << 16);
 }
@@ -95,6 +115,51 @@ __device__ float chelis_f16_to_f32(chelis_u16 value) {
         bits = sign | ((exponent + 112u) << 23) | (fraction << 13);
     }
     return chelis_f32_from_storage_bits(bits);
+}
+__device__ chelis_u32 chelis_round_shift_right_even(chelis_u32 value, chelis_u32 shift) {
+    chelis_u32 truncated = value >> shift;
+    chelis_u32 remainder = value & ((1u << shift) - 1u);
+    chelis_u32 halfway = 1u << (shift - 1u);
+    if (remainder > halfway || (remainder == halfway && (truncated & 1u) != 0)) {
+        truncated += 1u;
+    }
+    return truncated;
+}
+__device__ chelis_u16 chelis_f32_to_bf16(float value) {
+    chelis_u32 bits = chelis_f32_to_storage_bits(value);
+    if ((bits & 0x7fffffffu) > 0x7f800000u) {
+        return (chelis_u16)0x7fc0u;
+    }
+    chelis_u32 rounding_bias = 0x00007fffu + ((bits >> 16) & 1u);
+    return (chelis_u16)((bits + rounding_bias) >> 16);
+}
+__device__ chelis_u16 chelis_f32_to_f16(float value) {
+    chelis_u32 bits = chelis_f32_to_storage_bits(value);
+    chelis_u32 sign = bits & 0x80000000u;
+    chelis_u32 exponent = bits & 0x7f800000u;
+    chelis_u32 mantissa = bits & 0x007fffffu;
+    if (exponent == 0x7f800000u) {
+        return (chelis_u16)(mantissa == 0 ? ((sign >> 16) | 0x7c00u) : 0x7e00u);
+    }
+    chelis_u32 half_sign = sign >> 16;
+    int unbiased_exponent = (int)(exponent >> 23) - 127;
+    int half_exponent = unbiased_exponent + 15;
+    if (half_exponent >= 0x1f) {
+        return (chelis_u16)(half_sign | 0x7c00u);
+    }
+    if (half_exponent <= 0) {
+        chelis_u32 shift = (chelis_u32)(14 - half_exponent);
+        if (shift > 24u) {
+            return (chelis_u16)half_sign;
+        }
+        mantissa |= 0x00800000u;
+        chelis_u32 half_mantissa = chelis_round_shift_right_even(mantissa, shift);
+        return (chelis_u16)(half_sign | half_mantissa);
+    }
+    chelis_u32 encoded_exponent = ((chelis_u32)half_exponent) << 10;
+    chelis_u32 shift = 13u;
+    chelis_u32 half_mantissa = chelis_round_shift_right_even(mantissa, shift);
+    return (chelis_u16)(half_sign | (encoded_exponent + half_mantissa));
 }
 ";
 
@@ -138,6 +203,28 @@ __device__ double chelis_uniform_sample_f64(unsigned long long seed, unsigned lo
 pub enum ElemKind {
     F32,
     F64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReducedFloatKind {
+    F16,
+    Bf16,
+}
+
+impl ReducedFloatKind {
+    fn decode(self) -> &'static str {
+        match self {
+            Self::F16 => "chelis_f16_to_f32",
+            Self::Bf16 => "chelis_bf16_to_f32",
+        }
+    }
+
+    fn encode(self) -> &'static str {
+        match self {
+            Self::F16 => "chelis_f32_to_f16",
+            Self::Bf16 => "chelis_f32_to_bf16",
+        }
+    }
 }
 
 impl ElemKind {
@@ -460,6 +547,17 @@ pub fn binary_elementwise_typed(
     op: &str,
     elem_c_ty: &str,
 ) -> String {
+    let expression = match (op, elem_c_ty) {
+        ("-", "float") => {
+            "isnan(a[idx_a] - b[idx_b]) ? __int_as_float(0x7fc00000) : a[idx_a] - b[idx_b]"
+                .to_string()
+        }
+        ("-", "double") => {
+            "isnan(a[idx_a] - b[idx_b]) ? __longlong_as_double(0x7ff8000000000000LL) : a[idx_a] - b[idx_b]"
+                .to_string()
+        }
+        _ => format!("a[idx_a] {op} b[idx_b]"),
+    };
     format!(
         "{DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}(
@@ -475,7 +573,7 @@ extern \"C\" __global__ void {kernel_name}(
   chelis_flat_to_indices(i, out_sh, out_ndim, indices);
   chelis_device_metadata idx_a = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
   chelis_device_metadata idx_b = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, b_s, b_ndim), b_size, 1);
-  out[i] = a[idx_a] {op} b[idx_b];
+  out[i] = {expression};
 }}
 ",
         a_strides = stride_params(rank, "a"),
@@ -493,6 +591,87 @@ extern \"C\" __global__ void {kernel_name}(
 /// `ElemKind`'s C-type spelling (`float` or `double`).
 pub fn binary_elementwise(rank: usize, kernel_name: &str, op: &str, kind: ElemKind) -> String {
     binary_elementwise_typed(rank, kernel_name, op, kind.c_type())
+}
+
+/// Direct checked signed-integer subtraction. The bounds test avoids
+/// evaluating an overflowing signed expression, and every failing lane
+/// contributes its row-major flat index to the module-local numeric trap
+/// record. The host reads that record after dispatch and raises [04-NUM-9]'s
+/// exact branded trap.
+pub fn binary_checked_sub_integer(
+    rank: usize,
+    kernel_name: &str,
+    elem_c_ty: &str,
+    minimum: &str,
+    maximum: &str,
+) -> String {
+    format!(
+        "{DEVICE_HELPERS}\
+extern \"C\" __global__ void {kernel_name}(
+    const {elem_c_ty} *a, {a_strides}, chelis_device_metadata a_ndim, chelis_device_metadata a_size,
+    const {elem_c_ty} *b, {b_strides}, chelis_device_metadata b_ndim, chelis_device_metadata b_size,
+    {elem_c_ty} *out, {out_shape}, chelis_device_metadata out_ndim, chelis_device_metadata out_size) {{
+{build_a_s}
+{build_b_s}
+{build_out_sh}
+  chelis_device_metadata i = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= out_size) return;
+  chelis_device_metadata indices[{rank}];
+  chelis_flat_to_indices(i, out_sh, out_ndim, indices);
+  chelis_device_metadata idx_a = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
+  chelis_device_metadata idx_b = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, b_s, b_ndim), b_size, 1);
+  {elem_c_ty} av = a[idx_a];
+  {elem_c_ty} bv = b[idx_b];
+  bool overflow =
+      (bv > ({elem_c_ty})0 && av < ({elem_c_ty})({minimum} + bv))
+      || (bv < ({elem_c_ty})0 && av > ({elem_c_ty})({maximum} + bv));
+  if (overflow) {{
+    chelis_record_numeric_failure((unsigned long long)i);
+    out[i] = ({elem_c_ty})0;
+    return;
+  }}
+  out[i] = ({elem_c_ty})(av - bv);
+}}
+",
+        a_strides = stride_params(rank, "a"),
+        b_strides = stride_params(rank, "b"),
+        out_shape = shape_params(rank, "out"),
+        build_a_s = build_array(rank, "a_s", "a", "s"),
+        build_b_s = build_array(rank, "b_s", "b", "s"),
+        build_out_sh = build_array(rank, "out_sh", "out", "sh"),
+    )
+}
+
+/// f16/bf16 subtraction computes at f32 and finalizes exactly once to the
+/// operand storage width.
+pub fn binary_sub_reduced(rank: usize, kernel_name: &str, kind: ReducedFloatKind) -> String {
+    let decode = kind.decode();
+    let encode = kind.encode();
+    format!(
+        "{DEVICE_HELPERS}{REDUCED_FLOAT_COMPARISON_HELPERS}\
+extern \"C\" __global__ void {kernel_name}(
+    const chelis_u16 *a, {a_strides}, chelis_device_metadata a_ndim, chelis_device_metadata a_size,
+    const chelis_u16 *b, {b_strides}, chelis_device_metadata b_ndim, chelis_device_metadata b_size,
+    chelis_u16 *out, {out_shape}, chelis_device_metadata out_ndim, chelis_device_metadata out_size) {{
+{build_a_s}
+{build_b_s}
+{build_out_sh}
+  chelis_device_metadata i = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= out_size) return;
+  chelis_device_metadata indices[{rank}];
+  chelis_flat_to_indices(i, out_sh, out_ndim, indices);
+  chelis_device_metadata idx_a = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
+  chelis_device_metadata idx_b = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, b_s, b_ndim), b_size, 1);
+  out[i] = {encode}({decode}(a[idx_a]) - {decode}(b[idx_b]));
+}}
+",
+        a_strides = stride_params(rank, "a"),
+        b_strides = stride_params(rank, "b"),
+        out_shape = shape_params(rank, "out"),
+        build_a_s = build_array(rank, "a_s", "a", "s"),
+        build_b_s = build_array(rank, "b_s", "b", "s"),
+        build_out_sh = build_array(rank, "out_sh", "out", "sh"),
+    )
 }
 
 /// chelis#178: floor-division kernel (round quotient toward −∞).
@@ -619,6 +798,46 @@ extern \"C\" __global__ void {kernel_name}(
     )
 }
 
+/// Exact f16/bf16 extrema. Comparison happens on decoded f32 values, while
+/// the selected stored operand is copied unchanged.
+pub fn binary_extrema_reduced(
+    rank: usize,
+    kernel_name: &str,
+    is_max: bool,
+    kind: ReducedFloatKind,
+) -> String {
+    let comparison = if is_max { ">=" } else { "<=" };
+    let decode = kind.decode();
+    format!(
+        "{DEVICE_HELPERS}{REDUCED_FLOAT_COMPARISON_HELPERS}\
+extern \"C\" __global__ void {kernel_name}(
+    const chelis_u16 *a, {a_strides}, chelis_device_metadata a_ndim, chelis_device_metadata a_size,
+    const chelis_u16 *b, {b_strides}, chelis_device_metadata b_ndim, chelis_device_metadata b_size,
+    chelis_u16 *out, {out_shape}, chelis_device_metadata out_ndim, chelis_device_metadata out_size) {{
+{build_a_s}
+{build_b_s}
+{build_out_sh}
+  chelis_device_metadata i = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= out_size) return;
+  chelis_device_metadata indices[{rank}];
+  chelis_flat_to_indices(i, out_sh, out_ndim, indices);
+  chelis_device_metadata idx_a = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
+  chelis_device_metadata idx_b = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, b_s, b_ndim), b_size, 1);
+  float av = {decode}(a[idx_a]);
+  float bv = {decode}(b[idx_b]);
+  bool select_left = isnan(av) || (!isnan(bv) && av {comparison} bv);
+  out[i] = select_left ? a[idx_a] : b[idx_b];
+}}
+",
+        a_strides = stride_params(rank, "a"),
+        b_strides = stride_params(rank, "b"),
+        out_shape = shape_params(rank, "out"),
+        build_a_s = build_array(rank, "a_s", "a", "s"),
+        build_b_s = build_array(rank, "b_s", "b", "s"),
+        build_out_sh = build_array(rank, "out_sh", "out", "sh"),
+    )
+}
+
 /// Generate the AD-only exact extrema cotangent kernel. Inputs are the two
 /// forward operands and the incoming cotangent; output is the complete
 /// cotangent for the selected operand and exact positive zero otherwise.
@@ -659,6 +878,57 @@ extern \"C\" __global__ void {kernel_name}(
   {ty} bv = b[idx_b];
   bool select_left = isnan(av) || (!isnan(bv) && av {comparison} bv);
   out[i] = {selected} ? g[idx_g] : {zero};
+}}
+",
+        a_strides = stride_params(rank, "a"),
+        b_strides = stride_params(rank, "b"),
+        g_strides = stride_params(rank, "g"),
+        out_shape = shape_params(rank, "out"),
+        build_a_s = build_array(rank, "a_s", "a", "s"),
+        build_b_s = build_array(rank, "b_s", "b", "s"),
+        build_g_s = build_array(rank, "g_s", "g", "s"),
+        build_out_sh = build_array(rank, "out_sh", "out", "sh"),
+    )
+}
+
+/// Exact f16/bf16 extrema cotangent routing. The comparison decodes values;
+/// the selected cotangent is copied as raw storage bits.
+pub fn extrema_adjoint_reduced(
+    rank: usize,
+    kernel_name: &str,
+    is_max: bool,
+    select_left_operand: bool,
+    kind: ReducedFloatKind,
+) -> String {
+    let comparison = if is_max { ">=" } else { "<=" };
+    let selected = if select_left_operand {
+        "select_left"
+    } else {
+        "!select_left"
+    };
+    let decode = kind.decode();
+    format!(
+        "{DEVICE_HELPERS}{REDUCED_FLOAT_COMPARISON_HELPERS}\
+extern \"C\" __global__ void {kernel_name}(
+    const chelis_u16 *a, {a_strides}, chelis_device_metadata a_ndim, chelis_device_metadata a_size,
+    const chelis_u16 *b, {b_strides}, chelis_device_metadata b_ndim, chelis_device_metadata b_size,
+    const chelis_u16 *g, {g_strides}, chelis_device_metadata g_ndim, chelis_device_metadata g_size,
+    chelis_u16 *out, {out_shape}, chelis_device_metadata out_ndim, chelis_device_metadata out_size) {{
+{build_a_s}
+{build_b_s}
+{build_g_s}
+{build_out_sh}
+  chelis_device_metadata i = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= out_size) return;
+  chelis_device_metadata indices[{rank}];
+  chelis_flat_to_indices(i, out_sh, out_ndim, indices);
+  chelis_device_metadata idx_a = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
+  chelis_device_metadata idx_b = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, b_s, b_ndim), b_size, 1);
+  chelis_device_metadata idx_g = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, g_s, g_ndim), g_size, 1);
+  float av = {decode}(a[idx_a]);
+  float bv = {decode}(b[idx_b]);
+  bool select_left = isnan(av) || (!isnan(bv) && av {comparison} bv);
+  out[i] = {selected} ? g[idx_g] : (chelis_u16)0;
 }}
 ",
         a_strides = stride_params(rank, "a"),
@@ -1482,7 +1752,12 @@ fn fused_step_lines(
             FusedStepOp::Sub => {
                 let a = resolve_fused_input(&step.input_indices[0]);
                 let b = resolve_fused_input(&step.input_indices[1]);
-                format!("{a} - {b}")
+                let canonical = match kind {
+                    ElemKind::F32 => "__int_as_float(0x7fc00000)",
+                    ElemKind::F64 => "__longlong_as_double(0x7ff8000000000000LL)",
+                };
+                let raw = format!("({a} - {b})");
+                format!("isnan({raw}) ? {canonical} : {raw}")
             }
             FusedStepOp::Mul => {
                 let a = resolve_fused_input(&step.input_indices[0]);
@@ -1686,6 +1961,107 @@ extern \"C\" __global__ void {kernel_name}(
 pub enum ReduceKind {
     Sum,
     Max,
+}
+
+fn fused_reduced_step_lines(
+    steps: &[chelis_ir::dag::FusedStep],
+    kind: ReducedFloatKind,
+) -> Vec<String> {
+    use chelis_ir::dag::FusedStepOp;
+    let decode = kind.decode();
+    let encode = kind.encode();
+    let mut lines = Vec::new();
+    for (index, step) in steps.iter().enumerate() {
+        let left = resolve_fused_input(&step.input_indices[0]);
+        let right = resolve_fused_input(&step.input_indices[1]);
+        match step.op {
+            FusedStepOp::Sub => {
+                lines.push(format!(
+                    "  chelis_u16 v{index} = {encode}({decode}({left}) - {decode}({right}));"
+                ));
+            }
+            FusedStepOp::MaxElem | FusedStepOp::MinElem => {
+                let comparison = if matches!(step.op, FusedStepOp::MaxElem) {
+                    ">="
+                } else {
+                    "<="
+                };
+                lines.push(format!("  float v{index}_left = {decode}({left});"));
+                lines.push(format!("  float v{index}_right = {decode}({right});"));
+                lines.push(format!(
+                    "  bool v{index}_select_left = isnan(v{index}_left) || (!isnan(v{index}_right) && v{index}_left {comparison} v{index}_right);"
+                ));
+                lines.push(format!(
+                    "  chelis_u16 v{index} = v{index}_select_left ? {left} : {right};"
+                ));
+            }
+            _ => unreachable!("the reduced fused HIP kernel admits only sub/max_elem/min_elem"),
+        }
+    }
+    lines
+}
+
+/// Fused f16/bf16 direct arithmetic. Every step is finalized back to the
+/// 16-bit stored representation before a later step consumes it, preserving
+/// the per-operation finalization boundary required by [04-NUM-8].
+pub fn fused_elementwise_reduced(
+    rank: usize,
+    kernel_name: &str,
+    steps: &[chelis_ir::dag::FusedStep],
+    n_external: usize,
+    in_place_aliased_ext: Option<usize>,
+    kind: ReducedFloatKind,
+) -> String {
+    let mut params = Vec::new();
+    for i in 0..n_external {
+        let prefix = format!("ext{i}");
+        let qualifier = if in_place_aliased_ext.is_some() && in_place_aliased_ext != Some(i) {
+            "const chelis_u16 *__restrict__ "
+        } else {
+            "const chelis_u16 *"
+        };
+        params.push(format!("{qualifier}{prefix}"));
+        params.push(stride_params(rank, &prefix));
+        params.push(format!("chelis_device_metadata {prefix}_ndim"));
+        params.push(format!("chelis_device_metadata {prefix}_size"));
+    }
+    params.push("chelis_u16 *out".to_string());
+    params.push(shape_params(rank, "out"));
+    params.push("chelis_device_metadata out_ndim".to_string());
+    params.push("chelis_device_metadata out_size".to_string());
+
+    let mut arrays = Vec::new();
+    let mut indices = Vec::new();
+    for i in 0..n_external {
+        let prefix = format!("ext{i}");
+        arrays.push(build_array(rank, &format!("{prefix}_s"), &prefix, "s"));
+        indices.push(format!(
+            "  chelis_device_metadata idx_{prefix} = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, {prefix}_s, {prefix}_ndim), {prefix}_size, 1);"
+        ));
+    }
+    arrays.push(build_array(rank, "out_sh", "out", "sh"));
+    let step_lines = fused_reduced_step_lines(steps, kind);
+    let last_step = steps.len() - 1;
+
+    format!(
+        "{DEVICE_HELPERS}{REDUCED_FLOAT_COMPARISON_HELPERS}\
+extern \"C\" __global__ void {kernel_name}(
+    {params}) {{
+{arrays}
+  chelis_device_metadata i = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= out_size) return;
+  chelis_device_metadata indices[{rank}];
+  chelis_flat_to_indices(i, out_sh, out_ndim, indices);
+{indices}
+{steps}
+  out[i] = v{last_step};
+}}
+",
+        params = params.join(",\n    "),
+        arrays = arrays.join("\n"),
+        indices = indices.join("\n"),
+        steps = step_lines.join("\n"),
+    )
 }
 
 /// Generate kernel source for a fused elementwise chain.
@@ -2083,6 +2459,66 @@ extern \"C\" __global__ void {kernel_name}(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reduced_float_conversions_emit_round_to_nearest_ties_to_even() {
+        assert!(
+            REDUCED_FLOAT_COMPARISON_HELPERS.contains(concat!(
+                "if ((bits & 0x7fffffffu) > 0x7f800000u) {",
+                "\n        return (chelis_u16)0x7fc0u;"
+            )),
+            "bf16 arithmetic NaNs must finalize to the canonical positive quiet NaN"
+        );
+        assert!(
+            REDUCED_FLOAT_COMPARISON_HELPERS.contains(concat!(
+                "if (exponent == 0x7f800000u) {",
+                "\n        return (chelis_u16)",
+                "(mantissa == 0 ? ((sign >> 16) | 0x7c00u) : 0x7e00u);"
+            )),
+            "f16 arithmetic NaNs must finalize to the canonical positive quiet NaN while infinities keep their sign"
+        );
+        assert!(
+            REDUCED_FLOAT_COMPARISON_HELPERS.contains("0x00007fffu + ((bits >> 16) & 1u)"),
+            "bf16 rounding must bias exact ties by the retained LSB"
+        );
+        assert!(
+            REDUCED_FLOAT_COMPARISON_HELPERS
+                .contains("chelis_round_shift_right_even(mantissa, shift)"),
+            "f16 normal and subnormal rounding must share the exact RNE shift helper"
+        );
+        assert!(
+            REDUCED_FLOAT_COMPARISON_HELPERS
+                .contains("remainder > halfway || (remainder == halfway && (truncated & 1u) != 0)"),
+            "exact halfway cases must increment only when the retained LSB is odd"
+        );
+        assert!(
+            !REDUCED_FLOAT_COMPARISON_HELPERS.contains("3u * round_bit - 1u"),
+            "the ties-away mask must not return"
+        );
+    }
+
+    #[test]
+    fn reduced_float_halfway_vectors_distinguish_even_and_odd_retained_lsbs() {
+        for (bits, expected) in [(0x3f80_8000, 0x3f80), (0x3f81_8000, 0x3f82)] {
+            assert_eq!(
+                half::bf16::from_f32(f32::from_bits(bits)).to_bits(),
+                expected
+            );
+        }
+
+        for (bits, expected) in [
+            (0x3f80_1000, 0x3c00),
+            (0x3f80_3000, 0x3c02),
+            (0x3300_0000, 0x0000),
+            (0x33c0_0000, 0x0002),
+            (0x387f_e000, 0x0400),
+        ] {
+            assert_eq!(
+                half::f16::from_f32(f32::from_bits(bits)).to_bits(),
+                expected
+            );
+        }
+    }
 
     #[test]
     fn binary_add_kernel_has_correct_structure() {

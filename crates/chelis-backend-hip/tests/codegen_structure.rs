@@ -44,6 +44,13 @@ fn vec_i64(n: usize) -> TensorType {
     }
 }
 
+fn vec_of(n: usize, precision: Prim) -> TensorType {
+    TensorType {
+        dims: vec![DimInfo::Lit(n)],
+        precision,
+    }
+}
+
 fn mat_f32(rows: usize, cols: usize) -> TensorType {
     TensorType {
         dims: vec![DimInfo::Lit(rows), DimInfo::Lit(cols)],
@@ -391,8 +398,218 @@ fn direct_extrema_and_adjoint_emit_bit_preserving_kernels() {
     }
     assert!(source.contains("bool select_left = isnan(av) || (!isnan(bv) && av >= bv);"));
     assert!(source.contains("bool select_left = isnan(av) || (!isnan(bv) && av <= bv);"));
+    assert!(
+        source.contains(
+            "out[i] = isnan(a[idx_a] - b[idx_b]) ? __int_as_float(0x7fc00000) : a[idx_a] - b[idx_b];"
+        ),
+        "f32 subtraction must canonicalize NaNs: {source}"
+    );
     assert!(!source.contains("fmaxf(av, bv)"), "{source}");
     assert!(!source.contains("fminf(av, bv)"), "{source}");
+}
+
+#[test]
+fn direct_and_fused_wide_float_subtraction_emit_canonical_nan_finalization() {
+    for (precision, suffix, canonical) in [
+        (Prim::F32, "f32", "__int_as_float(0x7fc00000)"),
+        (
+            Prim::F64,
+            "f64",
+            "__longlong_as_double(0x7ff8000000000000LL)",
+        ),
+    ] {
+        let ty = vec_of(4, precision);
+        let mut direct = Dag::new();
+        let a = direct.add_node(RiscOp::Load { name: "a".into() }, vec![], ty.clone(), None);
+        let b = direct.add_node(RiscOp::Load { name: "b".into() }, vec![], ty.clone(), None);
+        let out = direct.add_node(RiscOp::Sub, vec![a, b], ty.clone(), None);
+        direct.add_root(out);
+        let source = codegen_hip(&direct, &format!("canonical_sub_{suffix}"))
+            .expect("wide direct subtraction must codegen")
+            .c_source;
+        assert!(source.contains(&format!("? {canonical} :")), "{source}");
+
+        let mut fused = Dag::new();
+        let a = fused.add_node(RiscOp::Load { name: "a".into() }, vec![], ty.clone(), None);
+        let b = fused.add_node(RiscOp::Load { name: "b".into() }, vec![], ty.clone(), None);
+        let c = fused.add_node(RiscOp::Load { name: "c".into() }, vec![], ty.clone(), None);
+        let difference = fused.add_node(RiscOp::Sub, vec![a, b], ty.clone(), None);
+        let result = fused.add_node(RiscOp::MinElem, vec![difference, c], ty, None);
+        fused.add_root(result);
+        let fused = fuse(&fused);
+        let source = codegen_hip(&fused, &format!("canonical_fused_sub_{suffix}"))
+            .expect("wide fused subtraction must codegen")
+            .c_source;
+        assert!(
+            source.contains(&format!("? {canonical} :")),
+            "fused {suffix} subtraction must canonicalize each arithmetic step: {source}"
+        );
+    }
+}
+
+#[test]
+fn direct_checked_signed_sub_emits_exact_always_on_trap_channel() {
+    for (precision, suffix, minimum, maximum) in [
+        (Prim::Int8, "i8", "(-127 - 1)", "127"),
+        (Prim::Int16, "i16", "(-32767 - 1)", "32767"),
+        (Prim::Int32, "i32", "(-2147483647 - 1)", "2147483647"),
+        (
+            Prim::Int64,
+            "i64",
+            "(-9223372036854775807LL - 1LL)",
+            "9223372036854775807LL",
+        ),
+    ] {
+        let ty = vec_of(4, precision);
+        let mut dag = Dag::new();
+        let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], ty.clone(), None);
+        let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], ty.clone(), None);
+        let out = dag.add_node(RiscOp::Sub, vec![a, b], ty, None);
+        dag.add_root(out);
+
+        let source = codegen_hip(&dag, &format!("direct_checked_sub_{suffix}"))
+            .expect("every signed width must reach the checked HIP subtraction kernel")
+            .c_source;
+        assert!(source.contains(&format!("kernel_sub_{suffix}")), "{source}");
+        assert!(source.contains(minimum), "{source}");
+        assert!(source.contains(maximum), "{source}");
+        assert!(
+            source.contains("chelis_record_numeric_failure((unsigned long long)i);"),
+            "{source}"
+        );
+        assert!(
+            source.contains("chelis_numeric_failure_flag")
+                && source.contains("chelis_numeric_failure_index"),
+            "{source}"
+        );
+        assert!(
+            source.contains(&format!(
+                "chelis_numeric_trap(\"numeric trap: overflow in sub at {}\")",
+                precision.name()
+            )),
+            "{source}"
+        );
+        assert!(
+            source.contains("hipModuleGetGlobal")
+                && source.contains("hipMemcpyHtoD")
+                && source.contains("hipMemcpyDtoH"),
+            "the trap record must cross the device boundary: {source}"
+        );
+        assert!(
+            !source.contains("a[idx_a] + -b[idx_b]"),
+            "direct subtraction must not reconstruct add+neg: {source}"
+        );
+    }
+
+    let source = codegen_hip(&dag_add_consts(), "ordinary_add")
+        .expect("ordinary add remains supported")
+        .c_source;
+    assert!(
+        !source.contains("numeric trap: overflow in sub at"),
+        "non-trapping arithmetic must not acquire the sub trap boundary: {source}"
+    );
+}
+
+#[test]
+fn direct_narrow_float_arithmetic_emits_f32_compute_and_raw_selection() {
+    for (precision, suffix, decode, encode) in [
+        (Prim::F16, "f16", "chelis_f16_to_f32", "chelis_f32_to_f16"),
+        (
+            Prim::Bf16,
+            "bf16",
+            "chelis_bf16_to_f32",
+            "chelis_f32_to_bf16",
+        ),
+    ] {
+        let ty = vec_of(4, precision);
+        let mut dag = Dag::new();
+        let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], ty.clone(), None);
+        let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], ty.clone(), None);
+        let g = dag.add_node(RiscOp::Load { name: "g".into() }, vec![], ty.clone(), None);
+        let sub = dag.add_node(RiscOp::Sub, vec![a, b], ty.clone(), None);
+        let max = dag.add_node(RiscOp::MaxElem, vec![a, b], ty.clone(), None);
+        let min = dag.add_node(RiscOp::MinElem, vec![a, b], ty.clone(), None);
+        let adjoint = dag.add_node(
+            RiscOp::ExtremaAdjoint {
+                kind: ExtremaKind::Max,
+                operand: ExtremaOperand::Left,
+            },
+            vec![a, b, g],
+            ty,
+            None,
+        );
+        for root in [sub, max, min, adjoint] {
+            dag.add_root(root);
+        }
+
+        let source = codegen_hip(&dag, &format!("direct_narrow_{suffix}"))
+            .expect("f16/bf16 direct arithmetic must reach exact HIP kernels")
+            .c_source;
+        for kernel in [
+            format!("kernel_sub_{suffix}"),
+            format!("kernel_max_elem_{suffix}"),
+            format!("kernel_min_elem_{suffix}"),
+            format!("kernel_max_adjoint_left_{suffix}"),
+        ] {
+            assert!(source.contains(&kernel), "missing {kernel}: {source}");
+        }
+        assert!(source.contains("const chelis_u16 *a"), "{source}");
+        assert!(source.contains(decode), "{source}");
+        assert!(source.contains(encode), "{source}");
+        assert!(
+            source.contains("out[i] = select_left ? a[idx_a] : b[idx_b];"),
+            "extrema must copy a selected stored operand: {source}"
+        );
+        assert!(
+            source.contains("out[i] = select_left ? g[idx_g] : (chelis_u16)0;"),
+            "adjoints must copy stored cotangent bits or exact positive zero: {source}"
+        );
+
+        let mut fused_dag = Dag::new();
+        let x = fused_dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec_of(4, precision),
+            None,
+        );
+        let y = fused_dag.add_node(
+            RiscOp::Load { name: "y".into() },
+            vec![],
+            vec_of(4, precision),
+            None,
+        );
+        let z = fused_dag.add_node(
+            RiscOp::Load { name: "z".into() },
+            vec![],
+            vec_of(4, precision),
+            None,
+        );
+        let difference = fused_dag.add_node(RiscOp::Sub, vec![x, y], vec_of(4, precision), None);
+        let result = fused_dag.add_node(
+            RiscOp::MinElem,
+            vec![difference, z],
+            vec_of(4, precision),
+            None,
+        );
+        fused_dag.add_root(result);
+        let fused_dag = fuse(&fused_dag);
+        assert!(
+            fused_dag
+                .nodes()
+                .iter()
+                .any(|node| matches!(node.op, RiscOp::FusedElem { .. })),
+            "the test must exercise the admitted fused path"
+        );
+        let fused_source = codegen_hip(&fused_dag, &format!("fused_narrow_{suffix}"))
+            .expect("fused f16/bf16 sub+min must reach exact HIP codegen")
+            .c_source;
+        assert!(fused_source.contains(decode), "{fused_source}");
+        assert!(fused_source.contains(encode), "{fused_source}");
+        assert!(
+            fused_source.contains("chelis_u16 v0") && fused_source.contains("chelis_u16 v1"),
+            "every fused step must finalize back to narrow storage: {fused_source}"
+        );
+    }
 }
 
 #[test]

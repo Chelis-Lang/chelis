@@ -898,12 +898,12 @@ impl<'plan> Emitter<'plan> {
                 "Metal direct nonnumeric node {id} reached emission after the #2266 typed capability rejection"
             )),
 
-            // chelis#1306: these identities are rejected by the shared typed
+            // chelis#2338: these identities are rejected by the shared typed
             // Metal capability gate. Keep explicit backend arms so no new
             // operation can fall through the generic unsupported wildcard.
             RiscOp::Sub | RiscOp::MaxElem | RiscOp::MinElem | RiscOp::ExtremaAdjoint { .. } => {
                 Err(format!(
-                    "Metal direct arithmetic node {id} reached emission after the #1306 typed capability rejection"
+                    "Metal direct arithmetic node {id} reached emission after the #2338 typed capability rejection"
                 ))
             }
             RiscOp::FusedElem { ops }
@@ -917,7 +917,7 @@ impl<'plan> Emitter<'plan> {
                 }) =>
             {
                 Err(format!(
-                    "Metal fused direct arithmetic node {id} reached emission after the #1306 typed capability rejection"
+                    "Metal fused direct arithmetic node {id} reached emission after the #2338 typed capability rejection"
                 ))
             }
 

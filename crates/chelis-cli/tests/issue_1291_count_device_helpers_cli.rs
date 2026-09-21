@@ -137,7 +137,7 @@ fn metal_cli_isolates_multiple_host_count_helpers() {
 
 /// A Count-bearing helper is emitted as device code, so it receives the full
 /// device capability policy at the shared gate before any backend runs. On
-/// Metal, direct `sub` is an unimplemented chelis#1306 cell: the build must
+/// Metal, direct `sub` is an unimplemented chelis#2338 cell: the build must
 /// stop at the gate with that typed receipt, not fall through to the
 /// emitter's backstop.
 #[test]
@@ -170,7 +170,8 @@ fn metal_cli_gates_a_count_helper_with_the_full_device_policy() {
         String::from_utf8_lossy(&result.stdout)
     );
     let stderr = String::from_utf8_lossy(&result.stderr);
-    assert!(stderr.contains("unimplemented chelis#1306:"), "{stderr}");
+    assert!(stderr.contains("unimplemented chelis#2338:"), "{stderr}");
+    assert!(!stderr.contains("chelis#1306"), "{stderr}");
     assert!(
         stderr.contains("does not yet support exact `sub`"),
         "the shared gate, not the emitter backstop, must reject:\n{stderr}"
@@ -181,12 +182,11 @@ fn metal_cli_gates_a_count_helper_with_the_full_device_policy() {
     );
 }
 
-/// The HIP lane runs the same gate call. Checked `i64` subtraction is an
-/// unimplemented chelis#1306 cell on HIP, so the same program stops at the
-/// early capability gate with that typed receipt rather than reaching the
-/// HIP emitter.
+/// The HIP lane runs the same gate call, but checked `i64` subtraction is now
+/// an implemented chelis#1306 cell. The Count-bearing helper must therefore
+/// pass the shared capability gate and emit HIP code.
 #[test]
-fn hip_cli_gates_a_count_helper_with_the_full_device_policy() {
+fn hip_cli_emits_a_count_helper_with_direct_sub() {
     let temp = tempdir().expect("temporary source and output directory");
     let source = temp.path().join("count_sub.ch");
     std::fs::write(
@@ -210,25 +210,33 @@ fn hip_cli_gates_a_count_helper_with_the_full_device_policy() {
         .output()
         .expect("chelis build runs");
     assert!(
-        !result.status.success(),
-        "a Count helper carrying checked i64 `sub` must not build for HIP:\n{}",
-        String::from_utf8_lossy(&result.stdout)
+        result.status.success(),
+        "a Count helper carrying checked i64 `sub` must build for HIP:\n{}",
+        String::from_utf8_lossy(&result.stderr)
     );
-    let stderr = String::from_utf8_lossy(&result.stderr);
-    assert!(stderr.contains("unimplemented chelis#1306:"), "{stderr}");
-    assert!(
-        stderr.contains("early capability gate"),
-        "the shared gate, not the emitter, must reject:\n{stderr}"
-    );
-    assert!(!stderr.contains("reached emission"), "{stderr}");
+    let emitted = std::fs::read_dir(&output_dir)
+        .expect("HIP output directory")
+        .map(|entry| entry.expect("generated artifact").path())
+        .collect::<Vec<_>>();
+    let helper = emitted
+        .iter()
+        .find(|path| {
+            path.file_name().is_some_and(|name| {
+                let name = name.to_string_lossy();
+                name.contains("global__tensor_") && name.ends_with("_hip.cpp")
+            })
+        })
+        .unwrap_or_else(|| panic!("HIP output lacks the Count-plus-sub helper: {emitted:?}"));
+    let helper = std::fs::read_to_string(helper).expect("HIP helper is readable");
+    assert!(helper.contains("kernel_sub"), "{helper}");
 }
 
 /// The `build-deep` lane runs the same four gate call sites as `build`. The
-/// fixture is desugared with `chelis deep` and built from the `.dp`, so both
-/// `cmd_build_deep` sites (Metal and HIP) stop at the gate with the typed
-/// chelis#1306 receipt instead of reaching an emitter.
+/// fixture is desugared with `chelis deep` and built from the `.dp`: Metal
+/// retains the chelis#2338 typed rejection while HIP emits the implemented
+/// chelis#1306 direct arithmetic.
 #[test]
-fn build_deep_gates_a_count_helper_with_the_full_device_policy() {
+fn build_deep_uses_target_specific_direct_arithmetic_policy() {
     let temp = tempdir().expect("temporary source and output directory");
     let surf = temp.path().join("count_sub.ch");
     std::fs::write(
@@ -251,10 +259,7 @@ fn build_deep_gates_a_count_helper_with_the_full_device_policy() {
     let deep = temp.path().join("count_sub.dp");
     std::fs::write(&deep, &desugared.stdout).expect("write desugared fixture");
 
-    for (target, gate_marker) in [
-        ("metal", "does not yet support exact `sub`"),
-        ("hip", "early capability gate"),
-    ] {
+    for target in ["metal", "hip"] {
         let output_dir = temp.path().join(format!("count-sub-deep-{target}"));
         let result = Command::cargo_bin("chelis")
             .expect("chelis binary")
@@ -269,17 +274,26 @@ fn build_deep_gates_a_count_helper_with_the_full_device_policy() {
             ])
             .output()
             .expect("chelis build runs");
-        assert!(
-            !result.status.success(),
-            "{target} build-deep of a Count helper carrying `sub` must not build:\n{}",
-            String::from_utf8_lossy(&result.stdout)
-        );
-        let stderr = String::from_utf8_lossy(&result.stderr);
-        assert!(
-            stderr.contains("unimplemented chelis#1306:"),
-            "{target}: {stderr}"
-        );
-        assert!(stderr.contains(gate_marker), "{target}: {stderr}");
-        assert!(!stderr.contains("reached emission"), "{target}: {stderr}");
+        if target == "metal" {
+            assert!(
+                !result.status.success(),
+                "Metal build-deep of a Count helper carrying `sub` must not build:\n{}",
+                String::from_utf8_lossy(&result.stdout)
+            );
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            assert!(stderr.contains("unimplemented chelis#2338:"), "{stderr}");
+            assert!(
+                stderr.contains("does not yet support exact `sub`"),
+                "{stderr}"
+            );
+            assert!(!stderr.contains("chelis#1306"), "{stderr}");
+            assert!(!stderr.contains("reached emission"), "{stderr}");
+        } else {
+            assert!(
+                result.status.success(),
+                "HIP build-deep of a Count helper carrying `sub` must build:\n{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
     }
 }
