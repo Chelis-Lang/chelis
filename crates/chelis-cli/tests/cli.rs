@@ -4154,8 +4154,8 @@ fn build_device_targets_reject_host_reduce_window_max_without_c_fallback() {
     }
 }
 
-/// The selected host implementation still owes a clean capability failure
-/// for its unsupported dtype; this is an implementation gap, not [05-RWIN-2].
+/// Device window extrema remain fenced until their exact semantics are
+/// implemented; this is an implementation gap, not [05-RWIN-2].
 #[test]
 fn build_hip_host_rejects_unimplemented_window_dtype_cleanly() {
     let dir = tempdir().unwrap();
@@ -4180,7 +4180,8 @@ fn build_hip_host_rejects_unimplemented_window_dtype_cleanly() {
         .failure()
         .stderr(predicate::str::contains("reduce_window"))
         .stderr(predicate::str::contains("bf16"))
-        .stderr(predicate::str::contains("unimplemented chelis#729"))
+        .stderr(predicate::str::contains("unimplemented chelis#2339"))
+        .stderr(predicate::str::contains("(codegen:hip)"))
         .stderr(predicate::str::contains("panicked").not());
 }
 
@@ -5498,14 +5499,20 @@ fn build_hip_rejects_sparse_gather_with_non_load_cast_indices() {
 #[test]
 fn build_hip_creates_missing_output_directory_and_reports_runtime_path() {
     let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("hip_output.ch");
     let out_dir = dir.path().join("nested/hip-output");
+    write_file(
+        &path,
+        "def main(x: tensor[4, f32], y: tensor[4, f32]) -> tensor[4, f32] = \
+         relu(add(x, y))\n",
+    );
 
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
-            mnist_example().to_str().unwrap(),
+            path.to_str().unwrap(),
             "--target",
             "hip",
             "--output",
@@ -5519,24 +5526,30 @@ fn build_hip_creates_missing_output_directory_and_reports_runtime_path() {
         .stdout(predicate::str::contains("Peak device memory formula:"))
         .stdout(predicate::str::contains("Estimated peak device memory:"));
 
-    assert!(out_dir.join("mnist_hip.cpp").exists());
-    assert!(out_dir.join("mnist_hip.h").exists());
+    assert!(out_dir.join("hip_output_hip.cpp").exists());
+    assert!(out_dir.join("hip_output_hip.h").exists());
     assert!(out_dir.join("chelis_runtime.h").exists());
     assert!(out_dir.join("libchelis_runtime.a").exists());
     assert!(out_dir.join("chelis_hip_runtime.h").exists());
 }
 
 #[test]
-fn build_hip_mnist_emits_fused_kernels_and_launches() {
+fn build_hip_admitted_sum_program_emits_fused_kernel_and_launch() {
     let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("fused.ch");
     let out_dir = dir.path().join("hip-output");
+    write_file(
+        &path,
+        "def main(x: tensor[3, 4, f32], y: tensor[3, 4, f32]) -> tensor[3, f32] = \
+         sum(neg(add(x, y)), 1)\n",
+    );
 
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
-            mnist_example().to_str().unwrap(),
+            path.to_str().unwrap(),
             "--target",
             "hip",
             "--output",
@@ -5545,14 +5558,14 @@ fn build_hip_mnist_emits_fused_kernels_and_launches() {
         .assert()
         .success();
 
-    let hip_src = fs::read_to_string(out_dir.join("mnist_hip.cpp")).expect("hip source");
+    let hip_src = fs::read_to_string(out_dir.join("fused_hip.cpp")).expect("hip source");
     assert!(
-        hip_src.contains("kernel_fused_") || hip_src.contains("kernel_fused_sum_"),
-        "MNIST HIP build should emit fused kernels on the real CLI path"
+        hip_src.contains("kernel_fused_sum_"),
+        "an admitted HIP sum build should emit a fused reduction kernel on the real CLI path"
     );
     assert!(
         hip_src.contains("chelis_launch_kernel"),
-        "MNIST HIP build should emit kernel launches on the real CLI path"
+        "an admitted HIP sum build should emit a kernel launch on the real CLI path"
     );
 }
 

@@ -960,7 +960,7 @@
         "chelis-backend-c::emit::tests::path_sensitive_uniform_reads_float_backed_bool_and_gates_counter",
         "chelis-backend-c::emit::tests::permute_materializes_the_axis_mapping",
         "chelis-backend-c::emit::tests::realize_emits_materialization_loop",
-        "chelis-backend-c::emit::tests::reduce_window_max_min_drop_nan",
+        "chelis-backend-c::emit::tests::reduce_window_max_min_select_first_nan_and_stored_representation",
         "chelis-backend-c::emit::tests::repeated_load_names_share_one_input_slot",
         "chelis-backend-c::emit::tests::reshape_materializes_contiguous_storage",
         "chelis-backend-c::emit::tests::roots_are_emitted_as_multiple_outputs",
