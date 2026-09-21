@@ -8,8 +8,7 @@ fn validate(source: &str) -> Result<(), String> {
     for name in [
         "emit_count",
         "emit_reduce_sum_general",
-        "emit_reduce_max",
-        "emit_reduce_max_reduced_f",
+        "emit_reduce_extreme",
         "emit_reduce_simple",
         "emit_reduce_argcmp",
         "emit_fused_reduce",
@@ -36,6 +35,19 @@ fn validate(source: &str) -> Result<(), String> {
             if body.contains(raw) {
                 return Err(format!("{name}: raw metadata authority"));
             }
+        }
+    }
+    let max = method(source, "emit_reduce_max");
+    if !max.contains("self.emit_reduce_extreme(") {
+        return Err("emit_reduce_max: missing checked extrema delegation".into());
+    }
+    let dispatch = method(source, "emit_node");
+    for required in [
+        "self.emit_reduce_max(id, *axis",
+        "self.emit_reduce_extreme(id, *axis",
+    ] {
+        if !dispatch.contains(required) {
+            return Err(format!("emit_node: missing checked dispatch {required}"));
         }
     }
     let scratch = method(source, "emit_sum_level");
@@ -72,8 +84,7 @@ fn bypassing_each_consumer_and_scratch_owner_is_rejected() {
     for name in [
         "emit_count",
         "emit_reduce_sum_general",
-        "emit_reduce_max",
-        "emit_reduce_max_reduced_f",
+        "emit_reduce_extreme",
         "emit_reduce_simple",
         "emit_reduce_argcmp",
         "emit_fused_reduce",
@@ -89,6 +100,22 @@ fn bypassing_each_consumer_and_scratch_owner_is_rejected() {
                 "{name}: {original}"
             );
         }
+    }
+    let max = method(source, "emit_reduce_max");
+    assert!(
+        validate(&source.replace(max, &max.replace("self.emit_reduce_extreme(", "removed(")))
+            .is_err(),
+        "emit_reduce_max: checked extrema delegation"
+    );
+    let dispatch = method(source, "emit_node");
+    for required in [
+        "self.emit_reduce_max(id, *axis",
+        "self.emit_reduce_extreme(id, *axis",
+    ] {
+        assert!(
+            validate(&source.replace(dispatch, &dispatch.replace(required, "removed("))).is_err(),
+            "emit_node: checked reduction dispatch {required}"
+        );
     }
     assert!(
         validate(&source.replace("chelis_alloc(1, &__sum_n_{id}", "malloc(1, &__sum_n_{id}"))

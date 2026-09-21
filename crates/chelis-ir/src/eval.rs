@@ -1304,7 +1304,18 @@ fn is_runtime_mean_div(dag: &Dag, node: &DagNode) -> bool {
     let [sum_id, divisor_id] = node.inputs.as_slice() else {
         return false;
     };
-    let (Some(sum), Some(divisor)) = (dag.get(*sum_id), dag.get(*divisor_id)) else {
+    let storage_sum = |id| {
+        let node = dag.get(id)?;
+        match node.op {
+            RiscOp::Cast { new_precision }
+                if node.inputs.len() == 1 && new_precision == node.output_type.precision =>
+            {
+                dag.get(node.inputs[0])
+            }
+            _ => Some(node),
+        }
+    };
+    let (Some(sum), Some(divisor)) = (storage_sum(*sum_id), storage_sum(*divisor_id)) else {
         return false;
     };
     let (
@@ -3185,8 +3196,7 @@ where
                     && values[&node.inputs[1]]
                         .storage()
                         .to_f64_lossy_vec()
-                        .iter()
-                        .any(|value| *value == 0.0)
+                        .contains(&0.0)
                 {
                     return Err(NumericTrap::Domain {
                         op: "mean",

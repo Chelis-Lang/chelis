@@ -410,37 +410,6 @@ fn bare_var_name(expr: &Expr) -> Option<String> {
     Some(name.clone())
 }
 
-/// Synthesize `(app {} (var {} fname) <operand> <axis>)` — one stage of the
-/// chelis#339 variadic named-axis reduction desugar. `sum(x, seq, head)`
-/// lowers as the documented composition `sum(sum(x, head), seq)`: each
-/// synthesized 2-arg stage resolves its named axis against its own operand's
-/// dims, so the result is order-insensitive.
-fn synth_reduction_app(fname: &str, operand: Expr, axis: Expr, app_span: Span) -> Expr {
-    let zero_span = Span::new(0, 0);
-    let callee = Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::Var), zero_span),
-                Expr::Map(Metadata::default(), zero_span),
-                Expr::Atom(Atom::Name(fname.to_string()), zero_span),
-            ],
-        },
-        zero_span,
-    );
-    Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::App), zero_span),
-                Expr::Map(Metadata::default(), zero_span),
-                callee,
-                operand,
-                axis,
-            ],
-        },
-        app_span,
-    )
-}
-
 fn expr_diagnostic_location(expr: &Expr) -> (Option<Span>, Option<String>) {
     (Some(expr.span()), expr.span_id().map(ToOwned::to_owned))
 }
@@ -7780,6 +7749,85 @@ impl<'program> LowerCtx<'program> {
         from_input
     }
 
+    fn lower_variadic_value_reduction_stage(
+        &mut self,
+        name: &str,
+        input: NodeId,
+        axis: usize,
+        app_span: Span,
+    ) -> NodeId {
+        let input_ty = self
+            .dag
+            .get(input)
+            .expect("variadic reduction input exists")
+            .output_type
+            .clone();
+        let output_ty = TensorType {
+            dims: Self::reduction_out_dims(&input_ty.dims, &Self::default_type(), axis),
+            precision: input_ty.precision,
+        };
+        match name {
+            "sum" => {
+                let op = RiscOp::sum_default(axis, input_ty.precision)
+                    .expect("checked variadic sum dtype");
+                let RiscOp::Sum { accumulator, .. } = op else {
+                    unreachable!("sum_default returns Sum");
+                };
+                let sum = self.dag.add_node(
+                    op,
+                    vec![input],
+                    TensorType {
+                        dims: output_ty.dims.clone(),
+                        precision: accumulator,
+                    },
+                    self.current_span_id.clone(),
+                );
+                if accumulator == output_ty.precision {
+                    sum
+                } else {
+                    self.dag.add_node(
+                        RiscOp::Cast {
+                            new_precision: output_ty.precision,
+                        },
+                        vec![sum],
+                        output_ty,
+                        self.current_span_id.clone(),
+                    )
+                }
+            }
+            "mean" => {
+                let parent_span = self.current_span_id.clone();
+                let node = tier2::lower_mean(
+                    &mut self.dag,
+                    input,
+                    axis,
+                    &input_ty,
+                    parent_span.as_deref(),
+                );
+                self.attach_reuse_hint(node, app_span, &[input])
+            }
+            "max_reduce" => self.dag.add_node(
+                RiscOp::MaxReduce { axis },
+                vec![input],
+                output_ty,
+                self.current_span_id.clone(),
+            ),
+            "min_reduce" => self.dag.add_node(
+                RiscOp::MinReduce { axis },
+                vec![input],
+                output_ty,
+                self.current_span_id.clone(),
+            ),
+            "prod_reduce" => self.dag.add_node(
+                RiscOp::ProdReduce { axis },
+                vec![input],
+                output_ty,
+                self.current_span_id.clone(),
+            ),
+            _ => unreachable!("guarded variadic value reduction"),
+        }
+    }
+
     /// Choose the output `TensorType` for an elementwise op whose shape
     /// matches the first input. Prefer the input DAG node's dims over the
     /// annotated `ty.dims` when the input has a non-empty rank — the input
@@ -13615,10 +13663,11 @@ impl<'program> LowerCtx<'program> {
             // and we must insert a Cast back to the operand precision
             // to recover the user-facing tensor type.
             // chelis#339 Part 2: variadic named-axis reduction
-            // (`sum(x, seq, head)`, spec §4.5.3). Desugar to the documented
-            // composition — innermost stage reduces the LAST listed axis —
-            // and recurse; each 2-arg stage resolves its named axis against
-            // its own operand's dims, so the result is order-insensitive.
+            // (`sum(x, seq, head)`, spec §4.5.3). Resolve every name against
+            // the original operand, sort by descending original position,
+            // then lower that canonical single-axis composition directly.
+            // Removing a higher axis leaves every remaining lower original
+            // position unchanged.
             // Only bare-name axes reach this arm (the checker rejects
             // positional integers in the variadic form); anything else falls
             // through to the 2-arg arms or the generic fallback.
@@ -13665,11 +13714,36 @@ impl<'program> LowerCtx<'program> {
             "sum" | "mean" | "max_reduce" | "min_reduce" | "prod_reduce"
                 if args.len() >= 3 && args[1..].iter().all(|a| bare_var_name(a).is_some()) =>
             {
-                let mut expr = args[0].clone();
-                for axis in args[1..].iter().rev() {
-                    expr = synth_reduction_app(func_name, expr, axis.clone(), app_span);
+                let input = self.lower_expr_node(&args[0], "variadic named-axis input");
+                let original_rank = self
+                    .dag
+                    .get(input)
+                    .expect("variadic reduction input exists")
+                    .output_type
+                    .dims
+                    .len();
+                let mut axes = args[1..]
+                    .iter()
+                    .map(|axis| self.resolve_reduce_axis(axis, input, original_rank, func_name))
+                    .collect::<Vec<_>>();
+                axes.sort_unstable_by(|left, right| right.cmp(left));
+                if axes.windows(2).any(|pair| pair[0] == pair[1]) {
+                    raise_fatal_lowering_error(
+                        format!(
+                            "{func_name} variadic named axes must resolve uniquely against the \
+                             original operand"
+                        ),
+                        Some(app_span),
+                        self.current_span_id.clone(),
+                    );
                 }
-                self.lower_expr_node(&expr, "variadic named-axis reduction")
+                let mut result = input;
+                for position in axes {
+                    result = self.lower_variadic_value_reduction_stage(
+                        func_name, result, position, app_span,
+                    );
+                }
+                result
             }
             "sum" if args.len() == 2 => {
                 let x = self.lower_expr_node(&args[0], "sum input");

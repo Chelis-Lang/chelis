@@ -3,9 +3,10 @@
 use chelis_ir::dag::{Dag, DimInfo, ReduceWindowKind, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor};
 use chelis_ir::grad::{AdError, AdRejectionReason, grad_dag_checked};
+use chelis_ir::lower::try_lower_program;
 use chelis_ir::tier2;
 use chelis_types::types::Prim;
-use chelis_types::{RawTensor, StorageView, finalize_tensor};
+use chelis_types::{RawTensor, StorageView, check_ir_program, finalize_tensor};
 use chelis_unord::UnordMap;
 
 fn tensor_type(dims: &[usize], precision: Prim) -> TensorType {
@@ -34,6 +35,21 @@ fn evaluate_single_input(
     let mut inputs = UnordMap::new();
     inputs.insert(name.to_string(), input);
     eval_tensor(dag, &inputs)
+}
+
+fn lower_surf(source: &str) -> Dag {
+    let decls = chelis_surf::parser::parse_str(source).expect("Surf fixture parses");
+    let exprs = chelis_macros::expand_program(
+        &chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture desugars"),
+        &chelis_macros::ExpansionOptions::default(),
+    )
+    .expect("Surf fixture expands")
+    .into_exprs();
+    let checked = check_ir_program(&exprs)
+        .unwrap_or_else(|report| panic!("Surf fixture checks: {:#?}", report.errors));
+    let checked = chelis_effects::check_program(&checked).expect("Surf fixture effects check");
+    let checked = chelis_types::check_linearity(&checked).expect("Surf fixture linearity check");
+    try_lower_program(&checked).expect("Surf fixture lowers")
 }
 
 #[test]
@@ -191,33 +207,57 @@ fn runtime_empty_mean_extrema_and_arg_reductions_trap_domain() {
         );
     }
 
-    let mut mean_dag = Dag::new();
-    let x = mean_dag.add_node(
-        RiscOp::Load { name: "x".into() },
-        vec![],
-        TensorType {
+    for precision in [Prim::F16, Prim::Bf16, Prim::F32] {
+        let mut mean_dag = Dag::new();
+        let ty = TensorType {
             dims: vec![DimInfo::Named("n".into(), None)],
-            precision: Prim::F32,
-        },
-        None,
-    );
-    tier2::lower_mean(
-        &mut mean_dag,
-        x,
-        0,
-        &TensorType {
-            dims: vec![DimInfo::Named("n".into(), None)],
-            precision: Prim::F32,
-        },
-        None,
-    );
-    let error = evaluate_single_input(
-        &mean_dag,
-        "x",
-        exact_tensor(vec![0], Prim::F32, RawTensor::Float(vec![])),
-    )
-    .expect_err("empty runtime mean must trap");
-    assert_eq!(error, "numeric trap: domain in mean at f32");
+            precision,
+        };
+        let x = mean_dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+        let mean = tier2::lower_mean(&mut mean_dag, x, 0, &ty, None);
+        let error = evaluate_single_input(
+            &mean_dag,
+            "x",
+            exact_tensor(vec![0], precision, RawTensor::Float(vec![])),
+        )
+        .expect_err("empty runtime mean must trap through storage casts");
+        assert_eq!(
+            error,
+            format!("numeric trap: domain in mean at {}", precision.name())
+        );
+
+        let values = evaluate_single_input(
+            &mean_dag,
+            "x",
+            exact_tensor(vec![2], precision, RawTensor::Float(vec![2.0, 4.0])),
+        )
+        .expect("non-empty runtime mean must remain admitted");
+        assert_eq!(values[&mean].to_f64_lossy_vec(), vec![3.0]);
+    }
+}
+
+#[test]
+fn variadic_named_axis_mean_reduces_highest_original_axis_first() {
+    for axes in [("head", "seq"), ("seq", "head")] {
+        let dag = lower_surf(&format!(
+            "def main(x: &tensor[batch, seq, head, f32]) -> tensor[batch, f32] = \
+             mean(x, {}, {})",
+            axes.0, axes.1
+        ));
+        let sum_axes = dag
+            .nodes()
+            .iter()
+            .filter_map(|node| match node.op {
+                RiscOp::Sum { axis, .. } => Some(axis),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            sum_axes,
+            vec![2, 2, 1, 1],
+            "variadic mean axes {axes:?} must execute in descending original position"
+        );
+    }
 }
 
 #[test]
@@ -239,7 +279,7 @@ fn mean_uses_canonical_sum_then_divide_at_declared_f32_width() {
     let StorageView::F32(storage) = values[&mean].storage().view() else {
         panic!("f32 mean must preserve f32 storage");
     };
-    assert_eq!(storage[0].to_bits(), (-4_194_303.25f32).to_bits());
+    assert_eq!(storage[0].to_bits(), 0xca7f_fffd);
 }
 
 fn reduction_grad(op: RiscOp, input: TensorValue) -> TensorValue {
