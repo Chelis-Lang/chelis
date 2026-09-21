@@ -956,8 +956,24 @@ fn extrema_selects_left<T: Copy + PartialOrd>(
     }
 }
 
+fn canonicalize_subtraction_f32(value: f32) -> f32 {
+    if value.is_nan() {
+        f32::from_bits(0x7fc0_0000)
+    } else {
+        value
+    }
+}
+
+fn canonicalize_subtraction_f64(value: f64) -> f64 {
+    if value.is_nan() {
+        f64::from_bits(0x7ff8_0000_0000_0000)
+    } else {
+        value
+    }
+}
+
 fn apply_float_binop_f32(op: FloatBinOp, lhs: f32, rhs: f32) -> f32 {
-    match op {
+    let value = match op {
         FloatBinOp::Add => lhs + rhs,
         FloatBinOp::Sub => lhs - rhs,
         FloatBinOp::Mul => lhs * rhs,
@@ -965,11 +981,15 @@ fn apply_float_binop_f32(op: FloatBinOp, lhs: f32, rhs: f32) -> f32 {
         FloatBinOp::FloorDiv => (lhs / rhs).floor(),
         FloatBinOp::Max => select_float_max_first(lhs, rhs, f32::is_nan),
         FloatBinOp::Min => select_float_min_first(lhs, rhs, f32::is_nan),
+    };
+    match op {
+        FloatBinOp::Sub => canonicalize_subtraction_f32(value),
+        _ => value,
     }
 }
 
 fn apply_float_binop_f64(op: FloatBinOp, lhs: f64, rhs: f64) -> f64 {
-    match op {
+    let value = match op {
         FloatBinOp::Add => lhs + rhs,
         FloatBinOp::Sub => lhs - rhs,
         FloatBinOp::Mul => lhs * rhs,
@@ -977,6 +997,10 @@ fn apply_float_binop_f64(op: FloatBinOp, lhs: f64, rhs: f64) -> f64 {
         FloatBinOp::FloorDiv => (lhs / rhs).floor(),
         FloatBinOp::Max => select_float_max_first(lhs, rhs, f64::is_nan),
         FloatBinOp::Min => select_float_min_first(lhs, rhs, f64::is_nan),
+    };
+    match op {
+        FloatBinOp::Sub => canonicalize_subtraction_f64(value),
+        _ => value,
     }
 }
 
@@ -1801,12 +1825,12 @@ fn float_vec_binop_f32<T: Copy + PartialOrd>(
     from_f32: impl Fn(f32) -> T,
 ) -> Vec<T> {
     match op {
-        FloatBinOp::Add => zip_map(lhs, rhs, |lhs, rhs| from_f32(to_f32(lhs) + to_f32(rhs))),
-        FloatBinOp::Sub => zip_map(lhs, rhs, |lhs, rhs| from_f32(to_f32(lhs) - to_f32(rhs))),
-        FloatBinOp::Mul => zip_map(lhs, rhs, |lhs, rhs| from_f32(to_f32(lhs) * to_f32(rhs))),
-        FloatBinOp::Div => zip_map(lhs, rhs, |lhs, rhs| from_f32(to_f32(lhs) / to_f32(rhs))),
-        FloatBinOp::FloorDiv => zip_map(lhs, rhs, |lhs, rhs| {
-            from_f32((to_f32(lhs) / to_f32(rhs)).floor())
+        FloatBinOp::Add
+        | FloatBinOp::Sub
+        | FloatBinOp::Mul
+        | FloatBinOp::Div
+        | FloatBinOp::FloorDiv => zip_map(lhs, rhs, |lhs, rhs| {
+            from_f32(apply_float_binop_f32(op, to_f32(lhs), to_f32(rhs)))
         }),
         FloatBinOp::Max => zip_map(lhs, rhs, |lhs, rhs| {
             select_float_max_first(lhs, rhs, |value| to_f32(value).is_nan())
@@ -1819,11 +1843,11 @@ fn float_vec_binop_f32<T: Copy + PartialOrd>(
 
 fn float_vec_binop_f64(op: FloatBinOp, lhs: &[f64], rhs: &[f64]) -> Vec<f64> {
     match op {
-        FloatBinOp::Add => zip_map(lhs, rhs, |lhs, rhs| lhs + rhs),
-        FloatBinOp::Sub => zip_map(lhs, rhs, |lhs, rhs| lhs - rhs),
-        FloatBinOp::Mul => zip_map(lhs, rhs, |lhs, rhs| lhs * rhs),
-        FloatBinOp::Div => zip_map(lhs, rhs, |lhs, rhs| lhs / rhs),
-        FloatBinOp::FloorDiv => zip_map(lhs, rhs, |lhs, rhs| (lhs / rhs).floor()),
+        FloatBinOp::Add
+        | FloatBinOp::Sub
+        | FloatBinOp::Mul
+        | FloatBinOp::Div
+        | FloatBinOp::FloorDiv => zip_map(lhs, rhs, |lhs, rhs| apply_float_binop_f64(op, lhs, rhs)),
         FloatBinOp::Max => zip_map(lhs, rhs, |lhs, rhs| {
             select_float_max_first(lhs, rhs, f64::is_nan)
         }),
@@ -5609,6 +5633,149 @@ mod tests {
         assert_width!(Prim::Int16, I16, i16::MIN, i16::MAX);
         assert_width!(Prim::Int32, I32, i32::MIN, i32::MAX);
         assert_width!(Prim::Int64, I64, i64::MIN, i64::MAX);
+    }
+
+    #[test]
+    fn direct_subtraction_canonicalizes_float_nan_at_every_storage_width() {
+        fn assert_scalar_bits(actual: ScalarValue, expected: ScalarValue) {
+            match (actual.bits, expected.bits) {
+                (Bits::F16(actual), Bits::F16(expected)) => {
+                    assert_eq!(actual.to_bits(), expected.to_bits())
+                }
+                (Bits::Bf16(actual), Bits::Bf16(expected)) => {
+                    assert_eq!(actual.to_bits(), expected.to_bits())
+                }
+                (Bits::F32(actual), Bits::F32(expected)) => {
+                    assert_eq!(actual.to_bits(), expected.to_bits())
+                }
+                (Bits::F64(actual), Bits::F64(expected)) => {
+                    assert_eq!(actual.to_bits(), expected.to_bits())
+                }
+                _ => panic!("test cases must compare one matching float dtype"),
+            }
+        }
+
+        let scalar_cases = [
+            (
+                ScalarValue {
+                    bits: Bits::F16(half::f16::from_bits(0xfe55)),
+                },
+                ScalarValue {
+                    bits: Bits::F16(half::f16::from_f32(1.0)),
+                },
+                ScalarValue {
+                    bits: Bits::F16(half::f16::from_bits(0x7e00)),
+                },
+            ),
+            (
+                ScalarValue {
+                    bits: Bits::Bf16(half::bf16::from_bits(0xffe5)),
+                },
+                ScalarValue {
+                    bits: Bits::Bf16(half::bf16::from_f32(1.0)),
+                },
+                ScalarValue {
+                    bits: Bits::Bf16(half::bf16::from_bits(0x7fc0)),
+                },
+            ),
+            (
+                ScalarValue {
+                    bits: Bits::F32(f32::from_bits(0xffc5_4321)),
+                },
+                ScalarValue {
+                    bits: Bits::F32(1.0),
+                },
+                ScalarValue {
+                    bits: Bits::F32(f32::from_bits(0x7fc0_0000)),
+                },
+            ),
+            (
+                ScalarValue {
+                    bits: Bits::F64(f64::from_bits(0xfff8_abcd_1234_5678)),
+                },
+                ScalarValue {
+                    bits: Bits::F64(1.0),
+                },
+                ScalarValue {
+                    bits: Bits::F64(f64::from_bits(0x7ff8_0000_0000_0000)),
+                },
+            ),
+        ];
+        for (lhs, rhs, expected) in scalar_cases {
+            assert_scalar_bits(float_binop(FloatBinOp::Sub, lhs, rhs).unwrap(), expected);
+        }
+
+        let tensor_cases = [
+            (
+                TensorStorage {
+                    buf: Buf::F16(vec![half::f16::from_bits(0xfe55)]),
+                },
+                TensorStorage {
+                    buf: Buf::F16(vec![half::f16::from_f32(1.0)]),
+                },
+                TensorStorage {
+                    buf: Buf::F16(vec![half::f16::from_bits(0x7e00)]),
+                },
+            ),
+            (
+                TensorStorage {
+                    buf: Buf::Bf16(vec![half::bf16::from_bits(0xffe5)]),
+                },
+                TensorStorage {
+                    buf: Buf::Bf16(vec![half::bf16::from_f32(1.0)]),
+                },
+                TensorStorage {
+                    buf: Buf::Bf16(vec![half::bf16::from_bits(0x7fc0)]),
+                },
+            ),
+        ];
+        for (lhs, rhs, expected) in tensor_cases {
+            match (
+                float_tensor_binop(FloatBinOp::Sub, &lhs, &rhs).unwrap().buf,
+                expected.buf,
+            ) {
+                (Buf::F16(actual), Buf::F16(expected)) => {
+                    assert_eq!(actual[0].to_bits(), expected[0].to_bits())
+                }
+                (Buf::Bf16(actual), Buf::Bf16(expected)) => {
+                    assert_eq!(actual[0].to_bits(), expected[0].to_bits())
+                }
+                _ => panic!("test cases must compare one matching reduced float dtype"),
+            }
+        }
+        match float_tensor_binop(
+            FloatBinOp::Sub,
+            &TensorStorage {
+                buf: Buf::F32(vec![f32::from_bits(0xffc5_4321)]),
+            },
+            &TensorStorage {
+                buf: Buf::F32(vec![1.0]),
+            },
+        )
+        .unwrap()
+        .buf
+        {
+            Buf::F32(actual) => assert_eq!(actual[0].to_bits(), 0x7fc0_0000),
+            _ => panic!("f32 subtraction must retain f32 storage"),
+        }
+        match float_tensor_binop(
+            FloatBinOp::Sub,
+            &TensorStorage {
+                buf: Buf::F64(vec![f64::from_bits(0xfff8_abcd_1234_5678)]),
+            },
+            &TensorStorage {
+                buf: Buf::F64(vec![1.0]),
+            },
+        )
+        .unwrap()
+        {
+            TensorStorage {
+                buf: Buf::F64(actual),
+            } => {
+                assert_eq!(actual[0].to_bits(), 0x7ff8_0000_0000_0000)
+            }
+            _ => panic!("f64 subtraction must retain f64 storage"),
+        }
     }
 
     #[test]

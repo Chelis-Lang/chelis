@@ -51,6 +51,46 @@ explicitly in `[dependencies]` (the installer soft-verifies that the
 declared version matches the bundled version, mismatches surface a
 typed error), but it is never required.
 
+### Shell guidance and skills
+
+`chelis reef conform sync` refreshes the toolchain-managed regions in a shell's
+`AGENTS.md` and `docs/CHELIS_SURFACE.md` and synchronizes `agent-skills/`.
+Shell-owned text outside the managed document regions remains in place. The
+shell can adjust the synchronized skill set in `reef.toml`:
+
+```toml
+[conform]
+local_skills = ["my-shell-domain"]
+excluded_skills = ["backend-numerics", "cli-surface"]
+```
+
+`local_skills` preserves shell-owned additions. `excluded_skills` removes exact
+embedded shared-skill names during sync; removing a name restores the current
+toolchain copy. Sync and audit reject unknown excluded names so misspellings and
+upstream renames are visible.
+
+To keep a shared skill while removing irrelevant inherited sections, add exact
+heading selectors inside its trailing shell-local block:
+
+```markdown
+<!-- shell-local:begin -->
+<!-- shell-local:exclude:begin -->
+<!-- ## Backend-only workflow -->
+<!-- ## Device validation -->
+<!-- shell-local:exclude:end -->
+
+## Shell-specific guidance
+
+Local additions remain here.
+<!-- shell-local:end -->
+```
+
+Each comment-wrapped selector removes that heading and its section. Removing the
+selector restores the current upstream section. Sync and audit fail if a
+selector is missing, duplicated, malformed, or overlaps another selected section. Run
+`chelis reef conform sync --help` for the same configuration summary at the
+command line.
+
 ## Install Paths
 
 `chelis reef install` accepts four sources, used independently:

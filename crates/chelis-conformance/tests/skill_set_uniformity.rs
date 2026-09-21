@@ -1,22 +1,14 @@
-//! chelis#1262: the shared skill set is uniform by design and there is no
-//! per-shell exclusion control.
+//! Contract §8 skill-set customization: shell-owned additions and exact
+//! embedded-skill exclusions survive `conform sync` without allowing a silent
+//! fork of a retained shared skill.
 //!
-//! The decision (contract §8) is that a shell carries every skill in the pinned
-//! toolchain's set. An unused skill is inert markdown; an exclusion, by
-//! contrast, is a permanent declaration about a surface that changes, so the day
-//! a shell grows the surface a skill covers, the exclusion is exactly the
-//! guidance it silently withheld. The sanctioned way to record "this does not
-//! fit here" is a trailing shell-local block (chelis#653), which survives sync
-//! and reaches the agent at the point of use.
+//! Enforcement runs in both directions: an undeclared prune fails and sync
+//! restores it; a declared exclusion removes the directory and audits green;
+//! removing the declaration restores current upstream bytes. Unknown exclusion
+//! names fail before sync writes, and near-miss control names remain rejected.
 //!
-//! What that decision has to be worth is enforcement in three directions:
-//!   1. a deliberate prune does not survive (audit fails, sync restores it),
-//!   2. the restore is LOUD, because a silent one is how the decision degraded
-//!      into AGENTS.md lore the tree then contradicted,
-//!   3. a declared exclusion key is REJECTED rather than ignored, so a shell can
-//!      never believe in a control the tool does not implement.
-//!
-//! Plus negative parity: the sanctioned states still pass.
+//! Repo-local additions and trailing shell-local override blocks provide the
+//! positive and negative parity for the two other sanctioned states.
 
 use std::path::{Path, PathBuf};
 
@@ -89,8 +81,8 @@ fn a_pruned_shared_skill_fails_the_audit() {
         r.diagnostic
     );
     assert!(
-        r.fix.contains("uniform") && r.fix.contains("shell-local"),
-        "the fix must state the rule and name the sanctioned alternative, not just \
+        r.fix.contains("excluded_skills") && r.fix.contains("shell-local"),
+        "the fix must name both sanctioned alternatives, not just \
          say `run sync`: {}",
         r.fix
     );
@@ -112,8 +104,8 @@ fn sync_restores_a_pruned_shared_skill_and_says_so() {
         .find(|n| n.starts_with("cli-surface:"))
         .unwrap_or_else(|| panic!("sync must announce the restore; notices: {notices:?}"));
     assert!(
-        notice.contains("uniform") && notice.contains("shell-local"),
-        "the notice must explain why it came back and what to do instead: {notice}"
+        notice.contains("excluded_skills"),
+        "the notice must explain how to omit the restored skill: {notice}"
     );
     assert!(audit::audit(&root).ok(), "sync restores green");
 }
@@ -141,49 +133,128 @@ fn a_fresh_init_does_not_report_its_own_skills_as_restored() {
     );
 }
 
-// -------------------------------------------------- 3. no exclusion mechanism
+// ------------------------------------------- 3. declared shared-skill exclusions
 
 #[test]
-fn a_declared_exclusion_key_fails_the_audit() {
+fn sync_removes_declared_shared_skills_and_audit_accepts_the_result() {
     let tmp = tempfile::tempdir().unwrap();
     let root = stamp(tmp.path(), "excluded");
-    // The mechanism chelis#1262 considered and this contract declines: a shell
-    // declaring which skills it does not want. reef itself ignores unknown
-    // `[conform]` keys, so without this check the shell gets no error from any
-    // tool and reasonably concludes the control works.
     append_conform_table(
         &root,
-        "\n[conform]\nexclude = [\"cli-surface\", \"backend-numerics\"]\n",
+        "\n[conform]\nexcluded_skills = [\"cli-surface\", \"backend-numerics\"]\n",
     );
 
-    let report = audit::audit(&root);
-    let r = row(&report, "vendored-skills");
     assert_eq!(
-        r.verdict,
+        row(&audit::audit(&root), "vendored-skills").verdict,
         Verdict::Fail,
-        "a declared exclusion must be rejected, not silently overridden"
+        "declared exclusions must take effect before the tree is conformant"
+    );
+    scaffold::materialize_skills(&root).expect("materialize exclusions");
+    assert!(
+        !root.join("agent-skills/cli-surface").exists()
+            && !root.join("agent-skills/backend-numerics").exists(),
+        "sync must remove every declared shared skill"
     );
     assert!(
-        r.diagnostic.contains("exclude"),
-        "the diagnostic must name the offending key: {}",
-        r.diagnostic
+        root.join("agent-skills/spec-sync/SKILL.md").is_file(),
+        "sync must retain shared skills that were not excluded"
+    );
+    let upstream = std::fs::read_to_string(root.join("agent-skills/UPSTREAM.toml")).unwrap();
+    assert!(
+        upstream.contains("spec-sync"),
+        "pointer must list retained skills"
     );
     assert!(
-        r.diagnostic.contains("local_skills"),
-        "and name the keys that ARE recognized: {}",
-        r.diagnostic
+        !upstream.contains("cli-surface") && !upstream.contains("backend-numerics"),
+        "pointer must list the materialized subset: {upstream}"
     );
     assert!(
-        r.fix.contains("shell-local"),
-        "the fix must point at the sanctioned alternative: {}",
-        r.fix
+        audit::audit(&root).ok(),
+        "the configured subset must audit green"
     );
 }
 
 #[test]
-fn every_spelling_of_an_exclusion_key_is_rejected() {
-    // The rule is "unrecognized key", not a blocklist of guessed spellings, so
-    // a shell cannot route around it by renaming the key.
+fn audit_rejects_any_materialized_directory_for_an_excluded_shared_skill() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = stamp(tmp.path(), "excluded-directory");
+    append_conform_table(&root, "\n[conform]\nexcluded_skills = [\"cli-surface\"]\n");
+    scaffold::materialize_skills(&root).expect("materialize exclusions");
+
+    let excluded_dir = root.join("agent-skills/cli-surface");
+    std::fs::create_dir_all(&excluded_dir).unwrap();
+    std::fs::write(excluded_dir.join("README.md"), "leftover\n").unwrap();
+
+    let report = audit::audit(&root);
+    let result = row(&report, "vendored-skills");
+    assert_eq!(result.verdict, Verdict::Fail);
+    assert!(
+        result.diagnostic.contains("cli-surface")
+            && result.diagnostic.contains("present but declared"),
+        "diagnostic: {}",
+        result.diagnostic
+    );
+}
+
+#[test]
+fn removing_an_exclusion_restores_the_current_embedded_skill() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = stamp(tmp.path(), "restored-exclusion");
+    append_conform_table(&root, "\n[conform]\nexcluded_skills = [\"cli-surface\"]\n");
+    scaffold::materialize_skills(&root).expect("exclude");
+    assert!(
+        !root.join("agent-skills/cli-surface").exists(),
+        "precondition: exclusion removed the skill"
+    );
+
+    let manifest = root.join("reef.toml");
+    let text = std::fs::read_to_string(&manifest).unwrap();
+    std::fs::write(
+        &manifest,
+        text.replace(
+            "excluded_skills = [\"cli-surface\"]",
+            "excluded_skills = []",
+        ),
+    )
+    .unwrap();
+    scaffold::materialize_skills(&root).expect("restore");
+
+    let restored = std::fs::read_to_string(root.join("agent-skills/cli-surface/SKILL.md"))
+        .expect("restored skill");
+    assert_eq!(
+        restored.trim_end(),
+        skills::skill_body("cli-surface").unwrap().trim_end(),
+        "removing the exclusion must restore the current embedded body"
+    );
+    assert!(audit::audit(&root).ok());
+}
+
+#[test]
+fn an_unknown_excluded_skill_fails_audit_and_sync_before_writing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = stamp(tmp.path(), "unknown-exclusion");
+    append_conform_table(&root, "\n[conform]\nexcluded_skills = [\"cli-surfaec\"]\n");
+    let upstream_before = std::fs::read_to_string(root.join("agent-skills/UPSTREAM.toml")).unwrap();
+
+    let report = audit::audit(&root);
+    let r = row(&report, "vendored-skills");
+    assert_eq!(r.verdict, Verdict::Fail);
+    assert!(
+        r.diagnostic.contains("cli-surfaec"),
+        "diag: {}",
+        r.diagnostic
+    );
+    let err = scaffold::materialize_skills(&root).unwrap_err();
+    assert!(err.contains("cli-surfaec"), "sync error: {err}");
+    assert_eq!(
+        std::fs::read_to_string(root.join("agent-skills/UPSTREAM.toml")).unwrap(),
+        upstream_before,
+        "sync must validate exclusion names before its first write"
+    );
+}
+
+#[test]
+fn exclusion_aliases_are_rejected_in_favor_of_the_one_documented_key() {
     for key in [
         "exclude",
         "exclude_skills",
@@ -198,6 +269,14 @@ fn every_spelling_of_an_exclusion_key_is_rejected() {
         let r = row(&report, "vendored-skills");
         assert_eq!(r.verdict, Verdict::Fail, "[conform] {key} must be rejected");
         assert!(r.diagnostic.contains(key), "diag: {}", r.diagnostic);
+        assert!(
+            r.diagnostic.contains("excluded_skills"),
+            "diag: {}",
+            r.diagnostic
+        );
+        let err = scaffold::materialize_skills(&root).unwrap_err();
+        assert!(err.contains(key), "sync error: {err}");
+        assert!(err.contains("excluded_skills"), "sync error: {err}");
     }
 }
 
@@ -210,7 +289,7 @@ fn every_spelling_of_an_exclusion_key_is_rejected() {
 /// finds: they never reached the old scan at all, because it only entered scope
 /// on a `[conform]` table HEADER, and header-less forms are ordinary TOML idiom.
 #[test]
-fn ordinary_toml_spellings_of_an_exclusion_are_rejected_too() {
+fn ordinary_toml_spellings_of_unsupported_exclusion_aliases_are_rejected_too() {
     let cases: &[(&str, At, &str, &str)] = &[
         // --- round 1: reached the scan, got past it.
         (

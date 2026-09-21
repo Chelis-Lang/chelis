@@ -725,6 +725,24 @@
       ]
     },
     {
+      "name": "exact direct arithmetic HIP source and dtype admission controls",
+      "args": [
+        "-p",
+        "chelis-backend-hip",
+        "--test",
+        "codegen_structure",
+        "-E",
+        "(test(direct_extrema_and_adjoint_emit_bit_preserving_kernels) | test(direct_checked_signed_sub_emits_exact_always_on_trap_channel) | test(direct_narrow_float_arithmetic_emits_f32_compute_and_raw_selection) | test(direct_signed_integer_extrema_chains_stay_on_typed_hip_kernels) | test(direct_and_fused_wide_float_subtraction_emit_canonical_nan_finalization)) & (not test(=an_allocation_above_int32_elements_reports_its_true_extent))"
+      ],
+      "required": [
+        "chelis-backend-hip::codegen_structure::direct_and_fused_wide_float_subtraction_emit_canonical_nan_finalization",
+        "chelis-backend-hip::codegen_structure::direct_checked_signed_sub_emits_exact_always_on_trap_channel",
+        "chelis-backend-hip::codegen_structure::direct_extrema_and_adjoint_emit_bit_preserving_kernels",
+        "chelis-backend-hip::codegen_structure::direct_narrow_float_arithmetic_emits_f32_compute_and_raw_selection",
+        "chelis-backend-hip::codegen_structure::direct_signed_integer_extrema_chains_stay_on_typed_hip_kernels"
+      ]
+    },
+    {
       "name": "checked C shared indexing optimized sanitizer execution",
       "args": [
         "-p",

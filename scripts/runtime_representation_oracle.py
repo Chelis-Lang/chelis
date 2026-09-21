@@ -263,6 +263,28 @@ UNIFORM_RANDOM_BACKEND_FINAL_FORMS = (
         "HostEmitter < 'a >::assign_uniform_like",
     ),
 )
+DIRECT_ARITHMETIC_BACKEND_FINAL_FORMS = (
+    (
+        "crates/chelis-backend-hip/src/kernels.rs",
+        "backend-element-spelling",
+        "binary_elementwise_typed",
+    ),
+    (
+        "crates/chelis-backend-hip/src/kernels.rs",
+        "backend-element-spelling",
+        "fused_reduced_step_lines",
+    ),
+    (
+        "crates/chelis-backend-hip/src/kernels.rs",
+        "load-store-template",
+        "binary_extrema_reduced",
+    ),
+    (
+        "crates/chelis-backend-hip/src/kernels.rs",
+        "load-store-template",
+        "extrema_adjoint_reduced",
+    ),
+)
 UTF8_STRING_FINAL_FORMS = (
     (
         "crates/chelis-backend-c/src/host_emit.rs",
@@ -368,6 +390,8 @@ def owner_module_final_form(kind: str, path: str, owner: str) -> bool:
         (path, kind, owner) in TYPED_NONNUMERIC_BACKEND_FINAL_FORMS
     ) or (
         (path, kind, owner) in UNIFORM_RANDOM_BACKEND_FINAL_FORMS
+    ) or (
+        (path, kind, owner) in DIRECT_ARITHMETIC_BACKEND_FINAL_FORMS
     ) or (
         (path, kind, owner) in UTF8_STRING_FINAL_FORMS
     ) or (
@@ -749,6 +773,7 @@ def _owner_module_final_forms_manifest() -> dict[str, list[dict[str, str]]]:
         *((path, "backend-element-spelling", owner) for path, owner in C_INDEX_PROJECTION_OWNERS),
         *TYPED_NONNUMERIC_BACKEND_FINAL_FORMS,
         *UNIFORM_RANDOM_BACKEND_FINAL_FORMS,
+        *DIRECT_ARITHMETIC_BACKEND_FINAL_FORMS,
         *UTF8_STRING_FINAL_FORMS,
         *((METADATA_OWNER, "width-arithmetic", owner) for owner in METADATA_FINAL_WIDTH_OWNERS),
         *((ELEMENT_OWNER, "dtype-contract", owner) for owner in ELEMENT_FINAL_CONTRACT_OWNERS),
@@ -2241,6 +2266,18 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
             ),
         ),
         OracleLeg(
+            "exact direct arithmetic HIP source and dtype admission controls",
+            (
+                "cargo", "nextest", "run", "-p", "chelis-backend-hip",
+                "--test", "codegen_structure", "-E",
+                "test(direct_extrema_and_adjoint_emit_bit_preserving_kernels) | "
+                "test(direct_checked_signed_sub_emits_exact_always_on_trap_channel) | "
+                "test(direct_narrow_float_arithmetic_emits_f32_compute_and_raw_selection) | "
+                "test(direct_signed_integer_extrema_chains_stay_on_typed_hip_kernels) | "
+                "test(direct_and_fused_wide_float_subtraction_emit_canonical_nan_finalization)",
+            ),
+        ),
+        OracleLeg(
             "checked C shared indexing optimized sanitizer execution",
             ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "exec_compile",
              "-E", "test(checked_c_indexing_)"),
@@ -2425,6 +2462,15 @@ def hardware_probe_manifest() -> tuple[dict[str, str], ...]:
                 "scripts/hip_test.py -p chelis-backend-hip "
                 "--test logical_comparison_where_gpu "
                 "-- --ignored --test-threads=1"
+            ),
+        },
+        {
+            "lane": "hip-direct-arithmetic",
+            "status": "manual-required",
+            "command": (
+                "scripts/hip_test.py -p chelis-backend-hip --test gpu_correctness "
+                "direct_ -- --ignored --test-threads=1 "
+                "--skip direct_relu_and_adjoint_preserve_exact_bits_at_every_float_width_on_gpu"
             ),
         },
         {
