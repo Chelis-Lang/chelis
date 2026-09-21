@@ -74,10 +74,10 @@ fn c_inherited_claim_reaches_named_alias_and_literal_callbacks() {
 
 fn repeated_callable_source(last: &str) -> String {
     format!(
-        "def cut[n](value: tensor[n, f32]) -> tensor[*, f32] = shrink(value, [[1i64, shape(value, 0i32)]])\n\
-         def invoke(f: tensor[*, f32] -> tensor[*, f32], value: tensor[*, f32]) -> tensor[*, f32] = f(value)\n\
-         def two[n](f: tensor[*, f32] -> tensor[*, f32], value: tensor[n, f32]) -> tensor[2, f32] = invoke(f, value)\n\
-         def three[n](f: tensor[*, f32] -> tensor[*, f32], value: tensor[n, f32]) -> tensor[3, f32] = invoke(f, value)\n\
+        "def cut[n](value: tensor[n, f32]) -> tensor[*, f32] ! {{ IO }} = {{\n _ = print(\"invocation-before\")\n result = shrink(value, [[1i64, shape(value, 0i32)]])\n _ = print(\"invocation-after\")\n result\n}}\n\
+         def invoke(f: tensor[*, f32] -> tensor[*, f32], value: tensor[*, f32]) -> tensor[*, f32] ! {{ IO }} = f(value)\n\
+         def two[n](f: tensor[*, f32] -> tensor[*, f32], value: tensor[n, f32]) -> tensor[2, f32] ! {{ IO }} = invoke(f, value)\n\
+         def three[n](f: tensor[*, f32] -> tensor[*, f32], value: tensor[n, f32]) -> tensor[3, f32] ! {{ IO }} = invoke(f, value)\n\
          a = two(cut, to_tensor({TWO}))\n\
          b = three(cut, to_tensor({THREE}))\n\
          out = three(cut, to_tensor({last}))\n"
@@ -89,6 +89,12 @@ fn assert_invocation_isolation(native: bool) {
         let source = repeated_callable_source(last);
         let (ok, output) = run(&source, native);
         assert_eq!(ok, agrees, "{source}\n{output}");
+        assert_eq!(output.matches("invocation-before").count(), 3, "{output}");
+        assert_eq!(
+            output.matches("invocation-after").count(),
+            if agrees { 3 } else { 2 },
+            "{output}"
+        );
         if agrees {
             assert!(
                 output.contains("a = tensor(shape=[2], data=[2.0, 3.0])"),
