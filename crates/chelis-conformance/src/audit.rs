@@ -998,9 +998,10 @@ fn check_vendored_skills(ctx: &Ctx) -> Check {
         }
     }
     for (name, body) in skills::EMBEDDED_SKILLS {
-        let path = skills_dir.join(name).join("SKILL.md");
+        let skill_dir = skills_dir.join(name);
+        let path = skill_dir.join("SKILL.md");
         if ctx.excluded_skills().iter().any(|s| s == name) {
-            if path.exists() {
+            if skill_dir.exists() {
                 problems.push(format!(
                     "{name}: present but declared in [conform] excluded_skills"
                 ));

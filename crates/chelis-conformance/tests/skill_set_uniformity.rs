@@ -175,6 +175,28 @@ fn sync_removes_declared_shared_skills_and_audit_accepts_the_result() {
 }
 
 #[test]
+fn audit_rejects_any_materialized_directory_for_an_excluded_shared_skill() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = stamp(tmp.path(), "excluded-directory");
+    append_conform_table(&root, "\n[conform]\nexcluded_skills = [\"cli-surface\"]\n");
+    scaffold::materialize_skills(&root).expect("materialize exclusions");
+
+    let excluded_dir = root.join("agent-skills/cli-surface");
+    std::fs::create_dir_all(&excluded_dir).unwrap();
+    std::fs::write(excluded_dir.join("README.md"), "leftover\n").unwrap();
+
+    let report = audit::audit(&root);
+    let result = row(&report, "vendored-skills");
+    assert_eq!(result.verdict, Verdict::Fail);
+    assert!(
+        result.diagnostic.contains("cli-surface")
+            && result.diagnostic.contains("present but declared"),
+        "diagnostic: {}",
+        result.diagnostic
+    );
+}
+
+#[test]
 fn removing_an_exclusion_restores_the_current_embedded_skill() {
     let tmp = tempfile::tempdir().unwrap();
     let root = stamp(tmp.path(), "restored-exclusion");
