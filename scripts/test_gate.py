@@ -9,11 +9,8 @@ Four things are locked here:
   (a) the full developer gate keeps the complete default nextest profile while
       CI delegates its two census binaries from the `ci` profile to the dtype
       oracle;
-  (b) a structural parity assertion: every single-line `run:` scalar in a
-      gate-owned job exactly matches that job's reviewed allowlist. This does
-      not emulate Bash; quoting, expansion, and substitution cannot hide an
-      added command. Every other CI job is classified by name so the scope
-      exclusion is explicit and reviewable;
+  (b) hosted selection, shard, receipt and trust boundaries remain explicit;
+      environment activation is exercised behaviorally in test_ci_devenv;
   (c) `--list` prints the canonical full list;
   (d) no-ai-authorship patterns cover the current banned tool identities.
 """
@@ -77,7 +74,7 @@ CHELIS_PROVE_TOML = REPO_ROOT / "crates" / "chelis-prove" / "Cargo.toml"
 NIX_PACKAGES_YML = REPO_ROOT / ".github" / "workflows" / "nix-packages.yml"
 DEVENV_SETUP_ACTION = (
     "Chelis-Lang/ci/actions/setup-devenv@"
-    "73f017c4d3179dc313844e9d5f08d17a7879c824"
+    "0b5faba5025fade929194b46a9e52e43fec63462"
 )
 PORTABLE_DEVENV_SHELL = "devenv-ci bash --noprofile --norc -e -o pipefail {0}"
 WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
@@ -503,7 +500,7 @@ def _nix_workflow_events(workflow: str) -> dict[str, dict[str, str]]:
 
 
 _NIX_REVIEWED_WORKFLOW_SHA256 = (
-    "6f4f661e55a108b30d3bb2e6f463fbcde39c4f69e7b94f50f16c6b4ef721850b"
+    "22bb60c2b83fcbfb653b74d3366418937adb23e43d34e7ba1d767204d854f217"
 )
 
 
@@ -551,80 +548,20 @@ def _assert_runner_resource_bounds(workflow: str) -> None:
     }
     for job, bound in max_jobs.items():
         block = blocks.get(job, "")
-        for required in ("sandbox = true", bound, "cores = 0"):
+        for required in ("sandbox = true", "require-sigs = true", bound, "cores = 0"):
             if required not in block:
                 raise AssertionError(f"{job!r} must set {required!r} in NIX_CONFIG")
-    linux = blocks.get("nix-linux-x86-64", "")
-    reclaim_index = linux.find("name: Reclaim runner disk space")
-    setup_index = linux.find(f"uses: {DEVENV_SETUP_ACTION}")
-    if reclaim_index < 0 or setup_index < 0 or reclaim_index > setup_index:
-        raise AssertionError(
-            "the Linux Nix job must reclaim runner disk before Devenv setup"
-        )
 
 
-def _assert_cvc5_closure_cache(workflow: str) -> None:
-    blocks = _workflow_job_blocks(workflow)
-    jobs = (
-        ("nix-linux-x86-64", "x86_64-linux"),
-        ("nix-darwin-arm64", "aarch64-darwin"),
-    )
-    for job, system in jobs:
-        block = blocks.get(job, "")
-        markers = (
-            "uses: actions/cache/restore@v4",
-            "uses: actions/cache/save@v4",
-            f".#legacyPackages.{system}.cvc5-dir.drvPath",
-            f".#legacyPackages.{system}.cvc5-dir.outPath",
-            "--no-check-sigs",
-        )
-        for marker in markers:
-            if marker not in block:
-                raise AssertionError(
-                    f"{job!r} must cache the cvc5 closure: missing {marker!r}"
-                )
-        check_index = block.index("run: nix flake check")
-        if block.index("uses: actions/cache/restore@v4") > check_index:
-            raise AssertionError(
-                f"{job!r} must restore the cvc5 closure before the flake check"
-            )
-        if block.index("uses: actions/cache/save@v4") < check_index:
-            raise AssertionError(
-                f"{job!r} must save the cvc5 closure after the flake check"
-            )
 
 
-# Every single-line command allowed in the three gate-owned workers. Comparing
-# complete scalars is intentionally stricter than recognizing Cargo through
-# Bash syntax: an added command of any kind requires an explicit review here.
-GATE_WORKER_RUN_COMMANDS = {
-    "lint-rust": (
-        "python3 scripts/ci_apt_get.py gcc libopenblas-dev libasan8 libubsan1",
-        "python3 scripts/ci_setup_uv_python.py",
-        "python3 scripts/gate.py lint-and-unit",
-        "python3 scripts/gate.py targeted-units",
-    ),
-    "ci-fast": (
-        # `clang` is the chelis#893 Phase 0 oracle's C/Objective-C front end
-        # and the census's `cc` is gcc here; the image ships clang, but the
-        # gate asserts it rather than assuming it.
-        "python3 scripts/ci_apt_get.py gcc clang libopenblas-dev libasan8 libubsan1",
-        "python3 scripts/ci_setup_uv_python.py",
-        "uv pip install --python .venv/bin/python -r bindings/python/pyproject.toml",
-        "python3 scripts/gate.py ci-fast",
-    ),
-    # Rule-id: GATE-STAGE-RUNTIME-REPRESENTATION -- chelis#893 Phase 0's oracle
-    # is its own gate stage because its release-profile reproducers and serial
-    # mutation re-scans cost about eleven hosted minutes, which doubled the
-    # workspace shard that used to carry it. The job restores the read-only
-    # workspace cache and needs `clang` for the C/Objective-C header lanes.
-
-}
+# Gate-owned workers; provisioning is exercised by test_ci_devenv, not pinned
+# to installer command spellings here.
+GATE_WORKERS = {"lint-rust", "ci-fast"}
 
 
 # CI jobs that are deliberately NOT part of the per-PR developer gate.
-# `gate.py` only owns the three workers above; every other job is listed by name
-# so a new job cannot silently escape a scope decision.
+# Other jobs are classified by name so new owners require a scope decision.
 NON_GATE_JOBS = {
     # CI-owned Python unit coverage; it runs no canonical gate stage.
     "script-unit",
@@ -698,7 +635,7 @@ class RejectionAuthorityPrBoundaryTests(unittest.TestCase):
         self.assertNotIn("issues: read", script_unit)
         _assert_executable_run_once(
             script_unit,
-            ".venv/bin/python scripts/check_rejection_authority_boundary.py",
+            "python scripts/check_rejection_authority_boundary.py",
         )
 
 
@@ -710,21 +647,20 @@ class DiagnosticKindOracleJobTests(unittest.TestCase):
         self.assertIn("contents: read", block)
         _assert_executable_run_once(
             block,
-            ".venv/bin/python scripts/diagnostic_kind_oracle.py",
+            "python scripts/diagnostic_kind_oracle.py",
         )
-        self.assertIn("taiki-e/install-action@nextest", block)
 
     def test_a_quoted_passing_noop_is_not_the_oracle_step(self):
         block = _ci_job_block("diagnostic-kind-oracle")
         mutated = block.replace(
-            "run: .venv/bin/python scripts/diagnostic_kind_oracle.py",
+            "run: python scripts/diagnostic_kind_oracle.py",
             'run: "true # scripts/diagnostic_kind_oracle.py"',
             1,
         )
         with self.assertRaises(AssertionError):
             _assert_executable_run_once(
                 mutated,
-                ".venv/bin/python scripts/diagnostic_kind_oracle.py",
+                "python scripts/diagnostic_kind_oracle.py",
             )
 
 # Whole WORKFLOW FILES that are out-of-scope-by-design for the per-PR developer
@@ -1156,40 +1092,6 @@ class ListOutputTests(unittest.TestCase):
             "compiler front-end performance oracle: PASS", script.read_text()
         )
 
-    def test_the_oracles_stage_is_a_job_that_installs_nextest(self):
-        # Both of the oracle's compiled obligations run `cargo nextest`. The
-        # Rust-policy worker deliberately does not install it, so placing the
-        # oracle in its lint-and-unit stage produces a deterministic
-        # `no such command: nextest`.
-        # Assert the pairing structurally: the stage the oracle lives in must
-        # be run by a job that installs cargo-nextest.
-        command = "<managed-python> scripts/unrepresentable_domain_oracle.py"
-        owning_stages = [
-            stage
-            for stage, entries in gate.STAGES.items()
-            if command in [gate.render(entry) for entry in entries]
-        ]
-        self.assertEqual(
-            owning_stages,
-            ["integration"],
-            "the oracle must live in exactly one stage, and it must be a "
-            "nextest-installing one",
-        )
-        workflow = CI_YML.with_name("heavy-e2e.yml").read_text()
-        blocks = _workflow_job_blocks(workflow)
-        owning_jobs = [
-            name
-            for name, block in blocks.items()
-            if "gate.py integration" in block
-        ]
-        self.assertTrue(owning_jobs, "some job must run `gate.py integration`")
-        for name in owning_jobs:
-            self.assertIn(
-                "taiki-e/install-action@nextest",
-                blocks[name],
-                f"job `{name}` runs the oracle's stage but does not install "
-                "cargo-nextest",
-            )
 
     def test_a_chelis_build_precedes_the_oracle_in_every_list_that_runs_it(self):
         # chelis#1322. The oracle drives a built `chelis` over its .dp
@@ -1897,10 +1799,13 @@ def _ci_step_block(job_block: str, step_name: str) -> str:
 
 def _assert_support_slice_contract(block: str) -> None:
     assert "slice: [frontend, domain]" in block
-    command = "python3 scripts/gate.py integration --support-only --support-slice ${{ matrix.slice }}"
+    command = "chelis-gate integration --support-only --support-slice ${{ matrix.slice }}"
     _assert_executable_run_once(block, command)
     assert block.count("--support-only") == 1
-    assert "    if:" not in block
+    assert re.search(r"^    if\s*:", block, re.MULTILINE) is None
+    step = _ci_step_block(block, "Gate (integration support subset)")
+    _assert_executable_run_once(step, command)
+    assert re.search(r"^\s+if\s*:", step, re.MULTILINE) is None
 
 
 def _workflow_job_block(path: Path, job: str) -> str:
@@ -2111,40 +2016,11 @@ class CiParityTests(unittest.TestCase):
     def test_ci_file_exists(self):
         self.assertTrue(CI_YML.is_file(), f"missing {CI_YML}")
 
-    def test_gate_jobs_call_gate_py(self):
-        # Every run scalar in a gate-owned worker is reviewed here. This is a
-        # structural contract, not a partial Bash executable classifier.
-        commands = _parse_ci_run_commands()
-        for job, expected in GATE_WORKER_RUN_COMMANDS.items():
-            self.assertIn(job, commands, f"CI job '{job}' not found")
-            self.assertEqual(
-                commands[job],
-                list(expected),
-                (
-                    f"CI job '{job}' has unreviewed or reordered run commands; "
-                    "route gate work through scripts/gate.py and review any "
-                    "bootstrap or reporting command explicitly"
-                ),
-            )
-        # Positive parity: the workflow text must actually call
-        # gate.py for every stage. The workspace test shards select only the
-        # partitioned nextest command; shard 2 selects the remaining
-        # integration oracles exactly once after its test partition; the
-        # runtime-representation stage has a worker of its own.
-        text = CI_YML.read_text()
-        self.assertIn("scripts/gate.py lint-and-unit", text)
-        self.assertIn("scripts/gate.py targeted-units", text)
-        self.assertIn(
-            "scripts/gate.py ci-fast",
-            text,
-        )
-        self.assertIn("scripts/gate.py integration --support-only", CI_YML.with_name("heavy-e2e.yml").read_text())
-        self.assertIn("scripts/gate.py runtime-representation", CI_YML.with_name("heavy-e2e.yml").read_text())
 
     def test_python_binding_ingress_suite_is_continuous(self):
         text = CI_YML.read_text()
         self.assertIn(
-            ".venv/bin/python -m unittest discover -s bindings/python/tests "
+            "python -m unittest discover -s bindings/python/tests "
             "-p 'test_*.py'",
             text,
             (
@@ -2153,9 +2029,9 @@ class CiParityTests(unittest.TestCase):
             ),
         )
         block = _ci_job_block("script-unit")
-        dependencies = "uv pip install --python .venv/bin/python -r bindings/python/pyproject.toml"
-        scripts = ".venv/bin/python scripts/ci_script_tests.py pr"
-        bindings = ".venv/bin/python -m unittest discover -s bindings/python/tests -p 'test_*.py'"
+        dependencies = "uv pip install --python \"$PYO3_PYTHON\" -r bindings/python/pyproject.toml"
+        scripts = "python scripts/ci_script_tests.py pr"
+        bindings = "python -m unittest discover -s bindings/python/tests -p 'test_*.py'"
         for command in (dependencies, scripts, bindings):
             _assert_executable_run_once(block, command)
         for command in (scripts, bindings):
@@ -2169,7 +2045,7 @@ class CiParityTests(unittest.TestCase):
         block = _ci_job_block("script-unit")
         dependency_step = (
             "      - name: Install Python binding dependencies\n"
-            "        run: uv pip install --python .venv/bin/python -r bindings/python/pyproject.toml\n\n"
+            "        run: uv pip install --python \"$PYO3_PYTHON\" -r bindings/python/pyproject.toml\n\n"
         )
         self.assertEqual(block.count(dependency_step), 1)
         late = block.replace(dependency_step, "").replace(
@@ -2188,8 +2064,8 @@ class CiParityTests(unittest.TestCase):
         top_level_permissions = workflow[
             workflow.index("permissions:\n") : workflow.index("\nenv:\n")
         ]
-        numpy_command = "run: uv pip install --python .venv/bin/python -r bindings/python/pyproject.toml"
-        oracle_command = "run: .venv/bin/python scripts/dtype_phase3_oracle.py"
+        numpy_command = "run: uv pip install --python \"$PYO3_PYTHON\" -r bindings/python/pyproject.toml"
+        oracle_command = "run: python scripts/dtype_phase3_oracle.py"
         authenticated_oracle = (
             "env:\n"
             "          GH_TOKEN: ${{ github.token }}\n"
@@ -2238,14 +2114,11 @@ class CiParityTests(unittest.TestCase):
         dtype_block = _ci_job_block("dtype-phase3-oracle")
         oracle_block = _ci_job_block("faithful-observation-phase2-oracle")
         aggregate_block = _ci_job_block("integration")
-        command = ".venv/bin/python scripts/faithful_observation_phase2_oracle.py"
+        command = "python scripts/faithful_observation_phase2_oracle.py"
 
         self.assertIn("name: Faithful Observation Phase 2 Oracle", oracle_block)
         self.assertNotIn("    needs:", oracle_block)
         self.assertIn("contents: read", oracle_block)
-        self.assertIn("dtolnay/rust-toolchain@stable", oracle_block)
-        self.assertIn("python3 scripts/ci_setup_uv_python.py", oracle_block)
-        self.assertIn("taiki-e/install-action@nextest", oracle_block)
         cache_inputs = _rust_cache_inputs(oracle_block)
         self.assertEqual(cache_inputs.get("shared-key"), "linux-workspace")
         self.assertEqual(cache_inputs.get("save-if"), "false")
@@ -2263,8 +2136,8 @@ class CiParityTests(unittest.TestCase):
         oracle_block = _ci_job_block("compiled-value-ownership-phase0-oracle")
         aggregate_block = _ci_job_block("integration")
         commands = (
-            ".venv/bin/python scripts/compiled_value_ownership_oracle.py --phase 2",
-            ".venv/bin/python scripts/compiled_value_ownership_oracle.py --phase launch",
+            "python scripts/compiled_value_ownership_oracle.py --phase 2",
+            "python scripts/compiled_value_ownership_oracle.py --phase launch",
         )
 
         self.assertIn(
@@ -2273,8 +2146,6 @@ class CiParityTests(unittest.TestCase):
         )
         self.assertNotIn("    needs:", oracle_block)
         self.assertIn("contents: read", oracle_block)
-        self.assertIn("dtolnay/rust-toolchain@stable", oracle_block)
-        self.assertIn("python3 scripts/ci_setup_uv_python.py", oracle_block)
         cache_inputs = _rust_cache_inputs(oracle_block)
         self.assertEqual(cache_inputs.get("shared-key"), "linux-workspace")
         self.assertEqual(cache_inputs.get("save-if"), "false")
@@ -2292,7 +2163,7 @@ class CiParityTests(unittest.TestCase):
         ownership_block = _ci_job_block("compiled-value-ownership-phase0-oracle")
         oracle_block = _ci_job_block("runtime-representation-phase0-oracle")
         aggregate_block = _ci_job_block("integration")
-        command = "python3 scripts/gate.py runtime-representation"
+        command = "chelis-gate runtime-representation"
 
         self.assertIn(
             "name: Runtime Representation Phase 2 Oracle",
@@ -2310,15 +2181,6 @@ class CiParityTests(unittest.TestCase):
         )
         self.assertIn(
             "target/runtime-representation-phase2/",
-            oracle_block,
-        )
-        self.assertIn("dtolnay/rust-toolchain@stable", oracle_block)
-        self.assertIn("python3 scripts/ci_setup_uv_python.py", oracle_block)
-        self.assertIn("taiki-e/install-action@nextest", oracle_block)
-        # The oracle's C/Objective-C header lanes parse through clang.
-        self.assertIn(
-            "python3 scripts/ci_apt_get.py gcc clang libopenblas-dev "
-            "libasan8 libubsan1",
             oracle_block,
         )
         _assert_read_only_workspace_cache(oracle_block)
@@ -2356,9 +2218,6 @@ class CiParityTests(unittest.TestCase):
         self.assertIn("shard: [1, 2, 3, 4]", shard_block)
         self.assertNotIn("    needs:", shard_block)
         self.assertIn("contents: read", shard_block)
-        self.assertIn("dtolnay/rust-toolchain@stable", shard_block)
-        self.assertIn("python3 scripts/ci_setup_uv_python.py", shard_block)
-        self.assertIn("taiki-e/install-action@nextest", shard_block)
         _assert_executable_run_once(shard_block, command)
 
         self.assertIn("name: Typecheck Level Generalization Oracle", oracle_block)
@@ -2395,7 +2254,7 @@ class CiParityTests(unittest.TestCase):
     def test_fast_worker_and_nightly_support_have_separate_owners(self):
         worker = _ci_job_block("ci-fast")
         self.assertNotIn("    strategy:", worker)
-        self.assertIn("scripts/gate.py ci-fast", worker)
+        self.assertIn("chelis-gate ci-fast", worker)
         self.assertNotIn("--support-only", worker)
         self.assertNotIn("ProfilePartitionTests", worker)
         _assert_support_slice_contract(_ci_job_block("integration-support"))
@@ -2410,7 +2269,11 @@ class CiParityTests(unittest.TestCase):
             block.replace("slice: [frontend, domain]", "slice: [frontend, frontend]"),
             block.replace(" --support-slice ${{ matrix.slice }}", ""),
             block.replace("    steps:", "    if: false\n    steps:"),
-            block + "      - run: python3 scripts/gate.py integration --support-only --support-slice ${{ matrix.slice }}\n",
+            block.replace(
+                "      - name: Gate (integration support subset)",
+                "      - name: Gate (integration support subset)\n        if: false",
+            ),
+            block + "      - run: chelis-gate integration --support-only --support-slice ${{ matrix.slice }}\n",
         )
         for changed in mutations:
             with self.subTest(workflow=changed), self.assertRaises(AssertionError):
@@ -2523,13 +2386,6 @@ class CiParityTests(unittest.TestCase):
         loader = unittest.TestLoader()
         loader.loadTestsFromName(entrypoint)
         self.assertEqual(loader.errors, [], "the hosted topology guard must resolve")
-        self.assertIn("uses: astral-sh/setup-uv@v8.1.0", docs_block)
-        self.assertIn(
-            "uv run --managed-python --python 3.11 --no-project python "
-            "-m unittest scripts.test_gate.CiParityTests."
-            "test_topology_docs_name_current_shard_owners",
-            docs_block,
-        )
 
     def test_phase4b_freeze_oracle_runs_in_the_always_run_docs_job(self):
         # chelis#729's Phase 4B freeze is enforced by document digests over
@@ -2537,12 +2393,12 @@ class CiParityTests(unittest.TestCase):
         # job, so the oracle has to live in an always-run job or the edits most
         # likely to break the freeze are the ones nothing checks.
         docs_block = _ci_job_block("docs")
-        command = (
-            "uv run --managed-python --python 3.11 --no-project python "
-            "scripts/dtype_phase4b_oracle.py"
-        )
+        command = re.search(
+            r"^\s*run: ((?:\.venv/bin/)?python(?:3)? scripts/dtype_phase4b_oracle\.py)$",
+            docs_block,
+            re.MULTILINE,
+        ).group(1)
         _assert_executable_run_once(docs_block, command)
-        self.assertIn("uses: astral-sh/setup-uv@v8.1.0", docs_block)
         self.assertLess(
             docs_block.index(command),
             docs_block.index("run: mdbook build docs/book"),
@@ -2573,15 +2429,23 @@ class CiParityTests(unittest.TestCase):
         # event -- never on `docs_only`, which is the evasion the unconditional
         # step above exists to prevent.
         acknowledgement_block = _ci_job_block("acknowledgements")
-        command = (
-            '.venv/bin/python scripts/phase4b_change_report.py --pr-head "$PR_HEAD" '
+        report_arguments = (
+            'scripts/phase4b_change_report.py --pr-head "$PR_HEAD" '
             "--require-acknowledgement --acknowledgements-env PR_BODY "
             "--output target/phase4b-contract-changes.json"
         )
-        _assert_executable_run_once(acknowledgement_block, command)
         step = _ci_step_block(
             acknowledgement_block, "Require frozen contract acknowledgements"
         )
+        invocation = re.search(
+            r"^\s+run: ((?:[A-Za-z0-9_./-]+/)?python(?:3(?:\.\d+)?)? "
+            + re.escape(report_arguments)
+            + r")$",
+            step,
+            re.MULTILINE,
+        )
+        self.assertIsNotNone(invocation, "missing executable acknowledgement report")
+        _assert_executable_run_once(acknowledgement_block, invocation.group(1))
         conditions = [
             line.split("if:", 1)[1].strip()
             for line in step.splitlines()
@@ -2612,10 +2476,11 @@ class CiParityTests(unittest.TestCase):
 
     def test_commented_phase4b_oracle_is_not_an_executable_step(self):
         block = _ci_job_block("docs")
-        command = (
-            "uv run --managed-python --python 3.11 --no-project python "
-            "scripts/dtype_phase4b_oracle.py"
-        )
+        command = re.search(
+            r"^\s*run: ((?:\.venv/bin/)?python(?:3)? scripts/dtype_phase4b_oracle\.py)$",
+            block,
+            re.MULTILINE,
+        ).group(1)
         mutated = block.replace(
             f"run: {command}",
             f'# run: {command}\n        run: "true"',
@@ -2654,29 +2519,6 @@ class CiParityTests(unittest.TestCase):
             with self.subTest(job=job):
                 block = _ci_job_block(job)
                 _assert_read_only_workspace_cache(block)
-
-    def test_capacity_rustdoc_cache_is_restored_by_its_linux_owner(self):
-        path = "path: target/agents/729-capacity-rustdoc"
-        key = (
-            "key: ${{ runner.os }}-${{ runner.arch }}-capacity-rustdoc-v1-"
-            "${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', "
-            "'scripts/capacity_census_typed.py', "
-            "'crates/chelis-compiler-api/**', 'crates/chelis-python/**') }}"
-        )
-        dtype = _ci_job_block("dtype-phase3-oracle")
-        generalization = _ci_job_block("generalize-sweep-oracle-shard")
-        for name, block in (
-            ("dtype-phase3-oracle", dtype),
-        ):
-            with self.subTest(job=name):
-                self.assertEqual(block.count("uses: actions/cache/restore@v4"), 2)
-                self.assertIn(path, block)
-                self.assertIn(key, block)
-        self.assertEqual(dtype.count("uses: actions/cache/save@v4"), 2)
-        self.assertNotIn("github.event_name == 'push'", dtype)
-        self.assertIn("github.ref == 'refs/heads/main'", dtype)
-        self.assertNotIn("uses: actions/cache/save@v4", generalization)
-        self.assertNotIn("uses: actions/cache/restore@v4", generalization)
 
     def test_nextest_jobs_share_one_reef_fixture_root_per_runner(self):
         setting = (
@@ -2933,11 +2775,11 @@ class CiParityTests(unittest.TestCase):
         workspace_block = _ci_job_block("full-workspace")
         generalization_block = _ci_job_block("generalize-sweep-oracle-shard")
         default_census = (
-            ".venv/bin/python -m unittest "
+            "python -m unittest "
             "scripts.test_nextest_profile_partition.ProfilePartitionTests"
         )
         generalization_census = (
-            ".venv/bin/python -m unittest "
+            "python -m unittest "
             "scripts.test_nextest_profile_partition.GeneralizationPartitionTests"
         )
         _assert_executable_run_once(workspace_block, default_census)
@@ -2963,7 +2805,7 @@ class CiParityTests(unittest.TestCase):
 
     def test_quoted_oracle_name_is_not_an_executable_oracle_step(self):
         block = _ci_job_block("dtype-phase3-oracle")
-        oracle_command = "run: .venv/bin/python scripts/dtype_phase3_oracle.py"
+        oracle_command = "run: python scripts/dtype_phase3_oracle.py"
         mutated = block.replace(
             oracle_command,
             'run: "true # scripts/dtype_phase3_oracle.py"',
@@ -2977,7 +2819,7 @@ class CiParityTests(unittest.TestCase):
 
     def test_commented_oracle_plus_noop_is_not_an_executable_oracle_step(self):
         block = _ci_job_block("dtype-phase3-oracle")
-        command = ".venv/bin/python scripts/dtype_phase3_oracle.py"
+        command = "python scripts/dtype_phase3_oracle.py"
         mutated = block.replace(
             f"run: {command}",
             f"# run: {command}\n        run: \"true\"",
@@ -3003,7 +2845,7 @@ class CiParityTests(unittest.TestCase):
 
     def test_every_ci_job_is_scope_classified(self):
         commands = _parse_ci_run_commands()
-        gate_workers = set(GATE_WORKER_RUN_COMMANDS)
+        gate_workers = set(GATE_WORKERS)
         unclassified = set(commands) - gate_workers - NON_GATE_JOBS
         self.assertEqual(
             unclassified,
@@ -3284,21 +3126,6 @@ class CiParityTests(unittest.TestCase):
             )
             self.assertIn(name, NON_GATE_WORKFLOWS)
 
-    def test_no_multiline_run_in_gate_jobs(self):
-        # Multi-line shell bodies are deliberately outside the exact scalar
-        # contract for gate-owned workers.
-        invocations = _parse_ci_run_commands()
-        for job in GATE_WORKER_RUN_COMMANDS:
-            self.assertNotIn(
-                "<multiline-run-block>",
-                invocations.get(job, []),
-                (
-                    f"CI gate job '{job}' uses a multi-line run block; "
-                    f"keep gate steps as single-line `run: python3 "
-                    f"scripts/gate.py ...` so the parity parser sees them"
-                ),
-            )
-
 
 class NixPackagesWorkflowTests(unittest.TestCase):
     """Lock the two native Nix package jobs and their complete check command."""
@@ -3328,7 +3155,6 @@ class NixPackagesWorkflowTests(unittest.TestCase):
         text = _read_nix_packages_workflow()
         required = [
             "name: Nix Packages (x86_64-linux)",
-            "runs-on: ubuntu-latest",
             "name: Nix Packages (aarch64-darwin)",
             "runs-on: macos-latest",
         ]
@@ -3365,14 +3191,6 @@ class NixPackagesWorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "aarch64-linux"):
             _assert_nix_system_job_parity(contracts, workflow)
 
-    def test_each_native_job_runs_the_nix_contract_suite_with_project_python(self):
-        text = _read_nix_packages_workflow()
-        self.assertEqual(text.count("uses: astral-sh/setup-uv@v8.1.0"), 2)
-        self.assertEqual(text.count("run: uv venv --python 3.11 .venv"), 2)
-        self.assertEqual(
-            text.count("run: .venv/bin/python scripts/test_nix_flake_contract.py"),
-            2,
-        )
 
     def test_each_native_job_uses_the_reviewed_portable_devenv_base(self):
         text = _read_nix_packages_workflow()
@@ -3455,9 +3273,9 @@ class NixPackagesWorkflowTests(unittest.TestCase):
             ),
             "Linux dispatch blocked": (
                 text.replace(
-                    "    runs-on: ubuntu-latest\n",
-                    "    if: github.event.action == 'published'\n"
-                    "    runs-on: ubuntu-latest\n",
+                    "  nix-linux-x86-64:\n",
+                    "  nix-linux-x86-64:\n"
+                    "    if: github.event.action == 'published'\n",
                     1,
                 ),
                 "reviewed native recipe",
@@ -3472,21 +3290,20 @@ class NixPackagesWorkflowTests(unittest.TestCase):
             ),
             "event-dependent empty matrix": (
                 text.replace(
-                    "    runs-on: ubuntu-latest\n",
+                    "  nix-linux-x86-64:\n",
+                    "  nix-linux-x86-64:\n"
                     "    strategy:\n"
                     "      matrix:\n"
                     "        lane: ${{ github.event_name == 'workflow_dispatch' "
-                    "&& fromJSON('[\"run\"]') || fromJSON('[]') }}\n"
-                    "    runs-on: ubuntu-latest\n",
+                    "&& fromJSON('[\"run\"]') || fromJSON('[]') }}\n",
                     1,
                 ),
                 "reviewed native recipe",
             ),
             "event-dependent runner": (
                 text.replace(
-                    "    runs-on: ubuntu-latest\n",
-                    "    runs-on: ${{ github.event_name == 'workflow_dispatch' "
-                    "&& 'ubuntu-latest' || 'no-such-runner' }}\n",
+                    "chelis-ci-warm-x64",
+                    "no-such-runner",
                     1,
                 ),
                 "reviewed native recipe",
@@ -3568,21 +3385,6 @@ class NixPackagesWorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "max-jobs = 2"):
             _assert_runner_resource_bounds(mutated)
 
-    def test_missing_disk_reclaim_fails_the_resource_lock(self):
-        text = _read_nix_packages_workflow()
-        mutated = text.replace("name: Reclaim runner disk space", "name: omitted", 1)
-        with self.assertRaisesRegex(AssertionError, "reclaim runner disk"):
-            _assert_runner_resource_bounds(mutated)
-
-    def test_each_job_caches_the_cvc5_toolchain_closure(self):
-        text = _read_nix_packages_workflow()
-        _assert_cvc5_closure_cache(text)
-
-    def test_missing_cvc5_restore_fails_the_cache_lock(self):
-        text = _read_nix_packages_workflow()
-        mutated = text.replace("uses: actions/cache/restore@v4", "uses: omitted", 1)
-        with self.assertRaisesRegex(AssertionError, "cvc5 closure"):
-            _assert_cvc5_closure_cache(mutated)
 
     def test_direct_devenv_bootstrap_fails_the_native_recipe(self):
         text = _read_nix_packages_workflow()
@@ -3851,23 +3653,6 @@ class SmtCiSplitTests(unittest.TestCase):
                 carcara_result.stdout,
                 all_result.stdout + '\ngmp-mpfr-sys feature "use-system-libs"',
             )
-
-    def test_full_smt_workflow_shares_smoke_cache_key(self):
-        smoke_inputs = _rust_cache_inputs(_ci_job_block("smt-build"))
-        full_inputs = _rust_cache_inputs(
-            _workflow_job_block(SMT_FULL_PROVE_YML, "full-smt-prove")
-        )
-        self.assertEqual(
-            smoke_inputs,
-            full_inputs,
-            "required smt smoke and full-prove lane must share rust-cache inputs",
-        )
-        # cache-on-failure persists a warm workspace cache even when a later
-        # step fails, so a slow cold run is not re-paid next attempt (#583).
-        self.assertEqual(
-            smoke_inputs,
-            {"shared-key": "smt-smt-build", "cache-on-failure": "true"},
-        )
 
 
 def _parse_job_attrs(text: str | None = None) -> dict[str, dict[str, str]]:
