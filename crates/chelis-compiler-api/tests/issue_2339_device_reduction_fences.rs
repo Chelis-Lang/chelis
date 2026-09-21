@@ -1,5 +1,5 @@
 use chelis_compiler_api::compiler::{
-    BuildTarget, reject_inexact_device_reduction_cells, reject_unsupported_hip_ops,
+    BuildTarget, CompilerError, reject_inexact_device_reduction_cells, reject_unsupported_hip_ops,
     reject_unsupported_metal_ops,
 };
 use chelis_ir::{
@@ -135,7 +135,7 @@ fn reduction_cases() -> Vec<(&'static str, Dag)> {
 fn assert_issue_2339_receipt(
     target: &'static str,
     expected_operation: &str,
-    error: chelis_compiler_api::schema::CompilerError,
+    error: CompilerError,
 ) {
     let diagnostic = error.errors.first().expect("one typed diagnostic");
     assert_eq!(
@@ -174,7 +174,7 @@ fn assert_issue_2339_receipt(
 fn c_target_keeps_every_issue_2339_operation_admitted() {
     for (operation, dag) in reduction_cases() {
         reject_inexact_device_reduction_cells(&dag, BuildTarget::C)
-            .unwrap_or_else(|error| panic!("C must keep `{operation}` admitted: {error}"));
+            .unwrap_or_else(|error| panic!("C must keep `{operation}` admitted: {error:?}"));
     }
 }
 
