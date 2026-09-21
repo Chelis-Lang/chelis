@@ -1831,6 +1831,15 @@ reason = "the discovered PR script suite executes both hooks' owned-profile, for
 tracking_issue = "chelis#2287"
 
 [[path_rule]]
+prefix = "scripts/test_bootstrapless_scripts.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the discovered PR script suite executes the bootstrap-free carve-out's 3.9-parse, stdlib-only, and gate re-exec locks"
+tracking_issue = "chelis#2287"
+
+[[path_rule]]
 prefix = "scripts/capacity_census_native_execution.py"
 disposition = "owner"
 workflow = "heavy-e2e.yml"

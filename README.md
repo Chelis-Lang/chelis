@@ -173,6 +173,15 @@ worktree has neither Devenv nor `.venv`. Both hooks reject AI tool authorship
 markers before Git creates a commit. All listed format and lint hooks remain
 disabled.
 
+Do not reach the hook through `core.hooksPath` instead. That config is
+repository-scoped while a tracked file is branch-scoped, so a worktree on a
+branch without `.githooks` would run no hook at all and accept the commit
+silently, with the `.git/hooks` fallback disabled by the same config. Do not
+reinstate an installer that writes an absolute path either: that names one
+worktree for every worktree, and all of them lose the ability to commit once it
+is deleted (chelis#1409). `scripts/test_commit_hook.py` locks the tracked path,
+the absence of any absolute path, and the accept/reject behavior.
+
 ### Devenv development shell (optional)
 
 Devenv is optional. It supplies pinned Rust, Python, C, and contributor tools in
