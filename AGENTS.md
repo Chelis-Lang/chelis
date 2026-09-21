@@ -76,7 +76,9 @@ It carries the brief shape, the worktree-reuse rules, and the verify mode.
   reviewer an existing worktree and its warm target only when it is at the exact review
   head, has a known clean baseline, and has no concurrent writer, and paste the output of
   `.venv/bin/python scripts/worktree_status.py` into the brief as the evidence. Unknown
-  or not-clean means wait. A reviewer whose probes mutate tracked source gets its own
+  or not-clean means wait, and free is the probe's best answer rather than a proof: a
+  run that takes no lease, `--fast` among them, is caught only by a scan of the
+  processes it spawned. A reviewer whose probes mutate tracked source gets its own
   worktree, and you never edit a worktree a reviewer is reading.
 - Before spawning a fresh round, retire only your own stale or failed subagent handles;
   a standing reviewer awaiting a fix is neither. If a spawn routes to remote
@@ -253,7 +255,10 @@ change land. Automatic acceptance proves path and schema validity, not correctne
 - **Changelog fragments.** A behavior-changing PR adds a fragment in `changelog.d/`
   named `<pr-or-slug>.<added|changed|fixed>[.breaking].md`; correct a pending fragment
   when follow-up work changes its claim. Internal work may use the `no-changelog` label.
-  Reserve `CHANGELOG.md` edits for release assembly.
+  Reserve `CHANGELOG.md` edits for release assembly: the release author runs
+  `.venv/bin/python scripts/changelog.py build --version VERSION --date YYYY-MM-DD`,
+  reviews the preview, repeats with `--write`, and commits the notes, fragment
+  deletions, and version bump together, never recreating `[Unreleased]`.
   [The fragment contract](changelog.d/README.md) owns the format.
 - **Commit messages.** Plain conventional commits with the configured human author. No
   `Claude-Session` trailers, Codex or Claude attribution, AI co-authorship markers, or
@@ -415,7 +420,8 @@ holds the measurements behind these rules.
   nobody. Never watch CI from a foreground sleep or poll loop.
 - If an agent returns "waiting" or goes idle without the deliverable, resume it
   immediately with the exact missing items. Prefer a labelled partial report over
-  silence or an overstated completion claim.
+  silence or an overstated completion claim, and deduplicate repeated reports that
+  race with a resume nudge.
 - More than five subagents live at once under one orchestrator needs the user's
   explicit approval and a stated reason. Five is the widest fan-out measured working
   here, not a certified safe width, and it is a separate budget from the CPU one above.
