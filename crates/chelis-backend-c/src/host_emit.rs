@@ -293,7 +293,7 @@ pub(crate) fn emit_host_abi_program(
             internal_names
                 .get(&function.name)
                 .expect("authored function has owned-body name"),
-            private_host_params(&params)
+            private_host_function_params(&params)
         ));
     }
     if program
@@ -488,6 +488,13 @@ pub(crate) fn emit_host_abi_program(
                 CEmitter::output_labels(verified.dag()).len().max(1)
             })
             .collect::<Vec<_>>();
+        let helper_result_origins = (0..program.global_tensor_helpers.len())
+            .map(|helper| {
+                projected
+                    .global_tensor_helper(helper)
+                    .and_then(verified_helper_result_origin)
+            })
+            .collect::<Vec<_>>();
         emit_main(
             &mut body,
             program_name,
@@ -497,6 +504,7 @@ pub(crate) fn emit_host_abi_program(
             projected.root_sites(),
             &internal_names,
             &helper_output_counts,
+            helper_result_origins,
             external_helpers,
         )?;
     }
@@ -1665,7 +1673,7 @@ fn emit_host_declarations(
                 .join(", ");
             let emitted_name = emitted_function_name(program_name, &function.name);
             let params = if function.is_monomorphized_specialization() {
-                private_host_params(&params)
+                private_host_function_params(&params)
             } else {
                 params
             };
@@ -1829,6 +1837,7 @@ fn append_external_helper_declaration(out: &mut Vec<String>, helper_name: &str) 
         )
     ));
     out.push("    (void)__chelis_rng;".to_string());
+    out.push("    (void)__chelis_result_origin_out;".to_string());
     #[cfg(feature = "native-random-observer")]
     out.push("    (void)__chelis_observer;".to_string());
     out.push(format!("    {helper_name}(inputs, n_in, outputs, n_out);"));
@@ -1920,7 +1929,7 @@ fn append_unreachable_fn_abort_stub(
         ""
     };
     let params = if function.is_monomorphized_specialization() {
-        private_host_params(&params)
+        private_host_function_params(&params)
     } else {
         params
     };
@@ -2048,6 +2057,15 @@ fn private_host_params(params: &str) -> String {
     )
 }
 
+/// Owned host bodies additionally return private producer provenance. Public
+/// wrappers pass NULL, so this never enters the generated ABI.
+fn private_host_function_params(params: &str) -> String {
+    format!(
+        "{}, __chelis_host_result_origin *__chelis_result_origin_out",
+        private_host_params(params)
+    )
+}
+
 fn append_host_result_claim_support(out: &mut Vec<String>) {
     out.push(r#"typedef struct __chelis_host_result_claim {
     const struct __chelis_host_result_claim *next;
@@ -2055,6 +2073,11 @@ fn append_host_result_claim_support(out: &mut Vec<String>) {
     int64_t count;
     const int64_t (*axes)[2];
 } __chelis_host_result_claim;
+
+typedef struct __chelis_host_result_origin {
+    const char *op;
+    const char *trap;
+} __chelis_host_result_origin;
 
 static void __chelis_check_host_result_extent_claims(const __chelis_host_result_claim *claims, int64_t rank, const int64_t (*observations)[3], int64_t count, const char *op, const char *trap) {
     for (; claims != NULL; claims = claims->next) {
@@ -2212,7 +2235,7 @@ fn emit_function(
         "{prefix}{} {}({}) {{",
         c_type(&function.ret_ty)?,
         body_name,
-        private_host_params(&params)
+        private_host_function_params(&params)
     ));
     out.push("    (void)__chelis_rng;".to_string());
     let mut emitter = HostEmitter::new(
@@ -2222,10 +2245,24 @@ fn emit_function(
         function_specializations.clone(),
         &function.tensor_helpers,
         helper_output_counts,
+        verified_helpers
+            .iter()
+            .copied()
+            .map(verified_helper_result_origin)
+            .collect(),
         ownership_sites,
     );
     emitter.entry_projection = entry::helper_coverage_with_verified(function, verified_helpers);
     emitter.external_helpers = external_helpers.clone();
+    for param in &function.params {
+        if matches!(param.ty, HostAbiType::Tensor(_)) {
+            let origin = result_origin_name(&param.name);
+            emitter.lines.push(format!(
+                "{}__chelis_host_result_origin {origin} = {{ \"load\", \"numeric trap: domain in load at i64\" }};",
+                emitter.indent
+            ));
+        }
+    }
     #[cfg(feature = "native-random-observer")]
     {
         if !crate::random_observer::source_bijection(source_sites, &emitter.expression_sites) {
@@ -2316,6 +2353,13 @@ fn emit_function(
             )
         })?;
     emitter.emit_terminal_site(terminal, Some("__result"))?;
+    if matches!(function.ret_ty, HostAbiType::Tensor(_)) {
+        emitter.lines.push(format!(
+            "{}if (__chelis_result_origin_out != NULL) *__chelis_result_origin_out = {};",
+            emitter.indent,
+            result_origin_name("__result")
+        ));
+    }
     emitter.finish_expression_sites()?;
     out.extend(emitter.lines);
     #[cfg(feature = "native-random-observer")]
@@ -2365,6 +2409,7 @@ fn emit_function(
             }
         }
         append_private_context_args(&mut args);
+        args.push("NULL".to_string());
         args.push("NULL".to_string());
         out.push(format!(
             "    {} __result = {}({});",
@@ -2416,6 +2461,7 @@ fn emit_function(
                 }
             }
             append_private_context_args(&mut args);
+            args.push("NULL".to_string());
             args.push("NULL".to_string());
             out.push(format!(
                 "    {} __result = {}({});",
@@ -2479,6 +2525,7 @@ fn emit_main(
     ownership_sites: &[ProjectedHostSite<'_>],
     internal_names: &UnordMap<String, String>,
     helper_output_counts: &[usize],
+    helper_result_origins: Vec<Option<String>>,
     external_helpers: &UnordSet<String>,
 ) -> Result<(), Unsupported> {
     out.push("int main(void) {".to_string());
@@ -2494,6 +2541,7 @@ fn emit_main(
         function_specializations(program),
         &program.global_tensor_helpers,
         helper_output_counts,
+        helper_result_origins,
         ownership_sites,
     );
     emitter.entry_projection = entry::global_helper_coverage(program);
@@ -2959,6 +3007,22 @@ fn host_functions_reachable_from_main(program: &HostProgram) -> UnordSet<String>
     reachable
 }
 
+fn verified_helper_result_origin(helper: VerifiedHostTensorHelperView<'_>) -> Option<String> {
+    let dag = helper.dag();
+    let [root] = dag.roots() else {
+        return None;
+    };
+    let sites = dag.result_extent_sites(*root);
+    let operation = sites.first()?.operation();
+    if sites.iter().all(|site| site.operation() == operation) {
+        Some(operation.to_string())
+    } else {
+        // A scalar operation label cannot honestly represent axes attributed
+        // to different producers. Pending delayed claims fail closed.
+        None
+    }
+}
+
 struct HostEmitter<'a> {
     lines: Vec<String>,
     indent: String,
@@ -2967,6 +3031,7 @@ struct HostEmitter<'a> {
     function_specializations: UnordMap<String, HostFunctionSpecialization>,
     tensor_helpers: &'a [HostTensorHelper],
     tensor_helper_output_counts: &'a [usize],
+    tensor_helper_result_origins: Vec<Option<String>>,
     expression_sites: Vec<ProjectedHostSite<'a>>,
     expression_site_index: usize,
     entry_projection: entry::Projection,
@@ -3091,6 +3156,7 @@ impl<'a> HostEmitter<'a> {
         function_specializations: UnordMap<String, HostFunctionSpecialization>,
         tensor_helpers: &'a [HostTensorHelper],
         tensor_helper_output_counts: &'a [usize],
+        tensor_helper_result_origins: Vec<Option<String>>,
         ownership_sites: &[ProjectedHostSite<'a>],
     ) -> Self {
         Self {
@@ -3101,6 +3167,7 @@ impl<'a> HostEmitter<'a> {
             function_specializations,
             tensor_helpers,
             tensor_helper_output_counts,
+            tensor_helper_result_origins,
             expression_sites: ownership_sites
                 .iter()
                 .filter(|site| site.kind == chelis_ir::ownership::HostSiteKind::Expression)
@@ -3324,6 +3391,13 @@ impl<'a> HostEmitter<'a> {
     ) -> Result<(), Unsupported> {
         self.lines
             .push(format!("{}{};", self.indent, c_decl(ty, target)?));
+        if matches!(ty, HostType::Tensor(_)) {
+            self.lines.push(format!(
+                "{}__chelis_host_result_origin {} = {{ NULL, NULL }};",
+                self.indent,
+                result_origin_name(target)
+            ));
+        }
         self.assign_expr(target, expr, ty)?;
         Ok(())
     }
@@ -4268,7 +4342,16 @@ impl<'a> HostEmitter<'a> {
                     // the same mangled identifier its declaration used.
                     self.lines
                         .push(format!("{}{target} = {};", self.indent, c_ident(name)));
+                    if matches!(ty, HostType::Tensor(_)) {
+                        self.lines.push(format!(
+                            "{}{} = {};",
+                            self.indent,
+                            result_origin_name(target),
+                            result_origin_name(name)
+                        ));
+                    }
                 }
+                self.emit_result_claim_guard(target, ty, result_claims.as_deref());
             }
             HostExprKind::Call {
                 function,
@@ -4293,7 +4376,8 @@ impl<'a> HostEmitter<'a> {
             } => {
                 require_same_abi_type(ty, expr_ty, "builtin expression")?;
                 self.assign_builtin(target, name, args, ty, site)?;
-                self.emit_result_claim_guard(target, ty, result_claims.as_deref(), name);
+                self.stamp_result_origin(target, ty, name);
+                self.emit_result_claim_guard(target, ty, result_claims.as_deref());
             }
             HostExprKind::AdtConstruct {
                 ctor,
@@ -4513,6 +4597,13 @@ impl<'a> HostEmitter<'a> {
                         self.indent,
                         c_decl(&binding.ty, &binding.name)?
                     ));
+                    if matches!(binding.ty, HostType::Tensor(_)) {
+                        self.lines.push(format!(
+                            "{}__chelis_host_result_origin {};",
+                            self.indent,
+                            result_origin_name(&binding.name)
+                        ));
+                    }
                     // #379: assign to the same mangled identifier the
                     // declaration used (both route through `c_ident`).
                     self.lines.push(format!(
@@ -4521,6 +4612,14 @@ impl<'a> HostEmitter<'a> {
                         c_ident(&binding.name),
                         temp
                     ));
+                    if matches!(binding.ty, HostType::Tensor(_)) {
+                        self.lines.push(format!(
+                            "{}{} = {};",
+                            self.indent,
+                            result_origin_name(&binding.name),
+                            result_origin_name(&temp)
+                        ));
+                    }
                 }
                 self.claim_on_spine = on_result_spine && spine_binding.is_none();
                 self.assign_expr(target, body, ty)?;
@@ -4706,18 +4805,31 @@ impl<'a> HostEmitter<'a> {
         self.emit_expression_site(site, target)
     }
 
-    fn emit_result_claim_guard(
-        &mut self,
-        target: &str,
-        ty: &HostType,
-        claims: Option<&str>,
-        op: &str,
-    ) {
+    fn stamp_result_origin(&mut self, target: &str, ty: &HostType, op: &str) {
+        if !matches!(ty, HostType::Tensor(_)) {
+            return;
+        }
+        let op = chelis_ir::span_sanitize::sanitize_for_format_string(op);
+        let origin = result_origin_name(target);
+        self.lines.push(format!(
+            "{}{origin}.op = \"{op}\"; {origin}.trap = \"numeric trap: domain in {op} at i64\";",
+            self.indent
+        ));
+    }
+
+    fn emit_result_claim_guard(&mut self, target: &str, ty: &HostType, claims: Option<&str>) {
         if let Some(claims) = claims
             && matches!(ty, HostType::Tensor(_))
         {
-            let op = chelis_ir::span_sanitize::sanitize_for_format_string(op);
-            self.lines.push(format!("{}__chelis_check_host_result_claims({claims}, {target}, \"{op}\", \"numeric trap: domain in {op} at i64\");", self.indent));
+            let origin = result_origin_name(target);
+            self.lines.push(format!(
+                "{}if ({origin}.op == NULL || {origin}.trap == NULL) {{ fprintf(stderr, \"host runtime: pending result claim reached a tensor without producer provenance\\n\"); abort(); }}",
+                self.indent
+            ));
+            self.lines.push(format!(
+                "{}__chelis_check_host_result_claims({claims}, {target}, {origin}.op, {origin}.trap);",
+                self.indent
+            ));
         }
     }
 
@@ -6739,6 +6851,8 @@ impl<'a> HostEmitter<'a> {
             match host_helper.specialization.as_ref() {
                 Some(HostTensorSpecialization::BlasMatmul(summary)) => {
                     self.assign_blas_matmul_summary(target, summary, args, ty)?;
+                    self.stamp_result_origin(target, ty, "matmul");
+                    self.emit_result_claim_guard(target, ty, result_claims);
                     return Ok(());
                 }
                 Some(HostTensorSpecialization::SparseGather(summary)) => {
@@ -6749,6 +6863,8 @@ impl<'a> HostEmitter<'a> {
                         args,
                         ty,
                     )?;
+                    self.stamp_result_origin(target, ty, "gather");
+                    self.emit_result_claim_guard(target, ty, result_claims);
                     return Ok(());
                 }
                 Some(HostTensorSpecialization::SparseScatterAdd(summary)) => {
@@ -6759,6 +6875,8 @@ impl<'a> HostEmitter<'a> {
                         args,
                         ty,
                     )?;
+                    self.stamp_result_origin(target, ty, "scatter_add");
+                    self.emit_result_claim_guard(target, ty, result_claims);
                     return Ok(());
                 }
                 Some(HostTensorSpecialization::SparseScatterReplace(summary)) => {
@@ -6769,6 +6887,8 @@ impl<'a> HostEmitter<'a> {
                         args,
                         ty,
                     )?;
+                    self.stamp_result_origin(target, ty, "scatter");
+                    self.emit_result_claim_guard(target, ty, result_claims);
                     return Ok(());
                 }
                 None => {}
@@ -6916,6 +7036,17 @@ impl<'a> HostEmitter<'a> {
                 self.lines
                     .push(format!("{}chelis_tensor_release({boxed});", self.indent));
             }
+        }
+        let producer = self
+            .tensor_helper_result_origins
+            .get(helper)
+            .cloned()
+            .flatten();
+        if let Some(producer) = producer {
+            self.stamp_result_origin(target, ty, &producer);
+        }
+        if self.external_helpers.contains(&base) {
+            self.emit_result_claim_guard(target, ty, result_claims);
         }
         Ok(())
     }
@@ -7371,6 +7502,8 @@ impl<'a> HostEmitter<'a> {
             match spec {
                 HostFunctionSpecialization::BlasMatmul(summary) => {
                     self.assign_blas_matmul_summary(target, &summary, args, ty)?;
+                    self.stamp_result_origin(target, ty, "matmul");
+                    self.emit_result_claim_guard(target, ty, result_claims);
                     return Ok(());
                 }
                 HostFunctionSpecialization::SparseGather(summary) => {
@@ -7381,6 +7514,8 @@ impl<'a> HostEmitter<'a> {
                         args,
                         ty,
                     )?;
+                    self.stamp_result_origin(target, ty, "gather");
+                    self.emit_result_claim_guard(target, ty, result_claims);
                     return Ok(());
                 }
                 HostFunctionSpecialization::SparseScatterAdd(summary) => {
@@ -7391,6 +7526,8 @@ impl<'a> HostEmitter<'a> {
                         args,
                         ty,
                     )?;
+                    self.stamp_result_origin(target, ty, "scatter_add");
+                    self.emit_result_claim_guard(target, ty, result_claims);
                     return Ok(());
                 }
                 HostFunctionSpecialization::SparseScatterReplace(summary) => {
@@ -7401,6 +7538,8 @@ impl<'a> HostEmitter<'a> {
                         args,
                         ty,
                     )?;
+                    self.stamp_result_origin(target, ty, "scatter");
+                    self.emit_result_claim_guard(target, ty, result_claims);
                     return Ok(());
                 }
             }
@@ -7438,6 +7577,11 @@ impl<'a> HostEmitter<'a> {
         if self.emitted_names.contains_key(function) {
             append_private_context_args(&mut arg_vars);
             arg_vars.push(result_claims.unwrap_or("NULL").to_string());
+            arg_vars.push(if matches!(ty, HostType::Tensor(_)) {
+                format!("&{}", result_origin_name(target))
+            } else {
+                "NULL".to_string()
+            });
         }
         self.lines.push(format!(
             "{}{target} = {}({});",
@@ -7453,6 +7597,9 @@ impl<'a> HostEmitter<'a> {
                 .unwrap_or_else(|| c_ident(function)),
             arg_vars.join(", ")
         ));
+        if !self.emitted_names.contains_key(function) {
+            self.emit_result_claim_guard(target, ty, result_claims);
+        }
         Ok(())
     }
 
@@ -9078,6 +9225,10 @@ const C_RESERVED_WORDS: &[&str] = &[
 /// #379 limit.
 const C_USER_IDENT_PREFIX: &str = "chelis_user__";
 
+fn result_origin_name(value: &str) -> String {
+    format!("__chelis_result_origin_{}", c_ident(value))
+}
+
 /// Map a Chelis identifier to a legal, collision-free C identifier (#379).
 ///
 /// Most names pass through byte-identical so the existing C/HIP corpus is
@@ -9812,6 +9963,7 @@ mod expression_dispatch_tests {
             UnordMap::new(),
             &[],
             &[],
+            Vec::new(),
             &[],
         );
         emitter.emit_labeled_boxed_root("root", "boxed");
