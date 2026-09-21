@@ -35,6 +35,7 @@ fn info(prim: Prim, origin: OwnerOrigin) -> OwnerInfo {
         placement: Placement::Value,
         origin,
         names: Vec::new(),
+        span_id: None,
     }
 }
 
@@ -46,6 +47,7 @@ fn parameter_info(prim: Prim, origin: OwnerOrigin) -> OwnerInfo {
         placement: Placement::Parameter,
         origin,
         names: Vec::new(),
+        span_id: None,
     }
 }
 
@@ -56,6 +58,7 @@ fn value_info(ty: ConcreteHostType, origin: OwnerOrigin) -> OwnerInfo {
         placement: Placement::Value,
         origin,
         names: Vec::new(),
+        span_id: None,
     }
 }
 
@@ -553,6 +556,149 @@ fn join_mismatch_names_the_owners_the_paths_disagree_about() {
     );
 }
 
+/// chelis#2122: when lowering recorded a span for the owner, the join mismatch
+/// names the source region beside the binding name. Without one it prints the
+/// owner exactly as before, with no placeholder.
+#[test]
+fn join_mismatch_reports_the_span_when_lowering_recorded_one() {
+    let make = |span: Option<&str>| {
+        let mut carried = info(Prim::Int64, OwnerOrigin::Owned);
+        carried.names = vec!["carry".into()];
+        carried.span_id = span.map(str::to_string);
+        roots(
+            vec![
+                block(
+                    0,
+                    vec![BlockParam {
+                        owner: OwnerId(0),
+                        mode: ParamMode::EntryBorrow,
+                    }],
+                    vec![define(1), define(2)],
+                    Terminator::Branch {
+                        condition: Operand::borrow(OwnerId(0)),
+                        then_edge: Edge {
+                            id: EdgeId::UNASSIGNED,
+                            target: BlockId(1),
+                            args: Vec::new(),
+                            terminals: vec![
+                                edge_terminal(90, Terminal::Drop(OwnerId(1))),
+                                edge_terminal(91, Terminal::Discard(OwnerId(2))),
+                            ],
+                        },
+                        else_edge: Edge {
+                            id: EdgeId::UNASSIGNED,
+                            target: BlockId(1),
+                            args: Vec::new(),
+                            terminals: vec![edge_terminal(92, Terminal::Drop(OwnerId(1)))],
+                        },
+                    },
+                ),
+                block(1, vec![], vec![], Terminator::Exit),
+            ],
+            BTreeMap::from([
+                (OwnerId(0), info(Prim::Bool, OwnerOrigin::ExternalBorrow)),
+                (OwnerId(1), info(Prim::String, OwnerOrigin::Owned)),
+                (OwnerId(2), carried),
+            ]),
+        )
+    };
+
+    assert_eq!(
+        verify_raw(make(Some("surf:120..135")))
+            .unwrap_err()
+            .to_string(),
+        "block b1 in `roots` is reached with inconsistent live owners: \
+         live only on this path: %2[carry]@surf:120..135; live only on the path \
+         already verified: none (2 live here, 1 earlier)"
+            .replace("         ", " ")
+    );
+
+    assert_eq!(
+        verify_raw(make(None)).unwrap_err().to_string(),
+        "block b1 in `roots` is reached with inconsistent live owners: \
+         live only on this path: %2[carry]; live only on the path already \
+         verified: none (2 live here, 1 earlier)"
+            .replace("         ", " ")
+    );
+}
+
+/// chelis#2122: a span id is an opaque producer string. One that is empty, or
+/// that carries the separators this single-line message is built from, must not
+/// reach the diagnostic: it would end the label in a dangling `@`, or forge a
+/// clause or a second owner. Such an id renders as no span at all.
+#[test]
+fn join_mismatch_drops_a_span_id_that_could_restructure_the_message() {
+    let render_with = |span: &str| {
+        let mut carried = info(Prim::Int64, OwnerOrigin::Owned);
+        carried.names = vec!["carry".into()];
+        carried.span_id = Some(span.to_string());
+        verify_raw(roots(
+            vec![
+                block(
+                    0,
+                    vec![BlockParam {
+                        owner: OwnerId(0),
+                        mode: ParamMode::EntryBorrow,
+                    }],
+                    vec![define(1), define(2)],
+                    Terminator::Branch {
+                        condition: Operand::borrow(OwnerId(0)),
+                        then_edge: Edge {
+                            id: EdgeId::UNASSIGNED,
+                            target: BlockId(1),
+                            args: Vec::new(),
+                            terminals: vec![
+                                edge_terminal(90, Terminal::Drop(OwnerId(1))),
+                                edge_terminal(91, Terminal::Discard(OwnerId(2))),
+                            ],
+                        },
+                        else_edge: Edge {
+                            id: EdgeId::UNASSIGNED,
+                            target: BlockId(1),
+                            args: Vec::new(),
+                            terminals: vec![edge_terminal(92, Terminal::Drop(OwnerId(1)))],
+                        },
+                    },
+                ),
+                block(1, vec![], vec![], Terminator::Exit),
+            ],
+            BTreeMap::from([
+                (OwnerId(0), info(Prim::Bool, OwnerOrigin::ExternalBorrow)),
+                (OwnerId(1), info(Prim::String, OwnerOrigin::Owned)),
+                (OwnerId(2), carried),
+            ]),
+        ))
+        .unwrap_err()
+        .to_string()
+    };
+
+    let clean = render_with("surf:120..135");
+    assert!(clean.contains("%2[carry]@surf:120..135"), "{clean}");
+
+    for hostile in [
+        "",
+        "   ",
+        "surf:1..2; live only on the path already verified: %99[forged]",
+        "surf:1..2, %98[forged]",
+        "surf:1..2\nINJECTED",
+    ] {
+        let rendered = render_with(hostile);
+        assert!(
+            rendered.contains("%2[carry];"),
+            "an id that cannot be rendered safely leaves the owner unadorned, got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("forged") && !rendered.contains("INJECTED"),
+            "no part of the id reaches the message: {rendered}"
+        );
+        assert_eq!(
+            rendered.lines().count(),
+            1,
+            "the diagnostic stays one line: {rendered}"
+        );
+    }
+}
+
 /// The two sides are not interchangeable: an owner live only on the path being
 /// verified now must not be reported as live only on the path verified before,
 /// and the counts follow the same order (chelis#2122 red team, F2).
@@ -1023,6 +1169,7 @@ fn direct_call_argument_class_matches_the_callable_body_parameter() {
             placement: Placement::Value,
             origin: OwnerOrigin::Owned,
             names: Vec::new(),
+            span_id: None,
         },
     );
     assert!(matches!(
@@ -2197,6 +2344,7 @@ fn typed_info(ty: ConcreteHostType, origin: OwnerOrigin) -> OwnerInfo {
         placement: Placement::Value,
         origin,
         names: Vec::new(),
+        span_id: None,
     }
 }
 

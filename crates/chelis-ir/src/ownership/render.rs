@@ -58,12 +58,31 @@ fn edge(value: &Edge) -> String {
 /// the binding names it came from. Shared with the verifier so a diagnostic
 /// and a dump spell the same owner the same way.
 pub(crate) fn owner_label(unit: &Unit, id: OwnerId) -> String {
-    let names = unit.owners[&id].names.join(",");
-    if names.is_empty() {
+    let info = &unit.owners[&id];
+    let names = info.names.join(",");
+    let base = if names.is_empty() {
         format!("%{}", id.0)
     } else {
         format!("%{}[{names}]", id.0)
+    };
+    match info.span_id.as_deref() {
+        Some(span) if renderable_span(span) => format!("{base}@{span}"),
+        _ => base,
     }
+}
+
+/// `span_id` is an opaque producer-issued string: `chelis_deep` admits an empty
+/// one, and a Deep input can carry any id its producer chose. The join-mismatch
+/// diagnostic is one line whose owners are `, `-joined and whose clauses are
+/// `;`-separated, so an id carrying those characters, or whitespace, could
+/// forge a clause or a second owner. Render only an id that can locate
+/// something and cannot restructure the message; anything else renders as no
+/// span rather than as corrupted output (chelis#2122).
+fn renderable_span(span: &str) -> bool {
+    !span.is_empty()
+        && !span
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || c == ';' || c == ',')
 }
 
 fn owner(unit: &Unit, id: OwnerId) -> String {
