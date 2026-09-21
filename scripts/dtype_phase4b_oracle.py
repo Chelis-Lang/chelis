@@ -3189,8 +3189,8 @@ def validate_schema_and_consumers(
                 "derived stdlib execution rule",
             ),
             (
-                "Unimplemented { issue: #1281, diagnostic_kind: UnsupportedFeature }",
-                "reduction implementation owner",
+                "Unimplemented { issue: #2339, diagnostic_kind: UnsupportedFeature }",
+                "device reduction implementation owner",
             ),
             (
                 "Unimplemented { issue: #1290, diagnostic_kind: UnsupportedFeature }",

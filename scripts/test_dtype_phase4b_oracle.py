@@ -3543,13 +3543,13 @@ class ContractValidationTests(unittest.TestCase):
         )
         self.assert_contract_fails("effect no-default rule")
 
-    def test_reduction_rows_cannot_cite_the_tracking_hub(self) -> None:
+    def test_device_reduction_rows_cannot_cite_the_tracking_hub(self) -> None:
         self.replace(
             Path("spec/design/capability_table.md"),
-            "Unimplemented { issue: #1281, diagnostic_kind: UnsupportedFeature }",
+            "Unimplemented { issue: #2339, diagnostic_kind: UnsupportedFeature }",
             "Unimplemented { issue: #729, diagnostic_kind: UnsupportedFeature }",
         )
-        self.assert_contract_fails("reduction implementation owner")
+        self.assert_contract_fails("device reduction implementation owner")
 
     def test_logical_rows_cannot_cite_the_tracking_hub(self) -> None:
         self.replace(

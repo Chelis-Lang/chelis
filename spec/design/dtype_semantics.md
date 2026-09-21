@@ -2546,6 +2546,11 @@ callable from bypassing review while the capability tables are built.
    operations, comparison-derived negation, and `where`.
    [#1306] owns replacing the trap- and stored-bit-changing `sub` and
    `min_elem` arithmetic surrogates with direct typed identities in every lane.
+   [#1281] owns exact `mean`, extrema, argument-reduction, and window-extrema
+   behavior in the checker, evaluator, IR/AD, and compiled-C lanes.
+   Experimental HIP and Metal implementation gaps retain stable typed receipts
+   under [#2339] rather than weakening or silently partially implementing those
+   cells.
 
 **Authoritative direct-arithmetic oracle ([#1306]):**
 `.venv/bin/python scripts/dtype_direct_arithmetic_oracle.py`; exit 0 and final
@@ -2568,6 +2573,18 @@ and adjoints, f32/f64 subtraction agreement, fused direct subtraction followed
 by minimum, and signed-i32 extrema. A host without `hipcc`, the documented ROCm
 wheel paths, or a compatible device records this leg as **BLOCKED**, never as a
 pass; it does not weaken or remove the ignored hardware tests.
+
+**Authoritative exact-reduction oracle ([#1281]):**
+`.venv/bin/python scripts/dtype_exact_reductions_oracle.py`; exit 0 and final
+line `DTYPE EXACT REDUCTIONS ORACLE: PASS`. It runs the typed reduction kernels,
+exact IR evaluation and adjoints, compiled-C execution, checker-domain cases,
+and exhaustive downstream compilation. Its exact-bit cases cover runtime-empty
+`Domain`, first-NaN payload selection, first stored representation on equal
+values, exact i64 argument indices, non-NaN tie splitting including infinities,
+and deterministic overlapping-window accumulation. It never claims ignored
+device execution. HIP and Metal cells that lack that complete behavior reject
+with the stable typed authority [#2339] until their device implementation and
+real-hardware evidence land.
 
 **Authoritative ReLU oracle ([#1313]):** `.venv/bin/python
 scripts/dtype_relu_oracle.py`; exit 0 and final line `DTYPE RELU ORACLE:
