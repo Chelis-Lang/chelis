@@ -11,6 +11,8 @@ use result_claims::{assert_claim, run};
 
 const TWO: &str = "[1.0f32, 2.0f32, 3.0f32]";
 const THREE: &str = "[1.0f32, 2.0f32, 3.0f32, 4.0f32]";
+const TWO_BY_FOUR: &str = "[[1.0f32, 2.0f32, 3.0f32, 4.0f32], [5.0f32, 6.0f32, 7.0f32, 8.0f32]]";
+const THREE_BY_FOUR: &str = "[[1.0f32, 2.0f32, 3.0f32, 4.0f32], [5.0f32, 6.0f32, 7.0f32, 8.0f32], [9.0f32, 10.0f32, 11.0f32, 12.0f32]]";
 
 fn callable_source(values: &str, literal: bool) -> String {
     let (binding, callable) = if literal {
@@ -117,8 +119,16 @@ fn c_shared_callback_claims_are_invocation_local() {
 }
 
 fn delayed_selection_source(select_second: bool, selected_agrees: bool) -> String {
-    let chosen = if selected_agrees { THREE } else { TWO };
-    let unchosen = if selected_agrees { TWO } else { THREE };
+    let chosen = if selected_agrees {
+        THREE_BY_FOUR
+    } else {
+        TWO_BY_FOUR
+    };
+    let unchosen = if selected_agrees {
+        TWO_BY_FOUR
+    } else {
+        THREE_BY_FOUR
+    };
     let (x, y) = if select_second {
         (unchosen, chosen)
     } else {
@@ -154,7 +164,15 @@ fn assert_delayed_selection(native: bool) {
             let selected_op = if select_second { "cumsum" } else { "diagonal" };
             let unselected_op = if select_second { "diagonal" } else { "cumsum" };
             if selected_agrees {
-                assert!(output.contains("out = tensor(shape=[3]"), "{output}");
+                let values = if select_second {
+                    "[1.0, 7.0, 18.0]"
+                } else {
+                    "[1.0, 6.0, 11.0]"
+                };
+                assert!(
+                    output.contains(&format!("out = tensor(shape=[3], data={values})")),
+                    "{output}"
+                );
                 assert!(!output.contains("numeric trap:"), "{output}");
             } else {
                 assert_claim(&output, selected_op, 2);
@@ -175,4 +193,72 @@ fn eval_delayed_selection_guards_only_the_selected_value() {
 #[test]
 fn c_delayed_selection_guards_only_the_selected_value() {
     assert_delayed_selection(true);
+}
+
+fn selection_before_production_source(select_second: bool, agrees: bool) -> String {
+    let selected = if agrees { THREE_BY_FOUR } else { TWO_BY_FOUR };
+    let unselected = if agrees { TWO_BY_FOUR } else { THREE_BY_FOUR };
+    let (x, y) = if select_second {
+        (unselected, selected)
+    } else {
+        (selected, unselected)
+    };
+    format!(
+        "def decide(flag: bool) -> bool ! {{ IO }} = {{\n _ = print(\"selector-ran\")\n flag\n}}\n\
+         def choose[n, m](x: tensor[n, 4, f32], y: tensor[m, 4, f32], second: bool) -> tensor[3, f32] ! {{ IO }} = {{\n selected = if decide(second) then {{\n _ = print(\"cumsum-before\")\n value = cumsum(diagonal(y, 0i32, 1i32), 0i32)\n _ = print(\"cumsum-after\")\n value\n }} else {{\n _ = print(\"diagonal-before\")\n value = diagonal(x, 0i32, 1i32)\n _ = print(\"diagonal-after\")\n value\n }}\n _ = print(\"selection-after\")\n selected\n}}\n\
+         out = choose(to_tensor({x}), to_tensor({y}), {select_second})\n"
+    )
+}
+
+fn assert_selection_before_production(native: bool) {
+    for select_second in [false, true] {
+        for agrees in [true, false] {
+            let source = selection_before_production_source(select_second, agrees);
+            let (ok, output) = run(&source, native);
+            assert_eq!(ok, agrees, "{source}\n{output}");
+            assert_eq!(output.matches("selector-ran").count(), 1, "{output}");
+            let (selected_op, unselected_op, expected) = if select_second {
+                ("cumsum", "diagonal", "[1.0, 7.0, 18.0]")
+            } else {
+                ("diagonal", "cumsum", "[1.0, 6.0, 11.0]")
+            };
+            assert_eq!(
+                output.matches(&format!("{selected_op}-before")).count(),
+                1,
+                "{output}"
+            );
+            assert!(
+                !output.contains(&format!("{unselected_op}-before")),
+                "{output}"
+            );
+            assert_eq!(
+                output.matches(&format!("{selected_op}-after")).count(),
+                usize::from(agrees),
+                "{output}"
+            );
+            assert_eq!(
+                output.matches("selection-after").count(),
+                usize::from(agrees),
+                "{output}"
+            );
+            if agrees {
+                assert!(
+                    output.contains(&format!("out = tensor(shape=[3], data={expected})")),
+                    "{output}"
+                );
+            } else {
+                assert_claim(&output, selected_op, 2);
+            }
+        }
+    }
+}
+
+#[test]
+fn eval_selection_before_production_forwards_only_to_the_selected_arm() {
+    assert_selection_before_production(false);
+}
+
+#[test]
+fn c_selection_before_production_forwards_only_to_the_selected_arm() {
+    assert_selection_before_production(true);
 }
