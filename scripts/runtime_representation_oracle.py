@@ -176,6 +176,7 @@ INVENTORY_SOURCES: tuple[str, ...] = (
     "crates/chelis-runtime/src/format_shortest.rs",
     "crates/chelis-runtime/src/ieee_narrow.rs",
     "crates/chelis-runtime/src/lib.rs",
+    "crates/chelis-runtime/src/list.rs",
     "crates/chelis-runtime/src/metadata.rs",
     "crates/chelis-runtime/src/ownership_ledger.rs",
     "crates/chelis-runtime/src/runtime_dtype_contract_tests.rs",
