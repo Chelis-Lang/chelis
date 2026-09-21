@@ -88,6 +88,22 @@ def assert_extended(test, pr, nightly):
                 "with a 60-minute timeout",
                 RUNTIME_REPRESENTATION_DESIGN.read_text(),
             )
+            step_names = [step.get("name") for step in job["steps"]]
+            test.assertEqual(
+                [
+                    step.get("run")
+                    for step in job["steps"]
+                    if step.get("name") == "Install Python binding dependencies"
+                ],
+                [
+                    "uv pip install --python .venv/bin/python "
+                    "-r bindings/python/pyproject.toml"
+                ],
+            )
+            test.assertLess(
+                step_names.index("Install Python binding dependencies"),
+                step_names.index("Gate (runtime representation stage)"),
+            )
             artifacts = [
                 step
                 for step in job["steps"]
