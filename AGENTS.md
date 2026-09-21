@@ -11,10 +11,13 @@ not drift.
 
 Chelis is a functional language for AI research, built for a workflow where a coding
 agent is the primary author and a human is the supervisor, and where the programs are
-themselves AI systems: models, training pipelines, learned functions.
-`spec/00-context.md` §5 owns the design principles and
-`spec/design/chelis_canonical_reference.md` the architecture; their specifics may lag,
-their intent does not. When a tradeoff appears, apply these in order:
+themselves AI systems: models, training loops, search spaces, learned functions. The
+bet is that a type system, representation, and compilation model designed around AI
+primitives from the start beat ones bolted onto Python or a systems language later. It
+is not a general-purpose language, a systems language, a web framework, or a Python
+replacement. `spec/00-context.md` and `spec/design/chelis_canonical_reference.md` own
+the full statement; their specifics may lag, their intent does not. When a tradeoff
+appears, apply these in order:
 
 1. **Unambiguity over ergonomics.** The author is an agent. The friction a human feels
    spelling out every type, effect, dtype, and dimension is not worth a reading the
