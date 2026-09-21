@@ -644,8 +644,13 @@ both selector timings with exact primitive attribution and effects before and
 after the guard. The existing host-builtin receipts alone do not establish this
 continuation's completion.
 The pure-helper slice enrolls `return.pure_helper.literal.{eval,c}`. Callable
-transport and selected-alias provenance remain separate continuation slices;
-their pending witnesses do not count as passing pure-helper receipts.
+transport is a separate continuation slice: private invocation-local claim
+scopes retain an authored literal result contract when supported higher-order
+host specialization inlines away that declaration boundary. Its Eval/C
+receipts cover named and literal callback paths plus different claims through
+one shared callback. Selected-alias provenance remains a further continuation
+slice; its pending witnesses count as neither callable-transport nor
+pure-helper receipts.
 The receipts do not establish general preallocation coverage for every host
 primitive. Named host declared-result claims remain #1900.
 

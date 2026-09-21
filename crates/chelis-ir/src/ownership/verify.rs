@@ -704,6 +704,9 @@ fn census_host_expr<'a>(
     };
     sites.push(expression_site);
     match &expr.kind {
+        ConcreteHostExprKind::ResultClaimScope { body, .. } => {
+            census_host_expr(body, helpers, unit, sites)?;
+        }
         ConcreteHostExprKind::Int(_)
         | ConcreteHostExprKind::Float(_)
         | ConcreteHostExprKind::Bool(_)

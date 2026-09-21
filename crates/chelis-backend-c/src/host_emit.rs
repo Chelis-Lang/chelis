@@ -2694,6 +2694,7 @@ fn captured_global_names(program: &HostProgram) -> Vec<String> {
 /// over `HostExprKind` so a new variant forces this walk to be revisited.
 fn collect_var_names(expr: &HostExpr, out: &mut UnordSet<String>) {
     match &expr.kind {
+        HostExprKind::ResultClaimScope { body, .. } => collect_var_names(body, out),
         HostExprKind::Int(_)
         | HostExprKind::Float(_)
         | HostExprKind::Bool(_)
@@ -2807,6 +2808,7 @@ fn collect_referenced_fn_names(expr: &HostExpr, out: &mut UnordSet<String>) {
     collect_var_names(expr, out);
     fn walk(expr: &HostExpr, out: &mut UnordSet<String>) {
         match &expr.kind {
+            HostExprKind::ResultClaimScope { body, .. } => walk(body, out),
             HostExprKind::Call { function, args, .. } => {
                 out.insert(function.clone());
                 for arg in args {
@@ -4178,6 +4180,45 @@ impl<'a> HostEmitter<'a> {
             .then(|| self.result_claims.clone())
             .flatten();
         match &expr.kind {
+            HostExprKind::ResultClaimScope {
+                plan,
+                body,
+                ty: scope_ty,
+            } => {
+                require_same_abi_type(ty, scope_ty, "result-claim scope")?;
+                let result = plan.result();
+                let literal_axes = result
+                    .dims
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(axis, dim)| match dim {
+                        DimInfo::Lit(required) => Some((axis, *required)),
+                        DimInfo::Named(_, _) => None,
+                    })
+                    .collect::<Vec<_>>();
+                let axes = self.next_temp("result_claim_axes");
+                let frame = self.next_temp("result_claim_frame");
+                self.lines
+                    .push(format!("{}const int64_t {axes}[][2] = {{", self.indent));
+                for (axis, required) in &literal_axes {
+                    self.lines
+                        .push(format!("{}    {{ {axis}, {required} }},", self.indent));
+                }
+                self.lines.push(format!("{}}};", self.indent));
+                let parent = result_claims.as_deref().unwrap_or("NULL");
+                self.lines.push(format!(
+                    "{}const __chelis_host_result_claim {frame} = {{ {parent}, {}, {}, {axes} }};",
+                    self.indent,
+                    result.dims.len(),
+                    literal_axes.len()
+                ));
+                let previous_claims = self.result_claims.replace(format!("&{frame}"));
+                self.claim_on_spine = true;
+                self.assign_expr(target, body, ty)?;
+                self.result_claims = previous_claims;
+                self.emit_expression_site(site, target)?;
+                return Ok(());
+            }
             HostExprKind::Int(value) => {
                 // The positive magnitude of i64::MIN is not a signed C
                 // decimal literal, even when preceded by unary minus.
@@ -9123,7 +9164,8 @@ fn host_type(expr: &HostExpr) -> HostType {
         | HostExprKind::Partition { ty, .. }
         | HostExprKind::FlatMap { ty, .. }
         | HostExprKind::WithSeed { ty, .. }
-        | HostExprKind::TensorCall { ty, .. } => ty.clone(),
+        | HostExprKind::TensorCall { ty, .. }
+        | HostExprKind::ResultClaimScope { ty, .. } => ty.clone(),
         HostExprKind::Unit | HostExprKind::SignatureEntry { .. } => HostType::Unit,
     }
 }

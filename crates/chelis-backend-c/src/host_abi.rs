@@ -457,6 +457,13 @@ fn project_expr(
     allowed_callbacks: &UnordSet<String>,
 ) -> Result<HostAbiExpr, Unsupported> {
     let kind = match expr.kind {
+        ConcreteHostExprKind::ResultClaimScope { plan, body, ty } => {
+            HostAbiExprKind::ResultClaimScope {
+                plan,
+                body: Box::new(project_expr(*body, allowed_callbacks)?),
+                ty: HostAbiType::try_from_concrete(&ty)?,
+            }
+        }
         ConcreteHostExprKind::Int(value) => HostAbiExprKind::Int(value),
         ConcreteHostExprKind::Float(value) => HostAbiExprKind::Float(value),
         ConcreteHostExprKind::Bool(value) => HostAbiExprKind::Bool(value),

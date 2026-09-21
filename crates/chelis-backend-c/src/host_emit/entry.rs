@@ -313,6 +313,9 @@ impl<'a> Walker<'a> {
         let expression = self.expression;
         self.expression += 1;
         match &expr.kind {
+            HostExprKind::ResultClaimScope { body, .. } => {
+                self.walk(body, env, facts);
+            }
             HostExprKind::SignatureEntry { plan, args } => {
                 for arg in args {
                     self.walk(arg, env, facts);
