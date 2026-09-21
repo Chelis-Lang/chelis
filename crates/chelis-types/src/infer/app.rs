@@ -394,7 +394,20 @@ fn infer_app_inner(
         })
         .collect();
 
-    if matches!(func_name.as_deref(), Some("drop")) && arg_tys.len() == 1 {
+    // [05-OP-67]: `drop` is the one-argument linearity consume and returns
+    // unit for every operand type. Its arity is exact here rather than in
+    // `app_post`, because this route returns before unification runs; the
+    // list slice that once shared the name is `skip` ([05-OP-54]).
+    if matches!(func_name.as_deref(), Some("drop")) {
+        if arg_tys.len() != 1 {
+            return_with_collection_cleanup!(report_builtin_arity(
+                errors,
+                list,
+                "drop",
+                1,
+                arg_tys.len()
+            ));
+        }
         return_with_collection_cleanup!(Type::Unit);
     }
 

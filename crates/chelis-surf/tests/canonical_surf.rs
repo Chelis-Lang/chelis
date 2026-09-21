@@ -2152,3 +2152,92 @@ fn normalization_retains_property_parameter_types_with_a_signature() {
     );
     assert!(parse_deep(&bad).is_err());
 }
+
+/// The v0.18 list slice `drop(xs, n)` became `skip(xs, n)` when [05-OP-54]
+/// and [05-OP-67] separated the container operation from the linearity
+/// consume. The migration is arity-driven, not textual: the one-argument
+/// `drop(value)` keeps its name, and a pipe stage supplies the piped value in
+/// argument position zero, so `xs |> drop(1)` is the two-argument form
+/// written with one written argument.
+#[test]
+fn explicit_v018_migration_renames_the_two_argument_list_drop_to_skip() {
+    let legacy = concat!(
+        "sliced = drop(xs, 1i64)\n",
+        "consumed = drop(xs)\n",
+        "nested = concat(take(xs, 2i64), drop(drop(xs, 1i64), 1i64))\n",
+        "piped = xs |> drop(1i64)\n",
+        "piped_bare = xs |> drop\n",
+        "chained = xs |> take(3i64) |> drop(1i64) |> len\n",
+        "def consume_then_slice(ys) = {\n",
+        "  _ = drop(copy(ys))\n",
+        "  drop(ys, 1i64)\n",
+        "}\n",
+    );
+    let expected = concat!(
+        "sliced = skip(xs, 1i64)\n",
+        "consumed = drop(xs)\n",
+        "nested = concat(take(xs, 2i64), skip(skip(xs, 1i64), 1i64))\n",
+        "piped = xs |> skip(1i64)\n",
+        "piped_bare = xs |> drop\n",
+        "chained = xs\n|> take(3i64)\n|> skip(1i64)\n|> len\n",
+        "def consume_then_slice(ys) = {\n",
+        "  _ = drop(copy(ys))\n",
+        "  skip(ys, 1i64)\n",
+        "}\n",
+    );
+    assert_eq!(migrate_source_v018(legacy).unwrap(), expected);
+}
+
+/// A `drop` shadowed by a parameter, a lambda parameter, a block binding or a
+/// match binder is an ordinary local value (spec/04 section 8.6), so a
+/// two-argument call to it is not the list slice. A three-argument call is
+/// neither operation. None of these is rewritten.
+#[test]
+fn explicit_v018_migration_leaves_a_shadowed_drop_and_a_wrong_arity_call_alone() {
+    let legacy = concat!(
+        "def apply_twice(drop, x) = drop(x, x)\n",
+        "lambda_shadow = fn (drop) -> drop(xs, 1i64)\n",
+        "def block_shadow(f) = {\n",
+        "  drop = f\n",
+        "  drop(xs, 1i64)\n",
+        "}\n",
+        "def match_shadow(v) =\n",
+        "  match v with {\n",
+        "    | Some(drop) => drop(xs, 1i64)\n",
+        "    | None => xs\n",
+        "  }\n",
+        "wrong_arity = drop(xs, 1i64, 2i64)\n",
+        "wrong_arity_piped = xs |> drop(1i64, 2i64)\n",
+    );
+    assert_eq!(migrate_source_v018(legacy).unwrap(), legacy);
+}
+
+/// The shadow ends with its scope: a call after the shadowing block, or in a
+/// sibling definition, still names the builtin and still migrates.
+#[test]
+fn explicit_v018_migration_resumes_renaming_once_the_shadow_ends() {
+    let legacy = concat!(
+        "def shadowed(f) = {\n",
+        "  drop = f\n",
+        "  drop(xs, 1i64)\n",
+        "}\n",
+        "def sibling() = drop(xs, 1i64)\n",
+    );
+    let expected = concat!(
+        "def shadowed(f) = {\n",
+        "  drop = f\n",
+        "  drop(xs, 1i64)\n",
+        "}\n",
+        "def sibling() = skip(xs, 1i64)\n",
+    );
+    assert_eq!(migrate_source_v018(legacy).unwrap(), expected);
+}
+
+/// A block binding takes effect after its own value: the binder named `drop`
+/// does not shadow the builtin inside the expression that defines it.
+#[test]
+fn explicit_v018_migration_renames_inside_the_value_that_binds_the_shadow() {
+    let legacy = "def f() = {\n  drop = drop(xs, 1i64)\n  drop\n}\n";
+    let expected = "def f() = {\n  drop = skip(xs, 1i64)\n  drop\n}\n";
+    assert_eq!(migrate_source_v018(legacy).unwrap(), expected);
+}

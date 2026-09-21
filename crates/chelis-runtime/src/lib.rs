@@ -4883,7 +4883,15 @@ pub unsafe extern "C" fn chelis_list_drop(
     count: i64,
 ) -> *mut chelis_list {
     if count < 0 {
-        runtime_fail!("drop requires non-negative count");
+        // The message names the Surf operation the user wrote, `skip`
+        // ([05-OP-54]), not this symbol. The exported C name keeps its
+        // `chelis_list_drop` spelling deliberately -- it is unambiguous
+        // behind the `list_` prefix and renaming it would retire a
+        // capacity-census row -- but a diagnostic naming `drop` would send
+        // the reader to the one-argument linearity consume of [05-OP-67],
+        // and would disagree with the eval lane's wording for the same
+        // program.
+        runtime_fail!("skip requires non-negative count");
     }
     if list.is_null() || count as usize >= (*list).items.len() {
         return chelis_list_empty();

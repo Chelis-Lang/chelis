@@ -11,7 +11,7 @@ def try_read_csv(path: string) -> Option[List[Dict[string, string]]] =
     raw_lines = read_lines(path)
     lines = filter(fn (line: string) -> gt(string_len(line), cast(0, i64)), raw_lines)
     if eq(len(lines), cast(0, i64)) then Some([]) else match parse_line(index(lines, cast(0, i64))) with {
-      | Some(headers) => parse_rows(headers, drop(lines, cast(1, i64)))
+      | Some(headers) => parse_rows(headers, skip(lines, cast(1, i64)))
       | None => None
     }
   }
@@ -65,7 +65,7 @@ def first_invalid_row(rows: List[Dict[string, string]]) -> i64 =
   }
 -- Row parsing runs on the linear combinator lane. The pre-#1213 shape
 -- recursed one line at a time through `append(rows, ...)` and
--- `drop(lines, 1)`; both deep-clone their list argument, so reading r
+-- `skip(lines, 1)`; both deep-clone their list argument, so reading r
 -- rows allocated O(r^2) list bytes and every intermediate generation
 -- stayed live until the recursion bottomed out. `map` and `fold` lower
 -- to a capacity-reserved list plus in-place pushes (chelis#943/#949),

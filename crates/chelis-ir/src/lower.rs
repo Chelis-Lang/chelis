@@ -4762,6 +4762,7 @@ fn expr_requires_host_runtime_with_ctx(expr: &Expr, exempt_to_tensor_literal: bo
                         | "append"
                         | "concat"
                         | "take"
+                        | "skip"
                         | "chunk"
                         | "range"
                         | "map"
@@ -4822,8 +4823,13 @@ fn expr_requires_host_runtime_with_ctx(expr: &Expr, exempt_to_tensor_literal: bo
                 ) {
                     return true;
                 }
+                // [05-OP-67]: the one-argument linearity consume lowers to
+                // `Drop` nodes in the primitive DAG and needs no host
+                // runtime of its own. Before `skip` took the list slice's
+                // name this arm read the arity to say the same thing;
+                // `drop` now has only the one form.
                 if name == "drop" {
-                    return kids.len() != 2;
+                    return false;
                 }
                 if matches!(
                     name,
@@ -10338,7 +10344,7 @@ impl<'program> LowerCtx<'program> {
             // index wrappers so ordinary tensor AD assigns cotangents to
             // the exact selected/taken/dropped positions.
             if self.allow_host_list_ad_rewrites
-                && matches!(func_name.as_str(), "index" | "take" | "drop")
+                && matches!(func_name.as_str(), "index" | "take" | "skip")
                 && elems.len() == 5
                 && let Some(value) =
                     self.try_lower_staged_list_selection(func_name, &elems[3], &elems[4], &ty)
@@ -10949,7 +10955,7 @@ impl<'program> LowerCtx<'program> {
                     // parameters, but the staged List spine still needs their
                     // exact call-site value while the grad body is lowered.
                     // Preserve a statically known integer through the fresh
-                    // Load so an imported list_index/take_list/drop_list
+                    // Load so an imported list_index/take_list/skip_list
                     // wrapper can select the correct primal positions.
                     if let Some(value) = self.static_i64_from_node(*actual) {
                         subctx.static_size_bindings.insert(name.clone(), value);
@@ -15182,7 +15188,7 @@ impl<'program> LowerCtx<'program> {
                     )
                 })),
                 "take" => Some(rebuild_cons_chain(items.into_iter().take(count).collect())),
-                "drop" => Some(rebuild_cons_chain(items.into_iter().skip(count).collect())),
+                "skip" => Some(rebuild_cons_chain(items.into_iter().skip(count).collect())),
                 _ => None,
             };
         }
@@ -15195,7 +15201,7 @@ impl<'program> LowerCtx<'program> {
                 operation: match name {
                     "index" => "index",
                     "take" => "take",
-                    "drop" => "drop",
+                    "skip" => "skip",
                     _ => return None,
                 },
                 argument,
@@ -15284,7 +15290,7 @@ impl<'program> LowerCtx<'program> {
         };
         match name {
             "take" => Some(rebuild_runtime_list_view(offset, clamped, items)),
-            "drop" => {
+            "skip" => {
                 let new_offset = self.dag.add_node(
                     RiscOp::Add,
                     vec![offset, clamped],

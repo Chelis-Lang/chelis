@@ -1183,14 +1183,14 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "index::drop_list: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} i64) (t-adt {} List (t-var {} item)))",
+        "index::list_index: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} i64) (t-var {} item))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "index::list_index: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} i64) (t-var {} item))",
+        "index::skip_list: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} i64) (t-adt {} List (t-var {} item)))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"

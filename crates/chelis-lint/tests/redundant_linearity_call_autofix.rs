@@ -497,31 +497,43 @@ result = f(to_tensor([1.0, 2.0]))
     );
 }
 
-/// F12 (Lint-PreferPipeRedundantLinearityPair-F1, 0.7.9 cleanup):
-/// Coral's report. The pipe form `xs |> drop(n)` puts a literal
-/// single-arg `drop(n)` in the source text, but semantically it is the
-/// 2-arg list-drop with the first argument piped in. Stripping
-/// `drop(n)` to `n` would replace the call with an integer and fail
-/// the typed pipeline. Today (pre-fix): the rule's regex matches
-/// `drop(n)` as single-arg and fires; the CLI gate correctly drops
-/// the `[fix]` marker, but the warning is misleading. After fix:
-/// `check_mirrors_fix` suppresses the warning because no safe rewrite
-/// is on offer. Coral observed this against 0.7.7 in
-/// `src/internal/hamt.ch` and `src/internal/window.ch` and worked
-/// around it by writing `drop(xs, one_i64())` directly.
+/// F12 (Lint-PreferPipeRedundantLinearityPair-F1, 0.7.9 cleanup), rewritten
+/// by the [05-OP-54]/[05-OP-67] split. Coral reported that the pipe form of
+/// the List slice put a literal single-argument call in the source text
+/// while being semantically the two-argument slice, so the rule's regex
+/// matched it and offered a strip that would fail the typed pipeline;
+/// `check_mirrors_fix` suppressed the warning.
+///
+/// **The ambiguity the suppression existed for is gone**, and the fixture
+/// has to change to compile at all: `xs |> drop(n)` is now an arity error,
+/// and a fixture asserting lint silence over source the checker rejects
+/// asserts nothing -- this rule is a text walker that never type-checks
+/// its input.
+///
+/// What this now pins is the user-facing property, that the List slice in
+/// pipe form draws no linearity warning, and TWO independent mechanisms
+/// each suffice for it: the rule's `\b(copy|drop)\s*\(` regex does not
+/// name `skip`, and `check_mirrors_fix` would suppress the warning anyway
+/// because stripping `skip(n)` to `n` fails the typed pipeline. Measured:
+/// adding `skip` to that regex does not make this test fire. So it is a
+/// disposition lock over both paths rather than a regression test for
+/// either one, and it cannot tell you which is doing the work.
+///
+/// Coral's own workaround, writing `skip(xs, one_i64())` directly, is now
+/// simply the correct spelling.
 #[test]
-fn f12_warning_suppressed_on_2arg_list_drop_in_pipe_form() {
+fn f12_linearity_warning_does_not_reach_the_list_slice_in_pipe_form() {
     let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("pipe_list_drop.ch");
+    let path = dir.path().join("pipe_list_skip.ch");
     let source = "\
-def f(xs: List[i64], n: i64) -> List[i64] = xs |> drop(n)
+def f(xs: List[i64], n: i64) -> List[i64] = xs |> skip(n)
 ";
     write_and_format(&path, source);
 
     let lint_stdout = chelis_lint_check_stdout(&path);
     assert!(
         !lint_stdout.contains("redundant-linearity-call"),
-        "f12: warning fired on 2-arg list-drop in pipe form; stripping `drop(n)` to `n` would fail the typed pipeline; got:\n{lint_stdout}",
+        "f12: the linearity rule fired on the List slice in pipe form; `skip` is [05-OP-54]'s container operation, not a linearity call; got:\n{lint_stdout}",
     );
 }
 

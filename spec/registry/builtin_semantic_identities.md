@@ -71,8 +71,7 @@ Each row names its governing atom.
 | `Container:dict_of:DictOf` | [05-OP-56] |
 | `Container:dict_remove:DictRemove` | [05-OP-56] |
 | `Container:dict_values:DictValues` | [05-OP-56] |
-| `Container:drop:DropList` | [05-OP-54] |
-| `Container:drop:DropValue` | [05-OP-54] |
+| `Container:drop:DropValue` | [05-OP-67] |
 | `Container:enumerate:EnumerateList` | [05-OP-55] |
 | `Container:eq:EqRecursive` | [05-OP-36] |
 | `Container:filter:FilterList` | [05-OP-55] |
@@ -88,6 +87,7 @@ Each row names its governing atom.
 | `Container:pad_sequences_to:PadSequencesTo` | [05-OP-10] |
 | `Container:partition:PartitionList` | [05-OP-55] |
 | `Container:scan:ScanList` | [05-OP-55] |
+| `Container:skip:SkipList` | [05-OP-54] |
 | `Container:take:TakeList` | [05-OP-54] |
 | `Container:zip:ZipList` | [05-OP-55] |
 | `Numeric:ExtremaAdjoint:TableA` | [05-OP-40] |

@@ -24,6 +24,6 @@ def repeat_local(value, lengths) = {
 local_insert = repeat_local(to_tensor([9007199254740993i64]), to_tensor([1i64, 2i64, 3i64, 4i64]))
 -- Separate signatures retain dtype evidence for computed empty Lists.
 sig empty_like[n, p: Numeric]: p -> tensor[n, p]
-def empty_like(x) = to_tensor(drop([x], 1i64))
+def empty_like(x) = to_tensor(skip([x], 1i64))
 constructed_empty_f64 = empty_like(0.0f64)
 constructed_empty_int64 = empty_like(0i64)
