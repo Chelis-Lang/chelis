@@ -50,6 +50,7 @@ FROZEN_FIXTURE_IDS = frozenset(
     """
     oracle-self-tests runtime-ledger-process-tests runtime-heap-kind-tests
     runtime-option-node-tests runtime-mapped-file-tests runtime-write-guard-tests
+    runtime-list-skip-tests
     aggregate-tensor-list aggregate-tensor-tuple aggregate-tensor-dict
     aggregate-tensor-adt aggregate-tensor-nested-repeated aggregate-scalar-control
     list-string-4-threshold-control list-string-5-threshold
@@ -615,6 +616,28 @@ def fixture_manifest() -> tuple[Fixture, ...]:
             "mapped_file_contract_child",
             "mapped_file_lifetime_rejects_null_and_live_wrong_kind_handles",
             "mapped_file_retain_release_is_balanced",
+        )),
+        # chelis#2334's consuming skip. Its `head` offset is the first
+        # thing a list row has that changes what the finalizer walks, so
+        # the instrument that certifies this class has to know the class
+        # gained a member. Census generated from the test binary's own
+        # `--list`, never typed.
+        ("runtime-list-skip-tests", "list_skip_owned", (
+            "a_count_above_the_length_empties_the_list_without_breaking_it",
+            "a_cursor_walk_leaks_nothing_and_allocates_once",
+            "a_list_finalized_with_a_retired_prefix_releases_each_child_once",
+            "a_null_list_behaves_like_the_cloning_entry_point",
+            "a_skipped_heap_element_leaves_the_list_without_a_second_release",
+            "a_skipped_list_reads_correctly_through_the_value_abi",
+            "append_and_concat_are_correct_after_a_skip",
+            "concat_owned_with_an_rhs_aliasing_a_skipped_lhs_clones_the_live_window",
+            "repeated_skips_compose_and_leave_the_list_readable",
+            "shared_skip_owned_clones_and_leaves_the_shared_view_untouched",
+            "skip_owned_agrees_with_the_cloning_skip_on_every_count",
+            "skip_owned_invalid_input_child",
+            "skip_owned_ledger_child",
+            "skip_owned_refuses_a_negative_count_before_it_reads_the_list",
+            "unique_skip_owned_advances_in_place_and_returns_the_same_list",
         )),
         ("runtime-write-guard-tests", "tensor_write_guard", (
             "ended_write_guard_has_no_view_and_cannot_be_consumed_twice",

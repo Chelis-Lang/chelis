@@ -118,11 +118,10 @@ fn c_main(program: &str, name: &str) -> (String, String) {
 
 /// The cursor shape every measured caller has: the head is bound before
 /// the recursive call, so the list's last use is the `skip`.
-const CURSOR: &str = "def walk(xs: List[i64], acc: i64) -> i64 = {\n\
-  if eq(len(xs), cast(0, i64)) then acc else {\n\
-    head = index(xs, cast(0, i64))\n\
-    walk(skip(xs, cast(1, i64)), add(acc, head))\n\
-  }\n\
+const CURSOR: &str = "def walk(xs: List[i64], acc: i64) -> i64 = \
+if eq(len(xs), cast(0, i64)) then acc else {\n\
+  head = index(xs, cast(0, i64))\n\
+  walk(skip(xs, cast(1, i64)), add(acc, head))\n\
 }\n";
 
 /// The same walk with the head read inside a later argument of the same
@@ -134,11 +133,10 @@ walk_inline(skip(xs, cast(1, i64)), add(acc, index(xs, cast(0, i64))))\n";
 
 const SHARED_SEED: &str = "module Ac.Main\n\
 export (main)\n\
-def walk(xs: List[i64], acc: i64) -> i64 = {\n\
-  if eq(len(xs), cast(0, i64)) then acc else {\n\
-    head = index(xs, cast(0, i64))\n\
-    walk(skip(xs, cast(1, i64)), add(acc, head))\n\
-  }\n\
+def walk(xs: List[i64], acc: i64) -> i64 = \
+if eq(len(xs), cast(0, i64)) then acc else {\n\
+  head = index(xs, cast(0, i64))\n\
+  walk(skip(xs, cast(1, i64)), add(acc, head))\n\
 }\n\
 def main() -> i64 = {\n\
   seed = [cast(1, i64), cast(2, i64), cast(3, i64)]\n\
@@ -294,17 +292,22 @@ fn the_move_needs_the_terminal_after_the_application() {
         "eval agrees on the inline"
     );
 
+    // The call spelling, not the bare symbol. Every translation unit's
+    // prelude declares `chelis_list *chelis_list_drop_owned(...)`
+    // whether or not it calls it, so a bare-name search answers "is the
+    // prototype present" and never "which entry point did the emitter
+    // select". Leading ` = ` is what makes it a call site.
     assert!(
-        bound_c.contains("chelis_list_drop_owned("),
+        bound_c.contains(" = chelis_list_drop_owned("),
         "the bound-head cursor is the shape the move reaches:\n{bound_c}"
     );
     assert!(
-        !inline_c.contains("chelis_list_drop_owned("),
+        !inline_c.contains(" = chelis_list_drop_owned("),
         "the operand is still live at the inline cursor's skip, so it stays on the \
          cloning path; this is the documented limit, not a regression:\n{inline_c}"
     );
     assert!(
-        inline_c.contains("chelis_list_drop("),
+        inline_c.contains(" = chelis_list_drop("),
         "the inline cursor still emits the cloning call:\n{inline_c}"
     );
 }
