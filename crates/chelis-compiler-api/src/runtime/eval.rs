@@ -991,7 +991,13 @@ impl<'a> EvalContext<'a> {
                             _ => None,
                         };
                         self.binding_types.insert(capture.binding.clone(), declared);
-                        self.bindings.insert(capture.binding.clone(), value);
+                        let producer =
+                            matches!(value, RuntimeValue::Tensor(_)).then(|| "load".to_string());
+                        self.bindings.insert_with_result_producer(
+                            capture.binding.clone(),
+                            value,
+                            producer,
+                        );
                     }
                     let result = if let Some(frame) = &mut execution {
                         frame.with_context(|context| {
@@ -1531,6 +1537,9 @@ impl<'a> EvalContext<'a> {
             return Ok(value);
         }
         if let Some(value) = self.tensor_bindings.get(name) {
+            // External tensor bindings enter the host evaluator through the
+            // same semantic ingress as a DAG Load.
+            self.result_producer = Some("load".to_string());
             return Ok(RuntimeValue::Tensor(value.clone()));
         }
         if let Some((_, definition)) = self.lookup_top_level_def(name) {
@@ -1929,10 +1938,12 @@ impl<'a> EvalContext<'a> {
             | ExprCarrier::MalformedLegacyList(_) => {}
         }
         let value = self.eval_expr(expr)?;
-        if let Some(producer) = self.result_producer.clone() {
-            for claim in claims {
-                claim.verdict(&value, &producer)?;
-            }
+        let producer = self.result_producer.clone().ok_or_else(|| {
+            "host runtime: pending result claim reached a tensor without producer provenance"
+                .to_string()
+        })?;
+        for claim in claims {
+            claim.verdict(&value, &producer)?;
         }
         Ok(value)
     }
@@ -2590,7 +2601,10 @@ impl<'a> EvalContext<'a> {
                                 .insert(0, callable_contract.expect("checked above").clone());
                         }
                         self.binding_types.insert(param.clone(), declared);
-                        self.bindings.insert(param, arg);
+                        let producer =
+                            matches!(arg, RuntimeValue::Tensor(_)).then(|| "load".to_string());
+                        self.bindings
+                            .insert_with_result_producer(param, arg, producer);
                     }
                     // chelis#1739 and chelis#1771: a declared literal result
                     // extent is a claim the host lane owes a runtime verdict
