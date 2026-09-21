@@ -132,11 +132,7 @@ fn reduction_cases() -> Vec<(&'static str, Dag)> {
     ]
 }
 
-fn assert_issue_2339_receipt(
-    target: &'static str,
-    expected_operation: &str,
-    error: CompilerError,
-) {
+fn assert_issue_2339_receipt(target: &'static str, expected_operation: &str, error: CompilerError) {
     let diagnostic = error.errors.first().expect("one typed diagnostic");
     assert_eq!(
         diagnostic.kind(),
