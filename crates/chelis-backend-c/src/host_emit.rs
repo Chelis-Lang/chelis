@@ -2016,6 +2016,21 @@ struct HostResultClaim {
 }
 
 impl HostResultClaim {
+    fn from_tensor_type(ty: &TensorType) -> Self {
+        Self {
+            rank: ty.dims.len(),
+            axes: ty
+                .dims
+                .iter()
+                .enumerate()
+                .filter_map(|(axis, dim)| match dim {
+                    DimInfo::Lit(required) => Some((axis, *required)),
+                    DimInfo::Named(_, _) => None,
+                })
+                .collect(),
+        }
+    }
+
     fn of(function: &HostFunction) -> Option<Self> {
         let HostAbiType::Tensor(ty) = &function.ret_ty else {
             return None;
@@ -2041,16 +2056,29 @@ impl HostResultClaim {
         })
     }
 
-    fn frame_lines(&self, indent: &str) -> Vec<String> {
-        let mut lines = vec![format!(
-            "{indent}const int64_t __chelis_result_axes[][2] = {{"
-        )];
+    fn frame_lines(
+        &self,
+        indent: &str,
+        axes_name: &str,
+        frame_name: &str,
+        parent: &str,
+        claims_name: Option<&str>,
+    ) -> Vec<String> {
+        let mut lines = vec![format!("{indent}const int64_t {axes_name}[][2] = {{")];
         for (axis, required) in &self.axes {
             lines.push(format!("{indent}    {{ {axis}, {required} }},"));
         }
         lines.push(format!("{indent}}};"));
-        lines.push(format!("{indent}const __chelis_host_result_claim __chelis_declared_result = {{ __chelis_caller_result_claims, {}, {}, __chelis_result_axes }};", self.rank, self.axes.len()));
-        lines.push(format!("{indent}const __chelis_host_result_claim *__chelis_result_claims = &__chelis_declared_result;"));
+        lines.push(format!(
+            "{indent}const __chelis_host_result_claim {frame_name} = {{ {parent}, {}, {}, {axes_name} }};",
+            self.rank,
+            self.axes.len()
+        ));
+        if let Some(claims_name) = claims_name {
+            lines.push(format!(
+                "{indent}const __chelis_host_result_claim *{claims_name} = &{frame_name};"
+            ));
+        }
         lines
     }
 }
@@ -2346,7 +2374,13 @@ fn emit_function(
     // The expression spine forwards the frame; branch arms share its immutable
     // contents and arguments/sibling bindings never inherit it.
     match HostResultClaim::of(function) {
-        Some(claim) => emitter.lines.extend(claim.frame_lines(&emitter.indent)),
+        Some(claim) => emitter.lines.extend(claim.frame_lines(
+            &emitter.indent,
+            "__chelis_result_axes",
+            "__chelis_declared_result",
+            "__chelis_caller_result_claims",
+            Some("__chelis_result_claims"),
+        )),
         None => emitter.lines.push(format!("{}const __chelis_host_result_claim *__chelis_result_claims = __chelis_caller_result_claims;", emitter.indent)),
     }
     emitter.result_claims = Some("__chelis_result_claims".to_string());
@@ -4309,31 +4343,17 @@ impl<'a> HostEmitter<'a> {
             } => {
                 require_same_abi_type(ty, scope_ty, "result-claim scope")?;
                 let result = plan.result();
-                let literal_axes = result
-                    .dims
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(axis, dim)| match dim {
-                        DimInfo::Lit(required) => Some((axis, *required)),
-                        DimInfo::Named(_, _) => None,
-                    })
-                    .collect::<Vec<_>>();
                 let axes = self.next_temp("result_claim_axes");
                 let frame = self.next_temp("result_claim_frame");
-                self.lines
-                    .push(format!("{}const int64_t {axes}[][2] = {{", self.indent));
-                for (axis, required) in &literal_axes {
-                    self.lines
-                        .push(format!("{}    {{ {axis}, {required} }},", self.indent));
-                }
-                self.lines.push(format!("{}}};", self.indent));
                 let parent = result_claims.as_deref().unwrap_or("NULL");
-                self.lines.push(format!(
-                    "{}const __chelis_host_result_claim {frame} = {{ {parent}, {}, {}, {axes} }};",
-                    self.indent,
-                    result.dims.len(),
-                    literal_axes.len()
-                ));
+                self.lines
+                    .extend(HostResultClaim::from_tensor_type(result).frame_lines(
+                        &self.indent,
+                        &axes,
+                        &frame,
+                        parent,
+                        None,
+                    ));
                 let previous_claims = self.result_claims.replace(format!("&{frame}"));
                 self.claim_on_spine = true;
                 self.assign_expr(target, body, ty)?;
