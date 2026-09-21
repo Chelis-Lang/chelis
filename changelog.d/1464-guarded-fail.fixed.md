@@ -1,0 +1,9 @@
+A `fail(...)` branch inside `grad` or `vmap` now aborts with its authored
+message instead of returning a zero placeholder. Lowering represented the
+failing branch as a value, so a taken abort was selected as the result and
+the program exited successfully with `0.0` in both the evaluator and the
+generated C binary. The new [05-OP-68] guarded-abort identity keeps the trap
+in the graph, so its occurrence survives differentiation, batching,
+optimization and code generation, while an untaken guard still computes and
+differentiates unchanged. Fixes
+[#1464](https://github.com/Chelis-Lang/chelis/issues/1464).
