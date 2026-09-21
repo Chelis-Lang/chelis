@@ -254,8 +254,11 @@ make your change pass is never the fix.
   exported C signature or data declaration, or binding parameter or result that carries
   numbers as bare `f64`/`double`, or takes a raw integer dtype id, is a review-blocking
   finding with no citation or override path: redesign it onto the tagged carrier or
-  remove it. Every discovered row ends in exactly one class: structurally nonnumeric, a
-  recognized exact tagged carrier, or an exact numeric operation registration.
+  remove it. Opening a fresh issue does not authorize capacity debt.
+  No grandfather, permanent-disposition, successor-override, or integer-plumbing path
+  is part of the final contract. Every discovered row ends in exactly one class:
+  structurally nonnumeric, a recognized exact tagged carrier, or an exact numeric
+  operation registration.
 - Every new or changed numeric op, every stdlib ADT constructor with a numeric field
   included, requires an exact semantic registration in the same change set, binding its
   canonical identity to one verbatim existing `[05-OP-N]` atom
@@ -436,7 +439,11 @@ python3 scripts/gate.py --list    # the canonical command list with ownership an
   phase acceptance oracle, so dispatch `heavy-e2e.yml` on the candidate when claiming
   completion.
 - Use focused `cargo check -p <crate> --tests` and `cargo nextest run -p <crate>
-  --test <file>` for the inner loop; never a workspace-wide `cargo test`.
+  --test <file>` for the inner loop; never a workspace-wide `cargo test`. The same
+  applies to a check you want early evidence for: run its owning test locally, for
+  example `cargo nextest run -p chelis-cli --test capacity_census_tripwire`, rather
+  than dispatching a large workflow such as `heavy-e2e.yml` ad hoc because it happens
+  to contain that test. `.config/ci-test-targets.toml` names each test's owner.
 - On failure the gate keeps the transcript under `target/gate-failures/` and prints the
   exact rerun command. A detached run's verdict comes from `--status`, never from the
   launch exit code.
