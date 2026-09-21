@@ -27,11 +27,6 @@ not drift.
 - After green CI, check what active requirements still lack tests.
 - Audit silent fallbacks, default values, empty error vectors, and `unwrap_or` paths.
 
-### Phase Completion
-
-Every phase names one authoritative completion oracle. Use the
-[`phase-gate` skill](agent-skills/phase-gate/SKILL.md) before claiming completion.
-
 ## Red Team Protocol
 
 See the [`redteam-exec` skill](agent-skills/redteam-exec/SKILL.md) for specifics.
@@ -325,20 +320,16 @@ active OpenSpec change.
   should record the reasoning behind it, but it does not get to decide one.
 - **Where the two disagree, the numbered spec wins and the design doc has a bug.** Say
   so in the doc when you find it rather than reconciling silently in code.
-
-Two rules follow, and both are cheap:
-
-1. **When a design doc states a rule that is really a language decision, lift it into
-   the numbered spec and leave a pointer behind.**
-2. **Watch for permission-to-mandate escalation.** "X is a conforming implementation"
-   in a spec does not license "therefore we do X" in a design doc, and neither
-   licenses "therefore we do X everywhere" in code. If your implementation needs a
-   stronger rule than the spec states, amend the spec first and say so in the PR.
+- **When a design doc states a rule that is really a language decision, lift it into
+  the numbered spec and leave a pointer behind.**
+- **Watch for permission-to-mandate escalation.** "X is a conforming implementation"
+  in a spec does not license "therefore we do X" in a design doc, and neither
+  licenses "therefore we do X everywhere" in code. If your implementation needs a
+  stronger rule than the spec states, amend the spec first and say so in the PR.
 
 A design doc is a working artifact: read constantly while its phases are in flight,
 unread once they ship, so a decision parked in one does not survive the work that made
-it. The 2026-07 three-level f64 drift that produced both rules, and the worked examples
-of each, are in [`docs/investigations/agent_contract_rationale.md`](docs/investigations/agent_contract_rationale.md) §1.
+it. 
 
 ### Challenge Written Designs Before Implementation
 
@@ -387,67 +378,26 @@ numeric data, whether or not you have read that document:
   finding. Zero-exception classification is the landing rule: every discovered row
   must end in exactly one final authority class - structurally nonnumeric, a
   structurally recognized exact tagged carrier/transport, or an exact numeric
-  operation registration. Historical foundation snapshots record the old 39
-  grandfather rows, three successor overrides, and 155 permanent plain rows; the
-  executable primary census and guard retain none of those disposition lists or
-  admission paths. The active primary baseline has completed
-  that migration: all 313 rows have final authority as 74 exact structurally
-  nonnumeric rows, 16 structurally recognized tagged carriers/transports, and
-  223 registered numeric operations (the [05-OP-35] stdlib registrations among
-  them). It retains no grandfather, successor-override, permanent-disposition,
-  integer-plumbing, or other transition rows. The wire baseline has 97 final
-  numeric leaves: 80 verified transports and 17 exact numeric operations.
-  WireDag v15 includes the `WireDagNode.shape_deps: u64` and opaque
-  local-ascription-identity transports plus the fixed `NonnegativeExtent`
-  carrier's literal-witness requirement role. Its
-  private verifier requires current graph, codec/admission, cache, publication
-  and mutation execution; neither a static descriptor nor a baseline grants
-  wire authority. Nine source/name/path/vocabulary and opaque-handle bindings have final
-  nonnumeric authority. Seven bindings have final tagged-transport authority: four
-  compiler-JSON functions, the compiled-model tensor call, and the two DLPack methods.
-  `NativeTensor.shape` has exact numeric-operation authority under [05-OP-45].
-  The binding census retains no legacy cohort; every discovered row requires current
-  graph and execution authority. The backend-header baseline has ten final rows:
-  the exact generated `chelis_gpu_tensor` tagged transport and nine [05-OP-33]
-  device-owner operations, discovered through the complete HIP support root
-  under the committed Phase-0 SDK stubs, a fixed target and freestanding
-  standard-library-free include search. Canonical include attribution fails if
-  it escapes that declared universe. The recursively discovered HIP header set,
-  not a basename allowlist, selects attributed files before row extraction, so
-  every declaration in a reached nested support header reaches authority
-  comparison while SDK fixtures remain inputs only. The complete recursively
-  discovered published Metal header set exports no ABI row today; an executable
-  enrollment gate scans every `.h` with the shared C-family lexer and fails when
-  any first does, so braces in comments or literal payloads cannot hide a later
-  declaration and no vacuous Metal lane or workstation SDK can stand in for
-  coverage. A bare
+  operation registration. `NativeTensor.shape` has exact numeric-operation authority under [05-OP-45].
+  Every discovered row requires current graph and execution authority. A bare
   numeric carrier has no citation or maintainer-override path:
-  redesign it onto the tagged carrier or remove it. Opening a fresh issue does not
-  authorize capacity debt. No grandfather, permanent-disposition,
-  successor-override, or integer-plumbing path is part of the final contract. A language-level stdlib ADT
+  redesign it onto the tagged carrier or remove it. A language-level stdlib ADT
   field such as `t-prim f64` remains type-tagged by its declared Chelis type; the ADT
   constructor is therefore a `numeric-op` requiring exact semantic registration,
   not a C-style untagged carrier seam. Integer fields follow the same rule. Every
   such constructor, irrespective of age, owes the semantic registration below.
   Source-faithful ingestion still preserves distinct variants such as
   `JsonInt(i64)` and `JsonFloat(f64)`; one float funnel is not an equivalent
-  tagged source model. The
-  complete inventory is exact and bijective with its authority map; regeneration
-  cannot bless an unclassified row. A rename, signature change, or reclassification
+  tagged source model. . A rename, signature change, or reclassification
   removes the old identity and adds a successor that independently satisfies the
-  final rule. The pre-Phase-1 baseline is deliberately partial: wire-schema and PyO3
-  coverage become mandatory only through their named executable entry gates in §C6,
-  and Phase 1 may not start before both are green. Coverage state comes from the
-  test's typed `coverage_manifest()` (artifact, enumerator, command, expected
-  success, and mutations), never an editable field in the baseline JSON.
+  final rule. 
 - **Every new or changed numeric op requires an exact semantic registration in the
   same change set.** The owning family
   registry binds the callable's exact canonical identity to
   one verbatim, existing `[05-OP-N]` authority in
   `spec/05-risc-primitives.md`. A callable without an existing governing atom authors
   that atom and its mapping together. A chapter substring, `[05-OBS-1]`, an absent
-  atom, or a Rust doc comment
-  is not authority; existence means a normative definition line beginning
+  atom, or a Rust doc comment  is not authority; existence means a normative definition line beginning
   `> **[05-OP-N]**`, not a cross-reference elsewhere. The atom states the signature,
   per-dtype semantics at [04-NUM-8]'s declared widths, adjoint or
   non-differentiability rule, and accumulator rule where applicable; it may
@@ -458,9 +408,7 @@ numeric data, whether or not you have read that document:
   text actually governs the callable. Review does not confer semantic authority: if
   no existing atom governs it, amend the numbered spec first and register that new
   atom. Before allocating its number, re-check the highest existing `[05-OP-N]` on
-  current `main`. The chelis#1288/#1293 prerequisites apply the same requirement to
-  every surviving legacy row; age and an old census disposition are not authority.
-  Authoring the atom also requires running
+  current `main`. 
   `.venv/bin/python scripts/generate_rejection_registries.py --write` and committing
   the resulting `crates/chelis-types/src/rejection_registry_generated.rs`; that
   generated membership artifact is required in addition to, and is not a substitute
@@ -477,9 +425,7 @@ numeric data, whether or not you have read that document:
   set, or does not land.
 - **Published C ABI is configuration-invariant, and every declaration in it is
   attributable.** Public declarations may not vary
-  by preprocessor feature/context. The §C6 header leg enforces that prohibition and
-  compares toolchain-stable canonical declaration identities, never a
-  preprocessor's whitespace or pretty-print spelling. Published headers may contain
+  by preprocessor feature/context. Published headers may contain
   no `#line` directive or hand-written linemarker - those rewrite the file
   attribution the census reads back from `cc -E`, which can delete a real callable
   export from the inventory - and every `.h` in the published include directory must
@@ -487,25 +433,11 @@ numeric data, whether or not you have read that document:
 - **C numeric-callable classification is conservative.** A non-boolean,
   non-character built-in arithmetic value type - including bare `int`, `short`,
   `long`, signed/unsigned forms, pointer-sized integers, and the exact-width integer
-  types - makes a callable `numeric-op`. Names and parameter-name heuristics never
-  turn a callable into plumbing. The executable primary census has no
-  integer-plumbing exceptions; every arithmetic declaration follows the conservative
-  classification rule. The final rule
-  registers extents, allocation sizes, indices, and dtype selectors as numeric
-  operations; raw dtype selectors are forbidden.
-  Conditional macro definitions
-  likewise taint their whole connected local-include component, by either include
-  spelling: a public declaration consuming a tainted token is rejected even when the
-  definition lives in another header. These conservative classification and
-  context rules are locked by PR #956 commit
-  `6ddf1a72d6dea6770a330d5c2ef3b8fa7d023c43`; weakening either rule requires
-  changing this contract and the negative controls together.
+  types - makes a callable `numeric-op`. 
 - **An arithmetic spelling the census does not recognize is a BUILD FAILURE, not an
   unflagged row.** The closed list is the non-numeric one
   (`NON_NUMERIC_C_TYPE_WORDS`): qualifier and aggregate keywords plus the two
-  non-arithmetic value spellings. An allowlist of arithmetic spellings can never be
-  complete - `_Float16`, `__fp16`, `__bf16`, `_Decimal64`, and `__int128` were all
-  classifying as dtype-free - so the rule is inverted. If you add a type word to a
+  non-arithmetic value spellings. If you add a type word to a
   published header and the census rejects it, decide which list it belongs in; do
   not route around it. The same lock exists on the language side: adding a variant
   to `chelis_types::Prim` stops the tripwire compiling until the new dtype is
@@ -638,8 +570,7 @@ openspec validate --all --strict --no-interactive
 ### One Tracking Issue Per Class
 
 A recurring defect class gets **one tracking issue**, which is also the GitHub
-**sub-issue parent** for every instance, and no second issue beside it: do not file a
-separate META issue to hold the class statement or the instance list. Its body carries the plan (phases,
+**sub-issue parent** for every instance, and no second issue beside it. Its body carries the plan (phases,
 oracles, freeze points, the class statement); its evidence lives in the owning
 design doc under `spec/design/` or in `docs/investigations/`.
 
@@ -647,8 +578,7 @@ Rules:
 
 - When filing an issue, always check to see if it should be grouped under a relevant
   tracking issue.
-- An issue has **one** parent. When a defect splits across classes (the #689
-  shape: a silent half and a support half), parent it to whichever class's
+- An issue has **one** parent. When a defect splits across classes, parent it to whichever class's
   **oracle turns green when it is fixed**, and add an explicit `Also part of #N`
   line or comment for the other. Do not leave the second half implicit; that is
   how a half gets dropped when the first parent closes.
@@ -657,6 +587,7 @@ Rules:
 - A class without a design doc is legitimate. Say so in the tracker ("no design
   doc is planned; this is a parent, not a plan") rather than leaving a reader to
   wonder which doc they failed to find.
+- Not ever issue needs to have a parent tracking issue. 
 
 ### Labels
 
@@ -694,16 +625,6 @@ Examples:
 
 When a public surface has an implicit invariant, make it explicit and test it.
 
-## Example Corpus Policy
-
-- `examples/` means executable Phase 0 examples that should survive `chelis fmt` and
-  `chelis check` cleanly.
-- `examples/illustrative/` is for syntax or design examples that are useful but not on
-  the executable Phase 0 path.
-- Do not mix those meanings in tests or docs.
-- Decide the executable-vs-illustrative split early in a phase, not after examples have
-  already been used as proof artifacts.
-
 ## Manual Gates
 
 - Every manual acceptance gate must have a documented command, expected success condition,
@@ -711,8 +632,6 @@ When a public surface has an implicit invariant, make it explicit and test it.
 - If default CI does not run the gate, the docs must say so directly.
 - Ignored tests are allowed only when they clearly mirror a documented manual gate or an
   environment-dependent prerequisite.
-- Phase summaries must not imply that a manual gate is part of the default workspace pass
-  when it is not.
 
 ## CLI Surface Discipline
 
@@ -725,39 +644,19 @@ When a public surface has an implicit invariant, make it explicit and test it.
 
 - **Python** for all scripts, utilities, report generators, and automation helpers.
   Write tests for them.
-- **Rust** where the task naturally fits a compiled workspace member.
-- **Never shell.** Do not write `.sh` scripts. If a CI step needs a one-liner, invoke
-  Python instead. Shell is fragile and untestable.
-- **The exception list has one entry, and `spec/01-nomenclature.md` §2.9 controls it:**
-  `crates/chelisup/bootstrap/chelisup.sh`, the `curl ... | sh` one-liner that runs on a
-  bare machine before Chelis, Cargo, or Python exists. It is the only committed `.sh`
-  file in the repository and the only entry the `no-shell-scripts` lint exempts
-  (`style_gate.rs::exceptions()`). Adding a second entry is a numbered-spec change, not
-  a judgment call.
-- **Three other sanctioned shell artifacts exist and never reach that list**, because
-  the lint cannot see any of them: the Nix `chelisup` launcher is generated at build
-  time rather than committed, and `.githooks/commit-msg` and
-  `.cargo-husky/hooks/commit-msg` have no file extension, so `chelis_lint`'s
-  `Surface::classify` - which keys on the extension - never classifies them. All three
-  must still be minimal POSIX `sh` and `shellcheck`-clean, and you have to verify that
-  yourself: CI checks only the two hooks, with `sh -n`. Nothing checks the bootstrap,
-  and the launcher's `chelisupLauncherLint` uses `bash -n` rather than `sh -n` and has
-  not run on a pull request since chelis#1450. All other scripts remain Python.
-- Existing `scripts/` directory uses Python; follow that convention.
 - **Use a uv-managed Python**, not the system Python, for every script and every
   ad-hoc invocation. [Build Toolchain](#build-toolchain) owns provisioning, the
   resolution order, and the direct-invocation forms.
 - **Two diagnostics are deliberately bootstrap-free.**
   `scripts/reap_orphans.py` and `scripts/preflight_exec_probe.py` are invoked
   as bare `python3` on purpose: they run *before* and independently of a
-  working project environment, which is exactly when a uv re-exec would be
-  the thing that is broken. They therefore MUST stay standard-library only
+  working project environment. They therefore MUST stay standard-library only
   and MUST keep parsing on the oldest system Python a supported workstation
-  ships (macOS still ships 3.9), which is what the
-  `from __future__ import annotations` header in each buys. Neither
-  exemption extends to any other script: everything else, and all ad-hoc
-  scripting, uses a uv-managed interpreter.
-  `scripts/test_bootstrapless_scripts.py` locks both properties.
+  ships (macOS still ships 3.9).
+- **Rust** where the task naturally fits a compiled workspace member.
+- **Never shell.** Do not write `.sh` scripts. If a CI step needs a one-liner, invoke
+  Python instead. Shell is fragile and untestable. The only except is 
+  `crates/chelisup/bootstrap/chelisup.sh` recorded in `spec/01-nomenclature.md` §2.9  
 
 ## Worktree And Branch Discipline
 
@@ -781,8 +680,6 @@ When a public surface has an implicit invariant, make it explicit and test it.
   paired `pop` then takes whatever a peer session left on top. To discard your own
   changes, use `git checkout -- <paths>`. To park them, copy the files to task-owned
   scratch space.
-  [`docs/investigations/agent_contract_rationale.md`](docs/investigations/agent_contract_rationale.md)
-  §5 records the incident.
 - Do not repurpose an unrelated worktree because it appears idle. Reuse is allowed only
   for the same PR or immediate follow-up work after checking ownership, exact head,
   status, and active processes.
