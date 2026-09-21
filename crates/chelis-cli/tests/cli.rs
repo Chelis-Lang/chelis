@@ -4120,63 +4120,38 @@ fn build_c_rejects_bf16_reduce_window_with_clean_diagnostic() {
         .stderr(predicate::str::contains("panicked").not());
 }
 
-/// [05-RWIN-2] admits window reductions. A checked host entry uses the
-/// existing C implementation; DAG lowerability must not force device emission.
+/// chelis#2339 owns the still-inexact HIP reduction cell. Selecting a host
+/// entry must not turn the C implementation into a silent device fallback.
 #[test]
-fn build_hip_executes_host_reduce_window_with_exact_shape_and_values() {
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("rw_hip.ch");
-    write_file(
-        &path,
-        "def pool_hip(x: tensor[1, 1, 4, 4, f32]) -> tensor[1, 1, 3, 3, f32] = \
-         reduce_window_max(&x, [2i64, 2i64], [1i64, 1i64])\n",
-    );
-    let out_dir = dir.path().join("rw-hip-build");
+fn build_device_targets_reject_host_reduce_window_max_without_c_fallback() {
+    for target in ["hip", "metal"] {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join(format!("rw_{target}.ch"));
+        write_file(
+            &path,
+            "def pool(x: tensor[1, 1, 4, 4, f32]) -> tensor[1, 1, 3, 3, f32] = \
+             reduce_window_max(&x, [2i64, 2i64], [1i64, 1i64])\n",
+        );
+        let out_dir = dir.path().join(format!("rw-{target}-build"));
 
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args([
-            "build",
-            path.to_str().unwrap(),
-            "--target",
-            "hip",
-            "--output",
-            out_dir.to_str().unwrap(),
-        ])
-        .assert()
-        .success()
-        .stderr(predicate::str::contains("panicked").not());
-
-    let mut source = fs::read_to_string(out_dir.join("rw_hip_hip.cpp")).unwrap();
-    assert!(!source.contains("__global__") && !source.contains("hipLaunchKernelGGL"));
-    source.push_str(
-        &r#"
-int main(void) {
-    int64_t shape[] = {1, 1, 4, 4};
-    float data[] = {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16};
-    chelis_tensor *input = chelis_tensor_entry_borrow(4, shape, CHELIS_DTYPE_F32, data, sizeof(data));
-    chelis_tensor *result = CHELIS_TEST_POOL_HIP(input);
-    int64_t expected_shape[] = {1, 1, 3, 3};
-    float expected[] = {6,7,8,10,11,12,14,15,16};
-    if (chelis_tensor_rank(result) != 4) return 10;
-    for (int32_t axis = 0; axis < 4; ++axis)
-        if (chelis_tensor_shape(result, axis) != expected_shape[axis]) return 11;
-    chelis_read_view view = chelis_tensor_read_view(result);
-    if (view.dtype != CHELIS_DTYPE_F32 || view.count != 9) return 12;
-    for (int64_t i = 0; i < 9; ++i)
-        if (((const float *)view.data)[i] != expected[i]) return 13;
-    chelis_tensor_release(result);
-    chelis_tensor_release(input);
-    return 0;
-}
-"#
-        .replace("CHELIS_TEST_POOL_HIP", &authored_c_symbol("pool_hip")),
-    );
-    fs::write(out_dir.join("rw_host.c"), source).unwrap();
-    assert!(gcc_link_generated(&out_dir, "rw_host.c", "rw_host").success());
-    let run = StdCommand::new(out_dir.join("rw_host")).output().unwrap();
-    assert!(run.status.success(), "{run:?}");
+        Command::cargo_bin("chelis")
+            .expect("binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args([
+                "build",
+                path.to_str().unwrap(),
+                "--target",
+                target,
+                "--output",
+                out_dir.to_str().unwrap(),
+            ])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("reduce_window_max"))
+            .stderr(predicate::str::contains("unimplemented chelis#2339"))
+            .stderr(predicate::str::contains(format!("(codegen:{target})")))
+            .stderr(predicate::str::contains("panicked").not());
+    }
 }
 
 /// The selected host implementation still owes a clean capability failure

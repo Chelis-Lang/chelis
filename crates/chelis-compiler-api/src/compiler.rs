@@ -5260,9 +5260,10 @@ fn helper_is_device_emitted(dag: &Dag) -> bool {
         .any(|node| matches!(node.op, RiscOp::Count { .. }))
 }
 
-/// Apply the full HIP capability policy to every tensor-helper DAG a HIP
-/// host program emits as HIP device code, namely each Count-bearing helper.
-/// Other helper operations retain their C-host fallback semantics.
+/// Apply the chelis#2339 exact-reduction fence to every HIP host helper:
+/// selecting a host entry must not turn the implemented C reduction into a
+/// silent device fallback. Count-bearing helpers additionally receive the
+/// full HIP device capability policy because they are emitted as HIP code.
 pub fn reject_unsupported_hip_ops_in_host_program(
     program: &chelis_ir::host::ConcreteHostProgram,
 ) -> std::result::Result<(), CompilerError> {
@@ -5270,14 +5271,16 @@ pub fn reject_unsupported_hip_ops_in_host_program(
         if helper_is_device_emitted(dag) {
             reject_unsupported_hip_ops(dag)
         } else {
-            Ok(())
+            reject_inexact_device_reduction_cells(dag, BuildTarget::Hip)
         }
     })
 }
 
-/// Apply the full Metal capability policy to every tensor-helper DAG a Metal
-/// host program emits as Metal device code, namely each Count-bearing
-/// helper. Other helper operations retain their C-host fallback semantics.
+/// Apply the chelis#2339 exact-reduction fence to every Metal host helper:
+/// selecting a host entry must not turn the implemented C reduction into a
+/// silent device fallback. Count-bearing helpers additionally receive the
+/// full Metal device capability policy because they are emitted as Metal
+/// code.
 pub fn reject_unsupported_metal_ops_in_host_program(
     program: &chelis_ir::host::ConcreteHostProgram,
 ) -> std::result::Result<(), CompilerError> {
@@ -5285,7 +5288,7 @@ pub fn reject_unsupported_metal_ops_in_host_program(
         if helper_is_device_emitted(dag) {
             reject_unsupported_metal_ops(dag)
         } else {
-            Ok(())
+            reject_inexact_device_reduction_cells(dag, BuildTarget::Metal)
         }
     })
 }
