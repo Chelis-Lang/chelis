@@ -542,12 +542,12 @@
         "chelis-backend-c::exec_compile::exec_reduce_window_grad_sum_matches_evaluator_oracle",
         "chelis-backend-c::exec_compile::exec_reduce_window_max_matches_evaluator_oracle",
         "chelis-backend-c::exec_compile::exec_reduce_window_mean_matches_evaluator_oracle",
-        "chelis-backend-c::issue_254_reduce_window_emit::issue254_emit_reduce_window_max_uses_fmaxf_and_neg_infinity",
+        "chelis-backend-c::issue_254_reduce_window_emit::issue254_emit_reduce_window_max_selects_first_nan_without_fmaxf",
         "chelis-backend-c::issue_254_reduce_window_emit::issue254_emit_reduce_window_max_uses_stride_in_index_arithmetic",
         "chelis-backend-c::issue_254_reduce_window_emit::issue254_emit_reduce_window_mean_divides_by_window_volume",
-        "chelis-backend-c::issue_254_reduce_window_emit::issue254_emit_reduce_window_min_uses_fminf_and_positive_infinity",
-        "chelis-backend-c::issue_254_reduce_window_emit::issue254_emit_reduce_window_sum_uses_plus_equals",
-        "chelis-backend-c::issue_254_reduce_window_emit::non_f32_windowed_reduction_names_its_real_implementation_owner",
+        "chelis-backend-c::issue_254_reduce_window_emit::issue254_emit_reduce_window_min_selects_first_nan_without_fminf",
+        "chelis-backend-c::issue_254_reduce_window_emit::issue254_emit_reduce_window_sum_uses_adjacent_pair_tree",
+        "chelis-backend-c::issue_254_reduce_window_emit::reduced_float_windowed_reduction_uses_f32_arithmetic_and_f16_storage",
         "chelis-backend-c::issue_254_reduce_window_emit::runtime_symbolic_window_extent_names_dynamic_shape_owner"
       ]
     },
