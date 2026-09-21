@@ -1066,6 +1066,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         tail: Option<usize>,
     ) -> Result<Value, OwnershipError> {
         match &expr.kind {
+            ConcreteHostExprKind::ResultClaimScope { body, .. } => self.lower_expr(body, tail),
             ConcreteHostExprKind::Int(value) => {
                 self.define(&ConcreteHostType::Int64, format!("literal {value}"))
             }
@@ -2517,7 +2518,8 @@ fn expr_type(expr: &ConcreteHostExpr) -> ConcreteHostType {
         | ConcreteHostExprKind::Partition { ty, .. }
         | ConcreteHostExprKind::FlatMap { ty, .. }
         | ConcreteHostExprKind::WithSeed { ty, .. }
-        | ConcreteHostExprKind::TensorCall { ty, .. } => ty.clone(),
+        | ConcreteHostExprKind::TensorCall { ty, .. }
+        | ConcreteHostExprKind::ResultClaimScope { ty, .. } => ty.clone(),
     }
 }
 

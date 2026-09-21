@@ -203,7 +203,7 @@ fn compiled_kernels(model: &str) -> String {
         "must execute at least one generated kernel"
     );
     let mut output = String::from(
-        "#include <stdint.h>\n#include <cmath>\n#include <cstring>\n#include <cstdlib>\n#include <hip/hip_runtime.h>\n#define __device__\n#define __global__\n#define CHELIS_DEBUG_BOUNDS 0\nstatic dim3 blockIdx, blockDim, threadIdx;\ntemplate<class T> static T atomicAdd(T *address, T value) { T old = *address; *address += value; return old; }\nusing Launch = void (*)(unsigned int, unsigned int, void **);\n",
+        "#include <stdint.h>\n#include <cmath>\n#include <cstring>\n#include <cstdlib>\n#include <hip/hip_runtime.h>\n#define __device__\n#define __global__\n#define CHELIS_DEBUG_BOUNDS 0\nstatic dim3 blockIdx, blockDim, threadIdx;\ntemplate<class T> static T atomicAdd(T *address, T value) { T old = *address; *address += value; return old; }\ntemplate<class T> static T atomicCAS(T *address, T compare, T value) { T old = *address; if (old == compare) *address = value; return old; }\ntemplate<class T> static T atomicExch(T *address, T value) { T old = *address; *address = value; return old; }\nusing Launch = void (*)(unsigned int, unsigned int, void **);\n",
     );
     for (index, (name, source)) in kernels.iter().enumerate() {
         let signature = format!("void {name}(");

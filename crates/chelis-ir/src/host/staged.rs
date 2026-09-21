@@ -509,6 +509,9 @@ pub(super) fn resolve_callable_aliases(
         }
     }
     match &mut expr.kind {
+        HostExprKind::ResultClaimScope { body, .. } => {
+            resolve_callable_aliases(body, aliases);
+        }
         HostExprKind::Var(name, _) => {
             if let Some(resolved) = aliases.get(name) {
                 *name = resolved.clone();

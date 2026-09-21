@@ -3,7 +3,7 @@ use chelis_unord::UnordMap;
 use std::fs;
 
 use chelis_deep::ast::{Atom, Expr, ExprCarrier, List};
-use chelis_ir::dag::{DimInfo, NodeId, RiscOp, TensorType};
+use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::TensorValue as IrTensorValue;
 use chelis_ir::evaluation::RandomExecutionContext;
 use chelis_ir::host::{HostDefKernel, RandomLoweringState, host_def_evaluation_plan};
@@ -20,6 +20,15 @@ use super::host_ops::*;
 use super::named_axis::*;
 use super::transforms::*;
 use super::*;
+
+pub(super) fn tensor_result_producer(dag: &Dag, root: NodeId) -> Option<ResultProducer> {
+    let sites = chelis_ir::axis_sources::result_extent_sites(dag, root);
+    let operation = sites.first()?.operation();
+    sites
+        .iter()
+        .all(|site| site.operation() == operation)
+        .then(|| ResultProducer::tensor(operation))
+}
 
 thread_local! {
     /// Counts how many times an [`EvalContext`] cloned the whole program's
@@ -853,6 +862,9 @@ impl<'a> EvalContext<'a> {
                 "host runtime: kernel `{name}` lowering produced no roots"
             ));
         }
+        let result_producer = (roots.len() == 1)
+            .then(|| tensor_result_producer(&kernel.dag, roots[0]))
+            .flatten();
         let result_claims = inherited_claims
             .iter()
             .map(|claim| {
@@ -902,7 +914,9 @@ impl<'a> EvalContext<'a> {
                 },
             );
             self.random_counter = context.state().counter;
-            return pack_dag_roots(&kernel.dag, &roots, &result?, name);
+            let value = pack_dag_roots(&kernel.dag, &roots, &result?, name)?;
+            self.result_producer = result_producer;
+            return Ok(value);
         }
         let (values, executed_counter) = chelis_ir::eval::eval_tensor_roots_with_result_claims(
             &kernel.dag,
@@ -927,7 +941,9 @@ impl<'a> EvalContext<'a> {
                 kernel.next_random_counter.unwrap_or(executed_counter)
             };
         }
-        pack_dag_roots(&kernel.dag, &roots, &values, name)
+        let value = pack_dag_roots(&kernel.dag, &roots, &values, name)?;
+        self.result_producer = result_producer;
+        Ok(value)
     }
 
     fn apply_staged_host_plan(
@@ -944,6 +960,7 @@ impl<'a> EvalContext<'a> {
             return Err(format!("staged kernel `{name}` argument arity mismatch"));
         }
         let mut values: UnordMap<String, RuntimeValue> = params.iter().cloned().zip(args).collect();
+        let mut result_producers: UnordMap<String, ResultProducer> = UnordMap::new();
         let mut context = RandomExecutionContext::new(RandomLoweringState {
             seed: self.random_seed,
             counter: self.random_counter,
@@ -980,7 +997,12 @@ impl<'a> EvalContext<'a> {
                             _ => None,
                         };
                         self.binding_types.insert(capture.binding.clone(), declared);
-                        self.bindings.insert(capture.binding.clone(), value);
+                        let producer = ResultProducer::interface_load(&value);
+                        self.bindings.insert_with_result_producer(
+                            capture.binding.clone(),
+                            value,
+                            producer,
+                        );
                     }
                     let result = if let Some(frame) = &mut execution {
                         frame.with_context(|context| {
@@ -998,6 +1020,7 @@ impl<'a> EvalContext<'a> {
                     self.bindings = saved;
                     self.binding_types = saved_types;
                     let value = result?;
+                    let producer = self.result_producer.take();
                     if matches!(
                         ty,
                         HostTypeTerm::Scalar(
@@ -1008,6 +1031,9 @@ impl<'a> EvalContext<'a> {
                         return Err("staged reshape target did not produce exactly i64".into());
                     }
                     values.insert(output.clone(), value);
+                    if let Some(producer) = producer {
+                        result_producers.insert(output.clone(), producer);
+                    }
                 }
                 HostStage::Kernel { dag, outputs } => {
                     let mut inputs = UnordMap::new();
@@ -1060,13 +1086,18 @@ impl<'a> EvalContext<'a> {
                             output.clone(),
                             RuntimeValue::Tensor(RuntimeTensorValue::new(value)),
                         );
+                        if let Some(producer) = tensor_result_producer(dag, *root) {
+                            result_producers.insert(output.clone(), producer);
+                        }
                     }
                 }
             }
         }
-        values
+        let value = values
             .remove(plan.output())
-            .ok_or_else(|| "staged kernel omitted its final result".into())
+            .ok_or_else(|| "staged kernel omitted its final result".to_string())?;
+        self.result_producer = result_producers.remove(plan.output());
+        Ok(value)
     }
 
     pub(super) fn lookup_top_level_def(&self, name: &str) -> Option<(String, Expr)> {
@@ -1103,6 +1134,23 @@ impl<'a> EvalContext<'a> {
     }
 
     pub(super) fn eval_expr(&mut self, expr: &Expr) -> Result<RuntimeValue, String> {
+        // Provenance describes this expression's result, never whichever
+        // tensor an argument, selector, or preceding effect happened to
+        // evaluate last. Recursive calls establish their own result and the
+        // outer form either replaces it or transparently returns it.
+        self.result_producer = None;
+        let value = self.eval_expr_inner(expr)?;
+        if !self
+            .result_producer
+            .as_ref()
+            .is_some_and(|producer| producer.matches_value(&value))
+        {
+            self.result_producer = None;
+        }
+        Ok(value)
+    }
+
+    fn eval_expr_inner(&mut self, expr: &Expr) -> Result<RuntimeValue, String> {
         // chelis#914: cooperative cancellation. Every node visit passes
         // through here — including each element of a fold/map, which reach
         // `eval_expr` via `apply_resolved_callable_with_arg_types` — so this
@@ -1144,12 +1192,16 @@ impl<'a> EvalContext<'a> {
             DeepTag::App => self.eval_app(node),
             DeepTag::If => self.eval_if(node),
             DeepTag::Let => self.eval_let(node),
-            DeepTag::Tuple => Ok(RuntimeValue::Tuple(
-                node.children
-                    .iter()
-                    .map(|child| self.eval_expr(child))
-                    .collect::<Result<Vec<_>, _>>()?,
-            )),
+            DeepTag::Tuple => {
+                let mut values = Vec::with_capacity(node.children.len());
+                let mut producers = Vec::with_capacity(node.children.len());
+                for child in node.children {
+                    values.push(self.eval_expr(child)?);
+                    producers.push(self.result_producer.take());
+                }
+                self.result_producer = ResultProducer::aggregate(producers);
+                Ok(RuntimeValue::Tuple(values))
+            }
             DeepTag::Copy => {
                 let value = self.eval_expr(
                     node.children
@@ -1341,6 +1393,7 @@ impl<'a> EvalContext<'a> {
             .and_then(symbol_name)
             .ok_or_else(|| "record missing constructor name".to_string())?;
         let mut fields_by_name = UnordMap::new();
+        let mut producers_by_name = UnordMap::new();
         let mut source_order = Vec::new();
         for field in kids.iter().skip(1) {
             let field_kids = match field.carrier() {
@@ -1367,8 +1420,12 @@ impl<'a> EvalContext<'a> {
                     .get(1)
                     .ok_or_else(|| "record field missing value".to_string())?,
             )?;
+            let producer = self.result_producer.take();
             source_order.push(name.to_string());
             fields_by_name.insert(name.to_string(), value);
+            if let Some(producer) = producer {
+                producers_by_name.insert(name.to_string(), producer);
+            }
         }
         let declared = self
             .adt_fields
@@ -1376,11 +1433,13 @@ impl<'a> EvalContext<'a> {
             .cloned()
             .unwrap_or_else(|| source_order.clone());
         let mut ordered = Vec::with_capacity(declared.len());
+        let mut ordered_producers = Vec::with_capacity(declared.len());
         for field_name in &declared {
             let value = fields_by_name.remove(field_name).ok_or_else(|| {
                 format!("record `{ctor}` missing field `{field_name}` at runtime")
             })?;
             ordered.push(value);
+            ordered_producers.push(producers_by_name.remove(field_name));
         }
         if let Some((extra, _)) = fields_by_name.to_sorted().into_iter().next() {
             return Err(format!(
@@ -1393,6 +1452,7 @@ impl<'a> EvalContext<'a> {
         // kvs alphabetically), so any record whose alphabetical order
         // differs from its declared order carried misaligned
         // `field_names[i]` metadata against `fields[i]`.
+        self.result_producer = ResultProducer::aggregate(ordered_producers);
         Ok(RuntimeValue::Adt {
             ctor: ctor.to_string(),
             fields: ordered,
@@ -1406,6 +1466,7 @@ impl<'a> EvalContext<'a> {
             kids.first()
                 .ok_or_else(|| "access missing target".to_string())?,
         )?;
+        let target_producer = self.result_producer.take();
         let field = kids
             .get(1)
             .and_then(symbol_name)
@@ -1425,10 +1486,15 @@ impl<'a> EvalContext<'a> {
                 let Some(index) = declared.iter().position(|name| name == field) else {
                     return Err(format!("record `{ctor}` has no field `{field}`"));
                 };
-                fields
+                let value = fields
                     .get(index)
                     .cloned()
-                    .ok_or_else(|| format!("record `{ctor}` missing field `{field}`"))
+                    .ok_or_else(|| format!("record `{ctor}` missing field `{field}`"))?;
+                self.result_producer = target_producer
+                    .as_ref()
+                    .and_then(|producer| producer.child(index))
+                    .filter(|producer| producer.matches_value(&value));
+                Ok(value)
             }
             other => Err(format!("field access expects record value, got {other:?}")),
         }
@@ -1502,10 +1568,14 @@ impl<'a> EvalContext<'a> {
             .first()
             .and_then(symbol_name)
             .ok_or_else(|| "var missing name".to_string())?;
-        if let Some(value) = self.bindings.get(name) {
-            return Ok(value.clone());
+        if let Some(value) = self.bindings.get(name).cloned() {
+            self.result_producer = self.bindings.result_producer(name).cloned();
+            return Ok(value);
         }
         if let Some(value) = self.tensor_bindings.get(name) {
+            // External tensor bindings enter the host evaluator through the
+            // same semantic ingress as a DAG Load.
+            self.result_producer = Some(ResultProducer::tensor("load"));
             return Ok(RuntimeValue::Tensor(value.clone()));
         }
         if let Some((_, definition)) = self.lookup_top_level_def(name) {
@@ -1523,6 +1593,11 @@ impl<'a> EvalContext<'a> {
             {
                 return self.apply_resolved_callable(value, Vec::new());
             }
+            // A declaration value is read through the top-level binding
+            // interface. Its initializer has already run (and may be cached),
+            // so a returned tensor has `load` provenance rather than that of
+            // whichever operation happened to initialize it.
+            self.result_producer = ResultProducer::interface_load(&value);
             return Ok(value);
         }
         if name == "Nil" {
@@ -1761,6 +1836,8 @@ impl<'a> EvalContext<'a> {
         if let Some(name) = self.active_builtin_name(func) {
             let value =
                 self.eval_builtin(name, &args, &arg_type_exprs, result_type_expr.as_ref())?;
+            self.result_producer =
+                matches!(value, RuntimeValue::Tensor(_)).then(|| ResultProducer::tensor(name));
             for claim in claims {
                 claim.verdict(&value, name)?;
             }
@@ -1901,7 +1978,22 @@ impl<'a> EvalContext<'a> {
             | ExprCarrier::MetadataExpression(_)
             | ExprCarrier::MalformedLegacyList(_) => {}
         }
-        self.eval_expr(expr)
+        let value = self.eval_expr(expr)?;
+        if claims.iter().all(|claim| claim.axes.is_empty()) {
+            return Ok(value);
+        }
+        let producer = self
+            .result_producer
+            .as_ref()
+            .and_then(ResultProducer::operation)
+            .ok_or_else(|| {
+                "host runtime: pending result claim reached a tensor without producer provenance"
+                    .to_string()
+            })?;
+        for claim in claims {
+            claim.verdict(&value, producer)?;
+        }
+        Ok(value)
     }
 
     /// [`Self::eval_let`], forwarding a declared-result claim to the binding
@@ -1980,8 +2072,10 @@ impl<'a> EvalContext<'a> {
                 } else {
                     self.eval_expr(&bind_kids[index + 1])?
                 };
+                let result_producer = self.result_producer.take();
                 self.binding_types.insert(name.to_string(), static_ty);
-                self.bindings.insert(name.to_string(), value);
+                self.bindings
+                    .insert_with_result_producer(name.to_string(), value, result_producer);
                 index += 2;
             }
             if guarded.is_some() {
@@ -2095,6 +2189,7 @@ impl<'a> EvalContext<'a> {
         for claim in inherited_result_claims {
             claim.verdict(&value, producer_operation)?;
         }
+        self.result_producer = Some(ResultProducer::tensor(producer_operation));
         Ok(value)
     }
 
@@ -2167,8 +2262,10 @@ impl<'a> EvalContext<'a> {
                     )?,
                     None => self.eval_expr(&bind_kids[index + 1])?,
                 };
+                let result_producer = self.result_producer.take();
                 self.binding_types.insert(name.to_string(), static_ty);
-                self.bindings.insert(name.to_string(), value);
+                self.bindings
+                    .insert_with_result_producer(name.to_string(), value, result_producer);
                 index += 2;
             }
             self.eval_expr(kids.get(1).ok_or_else(|| "let missing body".to_string())?)
@@ -2184,6 +2281,7 @@ impl<'a> EvalContext<'a> {
             kids.first()
                 .ok_or_else(|| "tuple-get missing tuple".to_string())?,
         )?;
+        let tuple_producer = self.result_producer.take();
         let index_expr = kids
             .get(1)
             .ok_or_else(|| "tuple-get missing index".to_string())?;
@@ -2204,10 +2302,17 @@ impl<'a> EvalContext<'a> {
             .ok_or_else(|| "tuple-get index must be an int literal".to_string())?
             as usize;
         match tuple {
-            RuntimeValue::Tuple(items) => items
-                .get(idx)
-                .cloned()
-                .ok_or_else(|| format!("tuple-get index {idx} out of bounds")),
+            RuntimeValue::Tuple(items) => {
+                let value = items
+                    .get(idx)
+                    .cloned()
+                    .ok_or_else(|| format!("tuple-get index {idx} out of bounds"))?;
+                self.result_producer = tuple_producer
+                    .as_ref()
+                    .and_then(|producer| producer.child(idx))
+                    .filter(|producer| producer.matches_value(&value));
+                Ok(value)
+            }
             other => Err(format!("tuple-get expects tuple input, got {other:?}")),
         }
     }
@@ -2552,7 +2657,9 @@ impl<'a> EvalContext<'a> {
                                 .insert(0, callable_contract.expect("checked above").clone());
                         }
                         self.binding_types.insert(param.clone(), declared);
-                        self.bindings.insert(param, arg);
+                        let producer = ResultProducer::interface_load(&arg);
+                        self.bindings
+                            .insert_with_result_producer(param, arg, producer);
                     }
                     // chelis#1739 and chelis#1771: a declared literal result
                     // extent is a claim the host lane owes a runtime verdict
@@ -2574,11 +2681,13 @@ impl<'a> EvalContext<'a> {
                     // exactly the alias spelling (round 1 P1). `return_type`
                     // remains the fallback for a closure the checker recorded
                     // no signature for.
-                    let declared_result = checked_signature
-                        .as_ref()
-                        .and_then(checked_function_children)
-                        .and_then(<[Expr]>::last)
-                        .or(return_type.as_ref());
+                    let declared_result = return_type.as_ref().and_then(|authored| {
+                        checked_signature
+                            .as_ref()
+                            .and_then(checked_function_children)
+                            .and_then(<[Expr]>::last)
+                            .or(Some(authored))
+                    });
                     // Frames retain distinct declarations even when the literal
                     // values agree. Forwarding a frame does not append it again.
                     let mut claims = Self::declared_result_claim(declared_result)
@@ -4588,6 +4697,7 @@ mod legacy_capture_order_tests {
         register_declared_signatures(checked.exprs(), &mut signatures);
         EvalContext {
             bindings: Frame::new(),
+            result_producer: None,
             binding_types: UnordMap::new(),
             precision_bindings: UnordMap::new(),
             declaration_values: UnordMap::new(),

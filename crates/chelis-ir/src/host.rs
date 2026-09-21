@@ -1586,6 +1586,22 @@ pub struct HostExpr<T = HostTypeTerm> {
     pub merged_spans: Vec<String>,
 }
 
+/// One invocation-local literal result obligation retained when host
+/// specialization inlines away the authored function boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostResultClaimPlan {
+    result: TensorType,
+}
+
+impl HostResultClaimPlan {
+    /// The authored tensor result is the existing tagged numeric carrier for
+    /// this private lowering plan. Consumers derive literal obligations from
+    /// it instead of introducing a parallel bare extent channel.
+    pub fn result(&self) -> &TensorType {
+        &self.result
+    }
+}
+
 impl<T> HostExpr<T> {
     /// Construct a HostExpr from a kind with no span metadata. The host-side
     /// lowering layer (§2.3 host-side table, rule "Lowering") populates
@@ -1647,6 +1663,14 @@ pub enum HostExprKind<T = HostTypeTerm> {
     SignatureEntry {
         plan: SignatureEntryPlan,
         args: Vec<HostExpr<T>>,
+    },
+    /// Keep an authored declaration's literal result obligation around an
+    /// inlined invocation. This is private host-lowering state, not a public
+    /// value carrier or ABI field.
+    ResultClaimScope {
+        plan: HostResultClaimPlan,
+        body: Box<HostExpr<T>>,
+        ty: T,
     },
     Int(i64),
     Float(f64),
@@ -1847,6 +1871,13 @@ fn resolve_host_expr(expr: HostExpr) -> Result<ConcreteHostExpr, crate::HostType
                 .map(resolve_host_expr)
                 .collect::<Result<Vec<_>, _>>()?,
         },
+        HostExprKind::ResultClaimScope { plan, body, ty } => {
+            ConcreteHostExprKind::ResultClaimScope {
+                plan,
+                body: Box::new(resolve_host_expr(*body)?),
+                ty: ty.into_concrete()?,
+            }
+        }
         HostExprKind::Int(value) => ConcreteHostExprKind::Int(value),
         HostExprKind::Float(value) => ConcreteHostExprKind::Float(value),
         HostExprKind::Bool(value) => ConcreteHostExprKind::Bool(value),
@@ -3237,6 +3268,7 @@ fn host_callback_uses_builtin<T>(callback: &HostCallback<T>, builtin: &str) -> b
 
 fn host_body_uses_builtin<T>(expr: &HostExpr<T>, builtin: &str) -> bool {
     match &expr.kind {
+        HostExprKind::ResultClaimScope { body, .. } => host_body_uses_builtin(body, builtin),
         HostExprKind::Builtin { name, args, .. } => {
             name == builtin || args.iter().any(|arg| host_body_uses_builtin(arg, builtin))
         }
@@ -8679,6 +8711,9 @@ fn collect_named_callback_signatures(
     out: &mut UnordMap<String, (Vec<HostTypeTerm>, HostTypeTerm)>,
 ) {
     match &expr.kind {
+        HostExprKind::ResultClaimScope { body, .. } => {
+            collect_named_callback_signatures(body, out);
+        }
         HostExprKind::Call { args, .. }
         | HostExprKind::Builtin { args, .. }
         | HostExprKind::SignatureEntry { args, .. } => {
@@ -8841,6 +8876,9 @@ fn infer_callable_param_types_in_expr(
     out: &mut UnordMap<String, HostTypeTerm>,
 ) {
     match &expr.kind {
+        HostExprKind::ResultClaimScope { body, .. } => {
+            infer_callable_param_types_in_expr(body, unknown, out);
+        }
         HostExprKind::Call {
             function,
             args,
@@ -8972,6 +9010,14 @@ fn refine_host_expr_types(
 ) -> bool {
     let mut changed = false;
     match &mut expr.kind {
+        HostExprKind::ResultClaimScope { body, ty, .. } => {
+            changed |= refine_host_expr_types(body, scope, signatures);
+            let body_ty = host_expr_type(body);
+            if ty.is_unresolved() && !body_ty.is_unresolved() {
+                *ty = body_ty;
+                changed = true;
+            }
+        }
         HostExprKind::Var(name, ty) => {
             if host_type_is_unresolved(ty)
                 && let Some(inferred) = scope.get(name)
@@ -12002,6 +12048,11 @@ fn lower_app_host_expr(
         .and_then(host_fn_signature)
         .or_else(|| lookup_declared_fn_type(program, &name))
         .or_else(|| kids.first().and_then(expr_fn_type));
+    // Result claims belong to the callee's authored declaration. Keep that
+    // source separate from `fn_sig`: lexical and application metadata may
+    // carry an inferred/specialized result shape that must not manufacture a
+    // declaration-site obligation.
+    let declared_fn_sig = lookup_declared_fn_type(program, &name);
     // Ordinary lexical lookup precedes builtin callable routes. A
     // function-typed parameter named `round_to` or `map` is a call through
     // that parameter, not a builtin selected by spelling
@@ -12451,7 +12502,10 @@ fn lower_app_host_expr(
             tensor_helpers,
         )?
     {
-        return Ok(guarded);
+        return Ok(retain_inlined_result_claim(
+            guarded,
+            declared_fn_sig.as_ref(),
+        ));
     }
     if has_callable_params && let Some(specialized) = inline_top_level_host_call(app_expr, program)
     {
@@ -12475,7 +12529,7 @@ fn lower_app_host_expr(
         if pushed {
             pop_inlining(&name);
         }
-        return lowered;
+        return lowered.map(|body| retain_inlined_result_claim(body, declared_fn_sig.as_ref()));
     }
     // chelis#1158: a recursive ordinary-generic function has no standalone
     // C symbol and cannot be inlined (the call graph has a cycle). Compile
@@ -12579,6 +12633,40 @@ fn lower_app_host_expr(
         infer_builtin_host_type(&name, &args).unwrap_or_else(fresh_host_inference)
     };
     Ok(HostExpr::new(HostExprKind::Builtin { name, args, ty }))
+}
+
+/// A callable-parameter declaration is specialized at its call site because
+/// the tensor DAG has no function-pointer input. Keep its authored literal
+/// result contract as an explicit scope instead of erasing it with the
+/// function boundary. The selected producer inside `body` still owns
+/// attribution and placement.
+fn retain_inlined_result_claim(
+    body: HostExpr,
+    signature: Option<&(Vec<HostTypeTerm>, HostTypeTerm)>,
+) -> HostExpr {
+    let Some((_, HostTypeTerm::Tensor(result))) = signature else {
+        return body;
+    };
+    let axes = result
+        .dims
+        .iter()
+        .enumerate()
+        .filter_map(|(axis, dim)| match dim {
+            DimInfo::Lit(required) => Some((axis, *required)),
+            DimInfo::Named(_, _) => None,
+        })
+        .collect::<Vec<_>>();
+    if axes.is_empty() {
+        return body;
+    }
+    let ty = host_expr_type(&body);
+    HostExpr::new(HostExprKind::ResultClaimScope {
+        plan: HostResultClaimPlan {
+            result: result.clone(),
+        },
+        body: Box::new(body),
+        ty,
+    })
 }
 
 /// Beta-reduce an anonymous call for structural shape evidence only.
@@ -18154,7 +18242,8 @@ fn host_expr_type(expr: &HostExpr) -> HostTypeTerm {
         | HostExprKind::Partition { ty, .. }
         | HostExprKind::FlatMap { ty, .. }
         | HostExprKind::WithSeed { ty, .. }
-        | HostExprKind::TensorCall { ty, .. } => ty.clone(),
+        | HostExprKind::TensorCall { ty, .. }
+        | HostExprKind::ResultClaimScope { ty, .. } => ty.clone(),
         HostExprKind::Unit | HostExprKind::SignatureEntry { .. } => HostTypeTerm::Unit,
     }
 }
@@ -18335,6 +18424,11 @@ fn force_host_expr_type(expr: HostExpr, ty: HostTypeTerm) -> HostExpr {
         HostExprKind::TensorCall { helper, args, .. } => {
             HostExprKind::TensorCall { helper, args, ty }
         }
+        HostExprKind::ResultClaimScope { plan, body, .. } => HostExprKind::ResultClaimScope {
+            plan,
+            body: Box::new(force_host_expr_type(*body, ty.clone())),
+            ty,
+        },
         other => other,
     };
     HostExpr {
@@ -24559,6 +24653,47 @@ mod record_hoist_binder_vocabulary_tests {
         assert!(
             read.unwrap_err().contains("params"),
             "the refusal names the construct"
+        );
+    }
+
+    #[test]
+    fn inlined_result_claims_come_only_from_authored_literal_results() {
+        let body_ty = HostTypeTerm::Tensor(TensorType {
+            dims: vec![DimInfo::Lit(9)],
+            precision: Prim::F32,
+        });
+        let body = || HostExpr::new(HostExprKind::Var("produced".into(), body_ty.clone()));
+
+        assert!(matches!(
+            retain_inlined_result_claim(body(), None).kind,
+            HostExprKind::Var(..)
+        ));
+
+        let named_signature = (
+            Vec::new(),
+            HostTypeTerm::Tensor(TensorType {
+                dims: vec![DimInfo::Named("n".into(), None)],
+                precision: Prim::F32,
+            }),
+        );
+        assert!(matches!(
+            retain_inlined_result_claim(body(), Some(&named_signature)).kind,
+            HostExprKind::Var(..)
+        ));
+
+        let literal_result = TensorType {
+            dims: vec![DimInfo::Lit(3)],
+            precision: Prim::F32,
+        };
+        let literal_signature = (Vec::new(), HostTypeTerm::Tensor(literal_result.clone()));
+        let retained = retain_inlined_result_claim(body(), Some(&literal_signature));
+        let HostExprKind::ResultClaimScope { plan, ty, .. } = retained.kind else {
+            panic!("an authored literal result must retain a claim scope");
+        };
+        assert_eq!(plan.result(), &literal_result);
+        assert_eq!(
+            ty, body_ty,
+            "body inference must not rewrite the claim plan"
         );
     }
 }

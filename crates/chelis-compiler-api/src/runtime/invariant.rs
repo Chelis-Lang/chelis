@@ -812,6 +812,7 @@ pub(crate) fn revalidate_adt_value(
     let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
     let mut ctx = EvalContext {
         bindings: Frame::new(),
+        result_producer: None,
         binding_types: UnordMap::new(),
         precision_bindings: UnordMap::new(),
         declaration_values: UnordMap::new(),

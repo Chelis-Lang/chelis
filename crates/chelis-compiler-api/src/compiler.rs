@@ -1111,6 +1111,7 @@ fn project_host_program_to_entry(
                 }
             }
             ConcreteHostExprKind::AdtFieldAccess { base, .. } => collect_expr(base, bound, out),
+            ConcreteHostExprKind::ResultClaimScope { body, .. } => collect_expr(body, bound, out),
             ConcreteHostExprKind::If {
                 cond,
                 then_expr,

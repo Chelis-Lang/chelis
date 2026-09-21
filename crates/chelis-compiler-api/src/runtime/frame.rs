@@ -21,6 +21,84 @@ use chelis_unord::UnordMap;
 
 use super::RuntimeValue;
 
+/// Private producer provenance paired with a runtime value. Aggregates retain
+/// one entry per value slot so a later projection cannot inherit a sibling's
+/// producer or collapse distinct transform roots to a guessed common name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ResultProducer {
+    Tensor(String),
+    Aggregate(Vec<Option<ResultProducer>>),
+}
+
+impl ResultProducer {
+    pub(crate) fn tensor(operation: impl Into<String>) -> Self {
+        Self::Tensor(operation.into())
+    }
+
+    pub(crate) fn operation(&self) -> Option<&str> {
+        match self {
+            Self::Tensor(operation) => Some(operation),
+            Self::Aggregate(_) => None,
+        }
+    }
+
+    pub(crate) fn child(&self, index: usize) -> Option<Self> {
+        match self {
+            Self::Aggregate(children) => children.get(index).cloned().flatten(),
+            Self::Tensor(_) => None,
+        }
+    }
+
+    pub(crate) fn aggregate(children: Vec<Option<Self>>) -> Option<Self> {
+        children
+            .iter()
+            .any(Option::is_some)
+            .then_some(Self::Aggregate(children))
+    }
+
+    /// Stamp a value crossing a genuine runtime interface. Every tensor leaf
+    /// is observed through `load`; aggregate shape is retained so a later
+    /// projection cannot lose the interface origin or borrow a sibling's.
+    pub(crate) fn interface_load(value: &RuntimeValue) -> Option<Self> {
+        match value {
+            RuntimeValue::Tensor(_) => Some(Self::tensor("load")),
+            RuntimeValue::Tuple(values) | RuntimeValue::List(values) => {
+                Self::aggregate(values.iter().map(Self::interface_load).collect())
+            }
+            RuntimeValue::Adt { fields, .. } => {
+                Self::aggregate(fields.iter().map(Self::interface_load).collect())
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn matches_value(&self, value: &RuntimeValue) -> bool {
+        match (self, value) {
+            (Self::Tensor(_), RuntimeValue::Tensor(_)) => true,
+            (Self::Aggregate(children), RuntimeValue::Tuple(values))
+            | (Self::Aggregate(children), RuntimeValue::List(values)) => {
+                children.len() == values.len()
+                    && children.iter().zip(values).all(|(producer, value)| {
+                        producer.as_ref().is_none_or(|p| p.matches_value(value))
+                    })
+            }
+            (Self::Aggregate(children), RuntimeValue::Adt { fields, .. }) => {
+                children.len() == fields.len()
+                    && children.iter().zip(fields).all(|(producer, value)| {
+                        producer.as_ref().is_none_or(|p| p.matches_value(value))
+                    })
+            }
+            _ => false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Binding {
+    value: RuntimeValue,
+    result_producer: Option<ResultProducer>,
+}
+
 thread_local! {
     /// Binding entries deep-copied by frame clones on this thread since the
     /// last reset. Counted at the copy, never estimated.
@@ -55,7 +133,7 @@ pub(crate) fn reset_frame_value_copies() {
 #[derive(Debug, Default)]
 pub struct Frame {
     /// Bindings made in this scope since it was last captured.
-    locals: UnordMap<String, RuntimeValue>,
+    locals: UnordMap<String, Binding>,
     /// Every scope captured below this one, innermost first. Shared with the
     /// closures that captured it and never mutated after freezing.
     captured: Option<Arc<Frame>>,
@@ -81,8 +159,20 @@ impl Frame {
     pub(crate) fn get(&self, name: &str) -> Option<&RuntimeValue> {
         let mut frame = self;
         loop {
-            if let Some(value) = frame.locals.get(name) {
-                return Some(value);
+            if let Some(binding) = frame.locals.get(name) {
+                return Some(&binding.value);
+            }
+            frame = frame.captured.as_deref()?;
+        }
+    }
+
+    /// Producer provenance retained beside a lexical value. It is private
+    /// execution metadata, not part of the value or its public representation.
+    pub(crate) fn result_producer(&self, name: &str) -> Option<&ResultProducer> {
+        let mut frame = self;
+        loop {
+            if let Some(binding) = frame.locals.get(name) {
+                return binding.result_producer.as_ref();
             }
             frame = frame.captured.as_deref()?;
         }
@@ -95,7 +185,27 @@ impl Frame {
     /// Bind `name` in the innermost scope, shadowing any captured binding.
     /// Returns the value this scope previously bound to `name`, if any.
     pub(crate) fn insert(&mut self, name: String, value: RuntimeValue) -> Option<RuntimeValue> {
-        self.locals.insert(name, value)
+        self.insert_with_result_producer(name, value, None)
+    }
+
+    /// Bind a value and the operation that produced this exact tensor result.
+    /// Shadowing replaces both together, so an alias captured before a later
+    /// same-named binding retains its original producer.
+    pub(crate) fn insert_with_result_producer(
+        &mut self,
+        name: String,
+        value: RuntimeValue,
+        result_producer: Option<ResultProducer>,
+    ) -> Option<RuntimeValue> {
+        self.locals
+            .insert(
+                name,
+                Binding {
+                    value,
+                    result_producer,
+                },
+            )
+            .map(|binding| binding.value)
     }
 
     /// Whether no scope binds anything. Test-only receipt support.
@@ -128,8 +238,8 @@ impl Frame {
         let mut merged: BTreeMap<&String, &RuntimeValue> = BTreeMap::new();
         // Outermost first, so an inner scope's binding overwrites an outer one.
         for frame in chain.into_iter().rev() {
-            for (name, value) in frame.locals.to_sorted() {
-                merged.insert(name, value);
+            for (name, binding) in frame.locals.to_sorted() {
+                merged.insert(name, &binding.value);
             }
         }
         merged.into_iter().collect()
@@ -241,6 +351,100 @@ mod tests {
         frame.insert("w".to_string(), int(9));
         let _copied = frame.clone();
         assert_eq!(frame_value_copies(), 1, "only the new local is copied");
+    }
+
+    #[test]
+    fn captured_alias_producer_survives_later_same_name_shadowing() {
+        let mut frame = Frame::new();
+        frame.insert_with_result_producer(
+            "value".to_string(),
+            int(1),
+            Some(ResultProducer::tensor("diagonal")),
+        );
+        let captured = frame.capture();
+        frame.insert_with_result_producer(
+            "value".to_string(),
+            int(2),
+            Some(ResultProducer::tensor("cumsum")),
+        );
+        assert_eq!(
+            captured
+                .result_producer("value")
+                .and_then(ResultProducer::operation),
+            Some("diagonal")
+        );
+        assert_eq!(
+            frame
+                .result_producer("value")
+                .and_then(ResultProducer::operation),
+            Some("cumsum")
+        );
+    }
+
+    #[test]
+    fn aggregate_producer_keeps_each_projected_field_distinct() {
+        let producer = ResultProducer::aggregate(vec![
+            Some(ResultProducer::tensor("diagonal")),
+            Some(ResultProducer::tensor("cumsum")),
+            None,
+        ])
+        .expect("two fields carry producer provenance");
+
+        assert_eq!(
+            producer.operation(),
+            None,
+            "an aggregate has no guessed common op"
+        );
+        assert_eq!(
+            producer
+                .child(0)
+                .as_ref()
+                .and_then(ResultProducer::operation),
+            Some("diagonal")
+        );
+        assert_eq!(
+            producer
+                .child(1)
+                .as_ref()
+                .and_then(ResultProducer::operation),
+            Some("cumsum")
+        );
+        assert_eq!(producer.child(2), None);
+        assert_eq!(producer.child(3), None);
+        assert_eq!(ResultProducer::aggregate(vec![None, None]), None);
+    }
+
+    #[test]
+    fn aggregate_interface_load_stamps_only_tensor_leaves() {
+        let tensor = RuntimeValue::Tensor(super::super::RuntimeTensorValue::new(
+            chelis_ir::eval::TensorValue::from_vec(vec![1], vec![1.0]),
+        ));
+        let value = RuntimeValue::Tuple(vec![
+            int(7),
+            tensor.clone(),
+            RuntimeValue::Adt {
+                ctor: "Some".to_string(),
+                fields: vec![tensor],
+                field_names: None,
+            },
+        ]);
+        let producer = ResultProducer::interface_load(&value).expect("tensor leaves exist");
+        assert_eq!(producer.child(0), None);
+        assert_eq!(
+            producer
+                .child(1)
+                .as_ref()
+                .and_then(ResultProducer::operation),
+            Some("load")
+        );
+        assert_eq!(
+            producer
+                .child(2)
+                .and_then(|adt| adt.child(0))
+                .as_ref()
+                .and_then(ResultProducer::operation),
+            Some("load")
+        );
     }
 
     impl Frame {

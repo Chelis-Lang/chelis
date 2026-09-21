@@ -10,6 +10,7 @@ use chelis_ir::host::RandomLoweringState;
 use chelis_ir::lower::SubexprLoweringContext;
 use chelis_types::types::{NominalArg, Prim, TensorPrec, Type, TypeVar};
 
+use super::eval::tensor_result_producer;
 use super::host_ops::terminal_name_matches;
 use super::named_axis::*;
 use super::*;
@@ -81,6 +82,32 @@ impl GradListShape {
                 field_names: field_names.clone(),
             },
         })
+    }
+
+    fn repack_producer(
+        &self,
+        leaves: &mut impl Iterator<Item = Option<ResultProducer>>,
+    ) -> Option<ResultProducer> {
+        match self {
+            Self::Leaf => leaves.next().flatten(),
+            Self::ScalarLeaf(_) => {
+                let _ = leaves.next();
+                None
+            }
+            Self::Unit => None,
+            Self::List(items) | Self::Tuple(items) => ResultProducer::aggregate(
+                items
+                    .iter()
+                    .map(|item| item.repack_producer(leaves))
+                    .collect(),
+            ),
+            Self::Adt { fields, .. } => ResultProducer::aggregate(
+                fields
+                    .iter()
+                    .map(|field| field.repack_producer(leaves))
+                    .collect(),
+            ),
+        }
     }
 }
 
@@ -493,6 +520,10 @@ impl<'a> EvalContext<'a> {
         // captured by the inner fn body).
         let tensor_bindings = self.tensor_bindings;
         let roots: Vec<chelis_ir::dag::NodeId> = dag.roots().to_vec();
+        let root_producers: Vec<Option<ResultProducer>> = roots
+            .iter()
+            .map(|root| tensor_result_producer(&dag, *root))
+            .collect();
         let mut empty_packed = None;
         if roots.is_empty() {
             // Preserve the historical empty-root early-return behavior. In
@@ -710,6 +741,7 @@ impl<'a> EvalContext<'a> {
                 RuntimeValue::Tuple(items) => items,
                 single => vec![single],
             };
+            let mut flat_producers = root_producers.into_iter();
             // Every ADT slot always owns exactly `field_count` roots and
             // every tensor slot owns one, because the IR lowering
             // (`GradResultPlan`) zero-fills BOTH adjoint-free ADT fields and,
@@ -737,26 +769,46 @@ impl<'a> EvalContext<'a> {
             }
             let mut flat_iter = flat.into_iter();
             let mut slots: Vec<RuntimeValue> = Vec::with_capacity(arg_repacks.len());
+            let mut slot_producers = Vec::with_capacity(arg_repacks.len());
             for slot in &arg_repacks {
                 match slot {
                     ArgRepack::Tensor => {
                         slots.push(flat_iter.next().expect("count checked above"));
+                        slot_producers.push(flat_producers.next().flatten());
                     }
-                    ArgRepack::Scalar(prim) => slots.push(repack_scalar_gradient(
-                        flat_iter.next().expect("count checked above"),
-                        *prim,
-                    )?),
-                    ArgRepack::Structured { shape } => slots.push(shape.repack(&mut flat_iter)?),
+                    ArgRepack::Scalar(prim) => {
+                        slots.push(repack_scalar_gradient(
+                            flat_iter.next().expect("count checked above"),
+                            *prim,
+                        )?);
+                        let _ = flat_producers.next();
+                        slot_producers.push(None);
+                    }
+                    ArgRepack::Structured { shape } => {
+                        slots.push(shape.repack(&mut flat_iter)?);
+                        slot_producers.push(shape.repack_producer(&mut flat_producers));
+                    }
                 }
             }
-            return Ok(match slots.len() {
+            let value = match slots.len() {
                 // A single differentiated target (one ADT, possibly with
                 // other non-selected args present) returns the bare
                 // gradient value, not a one-element tuple.
                 1 => slots.into_iter().next().expect("non-empty"),
                 _ => RuntimeValue::Tuple(slots),
-            });
+            };
+            self.result_producer = if slot_producers.len() == 1 {
+                slot_producers.pop().flatten()
+            } else {
+                ResultProducer::aggregate(slot_producers)
+            };
+            return Ok(value);
         }
+        self.result_producer = if root_producers.len() == 1 {
+            root_producers.into_iter().next().flatten()
+        } else {
+            ResultProducer::aggregate(root_producers)
+        };
         Ok(packed)
     }
 }
