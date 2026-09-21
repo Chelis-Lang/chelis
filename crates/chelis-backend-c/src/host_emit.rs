@@ -221,6 +221,7 @@ pub(crate) fn emit_host_abi_program(
     external_helpers: &UnordSet<String>,
 ) -> Result<String, Unsupported> {
     let program = projected.program();
+    reject_when_no_handler_can_reach_a_demoted_entry(program)?;
     let _site_identity_count = projected.sites().len();
     // Emit helpers and functions into a body buffer first so we can detect which
     // runtime headers they transitively require (e.g. `chelis_math.h` on macOS
@@ -1683,6 +1684,18 @@ fn emit_host_declarations(
         .functions
         .iter()
         .filter(|function| include_specializations || !function.is_monomorphized_specialization())
+        // [04-EFF-3]: a demoted definition is never declared as a public
+        // entry, so neither the published header nor the in-`.c` prototype
+        // block can offer a symbol no caller could seed (chelis#2318).
+        //
+        // This drops the declaration on BOTH legs, `include_specializations`
+        // notwithstanding. An earlier revision kept the in-`.c` prototype on
+        // the theory that the program's own bodies still call it. They do not:
+        // internal callers go to the `__chelis_owned_body` symbol, which is
+        // `static inline` and carries its own declaration. Keeping the public
+        // prototype left a forward declaration for a function this emitter no
+        // longer defines — dead, and a reader would take it for an entry.
+        .filter(|function| !is_demoted_by_eff3(function))
         .map(|function| {
             let prefix = if internal_linkage || function.is_monomorphized_specialization() {
                 "static inline "
@@ -2625,7 +2638,36 @@ fn emit_function(
     out.push("    return __result;".to_string());
     out.push("}".to_string());
 
-    if authored {
+    // spec/04-type-system.md [04-EFF-3]: the public entry ABI carries no RNG
+    // frame, so a wrapper for a body with an undischarged `Random` could only
+    // open an INACTIVE `chelis_rng_state` and hand it over. The two downstream
+    // behaviours were a silent draw against that inactive state (tensor-DAG
+    // lane, whose standalone `CHELIS_EFFECTIVE_UNIFORM_SEED(seed) (seed)`
+    // fallback bakes the operand) and a run-time abort (host lane); [04-EFF-3]
+    // forbids emitting the entry in either case (chelis#2318).
+    //
+    // Demote rather than reject here. The owned body above is still emitted,
+    // so the program's own seeded callers keep working; only the unusable
+    // public wrapper is withheld. `reject_when_no_handler_can_reach_a_demoted_entry`
+    // owns the case where demotion would leave nothing to publish.
+    //
+    // chelis#1872's `emit.rs` guard states the same rule, but it lives in
+    // `emit_evaluation`, whose only caller is the fixed-control path, so the
+    // ordinary export build never reached it. This is that rule on the path
+    // that was missing it, not a second rule.
+    if authored && is_demoted_by_eff3(function) {
+        // Leave the reason in the artifact. The demotion is otherwise visible
+        // only as an absence — a symbol that used to be in the header and is
+        // not any more — and an absence teaches a reader nothing.
+        out.push(format!(
+            "/* [04-EFF-3]: `{}` performs a Random no handler in its body \
+             discharges, so it is not published as a public entry; the public \
+             ABI has no RNG frame to supply its seed (chelis#2318). It is \
+             still callable from this program's own seeded regions. */",
+            function.name
+        ));
+    }
+    if authored && !is_demoted_by_eff3(function) {
         let entry_uses = authored_entry_uses(ownership_sites, function.params.len())?;
         let wrapper_params = function
             .params
@@ -10340,6 +10382,96 @@ fn static_float_bound(expr: Option<&HostExpr>) -> Option<f64> {
     staged_bound(expr)
         .and_then(|staged| staged.finalize(Prim::F32))
         .map(|value| value.as_f64_lossy())
+}
+
+/// True when this authored definition may not be published as a public entry
+/// under [04-EFF-3]: its body performs a `Random` that no handler inside it
+/// discharges, and the public entry ABI has no RNG frame to supply one.
+///
+/// A monomorphized specialization is already `static inline` and is never a
+/// public entry, so it is excluded here rather than relied on downstream.
+fn is_demoted_by_eff3(function: &HostFunction) -> bool {
+    function.inherits_random
+        && function.origin == chelis_ir::host::HostFunctionOrigin::Authored
+        && !function.is_monomorphized_specialization()
+}
+
+/// [04-EFF-3] admission for the whole program: demote, then reject.
+///
+/// A `Random`-carrying definition is *demoted* — emitted for the program's own
+/// seeded callers but never published as a public entry. That keeps the
+/// ordinary library pattern compiling: the stdlib's own random helpers carry an
+/// undischarged `Random` and are discharged by their callers
+/// (`spec/04-type-system.md` §7.1).
+///
+/// Demotion is only honest when the program has an internal caller that could
+/// discharge the effect. When the program opens NO RNG scope anywhere, nothing
+/// in it can ever call the demoted definition under a handler, so its only
+/// possible consumer was the public entry [04-EFF-3] forbids. Withholding it
+/// then deletes the one thing the author asked to build, so the build is
+/// rejected loudly instead.
+///
+/// `chelis_ir::host::host_program_opens_rng_scope` is the signal, and it is
+/// deliberately NOT call-graph reachability. Two earlier revisions tried
+/// reachability and both wrongly rejected `def keep(x) = dropout(x, 0.5f32)`
+/// beside `def sample(x) = with seed(42i64) { keep(x) }`:
+///
+/// * `globals.is_empty()` — that program has no globals, but its helper has a
+///   perfectly good caller.
+/// * the host call graph — `sample`'s body does not name `keep` at all. The
+///   draw is INLINED into `sample`'s DAG tensor helper, so inlining erases the
+///   edge and every inlined helper reads as dead.
+///
+/// Both are locked by `cli::fixed_control_c_entry_is_independent_of_host_siblings`
+/// (chelis#1872).
+///
+/// The signal over-approximates in the safe direction: an unrelated handler
+/// elsewhere in the program makes this demote rather than reject, which still
+/// removes the unusable entry and still records why in the artifact.
+fn reject_when_no_handler_can_reach_a_demoted_entry(
+    program: &HostProgram,
+) -> Result<(), Unsupported> {
+    let Some(first_demoted) = program.functions.iter().find(|f| is_demoted_by_eff3(f)) else {
+        return Ok(());
+    };
+    if chelis_ir::host::host_program_opens_rng_scope(program) {
+        return Ok(());
+    }
+    Err(public_entry_inherits_random(&first_demoted.name))
+}
+
+/// The [04-EFF-3] terminal for a public entry whose body can perform a
+/// `Random` no handler inside it discharges (chelis#2318).
+///
+/// The definition is not at fault — a def carrying an undischarged `Random`
+/// is an ordinary function whose caller supplies the handler, which is how
+/// the stdlib's own random helpers work. What cannot exist is a PUBLIC ENTRY
+/// for it: the entry ABI has no RNG frame, so the only wrapper the emitter
+/// could write is one holding an inactive `chelis_rng_state`.
+fn public_entry_inherits_random(name: &str) -> Unsupported {
+    Unsupported::new(
+        UnsupportedKind::Construct(format!("public entry {name}")),
+        "`chelis build` host emission",
+        Stage::Codegen("c"),
+        chelis_types::deliberate_rejection!(
+            "[04-EFF-3]",
+            "this definition draws from `Random` and nothing inside it handles \
+             that effect, so it can only run under a seed its caller supplies. \
+             A public entry's ABI has no RNG frame to carry one, and this \
+             program opens no `with seed(...)` region anywhere, so nothing here \
+             can call it under a handler either. Emitting it would hand the \
+             body an inactive RNG: one compiled lane then returns draws no \
+             `with seed(...)` can reproduce, and the other aborts at the first \
+             call. Either wrap the body in `with seed(...) { ... }` so it is a \
+             self-contained entry, or call it from a seeded region in this \
+             program and let that region be the entry instead"
+        ),
+    )
+    .with_supported_alternative(
+        "wrap the body in `with seed(...) { ... }` to make it a self-contained \
+         entry, or call it from a seeded region in this program and let that \
+         region be the entry instead",
+    )
 }
 
 /// The loud terminal for a `uniform_like` bound this emitter cannot fold.

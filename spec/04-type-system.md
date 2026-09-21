@@ -2745,6 +2745,19 @@ execution boundaries reject an unhandled `Test` effect.
 > host-C admission boundary only; it does not define device-label vocabulary,
 > placement, transfer, or accelerator-target semantics.
 
+> **[04-EFF-3]** Before emitting a host-C artifact, the build boundary SHALL
+> reject every public entry whose body can perform a `Random` effect that no
+> handler inside that body discharges. The public entry ABI carries no RNG
+> frame, so no caller can supply the seed such a body requires. The rejection
+> SHALL occur before any artifact or emission observation is produced, and SHALL
+> apply identically on every emission path; a path that instead emits an entry
+> holding an inactive RNG state is non-conforming, whether the resulting draw
+> traps or returns a value. An entry whose body discharges its own `Random` with
+> `with seed(...)` is admitted, and so is a definition carrying an undischarged
+> `Random` that is not itself a public entry: such a definition is an ordinary
+> function whose caller supplies the handler. This rule governs admission only;
+> `spec/05-risc-primitives.md` [05-RNG-1] owns the seeded stream it admits.
+
 Inference and checking obey these rules:
 
 - effect inference runs after HM type inference on the annotated Deep returned by the
@@ -2774,7 +2787,11 @@ Inference and checking obey these rules:
 - declared `Resource("...")` annotations on `t-fn` expressions constrain the
   inferred resource set, and checked `fn` metadata records every unhandled
   `Resource(Device)` effect
-- unhandled top-level `Random` is a check error with repair guidance
+- an unhandled `Random` on a top-level value binding is a check error with
+  repair guidance. A definition whose inferred effect set contains `Random` is
+  an ordinary function whose caller supplies the handler, and is not a check
+  error on that ground alone; [04-EFF-3] governs whether such a definition may
+  also be emitted as a public entry
 - top-level `IO` is permitted
 - assertion operations introduce `Test`; only the test runner handles it
 

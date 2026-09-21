@@ -68,6 +68,7 @@ fn make_binary_program(op_name: &str, prim: Prim) -> HostProgram {
             origin: HostFunctionOrigin::Authored,
             specialization: None,
             summary_rejections: Vec::new(),
+            inherits_random: false,
         }],
         summary_rejections: Vec::new(),
     }
@@ -99,6 +100,7 @@ fn make_unary_program(op_name: &str, prim: Prim) -> HostProgram {
             origin: HostFunctionOrigin::Authored,
             specialization: None,
             summary_rejections: Vec::new(),
+            inherits_random: false,
         }],
         summary_rejections: Vec::new(),
     }
@@ -133,6 +135,7 @@ fn make_tensor_to_scalar_program(prim: Prim, scalar_ty: HostType) -> HostProgram
             origin: HostFunctionOrigin::Authored,
             specialization: None,
             summary_rejections: Vec::new(),
+            inherits_random: false,
         }],
         summary_rejections: Vec::new(),
     }
@@ -167,6 +170,7 @@ fn make_scalar_to_tensor_program() -> HostProgram {
             origin: HostFunctionOrigin::Authored,
             specialization: None,
             summary_rejections: Vec::new(),
+            inherits_random: false,
         }],
         summary_rejections: Vec::new(),
     }
@@ -265,6 +269,7 @@ fn make_checked_tensor_cast_program(source: Prim, target: Prim) -> HostProgram {
             origin: HostFunctionOrigin::Authored,
             specialization: None,
             summary_rejections: Vec::new(),
+            inherits_random: false,
         }],
         summary_rejections: Vec::new(),
     }

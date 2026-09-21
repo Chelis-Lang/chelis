@@ -923,6 +923,24 @@ pub struct HostFunction<T = HostTypeTerm> {
     /// helpers and from the function-level summary-derivation pass.
     /// See `HostProgram::summary_rejections`.
     pub summary_rejections: Vec<SummaryRejection>,
+    /// True when this body can perform a `Random` effect that no handler
+    /// inside the body discharges, read from the authoritative per-def
+    /// effect rows (`chelis_effects::def_effect_rows`) during lowering.
+    ///
+    /// The public entry ABI carries no RNG frame, so a wrapper for such a
+    /// body could only open an INACTIVE `chelis_rng_state` and hand it over
+    /// — which `spec/04-type-system.md` [04-EFF-3] forbids emitting, whether
+    /// the resulting draw traps or returns a value (chelis#2318). The
+    /// backend rejects on this flag rather than re-deriving the effect set
+    /// from the emitted body: a second derivation is a second rule, and two
+    /// copies of one rule is how chelis#2316 happened.
+    ///
+    /// This is NOT a defect in the definition itself. A def carrying an
+    /// undischarged `Random` is an ordinary function whose caller supplies
+    /// the handler — the stdlib's own `normal_like` and Kaiming/Xavier
+    /// initializers work exactly that way (`spec/04-type-system.md` §7.1).
+    /// The flag only decides whether the def may ALSO become a public entry.
+    pub inherits_random: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1845,6 +1863,7 @@ fn resolve_host_function(
         origin: function.origin,
         specialization: function.specialization,
         summary_rejections: function.summary_rejections,
+        inherits_random: function.inherits_random,
     })
 }
 
@@ -3293,39 +3312,45 @@ fn find_direct_builtin_call_in_expr(expr: &Expr, builtins: &[&str]) -> Option<St
     }
 }
 
-fn host_callback_uses_builtin<T>(callback: &HostCallback<T>, builtin: &str) -> bool {
+fn host_callback_any<T>(
+    callback: &HostCallback<T>,
+    pred: &dyn Fn(&HostExprKind<T>) -> bool,
+) -> bool {
     match &callback.kind {
-        HostCallbackKind::Inline { body, .. } => host_body_uses_builtin(body, builtin),
+        HostCallbackKind::Inline { body, .. } => host_body_any(body, pred),
         HostCallbackKind::Named { .. } => false,
     }
 }
 
-fn host_body_uses_builtin<T>(expr: &HostExpr<T>, builtin: &str) -> bool {
+/// True when any sub-expression of `expr` satisfies `pred`, walking every
+/// carrier that can hold one. `host_body_uses_builtin` and
+/// `host_body_opens_rng_scope` are the two predicates over this one traversal;
+/// a second hand-written match would be a second thing to keep in step.
+fn host_body_any<T>(expr: &HostExpr<T>, pred: &dyn Fn(&HostExprKind<T>) -> bool) -> bool {
+    if pred(&expr.kind) {
+        return true;
+    }
     match &expr.kind {
-        HostExprKind::ResultClaimScope { body, .. } => host_body_uses_builtin(body, builtin),
-        HostExprKind::FormalIngress { value, .. } => host_body_uses_builtin(value, builtin),
-        HostExprKind::Builtin { name, args, .. } => {
-            name == builtin || args.iter().any(|arg| host_body_uses_builtin(arg, builtin))
-        }
+        HostExprKind::ResultClaimScope { body, .. } => host_body_any(body, pred),
+        // `FormalIngress` arrived on main while this walker was being
+        // generalized. It must keep being traversed: dropping it would stop
+        // both predicates seeing through it, silently.
+        HostExprKind::FormalIngress { value, .. } => host_body_any(value, pred),
+        HostExprKind::Builtin { args, .. } => args.iter().any(|arg| host_body_any(arg, pred)),
         HostExprKind::Call { args, .. } | HostExprKind::SignatureEntry { args, .. } => {
-            args.iter().any(|arg| host_body_uses_builtin(arg, builtin))
+            args.iter().any(|arg| host_body_any(arg, pred))
         }
-        HostExprKind::TensorCall { args, .. } => {
-            args.iter().any(|arg| host_body_uses_builtin(arg, builtin))
-        }
-        HostExprKind::AdtConstruct { fields, .. } => {
-            fields.iter().any(|f| host_body_uses_builtin(f, builtin))
-        }
+        HostExprKind::TensorCall { args, .. } => args.iter().any(|arg| host_body_any(arg, pred)),
+        HostExprKind::AdtConstruct { fields, .. } => fields.iter().any(|f| host_body_any(f, pred)),
         HostExprKind::Tuple(items, _) | HostExprKind::List(items, _) => {
-            items.iter().any(|i| host_body_uses_builtin(i, builtin))
+            items.iter().any(|i| host_body_any(i, pred))
         }
-        HostExprKind::AdtFieldAccess { base, .. } => host_body_uses_builtin(base, builtin),
+        HostExprKind::AdtFieldAccess { base, .. } => host_body_any(base, pred),
+        // `RetainedInvocation` likewise arrived on main and binds the same way
+        // as `Let`; it shares the arm rather than being dropped.
         HostExprKind::Let { bindings, body, .. }
         | HostExprKind::RetainedInvocation { bindings, body, .. } => {
-            bindings
-                .iter()
-                .any(|b| host_body_uses_builtin(&b.value, builtin))
-                || host_body_uses_builtin(body, builtin)
+            bindings.iter().any(|b| host_body_any(&b.value, pred)) || host_body_any(body, pred)
         }
         HostExprKind::If {
             cond,
@@ -3333,9 +3358,9 @@ fn host_body_uses_builtin<T>(expr: &HostExpr<T>, builtin: &str) -> bool {
             else_expr,
             ..
         } => {
-            host_body_uses_builtin(cond, builtin)
-                || host_body_uses_builtin(then_expr, builtin)
-                || host_body_uses_builtin(else_expr, builtin)
+            host_body_any(cond, pred)
+                || host_body_any(then_expr, pred)
+                || host_body_any(else_expr, pred)
         }
         HostExprKind::MatchOption {
             scrutinee,
@@ -3343,9 +3368,9 @@ fn host_body_uses_builtin<T>(expr: &HostExpr<T>, builtin: &str) -> bool {
             none_expr,
             ..
         } => {
-            host_body_uses_builtin(scrutinee, builtin)
-                || host_body_uses_builtin(some_expr, builtin)
-                || host_body_uses_builtin(none_expr, builtin)
+            host_body_any(scrutinee, pred)
+                || host_body_any(some_expr, pred)
+                || host_body_any(none_expr, pred)
         }
         HostExprKind::MatchAdt {
             scrutinee,
@@ -3353,19 +3378,17 @@ fn host_body_uses_builtin<T>(expr: &HostExpr<T>, builtin: &str) -> bool {
             default_expr,
             ..
         } => {
-            host_body_uses_builtin(scrutinee, builtin)
-                || arms
-                    .iter()
-                    .any(|arm| host_body_uses_builtin(&arm.expr, builtin))
+            host_body_any(scrutinee, pred)
+                || arms.iter().any(|arm| host_body_any(&arm.expr, pred))
                 || default_expr
                     .as_ref()
-                    .is_some_and(|d| host_body_uses_builtin(d, builtin))
+                    .is_some_and(|d| host_body_any(d, pred))
         }
         HostExprKind::Map { callback, list, .. }
         | HostExprKind::Filter { callback, list, .. }
         | HostExprKind::Partition { callback, list, .. }
         | HostExprKind::FlatMap { callback, list, .. } => {
-            host_callback_uses_builtin(callback, builtin) || host_body_uses_builtin(list, builtin)
+            host_callback_any(callback, pred) || host_body_any(list, pred)
         }
         HostExprKind::Fold {
             callback,
@@ -3379,12 +3402,12 @@ fn host_body_uses_builtin<T>(expr: &HostExpr<T>, builtin: &str) -> bool {
             list,
             ..
         } => {
-            host_callback_uses_builtin(callback, builtin)
-                || host_body_uses_builtin(init, builtin)
-                || host_body_uses_builtin(list, builtin)
+            host_callback_any(callback, pred)
+                || host_body_any(init, pred)
+                || host_body_any(list, pred)
         }
         HostExprKind::WithSeed { seed, body, .. } => {
-            host_body_uses_builtin(seed, builtin) || host_body_uses_builtin(body, builtin)
+            host_body_any(seed, pred) || host_body_any(body, pred)
         }
         HostExprKind::Int(_)
         | HostExprKind::Float(_)
@@ -3393,6 +3416,44 @@ fn host_body_uses_builtin<T>(expr: &HostExpr<T>, builtin: &str) -> bool {
         | HostExprKind::Var(_, _)
         | HostExprKind::Unit => false,
     }
+}
+
+fn host_body_uses_builtin<T>(expr: &HostExpr<T>, builtin: &str) -> bool {
+    host_body_any(
+        expr,
+        &|kind: &HostExprKind<T>| matches!(kind, HostExprKind::Builtin { name, .. } if name == builtin),
+    )
+}
+
+/// True when `expr` establishes an RNG scope with `with seed(...)`.
+fn host_body_opens_rng_scope<T>(expr: &HostExpr<T>) -> bool {
+    host_body_any(expr, &|kind: &HostExprKind<T>| {
+        matches!(kind, HostExprKind::WithSeed { .. })
+    })
+}
+
+/// True when any global binding or function body in `program` establishes an
+/// RNG scope.
+///
+/// chelis#2318: a program that opens no scope anywhere has no internal caller
+/// that could discharge a `Random`-carrying definition, so such a definition
+/// was reachable only through the public entry `spec/04-type-system.md`
+/// [04-EFF-3] forbids. Withholding it silently would delete the one thing the
+/// author asked to build, so the backend rejects loudly instead.
+///
+/// This is the signal the backend cannot get from its own call graph: a draw
+/// inside a seeded helper is INLINED into the caller's DAG tensor helper, so
+/// the caller's host body never names the helper and call-graph reachability
+/// reports every inlined helper as dead.
+pub fn host_program_opens_rng_scope<T>(program: &HostProgram<T>) -> bool {
+    program
+        .globals
+        .iter()
+        .any(|binding| host_body_opens_rng_scope(&binding.value))
+        || program
+            .functions
+            .iter()
+            .any(|function| host_body_opens_rng_scope(&function.body))
 }
 
 fn derive_host_function_specializations(functions: &mut [HostFunction]) {
@@ -5709,6 +5770,12 @@ fn lower_host_function(
             origin: HostFunctionOrigin::Authored,
             specialization: None,
             summary_rejections: Vec::new(),
+            // chelis#2318: the authoritative per-def effect row, read once
+            // here so the backend never re-derives it. An absent row means
+            // the def has no inferred effects to inherit.
+            inherits_random: cached_def_effect_rows(program)
+                .get(name)
+                .is_some_and(|row| row.contains(&chelis_types::types::Effect::Random)),
         },
         products,
     }))
@@ -14491,6 +14558,10 @@ fn lower_mono_specialized_function(
             origin: HostFunctionOrigin::Monomorphized,
             specialization: None,
             summary_rejections: Vec::new(),
+            // A monomorphized specialization is emitted `static inline` and
+            // is never a public entry, so [04-EFF-3] cannot apply to it; its
+            // Random, if any, belongs to the authored caller that owns it.
+            inherits_random: false,
         },
         products,
     })
@@ -21419,6 +21490,7 @@ def bad[b](box: Box[b]) -> bool =
                     origin: HostFunctionOrigin::Monomorphized,
                     specialization: None,
                     summary_rejections: Vec::new(),
+                    inherits_random: false,
                 },
                 products: Vec::new(),
             }],
@@ -21648,6 +21720,7 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
             origin,
             specialization: None,
             summary_rejections: Vec::new(),
+            inherits_random: false,
         }
     }
 

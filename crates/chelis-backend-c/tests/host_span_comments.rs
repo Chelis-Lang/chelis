@@ -40,6 +40,7 @@ fn make_program(body: HostExpr) -> HostProgram {
             origin: chelis_ir::host::HostFunctionOrigin::Authored,
             specialization: None,
             summary_rejections: Vec::new(),
+            inherits_random: false,
         }],
         summary_rejections: Vec::new(),
     }

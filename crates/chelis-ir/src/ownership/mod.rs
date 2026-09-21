@@ -1206,6 +1206,14 @@ impl<'a> VerifiedHostFunctionView<'a> {
         &self.function().summary_rejections
     }
 
+    /// True when this body performs a `Random` that no handler inside the
+    /// body discharges. `spec/04-type-system.md` [04-EFF-3] forbids emitting
+    /// a public entry for such a body, because the entry ABI carries no RNG
+    /// frame through which a caller could supply the seed (chelis#2318).
+    pub fn inherits_random(self) -> bool {
+        self.function().inherits_random
+    }
+
     pub fn tensor_helper_count(self) -> usize {
         self.function().tensor_helpers.len()
     }

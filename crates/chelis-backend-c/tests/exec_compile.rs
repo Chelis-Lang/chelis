@@ -581,6 +581,7 @@ fn checked_blas_batches_scratch_and_empty_domains_execute_under_sanitizers() {
                     origin: HostFunctionOrigin::Authored,
                     specialization: None,
                     summary_rejections: vec![],
+                    inherits_random: false,
                 }],
             };
             let mut host_source =
@@ -954,6 +955,7 @@ int main(void) {{
                         origin: HostFunctionOrigin::Authored,
                         specialization: None,
                         summary_rejections: vec![],
+                        inherits_random: false,
                     }],
                 };
                 let mut host_source = emit_host_program(&program, "host_sparse_boundary").unwrap();
@@ -6407,6 +6409,7 @@ fn host_binary_program(builtin: &str, lhs: Vec<usize>, rhs: Vec<usize>) -> HostP
             origin: HostFunctionOrigin::Authored,
             specialization: None,
             summary_rejections: Vec::new(),
+            inherits_random: false,
         }],
         summary_rejections: Vec::new(),
     }
@@ -7253,6 +7256,7 @@ fn host_scalar_relu_program(ty: HostType) -> HostProgram {
             origin: HostFunctionOrigin::Authored,
             specialization: None,
             summary_rejections: Vec::new(),
+            inherits_random: false,
         }],
         summary_rejections: Vec::new(),
     }
@@ -9157,6 +9161,7 @@ fn host_diagonal_program(operand: Vec<usize>, declared: usize) -> HostProgram {
             origin: HostFunctionOrigin::Authored,
             specialization: None,
             summary_rejections: Vec::new(),
+            inherits_random: false,
         }],
         summary_rejections: Vec::new(),
     }

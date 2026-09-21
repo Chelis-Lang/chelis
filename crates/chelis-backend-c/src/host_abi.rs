@@ -401,6 +401,7 @@ fn project_function(
         origin: function.origin(),
         specialization: function.specialization().cloned(),
         summary_rejections: function.summary_rejections().to_vec(),
+        inherits_random: function.inherits_random(),
     })
 }
 

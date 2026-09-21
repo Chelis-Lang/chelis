@@ -2050,6 +2050,7 @@ fn host_payload_sites_and_actions_are_bound_to_their_structural_unit() {
             origin: HostFunctionOrigin::Authored,
             specialization: None,
             summary_rejections: Vec::new(),
+            inherits_random: false,
         }],
         ..ConcreteHostProgram::default()
     };

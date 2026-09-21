@@ -565,6 +565,7 @@ mod tests {
             origin: HostFunctionOrigin::Authored,
             specialization: None,
             summary_rejections: Vec::new(),
+            inherits_random: false,
         }
     }
 

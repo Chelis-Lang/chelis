@@ -49,6 +49,7 @@ fn program_with_body(ret_ty: HostType, body: HostExpr) -> HostProgram {
             origin: chelis_ir::host::HostFunctionOrigin::Authored,
             specialization: None,
             summary_rejections: Vec::new(),
+            inherits_random: false,
         }],
         summary_rejections: Vec::new(),
     }

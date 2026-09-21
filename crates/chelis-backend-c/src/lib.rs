@@ -913,6 +913,7 @@ mod tests {
             origin: chelis_ir::host::HostFunctionOrigin::Authored,
             specialization: None,
             summary_rejections: Vec::new(),
+            inherits_random: false,
         };
 
         let program = HostProgram {
@@ -1019,6 +1020,7 @@ mod tests {
             origin: chelis_ir::host::HostFunctionOrigin::Authored,
             specialization: None,
             summary_rejections: Vec::new(),
+            inherits_random: false,
         };
         let program = HostProgram {
             globals: vec![],
@@ -3949,6 +3951,7 @@ int main(void) {{
             origin: chelis_ir::host::HostFunctionOrigin::Authored,
             specialization: None,
             summary_rejections: Vec::new(),
+            inherits_random: false,
         };
 
         // Adding a global binding triggers `main` emission.
@@ -4028,6 +4031,7 @@ int main(void) {{
             origin: chelis_ir::host::HostFunctionOrigin::Authored,
             specialization: None,
             summary_rejections: Vec::new(),
+            inherits_random: false,
         };
 
         // No globals → external linkage for functions (library mode)
