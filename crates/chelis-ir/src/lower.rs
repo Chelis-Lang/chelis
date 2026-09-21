@@ -17885,11 +17885,37 @@ impl<'program> LowerCtx<'program> {
                     // its last child, 3.0 (chelis#794). Composite semantics
                     // belong to ordinary lowering; this static extractor
                     // rejects them instead of guessing or dropping effects.
-                    DeepTag::Lit => match kids.first() {
-                        Some(Expr::Atom(Atom::Float(f), _)) => Some(*f),
-                        Some(Expr::Atom(Atom::Int(n), _)) => Some(*n as f64),
-                        _ => None,
-                    },
+                    DeepTag::Lit => {
+                        let raw = match kids.first() {
+                            Some(Expr::Atom(Atom::Float(f), _)) => *f,
+                            Some(Expr::Atom(Atom::Int(n), _)) => *n as f64,
+                            _ => return None,
+                        };
+                        // chelis#2316 round 2: a `lit` carries its OWN declared
+                        // dtype, and the evaluator finalizes the literal at that
+                        // dtype before any enclosing cast rounds it again.
+                        // Returning the raw `Atom::Float` skipped that step, so
+                        // `cast(cast(0.015632629860192537f32, f16), f32)` rounded
+                        // f64 -> f16 in ONE step here while eval rounded
+                        // f64 -> f32 -> f16 in two. The host lane never had the
+                        // bug because `HostExprKind::Float` already holds the
+                        // finalized value, so fixing only the cast arm left the
+                        // two compiled lanes DISAGREEING -- the lane split
+                        // `assign_uniform_like` warns about, where template
+                        // foldability becomes observable again (chelis#2120).
+                        //
+                        // An integer-typed literal is exact at its own dtype, so
+                        // finalizing it changes nothing; an unresolved type leaves
+                        // the raw value, matching the pre-existing disposition.
+                        match expr_type_metadata(expr)
+                            .and_then(|ty| static_controls::type_prim(ty, substitutions))
+                        {
+                            Some(prim) if prim.is_float() => {
+                                chelis_types::dtype_semantics::round_float_bound(prim, raw)
+                            }
+                            _ => Some(raw),
+                        }
+                    }
                     _ => None,
                 }
             }

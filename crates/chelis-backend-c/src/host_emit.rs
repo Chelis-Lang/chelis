@@ -3140,18 +3140,20 @@ impl<'a> HostEmitter<'a> {
     ///    the same exact bit pattern the DAG lane bakes, so a template that
     ///    folds and one that does not sample identically.
     ///
-    ///    This fold is value-based and does NOT model an intermediate
-    ///    rounding: a bound spelled `cast(cast(x, f16), f32)` type-checks,
-    ///    and the evaluator applies both roundings while `static_float_bound`
-    ///    applies neither. The DAG lane's `lower::extract_f64_value` has the
-    ///    identical behavior, so the two compiled lanes agree with each other
-    ///    and both differ from `eval` on that spelling. The CLASS is
-    ///    pre-existing and owned outside this change (chelis#2316); the
-    ///    host-lane INSTANCE is new, because this lane previously refused to
-    ///    build at all. Reproducing the DAG lane's exact behavior is
-    ///    deliberate: correcting one lane alone would make template
-    ///    foldability observable again, which is the defect chelis#2120
-    ///    exists to remove.
+    ///    This fold honours every rounding in a bound's cast chain, so a
+    ///    bound spelled `cast(cast(x, f16), f32)` bakes the value `eval`
+    ///    computes. Both compiled lanes route their rounding through
+    ///    `chelis_types::dtype_semantics::round_float_bound`, and the IR
+    ///    lane additionally finalizes a `lit` at its own declared dtype
+    ///    before the chain applies, so the two folds take the same roundings
+    ///    in the same order (chelis#2316).
+    ///
+    ///    Keeping the lanes identical here is not stylistic. Correcting one
+    ///    lane alone makes template foldability observable again, which is
+    ///    the defect chelis#2120 exists to remove — a first revision of the
+    ///    chelis#2316 fix did exactly that, and its regression witnesses are
+    ///    `a_suffixed_literal_inside_a_narrowing_cast_agrees_across_lanes`
+    ///    and its siblings. Change both folds together or neither.
     ///
     /// The template's element values are never read — only its shape and
     /// dtype reach the output through `chelis_host_alloc_like` — which is
@@ -9496,8 +9498,8 @@ impl BinaryElementwiseFunc {
     }
 }
 
-/// chelis#2120: recover a `uniform_like` bound's exact source value from the
-/// host expression tree.
+/// Fold a `uniform_like` bound to the exact compile-time value the emitter
+/// bakes into the generated call (chelis#2120).
 ///
 /// The checker already restricts these bounds to static literals
 /// (`chelis-types` `infer::app_operand_dtype`, whose message is the
@@ -9507,8 +9509,6 @@ impl BinaryElementwiseFunc {
 /// between that gate and this emitter, and is rejected loudly rather than
 /// defaulted — silently substituting `[0, 1)` for an unreadable bound is the
 /// exact chelis#776 failure this must not reintroduce.
-/// Fold a `uniform_like` bound to the exact compile-time value the emitter
-/// bakes into the generated call.
 ///
 /// chelis#2316: the `cast` arm used to recurse on the operand and IGNORE the
 /// node's target type entirely — it did not even make the float/int

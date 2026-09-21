@@ -33,11 +33,11 @@
 //! total IEEE-754 round-to-nearest, ties-to-even at the target width per
 //! [04-NUM-2], even when that loses integer exactness."
 //!
-//! [04-NUM-5] binds that to compile-time folding specifically: "a cast's
-//! rounding applies before any comparison reads it, including in compile-time
-//! condition folds, which SHALL either fold with exact per-dtype semantics or
-//! decline to fold." Both fold sites did neither — they folded with INEXACT
-//! semantics.
+//! That is the whole authority, and it is enough: a compiled bound is a value
+//! produced by a cast, so it owes the target width's rounding, and a literal
+//! owes its own declared width's rounding before any enclosing cast applies.
+//! [04-NUM-5] is adjacent but does NOT govern here — its normative subject is
+//! comparisons and condition folds, and a `uniform_like` bound fold is neither.
 //!
 //! ## Why one shared helper
 //!
@@ -251,37 +251,37 @@ fn bare_literal_bounds_still_agree_with_eval() {
     assert_both_lanes_match_eval("2.0f32", "5.0f32", "bare");
 }
 
-/// NEGATIVE PARITY (chelis#776): an integer-target cast changes the value by
-/// truncation and is left unresolved, so the build goes loud rather than
-/// baking a guessed truncation. Teaching the fold to honour FLOAT targets must
-/// not open this path.
+/// NEGATIVE PARITY (chelis#776): an integer-target cast bound never reaches
+/// the fold, because `uniform_like`'s bounds are typed `f32` and the checker
+/// rejects the mismatch first. This asserts the rejection AND its reason.
+///
+/// An earlier version of this test used `cast(2.7, int32)` and asserted only a
+/// non-zero exit. That was vacuous twice over: `int32` is a retired v0.18
+/// spelling that dies in the lexer, and the canonical `i32` spelling is
+/// rejected by the type checker before `extract_f64_value` ever sees it. It
+/// locked nothing. The integer-target `None` path in the fold is covered where
+/// it can actually be reached, by `integer_and_bool_targets_are_unresolved`
+/// beside `round_float_bound` in `chelis-types`.
 #[test]
-fn integer_target_cast_bound_is_still_rejected() {
+fn integer_target_cast_bound_is_rejected_by_the_checker_before_the_fold() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("int_target.ch");
-    let out_dir = dir.path().join("int_target-out");
-    write_file(
-        &path,
-        &dag_lane_program("cast(2.7, int32)", "cast(5.2, int32)"),
-    );
+    write_file(&path, &dag_lane_program("cast(2.7, i32)", "cast(5.2, i32)"));
     let out = Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args([
-            "build",
-            path.to_str().unwrap(),
-            "--target",
-            "c",
-            "--output",
-            out_dir.to_str().unwrap(),
-        ])
+        .args(["check", path.to_str().unwrap()])
         .output()
-        .expect("chelis build should run");
-    assert!(
-        !out.status.success(),
-        "an integer-target cast bound must not silently fold (chelis#776); \
-         stdout was:\n{}",
+        .expect("chelis check should run");
+    let text = format!(
+        "{}{}",
         String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        text.contains("i32") && (text.contains("f32") || text.contains("recision")),
+        "an integer-target bound must be rejected as a dtype mismatch against \
+         the f32 bound type, not folded; got:\n{text}",
     );
 }
 
@@ -306,5 +306,56 @@ fn runtime_computed_bound_is_still_rejected() {
     assert!(
         !out.status.success(),
         "a runtime-computed bound must stay rejected (chelis#776)",
+    );
+}
+
+/// REGRESSION, chelis#2316 round 2: a literal carrying an explicit narrower
+/// SUFFIX inside a further-narrowing cast.
+///
+/// The first revision of this fix taught the `cast` arm to honour its target
+/// but left `extract_f64_value`'s `Lit` arm returning the raw `Atom::Float`,
+/// ignoring the literal's own declared dtype. `eval` finalizes the literal at
+/// `f32` and then rounds to `f16` — two roundings; the fold went `f64 -> f16`
+/// in one. The C host lane was unaffected, because `HostExprKind::Float`
+/// already holds the f32-finalized value.
+///
+/// So the first revision turned a defect both compiled lanes shared into a
+/// LANE SPLIT: DAG baked `0x3c802000`, host and eval agreed on `0x3c800000`.
+/// That is the exact hazard `assign_uniform_like`'s doc comment names —
+/// correcting one lane alone makes template foldability observable again,
+/// which is what chelis#2120 exists to remove.
+///
+/// An unsuffixed literal cannot witness this: inside `cast(·, f16)` it is
+/// inferred as `f16`, which makes the raw value coincidentally correct. The
+/// suffix is required.
+#[test]
+fn a_suffixed_literal_inside_a_narrowing_cast_agrees_across_lanes() {
+    assert_both_lanes_match_eval(
+        "cast(cast(0.015632629860192537f32, f16), f32)",
+        "cast(cast(0.9, f16), f32)",
+        "suffixed",
+    );
+}
+
+/// A second witness for the same class, so the fix is not pinned to one
+/// value's rounding accident.
+#[test]
+fn a_second_suffixed_literal_witness_agrees_across_lanes() {
+    assert_both_lanes_match_eval(
+        "cast(cast(0.016761780250817537f32, f16), f32)",
+        "cast(cast(0.9, f16), f32)",
+        "suffixed2",
+    );
+}
+
+/// The same shape with the suffix at `f64`, so the literal's declared dtype is
+/// WIDER than the chain's first cast rather than narrower. Both orderings must
+/// finalize at the literal's own dtype first.
+#[test]
+fn a_f64_suffixed_literal_inside_a_narrowing_cast_agrees_across_lanes() {
+    assert_both_lanes_match_eval(
+        "cast(cast(0.015632629860192537f64, f16), f32)",
+        "cast(cast(0.9, f16), f32)",
+        "suffixed64",
     );
 }
