@@ -102,9 +102,16 @@ pub(crate) fn apply_shell_local_exclusions(
 
     let mut headings = Vec::new();
     let mut offset = 0;
+    let mut fence = None;
     for piece in upstream.split_inclusive('\n') {
         let line = piece.trim_end_matches(['\n', '\r']);
-        if let Some(level) = atx_heading_level(line) {
+        if let Some((marker, length)) = fence {
+            if closes_fenced_code_block(line, marker, length) {
+                fence = None;
+            }
+        } else if let Some(opening) = opens_fenced_code_block(line) {
+            fence = Some(opening);
+        } else if let Some(level) = atx_heading_level(line) {
             headings.push(Heading {
                 start: offset,
                 level,
@@ -262,6 +269,47 @@ fn atx_heading_level(line: &str) -> Option<usize> {
     let bytes = line.as_bytes();
     let level = bytes.iter().take_while(|b| **b == b'#').count();
     (level > 0 && level <= 6 && bytes.get(level) == Some(&b' ')).then_some(level)
+}
+
+fn opens_fenced_code_block(line: &str) -> Option<(u8, usize)> {
+    let candidate = fence_candidate(line)?;
+    let marker = *candidate.as_bytes().first()?;
+    if marker != b'`' && marker != b'~' {
+        return None;
+    }
+    let length = candidate
+        .as_bytes()
+        .iter()
+        .take_while(|byte| **byte == marker)
+        .count();
+    if length < 3 {
+        return None;
+    }
+    let info = &candidate[length..];
+    if marker == b'`' && info.as_bytes().contains(&b'`') {
+        return None;
+    }
+    Some((marker, length))
+}
+
+fn closes_fenced_code_block(line: &str, marker: u8, opening_length: usize) -> bool {
+    let Some(candidate) = fence_candidate(line) else {
+        return false;
+    };
+    let length = candidate
+        .as_bytes()
+        .iter()
+        .take_while(|byte| **byte == marker)
+        .count();
+    length >= opening_length
+        && candidate[length..]
+            .bytes()
+            .all(|byte| byte == b' ' || byte == b'\t')
+}
+
+fn fence_candidate(line: &str) -> Option<&str> {
+    let indentation = line.bytes().take_while(|byte| *byte == b' ').count();
+    (indentation <= 3).then(|| &line[indentation..])
 }
 
 /// Materialize `agent-skills/` from the embedded pinned skill set and wire the
@@ -844,5 +892,26 @@ mod tests {
         let upstream = "# Skill\n\nintro\n\n## A\na\n\n### A child\nchild\n\n## B\nb\n\n## C\nc\n";
         let filtered = apply_shell_local_exclusions(upstream, Some(&block("## A\n## C"))).unwrap();
         assert_eq!(filtered, "# Skill\n\nintro\n\n## B\nb\n\n");
+    }
+
+    #[test]
+    fn fenced_heading_text_does_not_end_the_selected_section() {
+        let upstream = "# Skill\n\n## Remove\nbefore\n\n```markdown\n\
+                        ## Example heading\n```\n\nafter\n\n## Keep\nkeep\n";
+        let filtered = apply_shell_local_exclusions(upstream, Some(&block("## Remove"))).unwrap();
+        assert_eq!(filtered, "# Skill\n\n## Keep\nkeep\n");
+    }
+
+    #[test]
+    fn selector_does_not_match_heading_text_inside_a_fence() {
+        for fence in ["```", "~~~"] {
+            let upstream = format!("# Skill\n\n{fence}markdown\n## Example heading\n{fence}\n");
+            let err = apply_shell_local_exclusions(&upstream, Some(&block("## Example heading")))
+                .unwrap_err();
+            assert!(
+                err.contains("matches no upstream heading"),
+                "{fence}: {err}"
+            );
+        }
     }
 }
