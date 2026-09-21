@@ -558,6 +558,10 @@ pub(crate) fn emit_host_abi_program(
         "chelis_list *chelis_list_append_owned(chelis_list *list, chelis_value value);".to_string(),
         "chelis_list *chelis_list_concat_owned(chelis_list *lhs, const chelis_list *rhs);"
             .to_string(),
+        // chelis#2334: the consuming `skip`. Private for the same reason,
+        // and it keeps the `chelis_list_drop` stem of the published
+        // cloning symbol it pairs with.
+        "chelis_list *chelis_list_drop_owned(chelis_list *list, int64_t count);".to_string(),
         "chelis_dict *chelis_dict_insert_owned(chelis_dict *dict, chelis_value key, chelis_value value);"
             .to_string(),
         "chelis_dict *chelis_dict_merge_owned(chelis_dict *lhs, const chelis_dict *rhs);"
@@ -5424,9 +5428,19 @@ impl<'a> HostEmitter<'a> {
                 // The published runtime symbol keeps its `chelis_list_drop`
                 // spelling: it is already unambiguous behind the `list_`
                 // prefix, and renaming a C ABI identity would retire a
-                // capacity-census row without removing any ambiguity.
+                // capacity-census row without removing any ambiguity. The
+                // consuming counterpart keeps the same stem.
+                //
+                // chelis#2334: a list the verifier moved at its last use is
+                // skipped in place by advancing the runtime's private
+                // offset; a borrowed one still clones the retained suffix.
+                let entry = if container_operand_is_moved(site, "builtin:skip")? {
+                    "chelis_list_drop_owned"
+                } else {
+                    "chelis_list_drop"
+                };
                 self.lines.push(format!(
-                    "{}{target} = chelis_list_drop({}, {});",
+                    "{}{target} = {entry}({}, {});",
                     self.indent, arg_vars[0].0, arg_vars[1].0
                 ));
                 return Ok(());

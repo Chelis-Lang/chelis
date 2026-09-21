@@ -741,6 +741,16 @@ name = "issue_2205_dict_last_use"
 package = "chelis-cli"
 name = "issue_2205_string_last_use"
 
+# chelis#2334 extends that table with `skip`, and this target carries the
+# same counted receipt for it: an N-step let-bound skip chain emitting zero
+# cloning calls, plus the pair that shows the move reaches the bound-head
+# cursor and not the inline one. The comment above applies unchanged --
+# the value-parity rows beside it pass with the row removed, and package
+# expansion is the lane that does not reliably finish.
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_2334_skip_cursor"
+
 # All five rows in this published-stdlib acceptance target are intentionally
 # ignored. A direct modification remains required change-owned coverage: the
 # worker lists with ignored tests included, rejects this mode if any active

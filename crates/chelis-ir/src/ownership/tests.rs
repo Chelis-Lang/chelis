@@ -3742,6 +3742,7 @@ fn a_consumer_row_matches_only_its_own_heap_kind() {
     for (label, class) in [
         ("builtin:append", list),
         ("builtin:concat", list),
+        ("builtin:skip", list),
         ("builtin:dict_insert", dict),
         ("builtin:dict_merge", dict),
         ("builtin:dict_remove", dict),
@@ -3759,6 +3760,15 @@ fn a_consumer_row_matches_only_its_own_heap_kind() {
         container_consumer_operand("builtin:concat", Some(dict), |_| Some(dict)),
         None,
         "a dictionary application never matches the list-kinded `concat` row"
+    );
+    // The same test on chelis#2334's row. `skip` is the one row whose
+    // result is a sub-range of its operand rather than a grown copy, so
+    // it is worth pinning that membership still turns on the kind and
+    // not on the shape.
+    assert_eq!(
+        container_consumer_operand("builtin:skip", Some(dict), |_| Some(dict)),
+        None,
+        "a dictionary application never matches the list-kinded `skip` row"
     );
     // Rejected by the result comparison: the row's kind is Dict.
     assert_eq!(
