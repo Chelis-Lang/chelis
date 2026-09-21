@@ -2547,16 +2547,17 @@ pub(super) fn infer_top_level(
         // declared concrete shape (#39).
         //
         // Implicit-copy fan-out v3 Shape A: if the initial unify fails
-        // and the body's tail position resolves to a `(var x)`
-        // reference (after walking `let`/`if`/`match` wrappers via
-        // `descend_to_tail_var`) whose declared return is owned `T`
-        // while the body's inferred type returns `Ref(T)`, retry the
+        // and the body's tail position resolves to one borrowed
+        // parameter (after walking `let`/`if`/`match` wrappers via
+        // `descend_to_tail_parameter`) whose declared return is owned
+        // `T` while the body's inferred type returns `Ref(T)`, retry the
         // unify against the declared return relaxed into `Ref(T)`.
         // This mirrors `auto_borrow_call_arg_types`'s owned-to-borrow
         // coercion at argument positions: the caller already arranged
-        // the borrow lifetime via the param itself, and the tail-var
-        // descent confirms every reachable return path returns the
-        // same parameter.  Heterogeneous returns and bodies whose tail
+        // the borrow lifetime via the param itself, and the descent
+        // confirms every reachable return path returns the same
+        // parameter's own value, by binding identity rather than by
+        // source spelling.  Heterogeneous returns and bodies whose tail
         // is an `app` or other non-var expression still fail with the
         // existing TypeMismatch.
         let scheme_body = if is_exact_op35_wrapper(&name) {

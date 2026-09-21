@@ -8,6 +8,7 @@
 pub use chelis_vocab::{RuntimeDType, RuntimeDTypeDecodeError};
 pub use element::{Bf16Bits, F16Bits};
 use libc::{c_char, c_int};
+pub use list::chelis_list;
 use memmap2::Mmap;
 use std::ffi::CStr;
 #[cfg(test)]
@@ -22,6 +23,7 @@ mod decimal_parse;
 pub mod dtype_header;
 mod element;
 mod ieee_narrow;
+mod list;
 mod metadata;
 use metadata::{
     AllocationBytes, AxisDecomposition, ByteCount, ElementCount, IterationSpace, MatmulDimension,
@@ -1140,12 +1142,6 @@ unsafe fn value_from_handle(tag: chelis_value_tag, handle: *mut libc::c_void) ->
 }
 
 #[repr(C)]
-pub struct chelis_list {
-    header: HeapHeader,
-    items: Vec<chelis_value>,
-}
-
-#[repr(C)]
 pub struct chelis_tuple {
     header: HeapHeader,
     items: Vec<chelis_value>,
@@ -1218,10 +1214,7 @@ unsafe fn require_live_kind(
 
 fn new_list(items: Vec<chelis_value>, site: &str) -> *mut chelis_list {
     let bytes = (items.capacity() as u64).saturating_mul(LEDGER_VALUE_SLOT_BYTES);
-    let pointer = Box::into_raw(Box::new(chelis_list {
-        header: HeapHeader::new(ownership_ledger::Kind::List),
-        items,
-    }));
+    let pointer = Box::into_raw(Box::new(chelis_list::new(items)));
     ledger_allocation(pointer.cast(), ownership_ledger::Kind::List, bytes, site);
     pointer
 }
@@ -1291,7 +1284,7 @@ fn resize_list_ledger(list: *mut chelis_list, site: &str) {
         return;
     }
     let bytes =
-        unsafe { ((*list).items.capacity() as u64).saturating_mul(LEDGER_VALUE_SLOT_BYTES) };
+        unsafe { ((*list).buffer_capacity() as u64).saturating_mul(LEDGER_VALUE_SLOT_BYTES) };
     if !ownership_ledger::resize(list.cast(), bytes, site) {
         runtime_fail!("compiled ownership ledger rejected list resize at {site}");
     }
@@ -1445,7 +1438,7 @@ unsafe fn finalize_heap(kind: ownership_ledger::Kind, pointer: *mut libc::c_void
         }
         ownership_ledger::Kind::List => {
             let list = Box::from_raw(pointer.cast::<chelis_list>());
-            for value in &list.items {
+            for value in list.live() {
                 chelis_value_release(*value);
             }
             finish_finalization(pointer, kind, site);
@@ -1795,10 +1788,10 @@ unsafe fn tensor_scalar_or_same_shape_validated(
 }
 
 unsafe fn int_list_value(list: *const chelis_list, index: i64, op: &str) -> i64 {
-    if list.is_null() || index < 0 || index >= (*list).items.len() as i64 {
+    if list.is_null() || index < 0 || index >= (*list).live().len() as i64 {
         runtime_fail!("{op} expects a list of i64 values");
     }
-    internal_value_as_i64((*list).items[index as usize])
+    internal_value_as_i64((*list).live()[index as usize])
 }
 
 #[no_mangle]
@@ -3828,7 +3821,7 @@ pub unsafe extern "C" fn chelis_tensor_reshape(
     let context = "chelis_tensor_reshape";
     let dtype = tensor_dtype(tensor, context);
     require_live_kind(shape.cast(), ownership_ledger::Kind::List, context);
-    let items = &(*shape).items;
+    let items = (*shape).live();
     metadata_or_fail(ShapeMetadata::checked_rank(items.len()), context);
     let axes = metadata_or_fail(ElementCount::scratch_entries(items.len(), 0), context);
     let mut extents = Vec::with_capacity(metadata_or_fail(axes.scratch_len::<i64>(), context));
@@ -4269,7 +4262,7 @@ pub unsafe extern "C" fn chelis_list_len(list: *const chelis_list) -> i64 {
     if list.is_null() {
         0
     } else {
-        (*list).items.len() as i64
+        (*list).live().len() as i64
     }
 }
 
@@ -4713,10 +4706,10 @@ pub unsafe extern "C" fn chelis_list_from_values(
 
 #[no_mangle]
 pub unsafe extern "C" fn chelis_list_index(list: *const chelis_list, index: i64) -> chelis_value {
-    if list.is_null() || index < 0 || index >= (*list).items.len() as i64 {
+    if list.is_null() || index < 0 || index >= (*list).live().len() as i64 {
         runtime_fail!("list index out of bounds");
     }
-    chelis_value_clone((*list).items[index as usize])
+    chelis_value_clone((*list).live()[index as usize])
 }
 
 #[no_mangle]
@@ -4736,7 +4729,7 @@ pub unsafe extern "C" fn chelis_list_append(
     let mut items = if list.is_null() {
         Vec::with_capacity(1)
     } else {
-        clone_items_reserving(&(*list).items, 1)
+        clone_items_reserving((*list).live(), 1)
     };
     items.push(chelis_value_clone(value));
     new_list(items, "chelis_list_append")
@@ -4763,7 +4756,7 @@ pub unsafe extern "C" fn chelis_list_push(list: *mut chelis_list, value: chelis_
     if (*list).header.strong.load(Ordering::Relaxed) != 1 {
         runtime_fail!("chelis_list_push requires exclusive ownership (refcount 1)");
     }
-    (*list).items.push(chelis_value_clone(value));
+    (*list).push(chelis_value_clone(value));
     resize_list_ledger(list, "chelis_list_push");
 }
 
@@ -4782,8 +4775,8 @@ pub unsafe extern "C" fn chelis_list_extend(list: *mut chelis_list, src: *const 
     if src.is_null() {
         return;
     }
-    for &value in &(*src).items {
-        (*list).items.push(chelis_value_clone(value));
+    for &value in (*src).live() {
+        (*list).push(chelis_value_clone(value));
     }
     resize_list_ledger(list, "chelis_list_extend");
 }
@@ -4804,7 +4797,7 @@ pub unsafe extern "C" fn chelis_list_append_owned(
         return chelis_list_append(list, value);
     }
     if (*list).header.strong.load(Ordering::Relaxed) == 1 {
-        (*list).items.push(chelis_value_clone(value));
+        (*list).push(chelis_value_clone(value));
         resize_list_ledger(list, "chelis_list_append_owned");
         return list;
     }
@@ -4831,8 +4824,8 @@ pub unsafe extern "C" fn chelis_list_concat_owned(
     let aliased = std::ptr::eq(lhs as *const chelis_list, rhs);
     if !aliased && (*lhs).header.strong.load(Ordering::Relaxed) == 1 {
         if !rhs.is_null() {
-            for &value in &(*rhs).items {
-                (*lhs).items.push(chelis_value_clone(value));
+            for &value in (*rhs).live() {
+                (*lhs).push(chelis_value_clone(value));
             }
         }
         resize_list_ledger(lhs, "chelis_list_concat_owned");
@@ -4851,10 +4844,10 @@ pub unsafe extern "C" fn chelis_list_concat(
     let mut items = if lhs.is_null() {
         Vec::new()
     } else {
-        clone_items(&(*lhs).items)
+        clone_items((*lhs).live())
     };
     if !rhs.is_null() {
-        for item in &(*rhs).items {
+        for item in (*rhs).live() {
             items.push(chelis_value_clone(*item));
         }
     }
@@ -4872,7 +4865,8 @@ pub unsafe extern "C" fn chelis_list_take(
     let items = if list.is_null() {
         Vec::new()
     } else {
-        clone_items(&(*list).items[..(*list).items.len().min(count as usize)])
+        let live = (*list).live();
+        clone_items(&live[..live.len().min(count as usize)])
     };
     new_list(items, "chelis_list_take")
 }
@@ -4893,13 +4887,80 @@ pub unsafe extern "C" fn chelis_list_drop(
         // program.
         runtime_fail!("skip requires non-negative count");
     }
-    if list.is_null() || count as usize >= (*list).items.len() {
+    if list.is_null() || count as usize >= (*list).live().len() {
         return chelis_list_empty();
     }
     new_list(
-        clone_items(&(*list).items[count as usize..]),
+        clone_items(&(*list).live()[count as usize..]),
         "chelis_list_drop",
     )
+}
+
+/// Consuming skip (chelis#2334): the in-place counterpart of
+/// `chelis_list_drop` for a uniquely owned list, with the same contract as
+/// `chelis_list_append_owned`.
+///
+/// At strong-owner count one this releases the leading `count` elements and
+/// advances the list's private offset. That is O(count) where the cloning
+/// entry point is O(length), which is what makes a recursive cursor linear
+/// instead of quadratic. The returned pointer is the input, exactly as
+/// `chelis_list_append_owned` already returns its input; [04-LIN-4] forbids
+/// a backend from inferring a returned owner from pointer equality, so the
+/// identity carries no meaning the caller may read.
+///
+/// Otherwise the cloning path runs and the consumed input is released, so a
+/// retained alias is never mutated and never sees a moved offset. The
+/// clone has its own head at zero.
+///
+/// A count at or above the length leaves an empty list, per [05-OP-32].
+#[no_mangle]
+pub unsafe extern "C" fn chelis_list_drop_owned(
+    list: *mut chelis_list,
+    count: i64,
+) -> *mut chelis_list {
+    if count < 0 {
+        // The cloning entry point's diagnostic, for the reason recorded
+        // there: the user wrote `skip`, not this symbol and not
+        // [05-OP-67]'s one-argument `drop`.
+        runtime_fail!("skip requires non-negative count");
+    }
+    if list.is_null() {
+        return chelis_list_drop(list, count);
+    }
+    if (*list).header.strong.load(Ordering::Relaxed) == 1 {
+        // Saturating rather than failing, which is where this parts
+        // company with `chelis_list_with_capacity`'s "exceeds platform
+        // size". `count` is non-negative here, so the conversion can
+        // only fail on a platform whose `usize` is narrower than `i64`,
+        // and there a count that large is above every list's length,
+        // which [05-OP-32] defines as the empty List. A capacity that
+        // large has no defined answer; a skip count does.
+        let requested = usize::try_from(count).unwrap_or(usize::MAX);
+        let retired = requested.min((*list).live().len());
+        for offset in 0..retired {
+            // Read the slot out, then release, so no borrow of the list
+            // spans the call. A released child cannot reach the list that
+            // held it, but an index costs nothing and does not rest on
+            // that.
+            let value = (*list).live()[offset];
+            chelis_value_release(value);
+        }
+        (*list).advance_head(retired);
+        (*list).compact_retired_prefix();
+        // Owed on every in-place return: a `resize` at a consuming entry
+        // point's site is the ledger's only per-call signal that the
+        // in-place arm ran rather than the cloning one, which is why
+        // `chelis_string_concat_owned` records one even for an empty
+        // right-hand side that changes no byte. A skip alone frees
+        // nothing, so most of these record the figure they already had;
+        // a compaction rebuilds the buffer at the live length, and that
+        // one records a real shrink.
+        resize_list_ledger(list, "chelis_list_drop_owned");
+        return list;
+    }
+    let result = chelis_list_drop(list, count);
+    release_list_ptr(list);
+    result
 }
 
 #[no_mangle]
@@ -4914,7 +4975,7 @@ pub unsafe extern "C" fn chelis_list_chunk(
     let items = if list.is_null() {
         &[][..]
     } else {
-        &(*list).items[..]
+        (*list).live()
     };
     for chunk in items.chunks(size as usize) {
         let inner = new_list(clone_items(chunk), "chelis_list_chunk inner");
@@ -4927,13 +4988,13 @@ pub unsafe extern "C" fn chelis_list_chunk(
 pub unsafe extern "C" fn chelis_list_flatten(list: *const chelis_list) -> *mut chelis_list {
     let mut out = Vec::new();
     if !list.is_null() {
-        for item in &(*list).items {
+        for item in (*list).live() {
             if item.tag != chelis_value_tag::CHELIS_VALUE_LIST {
                 runtime_fail!("flatten expects nested list input");
             }
             let inner = item.payload.list;
             if !inner.is_null() {
-                for value in &(*inner).items {
+                for value in (*inner).live() {
                     out.push(chelis_value_clone(*value));
                 }
             }
@@ -4980,12 +5041,12 @@ pub unsafe extern "C" fn chelis_list_zip(
     let lhs_items = if lhs.is_null() {
         &[][..]
     } else {
-        &(*lhs).items[..]
+        (*lhs).live()
     };
     let rhs_items = if rhs.is_null() {
         &[][..]
     } else {
-        &(*rhs).items[..]
+        (*rhs).live()
     };
     let mut out = Vec::new();
     for (left, right) in lhs_items.iter().zip(rhs_items.iter()) {
@@ -5000,7 +5061,7 @@ pub unsafe extern "C" fn chelis_list_zip(
 pub unsafe extern "C" fn chelis_list_enumerate(list: *const chelis_list) -> *mut chelis_list {
     let mut out = Vec::new();
     if !list.is_null() {
-        for (index, item) in (*list).items.iter().enumerate() {
+        for (index, item) in (*list).live().iter().enumerate() {
             let pair = [internal_value_from_i64(index as i64), *item];
             let tuple = chelis_tuple_from_values(pair.as_ptr(), 2);
             out.push(chelis_value_take_tuple(tuple));
@@ -5013,7 +5074,7 @@ pub unsafe extern "C" fn chelis_list_enumerate(list: *const chelis_list) -> *mut
 pub unsafe extern "C" fn chelis_dict_from_pairs(pairs: *const chelis_list) -> *mut chelis_dict {
     let mut entries: Vec<chelis_dict_entry> = Vec::new();
     if !pairs.is_null() {
-        for pair in &(*pairs).items {
+        for pair in (*pairs).live() {
             if pair.tag != chelis_value_tag::CHELIS_VALUE_TUPLE {
                 runtime_fail!("dict_of expects list entries to be tuples");
             }
@@ -5352,7 +5413,7 @@ unsafe fn nested_list_shape(list: *const chelis_list) -> Vec<i64> {
     if list.is_null() {
         runtime_fail!("Domain: chelis_tensor_from_values received a null list");
     }
-    let items = &(*list).items;
+    let items = (*list).live();
     let mut shape = vec![i64::try_from(items.len()).unwrap_or_else(|_| {
         runtime_fail!("Overflow: chelis_tensor_from_values list length exceeds i64")
     })];
@@ -5406,7 +5467,7 @@ unsafe fn flatten_exact_scalars(
     tensor: *mut chelis_tensor,
     index: &mut usize,
 ) {
-    for item in &(*list).items {
+    for item in (*list).live() {
         validate_value(*item, "chelis_tensor_from_values element");
         if item.tag == CHELIS_VALUE_LIST {
             flatten_exact_scalars(item.payload.list, dtype, tensor, index);
@@ -5516,18 +5577,18 @@ pub unsafe extern "C" fn chelis_pad_sequences(
     let batch = chelis_list_len(sequences);
     let mut width = 0usize;
     if !sequences.is_null() {
-        for item in &(*sequences).items {
+        for item in (*sequences).live() {
             if item.tag != chelis_value_tag::CHELIS_VALUE_LIST {
                 runtime_fail!("pad_sequences expects nested lists");
             }
-            width = width.max((*item.payload.list).items.len());
+            width = width.max((*item.payload.list).live().len());
         }
     }
     let width_count = metadata_or_fail(ElementCount::scratch_entries(width, 0), "padding width");
     let shape = [batch, width_count.get()];
     let out = chelis_alloc(2, shape.as_ptr(), dtype.id() as chelis_dtype);
     if !sequences.is_null() {
-        for (row, item) in (*sequences).items.iter().enumerate() {
+        for (row, item) in (*sequences).live().iter().enumerate() {
             validate_value(*item, "chelis_pad_sequences sequence");
             if item.tag != CHELIS_VALUE_LIST {
                 runtime_fail!("Domain: chelis_pad_sequences expects nested lists");
@@ -5538,8 +5599,8 @@ pub unsafe extern "C" fn chelis_pad_sequences(
                     (*out).metadata.flat_index(&[row as i64, col as i64]),
                     "padding coordinate",
                 );
-                let scalar = if col < (*seq).items.len() {
-                    let value = (*seq).items[col];
+                let scalar = if col < (*seq).live().len() {
+                    let value = (*seq).live()[col];
                     if value.tag != CHELIS_VALUE_SCALAR {
                         runtime_fail!("Domain: chelis_pad_sequences elements must be scalars");
                     }
@@ -5572,7 +5633,7 @@ pub unsafe extern "C" fn chelis_pad_sequences_to(
     let dtype = validate_scalar(pad_value, "chelis_pad_sequences_to pad value");
     let out = chelis_alloc(2, shape.as_ptr(), dtype.id() as chelis_dtype);
     if !sequences.is_null() {
-        for (row, item) in (*sequences).items.iter().enumerate() {
+        for (row, item) in (*sequences).live().iter().enumerate() {
             validate_value(*item, "chelis_pad_sequences_to sequence");
             if item.tag != chelis_value_tag::CHELIS_VALUE_LIST {
                 runtime_fail!("Domain: chelis_pad_sequences_to expects nested lists");
@@ -5585,8 +5646,8 @@ pub unsafe extern "C" fn chelis_pad_sequences_to(
                 );
                 let col = usize::try_from(col)
                     .unwrap_or_else(|_| runtime_fail!("Overflow: padding column exceeds usize"));
-                let scalar = if col < (*seq).items.len() {
-                    let value = (*seq).items[col];
+                let scalar = if col < (*seq).live().len() {
+                    let value = (*seq).live()[col];
                     if value.tag != CHELIS_VALUE_SCALAR {
                         runtime_fail!("Domain: chelis_pad_sequences_to elements must be scalars");
                     }
@@ -5610,11 +5671,11 @@ pub unsafe extern "C" fn chelis_tensor_concat(
     parts: *const chelis_list,
     axis: i32,
 ) -> *mut chelis_tensor {
-    if parts.is_null() || (*parts).items.is_empty() {
+    if parts.is_null() || (*parts).live().is_empty() {
         runtime_fail!("Domain: concat expects at least one tensor part");
     }
     let tensors = (*parts)
-        .items
+        .live()
         .iter()
         .map(|item| chelis_tensor_borrow_value(*item))
         .collect::<Vec<_>>();
@@ -7007,7 +7068,7 @@ pub unsafe extern "C" fn chelis_contiguous(t: *const chelis_tensor) -> *mut chel
 unsafe fn list_to_string(list: *const chelis_list) -> String {
     let mut out = String::from("[");
     if !list.is_null() {
-        for (i, value) in (*list).items.iter().enumerate() {
+        for (i, value) in (*list).live().iter().enumerate() {
             if i > 0 {
                 out.push_str(", ");
             }
@@ -7401,12 +7462,12 @@ mod tests {
     fn list_push_appends_in_place_with_amortized_growth() {
         unsafe {
             let list = chelis_list_with_capacity(2);
-            assert!((*list).items.capacity() >= 2);
+            assert!((*list).buffer_capacity() >= 2);
             chelis_list_push(list, internal_value_from_i64(1));
             chelis_list_push(list, internal_value_from_i64(2));
             chelis_list_push(list, internal_value_from_i64(3));
             assert_eq!(chelis_list_len(list), 3);
-            assert!((*list).items.capacity() >= 3);
+            assert!((*list).buffer_capacity() >= 3);
             let item = chelis_list_index(list, 2);
             assert_eq!(internal_value_as_i64(item), 3);
             chelis_value_release(item);
@@ -7646,18 +7707,18 @@ mod tests {
     fn append_reserves_exactly_one_slot() {
         unsafe {
             let mut list = chelis_list_empty();
-            assert_eq!((*list).items.capacity(), 0, "empty list holds no buffer");
+            assert_eq!((*list).buffer_capacity(), 0, "empty list holds no buffer");
             for expected_len in 1..=8usize {
                 let grown = chelis_list_append(list, internal_value_from_i64(1));
                 chelis_list_release(list);
                 list = grown;
-                assert_eq!((*list).items.len(), expected_len);
+                assert_eq!((*list).live().len(), expected_len);
                 assert_eq!(
-                    (*list).items.capacity(),
+                    (*list).buffer_capacity(),
                     expected_len,
                     "append must reserve exactly one slot; capacity {} at length {} \
                      means the push reallocated to double capacity",
-                    (*list).items.capacity(),
+                    (*list).buffer_capacity(),
                     expected_len
                 );
             }
@@ -7681,7 +7742,7 @@ mod tests {
             chelis_list_push(source, internal_value_from_i64(10));
             chelis_list_push(source, internal_value_from_i64(20));
             let source_len_before = chelis_list_len(source);
-            let source_buffer_before = (*source).items.as_ptr();
+            let source_buffer_before = (*source).live().as_ptr();
 
             let appended = chelis_list_append(source, internal_value_from_i64(30));
 
@@ -7695,7 +7756,7 @@ mod tests {
                 "append must not grow the list it was handed"
             );
             assert_eq!(
-                (*source).items.as_ptr(),
+                (*source).live().as_ptr(),
                 source_buffer_before,
                 "append must not reallocate the source's buffer"
             );

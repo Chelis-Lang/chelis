@@ -1381,6 +1381,76 @@ fn verified_live_byte_bound_overflow_fails_closed() {
     ));
 }
 
+/// chelis#2331 deferred the `add_live_byte_bounds` diagnostic context behind a
+/// closure so the success path stops formatting a string it discards. That
+/// text is part of the ownership error surface, so pin its exact bytes on the
+/// path that builds it: two owned heap tensors whose byte costs each convert
+/// and whose sum does not.
+///
+/// The summation inside `live_byte_cost` is what overflows here, rather than
+/// the per-operation transient accounting, because a `DirectCall` destination
+/// deliberately skips that transient (a callee's peak is composed separately).
+/// The post-operation live-set sum is therefore the first addition to see both
+/// owners.
+#[test]
+fn verified_live_byte_summation_overflow_names_the_unit() {
+    // 2^61 f32 elements is 2^63 bytes: each owner converts, the pair does not.
+    let half = 1usize << 61;
+    let body = block(
+        0,
+        Vec::new(),
+        vec![
+            define(0),
+            Op::Apply {
+                dest: Some(OwnerId(1)),
+                label: "second live tensor".into(),
+                kind: ApplyKind::DirectCall { callee: UnitId(1) },
+                schema: OperationSchema::new(Vec::new(), Some(ValueClass::Heap(HeapKind::Tensor))),
+                args: Vec::new(),
+            },
+            Op::Drop {
+                owner: Operand::move_(OwnerId(0)),
+            },
+        ],
+        Terminator::Return {
+            result: Operand::move_(OwnerId(1)),
+        },
+    );
+    let program = RawProgram {
+        units: vec![
+            Unit {
+                id: UnitId(0),
+                name: "roots".into(),
+                kind: UnitKind::Roots,
+                schedule: ScheduleState::Phase2ScopeExit,
+                callable_body: None,
+                entry: BlockId(0),
+                blocks: vec![block(0, Vec::new(), Vec::new(), Terminator::Exit)],
+                owners: BTreeMap::new(),
+            },
+            Unit {
+                id: UnitId(1),
+                name: "summed".into(),
+                kind: UnitKind::Function,
+                schedule: ScheduleState::Phase2ScopeExit,
+                callable_body: Some(CallableBody::new(BlockId(0))),
+                entry: BlockId(0),
+                blocks: vec![body],
+                owners: BTreeMap::from([
+                    (OwnerId(0), fixed_tensor_info(half)),
+                    (OwnerId(1), fixed_tensor_info(half)),
+                ]),
+            },
+        ],
+    };
+
+    let error = super::verify::verify(&program).expect_err("the live-set sum must overflow");
+    let OwnershipError::LiveByteBoundOverflow { context } = error else {
+        panic!("expected a live-byte overflow, got {error:?}");
+    };
+    assert_eq!(context, "summing live owners in `summed`");
+}
+
 #[test]
 fn verified_live_byte_bound_rejects_a_deferred_tensor_dtype() {
     let deferred = value_info(
@@ -3672,6 +3742,7 @@ fn a_consumer_row_matches_only_its_own_heap_kind() {
     for (label, class) in [
         ("builtin:append", list),
         ("builtin:concat", list),
+        ("builtin:skip", list),
         ("builtin:dict_insert", dict),
         ("builtin:dict_merge", dict),
         ("builtin:dict_remove", dict),
@@ -3689,6 +3760,15 @@ fn a_consumer_row_matches_only_its_own_heap_kind() {
         container_consumer_operand("builtin:concat", Some(dict), |_| Some(dict)),
         None,
         "a dictionary application never matches the list-kinded `concat` row"
+    );
+    // The same test on chelis#2334's row. `skip` is the one row whose
+    // result is a sub-range of its operand rather than a grown copy, so
+    // it is worth pinning that membership still turns on the kind and
+    // not on the shape.
+    assert_eq!(
+        container_consumer_operand("builtin:skip", Some(dict), |_| Some(dict)),
+        None,
+        "a dictionary application never matches the list-kinded `skip` row"
     );
     // Rejected by the result comparison: the row's kind is Dict.
     assert_eq!(

@@ -704,6 +704,9 @@ fn census_host_expr<'a>(
     };
     sites.push(expression_site);
     match &expr.kind {
+        ConcreteHostExprKind::ResultClaimScope { body, .. } => {
+            census_host_expr(body, helpers, unit, sites)?;
+        }
         ConcreteHostExprKind::Int(_)
         | ConcreteHostExprKind::Float(_)
         | ConcreteHostExprKind::Bool(_)
@@ -1125,10 +1128,12 @@ fn verify_unit(
                     local_max_live_bytes = local_max_live_bytes.maximum(add_live_byte_bounds(
                         live_byte_cost(unit, &live)?,
                         owner_byte_cost(unit, dest)?,
-                        format!(
-                            "accounting for `{}` operation o{} result",
-                            unit.name, operation.id.0
-                        ),
+                        || {
+                            format!(
+                                "accounting for `{}` operation o{} result",
+                                unit.name, operation.id.0
+                            )
+                        },
                     )?);
                 }
             }
@@ -1329,10 +1334,20 @@ fn live_heap_count(unit: &Unit, live: &BTreeSet<OwnerId>) -> usize {
         .count()
 }
 
+/// Sum two live-byte bounds, reporting `context` only when the addition
+/// overflows.
+///
+/// `context` is a closure rather than a `String` because the call inside
+/// [`live_byte_cost`] runs once per live owner per operation, and
+/// `live_byte_cost` itself runs two to four times per operation: an eagerly
+/// formatted diagnostic put roughly 39% of that function's samples in
+/// `alloc::fmt::format::format_inner` at N=640 on the chelis#1205 corpus, for
+/// a string the success path discards. The diagnostic text is unchanged
+/// (chelis#2331).
 fn add_live_byte_bounds(
     lhs: super::LiveByteBound,
     rhs: super::LiveByteBound,
-    context: String,
+    context: impl FnOnce() -> String,
 ) -> Result<super::LiveByteBound, OwnershipError> {
     match (lhs, rhs) {
         (super::LiveByteBound::Unbounded, _) | (_, super::LiveByteBound::Unbounded) => {
@@ -1344,7 +1359,7 @@ fn add_live_byte_bounds(
         (super::LiveByteBound::Exact(lhs), super::LiveByteBound::Exact(rhs)) => lhs
             .checked_add(rhs)
             .map(super::LiveByteBound::Exact)
-            .ok_or(OwnershipError::LiveByteBoundOverflow { context }),
+            .ok_or_else(|| OwnershipError::LiveByteBoundOverflow { context: context() }),
     }
 }
 
@@ -1426,11 +1441,9 @@ fn live_byte_cost(
         if info.origin != OwnerOrigin::Owned || !info.class.is_heap() {
             continue;
         }
-        result = add_live_byte_bounds(
-            result,
-            owner_byte_cost(unit, *owner)?,
-            format!("summing live owners in `{}`", unit.name),
-        )?;
+        result = add_live_byte_bounds(result, owner_byte_cost(unit, *owner)?, || {
+            format!("summing live owners in `{}`", unit.name)
+        })?;
     }
     Ok(result)
 }
@@ -1530,11 +1543,9 @@ fn compose_live_byte_bound(
         let mut bound = facts[index].local;
         for (callee, carry) in &facts[index].outgoing {
             let callee = component_bound(*callee, facts, memo, visiting)?;
-            bound = bound.maximum(add_live_byte_bounds(
-                *carry,
-                callee,
-                "composing caller carry with callee peak".to_string(),
-            )?);
+            bound = bound.maximum(add_live_byte_bounds(*carry, callee, || {
+                "composing caller carry with callee peak".to_string()
+            })?);
         }
         visiting.remove(&index);
         memo[index] = Some(bound);

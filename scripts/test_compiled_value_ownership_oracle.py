@@ -27,6 +27,7 @@ EXPECTED_FIXTURE_IDS = frozenset(
     """
     oracle-self-tests runtime-ledger-process-tests runtime-heap-kind-tests
     runtime-option-node-tests runtime-mapped-file-tests runtime-write-guard-tests
+    runtime-list-skip-tests
     aggregate-tensor-list aggregate-tensor-tuple aggregate-tensor-dict
     aggregate-tensor-adt aggregate-tensor-nested-repeated aggregate-scalar-control
     list-string-4-threshold-control list-string-5-threshold
@@ -1144,6 +1145,7 @@ class ReceiptContractTests(unittest.TestCase):
                 "runtime-option-node-tests",
                 "runtime-mapped-file-tests",
                 "runtime-write-guard-tests",
+                "runtime-list-skip-tests",
             }
         }
         context = mock.Mock(environment={})
@@ -1169,6 +1171,7 @@ class ReceiptContractTests(unittest.TestCase):
             ("runtime-option-node-tests", "ignored"),
             ("runtime-mapped-file-tests", "ignored"),
             ("runtime-write-guard-tests", "ignored"),
+            ("runtime-list-skip-tests", "ignored"),
             ("c-caller-owned-reuse", "ignored"),
             ("hip-caller-bytes-unchanged-hardware", "ignored"),
         )

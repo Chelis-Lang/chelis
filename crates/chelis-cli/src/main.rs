@@ -2192,9 +2192,9 @@ fn copy_cost_for_file(
     let deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
     let entry_deep_exprs = expanded_desugared_program(&entry_decls).map_err(boxed_string_error)?;
     let check_deep_exprs = if linked_program {
-        let live_deep_exprs =
-            drop_unreachable_eval_only_defs(deep_exprs.clone(), &entry_deep_exprs);
-        prune_build_program_to_reachable_defs(&live_deep_exprs, &entry_deep_exprs)
+        let entry_seeds = entry_seed_names(&entry_deep_exprs);
+        let live_deep_exprs = drop_unreachable_eval_only_defs(deep_exprs.clone(), &entry_seeds);
+        prune_build_program_to_reachable_defs(&live_deep_exprs, &entry_seeds)
     } else {
         deep_exprs.clone()
     };
@@ -3847,12 +3847,18 @@ fn cmd_build(
     let _linked_guard = prepared
         .is_some()
         .then(chelis_types::install_linked_program_guard);
+    // `entry_decls` is `Some` only when the entry program is a proper part of
+    // the whole program: a reef-prepared build links the library declarations
+    // ahead of the entry module's. A bare `.ch` build parses one file, and the
+    // entry program IS the whole program. Recording that identity where it is
+    // established, rather than rediscovering it by comparing two decl lists,
+    // is what lets the entry seeds below reuse the one desugar pass
+    // (chelis#2331).
     let (decls, entry_decls) = match &prepared {
-        Some(prepared) => (prepared.decls.clone(), prepared.entry_decls.clone()),
+        Some(prepared) => (prepared.decls.clone(), Some(prepared.entry_decls.clone())),
         None => {
             let source = fs::read_to_string(file)?;
-            let decls = chelis_surf::parser::parse_str(&source)?;
-            (decls.clone(), decls)
+            (chelis_surf::parser::parse_str(&source)?, None)
         }
     };
     // Wave-1 red-team M2 (#207 follow-up): align with `chelis check`
@@ -3860,15 +3866,24 @@ fn cmd_build(
     // degenerate no-op C function. For reef-prepared programs the
     // user's contribution lives in `entry_decls`; outside a reef the
     // raw `decls` carry it directly.
-    let user_decls_empty = match &prepared {
-        Some(_) => entry_decls.is_empty(),
+    let user_decls_empty = match &entry_decls {
+        Some(entry) => entry.is_empty(),
         None => decls.is_empty(),
     };
     if user_decls_empty {
         return Err(boxed_string_error(EMPTY_PROGRAM_MESSAGE.to_string()));
     }
     let full_deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
-    let entry_deep_exprs = expanded_desugared_program(&entry_decls).map_err(boxed_string_error)?;
+    // Both consumers of the entry program below read nothing from it but its
+    // top-level names, so derive those seeds once. When the entry program is
+    // the whole program they come straight off `full_deep_exprs`, which is the
+    // second desugar pass this removes (chelis#2331).
+    let entry_seeds = match &entry_decls {
+        Some(entry) => {
+            entry_seed_names(&expanded_desugared_program(entry).map_err(boxed_string_error)?)
+        }
+        None => entry_seed_names(&full_deep_exprs),
+    };
     // chelis#334: drop dead library defs that use an eval-only host builtin
     // (`process_run`) so an unused transitive dependency module — e.g.
     // chelis-std's `Std.Process` — cannot force them into the compiled
@@ -3876,9 +3891,8 @@ fn cmd_build(
     // in a compiled artifact, so they are not part of the host-library
     // surface worth preserving. A *reachable* eval-only use is left in place
     // for the build gate to reject with a clean diagnostic.
-    let full_deep_exprs = drop_unreachable_eval_only_defs(full_deep_exprs, &entry_deep_exprs);
-    let pruned_deep_exprs =
-        prune_build_program_to_reachable_defs(&full_deep_exprs, &entry_deep_exprs);
+    let full_deep_exprs = drop_unreachable_eval_only_defs(full_deep_exprs, &entry_seeds);
+    let pruned_deep_exprs = prune_build_program_to_reachable_defs(&full_deep_exprs, &entry_seeds);
     // Whether build-time pruning dropped any decls. The single predicate the
     // layered-cache and cross-module-check decisions below all key off, rather
     // than re-deriving it from `.len()` comparisons across differently-sourced
@@ -3988,8 +4002,11 @@ fn cmd_build(
     let (mut dag, mut compiled_host, mut execution_host) =
         lower_build_program_for_cli(&checked_compilation, &root_manifest, target)?;
     let tensor_root_names = checked_compilation.root_metadata().tensor_names().clone();
-    let entry_root_names =
-        lowered_root_names_from_decls(&entry_decls, &deep_exprs, checked.type_env())?;
+    let entry_root_names = lowered_root_names_from_decls(
+        entry_decls.as_deref().unwrap_or(decls.as_slice()),
+        &deep_exprs,
+        checked.type_env(),
+    )?;
     let selected = tensor_root_names
         .iter()
         .enumerate()
@@ -4306,8 +4323,8 @@ fn cmd_build_deep(
     // .dp file is the program. Treat every top-level def as an entry
     // candidate; the existing pruner (`prune_build_program_to_reachable_defs`)
     // will trim unreachable defs.
-    let entry_deep_exprs = deep_exprs.clone();
-    let pruned_deep_exprs = prune_build_program_to_reachable_defs(&deep_exprs, &entry_deep_exprs);
+    let entry_seeds = entry_seed_names(&deep_exprs);
+    let pruned_deep_exprs = prune_build_program_to_reachable_defs(&deep_exprs, &entry_seeds);
     let preserve_host_library_surface =
         if target == BuildTarget::C && pruned_deep_exprs.len() != deep_exprs.len() {
             let full_checked = checked_program_with_effects(&deep_exprs)
@@ -4344,7 +4361,7 @@ fn cmd_build_deep(
     let (mut dag, mut compiled_host, mut execution_host) =
         lower_build_program_for_cli(&checked_compilation, &root_manifest, target)?;
     let tensor_root_names = checked_compilation.root_metadata().tensor_names().clone();
-    let entry_root_names = lowered_root_names_from_exprs(&entry_deep_exprs, checked.type_env());
+    let entry_root_names = lowered_root_names_from_exprs(&deep_exprs, checked.type_env());
     let selected = tensor_root_names
         .iter()
         .enumerate()
@@ -11651,13 +11668,10 @@ const EVAL_ONLY_HOST_BUILTINS: &[&str] = chelis_ir::host::EVAL_ONLY_HOST_BUILTIN
 /// eval-only-tainted def — such a def can never reach a compiled artifact, and
 /// the transitive closure widens this to arbitrary depth. `chelis check`
 /// remains the gate for those.
-fn drop_unreachable_eval_only_defs(
-    exprs: Vec<DeepExpr>,
-    entry_exprs: &[DeepExpr],
-) -> Vec<DeepExpr> {
+fn drop_unreachable_eval_only_defs(exprs: Vec<DeepExpr>, entry_seeds: &[String]) -> Vec<DeepExpr> {
     use chelis_unord::{UnordMap, UnordSet};
 
-    let reachable = prune_build_program_to_reachable_defs(&exprs, entry_exprs)
+    let reachable = prune_build_program_to_reachable_defs(&exprs, entry_seeds)
         .iter()
         .filter_map(|expr| deep_named_decl_name(expr).map(str::to_string))
         .collect::<UnordSet<_>>();
@@ -11724,21 +11738,29 @@ fn drop_unreachable_eval_only_defs(
         .collect()
 }
 
-fn prune_build_program_to_reachable_defs(
-    exprs: &[DeepExpr],
-    entry_exprs: &[DeepExpr],
-) -> Vec<DeepExpr> {
-    // Delegate to the shared reachable-defs pruner (single source of truth in
-    // chelis-compiler-api, also used by the WI-3 graph-extraction producer).
-    // The build path seeds reachability from the entry program's top-level
-    // def names; an EMPTY seed set drops every named decl, which this path
-    // relies on (see `prune_to_reachable_seeds`).
-    let seeds = entry_exprs
+/// The entry program's top-level names, which is the whole of what the build
+/// pruners read from it.
+///
+/// Naming the seeds separately from the entry expressions lets a caller that
+/// already holds the desugared whole program reuse it when the entry program
+/// IS that program, instead of desugaring the same declarations twice
+/// (chelis#2331). An EMPTY seed set drops every named decl, which the build
+/// path relies on (see `prune_to_reachable_seeds`).
+fn entry_seed_names(entry_exprs: &[DeepExpr]) -> Vec<String> {
+    entry_exprs
         .iter()
         .filter_map(deep_top_level_expr_name)
         .map(str::to_string)
-        .collect::<Vec<_>>();
-    chelis_compiler_api::prune::prune_to_reachable_seeds(exprs.to_vec(), seeds)
+        .collect()
+}
+
+fn prune_build_program_to_reachable_defs(
+    exprs: &[DeepExpr],
+    entry_seeds: &[String],
+) -> Vec<DeepExpr> {
+    // Delegate to the shared reachable-defs pruner (single source of truth in
+    // chelis-compiler-api, also used by the WI-3 graph-extraction producer).
+    chelis_compiler_api::prune::prune_to_reachable_seeds(exprs.to_vec(), entry_seeds.to_vec())
 }
 
 /// Every `var` reference name in `expr`. Delegates to the shared traversal in
@@ -12813,7 +12835,8 @@ mod batch_fallback_reason_tests {
 #[cfg(test)]
 mod eval_only_pruning_tests {
     use super::{
-        deep_named_decl_name, drop_unreachable_eval_only_defs, expanded_desugared_program,
+        deep_named_decl_name, drop_unreachable_eval_only_defs, entry_seed_names,
+        expanded_desugared_program,
     };
 
     fn desugar(src: &str) -> Vec<chelis_deep::ast::Expr> {
@@ -12834,7 +12857,7 @@ mod eval_only_pruning_tests {
         let entry = desugar(
             "def main(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[2, 2, f32] = matmul(&x, &w)\n",
         );
-        let kept = drop_unreachable_eval_only_defs(full, &entry);
+        let kept = drop_unreachable_eval_only_defs(full, &entry_seed_names(&entry));
         let names: Vec<&str> = kept.iter().filter_map(deep_named_decl_name).collect();
         assert!(
             names.contains(&"main"),
@@ -12853,7 +12876,7 @@ mod eval_only_pruning_tests {
     fn keeps_reachable_eval_only_def_for_the_gate() {
         let exprs =
             desugar("def main() -> (i64, string, string) = process_run(\"echo\", [\"hi\"])\n");
-        let entry = exprs.clone();
+        let entry = entry_seed_names(&exprs);
         let kept = drop_unreachable_eval_only_defs(exprs, &entry);
         let names: Vec<&str> = kept.iter().filter_map(deep_named_decl_name).collect();
         assert!(
