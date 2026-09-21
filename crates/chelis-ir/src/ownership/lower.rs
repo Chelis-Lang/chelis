@@ -1024,17 +1024,30 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         expr: &ConcreteHostExpr,
         tail: Option<usize>,
     ) -> Result<Value, OwnershipError> {
-        // A span-less node keeps the nearest enclosing span rather than
-        // clearing it: the enclosing source region still locates the owner,
-        // and host lowering leaves `span_id` empty on plenty of interior
-        // nodes (chelis#2122).
+        self.with_expr_span(expr, |lowerer| {
+            lowerer.with_site(HostSiteKind::Expression, |lowerer| {
+                lowerer.lower_expr_at_site(expr, tail)
+            })
+        })
+    }
+
+    /// Record `expr`'s span for the owners minted while lowering it, saved and
+    /// restored exactly as `active_site` is. A span-less node keeps the nearest
+    /// enclosing span rather than clearing it: the enclosing source region
+    /// still locates the owner, and host lowering leaves `span_id` empty on
+    /// plenty of interior nodes (chelis#2122). Every path that lowers an
+    /// expression goes through here, including direct-call arguments, which
+    /// reach `lower_expr_at_site` without passing through `lower_expr`.
+    fn with_expr_span<T>(
+        &mut self,
+        expr: &ConcreteHostExpr,
+        action: impl FnOnce(&mut Self) -> Result<T, OwnershipError>,
+    ) -> Result<T, OwnershipError> {
         let previous = self.active_span.clone();
         if expr.span_id.is_some() {
             self.active_span = expr.span_id.clone();
         }
-        let result = self.with_site(HostSiteKind::Expression, |lowerer| {
-            lowerer.lower_expr_at_site(expr, tail)
-        });
+        let result = action(self);
         self.active_span = previous;
         result
     }
@@ -1531,7 +1544,9 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                         actual: render_type(&actual),
                     });
                 }
-                lowerer.lower_expr_at_site(argument.expr, None)
+                lowerer.with_expr_span(argument.expr, |lowerer| {
+                    lowerer.lower_expr_at_site(argument.expr, None)
+                })
             })
         })
     }

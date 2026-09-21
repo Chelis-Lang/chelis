@@ -1779,25 +1779,89 @@ fn string_slice_and_string_trim_never_consume_their_operand() {
     );
 }
 
-/// chelis#2122: ownership owners carry the Surf span of the expression they
-/// were minted for, so an ownership diagnostic can name a source region and
-/// not only an owner id. The program below is real Surf, so the span ids come
-/// from the parser through Deep `meta["span"]` and host lowering, not from a
-/// synthetic fixture.
+/// chelis#2122: an owner carries the Surf span of the expression it was minted
+/// for. Real Surf, so the ids come from the parser through Deep `meta["span"]`
+/// and host lowering rather than a synthetic fixture, and every assertion
+/// resolves the span back to the source bytes it points at: a span that merely
+/// exists proves nothing, and a constant one would pass such a check.
 #[test]
 fn lowered_owners_carry_the_surf_span_of_their_defining_expression() {
-    let rendered = verified_source(
-        "module M\nexport (pick)\ndef pick(flag: bool) -> string = {\n  label = \"carry\"\n  if flag then label else \"other\"\n}\n",
-    )
-    .render();
+    let source = "module M\nexport (build)\ndef build(flag: bool) -> (string, i64) = {\n  head = if flag then \"a\" else \"b\"\n  (head, 1i64)\n}\n";
+    let rendered = verified_source(source).render();
+    let spans = owner_spans(&rendered, source);
 
-    let spans = rendered.match_indices("@surf:").count();
-    assert!(
-        spans > 0,
-        "at least one owner carries a surf span after lowering real Surf:\n{rendered}"
+    let texts = spans
+        .iter()
+        .map(|(_, text)| text.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        texts,
+        vec!["\"a\"", "\"b\"", "1i64"],
+        "each owner points at its own defining expression, in block order:\n{rendered}"
     );
-    assert!(
-        !rendered.contains("@surf:]") && !rendered.contains("@<"),
-        "a span is rendered as `@surf:start..end`, never empty or a placeholder:\n{rendered}"
+}
+
+/// chelis#2122: sibling expressions do not share a span. The active span is
+/// restored after each expression, so an owner minted later cannot inherit the
+/// region of an earlier sibling.
+#[test]
+fn sibling_expressions_keep_their_own_spans() {
+    let source = "module M\nexport (pair)\ndef pair() -> (string, string) = {\n  first = \"alpha\"\n  second = \"omega\"\n  (first, second)\n}\n";
+    let rendered = verified_source(source).render();
+
+    let texts = owner_spans(&rendered, source)
+        .into_iter()
+        .map(|(_, text)| text)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        texts,
+        vec!["\"alpha\"".to_string(), "\"omega\"".to_string()],
+        "the second binding keeps its own region rather than the first's:\n{rendered}"
     );
+}
+
+/// chelis#2122: an argument of a direct call to a user-defined `def` reaches
+/// lowering without passing through `lower_expr`, so it needs the same span
+/// handling. Each argument points at itself, not at the whole call.
+#[test]
+fn direct_call_arguments_carry_their_own_spans() {
+    let source = "module M\nexport (go)\ndef my_take(a: string, b: string) -> string = string_concat(a, b)\ndef go() -> string = my_take(\"alpha\", \"omega\")\n";
+    let rendered = verified_source(source).render();
+
+    let texts = owner_spans(&rendered, source)
+        .into_iter()
+        .map(|(_, text)| text)
+        .collect::<Vec<_>>();
+    assert!(
+        texts.contains(&"\"alpha\"".to_string()) && texts.contains(&"\"omega\"".to_string()),
+        "both arguments point at themselves rather than at the enclosing call: {texts:?}\n{rendered}"
+    );
+}
+
+/// Resolve every `%owner…@surf:start..end` label in a rendered dump back to the
+/// source bytes the span points at, so tests assert on regions rather than on
+/// the presence of a span.
+fn owner_spans(rendered: &str, source: &str) -> Vec<(String, String)> {
+    let mut found = Vec::new();
+    for (index, _) in rendered.match_indices("@surf:") {
+        let head = &rendered[..index];
+        let owner_start = head.rfind('%').expect("a span follows an owner label");
+        let owner = head[owner_start..].to_string();
+        let rest = &rendered[index + "@surf:".len()..];
+        let end = rest
+            .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+            .unwrap_or(rest.len());
+        let (start_text, end_text) = rest[..end]
+            .split_once("..")
+            .unwrap_or_else(|| panic!("span reads start..end, got {:?}", &rest[..end]));
+        let start: usize = start_text.parse().expect("span start is a byte offset");
+        let stop: usize = end_text.parse().expect("span end is a byte offset");
+        assert!(
+            stop <= source.len() && start <= stop,
+            "span {start}..{stop} lies inside the source (len {})",
+            source.len()
+        );
+        found.push((owner, source[start..stop].to_string()));
+    }
+    found
 }

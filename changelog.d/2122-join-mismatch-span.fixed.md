@@ -7,9 +7,13 @@ block b1 in `roots` is reached with inconsistent live owners: live only on this 
 ```
 
 Ownership lowering records the span of the expression an owner is minted for,
-taken from `HostExpr::span_id` per `spec/design/chelis_span_survival.md`. A
-node without its own span keeps the nearest enclosing one, since that region
-still locates the owner. An owner minted outside any expression, such as a unit
-parameter, prints as before with no span and no placeholder.
+taken from `HostExpr::span_id` per `spec/design/chelis_span_survival.md`, on
+every path that lowers an expression, including the arguments of a direct call
+to a user-defined `def`. A node without its own span keeps the nearest
+enclosing one, since that region still locates the owner. An owner minted
+outside any expression, such as a unit parameter, prints as before with no span
+and no placeholder, as does one whose producer issued an empty span id.
 
-The same label is used by the ownership dump, so spans appear there too.
+The ownership dump shares the same label, so owner-definition lines show spans
+there too. Lines for applications, copies and block parameters print the bare
+owner id as before.
