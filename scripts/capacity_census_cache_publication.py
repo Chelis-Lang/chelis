@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -24,6 +25,40 @@ class CachePublicationError(GraphError):
 def require(condition, message):
     if not condition:
         raise CachePublicationError(message)
+
+
+def seal_compiled_artifacts(
+    directory: Path, artifacts: dict[str, str]
+) -> dict[str, str]:
+    """Copy one build's exact artifacts out of Cargo's mutable cache."""
+
+    sources = {name: Path(filename) for name, filename in artifacts.items()}
+    filenames = [source.name for source in sources.values()]
+    require(
+        len(filenames) == len(set(filenames)),
+        "duplicate compiled artifact filename",
+    )
+    sealed_directory = directory / "sealed-dependencies"
+    sealed_directory.mkdir(parents=True, exist_ok=True)
+    sealed = {}
+    for name, source in sorted(sources.items()):
+        require(
+            source.is_file() and not source.is_symlink(),
+            f"missing or symlinked compiled cache publication artifact: {source}",
+        )
+        destination = sealed_directory / source.name
+        require(
+            not destination.is_symlink(),
+            f"sealed cache publication artifact is a symlink: {destination}",
+        )
+        before = hashlib.sha256(source.read_bytes()).hexdigest()
+        shutil.copy2(source, destination)
+        require(
+            hashlib.sha256(destination.read_bytes()).hexdigest() == before,
+            f"compiled cache publication artifact changed while sealing: {source}",
+        )
+        sealed[name] = str(destination)
+    return sealed
 
 
 @dataclass(frozen=True)
@@ -334,6 +369,8 @@ def verify_cache_publication(root: Path, target: Path) -> VerifiedCachePublicati
     require(set(artifacts) == required, "missing compiled cache dependencies")
     require(test_binary is not None, "missing cache runtime binary")
     artifacts["runtime_test"] = test_binary
+    artifacts = seal_compiled_artifacts(directory, artifacts)
+    test_binary = artifacts["runtime_test"]
     hashes = fixture_hashes + tuple(
         (filename, hashlib.sha256(Path(filename).read_bytes()).hexdigest())
         for _, filename in sorted(artifacts.items())
