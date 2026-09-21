@@ -2207,6 +2207,7 @@ fn explicit_v018_migration_leaves_a_shadowed_drop_and_a_wrong_arity_call_alone()
         "    | None => xs\n",
         "  }\n",
         "wrong_arity = drop(xs, 1i64, 2i64)\n",
+        "wrong_arity_piped = xs |> drop(1i64, 2i64)\n",
     );
     assert_eq!(migrate_source_v018(legacy).unwrap(), legacy);
 }

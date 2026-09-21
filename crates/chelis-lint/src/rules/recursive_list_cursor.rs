@@ -16,7 +16,7 @@
 //! `drop` is [05-OP-67]'s linearity consume and is never this rule's subject.
 
 use crate::{Context, Rule, Severity, Surface, Violation};
-use chelis_surf::ast::{Decl, Expr, LetPattern, Param};
+use chelis_surf::ast::{Decl, Expr, LetPattern, Param, Pattern};
 
 pub struct RecursiveListCursor;
 
@@ -172,10 +172,39 @@ fn collect_bound_names(expr: &Expr, out: &mut Vec<String>) {
         Expr::Lambda(params, _, _) => {
             out.extend(params.iter().map(|param| param.name.clone()));
         }
+        Expr::Match(_, arms, _) => {
+            for arm in arms {
+                collect_match_pattern_names(&arm.pattern, out);
+            }
+        }
         _ => {}
     }
     for child in children(expr) {
         collect_bound_names(child, out);
+    }
+}
+
+/// Names a match arm binds. Without these a parameter rebound by an arm
+/// binder is still compared against the recursive call, which contradicts the
+/// exclusion's own reason for existing.
+fn collect_match_pattern_names(pattern: &Pattern, out: &mut Vec<String>) {
+    match pattern {
+        Pattern::Var(name, _) => out.push(name.clone()),
+        Pattern::Wildcard(_) | Pattern::Lit(..) => {}
+        Pattern::Constructor(_, inner, _) | Pattern::Tuple(inner, _) => {
+            for pattern in inner {
+                collect_match_pattern_names(pattern, out);
+            }
+        }
+        Pattern::Record(_, fields, _) => {
+            for (_, inner) in fields {
+                collect_match_pattern_names(inner, out);
+            }
+        }
+        Pattern::As(name, inner, _) => {
+            out.push(name.clone());
+            collect_match_pattern_names(inner, out);
+        }
     }
 }
 
@@ -400,6 +429,21 @@ mod tests {
             "  xs = append(out, cast(1, i64))\n",
             "  if eq(len(xs), cast(0, i64)) then out else walk(skip(xs, cast(1, i64)), out)\n",
             "}\n",
+        );
+        assert!(violations(src).is_empty());
+    }
+
+    #[test]
+    fn ignores_a_definition_whose_cursor_parameter_is_rebound_by_a_match_binder() {
+        // A match arm binds `xs` for its body, exactly as a block binding or a
+        // lambda parameter would, so the `skip(xs, 1)` in the recursive call
+        // is not provably a slice of the parameter.
+        let src = concat!(
+            "def walk(xs: List[i64], out: List[i64]) -> List[i64] =\n",
+            "  match head_of(out) with {\n",
+            "    | Some(xs) => walk(skip(xs, cast(1, i64)), out)\n",
+            "    | None => out\n",
+            "  }\n",
         );
         assert!(violations(src).is_empty());
     }

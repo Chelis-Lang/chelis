@@ -286,14 +286,24 @@ fn migrate_expr(expr: &mut Expr, shadow: DropShadow) {
             // (spec/01 section 3.6), so `xs |> drop(1)` is the two-argument
             // list slice written with one argument, while a bare `xs |> drop`
             // stage is the one-argument consume and keeps its name.
+            //
+            // The stage's own head is decided HERE and the walk continues into
+            // its parts rather than into the stage: `migrate_expr` on the
+            // stage would reach the `Expr::Apply` arm, which reads the written
+            // argument count as the whole arity and would rename the head of
+            // `xs |> drop(a, b)` -- a three-argument call that is neither
+            // operation.
             migrate_expr(seed, shadow);
             for stage in stages.iter_mut() {
-                if let Expr::Apply(function, args, _) = stage
-                    && args.len() == 1
-                {
+                let Expr::Apply(function, args, _) = stage else {
+                    migrate_expr(stage, shadow);
+                    continue;
+                };
+                if args.len() == 1 {
                     rename_drop_head(function, shadow);
                 }
-                migrate_expr(stage, shadow);
+                migrate_expr(function, shadow);
+                args.iter_mut().for_each(|arg| migrate_expr(arg, shadow));
             }
         }
         Expr::If(condition, then_expr, else_expr, _) => {
