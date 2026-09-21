@@ -9,7 +9,7 @@ use chelis_backend_hip::HipCodegenResult;
 use chelis_deep::Expr as DeepExpr;
 use chelis_ir::dag::{
     ComparisonKind, Dag, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStepOp,
-    LogicalKind, NodeId, RiscOp, RtDim, TensorType,
+    LogicalKind, NodeId, ReduceWindowKind, RiscOp, RtDim, TensorType,
 };
 use chelis_ir::eval;
 use chelis_surf::ast::{
@@ -4831,6 +4831,135 @@ fn unsupported_gate_error(
     ))
 }
 
+fn reduction_sum_source(dag: &Dag, result: NodeId) -> Option<(usize, NodeId)> {
+    let mut node = dag.get(result)?;
+    if matches!(node.op, RiscOp::Cast { .. }) {
+        node = dag.get(*node.inputs.first()?)?;
+    }
+    let RiscOp::Sum { axis, .. } = &node.op else {
+        return None;
+    };
+    Some((*axis, *node.inputs.first()?))
+}
+
+/// Recognize the exact Tier-2 graph emitted for [05-OP-11] `mean`.
+///
+/// Mean intentionally remains a composition rather than gaining a duplicate
+/// IR identity. Its numerator is a reduction sum (optionally finalized by a
+/// Cast), and its divisor is either the statically shaped extent Const or the
+/// runtime extent represented by a sum of a shape-dependent ones tensor.
+/// Requiring those shape-dependency edges keeps this check from capturing an
+/// authored `div(sum(x), y)` expression.
+fn is_lowered_mean_result(dag: &Dag, node: &chelis_ir::dag::DagNode) -> bool {
+    if !matches!(node.op, RiscOp::Div) || node.inputs.len() != 2 {
+        return false;
+    }
+
+    let numerator = node.inputs[0];
+    let Some((axis, source)) = reduction_sum_source(dag, numerator) else {
+        return false;
+    };
+    let Some(divisor) = dag.get(node.inputs[1]) else {
+        return false;
+    };
+
+    if matches!(divisor.op, RiscOp::Const { .. }) && divisor.shape_deps.contains(&numerator) {
+        return true;
+    }
+
+    let Some((divisor_axis, divisor_source)) = reduction_sum_source(dag, divisor.id) else {
+        return false;
+    };
+    divisor_axis == axis
+        && dag.get(divisor_source).is_some_and(|ones| {
+            matches!(ones.op, RiscOp::Const { .. }) && ones.shape_deps.contains(&source)
+        })
+}
+
+fn inexact_device_reduction(
+    dag: &Dag,
+    node: &chelis_ir::dag::DagNode,
+) -> Option<(&'static str, Prim)> {
+    let operand_precision = || {
+        node.inputs
+            .first()
+            .and_then(|input| dag.get(*input))
+            .map(|input| input.output_type.precision)
+            .unwrap_or(node.output_type.precision)
+    };
+
+    if is_lowered_mean_result(dag, node) {
+        return Some(("mean", operand_precision()));
+    }
+
+    match &node.op {
+        RiscOp::MaxReduce { .. } => Some(("max_reduce", operand_precision())),
+        RiscOp::MinReduce { .. } => Some(("min_reduce", operand_precision())),
+        RiscOp::Argmax { .. } => Some(("argmax_reduce", operand_precision())),
+        RiscOp::Argmin { .. } => Some(("argmin_reduce", operand_precision())),
+        RiscOp::ReduceWindow {
+            reducer: ReduceWindowKind::Max,
+            ..
+        } => Some(("reduce_window_max", operand_precision())),
+        RiscOp::ReduceWindow {
+            reducer: ReduceWindowKind::Min,
+            ..
+        } => Some(("reduce_window_min", operand_precision())),
+        RiscOp::ReduceWindowGrad {
+            reducer: ReduceWindowKind::Max,
+            ..
+        } => Some(("reduce_window_max adjoint", operand_precision())),
+        RiscOp::ReduceWindowGrad {
+            reducer: ReduceWindowKind::Min,
+            ..
+        } => Some(("reduce_window_min adjoint", operand_precision())),
+        _ => None,
+    }
+}
+
+/// Fence device reduction cells whose complete exact semantics remain owned
+/// by chelis#2339. C is the canonical implemented lane and must pass through.
+///
+/// Only dtypes admitted by the target capability table receive this
+/// operation-specific receipt. A non-admitted dtype retains its earlier,
+/// target-wide typed rejection instead of being misclassified as #2339 work.
+pub fn reject_inexact_device_reduction_cells(
+    dag: &Dag,
+    target: BuildTarget,
+) -> std::result::Result<(), CompilerError> {
+    let device_target = match target {
+        BuildTarget::C => return Ok(()),
+        BuildTarget::Hip => Target::Hip,
+        BuildTarget::Metal => Target::Metal,
+    };
+    let admitted = crate::target_capability::tensor_capable_prims(device_target);
+    for node in dag.nodes() {
+        let Some((operation, precision)) = inexact_device_reduction(dag, node) else {
+            continue;
+        };
+        if !admitted.contains(&precision) {
+            continue;
+        }
+        let target = target.as_str();
+        return Err(unsupported_gate_error(
+            format!(
+                "`chelis build --target {target}` does not yet support exact `{operation}` \
+                 at lowered node {} for `{}`; use `--target c` for the implemented \
+                 [05-OP-11..16]/[05-RWIN-1..2] semantics",
+                node.id.0,
+                precision.name(),
+            ),
+            target,
+            chelis_types::unimplemented_rejection!(
+                2339,
+                "the admitted HIP/Metal reduction cell lacks exact stored-dtype selection, \
+                 empty-domain, index, or extrema-adjoint behavior; use the C target"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Reject direct host-runtime-only calls on checked Deep before host lowering
 /// descends into their callback arguments. This preserves the owning builtin
 /// diagnostic even when an argument is itself intentionally unrepresentable
@@ -5165,6 +5294,7 @@ pub fn reject_unsupported_metal_ops_in_host_program(
 /// provides the typed public diagnostic without allowing CLI/compiler-api
 /// copies to drift.
 pub fn reject_unsupported_metal_ops(dag: &Dag) -> std::result::Result<(), CompilerError> {
+    reject_inexact_device_reduction_cells(dag, BuildTarget::Metal)?;
     for node in dag.nodes() {
         let direct_nonnumeric = match &node.op {
             RiscOp::Compare(kind) => Some(format!("comparison `{}`", kind.surf_name())),
@@ -5553,6 +5683,7 @@ const HIP_UNSUPPORTED_DTYPE_HINT: &str =
     "this tensor dtype is not admitted by the HIP target; see spec/04-type-system.md §1.1.3";
 
 pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), CompilerError> {
+    reject_inexact_device_reduction_cells(dag, BuildTarget::Hip)?;
     for node in dag.nodes() {
         let fused_direct_ops = match &node.op {
             RiscOp::FusedElem { ops } => Some(ops),
@@ -8425,11 +8556,10 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
             .expect("f32 reduce_window must be allowed");
     }
 
-    // --- reduce_window: HIP build rejects the node cleanly (no todo! panic) ---
+    // --- reduce_window extrema: HIP build returns the #2339 typed fence ---
     //
-    // HIP windowed-reduction codegen is excluded by [05-RWIN-2].
-    // The build must reject a `ReduceWindow` node with a clean
-    // `unsupported_feature` error before it reaches the launch-emit `todo!`.
+    // The build must reject an inexact `ReduceWindow` extrema node with a
+    // typed `unsupported_feature` receipt before it reaches device codegen.
     #[test]
     fn hip_rejects_reduce_window_node_with_clean_message() {
         let dag = reduce_window_dag_with_precision(chelis_types::types::Prim::F32);
@@ -8440,7 +8570,7 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
             message.contains("reduce_window") && message.contains("--target hip"),
             "unexpected message: {message}"
         );
-        assert!(message.contains("deliberate [05-RWIN-2]:"));
+        assert!(message.contains("unimplemented chelis#2339:"));
         assert_eq!(
             err.errors[0].kind(),
             chelis_vocab::DiagnosticKind::UnsupportedFeature
@@ -8448,7 +8578,7 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
     }
 
     #[test]
-    fn hip_rejects_reduce_window_grad_with_the_same_target_authority() {
+    fn hip_rejects_reduce_window_extrema_grad_with_issue_2339_authority() {
         use chelis_ir::dag::ReduceWindowKind;
 
         let mut dag = Dag::new();
@@ -8480,7 +8610,7 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
             .expect_err("HIP must reject reduce_window adjoint codegen");
         let message = &err.errors[0].message;
         assert!(message.contains("ReduceWindowGrad"), "{message}");
-        assert!(message.contains("deliberate [05-RWIN-2]:"), "{message}");
+        assert!(message.contains("unimplemented chelis#2339:"), "{message}");
     }
 
     /// chelis#616: a runtime (node-valued) reshape target extent is C-only;
