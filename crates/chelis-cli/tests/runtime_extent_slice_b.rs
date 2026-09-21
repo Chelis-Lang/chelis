@@ -1023,8 +1023,8 @@ fn an_entry_obligation_witness_emits_the_legacy_hip_guard_pending_1786() {
 /// asserting a `Load` source for every occurrence, with a `panic!` backstop
 /// (`require_load_source`) for the op-declared case on the reasoning that
 /// `reject_unsupported_hip_ops` had already refused it. It had not:
-/// `examples/transformer_block.ch` reaches that panic on `main`, so the whole
-/// program emits nothing on HIP.
+/// A reduction-free expand-over-stride witness reaches that old panic shape
+/// without depending on target-local reduction support.
 ///
 /// The derived interface witnesses contain only `Load` sources by
 /// construction - `symbolic_bindings_interface` maps `ExternalAxis` members
@@ -1039,12 +1039,12 @@ fn an_entry_obligation_witness_emits_the_legacy_hip_guard_pending_1786() {
 /// with it, so what this row pins now is that the program still emits.
 #[test]
 fn an_op_declared_witness_reaches_the_hip_prologue_without_panicking() {
-    let example = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("workspace root")
-        .join("examples/transformer_block.ch");
     let dir = tempfile::tempdir().expect("tempdir");
+    let source = "module Repro.ExpandOverStrideHip\n\
+sig f[n, seq]: tensor[n, f32] -> tensor[3, seq, f32]\n\
+def f(x) = insert(stride(x, 2i64), 0i32, 3i64)\n\
+out = f(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32]))\n";
+    let example = fixture(&dir, "expand_stride_hip.ch", source);
     let out_dir = dir.path().join("hip-out");
     let build = Command::cargo_bin("chelis")
         .expect("chelis")
@@ -1069,7 +1069,7 @@ fn an_op_declared_witness_reaches_the_hip_prologue_without_panicking() {
         build.status.success(),
         "the HIP build must succeed: {stderr}"
     );
-    let emitted = fs::read_to_string(out_dir.join("transformer_block_hip.cpp"))
+    let emitted = fs::read_to_string(out_dir.join("expand_stride_hip_hip.cpp"))
         .expect("HIP host source is written");
     assert!(
         emitted.contains("chelis_device_metadata seq = chelis_tensor_shape("),

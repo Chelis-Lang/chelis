@@ -8609,7 +8609,7 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
         let err = reject_unsupported_hip_ops(&dag)
             .expect_err("HIP must reject reduce_window adjoint codegen");
         let message = &err.errors[0].message;
-        assert!(message.contains("ReduceWindowGrad"), "{message}");
+        assert!(message.contains("reduce_window_max adjoint"), "{message}");
         assert!(message.contains("unimplemented chelis#2339:"), "{message}");
     }
 
