@@ -303,7 +303,7 @@ effects even where an execution lane has not implemented them.
 ### 3.3 Higher-order list / sequence combinators
 
 `map`, `filter`, `fold`, `scan`, `partition`, `flat_map`, `flatten`, `zip`,
-`enumerate`, `chunk`, `take`, `drop`, `range`, `append`, `index`, `len`, `concat`.
+`enumerate`, `chunk`, `take`, `skip`, `range`, `append`, `index`, `len`, `concat`.
 Higher-order ones (`map`/`filter`/`fold`/`scan`/`partition`/`flat_map`) take callback
 functions — the DAG has no function-pointer node, which is why they are host-lane.
 The host lane is eager (no lazy list fusion).
@@ -420,7 +420,7 @@ Tier-2 DAG:   eq neq lt gt lte gte and or not relu sigmoid tanh silu gelu
 Host lane:    cumsum sort einsum diagonal trace where clamp concat split scatter
               pad_sequences pad_sequences_to tensor_scan
               map filter fold scan partition flat_map flatten zip enumerate chunk
-              take drop range append index len
+              take skip range append index len
               dict_of dict_get dict_contains dict_remove dict_insert dict_merge
               dict_keys dict_values dict_entries
               char_code char_from_code string_len string_concat string_slice string_contains
@@ -623,7 +623,7 @@ chelis-std 0.4.0 — there is no upstream NN fallback. Use these; do not reimple
 | `Std.Init.{Random,Xavier,Kaiming,XavierExt}` | `normal_like`, `kaiming_*`, `xavier_*`, `trunc_normal` (seeded, Box-Muller; handlers advance only for draws on the executed runtime path, including computed/nested conditionals inside `grad`) |
 | `Std.Sort` | `sort` (rank-polymorphic numeric tensor; returns sorted values and `i64` indices) |
 | `Std.Scan` | `scan_list` (list lane; tensor lane is the `tensor_scan` builtin) |
-| `Std.Index` | `list_index`, `take_list`, `drop_list` (scalar/tensor/nested/multi-target List adjoints preserve runtime length/positions through composed calls in eval and generated C) |
+| `Std.Index` | `list_index`, `take_list`, `skip_list` (scalar/tensor/nested/multi-target List adjoints preserve runtime length/positions through composed calls in eval and generated C) |
 | `Std.Io.{Csv,Json,Parquet,Safetensors}` | `read_csv`/`to_csv`/`write_csv`, `load_json`/`parse_json`/`to_json`/`write_json` (+ exported `Json` constructors/accessors and `try_*` twins). Ordinary package defs, so they run under **`chelis build`**. `Std.Io.Json` is the sole public JSON value surface: integer-form tokens use `JsonInt(i64)` or exact `JsonBigInt(string)` without a float funnel, while decimal/exponent tokens use `JsonFloat(f64)`; object serialization recursively orders keys by Unicode scalar-value sequence, escapes every RFC 8259 control character, decodes full `\uXXXX` escapes including valid surrogate pairs, and rejects malformed or unpaired sequences. Caveat: `to_csv` rejects CR/LF in fields (line-based reader cannot round-trip them, chelis#954). `save_tensors`/`load_tensors`, … |
 | `Std.Text` | `join(parts, sep)` |
 | `Std.Test` | `assert_*`, `assert_close*`, `assert_shape`, `fail` |

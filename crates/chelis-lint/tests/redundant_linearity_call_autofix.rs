@@ -508,7 +508,7 @@ result = f(to_tensor([1.0, 2.0]))
 /// `check_mirrors_fix` suppresses the warning because no safe rewrite
 /// is on offer. Coral observed this against 0.7.7 in
 /// `src/internal/hamt.ch` and `src/internal/window.ch` and worked
-/// around it by writing `drop(xs, one_i64())` directly.
+/// around it by writing `skip(xs, one_i64())` directly.
 #[test]
 fn f12_warning_suppressed_on_2arg_list_drop_in_pipe_form() {
     let dir = tempdir().expect("tempdir");

@@ -2951,20 +2951,20 @@ impl<'a> EvalContext<'a> {
                     list.into_iter().take(count as usize).collect(),
                 ))
             }
-            "drop" => match args.len() {
-                1 => Ok(RuntimeValue::Unit),
-                2 => {
-                    let list = expect_list_arg(args, 0)?;
-                    let count = expect_int_arg(args, 1)?;
-                    if count < 0 {
-                        return Err(format!("drop requires non-negative count, got {count}"));
-                    }
-                    Ok(RuntimeValue::List(
-                        list.into_iter().skip(count as usize).collect(),
-                    ))
+            "skip" => {
+                let list = expect_list_arg(args, 0)?;
+                let count = expect_int_arg(args, 1)?;
+                if count < 0 {
+                    return Err(format!("skip requires non-negative count, got {count}"));
                 }
-                n => Err(format!("drop expects 1 or 2 arguments, got {n}")),
-            },
+                Ok(RuntimeValue::List(
+                    list.into_iter().skip(count as usize).collect(),
+                ))
+            }
+            // [05-OP-67]: the explicit one-argument consume. The checker
+            // rejects every other arity before evaluation, so the arm reads
+            // no argument count.
+            "drop" => Ok(RuntimeValue::Unit),
             "chunk" => {
                 let list = expect_list_arg(args, 0)?;
                 let size = expect_int_arg(args, 1)?;

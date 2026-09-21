@@ -222,7 +222,7 @@ fn lp_leak_b_chelis_check_advisory_emit_does_not_suppress_unfixable_prefer_pipe(
     let path = dir.path().join("pipe_drop.ch");
     write_file(
         &path,
-        "def f(xs: List[i64], n: i64) -> List[i64] = drop(xs, n)\n\
+        "def f(xs: List[i64], n: i64) -> List[i64] = skip(xs, n)\n\
          result = f(list_of([1, 2, 3, 4]), cast(2, i64))\n",
     );
     fmt_inplace(&path);

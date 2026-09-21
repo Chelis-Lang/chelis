@@ -150,11 +150,6 @@ impl BuiltinDecl {
                 Type::Adt(name, _) if name == "List" => Case::ConcatList,
                 _ => return Err("concat requires List or i32 axis".into()),
             }),
-            "drop" => Some(match arguments.len() {
-                1 => Case::DropValue,
-                2 => Case::DropList,
-                _ => return Err("drop requires one or two arguments".into()),
-            }),
             "eq" | "neq" => match operand(0)? {
                 Type::Tensor(..) | Type::Prim(Prim::Bool) => None,
                 Type::Prim(prim) if prim.is_numeric() => None,

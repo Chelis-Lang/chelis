@@ -753,10 +753,10 @@ fn a_late_bound_secondary_operand_is_validated_too() {
             // `drop` shares `take`'s arm; the cell is here because the
             // diagnostic interpolates the callee name and a shared arm that
             // named one of them would pass with the other silently wrong.
-            route: "drop",
-            resolved_invalid: "def f(x: List[i32], k: f32) -> List[i32] = drop(x, k)\n",
-            late_invalid: "def f(x: List[i32], k: f32) -> List[i32] = {\n  g = fn (n) -> drop(x, n)\n  g(k)\n}\n",
-            late_valid: "def f(x: List[i32], k: i64) -> List[i32] = {\n  g = fn (n) -> drop(x, n)\n  g(k)\n}\n",
+            route: "skip",
+            resolved_invalid: "def f(x: List[i32], k: f32) -> List[i32] = skip(x, k)\n",
+            late_invalid: "def f(x: List[i32], k: f32) -> List[i32] = {\n  g = fn (n) -> skip(x, n)\n  g(k)\n}\n",
+            late_valid: "def f(x: List[i32], k: i64) -> List[i32] = {\n  g = fn (n) -> skip(x, n)\n  g(k)\n}\n",
             diagnostic: "drop expects integer count, got f32",
         },
         Cell {

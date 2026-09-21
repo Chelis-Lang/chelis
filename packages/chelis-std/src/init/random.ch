@@ -13,7 +13,7 @@ def normal_like(template, mean, std) = {
   values = map(fn (x) -> add(mean, mul(std, x)), to_list(z))
   _ = drop(u1)
   _ = drop(u2)
-  reshape(to_tensor(values), tensor_shape(template, cast(0, i32), cast(rank(template), i32), drop([cast(0, i64)], cast(1, i64))))
+  reshape(to_tensor(values), tensor_shape(template, cast(0, i32), cast(rank(template), i32), skip([cast(0, i64)], cast(1, i64))))
 }
 def validate_normal_params[p: Float](mean: p, std: p) -> bool = validate_domain(and(finite_float(mean), and(finite_float(std), gte(std, cast(0.0, p)))))
 -- Invalid maps to integer 2, so the checked bool cast traps Domain before Random; valid maps to 0. Avoiding a source `if` keeps validation in pathwise AD's forward graph.

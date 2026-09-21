@@ -33,7 +33,7 @@ fn compiled_list_adjoints_are_compositional_and_preserve_recursive_shapes() {
         &app_pkg.join("src/main.ch"),
         r#"module Demo.Main
 
-import Std.Index (drop_list, list_index, take_list)
+import Std.Index (skip_list, list_index, take_list)
 
 def sum_pair(value: tensor[2, f32]) -> f32 =
   tensor_to_scalar(sum(value, cast(0, i32)))
@@ -65,7 +65,7 @@ def empty_take_loss(xs: List[f32], count: i64) -> f32 = {
 }
 
 def reused_count_loss(xs: List[f32], count: i64) -> f32 = {
-  selected = drop_list(take_list(xs, count), sub(count, cast(1, i64)))
+  selected = skip_list(take_list(xs, count), sub(count, cast(1, i64)))
   add(list_index(selected, cast(0, i64)), mul(cast(count, f32), cast(0.0, f32)))
 }
 

@@ -1018,7 +1018,7 @@ def col_len[n](col: Col[n]) -> i64 = match col with {
 def all_eq_len[n](pairs: List[(string, Col[n])], expected: i64) -> bool =
   if eq(len(pairs), zero_i64()) then true else {
     entry = index(pairs, zero_i64())
-    if neq(col_len(entry.1), expected) then false else all_eq_len(drop(pairs, one_i64()), expected)
+    if neq(col_len(entry.1), expected) then false else all_eq_len(skip(pairs, one_i64()), expected)
   }
 def main() -> bool = all_eq_len([(\"a\", FloatCol(to_tensor([cast(1.0, f32), cast(2.0, f32)])))], cast(2, i64))
 out = print(main())
@@ -1037,7 +1037,7 @@ type Col[n, a] =
 def zero_i64() -> i64 = cast(0, i64)
 def one_i64() -> i64 = cast(1, i64)
 def all_eq_len[n, a](pairs: List[(string, Col[n, a])], expected: i64) -> bool =
-  if eq(len(pairs), zero_i64()) then true else all_eq_len(drop(pairs, one_i64()), expected)
+  if eq(len(pairs), zero_i64()) then true else all_eq_len(skip(pairs, one_i64()), expected)
 def main() -> bool = all_eq_len([], cast(0, i64))
 out = print(main())
 ";

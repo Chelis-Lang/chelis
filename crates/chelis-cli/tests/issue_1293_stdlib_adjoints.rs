@@ -36,7 +36,7 @@ fn stdlib_list_selection_adjoints_compile_and_run_with_eval_parity() {
         &app_pkg.join("src/main.ch"),
         r#"module Demo.Main
 
-import Std.Index (list_index, take_list, drop_list)
+import Std.Index (list_index, take_list, skip_list)
 
 def index_loss(xs: List[f32], idx: i64) -> f32 = list_index(xs, idx)
 def fixed_index_loss(xs: List[f32], ignored: i64) -> f32 = list_index(xs, cast(0, i64))
@@ -46,7 +46,7 @@ def take_loss(xs: List[f32], count: i64) -> f32 = {
 }
 
 def drop_loss(xs: List[f32], count: i64) -> f32 = {
-  ys = drop_list(xs, count)
+  ys = skip_list(xs, count)
   add(list_index(ys, cast(0, i64)), list_index(ys, cast(1, i64)))
 }
 def take_dynamic_loss(xs: List[f32], count: i64) -> f32 = {
@@ -54,7 +54,7 @@ def take_dynamic_loss(xs: List[f32], count: i64) -> f32 = {
   if eq(len(selected), cast(0, i64)) then cast(0.0, f32) else list_index(selected, cast(0, i64))
 }
 def drop_dynamic_loss(xs: List[f32], count: i64) -> f32 = {
-  selected = drop_list(xs, count)
+  selected = skip_list(xs, count)
   if eq(len(selected), cast(0, i64)) then cast(0.0, f32) else list_index(selected, cast(0, i64))
 }
 
@@ -268,7 +268,7 @@ fn stdlib_list_selection_adjoints_preserve_runtime_positions() {
         &app_pkg.join("src/main.ch"),
         r#"module Demo.Main
 
-import Std.Index (list_index, take_list, drop_list)
+import Std.Index (list_index, take_list, skip_list)
 
 def index_loss(xs: List[f32], idx: i64) -> f32 = list_index(xs, idx)
 def take_loss(xs: List[f32], count: i64) -> f32 = {
@@ -277,7 +277,7 @@ def take_loss(xs: List[f32], count: i64) -> f32 = {
 }
 
 def drop_loss(xs: List[f32], count: i64) -> f32 = {
-  ys = drop_list(xs, count)
+  ys = skip_list(xs, count)
   add(list_index(ys, cast(0, i64)), list_index(ys, cast(1, i64)))
 }
 def take_past_loss(xs: List[f32], count: i64) -> f32 = {
@@ -288,7 +288,7 @@ def take_past_loss(xs: List[f32], count: i64) -> f32 = {
   )
 }
 def drop_zero_loss(xs: List[f32], count: i64) -> f32 = {
-  ys = drop_list(xs, count)
+  ys = skip_list(xs, count)
   add(
     add(list_index(ys, cast(0, i64)), list_index(ys, cast(1, i64))),
     list_index(ys, cast(2, i64))
@@ -522,7 +522,7 @@ fn compiled_runtime_list_take_and_drop_adjoints_match_eval_errors() {
     );
     assert_runtime_list_count_grad_error_parity(
         "issue-1293-list-adjoints-runtime-negative-drop",
-        "drop_list",
+        "skip_list",
         "drop requires non-negative count",
     );
 }
@@ -558,9 +558,9 @@ bad = grad(loss, wrt=xs)(values, cast(-1, i64))"#,
     );
     assert_list_selection_grad_rejects(
         "issue-1293-list-adjoints-negative-drop",
-        "drop_list, list_index",
+        "skip_list, list_index",
         r#"def loss(xs: List[f32], count: i64) -> f32 = {
-  ys = drop_list(xs, count)
+  ys = skip_list(xs, count)
   list_index(ys, cast(0, i64))
 }
 values: List[f32] = [cast(2.0, f32), cast(3.0, f32)]

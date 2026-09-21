@@ -1,7 +1,7 @@
 xs: List[f32] = [1.0, 2.0]
 ys = concat(xs, [3.0, 4.0])
 prefix = take(ys, cast(3, i64))
-suffix = drop(ys, cast(1, i64))
+suffix = skip(ys, cast(1, i64))
 item_count = numel(to_tensor(ys))
 roundtrip = to_list(to_tensor(ys))
 token_rows: List[List[i64]] = [[cast(1, i64), cast(2, i64)], [cast(3, i64)]]

@@ -5018,15 +5018,19 @@ impl<'a> HostEmitter<'a> {
                 ));
                 return Ok(());
             }
+            "skip" => {
+                // The published runtime symbol keeps its `chelis_list_drop`
+                // spelling: it is already unambiguous behind the `list_`
+                // prefix, and renaming a C ABI identity would retire a
+                // capacity-census row without removing any ambiguity.
+                self.lines.push(format!(
+                    "{}{target} = chelis_list_drop({}, {});",
+                    self.indent, arg_vars[0].0, arg_vars[1].0
+                ));
+                return Ok(());
+            }
             "drop" => {
-                if arg_vars.len() == 1 {
-                    self.lines.push(format!("{}{target} = 0;", self.indent));
-                } else {
-                    self.lines.push(format!(
-                        "{}{target} = chelis_list_drop({}, {});",
-                        self.indent, arg_vars[0].0, arg_vars[1].0
-                    ));
-                }
+                self.lines.push(format!("{}{target} = 0;", self.indent));
                 return Ok(());
             }
             "chunk" => {

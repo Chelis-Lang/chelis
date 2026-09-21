@@ -118,10 +118,8 @@ fn every_declared_identity_has_a_unique_case_selector_witness() {
                     Type::Prim(Prim::Int32),
                 ],
             ],
-            "drop" => vec![
-                vec![list.clone()],
-                vec![list.clone(), Type::Prim(Prim::Int64)],
-            ],
+            "skip" => vec![vec![list.clone(), Type::Prim(Prim::Int64)]],
+            "drop" => vec![vec![list.clone()]],
             "eq" | "neq" => vec![vec![Type::Prim(Prim::F32)], vec![list.clone()]],
             "to_string" => vec![
                 Type::Prim(Prim::F32),
@@ -181,9 +179,9 @@ fn overloaded_applications_resolve_one_exact_case() {
         ),
         ("drop", vec![list.clone()], "Container:drop:DropValue"),
         (
-            "drop",
+            "skip",
             vec![list.clone(), Type::Prim(Prim::Int64)],
-            "Container:drop:DropList",
+            "Container:skip:SkipList",
         ),
         ("eq", vec![Type::Prim(Prim::F32)], "Numeric:eq:TableA"),
         ("eq", vec![list.clone()], "Container:eq:EqRecursive"),
@@ -212,7 +210,19 @@ fn overloaded_applications_resolve_one_exact_case() {
             .semantic_case(&[Type::Unit])
             .is_err()
     );
-    assert!(builtin_decl("drop").unwrap().semantic_case(&[]).is_err());
+    // The arity selector is gone with the [05-OP-54]/[05-OP-67] split:
+    // `drop` and `skip` are separate declarations with one sibling case
+    // each, so neither reads its operands to choose an identity. Before
+    // the split, `drop` with no arguments was the third arity and had no
+    // exact case.
+    assert_eq!(
+        builtin_decl("drop").unwrap().semantic_case(&[]).unwrap(),
+        "Container:drop:DropValue"
+    );
+    assert_eq!(
+        builtin_decl("skip").unwrap().semantic_case(&[]).unwrap(),
+        "Container:skip:SkipList"
+    );
 }
 
 #[test]
@@ -241,7 +251,7 @@ fn checked_applications_and_lexical_shadows_remain_distinct() {
     for source in [
         "a = len([1, 2])",
         "a = concat([1, 2], [3])",
-        "a = drop([1, 2], 1i64)",
+        "a = skip([1, 2], 1i64)",
         "a = to_string([1, 2])",
         "def apply(len: (f32 -> f32), x: f32) -> f32 = len(x)",
         "def apply(to_string: (f32 -> f32), x: f32) -> f32 = to_string(x)",

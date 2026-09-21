@@ -2744,7 +2744,7 @@ exact ADT identity by [05-OP-34].
 > cotangent list of the primal length with the output cotangent at exact index
 > `i` and zero cotangents elsewhere. `take_list(xs,n)` returns the output
 > cotangents followed by zeros for every untaken source position;
-> `drop_list(xs,n)` returns zeros for every dropped position followed by the
+> `skip_list(xs,n)` returns zeros for every skipped position followed by the
 > output cotangents. The exact forward truncation rules determine the split,
 > and every list cotangent preserves the primal runtime length and order under
 > spec/06 §2.1. Non-differentiable element types are forward-only.
@@ -3471,38 +3471,68 @@ path even though bare `round` under `grad` remains a structural
 
 > **[05-OP-54]** Signature: `len(xs)` accepts List[T] or Dict[K,V] and returns i64;
 > `index(xs,i)` takes List[T] and i64 and returns T; `append(xs,x)` and
-> `concat(xs,ys)` return List[T]; `take(xs,n)` and `drop(xs,n)` take i64
+> `concat(xs,ys)` return List[T]; `take(xs,n)` and `skip(xs,n)` take i64
 > counts; `chunk(xs,n)` returns List[List[T]]; `range(start,end)` takes
-> i64 endpoints and returns List[i64]. Separately, `drop(value)`
-> consumes one value and returns unit.
+> i64 endpoints and returns List[i64].
 >
 > Domain: List elements retain their exact type, recursively, with no
 > numeric conversion. Element/count/index quantities are i64. The two
 > concat forms are disjoint: List concatenation takes a List second
 > argument; tensor concatenation takes an i32 axis and is governed by
-> [05-OP-62]. The one-argument drop is explicit lifetime consumption, not a
-> List count default.
+> [05-OP-62]. Every identity here takes exactly the arguments its
+> signature names; none of them has an arity-selected second meaning.
 >
 > Result: Length is the exact collection size. Index selects a zero-based
-> element. Append and concat preserve order. Take/drop retain/remove up to n
-> leading elements; a count above length yields the whole/empty List. Chunk
+> element. Append and concat preserve order. Take and skip are complementary
+> prefix operations on the same count: take retains up to n leading elements
+> and skip removes up to n leading elements, so `concat(take(xs,n),
+> skip(xs,n))` is `xs` for every nonnegative n; a count above length yields
+> the whole/empty List. Chunk
 > uses consecutive groups of size n, retaining a shorter final group. Range
 > is the half-open ascending integer interval and is empty when end <=
-> start. Drop(value) performs the ordinary linear release.
+> start.
 >
 > Failure: Negative index/count, out-of-bounds index, nonpositive chunk
 > size, wrong arity/type, and unrepresentable i64 counts fail loudly.
-> Clamping take/drop at length is their stated semantics and never applies
+> Clamping take/skip at length is their stated semantics and never applies
 > to index.
 >
 > Adjoint: Float-containing List selection/concatenation/chunking routes
 > cotangents through the exact element positions under spec/06 section
 > 2.10.1; omitted elements receive recursive zero cotangents. Counts/indices
-> have zero cotangent; range is structurally non-differentiable. Explicit
-> lifetime drop follows spec/06's structural drop rule.
+> have zero cotangent; range is structurally non-differentiable.
 >
 > Accumulator: No forward numeric accumulator. Repeated cotangent
 > destinations use spec/06's ordered own-width combination.
+
+#### Explicit lifetime consumption
+
+> **[05-OP-67]** Signature: `drop(value)` takes exactly one argument of any
+> language type and returns unit. It is a linearity operation, not a
+> container operation, and has no count, index, or extent parameter.
+>
+> Domain: Every language type is admitted recursively: scalars, tensors,
+> List, Dict, tuples, ADTs, functions, resource handles, and unit. No
+> numeric conversion, narrowing, widening, or dtype selection occurs, and
+> no element is read. The argument is owned, not borrowed, so a borrowed
+> operand is a type error rather than an implicit consume of its owner.
+>
+> Result: The argument's linear lifetime ends at the call and the result is
+> the unit value. Release is structural over the value's owned payloads
+> under spec/04 section 8.3, each owned payload released exactly once. The
+> call has no other observable effect and produces no output.
+>
+> Failure: Any arity other than one is a type error naming the expected
+> arity. Consuming an already-consumed or currently-borrowed value is the
+> ownership rejection of spec/04 section 8.3; a second consume is never
+> silently accepted. `drop` has no List-count form: a two-argument call is
+> an arity error, not a prefix removal.
+>
+> Adjoint: Explicit lifetime consumption follows spec/06's structural drop
+> rule. The consumed value receives no cotangent and the call contributes
+> none.
+>
+> Accumulator: None. The operation performs no arithmetic.
 
 #### Higher-order List identities
 

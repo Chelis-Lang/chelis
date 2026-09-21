@@ -1570,7 +1570,7 @@ pub(super) fn finish_unified_app(
                     }
                 }
             }
-            "take" | "drop" => {
+            "take" | "skip" => {
                 if arg_tys.len() != 2 {
                     return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
                 }

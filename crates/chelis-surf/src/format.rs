@@ -101,17 +101,39 @@ pub fn migrate_source_v018(source: &str) -> Result<String, FormatError> {
             }
             _ => FormatError::Parse(error),
         })?;
-    migrate_v018_integer_names(&mut decls);
+    migrate_v018_names(&mut decls);
     if let Some(offset) = first_ambiguous_comment_offset(&decls, &comments) {
         return Err(FormatError::AmbiguousComment { offset });
     }
     Ok(format_decls_with_comments(&decls, &comments))
 }
 
-fn migrate_v018_integer_names(decls: &mut [Decl]) {
+/// A lexically shadowed `drop` is an ordinary local value, not the builtin
+/// ([04-LIN] spec/04 section 8.6 lets a parameter or block binding shadow a
+/// builtin name), so the list-slice rename must not touch a call to it. The
+/// walker carries the shadow depth rather than a name set because `drop` is
+/// the only name it decides about.
+#[derive(Default, Clone, Copy)]
+struct DropShadow(usize);
+
+impl DropShadow {
+    fn is_shadowed(self) -> bool {
+        self.0 > 0
+    }
+
+    fn entering(self, names: impl IntoIterator<Item = bool>) -> Self {
+        Self(self.0 + names.into_iter().filter(|shadows| *shadows).count())
+    }
+}
+
+/// Apply every v0.18 source rename: the integer dtype spellings, and the
+/// list slice `drop(xs, n)` -> `skip(xs, n)`. The list rename is arity-driven
+/// rather than textual, because the one-argument `drop(value)` is the
+/// unrelated linearity consume of [05-OP-67] and must not be rewritten.
+fn migrate_v018_names(decls: &mut [Decl]) {
     for decl in decls {
         match decl {
-            Decl::Module { decls, .. } => migrate_v018_integer_names(decls),
+            Decl::Module { decls, .. } => migrate_v018_names(decls),
             Decl::Sig { ty, .. } | Decl::TypeAlias { ty, .. } => migrate_type(ty),
             Decl::TypeDef {
                 variants,
@@ -129,7 +151,7 @@ fn migrate_v018_integer_names(decls: &mut [Decl]) {
                     }
                 }
                 if let Some(invariant) = invariant {
-                    migrate_expr(&mut invariant.body);
+                    migrate_expr(&mut invariant.body, DropShadow::default());
                 }
             }
             Decl::FunDef {
@@ -138,11 +160,12 @@ fn migrate_v018_integer_names(decls: &mut [Decl]) {
                 body,
                 ..
             } => {
+                let shadow = DropShadow::default().entering(param_shadows(params));
                 params.iter_mut().for_each(migrate_param);
                 if let Some(ty) = ret_ty {
                     migrate_type(ty);
                 }
-                migrate_expr(body);
+                migrate_expr(body, shadow);
             }
             Decl::Property {
                 params,
@@ -151,14 +174,17 @@ fn migrate_v018_integer_names(decls: &mut [Decl]) {
                 options,
                 ..
             } => {
+                let shadow = DropShadow::default().entering(param_shadows(params));
                 params.iter_mut().for_each(migrate_param);
-                preconditions.iter_mut().for_each(migrate_expr);
-                migrate_expr(body);
+                preconditions
+                    .iter_mut()
+                    .for_each(|expr| migrate_expr(expr, shadow));
+                migrate_expr(body, shadow);
                 for option in options {
                     match option {
                         PropertyOption::Tolerance(expr, _)
                         | PropertyOption::Seed(expr, _)
-                        | PropertyOption::Samples(expr, _) => migrate_expr(expr),
+                        | PropertyOption::Samples(expr, _) => migrate_expr(expr, shadow),
                         PropertyOption::Contract(..) => {}
                     }
                 }
@@ -167,12 +193,16 @@ fn migrate_v018_integer_names(decls: &mut [Decl]) {
                 if let Some(ty) = ty {
                     migrate_type(ty);
                 }
-                migrate_expr(value);
+                migrate_expr(value, DropShadow::default());
             }
-            Decl::MacroDef { body, .. } => migrate_expr(body),
+            Decl::MacroDef { body, .. } => migrate_expr(body, DropShadow::default()),
             Decl::Import { .. } | Decl::Dim { .. } | Decl::Export { .. } => {}
         }
     }
+}
+
+fn param_shadows(params: &[Param]) -> Vec<bool> {
+    params.iter().map(|param| param.name == "drop").collect()
 }
 
 fn migrate_param(param: &mut Param) {
@@ -207,22 +237,33 @@ fn migrate_type(ty: &mut TypeExpr) {
     }
 }
 
-fn migrate_expr(expr: &mut Expr) {
+fn migrate_expr(expr: &mut Expr, shadow: DropShadow) {
     match expr {
         Expr::Lit(..) | Expr::Var(..) | Expr::Constructor(..) => {}
         Expr::Apply(function, args, _) => {
-            migrate_expr(function);
-            args.iter_mut().for_each(migrate_expr);
+            // [05-OP-54]/[05-OP-67]: the two-argument list slice became
+            // `skip`; the one-argument linearity consume kept `drop`. Arity
+            // is the exact discriminator the old shared declaration used, so
+            // it is the one this rewrite uses too.
+            if args.len() == 2 {
+                rename_drop_head(function, shadow);
+            }
+            migrate_expr(function, shadow);
+            args.iter_mut().for_each(|arg| migrate_expr(arg, shadow));
         }
         Expr::List(items, _) | Expr::Tuple(items, _) | Expr::Par(items, _) | Expr::Do(items, _) => {
-            items.iter_mut().for_each(migrate_expr)
+            items.iter_mut().for_each(|item| migrate_expr(item, shadow))
         }
         Expr::Record(_, fields, _) => {
-            fields.iter_mut().for_each(|(_, value)| migrate_expr(value));
+            fields
+                .iter_mut()
+                .for_each(|(_, value)| migrate_expr(value, shadow));
         }
         Expr::RecordUpdate(base, fields, _) => {
-            migrate_expr(base);
-            fields.iter_mut().for_each(|(_, value)| migrate_expr(value));
+            migrate_expr(base, shadow);
+            fields
+                .iter_mut()
+                .for_each(|(_, value)| migrate_expr(value, shadow));
         }
         Expr::Access(value, _, _)
         | Expr::TupleGet(value, _, _)
@@ -233,55 +274,111 @@ fn migrate_expr(expr: &mut Expr) {
         | Expr::Borrow(value, _)
         | Expr::Quote(value, _)
         | Expr::Unquote(value, _)
-        | Expr::Splice(value, _) => migrate_expr(value),
+        | Expr::Splice(value, _) => migrate_expr(value, shadow),
         Expr::Binary(_, left, right, _)
         | Expr::WithSeed(left, right, _)
         | Expr::WithDevice(left, right, _) => {
-            migrate_expr(left);
-            migrate_expr(right);
+            migrate_expr(left, shadow);
+            migrate_expr(right, shadow);
         }
         Expr::Pipe(seed, stages, _) => {
-            migrate_expr(seed);
-            stages.iter_mut().for_each(migrate_expr);
+            // A pipe stage receives the piped value as its FIRST argument
+            // (spec/01 section 3.6), so `xs |> drop(1)` is the two-argument
+            // list slice written with one argument, while a bare `xs |> drop`
+            // stage is the one-argument consume and keeps its name.
+            migrate_expr(seed, shadow);
+            for stage in stages.iter_mut() {
+                if let Expr::Apply(function, args, _) = stage
+                    && args.len() == 1
+                {
+                    rename_drop_head(function, shadow);
+                }
+                migrate_expr(stage, shadow);
+            }
         }
         Expr::If(condition, then_expr, else_expr, _) => {
-            migrate_expr(condition);
-            migrate_expr(then_expr);
-            migrate_expr(else_expr);
+            migrate_expr(condition, shadow);
+            migrate_expr(then_expr, shadow);
+            migrate_expr(else_expr, shadow);
         }
         Expr::Match(scrutinee, arms, _) => {
-            migrate_expr(scrutinee);
+            migrate_expr(scrutinee, shadow);
             for arm in arms {
+                // A pattern binder named `drop` shadows the builtin for the
+                // arm's guard and body exactly as a parameter does.
+                let arm_shadow = shadow.entering(pattern_binder_shadows(&arm.pattern));
                 if let Some(guard) = &mut arm.guard {
-                    migrate_expr(guard);
+                    migrate_expr(guard, arm_shadow);
                 }
-                migrate_expr(&mut arm.body);
+                migrate_expr(&mut arm.body, arm_shadow);
             }
         }
         Expr::Lambda(params, body, _) => {
+            let inner = shadow.entering(param_shadows(params));
             params.iter_mut().for_each(migrate_param);
-            migrate_expr(body);
+            migrate_expr(body, inner);
         }
         Expr::Cast(value, precision, _, _) => {
-            migrate_expr(value);
+            migrate_expr(value, shadow);
             if let Some(canonical) = crate::desugar::migrated_integer_dtype_name(precision) {
                 *precision = canonical.to_string();
             }
         }
-        Expr::Grad(value, _, _) | Expr::Vmap(value, _, _) => migrate_expr(value),
+        Expr::Grad(value, _, _) | Expr::Vmap(value, _, _) => migrate_expr(value, shadow),
         Expr::Annotate(value, ty, _) => {
-            migrate_expr(value);
+            migrate_expr(value, shadow);
             migrate_type(ty);
         }
         Expr::Block(bindings, body, _) => {
+            // Block bindings are sequential, so each value is migrated in the
+            // scope before its own binder takes effect.
+            let mut inner = shadow;
             for binding in bindings {
                 if let Some(ty) = &mut binding.ty {
                     migrate_type(ty);
                 }
-                migrate_expr(&mut binding.value);
+                migrate_expr(&mut binding.value, inner);
+                inner = inner.entering(let_pattern_shadows(&binding.pattern));
             }
-            migrate_expr(body);
+            migrate_expr(body, inner);
         }
+    }
+}
+
+fn pattern_binder_shadows(pattern: &Pattern) -> Vec<bool> {
+    match pattern {
+        Pattern::Var(name, _) => vec![name == "drop"],
+        Pattern::Wildcard(_) | Pattern::Lit(..) => Vec::new(),
+        Pattern::Constructor(_, inner, _) | Pattern::Tuple(inner, _) => {
+            inner.iter().flat_map(pattern_binder_shadows).collect()
+        }
+        Pattern::Record(_, fields, _) => fields
+            .iter()
+            .flat_map(|(_, inner)| pattern_binder_shadows(inner))
+            .collect(),
+        Pattern::As(name, inner, _) => std::iter::once(name == "drop")
+            .chain(pattern_binder_shadows(inner))
+            .collect(),
+    }
+}
+
+fn let_pattern_shadows(pattern: &LetPattern) -> Vec<bool> {
+    match pattern {
+        LetPattern::Var(name, _) => vec![name == "drop"],
+        LetPattern::Wildcard(_) => Vec::new(),
+        LetPattern::Tuple(inner, _) => inner.iter().flat_map(let_pattern_shadows).collect(),
+    }
+}
+
+/// Rewrite a call head that names the v0.18 list `drop` to `skip`. The caller
+/// has already established that the call carries the list slice's two
+/// arguments, counting a piped value; this only decides the spelling.
+fn rename_drop_head(function: &mut Expr, shadow: DropShadow) {
+    if !shadow.is_shadowed()
+        && let Expr::Var(name, _) = function
+        && name == "drop"
+    {
+        *name = "skip".to_string();
     }
 }
 

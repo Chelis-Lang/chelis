@@ -97,7 +97,7 @@ fn runtime_list_selection_does_not_mix_unselected_non_finite_values() {
         &app_pkg.join("src/main.ch"),
         r#"module Demo.Main
 
-import Std.Index (drop_list, list_index, take_list)
+import Std.Index (skip_list, list_index, take_list)
 
 def square_selected(xs: List[f32], index: i64) -> f32 = {
   selected = list_index(xs, index)
@@ -120,7 +120,7 @@ def nested_selected(
 }
 
 def composed_selected(xs: List[f32], count: i64) -> f32 = {
-  window = drop_list(take_list(xs, add(count, count)), count)
+  window = skip_list(take_list(xs, add(count, count)), count)
   selected = list_index(window, sub(count, count))
   add(mul(selected, selected), mul(selected, selected))
 }
@@ -210,10 +210,10 @@ fn composed_runtime_list_bounds_are_guarded_before_internal_selection() {
         &app_pkg.join("src/main.ch"),
         r#"module Demo.Main
 
-import Std.Index (drop_list, list_index)
+import Std.Index (skip_list, list_index)
 
 def loss(xs: List[f32], drop_count: i64, index: i64) -> f32 =
-  list_index(drop_list(xs, drop_count), index)
+  list_index(skip_list(xs, drop_count), index)
 
 mask: tensor[2, bool] = [true, false]
 runtime_one: i64 = tensor_to_scalar(count(&mask, 0))
@@ -243,10 +243,10 @@ fn composed_runtime_list_negative_extreme_is_guarded_before_internal_selection()
         &app_pkg.join("src/main.ch"),
         r#"module Demo.Main
 
-import Std.Index (drop_list, list_index, take_list)
+import Std.Index (skip_list, list_index, take_list)
 
 def loss(xs: List[f32], drop_count: i64, take_count: i64) -> f32 =
-  list_index(take_list(drop_list(xs, drop_count), take_count), cast(0, i64))
+  list_index(take_list(skip_list(xs, drop_count), take_count), cast(0, i64))
 
 runtime_min: i64 = tensor_to_scalar(
   sum(to_tensor([-9223372036854775808i64]), cast(0, i32))

@@ -34,6 +34,7 @@ pub fn non_blocking_rules() -> Vec<Box<dyn Rule>> {
         Box::new(rules::invariant_float_equality::InvariantFloatEquality),
         Box::new(rules::unreachable_producer::UnreachableProducer),
         Box::new(rules::opaque_escape_site::OpaqueEscapeSite),
+        Box::new(rules::recursive_list_cursor::RecursiveListCursor),
     ]
 }
 

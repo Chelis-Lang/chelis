@@ -26,8 +26,8 @@ identity; row order is not semantic and no ordinal is part of any identity.
 | `decimal::decimal_to_float` | `(Decimal)->f64` |
 | `decimal::decimal_to_string` | `(Decimal)->string` |
 | `decimal::try_decimal` | `(string)->Option[Decimal]` |
-| `index::drop_list` | `(List[T],i64)->List[T]` |
 | `index::list_index` | `(List[T],i64)->T` |
+| `index::skip_list` | `(List[T],i64)->List[T]` |
 | `index::take_list` | `(List[T],i64)->List[T]` |
 | `init/kaiming::kaiming_normal` | `(&tensor[..r,p_float],p_float)->tensor[..r,p_float]!{Random}` |
 | `init/kaiming::kaiming_uniform` | `(&tensor[..r,p_float],p_float)->tensor[..r,p_float]!{Random}` |

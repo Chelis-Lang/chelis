@@ -153,10 +153,10 @@ repeated or nested seed handlers.
 
 `Std.Index`:
 
-- `list_index(values, idx)`, `take_list(values, count)`, `drop_list(values, count)`.
+- `list_index(values, idx)`, `take_list(values, count)`, `skip_list(values, count)`.
   Their adjoints preserve the input List's runtime length and positions: index
-  routes the cotangent to the selected element, while take/drop fill excluded
-  positions with zeros. Negative indices/counts fail; take/drop counts beyond
+  routes the cotangent to the selected element, while take/skip fill excluded
+  positions with zeros. Negative indices/counts fail; take/skip counts beyond
   the length retain their ordinary truncation behavior. Scalar, tensor, empty,
   nested, and multiple-List targets use the same rule, including runtime
   selectors/counts reused elsewhere in the differentiated body and selection
