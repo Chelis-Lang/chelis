@@ -3145,9 +3145,13 @@ impl<'a> HostEmitter<'a> {
     ///    and the evaluator applies both roundings while `static_float_bound`
     ///    applies neither. The DAG lane's `lower::extract_f64_value` has the
     ///    identical behavior, so the two compiled lanes agree with each other
-    ///    and both differ from `eval` on that spelling. That is a
-    ///    pre-existing class owned outside this change (chelis#2316), not a
-    ///    property introduced here; do not "fix" it in one lane alone.
+    ///    and both differ from `eval` on that spelling. The CLASS is
+    ///    pre-existing and owned outside this change (chelis#2316); the
+    ///    host-lane INSTANCE is new, because this lane previously refused to
+    ///    build at all. Reproducing the DAG lane's exact behavior is
+    ///    deliberate: correcting one lane alone would make template
+    ///    foldability observable again, which is the defect chelis#2120
+    ///    exists to remove.
     ///
     /// The template's element values are never read — only its shape and
     /// dtype reach the output through `chelis_host_alloc_like` — which is
