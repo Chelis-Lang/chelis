@@ -167,8 +167,8 @@ leg is part of the oracle test now).
   forward `fail` beside a transformed call still routes the enclosing body
   through host `if`/`fail`. This routing repair deliberately left
   transformed-subtree handling unchanged; it never claimed that a taken
-  internal `fail` may become a numeric placeholder. chelis#1464 owned that
-  pre-existing spec divergence and has since closed it with [05-OP-68]. Oracle:
+  internal `fail` may become a numeric placeholder. chelis#1464 owns that
+  pre-existing spec divergence; [05-OP-68] is the identity that repairs it. Oracle:
   `issue_662_forward_fail_grad_scope.rs` (taken and untaken forward siblings
   plus an untaken grad-internal routing control).
 - **Checker over-unification of movement chains** — RESOLVED

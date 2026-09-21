@@ -328,8 +328,8 @@ fn reject_guarded_fail(dag: VerifiedDagView<'_>) -> Result<(), Unsupported> {
         format!("a Metal DAG value at node {}", node.id.0),
         Stage::Codegen("metal"),
         chelis_types::unimplemented_rejection!(
-            1464,
-            "a guarded abort has no Metal kernel; the C target preserves the [05-OP-68] abort"
+            2360,
+            "a guarded abort reaching Metal kernel selection has no device form; it is emitted host-side"
         ),
     ))
 }

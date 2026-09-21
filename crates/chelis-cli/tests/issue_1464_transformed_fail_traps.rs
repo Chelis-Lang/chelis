@@ -244,6 +244,106 @@ fn a_fail_outside_any_transform_still_aborts() {
     );
 }
 
+/// A guard nested inside another runtime `if` branch. The inner guard's
+/// condition is true, but the OUTER condition selects the sibling, so the
+/// forward program never executes the inner branch and the guard must not
+/// fire (spec/06 2.10.1: untaken branches are not evaluated).
+fn nested_guard(outer: &str) -> String {
+    format!(
+        "module Repro.NestedGuard\n\
+         def loss(x: tensor[1, f32]) -> tensor[f32] = \
+         if {outer} \
+         then (if gt(tensor_to_scalar(sum(x, cast(0, i32))), cast(0.5, f32)) \
+         then fail(\"SHOULD NOT FIRE\") else sum(x, cast(0, i32))) \
+         else sum(mul(x, x), cast(0, i32))\n\
+         out = grad(loss)(to_tensor([cast(1.0, f32)]))\n"
+    )
+}
+
+#[test]
+fn a_guard_under_an_untaken_outer_branch_does_not_fire() {
+    // grad of x^2 at 1.0 is 2.0; the inner guard is on a path the forward
+    // program does not take.
+    assert_untaken_in_both_lanes(
+        &nested_guard("gt(tensor_to_scalar(sum(x, cast(0, i32))), cast(100.0, f32))"),
+        "nested_guard_runtime",
+        "data=[2.0]",
+    );
+}
+
+#[test]
+fn a_nested_guard_agrees_whether_or_not_the_outer_condition_folds() {
+    // The same program with a compile-time-resolvable outer condition. These
+    // two must agree: the first version of this fix returned 2.0 when the
+    // outer condition folded (chelis#620 pruning removed the guard) and
+    // aborted when it did not, which is how the defect was caught.
+    assert_untaken_in_both_lanes(
+        &nested_guard("gt(cast(1, i64), cast(2, i64))"),
+        "nested_guard_static",
+        "data=[2.0]",
+    );
+}
+
+#[test]
+fn guards_fire_in_source_order_not_dag_order() {
+    // Both conditions hold. The outer guard decides the branch, so it wins.
+    // Lowering the inner guard as an INPUT to the outer one inverted this:
+    // the inner was evaluated first and pre-empted the outer's message.
+    let source = "module Repro.GuardPrecedence\n\
+         def loss(x: tensor[1, f32]) -> tensor[f32] = \
+         if gt(tensor_to_scalar(sum(x, cast(0, i32))), cast(0.5, f32)) \
+         then fail(\"OUTER GUARD FIRES FIRST\") \
+         else (if gt(tensor_to_scalar(sum(x, cast(0, i32))), cast(0.2, f32)) \
+         then fail(\"INNER GUARD\") else sum(x, cast(0, i32)))\n\
+         out = grad(loss)(to_tensor([cast(1.0, f32)]))\n";
+    assert_taken_in_both_lanes(source, "guard_precedence", "OUTER GUARD FIRES FIRST");
+}
+
+/// chelis#1464 names `vmap` and `vmap(grad(...))` in its acceptance surface,
+/// so both get a taken and an untaken case.
+fn vmapped_guard(rows: &str) -> String {
+    format!(
+        "module Repro.VmappedGuard\n\
+         def row(t: tensor[1, f32]) -> tensor[f32] = \
+         if gt(tensor_to_scalar(sum(t, cast(0, i32))), cast(50.0, f32)) \
+         then fail(\"row too big\") else sum(mul(t, t), cast(0, i32))\n\
+         def batched(b: tensor[2, 1, f32]) -> tensor[2, f32] = vmap(row)(b)\n\
+         out = batched(to_tensor([{rows}]))\n"
+    )
+}
+
+#[test]
+fn a_vmapped_guard_aborts_when_any_row_fires() {
+    // [05-OP-68]: a batched condition aborts when ANY mapped element is true.
+    assert_taken_in_both_lanes(
+        &vmapped_guard("[cast(1.0, f32)], [cast(99.0, f32)]"),
+        "vmap_guard_taken",
+        "row too big",
+    );
+}
+
+#[test]
+fn a_vmapped_guard_computes_when_no_row_fires() {
+    assert_untaken_in_both_lanes(
+        &vmapped_guard("[cast(1.0, f32)], [cast(2.0, f32)]"),
+        "vmap_guard_untaken",
+        "data=[1.0, 4.0]",
+    );
+}
+
+#[test]
+fn vmap_of_grad_differentiates_through_an_untaken_guard() {
+    // grad of x^3 is 3x^2, so rows [1.0] and [2.0] give 3.0 and 12.0.
+    let source = "module Repro.VmapGrad\n\
+         def cube(t: tensor[1, f32]) -> tensor[f32] = \
+         if gt(tensor_to_scalar(sum(t, cast(0, i32))), cast(50.0, f32)) \
+         then fail(\"cube guard\") \
+         else sum(mul(mul(t, t), t), cast(0, i32))\n\
+         def batched(b: tensor[2, 1, f32]) -> tensor[2, 1, f32] = vmap(grad(cube))(b)\n\
+         out = batched(to_tensor([[cast(1.0, f32)], [cast(2.0, f32)]]))\n";
+    assert_untaken_in_both_lanes(source, "vmap_grad_untaken", "data=[3.0, 12.0]");
+}
+
 #[test]
 fn an_indirect_fail_in_the_surviving_branch_is_also_rejected() {
     // Regression for a gap in this issue's own first fix. When one branch is

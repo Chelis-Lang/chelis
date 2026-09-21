@@ -238,6 +238,19 @@ fn grad_dag_checked_impl(
                         live[template.0] = true;
                     }
                 }
+                // chelis#1464 / [05-OP-68]: input 0 is the guard's firing
+                // predicate, a control edge, and input 1 is the value the
+                // result carries. Only the fallback is on the gradient path.
+                // The predicate conjoins the enclosing branch path, so it is
+                // built from `Logical` nodes; treating the control edge as
+                // live would reject a program whose gradient is perfectly
+                // well defined, exactly as the `UniformLike` note above
+                // describes for its activation edge.
+                RiscOp::GuardedFail { .. } => {
+                    if let Some(fallback) = node.inputs.get(1) {
+                        live[fallback.0] = true;
+                    }
+                }
                 // A comparison contributes an exact zero cotangent to both
                 // operands. Its predicate may control differentiable float
                 // selection, but the arithmetic that formed the predicate is
@@ -924,16 +937,20 @@ fn compute_adjoints(
         // still evaluated and still fires; differentiation does not speculate
         // past it ([05-OP-68] Result, spec/06 §5.2).
         RiscOp::GuardedFail { .. } => {
-            let condition = node.inputs[0];
-            let fallback = node.inputs[1];
-            let condition_ty = forward.get(condition).unwrap().output_type.clone();
-            let zero_condition = dag.add_node(
-                RiscOp::synth_const(condition_ty.precision, 0.0),
-                vec![],
-                condition_ty,
-                None,
-            );
-            Some(vec![(condition, zero_condition), (fallback, g)])
+            // The fallback takes the result's cotangent unchanged: whenever
+            // the forward program produced a result at all, that result WAS
+            // the fallback.
+            //
+            // The condition is deliberately absent rather than paired with
+            // an explicit zero. Omitting it IS the zero cotangent of
+            // spec/06 2.10.1 — no contribution is queued — and it keeps the
+            // backward walk out of the condition subgraph entirely. That
+            // matters because the guard's firing predicate conjoins the
+            // enclosing branch path (chelis#1464), so it contains `Logical`
+            // nodes, and `Logical` is non-differentiable: materializing a
+            // zero for the condition would make AD descend into it and
+            // reject a program whose gradient is perfectly well defined.
+            Some(vec![(node.inputs[1], g)])
         }
         RiscOp::Where => {
             let condition = node.inputs[0];

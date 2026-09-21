@@ -443,13 +443,22 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
         | RiscOp::Cast { .. }
         | RiscOp::CastTrunc { .. }
         | RiscOp::FusedElem { .. }
-        // chelis#1464: the result is the fallback's value unchanged, so the
-        // output shape is the fallback operand's. `shape_preserving` selects
-        // the rank-matching slot, which is the fallback — the rank-0
-        // condition only matches when the result is itself rank-0, and a
-        // rank-0 result has no axes to attribute.
-        | RiscOp::GuardedFail { .. }
         | RiscOp::Store { .. } => shape_preserving(dag, node),
+
+        // chelis#1464 / [05-OP-68]: the result IS the fallback, so every
+        // output axis comes from input slot 1.
+        //
+        // Deliberately NOT `shape_preserving`, which picks the FIRST
+        // rank-matching input: under `vmap` the condition is batched to
+        // rank 1 alongside the fallback, so it would select slot 0, the
+        // condition. `schema.rs`'s wire-side axis origin already reads
+        // `inputs.get(1)` directly; this keeps the two in agreement.
+        RiscOp::GuardedFail { .. } => match input_rank(dag, node, 1) {
+            Some(fallback_rank) if fallback_rank == rank => {
+                (0..rank).map(|axis| pass_through(id, 1, axis)).collect()
+            }
+            _ => op_computed(id, rank),
+        },
 
         // --- Reductions: the reduced axis is removed, so output axis `a`
         // maps back to input axis `a` before it and `a + 1` at or after it.

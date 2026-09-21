@@ -7512,7 +7512,17 @@ struct LowerCtx<'program> {
     /// dependency so its guard executes only when that source branch is
     /// selected. Unlike [`Self::random_path_condition`], this is present in
     /// ordinary tensor DAGs as well as transform/helper subcontexts.
-    local_ascription_path_condition: Option<NodeId>,
+    /// The conjunction of the enclosing `if` branch predicates, or `None`
+    /// at the top level. Maintained unconditionally by `lower_if` and
+    /// restored on exit.
+    ///
+    /// Two consumers: a local tensor ascription activates only on its path,
+    /// and (chelis#1464) an [05-OP-68] guard fires only on its path. The
+    /// DAG is evaluated eagerly in topological order, so a guard node that
+    /// did not conjoin this would be checked even when the forward program
+    /// takes the sibling branch — the exact thing
+    /// `spec/06-transformations.md` §2.10.1 forbids.
+    branch_path_condition: Option<NodeId>,
     local_unit_refinements: BTreeMap<(NodeId, usize), NodeId>,
     /// Unique scalar carriers for computed reshape targets. They are Copy
     /// until a returned axis acquires a claim, then checked in place before
@@ -7674,7 +7684,7 @@ impl<'program> LowerCtx<'program> {
             literal_result_claim_ownership: LiteralResultClaimOwnership::Legacy,
             local_tensor_ascriptions: Arc::new(Vec::new()),
             local_ascription_tokens: Vec::new(),
-            local_ascription_path_condition: None,
+            branch_path_condition: None,
             reshape_targets: BTreeMap::new(),
             local_unit_refinements: BTreeMap::new(),
             invocation_witnesses: Vec::new(),
@@ -9703,7 +9713,7 @@ impl<'program> LowerCtx<'program> {
                             }
                             for (_axis, token) in &claims {
                                 let latest_dependency = self
-                                    .local_ascription_path_condition
+                                    .branch_path_condition
                                     .map_or(token.0, |activation| token.0.max(activation.0));
                                 if owner.0 <= latest_dependency {
                                     let ty = self
@@ -9722,7 +9732,7 @@ impl<'program> LowerCtx<'program> {
                                 }
                                 self.dag.add_shape_dep(owner, *token);
                             }
-                            if let Some(activation) = self.local_ascription_path_condition
+                            if let Some(activation) = self.branch_path_condition
                                 && !claims.is_empty()
                             {
                                 self.dag.add_shape_dep(owner, activation);
@@ -18939,6 +18949,105 @@ impl<'program> LowerCtx<'program> {
         }
     }
 
+    /// chelis#1464: lower an `if` arm with `branch_path_condition` extended
+    /// by that arm's own predicate, then restore it.
+    ///
+    /// `lower_if`'s ordinary path does this inline for both arms. The
+    /// guarded-abort path lowers only the surviving arm, so it needs the
+    /// same extension rather than the enclosing path alone.
+    fn lower_branch_with_path(
+        &mut self,
+        branch: &Expr,
+        cond: NodeId,
+        on_true: bool,
+    ) -> LoweredValue {
+        let saved = self.branch_path_condition;
+        let path_ty = TensorType {
+            dims: Vec::new(),
+            precision: Prim::Bool,
+        };
+        let predicate = if on_true {
+            cond
+        } else {
+            self.dag.add_node(
+                RiscOp::Logical(LogicalKind::Not),
+                vec![cond],
+                path_ty.clone(),
+                self.current_span_id.clone(),
+            )
+        };
+        self.branch_path_condition = Some(match saved {
+            Some(parent) => self.dag.add_node(
+                RiscOp::Logical(LogicalKind::And),
+                vec![parent, predicate],
+                path_ty,
+                self.current_span_id.clone(),
+            ),
+            None => predicate,
+        });
+        self.if_branch_depth += 1;
+        let lowered = self.lower_expr(branch);
+        self.if_branch_depth -= 1;
+        self.branch_path_condition = saved;
+        lowered
+    }
+
+    /// chelis#1464 / [05-OP-68]: the predicate under which the guard must
+    /// actually abort — the branch predicate AND the enclosing path.
+    ///
+    /// Without the conjunction, a guard nested inside another runtime `if`
+    /// aborts even when the outer condition selects the sibling, because
+    /// the DAG evaluates every node regardless of which branch the forward
+    /// program takes. That turned programs with a well-defined value into
+    /// hard aborts in both lanes, and was visible as a static/runtime split:
+    /// the same program returned a value when the outer condition folded
+    /// (chelis#620 pruning removed the guard) and aborted when it did not.
+    ///
+    /// At the top level there is no enclosing path, so the branch predicate
+    /// is used directly and no nodes are synthesized.
+    fn guard_fire_condition(&mut self, cond: NodeId, trap_on_true: bool) -> (NodeId, bool) {
+        let Some(path) = self.branch_path_condition else {
+            return (cond, trap_on_true);
+        };
+        let path_ty = TensorType {
+            dims: Vec::new(),
+            precision: Prim::Bool,
+        };
+        // `trap_on_true` exists to avoid synthesizing a negation when the
+        // `fail` is the else arm; once the path is conjoined the firing
+        // predicate is explicit, so it collapses to `true`.
+        let branch_predicate = if trap_on_true {
+            cond
+        } else {
+            self.dag.add_node(
+                RiscOp::Logical(LogicalKind::Not),
+                vec![cond],
+                path_ty.clone(),
+                self.current_span_id.clone(),
+            )
+        };
+        let fires = self.dag.add_node(
+            RiscOp::Logical(LogicalKind::And),
+            vec![path, branch_predicate],
+            path_ty,
+            self.current_span_id.clone(),
+        );
+        (fires, true)
+    }
+
+    /// chelis#1464 / [05-OP-68]: `fail("")` as an `if` branch. The atom
+    /// makes an empty message a type error and forbids synthesizing one, so
+    /// there is no message to carry and no guard to build.
+    fn reject_empty_fail_message(&self, elems: &[Expr]) -> NodeId {
+        raise_lowering_error(
+            "`fail(\"\")` has no message to report. A guarded abort carries its message \
+             as part of its identity and never synthesizes or defaults one ([05-OP-68]); \
+             give the `fail` a non-empty message.",
+            elems.first().map(Expr::span),
+            self.current_span_id.clone(),
+        )
+    }
+
     /// chelis#1464: a `fail(...)` inside an `if` branch that `lower_if`
     /// could not convert to an [05-OP-68] guard, because it is not the
     /// branch expression itself.
@@ -18970,6 +19079,7 @@ impl<'program> LowerCtx<'program> {
     ) -> LoweredValue {
         let which = if trap_on_true { "then" } else { "else" };
         let fallback = self.expect_runtime_if_branch(fallback, which, elems);
+        let (cond, trap_on_true) = self.guard_fire_condition(cond, trap_on_true);
         let out_ty = self
             .dag
             .get(fallback)
@@ -19033,7 +19143,13 @@ impl<'program> LowerCtx<'program> {
             return None;
         }
         match message_kids.first()? {
-            Expr::Atom(Atom::Str(message), _) if !message.is_empty() => Some(message.clone()),
+            // An empty message is returned, not filtered out: [05-OP-68]
+            // makes it a type error, and the caller rejects it by name.
+            // Filtering it here sent `fail("")` to the indirect-`fail`
+            // diagnostic instead, which told the user to "write `fail(...)`
+            // directly as the branch" — which is exactly what they had
+            // written (chelis#1464 review, F-3).
+            Expr::Atom(Atom::Str(message), _) => Some(message.clone()),
             _ => None,
         }
     }
@@ -19093,6 +19209,9 @@ impl<'program> LowerCtx<'program> {
         // lowered the taken branch alone.
         let then_fail = self.fail_message_of(then_expr);
         let else_fail = self.fail_message_of(else_expr);
+        if then_fail.as_deref() == Some("") || else_fail.as_deref() == Some("") {
+            return LoweredValue::Node(self.reject_empty_fail_message(elems));
+        }
         match (&then_fail, &else_fail) {
             // The surviving branch is still an `if` branch, so it is lowered
             // at branch depth: an INDIRECT `fail` inside it has no guard of
@@ -19101,15 +19220,16 @@ impl<'program> LowerCtx<'program> {
             // the branch being fixed — `if c then fail("a") else boom(x)`
             // returned a zero with exit 0.
             (Some(message), None) => {
-                self.if_branch_depth += 1;
-                let fallback = self.lower_expr(else_expr);
-                self.if_branch_depth -= 1;
+                // The fallback is the ELSE arm, so it executes on
+                // `path AND NOT cond`. Entering it with that path is what
+                // makes a guard nested inside it fire in source order: a
+                // later guard must not pre-empt an earlier one that already
+                // decided the branch (chelis#1464).
+                let fallback = self.lower_branch_with_path(else_expr, cond, false);
                 return self.guarded_fail_value(cond, fallback, message, true, elems);
             }
             (None, Some(message)) => {
-                self.if_branch_depth += 1;
-                let fallback = self.lower_expr(then_expr);
-                self.if_branch_depth -= 1;
+                let fallback = self.lower_branch_with_path(then_expr, cond, true);
                 return self.guarded_fail_value(cond, fallback, message, false, elems);
             }
             (Some(_), Some(_)) => {
@@ -19129,11 +19249,11 @@ impl<'program> LowerCtx<'program> {
                 self.current_span_id.clone(),
             );
         }
-        let saved_local_path = self.local_ascription_path_condition;
+        let saved_branch_path = self.branch_path_condition;
         // Carry the selected path through arm lowering rather than guessing
         // from the arm's syntax: inlining can introduce a local claim only
         // after `lower_if` has entered the arm.
-        self.local_ascription_path_condition = Some(match saved_local_path {
+        self.branch_path_condition = Some(match saved_branch_path {
             Some(parent_path) => self.dag.add_node(
                 RiscOp::Logical(LogicalKind::And),
                 vec![parent_path, cond],
@@ -19192,7 +19312,7 @@ impl<'program> LowerCtx<'program> {
             path_ty.clone(),
             self.current_span_id.clone(),
         );
-        self.local_ascription_path_condition = Some(match saved_local_path {
+        self.branch_path_condition = Some(match saved_branch_path {
             Some(parent_path) => self.dag.add_node(
                 RiscOp::Logical(LogicalKind::And),
                 vec![parent_path, not_cond],
@@ -19206,7 +19326,7 @@ impl<'program> LowerCtx<'program> {
         self.if_branch_depth -= 1;
         let else_node = self.expect_runtime_if_branch(else_value, "else", elems);
         self.random_path_condition = saved_random_path;
-        self.local_ascription_path_condition = saved_local_path;
+        self.branch_path_condition = saved_branch_path;
         let stamped_out_ty = if let Some(Expr::Map(meta, _)) = elems.get(1) {
             self.type_from_meta(meta)
         } else {

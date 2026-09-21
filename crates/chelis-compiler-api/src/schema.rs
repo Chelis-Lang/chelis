@@ -2085,11 +2085,11 @@ pub struct WireRecordPatternField {
 ///   `CmpLt` operation spelling is removed.
 /// - `16`: a scalar `if` whose branch is `fail(...)` carries its abort as a
 ///   `GuardedFail` operation ([05-OP-68], chelis#1464) instead of lowering
-///   the failing branch to a placeholder value. A version-15 producer never
-///   emitted the operation, so a version-15 graph remains readable
-///   unchanged; a version-16 graph containing it is not representable at
-///   version 15, because there is no placeholder spelling that preserves
-///   the abort.
+///   the failing branch to a placeholder value. The validator accepts the
+///   current version exactly, so this is a breaking bump like every other
+///   entry here: a version-15 graph is rejected, and a version-16 graph
+///   containing the operation has no version-15 spelling, because no
+///   placeholder preserves the abort.
 pub const WIRE_DAG_SCHEMA_VERSION: u32 = 16;
 
 /// A typed failure from validating a serialized [`WireDag`] against the

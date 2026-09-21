@@ -4585,8 +4585,8 @@ impl HipEmitter {
             format!("the HIP kernel set (node {})", node.id.0),
             Stage::Codegen("hip"),
             chelis_types::unimplemented_rejection!(
-                1464,
-                "a guarded abort has no device kernel; the C target preserves the [05-OP-68] abort"
+                2360,
+                "a guarded abort reaching device kernel selection has no device form; it is emitted host-side"
             ),
         )
     }
