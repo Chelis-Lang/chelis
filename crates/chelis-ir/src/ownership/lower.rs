@@ -1045,8 +1045,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
     /// mints from a `Value::FunctionRef` that outlives the expression scope
     /// that produced it, so such an owner takes the enclosing region (for
     /// example the whole tuple in `(identity, 1i64)`). Narrowing it would mean
-    /// carrying a span on the `Value`, which is more than this change should
-    /// take on.
+    /// carrying a span on the `Value`, tracked as chelis#2319.
     fn with_expr_span<T>(
         &mut self,
         expr: &ConcreteHostExpr,

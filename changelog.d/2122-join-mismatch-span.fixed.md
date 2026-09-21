@@ -11,7 +11,8 @@ taken from `HostExpr::span_id` per `spec/design/chelis_span_survival.md`, on
 every path that lowers an expression: ordinary expressions, and the arguments
 of a direct call to a user-defined `def`, including an argument admitted as a
 raw literal. An owner minted for a function reference takes the enclosing
-region instead, because the value outlives the expression that produced it.
+region instead, because the value outlives the expression that produced it
+(chelis#2319).
 
 A node without its own span keeps the nearest enclosing one, since that region
 still locates the owner. An owner minted outside any expression, such as a unit
