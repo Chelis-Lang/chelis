@@ -329,6 +329,12 @@ pub(crate) fn emit_host_abi_program(
                 .find(|binding| binding.name == *name)
                 .expect("captured global name comes from program.globals");
             body.push(format!("static {};", c_decl(&binding.ty, name)?));
+            if matches!(binding.ty, HostType::Tensor(_)) {
+                body.push(format!(
+                    "static __chelis_host_result_origin {};",
+                    result_origin_name(name)
+                ));
+            }
         }
         body.push(String::new());
     }
@@ -2564,6 +2570,19 @@ fn emit_main(
                 c_decl(&binding.ty, &binding.name)?
             ));
         }
+        if matches!(binding.ty, HostType::Tensor(_)) {
+            let binding_origin = result_origin_name(&binding.name);
+            let value_origin = result_origin_name(&binding_var);
+            if hoisted.contains(binding.name.as_str()) {
+                emitter
+                    .lines
+                    .push(format!("    {binding_origin} = {value_origin};"));
+            } else {
+                emitter.lines.push(format!(
+                    "    __chelis_host_result_origin {binding_origin} = {value_origin};"
+                ));
+            }
+        }
     }
     let root_sites = ownership_sites
         .iter()
@@ -3406,6 +3425,21 @@ impl<'a> HostEmitter<'a> {
         }
         self.assign_expr(target, expr, ty)?;
         Ok(())
+    }
+
+    fn declare_result_origin(&mut self, value: &str, ty: &HostType, producer: Option<&str>) {
+        if !matches!(ty, HostType::Tensor(_)) {
+            return;
+        }
+        let origin = result_origin_name(value);
+        let initializer = producer.map_or_else(
+            || "{ NULL, NULL }".to_string(),
+            |op| format!("{{ \"{op}\", \"numeric trap: domain in {op} at i64\" }}"),
+        );
+        self.lines.push(format!(
+            "{}__chelis_host_result_origin {origin} = {initializer};",
+            self.indent
+        ));
     }
 
     fn next_expression_site(&mut self) -> Result<ProjectedHostSite<'a>, Unsupported> {
@@ -4515,6 +4549,7 @@ impl<'a> HostEmitter<'a> {
                             bind_name
                         ));
                         self.assign_unboxed_value(bind_name, &inner_ty, &boxed_inner)?;
+                        self.declare_result_origin(bind_name, &inner_ty, Some("load"));
                     }
                     other => {
                         return Err(invalid_abi_shape(
@@ -7769,6 +7804,7 @@ impl<'a> HostEmitter<'a> {
                     binding.name
                 ));
                 self.assign_unboxed_value(&binding.name, &binding.ty, &field_var)?;
+                self.declare_result_origin(&binding.name, &binding.ty, Some("load"));
                 self.bind_match_payload(
                     site,
                     arm_edges[index].target(),
@@ -7959,6 +7995,7 @@ impl<'a> HostEmitter<'a> {
             c_type(&callback.ret_ty)?,
             result_var
         ));
+        self.declare_result_origin(&result_var, &callback.ret_ty, None);
         let param = callback_param(callback, 0);
         let arg_var = self.next_temp("map_item");
         self.lines.push(format!(
@@ -7968,6 +8005,7 @@ impl<'a> HostEmitter<'a> {
             arg_var
         ));
         self.assign_unboxed_value(&arg_var, &param.ty, &item_value)?;
+        self.declare_result_origin(&arg_var, &param.ty, Some("load"));
         self.bind_loop_item(site, &arg_var)?;
         self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &result_var)?;
         self.lines.push(format!(
@@ -8027,6 +8065,7 @@ impl<'a> HostEmitter<'a> {
             arg_var
         ));
         self.assign_unboxed_value(&arg_var, &param.ty, &item_value)?;
+        self.declare_result_origin(&arg_var, &param.ty, Some("load"));
         self.bind_loop_item(site, &arg_var)?;
         self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &keep_var)?;
         self.lines
@@ -8082,6 +8121,14 @@ impl<'a> HostEmitter<'a> {
             c_type(&params[0].ty)?,
             acc_arg
         ));
+        if matches!(params[0].ty, HostType::Tensor(_)) {
+            self.lines.push(format!(
+                "{}__chelis_host_result_origin {} = {};",
+                self.indent,
+                result_origin_name(&acc_arg),
+                result_origin_name(target)
+            ));
+        }
         let [body_acc] = body_edge.params() else {
             return Err(invalid_abi_shape(
                 format!(
@@ -8133,6 +8180,7 @@ impl<'a> HostEmitter<'a> {
             item_arg
         ));
         self.assign_unboxed_value(&item_arg, &params[1].ty, &item_value)?;
+        self.declare_result_origin(&item_arg, &params[1].ty, Some("load"));
         self.bind_loop_item(site, &item_arg)?;
         self.emit_callback_assign(callback, &[acc_arg, item_arg], target)?;
         self.emit_expression_block_actions(site, body_block, target)?;
@@ -8223,6 +8271,14 @@ impl<'a> HostEmitter<'a> {
             acc_arg,
             acc_var
         ));
+        if matches!(params[0].ty, HostType::Tensor(_)) {
+            self.lines.push(format!(
+                "{}__chelis_host_result_origin {} = {};",
+                self.indent,
+                result_origin_name(&acc_arg),
+                result_origin_name(&acc_var)
+            ));
+        }
         let item_arg = self.next_temp("scan_item");
         self.lines.push(format!(
             "{}{} {};",
@@ -8231,6 +8287,7 @@ impl<'a> HostEmitter<'a> {
             item_arg
         ));
         self.assign_unboxed_value(&item_arg, &params[1].ty, &item_value)?;
+        self.declare_result_origin(&item_arg, &params[1].ty, Some("load"));
         self.bind_loop_item(site, &item_arg)?;
         self.emit_callback_assign(callback, &[acc_arg, item_arg], &acc_var)?;
         self.lines.push(format!(
@@ -8331,6 +8388,7 @@ impl<'a> HostEmitter<'a> {
             arg_var
         ));
         self.assign_unboxed_value(&arg_var, &param.ty, &item_value)?;
+        self.declare_result_origin(&arg_var, &param.ty, Some("load"));
         self.bind_loop_item(site, &arg_var)?;
         self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &keep_var)?;
         self.lines
@@ -8413,6 +8471,7 @@ impl<'a> HostEmitter<'a> {
             c_type(&callback.ret_ty)?,
             result_var
         ));
+        self.declare_result_origin(&result_var, &callback.ret_ty, None);
         let param = callback_param(callback, 0);
         let arg_var = self.next_temp("flat_map_item");
         self.lines.push(format!(
@@ -8422,6 +8481,7 @@ impl<'a> HostEmitter<'a> {
             arg_var
         ));
         self.assign_unboxed_value(&arg_var, &param.ty, &item_value)?;
+        self.declare_result_origin(&arg_var, &param.ty, Some("load"));
         self.bind_loop_item(site, &arg_var)?;
         self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &result_var)?;
         self.lines.push(format!(
@@ -8447,6 +8507,11 @@ impl<'a> HostEmitter<'a> {
                 if self.emitted_names.contains_key(function) {
                     append_private_context_args(&mut arg_vars);
                     arg_vars.push("NULL".to_string());
+                    arg_vars.push(if matches!(callback.ret_ty, HostType::Tensor(_)) {
+                        format!("&{}", result_origin_name(target))
+                    } else {
+                        "NULL".to_string()
+                    });
                 }
                 self.lines.push(format!(
                     "{}{target} = {}({});",
@@ -8471,6 +8536,14 @@ impl<'a> HostEmitter<'a> {
                         param.name,
                         arg_var
                     ));
+                    if matches!(param.ty, HostType::Tensor(_)) {
+                        self.lines.push(format!(
+                            "{}__chelis_host_result_origin {} = {};",
+                            self.indent,
+                            result_origin_name(&param.name),
+                            result_origin_name(arg_var)
+                        ));
+                    }
                 }
                 self.assign_expr(target, body, &callback.ret_ty)?;
             }
