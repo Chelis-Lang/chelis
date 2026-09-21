@@ -1089,6 +1089,29 @@ class ManifestTests(unittest.TestCase):
             if probe["lane"] == "hip"
         ))
 
+    def test_direct_arithmetic_hip_owners_require_exact_execution_controls(self) -> None:
+        manifest = oracle.coverage_manifest()
+        forms = manifest["source_inventory"]["owner_module_final_forms"]
+        for path, kind, owner in oracle.DIRECT_ARITHMETIC_BACKEND_FINAL_FORMS:
+            self.assertTrue(oracle.owner_module_final_form(kind, path, owner))
+            self.assertFalse(oracle.owner_module_final_form(kind, path, owner + "_unchecked"))
+            self.assertIn({"kind": kind, "owner": owner}, forms[path])
+        commands = [" ".join(leg.argv) for leg in oracle.phase0_legs()]
+        self.assertTrue(any(
+            "chelis-backend-hip" in command
+            and "codegen_structure" in command
+            and "direct_extrema_and_adjoint_emit_bit_preserving_kernels" in command
+            and "direct_checked_signed_sub_emits_exact_always_on_trap_channel" in command
+            and "direct_narrow_float_arithmetic_emits_f32_compute_and_raw_selection" in command
+            for command in commands
+        ))
+        self.assertTrue(any(
+            probe["lane"] == "hip-direct-arithmetic"
+            and "gpu_correctness" in probe["command"]
+            and "direct_" in probe["command"]
+            for probe in oracle.hardware_probe_manifest()
+        ))
+
     def test_utf8_string_byte_boundaries_are_exact_final_forms(self) -> None:
         manifest = oracle.coverage_manifest()
         forms = manifest["source_inventory"]["owner_module_final_forms"]

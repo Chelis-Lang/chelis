@@ -1081,6 +1081,18 @@ not serve. The two rows are the seams the Phase 0 scanner observes in that
 owner; neither is gratuitous, and dropping either reproduces an unclassified
 inventory hit.
 
+HIP exact direct arithmetic adds three closed typed-lane final forms:
+`fused_reduced_step_lines` supplies one `backend-element-spelling`, while
+`binary_extrema_reduced` and `extrema_adjoint_reduced` each supply one
+`load-store-template`. They are governed by the direct `sub` and extrema atoms
+and preserve the tagged lane contract: f16/bf16 arithmetic finalizes once at
+stored width, extrema compare decoded values but copy selected storage bits,
+and extrema adjoints route the complete stored cotangent or exact positive
+zero. The Phase 0 manifest binds these exact owners to Linux structural
+execution and the registered ignored real-HIP direct-arithmetic command.
+Another owner, spelling, or template remains unclassified; Metal remains the
+separate chelis#2338 capability gap rather than inheriting these HIP forms.
+
 ## C4. Validated typed tensor access
 
 The runtime moves the raw descriptor into a `tensor_storage` module. Its fields,
