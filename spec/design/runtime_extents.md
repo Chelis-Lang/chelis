@@ -644,13 +644,20 @@ both selector timings with exact primitive attribution and effects before and
 after the guard. The existing host-builtin receipts alone do not establish this
 continuation's completion.
 The pure-helper slice enrolls `return.pure_helper.literal.{eval,c}`. Callable
-transport is a separate continuation slice: private invocation-local claim
-scopes retain an authored literal result contract when supported higher-order
-host specialization inlines away that declaration boundary. Its Eval/C
-receipts cover named and literal callback paths plus different claims through
-one shared callback. Selected-alias provenance remains a further continuation
-slice; its pending witnesses count as neither callable-transport nor
-pure-helper receipts.
+transport and selected-value provenance compose as one continuation slice:
+private invocation-local claim scopes retain an authored literal result
+contract when supported higher-order host specialization inlines away that
+declaration boundary, while private value/origin pairs retain the selected
+producer through lexical aliases and helper returns. The origin is execution
+metadata, not a public value or ABI field. Eval keeps it beside lexical frame
+values; generated C keeps it inside the translation unit and uses only
+verified lowered producer sites. A true identity callback observes its tensor
+formal as interface `load`, after eager actual preparation and before the
+caller resumes. The combined Eval/C receipts cover named, literal and identity
+callbacks; different claims through one shared callback; selection both before
+and after production; helper-call boundaries; and selected-only attribution
+and effect ordering. These receipts count as neither pure-helper nor
+signature-entry receipts, whose independent controls remain enrolled.
 The receipts do not establish general preallocation coverage for every host
 primitive. Named host declared-result claims remain #1900.
 
