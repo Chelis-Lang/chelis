@@ -12,19 +12,18 @@ const TWO: &str = "[1.0f32, 2.0f32, 3.0f32]";
 const THREE: &str = "[1.0f32, 2.0f32, 3.0f32, 4.0f32]";
 
 fn callable_source(values: &str, literal: bool) -> String {
-    let (binding, callable) = if literal {
-        (
-            "local = fn (value: tensor[*, f32]) -> {\n _ = print(\"producer-before\")\n produced = shrink(value, [[1i64, shape(value, 0i32)]])\n _ = print(\"producer-after\")\n produced\n}\n",
-            "local",
+    let call = if literal {
+        format!(
+            "{{\n local = fn (value: tensor[*, f32]) -> {{\n _ = print(\"producer-before\")\n produced = shrink(value, [[1i64, shape(value, 0i32)]])\n _ = print(\"producer-after\")\n produced\n}}\n claimed(local, to_tensor({values}))\n}}"
         )
     } else {
-        ("", "cut")
+        format!("claimed(cut, to_tensor({values}))")
     };
     format!(
         "def cut[n](value: tensor[n, f32]) -> tensor[*, f32] ! {{ IO }} = {{\n _ = print(\"producer-before\")\n produced = shrink(value, [[1i64, shape(value, 0i32)]])\n _ = print(\"producer-after\")\n produced\n}}\n\
          def invoke(f: tensor[*, f32] -> tensor[*, f32], value: tensor[*, f32]) -> tensor[*, f32] ! {{ IO }} = f(value)\n\
          def claimed[n](f: tensor[*, f32] -> tensor[*, f32], value: tensor[n, f32]) -> tensor[3, f32] ! {{ IO }} = {{\n _ = print(\"caller-before\")\n result = invoke(f, value)\n _ = print(\"caller-after\")\n result\n}}\n\
-         out = {{\n {binding} claimed({callable}, to_tensor({values}))\n}}\n"
+         out = {call}\n"
     )
 }
 
