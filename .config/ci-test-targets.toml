@@ -1831,6 +1831,42 @@ reason = "the discovered PR script suite executes the CI activation and command-
 tracking_issue = "chelis#2241"
 
 [[path_rule]]
+prefix = ".cargo-husky/hooks/commit-msg"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the cargo-husky hook's real acceptance, rejection, and interpreter-ownership controls"
+tracking_issue = "chelis#2287"
+
+[[path_rule]]
+prefix = ".githooks/commit-msg"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the shared hook's acceptance, rejection, owned-profile isolation, and truncation controls"
+tracking_issue = "chelis#2287"
+
+[[path_rule]]
+prefix = "scripts/test_check_commit_message.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the discovered PR script suite executes commit-message policy and cargo-husky acceptance and rejection cases"
+tracking_issue = "chelis#2287"
+
+[[path_rule]]
+prefix = "scripts/test_commit_hook.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the discovered PR script suite executes both hooks' owned-profile, foreign-profile, uv fallback, and truncation regressions"
+tracking_issue = "chelis#2287"
+
+[[path_rule]]
 prefix = "scripts/capacity_census_native_execution.py"
 disposition = "owner"
 workflow = "heavy-e2e.yml"
