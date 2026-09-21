@@ -101,7 +101,8 @@ jobs:
 
       # Shallow checkout (depth 1); the detect step deepens to the PR
       # commit range. A retarget dispatch fetches the exact synthetic merge
-      # with full parents so the trusted validator can bind both sides.
+      # and both parents so the trusted validator can bind both sides.
+      # Depth 2, not 0: expressions treat 0 as false, so `&& 0 || 1` is 1.
       - name: Checkout exact candidate
         id: checkout-candidate
         continue-on-error: true
@@ -109,7 +110,7 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/pull/{0}/merge', inputs.pr_number) || github.sha }}
           path: candidate
-          fetch-depth: ${{ github.event_name == 'workflow_dispatch' && 0 || 1 }}
+          fetch-depth: ${{ github.event_name == 'workflow_dispatch' && 2 || 1 }}
 
       - name: Checkout trusted rebase reuse verifier
         id: checkout-trusted-rebase

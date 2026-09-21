@@ -108,7 +108,9 @@ jobs:
           fetch-depth: 1
 
       # Shallow checkout (depth 1); deepen in bash since GitHub Actions
-      # expressions have no arithmetic. See ci.yml's changes job.
+      # expressions have no arithmetic. See ci.yml's changes job. A retarget
+      # dispatch fetches the synthetic merge and both parents (depth 2; 0 is
+      # false in expressions, so `&& 0 || 1` would collapse to 1).
       - name: Checkout exact candidate
         id: checkout-candidate
         continue-on-error: true
@@ -116,7 +118,7 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/pull/{0}/merge', inputs.pr_number) || github.sha }}
           path: candidate
-          fetch-depth: ${{ github.event_name == 'workflow_dispatch' && 0 || 1 }}
+          fetch-depth: ${{ github.event_name == 'workflow_dispatch' && 2 || 1 }}
 
       - name: Checkout trusted rebase reuse verifier
         id: checkout-trusted-rebase
