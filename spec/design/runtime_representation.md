@@ -1061,6 +1061,22 @@ execution, HIP structural admission, and the ignored real-HIP exact-bit matrix.
 A renamed or additional owner remains unclassified until it independently
 supplies the same final-form authority and execution contract.
 
+The #1281 exact C reduction cutover adds two more closed
+`backend-element-spelling` owners as final forms:
+`CEmitter::emit_mean_nonempty_guard` and
+`CEmitter::emit_reduce_extreme`. The former observes the lowered divisor in
+its declared storage/arithmetic width and enforces [05-OP-11]'s runtime-empty
+Domain trap before division. The latter implements [05-OP-12..13] selection at
+the declared arithmetic width while copying the selected source storage bits,
+including first-NaN and equal-value behavior. Neither owner accepts a raw dtype
+identifier or creates a public numeric carrier. The Phase 0 manifest binds both
+exact identities to the complete compiled-C
+`issue_1281_exact_reductions` suite; Phase 1 freezes that suite's current ten
+test identities, including every admitted storage width and runtime-empty
+negative controls. Renaming or splitting either owner requires a new
+final-authority classification and execution contract rather than transition
+debt.
+
 `NUMERIC_DEVICE_HELPERS` is a separate numeric final-form owner for the
 `uniform_like` sampler governed by [05-OP-8]. Splitting it from the common HIP
 device helpers does not transfer it into the typed-nonnumeric cohort. Its exact

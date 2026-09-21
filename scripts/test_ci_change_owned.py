@@ -2387,6 +2387,44 @@ packages = ["chelis-cli", "chelis-e2e"]
             "rule",
         )
 
+    def test_exact_reduction_oracle_scripts_have_exact_script_unit_owners(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        config = owned.read_config(root / ".config/ci-test-targets.toml")
+        expected = {
+            "scripts/dtype_exact_reductions_oracle.py",
+            "scripts/test_dtype_exact_reductions_oracle.py",
+        }
+        rules = {
+            rule.prefix: rule
+            for rule in config.path_rules
+            if rule.prefix in expected
+        }
+        self.assertEqual(set(rules), expected)
+        for path, rule in rules.items():
+            with self.subTest(path=path):
+                self.assertEqual(rule.disposition, "owner")
+                self.assertIsNotNone(rule.owner)
+                self.assertEqual(
+                    (
+                        rule.owner.workflow,
+                        rule.owner.job,
+                        rule.owner.cadence,
+                        rule.owner.tracking_issue,
+                    ),
+                    (
+                        "ci.yml",
+                        "script-unit",
+                        "pull_request and push",
+                        "chelis#1281",
+                    ),
+                )
+        for neighbor in (
+            "scripts/dtype_exact_reductions_oracle_extra.py",
+            "scripts/test_dtype_exact_reductions_oracle_extra.py",
+        ):
+            with self.subTest(neighbor=neighbor):
+                self.assertFalse(any(rule.matches(neighbor) for rule in rules.values()))
+
     def test_targeted_frontier_rejects_a_nightly_excluded_target(self) -> None:
         frontier = owned.targeted_rebase_frontier(
             ["crates/p/tests/heavy.rs"],

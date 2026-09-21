@@ -2126,15 +2126,7 @@
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_argcmp",
-      "sample": "for (int64_t outer = 0; outer < t{id}_size; outer++) {{"
-    },
-    {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_max",
-      "sample": "for (int64_t outer = 0; outer < t{id}_size; outer++) {{"
-    },
-    {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_max_reduced_f",
-      "sample": "for (int64_t outer = 0; outer < t{id}_size; outer++) {{"
+      "sample": "float"
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_simple",
@@ -2146,11 +2138,11 @@
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_window",
-      "sample": "for (int64_t outer = 0; outer < t{id}_size; outer++) {{"
+      "sample": "reduce_window_mean admits only active float tensor dtypes"
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_window_grad",
-      "sample": "for (int64_t outer = 0; outer < t{g}_size; outer++) {{"
+      "sample": "window adjoints require one matching active float dtype"
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_runtime_dim_site",
@@ -2645,28 +2637,16 @@
       "sample": "float __av = {load}(__in_a_{id}[i]);"
     },
     {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_argcmp",
-      "sample": "float v = ((const float*)t{a}_data)[src_idx];"
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_max",
-      "sample": "((float*)t{id}_data)[0] = chelis_max_f32((const float*)t{a}_data, t{a}_size);"
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_max_reduced_f",
-      "sample": "acc = chelis_fmax_propnan_f32(acc, {load}(((uint16_t*)t{a}_data)[src_idx]));"
-    },
-    {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_simple",
       "sample": "((float*)t{id}_data)[0] = {fn_name}((const float*)t{a}_data, t{a}_size);"
     },
     {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_window",
-      "sample": "acc = fmaxf(acc, ((const float*)t{a}_data)[src_idx]);"
+      "sample": "({arithmetic_et})chelis_int_checked_add((int64_t)level[left], (int64_t)level[right], {bits}, {tra..."
     },
     {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_window_grad",
-      "sample": "for (int64_t i = 0; i < t{id}_size; i++) {{ ((float*)t{id}_data)[i] = 0.0f; }}"
+      "sample": "((uint16_t*)t{id}_data)[dst_idx] = {}(result);"
     },
     {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_shape",

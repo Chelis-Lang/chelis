@@ -359,6 +359,29 @@
       ]
     },
     {
+      "name": "exact C reduction stored-width and runtime-empty execution",
+      "args": [
+        "-p",
+        "chelis-backend-c",
+        "--test",
+        "issue_1281_exact_reductions",
+        "-E",
+        "not test(=an_allocation_above_int32_elements_reports_its_true_extent)"
+      ],
+      "required": [
+        "chelis-backend-c::issue_1281_exact_reductions::global_extrema_adjoints_split_infinity_ties_and_route_only_the_first_nan",
+        "chelis-backend-c::issue_1281_exact_reductions::global_extrema_and_argument_reductions_execute_at_every_remaining_storage_width",
+        "chelis-backend-c::issue_1281_exact_reductions::global_extrema_and_argument_reductions_preserve_f32_bits_and_first_indices",
+        "chelis-backend-c::issue_1281_exact_reductions::global_i64_extrema_and_argument_reductions_never_convert_through_float",
+        "chelis-backend-c::issue_1281_exact_reductions::global_mean_compiles_to_the_same_f32_sum_then_divide_bits_as_the_evaluator",
+        "chelis-backend-c::issue_1281_exact_reductions::overlapping_window_adjoint_combines_contributions_with_balanced_tree_order",
+        "chelis-backend-c::issue_1281_exact_reductions::reduced_float_window_extrema_and_mean_preserve_storage_and_f32_arithmetic",
+        "chelis-backend-c::issue_1281_exact_reductions::runtime_empty_global_extrema_and_argument_reductions_trap_domain",
+        "chelis-backend-c::issue_1281_exact_reductions::window_extrema_forward_and_adjoint_use_first_nan_and_divide_non_nan_ties",
+        "chelis-backend-c::issue_1281_exact_reductions::window_forward_extrema_execute_at_every_integer_and_wide_float_storage_width"
+      ]
+    },
+    {
       "name": "checked C reductions and Count optimized sanitizer execution",
       "args": [
         "-p",
@@ -519,12 +542,12 @@
         "chelis-backend-c::exec_compile::exec_reduce_window_grad_sum_matches_evaluator_oracle",
         "chelis-backend-c::exec_compile::exec_reduce_window_max_matches_evaluator_oracle",
         "chelis-backend-c::exec_compile::exec_reduce_window_mean_matches_evaluator_oracle",
-        "chelis-backend-c::issue_254_reduce_window_emit::issue254_emit_reduce_window_max_uses_fmaxf_and_neg_infinity",
+        "chelis-backend-c::issue_254_reduce_window_emit::issue254_emit_reduce_window_max_selects_first_nan_without_fmaxf",
         "chelis-backend-c::issue_254_reduce_window_emit::issue254_emit_reduce_window_max_uses_stride_in_index_arithmetic",
         "chelis-backend-c::issue_254_reduce_window_emit::issue254_emit_reduce_window_mean_divides_by_window_volume",
-        "chelis-backend-c::issue_254_reduce_window_emit::issue254_emit_reduce_window_min_uses_fminf_and_positive_infinity",
-        "chelis-backend-c::issue_254_reduce_window_emit::issue254_emit_reduce_window_sum_uses_plus_equals",
-        "chelis-backend-c::issue_254_reduce_window_emit::non_f32_windowed_reduction_names_its_real_implementation_owner",
+        "chelis-backend-c::issue_254_reduce_window_emit::issue254_emit_reduce_window_min_selects_first_nan_without_fminf",
+        "chelis-backend-c::issue_254_reduce_window_emit::issue254_emit_reduce_window_sum_uses_adjacent_pair_tree",
+        "chelis-backend-c::issue_254_reduce_window_emit::reduced_float_windowed_reduction_uses_f32_arithmetic_and_f16_storage",
         "chelis-backend-c::issue_254_reduce_window_emit::runtime_symbolic_window_extent_names_dynamic_shape_owner"
       ]
     },
@@ -937,7 +960,7 @@
         "chelis-backend-c::emit::tests::path_sensitive_uniform_reads_float_backed_bool_and_gates_counter",
         "chelis-backend-c::emit::tests::permute_materializes_the_axis_mapping",
         "chelis-backend-c::emit::tests::realize_emits_materialization_loop",
-        "chelis-backend-c::emit::tests::reduce_window_max_min_drop_nan",
+        "chelis-backend-c::emit::tests::reduce_window_max_min_select_first_nan_and_stored_representation",
         "chelis-backend-c::emit::tests::repeated_load_names_share_one_input_slot",
         "chelis-backend-c::emit::tests::reshape_materializes_contiguous_storage",
         "chelis-backend-c::emit::tests::roots_are_emitted_as_multiple_outputs",

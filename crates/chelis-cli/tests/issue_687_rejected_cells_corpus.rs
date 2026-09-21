@@ -215,17 +215,6 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &str)] = &[
          placeholder is chelis#734)\n",
     ),
     (
-        "c_int64_max_reduce",
-        "def f(x: tensor[4, i64]) -> tensor[i64] = max_reduce(x, 0)\n\
-         out = f(to_tensor([cast(1, i64), cast(4, i64), cast(2, i64), \
-         cast(3, i64)]))\n",
-        "c",
-        "error: unsupported: op `max_reduce` on `i64` tensors in the C DAG emitter (node 1) \
-         (codegen:c); unimplemented chelis#729: the C reduce kernels are f32-hardcoded today \
-         (WS-A1/F1); cast to f32 before the reduction. The target capability table owns non-f32 \
-         widening\n",
-    ),
-    (
         // [04-INF-9]: the Float admission contract rejects this before
         // lowering. Retain the exact original source and byte comparator.
         "c_int_tensor_cos",

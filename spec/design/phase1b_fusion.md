@@ -97,8 +97,10 @@ Supporting manual evidence:
 
 - rerun the Phase 1a HIP manual oracle:
   `cargo test -p chelis-backend-hip --test gpu_correctness -- --ignored --test-threads=1`
-- verify the real CLI build path still emits fused HIP kernels for MNIST:
-  `cargo test -p chelis-cli build_hip_mnist_emits_fused_kernels_and_launches -- --exact`
+- verify the real CLI build path still emits a fused HIP reduction kernel for
+  an admitted sum program (MNIST remains fenced by chelis#2339 until device
+  extrema reductions satisfy their exact contract):
+  `cargo test -p chelis-cli build_hip_admitted_sum_program_emits_fused_kernel_and_launch -- --exact`
 
 ### Execution Strategy
 

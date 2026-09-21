@@ -1076,6 +1076,33 @@ class ManifestTests(unittest.TestCase):
             for probe in hardware
         ))
 
+    def test_exact_reduction_backend_owners_require_exact_execution_controls(self) -> None:
+        expected = (
+            (
+                "crates/chelis-backend-c/src/emit.rs",
+                "backend-element-spelling",
+                "CEmitter::emit_mean_nonempty_guard",
+            ),
+            (
+                "crates/chelis-backend-c/src/emit.rs",
+                "backend-element-spelling",
+                "CEmitter::emit_reduce_extreme",
+            ),
+        )
+        self.assertEqual(oracle.EXACT_REDUCTION_BACKEND_FINAL_FORMS, expected)
+        forms = oracle.coverage_manifest()["source_inventory"]["owner_module_final_forms"]
+        for path, kind, owner in expected:
+            self.assertTrue(oracle.owner_module_final_form(kind, path, owner))
+            self.assertFalse(oracle.owner_module_final_form(kind, path, owner + "_unchecked"))
+            self.assertFalse(oracle.owner_module_final_form("load-store-template", path, owner))
+            self.assertIn({"kind": kind, "owner": owner}, forms[path])
+        commands = [" ".join(leg.argv) for leg in oracle.phase0_legs()]
+        self.assertTrue(any(
+            "chelis-backend-c" in command
+            and "issue_1281_exact_reductions" in command
+            for command in commands
+        ))
+
     def test_uniform_sampler_helper_keeps_op8_authority_and_gpu_execution(self) -> None:
         path, kind, owner = oracle.UNIFORM_RANDOM_BACKEND_FINAL_FORMS[0]
         self.assertEqual(owner, "NUMERIC_DEVICE_HELPERS")
