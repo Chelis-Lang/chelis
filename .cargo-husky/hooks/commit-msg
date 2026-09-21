@@ -4,26 +4,12 @@
 set -eu
 
 repo_root=$(git rev-parse --show-toplevel)
-repo_root=$(CDPATH='' cd "$repo_root" && pwd -P)
-
-# An activated profile must belong to the committing worktree, not its caller.
-if [ -n "${DEVENV_STATE:-}" ]; then
-    state=$(CDPATH='' cd "$DEVENV_STATE" 2>/dev/null && pwd -P) || state=
-    case "$state" in
-        "$repo_root/.devenv/"*)
-            if [ -x "$state/venv/bin/python" ]; then
-                exec "$state/venv/bin/python" "$repo_root/scripts/check_commit_message.py" "$@"
-            fi
-            ;;
-    esac
-fi
 
 if [ -x "$repo_root/.devenv/state/venv/bin/python" ]; then
     python_path="$repo_root/.devenv/state/venv/bin/python"
 elif [ -x "$repo_root/.venv/bin/python" ]; then
     python_path="$repo_root/.venv/bin/python"
 elif command -v uv >/dev/null 2>&1; then
-    unset UV_PYTHON_PREFERENCE
     exec uv run --managed-python --python 3.11 --no-project python \
         "$repo_root/scripts/check_commit_message.py" "$@"
 else

@@ -100,7 +100,7 @@ class PullRequestBoundaryTests(unittest.TestCase):
         runs = [step.get("run") for step in script_unit["steps"]]
         self.assertEqual(
             runs.count(
-                "python scripts/check_rejection_authority_boundary.py"
+                ".venv/bin/python scripts/check_rejection_authority_boundary.py"
             ),
             1,
         )

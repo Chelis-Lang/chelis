@@ -16,9 +16,11 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[1]
 GIT_HOOKS_MODULE = REPO_ROOT / "devenv/git-hooks.nix"
 SMOKE_TEST_MODULE = REPO_ROOT / "devenv/smoke-tests.nix"
-EXPECTED_REVISION = "360b5eb1397291383d10845a63a0247981bd5598"
-EXPECTED_URL = f"github:cachix/devenv/{EXPECTED_REVISION}?dir=src/modules"
-EXPECTED_CLI_REQUIREMENT = "=2.2.3"
+EXPECTED_URL = "github:cachix/devenv/v2.2.2?dir=src/modules"
+EXPECTED_REF = "v2.2.2"
+EXPECTED_REVISION = "b8030c58deafc013fc51791377fe8fea4dadcb00"
+EXPECTED_CLI_VERSION = "2.2.2"
+EXPECTED_CLI_REQUIREMENT = ">=2.2.0, <=2.2.2"
 EXPECTED_TEST_TASKS = (
     "chelis:toolchain-test",
     "chelis:python-test",
@@ -83,7 +85,7 @@ GENERATED_GIT_HOOK_CONFIG = "/.pre-commit-config.yaml"
 @dataclass(frozen=True)
 class DevenvPin:
     url: str
-    original_revision: str
+    ref: str
     directory: str
     locked_directory: str
     revision: str
@@ -409,7 +411,7 @@ def parse_devenv_pin(yaml_text: str, lock_data: Any) -> DevenvPin:
         node = lock_data["nodes"]["devenv"]
         original = node["original"]
         locked = node["locked"]
-        original_revision = original["rev"]
+        ref = original["ref"]
         directory = original["dir"]
         locked_directory = locked["dir"]
         revision = locked["rev"]
@@ -418,36 +420,43 @@ def parse_devenv_pin(yaml_text: str, lock_data: Any) -> DevenvPin:
             "devenv.lock does not contain a complete devenv pin"
         ) from error
 
-    values = (original_revision, directory, locked_directory, revision)
+    values = (ref, directory, locked_directory, revision)
     if not all(isinstance(value, str) for value in values):
         raise ValueError("the devenv lock fields must be strings")
 
     return DevenvPin(
         url=parse_devenv_url(yaml_text),
-        original_revision=original_revision,
+        ref=ref,
         directory=directory,
         locked_directory=locked_directory,
         revision=revision,
     )
 
 
-def require_devenv_pin(pin: DevenvPin) -> None:
+def require_v22(pin: DevenvPin) -> None:
     expected = DevenvPin(
         url=EXPECTED_URL,
-        original_revision=EXPECTED_REVISION,
+        ref=EXPECTED_REF,
         directory="src/modules",
         locked_directory="src/modules",
         revision=EXPECTED_REVISION,
     )
     if pin != expected:
-        raise ValueError(f"the repository must pin the reviewed Devenv module: {pin!r}")
+        raise ValueError(f"the repository must pin Devenv {EXPECTED_REF}: {pin!r}")
 
 
 class DevenvVersionTests(unittest.TestCase):
-    def test_repository_pins_the_reviewed_devenv_module(self) -> None:
+    def test_local_module_corrects_the_release_cli_version_metadata(self) -> None:
+        module = (REPO_ROOT / "devenv/toolchains.nix").read_text(encoding="utf-8")
+        self.assertIn(
+            f'devenv.latestVersion = "{EXPECTED_CLI_VERSION}";',
+            module,
+        )
+
+    def test_repository_pins_devenv_v22(self) -> None:
         yaml_text = (REPO_ROOT / "devenv.yaml").read_text(encoding="utf-8")
         lock_data = json.loads((REPO_ROOT / "devenv.lock").read_text(encoding="utf-8"))
-        require_devenv_pin(parse_devenv_pin(yaml_text, lock_data))
+        require_v22(parse_devenv_pin(yaml_text, lock_data))
 
     def test_repository_requires_the_reviewed_cli_range(self) -> None:
         yaml_text = (REPO_ROOT / "devenv.yaml").read_text(encoding="utf-8")
@@ -681,19 +690,19 @@ class DevenvVersionTests(unittest.TestCase):
         yaml_text = (REPO_ROOT / "devenv.yaml").read_text(encoding="utf-8")
         lock_data = json.loads((REPO_ROOT / "devenv.lock").read_text(encoding="utf-8"))
         lock_data["nodes"]["devenv"]["locked"]["dir"] = "other/modules"
-        with self.assertRaises(ValueError):
-            require_devenv_pin(parse_devenv_pin(yaml_text, lock_data))
+        with self.assertRaisesRegex(ValueError, "must pin Devenv v2.2"):
+            require_v22(parse_devenv_pin(yaml_text, lock_data))
 
     def test_old_devenv_revision_fails_the_release_contract(self) -> None:
         old_pin = DevenvPin(
             url=EXPECTED_URL,
-            original_revision=EXPECTED_REVISION,
+            ref=EXPECTED_REF,
             directory="src/modules",
             locked_directory="src/modules",
             revision="9767a1f458fbd99b487dbb600a130917d4cd2b13",
         )
-        with self.assertRaises(ValueError):
-            require_devenv_pin(old_pin)
+        with self.assertRaisesRegex(ValueError, "must pin Devenv v2.2"):
+            require_v22(old_pin)
 
 
 if __name__ == "__main__":
