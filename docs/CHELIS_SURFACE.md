@@ -435,6 +435,7 @@ Host lane:    cumsum sort einsum diagonal trace where clamp concat split scatter
               print fail debug test_assert test_assert_eq test_assert_close_tensor
               test_assert_eq_tensor
               mod bitand bitor bitxor shl shr
+              drop
 ```
 
 Prelude ADTs/constructors (also in scope): `Option`/`Some`/`None`,

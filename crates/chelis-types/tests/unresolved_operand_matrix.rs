@@ -750,14 +750,17 @@ fn a_late_bound_secondary_operand_is_validated_too() {
             diagnostic: "take expects integer count, got f32",
         },
         Cell {
-            // `drop` shares `take`'s arm; the cell is here because the
+            // `skip` shares `take`'s arm; the cell is here because the
             // diagnostic interpolates the callee name and a shared arm that
             // named one of them would pass with the other silently wrong.
+            // Before [05-OP-54]/[05-OP-67] split them this cell read `drop`;
+            // the one-argument `drop` no longer reaches this arm at all, and
+            // its own arity rejection is `infer::app`'s.
             route: "skip",
             resolved_invalid: "def f(x: List[i32], k: f32) -> List[i32] = skip(x, k)\n",
             late_invalid: "def f(x: List[i32], k: f32) -> List[i32] = {\n  g = fn (n) -> skip(x, n)\n  g(k)\n}\n",
             late_valid: "def f(x: List[i32], k: i64) -> List[i32] = {\n  g = fn (n) -> skip(x, n)\n  g(k)\n}\n",
-            diagnostic: "drop expects integer count, got f32",
+            diagnostic: "skip expects integer count, got f32",
         },
         Cell {
             route: "chunk",
