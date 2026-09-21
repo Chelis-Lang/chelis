@@ -1293,11 +1293,10 @@ in 0.18.3, 0.18.4, and 0.18.5 (chelis#1349).
   equal-infinity ties, the first NaN wins, and
   `ExtremaAdjoint { kind, operand }` routes the complete cotangent
   through the exact forward selector. Eval and C implement every direct
-  identity. HIP now implements every admitted numeric dtype, including
-  checked signed-integer subtraction through an exact device trap channel
-  and f16/bf16 direct and fused arithmetic with one final narrow. Metal
-  remains typed-unimplemented under chelis#2338 rather than falling through
-  a wildcard. Acceptance oracle:
+  identity. HIP implements the f32/f64 and signed-integer cells;
+  checked signed-integer subtraction, bf16/f16 direct arithmetic, and
+  Metal reject with typed chelis#1306 authority rather than falling
+  through a wildcard. Acceptance oracle:
   `scripts/dtype_direct_arithmetic_oracle.py`, ending
   `DTYPE DIRECT ARITHMETIC ORACLE: PASS`.
 
