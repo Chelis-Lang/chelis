@@ -416,9 +416,10 @@ jobs:
   runtime-representation-phase0-oracle:
     name: Runtime Representation Phase 2 Oracle
     runs-on: ubuntu-latest
-    # chelis#2299: after dependency setup was repaired, the exact-main oracle
-    # remained healthy but was still executing when the 60-minute budget ended.
-    timeout-minutes: 90
+    # chelis#2299: exact-main Phase 1 passed and Phase 2 reached its final
+    # Python/DLPack cohort before the still-running binding census was cancelled
+    # at 90 minutes. Preserve measured completion headroom without weakening it.
+    timeout-minutes: 120
     permissions:
       contents: read
     env:

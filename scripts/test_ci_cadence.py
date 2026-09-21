@@ -76,12 +76,10 @@ def assert_extended(test, pr, nightly):
         test.assertNotIn("if", job)
         test.assertFalse(job.get("continue-on-error", False))
         expected_timeout = (
-            90
-            if name
-            in {
-                "dtype-phase3-oracle",
-                "runtime-representation-phase0-oracle",
-            }
+            120
+            if name == "runtime-representation-phase0-oracle"
+            else 90
+            if name == "dtype-phase3-oracle"
             else 60
             if name.startswith("generalize")
             else 45
@@ -90,7 +88,7 @@ def assert_extended(test, pr, nightly):
         if name == "runtime-representation-phase0-oracle":
             test.assertEqual(job["name"], "Runtime Representation Phase 2 Oracle")
             test.assertIn(
-                "with a 90-minute timeout",
+                "with a 120-minute timeout",
                 RUNTIME_REPRESENTATION_DESIGN.read_text(),
             )
             step_names = [step.get("name") for step in job["steps"]]
@@ -312,7 +310,7 @@ class ExtendedCadenceTests(unittest.TestCase):
 
     def test_missing_skipped_or_nonblocking_oracle_is_rejected(self):
         for name in MOVED:
-            for mutation in ("remove", "skip", "ignore", "command"):
+            for mutation in ("remove", "skip", "ignore", "command", "timeout"):
                 with self.subTest(job=name, mutation=mutation):
                     nightly = copy.deepcopy(self.nightly)
                     if mutation == "remove":
@@ -321,8 +319,10 @@ class ExtendedCadenceTests(unittest.TestCase):
                         nightly["jobs"][name]["if"] = "false"
                     elif mutation == "ignore":
                         nightly["jobs"][name]["continue-on-error"] = True
-                    else:
+                    elif mutation == "command":
                         nightly["jobs"][name]["steps"] = []
+                    else:
+                        nightly["jobs"][name]["timeout-minutes"] = 1
                     with self.assertRaises((AssertionError, KeyError)):
                         assert_extended(self, self.pr, nightly)
 
