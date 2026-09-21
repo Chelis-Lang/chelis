@@ -875,6 +875,7 @@
         "c_delayed_selection_guards_only_the_selected_value",
         "c_inherited_claim_reaches_named_and_literal_callbacks",
         "c_identity_callback_checks_claim_after_actual_preparation",
+        "c_rank_zero_host_identity_without_a_claim_preserves_value_and_effects",
         "c_selection_before_production_forwards_only_to_the_selected_arm",
         "c_shared_callback_claims_are_invocation_local",
         "eval_delayed_selection_guards_only_the_selected_value",

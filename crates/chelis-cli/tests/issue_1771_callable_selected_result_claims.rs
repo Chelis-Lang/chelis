@@ -186,6 +186,31 @@ fn rank_zero_identity_without_a_result_claim_executes_both_lanes() {
     }
 }
 
+#[test]
+fn c_rank_zero_host_identity_without_a_claim_preserves_value_and_effects() {
+    let source = "def identity(value: tensor[f32]) -> tensor[f32] ! { IO } = {\n\
+                  _ = print(\"rank-zero-before\")\n\
+                  alias = value\n\
+                  _ = print(\"rank-zero-after\")\n\
+                  alias\n\
+                  }\n\
+                  out = identity(scalar_to_tensor(7.0f32))\n";
+    let (ok, output) = run(source, true);
+    assert!(ok, "{source}\n{output}");
+    assert_eq!(output.matches("rank-zero-before").count(), 1, "{output}");
+    assert_eq!(output.matches("rank-zero-after").count(), 1, "{output}");
+    assert!(!output.contains("numeric trap:"), "{output}");
+    let out = output
+        .lines()
+        .find_map(|line| line.strip_prefix("out = "))
+        .unwrap_or_else(|| panic!("missing rank-zero result in:\n{output}"));
+    assert!(
+        !out.contains("tensor("),
+        "rank-zero result was not scalar: {output}"
+    );
+    assert_eq!(out.parse::<f32>().unwrap(), 7.0, "{output}");
+}
+
 fn delayed_selection_source(form: &str, select_second: bool, selected_agrees: bool) -> String {
     let chosen = if selected_agrees {
         THREE_BY_FOUR
