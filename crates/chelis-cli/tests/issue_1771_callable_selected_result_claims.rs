@@ -1,0 +1,178 @@
+//! Spec/04 section 4.7 and [04-NUM-9]: an inherited literal result
+//! obligation reaches the selected producer through supported callable calls
+//! and delayed selection.  The obligation is invocation-local and guards only
+//! the selected value, at the first source position where that choice is known.
+
+mod common;
+#[path = "common/result_claims.rs"]
+mod result_claims;
+
+use result_claims::{assert_claim, run};
+
+const TWO: &str = "[1.0f32, 2.0f32, 3.0f32]";
+const THREE: &str = "[1.0f32, 2.0f32, 3.0f32, 4.0f32]";
+
+fn callable_source(values: &str, literal: bool) -> String {
+    let (binding, callable) = if literal {
+        (
+            "local = fn (value: tensor[*, f32]) -> {\n _ = print(\"producer-before\")\n produced = shrink(value, [[1i64, shape(value, 0i32)]])\n _ = print(\"producer-after\")\n produced\n}\n",
+            "local",
+        )
+    } else {
+        ("alias = cut\n", "alias")
+    };
+    format!(
+        "def cut[n](value: tensor[n, f32]) -> tensor[*, f32] ! {{ IO }} = {{\n _ = print(\"producer-before\")\n produced = shrink(value, [[1i64, shape(value, 0i32)]])\n _ = print(\"producer-after\")\n produced\n}}\n\
+         def invoke(f: tensor[*, f32] -> tensor[*, f32], value: tensor[*, f32]) -> tensor[*, f32] ! {{ IO }} = f(value)\n\
+         def claimed[n](f: tensor[*, f32] -> tensor[*, f32], value: tensor[n, f32]) -> tensor[3, f32] ! {{ IO }} = {{\n _ = print(\"caller-before\")\n result = invoke(f, value)\n _ = print(\"caller-after\")\n result\n}}\n\
+         out = {{\n {binding} claimed({callable}, to_tensor({values}))\n}}\n"
+    )
+}
+
+fn assert_callable_transport(native: bool) {
+    for literal in [false, true] {
+        for (values, agrees) in [(THREE, true), (TWO, false)] {
+            let source = callable_source(values, literal);
+            let (ok, output) = run(&source, native);
+            assert_eq!(ok, agrees, "{source}\n{output}");
+            assert_eq!(output.matches("caller-before").count(), 1, "{output}");
+            assert_eq!(output.matches("producer-before").count(), 1, "{output}");
+            assert_eq!(
+                output.matches("producer-after").count(),
+                usize::from(agrees),
+                "{output}"
+            );
+            assert_eq!(
+                output.matches("caller-after").count(),
+                usize::from(agrees),
+                "{output}"
+            );
+            if agrees {
+                assert!(
+                    output.contains("out = tensor(shape=[3], data=[2.0, 3.0, 4.0])"),
+                    "{output}"
+                );
+                assert!(!output.contains("numeric trap:"), "{output}");
+            } else {
+                assert_claim(&output, "shrink", 2);
+            }
+        }
+    }
+}
+
+#[test]
+fn eval_inherited_claim_reaches_named_alias_and_literal_callbacks() {
+    assert_callable_transport(false);
+}
+
+#[test]
+fn c_inherited_claim_reaches_named_alias_and_literal_callbacks() {
+    assert_callable_transport(true);
+}
+
+fn repeated_callable_source(last: &str) -> String {
+    format!(
+        "def cut[n](value: tensor[n, f32]) -> tensor[*, f32] = shrink(value, [[1i64, shape(value, 0i32)]])\n\
+         def invoke(f: tensor[*, f32] -> tensor[*, f32], value: tensor[*, f32]) -> tensor[*, f32] = f(value)\n\
+         def two[n](f: tensor[*, f32] -> tensor[*, f32], value: tensor[n, f32]) -> tensor[2, f32] = invoke(f, value)\n\
+         def three[n](f: tensor[*, f32] -> tensor[*, f32], value: tensor[n, f32]) -> tensor[3, f32] = invoke(f, value)\n\
+         a = two(cut, to_tensor({TWO}))\n\
+         b = three(cut, to_tensor({THREE}))\n\
+         out = three(cut, to_tensor({last}))\n"
+    )
+}
+
+fn assert_invocation_isolation(native: bool) {
+    for (last, agrees) in [(THREE, true), (TWO, false)] {
+        let source = repeated_callable_source(last);
+        let (ok, output) = run(&source, native);
+        assert_eq!(ok, agrees, "{source}\n{output}");
+        if agrees {
+            assert!(
+                output.contains("a = tensor(shape=[2], data=[2.0, 3.0])"),
+                "{output}"
+            );
+            assert!(
+                output.contains("b = tensor(shape=[3], data=[2.0, 3.0, 4.0])"),
+                "{output}"
+            );
+            assert!(
+                output.contains("out = tensor(shape=[3], data=[2.0, 3.0, 4.0])"),
+                "{output}"
+            );
+        } else {
+            assert_claim(&output, "shrink", 2);
+        }
+    }
+}
+
+#[test]
+fn eval_shared_callback_claims_are_invocation_local() {
+    assert_invocation_isolation(false);
+}
+
+#[test]
+fn c_shared_callback_claims_are_invocation_local() {
+    assert_invocation_isolation(true);
+}
+
+fn delayed_selection_source(select_second: bool, selected_agrees: bool) -> String {
+    let chosen = if selected_agrees { THREE } else { TWO };
+    let unchosen = if selected_agrees { TWO } else { THREE };
+    let (x, y) = if select_second {
+        (unchosen, chosen)
+    } else {
+        (chosen, unchosen)
+    };
+    format!(
+        "def decide(flag: bool) -> bool ! {{ IO }} = {{\n _ = print(\"selector-ran\")\n flag\n}}\n\
+         def choose[n, m](x: tensor[n, 4, f32], y: tensor[m, 4, f32], second: bool) -> tensor[3, f32] ! {{ IO }} = {{\n _ = print(\"diagonal-before\")\n first = diagonal(x, 0i32, 1i32)\n _ = print(\"diagonal-after\")\n _ = print(\"cumsum-before\")\n second_value = cumsum(diagonal(y, 0i32, 1i32), 0i32)\n _ = print(\"cumsum-after\")\n selected = if decide(second) then {{ _ = drop(first)\n second_value }} else {{ _ = drop(second_value)\n first }}\n _ = print(\"selection-after\")\n selected\n}}\n\
+         out = choose(to_tensor({x}), to_tensor({y}), {select_second})\n"
+    )
+}
+
+fn assert_delayed_selection(native: bool) {
+    for select_second in [false, true] {
+        for selected_agrees in [true, false] {
+            let source = delayed_selection_source(select_second, selected_agrees);
+            let (ok, output) = run(&source, native);
+            assert_eq!(ok, selected_agrees, "{source}\n{output}");
+            for effect in [
+                "diagonal-before",
+                "diagonal-after",
+                "cumsum-before",
+                "cumsum-after",
+                "selector-ran",
+            ] {
+                assert_eq!(output.matches(effect).count(), 1, "{effect}: {output}");
+            }
+            assert_eq!(
+                output.matches("selection-after").count(),
+                usize::from(selected_agrees),
+                "{output}"
+            );
+            let selected_op = if select_second { "cumsum" } else { "diagonal" };
+            let unselected_op = if select_second { "diagonal" } else { "cumsum" };
+            if selected_agrees {
+                assert!(output.contains("out = tensor(shape=[3]"), "{output}");
+                assert!(!output.contains("numeric trap:"), "{output}");
+            } else {
+                assert_claim(&output, selected_op, 2);
+                assert!(
+                    !output.contains(&format!("numeric trap: domain in {unselected_op} at i64")),
+                    "{output}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn eval_delayed_selection_guards_only_the_selected_value() {
+    assert_delayed_selection(false);
+}
+
+#[test]
+fn c_delayed_selection_guards_only_the_selected_value() {
+    assert_delayed_selection(true);
+}
