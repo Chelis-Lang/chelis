@@ -359,6 +359,29 @@
       ]
     },
     {
+      "name": "exact C reduction stored-width and runtime-empty execution",
+      "args": [
+        "-p",
+        "chelis-backend-c",
+        "--test",
+        "issue_1281_exact_reductions",
+        "-E",
+        "not test(=an_allocation_above_int32_elements_reports_its_true_extent)"
+      ],
+      "required": [
+        "chelis-backend-c::issue_1281_exact_reductions::global_extrema_adjoints_split_infinity_ties_and_route_only_the_first_nan",
+        "chelis-backend-c::issue_1281_exact_reductions::global_extrema_and_argument_reductions_execute_at_every_remaining_storage_width",
+        "chelis-backend-c::issue_1281_exact_reductions::global_extrema_and_argument_reductions_preserve_f32_bits_and_first_indices",
+        "chelis-backend-c::issue_1281_exact_reductions::global_i64_extrema_and_argument_reductions_never_convert_through_float",
+        "chelis-backend-c::issue_1281_exact_reductions::global_mean_compiles_to_the_same_f32_sum_then_divide_bits_as_the_evaluator",
+        "chelis-backend-c::issue_1281_exact_reductions::overlapping_window_adjoint_combines_contributions_with_balanced_tree_order",
+        "chelis-backend-c::issue_1281_exact_reductions::reduced_float_window_extrema_and_mean_preserve_storage_and_f32_arithmetic",
+        "chelis-backend-c::issue_1281_exact_reductions::runtime_empty_global_extrema_and_argument_reductions_trap_domain",
+        "chelis-backend-c::issue_1281_exact_reductions::window_extrema_forward_and_adjoint_use_first_nan_and_divide_non_nan_ties",
+        "chelis-backend-c::issue_1281_exact_reductions::window_forward_extrema_execute_at_every_integer_and_wide_float_storage_width"
+      ]
+    },
+    {
       "name": "checked C reductions and Count optimized sanitizer execution",
       "args": [
         "-p",

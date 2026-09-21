@@ -118,6 +118,33 @@ class ReceiptTests(unittest.TestCase):
             with self.subTest(mutation=mutation), self.assertRaises(oracle.OracleFailure):
                 oracle.validate_manifest(changed)
 
+    def test_exact_reduction_final_forms_have_a_frozen_phase_one_execution_leg(self):
+        packet = oracle.frozen_manifest(
+            oracle.MANIFEST.read_bytes(),
+            oracle.MANIFEST_SHA256,
+        )
+        rows = {row["name"]: row for row in packet["legs"]}
+        row = rows["exact C reduction stored-width and runtime-empty execution"]
+        self.assertIn("issue_1281_exact_reductions", row["args"])
+        self.assertIn(
+            "chelis-backend-c::issue_1281_exact_reductions::"
+            "runtime_empty_global_extrema_and_argument_reductions_trap_domain",
+            row["required"],
+        )
+        self.assertIn(
+            "chelis-backend-c::issue_1281_exact_reductions::"
+            "global_extrema_and_argument_reductions_execute_at_every_remaining_storage_width",
+            row["required"],
+        )
+        self.assertEqual(
+            next(
+                args
+                for name, args in oracle.phase1_legs()
+                if name == row["name"]
+            ),
+            tuple(row["args"]),
+        )
+
     def test_failed_process_cannot_publish_a_passing_transcript(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

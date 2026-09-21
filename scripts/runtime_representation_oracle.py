@@ -239,6 +239,24 @@ TYPED_NONNUMERIC_BACKEND_FINAL_FORMS = (
         "REDUCED_FLOAT_COMPARISON_HELPERS",
     ),
 )
+EXACT_REDUCTION_BACKEND_FINAL_FORMS = (
+    # chelis#1281: the lowered mean guard observes the exact divisor storage
+    # selected by [05-OP-11], including explicit f16/bf16 decoding, before
+    # division can turn an empty runtime domain into NaN.
+    (
+        "crates/chelis-backend-c/src/emit.rs",
+        "backend-element-spelling",
+        "CEmitter::emit_mean_nonempty_guard",
+    ),
+    # chelis#1281: max/min reduction selection is governed by [05-OP-12..13].
+    # The owner decodes at the declared arithmetic width but copies the exact
+    # selected source storage bits, preserving first-NaN and tie behavior.
+    (
+        "crates/chelis-backend-c/src/emit.rs",
+        "backend-element-spelling",
+        "CEmitter::emit_reduce_extreme",
+    ),
+)
 UNIFORM_RANDOM_BACKEND_FINAL_FORMS = (
     (
         "crates/chelis-backend-hip/src/kernels.rs",
@@ -366,6 +384,8 @@ def owner_module_final_form(kind: str, path: str, owner: str) -> bool:
         and (path, owner) in C_INDEX_PROJECTION_OWNERS
     ) or (
         (path, kind, owner) in TYPED_NONNUMERIC_BACKEND_FINAL_FORMS
+    ) or (
+        (path, kind, owner) in EXACT_REDUCTION_BACKEND_FINAL_FORMS
     ) or (
         (path, kind, owner) in UNIFORM_RANDOM_BACKEND_FINAL_FORMS
     ) or (
@@ -748,6 +768,7 @@ def _owner_module_final_forms_manifest() -> dict[str, list[dict[str, str]]]:
         *PHASE2_FINAL_FORMS,
         *((path, "backend-element-spelling", owner) for path, owner in C_INDEX_PROJECTION_OWNERS),
         *TYPED_NONNUMERIC_BACKEND_FINAL_FORMS,
+        *EXACT_REDUCTION_BACKEND_FINAL_FORMS,
         *UNIFORM_RANDOM_BACKEND_FINAL_FORMS,
         *UTF8_STRING_FINAL_FORMS,
         *((METADATA_OWNER, "width-arithmetic", owner) for owner in METADATA_FINAL_WIDTH_OWNERS),
@@ -2132,6 +2153,18 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
         OracleLeg(
             "checked C reduction delegation and bypass mutations",
             ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "checked_c_reduction"),
+        ),
+        OracleLeg(
+            "exact C reduction stored-width and runtime-empty execution",
+            (
+                "cargo",
+                "nextest",
+                "run",
+                "-p",
+                "chelis-backend-c",
+                "--test",
+                "issue_1281_exact_reductions",
+            ),
         ),
         OracleLeg(
             "checked C reductions and Count optimized sanitizer execution",
