@@ -1,1 +1,0 @@
-Eval and compiled C now implement exact mean, extrema, argument-reduction, and window-extrema semantics, including empty-domain traps, first-NaN selection, stable ties, and exact adjoints; device completion remains tracked by #2339.
