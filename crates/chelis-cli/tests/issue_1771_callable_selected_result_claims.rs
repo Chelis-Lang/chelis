@@ -124,7 +124,7 @@ fn c_shared_callback_claims_are_invocation_local() {
     assert_invocation_isolation(true);
 }
 
-fn delayed_selection_source(select_second: bool, selected_agrees: bool) -> String {
+fn delayed_selection_source(form: &str, select_second: bool, selected_agrees: bool) -> String {
     let chosen = if selected_agrees {
         THREE_BY_FOUR
     } else {
@@ -140,52 +140,64 @@ fn delayed_selection_source(select_second: bool, selected_agrees: bool) -> Strin
     } else {
         (chosen, unchosen)
     };
+    let selection = match form {
+        "if" => {
+            "if decide(second) then { _ = drop(first)\n second_value } else { _ = drop(second_value)\n first }"
+        }
+        "match" => {
+            "match decide(second) with {\n | true => { _ = drop(first)\n second_value }\n | false => { _ = drop(second_value)\n first }\n}"
+        }
+        _ => panic!("unknown delayed selection form"),
+    };
     format!(
         "def decide(flag: bool) -> bool ! {{ IO }} = {{\n _ = print(\"selector-ran\")\n flag\n}}\n\
-         def choose[n, m](x: tensor[n, 4, f32], y: tensor[m, 4, f32], second: bool) -> tensor[3, f32] ! {{ IO }} = {{\n _ = print(\"diagonal-before\")\n first = diagonal(x, 0i32, 1i32)\n _ = print(\"diagonal-after\")\n _ = print(\"cumsum-before\")\n second_value = cumsum(diagonal(y, 0i32, 1i32), 0i32)\n _ = print(\"cumsum-after\")\n selected = if decide(second) then {{ _ = drop(first)\n second_value }} else {{ _ = drop(second_value)\n first }}\n _ = print(\"selection-after\")\n selected\n}}\n\
+         def choose[n, m](x: tensor[n, 4, f32], y: tensor[m, 4, f32], second: bool) -> tensor[3, f32] ! {{ IO }} = {{\n _ = print(\"diagonal-before\")\n first = diagonal(x, 0i32, 1i32)\n _ = print(\"diagonal-after\")\n _ = print(\"cumsum-before\")\n second_value = cumsum(diagonal(y, 0i32, 1i32), 0i32)\n _ = print(\"cumsum-after\")\n selected = {selection}\n alias = selected\n final_value = alias\n _ = print(\"selection-after\")\n final_value\n}}\n\
          out = choose(to_tensor({x}), to_tensor({y}), {select_second})\n"
     )
 }
 
 fn assert_delayed_selection(native: bool) {
-    for select_second in [false, true] {
-        for selected_agrees in [true, false] {
-            let source = delayed_selection_source(select_second, selected_agrees);
-            let (ok, output) = run(&source, native);
-            assert_eq!(ok, selected_agrees, "{source}\n{output}");
-            for effect in [
-                "diagonal-before",
-                "diagonal-after",
-                "cumsum-before",
-                "cumsum-after",
-                "selector-ran",
-            ] {
-                assert_eq!(output.matches(effect).count(), 1, "{effect}: {output}");
-            }
-            assert_eq!(
-                output.matches("selection-after").count(),
-                usize::from(selected_agrees),
-                "{output}"
-            );
-            let selected_op = if select_second { "cumsum" } else { "diagonal" };
-            let unselected_op = if select_second { "diagonal" } else { "cumsum" };
-            if selected_agrees {
-                let values = if select_second {
-                    "[1.0, 7.0, 18.0]"
+    for form in ["if", "match"] {
+        for select_second in [false, true] {
+            for selected_agrees in [true, false] {
+                let source = delayed_selection_source(form, select_second, selected_agrees);
+                let (ok, output) = run(&source, native);
+                assert_eq!(ok, selected_agrees, "{source}\n{output}");
+                for effect in [
+                    "diagonal-before",
+                    "diagonal-after",
+                    "cumsum-before",
+                    "cumsum-after",
+                    "selector-ran",
+                ] {
+                    assert_eq!(output.matches(effect).count(), 1, "{effect}: {output}");
+                }
+                assert_eq!(
+                    output.matches("selection-after").count(),
+                    usize::from(selected_agrees),
+                    "{output}"
+                );
+                let selected_op = if select_second { "cumsum" } else { "diagonal" };
+                let unselected_op = if select_second { "diagonal" } else { "cumsum" };
+                if selected_agrees {
+                    let values = if select_second {
+                        "[1.0, 7.0, 18.0]"
+                    } else {
+                        "[1.0, 6.0, 11.0]"
+                    };
+                    assert!(
+                        output.contains(&format!("out = tensor(shape=[3], data={values})")),
+                        "{output}"
+                    );
+                    assert!(!output.contains("numeric trap:"), "{output}");
                 } else {
-                    "[1.0, 6.0, 11.0]"
-                };
-                assert!(
-                    output.contains(&format!("out = tensor(shape=[3], data={values})")),
-                    "{output}"
-                );
-                assert!(!output.contains("numeric trap:"), "{output}");
-            } else {
-                assert_claim(&output, selected_op, 2);
-                assert!(
-                    !output.contains(&format!("numeric trap: domain in {unselected_op} at i64")),
-                    "{output}"
-                );
+                    assert_claim(&output, selected_op, 2);
+                    assert!(
+                        !output
+                            .contains(&format!("numeric trap: domain in {unselected_op} at i64")),
+                        "{output}"
+                    );
+                }
             }
         }
     }
