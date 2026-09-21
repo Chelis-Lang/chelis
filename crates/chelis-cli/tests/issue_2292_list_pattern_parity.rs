@@ -148,6 +148,53 @@ narrow = narrow_literal([19i32])
 }
 
 #[test]
+fn failed_list_patterns_do_not_capture_later_arms_and_unit_patterns_match() {
+    let source = r#"
+def shadow(xs: List[i64], value: i64) -> i64 =
+  match xs with {
+    | Cons(value, Cons(_, Nil)) => value
+    | _ => value
+  }
+def singleton_unit(xs: List[unit]) -> i64 =
+  match xs with {
+    | Cons((), Nil) => 1i64
+    | _ => 0i64
+  }
+def nested_shadow(xs: List[i64], value: i64) -> i64 =
+  match xs with {
+    | Cons(value, Nil) =>
+        match [9i64] with {
+          | Cons(value, Nil) => value
+          | _ => 0i64
+        }
+    | _ => value
+  }
+outer_value = shadow([3i64], 50i64)
+unit_yes = singleton_unit([()])
+unit_no = singleton_unit(Nil)
+nested_value = nested_shadow([3i64], 50i64)
+"#;
+
+    let interpreted = evaluate(source, "list_pattern_scope_and_unit");
+    let compiled = build_and_run(source, "list_pattern_scope_and_unit");
+    assert_eq!(
+        compiled, interpreted,
+        "eval/C output must be byte-identical"
+    );
+    for expected in [
+        "outer_value = 50",
+        "unit_yes = 1",
+        "unit_no = 0",
+        "nested_value = 9",
+    ] {
+        assert!(
+            interpreted.lines().any(|line| line == expected),
+            "{interpreted}"
+        );
+    }
+}
+
+#[test]
 fn cons_without_nil_remains_a_checker_error() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("non_exhaustive.ch");

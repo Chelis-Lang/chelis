@@ -166,6 +166,9 @@ pub(super) fn pattern_matches(
             }
         }
         DeepTag::PatTuple => {
+            if kids.is_empty() && matches!(value, RuntimeValue::Unit) {
+                return Ok(true);
+            }
             let RuntimeValue::Tuple(items) = value else {
                 return Ok(false);
             };

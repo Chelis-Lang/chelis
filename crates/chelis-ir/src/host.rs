@@ -7880,6 +7880,9 @@ fn lower_host_expr_kind(
             lower_record_host_expr(list, program, scope, tensor_helpers, expected_ty)?
         }
         Expr::List(list, _) if tag(list) == Some(DeepTag::Lit) => {
+            if matches!(expr_host_type(expr, program, scope), HostTypeTerm::Unit) {
+                return Ok(HostExpr::new(HostExprKind::Unit));
+            }
             let child = children(list).first().ok_or_else(|| {
                 host_expr_lowering_error(expr, "a `lit` node has no literal child")
             })?;
@@ -9707,12 +9710,14 @@ fn lower_match_host_expr(
 enum HostPatternPlan {
     Wild,
     Bind {
-        name: String,
+        source_name: String,
+        lowered_name: String,
         ty: HostTypeTerm,
     },
     Literal(HostExpr),
     As {
-        name: String,
+        source_name: String,
+        lowered_name: String,
         ty: HostTypeTerm,
         inner: Box<HostPatternPlan>,
     },
@@ -9738,11 +9743,18 @@ enum HostPatternPlan {
 impl HostPatternPlan {
     fn extend_scope(&self, scope: &mut UnordMap<String, HostTypeTerm>) {
         match self {
-            Self::Bind { name, ty } => {
-                scope.insert(name.clone(), ty.clone());
+            Self::Bind {
+                lowered_name, ty, ..
+            } => {
+                scope.insert(lowered_name.clone(), ty.clone());
             }
-            Self::As { name, ty, inner } => {
-                scope.insert(name.clone(), ty.clone());
+            Self::As {
+                lowered_name,
+                ty,
+                inner,
+                ..
+            } => {
+                scope.insert(lowered_name.clone(), ty.clone());
                 inner.extend_scope(scope);
             }
             Self::ListCons { head, tail, .. } => {
@@ -9758,6 +9770,41 @@ impl HostPatternPlan {
             Self::Adt { fields, .. } => {
                 for (_, field, _) in fields {
                     field.extend_scope(scope);
+                }
+            }
+            Self::Wild | Self::Literal(_) | Self::ListNil | Self::OptionNone => {}
+        }
+    }
+
+    fn collect_renames(&self, renames: &mut Vec<(String, String)>) {
+        match self {
+            Self::Bind {
+                source_name,
+                lowered_name,
+                ..
+            } => renames.push((source_name.clone(), lowered_name.clone())),
+            Self::As {
+                source_name,
+                lowered_name,
+                inner,
+                ..
+            } => {
+                renames.push((source_name.clone(), lowered_name.clone()));
+                inner.collect_renames(renames);
+            }
+            Self::ListCons { head, tail, .. } => {
+                head.collect_renames(renames);
+                tail.collect_renames(renames);
+            }
+            Self::Tuple(items) => {
+                for (item, _) in items {
+                    item.collect_renames(renames);
+                }
+            }
+            Self::OptionSome { inner, .. } => inner.collect_renames(renames),
+            Self::Adt { fields, .. } => {
+                for (_, field, _) in fields {
+                    field.collect_renames(renames);
                 }
             }
             Self::Wild | Self::Literal(_) | Self::ListNil | Self::OptionNone => {}
@@ -9805,13 +9852,17 @@ fn lower_list_match_host_expr(
         let pattern = arm_kids.first().ok_or_else(|| {
             host_expr_lowering_error(&match_expr, "a List match arm has no pattern")
         })?;
-        let plan = plan_host_pattern(pattern, &scrutinee_ty, program, &match_expr)?;
+        let plan = plan_host_pattern(pattern, &scrutinee_ty, program, &match_expr, &mut names)?;
         let mut scoped = scope.clone();
         plan.extend_scope(&mut scoped);
+        let body = arm_kids
+            .get(2)
+            .ok_or_else(|| host_expr_lowering_error(&match_expr, "a List match arm has no body"))?;
+        let mut renames = Vec::new();
+        plan.collect_renames(&mut renames);
+        let renamed_body = rename_bound_names(body, &renames, &UnordSet::new());
         let body = lower_host_expr_with_expected_opt(
-            arm_kids.get(2).ok_or_else(|| {
-                host_expr_lowering_error(&match_expr, "a List match arm has no body")
-            })?,
+            &renamed_body,
             program,
             &scoped,
             tensor_helpers,
@@ -9874,6 +9925,7 @@ fn plan_host_pattern(
     expected_ty: &HostTypeTerm,
     program: &HostLoweringSession<'_>,
     match_expr: &Expr,
+    names: &mut HostMatchNameSupply,
 ) -> Result<HostPatternPlan, crate::lower::LowerDiagnostic> {
     let Some((tag, _, kids)) = stamped_parts(pattern) else {
         return Err(host_expr_lowering_error(
@@ -9889,35 +9941,47 @@ fn plan_host_pattern(
     };
     match tag {
         DeepTag::PatWild => Ok(HostPatternPlan::Wild),
-        DeepTag::PatVar => Ok(HostPatternPlan::Bind {
-            name: kids
+        DeepTag::PatVar => {
+            let source_name = kids
                 .first()
                 .and_then(symbol_name)
                 .ok_or_else(|| malformed("a variable pattern has no name"))?
-                .to_string(),
-            ty: expected_ty.clone(),
-        }),
+                .to_string();
+            Ok(HostPatternPlan::Bind {
+                lowered_name: names.fresh(&format!("__chelis_pattern_{source_name}")),
+                source_name,
+                ty: expected_ty.clone(),
+            })
+        }
         DeepTag::PatLit => Ok(HostPatternPlan::Literal(
             kids.first()
                 .and_then(|literal| host_literal_expr(literal, expected_ty))
                 .ok_or_else(|| malformed("a literal pattern has no host literal"))?,
         )),
-        DeepTag::PatAs => Ok(HostPatternPlan::As {
-            name: kids
+        DeepTag::PatAs => {
+            let source_name = kids
                 .first()
                 .and_then(symbol_name)
                 .ok_or_else(|| malformed("an as-pattern has no binding name"))?
-                .to_string(),
-            ty: expected_ty.clone(),
-            inner: Box::new(plan_host_pattern(
-                kids.get(1)
-                    .ok_or_else(|| malformed("an as-pattern has no inner pattern"))?,
-                expected_ty,
-                program,
-                match_expr,
-            )?),
-        }),
+                .to_string();
+            Ok(HostPatternPlan::As {
+                lowered_name: names.fresh(&format!("__chelis_pattern_{source_name}")),
+                source_name,
+                ty: expected_ty.clone(),
+                inner: Box::new(plan_host_pattern(
+                    kids.get(1)
+                        .ok_or_else(|| malformed("an as-pattern has no inner pattern"))?,
+                    expected_ty,
+                    program,
+                    match_expr,
+                    names,
+                )?),
+            })
+        }
         DeepTag::PatTuple => {
+            if kids.is_empty() && matches!(expected_ty, HostTypeTerm::Unit) {
+                return Ok(HostPatternPlan::Tuple(Vec::new()));
+            }
             let HostTypeTerm::Tuple(item_tys) = expected_ty else {
                 return Err(malformed("a tuple pattern has a non-tuple type"));
             };
@@ -9929,7 +9993,7 @@ fn plan_host_pattern(
                     .zip(item_tys)
                     .map(|(item, ty)| {
                         Ok((
-                            plan_host_pattern(item, ty, program, match_expr)?,
+                            plan_host_pattern(item, ty, program, match_expr, names)?,
                             ty.clone(),
                         ))
                     })
@@ -9947,13 +10011,14 @@ fn plan_host_pattern(
                     "Cons" if tag == DeepTag::PatCtor && kids.len() == 3 => {
                         Ok(HostPatternPlan::ListCons {
                             head: Box::new(plan_host_pattern(
-                                &kids[1], element_ty, program, match_expr,
+                                &kids[1], element_ty, program, match_expr, names,
                             )?),
                             tail: Box::new(plan_host_pattern(
                                 &kids[2],
                                 expected_ty,
                                 program,
                                 match_expr,
+                                names,
                             )?),
                             element_ty: (**element_ty).clone(),
                             list_ty: expected_ty.clone(),
@@ -9970,7 +10035,7 @@ fn plan_host_pattern(
                     "Some" if tag == DeepTag::PatCtor && kids.len() == 2 => {
                         Ok(HostPatternPlan::OptionSome {
                             inner: Box::new(plan_host_pattern(
-                                &kids[1], inner_ty, program, match_expr,
+                                &kids[1], inner_ty, program, match_expr, names,
                             )?),
                             inner_ty: (**inner_ty).clone(),
                         })
@@ -10012,7 +10077,7 @@ fn plan_host_pattern(
                     })?;
                     Ok((
                         field_index,
-                        plan_host_pattern(subpattern, &field_ty, program, match_expr)?,
+                        plan_host_pattern(subpattern, &field_ty, program, match_expr, names)?,
                         field_ty,
                     ))
                 })
@@ -10059,7 +10124,9 @@ fn compile_host_pattern(
     };
     match plan {
         HostPatternPlan::Wild => success,
-        HostPatternPlan::Bind { name, ty } => let_binding(name.clone(), ty.clone(), value, success),
+        HostPatternPlan::Bind {
+            lowered_name, ty, ..
+        } => let_binding(lowered_name.clone(), ty.clone(), value, success),
         HostPatternPlan::Literal(literal) => if_matches(
             HostExpr::new(HostExprKind::Builtin {
                 name: "eq".to_string(),
@@ -10069,10 +10136,15 @@ fn compile_host_pattern(
             success,
             failure,
         ),
-        HostPatternPlan::As { name, ty, inner } => {
-            let bound = HostExpr::new(HostExprKind::Var(name.clone(), ty.clone()));
+        HostPatternPlan::As {
+            lowered_name,
+            ty,
+            inner,
+            ..
+        } => {
+            let bound = HostExpr::new(HostExprKind::Var(lowered_name.clone(), ty.clone()));
             let body = compile_host_pattern(inner, bound, success, failure, result_ty, names);
-            let_binding(name.clone(), ty.clone(), value, body)
+            let_binding(lowered_name.clone(), ty.clone(), value, body)
         }
         HostPatternPlan::ListNil => if_matches(
             HostExpr::new(HostExprKind::Builtin {
@@ -13972,6 +14044,99 @@ fn fresh_binder_name(name: &str, avoid: &UnordSet<String>) -> String {
         .expect("an unused binder name exists")
 }
 
+fn collect_pattern_binder_names(pattern: &Expr, out: &mut UnordSet<String>) {
+    let Some((tag, _, kids)) = stamped_parts(pattern) else {
+        return;
+    };
+    match tag {
+        DeepTag::PatVar => {
+            if let Some(name) = kids.first().and_then(symbol_name) {
+                out.insert(name.to_string());
+            }
+        }
+        DeepTag::PatAs => {
+            if let Some(name) = kids.first().and_then(symbol_name) {
+                out.insert(name.to_string());
+            }
+            if let Some(inner) = kids.get(1) {
+                collect_pattern_binder_names(inner, out);
+            }
+        }
+        DeepTag::PatCtor => {
+            for child in kids.iter().skip(1) {
+                collect_pattern_binder_names(child, out);
+            }
+        }
+        DeepTag::PatRecord => {
+            for field in kids.iter().skip(1) {
+                if let Some((DeepTag::Kv, _, field_kids)) = stamped_parts(field)
+                    && let Some(field_pattern) = field_kids.get(1)
+                {
+                    collect_pattern_binder_names(field_pattern, out);
+                }
+            }
+        }
+        DeepTag::PatTuple => {
+            for child in kids {
+                collect_pattern_binder_names(child, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn rename_match_arm_bound_names(
+    arm: &Expr,
+    renames: &[(String, String)],
+    shadowed: &UnordSet<String>,
+) -> Expr {
+    let Some((DeepTag::Arm, _, kids)) = stamped_parts(arm) else {
+        return rename_bound_names(arm, renames, shadowed);
+    };
+    let mut inner = shadowed.clone();
+    if let Some(pattern) = kids.first() {
+        collect_pattern_binder_names(pattern, &mut inner);
+    }
+    match arm {
+        Expr::List(list, span) => Expr::List(
+            List {
+                elements: list
+                    .elements
+                    .iter()
+                    .enumerate()
+                    .map(|(index, child)| {
+                        if index <= 2 {
+                            child.clone()
+                        } else {
+                            rename_bound_names(child, renames, &inner)
+                        }
+                    })
+                    .collect(),
+            },
+            *span,
+        ),
+        Expr::Node(node, span) => Expr::Node(
+            Box::new(chelis_deep::node::Node::new(
+                node.tag(),
+                node.meta().clone(),
+                node.children_slice()
+                    .iter()
+                    .enumerate()
+                    .map(|(index, child)| {
+                        if index == 0 {
+                            child.clone()
+                        } else {
+                            rename_bound_names(child, renames, &inner)
+                        }
+                    })
+                    .collect(),
+            )),
+            *span,
+        ),
+        _ => arm.clone(),
+    }
+}
+
 /// Rename bound occurrences of `renames` inside `expr` (chelis#2163).
 ///
 /// A rename, not a substitution: it rewrites the NAME inside each `(var {}
@@ -14033,6 +14198,39 @@ fn rename_bound_names(
                 None => expr.clone(),
             }
         }
+        Expr::Node(node, span) if node.tag() == DeepTag::Match => Expr::Node(
+            Box::new(chelis_deep::node::Node::new(
+                node.tag(),
+                node.meta().clone(),
+                node.children_slice()
+                    .iter()
+                    .enumerate()
+                    .map(|(index, child)| {
+                        if index == 0 {
+                            rename_bound_names(child, renames, shadowed)
+                        } else {
+                            rename_match_arm_bound_names(child, renames, shadowed)
+                        }
+                    })
+                    .collect(),
+            )),
+            *span,
+        ),
+        Expr::List(list, span) if tag(list) == Some(DeepTag::Match) => Expr::List(
+            List {
+                elements: list
+                    .elements
+                    .iter()
+                    .enumerate()
+                    .map(|(index, child)| match index {
+                        0 | 1 => child.clone(),
+                        2 => rename_bound_names(child, renames, shadowed),
+                        _ => rename_match_arm_bound_names(child, renames, shadowed),
+                    })
+                    .collect(),
+            },
+            *span,
+        ),
         Expr::List(list, span) if tag(list) == Some(DeepTag::Fn) => {
             let kids = children(list);
             let mut inner = shadowed.clone();
