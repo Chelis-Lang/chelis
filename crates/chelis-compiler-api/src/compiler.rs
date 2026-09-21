@@ -5211,7 +5211,7 @@ pub fn reject_unsupported_metal_ops(dag: &Dag) -> std::result::Result<(), Compil
                 ),
                 "metal",
                 chelis_types::unimplemented_rejection!(
-                    1306,
+                    2338,
                     "the Metal direct-subtraction/extrema kernel and exact trap/bit-selection cells are not implemented"
                 ),
             ));
@@ -5501,7 +5501,7 @@ mod metal_runtime_dim_reject_tests {
     }
 
     #[test]
-    fn metal_seam_rejects_every_direct_arithmetic_identity_with_issue_1306() {
+    fn metal_seam_rejects_every_direct_arithmetic_identity_with_issue_2338() {
         let ops = [
             RiscOp::Sub,
             RiscOp::MaxElem,
@@ -5533,7 +5533,7 @@ mod metal_runtime_dim_reject_tests {
             let error = reject_unsupported_metal_ops(&dag)
                 .expect_err("Metal must reject every unimplemented direct arithmetic identity");
             let message = &error.errors[0].message;
-            assert!(message.contains("unimplemented chelis#1306:"), "{message}");
+            assert!(message.contains("unimplemented chelis#2338:"), "{message}");
         }
     }
 
@@ -5554,59 +5554,6 @@ const HIP_UNSUPPORTED_DTYPE_HINT: &str =
 
 pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), CompilerError> {
     for node in dag.nodes() {
-        let fused_direct_ops = match &node.op {
-            RiscOp::FusedElem { ops } => Some(ops),
-            _ => None,
-        };
-        let has_direct_sub = matches!(node.op, RiscOp::Sub)
-            || fused_direct_ops
-                .is_some_and(|ops| ops.iter().any(|step| matches!(step.op, FusedStepOp::Sub)));
-        let has_direct_arithmetic = matches!(
-            node.op,
-            RiscOp::Sub | RiscOp::MaxElem | RiscOp::MinElem | RiscOp::ExtremaAdjoint { .. }
-        ) || fused_direct_ops.is_some_and(|ops| {
-            ops.iter().any(|step| {
-                matches!(
-                    step.op,
-                    FusedStepOp::Sub | FusedStepOp::MaxElem | FusedStepOp::MinElem
-                )
-            })
-        });
-
-        if has_direct_sub && node.output_type.precision.is_integer() {
-            return Err(unsupported_gate_error(
-                format!(
-                    "`chelis build --target hip` cannot execute checked `{}` subtraction at lowered node {} without a device numeric-trap channel; use `--target c`",
-                    node.output_type.precision.name(),
-                    node.id.0
-                ),
-                "hip",
-                chelis_types::unimplemented_rejection!(
-                    1306,
-                    "checked signed-integer subtraction needs an exact HIP overflow-trap channel; the C target implements this cell"
-                ),
-            ));
-        }
-        if has_direct_arithmetic
-            && matches!(
-                node.output_type.precision,
-                chelis_types::types::Prim::Bf16 | chelis_types::types::Prim::F16
-            )
-        {
-            return Err(unsupported_gate_error(
-                format!(
-                    "`chelis build --target hip` does not yet support exact `{}` direct arithmetic at lowered node {}",
-                    node.output_type.precision.name(),
-                    node.id.0
-                ),
-                "hip",
-                chelis_types::unimplemented_rejection!(
-                    1306,
-                    "the HIP bf16/f16 direct-subtraction/extrema bit-preserving kernels are not implemented"
-                ),
-            ));
-        }
-
         match &node.op {
             // Exact direct nonnumeric kernels are an admitted HIP capability.
             // Keep this explicit so a future broad rejection cannot silently
@@ -5954,7 +5901,21 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
             | RiscOp::Realize
             | RiscOp::Relu
             | RiscOp::ReluAdjoint
-            | RiscOp::Where => Some(node.id),
+            | RiscOp::Where
+            | RiscOp::Sub
+            | RiscOp::MaxElem
+            | RiscOp::MinElem
+            | RiscOp::ExtremaAdjoint { .. } => Some(node.id),
+            RiscOp::FusedElem { ops }
+                if ops.iter().all(|step| {
+                    matches!(
+                        step.op,
+                        FusedStepOp::Sub | FusedStepOp::MaxElem | FusedStepOp::MinElem
+                    )
+                }) =>
+            {
+                Some(node.id)
+            }
             _ => None,
         })
         .collect();
@@ -7911,23 +7872,15 @@ mod tests {
     }
 
     #[test]
-    fn hip_seam_rejects_unimplemented_direct_arithmetic_cells_with_issue_1306() {
+    fn hip_direct_arithmetic_accepts_non_metal_issue_1306_residuals() {
         for precision in [
             chelis_types::types::Prim::Int8,
             chelis_types::types::Prim::Int16,
             chelis_types::types::Prim::Int32,
             chelis_types::types::Prim::Int64,
         ] {
-            let error =
-                reject_unsupported_hip_ops(&hip_direct_arithmetic_dag(RiscOp::Sub, precision))
-                    .expect_err("HIP integer subtraction needs a device trap channel");
-            assert!(
-                error.errors[0]
-                    .message
-                    .contains("unimplemented chelis#1306:"),
-                "{}",
-                error.errors[0].message
-            );
+            reject_unsupported_hip_ops(&hip_direct_arithmetic_dag(RiscOp::Sub, precision))
+                .expect("HIP checked integer subtraction now has a device trap channel");
         }
 
         for precision in [
@@ -7943,15 +7896,8 @@ mod tests {
                     operand: ExtremaOperand::Left,
                 },
             ] {
-                let error = reject_unsupported_hip_ops(&hip_direct_arithmetic_dag(op, precision))
-                    .expect_err("HIP narrow-float direct arithmetic is not implemented");
-                assert!(
-                    error.errors[0]
-                        .message
-                        .contains("unimplemented chelis#1306:"),
-                    "{}",
-                    error.errors[0].message
-                );
+                reject_unsupported_hip_ops(&hip_direct_arithmetic_dag(op, precision))
+                    .expect("HIP narrow-float direct arithmetic now has exact kernels");
             }
         }
 
@@ -7962,22 +7908,28 @@ mod tests {
             }],
         };
         for precision in [
-            chelis_types::types::Prim::Int32,
             chelis_types::types::Prim::F16,
+            chelis_types::types::Prim::Bf16,
         ] {
-            let error = reject_unsupported_hip_ops(&hip_direct_arithmetic_dag(
-                fused_sub.clone(),
-                precision,
-            ))
-            .expect_err("fused subtraction inherits the direct target disposition");
-            assert!(
-                error.errors[0]
-                    .message
-                    .contains("unimplemented chelis#1306:"),
-                "{}",
-                error.errors[0].message
-            );
+            reject_unsupported_hip_ops(&hip_direct_arithmetic_dag(fused_sub.clone(), precision))
+                .expect("fused narrow-float subtraction is admitted");
         }
+    }
+
+    #[test]
+    fn hip_direct_arithmetic_keeps_unrelated_narrow_float_compute_typed_rejected() {
+        let error = reject_unsupported_hip_ops(&hip_direct_arithmetic_dag(
+            RiscOp::Add,
+            chelis_types::types::Prim::F16,
+        ))
+        .expect_err("shipping direct arithmetic must not silently admit every narrow-float op");
+        assert!(
+            error.errors[0]
+                .message
+                .contains("unimplemented chelis#729:"),
+            "{}",
+            error.errors[0].message
+        );
     }
 
     #[test]
