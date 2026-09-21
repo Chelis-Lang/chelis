@@ -1616,8 +1616,8 @@ fn direct_sub_gpu_matches_own_width_evaluator() {
     for (prim, lhs, rhs, expected) in [
         (
             Prim::F16,
-            [0x3c00, 0x8000, 0x7bff, 0xc450],
-            [0x4000, 0, 0x7bff, 0x4480],
+            [0x3c00, 0x8000, 0x7bff, 0xc450, 0xfe01, 0x3c00],
+            [0x4000, 0, 0x7bff, 0x4480, 0x3c00, 0x7d01],
             [
                 u64::from(
                     half::f16::from_f32(
@@ -1646,12 +1646,14 @@ fn direct_sub_gpu_matches_own_width_evaluator() {
                     )
                     .to_bits(),
                 ),
+                0x7e00,
+                0x7e00,
             ],
         ),
         (
             Prim::Bf16,
-            [0x3f80, 0x8000, 0x7f7f, 0xc10a],
-            [0x4000, 0, 0x7f7f, 0x4090],
+            [0x3f80, 0x8000, 0x7f7f, 0xc10a, 0xffc1, 0x3f80],
+            [0x4000, 0, 0x7f7f, 0x4090, 0x3f80, 0x7f81],
             [
                 u64::from(
                     half::bf16::from_f32(
@@ -1680,11 +1682,13 @@ fn direct_sub_gpu_matches_own_width_evaluator() {
                     )
                     .to_bits(),
                 ),
+                0x7fc0,
+                0x7fc0,
             ],
         ),
     ] {
         let ty = TensorType {
-            dims: vec![DimInfo::Lit(4)],
+            dims: vec![DimInfo::Lit(lhs.len())],
             precision: prim,
         };
         let mut dag = Dag::new();

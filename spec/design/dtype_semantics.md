@@ -2554,8 +2554,10 @@ line `DTYPE DIRECT ARITHMETIC ORACLE: PASS`. It runs the exact-width typed
 kernels, direct IR lowering/evaluation/AD, constant folding, WireDag v6 and
 target-disposition tests, compiled-C boundary/overflow/stored-bit cases, HIP
 source-generation tests, exhaustive downstream compilation, and its standing
-anti-surrogate mutations. [#1296] consumes this exact child command and success
-line; it does not reconstruct #1306 evidence from prose.
+anti-surrogate mutations. HIP f16/bf16 direct arithmetic narrows once with
+round-to-nearest, ties-to-even and finalizes every NaN as the dtype's canonical
+positive quiet NaN. [#1296] consumes this exact child command and success line;
+it does not reconstruct #1306 evidence from prose.
 
 The normal oracle compiles the ignored HIP execution cases but cannot claim
 device execution. The manual hardware gate is:

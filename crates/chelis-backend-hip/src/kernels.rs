@@ -128,7 +128,7 @@ __device__ chelis_u32 chelis_round_shift_right_even(chelis_u32 value, chelis_u32
 __device__ chelis_u16 chelis_f32_to_bf16(float value) {
     chelis_u32 bits = chelis_f32_to_storage_bits(value);
     if ((bits & 0x7fffffffu) > 0x7f800000u) {
-        return (chelis_u16)((bits >> 16) | 0x0040u);
+        return (chelis_u16)0x7fc0u;
     }
     chelis_u32 rounding_bias = 0x00007fffu + ((bits >> 16) & 1u);
     return (chelis_u16)((bits + rounding_bias) >> 16);
@@ -139,10 +139,7 @@ __device__ chelis_u16 chelis_f32_to_f16(float value) {
     chelis_u32 exponent = bits & 0x7f800000u;
     chelis_u32 mantissa = bits & 0x007fffffu;
     if (exponent == 0x7f800000u) {
-        chelis_u32 nan_bit = mantissa == 0 ? 0u : 0x0200u;
-        return (chelis_u16)(
-            (sign >> 16) | 0x7c00u | nan_bit | (mantissa >> 13)
-        );
+        return (chelis_u16)(mantissa == 0 ? ((sign >> 16) | 0x7c00u) : 0x7e00u);
     }
     chelis_u32 half_sign = sign >> 16;
     int unbiased_exponent = (int)(exponent >> 23) - 127;
@@ -2449,6 +2446,21 @@ mod tests {
 
     #[test]
     fn reduced_float_conversions_emit_round_to_nearest_ties_to_even() {
+        assert!(
+            REDUCED_FLOAT_COMPARISON_HELPERS.contains(concat!(
+                "if ((bits & 0x7fffffffu) > 0x7f800000u) {",
+                "\n        return (chelis_u16)0x7fc0u;"
+            )),
+            "bf16 arithmetic NaNs must finalize to the canonical positive quiet NaN"
+        );
+        assert!(
+            REDUCED_FLOAT_COMPARISON_HELPERS.contains(concat!(
+                "if (exponent == 0x7f800000u) {",
+                "\n        return (chelis_u16)",
+                "(mantissa == 0 ? ((sign >> 16) | 0x7c00u) : 0x7e00u);"
+            )),
+            "f16 arithmetic NaNs must finalize to the canonical positive quiet NaN while infinities keep their sign"
+        );
         assert!(
             REDUCED_FLOAT_COMPARISON_HELPERS.contains("0x00007fffu + ((bits >> 16) & 1u)"),
             "bf16 rounding must bias exact ties by the retained LSB"

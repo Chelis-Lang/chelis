@@ -169,6 +169,24 @@ class SourceContractMutationTests(unittest.TestCase):
         with self.assertRaisesRegex(oracle.OracleFailure, "HIP narrow direct arithmetic"):
             oracle.validate_source_contracts(self.repo)
 
+    def test_hip_bf16_nan_payload_restoration_fails(self) -> None:
+        self.mutate(
+            "crates/chelis-backend-hip/src/kernels.rs",
+            "return (chelis_u16)0x7fc0u;",
+            "return (chelis_u16)((bits >> 16) | 0x0040u);",
+        )
+        with self.assertRaisesRegex(oracle.OracleFailure, "HIP narrow direct arithmetic"):
+            oracle.validate_source_contracts(self.repo)
+
+    def test_hip_f16_nan_payload_restoration_fails(self) -> None:
+        self.mutate(
+            "crates/chelis-backend-hip/src/kernels.rs",
+            "return (chelis_u16)(mantissa == 0 ? ((sign >> 16) | 0x7c00u) : 0x7e00u);",
+            "return (chelis_u16)((sign >> 16) | 0x7c00u | 0x0200u | (mantissa >> 13));",
+        )
+        with self.assertRaisesRegex(oracle.OracleFailure, "HIP narrow direct arithmetic"):
+            oracle.validate_source_contracts(self.repo)
+
     def test_target_authority_mutation_fails(self) -> None:
         self.mutate(
             "crates/chelis-compiler-api/src/compiler.rs",

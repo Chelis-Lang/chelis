@@ -130,10 +130,14 @@ def source_contracts() -> tuple[SourceContract, ...]:
                 "pub fn fused_elementwise_reduced(",
                 "chelis_round_shift_right_even(mantissa, shift)",
                 "0x00007fffu + ((bits >> 16) & 1u)",
+                "return (chelis_u16)0x7fc0u;",
+                "return (chelis_u16)(mantissa == 0 ? ((sign >> 16) | 0x7c00u) : 0x7e00u);",
             ),
             (
                 "chelis_u32 round_bit = 0x00008000u;",
                 "chelis_u32 round_bit = 0x00001000u;",
+                "return (chelis_u16)((bits >> 16) | 0x0040u);",
+                "chelis_u32 nan_bit = mantissa == 0 ? 0u : 0x0200u;",
             ),
         ),
         SourceContract(
