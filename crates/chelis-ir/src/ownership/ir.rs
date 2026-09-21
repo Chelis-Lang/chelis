@@ -131,6 +131,12 @@ pub(crate) struct OwnerInfo {
     pub(crate) placement: Placement,
     pub(crate) origin: OwnerOrigin,
     pub(crate) names: Vec<String>,
+    /// Canonical `surf:<start>..<end>` id of the expression this owner was
+    /// minted for, taken from `HostExpr::span_id` (see
+    /// `spec/design/chelis_span_survival.md`). `None` for owners minted
+    /// outside an expression, such as unit parameters, and for programs whose
+    /// Deep nodes carry no span (chelis#2122).
+    pub(crate) span_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

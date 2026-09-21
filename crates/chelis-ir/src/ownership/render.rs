@@ -58,11 +58,16 @@ fn edge(value: &Edge) -> String {
 /// the binding names it came from. Shared with the verifier so a diagnostic
 /// and a dump spell the same owner the same way.
 pub(crate) fn owner_label(unit: &Unit, id: OwnerId) -> String {
-    let names = unit.owners[&id].names.join(",");
-    if names.is_empty() {
+    let info = &unit.owners[&id];
+    let names = info.names.join(",");
+    let base = if names.is_empty() {
         format!("%{}", id.0)
     } else {
         format!("%{}[{names}]", id.0)
+    };
+    match &info.span_id {
+        Some(span) => format!("{base}@{span}"),
+        None => base,
     }
 }
 

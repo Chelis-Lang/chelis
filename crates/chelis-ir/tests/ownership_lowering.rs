@@ -1778,3 +1778,26 @@ fn string_slice_and_string_trim_never_consume_their_operand() {
         "`string_trim` is not a consumer row: {trimmed}"
     );
 }
+
+/// chelis#2122: ownership owners carry the Surf span of the expression they
+/// were minted for, so an ownership diagnostic can name a source region and
+/// not only an owner id. The program below is real Surf, so the span ids come
+/// from the parser through Deep `meta["span"]` and host lowering, not from a
+/// synthetic fixture.
+#[test]
+fn lowered_owners_carry_the_surf_span_of_their_defining_expression() {
+    let rendered = verified_source(
+        "module M\nexport (pick)\ndef pick(flag: bool) -> string = {\n  label = \"carry\"\n  if flag then label else \"other\"\n}\n",
+    )
+    .render();
+
+    let spans = rendered.match_indices("@surf:").count();
+    assert!(
+        spans > 0,
+        "at least one owner carries a surf span after lowering real Surf:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("@surf:]") && !rendered.contains("@<"),
+        "a span is rendered as `@surf:start..end`, never empty or a placeholder:\n{rendered}"
+    );
+}

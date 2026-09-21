@@ -560,6 +560,10 @@ struct UnitLowerer<'a, 'sites> {
     sites: &'sites mut HostSiteBuilder,
     unit_index: usize,
     active_site: Option<HostSiteId>,
+    /// Span of the host expression currently being lowered, saved and restored
+    /// around each expression exactly as `active_site` is. Owners minted while
+    /// it is set record it (chelis#2122).
+    active_span: Option<String>,
 }
 
 impl<'a, 'sites> UnitLowerer<'a, 'sites> {
@@ -590,6 +594,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             sites,
             unit_index,
             active_site: None,
+            active_span: None,
         }
     }
 
@@ -762,6 +767,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                 placement,
                 origin,
                 names,
+                span_id: self.active_span.clone(),
             },
         );
         self.owner_depth.insert(id, self.depth());
@@ -1018,9 +1024,19 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         expr: &ConcreteHostExpr,
         tail: Option<usize>,
     ) -> Result<Value, OwnershipError> {
-        self.with_site(HostSiteKind::Expression, |lowerer| {
+        // A span-less node keeps the nearest enclosing span rather than
+        // clearing it: the enclosing source region still locates the owner,
+        // and host lowering leaves `span_id` empty on plenty of interior
+        // nodes (chelis#2122).
+        let previous = self.active_span.clone();
+        if expr.span_id.is_some() {
+            self.active_span = expr.span_id.clone();
+        }
+        let result = self.with_site(HostSiteKind::Expression, |lowerer| {
             lowerer.lower_expr_at_site(expr, tail)
-        })
+        });
+        self.active_span = previous;
+        result
     }
 
     fn lower_expr_at_site(
