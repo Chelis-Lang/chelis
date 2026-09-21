@@ -19235,7 +19235,19 @@ impl<'program> LowerCtx<'program> {
             if let Some(message) = self.fail_message_of(selected) {
                 return LoweredValue::Node(self.reject_static_taken_fail(elems, &message));
             }
-            return self.lower_expr(selected);
+            // The selected branch is still an `if` BRANCH, so it is lowered
+            // at branch depth like every other arm. This path was the one
+            // exception, and the exception is what made chelis#1464's defect
+            // class reachable three separate ways: a `fail` arriving here
+            // indirectly — behind a helper call or a `let` body, where
+            // `fail_message_of` deliberately does not look — met neither the
+            // guard above nor the depth check in `lower_builtin_app`, and
+            // became a zero placeholder. Entering at depth closes the class
+            // rather than the individual route.
+            self.if_branch_depth += 1;
+            let lowered = self.lower_expr(selected);
+            self.if_branch_depth -= 1;
+            return lowered;
         }
 
         // chelis#1464 / [05-OP-68]: a `fail(...)` branch is a TRAP, not a
