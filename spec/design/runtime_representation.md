@@ -1088,8 +1088,9 @@ HIP exact direct arithmetic adds three closed typed-lane final forms:
 and preserve the tagged lane contract: f16/bf16 arithmetic finalizes once at
 stored width, extrema compare decoded values but copy selected storage bits,
 and extrema adjoints route the complete stored cotangent or exact positive
-zero. The Phase 0 manifest binds these exact owners to Linux structural
-execution and the registered ignored real-HIP direct-arithmetic command.
+zero. The Phase 0 and frozen Phase 1 manifests bind these exact owners to the
+four named `codegen_structure` direct-arithmetic controls and the registered
+ignored real-HIP direct-arithmetic command.
 Another owner, spelling, or template remains unclassified; Metal remains the
 separate chelis#2338 capability gap rather than inheriting these HIP forms.
 
