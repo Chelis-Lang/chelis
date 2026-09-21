@@ -414,7 +414,9 @@ jobs:
   runtime-representation-phase0-oracle:
     name: Runtime Representation Phase 2 Oracle
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # chelis#2299: the exact-main oracle had 32/33 Phase 2 tests green with
+    # the final test running when the old 45-minute budget cancelled it.
+    timeout-minutes: 60
     permissions:
       contents: read
     env:

@@ -74,7 +74,13 @@ def assert_extended(test, pr, nightly):
         job = jobs[name]
         test.assertNotIn("if", job)
         test.assertFalse(job.get("continue-on-error", False))
-        test.assertEqual(job["timeout-minutes"], 60 if name.startswith(("generalize", "dtype")) else 45)
+        expected_timeout = (
+            60
+            if name.startswith(("generalize", "dtype"))
+            or name == "runtime-representation-phase0-oracle"
+            else 45
+        )
+        test.assertEqual(job["timeout-minutes"], expected_timeout)
         if name == "runtime-representation-phase0-oracle":
             test.assertEqual(job["name"], "Runtime Representation Phase 2 Oracle")
             artifacts = [
