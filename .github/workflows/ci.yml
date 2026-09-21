@@ -642,8 +642,8 @@ jobs:
     defaults:
       run:
         shell: chelis-ci-shell run {0}
-    # Reserve 25 minutes for cold hosted Devenv realization.
-    timeout-minutes: 55
+    # Reserve headroom for cold Devenv and optional native dependencies.
+    timeout-minutes: 75
     needs: [changes]
     if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_run_rust == 'true') || (needs.changes.outputs.rebase_lane == 'ordinary' && needs.changes.outputs.docs_only != 'true')) }}
     # Strip debuginfo from the dev/test build. Debuginfo is the dominant
@@ -801,8 +801,8 @@ jobs:
         shell: chelis-ci-shell run {0}
     # The Nix ABI has its own exact-environment cvc5 cache. The first run
     # builds from source; subsequent runs can restore that complete payload.
-    # Reserve 25 minutes for cold hosted Devenv realization.
-    timeout-minutes: 50
+    # Budget for cold Devenv and the initial cvc5 source build.
+    timeout-minutes: 90
     # Skip on docs-only PRs (chelis#419); a skipped required job reports
     # success. Runs on every code PR and push.
     needs: [changes]
