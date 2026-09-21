@@ -1,1 +1,0 @@
-Type inference rejects incompatible literal stamps in `vmap` axes and `tuple-get` indices. Its node counters include these newly checked literals. Valid literal inputs retain their acceptance behavior. See [#1603](https://github.com/Chelis-Lang/chelis/issues/1603).
