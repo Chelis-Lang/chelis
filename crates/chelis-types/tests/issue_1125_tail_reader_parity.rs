@@ -307,6 +307,49 @@ fn pat_as_inner_ctor_binder_does_not_inherit_only_the_outer_name() {
     );
 }
 
+/// The shared-spelling case, and the control directly above it is the same
+/// program with the two binders spelled apart. One spelling is both the
+/// `pat-as` outer name, which denotes the whole scrutinee, and the payload
+/// binder, which denotes a projection. Being a whole-scrutinee binder
+/// somewhere in the pattern must not launder the projection: the name has to
+/// refuse.
+#[test]
+fn a_spelling_that_is_both_whole_and_projection_refuses() {
+    let diagnostics = ingress_messages(&format!(
+        "{HOLDER}
+         (defsig {{}} peek (t-fn {{}} (t-ref {{}} (t-adt {{}} Holder)) {T3}))
+         (def {{}} peek (fn {{}} (params {{}} h)
+           (match {{}} (var {{}} h)
+             (arm {{}} (pat-as {{}} h (pat-ctor {{}} Hold (pat-var {{}} h))) () (var {{}} h)))))"
+    ));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|message| message.contains("doesn't match declared signature")),
+        "{diagnostics:?}"
+    );
+}
+
+/// The same defect without the parameter in the collision, so the fixture
+/// above is not read as being about shadowing a parameter. Only the two
+/// binders share a spelling here; the parameter is spelled apart from both.
+#[test]
+fn two_binders_sharing_a_spelling_refuse_without_shadowing_the_parameter() {
+    let diagnostics = ingress_messages(&format!(
+        "{HOLDER}
+         (defsig {{}} peek (t-fn {{}} (t-ref {{}} (t-adt {{}} Holder)) {T3}))
+         (def {{}} peek (fn {{}} (params {{}} boxed)
+           (match {{}} (var {{}} boxed)
+             (arm {{}} (pat-as {{}} w (pat-ctor {{}} Hold (pat-var {{}} w))) () (var {{}} w)))))"
+    ));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|message| message.contains("doesn't match declared signature")),
+        "{diagnostics:?}"
+    );
+}
+
 #[test]
 fn record_field_binder_does_not_inherit_the_scrutinee_provenance() {
     let diagnostics = ingress_messages(&format!(

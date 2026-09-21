@@ -175,20 +175,29 @@ fn borrowed_parameter_roots(
     Some(roots)
 }
 
-/// Collect the names a pattern binds to the *whole* scrutinee value.
+/// Classify a pattern's binders by the path that reaches each one.
 ///
 /// A binder denotes the whole scrutinee iff **every step on the path from the
 /// pattern root down to it preserves the whole value**. The predicate is
-/// therefore path-recursive, not tag-keyed, and this walker implements it by
-/// traversing exactly the edges that preserve the value: a `pat-as`'s inner
-/// slot, and nothing else.
+/// therefore path-recursive, not tag-keyed, and `preserves_whole` carries that
+/// path state down. A binder reached by any other path names a projection out
+/// of the scrutinee, and a projection is a different value.
 ///
 /// The seven-row `pat-*` table in `spec/03-deep-syntax.md` supplies the edges.
 /// `pat-var` is "Bind to name" and `pat-as` is "Bind name, then match", so a
 /// `pat-as`'s inner pattern is matched against the *same* value the outer name
-/// just bound. Every other sub-pattern position -- the children of `pat-ctor`,
-/// `pat-tuple` and `pat-record` -- names a projection out of the scrutinee,
-/// and a projection is a different value.
+/// just bound and that edge passes `preserves_whole` through unchanged. The
+/// children of `pat-ctor`, `pat-tuple` and `pat-record` are projections, so
+/// those edges set it to false and it never becomes true again.
+///
+/// Both lists are returned because **a single spelling can be reached by both
+/// kinds of path**, and then it must refuse. In
+/// `(pat-as {} h (pat-ctor {} Hold (pat-var {} h)))` the name `h` is the outer
+/// whole-scrutinee binder and the payload binder at once; granting it the
+/// scrutinee's provenance would hand the relaxation a borrow of the field's
+/// referent, which the caller never supplied. The caller subtracts
+/// `projection` from `whole` before re-inserting, so being whole *somewhere*
+/// in a pattern cannot launder a projection elsewhere in it.
 ///
 /// Two shapes show why one level of `pat-as` handling is not enough.
 /// `(pat-as {} a (pat-as {} b (pat-var {} c)))` binds all three names to the
@@ -196,36 +205,63 @@ fn borrowed_parameter_roots(
 /// `(pat-as {} a (pat-ctor {} Some (pat-as {} b (pat-var {} c))))` binds only
 /// `a`: the `pat-ctor` edge breaks both other paths, and `b` and `c` are
 /// projections wearing a `pat-as`. A reader who keeps only the tag list will
-/// re-derive the second case wrongly, which is why the path property is
-/// written down here rather than the list of tags it happens to select.
+/// re-derive both bugs, which is why the path property is written down here
+/// rather than the list of tags it happens to select.
 ///
-/// Keying on the tag instead would read the `pat-var` inside
-/// `(pat-ctor {} Some (pat-var {} x))` as a whole-scrutinee binder and hand
-/// `x` a provenance it does not have. That is the unsound direction: the def
-/// would be relaxed into returning a borrow the caller never supplied, rather
-/// than the caller's own parameter. A binder this walker omits merely fails
-/// the relaxation and reports, so an unrecognized form contributing nothing
-/// refuses rather than accepts.
-fn whole_scrutinee_binders(pattern: &deep::Expr, out: &mut Vec<String>) {
-    stack_guard!("whole_scrutinee_binders", pattern);
+/// An unrecognized form recurses as a projection. That is the conservative
+/// direction: a name landing in `projection` can only cause a refusal.
+fn classify_pattern_binders(
+    pattern: &deep::Expr,
+    preserves_whole: bool,
+    whole: &mut Vec<String>,
+    projection: &mut Vec<String>,
+) {
+    stack_guard!("classify_pattern_binders", pattern);
     let deep::ExprCarrier::DecodedNode(tag, _, children) = pattern.carrier() else {
         return;
     };
+    let bind = |name: Option<&str>, whole: &mut Vec<String>, projection: &mut Vec<String>| {
+        if let Some(name) = name {
+            if preserves_whole {
+                whole.push(name.to_string());
+            } else {
+                projection.push(name.to_string());
+            }
+        }
+    };
     match tag {
-        DeepTag::PatVar => {
-            if let Some(name) = children.first().and_then(symbol_name) {
-                out.push(name.to_string());
-            }
-        }
+        DeepTag::PatVar => bind(children.first().and_then(symbol_name), whole, projection),
         DeepTag::PatAs => {
-            if let Some(name) = children.first().and_then(symbol_name) {
-                out.push(name.to_string());
-            }
+            bind(children.first().and_then(symbol_name), whole, projection);
             if let Some(inner) = children.get(1) {
-                whole_scrutinee_binders(inner, out);
+                classify_pattern_binders(inner, preserves_whole, whole, projection);
             }
         }
-        _ => {}
+        DeepTag::PatCtor => {
+            for child in children.iter().skip(1) {
+                classify_pattern_binders(child, false, whole, projection);
+            }
+        }
+        DeepTag::PatTuple => {
+            for child in children {
+                classify_pattern_binders(child, false, whole, projection);
+            }
+        }
+        DeepTag::PatRecord => {
+            for field in children.iter().skip(1) {
+                let deep::ExprCarrier::DecodedNode(DeepTag::Kv, _, kv) = field.carrier() else {
+                    continue;
+                };
+                if let Some(field_pattern) = kv.get(1) {
+                    classify_pattern_binders(field_pattern, false, whole, projection);
+                }
+            }
+        }
+        _ => {
+            for child in children {
+                classify_pattern_binders(child, false, whole, projection);
+            }
+        }
     }
 }
 
@@ -366,14 +402,24 @@ fn descend_to_tail_parameter(
                 // the whole scrutinee, bound to the scrutinee's own root
                 // rather than to whatever their spelling meant outside the
                 // arm. `(match (var x) (arm (pat-ctor Some (pat-var x)) ...))`
-                // falls out of that order without a special case: the removal
-                // drops the parameter's spelling and nothing is put back, so
-                // the projection cannot reach the parameter through a shared
-                // name.
+                // needs no special case: the removal drops the parameter's
+                // spelling and nothing is put back.
+                //
+                // A spelling reached by both kinds of path does need one, and
+                // subtraction is it. In
+                // `(pat-as {} h (pat-ctor {} Hold (pat-var {} h)))` the name
+                // `h` is a whole-scrutinee binder and a projection binder at
+                // once, and re-inserting it by name alone would grant the
+                // projection the parameter's provenance. Being whole somewhere
+                // in a pattern must not launder a projection elsewhere in it.
                 if let Some(root) = &scrutinee_root {
-                    let mut inheriting = Vec::new();
-                    whole_scrutinee_binders(pattern, &mut inheriting);
-                    for binder in inheriting {
+                    let mut whole = Vec::new();
+                    let mut projection = Vec::new();
+                    classify_pattern_binders(pattern, true, &mut whole, &mut projection);
+                    for binder in whole {
+                        if projection.contains(&binder) {
+                            continue;
+                        }
                         arm_roots.insert(binder, root.clone());
                     }
                 }
