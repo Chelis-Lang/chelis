@@ -565,9 +565,9 @@ post-dominance, not source scope alone:
 - a manifested root consumes its owner before process teardown.
 
 The consumed operand of a container-producing builtin (a row of the ownership
-IR's `CONTAINER_CONSUMERS` table: `append` and `concat` at the list kind,
-`dict_insert`, `dict_merge` and `dict_remove` at the dictionary kind, and
-`string_concat` at the string kind) is moved
+IR's `CONTAINER_CONSUMERS` table: `append`, `concat` and `skip` at the list
+kind, `dict_insert`, `dict_merge` and `dict_remove` at the dictionary kind,
+and `string_concat` at the string kind) is moved
 into the builtin when the scheduler places that owner's terminal directly
 after the application: lowering borrows every builtin operand, and the
 last-use scheduler upgrades the borrow to a move and drops the terminal, so
@@ -575,9 +575,10 @@ the verifier re-checks the move as it would any other (no live borrow, no
 later use). The move establishes only the borrow half of exclusivity. The
 sharing half is the runtime's: as with tensor reuse in C6, the consuming entry
 point (`chelis_list_append_owned`, `chelis_list_concat_owned`,
-`chelis_dict_insert_owned`, `chelis_dict_merge_owned`,
-`chelis_dict_remove_owned`, `chelis_string_concat_owned`, private to the
-emitter like the accumulator ABI)
+`chelis_list_drop_owned`, `chelis_dict_insert_owned`,
+`chelis_dict_merge_owned`, `chelis_dict_remove_owned`,
+`chelis_string_concat_owned`, private to the emitter like the accumulator
+ABI)
 re-checks the strong-owner count and mutates in place only at one, otherwise
 cloning and releasing the consumed input; a right-hand side that aliases the
 consumed left-hand side is such a retained owner and takes the same cloning
@@ -607,14 +608,13 @@ Membership is narrower than "produces its own kind". A row is for a callable
 whose result is its operand with an edit applied, so that reusing the
 allocation replaces a copy of the whole operand with the edit alone. The edit
 need not grow the container: `append`, `concat`, `dict_insert`, `dict_merge`
-and `string_concat` add, and `dict_remove` deletes, but in each the surviving
-content is carried over in place rather than rebuilt.
+and `string_concat` add, `dict_remove` deletes a keyed entry and `skip`
+deletes a leading run, but in each the surviving content is carried over in
+place rather than rebuilt.
 
-A callable whose result is a positional sub-range of its operand is not a row
-today. `take` and `drop` for lists, and `string_slice` and `string_trim` for
-strings, each carry over only part of the operand, and none of them is an
-accumulation shape. Two distinct facts hold them out, and only one is
-normative.
+A callable whose result is a positional sub-range of its operand is a row only
+where reusing the allocation removes the copy. Two distinct facts decide it,
+and only one is normative.
 
 The normative one is [05-OP-44]'s closed heap-kind universe. A sub-range that
 shares its operand's buffer needs a private storage kind behind the handle, as
@@ -625,12 +625,25 @@ sharing `xs`'s buffer stands at its own strong count of one, so
 `chelis_list_append_owned(ys, v)` takes the in-place arm, writes slot 3, and
 clobbers `xs[3]`.
 
-The other is sequencing. An exclusive offset carried inside the single
-allocation, reached only through a `drop` consumer row, needs no new heap kind
-and conflicts with nothing normative. It is reserved rather than proposed
-because the callers measured in this repository were rewritten onto `fold`
-rather than repaired, so nothing here exercises it. Revisit it when a caller
-does; the remaining work is tracked as [#2334].
+The other is whether an exclusive offset earns its complexity, and for `skip`
+it now does. An offset carried inside the single allocation, reached only
+through the `builtin:skip` row, needs no new heap kind and conflicts with
+nothing normative: it moves only in `chelis_list_drop_owned`, only at strong
+count one, only under a verified move, so there is never a second handle over
+one buffer and the clobber above cannot arise. Its result is the operand's
+suffix, so the surviving content needs no move at all, which is what makes the
+call O(count) where the cloning path is O(length). A retired prefix would
+otherwise stay allocated until the list dies, so the entry point compacts once
+the prefix exceeds the live window, capping the waste at the live length for an
+amortised O(1) per skipped element. [#2334] delivered it.
+
+`take` is not a row and does not need to be: its result is a prefix, so the
+in-place form is a truncation with no offset involved, and its callers are one
+standard-library wrapper and two examples. `string_slice` and `string_trim` are
+not rows either, because a string carries the derived state described below and
+a sub-range of one is not the single mutation a sub-range of a list is. Those
+three remain dispositions rather than derivations and could be revisited on
+their own evidence.
 
 The string row carries an obligation neither of the other kinds has, and it
 is the reason a heap kind is not interchangeable here. `RuntimeString` stores
@@ -659,6 +672,14 @@ derived from an operand a `CONTAINER_CONSUMERS` row can move. Those two point
 into single-character slices the helper allocates and releases itself, which
 no `string_concat` can consume, so nothing can grow the buffer under them.
 
+Adding `skip` puts a list operand under the same question, and lists answer it
+by publishing no interior pointer at all: `chelis_list_index` returns a
+`chelis_value` by value and the layout behind `chelis_list` is opaque, so
+there is nothing for an advanced offset to invalidate. The string case remains
+the one with a published interior pointer, and it remains the reason a kind
+whose public surface hands one out with a longer contract would need a
+different answer before taking a row.
+
 An in-place growth invalidates such a pointer exactly as the cloning path
 already does by releasing the consumed input, and the consuming entry point
 is private to the emitter, so no published-ABI caller can reach it. A new
@@ -676,6 +697,17 @@ other. `chelis_string_concat_owned` therefore records that event on every
 in-place return, including an empty right-hand side that changes no byte, so
 for strings the absence of the event means the cloning arm ran.
 
+`chelis_list_drop_owned` records on the same rule and for the same reason,
+though its byte count is almost always unchanged: a skip frees nothing, and a
+compaction's `drain` keeps the buffer. The event is the arm signal, not a
+report of a size change.
+
+A cursor gives a second reading the per-call caution does not forbid. Over a
+whole walk the consuming arm allocates no list at all while the cloning arm
+allocates one per step, so an allocation count against a known baseline
+separates them in aggregate even though one extra allocation cannot be
+attributed in isolation. That is the form chelis#2334's receipt takes.
+
 The dictionary entry points are uneven on this, so the same reading does not
 carry to them. `chelis_dict_merge_owned` records on every in-place return;
 `chelis_dict_insert_owned` records only when it pushes, not when it replaces
@@ -683,15 +715,30 @@ an existing key; and `chelis_dict_remove_owned` never records. For those two,
 a zero count still means "cloned, or edited nothing". chelis#2252 owns
 closing the gap.
 
-The dictionary rows carry one obligation the list rows do not. The cloning
+One obligation belongs to `dict_insert` alone. The cloning
 `chelis_dict_insert` releases the value it replaces before cloning the
 incoming one, which is safe because the caller still owns the incoming value.
 The consuming entry point clones first and releases second: the two may be
 the same heap value held exactly once, and releasing first would free it
-before the clone reads it. `chelis_dict_remove_owned` likewise releases the
-removed entry's key and value itself, because the consumed dictionary keeps
-its allocation; the cloning entry point leaves that to the caller's own
-release of the untouched input.
+before the clone reads it.
+
+A second obligation belongs to every row that removes content rather than
+adding it, which is now `dict_remove` and `skip`. `chelis_dict_remove_owned`
+releases the removed entry's key and value itself, and
+`chelis_list_drop_owned` releases each element it retires, because in both the
+consumed container keeps its allocation and no finalizer will reach those
+children again. The cloning entry points leave that to the caller's own
+release of the untouched input, which is why the obligation appears only on
+the consuming side.
+
+`skip` adds one corollary the dictionary case does not have, because its
+removal leaves the allocation holding slots the container no longer owns: the
+list's finalizer walks the live window rather than the allocation. Walking the
+allocation would release each retired element a second time, against
+[05-OP-44]'s "releases each stored child exactly once", and it is observable
+only when a list is finalized while a retired prefix survives -- a cursor
+walked to the end compacts that prefix away, so the shape that catches it is a
+partial skip released afterwards.
 
 The runtime's test-only allocation ledger records allocation identity, kind,
 size, retain/release events, live owners, and peak live bytes. It is compiled

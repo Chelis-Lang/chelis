@@ -4896,6 +4896,72 @@ pub unsafe extern "C" fn chelis_list_drop(
     )
 }
 
+/// Consuming skip (chelis#2334): the in-place counterpart of
+/// `chelis_list_drop` for a uniquely owned list, with the same contract as
+/// `chelis_list_append_owned`.
+///
+/// At strong-owner count one this releases the leading `count` elements and
+/// advances the list's private offset. That is O(count) where the cloning
+/// entry point is O(length), which is what makes a recursive cursor linear
+/// instead of quadratic. The returned pointer is the input, exactly as
+/// `chelis_list_append_owned` already returns its input; [04-LIN-4] forbids
+/// a backend from inferring a returned owner from pointer equality, so the
+/// identity carries no meaning the caller may read.
+///
+/// Otherwise the cloning path runs and the consumed input is released, so a
+/// retained alias is never mutated and never sees a moved offset. The
+/// clone has its own head at zero.
+///
+/// A count at or above the length leaves an empty list, per [05-OP-32].
+#[no_mangle]
+pub unsafe extern "C" fn chelis_list_drop_owned(
+    list: *mut chelis_list,
+    count: i64,
+) -> *mut chelis_list {
+    if count < 0 {
+        // The cloning entry point's diagnostic, for the reason recorded
+        // there: the user wrote `skip`, not this symbol and not
+        // [05-OP-67]'s one-argument `drop`.
+        runtime_fail!("skip requires non-negative count");
+    }
+    if list.is_null() {
+        return chelis_list_drop(list, count);
+    }
+    if (*list).header.strong.load(Ordering::Relaxed) == 1 {
+        // Saturating rather than failing, which is where this parts
+        // company with `chelis_list_with_capacity`'s "exceeds platform
+        // size". `count` is non-negative here, so the conversion can
+        // only fail on a platform whose `usize` is narrower than `i64`,
+        // and there a count that large is above every list's length,
+        // which [05-OP-32] defines as the empty List. A capacity that
+        // large has no defined answer; a skip count does.
+        let requested = usize::try_from(count).unwrap_or(usize::MAX);
+        let retired = requested.min((*list).live().len());
+        for offset in 0..retired {
+            // Read the slot out, then release, so no borrow of the list
+            // spans the call. A released child cannot reach the list that
+            // held it, but an index costs nothing and does not rest on
+            // that.
+            let value = (*list).live()[offset];
+            chelis_value_release(value);
+        }
+        (*list).advance_head(retired);
+        (*list).compact_retired_prefix();
+        // The byte count this records is usually unchanged, because a skip
+        // frees nothing and a compaction's `drain` keeps the buffer. The
+        // event is still owed on every in-place return: a `resize` at a
+        // consuming entry point's site is the ledger's only per-call signal
+        // that the in-place arm ran rather than the cloning one, and
+        // `chelis_string_concat_owned` already records it for an empty
+        // right-hand side that changes no byte for exactly that reason.
+        resize_list_ledger(list, "chelis_list_drop_owned");
+        return list;
+    }
+    let result = chelis_list_drop(list, count);
+    release_list_ptr(list);
+    result
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn chelis_list_chunk(
     list: *const chelis_list,

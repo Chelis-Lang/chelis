@@ -1,0 +1,1 @@
+`skip(xs, n)` on a List the compiler proved is at its last use now advances an offset inside the existing allocation instead of cloning the retained suffix, so a recursive cursor that skips one element per step is linear rather than quadratic. A List that any other owner still holds takes the unchanged cloning path.

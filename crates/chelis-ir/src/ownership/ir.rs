@@ -200,6 +200,16 @@ pub(crate) const CONTAINER_CONSUMERS: &[ContainerConsumer] = &[
         kind: HeapKind::List,
         operand: 0,
     },
+    // chelis#2334. `skip` returns a suffix of its operand rather than a
+    // grown copy, so the in-place story is the offset rather than a
+    // push: the consuming entry point releases the leading elements and
+    // advances a private head. The row's shape test still applies, so
+    // only a List-classed operand producing a List is upgraded.
+    ContainerConsumer {
+        label: "builtin:skip",
+        kind: HeapKind::List,
+        operand: 0,
+    },
     ContainerConsumer {
         label: "builtin:dict_insert",
         kind: HeapKind::Dict,
