@@ -101,10 +101,44 @@ def source_contracts() -> tuple[SourceContract, ...]:
             ),
         ),
         SourceContract(
+            "HIP checked subtraction trap channel",
+            "crates/chelis-backend-hip/src/kernels.rs",
+            (
+                "pub fn binary_checked_sub_integer(",
+                "chelis_record_numeric_failure((unsigned long long)i);",
+                "__device__ unsigned int chelis_numeric_failure_flag = 0;",
+                "__device__ unsigned long long chelis_numeric_failure_index = ~0ULL;",
+            ),
+        ),
+        SourceContract(
+            "HIP checked subtraction host observation",
+            "crates/chelis-backend-hip/src/emit.rs",
+            (
+                "hipModuleGetGlobal(&chelis_numeric_flag_symbol",
+                "\\\"chelis_numeric_failure_flag\\\"",
+                "hipModuleGetGlobal(&chelis_numeric_index_symbol",
+                "\\\"chelis_numeric_failure_index\\\"",
+            ),
+        ),
+        SourceContract(
+            "HIP narrow direct arithmetic",
+            "crates/chelis-backend-hip/src/kernels.rs",
+            (
+                "pub fn binary_sub_reduced(",
+                "pub fn binary_extrema_reduced(",
+                "pub fn extrema_adjoint_reduced(",
+                "pub fn fused_elementwise_reduced(",
+            ),
+        ),
+        SourceContract(
             "target dispositions",
             "crates/chelis-compiler-api/src/compiler.rs",
             (
-                "chelis_types::unimplemented_rejection!(\n                    1306,\n                    \"the Metal direct-subtraction/extrema",
+                "chelis_types::unimplemented_rejection!(\n                    2338,\n                    \"the Metal direct-subtraction/extrema",
+                "HIP checked integer subtraction now has a device trap channel",
+                "HIP narrow-float direct arithmetic now has exact kernels",
+            ),
+            (
                 "checked signed-integer subtraction needs an exact HIP overflow-trap channel",
                 "the HIP bf16/f16 direct-subtraction/extrema bit-preserving kernels are not implemented",
             ),

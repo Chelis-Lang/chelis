@@ -2545,7 +2545,8 @@ callable from bypassing review while the capability tables are built.
    owns replacing the pre-table boolean numeric aliases used by logical
    operations, comparison-derived negation, and `where`.
    [#1306] owns replacing the trap- and stored-bit-changing `sub` and
-   `min_elem` arithmetic surrogates with direct typed identities in every lane.
+   `min_elem` arithmetic surrogates with direct typed identities in eval, C,
+   and HIP. [#2338] owns the remaining Metal cells.
 
 **Authoritative direct-arithmetic oracle ([#1306]):**
 `.venv/bin/python scripts/dtype_direct_arithmetic_oracle.py`; exit 0 and final
@@ -2560,12 +2561,13 @@ The normal oracle compiles the ignored HIP execution cases but cannot claim
 device execution. The manual hardware gate is:
 
 ```text
-scripts/hip_test.py -p chelis-backend-hip --test gpu_correctness direct_ -- --ignored --test-threads=1
+scripts/hip_test.py -p chelis-backend-hip --test gpu_correctness direct_ -- --ignored --test-threads=1 --skip direct_relu_and_adjoint_preserve_exact_bits_at_every_float_width_on_gpu
 ```
 
-Expected success is four tests passed and zero failed: f32/f64 exact extrema
-and adjoints, f32/f64 subtraction agreement, fused direct subtraction followed
-by minimum, and signed-i32 extrema. A host without `hipcc`, the documented ROCm
+Expected success is five tests passed and zero failed: exact extrema and
+adjoints at every HIP float width, subtraction agreement at every HIP float
+width, checked signed-integer overflow trapping, fused direct subtraction
+followed by minimum, and signed-i32 extrema. A host without `hipcc`, the documented ROCm
 wheel paths, or a compatible device records this leg as **BLOCKED**, never as a
 pass; it does not weaken or remove the ignored hardware tests.
 
@@ -2819,10 +2821,11 @@ executing it. For Metal that is already the only available outcome ([#737]:
 that runtime has never been executed). For HIP it reaches only the cells that
 stay `Unimplemented`: the backend has real kernels and a documented hardware
 gate (`scripts/hip_test.py`), and an `Implemented { kernel_id }` cell still
-owes that gate rather than a diagnostic. And [#1291] and the device residual of
-[#1306] both stay open, but for different executable reasons. The remaining
-`Unimplemented` [#1306] cells cite that issue, so the daily/manual standing
-rejection-authority liveness check continues to cover them. The `count` device
+owes that gate rather than a diagnostic. And [#1291] and [#2338] both stay
+open, but for different executable reasons. The remaining `Unimplemented`
+Metal direct-arithmetic cells cite [#2338], so the daily/manual standing
+rejection-authority liveness check continues to cover them. No production
+rejection cites [#1306] after its eval/C/HIP oracle is green. The `count` device
 cells are already
 `Implemented { kernel_id }`; no production rejection cites [#1291], so the
 source-derived rejection manifest does not carry it. [#1291] instead closes
@@ -3098,7 +3101,7 @@ operation exists and what it computes.
 | 3 | [#714], [#715] dtype rows, [#716], [#718] C cells, [#723], [#728]; [#687] fully unblocked |
 | 4A-4B | §C6 capacity detection; [#898] reduction authorities; [#753]/[#759]/[#965] language decisions; [05-OP-29] first-class `count` authority; [05-OP-40..41] direct extrema/subtraction authority; canonical reduction-order authority; WireDag v6 schema freeze |
 | pre-4C authority and executable closure | [#1294] closed exhaustive `BuiltinDecl` domain/case declarations plus exact `[05-OP-N]` authority for every discovered Table-A IR/RISC operation and sibling-builtin identity; [#1296] one normal-gate composite over every prerequisite oracle and structural mutation; no machine key/cell type, authoring macro, or row may land first |
-| v0.19 behavior | [#1290] balanced sum/product backend work (also part of [#170]); [#1281] mean/extrema/argument-reduction and windowed-extrema behavior; [#722] remaining compiled integer unary/AD cells; [#753]/[#759]/[#965] numeric callables; [#1282] [05-OP-25] scalar/tensor/recursive-List `to_string` domain; [#1059] compiled C-host Tensor/List rendering cells; [#1284] typed non-numeric logical/comparison/`where` lowering; [#893]/[#1289] typed C carrier; [#1288] zero-exception census; [#1287] exact-only WireDag v6 plus first-class count delivery in eval/C, with [#1291]'s device kernels outside the Phase 4C entry set; [#1292] own-width tensor-close assertions; [#1293] the exact 84-definition stdlib, sole public JSON surface, pathwise random/List adjoints, and stub removal; [#1295] all-active-float `round_to`/`uniform_like`/`dropout` and all-dtype padding; [#1297] legal compiled host-effect operations; [#1298] runtime-axis shape and target-independent window reductions; [#1306] direct checked subtraction and stored-bit extrema selection across every admitted surface and lane |
+| v0.19 behavior | [#1290] balanced sum/product backend work (also part of [#170]); [#1281] mean/extrema/argument-reduction and windowed-extrema behavior; [#722] remaining compiled integer unary/AD cells; [#753]/[#759]/[#965] numeric callables; [#1282] [05-OP-25] scalar/tensor/recursive-List `to_string` domain; [#1059] compiled C-host Tensor/List rendering cells; [#1284] typed non-numeric logical/comparison/`where` lowering; [#893]/[#1289] typed C carrier; [#1288] zero-exception census; [#1287] exact-only WireDag v6 plus first-class count delivery in eval/C, with [#1291]'s device kernels outside the Phase 4C entry set; [#1292] own-width tensor-close assertions; [#1293] the exact 84-definition stdlib, sole public JSON surface, pathwise random/List adjoints, and stub removal; [#1295] all-active-float `round_to`/`uniform_like`/`dropout` and all-dtype padding; [#1297] legal compiled host-effect operations; [#1298] runtime-axis shape and target-independent window reductions; [#1306] direct checked subtraction and stored-bit extrema selection in eval/C/HIP, with Metal completion owned by [#2338] |
 | 4C-4E | [#692], [#712], [#715] lane-skew mechanisms; [#724]/[#726] generated policy; future lane skew as a class |
 | maintenance | [#878] delivered the internal typed Pad carrier but not the exact-only v6 break owned by [#1287]; [#937] delivered the earlier f64 sampler repair but [#1295] owns the final same-dtype parameter contract; [#1150]/[#1152] are one checked-cast source x target construction with [#730] LU6 owning only host-emission totality and rejection rendering |
 
@@ -3182,6 +3185,7 @@ substitute fixes (needed for [#722]'s C half regardless of this plan).
 [#1297]: https://github.com/Chelis-Lang/chelis/issues/1297
 [#1298]: https://github.com/Chelis-Lang/chelis/issues/1298
 [#1306]: https://github.com/Chelis-Lang/chelis/issues/1306
+[#2338]: https://github.com/Chelis-Lang/chelis/issues/2338
 [#1314]: https://github.com/Chelis-Lang/chelis/issues/1314
 [#849]: https://github.com/Chelis-Lang/chelis/issues/849
 [#1310]: https://github.com/Chelis-Lang/chelis/pull/1310

@@ -162,8 +162,18 @@ class SourceContractMutationTests(unittest.TestCase):
     def test_target_authority_mutation_fails(self) -> None:
         self.mutate(
             "crates/chelis-compiler-api/src/compiler.rs",
-            "chelis_types::unimplemented_rejection!(\n                    1306,\n                    \"the Metal direct-subtraction/extrema",
+            "chelis_types::unimplemented_rejection!(\n                    2338,\n                    \"the Metal direct-subtraction/extrema",
             "chelis_types::unimplemented_rejection!(\n                    9999,\n                    \"the Metal direct-subtraction/extrema",
+        )
+        with self.assertRaisesRegex(oracle.OracleFailure, "target dispositions"):
+            oracle.validate_source_contracts(self.repo)
+
+    def test_retired_hip_rejection_restoration_fails(self) -> None:
+        path = "crates/chelis-compiler-api/src/compiler.rs"
+        target = self.repo / path
+        target.write_text(
+            target.read_text()
+            + "\n// checked signed-integer subtraction needs an exact HIP overflow-trap channel\n"
         )
         with self.assertRaisesRegex(oracle.OracleFailure, "target dispositions"):
             oracle.validate_source_contracts(self.repo)
