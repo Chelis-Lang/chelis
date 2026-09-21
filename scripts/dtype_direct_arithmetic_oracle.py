@@ -64,15 +64,19 @@ def source_contracts() -> tuple[SourceContract, ...]:
             ),
         ),
         SourceContract(
-            "evaluator canonical arithmetic NaNs",
+            "evaluator canonical subtraction NaNs",
             "crates/chelis-types/src/dtype_semantics.rs",
             (
-                "fn canonicalize_arithmetic_f32(value: f32) -> f32 {",
+                "fn canonicalize_subtraction_f32(value: f32) -> f32 {",
                 "f32::from_bits(0x7fc0_0000)",
-                "fn canonicalize_arithmetic_f64(value: f64) -> f64 {",
+                "fn canonicalize_subtraction_f64(value: f64) -> f64 {",
                 "f64::from_bits(0x7ff8_0000_0000_0000)",
-                "_ => canonicalize_arithmetic_f32(value),",
-                "_ => canonicalize_arithmetic_f64(value),",
+                "FloatBinOp::Sub => canonicalize_subtraction_f32(value),",
+                "FloatBinOp::Sub => canonicalize_subtraction_f64(value),",
+            ),
+            (
+                "_ => canonicalize_subtraction_f32(value),",
+                "_ => canonicalize_subtraction_f64(value),",
             ),
         ),
         SourceContract(

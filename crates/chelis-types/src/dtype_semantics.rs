@@ -956,7 +956,7 @@ fn extrema_selects_left<T: Copy + PartialOrd>(
     }
 }
 
-fn canonicalize_arithmetic_f32(value: f32) -> f32 {
+fn canonicalize_subtraction_f32(value: f32) -> f32 {
     if value.is_nan() {
         f32::from_bits(0x7fc0_0000)
     } else {
@@ -964,7 +964,7 @@ fn canonicalize_arithmetic_f32(value: f32) -> f32 {
     }
 }
 
-fn canonicalize_arithmetic_f64(value: f64) -> f64 {
+fn canonicalize_subtraction_f64(value: f64) -> f64 {
     if value.is_nan() {
         f64::from_bits(0x7ff8_0000_0000_0000)
     } else {
@@ -983,8 +983,8 @@ fn apply_float_binop_f32(op: FloatBinOp, lhs: f32, rhs: f32) -> f32 {
         FloatBinOp::Min => select_float_min_first(lhs, rhs, f32::is_nan),
     };
     match op {
-        FloatBinOp::Max | FloatBinOp::Min => value,
-        _ => canonicalize_arithmetic_f32(value),
+        FloatBinOp::Sub => canonicalize_subtraction_f32(value),
+        _ => value,
     }
 }
 
@@ -999,8 +999,8 @@ fn apply_float_binop_f64(op: FloatBinOp, lhs: f64, rhs: f64) -> f64 {
         FloatBinOp::Min => select_float_min_first(lhs, rhs, f64::is_nan),
     };
     match op {
-        FloatBinOp::Max | FloatBinOp::Min => value,
-        _ => canonicalize_arithmetic_f64(value),
+        FloatBinOp::Sub => canonicalize_subtraction_f64(value),
+        _ => value,
     }
 }
 

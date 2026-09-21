@@ -131,11 +131,22 @@ class SourceContractMutationTests(unittest.TestCase):
     def test_evaluator_canonical_nan_removal_fails(self) -> None:
         self.mutate(
             "crates/chelis-types/src/dtype_semantics.rs",
-            "fn canonicalize_arithmetic_f32(value: f32) -> f32 {",
-            "fn preserve_arithmetic_f32_nan(value: f32) -> f32 {",
+            "fn canonicalize_subtraction_f32(value: f32) -> f32 {",
+            "fn preserve_subtraction_f32_nan(value: f32) -> f32 {",
         )
         with self.assertRaisesRegex(
-            oracle.OracleFailure, "evaluator canonical arithmetic NaNs"
+            oracle.OracleFailure, "evaluator canonical subtraction NaNs"
+        ):
+            oracle.validate_source_contracts(self.repo)
+
+    def test_evaluator_canonical_nan_scope_broadening_fails(self) -> None:
+        self.mutate(
+            "crates/chelis-types/src/dtype_semantics.rs",
+            "FloatBinOp::Sub => canonicalize_subtraction_f32(value),",
+            "_ => canonicalize_subtraction_f32(value),",
+        )
+        with self.assertRaisesRegex(
+            oracle.OracleFailure, "evaluator canonical subtraction NaNs"
         ):
             oracle.validate_source_contracts(self.repo)
 
