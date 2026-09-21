@@ -997,8 +997,7 @@ impl<'a> EvalContext<'a> {
                             _ => None,
                         };
                         self.binding_types.insert(capture.binding.clone(), declared);
-                        let producer = matches!(value, RuntimeValue::Tensor(_))
-                            .then(|| ResultProducer::tensor("load"));
+                        let producer = ResultProducer::interface_load(&value);
                         self.bindings.insert_with_result_producer(
                             capture.binding.clone(),
                             value,
@@ -1598,8 +1597,7 @@ impl<'a> EvalContext<'a> {
             // interface. Its initializer has already run (and may be cached),
             // so a returned tensor has `load` provenance rather than that of
             // whichever operation happened to initialize it.
-            self.result_producer =
-                matches!(value, RuntimeValue::Tensor(_)).then(|| ResultProducer::tensor("load"));
+            self.result_producer = ResultProducer::interface_load(&value);
             return Ok(value);
         }
         if name == "Nil" {
@@ -2659,8 +2657,7 @@ impl<'a> EvalContext<'a> {
                                 .insert(0, callable_contract.expect("checked above").clone());
                         }
                         self.binding_types.insert(param.clone(), declared);
-                        let producer = matches!(arg, RuntimeValue::Tensor(_))
-                            .then(|| ResultProducer::tensor("load"));
+                        let producer = ResultProducer::interface_load(&arg);
                         self.bindings
                             .insert_with_result_producer(param, arg, producer);
                     }

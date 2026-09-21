@@ -572,6 +572,63 @@ fn assert_projected_tuple_provenance(native: bool) {
     }
 }
 
+fn aggregate_interface_source(cached: bool, select_second: bool) -> String {
+    if cached {
+        return "pair = (to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32, 2.0f32, 3.0f32]))\n\
+                def select_cached() -> tensor[3, f32] ! { IO } = {\n\
+                  _ = print(\"interface-before\")\n\
+                  selected = pair.1\n\
+                  _ = print(\"interface-after-selection\")\n\
+                  selected\n\
+                }\n\
+                out = select_cached()\n"
+            .to_string();
+    }
+    format!(
+        "def select_pair(pair: (tensor[*, f32], tensor[*, f32]), second: bool) -> tensor[3, f32] ! {{ IO }} = {{\n\
+         _ = print(\"interface-before\")\n\
+         selected = if second then pair.1 else pair.0\n\
+         _ = print(\"interface-after-selection\")\n\
+         selected\n\
+        }}\n\
+        out = select_pair((to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32, 2.0f32, 3.0f32])), {select_second})\n"
+    )
+}
+
+#[test]
+fn eval_aggregate_interface_ingress_stamps_each_tensor_field_as_load() {
+    for cached in [false, true] {
+        let selections: &[bool] = if cached { &[true] } else { &[false, true] };
+        for &select_second in selections {
+            let source = aggregate_interface_source(cached, select_second);
+            let (ok, output) = run(&source, false);
+            assert_eq!(ok, select_second, "{source}\n{output}");
+            assert_eq!(output.matches("interface-before").count(), 1, "{output}");
+            assert_eq!(
+                output.matches("interface-after-selection").count(),
+                usize::from(select_second),
+                "{output}"
+            );
+            if select_second {
+                assert!(
+                    output.contains("out = tensor(shape=[3], data=[1.0, 2.0, 3.0])"),
+                    "{output}"
+                );
+                assert!(!output.contains("numeric trap:"), "{output}");
+            } else {
+                assert_claim(&output, "load", 2);
+            }
+        }
+    }
+    let static_mismatch = "pair = (to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32, 2.0f32, 3.0f32]))\n\
+         def invalid_cached_projection() -> tensor[3, f32] = pair.0\n\
+         out = invalid_cached_projection()\n";
+    let (ok, output) = run(static_mismatch, false);
+    assert!(!ok, "{static_mismatch}\n{output}");
+    assert!(output.contains("DimensionMismatch"), "{output}");
+    assert!(!output.contains("pending result claim"), "{output}");
+}
+
 #[test]
 fn eval_tuple_projection_retains_only_the_selected_producer() {
     assert_projected_tuple_provenance(false);

@@ -2205,6 +2205,12 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             "cli_result_callable_selection.eval_tuple_projection_retains_only_the_selected_producer",
         ),
         _row(
+            "return.callback.aggregate_interface.eval",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_result_callable_selection.eval_aggregate_interface_ingress_stamps_each_tensor_field_as_load",
+        ),
+        _row(
             "return.callback.rank_zero.no_claim.eval_c",
             EXECUTES,
             EXECUTES,

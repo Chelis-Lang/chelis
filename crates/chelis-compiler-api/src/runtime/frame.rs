@@ -56,6 +56,22 @@ impl ResultProducer {
             .then_some(Self::Aggregate(children))
     }
 
+    /// Stamp a value crossing a genuine runtime interface. Every tensor leaf
+    /// is observed through `load`; aggregate shape is retained so a later
+    /// projection cannot lose the interface origin or borrow a sibling's.
+    pub(crate) fn interface_load(value: &RuntimeValue) -> Option<Self> {
+        match value {
+            RuntimeValue::Tensor(_) => Some(Self::tensor("load")),
+            RuntimeValue::Tuple(values) | RuntimeValue::List(values) => {
+                Self::aggregate(values.iter().map(Self::interface_load).collect())
+            }
+            RuntimeValue::Adt { fields, .. } => {
+                Self::aggregate(fields.iter().map(Self::interface_load).collect())
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn matches_value(&self, value: &RuntimeValue) -> bool {
         match (self, value) {
             (Self::Tensor(_), RuntimeValue::Tensor(_)) => true,
@@ -396,6 +412,39 @@ mod tests {
         assert_eq!(producer.child(2), None);
         assert_eq!(producer.child(3), None);
         assert_eq!(ResultProducer::aggregate(vec![None, None]), None);
+    }
+
+    #[test]
+    fn aggregate_interface_load_stamps_only_tensor_leaves() {
+        let tensor = RuntimeValue::Tensor(super::super::RuntimeTensorValue::new(
+            chelis_ir::eval::TensorValue::from_vec(vec![1], vec![1.0]),
+        ));
+        let value = RuntimeValue::Tuple(vec![
+            int(7),
+            tensor.clone(),
+            RuntimeValue::Adt {
+                ctor: "Some".to_string(),
+                fields: vec![tensor],
+                field_names: None,
+            },
+        ]);
+        let producer = ResultProducer::interface_load(&value).expect("tensor leaves exist");
+        assert_eq!(producer.child(0), None);
+        assert_eq!(
+            producer
+                .child(1)
+                .as_ref()
+                .and_then(ResultProducer::operation),
+            Some("load")
+        );
+        assert_eq!(
+            producer
+                .child(2)
+                .and_then(|adt| adt.child(0))
+                .as_ref()
+                .and_then(ResultProducer::operation),
+            Some("load")
+        );
     }
 
     impl Frame {

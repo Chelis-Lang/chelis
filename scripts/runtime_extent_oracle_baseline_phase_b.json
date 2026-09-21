@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "37eb62b143ab49a0f2d10843d08aa58c898f7f598a476a2f0fc63af7e5cdb85c",
+  "corpus_sha256": "95b8e1b34b521ddfc9a2dfc25fe919af44ed247e24250e791e6896c26548b863",
   "rows": [
     {
       "id": "claim.literal.identity_root.c",
@@ -1777,6 +1777,12 @@
       "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "cli_return_boundary.eval_traps_on_a_call_bodied_return"
+    },
+    {
+      "id": "return.callback.aggregate_interface.eval",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_result_callable_selection.eval_aggregate_interface_ingress_stamps_each_tensor_field_as_load"
     },
     {
       "id": "return.callback.identity.c",

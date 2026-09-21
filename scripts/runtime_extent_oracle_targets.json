@@ -878,6 +878,7 @@
         "c_rank_zero_host_identity_without_a_claim_preserves_value_and_effects",
         "c_selection_before_production_forwards_only_to_the_selected_arm",
         "c_shared_callback_claims_are_invocation_local",
+        "eval_aggregate_interface_ingress_stamps_each_tensor_field_as_load",
         "eval_delayed_selection_guards_only_the_selected_value",
         "eval_identity_callback_checks_claim_after_actual_preparation",
         "eval_inherited_claim_reaches_named_and_literal_callbacks",
