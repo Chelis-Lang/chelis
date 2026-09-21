@@ -3,7 +3,7 @@
 //!
 //! Pin the structural invariants of the emitted C code so we catch
 //! silent regressions where (for example) `Mean` forgets to divide by
-//! the window volume or `Min` uses `fmaxf`. Numerical
+//! the window volume or extrema stop selecting the first stored value. Numerical
 //! evaluator-vs-C-backend parity is exercised through the host-runtime
 //! reduce_window tests in `chelis-compiler-api`, which evaluate the
 //! same Surf programs through the IR evaluator path. The IR evaluator
@@ -43,16 +43,20 @@ fn build_dag(reducer: ReduceWindowKind) -> Dag {
 }
 
 #[test]
-fn issue254_emit_reduce_window_max_uses_fmaxf_and_neg_infinity() {
+fn issue254_emit_reduce_window_max_selects_first_nan_without_fmaxf() {
     let dag = build_dag(ReduceWindowKind::Max);
     let src = codegen(&dag, "kernel").unwrap().c_source;
     assert!(
-        src.contains("acc = fmaxf("),
-        "Max emit must combine with fmaxf, got:\n{src}"
+        !src.contains("fmaxf("),
+        "Max emit must not use NaN-dropping fmaxf, got:\n{src}"
     );
     assert!(
-        src.contains("-INFINITY"),
-        "Max emit must initialize acc to -INFINITY, got:\n{src}"
+        src.contains("isnan(candidate) || candidate > best_value"),
+        "Max emit must select the first NaN or strict greater value, got:\n{src}"
+    );
+    assert!(
+        src.contains(")[outer] = ((const float*)t0_data)[best_src]"),
+        "Max emit must copy the selected stored representation, got:\n{src}"
     );
     assert!(src.contains("chelis_window_count("));
     assert!(src.contains("for (int64_t leaf = 0; leaf < t1_window_count;"));
@@ -61,36 +65,35 @@ fn issue254_emit_reduce_window_max_uses_fmaxf_and_neg_infinity() {
 }
 
 #[test]
-fn issue254_emit_reduce_window_min_uses_fminf_and_positive_infinity() {
+fn issue254_emit_reduce_window_min_selects_first_nan_without_fminf() {
     let dag = build_dag(ReduceWindowKind::Min);
     let src = codegen(&dag, "kernel").unwrap().c_source;
     assert!(
-        src.contains("acc = fminf("),
-        "Min emit must combine with fminf, got:\n{src}"
+        !src.contains("fminf("),
+        "Min emit must not use NaN-dropping fminf, got:\n{src}"
     );
-    // We init to INFINITY (no leading `-`).
     assert!(
-        src.contains("float acc = INFINITY;"),
-        "Min emit must initialize acc to INFINITY, got:\n{src}"
+        src.contains("isnan(candidate) || candidate < best_value"),
+        "Min emit must select the first NaN or strict lesser value, got:\n{src}"
     );
 }
 
 #[test]
-fn issue254_emit_reduce_window_sum_uses_plus_equals() {
+fn issue254_emit_reduce_window_sum_uses_adjacent_pair_tree() {
     let dag = build_dag(ReduceWindowKind::Sum);
     let src = codegen(&dag, "kernel").unwrap().c_source;
     assert!(
-        src.contains("acc += ((const float*)t"),
-        "Sum emit must use `acc += ...`, got:\n{src}"
+        src.contains("while (level_n > 1)"),
+        "Sum emit must use the canonical balanced tree, got:\n{src}"
     );
     assert!(
-        src.contains("float acc = 0.0f;"),
-        "Sum emit must initialize acc to 0.0f, got:\n{src}"
+        src.contains("level[left] + level[right]"),
+        "Sum emit must combine adjacent pairs, got:\n{src}"
     );
     // Sum must NOT emit a division by the window volume; that's the
     // distinguishing tell vs. Mean.
     assert!(
-        !src.contains("acc /= "),
+        !src.contains("result = result / "),
         "Sum emit must NOT divide by window volume, got:\n{src}"
     );
 }
@@ -100,12 +103,12 @@ fn issue254_emit_reduce_window_mean_divides_by_window_volume() {
     let dag = build_dag(ReduceWindowKind::Mean);
     let src = codegen(&dag, "kernel").unwrap().c_source;
     assert!(
-        src.contains("acc += ((const float*)t"),
-        "Mean emit must combine with sum, got:\n{src}"
+        src.contains("while (level_n > 1)") && src.contains("level[left] + level[right]"),
+        "Mean emit must first use the canonical balanced sum, got:\n{src}"
     );
     // Window volume = 2 * 2 = 4.
     assert!(
-        src.contains("acc /= (float)t1_window_count;"),
+        src.contains("result = result / (float)t1_window_count;"),
         "Mean emit must divide by the window volume (4 for 2x2), got:\n{src}"
     );
 }
@@ -140,7 +143,7 @@ fn issue254_emit_reduce_window_max_uses_stride_in_index_arithmetic() {
 }
 
 #[test]
-fn non_f32_windowed_reduction_names_its_real_implementation_owner() {
+fn reduced_float_windowed_reduction_uses_f32_arithmetic_and_f16_storage() {
     let mut dag = Dag::new();
     let input_ty = TensorType {
         dims: vec![DimInfo::Lit(4)],
@@ -161,16 +164,13 @@ fn non_f32_windowed_reduction_names_its_real_implementation_owner() {
         None,
     );
 
-    let error = match codegen(&dag, "kernel") {
-        Ok(_) => panic!("non-f32 windowed reduction must reject"),
-        Err(error) => error,
-    };
-    assert_eq!(
-        error.to_string(),
-        "unsupported: op `reduce_window_*` on `f16` tensors in the C DAG emitter \
-         (node 1) (codegen:c); unimplemented chelis#729: the C windowed-reduction \
-         emitter is f32-only today; cast to f32 before the windowed reduction \
-         (spec/05-risc-primitives.md section 2.3.1)"
+    let src = codegen(&dag, "kernel").unwrap().c_source;
+    assert!(src.contains("chelis_f16_to_f32"));
+    assert!(src.contains("chelis_f32_to_f16"));
+    assert!(src.contains("CHELIS_DTYPE_F32"));
+    assert!(
+        src.contains("chelis_alloc(1, (int64_t[]){ 3 }, CHELIS_DTYPE_F16)"),
+        "the result must retain f16 storage:\n{src}"
     );
 }
 
