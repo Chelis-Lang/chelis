@@ -864,6 +864,27 @@
     },
     {
       "phase": "b",
+      "id": "cli_result_callable_selection",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/issue_1771_callable_selected_result_claims.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "c_delayed_selection_guards_only_the_selected_value",
+        "c_inherited_claim_reaches_named_alias_and_literal_callbacks",
+        "c_selection_before_production_forwards_only_to_the_selected_arm",
+        "c_shared_callback_claims_are_invocation_local",
+        "eval_delayed_selection_guards_only_the_selected_value",
+        "eval_inherited_claim_reaches_named_alias_and_literal_callbacks",
+        "eval_selection_before_production_forwards_only_to_the_selected_arm",
+        "eval_shared_callback_claims_are_invocation_local"
+      ],
+      "note": "chelis#1771 and chelis#1945 continuation: inherited literal result claims cross supported named, aliased and literal callable invocations; remain invocation-local; and retain selected producer provenance when selection happens before production or after both alternatives are computed. Both host lanes prove selected-only guarding, exact diagonal/cumsum attribution, selector readiness, producer-relative before/after effects and exact agreeing values. The existing cli_return_boundary, cli_result_pure_helper and callable-entry targets remain independent controls."
+    },
+    {
+      "phase": "b",
       "id": "types_expand_size",
       "package": "chelis-types",
       "kind": "test",
