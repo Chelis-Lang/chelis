@@ -12,33 +12,38 @@ not drift.
 Chelis is a functional language for AI research, built for a workflow where a coding
 agent is the primary author and a human is the supervisor, and where the programs are
 themselves AI systems: models, training pipelines, learned functions.
-`spec/00-context.md` and `spec/design/chelis_canonical_reference.md` own the full
-statement; their specifics may lag, their intent does not. When a tradeoff appears,
-these tenets decide it, in this order:
+`spec/00-context.md` §5 owns the design principles and
+`spec/design/chelis_canonical_reference.md` the architecture; their specifics may lag,
+their intent does not. When a tradeoff appears, apply these in order:
 
-1. **Unambiguity over ergonomics.** The author is an agent, so the friction a human
-   feels spelling out every type, effect, dtype, and dimension is not a cost worth
-   trading for a reading the compiler has to guess at. Explicit spelling wins over
-   contextual inference wherever the spec leaves a choice.
-2. **Explicit over implicit.** No implicit broadcasting (`expand` only), no implicit
-   precision promotion, no implicit currying or partial application, no silent
-   narrowing at ingress, no hidden effects. Where the compiler would have to infer an
-   intent it cannot determine uniquely, it rejects.
-3. **Machine generation first.** Deep is the canonical, machine-facing representation;
-   Surf is additive sugar over it, and the two are bound by executable round-trip laws.
-   A convenience that exists only for a human typist is not a reason to add syntax.
-4. **Composition over special cases, and a small language with a big library.** The
-   compiler knows only the closed RISC primitive set and its derived built-ins;
-   everything else is a library, and a new capability composes existing primitives
+1. **Unambiguity over ergonomics.** The author is an agent. The friction a human feels
+   spelling out every type, effect, dtype, and dimension is not worth a reading the
+   compiler has to guess at.
+2. **Composition over special cases.** A new capability composes existing primitives
    before it earns a new one.
-5. **Inference over annotation where inference is total.** The checker fills in what it
-   can determine uniquely, so intermediates carry no ascription, and the author spells
-   everything it cannot.
-6. **Determinism.** For fixed program text, compiler build, target, and declared inputs,
-   every check, evaluation, and build result is a function of those inputs; feedback
-   that varies between identical runs is a defect.
-7. **The compiler is training signal.** Structured diagnostics, fitness scores, and
-   repair suggestions are product surface, because an agent repairs from them.
+3. **Inference over annotation.** Where the checker determines something uniquely, the
+   author does not repeat it; intermediates carry no ascription.
+4. **Machine generation first.** A convenience that exists only for a human typist is
+   not a reason to add syntax, a default, or a fallback.
+5. **Additive sugar only.** Every surface form desugars to the core; nothing in the
+   surface has semantics the core lacks.
+6. **Explicit over implicit.** No implicit broadcasting (`expand` only), no implicit
+   precision promotion, no implicit currying or partial application, no silent
+   narrowing at ingress, no hidden effects. Where intent cannot be determined uniquely,
+   the compiler rejects.
+7. **Small language, big library.** The compiler knows only the closed RISC primitive
+   set and its derived built-ins; everything else is a library. The canonical reference
+   §8.5 has the core/standard-library/external-library taxonomy.
+8. **Future-proof without over-building.** Decide the rule fully now, implement what
+   the phase needs, and never narrow a rule to what a lane implements today.
+
+Two corollaries govern how the compiler itself is changed. Chelis is pre-compatibility
+unless a controlling contract says otherwise, so prefer the structural design that
+makes a defect class impossible over a smaller-blast-radius patch, a legacy default, a
+versionless compatibility fallback, or phase deferral; close the class, not the
+instance. And determinism is part of the contract: for fixed program text, compiler
+build, target, and declared inputs, every check, evaluation, and build result is a
+function of those inputs, and feedback that varies between identical runs is a defect.
 
 ## Quality Standards
 
@@ -229,13 +234,11 @@ irrespective of how completely any compiler version implements them.
   it, test its claims against the controlling spec, hardware and ecosystem reality, and
   Chelis's stated principles. If it is wrong, over-broad, or drifted, amend the
   controlling document and tracker before writing code.
-- Where the spec leaves a real choice, prefer explicit spelling over contextual
-  inference: Chelis is machine-generation-first, so typing convenience never outweighs
-  unambiguous types, effects, dtypes, versions, or adaptation rules. Chelis is
-  pre-compatibility unless a controlling contract says otherwise: prefer the structural
-  design that makes a defect class impossible over a smaller patch, a legacy default, a
-  versionless fallback, or phase deferral. This bias never overrides a normative
-  semantic rule; amend that rule first when the language decision must change.
+- Where the spec leaves a real choice, the tenets above decide it: explicit spelling
+  over contextual inference, and the structural design over the patch. If a design doc
+  permits both, amend it to select the structural contract before implementing. This
+  bias never overrides a normative semantic rule; amend that rule first when the
+  language decision must change.
 
 ### Numeric Surface Discipline
 
