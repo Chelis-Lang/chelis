@@ -440,6 +440,9 @@ jobs:
       - name: Create uv-managed venv + wire libpython rpath
         run: python3 scripts/ci_setup_uv_python.py
 
+      - name: Install Python binding dependencies
+        run: uv pip install --python .venv/bin/python -r bindings/python/pyproject.toml
+
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
