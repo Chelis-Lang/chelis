@@ -76,16 +76,21 @@ def assert_extended(test, pr, nightly):
         test.assertNotIn("if", job)
         test.assertFalse(job.get("continue-on-error", False))
         expected_timeout = (
-            60
-            if name.startswith(("generalize", "dtype"))
-            or name == "runtime-representation-phase0-oracle"
+            90
+            if name
+            in {
+                "dtype-phase3-oracle",
+                "runtime-representation-phase0-oracle",
+            }
+            else 60
+            if name.startswith("generalize")
             else 45
         )
         test.assertEqual(job["timeout-minutes"], expected_timeout)
         if name == "runtime-representation-phase0-oracle":
             test.assertEqual(job["name"], "Runtime Representation Phase 2 Oracle")
             test.assertIn(
-                "with a 60-minute timeout",
+                "with a 90-minute timeout",
                 RUNTIME_REPRESENTATION_DESIGN.read_text(),
             )
             step_names = [step.get("name") for step in job["steps"]]
@@ -212,6 +217,7 @@ def assert_extended(test, pr, nightly):
     test.assertNotIn("runtime-extent-oracle", pr["jobs"])
     test.assertNotIn("if", extents)
     test.assertFalse(extents.get("continue-on-error", False))
+    test.assertEqual(extents["timeout-minutes"], 90)
     extent_commands = [step.get("run") or "" for step in extents["steps"]]
     test.assertEqual(
         [
@@ -333,6 +339,7 @@ class ExtendedCadenceTests(unittest.TestCase):
             "needs",
             "downgrade",
             "shortfall",
+            "timeout",
         ):
             nightly = copy.deepcopy(self.nightly)
             job = nightly["jobs"]["runtime-extent-oracle"]
@@ -357,6 +364,8 @@ class ExtendedCadenceTests(unittest.TestCase):
                 job["steps"][-1]["run"] = job["steps"][-1]["run"].replace(
                     "--phase final", "--phase b --allow-shortfall"
                 )
+            elif mutation == "timeout":
+                job["timeout-minutes"] = 45
             else:
                 # The subtler half: the command the equality accepts, with
                 # the flag appended. `--phase final` refuses the flag at run
