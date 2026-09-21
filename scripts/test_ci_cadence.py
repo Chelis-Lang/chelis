@@ -9,6 +9,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 NEXTEST_CONFIG = ROOT / ".config/nextest.toml"
+RUNTIME_REPRESENTATION_DESIGN = ROOT / "spec/design/runtime_representation.md"
 # A `cargo nextest` command naming its profile literally, anywhere a hosted job
 # can reach: the workflow files themselves, and the CI-invoked Python drivers.
 PROFILE_CALL = re.compile(r"--profile[\"',\s=]+([a-z][a-z0-9-]*)")
@@ -83,6 +84,10 @@ def assert_extended(test, pr, nightly):
         test.assertEqual(job["timeout-minutes"], expected_timeout)
         if name == "runtime-representation-phase0-oracle":
             test.assertEqual(job["name"], "Runtime Representation Phase 2 Oracle")
+            test.assertIn(
+                "with a 60-minute timeout",
+                RUNTIME_REPRESENTATION_DESIGN.read_text(),
+            )
             artifacts = [
                 step
                 for step in job["steps"]
