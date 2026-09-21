@@ -4569,16 +4569,17 @@ impl HipEmitter {
         matches!(expr, DimExpr::Concrete(_) | DimExpr::Sym(_))
     }
 
-    /// The [05-OP-6] rung has no guarded device kernel, so it never
-    /// reaches codegen: `reject_unsupported_hip_ops` gates it first.
-    /// These arms exist so a future HIP implementation has to remove
-    /// this rejection deliberately rather than inherit `cast`'s
-    /// unguarded conversion by accident.
-    /// chelis#1464 / [05-OP-68]: a guarded abort has no device kernel. A
-    /// GPU thread cannot raise the host-visible abort the atom requires, and
-    /// emitting the fallback alone would silently restore exactly the
-    /// substitution this identity exists to prevent. Reject instead; the C
-    /// target is canonical for a transformed `fail`.
+    /// chelis#1464 / [05-OP-68]: defensive. A guarded abort is emitted
+    /// HOST-side, exactly as on the C target, so it does not reach device
+    /// kernel selection — measured on both a scalar and a `vmap`-batched
+    /// guard, which each produced a complete HIP artifact carrying
+    /// `chelis_fail` and the authored message.
+    ///
+    /// This arm therefore exists so the operation cannot fall through a
+    /// wildcard into a device kernel, where emitting the fallback alone
+    /// would silently restore the substitution the identity exists to
+    /// prevent. chelis#2360 owns confirming the host-side guard on real
+    /// device hardware and deciding whether this stays defensive.
     fn guarded_fail_unsupported(node: &DagNode) -> Unsupported {
         Unsupported::new(
             UnsupportedKind::Op("guarded_fail".to_string()),
@@ -4591,6 +4592,11 @@ impl HipEmitter {
         )
     }
 
+    /// The [05-OP-6] rung has no guarded device kernel, so it never
+    /// reaches codegen: `reject_unsupported_hip_ops` gates it first.
+    /// These arms exist so a future HIP implementation has to remove
+    /// this rejection deliberately rather than inherit `cast`'s
+    /// unguarded conversion by accident.
     fn remainder_unsupported(node: &DagNode) -> Unsupported {
         Unsupported::new(
             UnsupportedKind::Op("mod".to_string()),

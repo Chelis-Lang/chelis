@@ -14649,7 +14649,14 @@ impl<'program> LowerCtx<'program> {
                     return self.reject_indirect_branch_fail(app_span);
                 }
                 // At depth 0 `fail` is a whole-value abort owned by the host
-                // lane, which traps correctly; the placeholder is discarded.
+                // lane, which traps correctly and discards this placeholder.
+                //
+                // "Depth 0" is load-bearing and was once wrong: a statically
+                // pruned branch also reached here at depth 0, and there the
+                // placeholder was NOT discarded — it became the transformed
+                // function's result. `lower_if` now rejects that case before
+                // lowering the branch, so the only depth-0 arrivals left are
+                // genuine whole-value aborts.
                 // The message argument is NOT lowered. It is a string, and
                 // the DAG has no string vocabulary: the nodes it produced
                 // were discarded here and dropped by DCE, so their only
@@ -19035,6 +19042,26 @@ impl<'program> LowerCtx<'program> {
         (fires, true)
     }
 
+    /// chelis#1464: a compile-time-resolvable `if` that selects its
+    /// `fail(...)` branch, inside a transform.
+    ///
+    /// The program aborts on every execution, so there is no value for
+    /// `grad`/`vmap` to produce and no fallback for an [05-OP-68] guard to
+    /// carry. Rejecting says that; substituting a placeholder value said
+    /// the program succeeded and returned zero.
+    fn reject_static_taken_fail(&self, elems: &[Expr], message: &str) -> NodeId {
+        raise_lowering_error(
+            format!(
+                "this `if` always selects its `fail({message:?})` branch, so the function \
+                 aborts on every execution and has no value to differentiate or batch \
+                 (chelis#1464). A transformed function must produce a value: move the \
+                 abort outside the transform, or make the branch total."
+            ),
+            elems.first().map(Expr::span),
+            self.current_span_id.clone(),
+        )
+    }
+
     /// chelis#1464 / [05-OP-68]: `fail("")` as an `if` branch. The atom
     /// makes an empty message a type error and forbids synthesizing one, so
     /// there is no message to carry and no guard to build.
@@ -19194,6 +19221,20 @@ impl<'program> LowerCtx<'program> {
                 (else_expr, then_expr)
             };
             self.discard_local_ascription_tokens_in(untaken);
+            // chelis#1464: when the SELECTED branch is the `fail(...)`, this
+            // `if` aborts unconditionally and has no value on any path. The
+            // guarded-abort form below needs a surviving arm to carry, and
+            // there is none: the sibling was pruned precisely because it is
+            // not executed.
+            //
+            // Before this check, the pruned `fail` was lowered at depth 0,
+            // reached the placeholder arm, and became a zero `Const` — the
+            // original chelis#1464 defect, surviving on the one path the
+            // guard never covered. `grad` over it returned 0.0 with exit 0
+            // in both lanes.
+            if let Some(message) = self.fail_message_of(selected) {
+                return LoweredValue::Node(self.reject_static_taken_fail(elems, &message));
+            }
             return self.lower_expr(selected);
         }
 

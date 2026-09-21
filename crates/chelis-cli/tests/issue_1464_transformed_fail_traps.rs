@@ -344,6 +344,89 @@ fn vmap_of_grad_differentiates_through_an_untaken_guard() {
     assert_untaken_in_both_lanes(source, "vmap_grad_untaken", "data=[3.0, 12.0]");
 }
 
+/// A guard whose condition is compile-time-resolvable and selects the
+/// `fail`. chelis#620 prunes such an `if` to the selected branch alone,
+/// which bypassed the guarded-abort lowering entirely: the `fail` reached
+/// the placeholder arm and `grad` returned `data=[0.0]` with exit 0 — the
+/// headline defect of this issue, on the one path no test covered.
+fn statically_taken(guard: &str, body: &str) -> String {
+    format!(
+        "module Repro.StaticTaken\n\
+         def loss(x: tensor[1, f32]) -> tensor[f32] = {guard}\n\
+         out = {body}\n"
+    )
+}
+
+fn assert_rejects_without_a_placeholder(source: &str, stem: &str) {
+    let evaluated = eval(source, stem);
+    let stdout = String::from_utf8_lossy(&evaluated.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&evaluated.stderr).into_owned();
+    assert!(
+        !evaluated.status.success(),
+        "an unconditional abort must not produce a value: stdout={stdout}"
+    );
+    assert!(
+        !stdout.contains("data=[0.0]"),
+        "the placeholder zero must not reach the output: {stdout}"
+    );
+    assert!(
+        stderr.contains("always selects its `fail"),
+        "the diagnostic must name the static selection, not the indirect-fail case; \
+         got: {stderr}"
+    );
+}
+
+#[test]
+fn a_statically_taken_fail_does_not_become_a_placeholder_under_grad() {
+    assert_rejects_without_a_placeholder(
+        &statically_taken(
+            "if gt(cast(2, i64), cast(1, i64)) then fail(\"STATIC TAKEN BOOM\") \
+             else sum(mul(x, x), cast(0, i32))",
+            "grad(loss)(to_tensor([cast(3.0, f32)]))",
+        ),
+        "static_taken_then",
+    );
+}
+
+#[test]
+fn a_statically_taken_else_fail_does_not_become_a_placeholder() {
+    assert_rejects_without_a_placeholder(
+        &statically_taken(
+            "if gt(cast(1, i64), cast(2, i64)) then sum(mul(x, x), cast(0, i32)) \
+             else fail(\"STATIC ELSE BOOM\")",
+            "grad(loss)(to_tensor([cast(3.0, f32)]))",
+        ),
+        "static_taken_else",
+    );
+}
+
+#[test]
+fn a_statically_taken_fail_nested_in_a_runtime_branch_is_named_accurately() {
+    // Also pins the diagnostic: this case used to report the indirect-`fail`
+    // message, telling the user to write `fail(...)` directly as the branch
+    // when that is exactly what they had written.
+    assert_rejects_without_a_placeholder(
+        &statically_taken(
+            "if gt(tensor_to_scalar(sum(x, cast(0, i32))), cast(1.0, f32)) \
+             then (if gt(cast(2, i64), cast(1, i64)) then fail(\"NESTED STATIC BOOM\") \
+             else sum(x, cast(0, i32))) else sum(mul(x, x), cast(0, i32))",
+            "grad(loss)(to_tensor([cast(3.0, f32)]))",
+        ),
+        "static_taken_nested",
+    );
+}
+
+#[test]
+fn a_statically_taken_fail_does_not_become_a_placeholder_under_vmap() {
+    let source = "module Repro.StaticVmap\n\
+         def row(t: tensor[1, f32]) -> tensor[f32] = \
+         if gt(cast(2, i64), cast(1, i64)) then fail(\"STATIC VMAP BOOM\") \
+         else sum(t, cast(0, i32))\n\
+         def batched(b: tensor[2, 1, f32]) -> tensor[2, f32] = vmap(row)(b)\n\
+         out = batched(to_tensor([[cast(1.0, f32)], [cast(2.0, f32)]]))\n";
+    assert_rejects_without_a_placeholder(source, "static_taken_vmap");
+}
+
 #[test]
 fn an_indirect_fail_in_the_surviving_branch_is_also_rejected() {
     // Regression for a gap in this issue's own first fix. When one branch is

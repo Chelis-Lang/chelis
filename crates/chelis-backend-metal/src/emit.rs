@@ -923,7 +923,7 @@ impl<'plan> Emitter<'plan> {
             )),
 
             RiscOp::GuardedFail { .. } => Err(format!(
-                "Metal guarded abort node {id} reached emission after the chelis#1464 typed capability rejection"
+                "Metal guarded abort node {id} reached emission after the chelis#2360 typed capability rejection"
             )),
 
             // chelis#2338: these identities are rejected by the shared typed
