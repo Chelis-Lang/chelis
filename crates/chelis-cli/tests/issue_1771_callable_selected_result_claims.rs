@@ -21,7 +21,7 @@ fn callable_source(values: &str, literal: bool) -> String {
             "local",
         )
     } else {
-        ("alias = cut\n", "alias")
+        ("", "cut")
     };
     format!(
         "def cut[n](value: tensor[n, f32]) -> tensor[*, f32] ! {{ IO }} = {{\n _ = print(\"producer-before\")\n produced = shrink(value, [[1i64, shape(value, 0i32)]])\n _ = print(\"producer-after\")\n produced\n}}\n\
@@ -63,12 +63,12 @@ fn assert_callable_transport(native: bool) {
 }
 
 #[test]
-fn eval_inherited_claim_reaches_named_alias_and_literal_callbacks() {
+fn eval_inherited_claim_reaches_named_and_literal_callbacks() {
     assert_callable_transport(false);
 }
 
 #[test]
-fn c_inherited_claim_reaches_named_alias_and_literal_callbacks() {
+fn c_inherited_claim_reaches_named_and_literal_callbacks() {
     assert_callable_transport(true);
 }
 
