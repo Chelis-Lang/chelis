@@ -343,6 +343,21 @@ case §5.4 decided: it runs from a current chelis (it may itself install the
 pinned toolchain), so a clone-and-`setup` does the right thing without the user
 reaching for `+<ver>`. WS-C also lands §5.4's unknown-subcommand hint in chelis.
 
+### 7.1 Shell-scaffolding synchronization
+
+`chelis reef conform sync` is the adjacent shell-maintenance verb. It refreshes
+the managed document regions and materializes the pinned toolchain's embedded
+skills while preserving shell-owned prose outside those regions. The shell may
+declare skill additions with `[conform] local_skills` and embedded-skill
+removals with `[conform] excluded_skills`. Exclusions are exact names from the
+pinned shared set; sync and audit reject unknown names and restore a skill when
+its exclusion is removed. Within a retained shared skill, the trailing
+`shell-local` block can add shell guidance and use a nested
+`shell-local:exclude` span of comment-wrapped exact heading selectors to remove
+irrelevant upstream sections; removing a selector restores the current section.
+The full shell contract remains
+[`shell_repo_contract.md`](shell_repo_contract.md) §8.
+
 ## 8. Roadmap & sequencing
 
 ```

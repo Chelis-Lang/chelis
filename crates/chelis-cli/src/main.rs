@@ -823,6 +823,12 @@ enum ConformCommand {
     /// from the pinned toolchain, restamping to the reef pin. Touches only
     /// managed regions and `agent-skills/`. Refuses, before writing anything, on
     /// a repo missing an artifact it restamps in place; run `conform init` first.
+    /// Shell-owned text outside managed regions is preserved. In `reef.toml`,
+    /// `[conform] local_skills = [...]` preserves shell-owned skill additions and
+    /// `excluded_skills = [...]` removes named embedded skills during sync.
+    /// Within a retained skill's trailing `shell-local` block, comment-wrapped
+    /// headings between `<!-- shell-local:exclude:begin -->` and
+    /// `<!-- shell-local:exclude:end -->` remove inherited sections.
     Sync {
         /// Shell package root (defaults to `.`).
         #[arg(long)]
@@ -837,6 +843,11 @@ enum ConformCommand {
     /// wiring, pre-existing doc fixes) exits 0 and lists the remaining steps.
     /// On a repo that has not been conformed (missing an artifact the bump
     /// restamps in place) it refuses before writing anything and names the gap.
+    /// Honors the same `reef.toml` skill controls as `conform sync`:
+    /// `[conform] local_skills = [...]` for shell-owned additions and
+    /// `excluded_skills = [...]` for named embedded removals.
+    /// A retained skill's `shell-local:exclude` heading selectors are also
+    /// reapplied while its local block is preserved.
     Bump {
         /// Target chelis version (bare `X.Y.Z`).
         version: String,
