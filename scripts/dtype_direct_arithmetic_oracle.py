@@ -88,12 +88,15 @@ def source_contracts() -> tuple[SourceContract, ...]:
             ),
         ),
         SourceContract(
-            "C wide subtraction canonical NaNs",
+            "C subtraction canonical NaNs",
             "crates/chelis-backend-c/src/emit.rs",
             (
                 'Prim::F32 => Some("chelis_f32_from_bits(UINT32_C(0x7fc00000))"),',
                 'Prim::F64 => Some("chelis_f64_from_bits(UINT64_C(0x7ff8000000000000))"),',
+                'Prim::F16 => "UINT16_C(0x7e00)",',
+                'Prim::Bf16 => "UINT16_C(0x7fc0)",',
                 "isnan({raw}) ? {canonical_nan} : {raw}",
+                "isnan({raw}) ? {canonical_nan} : {store}({raw})",
                 "_mm256_set1_ps(chelis_f32_from_bits(UINT32_C(0x7fc00000)))",
             ),
         ),

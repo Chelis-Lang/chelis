@@ -157,7 +157,18 @@ class SourceContractMutationTests(unittest.TestCase):
             "Prim::F32 => None,",
         )
         with self.assertRaisesRegex(
-            oracle.OracleFailure, "C wide subtraction canonical NaNs"
+            oracle.OracleFailure, "C subtraction canonical NaNs"
+        ):
+            oracle.validate_source_contracts(self.repo)
+
+    def test_c_reduced_nan_canonicalization_removal_fails(self) -> None:
+        self.mutate(
+            "crates/chelis-backend-c/src/emit.rs",
+            'Prim::F16 => "UINT16_C(0x7e00)",',
+            'Prim::F16 => "UINT16_C(0xfe00)",',
+        )
+        with self.assertRaisesRegex(
+            oracle.OracleFailure, "C subtraction canonical NaNs"
         ):
             oracle.validate_source_contracts(self.repo)
 

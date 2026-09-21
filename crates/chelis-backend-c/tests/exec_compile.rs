@@ -5937,7 +5937,7 @@ int main(void) {{
 }
 
 #[test]
-fn direct_float_subtraction_finalizes_canonical_nan_bits_at_wide_widths() {
+fn direct_float_subtraction_finalizes_canonical_nan_bits_at_every_width() {
     for (
         tag,
         prim,
@@ -6018,6 +6018,68 @@ int main(void) {{
         {uint_type} bits = 0;
         memcpy(&bits, &got[i], sizeof(bits));
         if (bits != {canonical_nan}) return 10 + i;
+    }}
+    puts("PASS");
+    return 0;
+}}
+"#
+        );
+        let output = compile_and_run_kernel(&function, &source, &harness)
+            .unwrap_or_else(|| panic!("{tag} canonical-NaN subtraction did not run"));
+        assert!(output.contains("PASS"), "{tag}: {output}");
+    }
+
+    for (tag, prim, c_dtype, lhs_nan, infinity, one, signaling_nan, canonical_nan) in [
+        (
+            "f16",
+            Prim::F16,
+            "CHELIS_DTYPE_F16",
+            "UINT16_C(0xfe55)",
+            "UINT16_C(0x7c00)",
+            "UINT16_C(0x3c00)",
+            "UINT16_C(0x7c01)",
+            "UINT16_C(0x7e00)",
+        ),
+        (
+            "bf16",
+            Prim::Bf16,
+            "CHELIS_DTYPE_BF16",
+            "UINT16_C(0xffe5)",
+            "UINT16_C(0x7f80)",
+            "UINT16_C(0x3f80)",
+            "UINT16_C(0x7f81)",
+            "UINT16_C(0x7fc0)",
+        ),
+    ] {
+        let mut dag = Dag::new();
+        let ty = vec_prim(3, prim);
+        let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], ty.clone(), None);
+        let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], ty.clone(), None);
+        let out = dag.add_node(RiscOp::Sub, vec![a, b], ty, None);
+        dag.add_root(out);
+        let function = format!("direct_sub_canonical_nan_{tag}");
+        let source = codegen(&dag, &function)
+            .expect("reduced-float direct subtraction codegen")
+            .c_source;
+        assert!(
+            source.contains(canonical_nan),
+            "{tag} subtraction source lacks exact canonical NaN: {source}"
+        );
+        let harness = format!(
+            r#"{HARNESS_HEADER}
+#include <stdint.h>
+extern void {function}(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    uint16_t a_data[3] = {{ {lhs_nan}, {infinity}, {one} }};
+    uint16_t b_data[3] = {{ {one}, {infinity}, {signaling_nan} }};
+    chelis_tensor *a = make_view_typed_1d(a_data, 3, {c_dtype});
+    chelis_tensor *b = make_view_typed_1d(b_data, 3, {c_dtype});
+    chelis_tensor *inputs[2] = {{ a, b }};
+    chelis_tensor *outputs[1] = {{ NULL }};
+    {function}(inputs, 2, outputs, 1);
+    const uint16_t *got = (const uint16_t *)chelis_tensor_read_view(outputs[0]).data;
+    for (int i = 0; i < 3; ++i) {{
+        if (got[i] != {canonical_nan}) return 10 + i;
     }}
     puts("PASS");
     return 0;

@@ -3433,11 +3433,19 @@ impl CEmitter {
         let load = Self::reduced_to_f32_fn(ty.precision);
         let store = Self::f32_to_reduced_fn(ty.precision);
         let is_relu_adjoint = op == "chelis_relu_adjoint";
+        let canonical_nan = match ty.precision {
+            Prim::F16 => "UINT16_C(0x7e00)",
+            Prim::Bf16 => "UINT16_C(0x7fc0)",
+            _ => unreachable!("reduced-float emitter requires f16 or bf16"),
+        };
         let elem_expr = |g_raw: String| -> String {
             if is_relu_adjoint {
                 // Decode x only for the predicate and select the original
                 // f16/bf16 cotangent storage word unchanged.
                 format!("0.0f < __av ? {g_raw} : UINT16_C(0)")
+            } else if op == "-" {
+                let raw = "(__av - __bv)";
+                format!("isnan({raw}) ? {canonical_nan} : {store}({raw})")
             } else {
                 format!("{store}(__av {op} __bv)")
             }
