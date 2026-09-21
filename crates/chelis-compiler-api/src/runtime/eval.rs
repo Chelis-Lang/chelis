@@ -2626,11 +2626,13 @@ impl<'a> EvalContext<'a> {
                     // exactly the alias spelling (round 1 P1). `return_type`
                     // remains the fallback for a closure the checker recorded
                     // no signature for.
-                    let declared_result = checked_signature
-                        .as_ref()
-                        .and_then(checked_function_children)
-                        .and_then(<[Expr]>::last)
-                        .or(return_type.as_ref());
+                    let declared_result = return_type.as_ref().and_then(|authored| {
+                        checked_signature
+                            .as_ref()
+                            .and_then(checked_function_children)
+                            .and_then(<[Expr]>::last)
+                            .or(Some(authored))
+                    });
                     // Frames retain distinct declarations even when the literal
                     // values agree. Forwarding a frame does not append it again.
                     let mut claims = Self::declared_result_claim(declared_result)
