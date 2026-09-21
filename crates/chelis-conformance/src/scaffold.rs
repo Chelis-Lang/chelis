@@ -10,6 +10,8 @@
 use std::fs;
 use std::path::Path;
 
+use pulldown_cmark::{Event, Parser, Tag};
+
 use crate::{canonical, managed_block, skills};
 
 /// Write a fully-conformant shell tree rooted at `root`, pinned to `version`.
@@ -100,36 +102,30 @@ pub(crate) fn apply_shell_local_exclusions(
         line: &'a str,
     }
 
-    let mut headings = Vec::new();
-    let mut offset = 0;
-    let mut fence = None;
-    for piece in upstream.split_inclusive('\n') {
-        let line = piece.trim_end_matches(['\n', '\r']);
-        if let Some((marker, length)) = fence {
-            if closes_fenced_code_block(line, marker, length) {
-                fence = None;
-            }
-        } else if let Some(opening) = opens_fenced_code_block(line) {
-            fence = Some(opening);
-        } else if let Some(level) = atx_heading_level(line) {
-            headings.push(Heading {
-                start: offset,
-                level,
+    // Derive heading structure from a CommonMark parser rather than scanning
+    // line prefixes. That makes fenced code, HTML blocks, and other Markdown
+    // containers structurally incapable of supplying a selector boundary.
+    let headings: Vec<_> = Parser::new(upstream)
+        .into_offset_iter()
+        .filter_map(|(event, range)| {
+            let Event::Start(Tag::Heading { level, .. }) = event else {
+                return None;
+            };
+            let start = upstream[..range.start]
+                .rfind('\n')
+                .map_or(0, |newline| newline + 1);
+            let end = upstream[range.start..]
+                .find('\n')
+                .map_or(upstream.len(), |newline| range.start + newline);
+            let line = upstream[start..end].trim_end_matches('\r');
+            let atx_level = atx_heading_level(line)?;
+            (atx_level == level as usize).then_some(Heading {
+                start,
+                level: atx_level,
                 line,
-            });
-        }
-        offset += piece.len();
-    }
-    if offset < upstream.len() {
-        let line = &upstream[offset..];
-        if let Some(level) = atx_heading_level(line) {
-            headings.push(Heading {
-                start: offset,
-                level,
-                line,
-            });
-        }
-    }
+            })
+        })
+        .collect();
 
     let mut ranges = Vec::new();
     for selector in selectors {
@@ -269,47 +265,6 @@ fn atx_heading_level(line: &str) -> Option<usize> {
     let bytes = line.as_bytes();
     let level = bytes.iter().take_while(|b| **b == b'#').count();
     (level > 0 && level <= 6 && bytes.get(level) == Some(&b' ')).then_some(level)
-}
-
-fn opens_fenced_code_block(line: &str) -> Option<(u8, usize)> {
-    let candidate = fence_candidate(line)?;
-    let marker = *candidate.as_bytes().first()?;
-    if marker != b'`' && marker != b'~' {
-        return None;
-    }
-    let length = candidate
-        .as_bytes()
-        .iter()
-        .take_while(|byte| **byte == marker)
-        .count();
-    if length < 3 {
-        return None;
-    }
-    let info = &candidate[length..];
-    if marker == b'`' && info.as_bytes().contains(&b'`') {
-        return None;
-    }
-    Some((marker, length))
-}
-
-fn closes_fenced_code_block(line: &str, marker: u8, opening_length: usize) -> bool {
-    let Some(candidate) = fence_candidate(line) else {
-        return false;
-    };
-    let length = candidate
-        .as_bytes()
-        .iter()
-        .take_while(|byte| **byte == marker)
-        .count();
-    length >= opening_length
-        && candidate[length..]
-            .bytes()
-            .all(|byte| byte == b' ' || byte == b'\t')
-}
-
-fn fence_candidate(line: &str) -> Option<&str> {
-    let indentation = line.bytes().take_while(|byte| *byte == b' ').count();
-    (indentation <= 3).then(|| &line[indentation..])
 }
 
 /// Materialize `agent-skills/` from the embedded pinned skill set and wire the
@@ -913,5 +868,16 @@ mod tests {
                 "{fence}: {err}"
             );
         }
+    }
+
+    #[test]
+    fn html_comment_heading_text_is_not_a_markdown_heading() {
+        let upstream = "# Skill\n\n## Remove\nbefore\n\n<!--\n## Commented heading\n-->\n\nafter\n\n## Keep\nkeep\n";
+        let filtered = apply_shell_local_exclusions(upstream, Some(&block("## Remove"))).unwrap();
+        assert_eq!(filtered, "# Skill\n\n## Keep\nkeep\n");
+
+        let err = apply_shell_local_exclusions(upstream, Some(&block("## Commented heading")))
+            .unwrap_err();
+        assert!(err.contains("matches no upstream heading"), "{err}");
     }
 }
