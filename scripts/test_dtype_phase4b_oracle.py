@@ -122,22 +122,6 @@ class ContractValidationTests(unittest.TestCase):
     # FrozenContractChangeTests, which runs the same mutations against the
     # merge-base acknowledgement gate.
 
-    def test_agent_numeric_surface_additive_successor_exception_fails(self) -> None:
-        path = self.root / "AGENTS.md"
-        original = path.read_text(encoding="utf-8")
-        marker = "### Public-Surface Change Rule"
-        self.assertIn(marker, original)
-        path.write_text(
-            original.replace(
-                marker,
-                "A predecessor census disposition may be copied onto its successor.\n\n"
-                + marker,
-                1,
-            ),
-            encoding="utf-8",
-        )
-        self.assert_changed_contract_requires_acknowledgement('region', 'agent numeric surface discipline')
-
     def test_the_acknowledgement_gate_cannot_be_restated_as_a_digest(self) -> None:
         # The Phase 4 handoff region digest moved when the plan's oracle
         # description was rewritten. These three mutations are what defends the
@@ -3413,14 +3397,6 @@ class ContractValidationTests(unittest.TestCase):
                     self.assert_contract_fails(message)
                 finally:
                     path.write_text(original, encoding="utf-8")
-
-    def test_agent_contract_cannot_restore_capacity_exceptions(self) -> None:
-        self.replace(
-            Path("AGENTS.md"),
-            "No grandfather, permanent-disposition,",
-            "legacy capacity rows retain their grandfather dispositions",
-        )
-        self.assert_contract_fails("agent zero-exception policy")
 
     def test_phase_handoff_requires_zero_capacity_exceptions(self) -> None:
         self.replace(

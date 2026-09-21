@@ -160,7 +160,7 @@ Mirror `crates/chelis-cli/tests/reef_setup.rs`,
 Behavior changes here must update, in the same change set:
 `spec/design/chelis_packaging_and_install.md`, `docs/book/src/install.md`,
 `docs/book/src/reef.md`, and the `chelis reef` rustdoc / help text. Keep the
-`AGENTS.md` (= `CLAUDE.md`) "Toolchain And Packaging Orchestration" section
+`AGENTS.md` (= `CLAUDE.md`) "Toolchain and packaging" pointer
 honest.
 
 ## Authoritative References

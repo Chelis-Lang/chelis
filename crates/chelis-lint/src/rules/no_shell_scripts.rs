@@ -19,7 +19,7 @@ impl Rule for NoShellScripts {
     }
 
     fn summary(&self) -> &str {
-        "shell scripts are prohibited; port to Python (CLAUDE.md Scripting Language Policy)"
+        "shell scripts are prohibited; port to Python (CLAUDE.md Python And Scripts)"
     }
 
     fn check(&self, ctx: &Context<'_>) -> Vec<Violation> {
