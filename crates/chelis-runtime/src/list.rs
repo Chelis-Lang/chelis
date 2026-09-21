@@ -171,6 +171,18 @@ mod tests {
         chelis_list::new(vec![unit(); len])
     }
 
+    /// A list whose allocation is larger than its contents, which is
+    /// what every push-built list looks like.
+    ///
+    /// `vec![v; n]` allocates exactly, so a fixture built that way
+    /// cannot tell a spurious reallocation from a no-op: shrinking a
+    /// `Vec` whose capacity already equals its length does nothing.
+    fn list_with_slack(capacity: usize, len: usize) -> chelis_list {
+        let mut items = Vec::with_capacity(capacity);
+        items.resize(len, unit());
+        chelis_list::new(items)
+    }
+
     #[test]
     fn live_excludes_the_retired_prefix_and_advance_clamps_at_the_end() {
         let mut list = list_of(4);
@@ -229,10 +241,22 @@ mod tests {
 
     /// The negative half: a compaction that does not fire must not
     /// reallocate, or every skip below the threshold would pay for one.
+    ///
+    /// The fixture carries slack deliberately. Round 1 found the
+    /// earlier version blind: it used an exactly-sized list, and
+    /// shrinking a `Vec` whose capacity already equals its length is a
+    /// no-op, so an unconditional `shrink_to_fit` ahead of the
+    /// threshold check -- the most likely over-correction anyone would
+    /// write -- passed it. The first assertion guards the fixture
+    /// itself, so this cannot quietly become vacuous again.
     #[test]
     fn a_compaction_that_does_not_fire_keeps_the_allocation() {
-        let mut list = list_of(8);
+        let mut list = list_with_slack(8, 6);
         let before = list.buffer_capacity();
+        assert!(
+            before > list.live().len(),
+            "the fixture must carry slack or the assertion below is vacuous"
+        );
         list.advance_head(2);
         assert!(!list.compact_retired_prefix());
         assert_eq!(list.buffer_capacity(), before);
