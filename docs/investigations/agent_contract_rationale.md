@@ -87,7 +87,7 @@ tier it took or why. The one clear success was a deliberate cheap-tier choice fo
 an agent whose whole job was waiting on CI. A per-spawn sentence is what turns a
 standing preference into an observable decision.
 
-## 4. Briefs that were re-derived, and briefs that survived, behind "Briefs"
+## 4. Briefs that were re-derived, and briefs that survived, behind "Subagents"
 
 Same run.
 

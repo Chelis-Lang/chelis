@@ -524,8 +524,9 @@ AST contract. `spec/02-surf-syntax.md` §0.1 is the authority.
 
 One line each, as of 2026-09-21; `gh repo list Chelis-Lang` is the live set, and the
 conformance `REGISTRY` in `crates/chelis-conformance` is the authority on which shells
-the conformance tooling binds. Every shell is a reef package layered on the
-compiler-bundled `chelis-std` runtime and bound by the shell contract.
+the conformance tooling binds. Every shell consumes the compiler-bundled `chelis-std`
+runtime and is bound by the shell contract; the registry records whether it does so
+through reef, a Cargo workspace, or Docker.
 
 | Repository | Contains |
 |---|---|
