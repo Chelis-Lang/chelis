@@ -116,16 +116,22 @@ __device__ float chelis_f16_to_f32(chelis_u16 value) {
     }
     return chelis_f32_from_storage_bits(bits);
 }
+__device__ chelis_u32 chelis_round_shift_right_even(chelis_u32 value, chelis_u32 shift) {
+    chelis_u32 truncated = value >> shift;
+    chelis_u32 remainder = value & ((1u << shift) - 1u);
+    chelis_u32 halfway = 1u << (shift - 1u);
+    if (remainder > halfway || (remainder == halfway && (truncated & 1u) != 0)) {
+        truncated += 1u;
+    }
+    return truncated;
+}
 __device__ chelis_u16 chelis_f32_to_bf16(float value) {
     chelis_u32 bits = chelis_f32_to_storage_bits(value);
     if ((bits & 0x7fffffffu) > 0x7f800000u) {
         return (chelis_u16)((bits >> 16) | 0x0040u);
     }
-    chelis_u32 round_bit = 0x00008000u;
-    if ((bits & round_bit) != 0 && (bits & (3u * round_bit - 1u)) != 0) {
-        return (chelis_u16)((bits >> 16) + 1u);
-    }
-    return (chelis_u16)(bits >> 16);
+    chelis_u32 rounding_bias = 0x00007fffu + ((bits >> 16) & 1u);
+    return (chelis_u16)((bits + rounding_bias) >> 16);
 }
 __device__ chelis_u16 chelis_f32_to_f16(float value) {
     chelis_u32 bits = chelis_f32_to_storage_bits(value);
@@ -145,28 +151,18 @@ __device__ chelis_u16 chelis_f32_to_f16(float value) {
         return (chelis_u16)(half_sign | 0x7c00u);
     }
     if (half_exponent <= 0) {
-        if (14 - half_exponent > 24) {
+        chelis_u32 shift = (chelis_u32)(14 - half_exponent);
+        if (shift > 24u) {
             return (chelis_u16)half_sign;
         }
         mantissa |= 0x00800000u;
-        chelis_u32 half_mantissa = mantissa >> (14 - half_exponent);
-        chelis_u32 round_bit = 1u << (13 - half_exponent);
-        if ((mantissa & round_bit) != 0
-            && (mantissa & (3u * round_bit - 1u)) != 0) {
-            half_mantissa += 1u;
-        }
+        chelis_u32 half_mantissa = chelis_round_shift_right_even(mantissa, shift);
         return (chelis_u16)(half_sign | half_mantissa);
     }
     chelis_u32 encoded_exponent = ((chelis_u32)half_exponent) << 10;
-    chelis_u32 half_mantissa = mantissa >> 13;
-    chelis_u32 round_bit = 0x00001000u;
-    if ((mantissa & round_bit) != 0
-        && (mantissa & (3u * round_bit - 1u)) != 0) {
-        return (chelis_u16)(
-            (half_sign | encoded_exponent | half_mantissa) + 1u
-        );
-    }
-    return (chelis_u16)(half_sign | encoded_exponent | half_mantissa);
+    chelis_u32 shift = 13u;
+    chelis_u32 half_mantissa = chelis_round_shift_right_even(mantissa, shift);
+    return (chelis_u16)(half_sign | (encoded_exponent + half_mantissa));
 }
 ";
 
@@ -2450,6 +2446,51 @@ extern \"C\" __global__ void {kernel_name}(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reduced_float_conversions_emit_round_to_nearest_ties_to_even() {
+        assert!(
+            REDUCED_FLOAT_COMPARISON_HELPERS.contains("0x00007fffu + ((bits >> 16) & 1u)"),
+            "bf16 rounding must bias exact ties by the retained LSB"
+        );
+        assert!(
+            REDUCED_FLOAT_COMPARISON_HELPERS
+                .contains("chelis_round_shift_right_even(mantissa, shift)"),
+            "f16 normal and subnormal rounding must share the exact RNE shift helper"
+        );
+        assert!(
+            REDUCED_FLOAT_COMPARISON_HELPERS
+                .contains("remainder > halfway || (remainder == halfway && (truncated & 1u) != 0)"),
+            "exact halfway cases must increment only when the retained LSB is odd"
+        );
+        assert!(
+            !REDUCED_FLOAT_COMPARISON_HELPERS.contains("3u * round_bit - 1u"),
+            "the ties-away mask must not return"
+        );
+    }
+
+    #[test]
+    fn reduced_float_halfway_vectors_distinguish_even_and_odd_retained_lsbs() {
+        for (bits, expected) in [(0x3f80_8000, 0x3f80), (0x3f81_8000, 0x3f82)] {
+            assert_eq!(
+                half::bf16::from_f32(f32::from_bits(bits)).to_bits(),
+                expected
+            );
+        }
+
+        for (bits, expected) in [
+            (0x3f80_1000, 0x3c00),
+            (0x3f80_3000, 0x3c02),
+            (0x3300_0000, 0x0000),
+            (0x33c0_0000, 0x0002),
+            (0x387f_e000, 0x0400),
+        ] {
+            assert_eq!(
+                half::f16::from_f32(f32::from_bits(bits)).to_bits(),
+                expected
+            );
+        }
+    }
 
     #[test]
     fn binary_add_kernel_has_correct_structure() {
