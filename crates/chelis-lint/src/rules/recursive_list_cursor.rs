@@ -13,12 +13,15 @@
 //! argument may be a bare name that one local binding in scope binds to a
 //! direct `skip` of a parameter. Substitution is one level deep: a chain of
 //! bindings resolves no further than its last link, and a cursor that
-//! reaches the argument through a call to another function is an
-//! interprocedural question this rule permanently declines. It skips a
-//! definition whose cursor parameter is rebound anywhere in the body and
-//! substitutes no name the body binds more than once, so shadowing produces
-//! silence rather than a guess. The one-argument `drop` is [05-OP-67]'s
-//! linearity consume and is never this rule's subject.
+//! reaches the argument through a call to another function is a fact about
+//! that other definition, which this rule has no input to establish.
+//!
+//! Three cases produce silence rather than a guess, and they are not the
+//! same case: a parameter the body rebinds is not a cursor, though the
+//! definition's other parameters are still read; a definition that rebinds
+//! its own name is skipped entirely; and no name the body binds more than
+//! once is substituted. The one-argument `drop` is [05-OP-67]'s linearity
+//! consume and is never this rule's subject.
 
 use crate::{Context, Rule, Severity, Surface, Violation};
 use chelis_surf::ast::{Decl, Expr, LetPattern, Param, Pattern};
@@ -512,6 +515,28 @@ mod tests {
     }
 
     #[test]
+    fn reports_a_second_cursor_when_one_cursor_parameter_is_rebound() {
+        // The exclusion is per parameter, not per definition. `a` is rebound
+        // and is therefore not a cursor; `b` is untouched and is still read.
+        // A single-cursor fixture cannot tell those two readings apart, which
+        // is why the rebinding test above needs this one beside it.
+        let src = concat!(
+            "def walk(a: List[i64], b: List[i64], out: List[i64]) -> List[i64] = {\n",
+            "  a = append(out, cast(1, i64))\n",
+            "  if eq(len(b), cast(0, i64)) then out else ",
+            "walk(skip(a, cast(1, i64)), skip(b, cast(1, i64)), out)\n",
+            "}\n",
+        );
+        let violations = violations(src);
+        assert_eq!(violations.len(), 1, "got {violations:?}");
+        assert!(violations[0].message.contains("`b`"));
+        assert!(
+            !violations[0].message.contains("`a`"),
+            "a rebound parameter is not a cursor: {violations:?}"
+        );
+    }
+
+    #[test]
     fn ignores_a_definition_whose_cursor_parameter_is_rebound_by_a_match_binder() {
         // A match arm binds `xs` for its body, exactly as a block binding or a
         // lambda parameter would, so the `skip(xs, 1)` in the recursive call
@@ -618,7 +643,7 @@ mod tests {
 
     #[test]
     fn reports_every_recursive_call_that_passes_the_bound_slice() {
-        // school's `decay_count` at `src/schedule.ch:32` writes the same
+        // school's `decay_count` in `src/schedule.ch` writes the same
         // bound slice into two recursive calls. Each call site is its own
         // report, exactly as the direct form's are.
         let src = concat!(

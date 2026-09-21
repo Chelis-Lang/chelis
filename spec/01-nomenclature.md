@@ -1404,8 +1404,7 @@ bare name that a local binding in scope at the call binds to
 ```chelis
 def walk(xs: List[i64], out: List[i64]) -> List[i64] = {
   rest = skip(xs, 1i64)
-  if eq(len(xs), 0i64) then out
-  else walk(rest, append(out, index(xs, 0i64)))
+  if eq(len(xs), 0i64) then out else walk(rest, append(out, index(xs, 0i64)))
 }
 ```
 
@@ -1424,18 +1423,24 @@ The rule is deliberately narrow, and reports neither of these:
   through a call to another function, as in
   `apply_all(merge_once(tokens, skip(tokens, 1)), rules)`.
 
-The second exclusion is permanent rather than an accepted under-report.
-Whether that call advances a cursor depends on whether `merge_once`
-returns a suffix of its argument, and that is an interprocedural
-question no rule reading one definition's syntax can decide.
+The second exclusion differs in kind from the first. Whether that call
+advances a cursor depends on whether `merge_once` returns a suffix of
+its argument, which is a fact about a different definition. A rule
+reading one definition's syntax has no way to establish it, so
+covering the form would mean giving the rule a different input rather
+than a deeper substitution.
 
-The rule also stays silent wherever its own reading would be a guess: a
-definition that rebinds a cursor parameter anywhere in its body is
-skipped entirely, and a name the body binds more than once is never
-substituted. Both cases err toward silence, which is the right
-direction for an advisory rule. Advisory severity follows from a
-further limit: a ten-element List is not a defect, and the rule cannot
-know the length.
+The rule also stays silent wherever its own reading would be a guess,
+in three ways that are worth keeping distinct. A parameter the body
+rebinds is no longer the value a recursive call walks, so that
+parameter is not a cursor; the definition's other parameters are still
+read, and a cursor among them is still reported. A definition that
+rebinds its own name is skipped entirely, because its recursive calls
+can no longer be identified by that name. And a name the body binds
+more than once is never substituted. Each case errs toward silence,
+which is the right direction for an advisory rule. Advisory severity
+follows from a further limit: a ten-element List is not a defect, and
+the rule cannot know the length.
 
 `skip` is [05-OP-54]'s prefix removal. The one-argument `drop` is
 [05-OP-67]'s linearity consume and is never this rule's subject.
