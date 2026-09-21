@@ -1314,6 +1314,51 @@ class SchemaTests(unittest.TestCase):
             with self.subTest(neighbor=neighbor):
                 self.assertFalse(any(rule.matches(neighbor) for rule in rules.values()))
 
+    def test_cache_publication_census_scripts_have_exact_automated_owners(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        config = owned.read_config(root / ".config/ci-test-targets.toml")
+        expected = {
+            "scripts/capacity_census_cache_publication.py": (
+                "heavy-e2e.yml",
+                "dtype-phase3-oracle",
+                "daily and workflow_dispatch",
+                "chelis#1730",
+            ),
+            "scripts/test_capacity_census_cache_publication.py": (
+                "ci.yml",
+                "script-unit",
+                "pull_request and push",
+                "chelis#1730",
+            ),
+        }
+        rules = {
+            rule.prefix: rule
+            for rule in config.path_rules
+            if rule.prefix in expected
+        }
+        self.assertEqual(set(rules), set(expected))
+        for path, owner_identity in expected.items():
+            with self.subTest(path=path):
+                rule = rules[path]
+                self.assertEqual(rule.prefix, path)
+                self.assertEqual(rule.disposition, "owner")
+                self.assertIsNotNone(rule.owner)
+                self.assertEqual(
+                    (
+                        rule.owner.workflow,
+                        rule.owner.job,
+                        rule.owner.cadence,
+                        rule.owner.tracking_issue,
+                    ),
+                    owner_identity,
+                )
+        for neighbor in (
+            "scripts/capacity_census_cache_publication_extra.py",
+            "scripts/test_capacity_census_cache_publication_extra.py",
+        ):
+            with self.subTest(neighbor=neighbor):
+                self.assertFalse(any(rule.matches(neighbor) for rule in rules.values()))
+
     def test_pre_phase4c_composite_scripts_have_exact_script_unit_owners(self) -> None:
         root = Path(__file__).resolve().parents[1]
         config = owned.read_config(root / ".config/ci-test-targets.toml")
