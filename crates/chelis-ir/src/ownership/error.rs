@@ -146,7 +146,7 @@ pub enum OwnershipError {
         actual: usize,
     },
     #[error(
-        "block b{block} in `{unit}` is reached with inconsistent live owners:          live only on this path: {only_here}; live only on the path already          verified: {only_earlier} ({here_count} live here, {earlier_count} earlier)"
+        "block b{block} in `{unit}` is reached with inconsistent live owners: live only on this path: {only_here}; live only on the path already verified: {only_earlier} ({here_count} live here, {earlier_count} earlier)"
     )]
     JoinMismatch {
         unit: String,

@@ -533,18 +533,15 @@ fn join_mismatch_names_the_owners_the_paths_disagree_about() {
         )
     };
 
-    let named = verify_raw(make(true)).unwrap_err().to_string();
-    assert!(
-        named.contains("%2[carry]"),
-        "the disagreeing owner is named with its source binding: {named}"
-    );
-    assert!(
-        named.contains("b1") && named.contains("`roots`"),
-        "the block and unit stay in the message: {named}"
-    );
-    assert!(
-        !named.contains("%1[text]"),
-        "owners both paths agree on are not reported as the disagreement: {named}"
+    // The whole message, not fragments of it: fragment assertions cannot see
+    // the two directions being swapped, the counts being swapped, or stray
+    // whitespace in the format literal.
+    assert_eq!(
+        verify_raw(make(true)).unwrap_err().to_string(),
+        "block b1 in `roots` is reached with inconsistent live owners: \
+         live only on this path: %2[carry]; live only on the path already \
+         verified: none (2 live here, 1 earlier)"
+            .replace("         ", " ")
     );
 
     // Negative parity: with no source names, the message still identifies the
@@ -553,6 +550,63 @@ fn join_mismatch_names_the_owners_the_paths_disagree_about() {
     assert!(
         anonymous.contains("%2") && !anonymous.contains("[]"),
         "an unnamed owner is identified by id alone: {anonymous}"
+    );
+}
+
+/// The two sides are not interchangeable: an owner live only on the path being
+/// verified now must not be reported as live only on the path verified before,
+/// and the counts follow the same order (chelis#2122 red team, F2).
+#[test]
+fn join_mismatch_reports_each_direction_on_its_own_side() {
+    let mut alpha = info(Prim::String, OwnerOrigin::Owned);
+    alpha.names = vec!["alpha".into()];
+    let mut beta = info(Prim::String, OwnerOrigin::Owned);
+    beta.names = vec!["beta".into(), "beta_alias".into()];
+    let gamma = info(Prim::String, OwnerOrigin::Owned);
+    let program = roots(
+        vec![
+            block(
+                0,
+                vec![BlockParam {
+                    owner: OwnerId(0),
+                    mode: ParamMode::EntryBorrow,
+                }],
+                vec![define(1), define(2), define(3)],
+                Terminator::Branch {
+                    condition: Operand::borrow(OwnerId(0)),
+                    then_edge: Edge {
+                        id: EdgeId::UNASSIGNED,
+                        target: BlockId(1),
+                        args: Vec::new(),
+                        terminals: vec![edge_terminal(90, Terminal::Drop(OwnerId(1)))],
+                    },
+                    else_edge: Edge {
+                        id: EdgeId::UNASSIGNED,
+                        target: BlockId(1),
+                        args: Vec::new(),
+                        terminals: vec![
+                            edge_terminal(91, Terminal::Drop(OwnerId(2))),
+                            edge_terminal(92, Terminal::Drop(OwnerId(3))),
+                        ],
+                    },
+                },
+            ),
+            block(1, vec![], vec![], Terminator::Exit),
+        ],
+        BTreeMap::from([
+            (OwnerId(0), info(Prim::Bool, OwnerOrigin::ExternalBorrow)),
+            (OwnerId(1), alpha),
+            (OwnerId(2), beta),
+            (OwnerId(3), gamma),
+        ]),
+    );
+
+    assert_eq!(
+        verify_raw(program).unwrap_err().to_string(),
+        "block b1 in `roots` is reached with inconsistent live owners: \
+         live only on this path: %1[alpha]; live only on the path already \
+         verified: %2[beta,beta_alias], %3 (2 live here, 3 earlier)"
+            .replace("         ", " ")
     );
 }
 
