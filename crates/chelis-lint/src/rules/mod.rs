@@ -16,6 +16,7 @@ pub mod opaque_without_invariant;
 pub mod phase_identifier_case;
 pub mod prefer_pipe_operator;
 pub mod prefix_namespace;
+pub mod recursive_list_cursor;
 pub mod redundant_linearity_call;
 pub mod snapshot_filename_pattern;
 pub mod surf_def_arrow_form;

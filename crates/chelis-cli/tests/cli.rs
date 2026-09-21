@@ -7646,7 +7646,7 @@ fn lint_allow_suppresses_diagnostic_and_fix() {
 fn lint_fix_does_not_rewrite_list_drop_builtin() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("list_drop.ch");
-    let original = "def f(ys: list[i64]) -> list[i64] = drop(ys, cast(1, i64))\n";
+    let original = "def f(ys: list[i64]) -> list[i64] = skip(ys, cast(1, i64))\n";
     write_file(&path, original);
 
     Command::cargo_bin("chelis")

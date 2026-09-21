@@ -1381,7 +1381,40 @@ root is rejected. Governance follows the ancillary link path as well as its
 resolved target: a link above the policy root remains machine-local even when
 it points to an admitted file inside the root.
 
-### 12.3 Future rule queue
+### 12.3 Recursive list cursor
+
+`recursive-list-cursor` is advisory. It reports a self-recursive
+definition whose recursive call passes `skip(p, k)` in the argument
+position that `p` itself occupies in the parameter list, where `p` is a
+parameter of that definition.
+
+That shape is a cursor walking a List one step at a time, and `skip`
+returns a new List rather than a view into the old one, so the walk
+allocates a fresh List per step and costs time quadratic in the List's
+length. The linear form is a `fold` or `map` over the whole List, which
+visits each element once. `Std.Io.Csv`'s row parser records the
+rewrite; the general shape is to carry a scalar accumulator in a `fold`
+and produce the result List with a single `map`.
+
+The rule is deliberately narrow, and reports neither of these:
+
+- `skip(xs, k)` outside a self-recursive call, including the single
+  tail pass `fold(f, index(xs, 0), skip(xs, 1))` and a `skip` handed to
+  a *different* function. One `skip` copies one List once.
+- a self-recursive call whose cursor reaches the recursive argument
+  through a local binding or a nested call rather than the argument
+  position itself.
+
+The second exclusion is an under-report, not a judgement that the shape
+is linear. A quadratic cursor written through a local binding is the
+same defect; the rule is syntactic and local, so it sees only the
+direct form. Advisory severity follows from the same limit: a
+ten-element List is not a defect, and the rule cannot know the length.
+
+`skip` is [05-OP-54]'s prefix removal. The one-argument `drop` is
+[05-OP-67]'s linearity consume and is never this rule's subject.
+
+### 12.4 Future rule queue
 
 The following rules are intentionally queued, not currently part of
 the blocking registry:

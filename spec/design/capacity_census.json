@@ -1541,7 +1541,7 @@
     },
     {
       "kind": "std-def-numeric",
-      "id": "index::drop_list: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} i64) (t-adt {} List (t-var {} item)))",
+      "id": "index::skip_list: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} i64) (t-adt {} List (t-var {} item)))",
       "flags": [
         "numeric-op"
       ]

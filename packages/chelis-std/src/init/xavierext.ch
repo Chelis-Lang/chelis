@@ -9,7 +9,7 @@ def xavier_uniform(template, fan_in, fan_out) = {
   flat = reshape(copy(raw), [numel(raw)])
   values = map(fn (x) -> mul(sub(mul(2.0, x), 1.0), bound), to_list(flat))
   _ = drop(raw)
-  reshape(to_tensor(values), tensor_shape(template, cast(0, i32), cast(rank(template), i32), drop([cast(0, i64)], cast(1, i64))))
+  reshape(to_tensor(values), tensor_shape(template, cast(0, i32), cast(rank(template), i32), skip([cast(0, i64)], cast(1, i64))))
 }
 sig xavier_normal[r, p: Float]: &tensor[..r, p] -> p -> p -> tensor[..r, p] ! { Random }
 def xavier_normal(template, fan_in, fan_out) = {
@@ -24,7 +24,7 @@ def trunc_normal(template, mean, std, a, b) = {
   flat = reshape(copy(raw), [numel(raw)])
   values = map(fn (x) -> if lt(x, a) then a else if gt(x, b) then b else x, to_list(flat))
   _ = drop(raw)
-  reshape(to_tensor(values), tensor_shape(template, cast(0, i32), cast(rank(template), i32), drop([cast(0, i64)], cast(1, i64))))
+  reshape(to_tensor(values), tensor_shape(template, cast(0, i32), cast(rank(template), i32), skip([cast(0, i64)], cast(1, i64))))
 }
 def validate_xavier_params[p: Float](fan_in: p, fan_out: p) -> bool = {
   fan_sum = add(fan_in, fan_out)

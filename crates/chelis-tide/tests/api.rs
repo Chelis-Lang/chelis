@@ -408,7 +408,7 @@ async fn eval_endpoint_returns_sequence_and_dict_helper_values() {
     let source = r#"
 xs: List[i64] = [cast(1, i64), cast(2, i64), cast(3, i64)]
 prefix = take(xs, cast(2, i64))
-suffix = drop(xs, cast(1, i64))
+suffix = skip(xs, cast(1, i64))
 groups = chunk(xs, cast(2, i64))
 scanned = scan(fn (acc: i64, x: i64) -> add(acc, x), cast(0, i64), xs)
 buckets = partition(fn (x: i64) -> gt(x, cast(1, i64)), xs)

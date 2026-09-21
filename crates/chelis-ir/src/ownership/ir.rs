@@ -131,6 +131,14 @@ pub(crate) struct OwnerInfo {
     pub(crate) placement: Placement,
     pub(crate) origin: OwnerOrigin,
     pub(crate) names: Vec<String>,
+    /// Span id of the expression this owner was minted for, taken verbatim
+    /// from `HostExpr::span_id` (see `spec/design/chelis_span_survival.md`).
+    /// Surf lowering issues `surf:<start>..<end>`, but the value is an opaque
+    /// producer-issued string: a Deep input may carry any id, including an
+    /// empty one. `None` for owners minted outside an expression, such as unit
+    /// parameters, and for programs whose Deep nodes carry no span
+    /// (chelis#2122).
+    pub(crate) span_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -242,7 +242,7 @@ impl<'a> EvalContext<'a> {
                 continue;
             }
             // A grad body may use an integer scalar as a discrete selector
-            // (for example list_index/take_list/drop_list). A synthetic Load
+            // (for example list_index/take_list/skip_list). A synthetic Load
             // preserves its dtype but erases its exact runtime value before
             // the staged List spine is selected. Embed that non-differentiable
             // argument as an exact typed literal instead; float/tensor

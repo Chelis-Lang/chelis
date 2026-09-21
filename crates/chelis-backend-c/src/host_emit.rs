@@ -3118,6 +3118,183 @@ impl<'a> HostEmitter<'a> {
         }
     }
 
+    /// chelis#2120: fill a freshly allocated tensor with a `[05-OP-8]`
+    /// uniform draw in the C HOST lane.
+    ///
+    /// The tensor-DAG lane has its own arm (`emit::emit_uniform_like`) and
+    /// bakes the handler seed into the kernel. The host lane cannot: its
+    /// seed lives in `__chelis_rng`, installed by `HostExprKind::WithSeed`,
+    /// and the draw ordinal is consumed at run time by
+    /// `chelis_effective_uniform_seed`. This is the FIRST host-lane ordinal
+    /// consumer, so the two rules below are what keep it in step with
+    /// `chelis eval` (`chelis-compiler-api` `runtime/eval.rs` `"uniform_like"`):
+    ///
+    /// 1. **Exactly one ordinal per application, read after the arguments.**
+    ///    `arg_vars` are already emitted when this runs, matching the
+    ///    evaluator's left-to-right argument evaluation followed by its
+    ///    `random_counter` read. `CHELIS_EFFECTIVE_UNIFORM_SEED` is invoked
+    ///    once, into a temporary, and never inside the element loop.
+    /// 2. **Bounds are re-folded from the structural `args`, not read from
+    ///    `arg_vars`.** The checker already guarantees static literal bounds
+    ///    (`infer::app_operand_dtype`, the chelis#776 gate), and this bakes
+    ///    the same exact bit pattern the DAG lane bakes, so a template that
+    ///    folds and one that does not sample identically.
+    ///
+    ///    This fold is value-based and does NOT model an intermediate
+    ///    rounding: a bound spelled `cast(cast(x, f16), f32)` type-checks,
+    ///    and the evaluator applies both roundings while `static_float_bound`
+    ///    applies neither. The DAG lane's `lower::extract_f64_value` has the
+    ///    identical behavior, so the two compiled lanes agree with each other
+    ///    and both differ from `eval` on that spelling. The CLASS is
+    ///    pre-existing and owned outside this change (chelis#2316); the
+    ///    host-lane INSTANCE is new, because this lane previously refused to
+    ///    build at all. Reproducing the DAG lane's exact behavior is
+    ///    deliberate: correcting one lane alone would make template
+    ///    foldability observable again, which is the defect chelis#2120
+    ///    exists to remove.
+    ///
+    /// The template's element values are never read — only its shape and
+    /// dtype reach the output through `chelis_host_alloc_like` — which is
+    /// [05-OP-8]'s "the template values are not observed" made structural
+    /// rather than incidental.
+    ///
+    /// Every active float dtype gets an arm. A runtime-derived template is
+    /// exactly the case the DAG lane does NOT serve, so leaving f16/bf16 on
+    /// the default arm would have built a program that aborts at run time
+    /// where the previous rejection at least failed at build time.
+    fn assign_uniform_like(
+        &mut self,
+        target: &str,
+        args: &[HostExpr],
+        arg_vars: &[(String, HostType)],
+    ) -> Result<(), Unsupported> {
+        let template = match arg_vars.first() {
+            Some((var, HostType::Tensor(_))) => var.clone(),
+            _ => {
+                return Err(Unsupported::new(
+                    UnsupportedKind::Builtin("uniform_like".to_string()),
+                    "`chelis build` host emission",
+                    Stage::Codegen("c"),
+                    chelis_types::deliberate_rejection!(
+                        "[04-TOT-2]",
+                        "uniform_like's first operand must be a tensor template; the checker \
+                         types it as one, so a non-tensor here is an internal desync"
+                    ),
+                ));
+            }
+        };
+        let low = static_float_bound(args.get(1)).ok_or_else(|| unresolved_uniform_bound("low"))?;
+        let high =
+            static_float_bound(args.get(2)).ok_or_else(|| unresolved_uniform_bound("high"))?;
+
+        // [05-OP-8] / chelis#248: the sampler sees the byte-identical f32
+        // narrowing of each source bound, not a decimal round-trip. The f64
+        // arm widens those SAME truncated images, exactly as
+        // `emit::emit_uniform_like` and `host_ops::uniform_like_value` do.
+        let low_f32 = low as f32;
+        let high_f32 = high as f32;
+        let low_f32_expr = format!(
+            "chelis_f32_from_bits(UINT32_C(0x{:08x}))",
+            low_f32.to_bits()
+        );
+        let high_f32_expr = format!(
+            "chelis_f32_from_bits(UINT32_C(0x{:08x}))",
+            high_f32.to_bits()
+        );
+        let low_f64_expr = format!(
+            "chelis_f64_from_bits(UINT64_C(0x{:016x}))",
+            f64::from(low_f32).to_bits()
+        );
+        let high_f64_expr = format!(
+            "chelis_f64_from_bits(UINT64_C(0x{:016x}))",
+            f64::from(high_f32).to_bits()
+        );
+
+        // An inactive scope is reachable, not an internal desync: a
+        // top-level binding with an unhandled `Random` is a hard check error,
+        // but an exported `def` carrying one is not, and its generated
+        // wrapper initializes `__chelis_rng` inactive. Abort there rather
+        // than let `chelis_effective_uniform_seed` silently return the baked
+        // operand without advancing the counter, which would both return the
+        // wrong value and desync every later draw in the scope.
+        let seed = self.next_temp("uniform_seed");
+        self.lines.push(format!(
+            "{}if (__chelis_rng == NULL || !__chelis_rng->active) {{",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}    fprintf(stderr, \"uniform_like requires an active host RNG scope\\n\");",
+            self.indent
+        ));
+        self.lines.push(format!("{}    abort();", self.indent));
+        self.lines.push(format!("{}}}", self.indent));
+        self.lines.push(format!(
+            "{}uint64_t {seed} = CHELIS_EFFECTIVE_UNIFORM_SEED(0ULL);",
+            self.indent
+        ));
+
+        self.lines.push(format!(
+            "{}{target} = chelis_host_alloc_like({template}, chelis_host_tensor_dtype({template}));",
+            self.indent
+        ));
+        let (guard, view) = self.begin_tensor_write(target);
+        self.lines
+            .push(format!("{}switch ({view}.dtype) {{", self.indent));
+        // One arm per active float dtype in [05-OP-8], which "admits every
+        // active float template dtype `p`". f32 and f64 sample at their own
+        // width. f16 and bf16 widen the stored bounds to f32, execute the one
+        // fused multiply-add in f32, and narrow exactly once at the store —
+        // the same shape `emit::emit_uniform_like` gives the DAG lane, so a
+        // template that folds and one that does not agree element for
+        // element. `chelis_f32_to_f16`/`_bf16` are `static inline` in
+        // `chelis_runtime.h`, which every emitted translation unit includes.
+        let sample_f32 = format!(
+            "chelis_uniform_sample_f32({seed}, (uint64_t)i, {low_f32_expr}, {high_f32_expr})"
+        );
+        for (macro_name, elem_t, sampled) in [
+            (
+                chelis_vocab::RuntimeDType::F32.c_macro(),
+                "float",
+                sample_f32.clone(),
+            ),
+            (
+                chelis_vocab::RuntimeDType::F64.c_macro(),
+                "double",
+                format!(
+                    "chelis_uniform_sample_f64({seed}, (uint64_t)i, {low_f64_expr}, {high_f64_expr})"
+                ),
+            ),
+            (
+                chelis_vocab::RuntimeDType::F16.c_macro(),
+                "uint16_t",
+                format!("chelis_f32_to_f16({sample_f32})"),
+            ),
+            (
+                chelis_vocab::RuntimeDType::Bf16.c_macro(),
+                "uint16_t",
+                format!("chelis_f32_to_bf16({sample_f32})"),
+            ),
+        ] {
+            let ind = &self.indent;
+            self.lines.push(format!("{ind}    case {macro_name}: {{"));
+            self.lines.push(format!(
+                "{ind}        {elem_t} *__target_data = ({elem_t}*){view}.data;"
+            ));
+            self.lines.push(format!(
+                "{ind}        for (int64_t i = 0; i < {view}.count; i++) {{"
+            ));
+            self.lines
+                .push(format!("{ind}            __target_data[i] = {sampled};"));
+            self.lines.push(format!("{ind}        }}"));
+            self.lines.push(format!("{ind}        break;"));
+            self.lines.push(format!("{ind}    }}"));
+        }
+        self.emit_default_runtime_fail_arm_for(&format!("{view}.dtype"), "uniform_like");
+        self.lines.push(format!("{}}}", self.indent));
+        self.end_tensor_write(&guard);
+        Ok(())
+    }
+
     fn begin_tensor_write(&mut self, tensor: &str) -> (String, String) {
         let guard = self.next_temp("tensor_write_guard");
         let view = self.next_temp("tensor_write_view");
@@ -5018,15 +5195,32 @@ impl<'a> HostEmitter<'a> {
                 ));
                 return Ok(());
             }
+            "skip" => {
+                // The published runtime symbol keeps its `chelis_list_drop`
+                // spelling: it is already unambiguous behind the `list_`
+                // prefix, and renaming a C ABI identity would retire a
+                // capacity-census row without removing any ambiguity.
+                self.lines.push(format!(
+                    "{}{target} = chelis_list_drop({}, {});",
+                    self.indent, arg_vars[0].0, arg_vars[1].0
+                ));
+                return Ok(());
+            }
             "drop" => {
-                if arg_vars.len() == 1 {
-                    self.lines.push(format!("{}{target} = 0;", self.indent));
-                } else {
-                    self.lines.push(format!(
-                        "{}{target} = chelis_list_drop({}, {});",
-                        self.indent, arg_vars[0].0, arg_vars[1].0
+                // Same reason as the interpreter's arm: a lowering can
+                // synthesize this node below the checker, and emitting `0`
+                // for a two-argument call binds a null list tail that only
+                // the runtime's own null check catches.
+                if arg_vars.len() != 1 {
+                    return Err(invalid_abi_shape(
+                        format!(
+                            "drop reached C emission with {} arguments; [05-OP-67] takes exactly one and the List slice is `skip` ([05-OP-54])",
+                            arg_vars.len()
+                        ),
+                        "linearity consume emission",
                     ));
                 }
+                self.lines.push(format!("{}{target} = 0;", self.indent));
                 return Ok(());
             }
             "chunk" => {
@@ -5367,6 +5561,16 @@ impl<'a> HostEmitter<'a> {
                 self.emit_print_value(&arg_vars[0].0, &arg_vars[0].1)?;
                 self.lines
                     .push(format!("{}{target} = {};", self.indent, arg_vars[0].0));
+                return Ok(());
+            }
+            // chelis#2120: the host lane had no `uniform_like` arm, so a draw
+            // whose template was not constant-foldable — and which therefore
+            // did not route through the tensor-DAG lane — fell into `decode`'s
+            // [04-TOT-2] catch-all while `eval` answered correctly. It
+            // allocates and fills a tensor, so it is completed here rather
+            // than admitted to the expression vocabulary below.
+            "uniform_like" => {
+                self.assign_uniform_like(target, args, &arg_vars)?;
                 return Ok(());
             }
             _ => {}
@@ -9290,6 +9494,50 @@ impl BinaryElementwiseFunc {
             Self::Min => "<=",
         }
     }
+}
+
+/// chelis#2120: recover a `uniform_like` bound's exact source value from the
+/// host expression tree.
+///
+/// The checker already restricts these bounds to static literals
+/// (`chelis-types` `infer::app_operand_dtype`, whose message is the
+/// chelis#776 gate), and this mirrors the shapes `is_static_numeric_bound`
+/// admits there: a bare float or integer literal, a float-target `cast`
+/// around one, and `neg` of either. Anything else is an internal desync
+/// between that gate and this emitter, and is rejected loudly rather than
+/// defaulted — silently substituting `[0, 1)` for an unreadable bound is the
+/// exact chelis#776 failure this must not reintroduce.
+fn static_float_bound(expr: Option<&HostExpr>) -> Option<f64> {
+    match &expr?.kind {
+        HostExprKind::Float(value) => Some(*value),
+        HostExprKind::Int(value) => Some(*value as f64),
+        HostExprKind::Builtin { name, args, .. } if name == "cast" => {
+            static_float_bound(args.first())
+        }
+        HostExprKind::Builtin { name, args, .. } if name == "neg" => {
+            static_float_bound(args.first()).map(|value| -value)
+        }
+        _ => None,
+    }
+}
+
+/// The loud terminal for a `uniform_like` bound this emitter cannot fold.
+fn unresolved_uniform_bound(which: &str) -> Unsupported {
+    Unsupported::new(
+        UnsupportedKind::Builtin("uniform_like".to_string()),
+        "`chelis build` host emission",
+        Stage::Codegen("c"),
+        chelis_types::deliberate_rejection!(
+            "[04-TOT-2]",
+            "uniform_like's bounds must be static literals the emitter can narrow to f32 \
+             exactly; the checker already rejects a runtime-computed bound, so an \
+             unreadable one here is an internal desync"
+        ),
+    )
+    .with_supported_alternative(match which {
+        "low" => "give `uniform_like` a literal low bound",
+        _ => "give `uniform_like` a literal high bound",
+    })
 }
 
 /// One arm of the runtime-dtype dispatch emitted by the elementwise

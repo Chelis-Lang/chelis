@@ -1284,7 +1284,7 @@ x = {
   _ = drop(t)
   actual
 }
-y = index(drop([cast(10, i64), cast(20, i64)], cast(1, i64)), cast(0, i64))
+y = index(skip([cast(10, i64), cast(20, i64)], cast(1, i64)), cast(0, i64))
 "#,
     );
 

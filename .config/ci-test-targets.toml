@@ -2958,6 +2958,24 @@ reason = "the completion oracle executes the structural wire-role acceptance and
 tracking_issue = "chelis#729"
 
 [[path_rule]]
+prefix = "scripts/capacity_census_cache_publication.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "dtype-phase3-oracle"
+cadence = "daily and workflow_dispatch"
+reason = "the dtype oracle executes the compiled cache-publication acceptance, rejection and artifact-integrity witnesses"
+tracking_issue = "chelis#1730"
+
+[[path_rule]]
+prefix = "scripts/test_capacity_census_cache_publication.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the cache-publication selection, artifact sealing and mutation controls"
+tracking_issue = "chelis#1730"
+
+[[path_rule]]
 prefix = "examples/pure_helper_result_claims.ch"
 disposition = "packages"
 packages = ["chelis-cli"]

@@ -46,7 +46,7 @@ CLAUSES = {
     51: ("einsum admits one active signed-integer or float dtype", "section 5.7.1's contraction accumulator", "no identity receives an invented zero adjoint", "epsilon is an explicit scalar of the operand dtype", "every positive spatial rank r", "each stride is positive", "nonnegative (low,high) extents", "exactly r entries", "floor((input[j]+low[j]+high[j]-kernel[j])/strides[j])+1", "(input-channel,kernel-axis-0,...,kernel-axis-r-1)", "empty contraction with dtype-zero result", "No scalar metadata broadcast or rank-named convolution alias"),
     52: ("any active signed-integer dtype", "last update in row-major update order", "structurally reject differentiation"),
     53: ("sort(x,axis)` returns (values, i64 indices)", "without converting bool to numeric", "saved permutation"),
-    54: ("List concatenation takes a List second argument", "one-argument drop is explicit lifetime consumption", "Element/count/index quantities are i64"),
+    54: ("List concatenation takes a List second argument", "none of them has an arity-selected second meaning", "Element/count/index quantities are i64"),
     55: ("exactly once per visited element in source order", "hold the exact forward predicate mask constant", "Cotangent combination follows spec/06's order"),
     56: ("Float and aggregate keys are type errors", "canonical observation order", "Missing lookup is the explicit Option result"),
     57: ("All active tensor element dtypes, including bool", "shape(scalar) = []", "shape([v0, ..., vn-1]) = [n] ++ s", "arbitrary List nesting", "A List's element type determines an empty result's dtype", "each element's stored bits", "reconstructs the saved source List nesting", "any positive rank r", "returns r nested Lists", "unobservable extents are supplied by the expected tensor type", "saved forward shape even when empty Lists hide trailing extents"),
@@ -62,6 +62,7 @@ CLAUSES = {
     61: ("CSV fields remain strings without numeric inference", "quoted delimiters/newlines", "there is no default empty cell"),
     62: ("axis:i32", "nonempty List of equal-rank tensors", "split the upstream cotangent at the exact source boundaries"),
     63: ("[04-NUM-14]'s checked cast domain", "fractional float-to-integer conversion traps Domain", "No intermediate float image"),
+    67: ("takes exactly one argument of any language type", "linearity operation, not a container operation", "a two-argument call is an arity error", "receives no cotangent"),
 }
 
 # Cross-chapter domain contradictions caught during semantic review. Requiring

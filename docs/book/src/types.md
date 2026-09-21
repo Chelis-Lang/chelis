@@ -98,7 +98,7 @@ internally, including an empty List:
 
 ```chelis-surf
 sig empty_like[n, p: Numeric]: p -> tensor[n, p]
-def empty_like(x) = to_tensor(drop([x], 1i64))
+def empty_like(x) = to_tensor(skip([x], 1i64))
 empty_f64 = empty_like(0.0f64)
 empty_int64 = empty_like(0i64)
 ```

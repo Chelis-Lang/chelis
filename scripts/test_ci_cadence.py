@@ -74,8 +74,35 @@ def assert_extended(test, pr, nightly):
         job = jobs[name]
         test.assertNotIn("if", job)
         test.assertFalse(job.get("continue-on-error", False))
+        execution_budget = (
+            120
+            if name == "runtime-representation-phase0-oracle"
+            else 90
+            if name == "dtype-phase3-oracle"
+            else 60
+            if name.startswith("generalize")
+            else 45
+        )
+        # Keep the complete oracle budget as well as cold Devenv setup headroom.
+        test.assertEqual(job["timeout-minutes"], execution_budget + 25)
         if name == "runtime-representation-phase0-oracle":
             test.assertEqual(job["name"], "Runtime Representation Phase 2 Oracle")
+            step_names = [step.get("name") for step in job["steps"]]
+            test.assertEqual(
+                [
+                    step.get("run")
+                    for step in job["steps"]
+                    if step.get("name") == "Install Python binding dependencies"
+                ],
+                [
+                    'uv pip install --python "$PYO3_PYTHON" '
+                    "-r bindings/python/pyproject.toml"
+                ],
+            )
+            test.assertLess(
+                step_names.index("Install Python binding dependencies"),
+                step_names.index("Gate (runtime representation stage)"),
+            )
             artifacts = [
                 step
                 for step in job["steps"]
@@ -182,6 +209,7 @@ def assert_extended(test, pr, nightly):
     test.assertNotIn("runtime-extent-oracle", pr["jobs"])
     test.assertNotIn("if", extents)
     test.assertFalse(extents.get("continue-on-error", False))
+    test.assertEqual(extents["timeout-minutes"], 115)
     extent_commands = [step.get("run") or "" for step in extents["steps"]]
     test.assertEqual(
         [
@@ -277,7 +305,7 @@ class ExtendedCadenceTests(unittest.TestCase):
 
     def test_missing_skipped_or_nonblocking_oracle_is_rejected(self):
         for name in MOVED:
-            for mutation in ("remove", "skip", "ignore", "command"):
+            for mutation in ("remove", "skip", "ignore", "command", "timeout"):
                 with self.subTest(job=name, mutation=mutation):
                     nightly = copy.deepcopy(self.nightly)
                     if mutation == "remove":
@@ -286,8 +314,10 @@ class ExtendedCadenceTests(unittest.TestCase):
                         nightly["jobs"][name]["if"] = "false"
                     elif mutation == "ignore":
                         nightly["jobs"][name]["continue-on-error"] = True
-                    else:
+                    elif mutation == "command":
                         nightly["jobs"][name]["steps"] = []
+                    else:
+                        nightly["jobs"][name]["timeout-minutes"] = 1
                     with self.assertRaises((AssertionError, KeyError)):
                         assert_extended(self, self.pr, nightly)
 
@@ -304,6 +334,7 @@ class ExtendedCadenceTests(unittest.TestCase):
             "needs",
             "downgrade",
             "shortfall",
+            "timeout",
         ):
             nightly = copy.deepcopy(self.nightly)
             job = nightly["jobs"]["runtime-extent-oracle"]
@@ -328,6 +359,8 @@ class ExtendedCadenceTests(unittest.TestCase):
                 job["steps"][-1]["run"] = job["steps"][-1]["run"].replace(
                     "--phase final", "--phase b --allow-shortfall"
                 )
+            elif mutation == "timeout":
+                job["timeout-minutes"] = 45
             else:
                 # The subtler half: the command the equality accepts, with
                 # the flag appended. `--phase final` refuses the flag at run

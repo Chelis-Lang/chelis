@@ -245,6 +245,23 @@ UNIFORM_RANDOM_BACKEND_FINAL_FORMS = (
         "backend-element-spelling",
         "NUMERIC_DEVICE_HELPERS",
     ),
+    # chelis#2120: the C host lane's uniform draw. Its f32/f64 element
+    # spellings and its store loop are exact final forms under the same
+    # [05-OP-8] authority as the device sampler above: the per-dtype
+    # arithmetic width is the one the atom fixes, the bounds carry the
+    # atom's exact f32 narrowing, and the loop stores one sampled element
+    # per flat index. Registered here rather than carried as inventory
+    # debt, because a new row must reach a final authority class.
+    (
+        "crates/chelis-backend-c/src/host_emit.rs",
+        "backend-element-spelling",
+        "HostEmitter < 'a >::assign_uniform_like",
+    ),
+    (
+        "crates/chelis-backend-c/src/host_emit.rs",
+        "load-store-template",
+        "HostEmitter < 'a >::assign_uniform_like",
+    ),
 )
 UTF8_STRING_FINAL_FORMS = (
     (

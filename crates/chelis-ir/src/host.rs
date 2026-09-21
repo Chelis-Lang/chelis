@@ -10201,7 +10201,10 @@ fn compile_host_pattern(
                         display_roots: Vec::new(),
                         ty: list_ty.clone(),
                         value: HostExpr::new(HostExprKind::Builtin {
-                            name: "drop".to_string(),
+                            // The tail is [05-OP-54]'s List slice, `skip`.
+                            // `drop` is [05-OP-67]'s one-argument linearity
+                            // consume and would bind the tail to unit.
+                            name: "skip".to_string(),
                             args: vec![value.clone(), HostExpr::new(HostExprKind::Int(1))],
                             ty: list_ty.clone(),
                         }),
@@ -18552,11 +18555,10 @@ fn infer_builtin_host_type_from_arg_tys(
                 ));
             }
         }
-        "index" | "take" | "chunk" | "flatten" | "enumerate" | "dict_of" | "to_tensor"
+        "index" | "take" | "skip" | "chunk" | "flatten" | "enumerate" | "dict_of" | "to_tensor"
         | "pad_sequences" | "pad_sequences_to" => {
             require_first("a list", is_list)?;
         }
-        "drop" if arg_tys.len() != 1 => require_first("a list", is_list)?,
         "concat" => {
             require_first(
                 "a list of tensors",
@@ -18768,8 +18770,8 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
             _ => Some(fresh_host_inference()),
         },
         "tuple-get" => Some(fresh_host_inference()),
-        "drop" if arg_tys.len() == 1 => Some(HostTypeTerm::Unit),
-        "take" | "drop" => match arg_tys.first() {
+        "drop" => Some(HostTypeTerm::Unit),
+        "take" | "skip" => match arg_tys.first() {
             Some(HostTypeTerm::List(inner)) => {
                 Some(HostTypeTerm::List(Box::new((**inner).clone())))
             }
@@ -24053,7 +24055,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
              def all_eq_len[n](pairs: List[(string, Col[n])], expected: i64) -> bool =\n\
                if eq(len(pairs), zero_i64()) then true else {\n\
                  entry = index(pairs, zero_i64())\n\
-                 if neq(col_len(entry.1), expected) then false else all_eq_len(drop(pairs, one_i64()), expected)\n\
+                 if neq(col_len(entry.1), expected) then false else all_eq_len(skip(pairs, one_i64()), expected)\n\
                }\n\
              def main() -> bool = all_eq_len([(\"a\", FloatCol(to_tensor([cast(1.0, f32), cast(2.0, f32)])))], cast(2, i64))\n",
         );

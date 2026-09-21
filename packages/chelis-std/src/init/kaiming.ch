@@ -9,7 +9,7 @@ def kaiming_uniform(template, fan_in) = {
   flat = reshape(copy(raw), [numel(raw)])
   values = map(fn (x) -> mul(sub(mul(2.0, x), 1.0), bound), to_list(flat))
   _ = drop(raw)
-  reshape(to_tensor(values), tensor_shape(template, cast(0, i32), cast(rank(template), i32), drop([cast(0, i64)], cast(1, i64))))
+  reshape(to_tensor(values), tensor_shape(template, cast(0, i32), cast(rank(template), i32), skip([cast(0, i64)], cast(1, i64))))
 }
 def tensor_shape[r, p](template: &tensor[..r, p], axis: i32, limit: i32, out: List[i64]) -> List[i64] = if gte(axis, limit) then out else tensor_shape(template, add(axis, cast(1, i32)), limit, append(out, shape(template, axis)))
 sig kaiming_normal[r, p: Float]: &tensor[..r, p] -> p -> tensor[..r, p] ! { Random }

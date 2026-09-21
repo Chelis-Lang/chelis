@@ -110,7 +110,7 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "append",
     "concat",
     "take",
-    "drop",
+    "skip",
     "chunk",
     "range",
     "map",
@@ -172,6 +172,10 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "diagonal",
     "trace",
     "clamp",
+    // Linearity, not a container operation: the explicit one-argument
+    // consume of [05-OP-67], paired with the `copy` keyword. The list
+    // slice that once shared this name is `skip` ([05-OP-54]).
+    "drop",
 ];
 
 /// Zero-based argument slots, after the callee, whose values name tensor
@@ -266,7 +270,7 @@ pub enum BuiltinSiblingCaseId {
     ConcatList,
     ConcatTensors,
     TakeList,
-    DropList,
+    SkipList,
     DropValue,
     ChunkList,
     RangeList,
@@ -535,7 +539,7 @@ const SPECIALIZED_INFERENCE_BUILTINS: &[&str] = &[
     "append",
     "concat",
     "take",
-    "drop",
+    "skip",
     "chunk",
     "range",
     "map",
@@ -593,6 +597,10 @@ const SPECIALIZED_INFERENCE_BUILTINS: &[&str] = &[
     "diagonal",
     "trace",
     "clamp",
+    // Linearity, not a container operation: the explicit one-argument
+    // consume of [05-OP-67], paired with the `copy` keyword. The list
+    // slice that once shared this name is `skip` ([05-OP-54]).
+    "drop",
 ];
 
 /// True only when the declared rule is wired to the corresponding closed
@@ -1714,20 +1722,24 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
+        name: "skip",
+        capability: sibling_capability!(CONTAINER_DOMAIN, Container, SkipList),
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    // `drop` is the one-argument linearity consume of [05-OP-67]. It kept
+    // `CONTAINER_DOMAIN` when [05-OP-54]'s list slice moved to `skip`: the
+    // closed domain vocabulary is Numeric/Container/Boundary and none of the
+    // three names linearity, so a fourth domain would change the identity
+    // strings in the normative registry, the discovery validator's
+    // Container/Boundary pairing loop, and the identity regex in
+    // `scripts/builtin_atom_registry.py`. That is a capability-system change,
+    // not part of separating the two operations.
+    BuiltinDecl {
         name: "drop",
-        capability: BuiltinCapabilityDecl {
-            domains: CONTAINER_DOMAIN,
-            sibling_cases: &[
-                BuiltinSiblingCaseDecl {
-                    domain: BuiltinSemanticDomain::Container,
-                    case: BuiltinSiblingCaseId::DropList,
-                },
-                BuiltinSiblingCaseDecl {
-                    domain: BuiltinSemanticDomain::Container,
-                    case: BuiltinSiblingCaseId::DropValue,
-                },
-            ],
-        },
+        capability: sibling_capability!(CONTAINER_DOMAIN, Container, DropValue),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -2949,7 +2961,25 @@ pub fn builtin_env() -> (Env, VarGen) {
     generic_binop("append", &mut env, &mut vg);
     generic_binop("concat", &mut env, &mut vg);
     generic_binop("take", &mut env, &mut vg);
-    generic_binop("drop", &mut env, &mut vg);
+    generic_binop("skip", &mut env, &mut vg);
+    // [05-OP-67]: `drop` consumes exactly one value of any type and
+    // returns unit. Binding the exact unit result here, rather than a
+    // free result variable, keeps a bare `drop` reference as precise as
+    // the application route in `infer::app`.
+    {
+        let consumed = vg.fresh_tvar();
+        env.bind(
+            "drop".to_string(),
+            Scheme {
+                constraints: vec![],
+                tvars: vec![consumed],
+                tvar_restrictions: vec![],
+                dvars: vec![],
+                rvars: vec![],
+                body: Type::Fn(vec![Type::Var(consumed)], Box::new(Type::Unit)),
+            },
+        );
+    }
     generic_binop("chunk", &mut env, &mut vg);
     generic_binop("range", &mut env, &mut vg);
     generic_binop("map", &mut env, &mut vg);

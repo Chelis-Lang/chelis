@@ -10,6 +10,7 @@ import shutil
 from capacity_census_cache_publication import (
     COMPILE_CASES,
     OWNERS,
+    seal_compiled_artifacts,
     closed_payload_owners,
     RUNTIME_CASES,
     TestExecution,
@@ -24,6 +25,42 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 class CachePublicationSelection(unittest.TestCase):
+    def test_compiled_artifacts_are_sealed_against_later_cargo_cache_churn(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cache = root / "target/debug/deps"
+            cache.mkdir(parents=True)
+            original = cache / "libbincode-example.rlib"
+            original.write_bytes(b"compiled witness")
+
+            sealed = seal_compiled_artifacts(
+                root / "target/cache-publication",
+                {"bincode": str(original)},
+            )
+            sealed_path = Path(sealed["bincode"])
+            self.assertNotEqual(sealed_path, original)
+            self.assertEqual(sealed_path.read_bytes(), b"compiled witness")
+
+            original.write_bytes(b"later legitimate cargo build")
+            self.assertEqual(sealed_path.read_bytes(), b"compiled witness")
+
+    def test_compiled_artifact_seal_rejects_ambiguous_filenames(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = root / "one/libsame.rlib"
+            second = root / "two/libsame.rlib"
+            first.parent.mkdir()
+            second.parent.mkdir()
+            first.write_bytes(b"one")
+            second.write_bytes(b"two")
+            with self.assertRaisesRegex(
+                CachePublicationError, "duplicate compiled artifact filename"
+            ):
+                seal_compiled_artifacts(
+                    root / "receipt",
+                    {"one": str(first), "two": str(second)},
+                )
+
     def test_fixture_inventory_accepts_exact_owned_sources_and_rejects_drift(self):
         source = ROOT / "crates/chelis-compiler-api/tests/fixtures"
         with tempfile.TemporaryDirectory() as directory:
