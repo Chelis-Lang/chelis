@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Declare the activated project profile and completed native flake outputs."""
+"""Declare the activated project runtime and completed native flake outputs."""
 
 from __future__ import annotations
 
@@ -19,6 +19,10 @@ def main() -> int:
     parser.add_argument("--checks", action="store_true", help="Run only after the complete native flake check succeeds")
     arguments = parser.parse_args()
     roots = [os.path.realpath(os.environ["DEVENV_PROFILE"])]
+    # Environment-only inputs are not dependencies of Devenv's package profile.
+    # Keep the SMT solver's archive/header tree reachable from the shared cache.
+    if cvc5_dir := os.environ.get("CVC5_DIR"):
+        roots.append(os.path.realpath(cvc5_dir))
     if arguments.checks:
         system = nix_output("eval", "--impure", "--raw", "--expr", "builtins.currentSystem")
         checks = json.loads(nix_output(

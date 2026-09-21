@@ -20,8 +20,8 @@ runs:
       if: runner.environment == 'self-hosted'
       uses: Chelis-Lang/ci/actions/restore-build-cache@0b6a14078e56e6af9cd76eca09b9419f1c84f19b
       with:
-        # Publication intent is not authorization; host admission remains separate.
-        mode: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && 'read-write' || 'read' }}
+        # Every admitted Tunnet member may read and write, including reviewed drafts.
+        mode: read-write
 
     - name: Activate project CI environment
       shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
