@@ -1067,6 +1067,20 @@ device helpers does not transfer it into the typed-nonnumeric cohort. Its exact
 affine and per-dtype rounding remain bound to the existing ignored real-HIP
 `gpu_correctness` execution lane.
 
+`HostEmitter::assign_uniform_like` joins that cohort with two rows, a
+`backend-element-spelling` and a `load-store-template`, under the same
+[05-OP-8] authority (chelis#2120). It is the C host lane's draw, reached when a
+`uniform_like` template is not constant-foldable and the binding therefore does
+not route to the tensor-DAG lane. Its execution contract is a different lane
+from the device sampler's: the compiled-C parity tests in
+`crates/chelis-cli/tests/issue_2120_uniform_like_runtime_template.rs`, which
+build, link, and run each program and compare it against `chelis eval` on f32
+bits. Those tests cover every active float dtype, because [05-OP-8] admits all
+four and a runtime-derived template is precisely the shape the DAG lane does
+not serve. The two rows are the seams the Phase 0 scanner observes in that
+owner; neither is gratuitous, and dropping either reproduces an unclassified
+inventory hit.
+
 ## C4. Validated typed tensor access
 
 The runtime moves the raw descriptor into a `tensor_storage` module. Its fields,
