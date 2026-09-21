@@ -598,11 +598,7 @@ jobs:
   diagnostic-kind-oracle:
     name: Diagnostic Kind Mutation Oracle
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        shell: chelis-ci-shell run {0}
-    # Reserve 25 minutes for cold hosted Devenv realization.
-    timeout-minutes: 55
+    timeout-minutes: 30
     needs: [changes]
     if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && needs.changes.outputs.rebase_lane != 'docs' && (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_run_diagnostic == 'true') || (needs.changes.outputs.rebase_lane == 'ordinary' && needs.changes.outputs.diagnostic_kind_changed != 'false')) }}
     permissions:
@@ -617,33 +613,32 @@ jobs:
           ref: ${{ needs.changes.outputs.candidate_sha }}
 
       - name: Free disk space (Ubuntu)
-        if: runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@0b5faba5025fade929194b46a9e52e43fec63462
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: Activate project CI environment
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
-        run: python scripts/ci_devenv.py
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv + wire libpython rpath
+        run: python3 scripts/ci_setup_uv_python.py
 
       - name: Cache cargo registry and mutation-oracle build
         uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}
           workspaces: . -> target/diagnostic-kind-oracle
 
       - name: Run C2.2 controlled mutations
-        run: python scripts/diagnostic_kind_oracle.py
+        run: .venv/bin/python scripts/diagnostic_kind_oracle.py
 
   lint-rust:
     name: Rust Policy (Linux)
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        shell: chelis-ci-shell run {0}
-    # Reserve headroom for cold Devenv and optional native dependencies.
-    timeout-minutes: 75
+    timeout-minutes: 30
     needs: [changes]
     if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_run_rust == 'true') || (needs.changes.outputs.rebase_lane == 'ordinary' && needs.changes.outputs.docs_only != 'true')) }}
     # Strip debuginfo from the dev/test build. Debuginfo is the dominant
@@ -665,45 +660,75 @@ jobs:
       # Free ~25-30 GB before the cargo build; see
       # .github/actions/free-disk-space (scripts/ci_free_disk.py).
       - name: Free disk space (Ubuntu)
-        if: runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@0b5faba5025fade929194b46a9e52e43fec63462
+      # apt-get under retry (scripts/ci_apt_get.py): the hosted runner's apt
+      # mirror intermittently resets the connection mid-download, flaking the
+      # job with no code change. The helper retries the update+install pair on
+      # a transient failure; a genuine packaging error still fails after the
+      # attempts are exhausted.
+      - name: Install C dependencies
+        run: python3 scripts/ci_apt_get.py gcc libopenblas-dev libasan8 libubsan1
 
-      - name: Activate project CI environment
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
-        run: python scripts/ci_devenv.py
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install cargo-nextest for targeted Rust units
+        if: needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_packages != ''
+        uses: taiki-e/install-action@nextest
+
+      # `.cargo/config.toml` sets `PYO3_PYTHON=.venv/bin/python` so the
+      # `chelis-python` link step finds the project-pinned interpreter
+      # on every developer's machine. CI runners don't ship a `.venv/`
+      # by default, so `scripts/ci_setup_uv_python.py` creates one with
+      # the same uv-managed Python the project policy requires, then
+      # appends the interpreter's `sysconfig.LIBDIR` to `$GITHUB_ENV` as
+      # `LD_LIBRARY_PATH` (Linux) or `DYLD_LIBRARY_PATH` (macOS) so the
+      # `chelis-python` test binaries can dlopen `libpython3.X.so` at
+      # runtime. pyo3-build-config is a transitive build-dep of pyo3
+      # and runs even when only its dependents are compiled, so this
+      # step must precede every cargo invocation — including the
+      # cache restore below, which is future-proofed against a
+      # Swatinem version that might invoke `cargo` directly.
+      - name: Install uv
+        # Pinned to v8.1.0 (specific patch) rather than @v8 because
+        # astral-sh/setup-uv does not yet publish a rolling `v8` major
+        # tag — only the explicit v8.0.0 and v8.1.0 patch tags exist.
+        # Using `@v8` resolves to "unable to find version `v8`" on the
+        # runner. Bump this pin when astral-sh publishes either a `v8`
+        # rolling tag or a newer patch.
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv + wire libpython rpath
+        run: python3 scripts/ci_setup_uv_python.py
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}
 
       # The Rust-policy gate subset (clippy, fmt, chelis lint --check,
       # doctests, and compile guards) is defined once in scripts/gate.py.
       # Clippy already compiles every workspace target, so a preceding
       # standalone `cargo build --workspace --all-targets` is redundant.
-      # Keep the complete Rust-policy selection in gate.py rather than
-      # hand-inlining a second list in this workflow.
+      # `gate.py lint-and-unit`. Do not hand-inline cargo/chelis
+      # commands into this job: scripts/test_gate.py greps this file
+      # and fails if any gate step is not produced by gate.py. See
+      # docs/investigations/test_toolchain_guards_design.md.
       - name: Gate (lint-and-unit subset)
         if: needs.changes.outputs.rebase_lane != 'targeted' || needs.changes.outputs.rebase_packages == ''
-        run: chelis-gate lint-and-unit
+        run: python3 scripts/gate.py lint-and-unit
 
       - name: Run affected Rust policy and units for targeted rebase
         if: needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_packages != ''
         env:
           CHELIS_TARGETED_PACKAGES: ${{ needs.changes.outputs.rebase_packages }}
-        run: chelis-gate targeted-units
+        run: python3 scripts/gate.py targeted-units
 
   script-unit:
     name: Script and Python Unit Tests (Linux)
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        shell: chelis-ci-shell run {0}
-    # Reserve 25 minutes for cold hosted Devenv realization.
-    timeout-minutes: 35
+    timeout-minutes: 10
     needs: [changes]
     if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_run_script_unit == 'true') || (needs.changes.outputs.rebase_lane == 'ordinary' && needs.changes.outputs.docs_only != 'true')) }}
     permissions:
@@ -713,36 +738,35 @@ jobs:
         with:
           ref: ${{ needs.changes.outputs.candidate_sha }}
 
-      - name: Free disk space (Ubuntu)
-        if: runner.environment == 'github-hosted'
-        uses: ./.github/actions/free-disk-space
+      # Small compiler fixtures remain here; full C6 execution is nightly-owned.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@0b5faba5025fade929194b46a9e52e43fec63462
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
 
-      - name: Activate project CI environment
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
-        run: python scripts/ci_devenv.py
+      - name: Create uv-managed venv + wire libpython rpath
+        run: python3 scripts/ci_setup_uv_python.py
 
       # Python execution ownership is explicit, independent of installed tools.
       - name: Install shared-skill validator dependency
-        run: uv pip install --python "$PYO3_PYTHON" PyYAML==6.0.3
+        run: uv pip install --python .venv/bin/python PyYAML==6.0.3
 
       - name: Install Python binding dependencies
-        run: uv pip install --python "$PYO3_PYTHON" -r bindings/python/pyproject.toml
+        run: uv pip install --python .venv/bin/python -r bindings/python/pyproject.toml
 
       - name: Script unit tests (scripts/test_*.py)
-        run: python scripts/ci_script_tests.py pr
+        run: .venv/bin/python scripts/ci_script_tests.py pr
 
       # Keep the privacy and source-usage construction boundary in script-unit
       # without querying mutable GitHub issue state. The always-running Docs
       # Phase 4B oracle owns fresh compiler closure and generated agreement;
       # the standing nightly owns exists/kind/open liveness.
       - name: Validate rejection authority construction boundary
-        run: python scripts/check_rejection_authority_boundary.py
+        run: .venv/bin/python scripts/check_rejection_authority_boundary.py
 
       - name: Python binding ingress unit tests
-        run: python -m unittest discover -s bindings/python/tests -p 'test_*.py'
+        run: .venv/bin/python -m unittest discover -s bindings/python/tests -p 'test_*.py'
 
       - name: Upload script selection and timings
         if: always()
@@ -796,13 +820,15 @@ jobs:
   smt-build:
     name: SMT Feature Build (Linux)
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        shell: chelis-ci-shell run {0}
-    # The Nix ABI has its own exact-environment cvc5 cache. The first run
-    # builds from source; subsequent runs can restore that complete payload.
-    # Budget for cold Devenv and the initial cvc5 source build.
-    timeout-minutes: 90
+    # In steady state this job LINKS a durable prebuilt cvc5 (a GitHub Release
+    # asset published by build-cvc5.yml, rustc-independent, no cache TTL/LRU),
+    # so it runs ~3m warm. The from-source cvc5 compile (~22m) is off the
+    # per-PR path: it only recurs on a cvc5-sys version bump before
+    # build-cvc5.yml republishes the asset (see docs/smt_build_setup.md for the
+    # bump runbook). 25m covers a warm link plus a fully cold Rust workspace
+    # recompile (e.g. after a stable-toolchain bump) with margin, and fails
+    # fast instead of silently absorbing a stray from-source cvc5 build.
+    timeout-minutes: 25
     # Skip on docs-only PRs (chelis#419); a skipped required job reports
     # success. Runs on every code PR and push.
     needs: [changes]
@@ -822,31 +848,51 @@ jobs:
       # Free ~25-30 GB before the cargo + cvc5 build; see
       # .github/actions/free-disk-space (scripts/ci_free_disk.py).
       - name: Free disk space (Ubuntu)
-        if: runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@0b5faba5025fade929194b46a9e52e43fec63462
+      - name: Install C dependencies
+        # apt-get under retry (scripts/ci_apt_get.py) so a transient
+        # mirror reset does not flake the cvc5 smoke job. This fast lane
+        # does not install Z3, Gappa, or Arb-only tools; those live in
+        # the non-required full prove workflow.
+        run: python3 scripts/ci_apt_get.py gcc g++ cmake libclang-dev libgmp-dev libmpfr-dev
 
-      - name: Activate project CI environment
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
-        run: python scripts/ci_devenv.py
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
 
-      # The native build-cvc5.yml producer does not publish Nix artifacts.
-      # Keep the existing verified fetch/fallback/harvest lifecycle, but key
-      # this lane by the project environment as well as cvc5-sys and schema.
-      # A durable miss restores this lane's Actions cache, or builds from
-      # source. Ubuntu-built C++ archives can never cross into this Nix ABI.
-      # `activate` exports CVC5_DIR only for a complete, verified store.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv + wire libpython rpath
+        run: python3 scripts/ci_setup_uv_python.py
+
+      # cvc5 (cvc5-sys) builds from source via CMake+make (~22m cold). To keep
+      # that off the per-PR path we LINK a prebuilt cvc5, tried in two layers
+      # (see docs/smt_build_setup.md and scripts/ci_cvc5_cache.py):
+      #   1. DURABLE (primary): a GitHub Release asset published by
+      #      build-cvc5.yml, keyed on the cvc5-sys version + namespace (NOT
+      #      Cargo.lock, NOT rustc). A Release asset has no 10GB LRU budget, no
+      #      7-day TTL, and no branch scope, so a stable-toolchain bump or a
+      #      quiet stretch no longer forces a cold rebuild. `fetch`
+      #      sha256-verifies and extracts it; on ANY miss it exits 0 with
+      #      warm=false.
+      #   2. FALLBACK (secondary): the stable-key Actions cache, restored only
+      #      when the durable fetch missed (the cvc5-sys-bump window before
+      #      build-cvc5.yml republishes). Best-effort; a hiccup degrades to
+      #      from-source, never fails the job.
+      # `activate` exports CVC5_DIR only when the store is complete (verified by
+      # ci_cvc5_cache.py's sentinel); otherwise the normal from-source path
+      # runs. (A PR branch DOES inherit main's caches/assets; only a PR's own
+      # cache SAVE is branch-scoped.)
       - name: Compute cvc5 cache key
         id: cvc5key
-        run: python3 scripts/ci_cvc5_cache.py key --namespace linux-nix-x86_64-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix') }}
+        run: python3 scripts/ci_cvc5_cache.py key --namespace linux-x86_64
 
       - name: Fetch durable prebuilt cvc5 (Release asset)
         id: cvc5fetch
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python3 scripts/ci_cvc5_cache.py fetch --namespace linux-nix-x86_64-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix') }} --dir "${{ steps.cvc5key.outputs.dir }}"
+        run: python3 scripts/ci_cvc5_cache.py fetch --namespace linux-x86_64 --dir "${{ steps.cvc5key.outputs.dir }}"
 
       - name: Restore prebuilt cvc5 (Actions cache fallback)
         id: cvc5restore
@@ -865,8 +911,9 @@ jobs:
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}
-          # Keep Nix Cargo outputs separate from the native full-prove lane.
+          # cvc5 builds from source into target/; share the former
+          # smt-build cache namespace with the optional full-prove lane
+          # while keeping the gate jobs lean.
           shared-key: smt-smt-build
           # Persist a warm workspace cache even if a later step fails, so a
           # slow cold run is not re-paid on the next attempt (chelis#583).
@@ -1044,12 +1091,8 @@ jobs:
 
   ci-fast:
     name: Fast Tests (Linux)
-    # Reserve 25 minutes for cold hosted Devenv realization.
-    timeout-minutes: 55
+    timeout-minutes: 30
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        shell: chelis-ci-shell run {0}
     needs: [changes]
     if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane == 'ordinary' && needs.changes.outputs.docs_only != 'true')) }}
     env:
@@ -1061,30 +1104,36 @@ jobs:
           ref: ${{ needs.changes.outputs.candidate_sha }}
 
       - name: Free disk space (Ubuntu)
-        if: runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@0b5faba5025fade929194b46a9e52e43fec63462
+      - name: Install C dependencies
+        run: python3 scripts/ci_apt_get.py gcc clang libopenblas-dev libasan8 libubsan1
 
-      - name: Activate project CI environment
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
-        run: python scripts/ci_devenv.py
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv + wire libpython rpath
+        run: python3 scripts/ci_setup_uv_python.py
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}
           shared-key: linux-workspace
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install Python binding dependencies
-        run: uv pip install --python "$PYO3_PYTHON" -r bindings/python/pyproject.toml
+        run: uv pip install --python .venv/bin/python -r bindings/python/pyproject.toml
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
 
       - name: Gate (units and reviewed integrations)
         env:
           CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
-        run: chelis-gate ci-fast
+        run: python3 scripts/gate.py ci-fast
 
       - name: Upload fast JUnit
         if: always()
@@ -1164,12 +1213,8 @@ jobs:
 
   change-owned-shard:
     name: Change-Owned Integration Tests (bucket ${{ matrix.shard }})
-    # Reserve 25 minutes for cold hosted Devenv realization.
-    timeout-minutes: 85
+    timeout-minutes: 60
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        shell: chelis-ci-shell run {0}
     permissions:
       contents: read
     needs: [changes, integration-plan]
@@ -1193,7 +1238,6 @@ jobs:
           path: ${{ runner.temp }}/integration-change
 
       - name: Preserve empty-shard evidence or request execution
-        shell: bash
         id: shard-selection
         run: >-
           python3 scripts/ci_change_owned.py prepare-shard
@@ -1204,29 +1248,39 @@ jobs:
           --github-output "$GITHUB_OUTPUT"
 
       - name: Free disk space (Ubuntu)
-        if: steps.shard-selection.outputs.has_targets == 'true' && runner.environment == 'github-hosted'
+        if: steps.shard-selection.outputs.has_targets == 'true'
         uses: ./.github/actions/free-disk-space
 
-      - name: Set up portable Devenv
+      - name: Install C dependencies
         if: steps.shard-selection.outputs.has_targets == 'true'
-        uses: Chelis-Lang/ci/actions/setup-devenv@0b5faba5025fade929194b46a9e52e43fec63462
+        run: python3 scripts/ci_apt_get.py gcc clang libopenblas-dev libasan8 libubsan1
 
-      - name: Activate project CI environment
+      - name: Install Rust toolchain
         if: steps.shard-selection.outputs.has_targets == 'true'
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
-        run: python scripts/ci_devenv.py
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install uv
+        if: steps.shard-selection.outputs.has_targets == 'true'
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv + wire libpython rpath
+        if: steps.shard-selection.outputs.has_targets == 'true'
+        run: python3 scripts/ci_setup_uv_python.py
 
       - name: Restore cargo registry and build cache
         if: steps.shard-selection.outputs.has_targets == 'true'
         uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}
           shared-key: linux-workspace
           save-if: false
 
       - name: Install Python binding dependencies
         if: steps.shard-selection.outputs.has_targets == 'true'
-        run: uv pip install --python "$PYO3_PYTHON" -r bindings/python/pyproject.toml
+        run: uv pip install --python .venv/bin/python -r bindings/python/pyproject.toml
+
+      - name: Install cargo-nextest
+        if: steps.shard-selection.outputs.has_targets == 'true'
+        uses: taiki-e/install-action@nextest
 
       # Cache restoration can replace target/; install the current plan last.
       - name: Download integration change plan
@@ -1241,7 +1295,7 @@ jobs:
         env:
           CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
         run: >-
-          python scripts/ci_change_owned.py run-shard
+          .venv/bin/python scripts/ci_change_owned.py run-shard
           --plan target/integration-change/plan.json
           --lane change-owned
           --shard ${{ matrix.shard }}
@@ -1422,11 +1476,7 @@ jobs:
   backend-sanitizers:
     name: Backend Sanitizers
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        shell: chelis-ci-shell run {0}
-    # Reserve 25 minutes for cold hosted Devenv realization.
-    timeout-minutes: 55
+    timeout-minutes: 30
     # Skip on docs-only PRs (chelis#419); a skipped required job reports
     # success. Runs on every code PR and push.
     needs: [changes]
@@ -1448,21 +1498,22 @@ jobs:
       # Free ~25-30 GB before the cargo build; see
       # .github/actions/free-disk-space (scripts/ci_free_disk.py).
       - name: Free disk space (Ubuntu)
-        if: runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@0b5faba5025fade929194b46a9e52e43fec63462
+      # apt-get under retry (scripts/ci_apt_get.py); see the lint-rust
+      # job for the transient-mirror-reset rationale.
+      - name: Install C dependencies
+        run: python3 scripts/ci_apt_get.py gcc libopenblas-dev libasan8 libubsan1
 
-      - name: Activate project CI environment
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
-        run: python scripts/ci_devenv.py
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}
 
+      # No uv setup here — `cargo test -p chelis-backend-c` does not
+      # transitively pull pyo3 (verified by `cargo tree -p chelis-backend-c`),
+      # so pyo3-build-config never runs in this job.
       - name: Backend tests under ASan/UBSan
         run: cargo test -p chelis-backend-c --lib
 
@@ -1554,9 +1605,6 @@ jobs:
   docs:
     name: Docs
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        shell: chelis-ci-shell run {0}
     needs: [changes]
     if: ${{ !cancelled() }}
     # Strip debuginfo; see lint-rust for the chelis#392 rationale.
@@ -1587,7 +1635,6 @@ jobs:
       # message describes jobs it cannot see has to be kept in sync with
       # them forever; the job log already shows what ran.
       - name: Require candidate lifecycle and CI contract preflight
-        shell: bash
         env:
           CANDIDATE_PREFLIGHT: ${{ needs.changes.outputs.candidate_preflight }}
           PREFLIGHT_REASON: ${{ needs.changes.outputs.preflight_reason }}
@@ -1604,29 +1651,25 @@ jobs:
       # Free ~25-30 GB before the cargo build; see
       # .github/actions/free-disk-space (scripts/ci_free_disk.py).
       - name: Free disk space (Ubuntu)
-        if: runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@0b5faba5025fade929194b46a9e52e43fec63462
-
-      - name: Activate project CI environment
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
-        run: python scripts/ci_devenv.py
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}
 
-      - name: Install shared-skill validator dependency
-        run: uv pip install --python "$PYO3_PYTHON" PyYAML==6.0.3
+      - name: Install uv for focused documentation contracts
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv for contract reports
+        run: uv venv --python 3.11
 
       - name: Report Phase 3 required-test changes
         env:
           BASE_REF: ${{ github.event_name == 'push' && github.event.before || '' }}
           PR_HEAD: ${{ inputs.expected_head_sha || github.event.pull_request.head.sha }}
-        run: python scripts/phase3_test_change_report.py --base "$BASE_REF" --pr-head "$PR_HEAD" --output target/phase3-test-changes.json
+        run: .venv/bin/python scripts/phase3_test_change_report.py --base "$BASE_REF" --pr-head "$PR_HEAD" --output target/phase3-test-changes.json
 
       - name: Publish Phase 3 required-test changes
         if: ${{ always() && hashFiles('target/phase3-test-changes.json') != '' }}
@@ -1640,7 +1683,7 @@ jobs:
         env:
           BASE_REF: ${{ github.event_name == 'push' && github.event.before || '' }}
           PR_HEAD: ${{ inputs.expected_head_sha || github.event.pull_request.head.sha }}
-        run: python scripts/phase4b_change_report.py --base "$BASE_REF" --pr-head "$PR_HEAD" --output target/phase4b-contract-changes.json
+        run: .venv/bin/python scripts/phase4b_change_report.py --base "$BASE_REF" --pr-head "$PR_HEAD" --output target/phase4b-contract-changes.json
 
       - name: Publish Phase 4B contract changes
         if: ${{ always() && hashFiles('target/phase4b-contract-changes.json') != '' }}
@@ -1651,15 +1694,15 @@ jobs:
           if-no-files-found: error
 
       - name: Validate CI topology documentation
-        run: python -m unittest scripts.test_gate.CiParityTests.test_topology_docs_name_current_shard_owners
+        run: uv run --managed-python --python 3.11 --no-project python -m unittest scripts.test_gate.CiParityTests.test_topology_docs_name_current_shard_owners
 
       # Agent instructions are Markdown, so their owning checks must also
       # run when docs-only routing skips the workspace and script jobs.
       - name: Validate shared agent skills
-        run: python scripts/check_agent_skills.py
+        run: uv run --managed-python --python 3.11 --no-project --with PyYAML==6.0.3 python scripts/check_agent_skills.py
 
       - name: Test hosted validation coverage
-        run: python -m unittest scripts.test_check_agent_skills scripts.test_hosted_validation
+        run: uv run --managed-python --python 3.11 --no-project --with PyYAML==6.0.3 python -m unittest scripts.test_check_agent_skills scripts.test_hosted_validation
 
       - name: Verify shared skill distribution
         run: cargo test -p chelis-conformance --test asset_drift_tripwire --test skill_set_uniformity
@@ -1675,8 +1718,15 @@ jobs:
       # workflow_dispatch it runs the atom and region digests and reports the
       # contract diff without requiring a pull request body.
       - name: Validate the chelis#729 Phase 4B freeze
-        run: python scripts/dtype_phase4b_oracle.py
+        run: uv run --managed-python --python 3.11 --no-project python scripts/dtype_phase4b_oracle.py
 
+      - name: Install mdBook
+        uses: taiki-e/install-action@v2
+        with:
+          tool: mdbook@0.5.2
+
+      # This example suite does not transitively pull pyo3. The contract reports
+      # above use the checkout venv; the freeze oracle uses managed uv directly.
       - name: Validate package SKILL and mdBook examples
         run: cargo test -p chelis-e2e --test skill_suite
 

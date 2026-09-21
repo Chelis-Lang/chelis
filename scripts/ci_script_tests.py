@@ -31,11 +31,9 @@ NIGHTLY_CLASSES = frozenset({
     "test_regenerate_chelis_std_bundle.RealGeneratorFixedPointTests",
 })
 NATIVE_EXECUTION_TARGET = ROOT / "target/agents/native-execution-integration"
-# Dedicated workflow/profile owners execute these outside the broad script lanes.
 PROFILE_CLASSES = frozenset({
     "test_nextest_profile_partition.ProfilePartitionTests",
     "test_nextest_profile_partition.GeneralizationPartitionTests",
-    "test_nix_flake_contract.NixFlakeContractTests",
 })
 
 

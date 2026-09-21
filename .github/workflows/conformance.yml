@@ -600,9 +600,6 @@ jobs:
   conformance:
     name: Hull Conformance Gate (Linux)
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        shell: chelis-ci-shell run {0}
     # Skip on docs-only PRs (chelis#419); a skipped required job reports
     # success. The `if` still fails safe for a changes job that did not
     # succeed, but that is now reachable only through job setup or a lost
@@ -614,8 +611,8 @@ jobs:
     if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.candidate_preflight == 'success' && (needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_run_hull == 'true') || (needs.changes.outputs.rebase_lane == 'ordinary' && needs.changes.outputs.docs_only != 'true')))) }}
     # ~1,500 subprocess calls at ~50-80 ms/call under contention across 2-4
     # cores is ~30-45 s of subprocess wall; the binary build dominates. Allow
-    # generous head room for a cold cargo cache and 25 minutes for cold Devenv.
-    timeout-minutes: 45
+    # generous head room for a cold cargo cache.
+    timeout-minutes: 20
     # Strip debuginfo on the build; debuginfo is the dominant target/
     # disk consumer and the conformance binary needs no symbols
     # (chelis#392). Release defaults to debug=false, but set it explicitly
@@ -629,7 +626,6 @@ jobs:
       # notice, which is also what keeps `preflight_reason` a consumed
       # output here rather than a declared one nothing reads.
       - name: Require candidate lifecycle and CI contract preflight
-        shell: bash
         env:
           CANDIDATE_PREFLIGHT: ${{ needs.changes.outputs.candidate_preflight }}
           PREFLIGHT_REASON: ${{ needs.changes.outputs.preflight_reason }}
@@ -650,20 +646,28 @@ jobs:
       # release-build job was missing the reclaim every ci.yml build job
       # already runs (chelis#392).
       - name: Free disk space (Ubuntu)
-        if: runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@0b5faba5025fade929194b46a9e52e43fec63462
+      # apt-get under retry (scripts/ci_apt_get.py): a transient apt mirror
+      # reset would otherwise flake this required gate with no code change.
+      - name: Install C dependencies
+        run: python3 scripts/ci_apt_get.py gcc libopenblas-dev libasan8 libubsan1
 
-      - name: Activate project CI environment
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
-        run: python scripts/ci_devenv.py
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # `.cargo/config.toml` sets `PYO3_PYTHON=.venv/bin/python`; CI runners
+      # need a matching uv-managed venv before any cargo run (pyo3-build-config
+      # is a transitive build-dep that runs before main compilation). See
+      # ci.yml lint-and-unit for the same pattern and the v8.1.0 pin rationale.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv + wire libpython rpath
+        run: python3 scripts/ci_setup_uv_python.py
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}
 
       # The conformance runner needs the chelis binary by ABSOLUTE path (never a
       # bare PATH name). A release build matches the Hull campaign profile (a
@@ -677,7 +681,7 @@ jobs:
       # self-test (the teeth). Binary-free; runs fast.
       - name: Conformance unit tests (pure core + teeth)
         run: |
-          python -m unittest \
+          .venv/bin/python -m unittest \
             tests.conformance.hull.test_run_conformance \
             tests.conformance.hull.test_wire_canonical \
             tests.conformance.hull.test_corpus_integrity
@@ -686,7 +690,7 @@ jobs:
       # binary. Fails on any CompilerUnsound / unexplained Disagree / EvalDisagree.
       - name: Conformance gate (frozen corpus vs live compiler)
         run: |
-          python tests/conformance/hull/run_conformance.py \
+          .venv/bin/python tests/conformance/hull/run_conformance.py \
             --chelis-bin "$GITHUB_WORKSPACE/target/release/chelis"
 
       # E2E TEETH PROOF: an injected compiler-accepts-a-reject-sentinel
@@ -694,7 +698,7 @@ jobs:
       # if the runner exits 0, the gate has no teeth and this step fails.
       - name: Conformance teeth (injected-unsound must fail the gate)
         run: |
-          if python tests/conformance/hull/run_conformance.py \
+          if .venv/bin/python tests/conformance/hull/run_conformance.py \
             --chelis-bin "$GITHUB_WORKSPACE/target/release/chelis" \
             --simulate-unsound reject_0000; then
             echo "TEETH BROKEN: --simulate-unsound exited 0; the gate did not catch the injected CompilerUnsound" >&2

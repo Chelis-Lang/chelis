@@ -10,7 +10,7 @@ from scripts import gate
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PYTHON = "python"
+PYTHON = "uv run --managed-python --python 3.11 --no-project --with PyYAML==6.0.3 python"
 SKILL_COMMANDS = (
     f"{PYTHON} scripts/check_agent_skills.py",
     f"{PYTHON} -m unittest scripts.test_check_agent_skills scripts.test_hosted_validation",

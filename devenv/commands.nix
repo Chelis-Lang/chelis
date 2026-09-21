@@ -43,12 +43,6 @@ in
       exec = runPython "scripts/gate.py";
     };
 
-    "chelis-ci-shell" = {
-      description = "Activate or run commands in the Chelis CI environment";
-      package = config.languages.python.package;
-      exec = runPython "scripts/ci_devenv.py";
-    };
-
     "chelis-reap-orphans" = {
       description = "List or remove orphaned Chelis build processes";
       package = config.languages.python.package;

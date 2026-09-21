@@ -42,24 +42,6 @@ class SelectionTests(unittest.TestCase):
             self.assertNotIn(name.rsplit(".", 1)[0], runner.NIGHTLY_CLASSES)
         self.assertTrue(identities[2] <= runner.census_controls())
 
-    def test_native_flake_execution_keeps_its_dedicated_owner(self):
-        from test_nix_flake_contract import NixFlakeContractTests, NixSourceContractTests
-
-        loader = unittest.defaultTestLoader
-        groups = runner.partition(loader.discover(str(runner.ROOT / "scripts")))
-        native = {
-            test.id() for test in runner.flatten(
-                loader.loadTestsFromTestCase(NixFlakeContractTests)
-            )
-        }
-        source = {
-            test.id() for test in runner.flatten(
-                loader.loadTestsFromTestCase(NixSourceContractTests)
-            )
-        }
-        self.assertLessEqual(native, {test.id() for test in groups["profiles"]})
-        self.assertLessEqual(source, {test.id() for test in groups["pr"]})
-
     def test_stale_class_or_duplicate_test_is_rejected(self):
         suite = unittest.TestSuite([unittest.FunctionTestCase(lambda: None)])
         with self.assertRaisesRegex(ValueError, "missing nightly"):

@@ -126,6 +126,8 @@ class OracleEnvironmentTests(unittest.TestCase):
                 results = list(pool.map(run_leg, range(2)))
             for result in results:
                 self.assertEqual(result.returncode, 0, result.stdout)
+            for target in targets:
+                self.assertTrue((target / ".rustc_info.json").is_file(), target)
 
 # Parser-only sample for `ignored_cells`. It is deliberately NOT checked
 # against the shipped ledger: its job is to keep both attribute spellings

@@ -3,7 +3,6 @@
 {
   imports = [
     ./devenv/toolchains.nix
-    ./devenv/ci.nix
     ./devenv/entry-shell.nix
     ./devenv/commands.nix
     ./devenv/generated-files.nix

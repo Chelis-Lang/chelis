@@ -381,7 +381,7 @@ class AcknowledgementTests(unittest.TestCase):
 
 
 class WorkflowTests(unittest.TestCase):
-    command = 'scripts/phase3_test_change_report.py --base "$BASE_REF" --pr-head "$PR_HEAD" --output target/phase3-test-changes.json'
+    command = '.venv/bin/python scripts/phase3_test_change_report.py --base "$BASE_REF" --pr-head "$PR_HEAD" --output target/phase3-test-changes.json'
 
     def workflow(self):
         root = Path(__file__).resolve().parents[1]
@@ -406,9 +406,7 @@ class WorkflowTests(unittest.TestCase):
         reports = [s for s in steps if "phase3_test_change_report.py" in s.get("run", "") and "--require-acknowledgement" not in s.get("run", "")]
         self.assertEqual(len(reports), 1)
         step = reports[0]
-        interpreter, arguments = step["run"].split(" ", 1)
-        self.assertIn(Path(interpreter).name, ("python", "python3"))
-        self.assertEqual(arguments, self.command)
+        self.assertEqual(step["run"], self.command)
         self.assertEqual(step["env"]["BASE_REF"], "${{ github.event_name == 'push' && github.event.before || '' }}")
         self.assertEqual(
             step["env"]["PR_HEAD"],
