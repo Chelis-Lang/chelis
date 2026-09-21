@@ -37,12 +37,14 @@ def capture(destination: Path) -> None:
     print(CAPTURE_MARKER, flush=True)
 
 
-def activate(root: Path, devenv: str, github_env: Path, github_path: Path) -> int:
+def activate(
+    root: Path, devenv: str, github_env: Path, github_path: Path, *, profile: str = "ci",
+) -> int:
     """Commit the shell environment only after a successful captured entry."""
     with tempfile.TemporaryDirectory(prefix="chelis-ci-entry-") as temporary:
         destination = Path(temporary) / "environment.json"
         evaluated = subprocess.run(
-            [devenv, "--no-tui", "--profile", "ci", "print-dev-env"],
+            [devenv, "--no-tui", "--profile", profile, "print-dev-env"],
             cwd=root, text=True, capture_output=True, check=False,
         )
         print(evaluated.stderr, end="", file=sys.stderr, flush=True)
@@ -55,7 +57,7 @@ def activate(root: Path, devenv: str, github_env: Path, github_path: Path) -> in
 set -euo pipefail
 : "${DEVENV_DOTFILE:?Devenv did not provide its shell state directory}"
 rm -f "$DEVENV_DOTFILE/load-exports"
-"$1" --no-tui --profile ci tasks run devenv:enterShell --mode before >&2
+"$1" --no-tui --profile "$4" tasks run devenv:enterShell --mode before >&2
 if [ ! -f "$DEVENV_DOTFILE/load-exports" ]; then
   echo "Project shell initialization did not complete." >&2
   exit 1
@@ -66,7 +68,7 @@ exec python "$2" capture "$3"
         result = subprocess.run(
             ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c",
              evaluated.stdout + "\n" + initialization, "project-entry",
-             devenv, str(Path(__file__).resolve()), str(destination)],
+             devenv, str(Path(__file__).resolve()), str(destination), profile],
             cwd=root, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             check=False,
         )
@@ -114,6 +116,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("operation", nargs="?", choices=("activate", "capture", "run"), default="activate")
     parser.add_argument("destination", nargs="?", type=Path)
+    parser.add_argument("--profile", choices=("ci", "ci-smt"), default="ci")
     args = parser.parse_args()
     if args.operation == "capture":
         if args.destination is None:
@@ -127,6 +130,7 @@ def main() -> int:
     return activate(
         ROOT, os.environ["CHELIS_DEVENV_BIN"],
         Path(os.environ["GITHUB_ENV"]), Path(os.environ["GITHUB_PATH"]),
+        profile=args.profile,
     )
 
 

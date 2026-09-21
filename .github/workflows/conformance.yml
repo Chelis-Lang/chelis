@@ -653,17 +653,14 @@ jobs:
         if: runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@0b5faba5025fade929194b46a9e52e43fec63462
-
-      - name: Activate project CI environment
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
-        run: python scripts/ci_devenv.py
+      - name: Set up project CI
+        id: build-cache
+        uses: ./.github/actions/setup-project-ci
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}
+          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', 'nix/ci-*.nix', '.kache.toml') }}
 
       # The conformance runner needs the chelis binary by ABSOLUTE path (never a
       # bare PATH name). A release build matches the Hull campaign profile (a
@@ -702,3 +699,9 @@ jobs:
           else
             echo "teeth verified: injected CompilerUnsound made the runner exit nonzero"
           fi
+
+      - name: Publish verified outputs and clean cache state
+        if: always() && steps.build-cache.outputs.state-path != ''
+        uses: Chelis-Lang/ci/actions/publish-build-cache@0b6a14078e56e6af9cd76eca09b9419f1c84f19b
+        with:
+          state-path: ${{ steps.build-cache.outputs.state-path }}

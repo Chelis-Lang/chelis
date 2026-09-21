@@ -54,13 +54,20 @@ fn edge(value: &Edge) -> String {
     }
 }
 
-fn owner(unit: &Unit, id: OwnerId) -> String {
+/// `%3` for an owner with no source names, `%3[total,acc]` when lowering kept
+/// the binding names it came from. Shared with the verifier so a diagnostic
+/// and a dump spell the same owner the same way.
+pub(crate) fn owner_label(unit: &Unit, id: OwnerId) -> String {
     let names = unit.owners[&id].names.join(",");
     if names.is_empty() {
         format!("%{}", id.0)
     } else {
         format!("%{}[{names}]", id.0)
     }
+}
+
+fn owner(unit: &Unit, id: OwnerId) -> String {
+    owner_label(unit, id)
 }
 
 fn render_op(unit: &Unit, op: &Op) -> String {

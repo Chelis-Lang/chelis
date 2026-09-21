@@ -64,6 +64,20 @@ pub(super) fn pattern_matches(
             let Some(ctor) = kids.first().and_then(symbol_name) else {
                 return Ok(false);
             };
+            if let RuntimeValue::List(items) = value {
+                return match ctor {
+                    "Nil" => Ok(kids.len() == 1 && items.is_empty()),
+                    "Cons" => {
+                        if kids.len() != 3 || items.is_empty() {
+                            return Ok(false);
+                        }
+                        let tail = RuntimeValue::List(items[1..].to_vec());
+                        Ok(pattern_matches(&items[0], &kids[1], bindings, adt_fields)?
+                            && pattern_matches(&tail, &kids[2], bindings, adt_fields)?)
+                    }
+                    _ => Ok(false),
+                };
+            }
             let RuntimeValue::Adt {
                 ctor: got, fields, ..
             } = value
@@ -137,7 +151,24 @@ pub(super) fn pattern_matches(
             }
             Ok(true)
         }
+        DeepTag::PatAs => {
+            let Some(name) = kids.first().and_then(symbol_name) else {
+                return Ok(false);
+            };
+            let Some(inner) = kids.get(1) else {
+                return Ok(false);
+            };
+            if pattern_matches(value, inner, bindings, adt_fields)? {
+                bindings.insert(name.to_string(), value.clone());
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }
         DeepTag::PatTuple => {
+            if kids.is_empty() && matches!(value, RuntimeValue::Unit) {
+                return Ok(true);
+            }
             let RuntimeValue::Tuple(items) = value else {
                 return Ok(false);
             };

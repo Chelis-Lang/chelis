@@ -1,0 +1,42 @@
+name: Set up project CI
+description: Restore signed Nix inputs before realizing the project, then attach its compiler cache.
+inputs:
+  profile:
+    description: Project CI profile; ci-smt additionally realizes the native solver.
+    required: false
+    default: ci
+outputs:
+  state-path:
+    description: Job-owned cache state; always finalize nonempty state with publish-build-cache.
+    value: ${{ steps.build-cache.outputs.state-path }}
+runs:
+  using: composite
+  steps:
+    - name: Set up portable Devenv
+      uses: Chelis-Lang/ci/actions/setup-devenv@0b6a14078e56e6af9cd76eca09b9419f1c84f19b
+
+    - name: Restore signed Nix inputs
+      id: build-cache
+      if: runner.environment == 'self-hosted'
+      uses: Chelis-Lang/ci/actions/restore-build-cache@0b6a14078e56e6af9cd76eca09b9419f1c84f19b
+      with:
+        # Publication intent is not authorization; host admission remains separate.
+        mode: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && 'read-write' || 'read' }}
+
+    - name: Activate project CI environment
+      shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
+      env:
+        PROJECT_CI_PROFILE: ${{ inputs.profile }}
+      run: python scripts/ci_devenv.py --profile "$PROJECT_CI_PROFILE"
+
+    - name: Attach the realized compiler cache
+      if: runner.environment == 'self-hosted'
+      uses: Chelis-Lang/ci/actions/restore-build-cache@0b6a14078e56e6af9cd76eca09b9419f1c84f19b
+      with:
+        state-path: ${{ steps.build-cache.outputs.state-path }}
+        kache-binary: ${{ env.RUSTC_WRAPPER }}
+
+    - name: Declare the realized environment cache root
+      if: runner.environment == 'self-hosted'
+      shell: chelis-ci-shell run {0}
+      run: python scripts/ci_nix_cache_roots.py

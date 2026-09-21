@@ -1759,15 +1759,6 @@ reason = "script-unit activates the declared Devenv inputs and checks the CLI ve
 tracking_issue = "chelis#2241"
 
 [[path_rule]]
-prefix = "devenv/ci.nix"
-disposition = "owner"
-workflow = "ci.yml"
-job = "script-unit"
-cadence = "pull_request and push"
-reason = "script-unit evaluates and activates the CI profile before running its Python suite"
-tracking_issue = "chelis#2241"
-
-[[path_rule]]
 prefix = "devenv/commands.nix"
 disposition = "owner"
 workflow = "ci.yml"
@@ -1795,12 +1786,39 @@ reason = "the native Nix job executes the complete flake check set, including th
 tracking_issue = "chelis#2241"
 
 [[path_rule]]
+prefix = "devenv/ci.nix"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit enters the project CI profile before executing runtime and environment handoff contracts"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
 prefix = "scripts/ci_devenv.py"
 disposition = "owner"
 workflow = "ci.yml"
 job = "script-unit"
 cadence = "pull_request and push"
-reason = "script-unit performs real CI activation and runs the positive and negative environment-publication and command-execution contracts"
+reason = "activation tests exercise successful handoff, failed initialization, cancellation and interpreter identity"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "scripts/test_ci_devenv.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the discovered script suite runs the project activation regression cases"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = ".github/actions/setup-project-ci/"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit activates the project through the shared setup sequence before its environment handoff regressions"
 tracking_issue = "chelis#2241"
 
 [[path_rule]]
@@ -1808,8 +1826,26 @@ prefix = "scripts/ci_nix_cache_roots.py"
 disposition = "owner"
 workflow = "nix-packages.yml"
 job = "nix-linux-x86-64"
-cadence = "workflow_dispatch on main after protected cache restoration"
-reason = "the protected native Nix job declares the activated profile and completed native check roots before verified cache publication"
+cadence = "workflow_dispatch and published release"
+reason = "the protected native job publishes only realized environment and completed flake-check roots"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "nix/ci-cvc5.nix"
+disposition = "owner"
+workflow = "ci.yml"
+job = "smt-build"
+cadence = "pull_request and push"
+reason = "the SMT lane realizes the native solver provider and exercises discharge, containment and feature-specific Clippy"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "nix/ci-openblas.nix"
+disposition = "owner"
+workflow = "ci.yml"
+job = "lint-rust"
+cadence = "pull_request and push"
+reason = "the Linux Nix Rust-policy stage compiles the complete solver-free feature configuration with the LP64 static provider"
 tracking_issue = "chelis#2241"
 
 [[path_rule]]
@@ -1819,15 +1855,6 @@ workflow = "ci.yml"
 job = "script-unit"
 cadence = "pull_request and push"
 reason = "script-unit executes the entry-result classifier's success, failed-task, missing-export, and missing-payload contracts"
-tracking_issue = "chelis#2241"
-
-[[path_rule]]
-prefix = "scripts/test_ci_devenv.py"
-disposition = "owner"
-workflow = "ci.yml"
-job = "script-unit"
-cadence = "pull_request and push"
-reason = "the discovered PR script suite executes the CI activation and command-handoff regression cases"
 tracking_issue = "chelis#2241"
 
 [[path_rule]]

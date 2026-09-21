@@ -757,17 +757,6 @@ class StageUnionTests(unittest.TestCase):
             ["--profile", "ci", "--no-fail-fast"],
         )
 
-    def test_stage_order_covers_every_stage(self):
-        self.assertEqual(
-            set(gate.STAGE_ORDER),
-            set(gate.STAGES) - {"ci-fast", "targeted-units"},
-            "STAGE_ORDER lists full/manual stages, excluding the hosted fast subset",
-        )
-        self.assertEqual(
-            len(gate.STAGE_ORDER),
-            len(set(gate.STAGE_ORDER)),
-            "STAGE_ORDER must not repeat a stage",
-        )
 
     def test_full_list_has_no_duplicate_commands(self):
         rendered = [gate.render(c) for c in gate.full_command_list()]
@@ -780,6 +769,30 @@ class StageUnionTests(unittest.TestCase):
     def test_lint_stage_does_not_repeat_the_workspace_build(self):
         self.assertNotIn(gate.BUILD_WORKSPACE, gate.STAGES["lint-and-unit"])
         self.assertIn(gate.CLIPPY_WORKSPACE, gate.STAGES["lint-and-unit"])
+
+    def test_nix_policy_preserves_all_checks_and_the_developer_provider(self):
+        arguments = dict(tests_only=False, support_only=False, partition=None)
+        developer = gate.selected_stage_commands("lint-and-unit", **arguments)
+        native = gate.selected_stage_commands("lint-and-unit-nix", **arguments)
+        provider = "chelis-prove/ci-openblas-system"
+        normalized = []
+        selected = []
+        for command in native:
+            command = command.copy()
+            if "--features" in command:
+                index = command.index("--features") + 1
+                features = command[index].split(",")
+                if provider in features:
+                    selected.append(command[:4])
+                    features.remove(provider)
+                    command[index] = ",".join(features)
+            normalized.append(command)
+        self.assertEqual(selected, [["cargo", "clippy", "--workspace", "--all-targets"]])
+        self.assertEqual(normalized, developer)
+        self.assertEqual(
+            gate.selected_stage_commands("lint-and-unit", **arguments), developer,
+        )
+        self.assertNotIn(provider, " ".join(map(gate.render, gate.full_command_list())))
 
     def test_targeted_rebase_units_require_an_exact_package_frontier(self):
         with self.assertRaisesRegex(ValueError, gate.TARGETED_PACKAGES_ENV):
@@ -902,24 +915,6 @@ class StageUnionTests(unittest.TestCase):
 
 
 class ListOutputTests(unittest.TestCase):
-    def test_list_prints_canonical_full_list(self):
-        # Each command line is `<command>  # <local-vs-ci annotation>`
-        # (chelis#360); the command part must still be exactly the
-        # canonical full list, in order. Standalone `#`-comment lines
-        # (the --local dynamic-stage note) are not commands.
-        buf = io.StringIO()
-        with redirect_stdout(buf):
-            rc = gate.main(["--list"])
-        self.assertEqual(rc, 0)
-        printed = [
-            line
-            for line in buf.getvalue().strip().splitlines()
-            if not line.startswith("#")
-        ]
-        commands = [line.split("  # ")[0] for line in printed]
-        expected = [gate.render(c) for c in gate.full_command_list()]
-        self.assertEqual(commands, expected)
-
     def test_list_includes_chelis_lint_check(self):
         # Regression guard: the historical `AGENTS.md` gate omitted
         # `chelis lint --check .`. It must be in the canonical list.

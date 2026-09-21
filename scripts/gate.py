@@ -322,6 +322,12 @@ CLIPPY_SOLVER_FREE_FEATURES: list[str] = [
     "chelis-types/generalize-sweep-oracle",
     "--", "-D", "warnings",
 ]
+# The Nix CI provider adds one native-library selection without changing the
+# developer gate's bundled OpenBLAS default or dropping any solver-free feature.
+CLIPPY_SOLVER_FREE_NIX_FEATURES = CLIPPY_SOLVER_FREE_FEATURES.copy()
+CLIPPY_SOLVER_FREE_NIX_FEATURES[
+    CLIPPY_SOLVER_FREE_NIX_FEATURES.index("--features") + 1
+] += ",chelis-prove/ci-openblas-system"
 FMT_CHECK: list[str] = ["cargo", "fmt", "--all", "--", "--check"]
 CHELIS_LINT_CHECK: list[str] = [
     "cargo",
@@ -558,6 +564,11 @@ STAGES: dict[str, list[list[str]]] = {
         RUNTIME_REPRESENTATION_ORACLE,
     ],
 }
+STAGES["lint-and-unit-nix"] = [
+    CLIPPY_SOLVER_FREE_NIX_FEATURES
+    if command == CLIPPY_SOLVER_FREE_FEATURES else command
+    for command in STAGES["lint-and-unit"]
+]
 
 STAGE_ORDER: list[str] = [
     "lint-and-unit",
@@ -3183,7 +3194,13 @@ def main(
     `CARGO_TARGET_DIR` or writing under the real repository."""
     args = parse_args(argv)
     if args.list:
-        for command in full_command_list():
+        commands = full_command_list()
+        # Include executable CI variants, not constants detached from a stage.
+        for stage_commands in STAGES.values():
+            for command in stage_commands:
+                if command not in commands:
+                    commands.append(command)
+        for command in commands:
             print(f"{render(command)}  # {list_annotation(command)}")
         print(FAST_DYNAMIC_NOTE)
         print(LOCAL_DYNAMIC_NOTE)

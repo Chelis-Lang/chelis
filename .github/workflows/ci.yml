@@ -620,21 +620,24 @@ jobs:
         if: runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@0b5faba5025fade929194b46a9e52e43fec63462
-
-      - name: Activate project CI environment
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
-        run: python scripts/ci_devenv.py
+      - name: Set up project CI
+        id: build-cache
+        uses: ./.github/actions/setup-project-ci
 
       - name: Cache cargo registry and mutation-oracle build
         uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}
+          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', 'nix/ci-*.nix', '.kache.toml') }}
           workspaces: . -> target/diagnostic-kind-oracle
 
       - name: Run C2.2 controlled mutations
         run: python scripts/diagnostic_kind_oracle.py
+
+      - name: Publish verified outputs and clean cache state
+        if: always() && steps.build-cache.outputs.state-path != ''
+        uses: Chelis-Lang/ci/actions/publish-build-cache@0b6a14078e56e6af9cd76eca09b9419f1c84f19b
+        with:
+          state-path: ${{ steps.build-cache.outputs.state-path }}
 
   lint-rust:
     name: Rust Policy (Linux)
@@ -668,17 +671,14 @@ jobs:
         if: runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@0b5faba5025fade929194b46a9e52e43fec63462
-
-      - name: Activate project CI environment
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
-        run: python scripts/ci_devenv.py
+      - name: Set up project CI
+        id: build-cache
+        uses: ./.github/actions/setup-project-ci
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}
+          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', 'nix/ci-*.nix', '.kache.toml') }}
 
       # The Rust-policy gate subset (clippy, fmt, chelis lint --check,
       # doctests, and compile guards) is defined once in scripts/gate.py.
@@ -688,13 +688,19 @@ jobs:
       # hand-inlining a second list in this workflow.
       - name: Gate (lint-and-unit subset)
         if: needs.changes.outputs.rebase_lane != 'targeted' || needs.changes.outputs.rebase_packages == ''
-        run: chelis-gate lint-and-unit
+        run: chelis-gate lint-and-unit-nix
 
       - name: Run affected Rust policy and units for targeted rebase
         if: needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_packages != ''
         env:
           CHELIS_TARGETED_PACKAGES: ${{ needs.changes.outputs.rebase_packages }}
         run: chelis-gate targeted-units
+
+      - name: Publish verified outputs and clean cache state
+        if: always() && steps.build-cache.outputs.state-path != ''
+        uses: Chelis-Lang/ci/actions/publish-build-cache@0b6a14078e56e6af9cd76eca09b9419f1c84f19b
+        with:
+          state-path: ${{ steps.build-cache.outputs.state-path }}
 
   script-unit:
     name: Script and Python Unit Tests (Linux)
@@ -717,12 +723,9 @@ jobs:
         if: runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@0b5faba5025fade929194b46a9e52e43fec63462
-
-      - name: Activate project CI environment
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
-        run: python scripts/ci_devenv.py
+      - name: Set up project CI
+        id: build-cache
+        uses: ./.github/actions/setup-project-ci
 
       # Python execution ownership is explicit, independent of installed tools.
       - name: Install shared-skill validator dependency
@@ -752,6 +755,12 @@ jobs:
           path: target/ci-script-tests/pr
           if-no-files-found: error
           retention-days: 14
+
+      - name: Publish verified outputs and clean cache state
+        if: always() && steps.build-cache.outputs.state-path != ''
+        uses: Chelis-Lang/ci/actions/publish-build-cache@0b6a14078e56e6af9cd76eca09b9419f1c84f19b
+        with:
+          state-path: ${{ steps.build-cache.outputs.state-path }}
 
   # Preserve the required branch-protection context while the independent
   # Rust and Python policy workers execute in parallel.
@@ -825,47 +834,16 @@ jobs:
         if: runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@0b5faba5025fade929194b46a9e52e43fec63462
-
-      - name: Activate project CI environment
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
-        run: python scripts/ci_devenv.py
-
-      # The native build-cvc5.yml producer does not publish Nix artifacts.
-      # Keep the existing verified fetch/fallback/harvest lifecycle, but key
-      # this lane by the project environment as well as cvc5-sys and schema.
-      # A durable miss restores this lane's Actions cache, or builds from
-      # source. Ubuntu-built C++ archives can never cross into this Nix ABI.
-      # `activate` exports CVC5_DIR only for a complete, verified store.
-      - name: Compute cvc5 cache key
-        id: cvc5key
-        run: python3 scripts/ci_cvc5_cache.py key --namespace linux-nix-x86_64-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix') }}
-
-      - name: Fetch durable prebuilt cvc5 (Release asset)
-        id: cvc5fetch
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: python3 scripts/ci_cvc5_cache.py fetch --namespace linux-nix-x86_64-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix') }} --dir "${{ steps.cvc5key.outputs.dir }}"
-
-      - name: Restore prebuilt cvc5 (Actions cache fallback)
-        id: cvc5restore
-        if: steps.cvc5fetch.outputs.warm != 'true'
-        uses: actions/cache/restore@v4
-        # Best-effort: a cache-service hiccup must degrade to a from-source
-        # build, never fail this job (chelis#583).
-        continue-on-error: true
+      - name: Set up project CI
+        id: build-cache
+        uses: ./.github/actions/setup-project-ci
         with:
-          path: ${{ steps.cvc5key.outputs.dir }}
-          key: ${{ steps.cvc5key.outputs.key }}
-
-      - name: Activate prebuilt cvc5 (link instead of rebuild)
-        run: python3 scripts/ci_cvc5_cache.py activate --dir "${{ steps.cvc5key.outputs.dir }}"
+          profile: ci-smt
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}
+          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', 'nix/ci-*.nix', '.kache.toml') }}
           # Keep Nix Cargo outputs separate from the native full-prove lane.
           shared-key: smt-smt-build
           # Persist a warm workspace cache even if a later step fails, so a
@@ -875,23 +853,6 @@ jobs:
       - name: Build smt feature
         run: cargo build -p chelis-cli --features smt
 
-      # Cold runs only (no CVC5_DIR active): copy the freshly built cvc5
-      # artifacts into the stable-key cache dir so the next Cargo.lock churn
-      # links them instead of rebuilding. `complete=true` is emitted only
-      # after a fully-verified harvest; the save step below is gated on it,
-      # so a partial/failed build never poisons the stable-key cache.
-      - name: Harvest cvc5 build for cache
-        id: cvc5harvest
-        run: python3 scripts/ci_cvc5_cache.py harvest --dir "${{ steps.cvc5key.outputs.dir }}"
-
-      - name: Save prebuilt cvc5
-        if: always() && steps.cvc5harvest.outputs.complete == 'true'
-        uses: actions/cache/save@v4
-        # Best-effort: saving the cvc5 cache must never fail the build.
-        continue-on-error: true
-        with:
-          path: ${{ steps.cvc5key.outputs.dir }}
-          key: ${{ steps.cvc5key.outputs.key }}
 
       - name: Verify cvc5 discharge path (smt feature live)
         run: python3 .github/scripts/verify_release_smt.py ./target/debug/chelis
@@ -924,6 +885,12 @@ jobs:
       # this command drifts from it.
       - name: Clippy over the cvc5 feature configuration
         run: cargo clippy --workspace --all-targets --features chelis-cli/smt,chelis-prove/smt,chelis-tide/smt -- -D warnings
+
+      - name: Publish verified outputs and clean cache state
+        if: always() && steps.build-cache.outputs.state-path != ''
+        uses: Chelis-Lang/ci/actions/publish-build-cache@0b6a14078e56e6af9cd76eca09b9419f1c84f19b
+        with:
+          state-path: ${{ steps.build-cache.outputs.state-path }}
 
   # chelis#422 (WS-4) PROVE-IN-CI lanes. release.yml ships
   # `chelis-cli --features smt` on three targets; cvc5 builds from
@@ -1064,17 +1031,14 @@ jobs:
         if: runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@0b5faba5025fade929194b46a9e52e43fec63462
-
-      - name: Activate project CI environment
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
-        run: python scripts/ci_devenv.py
+      - name: Set up project CI
+        id: build-cache
+        uses: ./.github/actions/setup-project-ci
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}
+          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', 'nix/ci-*.nix', '.kache.toml') }}
           shared-key: linux-workspace
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
@@ -1105,6 +1069,12 @@ jobs:
             target/gate-reports
           if-no-files-found: error
           retention-days: 14
+
+      - name: Publish verified outputs and clean cache state
+        if: always() && steps.build-cache.outputs.state-path != ''
+        uses: Chelis-Lang/ci/actions/publish-build-cache@0b6a14078e56e6af9cd76eca09b9419f1c84f19b
+        with:
+          state-path: ${{ steps.build-cache.outputs.state-path }}
 
   integration-plan:
     name: Plan Changed Integration Tests
@@ -1207,20 +1177,16 @@ jobs:
         if: steps.shard-selection.outputs.has_targets == 'true' && runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      - name: Set up portable Devenv
+      - name: Set up project CI
+        id: build-cache
         if: steps.shard-selection.outputs.has_targets == 'true'
-        uses: Chelis-Lang/ci/actions/setup-devenv@0b5faba5025fade929194b46a9e52e43fec63462
-
-      - name: Activate project CI environment
-        if: steps.shard-selection.outputs.has_targets == 'true'
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
-        run: python scripts/ci_devenv.py
+        uses: ./.github/actions/setup-project-ci
 
       - name: Restore cargo registry and build cache
         if: steps.shard-selection.outputs.has_targets == 'true'
         uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}
+          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', 'nix/ci-*.nix', '.kache.toml') }}
           shared-key: linux-workspace
           save-if: false
 
@@ -1255,6 +1221,12 @@ jobs:
           path: target/integration-change/change-owned-${{ matrix.shard }}
           if-no-files-found: error
           retention-days: 14
+
+      - name: Publish verified outputs and clean cache state
+        if: always() && steps.build-cache.outputs.state-path != ''
+        uses: Chelis-Lang/ci/actions/publish-build-cache@0b6a14078e56e6af9cd76eca09b9419f1c84f19b
+        with:
+          state-path: ${{ steps.build-cache.outputs.state-path }}
 
   change-owned-report:
     name: Change-Owned Integration Report
@@ -1451,23 +1423,26 @@ jobs:
         if: runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@0b5faba5025fade929194b46a9e52e43fec63462
-
-      - name: Activate project CI environment
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
-        run: python scripts/ci_devenv.py
+      - name: Set up project CI
+        id: build-cache
+        uses: ./.github/actions/setup-project-ci
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}
+          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', 'nix/ci-*.nix', '.kache.toml') }}
 
       - name: Backend tests under ASan/UBSan
         run: cargo test -p chelis-backend-c --lib
 
       - name: Backend doctests
         run: cargo test -p chelis-backend-c --doc
+
+      - name: Publish verified outputs and clean cache state
+        if: always() && steps.build-cache.outputs.state-path != ''
+        uses: Chelis-Lang/ci/actions/publish-build-cache@0b6a14078e56e6af9cd76eca09b9419f1c84f19b
+        with:
+          state-path: ${{ steps.build-cache.outputs.state-path }}
 
   no-ai-authorship:
     name: No AI authorship markers
@@ -1607,17 +1582,14 @@ jobs:
         if: runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@0b5faba5025fade929194b46a9e52e43fec63462
-
-      - name: Activate project CI environment
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
-        run: python scripts/ci_devenv.py
+      - name: Set up project CI
+        id: build-cache
+        uses: ./.github/actions/setup-project-ci
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}
+          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', 'nix/ci-*.nix', '.kache.toml') }}
 
       - name: Install shared-skill validator dependency
         run: uv pip install --python "$PYO3_PYTHON" PyYAML==6.0.3
@@ -1682,3 +1654,9 @@ jobs:
 
       - name: Build mdBook
         run: mdbook build docs/book
+
+      - name: Publish verified outputs and clean cache state
+        if: always() && steps.build-cache.outputs.state-path != ''
+        uses: Chelis-Lang/ci/actions/publish-build-cache@0b6a14078e56e6af9cd76eca09b9419f1c84f19b
+        with:
+          state-path: ${{ steps.build-cache.outputs.state-path }}

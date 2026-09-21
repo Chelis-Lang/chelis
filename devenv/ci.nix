@@ -10,13 +10,7 @@
       ...
     }:
     {
-      # Cargo's OpenBLAS consumer uses LP64, not Nixpkgs' x86_64 ILP64 default.
-      # Keep its headers and runtime library on the same integer ABI.
-      overlays = [
-        (_final: prev: {
-          openblas = prev.openblas.override { blas64 = false; };
-        })
-      ];
+      imports = [ ../nix/ci-openblas.nix ];
 
       # Clang's setup hook overwrites CC while mkShell collects packages.
       # Reassert the CI C provider after those hooks, before commands run.
@@ -44,6 +38,11 @@
         ++ lib.optionals pkgs.stdenv.isLinux [ pkgs.gfortran ];
 
       env = {
+        # The schema-transition oracle runs in the default development profile,
+        # not ordinary CI. Do not realize its second Kache build for every job.
+        KACHE_SCHEMA_27_WRAPPER = lib.mkForce "";
+        # Shared compiler-cache entries require non-incremental compilation.
+        CARGO_INCREMENTAL = "0";
         # The wrapper's Bash %q response syntax cannot preserve arbitrary path bytes.
         NIX_CC_USE_RESPONSE_FILE = "0";
       }
@@ -61,6 +60,7 @@
         LD_LIBRARY_PATH = lib.makeLibraryPath [
           config.languages.python.package
           pkgs.stdenv.cc.cc.lib
+          pkgs.gfortran.cc.lib
           pkgs.openblas
           pkgs.gmp
           pkgs.mpfr
@@ -69,4 +69,22 @@
         LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
       };
     };
+
+  # Only the SMT lane realizes the solver closure. Every other CI worker keeps
+  # the smaller base profile and its own existing feature selection.
+  profiles.ci-smt = {
+    extends = [ "ci" ];
+    module =
+      { pkgs, lib, ... }:
+      let
+        cvc5 = import ../nix/ci-cvc5.nix {
+          inherit pkgs lib;
+          root = ../.;
+        };
+      in
+      {
+        env.CVC5_DIR = "${cvc5.dir}";
+        outputs.cvc5 = cvc5.dir;
+      };
+  };
 }
