@@ -2235,8 +2235,10 @@ fn transfer(
             return Err(OwnershipError::JoinMismatch {
                 unit: unit.name.clone(),
                 block: target.id.0,
-                expected: ids(expected),
-                actual: ids(&next),
+                only_here: owner_difference(unit, &next, expected),
+                only_earlier: owner_difference(unit, expected, &next),
+                here_count: next.len(),
+                earlier_count: expected.len(),
             });
         }
     } else {
@@ -2445,8 +2447,19 @@ fn check_terminal(
     }
 }
 
-fn ids(owners: &BTreeSet<OwnerId>) -> BTreeSet<u32> {
-    owners.iter().map(|owner| owner.0).collect()
+/// The owners live in `from` and not in `to`, labelled with their source
+/// binding names. A join mismatch is only actionable if the reader can see
+/// which owner the two paths disagree about (chelis#2122).
+fn owner_difference(unit: &Unit, from: &BTreeSet<OwnerId>, to: &BTreeSet<OwnerId>) -> String {
+    let labels = from
+        .difference(to)
+        .map(|owner| crate::ownership::render::owner_label(unit, *owner))
+        .collect::<Vec<_>>();
+    if labels.is_empty() {
+        "none".to_string()
+    } else {
+        labels.join(", ")
+    }
 }
 
 fn incomplete(unit: &Unit, owner: OwnerId, missing: &'static str) -> OwnershipError {
