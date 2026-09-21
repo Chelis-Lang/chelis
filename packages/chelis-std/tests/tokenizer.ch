@@ -1,5 +1,6 @@
 module Std.Tests.Tokenizer
 import Std.Tokenizer (Tokenizer, BpeTokenizer, batch_encode, decode, encode, try_load_tokenizer)
+import Std.Text (join)
 import Std.Test (assert_eq, assert_true, fail)
 def make_ab_tokenizer() -> Tokenizer = {
   vocab = dict_of([("a", cast(1, i64)), ("b", cast(2, i64))])
@@ -108,6 +109,71 @@ def test_try_load_tokenizer_accepts_an_empty_vocab_and_merge_list() -> unit ! { 
     | None => fail("an empty vocab and merge list is well-formed")
   }
 }
+-- The eight cases below pin `Std.Tokenizer`'s behaviour on inputs a real
+-- tokenizer.json can carry and that the seven above do not reach. They also
+-- serve as the differential oracle for the [05-OP-54]/[05-OP-67] rewrite of
+-- the three JSON entry builders: this file is source, and `Std.*` resolves
+-- through the bundle embedded in whichever `chelis` runs it, so running it
+-- under a pre-rewrite and a post-rewrite binary compares the two
+-- implementations on identical input. Every value here was taken under both
+-- and agreed.
+def test_try_load_tokenizer_keeps_the_last_duplicate_vocab_key() -> unit ! { Test, IO } = {
+  path = written("/tmp/chelis_std_test_tokenizer_dupvocab.json", bpe_json("{\"<unk>\":0,\"a\":1,\"a\":2}", "[]"))
+  match try_load_tokenizer(path) with {
+    | Some(tok) => assert_eq(encode_csv(tok, "a"), "2", "a repeated vocab key resolves to its last binding")
+    | None => fail("a duplicate vocab key is well-formed JSON and must load")
+  }
+}
+def test_try_load_tokenizer_keeps_the_first_rank_for_a_duplicate_merge() -> unit ! { Test, IO } = {
+  path = written("/tmp/chelis_std_test_tokenizer_dupmerge.json", bpe_json("{\"<unk>\":0,\"a\":1,\"b\":2,\"ab\":3}", "[\"a b\",\"a b\"]"))
+  match try_load_tokenizer(path) with {
+    | Some(tok) => assert_eq(encode_csv(tok, "ab"), "3", "a repeated merge line still merges once")
+    | None => fail("a duplicate merge line is well-formed and must load")
+  }
+}
+def test_try_load_tokenizer_rejects_a_float_vocab_value() -> unit ! { Test, IO } = {
+  path = written("/tmp/chelis_std_test_tokenizer_floatval.json", bpe_json("{\"a\":1.5}", "[]"))
+  match try_load_tokenizer(path) with {
+    | Some(_) => fail("a float vocab id is not an i64 and must reject the document")
+    | None => assert_true(true, "a float vocab value yields None")
+  }
+}
+def test_try_load_tokenizer_accepts_a_negative_vocab_id() -> unit ! { Test, IO } = {
+  path = written("/tmp/chelis_std_test_tokenizer_negid.json", bpe_json("{\"<unk>\":0,\"a\":-4}", "[]"))
+  match try_load_tokenizer(path) with {
+    | Some(tok) => assert_eq(encode_csv(tok, "ab"), "-4,0", "a negative id is an exact i64, not a rejection")
+    | None => fail("a negative vocab id is representable and must load")
+  }
+}
+def test_try_load_tokenizer_preserves_an_id_beyond_f64_integer_precision() -> unit ! { Test, IO } = {
+  path = written("/tmp/chelis_std_test_tokenizer_bigint.json", bpe_json("{\"<unk>\":0,\"a\":9007199254740993}", "[]"))
+  match try_load_tokenizer(path) with {
+    | Some(tok) => assert_eq(encode_csv(tok, "ab"), "9007199254740993,0", "2^53+1 survives ingestion exactly, with no float funnel")
+    | None => fail("2^53+1 is an exact i64 and must load")
+  }
+}
+def test_try_load_tokenizer_splits_a_merge_line_at_its_first_space() -> unit ! { Test, IO } = {
+  path = written("/tmp/chelis_std_test_tokenizer_multispace.json", bpe_json("{\"<unk>\":0,\"a\":1,\"b\":2}", "[\"a  b\"]"))
+  match try_load_tokenizer(path) with {
+    | Some(tok) => assert_eq(encode_csv(tok, "ab"), "1,2", "the key is split at the first space, so \"a  b\" does not merge \"ab\"")
+    | None => fail("a multi-space merge line is well-formed and must load")
+  }
+}
+def test_try_load_tokenizer_rejects_a_malformed_leading_merge_line() -> unit ! { Test, IO } = {
+  path = written("/tmp/chelis_std_test_tokenizer_leadbad.json", bpe_json("{\"<unk>\":0,\"a\":1}", "[\"nospace\",\"a b\"]"))
+  match try_load_tokenizer(path) with {
+    | Some(_) => fail("a malformed first merge line must reject the whole document")
+    | None => assert_true(true, "position does not matter: a leading bad line rejects like a trailing one")
+  }
+}
+def test_try_load_tokenizer_handles_non_ascii_vocab_tokens() -> unit ! { Test, IO } = {
+  path = written("/tmp/chelis_std_test_tokenizer_unicode.json", bpe_json("{\"<unk>\":0,\"é\":2}", "[]"))
+  match try_load_tokenizer(path) with {
+    | Some(tok) => assert_eq(encode_csv(tok, "éb"), "2,0", "a non-ASCII token is one Unicode scalar value, not its bytes")
+    | None => fail("a non-ASCII vocab token must load")
+  }
+}
+def encode_csv(tokenizer: Tokenizer, text: string) -> string = join(map(fn (id: i64) -> to_string(id), encode(tokenizer, text)), ",")
 def test_try_load_tokenizer_missing_path_returns_none() -> unit ! { Test, IO } =
   match try_load_tokenizer("/tmp/chelis_std_test_tokenizer_absent.json") with {
     | Some(_) => fail("a missing path must return None")
