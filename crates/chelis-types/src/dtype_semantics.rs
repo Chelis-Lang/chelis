@@ -671,8 +671,8 @@ impl ReduceWindowGradOp {
 impl ArgReduceOp {
     pub const fn name(self) -> &'static str {
         match self {
-            Self::Argmax => "argmax",
-            Self::Argmin => "argmin",
+            Self::Argmax => "argmax_reduce",
+            Self::Argmin => "argmin_reduce",
         }
     }
 
@@ -2509,17 +2509,8 @@ fn reduction_extreme(
     lhs: ScalarValue,
     rhs: ScalarValue,
     take_max: bool,
-    ignore_nan: bool,
 ) -> Result<ScalarValue, NumericKernelError> {
     require_same_dtype(op.name(), lhs, rhs)?;
-    if ignore_nan {
-        if scalar_is_nan(lhs) {
-            return Ok(rhs);
-        }
-        if scalar_is_nan(rhs) {
-            return Ok(lhs);
-        }
-    }
     let compare = if take_max {
         CompareOp::Gt
     } else {
@@ -2542,16 +2533,14 @@ fn reduce_sum_group(
     group: &[usize],
     accumulator: Prim,
 ) -> Result<ScalarValue, NumericKernelError> {
-    let zero = reduction_seed(op, accumulator, 0, 0.0)?;
-    let mut acc = zero;
-    for &index in group {
-        acc = reduction_add(
-            op,
-            acc,
-            scalar_at_reduction_width(op, input, index, accumulator)?,
-        )?;
+    let leaves = group
+        .iter()
+        .map(|&index| scalar_at_reduction_width(op, input, index, accumulator))
+        .collect::<Result<Vec<_>, _>>()?;
+    match checked_adjacent_pair_fold(leaves, |left, right| reduction_add(op, left, right))? {
+        Some(value) => Ok(value),
+        None => reduction_seed(op, accumulator, 0, 0.0),
     }
-    Ok(acc)
 }
 
 fn reduce_group(
@@ -2561,19 +2550,16 @@ fn reduce_group(
     accumulator: Prim,
 ) -> Result<ScalarValue, NumericKernelError> {
     match op {
-        TensorReduceOp::Sum { .. } => {
-            let leaves = group
-                .iter()
-                .map(|&index| scalar_at_reduction_width(op, input, index, accumulator))
-                .collect::<Result<Vec<_>, _>>()?;
-            match checked_adjacent_pair_fold(leaves, |left, right| reduction_add(op, left, right))?
-            {
-                Some(value) => Ok(value),
-                None => reduction_seed(op, accumulator, 0, 0.0),
-            }
-        }
+        TensorReduceOp::Sum { .. } => reduce_sum_group(op, input, group, accumulator),
         TensorReduceOp::ReduceWindowSum => reduce_sum_group(op, input, group, accumulator),
         TensorReduceOp::ReduceWindowMean => {
+            if group.is_empty() {
+                return Err(NumericTrap::Domain {
+                    op: op.name(),
+                    prim: input.prim(),
+                }
+                .into());
+            }
             let sum = reduce_sum_group(op, input, group, accumulator)?;
             let divisor = reduction_seed(op, accumulator, group.len() as i64, group.len() as f64)?;
             reduction_div_float(op, sum, divisor)
@@ -2593,37 +2579,27 @@ fn reduce_group(
         | TensorReduceOp::MinReduce
         | TensorReduceOp::ReduceWindowMax
         | TensorReduceOp::ReduceWindowMin => {
+            let Some((&first_index, remaining)) = group.split_first() else {
+                return Err(NumericTrap::Domain {
+                    op: op.name(),
+                    prim: input.prim(),
+                }
+                .into());
+            };
             let take_max = matches!(
                 op,
                 TensorReduceOp::MaxReduce | TensorReduceOp::ReduceWindowMax
             );
-            let integer_identity = if accumulator.is_integer() {
-                let (lo, hi) = accumulator
-                    .integer_range()
-                    .expect("integer reduction accumulators have fixed bounds");
-                if take_max { lo } else { hi }
-            } else if take_max {
-                i64::MIN
-            } else {
-                i64::MAX
-            };
-            let float_identity = if take_max {
-                f64::NEG_INFINITY
-            } else {
-                f64::INFINITY
-            };
-            let mut acc = reduction_seed(op, accumulator, integer_identity, float_identity)?;
-            let propagate_nan = matches!(op, TensorReduceOp::MaxReduce | TensorReduceOp::MinReduce);
-            let ignore_nan = matches!(
-                op,
-                TensorReduceOp::ReduceWindowMax | TensorReduceOp::ReduceWindowMin
-            );
-            for &index in group {
-                let value = scalar_at_reduction_width(op, input, index, accumulator)?;
-                if propagate_nan && scalar_is_nan(value) {
+            let mut acc = input.scalar_at(first_index);
+            if scalar_is_nan(acc) {
+                return Ok(acc);
+            }
+            for &index in remaining {
+                let value = input.scalar_at(index);
+                if scalar_is_nan(value) {
                     return Ok(value);
                 }
-                acc = reduction_extreme(op, acc, value, take_max, ignore_nan)?;
+                acc = reduction_extreme(op, acc, value, take_max)?;
             }
             Ok(acc)
         }
@@ -2785,14 +2761,20 @@ pub fn arg_reduce_tensor_groups(
     let mut indices = Vec::with_capacity(groups.len());
     for group in groups {
         if group.is_empty() {
-            indices.push(-1);
-            continue;
+            return Err(NumericTrap::Domain {
+                op: op.name(),
+                prim: Prim::Int64,
+            }
+            .into());
         }
         let mut best_value = input.scalar_at(group[0]);
         let mut best_index = 0i64;
         for (axis_index, &input_index) in group.iter().enumerate().skip(1) {
             let candidate = input.scalar_at(input_index);
-            if compare_scalars(op.compare(), candidate, best_value)? {
+            if !scalar_is_nan(best_value)
+                && (scalar_is_nan(candidate)
+                    || compare_scalars(op.compare(), candidate, best_value)?)
+            {
                 best_value = candidate;
                 best_index = axis_index as i64;
             }
@@ -2843,10 +2825,16 @@ pub fn reduce_window_grad_tensor_groups(
             accumulator: prim,
             result: prim,
         })?;
-    let zero = reduction_seed(forward_op, accumulator, 0, 0.0)?;
-    let mut output = vec![zero; input.len()];
+    let mut output = vec![Vec::<ScalarValue>::new(); input.len()];
 
     for (group_index, group) in groups.iter().enumerate() {
+        if group.is_empty() {
+            return Err(NumericTrap::Domain {
+                op: forward_op.name(),
+                prim,
+            }
+            .into());
+        }
         let mut contribution =
             scalar_at_reduction_width(forward_op, cotangent, group_index, accumulator)?;
         if op == ReduceWindowGradOp::Mean {
@@ -2858,38 +2846,56 @@ pub fn reduce_window_grad_tensor_groups(
             )?;
             contribution = reduction_div_float(forward_op, contribution, divisor)?;
         }
-        let extreme = match op {
-            ReduceWindowGradOp::Max | ReduceWindowGradOp::Min => {
-                Some(reduce_group(forward_op, input, group, accumulator)?)
-            }
-            ReduceWindowGradOp::Sum | ReduceWindowGradOp::Mean => None,
-        };
 
-        for &input_index in group {
-            let selected = match extreme {
-                Some(extreme) => {
-                    let value =
-                        scalar_at_reduction_width(forward_op, input, input_index, accumulator)?;
-                    compare_scalars(CompareOp::Eq, value, extreme)?
+        match op {
+            ReduceWindowGradOp::Sum | ReduceWindowGradOp::Mean => {
+                for &input_index in group {
+                    output[input_index].push(contribution);
                 }
-                None => true,
-            };
-            if selected {
-                output[input_index] = reduction_add(forward_op, output[input_index], contribution)?;
+            }
+            ReduceWindowGradOp::Max | ReduceWindowGradOp::Min => {
+                if let Some(&first_nan) = group
+                    .iter()
+                    .find(|&&input_index| scalar_is_nan(input.scalar_at(input_index)))
+                {
+                    output[first_nan].push(contribution);
+                    continue;
+                }
+
+                let extreme = reduce_group(forward_op, input, group, accumulator)?;
+                let mut selected = Vec::new();
+                for &input_index in group {
+                    if compare_scalars(CompareOp::Eq, input.scalar_at(input_index), extreme)? {
+                        selected.push(input_index);
+                    }
+                }
+                let divisor = reduction_seed(
+                    forward_op,
+                    accumulator,
+                    i64::try_from(selected.len()).expect("window tie count fits i64"),
+                    selected.len() as f64,
+                )?;
+                let share = reduction_div_float(forward_op, contribution, divisor)?;
+                for input_index in selected {
+                    output[input_index].push(share);
+                }
             }
         }
     }
 
     let values = output
         .into_iter()
-        .map(|value| reduction_result_scalar(forward_op, value, prim))
+        .map(|contributions| {
+            let value = match checked_adjacent_pair_fold(contributions, |left, right| {
+                reduction_add(forward_op, left, right)
+            })? {
+                Some(value) => value,
+                None => reduction_seed(forward_op, accumulator, 0, 0.0)?,
+            };
+            reduction_result_scalar(forward_op, value, prim)
+        })
         .collect::<Result<Vec<_>, NumericKernelError>>()?;
-    finalize_tensor(
-        op.name(),
-        prim,
-        RawTensor::Float(values.iter().map(ScalarValue::as_f64_lossy).collect()),
-    )
-    .map_err(Into::into)
+    Ok(tensor_from_scalars(prim, &values))
 }
 
 fn splat_storage(value: ScalarValue, len: usize) -> TensorStorage {
@@ -5151,20 +5157,115 @@ mod tests {
     }
 
     #[test]
-    fn value_and_window_extrema_keep_their_distinct_nan_rules() {
-        let input =
-            finalize_tensor("test", Prim::F32, RawTensor::Float(vec![f64::NAN, 1.0])).unwrap();
-        assert!(
-            reduce_tensor_groups(TensorReduceOp::MaxReduce, &input, &one_group(2))
-                .unwrap()
-                .element_f64_lossy(0)
-                .is_nan()
-        );
+    fn value_and_window_extrema_preserve_first_nan_and_equal_value_bits() {
+        let first_nan = f32::from_bits(0xffc1_2345);
+        let later_nan = f32::from_bits(0x7fc5_4321);
+        let input = TensorStorage {
+            buf: Buf::F32(vec![first_nan, 1.0, later_nan]),
+        };
+        for op in [
+            TensorReduceOp::MaxReduce,
+            TensorReduceOp::MinReduce,
+            TensorReduceOp::ReduceWindowMax,
+            TensorReduceOp::ReduceWindowMin,
+        ] {
+            let output = reduce_tensor_groups(op, &input, &one_group(3)).unwrap();
+            let StorageView::F32(values) = output.view() else {
+                panic!("f32 extrema must return f32 storage");
+            };
+            assert_eq!(
+                values[0].to_bits(),
+                first_nan.to_bits(),
+                "{} must preserve the first NaN payload and sign",
+                op.name()
+            );
+        }
+
+        let zeros = TensorStorage {
+            buf: Buf::F32(vec![-0.0, 0.0]),
+        };
+        for op in [
+            TensorReduceOp::MaxReduce,
+            TensorReduceOp::MinReduce,
+            TensorReduceOp::ReduceWindowMax,
+            TensorReduceOp::ReduceWindowMin,
+        ] {
+            let output = reduce_tensor_groups(op, &zeros, &one_group(2)).unwrap();
+            let StorageView::F32(values) = output.view() else {
+                panic!("f32 extrema must return f32 storage");
+            };
+            assert_eq!(
+                values[0].to_bits(),
+                (-0.0f32).to_bits(),
+                "{} must preserve the first representation among equal values",
+                op.name()
+            );
+        }
+    }
+
+    #[test]
+    fn reductions_without_empty_identities_trap_domain() {
+        let float = finalize_tensor("test", Prim::F32, RawTensor::Float(vec![])).unwrap();
+        for op in [
+            TensorReduceOp::MaxReduce,
+            TensorReduceOp::MinReduce,
+            TensorReduceOp::ReduceWindowMean,
+            TensorReduceOp::ReduceWindowMax,
+            TensorReduceOp::ReduceWindowMin,
+        ] {
+            assert_eq!(
+                reduce_tensor_groups(op, &float, &[vec![]]),
+                Err(NumericKernelError::Trap(NumericTrap::Domain {
+                    op: op.name(),
+                    prim: Prim::F32,
+                }))
+            );
+        }
+        for op in [ArgReduceOp::Argmax, ArgReduceOp::Argmin] {
+            assert_eq!(
+                arg_reduce_tensor_groups(op, &float, &[vec![]]),
+                Err(NumericKernelError::Trap(NumericTrap::Domain {
+                    op: op.name(),
+                    prim: Prim::Int64,
+                }))
+            );
+        }
+    }
+
+    #[test]
+    fn arg_reductions_select_the_lowest_nan_index() {
+        let input = TensorStorage {
+            buf: Buf::F32(vec![5.0, f32::from_bits(0xffc1_2345), 9.0, f32::NAN]),
+        };
+        for op in [ArgReduceOp::Argmax, ArgReduceOp::Argmin] {
+            assert_eq!(
+                arg_reduce_tensor_groups(op, &input, &one_group(4))
+                    .unwrap()
+                    .to_i64_exact_vec(),
+                Some(vec![1])
+            );
+        }
+    }
+
+    #[test]
+    fn window_sum_and_mean_use_the_canonical_adjacent_pair_tree() {
+        let input = finalize_tensor(
+            "test",
+            Prim::F32,
+            RawTensor::Float(vec![-1.0e-7, 3.0, 16_777_216.0, -33_554_432.0]),
+        )
+        .unwrap();
         assert_eq!(
-            reduce_tensor_groups(TensorReduceOp::ReduceWindowMax, &input, &one_group(2))
+            reduce_tensor_groups(TensorReduceOp::ReduceWindowSum, &input, &one_group(4))
                 .unwrap()
                 .to_f64_lossy_vec(),
-            vec![1.0]
+            vec![-16_777_213.0]
+        );
+        assert_eq!(
+            reduce_tensor_groups(TensorReduceOp::ReduceWindowMean, &input, &one_group(4))
+                .unwrap()
+                .to_f64_lossy_vec(),
+            vec![-4_194_303.25]
         );
     }
 
@@ -5200,7 +5301,7 @@ mod tests {
     }
 
     #[test]
-    fn window_grad_kernel_preserves_selection_ties_and_rejects_dtype_mismatch() {
+    fn window_grad_kernel_splits_ties_and_rejects_dtype_mismatch() {
         let input =
             finalize_tensor("test", Prim::F32, RawTensor::Float(vec![2.0, 2.0, 2.0])).unwrap();
         let cotangent =
@@ -5210,7 +5311,7 @@ mod tests {
             reduce_window_grad_tensor_groups(ReduceWindowGradOp::Max, &input, &cotangent, &groups,)
                 .unwrap()
                 .to_f64_lossy_vec(),
-            vec![4.0, 8.0, 4.0]
+            vec![2.0, 4.0, 2.0]
         );
 
         let wrong = finalize_tensor("test", Prim::F64, RawTensor::Float(vec![4.0, 4.0])).unwrap();
@@ -5221,6 +5322,45 @@ mod tests {
                 lhs: Prim::F32,
                 rhs: Prim::F64,
             })
+        );
+    }
+
+    #[test]
+    fn window_grad_routes_first_nan_and_balances_overlap_add() {
+        let input = TensorStorage {
+            buf: Buf::F32(vec![
+                f32::from_bits(0xffc1_2345),
+                f32::from_bits(0x7fc5_4321),
+                2.0,
+            ]),
+        };
+        let cotangent =
+            finalize_tensor("test", Prim::F32, RawTensor::Float(vec![3.0, 5.0])).unwrap();
+        let groups = vec![vec![0, 1], vec![1, 2]];
+        assert_eq!(
+            reduce_window_grad_tensor_groups(ReduceWindowGradOp::Max, &input, &cotangent, &groups,)
+                .unwrap()
+                .to_f64_lossy_vec(),
+            vec![3.0, 5.0, 0.0]
+        );
+
+        let single = finalize_tensor("test", Prim::F32, RawTensor::Float(vec![0.0])).unwrap();
+        let overlap = finalize_tensor(
+            "test",
+            Prim::F32,
+            RawTensor::Float(vec![-1.0e-7, 3.0, 16_777_216.0, -33_554_432.0]),
+        )
+        .unwrap();
+        assert_eq!(
+            reduce_window_grad_tensor_groups(
+                ReduceWindowGradOp::Sum,
+                &single,
+                &overlap,
+                &[vec![0], vec![0], vec![0], vec![0]],
+            )
+            .unwrap()
+            .to_f64_lossy_vec(),
+            vec![-16_777_213.0]
         );
     }
 
