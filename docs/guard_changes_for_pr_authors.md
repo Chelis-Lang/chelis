@@ -20,11 +20,12 @@ owning design.
 Immediately before the first push, fetch the actual target and rebase onto it
 unless the branch is already based there. Run focused checks and
 `python3 scripts/gate.py --fast`, then publish the initial review candidate.
-Each review round may produce one consolidated repair candidate containing
-every finding currently known from that round.
-Reviewer verification happens on that repaired head while CI runs; it does not
-require a separate verification commit. A clean reviewed head becomes final by
-designation rather than by another push.
+During a review round, consolidate its findings into a local commit and hand
+that exact unpushed head to the standing reviewer. Do not push repair commits
+until the reviewer closes the round. Amend or replace the local commit as needed
+and repeat verification there. Once the round is satisfied, push the exact
+verified head once and let CI validate it. A confirmed in-scope P0 or P1 then
+requires a fresh round, subject to the repository's round cap.
 
 After the pull request exists, do not merge or rebase the target branch merely
 because it advanced. If a real conflict, unsafe prospective merge, or identified
@@ -135,6 +136,36 @@ not enter compiler or Hull workflows. A base-branch retarget is not
 metadata-only. `PR Base Retarget Validation` holds the head pending while fresh
 compiler and Hull dispatches validate the exact new synthetic merge. Wait for
 that receipt and the refreshed acknowledgement/changelog checks.
+
+### Reading the expansion report
+
+The report differences every observed failure against the newest complete
+nightly default-branch run and reports three disjoint counts: introduced,
+inherited, and unrun. It is clean when nothing was introduced, so a clean
+report is a real result rather than an absence of coverage, and a red one
+names the rows to act on. Read the counts, not the shard timings. An
+introduced row marked `absent` means the baseline never ran that test, so it
+confirms nothing and you establish the verdict yourself. Inherited rows belong
+to the default branch, not the candidate; do not repair them in the pull
+request. An unrun count is coverage the lane did not reach, never evidence of
+a pass, and it is the number to cite when a claim needs the coverage the
+expansion did not deliver. A report that says it had no usable baseline has
+classified nothing: it is not clean. When the message is that no run retains
+every artifact, redispatch once a complete nightly exists; when it is that no
+run is contained in the candidate's base, a later nightly is further away
+rather than nearer, so update the candidate's base instead, under the rules
+above.
+
+The baseline is the newest complete nightly the candidate's base contains,
+which is usually a few commits behind that base rather than equal to it. Over
+that distance the classification errs in both directions, and only one of them
+is safe. A test that went red on `main` after the baseline is reported as
+introduced, so an introduced row you cannot attribute to the candidate is worth
+checking against `main` before repairing it. A test that was failing at the
+baseline, was fixed on `main` since, and is broken again by the candidate
+reports as inherited, so an inherited row is not proof the candidate is
+innocent of it. The summary prints the distance; treat a large one as a reason
+to read the rows rather than the counts.
 
 ## Adding, moving or removing tests
 

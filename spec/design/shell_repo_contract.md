@@ -4,7 +4,7 @@
 [`chelis_canonical_reference.md`](chelis_canonical_reference.md) §Shell
 Ecosystem table (`nautilus`, `coral`, `shoals`, `octant`, `school`, `darwin`,
 `hull`, `hydrostatic`, `beacon`, and any future shell). Made binding by `AGENTS.md`
-§Downstream Shell Contract. Changes to this contract land in the monorepo
+§Pointers, Downstream shells. Changes to this contract land in the monorepo
 first and propagate to every shell per §10.
 
 **Key words** MUST / SHOULD / MAY are RFC-2119. Conditional requirements
@@ -121,7 +121,7 @@ School exemplar: [`school/AGENTS.md`](https://github.com/Chelis-Lang/school/blob
   (pre-chelisup form): the pin-resolving launcher written by
   [`scripts/install_chelis_toolchain.py`](https://github.com/Chelis-Lang/school/blob/main/scripts/install_chelis_toolchain.py).
 - **Python is uv-managed, never the system installation** (this surfaces the
-  monorepo `AGENTS.md` §Scripting Language Policy for shells): repo scripts
+  monorepo `AGENTS.md` §Python And Scripts for shells): repo scripts
   are stdlib-only and invoked via `python3`/`uv run --python X.Y`; any
   dependency-bearing harness (parity oracles etc.) is its **own uv project**
   (`pyproject.toml` + `uv.lock`, `uv sync --frozen` in CI), keeping heavy
@@ -338,6 +338,50 @@ Large bumps SHOULD get a one-off migration doc
 (School template: [`spec/design/migrate_0.7.24.md`](https://github.com/Chelis-Lang/school/blob/main/spec/design/migrate_0.7.24.md))
 pre-staging required changes, the unlock wave, and the re-probe table.
 
+### 7.1 Bump wave audit: what `conform bump` does not do
+
+`chelis +<new-version> reef conform bump <new-version>` is a mechanical
+starter, not a green-PR oracle. Run it from a fresh shell worktree with the new
+toolchain selected explicitly, then audit every item below:
+
+- Inspect both its exit status and `git status`. Pre-conformance repos can fail
+  or exit zero after a partial edit and materialize orphaned `.claude/`,
+  `.codex/`, or `agent-skills/` content; remove that half-retrofit and defer
+  full adoption to a separate `conform init` change.
+- Cascade every dependency surface manually: sibling-shell versions in
+  `reef.toml`, sibling tag/version variables in workflows, `[chelis-src]`'s
+  exact `CHELIS_PIN_COMMIT`, and every non-frozen nested project `reef.toml`.
+  The standard pin guard does not prove tag-to-SHA agreement or cover sibling
+  and nested pins.
+- Audit the shell's own package version, CHANGELOG convention, and hard-coded
+  version strings in both CI and release workflows before tagging. A workflow
+  at the tagged commit cannot be repaired by merely rerunning the failed
+  release.
+- Treat `reef.lock` by entry authority. Regenerate `bundled` toolchain entries.
+  Never commit `local_registry` entries without `remote_origin` or hashes
+  produced by a private local registry. Keep published dependency entries at
+  the last published release during a cascade block, and ensure `reef build`
+  precedes any `chelis test` or `chelis prove` step that reads the committed
+  lock.
+- Re-run `conform audit` and repair every live `docs/UPSTREAM_BUGS.md` entry to
+  carry its own `chelis#NNN` or `docs/issue_drafts/<file>` citation. Nested
+  detail bullets must not accidentally parse as uncited independent entries.
+- Verify a claimed acceptance command by opening the workflow and locating the
+  exact step. If the authoritative campaign is expensive, compare a bounded
+  pilot at the old and new pins on identical sources; only the delta supports
+  a "no new regressions" claim.
+- When a skipped version range crosses canonical Surf v0.19, run
+  `chelis migrate surf --from 0.18 --inplace` over maintained `.ch` sources,
+  then handle semantic migrations the tool cannot choose: explicit literal
+  suffixes, i64 extents, and checked `cast` versus truncating `cast_trunc`.
+- `chelis test` deliberately does not run the style gate. A shell that
+  generates Chelis source must run `chelis check` or `chelis fmt --check` over
+  emitted files; do not hide formatter drift behind a measured threshold in
+  the generator.
+- Finish with `reef build`, the shell's real CI-equivalent gates, and exact
+  review of the generated diff. A successful `conform bump` alone is never
+  completion evidence.
+
 ## 8. Agent surface & skills (MUST)
 
 - The shared skill set (`redteam-exec`, `spec-sync`, `phase-gate`,
@@ -356,7 +400,7 @@ pre-staging required changes, the unlock wave, and the re-probe table.
 - `.claude/skills` and `.codex/skills` are **symlinks** to `agent-skills/`;
   `.claude/commands/` and `.codex/commands/` wrappers stay mirrored; the
   `red-team` alias stays wired to `redteam-exec` (per monorepo `AGENTS.md`
-  §Shared Local Skills). `conform sync` wires the skill-dir symlinks.
+  §Pointers, Shared skills). `conform sync` wires the skill-dir symlinks.
 - Because the set is materialized from the pinned toolchain, it is always in
   lockstep with the monorepo at the shell's pin after applying the shell's
   declared additions, whole-skill exclusions, and section selectors — a shell

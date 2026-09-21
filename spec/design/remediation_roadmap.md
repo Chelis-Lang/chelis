@@ -29,7 +29,7 @@ The plan set: [`dtype_semantics.md`](dtype_semantics.md) ([#729]), [`loud_unsupp
 This map is scoped to the 2026-07 numeric audit's plan set and stays that way.
 The `meta (the class)` column names a META issue per row; that pairing is
 historical and is NOT the pattern for a new class - `AGENTS.md` section Issue
-Tracking Conventions owns the one-tracker-per-class rule now.
+Tracking owns the one-tracker-per-class rule now.
 
 ### #731 work after the original four phases
 

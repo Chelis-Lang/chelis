@@ -2,6 +2,7 @@
 
 For the actions to take when preparing a PR, read
 [Changing tests, inventories and protected contracts](guard_changes_for_pr_authors.md).
+[The local gate](local_gate.md) records what `scripts/gate.py` runs locally.
 
 Ordinary PRs and main pushes use Linux. Passing required PR checks is **not a phase acceptance result** for a full or feature-specific oracle that runs nightly.
 

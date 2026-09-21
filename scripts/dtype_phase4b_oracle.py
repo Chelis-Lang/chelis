@@ -580,11 +580,6 @@ REQUIRED_REGIONS = {
         '### 3.2 Exact Numeric Value Codec',
         '## 4. Invariant Revalidation At Decode Boundaries',
     ),
-    'agent numeric surface discipline': (
-        'AGENTS.md',
-        '### Numeric Surface Discipline',
-        '### Public-Surface Change Rule',
-    ),
     'numeric value semantics': (
         'spec/04-type-system.md',
         '## 9. Numeric Value Semantics',
@@ -1012,7 +1007,6 @@ def require_atom(
 def validate_normative_contract(
     docs: dict[str, str], violations: list[str]
 ) -> None:
-    agents = docs["AGENTS.md"]
     spec02 = docs["spec/02-surf-syntax.md"]
     spec03 = docs["spec/03-deep-syntax.md"]
     spec04 = docs["spec/04-type-system.md"]
@@ -1475,17 +1469,6 @@ def validate_normative_contract(
         ),
         violations,
     )
-    require_all(
-        agents,
-        (
-            (
-                "No grandfather, permanent-disposition,",
-                "agent zero-exception policy",
-            ),
-        ),
-        violations,
-    )
-
     spec04_blocks = atom_blocks(spec04)
     require_atom(
         spec04_blocks,

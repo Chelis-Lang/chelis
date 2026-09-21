@@ -1412,7 +1412,7 @@ named feature to a product crate and must go red. It is deliberately
 NOT presented as a derived guard over "any runtime switch": the
 repository legitimately carries a sanctioned test-selector
 convention (`CHELIS_TEST_*`, `CHELIS_STYLE_GATE_DISABLE` - the
-latter documented in the repo Style Gate section) at dozens of
+latter documented in `AGENTS.md` §Writing Chelis Source) at dozens of
 product-source sites, and product crates carry eight legitimate
 features; no derivation distinguishes those from a forbidden switch,
 so a guard claiming to derive the class would be either red on day
