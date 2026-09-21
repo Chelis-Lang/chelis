@@ -9507,12 +9507,33 @@ impl BinaryElementwiseFunc {
 /// between that gate and this emitter, and is rejected loudly rather than
 /// defaulted — silently substituting `[0, 1)` for an unreadable bound is the
 /// exact chelis#776 failure this must not reintroduce.
+/// Fold a `uniform_like` bound to the exact compile-time value the emitter
+/// bakes into the generated call.
+///
+/// chelis#2316: the `cast` arm used to recurse on the operand and IGNORE the
+/// node's target type entirely — it did not even make the float/int
+/// distinction the IR lane makes. So `cast(cast(0.30000001, f16), f32)` folded
+/// to the innermost literal and the emitted
+/// `chelis_uniform_sample_f32(..., 0x3e99999au, ...)` sampled an interval the
+/// program never declared, ~1600 f32 ULPs from the declared bound. Both
+/// compiled lanes did this identically, so they agreed with each other and
+/// diverged from `eval`, which rounds at every cast.
+///
+/// The rounding rule itself lives in
+/// `chelis_types::dtype_semantics::round_float_bound`, shared with the IR
+/// lane's `extract_f64_value`, so the two folds cannot drift apart again. A
+/// non-float target yields `None` and the caller goes loud (chelis#776).
 fn static_float_bound(expr: Option<&HostExpr>) -> Option<f64> {
     match &expr?.kind {
         HostExprKind::Float(value) => Some(*value),
         HostExprKind::Int(value) => Some(*value as f64),
-        HostExprKind::Builtin { name, args, .. } if name == "cast" => {
-            static_float_bound(args.first())
+        HostExprKind::Builtin { name, args, ty } if name == "cast" => {
+            let inner = static_float_bound(args.first())?;
+            let (prim, surface) = checked_cast_abi_axis(ty).ok()?;
+            if surface != CheckedCastSurface::Scalar {
+                return None;
+            }
+            chelis_types::dtype_semantics::round_float_bound(prim, inner)
         }
         HostExprKind::Builtin { name, args, .. } if name == "neg" => {
             static_float_bound(args.first()).map(|value| -value)

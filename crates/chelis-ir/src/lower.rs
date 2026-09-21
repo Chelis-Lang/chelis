@@ -17815,12 +17815,19 @@ impl<'program> LowerCtx<'program> {
     /// the statically-resolvable, value-carrying wrappers a numeric literal
     /// can arrive in: a `(lit ...)` node, a `neg(...)` of an extractable value,
     /// and a `cast(..., <float prim>)` of an extractable value. A float-target
-    /// cast preserves the numeric value (the f32/f64 sampler narrows the same
-    /// bits in every lane), so it is folded through; an integer-target cast
-    /// *changes* the value by truncation, so it is NOT folded — it returns
-    /// `None` and the caller fails loudly rather than baking a guessed
-    /// truncation into codegen. Any other form (a runtime variable, arithmetic,
-    /// a `shape()` read) also returns `None`.
+    /// cast is folded through its target's rounding via
+    /// `chelis_types::dtype_semantics::round_float_bound`, which is the single
+    /// definition of that rounding; an integer-target cast *changes* the value
+    /// by truncation, so it is NOT folded — it returns `None` and the caller
+    /// fails loudly rather than baking a guessed truncation into codegen. Any
+    /// other form (a runtime variable, arithmetic, a `shape()` read) also
+    /// returns `None`.
+    ///
+    /// chelis#2316: this used to claim "a float-target cast preserves the
+    /// numeric value" and recurse straight through. That is true only for
+    /// targets that cannot narrow the value it already holds; f16 and bf16
+    /// round, so the fold kept the innermost literal and the compiled lanes
+    /// sampled an interval the source never declared.
     ///
     /// chelis#776: this used to see through neither `cast` nor `neg`, so a
     /// wrapped bound fell to a caller `unwrap_or(default)` and silently
@@ -17849,8 +17856,15 @@ impl<'program> LowerCtx<'program> {
                         let target = Self::try_extract_prim(target)
                             .or_else(|| static_controls::type_prim(target, substitutions));
                         match target {
+                            // chelis#2316: honour the cast's TARGET dtype.
+                            // Recursing straight through kept the innermost
+                            // literal, which is only correct when the target
+                            // cannot narrow; `cast(cast(x, f16), f32)` then
+                            // baked an unrounded bound both compiled lanes
+                            // agreed on and `eval` did not.
                             Some(prim) if prim.is_float() => {
-                                Self::extract_f64_value(inner, substitutions)
+                                let inner = Self::extract_f64_value(inner, substitutions)?;
+                                chelis_types::dtype_semantics::round_float_bound(prim, inner)
                             }
                             _ => None,
                         }
