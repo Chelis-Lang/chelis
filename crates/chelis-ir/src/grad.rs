@@ -399,6 +399,7 @@ pub fn risc_op_name(op: &RiscOp) -> &'static str {
         RiscOp::Compare(kind) => kind.surf_name(),
         RiscOp::Logical(kind) => kind.surf_name(),
         RiscOp::Where => "where",
+        RiscOp::GuardedFail { .. } => "guarded_fail",
         RiscOp::MaxElem => "max_elem",
         RiscOp::MinElem => "min_elem",
         RiscOp::ExtremaAdjoint { .. } => "extrema_adjoint",
@@ -914,6 +915,26 @@ fn compute_adjoints(
             Some(vec![(a, za), (b, zb)])
         }
         RiscOp::Logical(_) => None,
+        // chelis#1464 / [05-OP-68]: the condition is discrete and takes zero
+        // cotangent (spec/06 §2.10.1). The fallback takes the result's
+        // cotangent UNCHANGED — not a `Where`-style masked cotangent —
+        // because whenever the forward program produced a result at all, that
+        // result was the fallback: the other path aborted. The forward
+        // `GuardedFail` node stays live in the forward DAG, so the abort is
+        // still evaluated and still fires; differentiation does not speculate
+        // past it ([05-OP-68] Result, spec/06 §5.2).
+        RiscOp::GuardedFail { .. } => {
+            let condition = node.inputs[0];
+            let fallback = node.inputs[1];
+            let condition_ty = forward.get(condition).unwrap().output_type.clone();
+            let zero_condition = dag.add_node(
+                RiscOp::synth_const(condition_ty.precision, 0.0),
+                vec![],
+                condition_ty,
+                None,
+            );
+            Some(vec![(condition, zero_condition), (fallback, g)])
+        }
         RiscOp::Where => {
             let condition = node.inputs[0];
             let then_value = node.inputs[1];

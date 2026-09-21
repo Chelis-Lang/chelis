@@ -7531,6 +7531,11 @@ struct LowerCtx<'program> {
     /// each draw consume the handled stream only when its executed path is
     /// active at runtime.
     random_path_condition: Option<NodeId>,
+    /// chelis#1464: depth of `if` branches currently being lowered. A
+    /// `fail(...)` lowered at depth > 0 that `lower_if` did NOT recognize
+    /// directly is an INDIRECT trap (behind a helper call or a `let`); it
+    /// has no [05-OP-68] guard and must not fall back to a placeholder.
+    if_branch_depth: usize,
     execution: Option<crate::evaluation::ExecutionMetadata>,
     execution_scope: crate::evaluation::ScopeId,
     resource_policy: crate::evaluation::ResourcePolicy,
@@ -7681,6 +7686,7 @@ impl<'program> LowerCtx<'program> {
             random_seed: None,
             random_counter: 0,
             random_path_condition: None,
+            if_branch_depth: 0,
             execution: None,
             execution_scope: crate::evaluation::ScopeId(0),
             resource_policy: crate::evaluation::ResourcePolicy::Legacy,
@@ -14623,6 +14629,17 @@ impl<'program> LowerCtx<'program> {
             // order; `lower_if` ties the placeholder's shape to the sibling
             // branch via a shape-dep).
             "fail" => {
+                // chelis#1464: `lower_if` converts a DIRECT `fail(...)`
+                // branch into an [05-OP-68] guard before reaching here, so a
+                // `fail` arriving at `if`-branch depth is an INDIRECT one —
+                // behind a helper call, or after a `let`. It has no guard,
+                // and the placeholder below would be selected as the branch
+                // value exactly as in the original defect. Reject instead.
+                if self.if_branch_depth > 0 {
+                    return self.reject_indirect_branch_fail(app_span);
+                }
+                // At depth 0 `fail` is a whole-value abort owned by the host
+                // lane, which traps correctly; the placeholder is discarded.
                 // The message argument is NOT lowered. It is a string, and
                 // the DAG has no string vocabulary: the nodes it produced
                 // were discarded here and dropped by DCE, so their only
@@ -18922,6 +18939,105 @@ impl<'program> LowerCtx<'program> {
         }
     }
 
+    /// chelis#1464: a `fail(...)` inside an `if` branch that `lower_if`
+    /// could not convert to an [05-OP-68] guard, because it is not the
+    /// branch expression itself.
+    fn reject_indirect_branch_fail(&self, app_span: Span) -> NodeId {
+        raise_lowering_error(
+            "`fail(...)` reached here as part of an `if` branch rather than as the branch \
+             itself, so it has no guarded-abort form and the DAG cannot represent it: a \
+             value DAG selects between branch VALUES and a placeholder would be returned \
+             in place of the trap (chelis#1464). Write `fail(\"...\")` directly as the \
+             branch, move the guard outside the transform, or make the branch total.",
+            Some(app_span),
+            self.current_span_id.clone(),
+        )
+    }
+
+    /// chelis#1464 / [05-OP-68]: build the guarded-abort node for an `if`
+    /// whose `trap_on_true` branch is a `fail(...)`.
+    ///
+    /// The result carries the fallback's exact type, so the guard is
+    /// type-transparent: every consumer downstream sees what it would have
+    /// seen had the branch been written without the guard.
+    fn guarded_fail_value(
+        &mut self,
+        cond: NodeId,
+        fallback: LoweredValue,
+        message: &str,
+        trap_on_true: bool,
+        elems: &[Expr],
+    ) -> LoweredValue {
+        let which = if trap_on_true { "then" } else { "else" };
+        let fallback = self.expect_runtime_if_branch(fallback, which, elems);
+        let out_ty = self
+            .dag
+            .get(fallback)
+            .map(|node| node.output_type.clone())
+            .unwrap_or_else(Self::default_type);
+        LoweredValue::Node(self.dag.add_node(
+            RiscOp::GuardedFail {
+                message: message.to_string(),
+                trap_on_true,
+            },
+            vec![cond, fallback],
+            out_ty,
+            self.current_span_id.clone(),
+        ))
+    }
+
+    /// chelis#1464: both branches of a runtime `if` are `fail(...)`, so the
+    /// expression aborts on every path and has no value to produce.
+    fn reject_total_fail_if(&self, elems: &[Expr]) -> NodeId {
+        let span = elems.first().map(Expr::span);
+        raise_lowering_error(
+            "both branches of this `if` are `fail(...)`, so it has no value on any path. \
+             A transformed function must produce a value to differentiate or batch \
+             (chelis#1464). Move the abort outside the transform.",
+            span,
+            self.current_span_id.clone(),
+        )
+    }
+
+    /// chelis#1464: the authored message of a direct `fail("...")`
+    /// application, if `expr` is one.
+    ///
+    /// Recognized at the Deep level rather than after lowering, because
+    /// [`RiscOp::GuardedFail`] needs the message BEFORE the branch is
+    /// lowered, and because lowering `fail` for its value is exactly the
+    /// step that loses the trap.
+    ///
+    /// Deliberately shallow: it matches the direct application only. A
+    /// `fail` reached indirectly (through a helper call, or after a `let`)
+    /// is NOT silently accepted here — it falls through to the placeholder
+    /// arm in `lower_builtin_app`, which rejects at `if`-branch depth rather
+    /// than substituting a value.
+    fn fail_message_of(&self, expr: &Expr) -> Option<String> {
+        let (tag, _, kids) = stamped_parts(expr)?;
+        if tag != DeepTag::App {
+            return None;
+        }
+        let (callee_tag, _, callee_kids) = stamped_parts(kids.first()?)?;
+        if callee_tag != DeepTag::Var {
+            return None;
+        }
+        match callee_kids.first()? {
+            Expr::Atom(Atom::Name(name), _) if name == "fail" => {}
+            _ => return None,
+        }
+        // `fail` takes exactly one argument, a string. A non-literal message
+        // (`fail(string_concat(..))`) has no compile-time identity, so it is
+        // not recognized here and reaches the rejecting arm instead.
+        let (message_tag, _, message_kids) = stamped_parts(kids.get(1)?)?;
+        if message_tag != DeepTag::Lit {
+            return None;
+        }
+        match message_kids.first()? {
+            Expr::Atom(Atom::Str(message), _) if !message.is_empty() => Some(message.clone()),
+            _ => None,
+        }
+    }
+
     fn lower_if(&mut self, elems: &[Expr]) -> LoweredValue {
         let Some(cond_expr) = elems.get(2) else {
             raise_malformed_deep(
@@ -18964,6 +19080,46 @@ impl<'program> LowerCtx<'program> {
             self.discard_local_ascription_tokens_in(untaken);
             return self.lower_expr(selected);
         }
+
+        // chelis#1464 / [05-OP-68]: a `fail(...)` branch is a TRAP, not a
+        // value, so this `if` cannot lower to `Where` — `Where` selects
+        // between branch VALUES and would need something to select for the
+        // failing side. Emit the guard instead, keeping the abort in the
+        // graph where differentiation, batching, optimization and codegen
+        // all still see it.
+        //
+        // Only reached when the condition is genuinely runtime: a
+        // compile-time-resolvable condition already returned above, having
+        // lowered the taken branch alone.
+        let then_fail = self.fail_message_of(then_expr);
+        let else_fail = self.fail_message_of(else_expr);
+        match (&then_fail, &else_fail) {
+            // The surviving branch is still an `if` branch, so it is lowered
+            // at branch depth: an INDIRECT `fail` inside it has no guard of
+            // its own and must reject rather than reach the placeholder arm.
+            // Without this, the original defect survived in the sibling of
+            // the branch being fixed — `if c then fail("a") else boom(x)`
+            // returned a zero with exit 0.
+            (Some(message), None) => {
+                self.if_branch_depth += 1;
+                let fallback = self.lower_expr(else_expr);
+                self.if_branch_depth -= 1;
+                return self.guarded_fail_value(cond, fallback, message, true, elems);
+            }
+            (None, Some(message)) => {
+                self.if_branch_depth += 1;
+                let fallback = self.lower_expr(then_expr);
+                self.if_branch_depth -= 1;
+                return self.guarded_fail_value(cond, fallback, message, false, elems);
+            }
+            (Some(_), Some(_)) => {
+                // Both branches abort, so the `if` has no value at all on any
+                // path. There is no fallback to carry and nothing downstream
+                // can legitimately consume the result.
+                return LoweredValue::Node(self.reject_total_fail_if(elems));
+            }
+            (None, None) => {}
+        }
         if self.host_program.is_some() {
             self.host_stage_status
                 .set(crate::host::staged::StagingStatus::HostControlBoundary);
@@ -19003,7 +19159,9 @@ impl<'program> LowerCtx<'program> {
             );
             self.random_path_condition = Some(then_path);
         }
+        self.if_branch_depth += 1;
         let then_value = self.lower_expr(then_expr);
+        self.if_branch_depth -= 1;
         let then_node = self.expect_runtime_if_branch(then_value, "then", elems);
         if let Some(parent_path) = saved_random_path {
             let path_ty = TensorType {
@@ -19043,7 +19201,9 @@ impl<'program> LowerCtx<'program> {
             ),
             None => not_cond,
         });
+        self.if_branch_depth += 1;
         let else_value = self.lower_expr(else_expr);
+        self.if_branch_depth -= 1;
         let else_node = self.expect_runtime_if_branch(else_value, "else", elems);
         self.random_path_condition = saved_random_path;
         self.local_ascription_path_condition = saved_local_path;

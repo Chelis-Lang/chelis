@@ -601,6 +601,26 @@ pub enum RiscOp {
     Logical(LogicalKind),
     /// Eager stored-bit conditional selection ([05-OP-53]).
     Where,
+    /// Guarded abort ([05-OP-68]). Inputs are `(condition, fallback)`.
+    /// When `condition` is true the program aborts with `message`; otherwise
+    /// the result is `fallback`'s stored bits unchanged.
+    ///
+    /// chelis#1464: a scalar `if` whose branch is `fail(...)` cannot lower to
+    /// [`RiscOp::Where`], because `Where` selects between branch VALUES and a
+    /// trap has none. Lowering that branch to a placeholder value instead
+    /// made a TAKEN `fail` return the placeholder with exit 0, discarding a
+    /// user-authored abort and violating `spec/06-transformations.md` §2.10.1
+    /// and §5.2. This identity keeps the trap in the graph, so its occurrence
+    /// survives differentiation, batching, optimization and code generation.
+    GuardedFail {
+        /// The authored abort message. Part of the operation's identity, so
+        /// the DAG needs no string value vocabulary to carry it.
+        message: String,
+        /// Whether the abort fires when the condition is true. A `fail` in
+        /// the `else` branch lowers with this false rather than synthesizing
+        /// a separate negation node.
+        trap_on_true: bool,
+    },
     MaxElem,
     /// Direct element-wise minimum selection. This identity preserves the
     /// selected operand bits and must not be rewritten through negation.
@@ -1018,6 +1038,7 @@ pub enum RiscAtomIdentity {
     Or,
     Not,
     Where,
+    GuardedFail,
     MaxElem,
     Neg,
     Exp,
@@ -1086,6 +1107,7 @@ impl RiscAtomIdentity {
         Self::Or,
         Self::Not,
         Self::Where,
+        Self::GuardedFail,
         Self::MaxElem,
         Self::Neg,
         Self::Exp,
@@ -1154,6 +1176,7 @@ impl RiscAtomIdentity {
             Self::Or => "or",
             Self::Not => "not",
             Self::Where => "where",
+            Self::GuardedFail => "guarded_fail",
             Self::MaxElem => "max_elem",
             Self::Neg => "neg",
             Self::Exp => "exp",
@@ -1242,6 +1265,7 @@ impl RiscOp {
                 LogicalKind::Not => Id::Not,
             }),
             Self::Where => Semantic(Id::Where),
+            Self::GuardedFail { .. } => Semantic(Id::GuardedFail),
             Self::MaxElem => Semantic(Id::MaxElem),
             Self::Neg => Semantic(Id::Neg),
             Self::Exp => Semantic(Id::Exp),
@@ -1542,6 +1566,14 @@ impl RiscOp {
             | RiscOp::Compare(_)
             | RiscOp::MaxElem
             | RiscOp::MinElem => true,
+
+            // --- Guarded abort ---
+            // chelis#1464: excluded. An envelope transformer would have to
+            // represent "this path aborts", which is a control effect rather
+            // than an output range, and a relaxation that simply passed the
+            // fallback's envelope through would silently drop the abort — the
+            // exact substitution [05-OP-68] exists to prevent.
+            RiscOp::GuardedFail { .. } => false,
 
             // --- Unary elementwise math ---
             // `Exp`, `Log`, `Sqrt` are direct ports of the auto_LiRPA
@@ -3315,6 +3347,10 @@ mod tests {
             RiscOp::Compare(ComparisonKind::Eq),
             RiscOp::Logical(LogicalKind::And),
             RiscOp::Where,
+            RiscOp::GuardedFail {
+                message: "sample".to_string(),
+                trap_on_true: true,
+            },
             RiscOp::MaxElem,
             RiscOp::Neg,
             RiscOp::Exp,
@@ -3418,8 +3454,8 @@ mod tests {
         // identities so they cannot inherit a verifier disposition.
         assert_eq!(
             all.len(),
-            58,
-            "one_of_every_risc_op must list all 58 classified samples"
+            59,
+            "one_of_every_risc_op must list all 59 classified samples"
         );
 
         // The classifier returns a definite bool for every variant (no
@@ -3437,13 +3473,16 @@ mod tests {
         // `ScatterElements`), linearity/lifecycle markers + store (4),
         // reduce-window-grad (1), fused-elem (1), and the dedicated ReLU
         // identity/adjoint (2) are excluded (22) until Beacon registers their
-        // own transformers.
+        // own transformers. chelis#1464 adds the [05-OP-68] guarded abort to
+        // the excluded side (+1 = 25): an abort is a control effect, not an
+        // output envelope, and relaxing it to its fallback's envelope would
+        // drop the trap.
         assert_eq!(
             targetable, 34,
             "targetable op count drifted from the pinned WI-2 subset"
         );
         assert_eq!(
-            excluded, 24,
+            excluded, 25,
             "excluded op count drifted from the pinned WI-2 subset"
         );
 

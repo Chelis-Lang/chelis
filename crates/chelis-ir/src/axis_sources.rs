@@ -443,6 +443,12 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
         | RiscOp::Cast { .. }
         | RiscOp::CastTrunc { .. }
         | RiscOp::FusedElem { .. }
+        // chelis#1464: the result is the fallback's value unchanged, so the
+        // output shape is the fallback operand's. `shape_preserving` selects
+        // the rank-matching slot, which is the fallback — the rank-0
+        // condition only matches when the result is itself rank-0, and a
+        // rank-0 result has no axes to attribute.
+        | RiscOp::GuardedFail { .. }
         | RiscOp::Store { .. } => shape_preserving(dag, node),
 
         // --- Reductions: the reduced axis is removed, so output axis `a`

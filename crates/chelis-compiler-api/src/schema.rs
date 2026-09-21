@@ -2083,7 +2083,14 @@ pub struct WireRecordPatternField {
 /// - `15`: comparison, logical, and conditional selection preserve their
 ///   direct identities as `Compare`, `Logical`, and `Where`; the standalone
 ///   `CmpLt` operation spelling is removed.
-pub const WIRE_DAG_SCHEMA_VERSION: u32 = 15;
+/// - `16`: a scalar `if` whose branch is `fail(...)` carries its abort as a
+///   `GuardedFail` operation ([05-OP-68], chelis#1464) instead of lowering
+///   the failing branch to a placeholder value. A version-15 producer never
+///   emitted the operation, so a version-15 graph remains readable
+///   unchanged; a version-16 graph containing it is not representable at
+///   version 15, because there is no placeholder spelling that preserves
+///   the abort.
+pub const WIRE_DAG_SCHEMA_VERSION: u32 = 16;
 
 /// A typed failure from validating a serialized [`WireDag`] against the
 /// supported schema version (WI-2). This is deliberately its own error
@@ -3186,6 +3193,24 @@ fn wire_axis_origin(
             load: node.id,
             axis,
         }),
+        // chelis#1464 / [05-OP-68]: the result IS the fallback, so the axis
+        // origin is the fallback's alone. The rank-0 condition carries no
+        // axis and is not consulted.
+        WireRiscOp::GuardedFail { .. } => {
+            let fallback = wire_node_by_id(nodes, *node.inputs.get(1)?)?;
+            (fallback.output_type.dims.len() == node.output_type.dims.len())
+                .then(|| {
+                    wire_axis_origin(
+                        nodes,
+                        fallback,
+                        axis,
+                        fuel - 1,
+                        relevant_shape_sources,
+                        require_input_agreement,
+                    )
+                })
+                .flatten()
+        }
         WireRiscOp::Where { .. } => {
             let then_value = wire_node_by_id(nodes, *node.inputs.get(1)?)?;
             let else_value = wire_node_by_id(nodes, *node.inputs.get(2)?)?;
@@ -3701,6 +3726,13 @@ pub enum WireRiscOp {
         logical: WireLogicalKind,
     },
     Where {},
+    /// chelis#1464 / [05-OP-68]. The message is part of the operation's
+    /// identity, so it crosses the wire as a field rather than as a string
+    /// value the DAG would otherwise have no vocabulary for.
+    GuardedFail {
+        message: String,
+        trap_on_true: bool,
+    },
     MaxElem,
     MinElem,
     ExtremaAdjoint {

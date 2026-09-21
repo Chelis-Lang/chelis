@@ -103,14 +103,17 @@ fn wire_dag_operation_vocabulary_is_pinned_to_its_schema_version() {
         "checked_reshape_extent",
         "checked_unit_axis",
         "mod",
+        // Version 16 (chelis#1464): the guarded abort that keeps a
+        // transformed `fail(...)` branch from becoming a placeholder value.
+        "guarded_fail",
     ];
     actual.sort();
     expected.sort();
     assert_eq!(
-        WIRE_DAG_SCHEMA_VERSION, 15,
+        WIRE_DAG_SCHEMA_VERSION, 16,
         "review vocabulary and migration history with every version change"
     );
-    assert_eq!(actual.len(), 65);
+    assert_eq!(actual.len(), 66);
     assert_eq!(
         actual, expected,
         "operation changes require a schema-version and migration-history review"

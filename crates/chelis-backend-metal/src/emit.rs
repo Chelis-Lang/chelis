@@ -277,6 +277,7 @@ pub(crate) fn emit_verified_dag(
 ) -> Result<EmitResult, Unsupported> {
     let dag = plan.dag();
     reject_direct_nonnumeric(dag)?;
+    reject_guarded_fail(dag)?;
     reject_f64(dag)?;
     dag.check_axis_sources(Stage::Codegen("metal"))?;
     reject_integer_abs(dag)?;
@@ -306,6 +307,29 @@ fn reject_direct_nonnumeric(dag: VerifiedDagView<'_>) -> Result<(), Unsupported>
         chelis_types::unimplemented_rejection!(
             2266,
             "the Metal exact comparison, Bool8 logical, and raw stored-bit where kernels are not implemented; use `--target c` or `--target hip`"
+        ),
+    ))
+}
+
+/// chelis#1464 / [05-OP-68]: a guarded abort has no Metal kernel. A GPU
+/// thread cannot raise the host-visible abort the atom requires, and
+/// emitting the fallback alone would silently restore the substitution the
+/// identity exists to prevent.
+fn reject_guarded_fail(dag: VerifiedDagView<'_>) -> Result<(), Unsupported> {
+    let Some(node) = dag
+        .nodes()
+        .iter()
+        .find(|node| matches!(&node.op, RiscOp::GuardedFail { .. }))
+    else {
+        return Ok(());
+    };
+    Err(Unsupported::new(
+        UnsupportedKind::Op("guarded_fail".to_string()),
+        format!("a Metal DAG value at node {}", node.id.0),
+        Stage::Codegen("metal"),
+        chelis_types::unimplemented_rejection!(
+            1464,
+            "a guarded abort has no Metal kernel; the C target preserves the [05-OP-68] abort"
         ),
     ))
 }
@@ -896,6 +920,10 @@ impl<'plan> Emitter<'plan> {
 
             RiscOp::Compare(_) | RiscOp::Logical(_) | RiscOp::Where => Err(format!(
                 "Metal direct nonnumeric node {id} reached emission after the #2266 typed capability rejection"
+            )),
+
+            RiscOp::GuardedFail { .. } => Err(format!(
+                "Metal guarded abort node {id} reached emission after the chelis#1464 typed capability rejection"
             )),
 
             // chelis#2338: these identities are rejected by the shared typed

@@ -692,6 +692,7 @@ fn variant_index(op: &RiscOp) -> usize {
         RiscOp::Mod => 62,
         RiscOp::Logical(_) => 63,
         RiscOp::Where => 64,
+        RiscOp::GuardedFail { .. } => 65,
     }
 }
 

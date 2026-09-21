@@ -854,6 +854,52 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                     }
                 }
             }
+            // chelis#1464 / [05-OP-68]: the guard's own contract, checked
+            // here so a malformed abort node cannot reach a backend. An
+            // empty message is rejected because the atom forbids a
+            // synthesized or defaulted one.
+            RiscOp::GuardedFail { message, .. } => {
+                if arity != 2 {
+                    errors.push(format!(
+                        "guarded_fail at node {} has {} inputs (expected 2)",
+                        node.id.0, arity
+                    ));
+                } else if let (Some(condition), Some(_)) =
+                    (dag.get(node.inputs[0]), dag.get(node.inputs[1]))
+                {
+                    if condition.output_type.precision != Prim::Bool {
+                        errors.push(format!(
+                            "guarded_fail at node {} condition must be Bool",
+                            node.id.0
+                        ));
+                    }
+                    if condition.output_type.dims.len() > 1 {
+                        errors.push(format!(
+                            "guarded_fail at node {} condition must be rank-0, or rank-1 \
+                             when mapped over a batch axis",
+                            node.id.0
+                        ));
+                    }
+                    let shape_participants = [node.inputs[1], node.id];
+                    if !node_types_semantically_equivalent(
+                        dag,
+                        node.inputs[1],
+                        node.id,
+                        &shape_participants,
+                    ) {
+                        errors.push(format!(
+                            "guarded_fail at node {} must have exactly its fallback's type",
+                            node.id.0
+                        ));
+                    }
+                }
+                if message.is_empty() {
+                    errors.push(format!(
+                        "guarded_fail at node {} has an empty message",
+                        node.id.0
+                    ));
+                }
+            }
             RiscOp::Where => {
                 if arity != 3 {
                     errors.push(format!(

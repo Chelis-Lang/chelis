@@ -6989,6 +6989,13 @@ fn wire_op(op: &RiscOp, precision: Prim) -> WireResult<WireRiscOp> {
             },
         },
         RiscOp::Where => WireRiscOp::Where {},
+        RiscOp::GuardedFail {
+            message,
+            trap_on_true,
+        } => WireRiscOp::GuardedFail {
+            message: message.clone(),
+            trap_on_true: *trap_on_true,
+        },
         RiscOp::MaxElem => WireRiscOp::MaxElem,
         RiscOp::MinElem => WireRiscOp::MinElem,
         RiscOp::ExtremaAdjoint { kind, operand } => WireRiscOp::ExtremaAdjoint {

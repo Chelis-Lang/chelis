@@ -1356,6 +1356,7 @@ impl HipEmitter {
                 Self::dtype_kernel_suffix(operand_prec())
             )),
             RiscOp::Logical(kind) => Some(format!("kernel_logical_{}", kind.surf_name())),
+            RiscOp::GuardedFail { .. } => return Err(Self::guarded_fail_unsupported(node)),
             RiscOp::Where => Some(format!(
                 "kernel_where{}",
                 Self::dtype_kernel_suffix(node.output_type.precision)
@@ -2184,6 +2185,7 @@ impl HipEmitter {
                 &node.inputs,
                 &node.output_type,
             ),
+            RiscOp::GuardedFail { .. } => return Err(Self::guarded_fail_unsupported(node)),
             RiscOp::Where => self.emit_ternary_launch(
                 id,
                 &resolved_kernel_name()?,
@@ -4572,6 +4574,23 @@ impl HipEmitter {
     /// These arms exist so a future HIP implementation has to remove
     /// this rejection deliberately rather than inherit `cast`'s
     /// unguarded conversion by accident.
+    /// chelis#1464 / [05-OP-68]: a guarded abort has no device kernel. A
+    /// GPU thread cannot raise the host-visible abort the atom requires, and
+    /// emitting the fallback alone would silently restore exactly the
+    /// substitution this identity exists to prevent. Reject instead; the C
+    /// target is canonical for a transformed `fail`.
+    fn guarded_fail_unsupported(node: &DagNode) -> Unsupported {
+        Unsupported::new(
+            UnsupportedKind::Op("guarded_fail".to_string()),
+            format!("the HIP kernel set (node {})", node.id.0),
+            Stage::Codegen("hip"),
+            chelis_types::unimplemented_rejection!(
+                1464,
+                "a guarded abort has no device kernel; the C target preserves the [05-OP-68] abort"
+            ),
+        )
+    }
+
     fn remainder_unsupported(node: &DagNode) -> Unsupported {
         Unsupported::new(
             UnsupportedKind::Op("mod".to_string()),
@@ -4614,6 +4633,7 @@ impl HipEmitter {
             | RiscOp::Compare(_)
             | RiscOp::Logical(_)
             | RiscOp::Where
+            | RiscOp::GuardedFail { .. }
             | RiscOp::MaxElem
             | RiscOp::MinElem
             | RiscOp::ExtremaAdjoint { .. }
