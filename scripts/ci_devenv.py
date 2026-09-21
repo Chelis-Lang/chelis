@@ -116,7 +116,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("operation", nargs="?", choices=("activate", "capture", "run"), default="activate")
     parser.add_argument("destination", nargs="?", type=Path)
-    parser.add_argument("--profile", choices=("ci", "ci-smt"), default="ci")
+    parser.add_argument("--profile", choices=("ci", "ci-smt", "ci-glibc231"), default="ci")
     args = parser.parse_args()
     if args.operation == "capture":
         if args.destination is None:

@@ -129,6 +129,8 @@ in
       pkg-config
       pyright
       patchedKache
+      # Direct rustc-private drivers link the pinned compiler's LLVM dependency.
+      zlib
     ]
     ++ lib.optionals stdenv.isLinux [
       # The chelis#893 Phase 0 inventory reads C and Objective-C headers

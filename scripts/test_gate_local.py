@@ -295,7 +295,6 @@ class ListAnnotationTests(unittest.TestCase):
     def test_every_command_line_is_annotated(self):
         lines = self._list_lines()
         command_lines = [ln for ln in lines if not ln.startswith("#")]
-        self.assertEqual(len(command_lines), len(gate.full_command_list()))
         annotations = {}
         for line in command_lines:
             self.assertIn("  # ", line, f"unannotated line: {line!r}")

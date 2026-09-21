@@ -2,6 +2,9 @@
   pkgs,
   lib,
   root,
+  # Build tools stay in pkgs; every target archive uses this stdenv.
+  # The default preserves the native CI recipe.
+  stdenv ? pkgs.stdenv,
 }:
 let
   cargoLock = lib.importTOML (root + "/Cargo.lock");
@@ -19,25 +22,33 @@ let
     rev = "ea1b484fa54bfe56c0f8b3ac90a6e3e2f46441e7"; # cvc5-1.3.1
     hash = "sha256-nxJjrpWZfYPuuKN4CWxOHEuou4r+MdK0AjdEPZHZbHI=";
   };
-  gmp = pkgs.gmp.override { withStatic = true; };
+  gmp = pkgs.gmp.override {
+    inherit stdenv;
+    withStatic = true;
+  };
 
   # This is the exact rel-2.1.3-elevate source selected by FindCaDiCaL.cmake,
   # built with the same stdenv as cvc5 and the Rust linker in the CI shell.
-  cadical = (pkgs.cadical.override { version = "2.1.3"; }).overrideAttrs (_old: {
-    src = pkgs.fetchFromGitHub {
-      owner = "arminbiere";
-      repo = "cadical";
-      rev = "a384d221a920d473b770df6a7221f35fc5d99e90";
-      hash = "sha256-2z65Fplm75p4nzTdjH9pKBRJC+sWZewIerTUT/nOdJM=";
-    };
-    configurePhase = ''
-      runHook preConfigure
-      ./configure --quiet --no-contrib -fPIC CXXFLAGS="-std=c++11"
-      runHook postConfigure
-    '';
-  });
+  cadical =
+    (pkgs.cadical.override {
+      inherit stdenv;
+      version = "2.1.3";
+    }).overrideAttrs
+      (_old: {
+        src = pkgs.fetchFromGitHub {
+          owner = "arminbiere";
+          repo = "cadical";
+          rev = "a384d221a920d473b770df6a7221f35fc5d99e90";
+          hash = "sha256-2z65Fplm75p4nzTdjH9pKBRJC+sWZewIerTUT/nOdJM=";
+        };
+        configurePhase = ''
+          runHook preConfigure
+          ./configure --quiet --no-contrib -fPIC CXXFLAGS="-std=c++11"
+          runHook postConfigure
+        '';
+      });
 
-  poly = (pkgs.libpoly.override { inherit gmp; }).overrideAttrs (_old: {
+  poly = (pkgs.libpoly.override { inherit stdenv gmp; }).overrideAttrs (_old: {
     version = "0.2.0";
     src = pkgs.fetchFromGitHub {
       owner = "SRI-CSL";
@@ -84,7 +95,7 @@ let
 
   package =
     (pkgs.cvc5.override {
-      inherit gmp symfpu;
+      inherit stdenv gmp symfpu;
       cadical' = cadical;
       libpoly = poly;
     }).overrideAttrs
@@ -159,8 +170,8 @@ assert lib.assertMsg (
   cvc5Sys != null && cvc5Sys.version == cvc5SysVersion && cvc5Sys.checksum == cvc5SysChecksum
 ) "nix/ci-cvc5.nix must be updated with the cvc5-sys native build contract";
 assert lib.assertMsg (
-  (pkgs.stdenv.hostPlatform.isLinux || pkgs.stdenv.hostPlatform.isDarwin)
-  && pkgs.stdenv.buildPlatform == pkgs.stdenv.hostPlatform
+  (stdenv.hostPlatform.isLinux || stdenv.hostPlatform.isDarwin)
+  && stdenv.buildPlatform == stdenv.hostPlatform
 ) "The CI cvc5-sys provider supports native Linux and Darwin builds only";
 {
   inherit

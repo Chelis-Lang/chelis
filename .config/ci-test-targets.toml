@@ -1849,6 +1849,42 @@ reason = "the Linux Nix Rust-policy stage compiles the complete solver-free feat
 tracking_issue = "chelis#2241"
 
 [[path_rule]]
+prefix = "nix/ci-arb.nix"
+disposition = "owner"
+workflow = "ci.yml"
+job = "lint-rust"
+cadence = "pull_request and push"
+reason = "the Nix Rust-policy stage compiles the Arb feature against the locked compiler-matched native numeric cache"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "nix/ci-glibc231.nix"
+disposition = "owner"
+workflow = "ci.yml"
+job = "smt-build-glibc231"
+cadence = "pull_request and push"
+reason = "the compatibility lane builds the release CLI against glibc 2.31 and executes real cvc5 discharge with the pinned loader"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = ".github/scripts/verify_release_smt.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "smt-build"
+cadence = "pull_request and push"
+reason = "both SMT lanes execute the release verifier; the native lane proves discharge and the compatibility lane binds the old loader"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "scripts/test_glibc231_workflows.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit checks the immutable Bullseye producer and release configuration; the Nix CI lane owns its separate runtime proof"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
 prefix = "scripts/devenv_entry_regression.py"
 disposition = "owner"
 workflow = "ci.yml"

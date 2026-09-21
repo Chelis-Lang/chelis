@@ -25,6 +25,16 @@ on:
         description: Unique coordinator token
         required: true
         type: string
+      execution_target:
+        description: Protected self-hosted execution requires separate exact-candidate admission
+        required: false
+        default: github-hosted
+        type: choice
+        options: [github-hosted, self-hosted]
+      expected_candidate_sha:
+        description: Exact synthetic merge SHA required for protected self-hosted execution
+        required: false
+        type: string
 
 concurrency:
   # Generic PR edits never enter this workflow. Exact-base retarget dispatches
@@ -54,7 +64,7 @@ jobs:
   # runs the full suite, per the WS-7 spend-trim scope.
   changes:
     name: Detect docs-only changes
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.execution_target == 'self-hosted' && fromJSON(format('["chelis-ci-warm-x64","chelis-ci-reviewed-{0}"]', inputs.retarget_token)) || 'ubuntu-latest' }}
     permissions:
       actions: read
       contents: read
@@ -129,9 +139,19 @@ jobs:
       - name: Record exact candidate
         id: candidate
         continue-on-error: true
+        env:
+          EXECUTION_TARGET: ${{ inputs.execution_target }}
+          EXPECTED_CANDIDATE_SHA: ${{ inputs.expected_candidate_sha }}
         working-directory: candidate
         run: |
           candidate="$(git rev-parse HEAD)"
+          if [ "$EXECUTION_TARGET" = self-hosted ] || [ -n "$EXPECTED_CANDIDATE_SHA" ]; then
+            if [[ ! "$EXPECTED_CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]] ||
+               [ "$candidate" != "$EXPECTED_CANDIDATE_SHA" ]; then
+              echo "::error::The server-controlled candidate differs from the reviewed synthetic merge."
+              exit 1
+            fi
+          fi
           echo "candidate_sha=$candidate" >> "$GITHUB_OUTPUT"
 
       - name: Bootstrap CI contract preflight selection
@@ -143,6 +163,13 @@ jobs:
           BASE_SHA: ${{ inputs.expected_base_sha || github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ inputs.expected_head_sha || github.event.pull_request.head.sha }}
         run: |
+          # Bootstrap before project activation without consulting a checkout-controlled PATH.
+          trusted_git=/usr/bin/git
+          trusted_python=/usr/bin/python3
+          if [ "${RUNNER_ENVIRONMENT:-github-hosted}" = "self-hosted" ]; then
+            trusted_git=/run/current-system/sw/bin/git
+            trusted_python=/run/current-system/sw/bin/python3
+          fi
           if [ "$EVENT_NAME" != "pull_request" ] &&
              [ "$EVENT_NAME" != "workflow_dispatch" ]; then
             echo "ci_contract_changed=false" >> "$GITHUB_OUTPUT"
@@ -152,17 +179,17 @@ jobs:
             classifier="trusted/scripts/ci_contract_paths.py"
           else
             classifier="$RUNNER_TEMP/ci-contract-paths.py"
-            if ! /usr/bin/git -C candidate show \
+            if ! "$trusted_git" -C candidate show \
               "$BASE_SHA:scripts/ci_contract_paths.py" > "$classifier"; then
               echo "ci_contract_changed=true" >> "$GITHUB_OUTPUT"
               exit 0
             fi
           fi
           set -o pipefail
-          if ! GIT_NO_REPLACE_OBJECTS=1 /usr/bin/git -C candidate \
+          if ! GIT_NO_REPLACE_OBJECTS=1 "$trusted_git" -C candidate \
             -c core.quotePath=true diff --name-only --no-renames \
             --no-ext-diff --no-textconv "$BASE_SHA" "$HEAD_SHA" \
-            | /usr/bin/python3 "$classifier"; then
+            | "$trusted_python" "$classifier"; then
             echo "ci_contract_changed=true" >> "$GITHUB_OUTPUT"
           fi
 
@@ -597,7 +624,7 @@ jobs:
   # controlled mutations whenever any owner/oracle/control input changes.
   diagnostic-kind-oracle:
     name: Diagnostic Kind Mutation Oracle
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.execution_target == 'self-hosted' && fromJSON(format('["chelis-ci-warm-x64","chelis-ci-reviewed-{0}"]', inputs.retarget_token)) || 'ubuntu-latest' }}
     defaults:
       run:
         shell: chelis-ci-shell run {0}
@@ -641,7 +668,7 @@ jobs:
 
   lint-rust:
     name: Rust Policy (Linux)
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.execution_target == 'self-hosted' && fromJSON(format('["chelis-ci-warm-x64","chelis-ci-reviewed-{0}"]', inputs.retarget_token)) || 'ubuntu-latest' }}
     defaults:
       run:
         shell: chelis-ci-shell run {0}
@@ -704,7 +731,7 @@ jobs:
 
   script-unit:
     name: Script and Python Unit Tests (Linux)
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.execution_target == 'self-hosted' && fromJSON(format('["chelis-ci-warm-x64","chelis-ci-reviewed-{0}"]', inputs.retarget_token)) || 'ubuntu-latest' }}
     defaults:
       run:
         shell: chelis-ci-shell run {0}
@@ -766,7 +793,7 @@ jobs:
   # Rust and Python policy workers execute in parallel.
   lint-and-unit:
     name: Lint and Unit Tests (Linux)
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.execution_target == 'self-hosted' && fromJSON(format('["chelis-ci-warm-x64","chelis-ci-reviewed-{0}"]', inputs.retarget_token)) || 'ubuntu-latest' }}
     permissions:
       contents: read
     needs: [changes, lint-rust, script-unit]
@@ -804,7 +831,7 @@ jobs:
   # Runbook: docs/smt_build_setup.md.
   smt-build:
     name: SMT Feature Build (Linux)
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.execution_target == 'self-hosted' && fromJSON(format('["chelis-ci-warm-x64","chelis-ci-reviewed-{0}"]', inputs.retarget_token)) || 'ubuntu-latest' }}
     defaults:
       run:
         shell: chelis-ci-shell run {0}
@@ -892,128 +919,72 @@ jobs:
         with:
           state-path: ${{ steps.build-cache.outputs.state-path }}
 
-  # chelis#422 (WS-4) PROVE-IN-CI lanes. release.yml ships
-  # `chelis-cli --features smt` on three targets; cvc5 builds from
-  # source (cmake/g++/libgmp) and is only PROVEN on ubuntu-latest by the
-  # smt-build job above. These two lanes prove cvc5 also builds on the
-  # other two release targets BEFORE release.yml relies on the feature
-  # there: the glibc-2.31 Bullseye compat toolchain and macOS-arm64.
-  # Each mirrors its release.yml job's build command exactly
-  # (`cargo build --release -p chelis-cli --features smt`) and runs the
-  # post-build verifier (.github/scripts/verify_release_smt.py) to
-  # confirm the binary actually discharges through cvc5, not the
-  # solver-free fuzz fallback. No uv setup: `cargo build -p chelis-cli`
-  # is pyo3-free on both the default and smt feature graphs (asserted by
-  # scripts/test_release_workflow_pyo3_isolation.py), unlike the
-  # `cargo test -p chelis-prove` step in the Linux smt-build job.
+  # Preserve the release CLI command and prove cvc5 under the actual 2.31
+  # loader, not merely on a newer host with an ELF symbol-ceiling check.
+  # The isolated Nix profile replaces the Bullseye job container; its native
+  # compiler/runtime and CVC5 closure never share the modern CI ABI cache.
+  # This release feature graph remains PyO3-free.
   smt-build-glibc231:
     name: SMT Feature Build (Linux, glibc 2.31)
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.execution_target == 'self-hosted' && fromJSON(format('["chelis-ci-warm-x64","chelis-ci-reviewed-{0}"]', inputs.retarget_token)) || 'ubuntu-latest' }}
+    # Cold Nix realization has separate headroom; the release build stays bounded.
+    timeout-minutes: 90
     needs: [changes]
     if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_run_smt == 'true') || (needs.changes.outputs.rebase_lane == 'ordinary' && needs.changes.outputs.docs_only != 'true')) }}
-    # The immutable digest supplies Python, git, curl, and CA certificates
-    # before checkout while retaining Debian 11's glibc 2.31. After checkout,
-    # ci_apt_get replaces its moving mirrors with the repository-pinned
-    # snapshot before installing anything.
-    container: python:3.11.13-bullseye@sha256:df0bd610af061603b29d63eb82027b64d5a3f15506e39270422b10b2a55079fc
     defaults:
       run:
-        shell: bash
+        shell: chelis-ci-shell run {0}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
         with:
           ref: ${{ needs.changes.outputs.candidate_sha }}
 
-      # m4 is required by GMP's configure; cmake/g++/libclang support the cvc5
-      # source build. The pinned snapshot makes package indices and payloads
-      # one immutable generation, while the retry loop still handles network
-      # resets and stalls. The Python 3.11 base already supplies git, pip, and
-      # venv, and cvc5 uses stdlib tomllib rather than a PyPI tomli bootstrap.
-      - name: Install build prerequisites
-        run: python3 scripts/ci_apt_get.py --debian-bullseye-snapshot --no-sudo --no-install-recommends build-essential m4 cmake libclang-dev libopenblas-dev libgmp-dev libmpfr-dev
+      - name: Set up project CI
+        id: build-cache
+        uses: ./.github/actions/setup-project-ci
+        with:
+          profile: ci-glibc231
 
       - name: Assert glibc 2.31 build environment
         run: |
-          set -euo pipefail
-          ldd --version | awk 'NR==1'
-          ldd --version | awk 'NR==1' | grep -F '2.31'
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      # chelis#583: dedicated stable-key cvc5 cache, in its OWN
-      # `linux-glibc231` namespace so the Bullseye (glibc 2.31) toolchain's
-      # libcvc5.a is never crossed with the ubuntu-latest one. On a warm hit
-      # cvc5-sys links the prebuilt lib (built in this same container, so the
-      # glibc-2.31 assertion below stays valid) instead of rebuilding from
-      # source after an unrelated Cargo.lock bump. See the smt-build job.
-      - name: Compute cvc5 cache key
-        id: cvc5key
-        run: python3 scripts/ci_cvc5_cache.py key --namespace linux-glibc231
-
-      # Durable Release asset first, Actions cache fallback second; see the
-      # smt-build job for the full rationale. The asset is built in this same
-      # Bullseye (glibc 2.31) container by build-cvc5.yml, so the glibc-2.31
-      # assertion below stays valid on the linked artifact.
-      - name: Fetch durable prebuilt cvc5 (Release asset)
-        id: cvc5fetch
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: python3 scripts/ci_cvc5_cache.py fetch --namespace linux-glibc231 --dir "${{ steps.cvc5key.outputs.dir }}"
-
-      - name: Restore prebuilt cvc5 (Actions cache fallback)
-        id: cvc5restore
-        if: steps.cvc5fetch.outputs.warm != 'true'
-        uses: actions/cache/restore@v4
-        # Best-effort: a cache-service hiccup must degrade to a from-source
-        # build, never fail this job (chelis#583).
-        continue-on-error: true
-        with:
-          path: ${{ steps.cvc5key.outputs.dir }}
-          key: ${{ steps.cvc5key.outputs.key }}
-
-      - name: Activate prebuilt cvc5 (link instead of rebuild)
-        run: python3 scripts/ci_cvc5_cache.py activate --dir "${{ steps.cvc5key.outputs.dir }}"
+          "$CHELIS_GLIBC231_LDD" --version
+          "$CHELIS_GLIBC231_LDD" --version | grep -F '2.31'
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
-          key: smt-glibc231
+          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', 'nix/ci-*.nix', '.kache.toml') }}
+          shared-key: smt-glibc231-nix
           cache-on-failure: true
 
       - name: Build chelis-cli (release, smt)
+        timeout-minutes: 30
         run: cargo build --release -p chelis-cli --features smt
-
-      - name: Harvest cvc5 build for cache
-        id: cvc5harvest
-        run: python3 scripts/ci_cvc5_cache.py harvest --dir "${{ steps.cvc5key.outputs.dir }}"
-
-      - name: Save prebuilt cvc5
-        if: always() && steps.cvc5harvest.outputs.complete == 'true'
-        uses: actions/cache/save@v4
-        # Best-effort: saving the cvc5 cache must never fail the build.
-        continue-on-error: true
-        with:
-          path: ${{ steps.cvc5key.outputs.dir }}
-          key: ${{ steps.cvc5key.outputs.key }}
 
       - name: Assert no glibc requirement above 2.31
         run: |
-          set -euo pipefail
-          max_req="$(objdump -T target/release/chelis | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)"
+          max_req="$(objdump -T "$CARGO_TARGET_DIR/release/chelis" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)"
           echo "max glibc requirement: ${max_req}"
+          test -n "$max_req"
           test "$(printf 'GLIBC_2.31\n%s\n' "${max_req}" | sort -V | tail -1)" = "GLIBC_2.31"
 
       - name: Verify cvc5 discharge path (smt feature live)
-        run: python3 .github/scripts/verify_release_smt.py ./target/release/chelis
+        run: >-
+          python3 .github/scripts/verify_release_smt.py
+          --runner "$CHELIS_GLIBC231_RUNNER" "$CARGO_TARGET_DIR/release/chelis"
+
+      - name: Publish verified outputs and clean cache state
+        if: always() && steps.build-cache.outputs.state-path != ''
+        uses: Chelis-Lang/ci/actions/publish-build-cache@0b6a14078e56e6af9cd76eca09b9419f1c84f19b
+        with:
+          state-path: ${{ steps.build-cache.outputs.state-path }}
 
   ci-fast:
     name: Fast Tests (Linux)
     # Reserve 25 minutes for cold hosted Devenv realization.
     timeout-minutes: 55
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.execution_target == 'self-hosted' && fromJSON(format('["chelis-ci-warm-x64","chelis-ci-reviewed-{0}"]', inputs.retarget_token)) || 'ubuntu-latest' }}
     defaults:
       run:
         shell: chelis-ci-shell run {0}
@@ -1079,7 +1050,7 @@ jobs:
   integration-plan:
     name: Plan Changed Integration Tests
     timeout-minutes: 10
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.execution_target == 'self-hosted' && fromJSON(format('["chelis-ci-warm-x64","chelis-ci-reviewed-{0}"]', inputs.retarget_token)) || 'ubuntu-latest' }}
     permissions:
       contents: read
     needs: [changes]
@@ -1136,7 +1107,7 @@ jobs:
     name: Change-Owned Integration Tests (bucket ${{ matrix.shard }})
     # Reserve 25 minutes for cold hosted Devenv realization.
     timeout-minutes: 85
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.execution_target == 'self-hosted' && fromJSON(format('["chelis-ci-warm-x64","chelis-ci-reviewed-{0}"]', inputs.retarget_token)) || 'ubuntu-latest' }}
     defaults:
       run:
         shell: chelis-ci-shell run {0}
@@ -1230,7 +1201,7 @@ jobs:
 
   change-owned-report:
     name: Change-Owned Integration Report
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.execution_target == 'self-hosted' && fromJSON(format('["chelis-ci-warm-x64","chelis-ci-reviewed-{0}"]', inputs.retarget_token)) || 'ubuntu-latest' }}
     permissions:
       contents: read
     needs: [changes, ci-fast, integration-plan, change-owned-shard]
@@ -1316,7 +1287,7 @@ jobs:
 
   integration:
     name: Integration Tests (Linux)
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.execution_target == 'self-hosted' && fromJSON(format('["chelis-ci-warm-x64","chelis-ci-reviewed-{0}"]', inputs.retarget_token)) || 'ubuntu-latest' }}
     permissions:
       contents: read
     needs: [changes, ci-fast, change-owned-report]
@@ -1355,7 +1326,7 @@ jobs:
 
   test-telemetry:
     name: CI Test Telemetry
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.execution_target == 'self-hosted' && fromJSON(format('["chelis-ci-warm-x64","chelis-ci-reviewed-{0}"]', inputs.retarget_token)) || 'ubuntu-latest' }}
     permissions:
       contents: read
     needs: [changes, ci-fast]
@@ -1393,7 +1364,7 @@ jobs:
 
   backend-sanitizers:
     name: Backend Sanitizers
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.execution_target == 'self-hosted' && fromJSON(format('["chelis-ci-warm-x64","chelis-ci-reviewed-{0}"]', inputs.retarget_token)) || 'ubuntu-latest' }}
     defaults:
       run:
         shell: chelis-ci-shell run {0}
@@ -1446,7 +1417,7 @@ jobs:
 
   no-ai-authorship:
     name: No AI authorship markers
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.execution_target == 'self-hosted' && fromJSON(format('["chelis-ci-warm-x64","chelis-ci-reviewed-{0}"]', inputs.retarget_token)) || 'ubuntu-latest' }}
     needs: [changes]
     if: ${{ !cancelled() }}
     steps:
@@ -1528,7 +1499,7 @@ jobs:
 
   docs:
     name: Docs
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.execution_target == 'self-hosted' && fromJSON(format('["chelis-ci-warm-x64","chelis-ci-reviewed-{0}"]', inputs.retarget_token)) || 'ubuntu-latest' }}
     defaults:
       run:
         shell: chelis-ci-shell run {0}

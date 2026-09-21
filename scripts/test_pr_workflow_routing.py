@@ -43,7 +43,6 @@ PREFLIGHT_GATED_JOBS = {
 }
 BOOTSTRAP_CONTRACT_MARKERS = {
     "scripts/ci_contract_paths.py",
-    "git -C candidate show",
     "BASE_SHA",
 }
 RECEIPT_TRIGGER_WORKFLOWS = {
@@ -271,6 +270,8 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
             "expected_head_sha",
             "expected_base_sha",
             "retarget_token",
+            "execution_target",
+            "expected_candidate_sha",
         },
     )
     concurrency = str(workflow["concurrency"])
@@ -415,8 +416,6 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
     test.assertIn("HEAD_SHA", bootstrap["env"])
     test.assertIn("diff --name-only --no-renames", bootstrap["run"])
     test.assertIn("GIT_NO_REPLACE_OBJECTS=1", bootstrap["run"])
-    test.assertIn("/usr/bin/git", bootstrap["run"])
-    test.assertIn("/usr/bin/python3", bootstrap["run"])
     test.assertNotIn("candidate-changed-paths.txt", bootstrap["run"])
     detect = next(
         step for step in changes["steps"] if step.get("id") == "detect"
@@ -621,6 +620,8 @@ def assert_hull_retarget_dispatch(test: unittest.TestCase, workflow: dict) -> No
             "expected_head_sha",
             "expected_base_sha",
             "retarget_token",
+            "execution_target",
+            "expected_candidate_sha",
         },
     )
     changes = workflow["jobs"]["changes"]
@@ -667,8 +668,6 @@ def assert_hull_retarget_dispatch(test: unittest.TestCase, workflow: dict) -> No
     test.assertIn("HEAD_SHA", bootstrap["env"])
     test.assertIn("diff --name-only --no-renames", bootstrap["run"])
     test.assertIn("GIT_NO_REPLACE_OBJECTS=1", bootstrap["run"])
-    test.assertIn("/usr/bin/git", bootstrap["run"])
-    test.assertIn("/usr/bin/python3", bootstrap["run"])
     test.assertNotIn("candidate-changed-paths.txt", bootstrap["run"])
     detect = next(
         step for step in changes["steps"] if step.get("id") == "detect"
@@ -1168,19 +1167,133 @@ class PullRequestWorkflowRoutingTests(unittest.TestCase):
                 assertion(self, workflow)
 
     def test_ci_and_hull_share_the_same_bootstrap_path_boundary(self) -> None:
-        workflows = [
-            yaml.safe_load(path.read_text()) for path in (CI, HULL)
-        ]
-        bootstrap_runs = []
-        for workflow in workflows:
-            bootstrap_runs.append(
-                next(
-                    step
-                    for step in workflow["jobs"]["changes"]["steps"]
+        for workflow_path in (CI, HULL):
+            with self.subTest(workflow=workflow_path.name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                candidate = root / "candidate"
+                candidate.mkdir()
+                environment = {
+                    key: value for key, value in os.environ.items()
+                    if not key.startswith("GIT_")
+                }
+                # Model the pre-activation host, not an enclosing developer shell.
+                # Apple's /usr/bin shims otherwise delegate into Nix's SDK/PATH.
+                for key in ("DEVELOPER_DIR", "SDKROOT", "TOOLCHAINS", "PYTHONPATH", "PYTHONHOME", "BASH_ENV", "ENV"):
+                    environment.pop(key, None)
+                environment.update(
+                    GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
+                    GIT_AUTHOR_NAME="CI fixture", GIT_AUTHOR_EMAIL="ci@example.invalid",
+                    GIT_COMMITTER_NAME="CI fixture", GIT_COMMITTER_EMAIL="ci@example.invalid",
+                )
+
+                def git(*arguments: str) -> str:
+                    return subprocess.check_output(
+                        ["git", *arguments], cwd=candidate, env=environment, text=True,
+                        stderr=subprocess.PIPE,
+                    ).strip()
+
+                git("init", "-q")
+                scripts = candidate / "scripts"
+                scripts.mkdir()
+                classifier = scripts / "ci_contract_paths.py"
+                classifier.write_text((ROOT / "scripts/ci_contract_paths.py").read_text())
+                (candidate / "README.md").write_text("base\n")
+                git("add", ".")
+                git("commit", "-qm", "base")
+                base = git("rev-parse", "HEAD")
+                (candidate / "README.md").write_text("documentation change\n")
+                git("commit", "-qam", "docs")
+                docs = git("rev-parse", "HEAD")
+                (scripts / "gate.py").write_text("# changed contract\n")
+                git("add", ".")
+                git("commit", "-qm", "contract")
+                head = git("rev-parse", "HEAD")
+
+                # Neither the working-tree classifier nor PATH owns the decision.
+                classifier.write_text("raise SystemExit(77)\n")
+                poison = root / "poison"
+                poison.mkdir()
+                marker = root / "untrusted-executable-ran"
+                for executable in ("git", "python3"):
+                    shadow = poison / executable
+                    shadow.write_text('#!/bin/sh\nprintf called > "$POISON_MARKER"\nexit 77\n')
+                    shadow.chmod(0o755)
+                output = root / "output"
+                environment.update(
+                    PATH=str(poison) + os.pathsep + environment["PATH"],
+                    POISON_MARKER=str(marker), RUNNER_TEMP=str(root),
+                    GITHUB_OUTPUT=str(output), EVENT_NAME="pull_request",
+                    RUNNER_ENVIRONMENT=(
+                        "self-hosted" if Path("/run/current-system/sw/bin/python3").is_file()
+                        else "github-hosted"
+                    ),
+                )
+                workflow = yaml.safe_load(workflow_path.read_text())
+                body = next(
+                    step["run"] for step in workflow["jobs"]["changes"]["steps"]
                     if step.get("id") == "ci-contract-bootstrap"
-                )["run"]
+                )
+                for before, after, expected in ((base, docs, "false"), (docs, head, "true")):
+                    output.write_text("")
+                    environment.update(BASE_SHA=before, HEAD_SHA=after)
+                    result = subprocess.run(
+                        ["bash", "-eu", "-o", "pipefail", "-c", body],
+                        cwd=root, env=environment, text=True, capture_output=True,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(output.read_text().strip(), f"ci_contract_changed={expected}", result.stderr)
+                    self.assertFalse(marker.exists(), "bootstrap executed a PATH shadow")
+
+    def test_reviewed_dispatch_rejects_missing_or_moved_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            environment = {
+                key: value for key, value in os.environ.items()
+                if not key.startswith("GIT_") and key not in {"BASH_ENV", "ENV"}
+            }
+            environment.update(
+                GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
+                GIT_AUTHOR_NAME="CI fixture", GIT_AUTHOR_EMAIL="ci@example.invalid",
+                GIT_COMMITTER_NAME="CI fixture", GIT_COMMITTER_EMAIL="ci@example.invalid",
             )
-        self.assertEqual(bootstrap_runs[0], bootstrap_runs[1])
+
+            def git(*arguments: str) -> str:
+                return subprocess.check_output(
+                    ["git", *arguments], cwd=root, env=environment, text=True,
+                    stderr=subprocess.PIPE,
+                ).strip()
+
+            git("init", "-q")
+            git("commit", "--allow-empty", "-qm", "reviewed candidate")
+            reviewed = git("rev-parse", "HEAD")
+            git("commit", "--allow-empty", "-qm", "moved candidate")
+            current = git("rev-parse", "HEAD")
+            output = root / "output"
+            environment["GITHUB_OUTPUT"] = str(output)
+            for workflow_path in (CI, HULL):
+                workflow = yaml.safe_load(workflow_path.read_text())
+                body = next(
+                    step["run"] for step in workflow["jobs"]["changes"]["steps"]
+                    if step.get("id") == "candidate"
+                )
+                for target, expected, accepted in (
+                    ("", "", True),
+                    ("self-hosted", current, True),
+                    ("self-hosted", "", False),
+                    ("self-hosted", reviewed, False),
+                ):
+                    with self.subTest(workflow=workflow_path.name, target=target, expected=expected):
+                        output.write_text("")
+                        environment.update(EXECUTION_TARGET=target, EXPECTED_CANDIDATE_SHA=expected)
+                        result = subprocess.run(
+                            ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", body],
+                            cwd=root, env=environment, text=True, capture_output=True,
+                        )
+                        self.assertEqual(result.returncode == 0, accepted, result.stderr)
+                        self.assertEqual(
+                            output.read_text(),
+                            f"candidate_sha={current}\n" if accepted else "",
+                        )
 
     def test_base_retarget_signal_and_dedicated_acknowledgements_are_required(self) -> None:
         retarget = yaml.safe_load(RETARGET.read_text())

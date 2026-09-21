@@ -39,6 +39,16 @@ on:
         description: Unique coordinator token
         required: true
         type: string
+      execution_target:
+        description: Protected self-hosted execution requires separate exact-candidate admission
+        required: false
+        default: github-hosted
+        type: choice
+        options: [github-hosted, self-hosted]
+      expected_candidate_sha:
+        description: Exact synthetic merge SHA required for protected self-hosted execution
+        required: false
+        type: string
 
 concurrency:
   group: conformance-${{ github.workflow }}-${{ github.event.pull_request.number || inputs.pr_number || github.ref }}
@@ -63,7 +73,7 @@ jobs:
   # shared-artifact fold is escalated separately.
   changes:
     name: Detect docs-only changes (conformance)
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.execution_target == 'self-hosted' && fromJSON(format('["chelis-ci-warm-x64","chelis-ci-reviewed-{0}"]', inputs.retarget_token)) || 'ubuntu-latest' }}
     permissions:
       actions: read
       contents: read
@@ -136,9 +146,19 @@ jobs:
       - name: Record exact candidate
         id: candidate
         continue-on-error: true
+        env:
+          EXECUTION_TARGET: ${{ inputs.execution_target }}
+          EXPECTED_CANDIDATE_SHA: ${{ inputs.expected_candidate_sha }}
         working-directory: candidate
         run: |
           candidate="$(git rev-parse HEAD)"
+          if [ "$EXECUTION_TARGET" = self-hosted ] || [ -n "$EXPECTED_CANDIDATE_SHA" ]; then
+            if [[ ! "$EXPECTED_CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]] ||
+               [ "$candidate" != "$EXPECTED_CANDIDATE_SHA" ]; then
+              echo "::error::The server-controlled candidate differs from the reviewed synthetic merge."
+              exit 1
+            fi
+          fi
           echo "candidate_sha=$candidate" >> "$GITHUB_OUTPUT"
 
       - name: Bootstrap CI contract preflight selection
@@ -150,6 +170,13 @@ jobs:
           BASE_SHA: ${{ inputs.expected_base_sha || github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ inputs.expected_head_sha || github.event.pull_request.head.sha }}
         run: |
+          # Bootstrap before project activation without consulting a checkout-controlled PATH.
+          trusted_git=/usr/bin/git
+          trusted_python=/usr/bin/python3
+          if [ "${RUNNER_ENVIRONMENT:-github-hosted}" = "self-hosted" ]; then
+            trusted_git=/run/current-system/sw/bin/git
+            trusted_python=/run/current-system/sw/bin/python3
+          fi
           if [ "$EVENT_NAME" != "pull_request" ] &&
              [ "$EVENT_NAME" != "workflow_dispatch" ]; then
             echo "ci_contract_changed=false" >> "$GITHUB_OUTPUT"
@@ -159,17 +186,17 @@ jobs:
             classifier="trusted/scripts/ci_contract_paths.py"
           else
             classifier="$RUNNER_TEMP/ci-contract-paths.py"
-            if ! /usr/bin/git -C candidate show \
+            if ! "$trusted_git" -C candidate show \
               "$BASE_SHA:scripts/ci_contract_paths.py" > "$classifier"; then
               echo "ci_contract_changed=true" >> "$GITHUB_OUTPUT"
               exit 0
             fi
           fi
           set -o pipefail
-          if ! GIT_NO_REPLACE_OBJECTS=1 /usr/bin/git -C candidate \
+          if ! GIT_NO_REPLACE_OBJECTS=1 "$trusted_git" -C candidate \
             -c core.quotePath=true diff --name-only --no-renames \
             --no-ext-diff --no-textconv "$BASE_SHA" "$HEAD_SHA" \
-            | /usr/bin/python3 "$classifier"; then
+            | "$trusted_python" "$classifier"; then
             echo "ci_contract_changed=true" >> "$GITHUB_OUTPUT"
           fi
 
@@ -599,7 +626,7 @@ jobs:
 
   conformance:
     name: Hull Conformance Gate (Linux)
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.execution_target == 'self-hosted' && fromJSON(format('["chelis-ci-warm-x64","chelis-ci-reviewed-{0}"]', inputs.retarget_token)) || 'ubuntu-latest' }}
     defaults:
       run:
         shell: chelis-ci-shell run {0}

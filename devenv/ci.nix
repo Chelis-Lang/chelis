@@ -9,16 +9,20 @@
       pkgs,
       ...
     }:
+    let
+      numerics = import ../nix/ci-arb.nix {
+        inherit pkgs lib;
+        root = ../.;
+      };
+    in
     {
       imports = [ ../nix/ci-openblas.nix ];
 
       # Clang's setup hook overwrites CC while mkShell collects packages.
       # Reassert the CI C provider after those hooks, before commands run.
-      enterShell = lib.mkAfter (
-        lib.optionalString pkgs.stdenv.isLinux ''
-          export CC=${lib.escapeShellArg config.env.CC}
-        ''
-      );
+      enterShell = lib.mkAfter ''
+        export CC=${lib.escapeShellArg config.env.CC}
+      '';
 
       packages =
         with pkgs;
@@ -34,8 +38,11 @@
           gmp
           mpfr
           nodejs
+          numerics.cache
         ]
         ++ lib.optionals pkgs.stdenv.isLinux [ pkgs.gfortran ];
+
+      outputs.native-numerics = numerics.cache;
 
       env = {
         # The schema-transition oracle runs in the default development profile,
@@ -45,15 +52,17 @@
         CARGO_INCREMENTAL = "0";
         # The wrapper's Bash %q response syntax cannot preserve arbitrary path bytes.
         NIX_CC_USE_RESPONSE_FILE = "0";
+        # Match the native cache producer's compiler and PIC configuration.
+        CC = numerics.compiler;
+        CFLAGS = numerics.cflags;
+        GMP_MPFR_SYS_CACHE = "${numerics.cache}/gmp";
+        FLINT_SYS_CACHE = "${numerics.cache}/flint";
+        ARB_SYS_CACHE = "${numerics.cache}/arb";
       }
       // lib.optionalAttrs pkgs.stdenv.isLinux {
         # Runtime image identities must remain content-derived under the Nix linker.
         NIX_SET_BUILD_ID = "1";
         NIX_BUILD_ID_STYLE = "sha1";
-        # Vendored GMP/MPFR variadic formatting fails with Clang 21 here.
-        # GNU C17 keeps GMP's configure probes compatible with GCC 15 and retains PIC.
-        CC = "${pkgs.stdenv.cc}/bin/cc";
-        CFLAGS = "-std=gnu17 -fPIC";
         FC = "${pkgs.gfortran}/bin/gfortran";
         # Native executables and Python extensions must load the same libraries
         # used by the Nix compiler/PyO3 build, not the runner distribution's ABI.
@@ -87,4 +96,7 @@
         outputs.cvc5 = cvc5.dir;
       };
   };
+
+  # This ABI island must not inherit modern CI native archives or library paths.
+  profiles.ci-glibc231.module = import ../nix/ci-glibc231.nix;
 }

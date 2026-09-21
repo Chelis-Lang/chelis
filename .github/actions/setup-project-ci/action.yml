@@ -2,7 +2,7 @@ name: Set up project CI
 description: Restore signed Nix inputs before realizing the project, then attach its compiler cache.
 inputs:
   profile:
-    description: Project CI profile; ci-smt additionally realizes the native solver.
+    description: Project profile (ci, ci-smt, or the isolated ci-glibc231 release CLI ABI).
     required: false
     default: ci
 outputs:
