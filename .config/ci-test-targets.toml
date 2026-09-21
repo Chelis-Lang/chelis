@@ -2814,6 +2814,24 @@ reason = "direct arithmetic oracle mutation controls execute in the script unit 
 tracking_issue = "chelis#1306"
 
 [[path_rule]]
+prefix = "scripts/dtype_exact_reductions_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the exact-reduction completion manifest and source contracts execute in the script unit suite"
+tracking_issue = "chelis#1281"
+
+[[path_rule]]
+prefix = "scripts/test_dtype_exact_reductions_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the exact-reduction oracle manifest and mutation controls execute in the script unit suite"
+tracking_issue = "chelis#1281"
+
+[[path_rule]]
 prefix = "scripts/dtype_nonnumeric_lowering_oracle.py"
 disposition = "owner"
 workflow = "ci.yml"
