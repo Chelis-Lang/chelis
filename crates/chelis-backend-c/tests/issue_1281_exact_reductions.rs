@@ -61,7 +61,11 @@ fn newest_runtime_archive(deps: &Path) -> std::io::Result<Option<PathBuf>> {
         let name = entry.file_name();
         let name = name.to_string_lossy();
         if name.starts_with("libchelis_runtime-") && name.ends_with(".a") {
-            let modified = entry.metadata()?.modified()?;
+            let metadata = entry.metadata()?;
+            if metadata.len() == 0 {
+                continue;
+            }
+            let modified = metadata.modified()?;
             if newest
                 .as_ref()
                 .is_none_or(|(current, _): &(std::time::SystemTime, PathBuf)| modified > *current)
@@ -80,8 +84,7 @@ fn runtime_lib_path() -> PathBuf {
     static PATH: OnceLock<PathBuf> = OnceLock::new();
     PATH.get_or_init(|| {
         let debug = target_debug_dir();
-        let canonical = debug.join("libchelis_runtime.a");
-        let hashed = newest_runtime_archive(&debug.join("deps"))
+        newest_runtime_archive(&debug.join("deps"))
             .expect("scan runtime archives")
             .or_else(|| {
                 let status = Command::new(env!("CARGO"))
@@ -91,9 +94,7 @@ fn runtime_lib_path() -> PathBuf {
                 assert!(status.success(), "build chelis-runtime static library");
                 newest_runtime_archive(&debug.join("deps")).expect("rescan runtime archives")
             })
-            .expect("libchelis_runtime-*.a exists");
-        fs::copy(&hashed, &canonical).expect("materialize runtime archive");
-        canonical
+            .expect("non-empty libchelis_runtime-*.a exists")
     })
     .clone()
 }
