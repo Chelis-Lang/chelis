@@ -28,7 +28,9 @@ Eligible jobs activate the declared `ci` profile once and execute repository com
 
 The CI profile owns GNU Make's `make` and `gmake` entry points, the LP64 OpenBLAS ABI and Linux Fortran provider, and the native libraries needed by embedded Python/NumPy. Compiler wrappers preserve arbitrary path bytes; Linux linkers emit content-derived GNU build IDs. `.kache.toml` includes these compiler/linker policy variables in artifact keys, and Rust target caches are partitioned by the Devenv recipe and Kache configuration so provider changes cannot reuse already-linked outputs from an older recipe.
 
-Linux C dependencies use the Nix GCC provider in GNU C17 mode with PIC; the vendored GMP/MPFR formatting checks fail with the pinned Clang C provider. C++ and Rust retain their declared Devenv compiler/linker selections.
+Linux C dependencies use the Nix GCC provider in GNU C17 mode with PIC; the vendored GMP/MPFR formatting checks fail with the pinned Clang C provider. Shell entry reasserts that selection after compiler package setup hooks, which can overwrite `CC`. C++ and Rust retain their declared Devenv compiler/linker selections.
+
+The runtime-representation inventory admits Clang's canonical resource `include` directory, including split Nix installations where it is a symlink. Resource-root siblings and headers escaping that include directory remain outside the inventory universe. Its fixed-target scan disables host C++ standard-library headers and uses the existing SDK stubs.
 
 The Linux workspace worker passes `--ignore-default-filter` and deliberately includes the PR selection. Only `chelis-compiler-api::capacity_census_wire` and `chelis-python::capacity_census_bindings` are excluded: the dtype worker executes both. The generalization worker uses the same census exclusions; census authority is checked on the default-feature configuration. Executable listing set-math proves that workspace plus dtype still covers every non-ignored test in the unfiltered corpus, with none in neither selection and no census test in both. The two selections do overlap elsewhere: the dtype oracle also owns several non-census binaries.
 

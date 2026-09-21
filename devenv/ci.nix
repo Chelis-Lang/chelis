@@ -18,6 +18,14 @@
         })
       ];
 
+      # Clang's setup hook overwrites CC while mkShell collects packages.
+      # Reassert the CI C provider after those hooks, before commands run.
+      enterShell = lib.mkAfter (
+        lib.optionalString pkgs.stdenv.isLinux ''
+          export CC=${lib.escapeShellArg config.env.CC}
+        ''
+      );
+
       packages =
         with pkgs;
         [

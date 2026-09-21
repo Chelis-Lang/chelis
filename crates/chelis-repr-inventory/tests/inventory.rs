@@ -1260,6 +1260,151 @@ fn an_include_outside_the_universe_fails_closed() {
     assert!(error.message.contains("parser.h"), "{}", error.message);
 }
 
+#[cfg(unix)]
+#[test]
+fn symlinked_compiler_resource_includes_preserve_the_universe_boundary() {
+    use std::io::Write;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::process::{Command, Stdio};
+
+    let path = std::env::var_os("PATH").expect("clang requires PATH");
+    let cwd = std::env::current_dir().expect("current directory");
+    let clang = std::env::split_paths(&path)
+        .map(|directory| cwd.join(directory).join("clang"))
+        .find(|candidate| candidate.is_file())
+        .expect("clang on PATH");
+    let resource = Command::new(&clang)
+        .env_clear()
+        .env("PATH", &path)
+        .arg("-print-resource-dir")
+        .output()
+        .expect("query real clang resource directory");
+    assert!(
+        resource.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resource.stderr)
+    );
+    let resource = std::path::PathBuf::from(
+        String::from_utf8(resource.stdout)
+            .expect("resource directory is UTF-8")
+            .trim(),
+    );
+
+    let scratch = tempfile::tempdir().expect("scratch dir");
+    let root = scratch.path();
+    // Match a split compiler installation: the wrapper owns resource-root,
+    // but its include directory belongs to a separate compiler package.
+    let wrapper = root.join("clang-wrapper/resource-root");
+    let compiler = root.join("clang-lib/lib/clang/21");
+    let includes = compiler.join("include");
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&wrapper).expect("wrapper resource directory");
+    std::fs::create_dir_all(&includes).expect("compiler include directory");
+    std::fs::create_dir(&bin).expect("wrapper bin directory");
+    std::fs::copy(resource.join("include/stdint.h"), includes.join("stdint.h"))
+        .expect("copy real freestanding compiler header");
+    symlink(&includes, wrapper.join("include")).expect("link resource includes");
+    let quote = |value: &std::path::Path| {
+        format!(
+            "'{}'",
+            value.to_str().expect("UTF-8 path").replace('\'', "'\\''")
+        )
+    };
+    let executable = bin.join("clang");
+    std::fs::write(
+        &executable,
+        format!(
+            "#!/bin/sh\nexec {} -resource-dir {} \"$@\"\n",
+            quote(&clang),
+            quote(&wrapper)
+        ),
+    )
+    .expect("write clang wrapper");
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
+        .expect("make clang wrapper executable");
+    let wrapped_path =
+        std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&path)))
+            .expect("wrapper PATH");
+    let staged = root.join(HEADER);
+    std::fs::create_dir_all(staged.parent().expect("header parent"))
+        .expect("fixture include directory");
+    let scan = |source: &str| {
+        std::fs::write(&staged, source).expect("write source");
+        // Only the scanner subprocess sees the wrapper; parallel tests keep
+        // their own PATH and real compiler.
+        let mut child = Command::new(env!("CARGO_BIN_EXE_chelis-repr-inventory"))
+            .args(["--repo"])
+            .arg(root)
+            .env("PATH", &wrapped_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("run inventory scanner");
+        child
+            .stdin
+            .take()
+            .expect("scanner stdin")
+            .write_all(
+                serde_json::to_string(&[HEADER])
+                    .expect("path manifest")
+                    .as_bytes(),
+            )
+            .expect("send path manifest");
+        child.wait_with_output().expect("scanner output")
+    };
+    let accepted = scan("#include <stdint.h>\nextern uint8_t *chelis_probe_own(void);\n");
+    assert!(
+        accepted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+    let output: serde_json::Value =
+        serde_json::from_slice(&accepted.stdout).expect("inventory JSON");
+    let identities: Vec<_> = output["rows"]
+        .as_array()
+        .expect("inventory rows")
+        .iter()
+        .map(|row| {
+            (
+                row["kind"].as_str().unwrap(),
+                row["owner"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(identities, [("raw-element-pointer", "chelis_probe_own")]);
+
+    let unrelated = root.join("unrelated-package.h");
+    std::fs::write(&unrelated, "extern float *chelis_probe_outside(void);\n")
+        .expect("write unrelated header");
+    symlink(&unrelated, includes.join("escape.h")).expect("link escaping header");
+    let wrapper_header = wrapper.join("outside.h");
+    let compiler_header = compiler.join("outside.h");
+    for header in [&wrapper_header, &compiler_header] {
+        std::fs::write(header, "extern float *chelis_probe_outside(void);\n")
+            .expect("write non-include compiler file");
+    }
+    for header in [
+        unrelated,
+        wrapper_header,
+        compiler_header,
+        wrapper.join("include/escape.h"),
+    ] {
+        let rejected = scan(&format!("#include \"{}\"\n", header.display()));
+        let error = String::from_utf8_lossy(&rejected.stderr);
+        assert!(
+            !rejected.status.success(),
+            "{} was admitted",
+            header.display()
+        );
+        assert!(
+            error.contains("outside the inventory universe"),
+            "{}: {error}",
+            header.display()
+        );
+    }
+}
+
 #[test]
 fn a_pointer_to_an_element_array_is_a_carrier() {
     let rows = c_owners("void chelis_probe_rows(float (*rows)[4]);");

@@ -164,9 +164,13 @@ uv pip install -e bindings/python # chelis Python bindings (optional)
 ```
 
 **Commit-message hook.** `.githooks/commit-msg` is the tracked commit-msg hook.
-It runs `scripts/check_commit_message.py` through Devenv, `.venv`, or a managed
-uv interpreter, in that order, and resolves its repository at run time, so one
-installed copy is correct from every worktree of a clone and on every branch.
+It runs `scripts/check_commit_message.py` through the activated
+`DEVENV_STATE/venv` when the canonical state is beneath this worktree's
+`.devenv`, then the default `.devenv/state/venv`, `.venv`, or managed uv Python.
+Foreign activated profiles are rejected; the uv fallback discards an inherited
+`UV_PYTHON_PREFERENCE` that conflicts with its explicit managed-Python choice.
+The hook resolves its repository at run time, so one installed copy is correct
+from every worktree of a clone and on every branch.
 On the primary path, cargo-husky installs it: `cargo test` installs a POSIX
 wrapper that invokes the same checker, using the same uv fallback when a
 worktree has neither Devenv nor `.venv`. Both hooks reject AI tool authorship

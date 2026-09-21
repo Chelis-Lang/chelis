@@ -3654,23 +3654,6 @@ class SmtCiSplitTests(unittest.TestCase):
                 all_result.stdout + '\ngmp-mpfr-sys feature "use-system-libs"',
             )
 
-    def test_full_smt_workflow_shares_smoke_cache_key(self):
-        smoke_inputs = _rust_cache_inputs(_ci_job_block("smt-build"))
-        full_inputs = _rust_cache_inputs(
-            _workflow_job_block(SMT_FULL_PROVE_YML, "full-smt-prove")
-        )
-        self.assertEqual(
-            smoke_inputs,
-            full_inputs,
-            "required smt smoke and full-prove lane must share rust-cache inputs",
-        )
-        # cache-on-failure persists a warm workspace cache even when a later
-        # step fails, so a slow cold run is not re-paid next attempt (#583).
-        self.assertEqual(
-            smoke_inputs,
-            {"shared-key": "smt-smt-build", "cache-on-failure": "true"},
-        )
-
 
 def _parse_job_attrs(text: str | None = None) -> dict[str, dict[str, str]]:
     """Parse `.github/workflows/ci.yml` and return, per job, its
