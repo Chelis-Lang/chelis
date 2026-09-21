@@ -625,6 +625,7 @@ def fixture_manifest() -> tuple[Fixture, ...]:
         ("runtime-list-skip-tests", "list_skip_owned", (
             "a_count_above_the_length_empties_the_list_without_breaking_it",
             "a_cursor_walk_leaks_nothing_and_allocates_once",
+            "a_large_skip_gives_the_retired_capacity_back",
             "a_list_finalized_with_a_retired_prefix_releases_each_child_once",
             "a_null_list_behaves_like_the_cloning_entry_point",
             "a_skipped_heap_element_leaves_the_list_without_a_second_release",
