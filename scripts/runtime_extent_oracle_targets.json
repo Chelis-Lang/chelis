@@ -883,9 +883,10 @@
         "eval_inherited_claim_reaches_named_and_literal_callbacks",
         "eval_selection_before_production_forwards_only_to_the_selected_arm",
         "eval_shared_callback_claims_are_invocation_local",
+        "eval_tuple_projection_retains_only_the_selected_producer",
         "rank_zero_identity_without_a_result_claim_executes_both_lanes"
       ],
-      "note": "chelis#1771 and chelis#1945: inherited literal result claims cross supported named, literal and identity callback invocations; remain invocation-local; and retain selected producer provenance through lexical aliases when selection happens before production or after both alternatives are computed. Both host lanes prove selected-only guarding, exact producer/interface attribution, selector readiness, argument preparation, producer-relative effects and exact agreeing values. The existing cli_return_boundary, cli_result_pure_helper and callable-entry targets remain independent controls."
+      "note": "chelis#1771 and chelis#1945: inherited literal result claims cross supported named, literal and identity callback invocations; remain invocation-local; and retain selected producer provenance through lexical aliases when selection happens before production or after both alternatives are computed. Both host lanes prove selected-only guarding, exact producer/interface attribution, selector readiness, argument preparation, producer-relative effects and exact agreeing values. The Eval lane additionally proves that a late runtime selector projects the exact heterogeneous tuple field without guarding its sibling; C aggregate projection remains outside this receipt. The existing cli_return_boundary, cli_result_pure_helper and callable-entry targets remain independent controls."
     },
     {
       "phase": "b",

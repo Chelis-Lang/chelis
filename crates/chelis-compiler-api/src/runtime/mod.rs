@@ -17,6 +17,7 @@ mod csv;
 mod eval;
 mod frame;
 pub use frame::Frame;
+use frame::ResultProducer;
 mod host_ops;
 mod invariant;
 mod named_axis;
@@ -1026,7 +1027,7 @@ struct EvalContext<'a> {
     /// Canonical producer of the tensor returned by the expression currently
     /// completing. Expression entry clears it, and only a producer or
     /// transparent value route may set it.
-    result_producer: Option<String>,
+    result_producer: Option<ResultProducer>,
     /// Declared/static Deep type expression for names in `bindings`,
     /// maintained in lockstep with `bindings` (saved/swapped/restored at
     /// every frame boundary). Every locally-bound name gets a key here:

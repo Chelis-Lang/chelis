@@ -2199,6 +2199,12 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             "cli_result_callable_selection.c_selection_before_production_forwards_only_to_the_selected_arm",
         ),
         _row(
+            "return.selected.tuple_projection.eval",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_result_callable_selection.eval_tuple_projection_retains_only_the_selected_producer",
+        ),
+        _row(
             "return.callback.rank_zero.no_claim.eval_c",
             EXECUTES,
             EXECUTES,

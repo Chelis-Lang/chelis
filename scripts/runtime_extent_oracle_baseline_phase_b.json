@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "21b8394e322db1b4d3ec3c77224c0ba9195ca10cd9d2891781a020e1db6bb650",
+  "corpus_sha256": "37eb62b143ab49a0f2d10843d08aa58c898f7f598a476a2f0fc63af7e5cdb85c",
   "rows": [
     {
       "id": "claim.literal.identity_root.c",
@@ -1885,6 +1885,12 @@
       "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "cli_result_callable_selection.eval_delayed_selection_guards_only_the_selected_value"
+    },
+    {
+      "id": "return.selected.tuple_projection.eval",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_result_callable_selection.eval_tuple_projection_retains_only_the_selected_producer"
     },
     {
       "id": "return.shared_callee.literal.c",

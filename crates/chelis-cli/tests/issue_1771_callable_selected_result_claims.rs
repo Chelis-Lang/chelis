@@ -506,6 +506,77 @@ fn assert_selection_before_production(native: bool) {
     }
 }
 
+fn projected_tuple_source(select_second: bool, selected_agrees: bool) -> String {
+    let selected = if selected_agrees {
+        THREE_BY_FOUR
+    } else {
+        TWO_BY_FOUR
+    };
+    let sibling = if selected_agrees {
+        TWO_BY_FOUR
+    } else {
+        THREE_BY_FOUR
+    };
+    let (x, y) = if select_second {
+        (sibling, selected)
+    } else {
+        (selected, sibling)
+    };
+    format!(
+        "def decide(flag: bool) -> bool ! {{ IO }} = {{\n\
+         _ = print(\"tuple-selector\")\n\
+         flag\n\
+        }}\n\
+        def choose[n, m](x: tensor[n, 4, f32], y: tensor[m, 4, f32], second: bool) -> tensor[3, f32] ! {{ IO }} = {{\n\
+         _ = print(\"tuple-before\")\n\
+         pair = (diagonal(x, 0i32, 1i32), cumsum(diagonal(y, 0i32, 1i32), 0i32))\n\
+         _ = print(\"tuple-after\")\n\
+         selected = if decide(second) then pair.1 else pair.0\n\
+         _ = print(\"projection-after\")\n\
+         selected\n\
+        }}\n\
+        out = choose(to_tensor({x}), to_tensor({y}), {select_second})\n"
+    )
+}
+
+fn assert_projected_tuple_provenance(native: bool) {
+    for select_second in [false, true] {
+        for selected_agrees in [true, false] {
+            let source = projected_tuple_source(select_second, selected_agrees);
+            let (ok, output) = run(&source, native);
+            assert_eq!(ok, selected_agrees, "{source}\n{output}");
+            assert_eq!(output.matches("tuple-before").count(), 1, "{output}");
+            assert_eq!(output.matches("tuple-after").count(), 1, "{output}");
+            assert_eq!(output.matches("tuple-selector").count(), 1, "{output}");
+            assert_eq!(
+                output.matches("projection-after").count(),
+                usize::from(selected_agrees),
+                "{output}"
+            );
+            let selected_op = if select_second { "cumsum" } else { "diagonal" };
+            if selected_agrees {
+                let expected = if select_second {
+                    "[1.0, 7.0, 18.0]"
+                } else {
+                    "[1.0, 6.0, 11.0]"
+                };
+                assert!(
+                    output.contains(&format!("out = tensor(shape=[3], data={expected})")),
+                    "{output}"
+                );
+                assert!(!output.contains("numeric trap:"), "{output}");
+            } else {
+                assert_claim(&output, selected_op, 2);
+            }
+        }
+    }
+}
+
+#[test]
+fn eval_tuple_projection_retains_only_the_selected_producer() {
+    assert_projected_tuple_provenance(false);
+}
+
 #[test]
 fn eval_selection_before_production_forwards_only_to_the_selected_arm() {
     assert_selection_before_production(false);

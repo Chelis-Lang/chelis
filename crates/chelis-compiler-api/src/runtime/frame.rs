@@ -21,10 +21,66 @@ use chelis_unord::UnordMap;
 
 use super::RuntimeValue;
 
+/// Private producer provenance paired with a runtime value. Aggregates retain
+/// one entry per value slot so a later projection cannot inherit a sibling's
+/// producer or collapse distinct transform roots to a guessed common name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ResultProducer {
+    Tensor(String),
+    Aggregate(Vec<Option<ResultProducer>>),
+}
+
+impl ResultProducer {
+    pub(crate) fn tensor(operation: impl Into<String>) -> Self {
+        Self::Tensor(operation.into())
+    }
+
+    pub(crate) fn operation(&self) -> Option<&str> {
+        match self {
+            Self::Tensor(operation) => Some(operation),
+            Self::Aggregate(_) => None,
+        }
+    }
+
+    pub(crate) fn child(&self, index: usize) -> Option<Self> {
+        match self {
+            Self::Aggregate(children) => children.get(index).cloned().flatten(),
+            Self::Tensor(_) => None,
+        }
+    }
+
+    pub(crate) fn aggregate(children: Vec<Option<Self>>) -> Option<Self> {
+        children
+            .iter()
+            .any(Option::is_some)
+            .then_some(Self::Aggregate(children))
+    }
+
+    pub(crate) fn matches_value(&self, value: &RuntimeValue) -> bool {
+        match (self, value) {
+            (Self::Tensor(_), RuntimeValue::Tensor(_)) => true,
+            (Self::Aggregate(children), RuntimeValue::Tuple(values))
+            | (Self::Aggregate(children), RuntimeValue::List(values)) => {
+                children.len() == values.len()
+                    && children.iter().zip(values).all(|(producer, value)| {
+                        producer.as_ref().is_none_or(|p| p.matches_value(value))
+                    })
+            }
+            (Self::Aggregate(children), RuntimeValue::Adt { fields, .. }) => {
+                children.len() == fields.len()
+                    && children.iter().zip(fields).all(|(producer, value)| {
+                        producer.as_ref().is_none_or(|p| p.matches_value(value))
+                    })
+            }
+            _ => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct Binding {
     value: RuntimeValue,
-    result_producer: Option<String>,
+    result_producer: Option<ResultProducer>,
 }
 
 thread_local! {
@@ -96,11 +152,11 @@ impl Frame {
 
     /// Producer provenance retained beside a lexical value. It is private
     /// execution metadata, not part of the value or its public representation.
-    pub(crate) fn result_producer(&self, name: &str) -> Option<&str> {
+    pub(crate) fn result_producer(&self, name: &str) -> Option<&ResultProducer> {
         let mut frame = self;
         loop {
             if let Some(binding) = frame.locals.get(name) {
-                return binding.result_producer.as_deref();
+                return binding.result_producer.as_ref();
             }
             frame = frame.captured.as_deref()?;
         }
@@ -123,7 +179,7 @@ impl Frame {
         &mut self,
         name: String,
         value: RuntimeValue,
-        result_producer: Option<String>,
+        result_producer: Option<ResultProducer>,
     ) -> Option<RuntimeValue> {
         self.locals
             .insert(
@@ -287,12 +343,59 @@ mod tests {
         frame.insert_with_result_producer(
             "value".to_string(),
             int(1),
-            Some("diagonal".to_string()),
+            Some(ResultProducer::tensor("diagonal")),
         );
         let captured = frame.capture();
-        frame.insert_with_result_producer("value".to_string(), int(2), Some("cumsum".to_string()));
-        assert_eq!(captured.result_producer("value"), Some("diagonal"));
-        assert_eq!(frame.result_producer("value"), Some("cumsum"));
+        frame.insert_with_result_producer(
+            "value".to_string(),
+            int(2),
+            Some(ResultProducer::tensor("cumsum")),
+        );
+        assert_eq!(
+            captured
+                .result_producer("value")
+                .and_then(ResultProducer::operation),
+            Some("diagonal")
+        );
+        assert_eq!(
+            frame
+                .result_producer("value")
+                .and_then(ResultProducer::operation),
+            Some("cumsum")
+        );
+    }
+
+    #[test]
+    fn aggregate_producer_keeps_each_projected_field_distinct() {
+        let producer = ResultProducer::aggregate(vec![
+            Some(ResultProducer::tensor("diagonal")),
+            Some(ResultProducer::tensor("cumsum")),
+            None,
+        ])
+        .expect("two fields carry producer provenance");
+
+        assert_eq!(
+            producer.operation(),
+            None,
+            "an aggregate has no guessed common op"
+        );
+        assert_eq!(
+            producer
+                .child(0)
+                .as_ref()
+                .and_then(ResultProducer::operation),
+            Some("diagonal")
+        );
+        assert_eq!(
+            producer
+                .child(1)
+                .as_ref()
+                .and_then(ResultProducer::operation),
+            Some("cumsum")
+        );
+        assert_eq!(producer.child(2), None);
+        assert_eq!(producer.child(3), None);
+        assert_eq!(ResultProducer::aggregate(vec![None, None]), None);
     }
 
     impl Frame {
