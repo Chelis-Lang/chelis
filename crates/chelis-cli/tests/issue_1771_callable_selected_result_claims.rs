@@ -170,3 +170,15 @@ fn eval_identity_callback_checks_claim_after_actual_preparation() {
 fn c_identity_callback_checks_claim_after_actual_preparation() {
     assert_identity_callback_checks_after_actual_preparation(true);
 }
+
+#[test]
+fn rank_zero_identity_without_a_result_claim_executes_both_lanes() {
+    let source = "def identity(value: tensor[f32]) -> tensor[f32] = value\n\
+                  out = identity(scalar_to_tensor(7.0f32))\n";
+    for native in [false, true] {
+        let (ok, output) = run(source, native);
+        assert!(ok, "{source}\n{output}");
+        assert!(output.contains("out = 7"), "{output}");
+        assert!(!output.contains("pending result claim"), "{output}");
+    }
+}

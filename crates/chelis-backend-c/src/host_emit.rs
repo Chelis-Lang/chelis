@@ -492,9 +492,11 @@ pub(crate) fn emit_host_abi_program(
             .map(|helper| {
                 projected
                     .global_tensor_helper(helper)
-                    .and_then(verified_helper_result_origin)
+                    .map(verified_helper_result_origin)
+                    .transpose()
+                    .map(Option::flatten)
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, _>>()?;
         emit_main(
             &mut body,
             program_name,
@@ -1837,7 +1839,6 @@ fn append_external_helper_declaration(out: &mut Vec<String>, helper_name: &str) 
         )
     ));
     out.push("    (void)__chelis_rng;".to_string());
-    out.push("    (void)__chelis_result_origin_out;".to_string());
     #[cfg(feature = "native-random-observer")]
     out.push("    (void)__chelis_observer;".to_string());
     out.push(format!("    {helper_name}(inputs, n_in, outputs, n_out);"));
@@ -2249,7 +2250,7 @@ fn emit_function(
             .iter()
             .copied()
             .map(verified_helper_result_origin)
-            .collect(),
+            .collect::<Result<Vec<_>, _>>()?,
         ownership_sites,
     );
     emitter.entry_projection = entry::helper_coverage_with_verified(function, verified_helpers);
@@ -3007,19 +3008,24 @@ fn host_functions_reachable_from_main(program: &HostProgram) -> UnordSet<String>
     reachable
 }
 
-fn verified_helper_result_origin(helper: VerifiedHostTensorHelperView<'_>) -> Option<String> {
+fn verified_helper_result_origin(
+    helper: VerifiedHostTensorHelperView<'_>,
+) -> Result<Option<String>, Unsupported> {
     let dag = helper.dag();
     let [root] = dag.roots() else {
-        return None;
+        return Ok(None);
     };
     let sites = dag.result_extent_sites(*root);
-    let operation = sites.first()?.operation();
+    let Some(operation) = sites.first().map(|site| site.operation()) else {
+        return Ok(None);
+    };
     if sites.iter().all(|site| site.operation() == operation) {
-        Some(operation.to_string())
+        Ok(Some(operation.to_string()))
     } else {
-        // A scalar operation label cannot honestly represent axes attributed
-        // to different producers. Pending delayed claims fail closed.
-        None
+        Err(invalid_abi_shape(
+            "one returned tensor root has conflicting per-axis producer operations".to_string(),
+            "verified tensor-helper result provenance",
+        ))
     }
 }
 
@@ -4822,14 +4828,17 @@ impl<'a> HostEmitter<'a> {
             && matches!(ty, HostType::Tensor(_))
         {
             let origin = result_origin_name(target);
+            self.lines
+                .push(format!("{}if ({claims} != NULL) {{", self.indent));
             self.lines.push(format!(
-                "{}if ({origin}.op == NULL || {origin}.trap == NULL) {{ fprintf(stderr, \"host runtime: pending result claim reached a tensor without producer provenance\\n\"); abort(); }}",
+                "{}    if ({origin}.op == NULL || {origin}.trap == NULL) {{ fprintf(stderr, \"host runtime: pending result claim reached a tensor without producer provenance\\n\"); abort(); }}",
                 self.indent
             ));
             self.lines.push(format!(
-                "{}__chelis_check_host_result_claims({claims}, {target}, {origin}.op, {origin}.trap);",
+                "{}    __chelis_check_host_result_claims({claims}, {target}, {origin}.op, {origin}.trap);",
                 self.indent
             ));
+            self.lines.push(format!("{}}}", self.indent));
         }
     }
 
