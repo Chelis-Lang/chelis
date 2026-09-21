@@ -1,11 +1,11 @@
 //! The `conform` control surface in a shell's `reef.toml`, read **structurally**.
 //!
-//! Contract §8 gives a shell exactly one knob over its conformance tooling:
-//! `conform.local_skills`, the repo-local domain skills `sync` preserves and the
-//! §8 audit exempts (chelis#651). Everything else under `conform` is a control
-//! the contract does not define, and §8 requires the audit to *report* it rather
-//! than ignore it, so a shell can never believe in a knob the tool does not
-//! implement (chelis#1262).
+//! Contract §8 gives a shell two knobs over its materialized skill set:
+//! `conform.local_skills`, the repo-local domain skills `sync` preserves, and
+//! `conform.excluded_skills`, the embedded shared skills it omits. Everything
+//! else under `conform` is a control the contract does not define, and §8
+//! requires the audit to *report* it rather than ignore it, so a shell can never
+//! believe in a knob the tool does not implement.
 //!
 //! **Why this module parses instead of scanning.** The first two implementations
 //! were hand-rolled line scans over `reef.toml`, and two review rounds produced
@@ -32,8 +32,11 @@
 
 use std::collections::BTreeSet;
 
-/// The one key contract §8 defines under `conform`.
+/// The repo-local addition key contract §8 defines under `conform`.
 pub const LOCAL_SKILLS: &str = "local_skills";
+
+/// The embedded shared-skill omission key contract §8 defines under `conform`.
+pub const EXCLUDED_SKILLS: &str = "excluded_skills";
 
 /// The table name that is the control surface.
 pub const CONFORM: &str = "conform";
@@ -44,6 +47,9 @@ pub struct ConformDecl {
     /// `conform.local_skills`, the recognized declaration: repo-local domain
     /// skills the shell owns (chelis#651). Empty when absent.
     pub local_skills: Vec<String>,
+    /// `conform.excluded_skills`, exact embedded shared-skill names the shell
+    /// intentionally omits. Empty when absent.
+    pub excluded_skills: Vec<String>,
     /// Every other declaration under the top-level `conform` table, by full
     /// dotted path, sorted. Each is a control the contract does not define.
     pub unrecognized: Vec<String>,
@@ -107,7 +113,7 @@ pub fn parse(reef_toml: &str) -> Result<ConformDecl, String> {
 
 /// Walk the `conform` table, recording the recognized key and every other
 /// declaration by full dotted path. `control` marks the top-level `conform`
-/// table itself, the only place `local_skills` means anything.
+/// table itself, the only place the two skill-set declarations mean anything.
 fn collect(
     value: &toml::Value,
     path: &str,
@@ -131,9 +137,10 @@ fn collect(
     }
     for (key, child) in table {
         let child_path = format!("{path}.{key}");
-        if control && key == LOCAL_SKILLS {
+        if control && (key == LOCAL_SKILLS || key == EXCLUDED_SKILLS) {
             match string_array(child) {
-                Some(names) => decl.local_skills = names,
+                Some(names) if key == LOCAL_SKILLS => decl.local_skills = names,
+                Some(names) => decl.excluded_skills = names,
                 // The recognized key is recognized by its VALUE TYPE, not by a
                 // spelling: `[conform.local_skills]` is a table where the
                 // contract defines an array of strings, so it declares a shape
@@ -232,6 +239,11 @@ mod tests {
         assert!(decl("[package]\nname = \"s\"\n").is_clean());
         // Present but empty.
         assert!(decl("[conform]\nlocal_skills = []\n").is_clean());
+        assert_eq!(
+            decl("[conform]\nexcluded_skills = [\"cli-surface\"]\n").excluded_skills,
+            vec!["cli-surface".to_string()]
+        );
+        assert!(decl("[conform]\nexcluded_skills = []\n").is_clean());
         assert!(decl("[conform]\n").is_clean());
     }
 
@@ -252,6 +264,20 @@ mod tests {
         ] {
             let d = decl(text);
             assert_eq!(d.local_skills, vec!["x".to_string()], "{text:?}");
+            assert!(d.is_clean(), "{text:?} -> {:?}", d.findings());
+        }
+        for text in [
+            "[conform]\nexcluded_skills = [\"cli-surface\"]\n",
+            "[conform]\n\"excluded_skills\" = [\"cli-surface\"]\n",
+            "conform = { excluded_skills = [\"cli-surface\"] }\n",
+            "conform.excluded_skills = [\"cli-surface\"]\n",
+        ] {
+            let d = decl(text);
+            assert_eq!(
+                d.excluded_skills,
+                vec!["cli-surface".to_string()],
+                "{text:?}"
+            );
             assert!(d.is_clean(), "{text:?} -> {:?}", d.findings());
         }
     }
@@ -325,6 +351,25 @@ mod tests {
                 d.findings()
                     .iter()
                     .any(|f| f.contains("conform.local_skills")),
+                "{text:?} -> {:?}",
+                d.findings()
+            );
+        }
+    }
+
+    #[test]
+    fn excluded_skills_must_be_an_array_of_strings() {
+        for text in [
+            "[conform.excluded_skills]\ncli_surface = true\n",
+            "[conform]\nexcluded_skills = \"cli-surface\"\n",
+            "[conform]\nexcluded_skills = [\"cli-surface\", 3]\n",
+        ] {
+            let d = decl(text);
+            assert!(d.excluded_skills.is_empty(), "{text:?}");
+            assert!(
+                d.findings()
+                    .iter()
+                    .any(|f| f.contains("conform.excluded_skills")),
                 "{text:?} -> {:?}",
                 d.findings()
             );

@@ -345,11 +345,12 @@ pre-staging required changes, the unlock wave, and the re-probe table.
   `issue-resolution`) is a **materialized pointer upstream, not a fork**. It is
   **embedded in the pinned toolchain**; `chelis reef conform sync` (and
   `reef setup`) materialize it into the shell's `agent-skills/`, and
-  `conform audit` byte-checks the **toolchain-owned span** of every present
-  shared skill against the embedded set for the shell's pin — so the shell owns
-  **zero shared-skill content** and any drift is a hard failure. Two sanctioned,
-  propagation-safe escape hatches exist for the shell's *own* content (repo-local
-  domain skills and shell-specific overrides), described below. A thin
+  `conform audit` derives the expected **toolchain-owned span** of every present
+  shared skill from the embedded body plus its declared section selectors and
+  byte-checks that result — so the shell owns **zero shared-skill content** and
+  any drift is a hard failure. Three declared,
+  propagation-safe controls cover the shell's own additions, exclusions, and
+  skill-specific overrides, described below. A thin
   `agent-skills/UPSTREAM.toml` records the stamp. This replaces the older
   hand-vendored copy, which drifted silently.
 - `.claude/skills` and `.codex/skills` are **symlinks** to `agent-skills/`;
@@ -357,10 +358,11 @@ pre-staging required changes, the unlock wave, and the re-probe table.
   `red-team` alias stays wired to `redteam-exec` (per monorepo `AGENTS.md`
   §Shared Local Skills). `conform sync` wires the skill-dir symlinks.
 - Because the set is materialized from the pinned toolchain, it is always in
-  lockstep with the monorepo at the shell's pin — a shell cannot *silently* fork
-  a shared skill, and a shared-skill change propagates on the next `conform sync`
-  / pin bump. The only shell-owned edits are the two declared escape hatches
-  below.
+  lockstep with the monorepo at the shell's pin after applying the shell's
+  declared additions, whole-skill exclusions, and section selectors — a shell
+  cannot *silently* fork a shared skill, and a shared-skill change propagates on
+  the next `conform sync` / pin bump. The only shell-owned edits are the declared
+  controls below.
 - **Repo-local domain skills** (chelis#651): a shell MAY carry a skill outside
   the shared set by declaring it in `reef.toml` under
   `[conform] local_skills = ["<name>", ...]`. `conform sync` then preserves those
@@ -370,27 +372,21 @@ pre-staging required changes, the unlock wave, and the re-probe table.
   downstream-authoring skill,
   [`agent-skills/chelis-std/`](https://github.com/Chelis-Lang/school/tree/main/agent-skills/chelis-std),
   declared this way.
-- **The set is uniform by design; there is no per-shell exclusion** (chelis#1262).
-  Every shell carries every skill in the pinned toolchain's set, whether or not
-  its domain exercises all of them, and an unused skill is **inert**: it is
-  markdown an agent loads only when the task matches its description — it runs
-  nothing, gates nothing, and costs a few kilobytes. There is deliberately **no**
-  `exclude` / `skip` control, in `agent-skills/UPSTREAM.toml`, in `reef.toml`, or
-  anywhere else. The reason is not implementation cost, it is that the
-  declaration and the fact have different lifetimes: applicability is a snapshot
-  of the shell's surface *today*, while an exclusion is permanent, so the day a
-  web shell grows a `chelis` invocation the skill it excluded is exactly the
-  guidance it needs and nobody remembers to re-enable it. That is the same shape
-  as a workaround outliving its justification (§4), and it is why the current
-  state is the worst option: shells document an exclusion the tooling overrides.
-  To record that a skill does **not** fit this shell, append a shell-local
-  override block (below) saying so. That is strictly better than deleting the
-  file: it survives `sync`, it keeps propagating upstream body changes underneath
-  it, and it reaches the agent at the point of use instead of leaving an absence
-  the agent cannot interpret. Correspondingly, the **top-level `conform` value**
-  in `reef.toml` carries exactly the declarations this contract defines. Today
-  there is one: **`conform.local_skills`, an array of strings** (§8's repo-local
-  domain-skill allowlist). Anything else under `conform` — any key, at any
+- **Shared-skill exclusions:** a shell MAY omit irrelevant embedded skills by
+  declaring exact names in
+  `[conform] excluded_skills = ["<shared-name>", ...]`. `conform sync` removes
+  those directories and records only the materialized shared skills in
+  `agent-skills/UPSTREAM.toml`; `conform audit` accepts their absence and rejects
+  their presence. Every name MUST identify a shared skill in the pinned
+  toolchain. An unknown name fails both commands, so a typo or an upstream rename
+  cannot become a silent exclusion. Removing a name and syncing restores the
+  current embedded skill body. Use a shell-local override block instead when the
+  shell needs to amend part of a shared skill while retaining the rest.
+  Correspondingly, the **top-level `conform` value** in `reef.toml` carries
+  exactly the declarations this contract defines. There are two:
+  **`conform.local_skills`**, the repo-local domain-skill allowlist, and
+  **`conform.excluded_skills`**, the embedded shared-skill omission list. Both are
+  arrays of strings. Anything else under `conform` — any key, at any
   nesting depth — **fails** `conform audit` rather than being silently ignored,
   so a shell can never believe in a control the tool does not implement.
   Recognition is by **key path and value type**, not by spelling: the manifest is
@@ -417,13 +413,27 @@ pre-staging required changes, the unlock wave, and the re-probe table.
   quietly normalizes or drops what it cannot read is itself the bypass.**
 - **Shell-specific overrides on a shared skill** (chelis#653): a shell MAY append
   a single trailing `<!-- shell-local:begin -->…<!-- shell-local:end -->` block to
-  a shared skill's `SKILL.md` to supersede toolchain guidance that does not fit
-  the shell. `conform sync` regenerates the toolchain-owned body *above* the block
-  verbatim — so upstream skill edits still propagate downstream — and preserves
-  the block; §8 byte-checks only the managed span. When a bump changes the
-  upstream body underneath a block, `conform bump` flags that skill so the author
-  re-checks the override against the new text. The block MUST be a well-formed
-  file suffix (exactly one begin/end pair, nothing after the end marker).
+  a shared skill's `SKILL.md` to adapt toolchain guidance that does not fit the
+  shell. Ordinary Markdown inside the block adds or supersedes local guidance.
+  To remove inherited sections, the block MAY contain one nested
+  `<!-- shell-local:exclude:begin -->…<!-- shell-local:exclude:end -->` span.
+  Each nonblank line in that span is an exact ATX heading (`##` through
+  `######`) wrapped as an HTML comment, for example
+  `<!-- ## Device validation -->`; sync omits that heading and its section
+  through the next heading of equal or shallower depth. A selector MUST match
+  exactly one upstream heading, and
+  selected ranges MUST NOT overlap. Missing, duplicate, malformed, or overlapping
+  selectors fail sync and audit, so an upstream rename cannot silently restore
+  irrelevant guidance. Removing a selector restores the current upstream section
+  on the next sync.
+
+  `conform sync` regenerates the retained toolchain-owned body above the trailing
+  block and preserves the block verbatim, so upstream edits to retained sections
+  still propagate downstream. Audit derives the same filtered body from the
+  embedded skill and byte-checks it. When a bump changes retained upstream text
+  underneath a block, `conform bump` flags that skill so the author re-checks the
+  override. The outer block MUST be a well-formed file suffix (exactly one
+  begin/end pair, nothing after the end marker).
 
 ## 9. Acceptance & parity (conditional MUST)
 
@@ -479,7 +489,7 @@ self-audit.
 | 11 | `tests_neg/` + runner, in CI | MUST | §6 | `tests_neg/`, `scripts/run_negative_tests.py` |
 | 12 | `tests_blocked/` + runner, in CI | MUST once a blocker exists | §5 | `tests_blocked/`, `scripts/run_blocked_probes.py` |
 | 13 | Pin Bump Checklist in AGENTS.md | MUST | §7 | `AGENTS.md` §Pin Bump Checklist |
-| 14 | Uniform vendored shared skill set (no per-shell exclusions) + symlinked skill dirs + mirrored commands | MUST | §8 | `agent-skills/`, `.claude/skills` |
+| 14 | Declared shared-skill subset + validated local additions/section exclusions + symlinked skill dirs + mirrored commands | MUST | §8 | `reef.toml [conform]`, `agent-skills/`, `.claude/skills` |
 | 15 | Parity harness (own uv project, checked-in goldens, oracle guards) | MUST if external oracles | §9 | `parity/` |
 | 16 | ≥2-config acceptance for new public surface | MUST | §9 | `spec/vision.md` amendments |
 | 17 | Scaffolding Drift Rule in AGENTS.md | MUST | §10 | `AGENTS.md` §Scaffolding Drift Rule |

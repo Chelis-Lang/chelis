@@ -178,6 +178,16 @@ impl Ctx {
         }
     }
 
+    /// The recognized `conform.excluded_skills` declaration, or empty when the
+    /// manifest or declaration is absent. The vendored-skills row reports parse
+    /// failures and invalid names before using this as an omission list.
+    fn excluded_skills(&self) -> &[String] {
+        match &self.conform {
+            Some(Ok(decl)) => &decl.excluded_skills,
+            _ => &[],
+        }
+    }
+
     fn read(&self, rel: &str) -> Option<String> {
         read_opt(&self.root.join(rel))
     }
@@ -937,15 +947,7 @@ fn check_agents_heading(ctx: &Ctx, heading: &str) -> Check {
 fn check_vendored_skills(ctx: &Ctx) -> Check {
     let skills_dir = ctx.root.join("agent-skills");
     let mut problems = Vec::new();
-    // §8: the shared skill set is uniform by design and there is no per-shell
-    // exclusion control (chelis#1262). A shell that writes one anyway must be
-    // TOLD, not silently overridden on the next `sync`. Reported before the
-    // per-skill drift scan because it explains a whole class of "why did my
-    // pruned skill come back" in one line, and reported as its own failure so
-    // the fix text can name the sanctioned alternative instead of the generic
-    // "run conform sync".
-    //
-    // The declaration is read from the PARSED manifest, so the answer does not
+    // The control surface is read from the PARSED manifest, so the answer does not
     // depend on how it was spelled. An unparseable manifest fails here rather
     // than reading as "declares nothing": §8 cannot be checked against a file
     // this tool cannot read, and a silent pass on a MUST row is the failure this
@@ -966,15 +968,13 @@ fn check_vendored_skills(ctx: &Ctx) -> Check {
             return fail(
                 format!(
                     "reef.toml declares conformance control(s) contract §8 does not define: {}. \
-                     The only recognized declaration is `conform.local_skills`, an array of \
-                     strings.",
+                     The recognized declarations are `conform.local_skills` and \
+                     `conform.excluded_skills`, both arrays of strings.",
                     decl.findings().join(", ")
                 ),
-                "the shared skill set is uniform by design (contract §8) and there is no exclusion \
-                 control, so a key like `exclude`/`skip_skills` would be silently overridden by the \
-                 next `conform sync`. Remove the declaration. To record that a shared skill does \
-                 not fit this shell, append a trailing `<!-- shell-local:begin -->` block to its \
-                 SKILL.md saying so: that survives sync and reaches the agent at the point of use.",
+                "use `[conform] local_skills = [...]` for shell-owned additions and \
+                 `excluded_skills = [...]` for exact embedded shared-skill removals. Remove or \
+                 correct every other declaration before syncing.",
             );
         }
         Some(Ok(_)) => {}
@@ -988,21 +988,39 @@ fn check_vendored_skills(ctx: &Ctx) -> Check {
             ));
         }
     }
+    // Exclusions are exact names from this pinned toolchain. Failing unknown
+    // names catches both typos and a skill removed or renamed upstream.
+    for excluded in ctx.excluded_skills() {
+        if !skills::SHARED_SKILLS.contains(&excluded.as_str()) {
+            problems.push(format!(
+                "{excluded}: [conform] excluded_skills does not name a shared skill in this toolchain"
+            ));
+        }
+    }
     for (name, body) in skills::EMBEDDED_SKILLS {
-        let path = skills_dir.join(name).join("SKILL.md");
+        let skill_dir = skills_dir.join(name);
+        let path = skill_dir.join("SKILL.md");
+        if ctx.excluded_skills().iter().any(|s| s == name) {
+            if skill_dir.exists() {
+                problems.push(format!(
+                    "{name}: present but declared in [conform] excluded_skills"
+                ));
+            }
+            continue;
+        }
         match read_opt(&path) {
             None => problems.push(format!("{name}: missing")),
             Some(live) => {
-                // A trailing shell-local block (chelis#653) is shell-owned; §8
-                // byte-checks only the toolchain-owned managed span above it.
+                // A trailing shell-local block (chelis#653) is shell-owned. §8
+                // derives the expected managed span by applying its validated
+                // exclusions to the embedded body, then byte-checks that span.
                 let (managed, block) = crate::scaffold::split_shell_local(&live);
-                if managed.trim_end() != body.trim_end() {
-                    problems.push(format!("{name}: forked/stale"));
-                }
-                if let Some(block) = block
-                    && let Err(why) = validate_shell_local_block(block)
-                {
-                    problems.push(format!("{name}: {why}"));
+                match crate::scaffold::apply_shell_local_exclusions(body, block) {
+                    Ok(expected) if managed.trim_end() != expected.trim_end() => {
+                        problems.push(format!("{name}: forked/stale"));
+                    }
+                    Err(why) => problems.push(format!("{name}: {why}")),
+                    Ok(_) => {}
                 }
             }
         }
@@ -1018,6 +1036,11 @@ fn check_vendored_skills(ctx: &Ctx) -> Check {
             let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
             if is_dir {
                 if skills::SHARED_SKILLS.contains(&name.as_str()) {
+                    if ctx.excluded_skills().iter().any(|s| s == &name) {
+                        // Presence was already reported above; do not inspect a
+                        // skill whose configured state is absence.
+                        continue;
+                    }
                     if let Ok(inner) = std::fs::read_dir(e.path()) {
                         for f in inner.flatten() {
                             let fname = f.file_name().to_string_lossy().into_owned();
@@ -1045,9 +1068,10 @@ fn check_vendored_skills(ctx: &Ctx) -> Check {
                 problems.join(", ")
             ),
             "run `chelis reef conform sync` to re-materialize agent-skills/ from the toolchain. \
-             The set is uniform by design (contract §8): a shared skill that does not fit this \
-             shell is recorded with a trailing `<!-- shell-local:begin -->` block in its SKILL.md, \
-             never removed, because a removal does not survive the next sync.",
+             Configure shell-owned additions with `[conform] local_skills` and embedded removals \
+             with `[conform] excluded_skills`; use a trailing `<!-- shell-local:begin -->` block \
+             to retain and amend a shared skill, with `shell-local:exclude` selectors for \
+             inherited sections that should be omitted.",
         );
     }
     // Both tool-surface skill dirs must be symlinks that actually resolve to
@@ -1062,28 +1086,6 @@ fn check_vendored_skills(ctx: &Ctx) -> Check {
         }
     }
     pass()
-}
-
-/// A trailing shell-local block (chelis#653) must be well-formed: exactly one
-/// begin marker, an end marker after it, and nothing but whitespace past the end
-/// marker (the block is strictly the file suffix, so `sync` can regenerate the
-/// managed span above it without touching author content).
-fn validate_shell_local_block(block: &str) -> Result<(), String> {
-    use crate::scaffold::{SHELL_LOCAL_BEGIN, SHELL_LOCAL_END};
-    if block.matches(SHELL_LOCAL_BEGIN).count() != 1 {
-        return Err(format!(
-            "malformed shell-local block (expected exactly one `{SHELL_LOCAL_BEGIN}`)"
-        ));
-    }
-    let Some(end) = block.find(SHELL_LOCAL_END) else {
-        return Err(format!("shell-local block missing `{SHELL_LOCAL_END}`"));
-    };
-    if !block[end + SHELL_LOCAL_END.len()..].trim().is_empty() {
-        return Err(format!(
-            "content after `{SHELL_LOCAL_END}` (the shell-local block must be the file suffix)"
-        ));
-    }
-    Ok(())
 }
 
 fn check_parity_harness(ctx: &Ctx) -> Check {

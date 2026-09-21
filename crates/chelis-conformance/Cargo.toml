@@ -8,6 +8,9 @@ repository.workspace = true
 
 [dependencies]
 chelis-version = { path = "../chelis-version" }
+# Section exclusions resolve headings through CommonMark structure so examples,
+# HTML blocks, and other non-heading text cannot become selector boundaries.
+pulldown-cmark = { version = "0.13.4", default-features = false }
 sha2 = "0.10"
 # The `[conform]` control surface in a shell's reef.toml is read STRUCTURALLY,
 # not line-wise (chelis#1262). Two review rounds produced six bypass spellings of

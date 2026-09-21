@@ -22,6 +22,129 @@ use tempfile::tempdir;
 /// assertions vacuous.
 const OLD_PIN: &str = "0.17.0";
 
+#[test]
+fn conform_sync_help_explains_skill_additions_and_removals() {
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["reef", "conform", "sync", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("local_skills"))
+        .stdout(predicate::str::contains("excluded_skills"))
+        .stdout(predicate::str::contains("shell-local:exclude"))
+        .stdout(predicate::str::contains("outside managed regions"));
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["reef", "conform", "bump", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("local_skills"))
+        .stdout(predicate::str::contains("excluded_skills"))
+        .stdout(predicate::str::contains("shell-local:exclude"));
+}
+
+#[test]
+fn conform_sync_applies_skill_additions_and_removals_together() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("shell");
+    init_shell(&root);
+
+    let reef = root.join("reef.toml");
+    let mut manifest = std::fs::read_to_string(&reef).unwrap();
+    manifest.push_str(
+        "\n[conform]\nlocal_skills = [\"shell-domain\"]\nexcluded_skills = [\"cli-surface\"]\n",
+    );
+    std::fs::write(&reef, manifest).unwrap();
+    let local = root.join("agent-skills/shell-domain/SKILL.md");
+    std::fs::create_dir_all(local.parent().unwrap()).unwrap();
+    std::fs::write(&local, "# shell domain\n").unwrap();
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["reef", "conform", "sync", "--path"])
+        .arg(&root)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "cli-surface: removed by [conform] excluded_skills",
+        ));
+
+    assert!(local.is_file(), "declared local addition must survive sync");
+    assert!(
+        !root.join("agent-skills/cli-surface").exists(),
+        "declared embedded removal must survive sync"
+    );
+    assert!(chelis_conformance::audit::audit(&root).ok());
+}
+
+#[test]
+fn conform_bump_preserves_declared_shared_skill_removals() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("shell");
+    init_shell(&root);
+
+    let reef = root.join("reef.toml");
+    let mut manifest = std::fs::read_to_string(&reef).unwrap();
+    manifest.push_str("\n[conform]\nexcluded_skills = [\"cli-surface\"]\n");
+    std::fs::write(&reef, manifest).unwrap();
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "reef",
+            "conform",
+            "bump",
+            chelis_compiler_api::COMPILER_VERSION,
+            "--path",
+        ])
+        .arg(&root)
+        .assert()
+        .success();
+
+    assert!(
+        !root.join("agent-skills/cli-surface").exists(),
+        "the bump's sync step must honor excluded_skills"
+    );
+    assert!(chelis_conformance::audit::audit(&root).ok());
+}
+
+#[test]
+fn conform_bump_applies_shell_local_section_exclusions() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("shell");
+    init_shell(&root);
+
+    let skill = root.join("agent-skills/example-corpus/SKILL.md");
+    let mut body = std::fs::read_to_string(&skill).unwrap();
+    body.push_str(
+        "\n<!-- shell-local:begin -->\n\
+         <!-- shell-local:exclude:begin -->\n\
+         <!-- ## Verification -->\n\
+         <!-- shell-local:exclude:end -->\n\
+         <!-- shell-local:end -->\n",
+    );
+    std::fs::write(&skill, body).unwrap();
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "reef",
+            "conform",
+            "bump",
+            chelis_compiler_api::COMPILER_VERSION,
+            "--path",
+        ])
+        .arg(&root)
+        .assert()
+        .success();
+
+    let after = std::fs::read_to_string(&skill).unwrap();
+    assert!(!after.contains("For executable examples:"));
+    assert!(after.contains("shell-local:exclude:begin"));
+    assert!(chelis_conformance::audit::audit(&root).ok());
+}
+
 fn init_shell(root: &std::path::Path) {
     Command::cargo_bin("chelis")
         .expect("binary")
@@ -154,10 +277,9 @@ fn bump_with_a_bump_owned_failure_exits_nonzero() {
     init_shell(&root);
 
     // Inject a defect in a bump-owned artifact: a malformed shell-local block
-    // (no end marker) on a shared skill. `materialize_skills` preserves it, so
-    // §8 (row `vendored-skills`, bump-owned) fails after the bump — which MUST
-    // read as a failure (exit 1), not an author-follow-up exit 0. This is the
-    // negative parity for `bump_with_only_author_follow_up_exits_zero...`.
+    // (no end marker) on a shared skill. Materialization validates overrides
+    // before rewriting skill files, so the bump fails directly rather than
+    // treating the defect as an author-follow-up row.
     let skill = root.join("agent-skills/spec-sync/SKILL.md");
     let body = std::fs::read_to_string(&skill).expect("scaffolded skill");
     std::fs::write(
@@ -173,8 +295,8 @@ fn bump_with_a_bump_owned_failure_exits_nonzero() {
         .arg(&root)
         .assert()
         .failure()
-        .stderr(predicate::str::contains("bump-owned artifact"))
-        .stderr(predicate::str::contains("vendored-skills"));
+        .stderr(predicate::str::contains("spec-sync"))
+        .stderr(predicate::str::contains("shell-local:end"));
 }
 
 // ------------------------------------------------- chelis#1263 write preflight
