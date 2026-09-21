@@ -100,15 +100,17 @@ jobs:
           fetch-depth: 1
 
       # Shallow checkout (depth 1); the detect step deepens to the PR
-      # commit range. A retarget dispatch fetches the exact synthetic merge
-      # and both parents so the trusted validator can bind both sides.
-      # Depth 2, not 0: expressions treat 0 as false, so `&& 0 || 1` is 1.
+      # commit range. A retarget dispatch with a pinned candidate checks out
+      # that exact merge commit by SHA (it stays reachable through the
+      # reviewer's refs/ci-candidates/<token> pin) and both parents so the
+      # trusted validator can bind them. Depth 2, not 0: expressions treat 0
+      # as false, so `&& 0 || 1` is 1.
       - name: Checkout exact candidate
         id: checkout-candidate
         continue-on-error: true
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/pull/{0}/merge', inputs.pr_number) || github.sha }}
+          ref: ${{ inputs.expected_candidate_sha != '' && inputs.expected_candidate_sha || (github.event_name == 'workflow_dispatch' && format('refs/pull/{0}/merge', inputs.pr_number) || github.sha) }}
           path: candidate
           fetch-depth: ${{ github.event_name == 'workflow_dispatch' && 2 || 1 }}
 
@@ -128,14 +130,25 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
+          EXPECTED_BASE_SHA: ${{ inputs.expected_base_sha }}
+          EXPECTED_CANDIDATE_SHA: ${{ inputs.expected_candidate_sha }}
         working-directory: candidate
-        run: >-
-          python3 ../trusted/scripts/ci_validate_pr_candidate.py
-          --repository "${{ github.repository }}"
-          --pr-number "${{ inputs.pr_number }}"
-          --expected-head-sha "${{ inputs.expected_head_sha }}"
-          --expected-base-sha "${{ inputs.expected_base_sha }}"
-          --validate-checkout
+        run: |
+          # A pinned candidate is a fixed merge of the reviewed base and the
+          # head. Bind its parents, not the live pull-request base: GitHub
+          # recomputes that base on every main push, and whether main moved
+          # is decided at merge time, not by rerunning this review.
+          if [ -n "$EXPECTED_CANDIDATE_SHA" ]; then
+            base_args=(--checkout-base-sha "$EXPECTED_BASE_SHA" --expected-base-ref main)
+          else
+            base_args=(--expected-base-sha "$EXPECTED_BASE_SHA")
+          fi
+          python3 ../trusted/scripts/ci_validate_pr_candidate.py \
+            --repository "${{ github.repository }}" \
+            --pr-number "${{ inputs.pr_number }}" \
+            --expected-head-sha "${{ inputs.expected_head_sha }}" \
+            "${base_args[@]}" \
+            --validate-checkout
 
       - name: Record exact candidate
         id: candidate

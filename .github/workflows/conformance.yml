@@ -109,14 +109,15 @@ jobs:
 
       # Shallow checkout (depth 1); deepen in bash since GitHub Actions
       # expressions have no arithmetic. See ci.yml's changes job. A retarget
-      # dispatch fetches the synthetic merge and both parents (depth 2; 0 is
-      # false in expressions, so `&& 0 || 1` would collapse to 1).
+      # dispatch with a pinned candidate checks out that exact merge commit by
+      # SHA (reachable through refs/ci-candidates/<token>) and both parents
+      # (depth 2; 0 is false in expressions, so `&& 0 || 1` would be 1).
       - name: Checkout exact candidate
         id: checkout-candidate
         continue-on-error: true
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/pull/{0}/merge', inputs.pr_number) || github.sha }}
+          ref: ${{ inputs.expected_candidate_sha != '' && inputs.expected_candidate_sha || (github.event_name == 'workflow_dispatch' && format('refs/pull/{0}/merge', inputs.pr_number) || github.sha) }}
           path: candidate
           fetch-depth: ${{ github.event_name == 'workflow_dispatch' && 2 || 1 }}
 
@@ -136,14 +137,23 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
+          EXPECTED_BASE_SHA: ${{ inputs.expected_base_sha }}
+          EXPECTED_CANDIDATE_SHA: ${{ inputs.expected_candidate_sha }}
         working-directory: candidate
-        run: >-
-          python3 ../trusted/scripts/ci_validate_pr_candidate.py
-          --repository "${{ github.repository }}"
-          --pr-number "${{ inputs.pr_number }}"
-          --expected-head-sha "${{ inputs.expected_head_sha }}"
-          --expected-base-sha "${{ inputs.expected_base_sha }}"
-          --validate-checkout
+        run: |
+          # A pinned candidate binds its parents, not the live pull-request
+          # base that GitHub recomputes on every main push. See ci.yml.
+          if [ -n "$EXPECTED_CANDIDATE_SHA" ]; then
+            base_args=(--checkout-base-sha "$EXPECTED_BASE_SHA" --expected-base-ref main)
+          else
+            base_args=(--expected-base-sha "$EXPECTED_BASE_SHA")
+          fi
+          python3 ../trusted/scripts/ci_validate_pr_candidate.py \
+            --repository "${{ github.repository }}" \
+            --pr-number "${{ inputs.pr_number }}" \
+            --expected-head-sha "${{ inputs.expected_head_sha }}" \
+            "${base_args[@]}" \
+            --validate-checkout
 
       - name: Record exact candidate
         id: candidate
