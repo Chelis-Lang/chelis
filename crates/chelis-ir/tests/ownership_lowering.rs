@@ -1801,9 +1801,10 @@ fn lowered_owners_carry_the_surf_span_of_their_defining_expression() {
     );
 }
 
-/// chelis#2122: sibling expressions do not share a span. The active span is
-/// restored after each expression, so an owner minted later cannot inherit the
-/// region of an earlier sibling.
+/// chelis#2122: sibling bindings each point at their own region rather than
+/// sharing one. This exercises the restore in passing but does not pin it: each
+/// binding here sets its own span, so dropping the restore leaves the test
+/// green. See the PR's coverage note.
 #[test]
 fn sibling_expressions_keep_their_own_spans() {
     let source = "module M\nexport (pair)\ndef pair() -> (string, string) = {\n  first = \"alpha\"\n  second = \"omega\"\n  (first, second)\n}\n";
@@ -1835,6 +1836,44 @@ fn direct_call_arguments_carry_their_own_spans() {
     assert!(
         texts.contains(&"\"alpha\"".to_string()) && texts.contains(&"\"omega\"".to_string()),
         "both arguments point at themselves rather than at the enclosing call: {texts:?}\n{rendered}"
+    );
+}
+
+/// chelis#2122: an integer literal argument whose declared slot already matches
+/// is admitted raw, returning before the expression is lowered. That exit needs
+/// the span too, or sibling arguments collide on the call's own region (red
+/// team round 2).
+#[test]
+fn raw_literal_call_arguments_carry_their_own_spans() {
+    let source = "module M\nexport (go)\ndef my_add(a: i64, b: i64) -> i64 = add(a, b)\ndef go() -> i64 = my_add(11i64, 22i64)\n";
+    let rendered = verified_source(source).render();
+
+    let texts = owner_spans(&rendered, source)
+        .into_iter()
+        .map(|(_, text)| text)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        texts,
+        vec!["11i64".to_string(), "22i64".to_string()],
+        "each raw literal argument points at itself, not at `my_add(11i64, 22i64)`:\n{rendered}"
+    );
+}
+
+/// The same admission path with one raw literal beside one lowered argument:
+/// the two must not disagree about which region they came from.
+#[test]
+fn mixed_raw_and_lowered_call_arguments_each_point_at_themselves() {
+    let source = "module M\nexport (go)\ndef my_pick(a: string, b: i64) -> string = a\ndef go() -> string = my_pick(\"ss\", 9i64)\n";
+    let rendered = verified_source(source).render();
+
+    let texts = owner_spans(&rendered, source)
+        .into_iter()
+        .map(|(_, text)| text)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        texts,
+        vec!["\"ss\"".to_string(), "9i64".to_string()],
+        "the lowered and raw-admitted arguments both point at themselves:\n{rendered}"
     );
 }
 

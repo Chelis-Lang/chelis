@@ -1035,9 +1035,18 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
     /// restored exactly as `active_site` is. A span-less node keeps the nearest
     /// enclosing span rather than clearing it: the enclosing source region
     /// still locates the owner, and host lowering leaves `span_id` empty on
-    /// plenty of interior nodes (chelis#2122). Every path that lowers an
-    /// expression goes through here, including direct-call arguments, which
-    /// reach `lower_expr_at_site` without passing through `lower_expr`.
+    /// plenty of interior nodes (chelis#2122).
+    ///
+    /// Every path that lowers an expression goes through here: `lower_expr`,
+    /// and `lower_direct_call_argument`, which reaches `lower_expr_at_site`
+    /// without passing through it and can also return early for a raw literal.
+    ///
+    /// One owner class is knowingly outside it: `materialize_function_ref`
+    /// mints from a `Value::FunctionRef` that outlives the expression scope
+    /// that produced it, so such an owner takes the enclosing region (for
+    /// example the whole tuple in `(identity, 1i64)`). Narrowing it would mean
+    /// carrying a span on the `Value`, which is more than this change should
+    /// take on.
     fn with_expr_span<T>(
         &mut self,
         expr: &ConcreteHostExpr,
@@ -1517,34 +1526,37 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         let actual = self.direct_call_argument_type(argument.expr)?;
         self.with_site(HostSiteKind::Argument, |lowerer| {
             lowerer.with_site(HostSiteKind::Expression, |lowerer| {
-                let raw_literal_allowed = match (&argument.expr.kind, argument.checked_slot) {
-                    (ConcreteHostExprKind::Int(_), ConcreteHostType::Scalar(prim)) => {
-                        prim.is_integer() || prim.is_float()
-                    }
-                    (ConcreteHostExprKind::Float(_), ConcreteHostType::Scalar(prim)) => {
-                        prim.is_float()
-                    }
-                    _ => false,
-                };
-                if raw_literal_allowed {
-                    let label = match &argument.expr.kind {
-                        ConcreteHostExprKind::Int(value) => format!("literal {value}"),
-                        ConcreteHostExprKind::Float(value) => format!("literal {value}"),
-                        _ => unreachable!("raw literal admission is exhaustive"),
-                    };
-                    return lowerer.define(argument.checked_slot, label);
-                }
-
-                if !instantiation.admits(argument.pattern, argument.formal, &actual) {
-                    return Err(OwnershipError::CallArgumentType {
-                        unit: lowerer.unit_name.clone(),
-                        callee: argument.function.to_string(),
-                        argument: argument.index,
-                        expected: render_type(argument.formal),
-                        actual: render_type(&actual),
-                    });
-                }
+                // The span covers BOTH ways out of this body: the raw-literal
+                // admission below returns without reaching `lower_expr_at_site`
+                // (chelis#2122 red team round 2).
                 lowerer.with_expr_span(argument.expr, |lowerer| {
+                    let raw_literal_allowed = match (&argument.expr.kind, argument.checked_slot) {
+                        (ConcreteHostExprKind::Int(_), ConcreteHostType::Scalar(prim)) => {
+                            prim.is_integer() || prim.is_float()
+                        }
+                        (ConcreteHostExprKind::Float(_), ConcreteHostType::Scalar(prim)) => {
+                            prim.is_float()
+                        }
+                        _ => false,
+                    };
+                    if raw_literal_allowed {
+                        let label = match &argument.expr.kind {
+                            ConcreteHostExprKind::Int(value) => format!("literal {value}"),
+                            ConcreteHostExprKind::Float(value) => format!("literal {value}"),
+                            _ => unreachable!("raw literal admission is exhaustive"),
+                        };
+                        return lowerer.define(argument.checked_slot, label);
+                    }
+
+                    if !instantiation.admits(argument.pattern, argument.formal, &actual) {
+                        return Err(OwnershipError::CallArgumentType {
+                            unit: lowerer.unit_name.clone(),
+                            callee: argument.function.to_string(),
+                            argument: argument.index,
+                            expected: render_type(argument.formal),
+                            actual: render_type(&actual),
+                        });
+                    }
                     lowerer.lower_expr_at_site(argument.expr, None)
                 })
             })

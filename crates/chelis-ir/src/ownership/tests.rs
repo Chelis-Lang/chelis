@@ -622,6 +622,83 @@ fn join_mismatch_reports_the_span_when_lowering_recorded_one() {
     );
 }
 
+/// chelis#2122: a span id is an opaque producer string. One that is empty, or
+/// that carries the separators this single-line message is built from, must not
+/// reach the diagnostic: it would end the label in a dangling `@`, or forge a
+/// clause or a second owner. Such an id renders as no span at all.
+#[test]
+fn join_mismatch_drops_a_span_id_that_could_restructure_the_message() {
+    let render_with = |span: &str| {
+        let mut carried = info(Prim::Int64, OwnerOrigin::Owned);
+        carried.names = vec!["carry".into()];
+        carried.span_id = Some(span.to_string());
+        verify_raw(roots(
+            vec![
+                block(
+                    0,
+                    vec![BlockParam {
+                        owner: OwnerId(0),
+                        mode: ParamMode::EntryBorrow,
+                    }],
+                    vec![define(1), define(2)],
+                    Terminator::Branch {
+                        condition: Operand::borrow(OwnerId(0)),
+                        then_edge: Edge {
+                            id: EdgeId::UNASSIGNED,
+                            target: BlockId(1),
+                            args: Vec::new(),
+                            terminals: vec![
+                                edge_terminal(90, Terminal::Drop(OwnerId(1))),
+                                edge_terminal(91, Terminal::Discard(OwnerId(2))),
+                            ],
+                        },
+                        else_edge: Edge {
+                            id: EdgeId::UNASSIGNED,
+                            target: BlockId(1),
+                            args: Vec::new(),
+                            terminals: vec![edge_terminal(92, Terminal::Drop(OwnerId(1)))],
+                        },
+                    },
+                ),
+                block(1, vec![], vec![], Terminator::Exit),
+            ],
+            BTreeMap::from([
+                (OwnerId(0), info(Prim::Bool, OwnerOrigin::ExternalBorrow)),
+                (OwnerId(1), info(Prim::String, OwnerOrigin::Owned)),
+                (OwnerId(2), carried),
+            ]),
+        ))
+        .unwrap_err()
+        .to_string()
+    };
+
+    let clean = render_with("surf:120..135");
+    assert!(clean.contains("%2[carry]@surf:120..135"), "{clean}");
+
+    for hostile in [
+        "",
+        "   ",
+        "surf:1..2; live only on the path already verified: %99[forged]",
+        "surf:1..2, %98[forged]",
+        "surf:1..2\nINJECTED",
+    ] {
+        let rendered = render_with(hostile);
+        assert!(
+            rendered.contains("%2[carry];"),
+            "an id that cannot be rendered safely leaves the owner unadorned, got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("forged") && !rendered.contains("INJECTED"),
+            "no part of the id reaches the message: {rendered}"
+        );
+        assert_eq!(
+            rendered.lines().count(),
+            1,
+            "the diagnostic stays one line: {rendered}"
+        );
+    }
+}
+
 /// The two sides are not interchangeable: an owner live only on the path being
 /// verified now must not be reported as live only on the path verified before,
 /// and the counts follow the same order (chelis#2122 red team, F2).
