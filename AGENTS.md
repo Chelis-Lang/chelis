@@ -936,12 +936,8 @@ a missing `clang` fails the scan loudly rather than skipping it.
 ## Local Git Hook
 
 `.githooks/commit-msg` is the tracked commit-msg hook. It runs
-`scripts/check_commit_message.py` through the activated `DEVENV_STATE/venv`
-when its canonical state directory is beneath the committing worktree's
-`.devenv`, then `.devenv/state/venv`, `.venv`, or
+`scripts/check_commit_message.py` through Devenv, `.venv`, or
 `uv run --managed-python --python 3.11 --no-project`, in that precedence order.
-Foreign or escaping activated profiles are not accepted. The explicit uv fallback
-locally unsets `UV_PYTHON_PREFERENCE` so it cannot conflict with `--managed-python`.
 
 Devenv **copies** it into the shared hooks directory on shell entry, resolved
 with `git rev-parse --git-common-dir` so a linked worktree installs to the same
@@ -956,12 +952,12 @@ silently, with the `.git/hooks` fallback disabled by the same config. Do not
 reinstate an installer that writes an absolute path either: that names one
 worktree for every worktree, and all of them lose the ability to commit once it
 is deleted (chelis#1409).
-`scripts/test_commit_hook.py` checks both entrypoints through real acceptance and
-rejection, owned-profile precedence, foreign-profile isolation, and truncation.
+`scripts/test_commit_hook.py` locks the tracked path, the absence of any
+absolute path, and the accept/reject behavior.
 
 Cargo-husky remains the fallback for the manual setup: `cargo test` installs
 `.cargo-husky/hooks/commit-msg`, a POSIX wrapper that runs the same checker through
-the same owned-profile/default/manual/uv precedence. It is
+Devenv, `.venv`, or `uv run --managed-python --python 3.11 --no-project`. It is
 worktree-agnostic for the same reason the tracked hook is, and the two are compatible
 because both resolve the repository at run time rather than naming one worktree.
 

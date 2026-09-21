@@ -69,19 +69,16 @@ def _assert_empty_shard_skips_preparation(
         "rust-toolchain",
         "setup-uv",
         "ci_setup_uv_python.py",
-        "setup-devenv",
-        "ci_devenv.py",
         "rust-cache",
         "uv pip install",
         "install-action@nextest",
     )
     for step in job["steps"]:
         if any(marker in str(step) for marker in heavy_markers):
-            condition = step.get("if", "")
-            test.assertIn(
-                "steps.shard-selection.outputs.has_targets == 'true'", condition
+            test.assertEqual(
+                step.get("if"),
+                "steps.shard-selection.outputs.has_targets == 'true'",
             )
-            test.assertNotIn("||", condition)
     executor = next(
         step
         for step in job["steps"]
@@ -105,9 +102,7 @@ def assert_change_owned_topology(
     test.assertLessEqual(expected, set(jobs))
     test.assertNotIn("package-expansion-shard", jobs)
     test.assertNotIn("package-expansion-summary", jobs)
-    # Native planner/reporters still need their checkout venv. The project
-    # shard's runtime identity is exercised by test_ci_devenv instead.
-    for name in expected - {"change-owned-shard"}:
+    for name in expected:
         steps = jobs[name]["steps"]
         invoke = next(
             (
@@ -150,6 +145,7 @@ def assert_change_owned_topology(
 
     required = jobs["change-owned-shard"]
     test.assertEqual(required["needs"], ["changes", "integration-plan"])
+    test.assertEqual(required["timeout-minutes"], 60)
     test.assertFalse(required.get("continue-on-error", False))
     test.assertFalse(required["strategy"]["fail-fast"])
     test.assertEqual(required["strategy"]["matrix"]["shard"], SHARDS)
@@ -400,6 +396,36 @@ class ChangeOwnedWorkflowTests(unittest.TestCase):
             8 * 60,
             "job setup runs before the executor's clock and eats this gap",
         )
+
+    def test_every_limit_the_topology_doc_states_matches_the_workflow(
+        self,
+    ) -> None:
+        """Reconcile the limits the topology table states against the jobs.
+
+        Nothing otherwise pins the deadline's absolute value, so reverting the
+        constant leaves the suites green while the document still claims the
+        new number. Two of the four figures in that table were also already
+        stale, which is how a wrong one reached a comment in this change.
+
+        One-directional by design: it requires each derived phrase to appear,
+        and cannot forbid a contradictory sentence elsewhere in the document.
+        Making it forbid one would mean deriving every prose mention, which is
+        more than a topology table needs.
+        """
+        doc = (ROOT / "docs/ci_validation.md").read_text()
+        expected = {
+            f"{self.workflow['jobs']['ci-fast']['timeout-minutes']}-minute "
+            f"limit",
+            f"{self.workflow['jobs']['change-owned-shard']['timeout-minutes']}"
+            f"-minute limit each",
+            f"{owned.EXPANSION_EXECUTION_SECONDS // 60}-minute execution "
+            f"deadline inside a "
+            f"{self.expansion_workflow['jobs']['package-expansion-shard']['timeout-minutes']}"
+            f"-minute job limit",
+        }
+        for phrase in sorted(expected):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, doc)
 
     def test_the_soft_budget_warns_before_the_deadline_it_derives_from(
         self,

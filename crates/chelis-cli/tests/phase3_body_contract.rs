@@ -2,8 +2,6 @@
 
 #[path = "common/phase3_body_contract.rs"]
 mod body_contract;
-#[path = "../../../tests/support/managed_python.rs"]
-mod managed_python;
 
 use body_contract::RequiredTest;
 use serde::Deserialize;
@@ -36,8 +34,7 @@ fn root() -> &'static Path {
 fn contract() -> &'static Contract {
     static CONTRACT: OnceLock<Contract> = OnceLock::new();
     CONTRACT.get_or_init(|| {
-        let python = managed_python::managed_python(root()).unwrap_or_else(|error| panic!("{error}"));
-        let output = Command::new(python)
+        let output = Command::new(root().join(".venv/bin/python"))
             .current_dir(root())
             .env("PYTHONPATH", root().join("scripts"))
             .args([

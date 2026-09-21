@@ -447,21 +447,11 @@ class CheckedNativeExecution:
         return self.packet
 
 
-def _owned_interpreter(root: Path) -> bool:
-    prefix = Path(sys.prefix).resolve()
-    devenv_state = os.environ.get("DEVENV_STATE")
-    if devenv_state:
-        state = Path(devenv_state).resolve()
-        if state.is_relative_to(root / ".devenv") and prefix == state / "venv":
-            return True
-    return prefix == (root / ".venv").resolve()
-
-
 def collect_native_execution(root: Path, target: Path):
     """Build current runtime and execute the exact corpus; accept no evidence inputs."""
     root, target = root.resolve(), target.resolve()
     _require(target.is_relative_to(root / "target"), "native execution target must belong to this worktree")
-    _require(_owned_interpreter(root),
+    _require(Path(sys.prefix).resolve() == (root / ".venv").resolve(),
              "native execution requires this worktree's owned interpreter")
     source = _source_packet(root)
     environment = _managed_python_environment()

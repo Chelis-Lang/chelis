@@ -1,0 +1,1 @@
+`Cons` and `Nil` patterns now destructure `List` values consistently in the evaluator and generated C, including nested list, tuple, option, ADT, record, literal, variable, wildcard, and as-patterns. See [#2292](https://github.com/Chelis-Lang/chelis/issues/2292).
