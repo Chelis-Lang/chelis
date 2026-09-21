@@ -873,11 +873,13 @@
       },
       "expected": [
         "c_inherited_claim_reaches_named_and_literal_callbacks",
+        "c_identity_callback_checks_claim_after_actual_preparation",
         "c_shared_callback_claims_are_invocation_local",
         "eval_inherited_claim_reaches_named_and_literal_callbacks",
+        "eval_identity_callback_checks_claim_after_actual_preparation",
         "eval_shared_callback_claims_are_invocation_local"
       ],
-      "note": "chelis#1771 and chelis#1945 callable slice: inherited literal result claims cross supported named and literal callable invocations and remain invocation-local. Both host lanes prove exact shrink attribution, producer-relative before/after effects and exact agreeing values. Delayed selected-producer provenance remains a separate continuation. The existing cli_return_boundary, cli_result_pure_helper and callable-entry targets remain independent controls."
+      "note": "chelis#1771 and chelis#1945 callable slice: inherited literal result claims cross supported named, literal and identity callback invocations and remain invocation-local. Both host lanes prove exact producer/interface attribution, argument preparation and producer-relative effect ordering, and exact agreeing values. Delayed selected-producer provenance composes with this transport in the same delivery slice. The existing cli_return_boundary, cli_result_pure_helper and callable-entry targets remain independent controls."
     },
     {
       "phase": "b",
