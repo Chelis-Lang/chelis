@@ -54,8 +54,11 @@ runs:
       if: runner.environment == 'self-hosted'
       uses: Chelis-Lang/ci/actions/restore-build-cache@6afc09f65c178211a9d1bea994a4b39b62d23024
       with:
-        # Every admitted Tunnet member may read and write, including reviewed drafts.
-        mode: read-write
+        # Pull-request workers consume the shared caches; push and dispatch
+        # workers publish. A dependency's build script running in a
+        # pull-request job therefore cannot write what every other worker
+        # substitutes. Publication intent, not authorization.
+        mode: ${{ github.event_name == 'pull_request' && 'read' || 'read-write' }}
 
     - name: Activate project CI environment
       if: runner.environment == 'self-hosted'
