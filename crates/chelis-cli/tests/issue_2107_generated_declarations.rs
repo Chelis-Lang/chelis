@@ -149,10 +149,8 @@ fn wrap_export_definition_with_macro(source: &str, symbol: &str, replacement: &s
 }
 
 fn swap_export_bodies(source: &str, first: &str, second: &str) -> String {
-    let first_call =
-        format!("int32_t __result = {first}__chelis_owned_body(x, __chelis_rng, NULL, NULL);");
-    let second_call =
-        format!("int32_t __result = {second}__chelis_owned_body(x, __chelis_rng, NULL, NULL);");
+    let first_call = format!("int32_t __result = {first}__chelis_owned_body(");
+    let second_call = format!("int32_t __result = {second}__chelis_owned_body(");
     source
         .replacen(&first_call, "__SWAPPED_PUBLIC_BODY_TARGET__", 1)
         .replacen(&second_call, &first_call, 1)
