@@ -35,6 +35,10 @@ z3 = ["dep:z3", "num-rational"]
 # discharge is CertificateBearing@Exact ONLY when the exact cert verifies. The
 # default / smt / solver-free builds link none of this.
 clarabel = ["dep:clarabel", "num-rational", "dep:num-bigint", "dep:num-traits"]
+# CI's pinned Nix LP64 provider supplies the static OpenBLAS archive. The
+# supported `system` feature skips openblas-src's native source build; keeping
+# this opt-in preserves the bundled provider for ordinary non-Nix builds.
+ci-openblas-system = ["clarabel", "dep:openblas-src"]
 # WI-16 Carcara auditability: re-check cvc5's Alethe proofs in-process for
 # independent auditability of the linear-arithmetic / EUF fragment (the
 # SmtExpr/SmtSort surface has no bit-vector representation, so the bit-vector
@@ -122,11 +126,15 @@ tempfile = "3"
 # entry, so cargo UNIFIES the features: when `--features clarabel` is on, the
 # `sdp` + the matching backend turn on for the active target; when it is off,
 # clarabel is not built at all (optional dep), so neither does any BLAS. Linux
-# builds and statically links the OpenBLAS source selected by `openblas-src`;
-# macOS uses the OS-bundled Accelerate framework. The shipped release binary
-# does not enable `clarabel`, so it links no BLAS.
+# statically links OpenBLAS: bundled source normally, or the prebuilt LP64
+# provider with `ci-openblas-system`. macOS uses the OS-bundled Accelerate
+# framework. The shipped release binary does not enable `clarabel`, so it
+# links no BLAS.
 [target.'cfg(target_os = "linux")'.dependencies]
 clarabel = { version = "0.11", optional = true, features = ["sdp-openblas"] }
+# Feature unification adds `system` to Clarabel's existing `static` provider,
+# without replacing sdp-openblas or changing its serde/SDP feature coverage.
+openblas-src = { version = "=0.10.16", optional = true, default-features = false, features = ["system", "static"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 clarabel = { version = "0.11", optional = true, features = ["sdp-accelerate"] }

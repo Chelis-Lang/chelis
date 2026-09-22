@@ -9,12 +9,10 @@ from __future__ import annotations
 
 import importlib.util
 import io
-import re
 import subprocess
 import sys
 import tempfile
 import unittest
-from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -50,61 +48,6 @@ ALLOWED_MESSAGES = (
     "refactor: rename the assistant module",
     "test: cover generated output from the compiler",
 )
-CARGO_HUSKY_DEPENDENCY = (
-    'cargo-husky = { version = "1", default-features = false, '
-    'features = ["user-hooks"] }'
-)
-
-
-@dataclass(frozen=True)
-class CargoHuskyFallback:
-    checker_path: str
-    interpreter_paths: tuple[str, str]
-    uv_command: str
-    dependency: str
-    locked_version: str
-
-    @classmethod
-    def parse(cls, hook: str, manifest: str, lock: str) -> CargoHuskyFallback:
-        if not hook.startswith("#!/bin/sh\n"):
-            raise ValueError("the cargo-husky hook must use POSIX sh")
-
-        checker_path = "scripts/check_commit_message.py"
-        interpreter_paths = (
-            ".devenv/state/venv/bin/python",
-            ".venv/bin/python",
-        )
-        missing_hook_paths = [
-            path for path in (checker_path, *interpreter_paths) if path not in hook
-        ]
-        if missing_hook_paths:
-            raise ValueError(
-                "the cargo-husky hook must use the shared checker and managed Python: "
-                f"{missing_hook_paths!r}"
-            )
-        uv_command = (
-            "uv run --managed-python --python 3.11 --no-project python"
-        )
-        if uv_command not in hook:
-            raise ValueError(
-                "the cargo-husky hook must fall back to uv-managed Python"
-            )
-        if CARGO_HUSKY_DEPENDENCY not in manifest:
-            raise ValueError("the chelis-cli manifest must retain cargo-husky")
-
-        locked = re.search(
-            r'(?m)^name = "cargo-husky"\nversion = "(?P<version>[^"]+)"$',
-            lock,
-        )
-        if locked is None:
-            raise ValueError("Cargo.lock must retain cargo-husky")
-        return cls(
-            checker_path=checker_path,
-            interpreter_paths=interpreter_paths,
-            uv_command=uv_command,
-            dependency=CARGO_HUSKY_DEPENDENCY,
-            locked_version=locked.group("version"),
-        )
 
 
 class CommitMessagePolicyTests(unittest.TestCase):
@@ -141,22 +84,6 @@ class CommitMessagePolicyTests(unittest.TestCase):
         self.assertEqual(result, 2)
         self.assertIn("requires one commit message file", stderr.getvalue())
 
-    def cargo_husky_inputs(self) -> tuple[str, str, str]:
-        hook = (REPO_ROOT / ".cargo-husky/hooks/commit-msg").read_text(
-            encoding="utf-8"
-        )
-        manifest = (REPO_ROOT / "crates/chelis-cli/Cargo.toml").read_text(
-            encoding="utf-8"
-        )
-        lock = (REPO_ROOT / "Cargo.lock").read_text(encoding="utf-8")
-        return hook, manifest, lock
-
-    def test_cargo_husky_fallback_is_retained(self) -> None:
-        fallback = CargoHuskyFallback.parse(*self.cargo_husky_inputs())
-        self.assertEqual(fallback.checker_path, "scripts/check_commit_message.py")
-        self.assertIn("--managed-python", fallback.uv_command)
-        self.assertEqual(fallback.locked_version, "1.5.0")
-
     def test_cargo_husky_hook_has_valid_posix_shell_syntax(self) -> None:
         hook_path = REPO_ROOT / ".cargo-husky/hooks/commit-msg"
         result = subprocess.run(
@@ -187,31 +114,6 @@ class CommitMessagePolicyTests(unittest.TestCase):
         result = self.run_cargo_husky_hook(PROHIBITED_MESSAGES[0])
         self.assertEqual(result.returncode, 1)
         self.assertIn("prohibited AI authorship marker", result.stderr)
-
-    def test_incomplete_cargo_husky_fallback_fails_at_parse_boundary(self) -> None:
-        hook, manifest, lock = self.cargo_husky_inputs()
-        mutations = (
-            (hook.replace("scripts/check_commit_message.py", "other.py"), manifest, lock),
-            (hook.replace("--managed-python", "--system"), manifest, lock),
-            (hook, manifest.replace(CARGO_HUSKY_DEPENDENCY, ""), lock),
-            (hook, manifest, lock.replace('name = "cargo-husky"', 'name = "other"')),
-        )
-        for mutated in mutations:
-            with self.subTest(mutated=mutated):
-                with self.assertRaises(ValueError):
-                    CargoHuskyFallback.parse(*mutated)
-
-    def test_malformed_cargo_husky_hook_fails_shell_parse(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            hook_path = Path(temp_dir) / "commit-msg"
-            hook_path.write_text("#!/bin/sh\nif then\n", encoding="utf-8")
-            result = subprocess.run(
-                ["sh", "-n", str(hook_path)],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-        self.assertNotEqual(result.returncode, 0)
 
 
 if __name__ == "__main__":

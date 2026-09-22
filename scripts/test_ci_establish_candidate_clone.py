@@ -472,7 +472,16 @@ class EstablishingStepPreambleTests(unittest.TestCase):
     ) -> None:
         """No `gh`, no `jq`, unreachable remote: the module must still run."""
 
-        completed = self.run_preamble(path="/usr/bin:/bin")
+        # Only the interpreters the step itself needs, resolved from wherever
+        # this host keeps them. `/usr/bin:/bin` named them on Ubuntu but is
+        # empty of bash, git and python3 on the NixOS runner.
+        with tempfile.TemporaryDirectory() as directory:
+            toolbox = Path(directory)
+            for tool in ("bash", "git", "python3"):
+                resolved = shutil.which(tool)
+                self.assertIsNotNone(resolved, tool)
+                (toolbox / tool).symlink_to(resolved)
+            completed = self.run_preamble(path=str(toolbox))
 
         self.assertIn("could not read the live pull request", completed.stderr)
         # Reaching the module is the property. It then fails closed *with

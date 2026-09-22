@@ -39,6 +39,16 @@ on:
         description: Unique coordinator token
         required: true
         type: string
+      execution_target:
+        description: Protected self-hosted execution requires separate exact-candidate admission
+        required: false
+        default: github-hosted
+        type: choice
+        options: [github-hosted, self-hosted]
+      expected_candidate_sha:
+        description: Exact synthetic merge SHA required for protected self-hosted execution
+        required: false
+        type: string
 
 concurrency:
   group: conformance-${{ github.workflow }}-${{ github.event.pull_request.number || inputs.pr_number || github.ref }}
@@ -63,7 +73,7 @@ jobs:
   # shared-artifact fold is escalated separately.
   changes:
     name: Detect docs-only changes (conformance)
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.execution_target == 'self-hosted' && fromJSON(format('["chelis-ci-warm-x64","chelis-ci-reviewed-{0}"]', inputs.retarget_token)) || 'ubuntu-latest' }}
     permissions:
       actions: read
       contents: read
@@ -98,15 +108,18 @@ jobs:
           fetch-depth: 1
 
       # Shallow checkout (depth 1); deepen in bash since GitHub Actions
-      # expressions have no arithmetic. See ci.yml's changes job.
+      # expressions have no arithmetic. See ci.yml's changes job. A retarget
+      # dispatch with a pinned candidate checks out that exact merge commit by
+      # SHA (reachable through refs/ci-candidates/<token>) and both parents
+      # (depth 2; 0 is false in expressions, so `&& 0 || 1` would be 1).
       - name: Checkout exact candidate
         id: checkout-candidate
         continue-on-error: true
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/pull/{0}/merge', inputs.pr_number) || github.sha }}
+          ref: ${{ inputs.expected_candidate_sha != '' && inputs.expected_candidate_sha || (github.event_name == 'workflow_dispatch' && format('refs/pull/{0}/merge', inputs.pr_number) || github.sha) }}
           path: candidate
-          fetch-depth: ${{ github.event_name == 'workflow_dispatch' && 0 || 1 }}
+          fetch-depth: ${{ github.event_name == 'workflow_dispatch' && 2 || 1 }}
 
       - name: Checkout trusted rebase reuse verifier
         id: checkout-trusted-rebase
@@ -124,21 +137,40 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
+          EXPECTED_BASE_SHA: ${{ inputs.expected_base_sha }}
+          EXPECTED_CANDIDATE_SHA: ${{ inputs.expected_candidate_sha }}
         working-directory: candidate
-        run: >-
-          python3 ../trusted/scripts/ci_validate_pr_candidate.py
-          --repository "${{ github.repository }}"
-          --pr-number "${{ inputs.pr_number }}"
-          --expected-head-sha "${{ inputs.expected_head_sha }}"
-          --expected-base-sha "${{ inputs.expected_base_sha }}"
-          --validate-checkout
+        run: |
+          # A pinned candidate binds its parents, not the live pull-request
+          # base that GitHub recomputes on every main push. See ci.yml.
+          if [ -n "$EXPECTED_CANDIDATE_SHA" ]; then
+            base_args=(--checkout-base-sha "$EXPECTED_BASE_SHA" --expected-base-ref main)
+          else
+            base_args=(--expected-base-sha "$EXPECTED_BASE_SHA")
+          fi
+          python3 ../trusted/scripts/ci_validate_pr_candidate.py \
+            --repository "${{ github.repository }}" \
+            --pr-number "${{ inputs.pr_number }}" \
+            --expected-head-sha "${{ inputs.expected_head_sha }}" \
+            "${base_args[@]}" \
+            --validate-checkout
 
       - name: Record exact candidate
         id: candidate
         continue-on-error: true
+        env:
+          EXECUTION_TARGET: ${{ inputs.execution_target }}
+          EXPECTED_CANDIDATE_SHA: ${{ inputs.expected_candidate_sha }}
         working-directory: candidate
         run: |
           candidate="$(git rev-parse HEAD)"
+          if [ "$EXECUTION_TARGET" = self-hosted ] || [ -n "$EXPECTED_CANDIDATE_SHA" ]; then
+            if [[ ! "$EXPECTED_CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]] ||
+               [ "$candidate" != "$EXPECTED_CANDIDATE_SHA" ]; then
+              echo "::error::The server-controlled candidate differs from the reviewed synthetic merge."
+              exit 1
+            fi
+          fi
           echo "candidate_sha=$candidate" >> "$GITHUB_OUTPUT"
 
       - name: Bootstrap CI contract preflight selection
@@ -150,6 +182,13 @@ jobs:
           BASE_SHA: ${{ inputs.expected_base_sha || github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ inputs.expected_head_sha || github.event.pull_request.head.sha }}
         run: |
+          # Bootstrap before project activation without consulting a checkout-controlled PATH.
+          trusted_git=/usr/bin/git
+          trusted_python=/usr/bin/python3
+          if [ "${RUNNER_ENVIRONMENT:-github-hosted}" = "self-hosted" ]; then
+            trusted_git=/run/current-system/sw/bin/git
+            trusted_python=/run/current-system/sw/bin/python3
+          fi
           if [ "$EVENT_NAME" != "pull_request" ] &&
              [ "$EVENT_NAME" != "workflow_dispatch" ]; then
             echo "ci_contract_changed=false" >> "$GITHUB_OUTPUT"
@@ -159,17 +198,17 @@ jobs:
             classifier="trusted/scripts/ci_contract_paths.py"
           else
             classifier="$RUNNER_TEMP/ci-contract-paths.py"
-            if ! /usr/bin/git -C candidate show \
+            if ! "$trusted_git" -C candidate show \
               "$BASE_SHA:scripts/ci_contract_paths.py" > "$classifier"; then
               echo "ci_contract_changed=true" >> "$GITHUB_OUTPUT"
               exit 0
             fi
           fi
           set -o pipefail
-          if ! GIT_NO_REPLACE_OBJECTS=1 /usr/bin/git -C candidate \
+          if ! GIT_NO_REPLACE_OBJECTS=1 "$trusted_git" -C candidate \
             -c core.quotePath=true diff --name-only --no-renames \
             --no-ext-diff --no-textconv "$BASE_SHA" "$HEAD_SHA" \
-            | /usr/bin/python3 "$classifier"; then
+            | "$trusted_python" "$classifier"; then
             echo "ci_contract_changed=true" >> "$GITHUB_OUTPUT"
           fi
 
@@ -599,7 +638,10 @@ jobs:
 
   conformance:
     name: Hull Conformance Gate (Linux)
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.execution_target == 'self-hosted' && fromJSON(format('["chelis-ci-warm-x64","chelis-ci-reviewed-{0}"]', inputs.retarget_token)) || 'ubuntu-latest' }}
+    defaults:
+      run:
+        shell: chelis-ci-shell run {0}
     # Skip on docs-only PRs (chelis#419); a skipped required job reports
     # success. The `if` still fails safe for a changes job that did not
     # succeed, but that is now reachable only through job setup or a lost
@@ -611,8 +653,12 @@ jobs:
     if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.candidate_preflight == 'success' && (needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_run_hull == 'true') || (needs.changes.outputs.rebase_lane == 'ordinary' && needs.changes.outputs.docs_only != 'true')))) }}
     # ~1,500 subprocess calls at ~50-80 ms/call under contention across 2-4
     # cores is ~30-45 s of subprocess wall; the binary build dominates. Allow
-    # generous head room for a cold cargo cache.
-    timeout-minutes: 20
+    # generous head room for a cold cargo cache and a cold Devenv: the first
+    # self-hosted realization built OpenBLAS, FLINT, Arb and Kache from source
+    # in 31 minutes, and the publication that seeds the private cache for
+    # every later run must not be cut off by this timeout. The broker's own
+    # job lifetime is two hours.
+    timeout-minutes: 90
     # Strip debuginfo on the build; debuginfo is the dominant target/
     # disk consumer and the conformance binary needs no symbols
     # (chelis#392). Release defaults to debug=false, but set it explicitly
@@ -626,6 +672,7 @@ jobs:
       # notice, which is also what keeps `preflight_reason` a consumed
       # output here rather than a declared one nothing reads.
       - name: Require candidate lifecycle and CI contract preflight
+        shell: bash
         env:
           CANDIDATE_PREFLIGHT: ${{ needs.changes.outputs.candidate_preflight }}
           PREFLIGHT_REASON: ${{ needs.changes.outputs.preflight_reason }}
@@ -646,28 +693,17 @@ jobs:
       # release-build job was missing the reclaim every ci.yml build job
       # already runs (chelis#392).
       - name: Free disk space (Ubuntu)
+        if: runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      # apt-get under retry (scripts/ci_apt_get.py): a transient apt mirror
-      # reset would otherwise flake this required gate with no code change.
-      - name: Install C dependencies
-        run: python3 scripts/ci_apt_get.py gcc libopenblas-dev libasan8 libubsan1
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      # `.cargo/config.toml` sets `PYO3_PYTHON=.venv/bin/python`; CI runners
-      # need a matching uv-managed venv before any cargo run (pyo3-build-config
-      # is a transitive build-dep that runs before main compilation). See
-      # ci.yml lint-and-unit for the same pattern and the v8.1.0 pin rationale.
-      - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
-
-      - name: Create uv-managed venv + wire libpython rpath
-        run: python3 scripts/ci_setup_uv_python.py
+      - name: Set up project CI
+        id: build-cache
+        uses: ./.github/actions/setup-project-ci
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: devenv-${{ runner.environment }}-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', 'nix/ci-*.nix', '.kache.toml') }}
 
       # The conformance runner needs the chelis binary by ABSOLUTE path (never a
       # bare PATH name). A release build matches the Hull campaign profile (a
@@ -681,7 +717,7 @@ jobs:
       # self-test (the teeth). Binary-free; runs fast.
       - name: Conformance unit tests (pure core + teeth)
         run: |
-          .venv/bin/python -m unittest \
+          python -m unittest \
             tests.conformance.hull.test_run_conformance \
             tests.conformance.hull.test_wire_canonical \
             tests.conformance.hull.test_corpus_integrity
@@ -690,7 +726,7 @@ jobs:
       # binary. Fails on any CompilerUnsound / unexplained Disagree / EvalDisagree.
       - name: Conformance gate (frozen corpus vs live compiler)
         run: |
-          .venv/bin/python tests/conformance/hull/run_conformance.py \
+          python tests/conformance/hull/run_conformance.py \
             --chelis-bin "$GITHUB_WORKSPACE/target/release/chelis"
 
       # E2E TEETH PROOF: an injected compiler-accepts-a-reject-sentinel
@@ -698,7 +734,7 @@ jobs:
       # if the runner exits 0, the gate has no teeth and this step fails.
       - name: Conformance teeth (injected-unsound must fail the gate)
         run: |
-          if .venv/bin/python tests/conformance/hull/run_conformance.py \
+          if python tests/conformance/hull/run_conformance.py \
             --chelis-bin "$GITHUB_WORKSPACE/target/release/chelis" \
             --simulate-unsound reject_0000; then
             echo "TEETH BROKEN: --simulate-unsound exited 0; the gate did not catch the injected CompilerUnsound" >&2
@@ -706,3 +742,9 @@ jobs:
           else
             echo "teeth verified: injected CompilerUnsound made the runner exit nonzero"
           fi
+
+      - name: Publish verified outputs and clean cache state
+        if: always() && steps.build-cache.outputs.state-path != ''
+        uses: Chelis-Lang/ci/actions/publish-build-cache@6afc09f65c178211a9d1bea994a4b39b62d23024
+        with:
+          state-path: ${{ steps.build-cache.outputs.state-path }}

@@ -12,11 +12,11 @@
 //! # Host independence
 //!
 //! Every header is parsed under a fixed target triple with `-ffreestanding
-//! -nostdlibinc` and a committed stub SDK (`sdk-stubs/`) in place of libc, the
-//! HIP SDK, hipBLAS, the BLAS headers, SLEEF, the Apple frameworks, and the
-//! SIMD intrinsics headers, and clang runs with a scrubbed environment. Linux
-//! CI, macOS CI, Devenv, and a workstation therefore see the same
-//! preprocessed text and produce the same rows, and the dumps stay small. The
+//! -nostdlibinc -nostdinc++` and a committed stub SDK (`sdk-stubs/`) in place of
+//! libc, the C++ standard library, the HIP SDK, hipBLAS, the BLAS headers, SLEEF,
+//! the Apple frameworks, and the SIMD intrinsics headers. Clang runs with a
+//! scrubbed environment. Linux CI, macOS CI, Devenv, and a workstation therefore
+//! see the same preprocessed text and produce the same rows, and the dumps stay small. The
 //! stub SDK is deliberately minimal: a runtime header that starts using an
 //! SDK symbol the stub does not declare fails the scan until the stub declares
 //! it, the same fail-closed discipline the capacity census applies to an
@@ -301,7 +301,7 @@ fn clang_command(
         .env("PATH", path)
         .args(["-w", "-fno-color-diagnostics"])
         .args(["-x", lane.language, "-target", lane.target])
-        .args(["-ffreestanding", "-nostdlibinc"]);
+        .args(["-ffreestanding", "-nostdlibinc", "-nostdinc++"]);
     if let Some(extra) = configuration.extra_include {
         command.arg("-isystem").arg(stubs.join(extra));
     }
@@ -335,9 +335,10 @@ fn run_clang(mut command: Command, what: &str) -> Result<Vec<u8>, ScanError> {
     Ok(output.stdout)
 }
 
-/// The compiler's own header directory, so `stdint.h` and friends are
-/// recognised as inside the universe.
-fn resource_dir() -> Result<PathBuf, ScanError> {
+/// The canonical compiler include directory, not the resource root: a wrapper
+/// may keep `resource-root` locally but symlink its `include` to the compiler's
+/// separate installation. Only that include directory authorizes headers.
+fn resource_include_dir() -> Result<PathBuf, ScanError> {
     let path = std::env::var_os("PATH").unwrap_or_default();
     let mut command = Command::new("clang");
     command
@@ -352,7 +353,7 @@ fn resource_dir() -> Result<PathBuf, ScanError> {
              compiler's own headers from an include outside the universe",
         ));
     }
-    Ok(PathBuf::from(dir))
+    canonical(&PathBuf::from(dir).join("include"))
 }
 
 /// The identity of a path on disk: canonical, so `..` and symlinks cannot
@@ -450,7 +451,7 @@ pub fn scan_c_source(
         .and_then(|name| name.to_str())
         .ok_or_else(|| ScanError::new(format!("`{path}` has no file name")))?;
     let (stubs, include, device_runtime) = support_dirs()?;
-    let resource = resource_dir()?;
+    let resource_include = resource_include_dir()?;
     let scratch = tempfile::Builder::new()
         .prefix("chelis-repr-inventory-")
         .tempdir()
@@ -468,7 +469,7 @@ pub fn scan_c_source(
         canonical(&file)?,
         canonical(&stubs)?,
         canonical(&include)?,
-        canonical(&resource)?,
+        resource_include,
     ];
     if lane == HIP_LANE || lane == DEVICE_CXX_LANE {
         universe.push(canonical(&device_runtime)?);

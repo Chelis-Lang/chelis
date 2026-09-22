@@ -148,7 +148,8 @@ CLIPPY_MATRIX: tuple[ClippyRun, ...] = (
             "chelis-python/extension-module,"
             "chelis-runtime/ownership-ledger,"
             "chelis-types/checkpoint-compile-probe,"
-            "chelis-types/generalize-sweep-oracle",
+            "chelis-types/generalize-sweep-oracle,"
+            "chelis-prove/ci-openblas-system",
             "--",
             "-D",
             "warnings",
@@ -213,6 +214,12 @@ CLIPPY_MATRIX += tuple(
     replace(
         run,
         label=f"{run.label}-macos",
+        # Darwin retains its Accelerate-backed provider; only Linux Nix CI
+        # selects the static LP64 OpenBLAS package.
+        command=tuple(
+            argument.removesuffix(",chelis-prove/ci-openblas-system")
+            for argument in run.command
+        ),
         owner=".github/workflows/macos-nightly.yml",
         hosts=("macos",),
         cadence=NIGHTLY,

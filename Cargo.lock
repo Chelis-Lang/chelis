@@ -778,6 +778,7 @@ dependencies = [
  "num-bigint",
  "num-rational",
  "num-traits",
+ "openblas-src",
  "serde",
  "serde_json",
  "sha2",

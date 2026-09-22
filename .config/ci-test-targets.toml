@@ -1832,6 +1832,114 @@ reason = "the native Nix job executes the complete flake check set, including th
 tracking_issue = "chelis#2241"
 
 [[path_rule]]
+prefix = "devenv/ci.nix"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit enters the project CI profile before executing runtime and environment handoff contracts"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "scripts/ci_devenv.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "activation tests exercise successful handoff, failed initialization, cancellation and interpreter identity"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "scripts/test_ci_devenv.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the discovered script suite runs the project activation regression cases"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "scripts/ci_hosted_commands.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "every hosted job enters its commands through these shims; the script suite proves the command file, gate and interpreter contract"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "scripts/test_ci_hosted_commands.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the discovered script suite runs the hosted command shim regression cases"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = ".github/actions/setup-project-ci/"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit activates the project through the shared setup sequence before its environment handoff regressions"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "scripts/ci_nix_cache_roots.py"
+disposition = "owner"
+workflow = "nix-packages.yml"
+job = "nix-linux-x86-64"
+cadence = "workflow_dispatch and published release"
+reason = "the protected native job publishes only realized environment and completed flake-check roots"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "nix/ci-cvc5.nix"
+disposition = "owner"
+workflow = "ci.yml"
+job = "smt-build"
+cadence = "pull_request and push"
+reason = "the SMT lane realizes the native solver provider and exercises discharge, containment and feature-specific Clippy"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "nix/ci-openblas.nix"
+disposition = "owner"
+workflow = "ci.yml"
+job = "lint-rust"
+cadence = "pull_request and push"
+reason = "the Linux Nix Rust-policy stage compiles the complete solver-free feature configuration with the LP64 static provider"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "nix/ci-arb.nix"
+disposition = "owner"
+workflow = "ci.yml"
+job = "lint-rust"
+cadence = "pull_request and push"
+reason = "the Nix Rust-policy stage compiles the Arb feature against the locked compiler-matched native numeric cache"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = ".github/scripts/verify_release_smt.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "smt-build"
+cadence = "pull_request and push"
+reason = "both SMT lanes execute the release verifier: the native lane proves discharge and the compatibility lane proves it under glibc 2.31"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "scripts/test_glibc231_workflows.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit checks the immutable Bullseye producer and release configuration; the Nix CI lane owns its separate runtime proof"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
 prefix = "scripts/devenv_entry_regression.py"
 disposition = "owner"
 workflow = "ci.yml"
@@ -2288,6 +2396,15 @@ workflow = "ci.yml"
 job = "script-unit"
 cadence = "pull_request and push"
 reason = "the exact --fast stage list, its ordering and its summary run in script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_gate_local.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the local gate's stage selection and tool resolution run in script-unit"
 tracking_issue = "chelis#1824"
 
 # The rows below own the opaque-invariants corpus, whose only CI consumer

@@ -102,6 +102,14 @@ across the smoke and full-prove jobs. The split removes the full proof corpus
 from the required context; it must not make the optional lane cold-build cvc5
 before reaching its proof steps.
 
+The required `smt-build` job realizes the `ci-smt` Devenv profile only on the
+self-hosted runner, which substitutes it from the private Nix cache:
+`nix/ci-cvc5.nix` builds the locked CVC5 1.3.1, GMP, CaDiCaL and LibPoly
+archive/header tree, and Cargo consumes its `CVC5_DIR` without rebuilding it.
+The job's Devenv-prefixed Cargo namespace keeps those outputs apart from the
+native full-prove lane. GitHub-hosted runs of the same job keep main's toolchain and link the
+prebuilt cvc5 stores described next, exactly as before.
+
 ### Durable prebuilt cvc5 (chelis#583 + follow-up)
 
 Building cvc5 from source is ~22 minutes of CMake/make. The SMT lanes must

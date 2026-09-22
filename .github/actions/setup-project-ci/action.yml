@@ -1,0 +1,77 @@
+name: Set up project CI
+description: Provide the project toolchain for the runner kind; on self-hosted workers restore signed Nix inputs before realizing the project, then attach its compiler cache.
+inputs:
+  profile:
+    description: Self-hosted project profile (ci or ci-smt). GitHub-hosted runners take main's toolchain instead.
+    required: false
+    default: ci
+outputs:
+  state-path:
+    description: Job-owned cache state; always finalize nonempty state with publish-build-cache.
+    value: ${{ steps.build-cache.outputs.state-path }}
+runs:
+  using: composite
+  steps:
+    # GitHub-hosted runners cannot reach the private caches, so they keep the
+    # toolchain main uses: Ubuntu's C compilers and OpenBLAS, a stable rustup
+    # toolchain, and the uv-managed interpreter. Cargo compiles the numerics
+    # from their vendored sources, and the SMT lane links the prebuilt cvc5.
+    - name: Install C dependencies
+      if: runner.environment == 'github-hosted'
+      shell: bash
+      run: python3 scripts/ci_apt_get.py gcc g++ clang cmake libclang-dev libopenblas-dev libgmp-dev libmpfr-dev libasan8 libubsan1
+
+    - name: Install Rust toolchain
+      if: runner.environment == 'github-hosted'
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Install cargo-nextest
+      if: runner.environment == 'github-hosted'
+      uses: taiki-e/install-action@nextest
+
+    - name: Install uv
+      if: runner.environment == 'github-hosted'
+      uses: astral-sh/setup-uv@v8.1.0
+
+    - name: Create uv-managed venv + wire libpython rpath
+      if: runner.environment == 'github-hosted'
+      shell: bash
+      run: python3 scripts/ci_setup_uv_python.py
+
+    - name: Publish the hosted project commands
+      if: runner.environment == 'github-hosted'
+      shell: bash
+      run: python3 scripts/ci_hosted_commands.py
+
+    # The self-hosted runner realizes the declared Devenv profile from the
+    # private Nix cache and attaches the shared compiler cache.
+    - name: Set up portable Devenv
+      if: runner.environment == 'self-hosted'
+      uses: Chelis-Lang/ci/actions/setup-devenv@6afc09f65c178211a9d1bea994a4b39b62d23024
+
+    - name: Restore signed Nix inputs
+      id: build-cache
+      if: runner.environment == 'self-hosted'
+      uses: Chelis-Lang/ci/actions/restore-build-cache@6afc09f65c178211a9d1bea994a4b39b62d23024
+      with:
+        # Every admitted Tunnet member may read and write, including reviewed drafts.
+        mode: read-write
+
+    - name: Activate project CI environment
+      if: runner.environment == 'self-hosted'
+      shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
+      env:
+        PROJECT_CI_PROFILE: ${{ inputs.profile }}
+      run: python scripts/ci_devenv.py --profile "$PROJECT_CI_PROFILE"
+
+    - name: Attach the realized compiler cache
+      if: runner.environment == 'self-hosted'
+      uses: Chelis-Lang/ci/actions/restore-build-cache@6afc09f65c178211a9d1bea994a4b39b62d23024
+      with:
+        state-path: ${{ steps.build-cache.outputs.state-path }}
+        kache-binary: ${{ env.RUSTC_WRAPPER }}
+
+    - name: Declare the realized environment cache root
+      if: runner.environment == 'self-hosted'
+      shell: chelis-ci-shell run {0}
+      run: python scripts/ci_nix_cache_roots.py
