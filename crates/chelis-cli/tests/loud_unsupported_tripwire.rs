@@ -750,12 +750,13 @@ const BASELINE: &[Entry] = &[
     (
         Pat::RustDebugNumericFormat,
         "crates/chelis-compiler-api/src/runtime/tests.rs",
-        23,
+        21,
         "cfg-gated runtime unit-test assertions, not product exits; \
          chelis#729 Phase 1 replaced one raw-scalar assertion with two \
          sealed ScalarValue assertion sites (net +1); branch-owned JSON \
          and CSV pipeline centralization removed the former local test \
-         assertions",
+         assertions; chelis#1281 replaced two lossy reduction Debug \
+         assertions with exact typed-storage checks (net -2)",
     ),
     (
         Pat::RustDebugNumericFormat,
