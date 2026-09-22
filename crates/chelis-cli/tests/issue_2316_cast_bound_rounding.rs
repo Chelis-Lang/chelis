@@ -465,7 +465,7 @@ fn an_exact_integer_source_bound_does_not_detour_through_f64() {
         );
         assert!(
             !source.contains("0x5a000000"),
-            "[{name}] baked 0x5a000000 — the f64 detour lost a bit",
+            "[{name}] baked 0x5a000000: the f64 detour lost a bit",
         );
     }
 }
