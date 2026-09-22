@@ -13116,10 +13116,38 @@ impl<'program> LowerCtx<'program> {
                 // chelis#776: statically resolve each bound (through neg /
                 // float-cast wrappers) or fail loudly — never the silent [0,1)
                 // default that dropped a wrapped or computed range in codegen.
-                let low = self.resolve_static_f64_arg(&args[1], "uniform_like", "low bound") as f32
-                    as f64;
-                let high = self.resolve_static_f64_arg(&args[2], "uniform_like", "high bound")
-                    as f32 as f64;
+                // chelis#2316: resolve through the TYPED fold, the same path
+                // `dropout` uses. The legacy f64 extractor read a literal's
+                // value without its declared dtype and lost an enclosing
+                // cast's target, so a bound spelled with suffixes or cast
+                // chains was baked at the wrong value. `static_rate` keeps an
+                // integer leaf exact through i64 and a typed leaf at its
+                // source dtype until the checked cast, then finalizes ONCE
+                // here -- `[04-LIT-1]`'s "SHALL NOT pass through f64 first".
+                //
+                // f32 is the target because the whole `uniform_like` pipeline
+                // bakes f32 bounds (`chelis_uniform_sample_f32`, and the f64
+                // sampler widens the same f32 bits). Changing that is a
+                // separate decision, not this one.
+                //
+                // The typed fold resolves an integer-target cast to an exact
+                // value, but chelis#776 deliberately refuses to let a
+                // dtype-changing cast launder a bound, and
+                // `uniform_like_integer_cast_bound_fails_loudly` pins that.
+                // Keep the refusal here, where a `cast` is always one the
+                // author wrote: a Deep `lit` carries its dtype in `type:`
+                // metadata, so this lane never sees a synthesized cast. The
+                // host lane must NOT copy this guard -- there a literal's
+                // declared dtype IS a synthesized cast ([04-LIT-1]), and
+                // rejecting it broke `cast(3i32, f32)` in round 2.
+                self.reject_integer_target_bound_cast(&args[1], "low bound");
+                self.reject_integer_target_bound_cast(&args[2], "high bound");
+                let low = self
+                    .resolve_static_scalar_arg(&args[1], Prim::F32, "uniform_like", "low bound")
+                    .as_f64_lossy();
+                let high = self
+                    .resolve_static_scalar_arg(&args[2], Prim::F32, "uniform_like", "high bound")
+                    .as_f64_lossy();
                 let (seed, activation) = if self.execution.is_some() {
                     (
                         self.random_seed.unwrap_or(COMPILED_HANDLER_OWNED_SEED),
@@ -17969,6 +17997,33 @@ impl<'program> LowerCtx<'program> {
         })
     }
 
+    /// Raise chelis#776's loud refusal when a `uniform_like` bound is wrapped
+    /// in a cast whose target is not a float.
+    ///
+    /// The typed fold would resolve such a cast to an exact value, but a
+    /// dtype-changing cast must not launder the bound contract. Every `cast`
+    /// this lane sees is author-written: a Deep `lit` carries its declared
+    /// dtype as `type:` metadata, never as a wrapper node.
+    fn reject_integer_target_bound_cast(&self, expr: &Expr, arg_desc: &str) {
+        let Some((DeepTag::Cast, _, kids)) = stamped_parts(expr) else {
+            return;
+        };
+        let Some(target) = kids.get(1) else {
+            return;
+        };
+        let resolved = Self::try_extract_prim(target)
+            .or_else(|| static_controls::type_prim(target, &self.prec_substitutions));
+        if resolved.is_some_and(|prim| !prim.is_float()) {
+            raise_fatal_lowering_error(
+                format!(
+                    "`uniform_like` requires a statically-resolvable {arg_desc}; a cast to a non-float dtype cannot carry one (Chelis-Lang/chelis#776)"
+                ),
+                Some(expr.span()),
+                expr.span_id().map(ToOwned::to_owned),
+            )
+        }
+    }
+
     /// Resolve a statically-known scalar and finalize it once at `target`.
     /// Unlike the legacy f64 extractor, an integer leaf remains exact through
     /// i64 and a typed leaf retains its source dtype until the checked cast.
@@ -17990,7 +18045,11 @@ impl<'program> LowerCtx<'program> {
         builtin: &'static str,
         arg_desc: &str,
     ) -> chelis_types::ScalarValue {
-        let value = match if builtin == "dropout" {
+        // chelis#2316: `uniform_like` joins `dropout` on the typed fold. Both
+        // bake a statically-resolved scalar into the emitted kernel, and both
+        // need a literal's declared dtype honoured before an enclosing cast
+        // rounds it again.
+        let value = match if builtin == "dropout" || builtin == "uniform_like" {
             self.static_rate(expr)
         } else {
             extract_numeric_leaf(expr)

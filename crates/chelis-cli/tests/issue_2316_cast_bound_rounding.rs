@@ -29,15 +29,21 @@
 //!
 //! No new atom: the spec was already right and the code was wrong.
 //!
-//! `spec/04-type-system.md` [04-NUM-14]: "A source cast to a float target is
-//! total IEEE-754 round-to-nearest, ties-to-even at the target width per
-//! [04-NUM-2], even when that loses integer exactness."
+//! TWO atoms govern, one per half of the defect.
 //!
-//! That is the whole authority, and it is enough: a compiled bound is a value
-//! produced by a cast, so it owes the target width's rounding, and a literal
-//! owes its own declared width's rounding before any enclosing cast applies.
-//! [04-NUM-5] is adjacent but does NOT govern here — its normative subject is
-//! comparisons and condition folds, and a `uniform_like` bound fold is neither.
+//! `[04-NUM-14]` covers the cast: "A source cast to a float target is total
+//! IEEE-754 round-to-nearest, ties-to-even at the target width per [04-NUM-2],
+//! even when that loses integer exactness."
+//!
+//! `[04-LIT-1]` covers the literal: it is "finalized once at the declared
+//! float width" and "SHALL NOT pass through f64 first". This is the atom the
+//! second half of the fix relies on — a literal owes its own declared width's
+//! rounding before any enclosing cast applies, and an exact integer source
+//! must reach its float target without an f64 detour. `chelis-ir/src/host.rs`
+//! already cites it for the same step on the host side.
+//!
+//! `[04-NUM-5]` is adjacent but does NOT govern: its normative subject is
+//! comparisons and condition folds, and a bound fold is neither.
 //!
 //! ## Why one shared helper
 //!
@@ -279,9 +285,14 @@ fn integer_target_cast_bound_is_rejected_by_the_checker_before_the_fold() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        text.contains("i32") && (text.contains("f32") || text.contains("recision")),
-        "an integer-target bound must be rejected as a dtype mismatch against \
-         the f32 bound type, not folded; got:\n{text}",
+        text.contains("PrecisionMismatch"),
+        "the rejection must be a PrecisionMismatch, so this test fails if the \
+         program starts failing for some other reason; got:\n{text}",
+    );
+    assert!(
+        text.contains("i32") && text.contains("f32"),
+        "the diagnostic must name both the offered and expected dtypes; \
+         got:\n{text}",
     );
 }
 
@@ -348,9 +359,11 @@ fn a_second_suffixed_literal_witness_agrees_across_lanes() {
     );
 }
 
-/// The same shape with the suffix at `f64`, so the literal's declared dtype is
-/// WIDER than the chain's first cast rather than narrower. Both orderings must
-/// finalize at the literal's own dtype first.
+/// The same shape with the suffix at `f64`. This is a DISPOSITION LOCK, not a
+/// witness: for an `f64` suffix, finalizing at the literal's declared dtype is
+/// the identity, so it cannot distinguish the staged fold from an unstaged
+/// one. It witnesses the cast-target half only, and is kept because it pins
+/// that the wider suffix did not regress when the staging changed.
 #[test]
 fn a_f64_suffixed_literal_inside_a_narrowing_cast_agrees_across_lanes() {
     assert_both_lanes_match_eval(
@@ -358,4 +371,45 @@ fn a_f64_suffixed_literal_inside_a_narrowing_cast_agrees_across_lanes() {
         "cast(cast(0.9, f16), f32)",
         "suffixed64",
     );
+}
+
+/// REGRESSION, chelis#2316 round 3: an integer-suffixed literal under a float
+/// cast must still BUILD in the host lane.
+///
+/// Round 2's revision finalized eagerly at every float cast and returned
+/// `None` for a non-float target. That looked safe because a user-written
+/// integer-target bound is rejected by the checker — but host lowering
+/// expresses a literal's declared dtype by SYNTHESIZING a cast around the raw
+/// lexical value ([04-LIT-1]). So `cast(3i32, f32)` arrives as
+/// `cast(cast(Int(3), i32), f32)`, the inner synthesized cast returned `None`,
+/// and the host lane hard-errored on a program the DAG lane and `eval` both
+/// accepted — a build regression against the PR base, and template
+/// foldability observable through buildability.
+#[test]
+fn an_integer_suffixed_literal_bound_builds_and_agrees_across_lanes() {
+    assert_both_lanes_match_eval("cast(3i32, f32)", "0.9f32", "i32lit");
+}
+
+/// The same shape at the other integer widths the synthesized cast can carry.
+/// `i64` is the lexical carrier, so no cast is synthesized for it and it never
+/// exercised the broken path — which is exactly why the narrower widths need
+/// their own witness.
+#[test]
+fn integer_suffixed_bounds_at_every_width_agree_across_lanes() {
+    for (suffix, tag) in [("3i8", "i8lit"), ("3i16", "i16lit"), ("3i64", "i64lit")] {
+        assert_both_lanes_match_eval(&format!("cast({suffix}, f32)"), "0.9f32", tag);
+    }
+}
+
+/// [04-LIT-1]: an exact integer source bound to a float prim is finalized
+/// straight from the integer and "SHALL NOT pass through f64 first".
+///
+/// `9007199791611905` is beyond f64's exactly-representable integer range, so
+/// the legacy `*n as f64` detour lost a bit and BOTH lanes baked `0x5a000000`
+/// where `eval` gives `0x5a000001`. Routing both folds through the staged
+/// `chelis_types` cast primitives keeps the integer exact through i64 and
+/// closes it.
+#[test]
+fn an_exact_integer_source_bound_does_not_detour_through_f64() {
+    assert_both_lanes_match_eval("9007199791611905f32", "1.0e17f32", "exactint");
 }

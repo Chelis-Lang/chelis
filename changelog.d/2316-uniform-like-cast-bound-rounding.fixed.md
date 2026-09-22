@@ -8,9 +8,11 @@ other and diverged from `eval`, so the error did not show up as a lane
 inconsistency.
 
 `spec/04-type-system.md` [04-NUM-14] already required a float-target cast to be
-total IEEE-754 round-to-nearest, ties-to-even at the target width. The rounding
-now has a single definition shared by both fold sites, and the IR lane also
-finalizes a literal at its own declared dtype before an enclosing cast rounds it
-again, so a bound such as `cast(cast(0.015632629860192537f32, f16), f32)` takes
-the same roundings in the same order in both lanes.
+total IEEE-754 round-to-nearest, ties-to-even at the target width, and
+[04-LIT-1] already required a literal to be finalized once at its declared
+width without passing through f64 first. Both compiled folds now stage a bound
+the way the evaluator does — an integer leaf stays exact through i64 and a
+float leaf stays at its source dtype until a cast finalizes it — so they apply
+the same roundings in the same order. This also stops an exact integer bound
+beyond f64's integer range from losing a bit on its way to f32.
 See [#2316](https://github.com/Chelis-Lang/chelis/issues/2316).

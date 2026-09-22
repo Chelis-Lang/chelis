@@ -9510,36 +9510,98 @@ impl BinaryElementwiseFunc {
 /// defaulted — silently substituting `[0, 1)` for an unreadable bound is the
 /// exact chelis#776 failure this must not reintroduce.
 ///
-/// chelis#2316: the `cast` arm used to recurse on the operand and IGNORE the
-/// node's target type entirely — it did not even make the float/int
-/// distinction the IR lane makes. So `cast(cast(0.30000001, f16), f32)` folded
-/// to the innermost literal and the emitted
-/// `chelis_uniform_sample_f32(..., 0x3e99999au, ...)` sampled an interval the
-/// program never declared, ~1600 f32 ULPs from the declared bound. Both
-/// compiled lanes did this identically, so they agreed with each other and
-/// diverged from `eval`, which rounds at every cast.
+/// chelis#2316: the value is staged exactly as `chelis-ir`'s
+/// `static_controls::scalar` stages it — an integer leaf stays EXACT through
+/// i64 and a float leaf stays at its source dtype until a cast finalizes it —
+/// and every transition goes through the shared `chelis_types` cast
+/// primitives. Both lanes therefore apply the same roundings in the same
+/// order, which is the property chelis#2120 needs: a template that folds and
+/// one that does not must sample identically.
 ///
-/// The rounding rule itself lives in
-/// `chelis_types::dtype_semantics::round_float_bound`, shared with the IR
-/// lane's `extract_f64_value`, so the two folds cannot drift apart again. A
-/// non-float target yields `None` and the caller goes loud (chelis#776).
-fn static_float_bound(expr: Option<&HostExpr>) -> Option<f64> {
+/// Two earlier revisions got this wrong in opposite directions. The first
+/// ignored a cast's target entirely, so a narrowing intermediate was dropped.
+/// The second finalized eagerly at every float cast and returned `None` for a
+/// non-float target — which broke a bound like `cast(3i32, f32)`, because host
+/// lowering expresses a literal's declared dtype by SYNTHESIZING a cast around
+/// the raw lexical value ([04-LIT-1], `chelis-ir/src/host.rs`). That
+/// synthesized `cast[i32]` is not a user-written narrowing cast; it is the
+/// literal's own type, and its value is exact.
+#[derive(Clone, Copy)]
+enum StagedBound {
+    /// An untyped lexical leaf: an integer that is still exact, or a float
+    /// literal that has not yet been finalized at any declared width.
+    Raw(chelis_types::RawScalar),
+    /// A value already finalized at a concrete dtype.
+    Typed(chelis_types::ScalarValue),
+}
+
+impl StagedBound {
+    /// Finalize at `target`, going through the same `chelis_types` primitives
+    /// `chelis-ir`'s typed fold uses.
+    fn finalize(self, target: Prim) -> Option<chelis_types::ScalarValue> {
+        match self {
+            StagedBound::Raw(raw) => chelis_types::cast_raw("uniform_like", raw, target).ok(),
+            StagedBound::Typed(value) => {
+                chelis_types::cast_scalar("uniform_like", value, target).ok()
+            }
+        }
+    }
+
+    fn negate(self) -> Option<Self> {
+        match self {
+            StagedBound::Raw(chelis_types::RawScalar::Int(v)) => Some(StagedBound::Raw(
+                chelis_types::RawScalar::Int(v.checked_neg()?),
+            )),
+            StagedBound::Raw(chelis_types::RawScalar::Float(v)) => {
+                Some(StagedBound::Raw(chelis_types::RawScalar::Float(-v)))
+            }
+            // A finalized value negates at its own width, not through f64.
+            StagedBound::Typed(value) => {
+                let prim = value.prim();
+                chelis_types::cast_raw(
+                    "uniform_like",
+                    chelis_types::RawScalar::Float(-value.as_f64_lossy()),
+                    prim,
+                )
+                .ok()
+                .map(StagedBound::Typed)
+            }
+        }
+    }
+}
+
+fn staged_bound(expr: Option<&HostExpr>) -> Option<StagedBound> {
     match &expr?.kind {
-        HostExprKind::Float(value) => Some(*value),
-        HostExprKind::Int(value) => Some(*value as f64),
+        HostExprKind::Float(value) => {
+            Some(StagedBound::Raw(chelis_types::RawScalar::Float(*value)))
+        }
+        HostExprKind::Int(value) => Some(StagedBound::Raw(chelis_types::RawScalar::Int(*value))),
         HostExprKind::Builtin { name, args, ty } if name == "cast" => {
-            let inner = static_float_bound(args.first())?;
+            let inner = staged_bound(args.first())?;
             let (prim, surface) = checked_cast_abi_axis(ty).ok()?;
             if surface != CheckedCastSurface::Scalar {
                 return None;
             }
-            chelis_types::dtype_semantics::round_float_bound(prim, inner)
+            // Finalize at THIS cast's target, whatever it is. An integer
+            // target is a declared-dtype marker from host lowering, not a
+            // user-written truncation: the checker rejects an integer-target
+            // bound before emission (`PrecisionMismatch: expected f32`), so a
+            // non-float target reaching here is always the literal's own type.
+            Some(StagedBound::Typed(inner.finalize(prim)?))
         }
         HostExprKind::Builtin { name, args, .. } if name == "neg" => {
-            static_float_bound(args.first()).map(|value| -value)
+            staged_bound(args.first())?.negate()
         }
         _ => None,
     }
+}
+
+fn static_float_bound(expr: Option<&HostExpr>) -> Option<f64> {
+    // f32 is the emitted bound width; see the matching note at the
+    // `uniform_like` site in `chelis-ir`'s lowering.
+    staged_bound(expr)
+        .and_then(|staged| staged.finalize(Prim::F32))
+        .map(|value| value.as_f64_lossy())
 }
 
 /// The loud terminal for a `uniform_like` bound this emitter cannot fold.
