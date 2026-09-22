@@ -316,13 +316,17 @@ impl<'a> Walker<'a> {
             HostExprKind::ResultClaimScope { body, .. } => {
                 self.walk(body, env, facts);
             }
+            HostExprKind::FormalIngress { value, .. } => {
+                self.walk(value, env, facts);
+            }
             HostExprKind::SignatureEntry { plan, args } => {
                 for arg in args {
                     self.walk(arg, env, facts);
                 }
                 facts.extend(plan_facts(plan, args, env));
             }
-            HostExprKind::Let { bindings, body, .. } => {
+            HostExprKind::Let { bindings, body, .. }
+            | HostExprKind::RetainedInvocation { bindings, body, .. } => {
                 let mut local = env.clone();
                 let mut known = facts.clone();
                 for binding in bindings {

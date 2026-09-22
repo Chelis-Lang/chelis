@@ -111,6 +111,8 @@ impl SourceSite<'_> {
 fn value_only(expr: &chelis_ir::host::ConcreteHostExpr) -> bool {
     use chelis_ir::host::ConcreteHostExprKind as E;
     match &expr.kind {
+        E::ResultClaimScope { body, .. } => value_only(body),
+        E::FormalIngress { value, .. } => value_only(value),
         E::Int(_) | E::Float(_) | E::Bool(_) | E::String(_) | E::Var(..) | E::Unit => true,
         E::Tuple(items, _) | E::List(items, _) => items.iter().all(value_only),
         E::Builtin { name, args, .. } if (name == "cast" || name == "copy") && args.len() == 1 => {
@@ -126,9 +128,11 @@ fn straight_line(expr: &chelis_ir::host::ConcreteHostExpr) -> bool {
         return true;
     }
     match &expr.kind {
-        E::Let { bindings, body, .. } => {
+        E::Let { bindings, body, .. } | E::RetainedInvocation { bindings, body, .. } => {
             bindings.iter().all(|b| straight_line(&b.value)) && straight_line(body)
         }
+        E::ResultClaimScope { body, .. } => straight_line(body),
+        E::FormalIngress { value, .. } => straight_line(value),
         E::Tuple(items, _) => items.iter().all(straight_line),
         E::WithSeed { seed, body, .. } => matches!(seed.kind, E::Int(_)) && straight_line(body),
         E::TensorCall { args, .. } | E::Call { args, .. } | E::SignatureEntry { args, .. } => {

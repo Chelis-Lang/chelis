@@ -1356,6 +1356,7 @@ impl HipEmitter {
                 Self::dtype_kernel_suffix(operand_prec())
             )),
             RiscOp::Logical(kind) => Some(format!("kernel_logical_{}", kind.surf_name())),
+            RiscOp::GuardedFail { .. } => return Err(Self::guarded_fail_unsupported(node)),
             RiscOp::Where => Some(format!(
                 "kernel_where{}",
                 Self::dtype_kernel_suffix(node.output_type.precision)
@@ -2184,6 +2185,7 @@ impl HipEmitter {
                 &node.inputs,
                 &node.output_type,
             ),
+            RiscOp::GuardedFail { .. } => return Err(Self::guarded_fail_unsupported(node)),
             RiscOp::Where => self.emit_ternary_launch(
                 id,
                 &resolved_kernel_name()?,
@@ -4567,6 +4569,29 @@ impl HipEmitter {
         matches!(expr, DimExpr::Concrete(_) | DimExpr::Sym(_))
     }
 
+    /// chelis#1464 / [05-OP-68]: defensive. A guarded abort is emitted
+    /// HOST-side, exactly as on the C target, so it does not reach device
+    /// kernel selection — measured on both a scalar and a `vmap`-batched
+    /// guard, which each produced a complete HIP artifact carrying
+    /// `chelis_fail` and the authored message.
+    ///
+    /// This arm therefore exists so the operation cannot fall through a
+    /// wildcard into a device kernel, where emitting the fallback alone
+    /// would silently restore the substitution the identity exists to
+    /// prevent. chelis#2360 owns confirming the host-side guard on real
+    /// device hardware and deciding whether this stays defensive.
+    fn guarded_fail_unsupported(node: &DagNode) -> Unsupported {
+        Unsupported::new(
+            UnsupportedKind::Op("guarded_fail".to_string()),
+            format!("the HIP kernel set (node {})", node.id.0),
+            Stage::Codegen("hip"),
+            chelis_types::unimplemented_rejection!(
+                2360,
+                "a guarded abort reaching device kernel selection has no device form; it is emitted host-side"
+            ),
+        )
+    }
+
     /// The [05-OP-6] rung has no guarded device kernel, so it never
     /// reaches codegen: `reject_unsupported_hip_ops` gates it first.
     /// These arms exist so a future HIP implementation has to remove
@@ -4614,6 +4639,7 @@ impl HipEmitter {
             | RiscOp::Compare(_)
             | RiscOp::Logical(_)
             | RiscOp::Where
+            | RiscOp::GuardedFail { .. }
             | RiscOp::MaxElem
             | RiscOp::MinElem
             | RiscOp::ExtremaAdjoint { .. }

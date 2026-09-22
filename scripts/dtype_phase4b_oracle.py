@@ -1165,7 +1165,7 @@ def validate_normative_contract(
     require_all(
         spec10,
         (
-            ("Schema version 15 is explicitly\npresent", "wire v15 presence"),
+            ("Schema version 16 is explicitly\npresent", "wire v16 presence"),
             ("the only accepted version", "wire current-version exactness"),
             ("There is no versionless default", "wire versionless rejection"),
             ("versionless default, legacy migration", "wire migration rejection"),
@@ -3172,8 +3172,8 @@ def validate_schema_and_consumers(
                 "derived stdlib execution rule",
             ),
             (
-                "Unimplemented { issue: #1281, diagnostic_kind: UnsupportedFeature }",
-                "reduction implementation owner",
+                "Unimplemented { issue: #2339, diagnostic_kind: UnsupportedFeature }",
+                "device reduction implementation owner",
             ),
             (
                 "Unimplemented { issue: #1290, diagnostic_kind: UnsupportedFeature }",

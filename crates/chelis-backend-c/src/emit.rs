@@ -1735,7 +1735,12 @@ impl CEmitter {
             RiscOp::Add => self.emit_binary(id, "+", &node.inputs, &node.output_type),
             RiscOp::Sub => self.emit_binary(id, "-", &node.inputs, &node.output_type),
             RiscOp::Mul => self.emit_binary(id, "*", &node.inputs, &node.output_type),
-            RiscOp::Div => self.emit_binary(id, "/", &node.inputs, &node.output_type),
+            RiscOp::Div => {
+                if Self::is_lowered_mean_div(dag, node) {
+                    self.emit_mean_nonempty_guard(id, &node.inputs, &node.output_type, dag);
+                }
+                self.emit_binary(id, "/", &node.inputs, &node.output_type);
+            }
             // chelis#178: `trunc_div` is the C integer `/` quotient (round
             // toward zero) — `emit_binary` already wraps the divisor in the
             // portable zero-divisor guard for integer dtypes. `trunc_div`
@@ -1762,6 +1767,12 @@ impl CEmitter {
             }
             RiscOp::Logical(kind) => self.emit_logical(id, *kind, &node.inputs, &node.output_type),
             RiscOp::Where => self.emit_where(id, &node.inputs, &node.output_type),
+            RiscOp::GuardedFail {
+                message,
+                trap_on_true,
+            } => {
+                self.emit_guarded_fail(id, &node.inputs, &node.output_type, message, *trap_on_true)
+            }
             RiscOp::Neg => self.emit_unary(id, UnaryEmission::Neg, &node.inputs, &node.output_type),
             RiscOp::Recip => self.emit_recip(id, &node.inputs, &node.output_type),
             RiscOp::Exp => self.emit_unary_func(id, "expf", &node.inputs, &node.output_type),
@@ -1885,18 +1896,7 @@ impl CEmitter {
                 }
             }
             RiscOp::MinReduce { axis } => {
-                self.emit_reduce_simple(
-                    id,
-                    *axis,
-                    &node.inputs,
-                    &node.output_type,
-                    dag,
-                    "INFINITY",
-                    // #172: propagate NaN (torch parity) in the strided
-                    // path, matching the contiguous `chelis_min_f32`.
-                    "acc = chelis_fmin_propnan_f32(acc, ((const float*)t{a}_data)[src_idx]);",
-                    Some("chelis_min_f32"),
-                )?;
+                self.emit_reduce_extreme(id, *axis, &node.inputs, &node.output_type, dag, false)?;
             }
             RiscOp::ProdReduce { axis } => {
                 self.emit_reduce_simple(
@@ -3747,6 +3747,52 @@ impl CEmitter {
     }
 
     // ---- Stored-bit conditional selection ----
+    /// chelis#1464 / [05-OP-68]: emit the guard as a real abort, not a
+    /// selected value. The check runs BEFORE the fallback is carried, so a
+    /// taken abort never produces a result — which is what makes the
+    /// compiled lane agree with the evaluator instead of both quietly
+    /// returning a placeholder.
+    ///
+    /// The message is a compile-time part of the node's identity, so it is
+    /// emitted as a byte literal through the same fixed-width octal escaper
+    /// the host lane uses. That escaper is immune to the `\u{...}` class of
+    /// defect because it never reproduces a source escape spelling.
+    fn emit_guarded_fail(
+        &mut self,
+        id: usize,
+        inputs: &[NodeId],
+        ty: &TensorType,
+        message: &str,
+        trap_on_true: bool,
+    ) {
+        let condition = inputs[0].0;
+        let fires = if trap_on_true { "!=" } else { "==" };
+        // A batched condition aborts when ANY mapped element fires; an
+        // unbatched condition has exactly one element, so the same loop
+        // serves both without a rank special case. Deliberately NOT an
+        // OpenMP parallel loop: the first firing element must win
+        // deterministically.
+        self.line(&format!(
+            "for (int64_t i = 0; i < t{condition}_size; i++) {{"
+        ));
+        self.indent += 1;
+        self.line(&format!(
+            "if (((const uint8_t*)t{condition}_data)[i] {fires} UINT8_C(0)) {{"
+        ));
+        self.indent += 1;
+        self.line(&format!(
+            "chelis_fail(chelis_string_from_utf8((const uint8_t *){}, INT64_C({})));",
+            crate::host_emit::c_utf8_byte_literal(message),
+            message.len()
+        ));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        // The guard did not fire, so the result is the fallback unchanged.
+        self.emit_realize(id, &inputs[1..], ty);
+    }
+
     fn emit_where(&mut self, id: usize, inputs: &[NodeId], ty: &TensorType) {
         let condition = inputs[0].0;
         let then_value = inputs[1].0;
@@ -5563,6 +5609,84 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         self.line(&format!("chelis_sparse_plan_release(t{id}_sparse);"));
     }
 
+    fn lowered_mean_sum_source(
+        dag: VerifiedDagView<'_>,
+        result: NodeId,
+    ) -> Option<(usize, NodeId)> {
+        let mut node = dag.get(result)?;
+        if matches!(node.op, RiscOp::Cast { .. }) {
+            node = dag.get(*node.inputs.first()?)?;
+        }
+        let RiscOp::Sum { axis, .. } = node.op else {
+            return None;
+        };
+        Some((axis, *node.inputs.first()?))
+    }
+
+    /// Recognize exactly the Tier-2 [05-OP-11] mean graph. Shape-dependency
+    /// edges distinguish it from an authored `div(sum(x), y)`.
+    fn is_lowered_mean_div(dag: VerifiedDagView<'_>, node: &DagNode) -> bool {
+        if !matches!(node.op, RiscOp::Div) || node.inputs.len() != 2 {
+            return false;
+        }
+        let numerator = node.inputs[0];
+        let Some((axis, source)) = Self::lowered_mean_sum_source(dag, numerator) else {
+            return false;
+        };
+        let Some(divisor) = dag.get(node.inputs[1]) else {
+            return false;
+        };
+        if matches!(divisor.op, RiscOp::Const { .. }) && divisor.shape_deps.contains(&numerator) {
+            return true;
+        }
+        let Some((divisor_axis, divisor_source)) = Self::lowered_mean_sum_source(dag, divisor.id)
+        else {
+            return false;
+        };
+        divisor_axis == axis
+            && dag.get(divisor_source).is_some_and(|ones| {
+                matches!(ones.op, RiscOp::Const { .. }) && ones.shape_deps.contains(&source)
+            })
+    }
+
+    /// Runtime-derived zero extents must trap as `mean`, before the separate
+    /// division operation can observe a zero divisor and manufacture NaN.
+    fn emit_mean_nonempty_guard(
+        &mut self,
+        id: usize,
+        inputs: &[NodeId],
+        ty: &TensorType,
+        dag: VerifiedDagView<'_>,
+    ) {
+        let divisor = inputs[1].0;
+        let divisor_ty = &dag
+            .get(inputs[1])
+            .expect("lowered mean divisor exists")
+            .output_type;
+        let storage_et = Self::elem_type(divisor_ty);
+        let value = if matches!(divisor_ty.precision, Prim::F16 | Prim::Bf16) {
+            format!(
+                "{}(((const {storage_et}*)t{divisor}_data)[mean_i])",
+                Self::reduced_to_f32_fn(divisor_ty.precision)
+            )
+        } else {
+            format!("((const {storage_et}*)t{divisor}_data)[mean_i]")
+        };
+        let trap = NumericTrap::Domain {
+            op: "mean",
+            prim: ty.precision,
+        }
+        .to_string();
+        self.line(&format!(
+            "for (int64_t mean_i = 0; mean_i < t{divisor}_size; mean_i++) {{"
+        ));
+        self.indent += 1;
+        self.line(&format!("if ({value} == 0) chelis_numeric_trap({trap:?});"));
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!("/* mean nonempty guard for node {id} */"));
+    }
+
     // ---- Reduce sum ----
     //
     // WS-A1: parameterized by the output tensor's dtype (== the IR
@@ -5924,145 +6048,100 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         ty: &TensorType,
         dag: VerifiedDagView<'_>,
     ) -> Result<(), Unsupported> {
-        let a = inputs[0].0;
-        let input_node = dag.get(inputs[0]).unwrap();
-        let axis_size = format!("t{id}_leaf_count");
-        // WS-A1 guard: reduce_max codegen is f32-hardcoded
-        // (`chelis_max_f32` SIMD helper, `float acc = -INFINITY`,
-        // `fmaxf` reduction operator). Per spec §2.3 max_reduce
-        // returns operand precision; WS-1 adds the bf16/f16 path
-        // (convert each element to f32, compare, convert back to the
-        // operand precision for storage) without disturbing the f32
-        // fast path. Other widenings (e.g. f64) remain follow-on
-        // work; the explicit panic still fires so the silent
-        // truncation footgun cannot recur.
-        if matches!(ty.precision, Prim::Bf16 | Prim::F16)
-            && input_node.output_type.precision == ty.precision
-        {
-            self.emit_reduce_max_reduced_f(id, axis, inputs, ty, dag);
-            return Ok(());
-        }
-        if !matches!(ty.precision, Prim::F32)
-            || !matches!(input_node.output_type.precision, Prim::F32)
-        {
-            // chelis#730 Phase 1 (census row 11, chelis#692): a clean
-            // diagnostic through the section C3 channel, not a compiler
-            // panic. Reachable from ordinary Surf (`max_reduce` over an
-            // i64 tensor).
-            return Err(Unsupported::new(
-                UnsupportedKind::Op("max_reduce".to_string()),
-                format!(
-                    "`{}` tensors in the C DAG emitter (node {id})",
-                    input_node.output_type.precision.name()
-                ),
-                Stage::Codegen("c"),
-                chelis_types::unimplemented_rejection!(
-                    729,
-                    "the C reduce kernels are f32-hardcoded today (WS-A1/F1); cast to f32 \
-                     before the reduction. The target capability table owns non-f32 widening"
-                ),
-            ));
-        }
-        self.emit_reduction_plan(
-            id,
-            Some(a),
-            &input_node.output_type,
-            &[axis],
-            ty,
-            "CHELIS_REDUCE_MAX",
-            false,
-        );
-        self.emit_slot_wrapper(id, ty);
-        let output_is_scalar = ty.dims.is_empty();
-        if output_is_scalar {
-            self.line(&format!("if (chelis_is_contiguous(t{a})) {{"));
-            self.indent += 1;
-            self.line(&format!(
-                "((float*)t{id}_data)[0] = chelis_max_f32((const float*)t{a}_data, t{a}_size);"
-            ));
-            self.indent -= 1;
-            self.line("} else {");
-            self.indent += 1;
-        }
-        self.line("#pragma omp parallel for");
-        self.line(&format!(
-            "for (int64_t outer = 0; outer < t{id}_size; outer++) {{"
-        ));
-        self.indent += 1;
-        self.line("float acc = -INFINITY;");
-        self.line(&format!(
-            "for (int64_t __reduce_i = 0; __reduce_i < {axis_size}; __reduce_i++) {{"
-        ));
-        self.indent += 1;
-        self.line(&format!("int64_t src_idx = chelis_reduction_index(t{id}_reduction, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)outer), chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)__reduce_i));"));
-        // #172: propagate NaN (torch parity), matching `chelis_max_f32`.
-        self.line(&format!(
-            "acc = chelis_fmax_propnan_f32(acc, ((const float*)t{a}_data)[src_idx]);"
-        ));
-        self.indent -= 1;
-        self.line("}");
-        self.line(&format!("((float*)t{id}_data)[outer] = acc;"));
-        self.indent -= 1;
-        self.line("}");
-        if output_is_scalar {
-            self.indent -= 1;
-            self.line("}");
-        }
-        self.line(&format!("chelis_reduction_plan_release(t{id}_reduction);"));
-        Ok(())
+        self.emit_reduce_extreme(id, axis, inputs, ty, dag, true)
     }
 
-    /// WS-1: bf16 / f16 reduce_max. Per spec §2.3 max_reduce keeps
-    /// operand precision, so the output is also bf16 / f16. We load
-    /// each operand through `chelis_<x>_to_f32`, fold with `fmaxf`,
-    /// and convert the final accumulator back to the operand
-    /// precision for the store. This keeps the comparison numerically
-    /// faithful (NaN propagation aside) without inflating the per-
-    /// element storage.
-    fn emit_reduce_max_reduced_f(
+    /// [05-OP-12..13] stored-width max/min selection. The selected result is
+    /// copied from the source slot rather than reconstructed from an
+    /// accumulator, preserving the first NaN payload/sign and the first
+    /// stored representation among numerically equal values.
+    fn emit_reduce_extreme(
         &mut self,
         id: usize,
         axis: usize,
         inputs: &[NodeId],
         ty: &TensorType,
         dag: VerifiedDagView<'_>,
-    ) {
+        take_max: bool,
+    ) -> Result<(), Unsupported> {
         let a = inputs[0].0;
-        let input_node = dag.get(inputs[0]).unwrap();
-        let axis_size = format!("t{id}_leaf_count");
-        let load = Self::reduced_to_f32_fn(ty.precision);
-        let store = Self::f32_to_reduced_fn(ty.precision);
-        self.emit_reduction_plan(
-            id,
-            Some(a),
-            &input_node.output_type,
-            &[axis],
-            ty,
-            "CHELIS_REDUCE_MAX",
-            false,
+        let input_ty = &dag
+            .get(inputs[0])
+            .expect("extrema input exists")
+            .output_type;
+        debug_assert_eq!(
+            input_ty.precision, ty.precision,
+            "verified extrema reductions preserve operand dtype"
         );
+        let prim = input_ty.precision;
+        let operation = if take_max { "max_reduce" } else { "min_reduce" };
+        let runtime_operation = if take_max {
+            "CHELIS_REDUCE_MAX"
+        } else {
+            "CHELIS_REDUCE_MIN"
+        };
+        let cmp = if take_max { ">" } else { "<" };
+        let storage_et = Self::elem_type(input_ty);
+        let arithmetic_et = if matches!(prim, Prim::F16 | Prim::Bf16) {
+            "float"
+        } else {
+            storage_et
+        };
+        let load = |index: &str| {
+            let stored = format!("((const {storage_et}*)t{a}_data)[{index}]");
+            if matches!(prim, Prim::F16 | Prim::Bf16) {
+                format!("{}({stored})", Self::reduced_to_f32_fn(prim))
+            } else {
+                stored
+            }
+        };
+        self.emit_reduction_plan(id, Some(a), input_ty, &[axis], ty, runtime_operation, false);
+        self.line(&format!("if (t{id}_leaf_count == 0) {{"));
+        self.indent += 1;
+        let trap = NumericTrap::Domain {
+            op: operation,
+            prim,
+        }
+        .to_string();
+        self.line(&format!("chelis_numeric_trap({trap:?});"));
+        self.indent -= 1;
+        self.line("}");
         self.emit_slot_wrapper(id, ty);
         self.line("#pragma omp parallel for");
         self.line(&format!(
             "for (int64_t outer = 0; outer < t{id}_size; outer++) {{"
         ));
         self.indent += 1;
-        self.line("float acc = -INFINITY;");
+        self.line("int64_t best_src = -1;");
+        self.line(&format!("{arithmetic_et} best_value = ({arithmetic_et})0;"));
         self.line(&format!(
-            "for (int64_t __reduce_i = 0; __reduce_i < {axis_size}; __reduce_i++) {{"
+            "for (int64_t __reduce_i = 0; __reduce_i < t{id}_leaf_count; __reduce_i++) {{"
         ));
         self.indent += 1;
         self.line(&format!("int64_t src_idx = chelis_reduction_index(t{id}_reduction, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)outer), chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)__reduce_i));"));
-        // #172: propagate NaN (torch parity), matching `chelis_max_f32`.
+        self.line(&format!("{arithmetic_et} candidate = {};", load("src_idx")));
+        let replace = if prim.is_float() {
+            format!(
+                "best_src < 0 || (!isnan(best_value) && (isnan(candidate) || candidate {cmp} best_value))"
+            )
+        } else {
+            format!("best_src < 0 || candidate {cmp} best_value")
+        };
+        self.line(&format!("if ({replace}) {{"));
+        self.indent += 1;
+        self.line("best_src = src_idx;");
+        self.line("best_value = candidate;");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
         self.line(&format!(
-            "acc = chelis_fmax_propnan_f32(acc, {load}(((uint16_t*)t{a}_data)[src_idx]));"
+            "(({storage_et}*)t{id}_data)[outer] = ((const {storage_et}*)t{a}_data)[best_src];"
         ));
         self.indent -= 1;
         self.line("}");
-        self.line(&format!("((uint16_t*)t{id}_data)[outer] = {store}(acc);"));
-        self.indent -= 1;
-        self.line("}");
         self.line(&format!("chelis_reduction_plan_release(t{id}_reduction);"));
+        Ok(())
     }
 
     // ---- Generic scalar reduction (min / prod) ----
@@ -6247,23 +6326,30 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
     ) -> Result<(), Unsupported> {
         let a = inputs[0].0;
         let input_node = dag.get(inputs[0]).unwrap();
-        if !matches!(ty.precision, Prim::F32)
-            || !matches!(input_node.output_type.precision, Prim::F32)
-        {
-            // chelis#730 Phase 1 (census row 11 shape): a clean diagnostic,
-            // not a panic; the pre-codegen gate normally rejects earlier.
+        let prim = input_node.output_type.precision;
+        if ty.precision != prim {
             return Err(Unsupported::new(
                 UnsupportedKind::Op("reduce_window_*".to_string()),
                 format!(
-                    "`{}` tensors in the C DAG emitter (node {id})",
-                    input_node.output_type.precision.name()
+                    "input `{}` and output `{}` dtypes in the C DAG emitter (node {id})",
+                    prim.name(),
+                    ty.precision.name()
                 ),
                 Stage::Codegen("c"),
-                chelis_types::unimplemented_rejection!(
-                    729,
-                    "the C windowed-reduction emitter is f32-only today; cast to f32 \
-                     before the windowed reduction (spec/05-risc-primitives.md \
-                     section 2.3.1)"
+                chelis_types::deliberate_rejection!(
+                    "[05-OP-39]",
+                    "window reductions preserve the operand dtype"
+                ),
+            ));
+        }
+        if matches!(reducer, ReduceWindowKind::Mean) && !prim.is_float() {
+            return Err(Unsupported::new(
+                UnsupportedKind::Op("reduce_window_mean".to_string()),
+                format!("`{}` tensors in the C DAG emitter (node {id})", prim.name()),
+                Stage::Codegen("c"),
+                chelis_types::deliberate_rejection!(
+                    "[05-OP-39]",
+                    "reduce_window_mean admits only active float tensor dtypes"
                 ),
             ));
         }
@@ -6351,19 +6437,24 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             "CHELIS_WINDOW_RESULT",
         )?;
         self.emit_slot_wrapper(id, ty);
-        // Arithmetic policy is unchanged here; #1298 owns canonical window
-        // accumulation and extrema NaN/adjoint remediation.
-        let (init_literal, combine_template) = match reducer {
-            ReduceWindowKind::Max => (
-                "-INFINITY",
-                "acc = fmaxf(acc, ((const float*)t{a}_data)[src_idx]);",
-            ),
-            ReduceWindowKind::Min => (
-                "INFINITY",
-                "acc = fminf(acc, ((const float*)t{a}_data)[src_idx]);",
-            ),
-            ReduceWindowKind::Sum | ReduceWindowKind::Mean => {
-                ("0.0f", "acc += ((const float*)t{a}_data)[src_idx];")
+        let storage_et = Self::elem_type(&input_node.output_type);
+        let arithmetic_prim = if matches!(prim, Prim::F16 | Prim::Bf16) {
+            Prim::F32
+        } else {
+            prim
+        };
+        let arithmetic_ty = TensorType {
+            dims: vec![],
+            precision: arithmetic_prim,
+        };
+        let arithmetic_et = Self::elem_type(&arithmetic_ty);
+        let arithmetic_dtype = Self::dtype_macro(&arithmetic_ty);
+        let load = |index: &str| {
+            let stored = format!("((const {storage_et}*)t{a}_data)[{index}]");
+            if matches!(prim, Prim::F16 | Prim::Bf16) {
+                format!("{}({stored})", Self::reduced_to_f32_fn(prim))
+            } else {
+                stored
             }
         };
         self.line("#pragma omp parallel for");
@@ -6371,19 +6462,107 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             "for (int64_t outer = 0; outer < t{id}_size; outer++) {{"
         ));
         self.indent += 1;
-        self.line(&format!("float acc = {init_literal};"));
-        self.line(&format!(
-            "for (int64_t leaf = 0; leaf < t{id}_window_count; leaf++) {{"
-        ));
-        self.indent += 1;
-        self.line(&format!("int64_t src_idx = chelis_window_index(t{id}_window, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)outer), chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)leaf));"));
-        self.line(&combine_template.replace("{a}", &a.to_string()));
-        self.indent -= 1;
-        self.line("}");
-        if matches!(reducer, ReduceWindowKind::Mean) {
-            self.line(&format!("acc /= (float)t{id}_window_count;"));
+        if matches!(reducer, ReduceWindowKind::Max | ReduceWindowKind::Min) {
+            let cmp = if matches!(reducer, ReduceWindowKind::Max) {
+                ">"
+            } else {
+                "<"
+            };
+            self.line("int64_t best_src = -1;");
+            self.line(&format!("{arithmetic_et} best_value = ({arithmetic_et})0;"));
+            self.line(&format!(
+                "for (int64_t leaf = 0; leaf < t{id}_window_count; leaf++) {{"
+            ));
+            self.indent += 1;
+            self.line(&format!("int64_t src_idx = chelis_window_index(t{id}_window, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)outer), chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)leaf));"));
+            self.line(&format!("{arithmetic_et} candidate = {};", load("src_idx")));
+            let replace = if prim.is_float() {
+                format!(
+                    "best_src < 0 || (!isnan(best_value) && (isnan(candidate) || candidate {cmp} best_value))"
+                )
+            } else {
+                format!("best_src < 0 || candidate {cmp} best_value")
+            };
+            self.line(&format!("if ({replace}) {{"));
+            self.indent += 1;
+            self.line("best_src = src_idx;");
+            self.line("best_value = candidate;");
+            self.indent -= 1;
+            self.line("}");
+            self.indent -= 1;
+            self.line("}");
+            self.line(&format!(
+                "(({storage_et}*)t{id}_data)[outer] = ((const {storage_et}*)t{a}_data)[best_src];"
+            ));
+        } else {
+            self.line(&format!("int64_t level_n = t{id}_window_count;"));
+            self.line(&format!(
+                "chelis_tensor *level_tensor = chelis_alloc(1, &level_n, {arithmetic_dtype});"
+            ));
+            self.line(
+                "chelis_tensor_write *level_guard = chelis_tensor_begin_write(level_tensor);",
+            );
+            self.line(&format!(
+                "{arithmetic_et} *level = ({arithmetic_et}*)chelis_tensor_write_view(level_guard).data;"
+            ));
+            self.line(&format!(
+                "for (int64_t leaf = 0; leaf < t{id}_window_count; leaf++) {{"
+            ));
+            self.indent += 1;
+            self.line(&format!("int64_t src_idx = chelis_window_index(t{id}_window, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)outer), chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)leaf));"));
+            self.line(&format!(
+                "level[leaf] = ({arithmetic_et})({});",
+                load("src_idx")
+            ));
+            self.indent -= 1;
+            self.line("}");
+            self.line("while (level_n > 1) {");
+            self.indent += 1;
+            self.line("int64_t next_n = level_n / 2 + level_n % 2;");
+            self.line("for (int64_t pair = 0; pair < next_n; pair++) {");
+            self.indent += 1;
+            self.line("int64_t left = 2 * pair;");
+            self.line("int64_t right = left + 1;");
+            let add = if prim.is_integer() {
+                let bits = Self::integer_width(prim);
+                let trap = NumericTrap::Overflow {
+                    op: "reduce_window_sum",
+                    prim,
+                }
+                .to_string();
+                format!(
+                    "({arithmetic_et})chelis_int_checked_add((int64_t)level[left], (int64_t)level[right], {bits}, {trap:?})"
+                )
+            } else {
+                "level[left] + level[right]".to_string()
+            };
+            self.line(&format!(
+                "level[pair] = right < level_n ? {add} : level[left];"
+            ));
+            self.indent -= 1;
+            self.line("}");
+            self.line("level_n = next_n;");
+            self.indent -= 1;
+            self.line("}");
+            self.line(&format!("{arithmetic_et} result = level[0];"));
+            if matches!(reducer, ReduceWindowKind::Mean) {
+                self.line(&format!(
+                    "result = result / ({arithmetic_et})t{id}_window_count;"
+                ));
+            }
+            if matches!(prim, Prim::F16 | Prim::Bf16) {
+                self.line(&format!(
+                    "((uint16_t*)t{id}_data)[outer] = {}(result);",
+                    Self::f32_to_reduced_fn(prim)
+                ));
+            } else {
+                self.line(&format!(
+                    "(({storage_et}*)t{id}_data)[outer] = ({storage_et})result;"
+                ));
+            }
+            self.line("chelis_tensor_end_write(level_guard);");
+            self.line("chelis_tensor_release(level_tensor);");
         }
-        self.line(&format!("((float*)t{id}_data)[outer] = acc;"));
         self.indent -= 1;
         self.line("}");
         self.line(&format!("chelis_window_plan_release(t{id}_window);"));
@@ -6396,9 +6575,9 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
     /// `g` the upstream cotangent (shape `S_out`). Output `din` has `x`'s
     /// shape. Each window's `g` is scattered (overlap-add) back over the
     /// window — `Sum` adds `g`, `Mean` adds `g / window_volume`, and
-    /// `Max`/`Min` add `g` only at positions equal to that window's extreme
-    /// (existing tie/NaN arithmetic remains tracked by #1298). Geometry follows
-    /// `spec/05-risc-primitives.md` §2.3.1.
+    /// `Max`/`Min` route the first-NaN cotangent or split `g / k` across
+    /// equal non-NaN extrema. Geometry follows `spec/05-risc-primitives.md`
+    /// §2.3.1.
     ///
     /// Emitted **serially** (no `#pragma omp parallel for`): overlapping
     /// windows scatter-add into shared `din` positions, so parallelising
@@ -6418,17 +6597,22 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         let g = inputs[1].0;
         let x_node = dag.get(inputs[0]).unwrap();
         let g_node = dag.get(inputs[1]).unwrap();
-        if !matches!(ty.precision, Prim::F32)
-            || !matches!(x_node.output_type.precision, Prim::F32)
-            || !matches!(g_node.output_type.precision, Prim::F32)
-        {
-            panic!(
-                "emit_reduce_window_grad: f32-only; node {id} has x precision `{}`, \
-                 g precision `{}`, output precision `{}`. bf16/f16 widening is follow-on work.",
-                x_node.output_type.precision.name(),
-                g_node.output_type.precision.name(),
-                ty.precision.name(),
-            );
+        let prim = x_node.output_type.precision;
+        if !prim.is_float() || g_node.output_type.precision != prim || ty.precision != prim {
+            return Err(Unsupported::new(
+                UnsupportedKind::Op("reduce_window_grad".to_string()),
+                format!(
+                    "x `{}`, g `{}`, and output `{}` dtypes in the C DAG emitter (node {id})",
+                    prim.name(),
+                    g_node.output_type.precision.name(),
+                    ty.precision.name()
+                ),
+                Stage::Codegen("c"),
+                chelis_types::deliberate_rejection!(
+                    "[05-OP-39]",
+                    "window adjoints require one matching active float dtype"
+                ),
+            ));
         }
         assert_eq!(
             window_shape.len(),
@@ -6454,44 +6638,161 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             "chelis_window_check_tensor(t{id}_window, t{g}, CHELIS_WINDOW_RESULT);"
         ));
         self.emit_slot_wrapper(id, ty);
+        let storage_et = Self::elem_type(ty);
+        let arithmetic_prim = if matches!(prim, Prim::F16 | Prim::Bf16) {
+            Prim::F32
+        } else {
+            prim
+        };
+        let arithmetic_ty = TensorType {
+            dims: vec![],
+            precision: arithmetic_prim,
+        };
+        let arithmetic_et = Self::elem_type(&arithmetic_ty);
+        let arithmetic_dtype = Self::dtype_macro(&arithmetic_ty);
+        let load_x = |index: &str| {
+            let stored = format!("((const {storage_et}*)t{x}_data)[{index}]");
+            if matches!(prim, Prim::F16 | Prim::Bf16) {
+                format!("{}({stored})", Self::reduced_to_f32_fn(prim))
+            } else {
+                stored
+            }
+        };
+        let load_g = |index: &str| {
+            let stored = format!("((const {storage_et}*)t{g}_data)[{index}]");
+            if matches!(prim, Prim::F16 | Prim::Bf16) {
+                format!("{}({stored})", Self::reduced_to_f32_fn(prim))
+            } else {
+                stored
+            }
+        };
+        // [05-RWIN-1]: gather one destination's contributions in increasing
+        // row-major output order, then combine them with the canonical
+        // adjacent-pair tree. This is deterministic even for overlapping
+        // windows and needs no racing scatter.
         self.line(&format!(
-            "for (int64_t i = 0; i < t{id}_size; i++) {{ ((float*)t{id}_data)[i] = 0.0f; }}"
+            "for (int64_t dst_idx = 0; dst_idx < t{id}_size; dst_idx++) {{"
         ));
-        // Serial cotangent/leaf order preserves deterministic overlap addition.
+        self.indent += 1;
+        self.line(&format!("int64_t contribution_capacity = t{g}_size;"));
+        self.line(&format!(
+            "chelis_tensor *contribution_tensor = chelis_alloc(1, &contribution_capacity, {arithmetic_dtype});"
+        ));
+        self.line("chelis_tensor_write *contribution_guard = chelis_tensor_begin_write(contribution_tensor);");
+        self.line(&format!(
+            "{arithmetic_et} *contributions = ({arithmetic_et}*)chelis_tensor_write_view(contribution_guard).data;"
+        ));
+        self.line("int64_t contribution_n = 0;");
         self.line(&format!(
             "for (int64_t outer = 0; outer < t{g}_size; outer++) {{"
         ));
         self.indent += 1;
-        self.line(&format!("float gval = ((const float*)t{g}_data)[outer];"));
-        if matches!(reducer, ReduceWindowKind::Max | ReduceWindowKind::Min) {
-            let (init, cmp) = match reducer {
-                ReduceWindowKind::Max => ("-INFINITY", "fmaxf"),
-                _ => ("INFINITY", "fminf"),
-            };
-            self.line(&format!("float ext = {init};"));
-            self.line(&format!(
-                "for (int64_t leaf = 0; leaf < t{id}_window_count; leaf++) {{"
-            ));
-            self.indent += 1;
-            self.line(&format!("int64_t src_idx = chelis_window_index(t{id}_window, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)outer), chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)leaf));"));
-            self.line(&format!(
-                "ext = {cmp}(ext, ((const float*)t{x}_data)[src_idx]);"
-            ));
-            self.indent -= 1;
-            self.line("}");
-        }
+        self.line("int in_window = 0;");
         self.line(&format!(
             "for (int64_t leaf = 0; leaf < t{id}_window_count; leaf++) {{"
         ));
         self.indent += 1;
-        self.line(&format!("int64_t dst_idx = chelis_window_index(t{id}_window, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)outer), chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)leaf));"));
-        match reducer {
-            ReduceWindowKind::Sum => self.line(&format!("((float*)t{id}_data)[dst_idx] += gval;")),
-            ReduceWindowKind::Mean => self.line(&format!("((float*)t{id}_data)[dst_idx] += gval / (float)t{id}_window_count;")),
-            ReduceWindowKind::Max | ReduceWindowKind::Min => self.line(&format!("if (((const float*)t{x}_data)[dst_idx] == ext) {{ ((float*)t{id}_data)[dst_idx] += gval; }}")),
-        }
+        self.line(&format!("int64_t src_idx = chelis_window_index(t{id}_window, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)outer), chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)leaf));"));
+        self.line("if (src_idx == dst_idx) in_window = 1;");
         self.indent -= 1;
         self.line("}");
+        self.line("if (!in_window) continue;");
+        self.line(&format!(
+            "{arithmetic_et} contribution = {};",
+            load_g("outer")
+        ));
+        match reducer {
+            ReduceWindowKind::Sum => {}
+            ReduceWindowKind::Mean => self.line(&format!(
+                "contribution = contribution / ({arithmetic_et})t{id}_window_count;"
+            )),
+            ReduceWindowKind::Max | ReduceWindowKind::Min => {
+                let cmp = if matches!(reducer, ReduceWindowKind::Max) {
+                    ">"
+                } else {
+                    "<"
+                };
+                self.line("int64_t best_src = -1;");
+                self.line(&format!("{arithmetic_et} best_value = ({arithmetic_et})0;"));
+                self.line(&format!(
+                    "for (int64_t leaf = 0; leaf < t{id}_window_count; leaf++) {{"
+                ));
+                self.indent += 1;
+                self.line(&format!("int64_t src_idx = chelis_window_index(t{id}_window, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)outer), chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)leaf));"));
+                self.line(&format!(
+                    "{arithmetic_et} candidate = {};",
+                    load_x("src_idx")
+                ));
+                self.line(&format!(
+                    "if (best_src < 0 || (!isnan(best_value) && (isnan(candidate) || candidate {cmp} best_value))) {{"
+                ));
+                self.indent += 1;
+                self.line("best_src = src_idx;");
+                self.line("best_value = candidate;");
+                self.indent -= 1;
+                self.line("}");
+                self.indent -= 1;
+                self.line("}");
+                self.line("if (isnan(best_value)) {");
+                self.indent += 1;
+                self.line("if (dst_idx != best_src) continue;");
+                self.indent -= 1;
+                self.line("} else {");
+                self.indent += 1;
+                self.line(&format!(
+                    "if (!({} == best_value)) continue;",
+                    load_x("dst_idx")
+                ));
+                self.line("int64_t tie_count = 0;");
+                self.line(&format!(
+                    "for (int64_t leaf = 0; leaf < t{id}_window_count; leaf++) {{"
+                ));
+                self.indent += 1;
+                self.line(&format!("int64_t src_idx = chelis_window_index(t{id}_window, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)outer), chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)leaf));"));
+                self.line(&format!(
+                    "if ({} == best_value) tie_count++;",
+                    load_x("src_idx")
+                ));
+                self.indent -= 1;
+                self.line("}");
+                self.line(&format!(
+                    "contribution = contribution / ({arithmetic_et})tie_count;"
+                ));
+                self.indent -= 1;
+                self.line("}");
+            }
+        }
+        self.line("contributions[contribution_n++] = contribution;");
+        self.indent -= 1;
+        self.line("}");
+        self.line("while (contribution_n > 1) {");
+        self.indent += 1;
+        self.line("int64_t next_n = contribution_n / 2 + contribution_n % 2;");
+        self.line("for (int64_t pair = 0; pair < next_n; pair++) {");
+        self.indent += 1;
+        self.line("int64_t left = 2 * pair;");
+        self.line("int64_t right = left + 1;");
+        self.line("contributions[pair] = right < contribution_n ? contributions[left] + contributions[right] : contributions[left];");
+        self.indent -= 1;
+        self.line("}");
+        self.line("contribution_n = next_n;");
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!(
+            "{arithmetic_et} result = contribution_n ? contributions[0] : ({arithmetic_et})0;"
+        ));
+        if matches!(prim, Prim::F16 | Prim::Bf16) {
+            self.line(&format!(
+                "((uint16_t*)t{id}_data)[dst_idx] = {}(result);",
+                Self::f32_to_reduced_fn(prim)
+            ));
+        } else {
+            self.line(&format!(
+                "(({storage_et}*)t{id}_data)[dst_idx] = ({storage_et})result;"
+            ));
+        }
+        self.line("chelis_tensor_end_write(contribution_guard);");
+        self.line("chelis_tensor_release(contribution_tensor);");
         self.indent -= 1;
         self.line("}");
         self.line(&format!("chelis_window_plan_release(t{id}_window);"));
@@ -6500,11 +6801,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
 
     // ---- Argmax / Argmin ----
     //
-    // Emits an index-tracking reduction. Output is an F32 tensor holding
-    // integer-valued floats (e.g. 0.0, 1.0, 2.0); see the RiscOp::Argmax doc
-    // comment in dag.rs for the rationale — the C runtime does not yet carry
-    // Int64 tensors natively, so the IR carries F32 and downstream casts are
-    // the caller's responsibility.
+    // Emits an exact i64 index-tracking reduction.
     fn emit_reduce_argcmp(
         &mut self,
         id: usize,
@@ -6515,49 +6812,40 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         is_argmax: bool,
     ) -> Result<(), Unsupported> {
         let a = inputs[0].0;
-        let input_node = dag.get(inputs[0]).unwrap();
-        let axis_size = format!("t{id}_leaf_count");
-        // WS-A1 guard: argmax/argmin codegen is f32-hardcoded
-        // (`chelis_argmax_f32`/`chelis_argmin_f32` SIMD helpers,
-        // `float best_val` declarator). Per the doc comment above,
-        // the OUTPUT is intentionally F32-encoded integer indices,
-        // but the INPUT may be F64; reading f64 storage as float*
-        // would silently truncate. Reject loudly until follow-on
-        // widens the input read.
-        if !matches!(input_node.output_type.precision, Prim::F32) {
-            // chelis#730 Phase 1 (census row 11, chelis#692).
-            return Err(Unsupported::new(
-                UnsupportedKind::Op(
-                    if is_argmax {
-                        "argmax_reduce"
-                    } else {
-                        "argmin_reduce"
-                    }
-                    .to_string(),
-                ),
-                format!(
-                    "`{}` tensor inputs in the C DAG emitter (node {id})",
-                    input_node.output_type.precision.name()
-                ),
-                Stage::Codegen("c"),
-                chelis_types::unimplemented_rejection!(
-                    729,
-                    "the C argmax/argmin kernels read f32 inputs only today (WS-A1/F1); \
-                     cast to f32 before the reduction; the target capability table owns widening"
-                ),
-            ));
-        }
-        let init = if is_argmax { "-INFINITY" } else { "INFINITY" };
-        let cmp = if is_argmax { ">" } else { "<" };
-        let simd_fn = if is_argmax {
-            "chelis_argmax_f32"
+        let input_ty = &dag
+            .get(inputs[0])
+            .expect("argument reduction input exists")
+            .output_type;
+        debug_assert_eq!(
+            ty.precision,
+            Prim::Int64,
+            "verified argmax/argmin output dtype is i64"
+        );
+        let prim = input_ty.precision;
+        let operation = if is_argmax {
+            "argmax_reduce"
         } else {
-            "chelis_argmin_f32"
+            "argmin_reduce"
+        };
+        let cmp = if is_argmax { ">" } else { "<" };
+        let storage_et = Self::elem_type(input_ty);
+        let arithmetic_et = if matches!(prim, Prim::F16 | Prim::Bf16) {
+            "float"
+        } else {
+            storage_et
+        };
+        let load = |index: &str| {
+            let stored = format!("((const {storage_et}*)t{a}_data)[{index}]");
+            if matches!(prim, Prim::F16 | Prim::Bf16) {
+                format!("{}({stored})", Self::reduced_to_f32_fn(prim))
+            } else {
+                stored
+            }
         };
         self.emit_reduction_plan(
             id,
             Some(a),
-            &input_node.output_type,
+            input_ty,
             &[axis],
             ty,
             if is_argmax {
@@ -6567,44 +6855,41 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             },
             false,
         );
-        self.emit_slot_wrapper(id, ty);
-        // #347: argmax/argmin produce integer INDEX outputs (the result
-        // tensor is allocated at the declared integer dtype, e.g.
-        // `CHELIS_DTYPE_I64`). The index must be stored through a pointer of the
-        // output element type, not into the `float* data` field directly:
-        // a bare `t->data[outer] = (float)best_idx` writes the f32 bit
-        // pattern of the index, which the print path then reads back as the
-        // wrong reinterpreted integer (the `1065353216 == 0x3F800000`
-        // signature). Mirrors `emit_cast`'s `(({dst_et}*)t->data)[i] = ...`
-        // store convention so eval and the C backend agree on the indices.
-        let dst_et = Self::elem_type(ty);
-        let output_is_scalar = ty.dims.is_empty();
-        if output_is_scalar {
-            self.line(&format!("if (chelis_is_contiguous(t{a})) {{"));
-            self.indent += 1;
-            self.line(&format!(
-                "(({dst_et}*)t{id}_data)[0] = ({dst_et}){simd_fn}(t{a}_data, t{a}_size);"
-            ));
-            self.indent -= 1;
-            self.line("} else {");
-            self.indent += 1;
+        self.line(&format!("if (t{id}_leaf_count == 0) {{"));
+        self.indent += 1;
+        let trap = NumericTrap::Domain {
+            op: operation,
+            prim: Prim::Int64,
         }
+        .to_string();
+        self.line(&format!("chelis_numeric_trap({trap:?});"));
+        self.indent -= 1;
+        self.line("}");
+        self.emit_slot_wrapper(id, ty);
+        let dst_et = Self::elem_type(ty);
         self.line("#pragma omp parallel for");
         self.line(&format!(
             "for (int64_t outer = 0; outer < t{id}_size; outer++) {{"
         ));
         self.indent += 1;
-        self.line(&format!("float best_val = {init};"));
+        self.line(&format!("{arithmetic_et} best_value = ({arithmetic_et})0;"));
         self.line("int64_t best_idx = -1;");
         self.line(&format!(
-            "for (int64_t __reduce_i = 0; __reduce_i < {axis_size}; __reduce_i++) {{"
+            "for (int64_t __reduce_i = 0; __reduce_i < t{id}_leaf_count; __reduce_i++) {{"
         ));
         self.indent += 1;
         self.line(&format!("int64_t src_idx = chelis_reduction_index(t{id}_reduction, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)outer), chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)__reduce_i));"));
-        self.line(&format!("float v = ((const float*)t{a}_data)[src_idx];"));
-        self.line(&format!("if (best_idx < 0 || v {cmp} best_val) {{"));
+        self.line(&format!("{arithmetic_et} candidate = {};", load("src_idx")));
+        let replace = if prim.is_float() {
+            format!(
+                "best_idx < 0 || (!isnan(best_value) && (isnan(candidate) || candidate {cmp} best_value))"
+            )
+        } else {
+            format!("best_idx < 0 || candidate {cmp} best_value")
+        };
+        self.line(&format!("if ({replace}) {{"));
         self.indent += 1;
-        self.line("best_val = v;");
+        self.line("best_value = candidate;");
         self.line("best_idx = __reduce_i;");
         self.indent -= 1;
         self.line("}");
@@ -6615,10 +6900,6 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         ));
         self.indent -= 1;
         self.line("}");
-        if output_is_scalar {
-            self.indent -= 1;
-            self.line("}");
-        }
         self.line(&format!("chelis_reduction_plan_release(t{id}_reduction);"));
         Ok(())
     }
@@ -8112,33 +8393,29 @@ mod tests {
         );
         dag.add_node(RiscOp::MaxReduce { axis: 0 }, vec![a], scalar_f32(), None);
         let c = emit_test_dag(&dag, "test_fn").unwrap();
-        // #172: the contiguous fast path uses the NaN-propagating SIMD
-        // helper; the strided fallback uses the NaN-propagating scalar
-        // helper. Plain C99 `fmaxf` (which DROPS NaN) must not appear in
-        // the reduction — it would diverge from torch.
+        // [05-OP-12] selects the first NaN, otherwise the first strictly
+        // greatest stored value. Source-index selection preserves the exact
+        // stored representation, including NaN payloads and signed zero.
         assert!(
-            c.contains("chelis_max_f32(") && c.contains("chelis_fmax_propnan_f32(acc"),
-            "max_reduce must emit the NaN-propagating max helpers (#172):\n{c}"
+            c.contains("isnan(candidate) || candidate > best_value"),
+            "max_reduce must select the first NaN or strict greater value:\n{c}"
         );
         assert!(
-            !c.contains("fmaxf(acc"),
-            "max_reduce must not use NaN-dropping fmaxf on the accumulator (#172):\n{c}"
+            c.contains("((float*)t1_data)[outer] = ((const float*)t0_data)[best_src];"),
+            "max_reduce must copy the selected source representation:\n{c}"
         );
-        assert!(c.contains("-INFINITY"));
+        assert!(!c.contains("fmaxf("), "{c}");
+        assert!(
+            c.contains("numeric trap: domain in max_reduce at f32"),
+            "{c}"
+        );
     }
 
     #[test]
-    fn reduce_window_max_min_drop_nan() {
-        // #172 sibling (C lane): windowed Max/Min keep C99 `fmaxf`/`fminf`,
-        // which DROP NaN (return the non-NaN operand) — the SAME semantics as
-        // eval's `f64::max`/`min` (locked by
-        // `host_runtime_reduce_window_max_min_drop_nan` in chelis-compiler-api).
-        // Unlike `max_reduce`/`min_reduce`, reduce_window must NOT use the
-        // NaN-propagating reduce helper. This pins the documented
-        // drop-vs-propagate asymmetry on the backend side.
-        for (reducer, op) in [
-            (ReduceWindowKind::Max, "fmaxf(acc"),
-            (ReduceWindowKind::Min, "fminf(acc"),
+    fn reduce_window_max_min_select_first_nan_and_stored_representation() {
+        for (reducer, comparison, forbidden) in [
+            (ReduceWindowKind::Max, "candidate > best_value", "fmaxf("),
+            (ReduceWindowKind::Min, "candidate < best_value", "fminf("),
         ] {
             let mut dag = Dag::new();
             let a = dag.add_node(
@@ -8159,13 +8436,14 @@ mod tests {
             );
             let c = emit_test_dag(&dag, "test_fn").unwrap();
             assert!(
-                c.contains(op),
-                "reduce_window {reducer:?} must use the NaN-dropping `{op}` (#172):\n{c}"
+                c.contains(&format!("isnan(candidate) || {comparison}")),
+                "reduce_window {reducer:?} must select the first NaN or strict extremum:\n{c}"
             );
             assert!(
-                !c.contains("propnan"),
-                "reduce_window must NOT use a NaN-propagating reduce helper (#172):\n{c}"
+                c.contains("((float*)t1_data)[outer] = ((const float*)t0_data)[best_src];"),
+                "reduce_window {reducer:?} must copy the selected source representation:\n{c}"
             );
+            assert!(!c.contains(forbidden), "{c}");
         }
     }
 

@@ -464,6 +464,10 @@ fn project_expr(
                 ty: HostAbiType::try_from_concrete(&ty)?,
             }
         }
+        ConcreteHostExprKind::FormalIngress { value, ty } => HostAbiExprKind::FormalIngress {
+            value: Box::new(project_expr(*value, allowed_callbacks)?),
+            ty: HostAbiType::try_from_concrete(&ty)?,
+        },
         ConcreteHostExprKind::Int(value) => HostAbiExprKind::Int(value),
         ConcreteHostExprKind::Float(value) => HostAbiExprKind::Float(value),
         ConcreteHostExprKind::Bool(value) => HostAbiExprKind::Bool(value),
@@ -628,6 +632,16 @@ fn project_expr(
             body: Box::new(project_expr(*body, allowed_callbacks)?),
             ty: HostAbiType::try_from_concrete(&ty)?,
         },
+        ConcreteHostExprKind::RetainedInvocation { bindings, body, ty } => {
+            HostAbiExprKind::RetainedInvocation {
+                bindings: bindings
+                    .into_iter()
+                    .map(|binding| project_binding(binding, allowed_callbacks))
+                    .collect::<Result<Vec<_>, _>>()?,
+                body: Box::new(project_expr(*body, allowed_callbacks)?),
+                ty: HostAbiType::try_from_concrete(&ty)?,
+            }
+        }
         ConcreteHostExprKind::Map { callback, list, ty } => HostAbiExprKind::Map {
             callback: project_callback(callback, allowed_callbacks)?,
             list: Box::new(project_expr(*list, allowed_callbacks)?),

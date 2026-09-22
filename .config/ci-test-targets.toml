@@ -1739,6 +1739,42 @@ cadence = "pull_request and push"
 reason = "the fast lane compiles and runs executable and runtime contracts through the checked-in Kache policy"
 tracking_issue = "chelis#2241"
 
+[[path_rule]]
+prefix = "scripts/kache_toolchain_smoke.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "test_kache_toolchain_smoke exercises managed-wrapper selection, repository-policy validation, and isolated-store rejection in the PR script suite"
+tracking_issue = "chelis#2385"
+
+[[path_rule]]
+prefix = "scripts/test_kache_toolchain_smoke.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the discovered PR script suite executes the managed-wrapper and isolated-config unit contracts"
+tracking_issue = "chelis#2385"
+
+[[path_rule]]
+prefix = "scripts/kache_executable_cache_regression.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "test_kache_executable_cache_regression exercises cache-report classification and restored-executable identity validation in the PR script suite"
+tracking_issue = "chelis#2385"
+
+[[path_rule]]
+prefix = "scripts/test_kache_executable_cache_regression.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the discovered PR script suite executes cache-report and restored-executable validation unit contracts"
+tracking_issue = "chelis#2385"
+
 # The project runtime is activated by script-unit before its discovered tests.
 # Native flake execution and protected cache publication retain their manual owners.
 [[path_rule]]
@@ -2939,6 +2975,24 @@ job = "script-unit"
 cadence = "pull_request and push"
 reason = "direct arithmetic oracle mutation controls execute in the script unit suite"
 tracking_issue = "chelis#1306"
+
+[[path_rule]]
+prefix = "scripts/dtype_exact_reductions_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the exact-reduction completion manifest and source contracts execute in the script unit suite"
+tracking_issue = "chelis#1281"
+
+[[path_rule]]
+prefix = "scripts/test_dtype_exact_reductions_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the exact-reduction oracle manifest and mutation controls execute in the script unit suite"
+tracking_issue = "chelis#1281"
 
 [[path_rule]]
 prefix = "scripts/dtype_nonnumeric_lowering_oracle.py"

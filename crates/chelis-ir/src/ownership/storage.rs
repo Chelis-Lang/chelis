@@ -668,6 +668,7 @@ fn classify_nodes(
                 | RiscOp::Compare(_)
                 | RiscOp::Logical(_)
                 | RiscOp::Where
+                | RiscOp::GuardedFail { .. }
                 | RiscOp::MaxElem
                 | RiscOp::MinElem
                 | RiscOp::ExtremaAdjoint { .. }

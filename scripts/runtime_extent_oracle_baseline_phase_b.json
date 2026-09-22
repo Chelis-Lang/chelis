@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "95b8e1b34b521ddfc9a2dfc25fe919af44ed247e24250e791e6896c26548b863",
+  "corpus_sha256": "7706f0cf26ab3308aeed1acddacdd5702f719d265b940dd523c881fe896e9c45",
   "rows": [
     {
       "id": "claim.literal.identity_root.c",
@@ -1785,6 +1785,18 @@
       "receipt": "cli_result_callable_selection.eval_aggregate_interface_ingress_stamps_each_tensor_field_as_load"
     },
     {
+      "id": "return.callback.composed_selection.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_result_callable_selection.c_inherited_callback_claim_waits_for_body_selection"
+    },
+    {
+      "id": "return.callback.composed_selection.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_result_callable_selection.eval_inherited_callback_claim_waits_for_body_selection"
+    },
+    {
       "id": "return.callback.identity.c",
       "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
@@ -1807,6 +1819,18 @@
       "baseline": "executes_exactly",
       "phase_b": "executes_exactly",
       "receipt": "cli_result_callable_selection.eval_inherited_claim_reaches_named_and_literal_callbacks"
+    },
+    {
+      "id": "return.callback.polymorphic.combined.c",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_result_callable_selection.c_combined_precision_rank_callback_claims_actualize_each_callsite"
+    },
+    {
+      "id": "return.callback.polymorphic.combined.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_result_callable_selection.eval_combined_precision_rank_callback_claims_actualize_each_callsite"
     },
     {
       "id": "return.callback.rank_zero.host_effect.c",
@@ -1891,6 +1915,12 @@
       "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "cli_result_callable_selection.eval_delayed_selection_guards_only_the_selected_value"
+    },
+    {
+      "id": "return.selected.tuple_projection.c",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_result_callable_selection.c_tuple_projection_retains_only_the_selected_producer"
     },
     {
       "id": "return.selected.tuple_projection.eval",

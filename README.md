@@ -360,6 +360,31 @@ executables, ignores file-backed machine `KACHE_*` overrides, and retains a
 no-Kache correctness control. Ordinary Cargo commands outside Devenv may still
 honor the contributor's Cargo configuration.
 
+The project policy reads and writes the shared S3 cache through
+`https://kache.mesh.cproof.ai` in `us-east-2`, using the
+`sand-dollar-kache-production-010928226848` bucket with an empty prefix and four
+concurrent transfers. It also keys the Nix compiler/linker environment pins so a
+response-file or build-ID policy change cannot reuse the old artifacts.
+Local storage uses Kache's platform default; CI cache activation replaces the
+store/runtime paths and remote write policy with job-owned settings.
+
+For shared-cache access, connect to the trusted Tunnet mesh and supply the public
+signing placeholders required by Kache 0.16.0:
+
+```sh
+export KACHE_S3_ACCESS_KEY=tunnet-anonymous
+export KACHE_S3_SECRET_KEY=tunnet-anonymous
+```
+
+These values are not AWS credentials; network membership authorizes access.
+Do not supply real AWS credentials to this gateway. Remote diagnostics require
+mesh access; compiler-wrapper remote failures fall back to local compilation.
+The Kache smoke and executable-cache regression probes derive local-only configs
+with temporary stores, so they neither require mesh access nor publish fixtures.
+For an offline development session, select a separate config with
+`[cache] local_only = true` via `KACHE_CONFIG` after shell activation; the project's
+`ignore_env = true` intentionally ignores `KACHE_LOCAL_ONLY`.
+
 Chelis's relocatable macOS executable/dSYM representation uses Kache cache-key
 schema 28. Existing schema-27 entries deliberately take one cold miss instead
 of restoring pre-sanitization paths. The executable-cache regression first

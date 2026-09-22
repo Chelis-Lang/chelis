@@ -324,6 +324,10 @@ fn agreement_op_for_risc(op: &RiscOp) -> AgreementOp {
         | RiscOp::Compare(_)
         | RiscOp::Logical(_)
         | RiscOp::Where
+        // chelis#1464 / [05-OP-68]: the guard carries the fallback's stored
+        // bits unchanged when it does not fire, so it is exact by
+        // construction; when it does fire there is no value to compare.
+        | RiscOp::GuardedFail { .. }
         | RiscOp::MaxElem
         | RiscOp::MinElem
         | RiscOp::ExtremaAdjoint { .. }

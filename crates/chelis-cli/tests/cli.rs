@@ -2207,12 +2207,60 @@ fn build_c_tensor_grad_local_wrapper_over_function_param_builds() {
     );
     // [05-OP-33]: list ingress uses the one exact tagged constructor. There
     // is no untyped or dtype-named compatibility entry point.
+    // The retained invocation prepares the actual once before formal ingress;
+    // the tensor helper must consume that formal rather than reaching back to
+    // the source expression and evaluating it again.
+    let assignment_target = |rhs: &str, prefix: &str| {
+        let suffix = format!(" = {rhs};");
+        source
+            .lines()
+            .map(str::trim)
+            .find(|line| line.starts_with(prefix) && line.ends_with(&suffix))
+            .and_then(|line| line.split_once(" = "))
+            .map(|(lhs, _)| lhs.to_string())
+            .unwrap_or_else(|| panic!("expected `{prefix}* = {rhs};` in generated C:\n{source}"))
+    };
+    let prepared_line = source
+        .lines()
+        .map(str::trim)
+        .find(|line| {
+            line.starts_with("__retained_actual_") && line.contains(" = chelis_tensor_from_values(")
+        })
+        .unwrap_or_else(|| panic!("expected a prepared f32 tensor actual:\n{source}"));
+    let prepared = prepared_line
+        .split_once(" = ")
+        .map(|(lhs, _)| lhs.to_string())
+        .expect("prepared actual assignment");
+    let checked_actual = assignment_target(&prepared, "__chelis_entry_actual_");
+    let formal_value = assignment_target(&checked_actual, "__retained_actual_");
+    let formal_ingress = assignment_target(&formal_value, "__chelis_entry_arg_");
+    let tensor_input = assignment_target(&formal_ingress, "__tensor_arg0_");
+    let helper_input = source
+        .lines()
+        .map(str::trim)
+        .find(|line| {
+            line.starts_with("__inputs_") && line.ends_with(&format!("[0] = {tensor_input};"))
+        })
+        .unwrap_or_else(|| panic!("expected `{tensor_input}` as helper input 0:\n{source}"));
+    let ordered_markers = [
+        prepared_line.to_string(),
+        format!("{checked_actual} = {prepared};"),
+        format!("{formal_value} = {checked_actual};"),
+        format!("{formal_ingress} = {formal_value};"),
+        format!("{tensor_input} = {formal_ingress};"),
+        helper_input.to_string(),
+        "tensor_grad_local_wrapper__global__tensor_0__with_rng(__inputs_".to_string(),
+    ];
+    let mut cursor = 0;
+    for marker in ordered_markers {
+        let offset = source[cursor..]
+            .find(&marker)
+            .unwrap_or_else(|| panic!("expected ordered marker `{marker}`:\n{source}"));
+        cursor += offset + marker.len();
+    }
     assert!(
-        source.contains("chelis_tensor_from_values(")
-            && source.contains("CHELIS_DTYPE_F32")
-            && source.contains("__host_tensor_arg_1")
-            && source.contains("tensor_grad_local_wrapper__global__tensor_0"),
-        "expected local-wrapper grad to specialize into a tensor helper with a hoisted tensor arg:\n{source}"
+        prepared_line.contains("CHELIS_DTYPE_F32"),
+        "expected the prepared list actual to retain its f32 dtype:\n{source}"
     );
     assert!(
         !source.contains("chelis_tensor_from_value_list("),
@@ -2231,8 +2279,25 @@ fn build_c_tensor_grad_local_wrapper_over_function_param_builds() {
         "local-wrapper grad lowering must not degrade to fallback, unresolved builtins, or int locals:\n{source}"
     );
 
-    let status = gcc_compile_generated(&out_dir, "tensor_grad_local_wrapper.c");
+    let status = gcc_link_generated(
+        &out_dir,
+        "tensor_grad_local_wrapper.c",
+        "tensor_grad_local_wrapper",
+    );
     assert!(status.success(), "gcc failed with status {status}");
+    let run_output = StdCommand::new(out_dir.join("tensor_grad_local_wrapper"))
+        .output()
+        .expect("compiled binary should run");
+    assert!(
+        run_output.status.success(),
+        "compiled binary failed with status {}",
+        run_output.status
+    );
+    let stdout = String::from_utf8(run_output.stdout).expect("utf-8 stdout");
+    assert!(
+        stdout.contains("out = tensor(shape=[2], data=[-1.0, -1.0])"),
+        "unexpected local-wrapper gradient output:\n{stdout}"
+    );
 }
 
 /// chelis#405 oracle: host-lane scalar forward-mode AD. A top-level scalar
@@ -4120,67 +4185,42 @@ fn build_c_rejects_bf16_reduce_window_with_clean_diagnostic() {
         .stderr(predicate::str::contains("panicked").not());
 }
 
-/// [05-RWIN-2] admits window reductions. A checked host entry uses the
-/// existing C implementation; DAG lowerability must not force device emission.
+/// chelis#2339 owns the still-inexact HIP reduction cell. Selecting a host
+/// entry must not turn the C implementation into a silent device fallback.
 #[test]
-fn build_hip_executes_host_reduce_window_with_exact_shape_and_values() {
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("rw_hip.ch");
-    write_file(
-        &path,
-        "def pool_hip(x: tensor[1, 1, 4, 4, f32]) -> tensor[1, 1, 3, 3, f32] = \
-         reduce_window_max(&x, [2i64, 2i64], [1i64, 1i64])\n",
-    );
-    let out_dir = dir.path().join("rw-hip-build");
+fn build_device_targets_reject_host_reduce_window_max_without_c_fallback() {
+    for target in ["hip", "metal"] {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join(format!("rw_{target}.ch"));
+        write_file(
+            &path,
+            "def pool(x: tensor[1, 1, 4, 4, f32]) -> tensor[1, 1, 3, 3, f32] = \
+             reduce_window_max(&x, [2i64, 2i64], [1i64, 1i64])\n",
+        );
+        let out_dir = dir.path().join(format!("rw-{target}-build"));
 
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args([
-            "build",
-            path.to_str().unwrap(),
-            "--target",
-            "hip",
-            "--output",
-            out_dir.to_str().unwrap(),
-        ])
-        .assert()
-        .success()
-        .stderr(predicate::str::contains("panicked").not());
-
-    let mut source = fs::read_to_string(out_dir.join("rw_hip_hip.cpp")).unwrap();
-    assert!(!source.contains("__global__") && !source.contains("hipLaunchKernelGGL"));
-    source.push_str(
-        &r#"
-int main(void) {
-    int64_t shape[] = {1, 1, 4, 4};
-    float data[] = {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16};
-    chelis_tensor *input = chelis_tensor_entry_borrow(4, shape, CHELIS_DTYPE_F32, data, sizeof(data));
-    chelis_tensor *result = CHELIS_TEST_POOL_HIP(input);
-    int64_t expected_shape[] = {1, 1, 3, 3};
-    float expected[] = {6,7,8,10,11,12,14,15,16};
-    if (chelis_tensor_rank(result) != 4) return 10;
-    for (int32_t axis = 0; axis < 4; ++axis)
-        if (chelis_tensor_shape(result, axis) != expected_shape[axis]) return 11;
-    chelis_read_view view = chelis_tensor_read_view(result);
-    if (view.dtype != CHELIS_DTYPE_F32 || view.count != 9) return 12;
-    for (int64_t i = 0; i < 9; ++i)
-        if (((const float *)view.data)[i] != expected[i]) return 13;
-    chelis_tensor_release(result);
-    chelis_tensor_release(input);
-    return 0;
-}
-"#
-        .replace("CHELIS_TEST_POOL_HIP", &authored_c_symbol("pool_hip")),
-    );
-    fs::write(out_dir.join("rw_host.c"), source).unwrap();
-    assert!(gcc_link_generated(&out_dir, "rw_host.c", "rw_host").success());
-    let run = StdCommand::new(out_dir.join("rw_host")).output().unwrap();
-    assert!(run.status.success(), "{run:?}");
+        Command::cargo_bin("chelis")
+            .expect("binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args([
+                "build",
+                path.to_str().unwrap(),
+                "--target",
+                target,
+                "--output",
+                out_dir.to_str().unwrap(),
+            ])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("reduce_window_max"))
+            .stderr(predicate::str::contains("unimplemented chelis#2339"))
+            .stderr(predicate::str::contains(format!("(codegen:{target})")))
+            .stderr(predicate::str::contains("panicked").not());
+    }
 }
 
-/// The selected host implementation still owes a clean capability failure
-/// for its unsupported dtype; this is an implementation gap, not [05-RWIN-2].
+/// Device window extrema remain fenced until their exact semantics are
+/// implemented; this is an implementation gap, not [05-RWIN-2].
 #[test]
 fn build_hip_host_rejects_unimplemented_window_dtype_cleanly() {
     let dir = tempdir().unwrap();
@@ -4205,7 +4245,8 @@ fn build_hip_host_rejects_unimplemented_window_dtype_cleanly() {
         .failure()
         .stderr(predicate::str::contains("reduce_window"))
         .stderr(predicate::str::contains("bf16"))
-        .stderr(predicate::str::contains("unimplemented chelis#729"))
+        .stderr(predicate::str::contains("unimplemented chelis#2339"))
+        .stderr(predicate::str::contains("(codegen:hip)"))
         .stderr(predicate::str::contains("panicked").not());
 }
 
@@ -5523,14 +5564,20 @@ fn build_hip_rejects_sparse_gather_with_non_load_cast_indices() {
 #[test]
 fn build_hip_creates_missing_output_directory_and_reports_runtime_path() {
     let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("hip_output.ch");
     let out_dir = dir.path().join("nested/hip-output");
+    write_file(
+        &path,
+        "def main(x: tensor[4, f32], y: tensor[4, f32]) -> tensor[4, f32] = \
+         relu(add(x, y))\n",
+    );
 
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
-            mnist_example().to_str().unwrap(),
+            path.to_str().unwrap(),
             "--target",
             "hip",
             "--output",
@@ -5544,24 +5591,30 @@ fn build_hip_creates_missing_output_directory_and_reports_runtime_path() {
         .stdout(predicate::str::contains("Peak device memory formula:"))
         .stdout(predicate::str::contains("Estimated peak device memory:"));
 
-    assert!(out_dir.join("mnist_hip.cpp").exists());
-    assert!(out_dir.join("mnist_hip.h").exists());
+    assert!(out_dir.join("hip_output_hip.cpp").exists());
+    assert!(out_dir.join("hip_output_hip.h").exists());
     assert!(out_dir.join("chelis_runtime.h").exists());
     assert!(out_dir.join("libchelis_runtime.a").exists());
     assert!(out_dir.join("chelis_hip_runtime.h").exists());
 }
 
 #[test]
-fn build_hip_mnist_emits_fused_kernels_and_launches() {
+fn build_hip_admitted_sum_program_emits_fused_kernel_and_launch() {
     let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("fused.ch");
     let out_dir = dir.path().join("hip-output");
+    write_file(
+        &path,
+        "def main(x: tensor[3, 4, f32], y: tensor[3, 4, f32]) -> tensor[3, f32] = \
+         sum(neg(add(x, y)), 1)\n",
+    );
 
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
-            mnist_example().to_str().unwrap(),
+            path.to_str().unwrap(),
             "--target",
             "hip",
             "--output",
@@ -5570,14 +5623,14 @@ fn build_hip_mnist_emits_fused_kernels_and_launches() {
         .assert()
         .success();
 
-    let hip_src = fs::read_to_string(out_dir.join("mnist_hip.cpp")).expect("hip source");
+    let hip_src = fs::read_to_string(out_dir.join("fused_hip.cpp")).expect("hip source");
     assert!(
-        hip_src.contains("kernel_fused_") || hip_src.contains("kernel_fused_sum_"),
-        "MNIST HIP build should emit fused kernels on the real CLI path"
+        hip_src.contains("kernel_fused_sum_"),
+        "an admitted HIP sum build should emit a fused reduction kernel on the real CLI path"
     );
     assert!(
         hip_src.contains("chelis_launch_kernel"),
-        "MNIST HIP build should emit kernel launches on the real CLI path"
+        "an admitted HIP sum build should emit a kernel launch on the real CLI path"
     );
 }
 

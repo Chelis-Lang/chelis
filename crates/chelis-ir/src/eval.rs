@@ -25,7 +25,7 @@ use crate::dag::{
 };
 use chelis_types::dtype_semantics::{
     ArgReduceOp, CheckedCastPlan, CompareOp, ExtremaOperand as KernelExtremaOperand, FloatBinOp,
-    FloatExtremaOp, FloatUnOp, IndexedTrapCandidate, IntBinOp, IntUnOp, RawTensor,
+    FloatExtremaOp, FloatUnOp, IndexedTrapCandidate, IntBinOp, IntUnOp, NumericTrap, RawTensor,
     ReduceWindowGradOp, TensorReduceOp, TensorStorage, arg_reduce_tensor_groups, compare_tensors,
     count_tensor_groups, finalize_tensor, float_extrema_adjoint, float_relu, float_relu_adjoint,
     float_tensor_binop, float_tensor_unop, int_tensor_binop, int_tensor_unop,
@@ -1298,6 +1298,45 @@ fn reduce_argcmp(input: &TensorValue, axis: usize, op: ArgReduceOp) -> Result<Te
     let storage =
         arg_reduce_tensor_groups(op, input.storage(), &groups).map_err(|err| err.to_string())?;
     Ok(TensorValue::from_storage(out_shape, storage))
+}
+
+fn is_runtime_mean_div(dag: &Dag, node: &DagNode) -> bool {
+    let [sum_id, divisor_id] = node.inputs.as_slice() else {
+        return false;
+    };
+    let storage_sum = |id| {
+        let node = dag.get(id)?;
+        match node.op {
+            RiscOp::Cast { new_precision }
+                if node.inputs.len() == 1 && new_precision == node.output_type.precision =>
+            {
+                dag.get(node.inputs[0])
+            }
+            _ => Some(node),
+        }
+    };
+    let (Some(sum), Some(divisor)) = (storage_sum(*sum_id), storage_sum(*divisor_id)) else {
+        return false;
+    };
+    let (
+        RiscOp::Sum { axis: sum_axis, .. },
+        RiscOp::Sum {
+            axis: count_axis, ..
+        },
+    ) = (&sum.op, &divisor.op)
+    else {
+        return false;
+    };
+    if sum_axis != count_axis {
+        return false;
+    }
+    let Some(ones) = divisor.inputs.first().and_then(|input| dag.get(*input)) else {
+        return false;
+    };
+    matches!(
+        ones.op,
+        RiscOp::Const { value } if value.as_f64_lossy() == 1.0
+    )
 }
 
 /// [05-OP-29] multi-axis bool count. Source elements are partitioned into
@@ -3152,11 +3191,25 @@ where
                 &values[&node.inputs[0]],
                 &values[&node.inputs[1]],
             )?,
-            RiscOp::Div => binary_elementwise(
-                ElementwiseBinOp::Div,
-                &values[&node.inputs[0]],
-                &values[&node.inputs[1]],
-            )?,
+            RiscOp::Div => {
+                if is_runtime_mean_div(dag, node)
+                    && values[&node.inputs[1]]
+                        .storage()
+                        .to_f64_lossy_vec()
+                        .contains(&0.0)
+                {
+                    return Err(NumericTrap::Domain {
+                        op: "mean",
+                        prim: out_prim,
+                    }
+                    .to_string());
+                }
+                binary_elementwise(
+                    ElementwiseBinOp::Div,
+                    &values[&node.inputs[0]],
+                    &values[&node.inputs[1]],
+                )?
+            }
             // chelis#178: floor division rounds the quotient toward -inf.
             // For integer-valued operands `(a / b).floor()` yields the
             // integer floored quotient, and for float operands it is
@@ -3321,6 +3374,32 @@ where
                 &values[&node.inputs[1]],
                 &values[&node.inputs[2]],
             )?,
+            // chelis#1464 / [05-OP-68]: the guard fires BEFORE the fallback
+            // is carried, so a taken abort never produces a value. Returning
+            // the message as an evaluation error is what makes the evaluator
+            // agree with the compiled lane's `chelis_fail`.
+            RiscOp::GuardedFail {
+                message,
+                trap_on_true,
+            } => {
+                let condition = &values[&node.inputs[0]];
+                if condition.prim() != Prim::Bool {
+                    return Err("guarded_fail: condition must have bool storage".into());
+                }
+                let condition_values = condition
+                    .storage()
+                    .to_i64_exact_vec()
+                    .expect("sealed bool storage has an exact integer view");
+                // A batched condition aborts when ANY mapped element fires
+                // ([05-OP-68]); an unbatched condition has exactly one.
+                if condition_values
+                    .into_iter()
+                    .any(|selected| (selected != 0) == *trap_on_true)
+                {
+                    return Err(message.clone());
+                }
+                values[&node.inputs[1]].clone()
+            }
             RiscOp::Sum { axis, accumulator } => reduce(
                 &values[&node.inputs[0]],
                 *axis,
@@ -4775,15 +4854,14 @@ mod tests {
     }
 
     #[test]
-    fn reduce_window_grad_max_distributes_to_ties() {
+    fn reduce_window_grad_max_splits_ties() {
         // A flat window: every position equals the max, so each tied
-        // position receives the full upstream gradient (the max_reduce
-        // mask convention), not a 1/k share.
+        // position receives g/k for its owning window.
         let x = TensorValue::from_vec(vec![3], vec![2.0, 2.0, 2.0]);
         let g = TensorValue::from_vec(vec![2], vec![4.0, 4.0]);
         let din = reduce_window_grad(&x, &g, ReduceWindowKind::Max, &[2], &[1], Prim::F64).unwrap();
-        // windows [0,1] and [1,2]: pos0 += 4 (win0), pos1 += 4+4, pos2 += 4.
-        assert_eq!(din.to_f64_lossy_vec(), vec![4.0, 8.0, 4.0]);
+        // windows [0,1] and [1,2]: pos0 += 2, pos1 += 2+2, pos2 += 2.
+        assert_eq!(din.to_f64_lossy_vec(), vec![2.0, 4.0, 2.0]);
     }
 
     #[test]

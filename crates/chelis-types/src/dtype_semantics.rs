@@ -671,8 +671,8 @@ impl ReduceWindowGradOp {
 impl ArgReduceOp {
     pub const fn name(self) -> &'static str {
         match self {
-            Self::Argmax => "argmax",
-            Self::Argmin => "argmin",
+            Self::Argmax => "argmax_reduce",
+            Self::Argmin => "argmin_reduce",
         }
     }
 
@@ -2533,17 +2533,8 @@ fn reduction_extreme(
     lhs: ScalarValue,
     rhs: ScalarValue,
     take_max: bool,
-    ignore_nan: bool,
 ) -> Result<ScalarValue, NumericKernelError> {
     require_same_dtype(op.name(), lhs, rhs)?;
-    if ignore_nan {
-        if scalar_is_nan(lhs) {
-            return Ok(rhs);
-        }
-        if scalar_is_nan(rhs) {
-            return Ok(lhs);
-        }
-    }
     let compare = if take_max {
         CompareOp::Gt
     } else {
@@ -2566,16 +2557,14 @@ fn reduce_sum_group(
     group: &[usize],
     accumulator: Prim,
 ) -> Result<ScalarValue, NumericKernelError> {
-    let zero = reduction_seed(op, accumulator, 0, 0.0)?;
-    let mut acc = zero;
-    for &index in group {
-        acc = reduction_add(
-            op,
-            acc,
-            scalar_at_reduction_width(op, input, index, accumulator)?,
-        )?;
+    let leaves = group
+        .iter()
+        .map(|&index| scalar_at_reduction_width(op, input, index, accumulator))
+        .collect::<Result<Vec<_>, _>>()?;
+    match checked_adjacent_pair_fold(leaves, |left, right| reduction_add(op, left, right))? {
+        Some(value) => Ok(value),
+        None => reduction_seed(op, accumulator, 0, 0.0),
     }
-    Ok(acc)
 }
 
 fn reduce_group(
@@ -2585,19 +2574,16 @@ fn reduce_group(
     accumulator: Prim,
 ) -> Result<ScalarValue, NumericKernelError> {
     match op {
-        TensorReduceOp::Sum { .. } => {
-            let leaves = group
-                .iter()
-                .map(|&index| scalar_at_reduction_width(op, input, index, accumulator))
-                .collect::<Result<Vec<_>, _>>()?;
-            match checked_adjacent_pair_fold(leaves, |left, right| reduction_add(op, left, right))?
-            {
-                Some(value) => Ok(value),
-                None => reduction_seed(op, accumulator, 0, 0.0),
-            }
-        }
+        TensorReduceOp::Sum { .. } => reduce_sum_group(op, input, group, accumulator),
         TensorReduceOp::ReduceWindowSum => reduce_sum_group(op, input, group, accumulator),
         TensorReduceOp::ReduceWindowMean => {
+            if group.is_empty() {
+                return Err(NumericTrap::Domain {
+                    op: op.name(),
+                    prim: input.prim(),
+                }
+                .into());
+            }
             let sum = reduce_sum_group(op, input, group, accumulator)?;
             let divisor = reduction_seed(op, accumulator, group.len() as i64, group.len() as f64)?;
             reduction_div_float(op, sum, divisor)
@@ -2617,37 +2603,27 @@ fn reduce_group(
         | TensorReduceOp::MinReduce
         | TensorReduceOp::ReduceWindowMax
         | TensorReduceOp::ReduceWindowMin => {
+            let Some((&first_index, remaining)) = group.split_first() else {
+                return Err(NumericTrap::Domain {
+                    op: op.name(),
+                    prim: input.prim(),
+                }
+                .into());
+            };
             let take_max = matches!(
                 op,
                 TensorReduceOp::MaxReduce | TensorReduceOp::ReduceWindowMax
             );
-            let integer_identity = if accumulator.is_integer() {
-                let (lo, hi) = accumulator
-                    .integer_range()
-                    .expect("integer reduction accumulators have fixed bounds");
-                if take_max { lo } else { hi }
-            } else if take_max {
-                i64::MIN
-            } else {
-                i64::MAX
-            };
-            let float_identity = if take_max {
-                f64::NEG_INFINITY
-            } else {
-                f64::INFINITY
-            };
-            let mut acc = reduction_seed(op, accumulator, integer_identity, float_identity)?;
-            let propagate_nan = matches!(op, TensorReduceOp::MaxReduce | TensorReduceOp::MinReduce);
-            let ignore_nan = matches!(
-                op,
-                TensorReduceOp::ReduceWindowMax | TensorReduceOp::ReduceWindowMin
-            );
-            for &index in group {
-                let value = scalar_at_reduction_width(op, input, index, accumulator)?;
-                if propagate_nan && scalar_is_nan(value) {
+            let mut acc = input.scalar_at(first_index);
+            if scalar_is_nan(acc) {
+                return Ok(acc);
+            }
+            for &index in remaining {
+                let value = input.scalar_at(index);
+                if scalar_is_nan(value) {
                     return Ok(value);
                 }
-                acc = reduction_extreme(op, acc, value, take_max, ignore_nan)?;
+                acc = reduction_extreme(op, acc, value, take_max)?;
             }
             Ok(acc)
         }
@@ -2809,14 +2785,20 @@ pub fn arg_reduce_tensor_groups(
     let mut indices = Vec::with_capacity(groups.len());
     for group in groups {
         if group.is_empty() {
-            indices.push(-1);
-            continue;
+            return Err(NumericTrap::Domain {
+                op: op.name(),
+                prim: Prim::Int64,
+            }
+            .into());
         }
         let mut best_value = input.scalar_at(group[0]);
         let mut best_index = 0i64;
         for (axis_index, &input_index) in group.iter().enumerate().skip(1) {
             let candidate = input.scalar_at(input_index);
-            if compare_scalars(op.compare(), candidate, best_value)? {
+            if !scalar_is_nan(best_value)
+                && (scalar_is_nan(candidate)
+                    || compare_scalars(op.compare(), candidate, best_value)?)
+            {
                 best_value = candidate;
                 best_index = axis_index as i64;
             }
@@ -2867,10 +2849,16 @@ pub fn reduce_window_grad_tensor_groups(
             accumulator: prim,
             result: prim,
         })?;
-    let zero = reduction_seed(forward_op, accumulator, 0, 0.0)?;
-    let mut output = vec![zero; input.len()];
+    let mut output = vec![Vec::<ScalarValue>::new(); input.len()];
 
     for (group_index, group) in groups.iter().enumerate() {
+        if group.is_empty() {
+            return Err(NumericTrap::Domain {
+                op: forward_op.name(),
+                prim,
+            }
+            .into());
+        }
         let mut contribution =
             scalar_at_reduction_width(forward_op, cotangent, group_index, accumulator)?;
         if op == ReduceWindowGradOp::Mean {
@@ -2882,38 +2870,56 @@ pub fn reduce_window_grad_tensor_groups(
             )?;
             contribution = reduction_div_float(forward_op, contribution, divisor)?;
         }
-        let extreme = match op {
-            ReduceWindowGradOp::Max | ReduceWindowGradOp::Min => {
-                Some(reduce_group(forward_op, input, group, accumulator)?)
-            }
-            ReduceWindowGradOp::Sum | ReduceWindowGradOp::Mean => None,
-        };
 
-        for &input_index in group {
-            let selected = match extreme {
-                Some(extreme) => {
-                    let value =
-                        scalar_at_reduction_width(forward_op, input, input_index, accumulator)?;
-                    compare_scalars(CompareOp::Eq, value, extreme)?
+        match op {
+            ReduceWindowGradOp::Sum | ReduceWindowGradOp::Mean => {
+                for &input_index in group {
+                    output[input_index].push(contribution);
                 }
-                None => true,
-            };
-            if selected {
-                output[input_index] = reduction_add(forward_op, output[input_index], contribution)?;
+            }
+            ReduceWindowGradOp::Max | ReduceWindowGradOp::Min => {
+                if let Some(&first_nan) = group
+                    .iter()
+                    .find(|&&input_index| scalar_is_nan(input.scalar_at(input_index)))
+                {
+                    output[first_nan].push(contribution);
+                    continue;
+                }
+
+                let extreme = reduce_group(forward_op, input, group, accumulator)?;
+                let mut selected = Vec::new();
+                for &input_index in group {
+                    if compare_scalars(CompareOp::Eq, input.scalar_at(input_index), extreme)? {
+                        selected.push(input_index);
+                    }
+                }
+                let divisor = reduction_seed(
+                    forward_op,
+                    accumulator,
+                    i64::try_from(selected.len()).expect("window tie count fits i64"),
+                    selected.len() as f64,
+                )?;
+                let share = reduction_div_float(forward_op, contribution, divisor)?;
+                for input_index in selected {
+                    output[input_index].push(share);
+                }
             }
         }
     }
 
     let values = output
         .into_iter()
-        .map(|value| reduction_result_scalar(forward_op, value, prim))
+        .map(|contributions| {
+            let value = match checked_adjacent_pair_fold(contributions, |left, right| {
+                reduction_add(forward_op, left, right)
+            })? {
+                Some(value) => value,
+                None => reduction_seed(forward_op, accumulator, 0, 0.0)?,
+            };
+            reduction_result_scalar(forward_op, value, prim)
+        })
         .collect::<Result<Vec<_>, NumericKernelError>>()?;
-    finalize_tensor(
-        op.name(),
-        prim,
-        RawTensor::Float(values.iter().map(ScalarValue::as_f64_lossy).collect()),
-    )
-    .map_err(Into::into)
+    Ok(tensor_from_scalars(prim, &values))
 }
 
 fn splat_storage(value: ScalarValue, len: usize) -> TensorStorage {
@@ -3013,6 +3019,37 @@ pub fn compare_scalar_tensor(
     tensor: &TensorStorage,
 ) -> Result<TensorStorage, NumericKernelError> {
     compare_tensors(op, &splat_storage(scalar, tensor.len()), tensor)
+}
+
+/// Round a compile-time float bound to `prim`'s exact value, the way the
+/// evaluator does when it stores one.
+///
+/// What a float-target `cast` does to a statically resolvable literal, for the
+/// legacy `extract_f64_value` fold that still serves the non-execution
+/// `dropout` arm.
+///
+/// `uniform_like` bounds do NOT come through here: they stage through
+/// `static_controls::scalar` (IR) and `StagedBound` (C), which reach the same
+/// `finalize_scalar` chokepoint via `cast_raw`/`cast_scalar`.
+///
+/// chelis#2316: both of them used to recurse THROUGH a `cast` and keep the
+/// innermost literal, on the premise recorded in `extract_f64_value`'s own
+/// doc comment that "a float-target cast preserves the numeric value". That
+/// holds for f32 and f64 and is false for every narrowing float target, so
+/// `cast(cast(0.30000001, f16), f32)` baked `0.30000001` where the program
+/// declares `0.300048828125` — a silent bound substitution of ~1600 f32 ULPs
+/// that both compiled lanes made identically while `eval` rounded correctly.
+///
+/// Returns `None` for a non-float target, matching the fold sites' existing
+/// contract that an integer-target cast is left unresolved and goes loud
+/// rather than baking a guessed truncation (chelis#776).
+pub fn round_float_bound(prim: Prim, value: f64) -> Option<f64> {
+    if !prim.is_float() {
+        return None;
+    }
+    finalize_scalar("cast", prim, RawScalar::Float(value))
+        .ok()
+        .map(|scalar| scalar.as_f64_lossy())
 }
 
 /// Finalize one wide intermediate into `prim` per the section C1 table,
@@ -5175,20 +5212,115 @@ mod tests {
     }
 
     #[test]
-    fn value_and_window_extrema_keep_their_distinct_nan_rules() {
-        let input =
-            finalize_tensor("test", Prim::F32, RawTensor::Float(vec![f64::NAN, 1.0])).unwrap();
-        assert!(
-            reduce_tensor_groups(TensorReduceOp::MaxReduce, &input, &one_group(2))
-                .unwrap()
-                .element_f64_lossy(0)
-                .is_nan()
-        );
+    fn value_and_window_extrema_preserve_first_nan_and_equal_value_bits() {
+        let first_nan = f32::from_bits(0xffc1_2345);
+        let later_nan = f32::from_bits(0x7fc5_4321);
+        let input = TensorStorage {
+            buf: Buf::F32(vec![first_nan, 1.0, later_nan]),
+        };
+        for op in [
+            TensorReduceOp::MaxReduce,
+            TensorReduceOp::MinReduce,
+            TensorReduceOp::ReduceWindowMax,
+            TensorReduceOp::ReduceWindowMin,
+        ] {
+            let output = reduce_tensor_groups(op, &input, &one_group(3)).unwrap();
+            let StorageView::F32(values) = output.view() else {
+                panic!("f32 extrema must return f32 storage");
+            };
+            assert_eq!(
+                values[0].to_bits(),
+                first_nan.to_bits(),
+                "{} must preserve the first NaN payload and sign",
+                op.name()
+            );
+        }
+
+        let zeros = TensorStorage {
+            buf: Buf::F32(vec![-0.0, 0.0]),
+        };
+        for op in [
+            TensorReduceOp::MaxReduce,
+            TensorReduceOp::MinReduce,
+            TensorReduceOp::ReduceWindowMax,
+            TensorReduceOp::ReduceWindowMin,
+        ] {
+            let output = reduce_tensor_groups(op, &zeros, &one_group(2)).unwrap();
+            let StorageView::F32(values) = output.view() else {
+                panic!("f32 extrema must return f32 storage");
+            };
+            assert_eq!(
+                values[0].to_bits(),
+                (-0.0f32).to_bits(),
+                "{} must preserve the first representation among equal values",
+                op.name()
+            );
+        }
+    }
+
+    #[test]
+    fn reductions_without_empty_identities_trap_domain() {
+        let float = finalize_tensor("test", Prim::F32, RawTensor::Float(vec![])).unwrap();
+        for op in [
+            TensorReduceOp::MaxReduce,
+            TensorReduceOp::MinReduce,
+            TensorReduceOp::ReduceWindowMean,
+            TensorReduceOp::ReduceWindowMax,
+            TensorReduceOp::ReduceWindowMin,
+        ] {
+            assert_eq!(
+                reduce_tensor_groups(op, &float, &[vec![]]),
+                Err(NumericKernelError::Trap(NumericTrap::Domain {
+                    op: op.name(),
+                    prim: Prim::F32,
+                }))
+            );
+        }
+        for op in [ArgReduceOp::Argmax, ArgReduceOp::Argmin] {
+            assert_eq!(
+                arg_reduce_tensor_groups(op, &float, &[vec![]]),
+                Err(NumericKernelError::Trap(NumericTrap::Domain {
+                    op: op.name(),
+                    prim: Prim::Int64,
+                }))
+            );
+        }
+    }
+
+    #[test]
+    fn arg_reductions_select_the_lowest_nan_index() {
+        let input = TensorStorage {
+            buf: Buf::F32(vec![5.0, f32::from_bits(0xffc1_2345), 9.0, f32::NAN]),
+        };
+        for op in [ArgReduceOp::Argmax, ArgReduceOp::Argmin] {
+            assert_eq!(
+                arg_reduce_tensor_groups(op, &input, &one_group(4))
+                    .unwrap()
+                    .to_i64_exact_vec(),
+                Some(vec![1])
+            );
+        }
+    }
+
+    #[test]
+    fn window_sum_and_mean_use_the_canonical_adjacent_pair_tree() {
+        let input = finalize_tensor(
+            "test",
+            Prim::F32,
+            RawTensor::Float(vec![-1.0e-7, 3.0, 16_777_216.0, -33_554_432.0]),
+        )
+        .unwrap();
         assert_eq!(
-            reduce_tensor_groups(TensorReduceOp::ReduceWindowMax, &input, &one_group(2))
+            reduce_tensor_groups(TensorReduceOp::ReduceWindowSum, &input, &one_group(4))
                 .unwrap()
                 .to_f64_lossy_vec(),
-            vec![1.0]
+            vec![-16_777_213.0]
+        );
+        assert_eq!(
+            reduce_tensor_groups(TensorReduceOp::ReduceWindowMean, &input, &one_group(4))
+                .unwrap()
+                .to_f64_lossy_vec(),
+            vec![-4_194_303.25]
         );
     }
 
@@ -5224,7 +5356,7 @@ mod tests {
     }
 
     #[test]
-    fn window_grad_kernel_preserves_selection_ties_and_rejects_dtype_mismatch() {
+    fn window_grad_kernel_splits_ties_and_rejects_dtype_mismatch() {
         let input =
             finalize_tensor("test", Prim::F32, RawTensor::Float(vec![2.0, 2.0, 2.0])).unwrap();
         let cotangent =
@@ -5234,7 +5366,7 @@ mod tests {
             reduce_window_grad_tensor_groups(ReduceWindowGradOp::Max, &input, &cotangent, &groups,)
                 .unwrap()
                 .to_f64_lossy_vec(),
-            vec![4.0, 8.0, 4.0]
+            vec![2.0, 4.0, 2.0]
         );
 
         let wrong = finalize_tensor("test", Prim::F64, RawTensor::Float(vec![4.0, 4.0])).unwrap();
@@ -5245,6 +5377,45 @@ mod tests {
                 lhs: Prim::F32,
                 rhs: Prim::F64,
             })
+        );
+    }
+
+    #[test]
+    fn window_grad_routes_first_nan_and_balances_overlap_add() {
+        let input = TensorStorage {
+            buf: Buf::F32(vec![
+                f32::from_bits(0xffc1_2345),
+                f32::from_bits(0x7fc5_4321),
+                2.0,
+            ]),
+        };
+        let cotangent =
+            finalize_tensor("test", Prim::F32, RawTensor::Float(vec![3.0, 5.0])).unwrap();
+        let groups = vec![vec![0, 1], vec![1, 2]];
+        assert_eq!(
+            reduce_window_grad_tensor_groups(ReduceWindowGradOp::Max, &input, &cotangent, &groups,)
+                .unwrap()
+                .to_f64_lossy_vec(),
+            vec![3.0, 5.0, 0.0]
+        );
+
+        let single = finalize_tensor("test", Prim::F32, RawTensor::Float(vec![0.0])).unwrap();
+        let overlap = finalize_tensor(
+            "test",
+            Prim::F32,
+            RawTensor::Float(vec![-1.0e-7, 3.0, 16_777_216.0, -33_554_432.0]),
+        )
+        .unwrap();
+        assert_eq!(
+            reduce_window_grad_tensor_groups(
+                ReduceWindowGradOp::Sum,
+                &single,
+                &overlap,
+                &[vec![0], vec![0], vec![0], vec![0]],
+            )
+            .unwrap()
+            .to_f64_lossy_vec(),
+            vec![-16_777_213.0]
         );
     }
 
@@ -6318,5 +6489,103 @@ mod tests {
                 ..
             })
         ));
+    }
+}
+
+#[cfg(test)]
+mod round_float_bound_tests {
+    use super::{Prim, round_float_bound};
+
+    /// The chelis#2316 repro, at the value level. `cast(0.30000001, f16)` is
+    /// `0.300048828125`, and widening that to f32 keeps it — so the chain's
+    /// value is NOT the literal it started from. Both compiled fold sites used
+    /// to return the literal.
+    #[test]
+    fn f16_then_f32_keeps_the_f16_rounding() {
+        let inner = round_float_bound(Prim::F16, 0.30000001).expect("f16 is a float target");
+        assert_eq!(inner, 0.300048828125);
+        let widened = round_float_bound(Prim::F32, inner).expect("f32 is a float target");
+        assert_eq!((widened as f32).to_bits(), 0x3e99a000);
+        // What the broken fold baked instead: the untouched literal, whose f32
+        // image is 0x3e99999a. That is the exact constant chelis#2316 found in
+        // the emitted `chelis_uniform_sample_f32` call.
+        assert_ne!((widened as f32).to_bits(), 0x3e99999a_u32);
+    }
+
+    /// The high bound from the same repro.
+    #[test]
+    fn f16_then_f32_high_bound_matches_the_declared_value() {
+        let inner = round_float_bound(Prim::F16, 0.90000001).expect("f16 is a float target");
+        let widened = round_float_bound(Prim::F32, inner).expect("f32 is a float target");
+        assert_eq!(widened, 0.89990234375);
+        assert_eq!((widened as f32).to_bits(), 0x3f666000);
+    }
+
+    /// bf16 has fewer mantissa bits than f16, so it rounds further. This is
+    /// why the bf16 program diverged more than the f16 one.
+    #[test]
+    fn bf16_rounds_further_than_f16() {
+        let f16 = round_float_bound(Prim::F16, 0.30000001).expect("float target");
+        let bf16 = round_float_bound(Prim::Bf16, 0.30000001).expect("float target");
+        assert_ne!(f16, bf16);
+        assert!(
+            (bf16 - 0.30000001f64).abs() > (f16 - 0.30000001f64).abs(),
+            "bf16 {bf16} should be further from the source than f16 {f16}",
+        );
+    }
+
+    /// DISPOSITION LOCK: a target that cannot narrow the value returns it
+    /// unchanged, which is why a lone `cast(lit, f32)` bound always agreed
+    /// across lanes even with the broken fold.
+    #[test]
+    fn a_non_narrowing_target_is_the_identity() {
+        let v = 0.30000001192092896_f64; // already exactly f32-representable
+        assert_eq!(round_float_bound(Prim::F32, v), Some(v));
+        assert_eq!(round_float_bound(Prim::F64, v), Some(v));
+    }
+
+    /// Ties-to-even at the target width, per [04-NUM-2] / [04-NUM-14].
+    #[test]
+    fn rounding_is_ties_to_even_not_truncation() {
+        // A value just above an f16 midpoint must round up, not truncate down.
+        let up = round_float_bound(Prim::F16, 0.30004884).expect("float target");
+        assert!(
+            up >= 0.300048828125,
+            "expected round-to-nearest, got truncation: {up}",
+        );
+    }
+
+    /// NEGATIVE PARITY (chelis#776): an integer target is left unresolved so
+    /// the caller goes loud rather than baking a guessed truncation. Both fold
+    /// sites depend on this `None`.
+    #[test]
+    fn integer_and_bool_targets_are_unresolved() {
+        for prim in [
+            Prim::Int8,
+            Prim::Int16,
+            Prim::Int32,
+            Prim::Int64,
+            Prim::Bool,
+        ] {
+            assert_eq!(
+                round_float_bound(prim, 2.7),
+                None,
+                "{prim:?} must not resolve as a float bound",
+            );
+        }
+    }
+
+    /// Non-finite values are not bounds the emitter can bake; they must not
+    /// silently become a finite number.
+    #[test]
+    fn non_finite_values_do_not_become_finite() {
+        for v in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            if let Some(rounded) = round_float_bound(Prim::F32, v) {
+                assert!(
+                    !rounded.is_finite(),
+                    "non-finite {v} must not round to the finite {rounded}",
+                );
+            }
+        }
     }
 }

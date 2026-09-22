@@ -50,11 +50,16 @@ integer scalars) and `Sym` is legal only in reshape targets.
   and Expand-restore adjoints restore Load-declared symbols as `Sym` (no new
   nodes; HIP-compatible) and any other runtime axis as an explicit `Shape`
   read.
-- **`if`/`fail` in the DAG lane**: `fail(...)` lowers to a zero-`Const`
-  placeholder (not the legacy bogus `Load { name: "fail" }`), conformed to
-  the if's rank after both branches with a shape-dep on the sibling; the
-  mask expansion and `lower_mean`'s count constants carry shape-deps that
-  eval and the C anon-dim renaming resolve.
+- **`if`/`fail` in the DAG lane**: SUPERSEDED by chelis#1464. This entry
+  described `fail(...)` lowering to a zero-`Const` placeholder conformed to
+  the if's rank. That placeholder was selected as the branch value on the
+  TAKEN path, so a transformed `fail` returned zero and exited 0 in both
+  lanes, against `spec/06-transformations.md` §2.10.1 and §5.2. A direct
+  `fail(...)` branch now lowers to the [05-OP-68] guarded abort instead, and
+  an indirect one is a typed rejection; neither substitutes a value. The
+  placeholder survives only at entry level, where the host lane owns the
+  abort and discards it. `lower_mean`'s count constants still carry the
+  shape-deps that eval and the C anon-dim renaming resolve.
 - **HIP/Metal**: reject node-valued movement bounds AND reshape targets with
   clean diagnostics naming `--target c` (compiler-api seam + CLI seam in
   lockstep; the Metal seam previously had no movement arm at all and reached
@@ -160,10 +165,10 @@ leg is part of the oracle test now).
   parity at two lengths plus fail-branch error parity in both lanes).
   The `grad`/`vmap` exemption is scoped to the transformed subtree: a
   forward `fail` beside a transformed call still routes the enclosing body
-  through host `if`/`fail`. This routing repair deliberately leaves
-  transformed-subtree handling unchanged; it does not claim that a taken
+  through host `if`/`fail`. This routing repair deliberately left
+  transformed-subtree handling unchanged; it never claimed that a taken
   internal `fail` may become a numeric placeholder. chelis#1464 owns that
-  pre-existing spec divergence. Oracle:
+  pre-existing spec divergence; [05-OP-68] is the identity that repairs it. Oracle:
   `issue_662_forward_fail_grad_scope.rs` (taken and untaken forward siblings
   plus an untaken grad-internal routing control).
 - **Checker over-unification of movement chains** — RESOLVED

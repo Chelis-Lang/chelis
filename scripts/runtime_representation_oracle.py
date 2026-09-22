@@ -229,6 +229,21 @@ TYPED_NONNUMERIC_BACKEND_FINAL_FORMS = (
         "load-store-template",
         "CEmitter::emit_where",
     ),
+    # chelis#1464 / [05-OP-68]: the guarded abort reads its condition as the
+    # Bool stored bits it is -- `const uint8_t*` compared against zero -- and
+    # carries the fallback through `emit_realize`. Both spellings are the same
+    # typed-nonnumeric final forms `emit_where` already registers, for the same
+    # reason: no numeric interpretation is placed on either operand.
+    (
+        "crates/chelis-backend-c/src/emit.rs",
+        "backend-element-spelling",
+        "CEmitter::emit_guarded_fail",
+    ),
+    (
+        "crates/chelis-backend-c/src/emit.rs",
+        "load-store-template",
+        "CEmitter::emit_guarded_fail",
+    ),
     (
         "crates/chelis-backend-hip/src/emit.rs",
         "backend-element-spelling",
@@ -238,6 +253,24 @@ TYPED_NONNUMERIC_BACKEND_FINAL_FORMS = (
         "crates/chelis-backend-hip/src/kernels.rs",
         "backend-element-spelling",
         "REDUCED_FLOAT_COMPARISON_HELPERS",
+    ),
+)
+EXACT_REDUCTION_BACKEND_FINAL_FORMS = (
+    # chelis#1281: the lowered mean guard observes the exact divisor storage
+    # selected by [05-OP-11], including explicit f16/bf16 decoding, before
+    # division can turn an empty runtime domain into NaN.
+    (
+        "crates/chelis-backend-c/src/emit.rs",
+        "backend-element-spelling",
+        "CEmitter::emit_mean_nonempty_guard",
+    ),
+    # chelis#1281: max/min reduction selection is governed by [05-OP-12..13].
+    # The owner decodes at the declared arithmetic width but copies the exact
+    # selected source storage bits, preserving first-NaN and tie behavior.
+    (
+        "crates/chelis-backend-c/src/emit.rs",
+        "backend-element-spelling",
+        "CEmitter::emit_reduce_extreme",
     ),
 )
 UNIFORM_RANDOM_BACKEND_FINAL_FORMS = (
@@ -296,6 +329,18 @@ UTF8_STRING_FINAL_FORMS = (
         "crates/chelis-runtime/include/chelis_runtime.h",
         "raw-element-pointer",
         "chelis_string_from_utf8",
+    ),
+)
+RESULT_CLAIM_METADATA_FINAL_FORMS = (
+    (
+        "crates/chelis-backend-c/src/host_emit.rs",
+        "load-store-template",
+        "append_host_result_claim_checks",
+    ),
+    (
+        "crates/chelis-backend-c/src/host_emit.rs",
+        "load-store-template",
+        "append_host_result_interface_origin_support",
     ),
 )
 PHASE2_FINAL_FORMS = (
@@ -390,11 +435,15 @@ def owner_module_final_form(kind: str, path: str, owner: str) -> bool:
     ) or (
         (path, kind, owner) in TYPED_NONNUMERIC_BACKEND_FINAL_FORMS
     ) or (
+        (path, kind, owner) in EXACT_REDUCTION_BACKEND_FINAL_FORMS
+    ) or (
         (path, kind, owner) in UNIFORM_RANDOM_BACKEND_FINAL_FORMS
     ) or (
         (path, kind, owner) in DIRECT_ARITHMETIC_BACKEND_FINAL_FORMS
     ) or (
         (path, kind, owner) in UTF8_STRING_FINAL_FORMS
+    ) or (
+        (path, kind, owner) in RESULT_CLAIM_METADATA_FINAL_FORMS
     ) or (
         (path, kind, owner) in PHASE2_FINAL_FORMS
     )
@@ -773,9 +822,11 @@ def _owner_module_final_forms_manifest() -> dict[str, list[dict[str, str]]]:
         *PHASE2_FINAL_FORMS,
         *((path, "backend-element-spelling", owner) for path, owner in C_INDEX_PROJECTION_OWNERS),
         *TYPED_NONNUMERIC_BACKEND_FINAL_FORMS,
+        *EXACT_REDUCTION_BACKEND_FINAL_FORMS,
         *UNIFORM_RANDOM_BACKEND_FINAL_FORMS,
         *DIRECT_ARITHMETIC_BACKEND_FINAL_FORMS,
         *UTF8_STRING_FINAL_FORMS,
+        *RESULT_CLAIM_METADATA_FINAL_FORMS,
         *((METADATA_OWNER, "width-arithmetic", owner) for owner in METADATA_FINAL_WIDTH_OWNERS),
         *((ELEMENT_OWNER, "dtype-contract", owner) for owner in ELEMENT_FINAL_CONTRACT_OWNERS),
         (ELEMENT_OWNER, "width-arithmetic", "assert_registration"),
@@ -2156,8 +2207,33 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
             ("cargo", "nextest", "run", "-p", "chelis-cli", "--test", "runtime_extent_slice_a", "-E", "test(vmap_shape_bound_with_concrete_batch_emits_c_without_to_end_ice)"),
         ),
         OracleLeg(
+            "selected-result C claim and aggregate-interface provenance metadata execution",
+            (
+                "cargo", "nextest", "run", "-p", "chelis-cli",
+                "--test", "issue_1771_callable_selected_result_claims", "-E",
+                "test(c_aggregate_interface_ingress_stamps_each_tensor_field_as_load) | "
+                "test(c_direct_list_skip_retains_selected_tail_producer) | "
+                "test(c_list_and_adt_projection_retains_selected_producer) | "
+                "test(c_nested_list_pattern_retains_selected_tail_producer) | "
+                "test(c_option_projection_distinguishes_local_and_formal_origins) | "
+                "test(c_aggregate_origin_arena_is_fresh_for_repeated_public_calls)",
+            ),
+        ),
+        OracleLeg(
             "checked C reduction delegation and bypass mutations",
             ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "checked_c_reduction"),
+        ),
+        OracleLeg(
+            "exact C reduction stored-width and runtime-empty execution",
+            (
+                "cargo",
+                "nextest",
+                "run",
+                "-p",
+                "chelis-backend-c",
+                "--test",
+                "issue_1281_exact_reductions",
+            ),
         ),
         OracleLeg(
             "checked C reductions and Count optimized sanitizer execution",

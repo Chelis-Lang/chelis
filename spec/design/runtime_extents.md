@@ -610,6 +610,14 @@ The evaluator carries the same invocation-local information. Argument
 evaluation does not inherit a claim on the call's result, and one invocation's
 claims must not leak into a later invocation.
 
+Generated C represents a supported named higher-order invocation as one
+explicit retained boundary, including when its signature has no entry guard.
+That boundary prepares every non-callable actual exactly once in caller order,
+checks any signature-entry obligations, reconstructs formal ingress as an
+interface `load`, and only then makes the invocation's result obligations
+available to the body. An early-returned parameter does not skip a later
+unused actual. An ordinary lexical `let` is not such a boundary.
+
 After successful helper lowering, the lowering result records whether that
 exact authored declaration transferred its literal obligations into its tensor
 helper. The host emitter consumes this explicit ownership record when deciding
@@ -626,9 +634,10 @@ claim reaching a call that happens to use that helper. Entry guards retain
 their separate position before body execution. The acceptance receipts must
 check branch selection, primitive attribution, lexical shadowing, effects on
 both sides of the producer, and different callers of one shared callee on Eval
-and compiled C. These receipts cover host-builtin producing expressions. An inherited claim
-ending in a lowered tensor helper still needs distinct producer-site transport;
-the helper's existing local claim is not evidence for that inherited claim.
+and compiled C. These receipts cover host-builtin producing expressions. An
+inherited claim ending in a lowered tensor helper uses distinct producer-site
+transport; the helper's existing local claim is not evidence for that
+inherited claim.
 
 The continuation carries inherited literal obligations across tensor helpers
 and supported callable invocations. Each invocation supplies its obligations;
@@ -647,19 +656,33 @@ The pure-helper slice enrolls `return.pure_helper.literal.{eval,c}`. Callable
 transport and selected-value provenance compose as one continuation slice:
 private invocation-local claim scopes retain an authored literal result
 contract when supported higher-order host specialization inlines away that
-declaration boundary, while private value/origin pairs retain the selected
-producer through lexical aliases and helper returns. The origin is execution
-metadata, not a public value or ABI field. Eval keeps it beside lexical frame
-values; generated C keeps it inside the translation unit and uses only
-verified lowered producer sites. A true identity callback observes its tensor
-formal as interface `load`, after eager actual preparation and before the
-caller resumes. The combined Eval/C receipts cover named, literal and identity
+declaration boundary. Eval keeps recursive producer metadata beside lexical
+frame values. Generated C uses an invocation-owned immutable origin tree for
+supported tuple, list, record, option and ADT construction and projection;
+aliases, branches, pattern bindings and private returns transport the selected
+child. True aggregate ingress and cached/global loads reconstruct fresh `load`
+trees in the current invocation. No origin pointer enters the public ABI or
+outlives its invocation. A missing origin required by a transparent projection
+fails closed instead of guessing the projection operation.
+
+Concrete precision/rank-polymorphic callback invocations actualize the checked
+parameter and authored result contracts from the call site. Rank spreads are
+expanded by their checked binder identities. Authored literal axes around a
+spread remain result obligations, while concrete dimensions learned only from
+actual arguments do not become claims. The invocation-local precision/rank map
+is passed into any fresh tensor-helper lowering context; no dtype default is
+used. A true identity callback observes its tensor formal as interface `load`,
+after eager actual preparation and before the caller resumes.
+
+The finite combined Eval/C receipts cover named, literal and identity
 callbacks; different claims through one shared callback; selection both before
-and after production; helper-call boundaries; and selected-only attribution
+and after production; helper-call boundaries; supported aggregate projection;
+precision-only, rank-only and combined call sites; selected-only attribution;
 and effect ordering. These receipts count as neither pure-helper nor
-signature-entry receipts, whose independent controls remain enrolled.
-The receipts do not establish general preallocation coverage for every host
-primitive. Named host declared-result claims remain #1900.
+signature-entry receipts, whose independent controls remain enrolled. They do
+not establish mutation-derived aggregate provenance such as `append`, general
+preallocation coverage for every host primitive, named result claims (#1900),
+or local callable aliases (#1947).
 
 ##### Host entry guards (#1788)
 
@@ -962,7 +985,7 @@ cargo nextest run -p chelis-cli -p chelis-ir -p chelis-compiler-api -p chelis-ba
   --test wire_extent_witness --test disk_cache \
   --test issue_513_symbolic_axis_adjoints --test exec_compile \
   --test runtime_extent_slice_b --test issue_912_root_boundary --test cli \
-  -E 'binary(runtime_extent_claim_preparation) | binary(runtime_extent_checked_transport) | binary(wire_extent_witness) | test(=cached_imports_preserve_computed_claims_and_unit_preconditions) | test(=previous_checked_extent_cache_is_rejected_before_payload_decode) | test(context_decode_rejects_missing_or_forged_authored_signatures) | binary(issue_513_symbolic_axis_adjoints) | test(static_reshape_folding_requires_independent_axis_sources) | test(checked_remainder) | test(staged_plan_) | test(cse_preserves_executed_random_draws) | test(=a_local_unit_extent_claim_is_guarded_on_the_hip_host_lowering) | test(=hip_tensor_root_uses_the_manifest_to_emit_a_gpu_executable) | test(=build_hip_executes_host_reduce_window_with_exact_shape_and_values) | test(=build_hip_host_rejects_unimplemented_window_dtype_cleanly)'
+  -E 'binary(runtime_extent_claim_preparation) | binary(runtime_extent_checked_transport) | binary(wire_extent_witness) | test(=cached_imports_preserve_computed_claims_and_unit_preconditions) | test(=previous_checked_extent_cache_is_rejected_before_payload_decode) | test(context_decode_rejects_missing_or_forged_authored_signatures) | binary(issue_513_symbolic_axis_adjoints) | test(static_reshape_folding_requires_independent_axis_sources) | test(checked_remainder) | test(staged_plan_) | test(cse_preserves_executed_random_draws) | test(=a_local_unit_extent_claim_is_guarded_on_the_hip_host_lowering) | test(=hip_tensor_root_uses_the_manifest_to_emit_a_gpu_executable) | test(=build_device_targets_reject_host_reduce_window_max_without_c_fallback) | test(=build_hip_host_rejects_unimplemented_window_dtype_cleanly)'
 ```
 
 The new public matrix has 117 initial exported/binding/main fixtures, 69

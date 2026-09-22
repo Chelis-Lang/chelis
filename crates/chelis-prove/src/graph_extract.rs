@@ -221,6 +221,7 @@ fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
             | WireRiscOp::Compare { .. }
             | WireRiscOp::Logical { .. }
             | WireRiscOp::Where {}
+            | WireRiscOp::GuardedFail { .. }
             | WireRiscOp::MaxElem
             | WireRiscOp::MinElem
             | WireRiscOp::ExtremaAdjoint { .. }
@@ -566,7 +567,13 @@ const _: () = {
     // Version 15 adds direct comparison, logical, and where identities with
     // no embedded numeric payload. All remain obligations outside this
     // float-envelope extraction boundary.
-    assert!(WIRE_DAG_SCHEMA_VERSION == 15);
+    // Version 16 (chelis#1464) adds the [05-OP-68] guarded abort. Its payload
+    // is a compile-time message and a boolean side, both discrete, so it adds
+    // nothing to the float-envelope extraction. It is classified with the
+    // no-numeric-payload group above rather than given a transformer: an
+    // abort is a control effect, and relaxing it to its fallback's envelope
+    // would drop the trap the identity exists to preserve.
+    assert!(WIRE_DAG_SCHEMA_VERSION == 16);
 };
 
 #[cfg(test)]

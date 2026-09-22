@@ -597,7 +597,7 @@ The wire census verifies the compiler/Python publication graph, exact carrier
 shapes, codec and admission execution, and the default compiler-api library's
 compiled serialization obligations. The executed baseline's 97 numeric leaves
 have final authority: 80 verified transports and 17 exact numeric-operation
-registrations. WireDag v15 includes the u64 shape-dependency reference, the
+registrations. WireDag v16 includes the u64 shape-dependency reference, the
 opaque u64 local-ascription identity, and the fixed-int64 extent carrier's
 literal-witness requirement role. The wire
 baseline has no frozen cohort or static-descriptor admission path. Every new or
@@ -952,7 +952,7 @@ Deliverables, with phase homes:
    zero grandfather, permanent-disposition, successor-override,
    integer-plumbing, or other transition rows. The wire baseline likewise has
    97 final rows (80 verified transports and 17 numeric operations), with no
-   legacy cohort. Fresh actual verification includes WireDag v15's u64
+   legacy cohort. Fresh actual verification includes WireDag v16's u64
    shape-dependency and local-ascription-identity transports plus the
    fixed-extent literal-witness role.
    Nine binding rows have final nonnumeric authority, seven rows have final
@@ -1632,7 +1632,7 @@ contract; it does not complete binding or runtime obligations.
 
 #### Final wire and binding contract handoff
 
-**Current integration state.** Execution version 3 and WireDag version 15 are
+**Current integration state.** Execution version 3 and WireDag version 16 are
 the source contract for spec/10 §§3.2–3.5. The executed wire baseline contains
 97 distinct numeric leaves: 80 verified transports and 17 numeric operations,
 with zero exception rows. It includes the shape-dependency and opaque
@@ -2547,6 +2547,11 @@ callable from bypassing review while the capability tables are built.
    [#1306] owns replacing the trap- and stored-bit-changing `sub` and
    `min_elem` arithmetic surrogates with direct typed identities in eval, C,
    and HIP. [#2338] owns the remaining Metal cells.
+   [#1281] owns exact `mean`, extrema, argument-reduction, and window-extrema
+   behavior in the checker, evaluator, IR/AD, and compiled-C lanes.
+   Experimental HIP and Metal implementation gaps retain stable typed receipts
+   under [#2339] rather than weakening or silently partially implementing those
+   cells.
 
 **Authoritative direct-arithmetic oracle ([#1306]):**
 `.venv/bin/python scripts/dtype_direct_arithmetic_oracle.py`; exit 0 and final
@@ -2573,6 +2578,18 @@ width, checked signed-integer overflow trapping, fused direct subtraction
 followed by minimum, and signed-i32 extrema. A host without `hipcc`, the documented ROCm
 wheel paths, or a compatible device records this leg as **BLOCKED**, never as a
 pass; it does not weaken or remove the ignored hardware tests.
+
+**Authoritative exact-reduction oracle ([#1281]):**
+`.venv/bin/python scripts/dtype_exact_reductions_oracle.py`; exit 0 and final
+line `DTYPE EXACT REDUCTIONS ORACLE: PASS`. It runs the typed reduction kernels,
+exact IR evaluation and adjoints, compiled-C execution, checker-domain cases,
+and exhaustive downstream compilation. Its exact-bit cases cover runtime-empty
+`Domain`, first-NaN payload selection, first stored representation on equal
+values, exact i64 argument indices, non-NaN tie splitting including infinities,
+and deterministic overlapping-window accumulation. It never claims ignored
+device execution. HIP and Metal cells that lack that complete behavior reject
+with the stable typed authority [#2339] until their device implementation and
+real-hardware evidence land.
 
 **Authoritative ReLU oracle ([#1313]):** `.venv/bin/python
 scripts/dtype_relu_oracle.py`; exit 0 and final line `DTYPE RELU ORACLE:
@@ -3189,6 +3206,7 @@ substitute fixes (needed for [#722]'s C half regardless of this plan).
 [#1298]: https://github.com/Chelis-Lang/chelis/issues/1298
 [#1306]: https://github.com/Chelis-Lang/chelis/issues/1306
 [#2338]: https://github.com/Chelis-Lang/chelis/issues/2338
+[#2339]: https://github.com/Chelis-Lang/chelis/issues/2339
 [#1314]: https://github.com/Chelis-Lang/chelis/issues/1314
 [#849]: https://github.com/Chelis-Lang/chelis/issues/849
 [#1310]: https://github.com/Chelis-Lang/chelis/pull/1310

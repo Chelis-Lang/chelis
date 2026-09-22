@@ -90,7 +90,7 @@ dependencies = [
 
 [[package]]
 name = "chelis-deep"
-version = "0.18.10"
+version = "0.18.11"
 dependencies = [
  "chelis-vocab",
  "miette",
@@ -100,7 +100,7 @@ dependencies = [
 
 [[package]]
 name = "chelis-pred"
-version = "0.18.10"
+version = "0.18.11"
 dependencies = [
  "chelis-deep",
  "thiserror",
@@ -108,7 +108,7 @@ dependencies = [
 
 [[package]]
 name = "chelis-types"
-version = "0.18.10"
+version = "0.18.11"
 dependencies = [
  "chelis-deep",
  "chelis-pred",
@@ -124,14 +124,14 @@ dependencies = [
 
 [[package]]
 name = "chelis-unord"
-version = "0.18.10"
+version = "0.18.11"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "chelis-vocab"
-version = "0.18.10"
+version = "0.18.11"
 
 [[package]]
 name = "cpufeatures"

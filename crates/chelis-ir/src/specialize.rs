@@ -778,6 +778,7 @@ fn node_has_contiguous_matrix_slices(dag: &Dag, id: NodeId, matrix_rank: usize) 
         | RiscOp::Compare(_)
         | RiscOp::Logical(_)
         | RiscOp::Where
+        | RiscOp::GuardedFail { .. }
         | RiscOp::MaxElem
         | RiscOp::MinElem
         | RiscOp::ExtremaAdjoint { .. }

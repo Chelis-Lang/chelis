@@ -2,9 +2,23 @@
 ignore_env = true
 cache_executables = true
 heartbeat_secs = 30
+
 # Compiler/linker provider policy can change outputs without changing rustc argv.
 key_env_vars = [
   "NIX_CC_USE_RESPONSE_FILE",
   "NIX_SET_BUILD_ID*",
   "NIX_BUILD_ID_STYLE",
 ]
+
+# Keep local_store and runtime_dir machine-local; CI supplies job-owned paths.
+remote_readonly = false
+s3_concurrency = 4
+
+# Access requires Tunnet membership. Signing placeholders are supplied at runtime,
+# not AWS credentials; see README.md for developer setup.
+[cache.remote]
+type = "s3"
+bucket = "sand-dollar-kache-production-010928226848"
+region = "us-east-2"
+endpoint = "https://kache.mesh.cproof.ai"
+prefix = ""

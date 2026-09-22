@@ -80,7 +80,7 @@ class ContractValidationTests(unittest.TestCase):
 
     def test_wire_binding_decisions_have_positive_and_negative_freeze_controls(self) -> None:
         cases = (
-            ("spec/10-serialization.md", "Schema version 15 is explicitly\npresent", "wire v15 presence"),
+            ("spec/10-serialization.md", "Schema version 16 is explicitly\npresent", "wire v16 presence"),
             ("spec/10-serialization.md", "`schema_version: 3`", "execution v3 exactness"),
             ("spec/10-serialization.md", "f64: 16; f32: 8; f16: 4; bf16: 4", "wire IEEE bit widths"),
             ("spec/10-serialization.md", "No codec normalizes a NaN payload or a signed zero.", "wire bit preservation"),
@@ -3519,13 +3519,13 @@ class ContractValidationTests(unittest.TestCase):
         )
         self.assert_contract_fails("effect no-default rule")
 
-    def test_reduction_rows_cannot_cite_the_tracking_hub(self) -> None:
+    def test_device_reduction_rows_cannot_cite_the_tracking_hub(self) -> None:
         self.replace(
             Path("spec/design/capability_table.md"),
-            "Unimplemented { issue: #1281, diagnostic_kind: UnsupportedFeature }",
+            "Unimplemented { issue: #2339, diagnostic_kind: UnsupportedFeature }",
             "Unimplemented { issue: #729, diagnostic_kind: UnsupportedFeature }",
         )
-        self.assert_contract_fails("reduction implementation owner")
+        self.assert_contract_fails("device reduction implementation owner")
 
     def test_logical_rows_cannot_cite_the_tracking_hub(self) -> None:
         self.replace(

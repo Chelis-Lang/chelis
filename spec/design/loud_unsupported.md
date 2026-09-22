@@ -748,7 +748,12 @@ C1.4 raise except five documented structural keeps in `lower.rs` (the
 defsig/deftype/typealias inert declaration node, the
 unknown-tag-with-children sequence seed, `zero_tensor_node`'s
 deliberate ADT zero adjoint, the empty-`drop` sequencing zero, and the
-`fail`-in-if mask placeholder - each annotated at the site). Row status
+`fail`-in-if mask placeholder - each annotated at the site). The
+`fail`-in-if keep was WITHDRAWN by chelis#1464: it was justified on the
+ground that the placeholder's value could never be observed, which was
+false on the taken path and untested. A direct `fail(...)` branch now
+lowers to the [05-OP-68] guarded abort and an indirect one is a section C2
+rejection, so four structural keeps remain. Row status
 notes below are left as the P0 record; the per-row conversion evidence
 is the un-ignored acceptance tests named in PR [#791] plus
 `loud_unsupported_phase1.rs`. Chelis#729 Phase 3 subsequently turns the

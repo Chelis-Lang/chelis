@@ -2605,19 +2605,19 @@ fn host_runtime_trace_f64_uses_canonical_balanced_tree() {
     assert_eq!(out.value.to_f64_lossy_vec()[0].to_bits(), 1.0_f64.to_bits());
 }
 
-/// #172 sibling (eval lane): windowed Max/Min DROP NaN — Rust `f64::max`/`min`
-/// return the non-NaN operand — unlike `max_reduce`/`min_reduce`, which
-/// PROPAGATE NaN (`tensor_reduce_host` `saw_nan` path). This pins the
-/// documented drop-vs-propagate asymmetry on the eval side; the C lane is
-/// pinned by `reduce_window_max_min_drop_nan` in `chelis-backend-c`. The two
-/// windows `[NaN, 1.0]` and `[2.0, NaN]` must reduce to the finite operand in
-/// either NaN position.
+/// [05-RWIN]: windowed extrema select the first NaN in row-major order and
+/// preserve its exact stored representation.
 #[test]
-fn host_runtime_reduce_window_max_min_drop_nan() {
-    let tensor = RuntimeTensorValue {
-        value: IrTensorValue::from_vec(vec![4], vec![f64::NAN, 1.0, 2.0, f64::NAN]),
-        precision: Prim::F32,
-    };
+fn host_runtime_reduce_window_max_min_preserve_first_nan_bits() {
+    let first_nan = f32::from_bits(0xffc1_2345);
+    let second_nan = f32::from_bits(0x7fc5_4321);
+    let tensor = RuntimeTensorValue::from_wide(
+        "test",
+        Prim::F32,
+        vec![4],
+        vec![f64::from(first_nan), 1.0, 2.0, f64::from(second_nan)],
+    )
+    .expect("typed f32 input");
     let max = tensor_reduce_window_host(
         &tensor,
         &[2],
@@ -2627,15 +2627,16 @@ fn host_runtime_reduce_window_max_min_drop_nan() {
     )
     .expect("reduce_window max must evaluate");
     assert_eq!(max.value.shape, vec![2]);
-    assert!(
-        max.value.to_f64_lossy_vec().iter().all(|v| !v.is_nan()),
-        "windowed max must DROP NaN (not propagate); got {:?}",
-        max.value.to_f64_lossy_vec(),
-    );
+    let chelis_types::dtype_semantics::StorageView::F32(max_values) = max.value.storage().view()
+    else {
+        panic!("window extrema must preserve f32 storage");
+    };
     assert_eq!(
-        max.value.to_f64_lossy_vec(),
-        vec![1.0, 2.0],
-        "windowed max drops NaN -> the non-NaN operand",
+        max_values
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        vec![first_nan.to_bits(), second_nan.to_bits()],
     );
     let min = tensor_reduce_window_host(
         &tensor,
@@ -2645,15 +2646,16 @@ fn host_runtime_reduce_window_max_min_drop_nan() {
         "reduce_window_min",
     )
     .expect("reduce_window min must evaluate");
-    assert!(
-        min.value.to_f64_lossy_vec().iter().all(|v| !v.is_nan()),
-        "windowed min must DROP NaN (not propagate); got {:?}",
-        min.value.to_f64_lossy_vec(),
-    );
+    let chelis_types::dtype_semantics::StorageView::F32(min_values) = min.value.storage().view()
+    else {
+        panic!("window extrema must preserve f32 storage");
+    };
     assert_eq!(
-        min.value.to_f64_lossy_vec(),
-        vec![1.0, 2.0],
-        "windowed min drops NaN -> the non-NaN operand",
+        min_values
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        vec![first_nan.to_bits(), second_nan.to_bits()],
     );
 }
 

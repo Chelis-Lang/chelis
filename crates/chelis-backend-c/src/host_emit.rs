@@ -179,7 +179,7 @@ use crate::emitted_expr::{BinaryOperator, EmittedExpr, UnaryOperator};
 /// Emit a C string literal whose bytes are unambiguous in every following
 /// lexical context. Fixed-width three-digit octal escapes preserve embedded
 /// NUL and cannot absorb an adjacent decimal or hexadecimal digit.
-fn c_utf8_byte_literal(value: &str) -> String {
+pub(crate) fn c_utf8_byte_literal(value: &str) -> String {
     let mut literal = String::from("\"");
     for byte in value.as_bytes() {
         literal.push_str(&format!("\\{byte:03o}"));
@@ -237,7 +237,6 @@ pub(crate) fn emit_host_abi_program(
     body.push(String::new());
     append_tensor_abi_helpers(&mut body);
     body.push(String::new());
-    append_host_result_claim_support(&mut body);
     append_tensor_reshape_helper(&mut body);
     body.push(String::new());
     append_tensor_print_helper(&mut body);
@@ -329,12 +328,6 @@ pub(crate) fn emit_host_abi_program(
                 .find(|binding| binding.name == *name)
                 .expect("captured global name comes from program.globals");
             body.push(format!("static {};", c_decl(&binding.ty, name)?));
-            if matches!(binding.ty, HostType::Tensor(_)) {
-                body.push(format!(
-                    "static __chelis_host_result_origin {};",
-                    result_origin_name(name)
-                ));
-            }
         }
         body.push(String::new());
     }
@@ -411,6 +404,7 @@ pub(crate) fn emit_host_abi_program(
             &helper_output_counts,
             &verified_helpers,
             external_helpers,
+            &captured_globals,
             #[cfg(feature = "native-random-observer")]
             &source_sites
                 .iter()
@@ -517,6 +511,25 @@ pub(crate) fn emit_host_abi_program(
         )?;
     }
 
+    // Keep runtime aggregate accessors out of translation units whose emitted
+    // code never reconstructs aggregate interface provenance. Besides avoiding
+    // dead support, this preserves the existing source-level contract that a
+    // compile-time record projection has no runtime ADT accessor at all. The
+    // helper group is mutually recursive through erased `chelis_value` children,
+    // so one actual aggregate-ingress call enables the complete group.
+    let needs_aggregate_interface_origin_support = body
+        .iter()
+        .any(|line| line.contains("__chelis_host_result_origin_interface_"));
+    let mut result_claim_support = Vec::new();
+    append_host_result_claim_support(&mut result_claim_support);
+    if needs_aggregate_interface_origin_support {
+        append_host_result_interface_origin_support(&mut result_claim_support);
+    }
+    append_host_result_claim_checks(&mut result_claim_support);
+    result_claim_support.push(String::new());
+    result_claim_support.extend(body);
+    body = result_claim_support;
+
     // Keep the JSON-only sorting machinery out of unrelated generated
     // translation units. Detect the structured call emitted above, then
     // prepend its definition so C never relies on an implicit declaration.
@@ -535,10 +548,9 @@ pub(crate) fn emit_host_abi_program(
         "#include \"chelis_runtime.h\"".to_string(),
         "#include <assert.h>".to_string(),
         "#include <math.h>".to_string(),
+        "#include <stdlib.h>".to_string(),
+        "#include <string.h>".to_string(),
     ];
-    if needs_json_canonical_object_helper {
-        out.push("#include <stdlib.h>".to_string());
-    }
     out.extend([
         String::new(),
         // chelis#943: emitter-internal accumulator ABI. Deliberately absent
@@ -1889,11 +1901,27 @@ fn append_private_context_args(args: &mut Vec<String>) {
     );
 }
 
+fn append_private_host_context_args(args: &mut Vec<String>) {
+    append_private_context_args(args);
+    args.push("__chelis_origin_arena".to_string());
+}
+
 fn append_invocation_random_context(out: &mut Vec<String>) {
     out.push("    chelis_rng_state __chelis_rng_local = {0ULL, 0ULL, 0};".to_string());
     out.push("    chelis_rng_state *__chelis_rng = &__chelis_rng_local;".to_string());
     #[cfg(feature = "native-random-observer")]
     crate::random_observer::append_inactive_context(out, "    ");
+}
+
+fn append_invocation_origin_context(out: &mut Vec<String>) {
+    out.push(
+        "    __chelis_host_result_origin_arena __chelis_origin_arena_storage = { NULL, NULL };"
+            .to_string(),
+    );
+    out.push(
+        "    __chelis_host_result_origin_arena *__chelis_origin_arena = &__chelis_origin_arena_storage;"
+            .to_string(),
+    );
 }
 
 fn verified_identity_helper_input(
@@ -2098,10 +2126,14 @@ fn private_host_params(params: &str) -> String {
 
 /// Owned host bodies additionally return private producer provenance. Public
 /// wrappers pass NULL, so this never enters the generated ABI.
+/// This spelling deliberately lives outside `__chelis_result_origin_<value>`:
+/// a legal source parameter such as `out` owns that exact sidecar namespace.
+const PRIVATE_RESULT_ORIGIN_RETURN_SLOT: &str = "__chelis_private_result_origin_return";
+
 fn private_host_function_params(params: &str) -> String {
     format!(
-        "{}, __chelis_host_result_origin *__chelis_result_origin_out",
-        private_host_params(params)
+        "{}, __chelis_host_result_origin_arena *__chelis_origin_arena, const __chelis_host_result_claim *__chelis_caller_result_claims, const __chelis_host_result_origin **{PRIVATE_RESULT_ORIGIN_RETURN_SLOT}",
+        private_random_params(params),
     )
 }
 
@@ -2114,10 +2146,192 @@ fn append_host_result_claim_support(out: &mut Vec<String>) {
 } __chelis_host_result_claim;
 
 typedef struct __chelis_host_result_origin {
+    struct __chelis_host_result_origin *allocation_next;
+    struct __chelis_host_result_origin *leaf_next;
     const char *op;
     const char *trap;
+    int64_t child_count;
+    const struct __chelis_host_result_origin *const *child_view;
+    const struct __chelis_host_result_origin *children[];
 } __chelis_host_result_origin;
 
+typedef struct __chelis_host_result_origin_arena {
+    __chelis_host_result_origin *head;
+    __chelis_host_result_origin *leaf_head;
+} __chelis_host_result_origin_arena;
+
+static void __chelis_host_result_origin_arena_destroy(__chelis_host_result_origin_arena *arena) {
+    __chelis_host_result_origin *node = arena->head;
+    while (node != NULL) {
+        __chelis_host_result_origin *next = node->allocation_next;
+        free(node);
+        node = next;
+    }
+    arena->head = NULL;
+    arena->leaf_head = NULL;
+}
+
+static __chelis_host_result_origin *__chelis_host_result_origin_alloc(__chelis_host_result_origin_arena *arena, int64_t child_count) {
+    if (arena == NULL || child_count < 0 || (uint64_t)child_count > (SIZE_MAX - sizeof(__chelis_host_result_origin)) / sizeof(const __chelis_host_result_origin *)) {
+        fprintf(stderr, "host runtime: invalid result producer provenance allocation\n");
+        abort();
+    }
+    size_t bytes = sizeof(__chelis_host_result_origin) + (size_t)child_count * sizeof(const __chelis_host_result_origin *);
+    __chelis_host_result_origin *node = (__chelis_host_result_origin *)malloc(bytes);
+    if (node == NULL) {
+        fprintf(stderr, "host runtime: result producer provenance allocation failed\n");
+        abort();
+    }
+    node->allocation_next = arena->head;
+    node->leaf_next = NULL;
+    node->op = NULL;
+    node->trap = NULL;
+    node->child_count = child_count;
+    node->child_view = NULL;
+    arena->head = node;
+    return node;
+}
+
+static const __chelis_host_result_origin *__chelis_host_result_origin_leaf(__chelis_host_result_origin_arena *arena, const char *op, const char *trap) {
+    for (__chelis_host_result_origin *node = arena->leaf_head; node != NULL; node = node->leaf_next) {
+        if (strcmp(node->op, op) == 0 && strcmp(node->trap, trap) == 0) return node;
+    }
+    __chelis_host_result_origin *node = __chelis_host_result_origin_alloc(arena, 0);
+    node->op = op;
+    node->trap = trap;
+    node->child_count = -1;
+    node->leaf_next = arena->leaf_head;
+    arena->leaf_head = node;
+    return node;
+}
+
+static const __chelis_host_result_origin *__chelis_host_result_origin_aggregate(__chelis_host_result_origin_arena *arena, int64_t child_count, const __chelis_host_result_origin *const *children) {
+    bool any = false;
+    for (int64_t i = 0; i < child_count; ++i) {
+        if (children[i] != NULL) any = true;
+    }
+    if (!any) return NULL;
+    __chelis_host_result_origin *node = __chelis_host_result_origin_alloc(arena, child_count);
+    for (int64_t i = 0; i < child_count; ++i) node->children[i] = children[i];
+    node->child_view = node->children;
+    return node;
+}
+
+static const __chelis_host_result_origin *__chelis_host_result_origin_child(const __chelis_host_result_origin *origin, int64_t index) {
+    if (origin == NULL) return NULL;
+    if (origin->child_count < 0 || index < 0 || index >= origin->child_count || origin->child_view == NULL) {
+        fprintf(stderr, "host runtime: aggregate result producer provenance does not match the projected value\n");
+        abort();
+    }
+    return origin->child_view[index];
+}
+
+static const __chelis_host_result_origin *__chelis_host_result_origin_list_suffix(__chelis_host_result_origin_arena *arena, const __chelis_host_result_origin *origin, int64_t count) {
+    if (origin == NULL || count == 0) return origin;
+    // The runtime owns skip's negative-count diagnostic. Preserve that
+    // ordering instead of replacing it with an internal metadata failure.
+    if (count < 0) return origin;
+    if (origin->child_count < 0 || origin->child_view == NULL) {
+        fprintf(stderr, "host runtime: aggregate result producer provenance does not match the projected value\n");
+        abort();
+    }
+    if (count >= origin->child_count) return NULL;
+    // This is an immutable view over another node in the same invocation
+    // arena. Flattening the view keeps repeated Cons-tail decomposition O(1).
+    __chelis_host_result_origin *suffix = __chelis_host_result_origin_alloc(arena, 0);
+    suffix->child_count = origin->child_count - count;
+    suffix->child_view = origin->child_view + count;
+    return suffix;
+}
+
+static const __chelis_host_result_origin **__chelis_host_result_origin_children(int64_t count) {
+    if (count <= 0) return NULL;
+    if ((uint64_t)count > SIZE_MAX / sizeof(const __chelis_host_result_origin *)) {
+        fprintf(stderr, "host runtime: invalid result producer provenance child count\n");
+        abort();
+    }
+    const __chelis_host_result_origin **children = (const __chelis_host_result_origin **)calloc((size_t)count, sizeof(*children));
+    if (children == NULL) {
+        fprintf(stderr, "host runtime: result producer provenance child allocation failed\n");
+        abort();
+    }
+    return children;
+}
+"#.to_string());
+}
+
+fn append_host_result_interface_origin_support(out: &mut Vec<String>) {
+    out.push(r#"
+static const __chelis_host_result_origin *__chelis_host_result_origin_interface_value(__chelis_host_result_origin_arena *arena, chelis_value value);
+
+static const __chelis_host_result_origin *__chelis_host_result_origin_interface_list(__chelis_host_result_origin_arena *arena, const chelis_list *value) {
+    int64_t count = chelis_list_len(value);
+    const __chelis_host_result_origin **children = __chelis_host_result_origin_children(count);
+    for (int64_t i = 0; i < count; ++i) {
+        chelis_value child = chelis_list_index(value, i);
+        children[i] = __chelis_host_result_origin_interface_value(arena, child);
+        chelis_value_release(child);
+    }
+    const __chelis_host_result_origin *origin = __chelis_host_result_origin_aggregate(arena, count, children);
+    free(children);
+    return origin;
+}
+
+static const __chelis_host_result_origin *__chelis_host_result_origin_interface_tuple(__chelis_host_result_origin_arena *arena, const chelis_tuple *value) {
+    int64_t count = chelis_tuple_len(value);
+    const __chelis_host_result_origin **children = __chelis_host_result_origin_children(count);
+    for (int64_t i = 0; i < count; ++i) {
+        chelis_value child = chelis_tuple_get(value, i);
+        children[i] = __chelis_host_result_origin_interface_value(arena, child);
+        chelis_value_release(child);
+    }
+    const __chelis_host_result_origin *origin = __chelis_host_result_origin_aggregate(arena, count, children);
+    free(children);
+    return origin;
+}
+
+static const __chelis_host_result_origin *__chelis_host_result_origin_interface_adt(__chelis_host_result_origin_arena *arena, const chelis_adt *value) {
+    int64_t count = chelis_adt_field_count(value);
+    const __chelis_host_result_origin **children = __chelis_host_result_origin_children(count);
+    for (int64_t i = 0; i < count; ++i) {
+        chelis_value child = chelis_adt_get_field(value, i);
+        children[i] = __chelis_host_result_origin_interface_value(arena, child);
+        chelis_value_release(child);
+    }
+    const __chelis_host_result_origin *origin = __chelis_host_result_origin_aggregate(arena, count, children);
+    free(children);
+    return origin;
+}
+
+static const __chelis_host_result_origin *__chelis_host_result_origin_interface_option(__chelis_host_result_origin_arena *arena, const chelis_option *value) {
+    if (!chelis_option_is_some(value)) return NULL;
+    chelis_value child = chelis_option_unwrap(value);
+    const __chelis_host_result_origin *child_origin = __chelis_host_result_origin_interface_value(arena, child);
+    chelis_value_release(child);
+    return __chelis_host_result_origin_aggregate(arena, 1, &child_origin);
+}
+
+static const __chelis_host_result_origin *__chelis_host_result_origin_interface_value(__chelis_host_result_origin_arena *arena, chelis_value value) {
+    switch (value.tag) {
+        case CHELIS_VALUE_TENSOR:
+            return __chelis_host_result_origin_leaf(arena, "load", "numeric trap: domain in load at i64");
+        case CHELIS_VALUE_LIST:
+            return __chelis_host_result_origin_interface_list(arena, (const chelis_list *)value.payload.handle);
+        case CHELIS_VALUE_TUPLE:
+            return __chelis_host_result_origin_interface_tuple(arena, (const chelis_tuple *)value.payload.handle);
+        case CHELIS_VALUE_ADT:
+            return __chelis_host_result_origin_interface_adt(arena, (const chelis_adt *)value.payload.handle);
+        case CHELIS_VALUE_OPTION:
+            return __chelis_host_result_origin_interface_option(arena, (const chelis_option *)value.payload.handle);
+        default:
+            return NULL;
+    }
+}
+"#.to_string());
+}
+
+fn append_host_result_claim_checks(out: &mut Vec<String>) {
+    out.push(r#"
 static void __chelis_check_host_result_extent_claims(const __chelis_host_result_claim *claims, int64_t rank, const int64_t (*observations)[3], int64_t count, const char *op, const char *trap) {
     for (; claims != NULL; claims = claims->next) {
         if (rank != claims->rank) continue;
@@ -2252,6 +2466,7 @@ fn emit_function(
     helper_output_counts: &[usize],
     verified_helpers: &[VerifiedHostTensorHelperView<'_>],
     external_helpers: &UnordSet<String>,
+    captured_globals: &[String],
     #[cfg(feature = "native-random-observer")]
     source_sites: &[crate::random_observer::SourceSite<'_>],
 ) -> Result<(), Unsupported> {
@@ -2295,14 +2510,10 @@ fn emit_function(
     );
     emitter.entry_projection = entry::helper_coverage_with_verified(function, verified_helpers);
     emitter.external_helpers = external_helpers.clone();
+    emitter.interface_reload_names = captured_globals.iter().cloned().collect();
     for param in &function.params {
-        if matches!(param.ty, HostAbiType::Tensor(_)) {
-            let origin = result_origin_name(&param.name);
-            emitter.lines.push(format!(
-                "{}__chelis_host_result_origin {origin} = {{ \"load\", \"numeric trap: domain in load at i64\" }};",
-                emitter.indent
-            ));
-        }
+        emitter.interface_reload_names.remove(&param.name);
+        emitter.declare_result_origin(&param.name, &param.ty, Some("load"));
     }
     #[cfg(feature = "native-random-observer")]
     {
@@ -2400,13 +2611,11 @@ fn emit_function(
             )
         })?;
     emitter.emit_terminal_site(terminal, Some("__result"))?;
-    if matches!(function.ret_ty, HostAbiType::Tensor(_)) {
-        emitter.lines.push(format!(
-            "{}if (__chelis_result_origin_out != NULL) *__chelis_result_origin_out = {};",
-            emitter.indent,
-            result_origin_name("__result")
-        ));
-    }
+    emitter.lines.push(format!(
+        "{}if ({PRIVATE_RESULT_ORIGIN_RETURN_SLOT} != NULL) *{PRIVATE_RESULT_ORIGIN_RETURN_SLOT} = {};",
+        emitter.indent,
+        result_origin_name("__result")
+    ));
     emitter.finish_expression_sites()?;
     out.extend(emitter.lines);
     #[cfg(feature = "native-random-observer")]
@@ -2436,6 +2645,7 @@ fn emit_function(
         ));
         out.push(format!("{} {{", declaration.trim_end_matches(';')));
         append_invocation_random_context(out);
+        append_invocation_origin_context(out);
         let mut args = Vec::with_capacity(function.params.len());
         for (index, (param, use_)) in function.params.iter().zip(&entry_uses).enumerate() {
             if *use_ == VerifiedOwnershipUse::Move && retain_call(&param.name, &param.ty).is_some()
@@ -2455,7 +2665,7 @@ fn emit_function(
                 args.push(c_ident(&param.name).into_owned());
             }
         }
-        append_private_context_args(&mut args);
+        append_private_host_context_args(&mut args);
         args.push("NULL".to_string());
         args.push("NULL".to_string());
         out.push(format!(
@@ -2464,6 +2674,9 @@ fn emit_function(
             body_name,
             args.join(", ")
         ));
+        out.push(
+            "    __chelis_host_result_origin_arena_destroy(__chelis_origin_arena);".to_string(),
+        );
         out.push("    return __result;".to_string());
         out.push("}".to_string());
         out.push(crate::generated_header::render_authored_export_end(
@@ -2487,6 +2700,7 @@ fn emit_function(
             out.push("    chelis_rng_state __chelis_rng_local = {0ULL, 0ULL, 0};".to_string());
             out.push("    chelis_rng_state *__chelis_rng = &__chelis_rng_local;".to_string());
             crate::random_observer::append_observed_context(out, "    ");
+            append_invocation_origin_context(out);
             let mut args = Vec::with_capacity(function.params.len() + 2);
             for (index, (param, use_)) in function.params.iter().zip(&entry_uses).enumerate() {
                 if *use_ == VerifiedOwnershipUse::Move
@@ -2507,7 +2721,7 @@ fn emit_function(
                     args.push(c_ident(&param.name).into_owned());
                 }
             }
-            append_private_context_args(&mut args);
+            append_private_host_context_args(&mut args);
             args.push("NULL".to_string());
             args.push("NULL".to_string());
             out.push(format!(
@@ -2516,6 +2730,9 @@ fn emit_function(
                 body_name,
                 args.join(", ")
             ));
+            out.push(
+                "    __chelis_host_result_origin_arena_destroy(__chelis_origin_arena);".to_string(),
+            );
             out.push("    return __result;".to_string());
             out.push("}".to_string());
         }
@@ -2577,6 +2794,7 @@ fn emit_main(
 ) -> Result<(), Unsupported> {
     out.push("int main(void) {".to_string());
     append_invocation_random_context(out);
+    append_invocation_origin_context(out);
     // chelis#840: the globals emitter needs the same original-to-emitted
     // function-name map as function bodies, or a global calling a def
     // whose name was mangled (`double`) or renamed (`main`) emits the raw
@@ -2612,19 +2830,11 @@ fn emit_main(
                 c_decl(&binding.ty, &binding.name)?
             ));
         }
-        if matches!(binding.ty, HostType::Tensor(_)) {
-            let binding_origin = result_origin_name(&binding.name);
-            let value_origin = result_origin_name(&binding_var);
-            if hoisted.contains(binding.name.as_str()) {
-                emitter
-                    .lines
-                    .push(format!("    {binding_origin} = {value_origin};"));
-            } else {
-                emitter.lines.push(format!(
-                    "    __chelis_host_result_origin {binding_origin} = {value_origin};"
-                ));
-            }
-        }
+        let binding_origin = result_origin_name(&binding.name);
+        let value_origin = result_origin_name(&binding_var);
+        emitter.lines.push(format!(
+            "    const __chelis_host_result_origin *{binding_origin} = {value_origin};"
+        ));
     }
     let root_sites = ownership_sites
         .iter()
@@ -2770,6 +2980,7 @@ fn emit_main(
     emitter.emit_terminal_site(terminal, None)?;
     emitter.finish_expression_sites()?;
     out.extend(emitter.lines);
+    out.push("    __chelis_host_result_origin_arena_destroy(__chelis_origin_arena);".to_string());
     out.push("    return 0;".to_string());
     out.push("}".to_string());
     Ok(())
@@ -2805,6 +3016,7 @@ fn captured_global_names(program: &HostProgram) -> Vec<String> {
 fn collect_var_names(expr: &HostExpr, out: &mut UnordSet<String>) {
     match &expr.kind {
         HostExprKind::ResultClaimScope { body, .. } => collect_var_names(body, out),
+        HostExprKind::FormalIngress { value, .. } => collect_var_names(value, out),
         HostExprKind::Int(_)
         | HostExprKind::Float(_)
         | HostExprKind::Bool(_)
@@ -2866,7 +3078,8 @@ fn collect_var_names(expr: &HostExpr, out: &mut UnordSet<String>) {
                 collect_var_names(default_expr, out);
             }
         }
-        HostExprKind::Let { bindings, body, .. } => {
+        HostExprKind::Let { bindings, body, .. }
+        | HostExprKind::RetainedInvocation { bindings, body, .. } => {
             for binding in bindings {
                 collect_var_names(&binding.value, out);
             }
@@ -2919,6 +3132,7 @@ fn collect_referenced_fn_names(expr: &HostExpr, out: &mut UnordSet<String>) {
     fn walk(expr: &HostExpr, out: &mut UnordSet<String>) {
         match &expr.kind {
             HostExprKind::ResultClaimScope { body, .. } => walk(body, out),
+            HostExprKind::FormalIngress { value, .. } => walk(value, out),
             HostExprKind::Call { function, args, .. } => {
                 out.insert(function.clone());
                 for arg in args {
@@ -2977,7 +3191,8 @@ fn collect_referenced_fn_names(expr: &HostExpr, out: &mut UnordSet<String>) {
                     walk(default_expr, out);
                 }
             }
-            HostExprKind::Let { bindings, body, .. } => {
+            HostExprKind::Let { bindings, body, .. }
+            | HostExprKind::RetainedInvocation { bindings, body, .. } => {
                 for binding in bindings {
                     walk(&binding.value, out);
                 }
@@ -3103,6 +3318,10 @@ struct HostEmitter<'a> {
     expression_site_index: usize,
     entry_projection: entry::Projection,
     external_helpers: UnordSet<String>,
+    /// Values stored outside this invocation have no arena-owned provenance.
+    /// Rebuild their aggregate load tree at each reference instead of reading
+    /// an origin pointer retained by the cached/global value.
+    interface_reload_names: UnordSet<String>,
     #[cfg(feature = "native-random-observer")]
     source_sites: Vec<crate::random_observer::SourceSite<'a>>,
     pre_emitted_clone_sites: UnordSet<HostSiteId>,
@@ -3247,6 +3466,7 @@ impl<'a> HostEmitter<'a> {
             expression_site_index: 0,
             entry_projection: entry::Projection::default(),
             external_helpers: UnordSet::new(),
+            interface_reload_names: UnordSet::new(),
             #[cfg(feature = "native-random-observer")]
             source_sites: Vec::new(),
             pre_emitted_clone_sites: UnordSet::new(),
@@ -3280,18 +3500,21 @@ impl<'a> HostEmitter<'a> {
     ///    the same exact bit pattern the DAG lane bakes, so a template that
     ///    folds and one that does not sample identically.
     ///
-    ///    This fold is value-based and does NOT model an intermediate
-    ///    rounding: a bound spelled `cast(cast(x, f16), f32)` type-checks,
-    ///    and the evaluator applies both roundings while `static_float_bound`
-    ///    applies neither. The DAG lane's `lower::extract_f64_value` has the
-    ///    identical behavior, so the two compiled lanes agree with each other
-    ///    and both differ from `eval` on that spelling. The CLASS is
-    ///    pre-existing and owned outside this change (chelis#2316); the
-    ///    host-lane INSTANCE is new, because this lane previously refused to
-    ///    build at all. Reproducing the DAG lane's exact behavior is
-    ///    deliberate: correcting one lane alone would make template
-    ///    foldability observable again, which is the defect chelis#2120
-    ///    exists to remove.
+    ///    This fold honours every rounding in a bound's cast chain, so a
+    ///    bound spelled `cast(cast(x, f16), f32)` bakes the value `eval`
+    ///    computes. Both lanes stage a bound the same way — an integer leaf
+    ///    exact through i64, a float leaf at its source dtype until a cast
+    ///    finalizes it — and both reach `finalize_scalar` through the shared
+    ///    `chelis_types` cast primitives, so they take the same roundings in
+    ///    the same order (chelis#2316). The two stagings are separate
+    ///    readers of differently-shaped trees; they are NOT one function.
+    ///
+    ///    Keeping the lanes identical here is not stylistic. Correcting one
+    ///    lane alone makes template foldability observable again, which is
+    ///    the defect chelis#2120 exists to remove — a first revision of the
+    ///    chelis#2316 fix did exactly that, and its regression witnesses are
+    ///    `a_suffixed_literal_inside_a_narrowing_cast_agrees_across_lanes`
+    ///    and its siblings. Change both folds together or neither.
     ///
     /// The template's element values are never read — only its shape and
     /// dtype reach the output through `chelis_host_alloc_like` — which is
@@ -3462,29 +3685,79 @@ impl<'a> HostEmitter<'a> {
     ) -> Result<(), Unsupported> {
         self.lines
             .push(format!("{}{};", self.indent, c_decl(ty, target)?));
-        if matches!(ty, HostType::Tensor(_)) {
-            self.lines.push(format!(
-                "{}__chelis_host_result_origin {} = {{ NULL, NULL }};",
-                self.indent,
-                result_origin_name(target)
-            ));
-        }
+        self.declare_result_origin(target, ty, None);
         self.assign_expr(target, expr, ty)?;
         Ok(())
     }
 
     fn declare_result_origin(&mut self, value: &str, ty: &HostType, producer: Option<&str>) {
-        if !matches!(ty, HostType::Tensor(_)) {
+        let origin = result_origin_name(value);
+        let initializer = match producer {
+            Some("load") => self.interface_result_origin_expr(value, ty),
+            Some(op) if matches!(ty, HostType::Tensor(_)) => {
+                let op = chelis_ir::span_sanitize::sanitize_for_format_string(op);
+                format!(
+                    "__chelis_host_result_origin_leaf(__chelis_origin_arena, \"{op}\", \"numeric trap: domain in {op} at i64\")"
+                )
+            }
+            _ => "NULL".to_string(),
+        };
+        self.lines.push(format!(
+            "{}const __chelis_host_result_origin *{origin} = {initializer};",
+            self.indent
+        ));
+    }
+
+    fn interface_result_origin_expr(&self, value: &str, ty: &HostType) -> String {
+        if !host_type_may_carry_result_origin(ty) {
+            return "NULL".to_string();
+        }
+        match ty {
+            HostType::Tensor(_) => "__chelis_host_result_origin_leaf(__chelis_origin_arena, \"load\", \"numeric trap: domain in load at i64\")".to_string(),
+            HostType::List(_) => format!(
+                "__chelis_host_result_origin_interface_list(__chelis_origin_arena, {value})"
+            ),
+            HostType::Tuple(_) => format!(
+                "__chelis_host_result_origin_interface_tuple(__chelis_origin_arena, {value})"
+            ),
+            HostType::Adt(_, _) => format!(
+                "__chelis_host_result_origin_interface_adt(__chelis_origin_arena, {value})"
+            ),
+            HostType::Option(_) => format!(
+                "__chelis_host_result_origin_interface_option(__chelis_origin_arena, {value})"
+            ),
+            _ => "NULL".to_string(),
+        }
+    }
+
+    fn assign_interface_result_origin(&mut self, target: &str, ty: &HostType) {
+        let origin = result_origin_name(target);
+        let initializer = self.interface_result_origin_expr(target, ty);
+        self.lines
+            .push(format!("{}{origin} = {initializer};", self.indent));
+    }
+
+    fn assign_aggregate_result_origin(&mut self, target: &str, children: &[String]) {
+        let origin = result_origin_name(target);
+        if children.is_empty() {
+            self.lines.push(format!("{}{origin} = NULL;", self.indent));
             return;
         }
-        let origin = result_origin_name(value);
-        let initializer = producer.map_or_else(
-            || "{ NULL, NULL }".to_string(),
-            |op| format!("{{ \"{op}\", \"numeric trap: domain in {op} at i64\" }}"),
-        );
+        let child_array = self.next_temp("result_origin_children");
         self.lines.push(format!(
-            "{}__chelis_host_result_origin {origin} = {initializer};",
-            self.indent
+            "{}const __chelis_host_result_origin *{child_array}[{}] = {{ {} }};",
+            self.indent,
+            children.len(),
+            children
+                .iter()
+                .map(|child| result_origin_name(child))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+        self.lines.push(format!(
+            "{}{origin} = __chelis_host_result_origin_aggregate(__chelis_origin_arena, {}, {child_array});",
+            self.indent,
+            children.len()
         ));
     }
 
@@ -4365,6 +4638,19 @@ impl<'a> HostEmitter<'a> {
                 self.emit_expression_site(site, target)?;
                 return Ok(());
             }
+            HostExprKind::FormalIngress {
+                value,
+                ty: ingress_ty,
+            } => {
+                require_same_abi_type(ty, ingress_ty, "formal ingress")?;
+                self.claim_on_spine = false;
+                self.assign_expr(target, value, ty)?;
+                self.assign_interface_result_origin(target, ty);
+                self.emit_result_claim_guard(target, ty, result_claims.as_deref());
+                self.claim_on_spine = on_result_spine;
+                self.emit_expression_site(site, target)?;
+                return Ok(());
+            }
             HostExprKind::Int(value) => {
                 // The positive magnitude of i64::MIN is not a signed C
                 // decimal literal, even when preceded by unary minus.
@@ -4414,11 +4700,15 @@ impl<'a> HostEmitter<'a> {
                     // the same mangled identifier its declaration used.
                     self.lines
                         .push(format!("{}{target} = {};", self.indent, c_ident(name)));
-                    if matches!(ty, HostType::Tensor(_)) {
+                    let target_origin = result_origin_name(target);
+                    if self.interface_reload_names.contains(name) {
+                        let load = self.interface_result_origin_expr(target, ty);
+                        self.lines
+                            .push(format!("{}{target_origin} = {load};", self.indent));
+                    } else {
                         self.lines.push(format!(
-                            "{}{} = {};",
+                            "{}{target_origin} = {};",
                             self.indent,
-                            result_origin_name(target),
                             result_origin_name(name)
                         ));
                     }
@@ -4448,7 +4738,9 @@ impl<'a> HostEmitter<'a> {
             } => {
                 require_same_abi_type(ty, expr_ty, "builtin expression")?;
                 self.assign_builtin(target, name, args, ty, site)?;
-                self.stamp_result_origin(target, ty, name);
+                if !matches!(name.as_str(), "tuple-get" | "index") {
+                    self.stamp_result_origin(target, ty, name);
+                }
                 self.emit_result_claim_guard(target, ty, result_claims.as_deref());
             }
             HostExprKind::AdtConstruct {
@@ -4466,6 +4758,7 @@ impl<'a> HostEmitter<'a> {
             } => {
                 require_same_abi_type(ty, expr_ty, "ADT field access")?;
                 self.assign_adt_field_access(target, base, *field_index, ty)?;
+                self.emit_result_claim_guard(target, ty, result_claims.as_deref());
             }
             HostExprKind::If {
                 cond,
@@ -4581,7 +4874,6 @@ impl<'a> HostEmitter<'a> {
                             bind_name
                         ));
                         self.assign_unboxed_value(bind_name, &inner_ty, &boxed_inner)?;
-                        self.declare_result_origin(bind_name, &inner_ty, Some("load"));
                     }
                     other => {
                         return Err(invalid_abi_shape(
@@ -4590,6 +4882,14 @@ impl<'a> HostEmitter<'a> {
                         ));
                     }
                 }
+                self.declare_result_origin(bind_name, &inner_ty, None);
+                self.lines.push(format!(
+                    "{}{} = __chelis_host_result_origin_child({}, 0);",
+                    self.indent,
+                    result_origin_name(bind_name),
+                    result_origin_name(&option_var)
+                ));
+                let shadowed_interface_global = self.interface_reload_names.remove(bind_name);
                 self.bind_match_payload(site, some_edge.target(), "option_payload", bind_name)?;
                 // chelis#1222: the binder shadows any enclosing name it
                 // reuses. Its key carries no outgoing edge, because the
@@ -4606,6 +4906,9 @@ impl<'a> HostEmitter<'a> {
                     scrutinee_owner,
                 )?;
                 self.emit_expression_block_actions(site, arm_blocks.0, target)?;
+                if shadowed_interface_global {
+                    self.interface_reload_names.insert(bind_name.clone());
+                }
                 self.indent = previous.clone();
                 self.lines.push(format!("{}}} else {{", self.indent));
                 let nested_indent = format!("{}    ", self.indent);
@@ -4656,6 +4959,7 @@ impl<'a> HostEmitter<'a> {
                 self.lines.push(format!("{}{{", self.indent));
                 let nested_indent = format!("{}    ", self.indent);
                 let previous = std::mem::replace(&mut self.indent, nested_indent);
+                let mut shadowed_interface_globals = Vec::new();
                 for (index, binding) in bindings.iter().enumerate() {
                     // Compute the value into a temp before declaring the binding name.
                     // If the compiler inlines a recursive call that reuses a binding
@@ -4670,13 +4974,7 @@ impl<'a> HostEmitter<'a> {
                         self.indent,
                         c_decl(&binding.ty, &binding.name)?
                     ));
-                    if matches!(binding.ty, HostType::Tensor(_)) {
-                        self.lines.push(format!(
-                            "{}__chelis_host_result_origin {};",
-                            self.indent,
-                            result_origin_name(&binding.name)
-                        ));
-                    }
+                    self.declare_result_origin(&binding.name, &binding.ty, None);
                     // #379: assign to the same mangled identifier the
                     // declaration used (both route through `c_ident`).
                     self.lines.push(format!(
@@ -4685,18 +4983,68 @@ impl<'a> HostEmitter<'a> {
                         c_ident(&binding.name),
                         temp
                     ));
-                    if matches!(binding.ty, HostType::Tensor(_)) {
-                        self.lines.push(format!(
-                            "{}{} = {};",
-                            self.indent,
-                            result_origin_name(&binding.name),
-                            result_origin_name(&temp)
-                        ));
+                    self.lines.push(format!(
+                        "{}{} = {};",
+                        self.indent,
+                        result_origin_name(&binding.name),
+                        result_origin_name(&temp)
+                    ));
+                    if self.interface_reload_names.remove(&binding.name) {
+                        shadowed_interface_globals.push(binding.name.clone());
                     }
                 }
                 self.claim_on_spine = on_result_spine && spine_binding.is_none();
                 self.assign_expr(target, body, ty)?;
                 self.emit_expression_site(site, target)?;
+                self.interface_reload_names
+                    .extend(shadowed_interface_globals);
+                self.indent = previous;
+                self.lines.push(format!("{}}}", self.indent));
+                return Ok(());
+            }
+            HostExprKind::RetainedInvocation {
+                bindings,
+                body,
+                ty: expr_ty,
+            } => {
+                require_same_abi_type(ty, expr_ty, "retained invocation")?;
+                self.lines.push(format!("{}{{", self.indent));
+                let nested_indent = format!("{}    ", self.indent);
+                let previous = std::mem::replace(&mut self.indent, nested_indent);
+                let mut shadowed_interface_globals = Vec::new();
+                for binding in bindings {
+                    let temp = self.next_temp("retained_actual");
+                    // A callee result contract never constrains actual
+                    // preparation, formal ingress, or signature entry.
+                    self.claim_on_spine = false;
+                    self.emit_expr_to_var(&binding.value, &temp, &binding.ty)?;
+                    self.lines.push(format!(
+                        "{}{};",
+                        self.indent,
+                        c_decl(&binding.ty, &binding.name)?
+                    ));
+                    self.declare_result_origin(&binding.name, &binding.ty, None);
+                    self.lines.push(format!(
+                        "{}{} = {};",
+                        self.indent,
+                        c_ident(&binding.name),
+                        temp
+                    ));
+                    self.lines.push(format!(
+                        "{}{} = {};",
+                        self.indent,
+                        result_origin_name(&binding.name),
+                        result_origin_name(&temp)
+                    ));
+                    if self.interface_reload_names.remove(&binding.name) {
+                        shadowed_interface_globals.push(binding.name.clone());
+                    }
+                }
+                self.claim_on_spine = on_result_spine;
+                self.assign_expr(target, body, ty)?;
+                self.emit_expression_site(site, target)?;
+                self.interface_reload_names
+                    .extend(shadowed_interface_globals);
                 self.indent = previous;
                 self.lines.push(format!("{}}}", self.indent));
                 return Ok(());
@@ -4885,7 +5233,7 @@ impl<'a> HostEmitter<'a> {
         let op = chelis_ir::span_sanitize::sanitize_for_format_string(op);
         let origin = result_origin_name(target);
         self.lines.push(format!(
-            "{}{origin}.op = \"{op}\"; {origin}.trap = \"numeric trap: domain in {op} at i64\";",
+            "{}{origin} = __chelis_host_result_origin_leaf(__chelis_origin_arena, \"{op}\", \"numeric trap: domain in {op} at i64\");",
             self.indent
         ));
     }
@@ -4898,11 +5246,11 @@ impl<'a> HostEmitter<'a> {
             self.lines
                 .push(format!("{}if ({claims} != NULL) {{", self.indent));
             self.lines.push(format!(
-                "{}    if ({origin}.op == NULL || {origin}.trap == NULL) {{ fprintf(stderr, \"host runtime: pending result claim reached a tensor without producer provenance\\n\"); abort(); }}",
+                "{}    if ({origin} == NULL || {origin}->child_count != -1 || {origin}->op == NULL || {origin}->trap == NULL) {{ fprintf(stderr, \"host runtime: pending result claim reached a tensor without producer provenance\\n\"); abort(); }}",
                 self.indent
             ));
             self.lines.push(format!(
-                "{}    __chelis_check_host_result_claims({claims}, {target}, {origin}.op, {origin}.trap);",
+                "{}    __chelis_check_host_result_claims({claims}, {target}, {origin}->op, {origin}->trap);",
                 self.indent
             ));
             self.lines.push(format!("{}}}", self.indent));
@@ -5191,6 +5539,7 @@ impl<'a> HostEmitter<'a> {
         match name {
             "Some" => {
                 self.assign_option_some(target, ty, &arg_vars[0].0, &arg_vars[0].1, &args[0])?;
+                self.assign_aggregate_result_origin(target, &[arg_vars[0].0.clone()]);
                 return Ok(());
             }
             "None" => {
@@ -5248,6 +5597,13 @@ impl<'a> HostEmitter<'a> {
                     self.indent, value_var, arg_vars[0].0, arg_vars[1].0
                 ));
                 self.assign_unboxed_value(target, ty, &value_var)?;
+                self.lines.push(format!(
+                    "{}{} = __chelis_host_result_origin_child({}, {});",
+                    self.indent,
+                    result_origin_name(target),
+                    result_origin_name(&arg_vars[0].0),
+                    arg_vars[1].0
+                ));
                 return Ok(());
             }
             "index" => {
@@ -5257,6 +5613,13 @@ impl<'a> HostEmitter<'a> {
                     self.indent, value_var, arg_vars[0].0, arg_vars[1].0
                 ));
                 self.assign_unboxed_value(target, ty, &value_var)?;
+                self.lines.push(format!(
+                    "{}{} = __chelis_host_result_origin_child({}, {});",
+                    self.indent,
+                    result_origin_name(target),
+                    result_origin_name(&arg_vars[0].0),
+                    arg_vars[1].0
+                ));
                 return Ok(());
             }
             "append" => {
@@ -5439,6 +5802,15 @@ impl<'a> HostEmitter<'a> {
                 } else {
                     "chelis_list_drop"
                 };
+                // Build the immutable metadata view before the consuming
+                // entry point can release or advance the source payload.
+                self.lines.push(format!(
+                    "{}{} = __chelis_host_result_origin_list_suffix(__chelis_origin_arena, {}, {});",
+                    self.indent,
+                    result_origin_name(target),
+                    result_origin_name(&arg_vars[0].0),
+                    arg_vars[1].0
+                ));
                 self.lines.push(format!(
                     "{}{target} = {entry}({}, {});",
                     self.indent, arg_vars[0].0, arg_vars[1].0
@@ -7661,13 +8033,9 @@ impl<'a> HostEmitter<'a> {
         // Calls to declared functions use private bodies and inherit this
         // invocation. Callback parameters retain their authored C signature.
         if self.emitted_names.contains_key(function) {
-            append_private_context_args(&mut arg_vars);
+            append_private_host_context_args(&mut arg_vars);
             arg_vars.push(result_claims.unwrap_or("NULL").to_string());
-            arg_vars.push(if matches!(ty, HostType::Tensor(_)) {
-                format!("&{}", result_origin_name(target))
-            } else {
-                "NULL".to_string()
-            });
+            arg_vars.push(format!("&{}", result_origin_name(target)));
         }
         self.lines.push(format!(
             "{}{target} = {}({});",
@@ -7684,6 +8052,7 @@ impl<'a> HostEmitter<'a> {
             arg_vars.join(", ")
         ));
         if !self.emitted_names.contains_key(function) {
+            self.assign_interface_result_origin(target, ty);
             self.emit_result_claim_guard(target, ty, result_claims);
         }
         Ok(())
@@ -7700,6 +8069,7 @@ impl<'a> HostEmitter<'a> {
         // ISO C forbids a zero-length array (`chelis_value adt_fields[0];`),
         // so pass a NULL fields pointer with count 0 instead; the runtime
         // helper's `len <= 0` guard never dereferences it (issue #310).
+        let mut field_vars = Vec::with_capacity(fields.len());
         let (fields_arg, field_values) = if fields.is_empty() {
             ("NULL".to_string(), None)
         } else {
@@ -7720,6 +8090,7 @@ impl<'a> HostEmitter<'a> {
                     values_name,
                     self.box_aggregate_value_expr(&field_var, &field_ty, field)?
                 ));
+                field_vars.push(field_var);
             }
             (values_name.clone(), Some(values_name))
         };
@@ -7747,6 +8118,7 @@ impl<'a> HostEmitter<'a> {
                 ));
             }
         }
+        self.assign_aggregate_result_origin(target, &field_vars);
         Ok(())
     }
 
@@ -7765,6 +8137,13 @@ impl<'a> HostEmitter<'a> {
             self.indent, value_var, base_var, field_index
         ));
         self.assign_unboxed_value(target, ty, &value_var)?;
+        self.lines.push(format!(
+            "{}{} = __chelis_host_result_origin_child({}, {});",
+            self.indent,
+            result_origin_name(target),
+            result_origin_name(&base_var),
+            field_index
+        ));
         Ok(())
     }
 
@@ -7833,6 +8212,7 @@ impl<'a> HostEmitter<'a> {
             // carry no outgoing edge -- `chelis_adt_field` hands back an
             // independently retained handle, so the arm binding is not a
             // copy of anything this scope already owns.
+            let mut shadowed_interface_globals = Vec::new();
             for binding in &arm.bindings {
                 let field_var = self.next_temp(&format!("{}_field", binding.name));
                 self.lines.push(format!(
@@ -7846,17 +8226,29 @@ impl<'a> HostEmitter<'a> {
                     binding.name
                 ));
                 self.assign_unboxed_value(&binding.name, &binding.ty, &field_var)?;
-                self.declare_result_origin(&binding.name, &binding.ty, Some("load"));
+                self.declare_result_origin(&binding.name, &binding.ty, None);
+                self.lines.push(format!(
+                    "{}{} = __chelis_host_result_origin_child({}, {});",
+                    self.indent,
+                    result_origin_name(&binding.name),
+                    result_origin_name(&scrutinee_var),
+                    binding.field_index
+                ));
                 self.bind_match_payload(
                     site,
                     arm_edges[index].target(),
                     "adt_payload:",
                     &binding.name,
                 )?;
+                if self.interface_reload_names.remove(&binding.name) {
+                    shadowed_interface_globals.push(binding.name.clone());
+                }
             }
             self.claim_on_spine = on_result_spine;
             self.assign_expr(target, &arm.expr, expr_ty)?;
             self.emit_expression_block_actions(site, arm_blocks[index], target)?;
+            self.interface_reload_names
+                .extend(shadowed_interface_globals);
             self.indent = previous;
             self.lines.push(format!("{}}}", self.indent));
         }
@@ -7906,6 +8298,7 @@ impl<'a> HostEmitter<'a> {
             values_name,
             items.len()
         ));
+        let mut item_vars = Vec::with_capacity(items.len());
         for (index, item) in items.iter().enumerate() {
             let item_var = self.next_temp(&format!("list_item{index}"));
             self.emit_expr_to_var(item, &item_var, item_ty)?;
@@ -7915,6 +8308,7 @@ impl<'a> HostEmitter<'a> {
                 values_name,
                 self.box_aggregate_value_expr(&item_var, item_ty, item)?
             ));
+            item_vars.push(item_var);
         }
         self.lines.push(format!(
             "{}{target} = chelis_list_from_values({}, {});",
@@ -7928,6 +8322,7 @@ impl<'a> HostEmitter<'a> {
                 self.indent
             ));
         }
+        self.assign_aggregate_result_origin(target, &item_vars);
         Ok(())
     }
 
@@ -7957,6 +8352,7 @@ impl<'a> HostEmitter<'a> {
         // (`chelis_value tuple_values[0];`), so pass a NULL items pointer with
         // count 0 instead; the runtime helper's `len <= 0` guard never
         // dereferences it (issue #310).
+        let mut item_vars = Vec::with_capacity(items.len());
         let items_arg = if items.is_empty() {
             "NULL".to_string()
         } else {
@@ -7977,6 +8373,7 @@ impl<'a> HostEmitter<'a> {
                     values_name,
                     self.box_aggregate_value_expr(&item_var, item_ty, item)?
                 ));
+                item_vars.push(item_var);
             }
             values_name
         };
@@ -7994,6 +8391,7 @@ impl<'a> HostEmitter<'a> {
                 ));
             }
         }
+        self.assign_aggregate_result_origin(target, &item_vars);
         Ok(())
     }
 
@@ -8163,14 +8561,12 @@ impl<'a> HostEmitter<'a> {
             c_type(&params[0].ty)?,
             acc_arg
         ));
-        if matches!(params[0].ty, HostType::Tensor(_)) {
-            self.lines.push(format!(
-                "{}__chelis_host_result_origin {} = {};",
-                self.indent,
-                result_origin_name(&acc_arg),
-                result_origin_name(target)
-            ));
-        }
+        self.lines.push(format!(
+            "{}const __chelis_host_result_origin *{} = {};",
+            self.indent,
+            result_origin_name(&acc_arg),
+            result_origin_name(target)
+        ));
         let [body_acc] = body_edge.params() else {
             return Err(invalid_abi_shape(
                 format!(
@@ -8313,14 +8709,12 @@ impl<'a> HostEmitter<'a> {
             acc_arg,
             acc_var
         ));
-        if matches!(params[0].ty, HostType::Tensor(_)) {
-            self.lines.push(format!(
-                "{}__chelis_host_result_origin {} = {};",
-                self.indent,
-                result_origin_name(&acc_arg),
-                result_origin_name(&acc_var)
-            ));
-        }
+        self.lines.push(format!(
+            "{}const __chelis_host_result_origin *{} = {};",
+            self.indent,
+            result_origin_name(&acc_arg),
+            result_origin_name(&acc_var)
+        ));
         let item_arg = self.next_temp("scan_item");
         self.lines.push(format!(
             "{}{} {};",
@@ -8547,13 +8941,9 @@ impl<'a> HostEmitter<'a> {
             HostCallbackKind::Named { function, .. } => {
                 let mut arg_vars = arg_vars.to_vec();
                 if self.emitted_names.contains_key(function) {
-                    append_private_context_args(&mut arg_vars);
+                    append_private_host_context_args(&mut arg_vars);
                     arg_vars.push("NULL".to_string());
-                    arg_vars.push(if matches!(callback.ret_ty, HostType::Tensor(_)) {
-                        format!("&{}", result_origin_name(target))
-                    } else {
-                        "NULL".to_string()
-                    });
+                    arg_vars.push(format!("&{}", result_origin_name(target)));
                 }
                 self.lines.push(format!(
                     "{}{target} = {}({});",
@@ -8568,8 +8958,12 @@ impl<'a> HostEmitter<'a> {
                         .unwrap_or_else(|| c_ident(function)),
                     arg_vars.join(", ")
                 ));
+                if !self.emitted_names.contains_key(function) {
+                    self.assign_interface_result_origin(target, &callback.ret_ty);
+                }
             }
             HostCallbackKind::Inline { params, body } => {
+                let mut shadowed_interface_globals = Vec::new();
                 for (param, arg_var) in params.iter().zip(arg_vars.iter()) {
                     self.lines.push(format!(
                         "{}{} {} = {};",
@@ -8578,16 +8972,14 @@ impl<'a> HostEmitter<'a> {
                         param.name,
                         arg_var
                     ));
-                    if matches!(param.ty, HostType::Tensor(_)) {
-                        self.lines.push(format!(
-                            "{}__chelis_host_result_origin {} = {};",
-                            self.indent,
-                            result_origin_name(&param.name),
-                            result_origin_name(arg_var)
-                        ));
+                    self.declare_result_origin(&param.name, &param.ty, Some("load"));
+                    if self.interface_reload_names.remove(&param.name) {
+                        shadowed_interface_globals.push(param.name.clone());
                     }
                 }
                 self.assign_expr(target, body, &callback.ret_ty)?;
+                self.interface_reload_names
+                    .extend(shadowed_interface_globals);
             }
         }
         Ok(())
@@ -9432,6 +9824,7 @@ fn host_type(expr: &HostExpr) -> HostType {
         | HostExprKind::MatchOption { ty, .. }
         | HostExprKind::MatchAdt { ty, .. }
         | HostExprKind::Let { ty, .. }
+        | HostExprKind::RetainedInvocation { ty, .. }
         | HostExprKind::Map { ty, .. }
         | HostExprKind::Filter { ty, .. }
         | HostExprKind::Fold { ty, .. }
@@ -9440,8 +9833,38 @@ fn host_type(expr: &HostExpr) -> HostType {
         | HostExprKind::FlatMap { ty, .. }
         | HostExprKind::WithSeed { ty, .. }
         | HostExprKind::TensorCall { ty, .. }
-        | HostExprKind::ResultClaimScope { ty, .. } => ty.clone(),
+        | HostExprKind::ResultClaimScope { ty, .. }
+        | HostExprKind::FormalIngress { ty, .. } => ty.clone(),
         HostExprKind::Unit | HostExprKind::SignatureEntry { .. } => HostType::Unit,
+    }
+}
+
+/// Whether the evaluator's `ResultProducer` model can attach provenance to
+/// a value of this resolved ABI type.  This keeps a true interface ingress
+/// O(1) for scalar-only lists/tuples instead of walking values that can only
+/// produce an all-null tree.  ADT arguments are type parameters rather than a
+/// field-layout description, so ADTs remain conservatively recursive.
+fn host_type_may_carry_result_origin(ty: &HostType) -> bool {
+    match ty {
+        HostType::Tensor(_) | HostType::Adt(_, _) => true,
+        HostType::List(inner) => host_type_may_carry_result_origin(inner),
+        HostType::Tuple(items) => items.iter().any(host_type_may_carry_result_origin),
+        HostType::Option(inner) => host_type_may_carry_result_origin(inner),
+        // Dict is a distinct evaluator value and is outside this tree model.
+        HostType::Int8
+        | HostType::Int16
+        | HostType::Int32
+        | HostType::Int64
+        | HostType::Float16
+        | HostType::BFloat16
+        | HostType::Float32
+        | HostType::Float64
+        | HostType::Bool
+        | HostType::String
+        | HostType::Callback(_, _)
+        | HostType::Dict(_, _)
+        | HostType::MappedFile
+        | HostType::Unit => false,
     }
 }
 
@@ -9813,8 +10236,8 @@ impl BinaryElementwiseFunc {
     }
 }
 
-/// chelis#2120: recover a `uniform_like` bound's exact source value from the
-/// host expression tree.
+/// Fold a `uniform_like` bound to the exact compile-time value the emitter
+/// bakes into the generated call (chelis#2120).
 ///
 /// The checker already restricts these bounds to static literals
 /// (`chelis-types` `infer::app_operand_dtype`, whose message is the
@@ -9824,18 +10247,99 @@ impl BinaryElementwiseFunc {
 /// between that gate and this emitter, and is rejected loudly rather than
 /// defaulted — silently substituting `[0, 1)` for an unreadable bound is the
 /// exact chelis#776 failure this must not reintroduce.
-fn static_float_bound(expr: Option<&HostExpr>) -> Option<f64> {
+///
+/// chelis#2316: the value is staged exactly as `chelis-ir`'s
+/// `static_controls::scalar` stages it — an integer leaf stays EXACT through
+/// i64 and a float leaf stays at its source dtype until a cast finalizes it —
+/// and every transition goes through the shared `chelis_types` cast
+/// primitives. Both lanes therefore apply the same roundings in the same
+/// order, which is the property chelis#2120 needs: a template that folds and
+/// one that does not must sample identically.
+///
+/// Two earlier revisions got this wrong in opposite directions. The first
+/// ignored a cast's target entirely, so a narrowing intermediate was dropped.
+/// The second finalized eagerly at every float cast and returned `None` for a
+/// non-float target — which broke a bound like `cast(3i32, f32)`, because host
+/// lowering expresses a literal's declared dtype by SYNTHESIZING a cast around
+/// the raw lexical value ([04-LIT-1], `chelis-ir/src/host.rs`). That
+/// synthesized `cast[i32]` is not a user-written narrowing cast; it is the
+/// literal's own type, and its value is exact.
+#[derive(Clone, Copy)]
+enum StagedBound {
+    /// An untyped lexical leaf: an integer that is still exact, or a float
+    /// literal that has not yet been finalized at any declared width.
+    Raw(chelis_types::RawScalar),
+    /// A value already finalized at a concrete dtype.
+    Typed(chelis_types::ScalarValue),
+}
+
+impl StagedBound {
+    /// Finalize at `target`, going through the same `chelis_types` primitives
+    /// `chelis-ir`'s typed fold uses.
+    fn finalize(self, target: Prim) -> Option<chelis_types::ScalarValue> {
+        match self {
+            StagedBound::Raw(raw) => chelis_types::cast_raw("uniform_like", raw, target).ok(),
+            StagedBound::Typed(value) => {
+                chelis_types::cast_scalar("uniform_like", value, target).ok()
+            }
+        }
+    }
+
+    fn negate(self) -> Option<Self> {
+        match self {
+            StagedBound::Raw(chelis_types::RawScalar::Int(v)) => Some(StagedBound::Raw(
+                chelis_types::RawScalar::Int(v.checked_neg()?),
+            )),
+            StagedBound::Raw(chelis_types::RawScalar::Float(v)) => {
+                Some(StagedBound::Raw(chelis_types::RawScalar::Float(-v)))
+            }
+            // A finalized value negates at its own width, not through f64.
+            StagedBound::Typed(value) => {
+                let prim = value.prim();
+                chelis_types::cast_raw(
+                    "uniform_like",
+                    chelis_types::RawScalar::Float(-value.as_f64_lossy()),
+                    prim,
+                )
+                .ok()
+                .map(StagedBound::Typed)
+            }
+        }
+    }
+}
+
+fn staged_bound(expr: Option<&HostExpr>) -> Option<StagedBound> {
     match &expr?.kind {
-        HostExprKind::Float(value) => Some(*value),
-        HostExprKind::Int(value) => Some(*value as f64),
-        HostExprKind::Builtin { name, args, .. } if name == "cast" => {
-            static_float_bound(args.first())
+        HostExprKind::Float(value) => {
+            Some(StagedBound::Raw(chelis_types::RawScalar::Float(*value)))
+        }
+        HostExprKind::Int(value) => Some(StagedBound::Raw(chelis_types::RawScalar::Int(*value))),
+        HostExprKind::Builtin { name, args, ty } if name == "cast" => {
+            let inner = staged_bound(args.first())?;
+            let (prim, surface) = checked_cast_abi_axis(ty).ok()?;
+            if surface != CheckedCastSurface::Scalar {
+                return None;
+            }
+            // Finalize at THIS cast's target, whatever it is. An integer
+            // target is a declared-dtype marker from host lowering, not a
+            // user-written truncation: the checker rejects an integer-target
+            // bound before emission (`PrecisionMismatch: expected f32`), so a
+            // non-float target reaching here is always the literal's own type.
+            Some(StagedBound::Typed(inner.finalize(prim)?))
         }
         HostExprKind::Builtin { name, args, .. } if name == "neg" => {
-            static_float_bound(args.first()).map(|value| -value)
+            staged_bound(args.first())?.negate()
         }
         _ => None,
     }
+}
+
+fn static_float_bound(expr: Option<&HostExpr>) -> Option<f64> {
+    // f32 is the emitted bound width; see the matching note at the
+    // `uniform_like` site in `chelis-ir`'s lowering.
+    staged_bound(expr)
+        .and_then(|staged| staged.finalize(Prim::F32))
+        .map(|value| value.as_f64_lossy())
 }
 
 /// The loud terminal for a `uniform_like` bound this emitter cannot fold.

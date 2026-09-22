@@ -238,6 +238,19 @@ fn grad_dag_checked_impl(
                         live[template.0] = true;
                     }
                 }
+                // chelis#1464 / [05-OP-68]: input 0 is the guard's firing
+                // predicate, a control edge, and input 1 is the value the
+                // result carries. Only the fallback is on the gradient path.
+                // The predicate conjoins the enclosing branch path, so it is
+                // built from `Logical` nodes; treating the control edge as
+                // live would reject a program whose gradient is perfectly
+                // well defined, exactly as the `UniformLike` note above
+                // describes for its activation edge.
+                RiscOp::GuardedFail { .. } => {
+                    if let Some(fallback) = node.inputs.get(1) {
+                        live[fallback.0] = true;
+                    }
+                }
                 // A comparison contributes an exact zero cotangent to both
                 // operands. Its predicate may control differentiable float
                 // selection, but the arithmetic that formed the predicate is
@@ -270,15 +283,23 @@ fn grad_dag_checked_impl(
                     reason: AdRejectionReason::IntegerArithmeticOutput,
                 });
             }
+            RiscOp::MaxReduce { .. } | RiscOp::MinReduce { .. }
+                if node.output_type.precision.is_integer() =>
+            {
+                return Err(AdError::NotSupported {
+                    op: risc_op_name(&node.op),
+                    reason: AdRejectionReason::IntegerArithmeticOutput,
+                });
+            }
             RiscOp::Argmax { .. } => {
                 return Err(AdError::NotSupported {
-                    op: "argmax",
+                    op: "argmax_reduce",
                     reason: AdRejectionReason::IntegerIndexOutput,
                 });
             }
             RiscOp::Argmin { .. } => {
                 return Err(AdError::NotSupported {
-                    op: "argmin",
+                    op: "argmin_reduce",
                     reason: AdRejectionReason::IntegerIndexOutput,
                 });
             }
@@ -391,6 +412,7 @@ pub fn risc_op_name(op: &RiscOp) -> &'static str {
         RiscOp::Compare(kind) => kind.surf_name(),
         RiscOp::Logical(kind) => kind.surf_name(),
         RiscOp::Where => "where",
+        RiscOp::GuardedFail { .. } => "guarded_fail",
         RiscOp::MaxElem => "max_elem",
         RiscOp::MinElem => "min_elem",
         RiscOp::ExtremaAdjoint { .. } => "extrema_adjoint",
@@ -418,8 +440,8 @@ pub fn risc_op_name(op: &RiscOp) -> &'static str {
         RiscOp::ProdReduce { .. } => "prod_reduce",
         RiscOp::ReduceWindow { reducer, .. } => reducer.surf_name(),
         RiscOp::ReduceWindowGrad { .. } => "reduce_window_grad",
-        RiscOp::Argmax { .. } => "argmax",
-        RiscOp::Argmin { .. } => "argmin",
+        RiscOp::Argmax { .. } => "argmax_reduce",
+        RiscOp::Argmin { .. } => "argmin_reduce",
         RiscOp::Reshape { .. } => "reshape",
         RiscOp::Permute { .. } => "permute",
         RiscOp::Expand { .. } => "expand",
@@ -906,6 +928,30 @@ fn compute_adjoints(
             Some(vec![(a, za), (b, zb)])
         }
         RiscOp::Logical(_) => None,
+        // chelis#1464 / [05-OP-68]: the condition is discrete and takes zero
+        // cotangent (spec/06 §2.10.1). The fallback takes the result's
+        // cotangent UNCHANGED — not a `Where`-style masked cotangent —
+        // because whenever the forward program produced a result at all, that
+        // result was the fallback: the other path aborted. The forward
+        // `GuardedFail` node stays live in the forward DAG, so the abort is
+        // still evaluated and still fires; differentiation does not speculate
+        // past it ([05-OP-68] Result, spec/06 §5.2).
+        RiscOp::GuardedFail { .. } => {
+            // The fallback takes the result's cotangent unchanged: whenever
+            // the forward program produced a result at all, that result WAS
+            // the fallback.
+            //
+            // The condition is deliberately absent rather than paired with
+            // an explicit zero. Omitting it IS the zero cotangent of
+            // spec/06 2.10.1 — no contribution is queued — and it keeps the
+            // backward walk out of the condition subgraph entirely. That
+            // matters because the guard's firing predicate conjoins the
+            // enclosing branch path (chelis#1464), so it contains `Logical`
+            // nodes, and `Logical` is non-differentiable: materializing a
+            // zero for the condition would make AD descend into it and
+            // reject a program whose gradient is perfectly well defined.
+            Some(vec![(node.inputs[1], g)])
+        }
         RiscOp::Where => {
             let condition = node.inputs[0];
             let then_value = node.inputs[1];
@@ -1274,96 +1320,8 @@ fn compute_adjoints(
             );
             Some(vec![(x, dx)])
         }
-        RiscOp::MaxReduce { axis } => {
-            // Subgradient: gradient flows to elements equal to the max.
-            // mask = eq(x, expand(max_reduce(x, axis), axis, size))
-            // dx = mul(expand(g, axis, size), mask)
-            let x = node.inputs[0];
-            let input_ty = forward.get(x).unwrap().output_type.clone();
-            let original_size = RtDim::InputAxis {
-                tensor: 1,
-                axis: crate::dag::RtAxis::Lit(i32::try_from(*axis).expect("rank fits i32")),
-            };
-
-            // Expand forward max_reduce node back to input shape.
-            let expanded_max = dag.add_node(
-                RiscOp::Expand {
-                    axis: *axis,
-                    size: original_size.clone(),
-                },
-                vec![node.id, x],
-                input_ty.clone(),
-                None,
-            );
-
-            // Expand gradient to input shape.
-            let expanded_g = dag.add_node(
-                RiscOp::Expand {
-                    axis: *axis,
-                    size: original_size,
-                },
-                vec![g, x],
-                input_ty.clone(),
-                None,
-            );
-
-            // Build equality mask: not(or(cmplt(x, expanded_max), cmplt(expanded_max, x)))
-            let mask_bool = tier2::lower_eq(dag, x, expanded_max, &input_ty, None);
-            let mask = dag.add_node(
-                RiscOp::Cast {
-                    new_precision: input_ty.precision,
-                },
-                vec![mask_bool],
-                input_ty.clone(),
-                None,
-            );
-
-            let dx = dag.add_node(RiscOp::Mul, vec![expanded_g, mask], input_ty, None);
-            Some(vec![(x, dx)])
-        }
-        RiscOp::MinReduce { axis } => {
-            // Subgradient mirrors MaxReduce: gradient flows to elements equal
-            // to the min. This is a first-class rule, NOT composed as
-            // neg(max_reduce(neg(x))) — that would work but obscures the
-            // numerical semantics and makes autodiff graph inspection
-            // harder. Spec §3j-pre: ship the rule explicitly.
-            let x = node.inputs[0];
-            let input_ty = forward.get(x).unwrap().output_type.clone();
-            let original_size = RtDim::InputAxis {
-                tensor: 1,
-                axis: crate::dag::RtAxis::Lit(i32::try_from(*axis).expect("rank fits i32")),
-            };
-
-            let expanded_min = dag.add_node(
-                RiscOp::Expand {
-                    axis: *axis,
-                    size: original_size.clone(),
-                },
-                vec![node.id, x],
-                input_ty.clone(),
-                None,
-            );
-            let expanded_g = dag.add_node(
-                RiscOp::Expand {
-                    axis: *axis,
-                    size: original_size,
-                },
-                vec![g, x],
-                input_ty.clone(),
-                None,
-            );
-            let mask_bool = tier2::lower_eq(dag, x, expanded_min, &input_ty, None);
-            let mask = dag.add_node(
-                RiscOp::Cast {
-                    new_precision: input_ty.precision,
-                },
-                vec![mask_bool],
-                input_ty.clone(),
-                None,
-            );
-            let dx = dag.add_node(RiscOp::Mul, vec![expanded_g, mask], input_ty, None);
-            Some(vec![(x, dx)])
-        }
+        RiscOp::MaxReduce { axis } => extrema_reduce_adjoint(node, g, *axis, forward, dag),
+        RiscOp::MinReduce { axis } => extrema_reduce_adjoint(node, g, *axis, forward, dag),
         RiscOp::ProdReduce { axis } => {
             // Safe prefix*suffix product adjoint. The naive form
             // `g * prod / x` divides by zero whenever any element in the
@@ -2272,6 +2230,165 @@ fn compute_adjoints(
             Some(vec![(a_id, da), (b_id, db)])
         }
     }
+}
+
+fn extrema_reduce_adjoint(
+    node: &DagNode,
+    g: NodeId,
+    axis: usize,
+    forward: &Dag,
+    dag: &mut Dag,
+) -> Option<Vec<(NodeId, NodeId)>> {
+    let x = node.inputs[0];
+    let input_ty = forward.get(x)?.output_type.clone();
+    input_ty.dims.get(axis)?;
+    let reduced_ty = node.output_type.clone();
+    let reduced_i64 = TensorType {
+        dims: reduced_ty.dims.clone(),
+        precision: Prim::Int64,
+    };
+    let reduced_bool = TensorType {
+        dims: reduced_ty.dims.clone(),
+        precision: Prim::Bool,
+    };
+    let original_size = RtDim::InputAxis {
+        tensor: 1,
+        axis: crate::dag::RtAxis::Lit(i32::try_from(axis).expect("rank fits i32")),
+    };
+    let expand = |dag: &mut Dag, value: NodeId, output_type: TensorType| {
+        dag.add_node(
+            RiscOp::Expand {
+                axis,
+                size: original_size.clone(),
+            },
+            vec![value, x],
+            output_type,
+            None,
+        )
+    };
+
+    let expanded_extreme = expand(dag, node.id, input_ty.clone());
+    let expanded_g = expand(dag, g, input_ty.clone());
+    let tie_mask = tier2::lower_eq(dag, x, expanded_extreme, &input_ty, None);
+    let tie_count = dag.add_node(
+        RiscOp::Count { axes: vec![axis] },
+        vec![tie_mask],
+        reduced_i64.clone(),
+        None,
+    );
+    let tie_count_float = dag.add_node(
+        RiscOp::Cast {
+            new_precision: input_ty.precision,
+        },
+        vec![tie_count],
+        reduced_ty.clone(),
+        None,
+    );
+    let expanded_tie_count = expand(dag, tie_count_float, input_ty.clone());
+    let tie_share = dag.add_node(
+        RiscOp::Div,
+        vec![expanded_g, expanded_tie_count],
+        input_ty.clone(),
+        None,
+    );
+    let zero = dag.add_node(
+        RiscOp::synth_const(input_ty.precision, 0.0),
+        vec![],
+        input_ty.clone(),
+        None,
+    );
+    dag.add_shape_dep(zero, x);
+    let non_nan_dx = dag.add_node(
+        RiscOp::Where,
+        vec![tie_mask, tie_share, zero],
+        input_ty.clone(),
+        None,
+    );
+
+    let nan_mask = tier2::lower_neq(dag, x, x, &input_ty, None);
+    let nan_f32 = dag.add_node(
+        RiscOp::Cast {
+            new_precision: Prim::F32,
+        },
+        vec![nan_mask],
+        TensorType {
+            dims: input_ty.dims.clone(),
+            precision: Prim::F32,
+        },
+        None,
+    );
+    let first_nan_index = dag.add_node(
+        RiscOp::Argmax { axis },
+        vec![nan_f32],
+        reduced_i64.clone(),
+        None,
+    );
+    let mut slice_dims = input_ty.dims.clone();
+    slice_dims[axis] = DimInfo::Lit(1);
+    let first_nan_index = dag.add_node(
+        RiscOp::Expand {
+            axis,
+            size: RtDim::Lit(1),
+        },
+        vec![first_nan_index],
+        TensorType {
+            dims: slice_dims.clone(),
+            precision: Prim::Int64,
+        },
+        None,
+    );
+    let nan_g = dag.add_node(
+        RiscOp::Expand {
+            axis,
+            size: RtDim::Lit(1),
+        },
+        vec![g],
+        TensorType {
+            dims: slice_dims,
+            precision: input_ty.precision,
+        },
+        None,
+    );
+    let nan_count = dag.add_node(
+        RiscOp::Count { axes: vec![axis] },
+        vec![nan_mask],
+        reduced_i64.clone(),
+        None,
+    );
+    let zero_count = dag.add_node(
+        RiscOp::synth_const(Prim::Int64, 0.0),
+        vec![],
+        reduced_i64,
+        None,
+    );
+    dag.add_shape_dep(zero_count, nan_count);
+    let has_nan = dag.add_node(
+        RiscOp::Compare(ComparisonKind::Gt),
+        vec![nan_count, zero_count],
+        reduced_bool,
+        None,
+    );
+    let expanded_has_nan = expand(
+        dag,
+        has_nan,
+        TensorType {
+            dims: input_ty.dims.clone(),
+            precision: Prim::Bool,
+        },
+    );
+    let nan_dx = dag.add_node(
+        RiscOp::ScatterElements { axis },
+        vec![zero, first_nan_index, nan_g],
+        input_ty.clone(),
+        None,
+    );
+    let dx = dag.add_node(
+        RiscOp::Where,
+        vec![expanded_has_nan, nan_dx, non_nan_dx],
+        input_ty,
+        None,
+    );
+    Some(vec![(x, dx)])
 }
 
 fn inverse_permutation(axes: &[usize]) -> Vec<usize> {
@@ -4018,27 +4135,9 @@ mod tests {
         let vals = eval_tensor(&grad_result.dag, &inputs).unwrap();
         let grad = &vals[&grad_result.grad_nodes[&x]];
 
-        // With ties, eq mask gives 1 for ALL elements equal to max.
-        // Column 0: both rows are 3 (the max), so both get gradient 1.
-        // Column 1: row 0 is 3 (the max), row 1 is 1, so only row 0 gets gradient.
-        // Expected: [[1, 1], [1, 0]]
-        //
-        // BUT: The gradient sum for column 0 is 2, not 1! This means
-        // the gradient is INFLATED when there are ties. The correct subgradient
-        // should only assign gradient to ONE element per reduction, not all ties.
-        let _expected_if_all_ties = [1.0, 1.0, 1.0, 0.0];
-        let grad_col0 = grad.to_f64_lossy_vec()[0] + grad.to_f64_lossy_vec()[2]; // should be 1.0 but will be 2.0
-        eprintln!(
-            "FINDING: max_reduce with ties: gradient = {:?}, column 0 sum = {grad_col0}",
-            grad.to_f64_lossy_vec()
-        );
-        if (grad_col0 - 2.0).abs() < 1e-6 {
-            eprintln!(
-                "CONFIRMED: max_reduce gradient is DOUBLED when elements tie. \
-                 The eq mask gives 1 to ALL tied elements, but the gradient should \
-                 only flow to one element (or be divided among tied elements)."
-            );
-        }
+        // Column 0 has two equal maxima, so each receives 1/2. Column 1
+        // has one selected maximum, so it receives the full cotangent.
+        assert_eq!(grad.to_f64_lossy_vec(), vec![0.5, 1.0, 0.5, 0.0]);
     }
 
     #[test]
@@ -4644,12 +4743,12 @@ mod tests {
             matches!(
                 err,
                 AdError::NotSupported {
-                    op: "argmax",
+                    op: "argmax_reduce",
                     reason: AdRejectionReason::IntegerIndexOutput,
                 }
             ),
             "argmax must be rejected with structured AdError::NotSupported \
-             {{ op: \"argmax\", reason: IntegerIndexOutput }}; got: {err:?}"
+             {{ op: \"argmax_reduce\", reason: IntegerIndexOutput }}; got: {err:?}"
         );
     }
 
@@ -4684,12 +4783,12 @@ mod tests {
             matches!(
                 err,
                 AdError::NotSupported {
-                    op: "argmin",
+                    op: "argmin_reduce",
                     reason: AdRejectionReason::IntegerIndexOutput,
                 }
             ),
             "argmin must be rejected with structured AdError::NotSupported \
-             {{ op: \"argmin\", reason: IntegerIndexOutput }}; got: {err:?}"
+             {{ op: \"argmin_reduce\", reason: IntegerIndexOutput }}; got: {err:?}"
         );
     }
 

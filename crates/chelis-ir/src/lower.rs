@@ -410,37 +410,6 @@ fn bare_var_name(expr: &Expr) -> Option<String> {
     Some(name.clone())
 }
 
-/// Synthesize `(app {} (var {} fname) <operand> <axis>)` — one stage of the
-/// chelis#339 variadic named-axis reduction desugar. `sum(x, seq, head)`
-/// lowers as the documented composition `sum(sum(x, head), seq)`: each
-/// synthesized 2-arg stage resolves its named axis against its own operand's
-/// dims, so the result is order-insensitive.
-fn synth_reduction_app(fname: &str, operand: Expr, axis: Expr, app_span: Span) -> Expr {
-    let zero_span = Span::new(0, 0);
-    let callee = Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::Var), zero_span),
-                Expr::Map(Metadata::default(), zero_span),
-                Expr::Atom(Atom::Name(fname.to_string()), zero_span),
-            ],
-        },
-        zero_span,
-    );
-    Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::App), zero_span),
-                Expr::Map(Metadata::default(), zero_span),
-                callee,
-                operand,
-                axis,
-            ],
-        },
-        app_span,
-    )
-}
-
 fn expr_diagnostic_location(expr: &Expr) -> (Option<Span>, Option<String>) {
     (Some(expr.span()), expr.span_id().map(ToOwned::to_owned))
 }
@@ -2076,15 +2045,50 @@ impl LocalAscriptionBindingRegion {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TensorCallsiteSpecialization {
+    /// Checker-owned identities used while lowering the concrete body. These
+    /// are safe to compose across nested retained invocations; authored names
+    /// are declaration-local and deliberately excluded.
+    precision_substitutions: UnordMap<String, Prim>,
+    rank_substitutions: UnordMap<String, Vec<DimInfo>>,
+    dim_axis_positions: UnordMap<String, (usize, DimInfo)>,
+    /// Checked plus authored aliases used only to rebuild the current
+    /// declaration's parameter/result contracts.
+    claim_precision_substitutions: UnordMap<String, Prim>,
+    claim_rank_substitutions: UnordMap<String, Vec<DimInfo>>,
+}
+
+#[derive(Clone, Debug)]
 pub struct SubexprLoweringContext {
     program_types: Arc<BTreeMap<String, TensorType>>,
     program_defs: Arc<BTreeMap<String, Expr>>,
     program_signatures: Arc<BTreeMap<String, Expr>>,
     local_tensor_ascriptions: Arc<Vec<chelis_types::CheckedLocalTensorAscription>>,
+    tensor_specialization: TensorCallsiteSpecialization,
 }
 
 impl SubexprLoweringContext {
+    pub(crate) fn with_tensor_callsite_specialization(
+        &self,
+        specialization: TensorCallsiteSpecialization,
+    ) -> Self {
+        let mut tensor_specialization = self.tensor_specialization.clone();
+        tensor_specialization
+            .precision_substitutions
+            .merge(specialization.precision_substitutions);
+        tensor_specialization
+            .rank_substitutions
+            .merge(specialization.rank_substitutions);
+        tensor_specialization
+            .dim_axis_positions
+            .merge(specialization.dim_axis_positions);
+        Self {
+            tensor_specialization,
+            ..self.clone()
+        }
+    }
+
     pub fn new(
         checked_types: UnordMap<String, Expr>,
         definitions: UnordMap<String, Expr>,
@@ -2419,6 +2423,7 @@ pub(crate) fn prepare_subexpr_lowering_context(
         program_defs,
         program_signatures,
         local_tensor_ascriptions: Arc::new(Vec::new()),
+        tensor_specialization: TensorCallsiteSpecialization::default(),
     }
 }
 
@@ -2689,6 +2694,12 @@ pub(crate) fn try_lower_staged_host_region(
             LinearityInfo::default(),
         );
         ctx.local_tensor_ascriptions = context.local_tensor_ascriptions.clone();
+        ctx.prec_substitutions = context
+            .tensor_specialization
+            .precision_substitutions
+            .clone();
+        ctx.rank_substitutions = context.tensor_specialization.rank_substitutions.clone();
+        ctx.dim_axis_positions = context.tensor_specialization.dim_axis_positions.clone();
         ctx.host_program = Some(program);
         ctx.host_stage_status = status.clone();
         ctx.literal_result_claim_ownership = options.literal_result_claim_ownership;
@@ -2840,6 +2851,12 @@ fn lower_subexpr_program_inner_impl(
         LinearityInfo::default(),
     );
     ctx.local_tensor_ascriptions = context.local_tensor_ascriptions.clone();
+    ctx.prec_substitutions = context
+        .tensor_specialization
+        .precision_substitutions
+        .clone();
+    ctx.rank_substitutions = context.tensor_specialization.rank_substitutions.clone();
+    ctx.dim_axis_positions = context.tensor_specialization.dim_axis_positions.clone();
     #[cfg(feature = "lowering-trace")]
     {
         ctx.trace = trace.clone();
@@ -3225,7 +3242,7 @@ fn rank_axis_binder_key(rank: &str, axis: usize) -> String {
     format!("{INTERNAL_RANK_AXIS_BINDER_PREFIX}{rank}:{axis}")
 }
 
-fn extent_binder_label(binder: &str) -> String {
+pub(crate) fn extent_binder_label(binder: &str) -> String {
     let Some(rest) = binder.strip_prefix(INTERNAL_RANK_AXIS_BINDER_PREFIX) else {
         return binder.to_owned();
     };
@@ -3235,23 +3252,44 @@ fn extent_binder_label(binder: &str) -> String {
     format!("{rank}[{axis}]")
 }
 
-/// Strip a leading `(t-ref {} ...)` wrapper and classify a raw tensor-type
-/// formal's dim slots in order (Spread/Named/Other), excluding the trailing
-/// precision child. Returns `None` when the expr is not a `(t-tensor ...)` type
-/// (so a non-tensor or malformed formal contributes no slots). The borrow
-/// wrapper is irrelevant to rank/anchor analysis, mirroring
-/// [`extract_precision_var_name`].
-fn tensor_formal_dim_slots(expr: &Expr) -> Option<Vec<DimSlot>> {
-    let stripped = match expr.carrier() {
-        ExprCarrier::DecodedNode(DeepTag::TRef, _, children) => children.first()?,
+/// Remove transparent type-expression shells while preserving the one
+/// underlying carrier that owns rank and precision syntax.
+///
+/// Checked callable metadata can wrap a parameter in both a legacy metadata
+/// expression and a borrow. Eval classifies those parameters as tensors before
+/// calling this module, so every tensor reader here must consume the same
+/// normalized carrier rather than letting one reader accept a wrapper that a
+/// later reader rejects.
+fn strip_transparent_type_wrappers(expr: &Expr) -> Option<&Expr> {
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::TRef, _, children) => {
+            children.first().and_then(strip_transparent_type_wrappers)
+        }
+        ExprCarrier::MetadataExpression(meta) => strip_transparent_type_wrappers(&meta.expr),
         ExprCarrier::DecodedNode(_, _, _)
         | ExprCarrier::StructuralList(_)
         | ExprCarrier::UndecodableHead(_, _, _)
         | ExprCarrier::Atom(_)
         | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_)
-        | ExprCarrier::MalformedLegacyList(_) => expr,
-    };
+        | ExprCarrier::MalformedLegacyList(_) => Some(expr),
+    }
+}
+
+fn normalized_tensor_type_expr(expr: &Expr) -> Option<&Expr> {
+    let stripped = strip_transparent_type_wrappers(expr)?;
+    matches!(
+        stripped.carrier(),
+        ExprCarrier::DecodedNode(DeepTag::TTensor, _, _)
+    )
+    .then_some(stripped)
+}
+
+/// Classify a normalized tensor formal's dim slots in order
+/// (Spread/Named/Other), excluding the trailing precision child. Returns
+/// `None` when the expression has no tensor carrier, so a scalar or malformed
+/// formal contributes no slots.
+fn tensor_formal_dim_slots(expr: &Expr) -> Option<Vec<DimSlot>> {
+    let stripped = normalized_tensor_type_expr(expr)?;
     let children = match stripped.carrier() {
         ExprCarrier::DecodedNode(DeepTag::TTensor, _, children) => children,
         ExprCarrier::DecodedNode(_, _, _)
@@ -3262,7 +3300,9 @@ fn tensor_formal_dim_slots(expr: &Expr) -> Option<Vec<DimSlot>> {
         | ExprCarrier::MetadataExpression(_)
         | ExprCarrier::MalformedLegacyList(_) => return None,
     };
-    if children.len() < 2 {
+    // A rank-zero tensor has exactly one child: its precision. Reject only a
+    // malformed carrier with no precision child; there need not be a dim.
+    if children.is_empty() {
         return None;
     }
     let dim_nodes = &children[..children.len() - 1];
@@ -3647,16 +3687,7 @@ fn tensor_prec_substitutions(
 /// parameter is treated the same as `tensor[..., p]` for substitution
 /// purposes — the borrow is irrelevant to precision monomorphization.
 fn extract_precision_var_name(expr: &Expr) -> Option<String> {
-    let stripped = match expr.carrier() {
-        ExprCarrier::DecodedNode(DeepTag::TRef, _, children) => children.first()?,
-        ExprCarrier::DecodedNode(_, _, _)
-        | ExprCarrier::StructuralList(_)
-        | ExprCarrier::UndecodableHead(_, _, _)
-        | ExprCarrier::Atom(_)
-        | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_)
-        | ExprCarrier::MalformedLegacyList(_) => expr,
-    };
+    let stripped = normalized_tensor_type_expr(expr)?;
     let kids = match stripped.carrier() {
         ExprCarrier::DecodedNode(DeepTag::TTensor, _, children) => children,
         ExprCarrier::DecodedNode(_, _, _)
@@ -3687,16 +3718,7 @@ fn extract_precision_var_name(expr: &Expr) -> Option<String> {
 
 /// Binder name from a bare scalar `(t-var {} p)` type (#1544).
 fn extract_scalar_precision_var_name(expr: &Expr) -> Option<String> {
-    let stripped = match expr.carrier() {
-        ExprCarrier::DecodedNode(DeepTag::TRef, _, children) => children.first()?,
-        ExprCarrier::DecodedNode(_, _, _)
-        | ExprCarrier::StructuralList(_)
-        | ExprCarrier::UndecodableHead(_, _, _)
-        | ExprCarrier::Atom(_)
-        | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_)
-        | ExprCarrier::MalformedLegacyList(_) => expr,
-    };
+    let stripped = strip_transparent_type_wrappers(expr)?;
     exact_type_variable_name(stripped).map(str::to_string)
 }
 
@@ -3720,17 +3742,7 @@ fn extract_scalar_precision_var_name(expr: &Expr) -> Option<String> {
 /// The caller binds the returned `tN` to that parameter's concrete actual
 /// precision.
 fn formal_param_type_var_name(expr: &Expr) -> Option<String> {
-    // Strip a leading `(t-ref {} ...)` borrow wrapper.
-    let stripped = match expr.carrier() {
-        ExprCarrier::DecodedNode(DeepTag::TRef, _, children) => children.first()?,
-        ExprCarrier::DecodedNode(_, _, _)
-        | ExprCarrier::StructuralList(_)
-        | ExprCarrier::UndecodableHead(_, _, _)
-        | ExprCarrier::Atom(_)
-        | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_)
-        | ExprCarrier::MalformedLegacyList(_) => expr,
-    };
+    let stripped = strip_transparent_type_wrappers(expr)?;
     // Bare `(t-var tN)`: the whole param type is one inference var.
     let bare_var_children = match stripped.carrier() {
         ExprCarrier::DecodedNode(DeepTag::TVar, _, children) => Some(children),
@@ -4091,6 +4103,299 @@ fn activation_rank_substitutions(
     substitutions
 }
 
+/// Actualize one authored tensor result contract at a concrete call site.
+///
+/// This is the host/evaluator counterpart of the ordinary DAG inliner's
+/// activation setup.  It deliberately derives rank-spread widths and tensor
+/// precision from declared parameter types paired with checked actual types;
+/// the result value is not evidence for its own obligation.  Rebuilding the
+/// result through [`authored_tensor_claim_type`] then turns axes contributed
+/// by a rank spread back into binder identities, so concrete dimensions learned
+/// from an actual never become literal result claims.  Authored literal axes
+/// stay literal and therefore shift naturally around an expanded spread.
+pub fn actualize_authored_tensor_result_claim(
+    actualization_formals: &[Option<Expr>],
+    authored_formals: &[Option<Expr>],
+    actual_args: &[TensorType],
+    authored_result: &Expr,
+) -> Result<TensorType, String> {
+    tensor_callsite_specialization(actualization_formals, authored_formals, actual_args)?
+        .actualize_authored_tensor(authored_result)
+}
+
+/// Actualize the authored tensor parameters of one concrete invocation.
+///
+/// Unlike result-claim actualization, parameter actualization retains every
+/// authored named dimension (including the activation-local axes contributed
+/// by a rank spread).  [`crate::host::SignatureEntryPlan`] can therefore build
+/// the declaration's literal and repeated-name obligations from these types
+/// while the separately supplied runtime shapes remain the observed values.
+/// Concrete extents learned from an actual are never promoted into a declared
+/// entry obligation.
+pub fn actualize_authored_tensor_parameters(
+    actualization_formals: &[Option<Expr>],
+    authored_formals: &[Option<Expr>],
+    actual_args: &[TensorType],
+) -> Result<Vec<TensorType>, String> {
+    let specialization =
+        tensor_callsite_specialization(actualization_formals, authored_formals, actual_args)?;
+    authored_formals
+        .iter()
+        .map(|formal| {
+            specialization.actualize_authored_tensor(
+                formal.as_ref().ok_or_else(|| {
+                    "parameter actualization is missing a tensor formal".to_string()
+                })?,
+            )
+        })
+        .collect()
+}
+
+/// Resolve the tensor type variables owned by one concrete invocation.
+///
+/// The same validated map drives both the private host-to-DAG specialization
+/// handoff and authored result-claim rebuilding. Keeping one authority here
+/// prevents the executable body and its delayed result obligation from
+/// disagreeing about a rank spread or precision binder.
+pub(crate) fn tensor_callsite_specialization(
+    actualization_formals: &[Option<Expr>],
+    authored_formals: &[Option<Expr>],
+    actual_args: &[TensorType],
+) -> Result<TensorCallsiteSpecialization, String> {
+    if actualization_formals.len() != authored_formals.len()
+        || actualization_formals.len() != actual_args.len()
+    {
+        return Err(format!(
+            "result-claim actualization lost positional alignment: {} checked formals, {} \
+             authored formals, {} tensor actuals",
+            actualization_formals.len(),
+            authored_formals.len(),
+            actual_args.len()
+        ));
+    }
+
+    let dim_axis_positions = tensor_dim_axis_positions(actualization_formals, actual_args);
+    // The ordinary lowering substitution helpers are intentionally tolerant:
+    // speculative reads may drop an unresolved rank spread and duplicate
+    // variables are protected only by a debug assertion. Result-claim
+    // metadata has no later body node that can repair such a guess. Validate
+    // every formal binding here so this public helper is fallible in release
+    // builds too, including after an ambiguous anchored split. A rank binder
+    // fixes the number and identity of spread axes, not their runtime extents:
+    // equal-width runs share the first binding and the signature-entry plan
+    // remains responsible for comparing their observed sizes.
+    let mut checked_rank_bindings: UnordMap<String, Vec<DimInfo>> = UnordMap::new();
+    let mut authored_rank_bindings: UnordMap<String, Vec<DimInfo>> = UnordMap::new();
+    for ((formal, authored), actual) in actualization_formals
+        .iter()
+        .zip(authored_formals)
+        .zip(actual_args)
+    {
+        let (Some(formal), Some(authored)) = (formal, authored) else {
+            return Err("result-claim actualization is missing a tensor formal".to_string());
+        };
+        let formal_spreads = tensor_formal_dim_slots(formal)
+            .ok_or_else(|| "result-claim actualization received a non-tensor formal".to_string())?
+            .into_iter()
+            .filter_map(|slot| match slot {
+                DimSlot::Spread(name) => Some(name),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let authored_spreads = tensor_formal_dim_slots(authored)
+            .ok_or_else(|| "result-claim actualization received a non-tensor formal".to_string())?
+            .into_iter()
+            .filter_map(|slot| match slot {
+                DimSlot::Spread(name) => Some(name),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if formal_spreads.len() != authored_spreads.len() {
+            return Err(format!(
+                "result-claim actualization cannot align {} checked rank spreads with {} authored rank spreads",
+                formal_spreads.len(),
+                authored_spreads.len()
+            ));
+        }
+        let bindings =
+            try_extract_rank_var_bindings(formal, &actual.dims, &dim_axis_positions, true)
+                .map_err(|error| error.message().to_string())?;
+        for (name, authored_name) in formal_spreads.into_iter().zip(authored_spreads) {
+            let Some((_, run)) = bindings.iter().find(|(bound, _)| bound == &name) else {
+                return Err(format!(
+                    "result-claim actualization could not resolve rank spread `{name}`"
+                ));
+            };
+            match checked_rank_bindings.entry(name.clone()) {
+                chelis_unord::Entry::Occupied(previous) if previous.get().len() != run.len() => {
+                    return Err(format!(
+                        "result-claim actualization found conflicting bindings for rank spread `{name}`"
+                    ));
+                }
+                chelis_unord::Entry::Occupied(_) => {}
+                chelis_unord::Entry::Vacant(slot) => {
+                    slot.insert(run.clone());
+                }
+            }
+            match authored_rank_bindings.entry(authored_name.clone()) {
+                chelis_unord::Entry::Occupied(previous) if previous.get().len() != run.len() => {
+                    return Err(format!(
+                        "result-claim actualization found conflicting bindings for authored rank spread `{authored_name}`"
+                    ));
+                }
+                chelis_unord::Entry::Occupied(_) => {}
+                chelis_unord::Entry::Vacant(slot) => {
+                    slot.insert(run.clone());
+                }
+            }
+        }
+    }
+    for (name, checked) in checked_rank_bindings.to_sorted() {
+        if let Some(authored) = authored_rank_bindings.get(name)
+            && authored.len() != checked.len()
+        {
+            return Err(format!(
+                "result-claim actualization found conflicting checked/authored rank bindings for `{name}`"
+            ));
+        }
+    }
+    let rank_substitutions = checked_rank_bindings.clone();
+    let mut claim_rank_substitutions = checked_rank_bindings;
+    claim_rank_substitutions.merge(authored_rank_bindings);
+    for authored in authored_formals.iter().flatten() {
+        let authored_spreads = tensor_formal_dim_slots(authored)
+            .ok_or_else(|| "result-claim actualization received a non-tensor formal".to_string())?
+            .into_iter()
+            .filter_map(|slot| match slot {
+                DimSlot::Spread(name) => Some(name),
+                _ => None,
+            });
+        for name in authored_spreads {
+            if !claim_rank_substitutions.contains_key(&name) {
+                return Err(format!(
+                    "result-claim actualization could not resolve authored rank spread `{name}`"
+                ));
+            }
+        }
+    }
+    let checked_precision_substitutions =
+        tensor_prec_substitutions(actualization_formals, actual_args);
+    let authored_precision_substitutions = tensor_prec_substitutions(authored_formals, actual_args);
+    for (name, checked) in checked_precision_substitutions.to_sorted() {
+        if let Some(authored) = authored_precision_substitutions.get(name)
+            && authored != checked
+        {
+            return Err(format!(
+                "result-claim actualization found conflicting precision bindings for `{name}`"
+            ));
+        }
+    }
+    for (formals, label) in [
+        (actualization_formals, "checked"),
+        (authored_formals, "authored"),
+    ] {
+        let mut seen = UnordMap::new();
+        for (formal, actual) in formals.iter().zip(actual_args) {
+            let Some(formal) = formal else {
+                continue;
+            };
+            let Some(name) = formal_param_type_var_name(formal) else {
+                continue;
+            };
+            if let Some(previous) = seen.insert(name.clone(), actual.precision)
+                && previous != actual.precision
+            {
+                return Err(format!(
+                    "result-claim actualization found ambiguous {label} precision binding for `{name}`"
+                ));
+            }
+        }
+    }
+    let precision_substitutions = checked_precision_substitutions.clone();
+    let mut claim_precision_substitutions = checked_precision_substitutions;
+    claim_precision_substitutions.merge(authored_precision_substitutions);
+    Ok(TensorCallsiteSpecialization {
+        precision_substitutions,
+        rank_substitutions,
+        dim_axis_positions,
+        claim_precision_substitutions,
+        claim_rank_substitutions,
+    })
+}
+
+impl TensorCallsiteSpecialization {
+    /// Add precision evidence carried by non-tensor parameters of the same
+    /// invocation. A scalar `p` can specialize a tensor result's element
+    /// precision even when no tensor formal exists. Checked identities extend
+    /// executable body lowering; authored identities remain contract-local.
+    pub(crate) fn with_precision_evidence(
+        mut self,
+        checked: UnordMap<String, Prim>,
+        authored: UnordMap<String, Prim>,
+    ) -> Result<Self, String> {
+        for (name, precision) in checked.to_sorted() {
+            if let Some(existing) = self.precision_substitutions.get(name)
+                && existing != precision
+            {
+                return Err(format!(
+                    "result-claim actualization found conflicting checked precision evidence for `{name}`"
+                ));
+            }
+            self.precision_substitutions
+                .insert(name.clone(), *precision);
+            self.claim_precision_substitutions
+                .insert(name.clone(), *precision);
+        }
+        for (name, precision) in authored.to_sorted() {
+            if let Some(existing) = self.claim_precision_substitutions.get(name)
+                && existing != precision
+            {
+                return Err(format!(
+                    "result-claim actualization found conflicting authored precision evidence for `{name}`"
+                ));
+            }
+            self.claim_precision_substitutions
+                .insert(name.clone(), *precision);
+        }
+        Ok(self)
+    }
+
+    pub(crate) fn actualize_authored_tensor(
+        &self,
+        authored_result: &Expr,
+    ) -> Result<TensorType, String> {
+        let Some(slots) = tensor_formal_dim_slots(authored_result) else {
+            return Err("the authored result claim is not a tensor type".to_string());
+        };
+        for name in slots.into_iter().filter_map(|slot| match slot {
+            DimSlot::Spread(name) => Some(name),
+            _ => None,
+        }) {
+            if !self.claim_rank_substitutions.contains_key(&name) {
+                return Err(format!(
+                    "result-claim actualization could not resolve result rank spread `{name}`"
+                ));
+            }
+        }
+        if let Some(name) = extract_precision_var_name(authored_result)
+            && !self.claim_precision_substitutions.contains_key(&name)
+        {
+            return Err(format!(
+                "result-claim actualization could not resolve result precision `{name}`"
+            ));
+        }
+        let tensor_expr = normalized_tensor_type_expr(authored_result)
+            .ok_or_else(|| "the authored result claim is not a tensor type".to_string())?;
+        let actualized = LowerCtx::try_extract_tensor_type_with_subst(
+            tensor_expr,
+            &self.claim_precision_substitutions,
+            &self.claim_rank_substitutions,
+        )
+        .ok_or_else(|| "the authored result claim is not a concrete tensor type".to_string())?;
+        authored_tensor_claim_type(authored_result, &actualized, &self.claim_rank_substitutions)
+    }
+}
+
 /// Bind each rank-var spread in a (possibly anchored, Tier-3) tensor-type
 /// formal to the run of the actual's concrete dims it covers, located by the
 /// named anchors between spreads — the lowering twin of the checker's
@@ -4110,17 +4415,31 @@ fn activation_rank_substitutions(
 /// recovered from the fixed position a concrete-rank caller recorded. This is
 /// the rank-spread analogue of the #388 recovery in
 /// [`LowerCtx::resolve_reduce_axis`]; both rely on the same map.
-fn extract_rank_var_bindings(
+enum RankBindingError {
+    Internal(String),
+    Fatal(String),
+}
+
+impl RankBindingError {
+    fn message(&self) -> &str {
+        match self {
+            Self::Internal(message) | Self::Fatal(message) => message,
+        }
+    }
+}
+
+fn try_extract_rank_var_bindings(
     expr: &Expr,
     actual_dims: &[DimInfo],
     dim_axis_positions: &UnordMap<String, (usize, DimInfo)>,
-) -> Vec<(String, Vec<DimInfo>)> {
+    allow_single_spread_width: bool,
+) -> Result<Vec<(String, Vec<DimInfo>)>, RankBindingError> {
     let Some(slots) = tensor_formal_dim_slots(expr) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
 
     if !slots.iter().any(|s| matches!(s, DimSlot::Spread(_))) {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     // Walk the slots against the actual dims, exactly as the checker's
@@ -4132,12 +4451,42 @@ fn extract_rank_var_bindings(
     let mut out: Vec<(String, Vec<DimInfo>)> = Vec::new();
     let mut gi = 0usize;
     let mut ri = 0usize;
+    let spread_count = slots
+        .iter()
+        .filter(|slot| matches!(slot, DimSlot::Spread(_)))
+        .count();
     while ri < slots.len() {
         if gi > n {
-            return out;
+            return Err(RankBindingError::Internal(format!(
+                "rank formal consumes more axes than its rank-{n} actual"
+            )));
         }
         match &slots[ri] {
             DimSlot::Spread(name) => {
+                // At a direct function-entry actualization boundary, one
+                // spread has a unique width even when the checked actual has
+                // erased every authored axis name: rank minus the fixed slots.
+                // Ordinary lowering keeps its stricter name/extent relocation
+                // behavior because an intervening reorder can make structural
+                // position stale. The result-claim caller passes `true` only
+                // for the eagerly prepared interface value itself.
+                if allow_single_spread_width && spread_count == 1 {
+                    let trailing_fixed = slots[ri + 1..].len();
+                    let Some(split) = n.checked_sub(trailing_fixed) else {
+                        return Err(RankBindingError::Internal(format!(
+                            "rank formal consumes more axes than its rank-{n} actual"
+                        )));
+                    };
+                    if split < gi {
+                        return Err(RankBindingError::Internal(format!(
+                            "rank formal consumes more axes than its rank-{n} actual"
+                        )));
+                    }
+                    out.push((name.clone(), actual_dims[gi..split].to_vec()));
+                    gi = split;
+                    ri += 1;
+                    continue;
+                }
                 let rest = &slots[ri + 1..];
                 match rest.iter().position(|s| !matches!(s, DimSlot::Spread(_))) {
                     Some(0) => {
@@ -4146,11 +4495,9 @@ fn extract_rank_var_bindings(
                             // The checker requires a named anchor after a spread,
                             // so this is unreachable for a checked program; fail
                             // loud in debug, bail in release.
-                            debug_assert!(
-                                false,
-                                "rank-spread anchor is not a named dim at lowering"
-                            );
-                            return out;
+                            return Err(RankBindingError::Internal(
+                                "rank-spread anchor is not a named dim at lowering".to_string(),
+                            ));
                         };
                         // Primary: locate the anchor by name in the (possibly
                         // still-symbolic) actual dims, exactly as the forward
@@ -4183,18 +4530,14 @@ fn extract_rank_var_bindings(
                                 // must not be absorbed by the C host-fallback
                                 // path into a generic grad-unsupported message.
                                 AnchorRecovery::AmbiguousAfterReorder => {
-                                    raise_fatal_lowering_error(
-                                        format!(
-                                            "rank-spread anchor `{anchor}` cannot be located: \
-                                             call-site monomorphization erased the name and an \
-                                             intervening axis-reorder (e.g. `permute`) left its \
-                                             recorded position stale; its recorded extent appears \
-                                             at multiple axes of the monomorphized actual. \
-                                             Refusing to split at a possibly-wrong axis (chelis#549)"
-                                        ),
-                                        None,
-                                        None,
-                                    )
+                                    return Err(RankBindingError::Fatal(format!(
+                                        "rank-spread anchor `{anchor}` cannot be located: \
+                                         call-site monomorphization erased the name and an \
+                                         intervening axis-reorder (e.g. `permute`) left its \
+                                         recorded position stale; its recorded extent appears \
+                                         at multiple axes of the monomorphized actual. \
+                                         Refusing to split at a possibly-wrong axis (chelis#549)"
+                                    )));
                                 }
                                 // Anchor absent by name AND not soundly
                                 // recoverable by position — the checker located it
@@ -4202,14 +4545,12 @@ fn extract_rank_var_bindings(
                                 // for a checked program. Fail loud (fail-closed)
                                 // rather than the former release-silent
                                 // `return out` partial binding.
-                                AnchorRecovery::Unrecorded => raise_lowering_error(
-                                    format!(
+                                AnchorRecovery::Unrecorded => {
+                                    return Err(RankBindingError::Internal(format!(
                                         "rank-spread anchor `{anchor}` absent from monomorphized \
                                          actual: internal rank-monomorphization error"
-                                    ),
-                                    None,
-                                    None,
-                                ),
+                                    )));
+                                }
                             },
                         };
                         out.push((name.clone(), actual_dims[gi..split].to_vec()));
@@ -4224,8 +4565,9 @@ fn extract_rank_var_bindings(
                     // Two adjacent spreads — the undetermined split is rejected at
                     // unification, so this never reaches a checked backend.
                     _ => {
-                        debug_assert!(false, "two adjacent rank spreads at lowering");
-                        return out;
+                        return Err(RankBindingError::Internal(
+                            "two adjacent rank spreads at lowering".to_string(),
+                        ));
                     }
                 }
             }
@@ -4235,7 +4577,24 @@ fn extract_rank_var_bindings(
             }
         }
     }
-    out
+    if gi > n {
+        return Err(RankBindingError::Internal(format!(
+            "rank formal consumes more axes than its rank-{n} actual"
+        )));
+    }
+    Ok(out)
+}
+
+fn extract_rank_var_bindings(
+    expr: &Expr,
+    actual_dims: &[DimInfo],
+    dim_axis_positions: &UnordMap<String, (usize, DimInfo)>,
+) -> Vec<(String, Vec<DimInfo>)> {
+    match try_extract_rank_var_bindings(expr, actual_dims, dim_axis_positions, false) {
+        Ok(bindings) => bindings,
+        Err(RankBindingError::Fatal(message)) => raise_fatal_lowering_error(message, None, None),
+        Err(RankBindingError::Internal(message)) => raise_lowering_error(message, None, None),
+    }
 }
 
 pub fn top_level_expr_is_lowered(
@@ -7543,7 +7902,17 @@ struct LowerCtx<'program> {
     /// dependency so its guard executes only when that source branch is
     /// selected. Unlike [`Self::random_path_condition`], this is present in
     /// ordinary tensor DAGs as well as transform/helper subcontexts.
-    local_ascription_path_condition: Option<NodeId>,
+    /// The conjunction of the enclosing `if` branch predicates, or `None`
+    /// at the top level. Maintained unconditionally by `lower_if` and
+    /// restored on exit.
+    ///
+    /// Two consumers: a local tensor ascription activates only on its path,
+    /// and (chelis#1464) an [05-OP-68] guard fires only on its path. The
+    /// DAG is evaluated eagerly in topological order, so a guard node that
+    /// did not conjoin this would be checked even when the forward program
+    /// takes the sibling branch — the exact thing
+    /// `spec/06-transformations.md` §2.10.1 forbids.
+    branch_path_condition: Option<NodeId>,
     local_unit_refinements: BTreeMap<(NodeId, usize), NodeId>,
     /// Unique scalar carriers for computed reshape targets. They are Copy
     /// until a returned axis acquires a claim, then checked in place before
@@ -7562,6 +7931,11 @@ struct LowerCtx<'program> {
     /// each draw consume the handled stream only when its executed path is
     /// active at runtime.
     random_path_condition: Option<NodeId>,
+    /// chelis#1464: depth of `if` branches currently being lowered. A
+    /// `fail(...)` lowered at depth > 0 that `lower_if` did NOT recognize
+    /// directly is an INDIRECT trap (behind a helper call or a `let`); it
+    /// has no [05-OP-68] guard and must not fall back to a placeholder.
+    if_branch_depth: usize,
     execution: Option<crate::evaluation::ExecutionMetadata>,
     execution_scope: crate::evaluation::ScopeId,
     resource_policy: crate::evaluation::ResourcePolicy,
@@ -7700,7 +8074,7 @@ impl<'program> LowerCtx<'program> {
             literal_result_claim_ownership: LiteralResultClaimOwnership::Legacy,
             local_tensor_ascriptions: Arc::new(Vec::new()),
             local_ascription_tokens: Vec::new(),
-            local_ascription_path_condition: None,
+            branch_path_condition: None,
             reshape_targets: BTreeMap::new(),
             local_unit_refinements: BTreeMap::new(),
             invocation_witnesses: Vec::new(),
@@ -7712,6 +8086,7 @@ impl<'program> LowerCtx<'program> {
             random_seed: None,
             random_counter: 0,
             random_path_condition: None,
+            if_branch_depth: 0,
             execution: None,
             execution_scope: crate::evaluation::ScopeId(0),
             resource_policy: crate::evaluation::ResourcePolicy::Legacy,
@@ -7778,6 +8153,85 @@ impl<'program> LowerCtx<'program> {
             return ty.dims.clone();
         }
         from_input
+    }
+
+    fn lower_variadic_value_reduction_stage(
+        &mut self,
+        name: &str,
+        input: NodeId,
+        axis: usize,
+        app_span: Span,
+    ) -> NodeId {
+        let input_ty = self
+            .dag
+            .get(input)
+            .expect("variadic reduction input exists")
+            .output_type
+            .clone();
+        let output_ty = TensorType {
+            dims: Self::reduction_out_dims(&input_ty.dims, &Self::default_type(), axis),
+            precision: input_ty.precision,
+        };
+        match name {
+            "sum" => {
+                let op = RiscOp::sum_default(axis, input_ty.precision)
+                    .expect("checked variadic sum dtype");
+                let RiscOp::Sum { accumulator, .. } = op else {
+                    unreachable!("sum_default returns Sum");
+                };
+                let sum = self.dag.add_node(
+                    op,
+                    vec![input],
+                    TensorType {
+                        dims: output_ty.dims.clone(),
+                        precision: accumulator,
+                    },
+                    self.current_span_id.clone(),
+                );
+                if accumulator == output_ty.precision {
+                    sum
+                } else {
+                    self.dag.add_node(
+                        RiscOp::Cast {
+                            new_precision: output_ty.precision,
+                        },
+                        vec![sum],
+                        output_ty,
+                        self.current_span_id.clone(),
+                    )
+                }
+            }
+            "mean" => {
+                let parent_span = self.current_span_id.clone();
+                let node = tier2::lower_mean(
+                    &mut self.dag,
+                    input,
+                    axis,
+                    &input_ty,
+                    parent_span.as_deref(),
+                );
+                self.attach_reuse_hint(node, app_span, &[input])
+            }
+            "max_reduce" => self.dag.add_node(
+                RiscOp::MaxReduce { axis },
+                vec![input],
+                output_ty,
+                self.current_span_id.clone(),
+            ),
+            "min_reduce" => self.dag.add_node(
+                RiscOp::MinReduce { axis },
+                vec![input],
+                output_ty,
+                self.current_span_id.clone(),
+            ),
+            "prod_reduce" => self.dag.add_node(
+                RiscOp::ProdReduce { axis },
+                vec![input],
+                output_ty,
+                self.current_span_id.clone(),
+            ),
+            _ => unreachable!("guarded variadic value reduction"),
+        }
     }
 
     /// Choose the output `TensorType` for an elementwise op whose shape
@@ -9649,7 +10103,7 @@ impl<'program> LowerCtx<'program> {
                             }
                             for (_axis, token) in &claims {
                                 let latest_dependency = self
-                                    .local_ascription_path_condition
+                                    .branch_path_condition
                                     .map_or(token.0, |activation| token.0.max(activation.0));
                                 if owner.0 <= latest_dependency {
                                     let ty = self
@@ -9668,7 +10122,7 @@ impl<'program> LowerCtx<'program> {
                                 }
                                 self.dag.add_shape_dep(owner, *token);
                             }
-                            if let Some(activation) = self.local_ascription_path_condition
+                            if let Some(activation) = self.branch_path_condition
                                 && !claims.is_empty()
                             {
                                 self.dag.add_shape_dep(owner, activation);
@@ -13116,10 +13570,38 @@ impl<'program> LowerCtx<'program> {
                 // chelis#776: statically resolve each bound (through neg /
                 // float-cast wrappers) or fail loudly — never the silent [0,1)
                 // default that dropped a wrapped or computed range in codegen.
-                let low = self.resolve_static_f64_arg(&args[1], "uniform_like", "low bound") as f32
-                    as f64;
-                let high = self.resolve_static_f64_arg(&args[2], "uniform_like", "high bound")
-                    as f32 as f64;
+                // chelis#2316: resolve through the TYPED fold, the same path
+                // `dropout` uses. The legacy f64 extractor read a literal's
+                // value without its declared dtype and lost an enclosing
+                // cast's target, so a bound spelled with suffixes or cast
+                // chains was baked at the wrong value. `static_rate` keeps an
+                // integer leaf exact through i64 and a typed leaf at its
+                // source dtype until the checked cast, then finalizes ONCE
+                // here -- `[04-LIT-1]`'s "SHALL NOT pass through f64 first".
+                //
+                // f32 is the target because the whole `uniform_like` pipeline
+                // bakes f32 bounds (`chelis_uniform_sample_f32`, and the f64
+                // sampler widens the same f32 bits). Changing that is a
+                // separate decision, not this one.
+                //
+                // The typed fold resolves an integer-target cast to an exact
+                // value, but chelis#776 deliberately refuses to let a
+                // dtype-changing cast launder a bound, and
+                // `uniform_like_integer_cast_bound_fails_loudly` pins that.
+                // Keep the refusal here, where a `cast` is always one the
+                // author wrote: a Deep `lit` carries its dtype in `type:`
+                // metadata, so this lane never sees a synthesized cast. The
+                // host lane must NOT copy this guard -- there a literal's
+                // declared dtype IS a synthesized cast ([04-LIT-1]), and
+                // rejecting it broke `cast(3i32, f32)` in round 2.
+                self.reject_integer_target_bound_cast(&args[1], "low bound");
+                self.reject_integer_target_bound_cast(&args[2], "high bound");
+                let low = self
+                    .resolve_static_scalar_arg(&args[1], Prim::F32, "uniform_like", "low bound")
+                    .as_f64_lossy();
+                let high = self
+                    .resolve_static_scalar_arg(&args[2], Prim::F32, "uniform_like", "high bound")
+                    .as_f64_lossy();
                 let (seed, activation) = if self.execution.is_some() {
                     (
                         self.random_seed.unwrap_or(COMPILED_HANDLER_OWNED_SEED),
@@ -13615,10 +14097,11 @@ impl<'program> LowerCtx<'program> {
             // and we must insert a Cast back to the operand precision
             // to recover the user-facing tensor type.
             // chelis#339 Part 2: variadic named-axis reduction
-            // (`sum(x, seq, head)`, spec §4.5.3). Desugar to the documented
-            // composition — innermost stage reduces the LAST listed axis —
-            // and recurse; each 2-arg stage resolves its named axis against
-            // its own operand's dims, so the result is order-insensitive.
+            // (`sum(x, seq, head)`, spec §4.5.3). Resolve every name against
+            // the original operand, sort by descending original position,
+            // then lower that canonical single-axis composition directly.
+            // Removing a higher axis leaves every remaining lower original
+            // position unchanged.
             // Only bare-name axes reach this arm (the checker rejects
             // positional integers in the variadic form); anything else falls
             // through to the 2-arg arms or the generic fallback.
@@ -13665,11 +14148,36 @@ impl<'program> LowerCtx<'program> {
             "sum" | "mean" | "max_reduce" | "min_reduce" | "prod_reduce"
                 if args.len() >= 3 && args[1..].iter().all(|a| bare_var_name(a).is_some()) =>
             {
-                let mut expr = args[0].clone();
-                for axis in args[1..].iter().rev() {
-                    expr = synth_reduction_app(func_name, expr, axis.clone(), app_span);
+                let input = self.lower_expr_node(&args[0], "variadic named-axis input");
+                let original_rank = self
+                    .dag
+                    .get(input)
+                    .expect("variadic reduction input exists")
+                    .output_type
+                    .dims
+                    .len();
+                let mut axes = args[1..]
+                    .iter()
+                    .map(|axis| self.resolve_reduce_axis(axis, input, original_rank, func_name))
+                    .collect::<Vec<_>>();
+                axes.sort_unstable_by(|left, right| right.cmp(left));
+                if axes.windows(2).any(|pair| pair[0] == pair[1]) {
+                    raise_fatal_lowering_error(
+                        format!(
+                            "{func_name} variadic named axes must resolve uniquely against the \
+                             original operand"
+                        ),
+                        Some(app_span),
+                        self.current_span_id.clone(),
+                    );
                 }
-                self.lower_expr_node(&expr, "variadic named-axis reduction")
+                let mut result = input;
+                for position in axes {
+                    result = self.lower_variadic_value_reduction_stage(
+                        func_name, result, position, app_span,
+                    );
+                }
+                result
             }
             "sum" if args.len() == 2 => {
                 let x = self.lower_expr_node(&args[0], "sum input");
@@ -14549,6 +15057,31 @@ impl<'program> LowerCtx<'program> {
             // order; `lower_if` ties the placeholder's shape to the sibling
             // branch via a shape-dep).
             "fail" => {
+                // chelis#1464: `lower_if` converts a DIRECT `fail(...)`
+                // branch into an [05-OP-68] guard before reaching here, so a
+                // `fail` arriving at `if`-branch depth is an INDIRECT one —
+                // behind a helper call, or after a `let`. It has no guard,
+                // and the placeholder below would be selected as the branch
+                // value exactly as in the original defect. Reject instead.
+                if self.if_branch_depth > 0 {
+                    return self.reject_indirect_branch_fail(app_span);
+                }
+                // Depth 0 means no enclosing `if` branch. OUTSIDE a
+                // transform that is a whole-value abort the host lane owns:
+                // it traps correctly and this placeholder is discarded.
+                //
+                // INSIDE a transform it is NOT covered, and this is a known
+                // hole rather than a justified absence: a `fail` that never
+                // passes through a branch is unguarded by construction,
+                // because the depth counter is the only gate. `grad` over
+                // `sum(add(x, fail("m")), 0i32)` still returns the
+                // placeholder's zero as an operand — chelis#2371.
+                //
+                // Closing it needs a signal the lowerer does not have, namely
+                // whether the DAG being built will actually be consumed. The
+                // depth counter cannot supply it: an earlier version of this
+                // comment claimed the only depth-0 arrivals left were genuine
+                // whole-value aborts, which is false.
                 // The message argument is NOT lowered. It is a string, and
                 // the DAG has no string vocabulary: the nodes it produced
                 // were discarded here and dropped by DCE, so their only
@@ -17815,12 +18348,19 @@ impl<'program> LowerCtx<'program> {
     /// the statically-resolvable, value-carrying wrappers a numeric literal
     /// can arrive in: a `(lit ...)` node, a `neg(...)` of an extractable value,
     /// and a `cast(..., <float prim>)` of an extractable value. A float-target
-    /// cast preserves the numeric value (the f32/f64 sampler narrows the same
-    /// bits in every lane), so it is folded through; an integer-target cast
-    /// *changes* the value by truncation, so it is NOT folded — it returns
-    /// `None` and the caller fails loudly rather than baking a guessed
-    /// truncation into codegen. Any other form (a runtime variable, arithmetic,
-    /// a `shape()` read) also returns `None`.
+    /// cast is folded through its target's rounding via
+    /// `chelis_types::dtype_semantics::round_float_bound`, which is the single
+    /// definition of that rounding; an integer-target cast *changes* the value
+    /// by truncation, so it is NOT folded — it returns `None` and the caller
+    /// fails loudly rather than baking a guessed truncation into codegen. Any
+    /// other form (a runtime variable, arithmetic, a `shape()` read) also
+    /// returns `None`.
+    ///
+    /// chelis#2316: this used to claim "a float-target cast preserves the
+    /// numeric value" and recurse straight through. That is true only for
+    /// targets that cannot narrow the value it already holds; f16 and bf16
+    /// round, so the fold kept the innermost literal and the compiled lanes
+    /// sampled an interval the source never declared.
     ///
     /// chelis#776: this used to see through neither `cast` nor `neg`, so a
     /// wrapped bound fell to a caller `unwrap_or(default)` and silently
@@ -17849,8 +18389,15 @@ impl<'program> LowerCtx<'program> {
                         let target = Self::try_extract_prim(target)
                             .or_else(|| static_controls::type_prim(target, substitutions));
                         match target {
+                            // chelis#2316: honour the cast's TARGET dtype.
+                            // Recursing straight through kept the innermost
+                            // literal, which is only correct when the target
+                            // cannot narrow; `cast(cast(x, f16), f32)` then
+                            // baked an unrounded bound both compiled lanes
+                            // agreed on and `eval` did not.
                             Some(prim) if prim.is_float() => {
-                                Self::extract_f64_value(inner, substitutions)
+                                let inner = Self::extract_f64_value(inner, substitutions)?;
+                                chelis_types::dtype_semantics::round_float_bound(prim, inner)
                             }
                             _ => None,
                         }
@@ -17871,11 +18418,37 @@ impl<'program> LowerCtx<'program> {
                     // its last child, 3.0 (chelis#794). Composite semantics
                     // belong to ordinary lowering; this static extractor
                     // rejects them instead of guessing or dropping effects.
-                    DeepTag::Lit => match kids.first() {
-                        Some(Expr::Atom(Atom::Float(f), _)) => Some(*f),
-                        Some(Expr::Atom(Atom::Int(n), _)) => Some(*n as f64),
-                        _ => None,
-                    },
+                    DeepTag::Lit => {
+                        let raw = match kids.first() {
+                            Some(Expr::Atom(Atom::Float(f), _)) => *f,
+                            Some(Expr::Atom(Atom::Int(n), _)) => *n as f64,
+                            _ => return None,
+                        };
+                        // chelis#2316 round 2: a `lit` carries its OWN declared
+                        // dtype, and the evaluator finalizes the literal at that
+                        // dtype before any enclosing cast rounds it again.
+                        // Returning the raw `Atom::Float` skipped that step, so
+                        // `cast(cast(0.015632629860192537f32, f16), f32)` rounded
+                        // f64 -> f16 in ONE step here while eval rounded
+                        // f64 -> f32 -> f16 in two. The host lane never had the
+                        // bug because `HostExprKind::Float` already holds the
+                        // finalized value, so fixing only the cast arm left the
+                        // two compiled lanes DISAGREEING -- the lane split
+                        // `assign_uniform_like` warns about, where template
+                        // foldability becomes observable again (chelis#2120).
+                        //
+                        // An integer-typed literal is exact at its own dtype, so
+                        // finalizing it changes nothing; an unresolved type leaves
+                        // the raw value, matching the pre-existing disposition.
+                        match expr_type_metadata(expr)
+                            .and_then(|ty| static_controls::type_prim(ty, substitutions))
+                        {
+                            Some(prim) if prim.is_float() => {
+                                chelis_types::dtype_semantics::round_float_bound(prim, raw)
+                            }
+                            _ => Some(raw),
+                        }
+                    }
                     _ => None,
                 }
             }
@@ -17929,6 +18502,48 @@ impl<'program> LowerCtx<'program> {
         })
     }
 
+    /// Raise chelis#776's loud refusal when a `uniform_like` bound contains a
+    /// cast whose target is not a float, at ANY depth.
+    ///
+    /// The typed fold would resolve such a cast to an exact value, but a
+    /// dtype-changing cast must not launder the bound contract. Every `cast`
+    /// this lane sees is author-written: a Deep `lit` carries its declared
+    /// dtype as `type:` metadata, never as a wrapper node. The host lane must
+    /// NOT copy this guard — there a literal's declared dtype IS a synthesized
+    /// cast ([04-LIT-1]), and refusing it broke `cast(3i32, f32)`.
+    ///
+    /// Depth matters because this is positioned as a CHECKER-INDEPENDENT
+    /// backstop: `uniform_like_integer_cast_bound_fails_loudly` reaches it
+    /// through `parse_and_lower_unchecked`. The base fold returned `None` for
+    /// an integer target at any depth; an outermost-only guard would quietly
+    /// narrow that to one level while still being described as a backstop.
+    /// `is_static_numeric_bound` also rejects these on every user ingress, so
+    /// this is defence in depth, not the only gate.
+    fn reject_integer_target_bound_cast(&self, expr: &Expr, arg_desc: &str) {
+        let Some((tag, _, kids)) = stamped_parts(expr) else {
+            return;
+        };
+        if tag == DeepTag::Cast
+            && let Some(target) = kids.get(1)
+            && Self::try_extract_prim(target)
+                .or_else(|| static_controls::type_prim(target, &self.prec_substitutions))
+                .is_some_and(|prim| !prim.is_float())
+        {
+            raise_fatal_lowering_error(
+                format!(
+                    "`uniform_like` requires a statically-resolvable {arg_desc}; a cast to a non-float dtype cannot carry one (Chelis-Lang/chelis#776)"
+                ),
+                Some(expr.span()),
+                expr.span_id().map(ToOwned::to_owned),
+            )
+        }
+        // Walking every child is the conservative reading: an extra visit can
+        // only find a cast this rule already forbids.
+        for kid in kids {
+            self.reject_integer_target_bound_cast(kid, arg_desc);
+        }
+    }
+
     /// Resolve a statically-known scalar and finalize it once at `target`.
     /// Unlike the legacy f64 extractor, an integer leaf remains exact through
     /// i64 and a typed leaf retains its source dtype until the checked cast.
@@ -17950,7 +18565,11 @@ impl<'program> LowerCtx<'program> {
         builtin: &'static str,
         arg_desc: &str,
     ) -> chelis_types::ScalarValue {
-        let value = match if builtin == "dropout" {
+        // chelis#2316: `uniform_like` joins `dropout` on the typed fold. Both
+        // bake a statically-resolved scalar into the emitted kernel, and both
+        // need a literal's declared dtype honoured before an enclosing cast
+        // rounds it again.
+        let value = match if builtin == "dropout" || builtin == "uniform_like" {
             self.static_rate(expr)
         } else {
             extract_numeric_leaf(expr)
@@ -18848,6 +19467,239 @@ impl<'program> LowerCtx<'program> {
         }
     }
 
+    /// chelis#1464: lower an `if` arm with `branch_path_condition` extended
+    /// by that arm's own predicate, then restore it.
+    ///
+    /// `lower_if`'s ordinary path does this inline for both arms. The
+    /// guarded-abort path lowers only the surviving arm, so it needs the
+    /// same extension rather than the enclosing path alone.
+    fn lower_branch_with_path(
+        &mut self,
+        branch: &Expr,
+        cond: NodeId,
+        on_true: bool,
+    ) -> LoweredValue {
+        let saved = self.branch_path_condition;
+        let path_ty = TensorType {
+            dims: Vec::new(),
+            precision: Prim::Bool,
+        };
+        let predicate = if on_true {
+            cond
+        } else {
+            self.dag.add_node(
+                RiscOp::Logical(LogicalKind::Not),
+                vec![cond],
+                path_ty.clone(),
+                self.current_span_id.clone(),
+            )
+        };
+        self.branch_path_condition = Some(match saved {
+            Some(parent) => self.dag.add_node(
+                RiscOp::Logical(LogicalKind::And),
+                vec![parent, predicate],
+                path_ty,
+                self.current_span_id.clone(),
+            ),
+            None => predicate,
+        });
+        self.if_branch_depth += 1;
+        let lowered = self.lower_expr(branch);
+        self.if_branch_depth -= 1;
+        self.branch_path_condition = saved;
+        lowered
+    }
+
+    /// chelis#1464 / [05-OP-68]: the predicate under which the guard must
+    /// actually abort — the branch predicate AND the enclosing path.
+    ///
+    /// Without the conjunction, a guard nested inside another runtime `if`
+    /// aborts even when the outer condition selects the sibling, because
+    /// the DAG evaluates every node regardless of which branch the forward
+    /// program takes. That turned programs with a well-defined value into
+    /// hard aborts in both lanes, and was visible as a static/runtime split:
+    /// the same program returned a value when the outer condition folded
+    /// (chelis#620 pruning removed the guard) and aborted when it did not.
+    ///
+    /// At the top level there is no enclosing path, so the branch predicate
+    /// is used directly and no nodes are synthesized.
+    fn guard_fire_condition(&mut self, cond: NodeId, trap_on_true: bool) -> (NodeId, bool) {
+        let Some(path) = self.branch_path_condition else {
+            return (cond, trap_on_true);
+        };
+        let path_ty = TensorType {
+            dims: Vec::new(),
+            precision: Prim::Bool,
+        };
+        // `trap_on_true` exists to avoid synthesizing a negation when the
+        // `fail` is the else arm; once the path is conjoined the firing
+        // predicate is explicit, so it collapses to `true`.
+        let branch_predicate = if trap_on_true {
+            cond
+        } else {
+            self.dag.add_node(
+                RiscOp::Logical(LogicalKind::Not),
+                vec![cond],
+                path_ty.clone(),
+                self.current_span_id.clone(),
+            )
+        };
+        let fires = self.dag.add_node(
+            RiscOp::Logical(LogicalKind::And),
+            vec![path, branch_predicate],
+            path_ty,
+            self.current_span_id.clone(),
+        );
+        (fires, true)
+    }
+
+    /// chelis#1464: a compile-time-resolvable `if` that selects its
+    /// `fail(...)` branch, inside a transform.
+    ///
+    /// The program aborts on every execution, so there is no value for
+    /// `grad`/`vmap` to produce and no fallback for an [05-OP-68] guard to
+    /// carry. Rejecting says that; substituting a placeholder value said
+    /// the program succeeded and returned zero.
+    fn reject_static_taken_fail(&self, elems: &[Expr], message: &str) -> NodeId {
+        raise_lowering_error(
+            // Deliberately describes the `if`, not the function. The rejection
+            // is a lowering-time decision, so it also fires when this `if`
+            // sits inside a runtime branch the forward program never takes --
+            // in which case the function as a whole does NOT abort on every
+            // execution, and saying so would be false.
+            format!(
+                "this `if` always selects its `fail({message:?})` branch, so it has no \
+                 value on any path and cannot be differentiated or batched \
+                 (chelis#1464). Move the abort outside the transform, or make the \
+                 branch total."
+            ),
+            elems.first().map(Expr::span),
+            self.current_span_id.clone(),
+        )
+    }
+
+    /// chelis#1464 / [05-OP-68]: `fail("")` as an `if` branch. The atom
+    /// makes an empty message a type error and forbids synthesizing one, so
+    /// there is no message to carry and no guard to build.
+    fn reject_empty_fail_message(&self, elems: &[Expr]) -> NodeId {
+        raise_lowering_error(
+            "`fail(\"\")` has no message to report. A guarded abort carries its message \
+             as part of its identity and never synthesizes or defaults one ([05-OP-68]); \
+             give the `fail` a non-empty message.",
+            elems.first().map(Expr::span),
+            self.current_span_id.clone(),
+        )
+    }
+
+    /// chelis#1464: a `fail(...)` inside an `if` branch that `lower_if`
+    /// could not convert to an [05-OP-68] guard, because it is not the
+    /// branch expression itself.
+    fn reject_indirect_branch_fail(&self, app_span: Span) -> NodeId {
+        raise_lowering_error(
+            "`fail(...)` reached here as part of an `if` branch rather than as the branch \
+             itself, so it has no guarded-abort form and the DAG cannot represent it: a \
+             value DAG selects between branch VALUES and a placeholder would be returned \
+             in place of the trap (chelis#1464). Write `fail(\"...\")` directly as the \
+             branch, move the guard outside the transform, or make the branch total.",
+            Some(app_span),
+            self.current_span_id.clone(),
+        )
+    }
+
+    /// chelis#1464 / [05-OP-68]: build the guarded-abort node for an `if`
+    /// whose `trap_on_true` branch is a `fail(...)`.
+    ///
+    /// The result carries the fallback's exact type, so the guard is
+    /// type-transparent: every consumer downstream sees what it would have
+    /// seen had the branch been written without the guard.
+    fn guarded_fail_value(
+        &mut self,
+        cond: NodeId,
+        fallback: LoweredValue,
+        message: &str,
+        trap_on_true: bool,
+        elems: &[Expr],
+    ) -> LoweredValue {
+        // The fallback is the arm that is NOT the `fail`: when the guard
+        // traps on true the `fail` is the `then` arm, so the surviving value
+        // came from `else`.
+        let which = if trap_on_true { "else" } else { "then" };
+        let fallback = self.expect_runtime_if_branch(fallback, which, elems);
+        let (cond, trap_on_true) = self.guard_fire_condition(cond, trap_on_true);
+        let out_ty = self
+            .dag
+            .get(fallback)
+            .map(|node| node.output_type.clone())
+            .unwrap_or_else(Self::default_type);
+        LoweredValue::Node(self.dag.add_node(
+            RiscOp::GuardedFail {
+                message: message.to_string(),
+                trap_on_true,
+            },
+            vec![cond, fallback],
+            out_ty,
+            self.current_span_id.clone(),
+        ))
+    }
+
+    /// chelis#1464: both branches of a runtime `if` are `fail(...)`, so the
+    /// expression aborts on every path and has no value to produce.
+    fn reject_total_fail_if(&self, elems: &[Expr]) -> NodeId {
+        let span = elems.first().map(Expr::span);
+        raise_lowering_error(
+            "both branches of this `if` are `fail(...)`, so it has no value on any path. \
+             A transformed function must produce a value to differentiate or batch \
+             (chelis#1464). Move the abort outside the transform.",
+            span,
+            self.current_span_id.clone(),
+        )
+    }
+
+    /// chelis#1464: the authored message of a direct `fail("...")`
+    /// application, if `expr` is one.
+    ///
+    /// Recognized at the Deep level rather than after lowering, because
+    /// [`RiscOp::GuardedFail`] needs the message BEFORE the branch is
+    /// lowered, and because lowering `fail` for its value is exactly the
+    /// step that loses the trap.
+    ///
+    /// Deliberately shallow: it matches the direct application only. A
+    /// `fail` reached indirectly (through a helper call, or after a `let`)
+    /// is NOT silently accepted here — it falls through to the placeholder
+    /// arm in `lower_builtin_app`, which rejects at `if`-branch depth rather
+    /// than substituting a value.
+    fn fail_message_of(&self, expr: &Expr) -> Option<String> {
+        let (tag, _, kids) = stamped_parts(expr)?;
+        if tag != DeepTag::App {
+            return None;
+        }
+        let (callee_tag, _, callee_kids) = stamped_parts(kids.first()?)?;
+        if callee_tag != DeepTag::Var {
+            return None;
+        }
+        match callee_kids.first()? {
+            Expr::Atom(Atom::Name(name), _) if name == "fail" => {}
+            _ => return None,
+        }
+        // `fail` takes exactly one argument, a string. A non-literal message
+        // (`fail(string_concat(..))`) has no compile-time identity, so it is
+        // not recognized here and reaches the rejecting arm instead.
+        let (message_tag, _, message_kids) = stamped_parts(kids.get(1)?)?;
+        if message_tag != DeepTag::Lit {
+            return None;
+        }
+        match message_kids.first()? {
+            // An empty message is returned, not filtered out: [05-OP-68]
+            // makes it a type error, and the caller rejects it by name.
+            // Filtering it here sent `fail("")` to the indirect-`fail`
+            // diagnostic instead, which told the user to "write `fail(...)`
+            // directly as the branch" — which is exactly what they had
+            // written (chelis#1464 review, F-3).
+            Expr::Atom(Atom::Str(message), _) => Some(message.clone()),
+            _ => None,
+        }
+    }
+
     fn lower_if(&mut self, elems: &[Expr]) -> LoweredValue {
         let Some(cond_expr) = elems.get(2) else {
             raise_malformed_deep(
@@ -18888,7 +19740,77 @@ impl<'program> LowerCtx<'program> {
                 (else_expr, then_expr)
             };
             self.discard_local_ascription_tokens_in(untaken);
-            return self.lower_expr(selected);
+            // chelis#1464: when the SELECTED branch is the `fail(...)`, this
+            // `if` aborts unconditionally and has no value on any path. The
+            // guarded-abort form below needs a surviving arm to carry, and
+            // there is none: the sibling was pruned precisely because it is
+            // not executed.
+            //
+            // Before this check, the pruned `fail` was lowered at depth 0,
+            // reached the placeholder arm, and became a zero `Const` — the
+            // original chelis#1464 defect, surviving on the one path the
+            // guard never covered. `grad` over it returned 0.0 with exit 0
+            // in both lanes.
+            if let Some(message) = self.fail_message_of(selected) {
+                return LoweredValue::Node(self.reject_static_taken_fail(elems, &message));
+            }
+            // The selected branch is still an `if` BRANCH, so it is lowered
+            // at branch depth like every other arm. This path was the one
+            // exception, and the exception is what made chelis#1464's defect
+            // class reachable three separate ways: a `fail` arriving here
+            // indirectly — behind a helper call or a `let` body, where
+            // `fail_message_of` deliberately does not look — met neither the
+            // guard above nor the depth check in `lower_builtin_app`, and
+            // became a zero placeholder. Entering at depth closes the class
+            // rather than the individual route.
+            self.if_branch_depth += 1;
+            let lowered = self.lower_expr(selected);
+            self.if_branch_depth -= 1;
+            return lowered;
+        }
+
+        // chelis#1464 / [05-OP-68]: a `fail(...)` branch is a TRAP, not a
+        // value, so this `if` cannot lower to `Where` — `Where` selects
+        // between branch VALUES and would need something to select for the
+        // failing side. Emit the guard instead, keeping the abort in the
+        // graph where differentiation, batching, optimization and codegen
+        // all still see it.
+        //
+        // Only reached when the condition is genuinely runtime: a
+        // compile-time-resolvable condition already returned above, having
+        // lowered the taken branch alone.
+        let then_fail = self.fail_message_of(then_expr);
+        let else_fail = self.fail_message_of(else_expr);
+        if then_fail.as_deref() == Some("") || else_fail.as_deref() == Some("") {
+            return LoweredValue::Node(self.reject_empty_fail_message(elems));
+        }
+        match (&then_fail, &else_fail) {
+            // The surviving branch is still an `if` branch, so it is lowered
+            // at branch depth: an INDIRECT `fail` inside it has no guard of
+            // its own and must reject rather than reach the placeholder arm.
+            // Without this, the original defect survived in the sibling of
+            // the branch being fixed — `if c then fail("a") else boom(x)`
+            // returned a zero with exit 0.
+            (Some(message), None) => {
+                // The fallback is the ELSE arm, so it executes on
+                // `path AND NOT cond`. Entering it with that path is what
+                // makes a guard nested inside it fire in source order: a
+                // later guard must not pre-empt an earlier one that already
+                // decided the branch (chelis#1464).
+                let fallback = self.lower_branch_with_path(else_expr, cond, false);
+                return self.guarded_fail_value(cond, fallback, message, true, elems);
+            }
+            (None, Some(message)) => {
+                let fallback = self.lower_branch_with_path(then_expr, cond, true);
+                return self.guarded_fail_value(cond, fallback, message, false, elems);
+            }
+            (Some(_), Some(_)) => {
+                // Both branches abort, so the `if` has no value at all on any
+                // path. There is no fallback to carry and nothing downstream
+                // can legitimately consume the result.
+                return LoweredValue::Node(self.reject_total_fail_if(elems));
+            }
+            (None, None) => {}
         }
         if self.host_program.is_some() {
             self.host_stage_status
@@ -18899,11 +19821,11 @@ impl<'program> LowerCtx<'program> {
                 self.current_span_id.clone(),
             );
         }
-        let saved_local_path = self.local_ascription_path_condition;
+        let saved_branch_path = self.branch_path_condition;
         // Carry the selected path through arm lowering rather than guessing
         // from the arm's syntax: inlining can introduce a local claim only
         // after `lower_if` has entered the arm.
-        self.local_ascription_path_condition = Some(match saved_local_path {
+        self.branch_path_condition = Some(match saved_branch_path {
             Some(parent_path) => self.dag.add_node(
                 RiscOp::Logical(LogicalKind::And),
                 vec![parent_path, cond],
@@ -18929,7 +19851,9 @@ impl<'program> LowerCtx<'program> {
             );
             self.random_path_condition = Some(then_path);
         }
+        self.if_branch_depth += 1;
         let then_value = self.lower_expr(then_expr);
+        self.if_branch_depth -= 1;
         let then_node = self.expect_runtime_if_branch(then_value, "then", elems);
         if let Some(parent_path) = saved_random_path {
             let path_ty = TensorType {
@@ -18960,7 +19884,7 @@ impl<'program> LowerCtx<'program> {
             path_ty.clone(),
             self.current_span_id.clone(),
         );
-        self.local_ascription_path_condition = Some(match saved_local_path {
+        self.branch_path_condition = Some(match saved_branch_path {
             Some(parent_path) => self.dag.add_node(
                 RiscOp::Logical(LogicalKind::And),
                 vec![parent_path, not_cond],
@@ -18969,10 +19893,12 @@ impl<'program> LowerCtx<'program> {
             ),
             None => not_cond,
         });
+        self.if_branch_depth += 1;
         let else_value = self.lower_expr(else_expr);
+        self.if_branch_depth -= 1;
         let else_node = self.expect_runtime_if_branch(else_value, "else", elems);
         self.random_path_condition = saved_random_path;
-        self.local_ascription_path_condition = saved_local_path;
+        self.branch_path_condition = saved_branch_path;
         let stamped_out_ty = if let Some(Expr::Map(meta, _)) = elems.get(1) {
             self.type_from_meta(meta)
         } else {
@@ -20595,6 +21521,7 @@ mod tests {
             program_defs: Arc::new(BTreeMap::new()),
             program_signatures: Arc::new(BTreeMap::new()),
             local_tensor_ascriptions: Arc::new(Vec::new()),
+            tensor_specialization: TensorCallsiteSpecialization::default(),
         };
         let (dag, _, trace) = try_lower_subexpr_program_with_ordered_inputs_and_trace(
             &expr,
@@ -20899,6 +21826,7 @@ mod tests {
             program_defs: Arc::new(BTreeMap::new()),
             program_signatures: Arc::new(BTreeMap::new()),
             local_tensor_ascriptions: Arc::new(vec![ascription.clone()]),
+            tensor_specialization: TensorCallsiteSpecialization::default(),
         };
 
         for decoded in [&binding, &node] {
@@ -24488,6 +25416,387 @@ mod tests {
             ]),
             "rank var `r` must bind to the actual arg's full shape vector"
         );
+    }
+
+    #[test]
+    fn authored_result_claim_actualization_preserves_only_authored_literals() {
+        let checked = vec![Some(parse_type_expr(
+            "(t-ref {} (t-tensor {} (d-name {} extent) (d-name {} first) \
+             (d-rank {} r0) (t-var {} t0)))",
+        ))];
+        let authored = vec![Some(parse_type_expr(
+            "(t-ref {} (t-tensor {} (d-name {} extent) (d-name {} first) \
+             (d-rank {} rest) (t-var {} p)))",
+        ))];
+        let actuals = vec![TensorType {
+            dims: vec![
+                DimInfo::Lit(2),
+                DimInfo::Lit(4),
+                DimInfo::Lit(5),
+                DimInfo::Lit(6),
+            ],
+            precision: Prim::F64,
+        }];
+
+        for (result, expected) in [
+            (
+                "(t-tensor {} (d-lit {} 3) (d-name {} first) \
+                 (d-rank {} rest) (t-var {} p))",
+                vec![
+                    DimInfo::Lit(3),
+                    DimInfo::Named("first".into(), None),
+                    DimInfo::Named(rank_axis_binder_key("rest", 0), None),
+                    DimInfo::Named(rank_axis_binder_key("rest", 1), None),
+                ],
+            ),
+            (
+                "(t-tensor {} (d-name {} first) (d-rank {} rest) \
+                 (d-lit {} 3) (t-var {} p))",
+                vec![
+                    DimInfo::Named("first".into(), None),
+                    DimInfo::Named(rank_axis_binder_key("rest", 0), None),
+                    DimInfo::Named(rank_axis_binder_key("rest", 1), None),
+                    DimInfo::Lit(3),
+                ],
+            ),
+        ] {
+            let actualized = actualize_authored_tensor_result_claim(
+                &checked,
+                &authored,
+                &actuals,
+                &parse_type_expr(result),
+            )
+            .expect("call-site claim actualizes");
+            assert_eq!(actualized.precision, Prim::F64);
+            assert_eq!(actualized.dims, expected);
+            assert_eq!(
+                actualized
+                    .dims
+                    .iter()
+                    .filter(|dim| matches!(dim, DimInfo::Lit(_)))
+                    .count(),
+                1,
+                "literal actual dimensions are not imported as result claims"
+            );
+        }
+    }
+
+    #[test]
+    fn scalar_precision_evidence_actualizes_a_tensor_result_and_body_context() {
+        let mut checked = UnordMap::new();
+        checked.insert("t349".to_string(), Prim::F64);
+        let mut authored = UnordMap::new();
+        authored.insert("p".to_string(), Prim::F64);
+        let specialization = tensor_callsite_specialization(&[], &[], &[])
+            .expect("an invocation without tensor parameters has empty rank evidence")
+            .with_precision_evidence(checked, authored)
+            .expect("scalar parameter precision specializes the tensor result");
+
+        assert_eq!(
+            specialization.precision_substitutions.get("t349"),
+            Some(&Prim::F64),
+            "checked scalar evidence reaches fresh tensor-helper lowering contexts"
+        );
+        assert_eq!(
+            specialization
+                .actualize_authored_tensor(&parse_type_expr(
+                    "(t-tensor {} (d-name {} n) (t-var {} p))",
+                ))
+                .expect("authored scalar evidence actualizes the tensor result"),
+            TensorType {
+                dims: vec![DimInfo::Named("n".into(), None)],
+                precision: Prim::F64,
+            }
+        );
+    }
+
+    #[test]
+    fn authored_result_claim_actualization_rejects_missing_or_ambiguous_bindings() {
+        let concrete = TensorType {
+            dims: vec![DimInfo::Lit(2)],
+            precision: Prim::F32,
+        };
+
+        let missing_rank = actualize_authored_tensor_result_claim(
+            &[Some(parse_type_expr(
+                "(t-tensor {} (d-name {} x) (t-prim {} f32))",
+            ))],
+            &[Some(parse_type_expr(
+                "(t-tensor {} (d-name {} x) (t-prim {} f32))",
+            ))],
+            std::slice::from_ref(&concrete),
+            &parse_type_expr("(t-tensor {} (d-rank {} rest) (t-prim {} f32))"),
+        )
+        .expect_err("an unbound result rank spread must fail closed");
+        assert!(missing_rank.contains("result rank spread `rest`"));
+
+        let too_short_for_single_spread = actualize_authored_tensor_result_claim(
+            &[Some(parse_type_expr(
+                "(t-tensor {} (d-name {} first) (d-rank {} r0) \
+                 (d-name {} extent) (t-prim {} f32))",
+            ))],
+            &[Some(parse_type_expr(
+                "(t-tensor {} (d-name {} first) (d-rank {} rest) \
+                 (d-name {} extent) (t-prim {} f32))",
+            ))],
+            std::slice::from_ref(&concrete),
+            &parse_type_expr(
+                "(t-tensor {} (d-name {} first) (d-rank {} rest) \
+                 (d-lit {} 3) (t-prim {} f32))",
+            ),
+        )
+        .expect_err("one spread cannot consume a negative-width run");
+        assert!(
+            too_short_for_single_spread.contains("consumes more axes"),
+            "{too_short_for_single_spread}"
+        );
+
+        let missing_precision = actualize_authored_tensor_result_claim(
+            &[Some(parse_type_expr(
+                "(t-tensor {} (d-name {} x) (t-prim {} f32))",
+            ))],
+            &[Some(parse_type_expr(
+                "(t-tensor {} (d-name {} x) (t-prim {} f32))",
+            ))],
+            std::slice::from_ref(&concrete),
+            &parse_type_expr("(t-tensor {} (d-name {} x) (t-var {} p))"),
+        )
+        .expect_err("an unbound result precision must fail without panicking");
+        assert!(missing_precision.contains("result precision `p`"));
+
+        let shared_rank = parse_type_expr("(t-tensor {} (d-rank {} r) (t-prim {} f32))");
+        let conflicting_rank = actualize_authored_tensor_result_claim(
+            &[Some(shared_rank.clone()), Some(shared_rank.clone())],
+            &[Some(shared_rank.clone()), Some(shared_rank.clone())],
+            &[
+                concrete.clone(),
+                TensorType {
+                    dims: vec![DimInfo::Lit(2), DimInfo::Lit(3)],
+                    precision: Prim::F32,
+                },
+            ],
+            &shared_rank,
+        )
+        .expect_err("one rank binder cannot have two widths");
+        assert!(conflicting_rank.contains("conflicting bindings for rank spread `r`"));
+
+        let conflicting_authored_alias = actualize_authored_tensor_result_claim(
+            &[
+                Some(parse_type_expr(
+                    "(t-tensor {} (d-rank {} checked0) (t-prim {} f32))",
+                )),
+                Some(parse_type_expr(
+                    "(t-tensor {} (d-rank {} checked1) (t-prim {} f32))",
+                )),
+            ],
+            &[Some(shared_rank.clone()), Some(shared_rank.clone())],
+            &[
+                concrete.clone(),
+                TensorType {
+                    dims: vec![DimInfo::Lit(2), DimInfo::Lit(3)],
+                    precision: Prim::F32,
+                },
+            ],
+            &shared_rank,
+        )
+        .expect_err("two checked binders cannot alias one authored rank at different widths");
+        assert!(
+            conflicting_authored_alias
+                .contains("conflicting bindings for authored rank spread `r`"),
+            "{conflicting_authored_alias}"
+        );
+
+        let shared_precision = parse_type_expr("(t-tensor {} (d-name {} x) (t-var {} p))");
+        let conflicting_precision = actualize_authored_tensor_result_claim(
+            &[
+                Some(shared_precision.clone()),
+                Some(shared_precision.clone()),
+            ],
+            &[
+                Some(shared_precision.clone()),
+                Some(shared_precision.clone()),
+            ],
+            &[
+                concrete,
+                TensorType {
+                    dims: vec![DimInfo::Lit(2)],
+                    precision: Prim::F64,
+                },
+            ],
+            &shared_precision,
+        )
+        .expect_err("one precision binder cannot have two dtypes");
+        assert!(conflicting_precision.contains("ambiguous checked precision binding for `p`"));
+
+        let ambiguous_anchor = actualize_authored_tensor_result_claim(
+            &[
+                Some(parse_type_expr(
+                    "(t-tensor {} (d-name {} seq) (t-prim {} f32))",
+                )),
+                Some(parse_type_expr(
+                    "(t-tensor {} (d-rank {} pre) (d-name {} seq) \
+                     (d-rank {} post) (t-prim {} f32))",
+                )),
+            ],
+            &[
+                Some(parse_type_expr(
+                    "(t-tensor {} (d-name {} seq) (t-prim {} f32))",
+                )),
+                Some(parse_type_expr(
+                    "(t-tensor {} (d-rank {} before) (d-name {} seq) \
+                     (d-rank {} after) (t-prim {} f32))",
+                )),
+            ],
+            &[
+                TensorType {
+                    dims: vec![DimInfo::Lit(2)],
+                    precision: Prim::F32,
+                },
+                TensorType {
+                    dims: vec![DimInfo::Lit(2), DimInfo::Lit(2), DimInfo::Lit(3)],
+                    precision: Prim::F32,
+                },
+            ],
+            &parse_type_expr(
+                "(t-tensor {} (d-rank {} before) (d-name {} seq) \
+                 (d-rank {} after) (t-prim {} f32))",
+            ),
+        )
+        .expect_err("a duplicated anchor extent cannot choose a rank split");
+        assert!(
+            ambiguous_anchor.contains("recorded extent appears at multiple axes"),
+            "{ambiguous_anchor}"
+        );
+    }
+
+    #[test]
+    fn authored_parameter_actualization_binds_shared_spread_width_not_runtime_extents() {
+        let shared = parse_type_expr("(t-tensor {} (d-rank {} r) (t-prim {} f32))");
+        let formals = vec![Some(shared.clone()), Some(shared)];
+        let actuals = vec![
+            TensorType {
+                dims: vec![DimInfo::Lit(3), DimInfo::Lit(2)],
+                precision: Prim::F32,
+            },
+            TensorType {
+                dims: vec![DimInfo::Lit(2), DimInfo::Lit(7)],
+                precision: Prim::F32,
+            },
+        ];
+
+        let actualized = actualize_authored_tensor_parameters(&formals, &formals, &actuals)
+            .expect("equal rank widths actualize before runtime entry equality guards");
+        let expected = vec![
+            DimInfo::Named(rank_axis_binder_key("r", 0), None),
+            DimInfo::Named(rank_axis_binder_key("r", 1), None),
+        ];
+        assert_eq!(actualized[0].dims, expected);
+        assert_eq!(actualized[1].dims, expected);
+    }
+
+    #[test]
+    fn authored_parameter_actualization_normalizes_borrowed_tensor_formals() {
+        let borrowed = parse_type_expr("(t-ref {} (t-tensor {} (d-name {} n) (t-var {} p)))");
+        let concrete = TensorType {
+            dims: vec![DimInfo::Lit(2)],
+            precision: Prim::F64,
+        };
+        let actualized = actualize_authored_tensor_parameters(
+            &[Some(borrowed.clone())],
+            &[Some(borrowed)],
+            std::slice::from_ref(&concrete),
+        )
+        .expect("a transparent borrow wrapper preserves tensor actualization");
+        assert_eq!(
+            actualized,
+            vec![TensorType {
+                dims: vec![DimInfo::Named("n".into(), None)],
+                precision: Prim::F64,
+            }]
+        );
+
+        let borrowed_spread =
+            parse_type_expr("(t-ref {} (t-tensor {} (d-rank {} rest) (t-prim {} f32)))");
+        let mismatch = actualize_authored_tensor_parameters(
+            &[Some(borrowed_spread.clone()), Some(borrowed_spread.clone())],
+            &[Some(borrowed_spread.clone()), Some(borrowed_spread)],
+            &[
+                TensorType {
+                    dims: vec![DimInfo::Lit(2)],
+                    precision: Prim::F32,
+                },
+                TensorType {
+                    dims: vec![DimInfo::Lit(2), DimInfo::Lit(3)],
+                    precision: Prim::F32,
+                },
+            ],
+        )
+        .expect_err("a borrow wrapper must not hide a conflicting spread width");
+        assert!(mismatch.contains("conflicting bindings for rank spread `rest`"));
+    }
+
+    #[test]
+    fn authored_parameter_actualization_normalizes_metadata_wrapped_tensor_formals() {
+        let span = Span::new(0, 0);
+        let wrapped = |expr: Expr| {
+            Expr::MetaExpr(
+                chelis_deep::MetaExpr {
+                    metadata: Metadata::default(),
+                    expr: Box::new(expr),
+                },
+                span,
+            )
+        };
+        let checked = wrapped(parse_type_expr(
+            "(t-ref {} (t-tensor {} (d-name {} n) (t-var {} checked_p)))",
+        ));
+        let authored = wrapped(parse_type_expr(
+            "(t-ref {} (t-tensor {} (d-name {} n) (t-var {} p)))",
+        ));
+        let concrete = TensorType {
+            dims: vec![DimInfo::Lit(2)],
+            precision: Prim::F64,
+        };
+
+        let actualized = actualize_authored_tensor_parameters(
+            &[Some(checked)],
+            &[Some(authored)],
+            std::slice::from_ref(&concrete),
+        )
+        .expect("transparent metadata and borrow wrappers preserve tensor actualization");
+        assert_eq!(
+            actualized,
+            vec![TensorType {
+                dims: vec![DimInfo::Named("n".into(), None)],
+                precision: Prim::F64,
+            }]
+        );
+
+        let scalar = parse_type_expr("(t-prim {} f64)");
+        let error = actualize_authored_tensor_parameters(
+            &[Some(scalar.clone())],
+            &[Some(scalar)],
+            std::slice::from_ref(&concrete),
+        )
+        .expect_err("a scalar formal must not be reclassified as a tensor carrier");
+        assert!(error.contains("non-tensor formal"), "{error}");
+
+        let missing_precision = Expr::List(
+            List {
+                elements: vec![
+                    Expr::Atom(Atom::Tag(DeepTag::TTensor), span),
+                    Expr::Map(Metadata::default(), span),
+                ],
+            },
+            span,
+        );
+        let error = actualize_authored_tensor_parameters(
+            &[Some(missing_precision.clone())],
+            &[Some(missing_precision)],
+            std::slice::from_ref(&concrete),
+        )
+        .expect_err("a rank-zero tensor without its precision child is malformed");
+        assert!(error.contains("non-tensor formal"), "{error}");
     }
 
     /// chelis#373: `tensor_dim_axis_positions` records a fixed anchor offset

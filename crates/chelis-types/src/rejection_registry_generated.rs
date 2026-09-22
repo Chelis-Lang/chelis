@@ -168,6 +168,7 @@ pub(crate) const REGISTERED_SPEC_ATOMS: &[&str] = &[
     "[05-OP-65]",
     "[05-OP-66]",
     "[05-OP-67]",
+    "[05-OP-68]",
     "[05-OP-6]",
     "[05-OP-7]",
     "[05-OP-8]",
@@ -208,4 +209,6 @@ pub(crate) const REGISTERED_OPEN_ISSUES: &[u32] = &[
     1844,
     2266,
     2338,
+    2339,
+    2360,
 ];

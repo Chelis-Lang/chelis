@@ -1062,6 +1062,22 @@ execution, HIP structural admission, and the ignored real-HIP exact-bit matrix.
 A renamed or additional owner remains unclassified until it independently
 supplies the same final-form authority and execution contract.
 
+The #1281 exact C reduction cutover adds two more closed
+`backend-element-spelling` owners as final forms:
+`CEmitter::emit_mean_nonempty_guard` and
+`CEmitter::emit_reduce_extreme`. The former observes the lowered divisor in
+its declared storage/arithmetic width and enforces [05-OP-11]'s runtime-empty
+Domain trap before division. The latter implements [05-OP-12..13] selection at
+the declared arithmetic width while copying the selected source storage bits,
+including first-NaN and equal-value behavior. Neither owner accepts a raw dtype
+identifier or creates a public numeric carrier. The Phase 0 manifest binds both
+exact identities to the complete compiled-C
+`issue_1281_exact_reductions` suite; Phase 1 freezes that suite's current ten
+test identities, including every admitted storage width and runtime-empty
+negative controls. Renaming or splitting either owner requires a new
+final-authority classification and execution contract rather than transition
+debt.
+
 `NUMERIC_DEVICE_HELPERS` is a separate numeric final-form owner for the
 `uniform_like` sampler governed by [05-OP-8]. Splitting it from the common HIP
 device helpers does not transfer it into the typed-nonnumeric cohort. Its exact
@@ -1517,6 +1533,26 @@ reject an additional unregistered template; the selected-result eval/C corpus
 checks that the admitted frames execute at the producer with the required
 primitive attribution and effect order. No dtype, width or numbered semantic
 contract changes.
+
+Selected-result aggregate provenance adds two exact private metadata final
+forms in `chelis-backend-c/src/host_emit.rs`:
+`append_host_result_claim_checks` compares declared axes with tensor shape
+metadata, and `append_host_result_interface_origin_support` traverses typed
+List, Tuple, ADT and Option handles to rebuild per-field `load` origins at a
+genuine interface. Neither owner reads tensor element storage or changes a
+public carrier or ABI, so both are final authorities rather than Phase 4
+transition debt. Exact path/kind/owner registration, wrong-path/kind/owner
+negatives and the existing unregistered load/store mutation preserve the
+closed inventory. The Phase 0 execution leg binds them to C claim failures,
+aggregate and Option projection, interface ingress and repeated public-call
+arena lifetime. Nested `Cons` execution additionally requires an O(1)
+invocation-arena suffix view before both cloning and consuming List skips, so
+pattern lowering and direct immutable `skip` preserve the selected child
+without copying each remaining origin array or reading a consumed payload.
+The frozen foundation and
+active-debt rows therefore do not
+grow, and their reviewed digest stays fixed; only the code-derived final-form
+and execution manifest changes.
 
 The captured activation-claim comparison adds the private
 `load-store-template` owner, `CEmitter::emit_runtime_dim_sites` in
