@@ -15066,32 +15066,55 @@ impl<'program> LowerCtx<'program> {
                 if self.if_branch_depth > 0 {
                     return self.reject_indirect_branch_fail(app_span);
                 }
-                // Depth 0 means no enclosing `if` branch. OUTSIDE a
-                // transform that is a whole-value abort the host lane owns:
-                // it traps correctly and this placeholder is discarded.
+                // Depth 0 means no enclosing `if` branch, so this `fail` is
+                // reached unconditionally whenever the surrounding expression
+                // is evaluated at all.
                 //
-                // INSIDE a transform it is NOT covered, and this is a known
-                // hole rather than a justified absence: a `fail` that never
-                // passes through a branch is unguarded by construction,
-                // because the depth counter is the only gate. `grad` over
-                // `sum(add(x, fail("m")), 0i32)` still returns the
-                // placeholder's zero as an operand — chelis#2371.
+                // chelis#2371: it used to emit the bare placeholder below,
+                // which was harmless OUTSIDE a transform (the host lane owns
+                // the abort and this DAG is discarded) and silently wrong
+                // INSIDE one, where the fabricated zero became part of the
+                // answer — `grad` over `sum(add(x, fail("m")), 0i32)`
+                // returned 1.0 with exit 0 and no `chelis_fail` in the
+                // generated C.
                 //
-                // Closing it needs a signal the lowerer does not have, namely
-                // whether the DAG being built will actually be consumed. The
-                // depth counter cannot supply it: an earlier version of this
-                // comment claimed the only depth-0 arrivals left were genuine
-                // whole-value aborts, which is false.
-                // The message argument is NOT lowered. It is a string, and
-                // the DAG has no string vocabulary: the nodes it produced
-                // were discarded here and dropped by DCE, so their only
-                // effect was to push a `Prim::String` literal through
-                // `lower_lit`. Pre-#856 that smuggled a junk
-                // `Const { value: 0.0 }` typed `string` into the IR; with
-                // sealed payloads it hits `finalize_scalar`'s
-                // unreachable-by-construction panic and takes down any
-                // `grad`/`vmap` over a function containing `fail(...)`.
-                // Abort semantics (and the message) live in the host lane.
+                // The fix does not need the "is a transform consuming this
+                // DAG?" signal the lowerer lacks. Because the `fail` is
+                // unconditional here, an [05-OP-68] guard whose condition is
+                // a constant `true` is equivalent to it wherever the guard
+                // is reached: it fires and aborts with the authored message.
+                //
+                // Untransformed programs are unaffected for a reason worth
+                // stating precisely, because the previous comment here got
+                // its mechanism wrong and that is why this issue existed:
+                // they do not reach DAG lowering at all. The host lane owns
+                // an entry-level `fail` and emits the abort itself, and an
+                // untransformed tensor body stops at host emission before a
+                // DAG is built. Measured, not assumed: an untransformed
+                // `fail("")` battery is NOT rejected here, and the generated
+                // C carries a direct host-emitted `chelis_fail` — that is
+                // what shows the site is never reached. (The `examples/`
+                // corpus is byte-identical across this change too, but it
+                // contains no `fail` at all, so it cannot distinguish this
+                // change from any other; chelis#2384 review, FE.)
+                //
+                // The placeholder becomes the guard's fallback. It is
+                // unreachable whenever the guard is evaluated, but NOT
+                // unreachable in general: if the guard's result is never
+                // consumed, DCE removes the guard and the fallback is what
+                // remains. That is chelis#2368, and it is why this change
+                // does not close chelis#2371 on its own.
+                //
+                // The depth check above stays: at depth > 0 the `fail` is
+                // conditional on its branch, so an always-true guard would
+                // fire even when the branch is not taken.
+                // The message argument is NOT lowered as a value. It is a
+                // string, and the DAG has no string vocabulary: pre-#856 that
+                // smuggled a junk `Const { value: 0.0 }` typed `string` into
+                // the IR; with sealed payloads it hits `finalize_scalar`'s
+                // unreachable-by-construction panic. [05-OP-68] carries the
+                // message as part of the operation's identity instead, which
+                // is why it must be a literal here.
                 let dims = ty
                     .dims
                     .iter()
@@ -15100,13 +15123,48 @@ impl<'program> LowerCtx<'program> {
                         DimInfo::Named(_, None) => DimInfo::Named(String::new(), None),
                     })
                     .collect();
-                self.dag.add_node(
+                let fallback_ty = TensorType {
+                    dims,
+                    precision: ty.precision,
+                };
+                let fallback = self.dag.add_node(
                     RiscOp::synth_const(ty.precision, 0.0),
                     vec![],
+                    fallback_ty.clone(),
+                    self.current_span_id.clone(),
+                );
+                let literal_message = args.first().and_then(|arg| self.static_string_arg(arg));
+                if literal_message.as_deref() == Some("") {
+                    // Same rule and same diagnostic whichever position the
+                    // `fail` is written in. [05-OP-68] never synthesizes or
+                    // defaults a message, and `lower_if` already rejects the
+                    // branch spelling by name.
+                    return self.reject_empty_fail_message(Some(app_span));
+                }
+                let Some(message) = literal_message else {
+                    // A non-literal message has no compile-time identity, so
+                    // there is no guard to build. Outside a transform the host
+                    // lane still owns the abort; inside one this is
+                    // chelis#2371's residue, narrowed to the dynamic-message
+                    // case and tracked by chelis#2383.
+                    return fallback;
+                };
+                let condition = self.dag.add_node(
+                    RiscOp::synth_const(Prim::Bool, 1.0),
+                    vec![],
                     TensorType {
-                        dims,
-                        precision: ty.precision,
+                        dims: Vec::new(),
+                        precision: Prim::Bool,
                     },
+                    self.current_span_id.clone(),
+                );
+                self.dag.add_node(
+                    RiscOp::GuardedFail {
+                        message,
+                        trap_on_true: true,
+                    },
+                    vec![condition, fallback],
+                    fallback_ty,
                     self.current_span_id.clone(),
                 )
             }
@@ -19578,15 +19636,20 @@ impl<'program> LowerCtx<'program> {
         )
     }
 
-    /// chelis#1464 / [05-OP-68]: `fail("")` as an `if` branch. The atom
-    /// makes an empty message a type error and forbids synthesizing one, so
-    /// there is no message to carry and no guard to build.
-    fn reject_empty_fail_message(&self, elems: &[Expr]) -> NodeId {
+    /// chelis#1464 / [05-OP-68]: `fail("")`, in either position — as an `if`
+    /// branch, or unconditionally inside a transform. The atom makes an empty
+    /// message a type error and forbids synthesizing one, so there is no
+    /// message to carry and no guard to build.
+    ///
+    /// Takes a span rather than the enclosing form because the two callers
+    /// have different ones, and because the rule is about the `fail`, not
+    /// about where it was written (chelis#2384 review, F1).
+    fn reject_empty_fail_message(&self, span: Option<Span>) -> NodeId {
         raise_lowering_error(
             "`fail(\"\")` has no message to report. A guarded abort carries its message \
              as part of its identity and never synthesizes or defaults one ([05-OP-68]); \
              give the `fail` a non-empty message.",
-            elems.first().map(Expr::span),
+            span,
             self.current_span_id.clone(),
         )
     }
@@ -19653,6 +19716,30 @@ impl<'program> LowerCtx<'program> {
             span,
             self.current_span_id.clone(),
         )
+    }
+
+    /// chelis#2371: the literal message of a `fail(...)` argument, if it is
+    /// one. [05-OP-68] carries the message as part of the operation's
+    /// identity, so only a compile-time literal can become a guard.
+    fn static_string_arg(&self, expr: &Expr) -> Option<String> {
+        let (tag, _, kids) = stamped_parts(expr)?;
+        if tag != DeepTag::Lit {
+            return None;
+        }
+        match kids.first()? {
+            // An empty message is RETURNED, not filtered out, and the caller
+            // rejects it by name. `fail_message_of` does the same, and says
+            // why: filtering sends `fail("")` to whatever the caller does
+            // with "no literal message" — which here was the silent
+            // placeholder, i.e. chelis#2371's own defect surviving for a
+            // message that IS a compile-time literal.
+            //
+            // The first version of this helper re-introduced exactly the
+            // filtering shape the chelis#1464 review had already rejected
+            // once (chelis#2384 review, F1).
+            Expr::Atom(Atom::Str(message), _) => Some(message.clone()),
+            _ => None,
+        }
     }
 
     /// chelis#1464: the authored message of a direct `fail("...")`
@@ -19782,7 +19869,9 @@ impl<'program> LowerCtx<'program> {
         let then_fail = self.fail_message_of(then_expr);
         let else_fail = self.fail_message_of(else_expr);
         if then_fail.as_deref() == Some("") || else_fail.as_deref() == Some("") {
-            return LoweredValue::Node(self.reject_empty_fail_message(elems));
+            return LoweredValue::Node(
+                self.reject_empty_fail_message(elems.first().map(Expr::span)),
+            );
         }
         match (&then_fail, &else_fail) {
             // The surviving branch is still an `if` branch, so it is lowered
