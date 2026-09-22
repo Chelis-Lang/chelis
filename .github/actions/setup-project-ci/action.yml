@@ -13,12 +13,12 @@ runs:
   using: composite
   steps:
     - name: Set up portable Devenv
-      uses: Chelis-Lang/ci/actions/setup-devenv@2b26c458b7764eb7efd14e7ae9e6388cf20fde25
+      uses: Chelis-Lang/ci/actions/setup-devenv@cfa80ab409d83fb6671f73a634fd4b57d44b2ce7
 
     - name: Restore signed Nix inputs
       id: build-cache
       if: runner.environment == 'self-hosted'
-      uses: Chelis-Lang/ci/actions/restore-build-cache@2b26c458b7764eb7efd14e7ae9e6388cf20fde25
+      uses: Chelis-Lang/ci/actions/restore-build-cache@cfa80ab409d83fb6671f73a634fd4b57d44b2ce7
       with:
         # Every admitted Tunnet member may read and write, including reviewed drafts.
         mode: read-write
@@ -31,7 +31,7 @@ runs:
 
     - name: Attach the realized compiler cache
       if: runner.environment == 'self-hosted'
-      uses: Chelis-Lang/ci/actions/restore-build-cache@2b26c458b7764eb7efd14e7ae9e6388cf20fde25
+      uses: Chelis-Lang/ci/actions/restore-build-cache@cfa80ab409d83fb6671f73a634fd4b57d44b2ce7
       with:
         state-path: ${{ steps.build-cache.outputs.state-path }}
         kache-binary: ${{ env.RUSTC_WRAPPER }}

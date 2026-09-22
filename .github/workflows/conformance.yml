@@ -745,6 +745,6 @@ jobs:
 
       - name: Publish verified outputs and clean cache state
         if: always() && steps.build-cache.outputs.state-path != ''
-        uses: Chelis-Lang/ci/actions/publish-build-cache@2b26c458b7764eb7efd14e7ae9e6388cf20fde25
+        uses: Chelis-Lang/ci/actions/publish-build-cache@cfa80ab409d83fb6671f73a634fd4b57d44b2ce7
         with:
           state-path: ${{ steps.build-cache.outputs.state-path }}
