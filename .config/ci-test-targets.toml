@@ -141,6 +141,16 @@ tracking_issue = "chelis#1854"
 package = "chelis-cli"
 name = "issue_1582_vmap_std_scalar"
 
+# The dedicated changelog job exercises the release-fragment policy and CLI.
+[[path_rule]]
+prefix = "scripts/changelog.py"
+disposition = "owner"
+workflow = "changelog.yml"
+job = "changelog"
+cadence = "pull_request"
+reason = "the changelog job runs the CLI contract tests and evaluates the candidate's release-fragment policy"
+tracking_issue = "chelis#1627"
+
 # The diagnostic-kind producer-seal script has a dedicated pull-request job,
 # while its mutation helpers and command contracts are covered by script-unit.
 # Keep this exact so unrelated scripts receive no implied owner.
