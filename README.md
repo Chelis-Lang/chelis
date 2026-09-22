@@ -650,6 +650,13 @@ git clone git@github.com:Chelis-Lang/openspec.git /absolute/path/to/openspec
 openspec store register /absolute/path/to/openspec --id chelis-plans --json
 openspec doctor --json
 ```
+Before consumer validation, refuse any local `openspec/specs/` or
+`openspec/changes/` directory, even if empty or containing only ignored files
+such as `.DS_Store`. Preserve unpublished work elsewhere before removing
+obsolete directories. OpenSpec 1.6.0 treats these as a real local root, ignores
+the store declaration with a warning, and can exit successfully with no items.
+That warning or an empty validation is **not** shared-store acceptance.
+
 
 Run `openspec doctor` from the Chelis checkout. It must report `chelis-plans`
 with `root.source: declared`. Registration chooses the local authoring

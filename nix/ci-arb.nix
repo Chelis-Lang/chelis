@@ -8,6 +8,12 @@ let
   locked = name: lib.findFirst (package: package.name == name) null cargoLock.package;
   arb = locked "arb-sys";
   arbRevision = lib.last (lib.splitString "#" (arb.source or ""));
+  # Fixed-output caches reuse a hash even when the requested revision changes.
+  # Require the lock to match the reviewed revision/hash pair before reuse.
+  arbPin = {
+    rev = "691abe3e533f48c5c0f3e672c556d79493a651d1";
+    hash = "sha256-6h/SdhNEVgVSD8DOlnJcSrAlc0LK1yc6GZNzzVkVHEg=";
+  };
   flint = locked "flint-sys";
   gmp = locked "gmp-mpfr-sys";
   compiler = "${pkgs.stdenv.cc}/bin/cc";
@@ -68,8 +74,7 @@ let
     src = pkgs.fetchFromGitHub {
       owner = "Chelis-Lang";
       repo = "arb-sys";
-      rev = arbRevision;
-      hash = "sha256-6h/SdhNEVgVSD8DOlnJcSrAlc0LK1yc6GZNzzVkVHEg=";
+      inherit (arbPin) rev hash;
     };
     cargoLock.lockFileContents = lockContents;
     cargoBuildFlags = [ "--locked" ];
@@ -155,6 +160,7 @@ assert lib.assertMsg (
   arb != null
   && arb.version == "0.3.6"
   && builtins.match "[0-9a-f]{40}" arbRevision != null
+  && arbRevision == arbPin.rev
   &&
     (arb.source or "") == "git+https://github.com/Chelis-Lang/arb-sys?rev=${arbRevision}#${arbRevision}"
   && flint != null

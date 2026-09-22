@@ -2,17 +2,27 @@ name: OpenSpec store
 
 # Resolve the immutable shared planning revision, not a local planning tree.
 # Store validation does not activate Chelis's Phase 0 governance or certify code.
+# The dependency scan must run on every source suffix it checks, so a new local
+# capability dependency fails on its introducing PR, not on a later lock bump.
 
 on:
   pull_request:
     paths:
       - "openspec/**"
-      - ".github/workflows/openspec-*.yml"
+      - "**/*.py"
+      - "**/*.nix"
+      - "**/*.sh"
+      - "**/*.yaml"
+      - "**/*.yml"
   push:
     branches: [main]
     paths:
       - "openspec/**"
-      - ".github/workflows/openspec-*.yml"
+      - "**/*.py"
+      - "**/*.nix"
+      - "**/*.sh"
+      - "**/*.yaml"
+      - "**/*.yml"
   workflow_dispatch:
 
 permissions:
