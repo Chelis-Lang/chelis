@@ -124,13 +124,13 @@ push, waits for required checks on the exact head, and performs an ordinary merg
 It submits no approval and bypasses no protection. Tooling, policy, configuration,
 schemas, mixed changes, and other store domains retain ordinary review.
 
-Deployment requires those workflows on the store's default branch and a
-dedicated `chelis-openspec` App installation granting `Pull requests: write`
-and `Contents: read` on the store. Its `OPENSPEC_APP_*` credential is distinct
-from the read-only `CHELIS_OPENSPEC_APP_*` credential with which consumer CI
-fetches the store. Missing credentials block the corresponding operation,
-with no built-in-token fallback. See the store operations guide linked from
-`README.md` for deployment and recovery.
+Deployment requires those workflows on the store's default branch. The existing
+`chelis-openspec` App supplies `Pull requests: write` and `Contents: read` through
+`OPENSPEC_APP_ID` and `OPENSPEC_APP_PRIVATE_KEY`. Consumer CI instead uses the
+existing `CI_APP_ID` and `CI_APP_PRIVATE_KEY`; the pinned store action mints a
+repository-scoped, read-only token. Missing credentials block the corresponding
+operation, with no built-in-token fallback. See the store operations guide linked
+from `README.md` for deployment and recovery.
 
 Moving the implementation does not prove its hosted create/merge calls.
 Acceptance evidence must name the store head and observed hosted results;

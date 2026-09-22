@@ -193,8 +193,8 @@ For project-level questions, what Chelis is, what it is for, and what the roadma
 
 Language semantics belong in the numbered spec documents. A chapter transfers only
 through a reviewed change that records the transfer; no chapter has transferred, so the
-numbered chapters control and the captured `openspec/` capabilities are reference. If
-active documents disagree, correct the document that controls the subject. Do not add a
+numbered chapters control and the pinned store's captured `chelis-*` capabilities
+are reference. If active documents disagree, correct the document that controls the subject. Do not add a
 third explanation.
 
 ### Normative Specs Are Timeless Contracts
