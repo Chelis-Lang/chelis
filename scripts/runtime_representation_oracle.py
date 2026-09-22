@@ -316,6 +316,18 @@ UTF8_STRING_FINAL_FORMS = (
         "chelis_string_from_utf8",
     ),
 )
+RESULT_CLAIM_METADATA_FINAL_FORMS = (
+    (
+        "crates/chelis-backend-c/src/host_emit.rs",
+        "load-store-template",
+        "append_host_result_claim_checks",
+    ),
+    (
+        "crates/chelis-backend-c/src/host_emit.rs",
+        "load-store-template",
+        "append_host_result_interface_origin_support",
+    ),
+)
 PHASE2_FINAL_FORMS = (
     ("crates/chelis-backend-hip/runtime/chelis_device_descriptor.h", "descriptor-field", "chelis_gpu_tensor::byte_capacity"),
     ("crates/chelis-backend-hip/runtime/chelis_device_descriptor.h", "descriptor-field", "chelis_gpu_tensor::count"),
@@ -415,6 +427,8 @@ def owner_module_final_form(kind: str, path: str, owner: str) -> bool:
         (path, kind, owner) in DIRECT_ARITHMETIC_BACKEND_FINAL_FORMS
     ) or (
         (path, kind, owner) in UTF8_STRING_FINAL_FORMS
+    ) or (
+        (path, kind, owner) in RESULT_CLAIM_METADATA_FINAL_FORMS
     ) or (
         (path, kind, owner) in PHASE2_FINAL_FORMS
     )
@@ -797,6 +811,7 @@ def _owner_module_final_forms_manifest() -> dict[str, list[dict[str, str]]]:
         *UNIFORM_RANDOM_BACKEND_FINAL_FORMS,
         *DIRECT_ARITHMETIC_BACKEND_FINAL_FORMS,
         *UTF8_STRING_FINAL_FORMS,
+        *RESULT_CLAIM_METADATA_FINAL_FORMS,
         *((METADATA_OWNER, "width-arithmetic", owner) for owner in METADATA_FINAL_WIDTH_OWNERS),
         *((ELEMENT_OWNER, "dtype-contract", owner) for owner in ELEMENT_FINAL_CONTRACT_OWNERS),
         (ELEMENT_OWNER, "width-arithmetic", "assert_registration"),
@@ -2175,6 +2190,17 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
         OracleLeg(
             "checked vmap shape observation on its shifted axis",
             ("cargo", "nextest", "run", "-p", "chelis-cli", "--test", "runtime_extent_slice_a", "-E", "test(vmap_shape_bound_with_concrete_batch_emits_c_without_to_end_ice)"),
+        ),
+        OracleLeg(
+            "selected-result C claim and aggregate-interface provenance metadata execution",
+            (
+                "cargo", "nextest", "run", "-p", "chelis-cli",
+                "--test", "issue_1771_callable_selected_result_claims", "-E",
+                "test(c_aggregate_interface_ingress_stamps_each_tensor_field_as_load) | "
+                "test(c_list_and_adt_projection_retains_selected_producer) | "
+                "test(c_option_projection_distinguishes_local_and_formal_origins) | "
+                "test(c_aggregate_origin_arena_is_fresh_for_repeated_public_calls)",
+            ),
         ),
         OracleLeg(
             "checked C reduction delegation and bypass mutations",

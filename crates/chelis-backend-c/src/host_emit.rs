@@ -2126,10 +2126,14 @@ fn private_host_params(params: &str) -> String {
 
 /// Owned host bodies additionally return private producer provenance. Public
 /// wrappers pass NULL, so this never enters the generated ABI.
+/// This spelling deliberately lives outside `__chelis_result_origin_<value>`:
+/// a legal source parameter such as `out` owns that exact sidecar namespace.
+const PRIVATE_RESULT_ORIGIN_RETURN_SLOT: &str = "__chelis_private_result_origin_return";
+
 fn private_host_function_params(params: &str) -> String {
     format!(
-        "{}, __chelis_host_result_origin_arena *__chelis_origin_arena, const __chelis_host_result_claim *__chelis_caller_result_claims, const __chelis_host_result_origin **__chelis_result_origin_out",
-        private_random_params(params)
+        "{}, __chelis_host_result_origin_arena *__chelis_origin_arena, const __chelis_host_result_claim *__chelis_caller_result_claims, const __chelis_host_result_origin **{PRIVATE_RESULT_ORIGIN_RETURN_SLOT}",
+        private_random_params(params),
     )
 }
 
@@ -2587,7 +2591,7 @@ fn emit_function(
         })?;
     emitter.emit_terminal_site(terminal, Some("__result"))?;
     emitter.lines.push(format!(
-        "{}if (__chelis_result_origin_out != NULL) *__chelis_result_origin_out = {};",
+        "{}if ({PRIVATE_RESULT_ORIGIN_RETURN_SLOT} != NULL) *{PRIVATE_RESULT_ORIGIN_RETURN_SLOT} = {};",
         emitter.indent,
         result_origin_name("__result")
     ));

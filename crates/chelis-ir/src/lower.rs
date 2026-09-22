@@ -3252,23 +3252,44 @@ pub(crate) fn extent_binder_label(binder: &str) -> String {
     format!("{rank}[{axis}]")
 }
 
-/// Strip a leading `(t-ref {} ...)` wrapper and classify a raw tensor-type
-/// formal's dim slots in order (Spread/Named/Other), excluding the trailing
-/// precision child. Returns `None` when the expr is not a `(t-tensor ...)` type
-/// (so a non-tensor or malformed formal contributes no slots). The borrow
-/// wrapper is irrelevant to rank/anchor analysis, mirroring
-/// [`extract_precision_var_name`].
-fn tensor_formal_dim_slots(expr: &Expr) -> Option<Vec<DimSlot>> {
-    let stripped = match expr.carrier() {
-        ExprCarrier::DecodedNode(DeepTag::TRef, _, children) => children.first()?,
+/// Remove transparent type-expression shells while preserving the one
+/// underlying carrier that owns rank and precision syntax.
+///
+/// Checked callable metadata can wrap a parameter in both a legacy metadata
+/// expression and a borrow. Eval classifies those parameters as tensors before
+/// calling this module, so every tensor reader here must consume the same
+/// normalized carrier rather than letting one reader accept a wrapper that a
+/// later reader rejects.
+fn strip_transparent_type_wrappers(expr: &Expr) -> Option<&Expr> {
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::TRef, _, children) => {
+            children.first().and_then(strip_transparent_type_wrappers)
+        }
+        ExprCarrier::MetadataExpression(meta) => strip_transparent_type_wrappers(&meta.expr),
         ExprCarrier::DecodedNode(_, _, _)
         | ExprCarrier::StructuralList(_)
         | ExprCarrier::UndecodableHead(_, _, _)
         | ExprCarrier::Atom(_)
         | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_)
-        | ExprCarrier::MalformedLegacyList(_) => expr,
-    };
+        | ExprCarrier::MalformedLegacyList(_) => Some(expr),
+    }
+}
+
+fn normalized_tensor_type_expr(expr: &Expr) -> Option<&Expr> {
+    let stripped = strip_transparent_type_wrappers(expr)?;
+    matches!(
+        stripped.carrier(),
+        ExprCarrier::DecodedNode(DeepTag::TTensor, _, _)
+    )
+    .then_some(stripped)
+}
+
+/// Classify a normalized tensor formal's dim slots in order
+/// (Spread/Named/Other), excluding the trailing precision child. Returns
+/// `None` when the expression has no tensor carrier, so a scalar or malformed
+/// formal contributes no slots.
+fn tensor_formal_dim_slots(expr: &Expr) -> Option<Vec<DimSlot>> {
+    let stripped = normalized_tensor_type_expr(expr)?;
     let children = match stripped.carrier() {
         ExprCarrier::DecodedNode(DeepTag::TTensor, _, children) => children,
         ExprCarrier::DecodedNode(_, _, _)
@@ -3279,7 +3300,9 @@ fn tensor_formal_dim_slots(expr: &Expr) -> Option<Vec<DimSlot>> {
         | ExprCarrier::MetadataExpression(_)
         | ExprCarrier::MalformedLegacyList(_) => return None,
     };
-    if children.len() < 2 {
+    // A rank-zero tensor has exactly one child: its precision. Reject only a
+    // malformed carrier with no precision child; there need not be a dim.
+    if children.is_empty() {
         return None;
     }
     let dim_nodes = &children[..children.len() - 1];
@@ -3664,16 +3687,7 @@ fn tensor_prec_substitutions(
 /// parameter is treated the same as `tensor[..., p]` for substitution
 /// purposes — the borrow is irrelevant to precision monomorphization.
 fn extract_precision_var_name(expr: &Expr) -> Option<String> {
-    let stripped = match expr.carrier() {
-        ExprCarrier::DecodedNode(DeepTag::TRef, _, children) => children.first()?,
-        ExprCarrier::DecodedNode(_, _, _)
-        | ExprCarrier::StructuralList(_)
-        | ExprCarrier::UndecodableHead(_, _, _)
-        | ExprCarrier::Atom(_)
-        | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_)
-        | ExprCarrier::MalformedLegacyList(_) => expr,
-    };
+    let stripped = normalized_tensor_type_expr(expr)?;
     let kids = match stripped.carrier() {
         ExprCarrier::DecodedNode(DeepTag::TTensor, _, children) => children,
         ExprCarrier::DecodedNode(_, _, _)
@@ -3704,16 +3718,7 @@ fn extract_precision_var_name(expr: &Expr) -> Option<String> {
 
 /// Binder name from a bare scalar `(t-var {} p)` type (#1544).
 fn extract_scalar_precision_var_name(expr: &Expr) -> Option<String> {
-    let stripped = match expr.carrier() {
-        ExprCarrier::DecodedNode(DeepTag::TRef, _, children) => children.first()?,
-        ExprCarrier::DecodedNode(_, _, _)
-        | ExprCarrier::StructuralList(_)
-        | ExprCarrier::UndecodableHead(_, _, _)
-        | ExprCarrier::Atom(_)
-        | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_)
-        | ExprCarrier::MalformedLegacyList(_) => expr,
-    };
+    let stripped = strip_transparent_type_wrappers(expr)?;
     exact_type_variable_name(stripped).map(str::to_string)
 }
 
@@ -3737,17 +3742,7 @@ fn extract_scalar_precision_var_name(expr: &Expr) -> Option<String> {
 /// The caller binds the returned `tN` to that parameter's concrete actual
 /// precision.
 fn formal_param_type_var_name(expr: &Expr) -> Option<String> {
-    // Strip a leading `(t-ref {} ...)` borrow wrapper.
-    let stripped = match expr.carrier() {
-        ExprCarrier::DecodedNode(DeepTag::TRef, _, children) => children.first()?,
-        ExprCarrier::DecodedNode(_, _, _)
-        | ExprCarrier::StructuralList(_)
-        | ExprCarrier::UndecodableHead(_, _, _)
-        | ExprCarrier::Atom(_)
-        | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_)
-        | ExprCarrier::MalformedLegacyList(_) => expr,
-    };
+    let stripped = strip_transparent_type_wrappers(expr)?;
     // Bare `(t-var tN)`: the whole param type is one inference var.
     let bare_var_children = match stripped.carrier() {
         ExprCarrier::DecodedNode(DeepTag::TVar, _, children) => Some(children),
@@ -4389,17 +4384,8 @@ impl TensorCallsiteSpecialization {
                 "result-claim actualization could not resolve result precision `{name}`"
             ));
         }
-        // Parameter contracts may carry a transparent borrow wrapper. Rank
-        // and precision binding already classify `&tensor[...]` as the same
-        // tensor formal; normalize that wrapper before asking the concrete
-        // tensor extractor, which deliberately accepts only `t-tensor` at its
-        // top level.
-        let tensor_expr = match authored_result.carrier() {
-            ExprCarrier::DecodedNode(DeepTag::TRef, _, children) => children
-                .first()
-                .ok_or_else(|| "the authored tensor reference has no target type".to_string())?,
-            _ => authored_result,
-        };
+        let tensor_expr = normalized_tensor_type_expr(authored_result)
+            .ok_or_else(|| "the authored result claim is not a tensor type".to_string())?;
         let actualized = LowerCtx::try_extract_tensor_type_with_subst(
             tensor_expr,
             &self.claim_precision_substitutions,
@@ -25399,6 +25385,70 @@ mod tests {
         )
         .expect_err("a borrow wrapper must not hide a conflicting spread width");
         assert!(mismatch.contains("conflicting bindings for rank spread `rest`"));
+    }
+
+    #[test]
+    fn authored_parameter_actualization_normalizes_metadata_wrapped_tensor_formals() {
+        let span = Span::new(0, 0);
+        let wrapped = |expr: Expr| {
+            Expr::MetaExpr(
+                chelis_deep::MetaExpr {
+                    metadata: Metadata::default(),
+                    expr: Box::new(expr),
+                },
+                span,
+            )
+        };
+        let checked = wrapped(parse_type_expr(
+            "(t-ref {} (t-tensor {} (d-name {} n) (t-var {} checked_p)))",
+        ));
+        let authored = wrapped(parse_type_expr(
+            "(t-ref {} (t-tensor {} (d-name {} n) (t-var {} p)))",
+        ));
+        let concrete = TensorType {
+            dims: vec![DimInfo::Lit(2)],
+            precision: Prim::F64,
+        };
+
+        let actualized = actualize_authored_tensor_parameters(
+            &[Some(checked)],
+            &[Some(authored)],
+            std::slice::from_ref(&concrete),
+        )
+        .expect("transparent metadata and borrow wrappers preserve tensor actualization");
+        assert_eq!(
+            actualized,
+            vec![TensorType {
+                dims: vec![DimInfo::Named("n".into(), None)],
+                precision: Prim::F64,
+            }]
+        );
+
+        let scalar = parse_type_expr("(t-prim {} f64)");
+        let error = actualize_authored_tensor_parameters(
+            &[Some(scalar.clone())],
+            &[Some(scalar)],
+            std::slice::from_ref(&concrete),
+        )
+        .expect_err("a scalar formal must not be reclassified as a tensor carrier");
+        assert!(error.contains("non-tensor formal"), "{error}");
+
+        let missing_precision = Expr::List(
+            List {
+                elements: vec![
+                    Expr::Atom(Atom::Tag(DeepTag::TTensor), span),
+                    Expr::Map(Metadata::default(), span),
+                ],
+            },
+            span,
+        );
+        let error = actualize_authored_tensor_parameters(
+            &[Some(missing_precision.clone())],
+            &[Some(missing_precision)],
+            std::slice::from_ref(&concrete),
+        )
+        .expect_err("a rank-zero tensor without its precision child is malformed");
+        assert!(error.contains("non-tensor formal"), "{error}");
     }
 
     /// chelis#373: `tensor_dim_axis_positions` records a fixed anchor offset

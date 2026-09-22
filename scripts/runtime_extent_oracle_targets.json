@@ -890,6 +890,7 @@
         "c_projection_without_origin_fails_instead_of_guessing_index",
         "c_rank_only_callback_claims_expand_empty_and_nonempty_spreads",
         "c_rank_zero_host_identity_without_a_claim_preserves_value_and_effects",
+        "c_scalar_only_precision_evidence_specializes_each_callsite",
         "c_selection_before_production_forwards_only_to_the_selected_arm",
         "c_shared_callback_claims_are_invocation_local",
         "c_tuple_projection_retains_only_the_selected_producer",
@@ -909,12 +910,14 @@
         "eval_precision_only_callback_claims_are_callsite_local",
         "eval_projection_without_origin_fails_instead_of_guessing_index",
         "eval_rank_only_callback_claims_expand_empty_and_nonempty_spreads",
+        "eval_scalar_only_precision_evidence_specializes_each_callsite",
         "eval_selection_before_production_forwards_only_to_the_selected_arm",
         "eval_shared_callback_claims_are_invocation_local",
         "eval_tuple_projection_retains_only_the_selected_producer",
+        "inadmissible_scalar_only_precision_evidence_is_rejected_by_checker",
         "rank_zero_identity_without_a_result_claim_executes_both_lanes"
       ],
-      "note": "chelis#1771 and chelis#1945 finite closure: inherited literal result claims cross supported named, literal and identity callback invocations; remain invocation-local; and retain selected producer provenance through aliases and delayed selection. Eval and C cover exact selected values and producer/interface attribution for supported tuple, list, record, Option and ADT construction/projection, true aggregate ingress, cached/global reload, local shadowing, missing-origin fail-close and repeated-invocation lifetime. Concrete precision-only, rank-only and combined callback instantiations preserve authored literal axes, eager actuals, entry/result independence and f64 values without importing inferred dimensions. The existing cli_return_boundary, cli_result_pure_helper and callable-entry targets remain independent controls; append transport, named result claims and local callable aliases remain outside this receipt."
+      "note": "chelis#1771 and chelis#1945 finite closure: inherited literal result claims cross supported named, literal and identity callback invocations; remain invocation-local; and retain selected producer provenance through aliases and delayed selection. Eval and C cover exact selected values and producer/interface attribution for supported tuple, list, record, Option and ADT construction/projection, true aggregate ingress, cached/global reload, local shadowing, missing-origin fail-close and repeated-invocation lifetime. Concrete tensor-carried and scalar-only precision, rank-only and combined callback instantiations preserve authored literal axes, eager actuals, entry/result independence and f64 values without importing inferred dimensions or defaulting precision; the scalar-only negative keeps the Float bound explicit. The existing cli_return_boundary, cli_result_pure_helper and callable-entry targets remain independent controls; append transport, named result claims and local callable aliases remain outside this receipt."
     },
     {
       "phase": "b",

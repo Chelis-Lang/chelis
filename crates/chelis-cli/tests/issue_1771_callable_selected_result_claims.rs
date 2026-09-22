@@ -1358,6 +1358,29 @@ fn assert_precision_only_callback_claims(native: bool) {
     }
 }
 
+fn scalar_only_precision_source() -> &'static str {
+    "def candidate[n, p: Float](witness: p, extent_source: tensor[n, i64]) -> tensor[3, p] = witness |> scalar_to_tensor |> insert(0i32, shape(extent_source, 0i32))\n\
+     def invoke32(f: f32 -> tensor[*, i64] -> tensor[*, f32], witness: f32, extent_source: tensor[*, i64]) -> tensor[*, f32] = f(witness, extent_source)\n\
+     def invoke64(f: f64 -> tensor[*, i64] -> tensor[*, f64], witness: f64, extent_source: tensor[*, i64]) -> tensor[*, f64] = f(witness, extent_source)\n\
+     first = invoke32(candidate, 16777217.0f32, to_tensor([0i64, 0i64, 0i64]))\n\
+     out = invoke64(candidate, 16777217.0f64, to_tensor([0i64, 0i64, 0i64]))\n"
+}
+
+fn assert_scalar_only_precision_evidence(native: bool) {
+    let source = scalar_only_precision_source();
+    let (ok, output) = run(source, native);
+    assert!(ok, "{source}\n{output}");
+    assert!(
+        output.contains("first = tensor(shape=[3], data=[16777216.0, 16777216.0, 16777216.0])"),
+        "{output}"
+    );
+    assert!(
+        output.contains("out = tensor(shape=[3], data=[16777217.0, 16777217.0, 16777217.0])"),
+        "{output}"
+    );
+    assert!(!output.contains("numeric trap:"), "{output}");
+}
+
 fn assert_rank_only_callback_claims(native: bool) {
     for agrees in [true, false] {
         let source = rank_only_callback_source(agrees);
@@ -1703,6 +1726,49 @@ fn eval_precision_only_callback_claims_are_callsite_local() {
 #[test]
 fn c_precision_only_callback_claims_are_callsite_local() {
     assert_precision_only_callback_claims(true);
+}
+
+#[test]
+fn eval_scalar_only_precision_evidence_specializes_each_callsite() {
+    assert_scalar_only_precision_evidence(false);
+}
+
+#[test]
+fn c_scalar_only_precision_evidence_specializes_each_callsite() {
+    assert_scalar_only_precision_evidence(true);
+}
+
+#[test]
+fn inadmissible_scalar_only_precision_evidence_is_rejected_by_checker() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("inadmissible_scalar_precision.ch");
+    fs::write(
+        &path,
+        "def candidate[n, p: Float](witness: p, extent_source: tensor[n, i64]) -> tensor[3, p] = witness |> scalar_to_tensor |> insert(0i32, shape(extent_source, 0i32))\n\
+         out = candidate(1i32, to_tensor([0i64, 0i64, 0i64]))\n",
+    )
+    .expect("fixture");
+    let checked = Command::cargo_bin("chelis")
+        .expect("chelis")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .arg("check")
+        .arg(&path)
+        .output()
+        .expect("check");
+    assert!(!checked.status.success(), "{checked:?}");
+    let report: serde_json::Value = serde_json::from_slice(&checked.stdout).expect("check report");
+    assert!(report["score"].as_f64().is_some_and(|score| score < 1.0));
+    assert!(
+        report["errors"]
+            .as_array()
+            .is_some_and(|errors| errors.iter().any(|error| {
+                error["kind"] == "PrecisionMismatch"
+                    && error["message"]
+                        .as_str()
+                        .is_some_and(|message| message.contains("Float"))
+            })),
+        "{report}"
+    );
 }
 
 #[test]

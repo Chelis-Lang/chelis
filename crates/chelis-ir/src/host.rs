@@ -23467,28 +23467,61 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             .find(|binding| binding.name == "out")
             .expect("out host binding");
         let (bindings, body) = match &out_binding.value.kind {
-            HostExprKind::Let { bindings, body, .. } => (bindings, body.as_ref()),
-            other => panic!("expected out to hoist host-lane tensor arg into let, got {other:?}"),
+            HostExprKind::RetainedInvocation { bindings, body, .. } => (bindings, body.as_ref()),
+            other => {
+                panic!("expected out to retain its prepared invocation boundary, got {other:?}")
+            }
         };
-        let theta_binding = bindings
+        let actual_binding = bindings
             .iter()
-            .find(|binding| binding.name.starts_with("__host_tensor_arg_"))
+            .find(|binding| {
+                binding.name.starts_with("__chelis_entry_actual_")
+                    && matches!(
+                        &binding.ty,
+                        HostTypeTerm::Tensor(tensor) if tensor.precision == Prim::F32
+                    )
+            })
             .unwrap_or_else(|| {
                 panic!(
-                    "theta temp binding missing; hoisted bindings were {:?}",
+                    "prepared f32 tensor actual missing; retained bindings were {:?}",
                     bindings
                         .iter()
                         .map(|binding| (&binding.name, &binding.ty))
                         .collect::<Vec<_>>()
                 )
             });
-        match &theta_binding.ty {
+        match &actual_binding.ty {
             HostTypeTerm::Tensor(tensor) => assert_eq!(tensor.precision, Prim::F32),
-            other => panic!("expected hoisted theta binding to be tensor-typed, got {other:?}"),
+            other => panic!("expected prepared theta actual to be tensor-typed, got {other:?}"),
         }
+        let formal_binding = bindings
+            .iter()
+            .find(|binding| match &binding.value.kind {
+                HostExprKind::FormalIngress { value, ty } => {
+                    matches!(
+                        ty,
+                        HostTypeTerm::Tensor(tensor) if tensor.precision == Prim::F32
+                    ) && matches!(
+                        &value.kind,
+                        HostExprKind::Var(name, HostTypeTerm::Tensor(tensor))
+                            if name == &actual_binding.name && tensor.precision == Prim::F32
+                    )
+                }
+                _ => false,
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "f32 formal ingress for prepared actual `{}` missing: {:?}",
+                    actual_binding.name,
+                    bindings
+                        .iter()
+                        .map(|binding| (&binding.name, &binding.value.kind))
+                        .collect::<Vec<_>>()
+                )
+            });
         let helper_index = match &body.kind {
             HostExprKind::TensorCall { helper, .. } => *helper,
-            other => panic!("expected hoisted body to call tensor helper, got {other:?}"),
+            other => panic!("expected retained body to call tensor helper, got {other:?}"),
         };
         let helper = host
             .global_tensor_helpers
@@ -23498,8 +23531,8 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             helper
                 .inputs
                 .iter()
-                .any(|input| input.name == theta_binding.name),
-            "helper inputs should reference hoisted tensor temp: {:?}",
+                .any(|input| input.name == formal_binding.name && input.ty.precision == Prim::F32),
+            "helper inputs should reference the f32 formal-ingress binding: {:?}",
             helper
                 .inputs
                 .iter()

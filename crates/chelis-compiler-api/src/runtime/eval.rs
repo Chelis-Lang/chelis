@@ -4867,6 +4867,94 @@ fn stage_kernel_argument(
 }
 
 #[cfg(test)]
+mod tensor_entry_actualization_tests {
+    use super::*;
+
+    fn type_expr(source: &str) -> Expr {
+        let parsed = chelis_deep::parser::parse_str(source)
+            .expect("type expression parses")
+            .into_iter()
+            .next()
+            .expect("one type expression");
+        fn legacy(expr: &Expr) -> Expr {
+            let ExprCarrier::DecodedNode(tag, metadata, children) = expr.carrier() else {
+                return expr.clone();
+            };
+            let span = expr.span();
+            let mut elements = vec![
+                Expr::Atom(Atom::Tag(tag), span),
+                Expr::Map(metadata.clone(), span),
+            ];
+            elements.extend(children.iter().map(legacy));
+            Expr::List(List { elements }, span)
+        }
+        legacy(&parsed)
+    }
+
+    fn wrapped(expr: Expr) -> Expr {
+        let span = expr.span();
+        Expr::MetaExpr(
+            chelis_deep::MetaExpr {
+                metadata: Metadata::default(),
+                expr: Box::new(expr),
+            },
+            span,
+        )
+    }
+
+    fn tensor(shape: Vec<usize>, values: Vec<f64>) -> RuntimeValue {
+        RuntimeValue::Tensor(
+            RuntimeTensorValue::from_wide("entry actualization test", Prim::F32, shape, values)
+                .expect("test tensor finalizes"),
+        )
+    }
+
+    #[test]
+    fn tensor_entry_actualization_preserves_wrapped_rank_zero_position_between_scalars() {
+        let tensor_formal = wrapped(type_expr("(t-tensor {} (t-prim {} f32))"));
+        let checked = vec![
+            type_expr("(t-prim {} f64)"),
+            tensor_formal.clone(),
+            type_expr("(t-prim {} i64)"),
+        ];
+        let authored = checked.iter().cloned().map(Some).collect::<Vec<_>>();
+
+        let actualized = actualize_tensor_entry_parameters(
+            Some(&checked),
+            &authored,
+            &[
+                RuntimeValue::float64(1.0),
+                tensor(Vec::new(), vec![2.0]),
+                RuntimeValue::int64(3),
+            ],
+        )
+        .expect("scalar neighbors do not contaminate the rank-zero tensor formal");
+        assert_eq!(
+            actualized,
+            vec![(
+                1,
+                TensorType {
+                    dims: Vec::new(),
+                    precision: Prim::F32,
+                },
+            )]
+        );
+
+        let error = actualize_tensor_entry_parameters(
+            Some(&checked),
+            &authored,
+            &[
+                RuntimeValue::float64(1.0),
+                tensor(vec![1], vec![2.0]),
+                RuntimeValue::int64(3),
+            ],
+        )
+        .expect_err("the rank mismatch remains owned by the tensor at position one");
+        assert_eq!(error, "input argument 1 expected rank 0, got 1");
+    }
+}
+
+#[cfg(test)]
 mod legacy_capture_order_tests {
     use super::*;
     use chelis_ir::evaluation::{EvaluationProfile, LegacyEvaluationReason};
