@@ -235,7 +235,147 @@ pub fn validate_build_target(
     program: &CheckedProgram,
     target: &str,
 ) -> Result<(), Vec<EffectError>> {
-    validate_build_target_expressions(program.annotated_exprs(), target)
+    let mut errors = Vec::new();
+    if let Err(mut random) = validate_public_entry_random(program, target) {
+        errors.append(&mut random);
+    }
+    if let Err(mut resource) = validate_build_target_expressions(program.annotated_exprs(), target)
+    {
+        errors.append(&mut resource);
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+/// `spec/04-type-system.md` [04-EFF-3]: the build boundary rejects a public
+/// entry whose body performs a `Random` that no handler inside the program
+/// discharges.
+///
+/// This lives at the BUILD BOUNDARY, beside [04-EFF-2]'s resource check and
+/// before lowering, because [04-EFF-3] requires the rule to "apply identically
+/// on every emission path". A guard placed in one backend emitter cannot do
+/// that: `chelis build --target c` selects its emission path by the entry's
+/// signature shape, so a tensor-parameter entry routes to the tensor-DAG
+/// emitter and a scalar-parameter one to host-ABI emission. An earlier
+/// revision of chelis#2318 guarded only host-ABI emission, and the reported
+/// defect stayed fully reproducible through the other path after changing one
+/// parameter type — publishing an entry that draws against an inactive RNG,
+/// with `check` still scoring 1.0.
+///
+/// The signal is whether the program opens ANY `Random` handler. It is
+/// deliberately not reachability: a draw inside a seeded helper is inlined
+/// into its caller's tensor helper, so the call-graph edge is erased and every
+/// inlined helper would read as unreachable. The over-approximation is in the
+/// safe direction — an unrelated handler admits the program, and the backend
+/// then withholds the unusable entry rather than publishing it.
+fn validate_public_entry_random(
+    program: &CheckedProgram,
+    target: &str,
+) -> Result<(), Vec<EffectError>> {
+    // `chelis eval` and `chelis test` supply an ambient interpreter scope and
+    // never publish a C entry, so this admission rule is build-target only.
+    if target.is_empty() {
+        return Ok(());
+    }
+    let (effects_by_def, _) = infer_program_effects(program.annotated_exprs());
+    let mut carriers: Vec<&String> = effects_by_def
+        .iter()
+        .filter(|(_, effects)| effects.contains(&Effect::Random))
+        .map(|(name, _)| name)
+        .collect();
+    if carriers.is_empty() {
+        return Ok(());
+    }
+    if program
+        .annotated_exprs()
+        .iter()
+        .any(expr_opens_random_handler)
+    {
+        return Ok(());
+    }
+    carriers.sort();
+    let named = carriers
+        .iter()
+        .map(|name| format!("`{name}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    // The remedies live in `message`, not only in `suggestions`: the build
+    // command renders the message and drops the suggestions, so guidance put
+    // only there reaches nobody. `the_rejection_names_the_cause_and_both_remedies`
+    // pins that.
+    let message = [
+        format!("[04-EFF-3]: {named} draws from `Random` and nothing inside it handles"),
+        "that effect, so it can only run under a seed its caller supplies. A public".to_string(),
+        "entry's ABI has no RNG frame to carry one, and this program opens no".to_string(),
+        "`with seed(...)` region anywhere, so nothing here can call it under a".to_string(),
+        format!("handler either. Emitting it for `{target}` would hand the body an"),
+        "inactive RNG: one compiled lane then returns draws no `with seed(...)` can".to_string(),
+        "reproduce, and the other aborts at the first call. Either wrap the body in".to_string(),
+        "`with seed(...) { ... }` so it is a self-contained entry, or call it from a".to_string(),
+        "seeded region in this program and let that region be the entry instead.".to_string(),
+    ]
+    .join(" ");
+    Err(vec![EffectError {
+        kind: EffectErrorKind::UnhandledEffect,
+        message,
+        suggestions: vec![
+            "wrap the body in `with seed(...) { ... }` so it is a self-contained entry".to_string(),
+            "or call it from a seeded region in this program and let that region be the entry"
+                .to_string(),
+        ],
+    }])
+}
+
+/// True when `expr` contains a `handle-effect` node naming the `random`
+/// handler boundary ([04-EFF-1]).
+fn expr_opens_random_handler(expr: &Expr) -> bool {
+    let mut found = false;
+    walk_for_random_handler(expr, &mut found);
+    found
+}
+
+fn walk_for_random_handler(expr: &Expr, found: &mut bool) {
+    if *found {
+        return;
+    }
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(tag, metadata, children) => {
+            if tag == DeepTag::HandleEffect
+                && matches!(effect_kind_from_metadata(metadata), Ok(EffectKind::Random))
+            {
+                *found = true;
+                return;
+            }
+            metadata.visit_expressions(&mut |value, _| walk_for_random_handler(value, found));
+            for kid in children {
+                walk_for_random_handler(kid, found);
+            }
+        }
+        ExprCarrier::MetadataMap(map) => {
+            map.visit_expressions(&mut |value, _| walk_for_random_handler(value, found));
+        }
+        ExprCarrier::MetadataExpression(meta) => {
+            walk_for_random_handler(&meta.expr, found);
+            meta.metadata
+                .visit_expressions(&mut |value, _| walk_for_random_handler(value, found));
+        }
+        ExprCarrier::UndecodableHead(_, metadata, children) => {
+            metadata.visit_expressions(&mut |value, _| walk_for_random_handler(value, found));
+            for kid in children {
+                walk_for_random_handler(kid, found);
+            }
+        }
+        // A handler cannot be decoded out of these carriers, so a `random`
+        // handler cannot hide in one. Erring here would admit a program the
+        // rule should reject, so they are deliberately not descended into --
+        // matching `validate_build_target_expr`'s own dispositions.
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::MalformedLegacyList(_)
+        | ExprCarrier::Atom(_) => {}
+    }
 }
 
 /// Check Resource regions in an emission scope selected from checked source.

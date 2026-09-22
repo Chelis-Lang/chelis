@@ -309,15 +309,23 @@ fn top_level_binding_random_is_still_a_check_error() {
     );
 }
 
-/// DEMOTION LOCK: this is the behaviour change, and it is observable in the
-/// published header. Before the fix `lib_ok.h` declared
-/// `chelis_tensor* my_noise(chelis_tensor* x);` and `lib_ok.c` defined it with
-/// external linkage over an inactive RNG — a symbol any C caller could link
-/// against and get draws no `with seed` could reproduce. After the fix the
-/// definition is still emitted for the program's own seeded `main`, but the
-/// public wrapper and its declaration are gone.
+/// DEMOTION LOCK: the withheld entry must be gone from the published header
+/// AND from the object's external symbols.
+///
+/// Emitted entry symbols are hex-mangled (`chelis_fn_<utf8-hex>`), so an
+/// earlier version of this test — which grepped the header and the `.c` for
+/// the SOURCE spelling `my_noise` — was vacuous: it passed with the fix
+/// reverted, because the broken wrapper is published as
+/// `chelis_fn_6d795f6e6f697365` and the string `my_noise` appears in neither
+/// artifact either way. Red-team round 1 caught it. Assert the mangled symbol,
+/// and assert against `nm` rather than the header alone: a symbol absent from
+/// the header can still be externally linkable.
 #[test]
 fn demoted_definition_is_not_published_or_externally_linkable() {
+    if !gcc_available() {
+        eprintln!("skipping: no C compiler available");
+        return;
+    }
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("demoted.ch");
     let out_dir = dir.path().join("demoted-out");
@@ -336,20 +344,64 @@ fn demoted_definition_is_not_published_or_externally_linkable() {
         .assert()
         .success();
 
+    // `my_noise` encoded with the `chelis_fn_<utf8-hex>` scheme in
+    // `host_emit::emitted_function_name`.
+    let mangled = format!(
+        "chelis_fn_{}",
+        "my_noise"
+            .bytes()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    );
     let header = std::fs::read_to_string(out_dir.join("demoted.h")).expect("generated header");
     assert!(
-        !header.contains("my_noise"),
-        "[04-EFF-3] a demoted definition must not be declared in the published \
-         header; no caller could supply its seed. Header was:\n{header}",
+        !header.contains(&mangled),
+        "[04-EFF-3] the demoted definition must not be declared in the published \
+         header; no caller could supply its seed. Looked for {mangled}. Header:\n{header}",
     );
 
-    // The wrapper definition itself must be gone too: a symbol absent from the
-    // header but present with external linkage in the object is still linkable.
     let source = std::fs::read_to_string(out_dir.join("demoted.c")).expect("generated source");
+    // A declaration or definition of the public entry lives at FILE SCOPE, so
+    // only unindented lines can carry one. Indented mentions are inside a
+    // function body — calls, and `fprintf` diagnostics that embed the symbol
+    // name in a string literal — and say nothing about linkage.
+    //
+    // A file-scope mention must therefore be `static`. An earlier revision
+    // emitted a non-`static` forward declaration for the withheld wrapper,
+    // which is exactly what this catches.
+    for line in source.lines() {
+        if line.contains(&mangled) && !line.starts_with(char::is_whitespace) {
+            assert!(
+                line.starts_with("static"),
+                "[04-EFF-3] a file-scope mention of the withheld entry must have \
+                 internal linkage, found: {line}",
+            );
+        }
+    }
+
+    // The object is the real test: a symbol absent from the header can still
+    // be linkable, and that is exactly what a C caller would reach for.
+    let object = out_dir.join("demoted.o");
+    let compiled = std::process::Command::new("clang")
+        .args(["-O2", "-c"])
+        .arg(out_dir.join("demoted.c"))
+        .arg("-I")
+        .arg(&out_dir)
+        .arg("-o")
+        .arg(&object)
+        .status()
+        .expect("clang should run");
+    assert!(compiled.success(), "generated C must compile");
+    let symbols = std::process::Command::new("nm")
+        .args(["-gU"])
+        .arg(&object)
+        .output()
+        .expect("nm should run");
+    let symbols = String::from_utf8_lossy(&symbols.stdout);
     assert!(
-        !source.contains("\nchelis_tensor* my_noise("),
-        "[04-EFF-3] the externally-linkable wrapper must not be emitted; \
-         withholding only the header declaration leaves the symbol linkable",
+        !symbols.contains(&mangled),
+        "[04-EFF-3] the demoted definition must not be externally linkable; \
+         `nm -gU` still lists {mangled}:\n{symbols}",
     );
 }
 
