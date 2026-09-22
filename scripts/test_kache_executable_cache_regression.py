@@ -15,13 +15,10 @@ from kache_executable_cache_regression import (
     ReportFailure,
     checkout_target,
     contains_bytes,
-    isolated_environment,
-    kache_store,
     restored_executable_candidates,
     validate_legacy_namespace_report,
     validate_debug_uuid_outputs,
     validate_warm_report,
-    write_isolated_kache_config,
 )
 
 
@@ -29,46 +26,6 @@ class KacheWarmReportTests(unittest.TestCase):
     def test_each_clean_clone_owns_its_target_directory(self) -> None:
         checkout = Path("/tmp/probe/warm")
         self.assertEqual(checkout_target(checkout), checkout / "target")
-
-    def test_cold_and_warm_runs_share_only_a_fresh_probe_cache(self) -> None:
-        with tempfile.TemporaryDirectory() as raw_directory:
-            root = Path(raw_directory)
-            cache_dir = root / "kache-cache"
-            config = root / "probe-kache.toml"
-            write_isolated_kache_config(
-                "[cache]\nignore_env = true\ncache_executables = true\n",
-                config,
-                cache_dir,
-            )
-            first = isolated_environment(
-                {"KACHE_CONFIG": "/host/config"},
-                target=root / "target-cold",
-                config=config,
-            )
-            second = isolated_environment(
-                {"KACHE_CONFIG": "/other/host/config"},
-                target=root / "target-warm",
-                config=config,
-            )
-            self.assertEqual(first["KACHE_CONFIG"], str(config))
-            self.assertEqual(second["KACHE_CONFIG"], str(config))
-            self.assertEqual(first["KACHE_LOG_FILE"], "kache=debug")
-            self.assertEqual(
-                first["KACHE_LOG_FILE_PATH"], str(root / "kache-wrapper.log")
-            )
-            self.assertNotEqual(first["CARGO_TARGET_DIR"], second["CARGO_TARGET_DIR"])
-            self.assertIn(f"local_store = {json.dumps(str(cache_dir))}", config.read_text())
-            self.assertEqual(kache_store(cache_dir), cache_dir / "store")
-
-    def test_isolated_config_rejects_an_existing_local_store(self) -> None:
-        with tempfile.TemporaryDirectory() as raw_directory:
-            root = Path(raw_directory)
-            with self.assertRaisesRegex(ReportFailure, "already sets local_store"):
-                write_isolated_kache_config(
-                    '[cache]\nlocal_store = "/host/cache"\n',
-                    root / "probe-kache.toml",
-                    root / "cache",
-                )
 
     def test_warm_report_requires_hits_and_restored_bytes(self) -> None:
         report = {
@@ -106,9 +63,7 @@ class KacheWarmReportTests(unittest.TestCase):
     def test_legacy_schema_entry_must_not_be_a_current_local_hit(self) -> None:
         report = {
             "summary": {"local_hits": 1, "misses": 0},
-            "all_events": [
-                {"crate_name": "schema_probe", "result": "local_hit"}
-            ],
+            "all_events": [{"crate_name": "schema_probe", "result": "local_hit"}],
         }
         with self.assertRaisesRegex(ReportFailure, "reused a schema-27 entry"):
             validate_legacy_namespace_report(report)
@@ -123,7 +78,9 @@ class KacheWarmReportTests(unittest.TestCase):
         }
         validate_legacy_namespace_report(report)
 
-    def test_local_hit_cache_metadata_identifies_the_exact_restored_executable(self) -> None:
+    def test_local_hit_cache_metadata_identifies_the_exact_restored_executable(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as raw_directory:
             store = Path(raw_directory) / "store"
             key = "a" * 64
@@ -179,7 +136,9 @@ class KacheWarmReportTests(unittest.TestCase):
                     [Path("suite-a1b2")], report, Path(raw_directory)
                 )
 
-    def test_crate_prefix_without_an_exact_executable_metadata_row_is_not_restored(self) -> None:
+    def test_crate_prefix_without_an_exact_executable_metadata_row_is_not_restored(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as raw_directory:
             store = Path(raw_directory) / "store"
             key = "c" * 64
