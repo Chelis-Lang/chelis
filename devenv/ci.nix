@@ -34,7 +34,6 @@
             mkdir -p "$out/bin"
             ln -s ${gnumake}/bin/make "$out/bin/gmake"
           '')
-          m4
           gmp
           mpfr
           nodejs
