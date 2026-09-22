@@ -331,6 +331,22 @@ fn a_vmapped_guard_computes_when_no_row_fires() {
     );
 }
 
+/// The taken twin of `vmap_of_grad_differentiates_through_an_untaken_guard`.
+/// The file header promises every taken case has an untaken twin; this pair
+/// was the one exception, and chelis#1464 names `vmap(grad(...))` in its
+/// acceptance surface.
+#[test]
+fn vmap_of_grad_aborts_when_the_guard_fires() {
+    let source = "module Repro.VmapGradTaken\n\
+         def cube(t: tensor[1, f32]) -> tensor[f32] = \
+         if gt(tensor_to_scalar(sum(t, cast(0, i32))), cast(1.5, f32)) \
+         then fail(\"cube guard fired\") \
+         else sum(mul(mul(t, t), t), cast(0, i32))\n\
+         def batched(b: tensor[2, 1, f32]) -> tensor[2, 1, f32] = vmap(grad(cube))(b)\n\
+         out = batched(to_tensor([[cast(1.0, f32)], [cast(2.0, f32)]]))\n";
+    assert_taken_in_both_lanes(source, "vmap_grad_taken", "cube guard fired");
+}
+
 #[test]
 fn vmap_of_grad_differentiates_through_an_untaken_guard() {
     // grad of x^3 is 3x^2, so rows [1.0] and [2.0] give 3.0 and 12.0.
@@ -457,6 +473,85 @@ fn an_indirect_fail_in_the_surviving_branch_is_also_rejected() {
     assert!(
         stderr.contains("1464"),
         "the rejection must cite its owning issue; got: {stderr}"
+    );
+}
+
+/// chelis#2371: a `fail` with NO enclosing `if` inside a transform. The
+/// depth counter guards `if` branches, so nothing guarded this route: the
+/// placeholder became part of the answer rather than replacing it.
+///
+/// `grad` over `sum(add(x, fail("m")), 0i32)` returned `1.0` with exit 0 and
+/// no `chelis_fail` anywhere in the generated C. It is unconditional here, so
+/// it lowers to an [05-OP-68] guard whose condition is a constant true.
+#[test]
+fn a_fail_as_a_plain_operand_aborts_in_both_lanes() {
+    let source = "module Repro.OperandFail\n\
+         def loss(x: tensor[1, f32]) -> tensor[f32] = \
+         sum(add(x, fail(\"operand boom\")), cast(0, i32))\n\
+         out = grad(loss)(to_tensor([cast(3.0, f32)]))\n";
+    assert_taken_in_both_lanes(source, "operand_fail", "operand boom");
+}
+
+#[test]
+fn a_fail_as_a_whole_transformed_body_aborts_in_both_lanes() {
+    let source = "module Repro.BodyFail\n\
+         def loss(x: tensor[1, f32]) -> tensor[f32] = fail(\"body boom\")\n\
+         out = grad(loss)(to_tensor([cast(3.0, f32)]))\n";
+    assert_taken_in_both_lanes(source, "body_fail", "body boom");
+}
+
+#[test]
+fn a_fail_reached_through_a_helper_with_no_if_aborts_in_both_lanes() {
+    let source = "module Repro.HelperFail\n\
+         def boom(x: tensor[1, f32]) -> tensor[f32] = fail(\"helper boom\")\n\
+         def loss(x: tensor[1, f32]) -> tensor[f32] = boom(x)\n\
+         out = grad(loss)(to_tensor([cast(3.0, f32)]))\n";
+    assert_taken_in_both_lanes(source, "helper_fail", "helper boom");
+}
+
+#[test]
+fn a_fail_with_no_if_aborts_under_vmap_too() {
+    let source = "module Repro.VmapBodyFail\n\
+         def row(t: tensor[1, f32]) -> tensor[f32] = fail(\"vmap body boom\")\n\
+         def batched(b: tensor[2, 1, f32]) -> tensor[2, f32] = vmap(row)(b)\n\
+         out = batched(to_tensor([[cast(1.0, f32)], [cast(2.0, f32)]]))\n";
+    assert_taken_in_both_lanes(source, "vmap_body_fail", "vmap body boom");
+}
+
+#[test]
+fn a_fail_inside_a_where_arm_aborts_in_both_lanes() {
+    // `where` is the tensor analogue of `if` and the natural spelling for an
+    // elementwise guard. Arguments are call-by-value, so the helper traps
+    // regardless of the condition -- this returned a value for BOTH inputs.
+    let source = "module Repro.WhereFail\n\
+         def boom(x: tensor[1, f32]) -> tensor[1, f32] = fail(\"where boom\")\n\
+         def loss(x: tensor[1, f32]) -> tensor[f32] = \
+         sum(where(gt(&x, to_tensor([cast(0.5, f32)])), boom(copy(x)), mul(&x, &x)), \
+         cast(0, i32))\n\
+         out = grad(loss)(to_tensor([cast(0.9, f32)]))\n";
+    assert_taken_in_both_lanes(source, "where_fail", "where boom");
+}
+
+/// The negative control for the four above: a `fail` with no enclosing `if`
+/// and NO transform is still the host lane's whole-value abort, and must keep
+/// working exactly as before. Breaking this is how an earlier attempt at this
+/// class went wrong.
+#[test]
+fn a_fail_with_no_if_and_no_transform_is_unchanged() {
+    let source = "module Repro.PlainFail\n\
+         def boom(x: tensor[1, f32]) -> tensor[f32] = fail(\"plain boom\")\n\
+         def loss(x: tensor[1, f32]) -> tensor[f32] = boom(x)\n\
+         out = loss(to_tensor([cast(3.0, f32)]))\n";
+    let evaluated = eval(source, "plain_fail");
+    let stderr = String::from_utf8_lossy(&evaluated.stderr).into_owned();
+    assert!(
+        !evaluated.status.success(),
+        "an untransformed fail must still abort: stdout={}",
+        String::from_utf8_lossy(&evaluated.stdout)
+    );
+    assert!(
+        stderr.contains("plain boom"),
+        "the host lane must still carry the message; got: {stderr}"
     );
 }
 
