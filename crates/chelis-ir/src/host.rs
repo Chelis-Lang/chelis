@@ -22728,7 +22728,8 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
             })
             .collect::<Vec<_>>();
         // Collisions the corpus lacks: an ambiguous terminal across two
-        // spellings, a duplicate definition, and a defsig beside its def.
+        // spellings, and a defsig beside its def. A duplicate definition is
+        // not covered: the checker rejects it, so no session can hold one.
         programs.push(parse_and_check(
             "(defsig {} Demo.depth (a) (t-fn {} (t-var {} a) (t-prim {} i32)))\n\
              (def {} Demo.depth (fn {} (params {} (x {type: (t-var {} a)})) (lit {type: (t-prim {} i32)} 1)))\n\

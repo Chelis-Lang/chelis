@@ -759,6 +759,15 @@ mod tests {
 
     /// Handcrafted programs aimed at each way a replayed walk could differ
     /// from a fresh one. Each one also runs through the corpus differential.
+    /// Deep-only fixtures for shapes Surf cannot spell. `m` has no
+    /// parameter list, so the walk leaves it in the active set; `n` is then
+    /// recorded before the second call to `n` re-reaches `m`, which the
+    /// original walk reports as recursion. Replay must not skip that second
+    /// walk (the round-1 red team's reproduction for `poison_replay`).
+    const DEEP_EXACTNESS_FIXTURES: &[&str] = &["(def {} m (fn {} (lit {} 1) (lit {} 2)))\n\
+         (def {} n (fn {} (params {} (x {})) (app {} (var {} m) (var {} x))))\n\
+         (def {} root (fn {} (params {} (x {})) (app {} (var {} add) (app {} (var {} n) (var {} x)) (app {} (var {} n) (var {} x)))))\n"];
+
     const EXACTNESS_FIXTURES: &[&str] = &[
         // The same helper with a static and then a runtime rate: the key
         // must tell the two actuals apart, in either order.
@@ -823,13 +832,22 @@ mod tests {
                 }
             }
         }
+        let mut programs = DEEP_EXACTNESS_FIXTURES
+            .iter()
+            .map(|source| {
+                let exprs = chelis_deep::parser::parse_str(source).expect("Deep fixture parses");
+                (format!("deep fixture:{}", &source[..24]), exprs)
+            })
+            .collect::<Vec<_>>();
+        programs.extend(
+            sources
+                .iter()
+                .filter_map(|(origin, source)| Some((origin.clone(), surf_program(source)?))),
+        );
         let mut compared = 0usize;
         let mut outcomes = BTreeMap::<String, usize>::new();
-        for (origin, source) in &sources {
-            let Some(exprs) = surf_program(source) else {
-                continue;
-            };
-            let defs = collect_top_level_defs(&exprs);
+        for (origin, exprs) in &programs {
+            let defs = collect_top_level_defs(exprs);
             let names = defs.keys().cloned().collect::<Vec<_>>();
             let mut shadowed = names.iter().step_by(3).cloned().collect::<UnordSet<_>>();
             shadowed.insert("neg".into());
@@ -991,5 +1009,22 @@ mod tests {
             callers + 1
         );
         assert!(asked > 0, "the lowering map no longer asks the classifier");
+    }
+
+    /// A malformed named function stays in the active set for the rest of
+    /// the walk, so a walk recorded before it was reached must not be
+    /// replayed afterwards.
+    #[test]
+    fn malformed_named_function_disables_replay() {
+        use crate::evaluation::{EvaluationProfile, LegacyEvaluationReason};
+        let exprs = chelis_deep::parser::parse_str(DEEP_EXACTNESS_FIXTURES[0]).unwrap();
+        let defs = collect_top_level_defs(&exprs);
+        let memoised = legacy_profile(&defs["root"], &defs);
+        let reference = as_reference(|| legacy_profile(&defs["root"], &defs));
+        assert_eq!(
+            reference,
+            EvaluationProfile::Legacy(LegacyEvaluationReason::RecursiveControl)
+        );
+        assert_eq!(memoised, reference);
     }
 }
