@@ -68,7 +68,9 @@ cvc5-rs = { version = "0.3", optional = true }
 # does NOT link a system FLINT) and exposes `arb_hypgeom_erf` plus the interval
 # extraction (`arb_get_lbound_arf`/`ubound_arf`) and directed-rounding f64
 # projection (`arf_get_d` with `ARF_RND_FLOOR`/`ARF_RND_CEIL`) the oracle needs.
-arb-sys = { version = "0.3.6", optional = true }
+# Pin the maintained fork's bundled-MPFR fix (arb-sys#1) and standalone
+# dependency manifest (arb-sys#2); crates.io 0.3.6 omits the MPFR prefix.
+arb-sys = { git = "https://github.com/Chelis-Lang/arb-sys", rev = "691abe3e533f48c5c0f3e672c556d79493a651d1", optional = true }
 # On the smt AND z3 paths: a RealLit lowers to its EXACT f64 value as a
 # rational `n/d` (BigRational::from_float), so the solver reasons about the
 # same number the runtime f64 evaluator does, not the literal's exact decimal.
