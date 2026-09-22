@@ -15669,9 +15669,7 @@ fn expr_calls_summary_rejecting_top_level_fn(
 
 /// Shared rather than cloned per ask: the kernel decision reads it on every
 /// application, and a clone copied every caller's callee set (chelis#2392).
-fn top_level_fn_call_graph(
-    program: &HostLoweringSession<'_>,
-) -> Arc<CallGraph> {
+fn top_level_fn_call_graph(program: &HostLoweringSession<'_>) -> Arc<CallGraph> {
     if let Some(cached) = program.facts.call_graph.borrow().clone() {
         return cached;
     }
