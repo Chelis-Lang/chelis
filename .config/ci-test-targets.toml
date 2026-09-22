@@ -1904,21 +1904,12 @@ reason = "the Nix Rust-policy stage compiles the Arb feature against the locked 
 tracking_issue = "chelis#2241"
 
 [[path_rule]]
-prefix = "nix/ci-glibc231.nix"
-disposition = "owner"
-workflow = "ci.yml"
-job = "smt-build-glibc231"
-cadence = "pull_request and push"
-reason = "the compatibility lane builds the release CLI against glibc 2.31 and executes real cvc5 discharge with the pinned loader"
-tracking_issue = "chelis#2241"
-
-[[path_rule]]
 prefix = ".github/scripts/verify_release_smt.py"
 disposition = "owner"
 workflow = "ci.yml"
 job = "smt-build"
 cadence = "pull_request and push"
-reason = "both SMT lanes execute the release verifier; the native lane proves discharge and the compatibility lane binds the old loader"
+reason = "both SMT lanes execute the release verifier: the native lane proves discharge and the compatibility lane proves it under glibc 2.31"
 tracking_issue = "chelis#2241"
 
 [[path_rule]]
