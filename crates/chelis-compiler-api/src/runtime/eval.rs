@@ -780,14 +780,12 @@ impl<'a> EvalContext<'a> {
         // A bound parameter shadows a same-named top-level def, so it must not
         // reach the classifier. Collisions are rare (parameters are named
         // `acc`, `x`, ...), so the common path classifies against the shared
-        // snapshot with no per-ask clone; only a genuine collision pays for a
-        // filtered copy, preserving the original shadowing semantics exactly.
+        // snapshot; a genuine collision hides the shadowed names from the
+        // classifier by name, which is exactly what a filtered copy of the
+        // table did, without the copy (chelis#2391).
         if bound.iter().any(|name| snapshot.contains_key(name)) {
-            let mut filtered = (*snapshot).clone();
-            for name in bound {
-                filtered.remove(name);
-            }
-            chelis_ir::lower::evaluation_profile_sorted(expr, &filtered)
+            let shadowed = bound.iter().cloned().collect();
+            chelis_ir::lower::evaluation_profile_sorted_shadowing(expr, &snapshot, &shadowed)
         } else {
             chelis_ir::lower::evaluation_profile_sorted(expr, &snapshot)
         }
