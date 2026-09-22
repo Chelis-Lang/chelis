@@ -245,6 +245,9 @@ fn pop_inlining(name: &str) {
     });
 }
 
+/// Each top-level fn's directly called top-level fns.
+type CallGraph = BTreeMap<String, BTreeSet<String>>;
+
 /// The per-program facts host lowering derives once and reads many times.
 ///
 /// Each field is its own `RefCell` rather than one cell over the struct,
@@ -263,7 +266,7 @@ struct DefLaneFacts {
     /// whose miss costs a full callee lowering (chelis#1835).
     helper_summary_rejects: RefCell<UnordMap<String, bool>>,
     /// Program-wide: the top-level fn call graph.
-    call_graph: RefCell<Option<Arc<BTreeMap<String, BTreeSet<String>>>>>,
+    call_graph: RefCell<Option<Arc<CallGraph>>>,
     /// Program-wide: every top-level definition body by name.
     program_defs: RefCell<Option<Arc<BTreeMap<String, Expr>>>>,
     /// Program-wide: the checker's effect row per definition.
@@ -15668,7 +15671,7 @@ fn expr_calls_summary_rejecting_top_level_fn(
 /// application, and a clone copied every caller's callee set (chelis#2392).
 fn top_level_fn_call_graph(
     program: &HostLoweringSession<'_>,
-) -> Arc<BTreeMap<String, BTreeSet<String>>> {
+) -> Arc<CallGraph> {
     if let Some(cached) = program.facts.call_graph.borrow().clone() {
         return cached;
     }
