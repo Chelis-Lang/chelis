@@ -36,7 +36,8 @@ fn conform_sync_help_explains_skill_additions_and_removals() {
             "complete pinned root Chelis contract",
         ))
         .stdout(predicate::str::contains(".claude/skills"))
-        .stdout(predicate::str::contains("outside managed regions"));
+        .stdout(predicate::str::contains("outside managed regions"))
+        .stdout(predicate::str::contains("standalone Markdown comments"));
 
     Command::cargo_bin("chelis")
         .expect("binary")
@@ -47,7 +48,8 @@ fn conform_sync_help_explains_skill_additions_and_removals() {
         .stdout(predicate::str::contains("excluded_skills"))
         .stdout(predicate::str::contains("shell-local:exclude"))
         .stdout(predicate::str::contains("complete pinned root contract"))
-        .stdout(predicate::str::contains("materialized copies"));
+        .stdout(predicate::str::contains("materialized copies"))
+        .stdout(predicate::str::contains("standalone Markdown comments"));
 }
 
 #[test]

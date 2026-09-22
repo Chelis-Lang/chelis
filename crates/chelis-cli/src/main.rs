@@ -835,7 +835,9 @@ enum ConformCommand {
     /// the current upstream section on the next sync; selecting the root
     /// `# Chelis Agent Contract` heading omits the whole inherited body. Full
     /// inheritance is the default, and each shell should keep the inherited and
-    /// shell-owned guidance that remains relevant and current.
+    /// shell-owned guidance that remains relevant and current. Selector control
+    /// markers must be standalone Markdown comments, outside code fences and
+    /// enclosing HTML blocks.
     Sync {
         /// Shell package root (defaults to `.`).
         #[arg(long)]
@@ -856,7 +858,9 @@ enum ConformCommand {
     /// A retained skill's `shell-local:exclude` heading selectors are also
     /// reapplied while its local block is preserved. Standalone AGENTS.md
     /// selectors are applied to the complete pinned root contract in the same
-    /// way. Both agent skill directories are rebuilt as materialized copies.
+    /// way. Selector control markers must be standalone Markdown comments,
+    /// outside code fences and enclosing HTML blocks. Both agent skill
+    /// directories are rebuilt as materialized copies.
     Bump {
         /// Target chelis version (bare `X.Y.Z`).
         version: String,

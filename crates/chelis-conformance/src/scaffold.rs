@@ -208,12 +208,8 @@ fn standalone_exclusion_selectors(document: &str) -> Result<Vec<&str>, String> {
             "malformed shell-local exclusion block (expected exactly one `{SHELL_LOCAL_EXCLUDE_END}`)"
         ));
     }
-    let begin = document
-        .find(SHELL_LOCAL_EXCLUDE_BEGIN)
-        .expect("count checked");
-    let end = document
-        .find(SHELL_LOCAL_EXCLUDE_END)
-        .expect("count checked");
+    let begin = standalone_markdown_comment_offset(document, SHELL_LOCAL_EXCLUDE_BEGIN)?;
+    let end = standalone_markdown_comment_offset(document, SHELL_LOCAL_EXCLUDE_END)?;
     if end <= begin + SHELL_LOCAL_EXCLUDE_BEGIN.len() {
         return Err("shell-local exclusion end marker must follow its begin marker".into());
     }
@@ -258,10 +254,8 @@ fn shell_local_exclusion_selectors(block: &str) -> Result<Vec<&str>, String> {
             "malformed shell-local exclusion block (expected exactly one `{SHELL_LOCAL_EXCLUDE_END}`)"
         ));
     }
-    let begin = block
-        .find(SHELL_LOCAL_EXCLUDE_BEGIN)
-        .expect("count checked");
-    let end = block.find(SHELL_LOCAL_EXCLUDE_END).expect("count checked");
+    let begin = standalone_markdown_comment_offset(block, SHELL_LOCAL_EXCLUDE_BEGIN)?;
+    let end = standalone_markdown_comment_offset(block, SHELL_LOCAL_EXCLUDE_END)?;
     if begin <= SHELL_LOCAL_BEGIN.len()
         || end <= begin + SHELL_LOCAL_EXCLUDE_BEGIN.len()
         || end >= outer_end
@@ -272,6 +266,36 @@ fn shell_local_exclusion_selectors(block: &str) -> Result<Vec<&str>, String> {
     }
 
     parse_exclusion_selector_lines(&block[begin + SHELL_LOCAL_EXCLUDE_BEGIN.len()..end], false)
+}
+
+/// Locate a control marker only when Markdown parses it as its own HTML
+/// comment. Raw text search still owns missing/duplicate diagnostics; this
+/// check prevents examples in code fences or enclosing HTML blocks from
+/// becoming active configuration.
+fn standalone_markdown_comment_offset(document: &str, marker: &str) -> Result<usize, String> {
+    let offset = document.find(marker).expect("marker count checked");
+    let marker_end = offset + marker.len();
+    let line_start = document[..offset]
+        .rfind('\n')
+        .map_or(0, |newline| newline + 1);
+    let line_end = document[marker_end..]
+        .find('\n')
+        .map_or(document.len(), |newline| marker_end + newline);
+    let alone_on_line = document[line_start..line_end].trim_end_matches('\r').trim() == marker;
+    let own_html_event = Parser::new(document)
+        .into_offset_iter()
+        .any(|(event, range)| {
+            matches!(event, Event::Start(Tag::HtmlBlock))
+                && range.start <= offset
+                && marker_end <= range.end
+                && document[range].trim() == marker
+        });
+    if !alone_on_line || !own_html_event {
+        return Err(format!(
+            "`{marker}` must be a standalone Markdown comment outside fenced code and enclosing HTML blocks"
+        ));
+    }
+    Ok(offset)
 }
 
 fn parse_exclusion_selector_lines(

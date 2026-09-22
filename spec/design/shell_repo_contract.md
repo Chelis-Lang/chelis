@@ -53,7 +53,10 @@ not a hypothetical.
   heading selectors use the same structural matching, range, validation, and
   restoration rules as shared-skill selectors in §8. Selecting the root
   `# Chelis Agent Contract` heading omits the complete inherited body; the
-  shell's own text outside the block remains.
+  shell's own text outside the block remains. Selector control markers are
+  standalone Markdown comments; sync and audit reject markers inside a code
+  fence or an enclosing HTML block rather than interpreting quoted examples as
+  configuration.
 - `AGENTS.md` contains at minimum these sections: **Repo Identity**,
   **Toolchain Policy**, **Pin Bump Checklist** (§7), an **Upstream Bugs**
   pointer (§4), and the **Scaffolding Drift Rule** (§10). The

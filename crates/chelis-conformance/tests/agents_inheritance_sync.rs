@@ -192,3 +192,55 @@ fn malformed_agents_selector_span_fails_before_any_write() {
     assert!(error.contains("shell-local:exclude:end"), "{error}");
     assert_eq!(std::fs::read_to_string(&agents_path).unwrap(), before);
 }
+
+#[test]
+fn quoted_agents_selector_spans_fail_before_any_write() {
+    let quoted_spans = [
+        (
+            "fenced code",
+            "\n```markdown\n<!-- shell-local:exclude:begin -->\n<!-- ### Numeric Surface Discipline -->\n<!-- shell-local:exclude:end -->\n```\n",
+        ),
+        (
+            "HTML block",
+            "\n<div>\n<!-- shell-local:exclude:begin -->\n<!-- ### Numeric Surface Discipline -->\n<!-- shell-local:exclude:end -->\n</div>\n",
+        ),
+    ];
+
+    for (name, quoted_span) in quoted_spans {
+        let (_tmp, root) = green_shell();
+        let agents_path = root.join("AGENTS.md");
+        let surface_path = root.join("docs/CHELIS_SURFACE.md");
+        append(&agents_path, quoted_span);
+        let agents_before = std::fs::read_to_string(&agents_path).unwrap();
+        let surface_before = std::fs::read_to_string(&surface_path).unwrap();
+
+        let report = audit::audit(&root);
+        let row = report
+            .rows
+            .iter()
+            .find(|row| row.key == "agents-md")
+            .unwrap();
+        assert_eq!(row.verdict, audit::Verdict::Fail, "{name}");
+        assert!(
+            row.diagnostic.contains("standalone Markdown comment"),
+            "{name}: {}",
+            row.diagnostic
+        );
+
+        let error = scaffold::sync_managed_blocks(&root, VER).unwrap_err();
+        assert!(
+            error.contains("standalone Markdown comment"),
+            "{name}: {error}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&agents_path).unwrap(),
+            agents_before,
+            "{name} changed AGENTS.md"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&surface_path).unwrap(),
+            surface_before,
+            "{name} changed the other managed document"
+        );
+    }
+}

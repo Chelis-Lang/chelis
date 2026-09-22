@@ -87,7 +87,9 @@ heading selector span anywhere outside its managed block:
 Each selector removes the heading and its section through the next heading of
 equal or shallower depth. Removing the selector restores the current upstream
 section. Selecting `# Chelis Agent Contract` removes the whole inherited body.
-Shell-owned prose outside the managed block is never replaced.
+Shell-owned prose outside the managed block is never replaced. The begin and
+end control markers must be standalone Markdown comments; markers shown inside
+a code fence or an enclosing HTML block are rejected rather than activated.
 
 To keep a shared skill while removing irrelevant inherited sections, add exact
 heading selectors inside its trailing shell-local block:
@@ -108,8 +110,9 @@ Local additions remain here.
 Each comment-wrapped selector removes that heading and its section. Removing the
 selector restores the current upstream section. Sync and audit fail if a
 selector is missing, duplicated, malformed, or overlaps another selected
-section. Run `chelis reef conform sync --help` for the same configuration
-summary at the command line.
+section. The same standalone-comment rule applies to these control markers.
+Run `chelis reef conform sync --help` for the same configuration summary at the
+command line.
 
 ## Install Paths
 
