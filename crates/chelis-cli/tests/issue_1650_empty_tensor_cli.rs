@@ -71,38 +71,18 @@ fn invalid_list_element_types_remain_checker_errors() {
 
 mod common;
 
-fn native_observation(dtype: &str, c_dtype: &str, nested: bool, empty: bool, wrong_dtype: bool) {
+fn run_native_observation(
+    source_text: &str,
+    c_dtype: &str,
+    rank: usize,
+    shape: &[usize],
+    count: usize,
+    wrong_dtype: bool,
+) {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("empty.ch");
     let output_dir = dir.path().join("generated");
-    let leaf = if dtype == "bool" {
-        "true".to_string()
-    } else {
-        format!("cast(1, {dtype})")
-    };
-    let (ty, input, rank, first, count) = match (nested, empty) {
-        (true, true) => (
-            format!("List[List[{dtype}]]"),
-            "[[], []]".to_string(),
-            2,
-            2,
-            0,
-        ),
-        (false, true) => (format!("List[{dtype}]"), "[]".to_string(), 1, 0, 0),
-        (true, false) => (
-            format!("List[List[{dtype}]]"),
-            format!("[[{leaf}], [{leaf}]]"),
-            2,
-            2,
-            2,
-        ),
-        (false, false) => (format!("List[{dtype}]"), format!("[{leaf}]"), 1, 1, 1),
-    };
-    fs::write(
-        &source,
-        format!("xs: {ty} = {input}\nout = to_tensor(xs)\n"),
-    )
-    .unwrap();
+    fs::write(&source, source_text).unwrap();
     let output = Command::new(assert_cmd::cargo_bin!("chelis"))
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
@@ -135,16 +115,13 @@ fn native_observation(dtype: &str, c_dtype: &str, nested: bool, empty: bool, wro
     } else {
         c_dtype
     };
-    let last_axis = if nested {
-        format!(
-            " || chelis_tensor_shape(t, 1) != {}",
-            if empty { 0 } else { 1 }
-        )
-    } else {
-        String::new()
-    };
+    let shape_checks = shape
+        .iter()
+        .enumerate()
+        .map(|(axis, extent)| format!(" || chelis_tensor_shape(t, {axis}) != {extent}"))
+        .collect::<String>();
     let check = format!(
-        "\nchelis_read_view observed = chelis_tensor_read_view(t);\nif (observed.dtype != {expected} || observed.count != {count} || chelis_tensor_rank(t) != {rank} || chelis_tensor_shape(t, 0) != {first}{last_axis}) exit(91);\n"
+        "\nchelis_read_view observed = chelis_tensor_read_view(t);\nif (observed.dtype != {expected} || observed.count != {count} || chelis_tensor_rank(t) != {rank}{shape_checks}) exit(91);\n"
     );
     fs::write(
         &generated,
@@ -160,8 +137,47 @@ fn native_observation(dtype: &str, c_dtype: &str, nested: bool, empty: bool, wro
             "typed observation must detect an incorrect dtype expectation"
         );
     } else {
-        assert!(run.status.success(), "{dtype}/{nested}: {run:?}");
+        assert!(run.status.success(), "{source_text}: {run:?}");
     }
+}
+
+fn native_observation(dtype: &str, c_dtype: &str, nested: bool, empty: bool, wrong_dtype: bool) {
+    let leaf = if dtype == "bool" {
+        "true".to_string()
+    } else {
+        format!("cast(1, {dtype})")
+    };
+    let (ty, input, rank, first, count) = match (nested, empty) {
+        (true, true) => (
+            format!("List[List[{dtype}]]"),
+            "[[], []]".to_string(),
+            2,
+            2,
+            0,
+        ),
+        (false, true) => (format!("List[{dtype}]"), "[]".to_string(), 1, 0, 0),
+        (true, false) => (
+            format!("List[List[{dtype}]]"),
+            format!("[[{leaf}], [{leaf}]]"),
+            2,
+            2,
+            2,
+        ),
+        (false, false) => (format!("List[{dtype}]"), format!("[{leaf}]"), 1, 1, 1),
+    };
+    let shape = if nested {
+        vec![first, if empty { 0 } else { 1 }]
+    } else {
+        vec![first]
+    };
+    run_native_observation(
+        &format!("xs: {ty} = {input}\nout = to_tensor(xs)\n"),
+        c_dtype,
+        rank,
+        &shape,
+        count,
+        wrong_dtype,
+    );
 }
 
 #[test]
@@ -188,6 +204,54 @@ fn generated_c_empty_tensor_metadata_matches_every_checked_dtype() {
 #[test]
 fn generated_c_typed_observation_rejects_an_incorrect_empty_dtype() {
     native_observation("f64", "CHELIS_DTYPE_F64", false, true, true);
+}
+
+#[test]
+fn generated_c_contextual_empty_tensor_preserves_the_checked_dtype() {
+    run_native_observation(
+        "out: tensor[0, f64] = to_tensor([])\n",
+        "CHELIS_DTYPE_F64",
+        1,
+        &[0],
+        0,
+        false,
+    );
+}
+
+#[test]
+fn generated_c_rejects_an_unresolved_empty_tensor_dtype() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("unresolved.ch");
+    let output_dir = dir.path().join("generated");
+    fs::write(&source, "out = to_tensor([])\n").unwrap();
+    let output = Command::new(assert_cmd::cargo_bin!("chelis"))
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            source.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            output_dir.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    let message = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        message.contains("host type did not resolve before the code-generation boundary"),
+        "{message}"
+    );
+    assert!(
+        message.contains("unresolved host inference variable"),
+        "{message}"
+    );
+    assert!(!output_dir.join("unresolved.c").exists(), "{message}");
+    assert!(!output_dir.join("unresolved.h").exists(), "{message}");
 }
 
 /// [05-OP-57]: an unconstrained empty payload cannot authorize f32.
