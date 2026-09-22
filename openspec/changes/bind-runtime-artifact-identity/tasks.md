@@ -1,3 +1,35 @@
+## Delivery scopes and dependencies
+
+[#1354](https://github.com/Chelis-Lang/chelis/issues/1354) remains the umbrella and
+final acceptance tracker. The sections below group obligations, not one mandatory
+all-at-once implementation phase. Deliver the following independently reviewable
+scopes; their native GitHub blocked-by relationships mirror this table.
+
+| Scope | Issue | Prerequisites | Owned boundary |
+|---|---|---|---|
+| Identity production | [#2394](https://github.com/Chelis-Lang/chelis/issues/2394) | None | Public contract, D1/D2 producer/decoder, independent CLI/Python expectations, Cargo/Nix build inputs and explicit provenance |
+| Shared verification | [#2395](https://github.com/Chelis-Lang/chelis/issues/2395) | #2394 | D3/D4/D5 resolver, live freshness, verified staging/receipts, shared adapter and representation-runner pins, core oracle machinery |
+| Native distributions | [#2396](https://github.com/Chelis-Lang/chelis/issues/2396) | #2394 | Exact Nix/release/container outputs, sealed bundles, installer validation and installed canary |
+| CLI activation | [#2397](https://github.com/Chelis-Lang/chelis/issues/2397) | #2395, #2396 | All production C/HIP/Metal staging callers, CLI-owned selectors/native drivers and CLI mutation witnesses |
+| Python activation and wheels | [#2398](https://github.com/Chelis-Lang/chelis/issues/2398) | #2395 | Extension-owned bundle, compile/stage/link/call, persisted load admission and Python mutation/wheel witnesses |
+| CPU harnesses | [#2399](https://github.com/Chelis-Lang/chelis/issues/2399) | #2395 | C backend unit/integration, E2E/spec runners and benchmarks; CLI-owned drivers stay in #2397 |
+| HIP harnesses | [#2400](https://github.com/Chelis-Lang/chelis/issues/2400) | #2395 | Conventional and Phase-2 exact-pin consumers, intended feature recipes and bounded HIP evidence |
+| Metal harnesses | [#2401](https://github.com/Chelis-Lang/chelis/issues/2401) | #2395 | Metal selection/staging/linking and separately reported macOS/Metal evidence |
+
+Each scope takes its applicable fixtures, positive/negative execution, documentation,
+changelog, selector dispositions and adversarial/hosted evidence from the obligations
+below. CPU families may use separate PRs under their issue; HIP and Metal do not wait
+for each other or Python. Native package validation uses the producer's common
+decoder/comparison contract, not a second compatibility policy.
+
+Producer/package support may land before enforcement with the parent bug still open.
+Every activated consumer must be complete through its own publication/load boundary
+and ship with matching producer outputs: no legacy fallback or identity bypass.
+Keep Python compilation and persisted `load` admission together; do not create a new
+native cache subsystem. A partial scoped run identifies its coverage, never a passing
+parent aggregate. #2395 owns shared oracle machinery; each later scope supplies its
+rows. Final full-oracle execution, evidence reconciliation and closure remain #1354.
+
 ## 1. Contract and discriminating fixtures
 
 These are implementation tasks, not completed by authoring or validating this plan.
@@ -5,7 +37,7 @@ The authoritative completion oracle is the planned command
 `.venv/bin/python scripts/runtime_artifact_identity_oracle.py` described in `design.md`.
 Every execution claim remains bounded to its recorded consumers/configurations.
 
-- [ ] 1.1 Reconcile draft PR #2036 and the local issue-1354 sketches with this plan; preserve their work and do not mark unexecuted tests as evidence. Enumerate all runtime selectors/producers from D6 and disposition every occurrence.
+- [ ] 1.1 Reconcile the superseded draft PR #2036 and local issue-1354 sketches with this plan; preserve their work and do not mark unexecuted tests as evidence. Enumerate all runtime selectors/producers from D6 and disposition every occurrence through its owning scope.
 - [ ] 1.2 Author the public identity, override, staging/failure, source-freshness, and receipt rules in `spec/08-backends.md` §2 and `spec/11-ffi.md` §§1.4/2; cross-reference them from the captured backend/FFI and Nix-package capabilities without transferring authority or adding a MODIFIED delta to this change.
 - [ ] 1.3 Build real matching/incompatible fixture archives using exact Cargo `compiler-artifact` outputs. Add red-first cases for all identity dimensions, missing/malformed/duplicate/unsupported records, identical copies, distinct-byte ambiguity, equal/reversed mtimes, and reversed enumeration. A valid unique match must succeed.
 - [ ] 1.4 Add override and staging cases: valid directory/exact-file pins, conflicting or invalid overrides with a valid default nearby, header mismatch, byte replacement during staging, and absent/stale cached-artifact receipts. Check failure before linking/usable publication, not arbitrary eventual errors.
@@ -20,18 +52,19 @@ Every execution claim remains bounded to its recorded consumers/configurations.
 - [ ] 2.4 Implement explicit source-worktree versus sealed-distribution provenance and live-source validation. Missing development inputs cannot select distribution mode, and Python expectation cannot come from an adjacent CLI.
 - [ ] 2.5 Implement verified copy/hash/header checks, atomic successful publication, the staged-archive line in the CLI's stdout artifact report (stderr stays empty on success), and staged/link receipts. Preserve the distinction between compiler image, runtime build identity, archive digest, and native artifact digest.
 
-## 3. Coordinated consumer and producer cutover
+## 3. Producer-first and per-consumer cutover
 
-- [ ] 3.1 Replace CLI C/HIP/Metal and Python selectors with the shared owner; link verified staged paths explicitly in Python. Validate persisted receipts/native bytes for compiled-artifact reuse and subsequent load, with existing `ChelisError` failure categories.
-- [ ] 3.2 Migrate the shared harness adapter and every inventoried C/CLI/E2E/HIP/Metal test and benchmark selector. Validate `CHELIS_RUNTIME_LIB` pins, including the consistent directory-plus-pin pair `scripts/runtime_representation_phase1.py::runtime_pin` sets for the registered runtime-representation oracle, delete obsolete first/newest/canonical-file guessing, and keep an evidence-backed disposition for nonconsumers.
-- [ ] 3.3 Make Cargo and separate Nix compiler/runtime derivations consume the same runtime recipe and exact producer output; supply the lockfile, manifests, and local sources each per-crate derivation needs to produce the descriptor, and remove Nix first-match archive packaging. Validate archive/header identity in combined and standalone outputs and existing native package checks.
-- [ ] 3.4 Update release/container assembly, installer validation, and installed-artifact canary to preserve/check embedded identity. Supply a matching runtime/header bundle in Python wheels; exercise relocation and clean source-free installs with no neighboring CLI as local and manual-gate evidence, since no hosted lane builds a wheel.
-- [ ] 3.5 Rebuild paired consumer/runtime distributions and invalidate incompatible compiled artifacts. Do not activate a partial cutover through permissive legacy fallback; failed deployments remain loud until the matching bundle is installed.
+- [ ] 3.1 Activate the shared owner for every CLI C/HIP/Metal staging caller in #2397, after shared verification and native distributions are ready. Migrate CLI-owned selectors/native drivers and execute the complete CLI staging/link/run and mutation witnesses with that slice.
+- [ ] 3.2 Migrate the shared harness adapter and representation-runner pin contract in #2395, CLI-owned harnesses in #2397, CPU C/E2E/benchmark families in #2399, HIP in #2400, and Metal in #2401. Validate `CHELIS_RUNTIME_LIB` pins, including the consistent directory-plus-pin pair `scripts/runtime_representation_phase1.py::runtime_pin` sets; delete each claimed path's first/newest/canonical guessing and unchecked reuse, including no-override fallbacks. Keep evidence-backed dispositions for nonconsumers.
+- [ ] 3.3 Establish common Cargo/Nix producer inputs in #2394; complete exact native package assembly in #2396. Supply the lockfile, manifests, and local sources each per-crate derivation needs, remove Nix first-match packaging, and validate archive/header identity in combined and standalone outputs and existing native package checks.
+- [ ] 3.4 Update release/container assembly, installer validation and the installed-artifact canary in #2396 to preserve/check embedded identity. Exercise relocation and clean source-free native installs. Python wheel assembly and its source-free witness belong to #2398 with Python activation.
+- [ ] 3.5 Rebuild/reinstall matching consumer/runtime/header distributions before activating each consumer, and invalidate incompatible compiled artifacts on its claimed path. Other consumers may remain unmigrated with #1354 open; an activated consumer never accepts an unstamped legacy fallback, and failed deployments remain loud until its matching bundle is installed.
+- [ ] 3.6 Activate Python selection, verified explicit native linking, persisted receipt/native-byte admission and subsequent `load` together in #2398, with existing `ChelisError` categories. Produce the extension's own matching wheel runtime/header bundle and execute compile/load/call, persisted reload, source/dependency mutation and relocated source-free wheel witnesses. Interpreter/wheel evidence remains local/manual under the existing lane boundary.
 
 ## 4. Documentation and strict validation
 
 - [ ] 4.1 Reconcile `spec/design/phase3m_rust_runtime_rewrite.md` and packaging/current-state docs with the decided contract; document rebuild/remedy and rollback behavior, and add the implementation changelog fragment.
-- [ ] 4.2 Implement the named Python oracle using existing exact-artifact/digest helpers. Register its script/tests in `.config/ci-test-targets.toml`, document its authority in `docs/phase_oracles.md`, and document accelerator commands/limits in `docs/manual_gates.md`.
+- [ ] 4.2 Implement the named Python oracle's shared machinery and core rows in #2395 using existing exact-artifact/digest helpers; each consumer/package/harness scope adds its executed rows. Register the script/tests in `.config/ci-test-targets.toml`, document its authority in `docs/phase_oracles.md`, and document accelerator commands/limits in `docs/manual_gates.md`. Scoped receipts cannot pass the full aggregate while mandatory rows or prerequisites are missing.
 - [ ] 4.3 Run `openspec validate bind-runtime-artifact-identity --strict --no-interactive` and `openspec validate --all --strict --no-interactive`; verify every requirement has positive and negative execution coverage or an explicitly bounded hardware row.
 - [ ] 4.4 Run the authoritative runtime identity oracle in an isolated target/environment; inspect actual CLI, Python, source-mutation, producer/package, and receipt results rather than only the aggregate exit status. Keep the acceptance claim inactive until its mandatory rows pass.
 

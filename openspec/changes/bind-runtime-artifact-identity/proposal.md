@@ -18,7 +18,8 @@ Discovery on 2026-09-22 found:
 - [Draft PR #2036](https://github.com/Chelis-Lang/chelis/pull/2036), head
   `1a8dab61d6af9eb34120d6e3ca585335630470ab`, adds a proposed identity section to
   `spec/design/phase3m_rust_runtime_rewrite.md`. Its discussion records passing
-  required documentation checks, not runtime acceptance. It remains a design draft.
+  required documentation checks, not runtime acceptance. It is superseded by this
+  plan and #1354's dependency-linked implementation scopes.
 - Local branch `agent/1354-runtime-artifact-identity`, head
   `c4ec84e82b598ac1b8df729f2a3ef43a74377cdb`, has uncommitted design/Python unit-test
   additions and untracked CLI/Python issue-1354 tests. These are regression sketches,
@@ -28,9 +29,10 @@ Discovery on 2026-09-22 found:
   not native runtime archives.
 
 This proposal carries forward the useful draft decisions and resolves its open
-identity-carrier, compatibility, package, and override choices. Reconcile #2036 and
-reuse useful fixtures during implementation; do not silently treat either draft or
-its local test sketches as completed work. This document change does not close #1354.
+identity-carrier, compatibility, package, and override choices. Preserve useful local
+#2036 fixtures during implementation; do not treat the superseded draft or its test
+sketches as completed work. `tasks.md` links the independently deliverable scopes.
+This document change does not close #1354.
 
 ## What Changes
 
@@ -48,8 +50,11 @@ its local test sketches as completed work. This document change does not close #
   staged archive and linked product, not merely a discovered filename.
 - Cover source-worktree freshness separately from installed-package compatibility,
   so an old compiler/archive pair cannot certify newly mutated source.
-- Migrate Cargo, Nix, release/container, and Python-wheel production and all identified
-  selector families together. Installed packages work without a source checkout.
+- Deliver Cargo/Nix identity producers and native package support before activating
+  each consumer; migrate CLI, Python/wheels, CPU harnesses, HIP and Metal in the
+  dependency-linked scopes in `tasks.md`. Each activated consumer has matching
+  producer outputs and no legacy fallback. Installed packages work without a source
+  checkout; unmigrated consumers keep #1354 open.
 - Add one authoritative acceptance suite with actual CLI staging/link/run, Python
   compile/load/call, positive controls, stale-correct masking mutations, and explicit
   hosted-versus-manual execution scope.

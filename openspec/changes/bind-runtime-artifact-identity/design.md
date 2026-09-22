@@ -241,18 +241,39 @@ disposition before asserting #1354 closure.
 
 ## Migration Plan
 
-1. Author the public rules in `spec/08-backends.md` and `spec/11-ffi.md`; synchronize
-   the existing captured/package contracts. Land fixtures before selector implementation.
-2. Implement common identity production/decoding, proving ordinary Cargo and separate
-   package derivations can supply matching descriptors, including Python's extension.
-3. Migrate producers, production consumers, and harness adapters as one coordinated
-   cutover. Rebuild/reinstall paired compiler, extension, runtime, and headers; do not
-   temporarily accept unstamped archives to accommodate old installations.
-4. Update runtime rewrite, packaging, manual gates, phase-oracle documentation, and
-   changelog; reconcile PR #2036 rather than leave contradictory draft decisions.
-5. Strictly validate the proposal, execute the oracle and adversarial controls, then
-   inspect exact-head hosted/package receipts. Only those receipts can support issue
-   closure; merging this plan cannot.
+1. Deliver the public rules, common identity producer/decoder and independent
+   expectations in #2394. Prove ordinary Cargo and separate package derivations,
+   including Python's extension, can supply matching descriptors. This additive
+   producer slice changes no selector and does not close the bug.
+2. Build shared resolution, live-source freshness, verified staging/receipts and
+   harness adapters in #2395. Independently deliver native package assembly,
+   installer validation and source-free package evidence in #2396 using #2394's
+   decoder/comparison contract. Both consume the same identity rule.
+3. Activate CLI production and CLI-owned harnesses in #2397 after #2395 and #2396.
+   Activate Python in #2398 after #2395, with its own matching wheel producer.
+   Python compilation and persisted-artifact load admission are one vertical slice;
+   no new native cache subsystem is required. Each consumer ships with its matching
+   runtime/header bundle, explicit provenance and complete verified publication
+   boundary. CLI and Python do not require a common merge commit.
+4. Migrate CPU C-backend/E2E/benchmark harnesses in #2399, HIP in #2400 and Metal in
+   #2401 after the shared mechanism is available. Each family removes its own
+   no-override/default/reuse bypasses; updating an optional override helper alone
+   does not migrate it. Record separate compile/stage and actual hardware evidence.
+5. Land each slice's real fixtures, numerical positive and mutation controls,
+   documentation/remedies, changelog and exact-head evidence with that slice.
+   Preserve useful local #2036 sketches without adopting their permissive fixture
+   setup/assertions as acceptance. The superseded draft is not an implementation
+   umbrella. `tasks.md` maps the delivery issues to the complete obligations.
+6. #2395 owns shared oracle/receipt machinery; subsequent scopes supply their rows.
+   Scoped runs report their bounded coverage, and a missing mandatory row cannot
+   produce a green full aggregate. Strictly validate the plan and execute the
+   complete oracle/adversarial controls against the integrated implementation,
+   then inspect exact-head hosted/package receipts before closing #1354.
+
+This is producer-first, per-consumer activation, not weaker compatibility or reduced
+acceptance. Unmigrated consumers keep the parent bug open. Every activated consumer
+fails closed and has matching package support; do not accept unstamped archives to
+accommodate old installations. The full acceptance matrix above is unchanged.
 
 Rollback is a coordinated package/code rollback, not a resolver fallback. During an
 incomplete deployment, fail runtime-consuming operations until a matching set is
