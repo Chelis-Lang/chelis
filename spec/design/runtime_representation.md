@@ -1533,6 +1533,26 @@ checks that the admitted frames execute at the producer with the required
 primitive attribution and effect order. No dtype, width or numbered semantic
 contract changes.
 
+Selected-result aggregate provenance adds two exact private metadata final
+forms in `chelis-backend-c/src/host_emit.rs`:
+`append_host_result_claim_checks` compares declared axes with tensor shape
+metadata, and `append_host_result_interface_origin_support` traverses typed
+List, Tuple, ADT and Option handles to rebuild per-field `load` origins at a
+genuine interface. Neither owner reads tensor element storage or changes a
+public carrier or ABI, so both are final authorities rather than Phase 4
+transition debt. Exact path/kind/owner registration, wrong-path/kind/owner
+negatives and the existing unregistered load/store mutation preserve the
+closed inventory. The Phase 0 execution leg binds them to C claim failures,
+aggregate and Option projection, interface ingress and repeated public-call
+arena lifetime. Nested `Cons` execution additionally requires an O(1)
+invocation-arena suffix view before both cloning and consuming List skips, so
+pattern lowering and direct immutable `skip` preserve the selected child
+without copying each remaining origin array or reading a consumed payload.
+The frozen foundation and
+active-debt rows therefore do not
+grow, and their reviewed digest stays fixed; only the code-derived final-form
+and execution manifest changes.
+
 The captured activation-claim comparison adds the private
 `load-store-template` owner, `CEmitter::emit_runtime_dim_sites` in
 `chelis-backend-c/src/emit.rs`. It reads the captured int64 witness before the

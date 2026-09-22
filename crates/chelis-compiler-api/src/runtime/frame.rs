@@ -49,6 +49,15 @@ impl ResultProducer {
         }
     }
 
+    pub(crate) fn aggregate_suffix(&self, start: usize) -> Option<Self> {
+        match self {
+            Self::Aggregate(children) => {
+                Self::aggregate(children.iter().skip(start).cloned().collect())
+            }
+            Self::Tensor(_) => None,
+        }
+    }
+
     pub(crate) fn aggregate(children: Vec<Option<Self>>) -> Option<Self> {
         children
             .iter()
@@ -412,6 +421,24 @@ mod tests {
         assert_eq!(producer.child(2), None);
         assert_eq!(producer.child(3), None);
         assert_eq!(ResultProducer::aggregate(vec![None, None]), None);
+    }
+
+    #[test]
+    fn aggregate_suffix_preserves_selected_children_and_null_slots() {
+        let producer = ResultProducer::aggregate(vec![
+            Some(ResultProducer::tensor("diagonal")),
+            None,
+            Some(ResultProducer::tensor("cumsum")),
+        ])
+        .expect("two fields carry producer provenance");
+        let suffix = producer.aggregate_suffix(1).expect("cumsum remains");
+        assert_eq!(suffix.child(0), None);
+        assert_eq!(
+            suffix.child(1).as_ref().and_then(ResultProducer::operation),
+            Some("cumsum")
+        );
+        assert_eq!(producer.aggregate_suffix(3), None);
+        assert_eq!(ResultProducer::tensor("load").aggregate_suffix(0), None);
     }
 
     #[test]

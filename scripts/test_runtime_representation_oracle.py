@@ -1076,6 +1076,45 @@ class ManifestTests(unittest.TestCase):
             for probe in hardware
         ))
 
+    def test_result_claim_metadata_owners_require_exact_execution_controls(self) -> None:
+        expected = (
+            (
+                "crates/chelis-backend-c/src/host_emit.rs",
+                "load-store-template",
+                "append_host_result_claim_checks",
+            ),
+            (
+                "crates/chelis-backend-c/src/host_emit.rs",
+                "load-store-template",
+                "append_host_result_interface_origin_support",
+            ),
+        )
+        self.assertEqual(oracle.RESULT_CLAIM_METADATA_FINAL_FORMS, expected)
+        forms = oracle.coverage_manifest()["source_inventory"]["owner_module_final_forms"]
+        for path, kind, owner in expected:
+            self.assertTrue(oracle.owner_module_final_form(kind, path, owner))
+            self.assertFalse(oracle.owner_module_final_form(kind, path, owner + "_unchecked"))
+            self.assertFalse(
+                oracle.owner_module_final_form("backend-element-spelling", path, owner)
+            )
+            self.assertFalse(
+                oracle.owner_module_final_form(
+                    kind, path.replace("host_emit.rs", "emit.rs"), owner
+                )
+            )
+            self.assertIn({"kind": kind, "owner": owner}, forms[path])
+        commands = [" ".join(leg.argv) for leg in oracle.phase0_legs()]
+        self.assertTrue(any(
+            "issue_1771_callable_selected_result_claims" in command
+            and "c_aggregate_interface_ingress_stamps_each_tensor_field_as_load" in command
+            and "c_direct_list_skip_retains_selected_tail_producer" in command
+            and "c_list_and_adt_projection_retains_selected_producer" in command
+            and "c_nested_list_pattern_retains_selected_tail_producer" in command
+            and "c_option_projection_distinguishes_local_and_formal_origins" in command
+            and "c_aggregate_origin_arena_is_fresh_for_repeated_public_calls" in command
+            for command in commands
+        ))
+
     def test_exact_reduction_backend_owners_require_exact_execution_controls(self) -> None:
         expected = (
             (

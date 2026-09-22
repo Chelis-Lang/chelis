@@ -707,6 +707,9 @@ fn census_host_expr<'a>(
         ConcreteHostExprKind::ResultClaimScope { body, .. } => {
             census_host_expr(body, helpers, unit, sites)?;
         }
+        ConcreteHostExprKind::FormalIngress { value, .. } => {
+            census_host_expr(value, helpers, unit, sites)?;
+        }
         ConcreteHostExprKind::Int(_)
         | ConcreteHostExprKind::Float(_)
         | ConcreteHostExprKind::Bool(_)
@@ -775,7 +778,8 @@ fn census_host_expr<'a>(
                 census_host_expr(default_expr, helpers, unit, sites)?;
             }
         }
-        ConcreteHostExprKind::Let { bindings, body, .. } => {
+        ConcreteHostExprKind::Let { bindings, body, .. }
+        | ConcreteHostExprKind::RetainedInvocation { bindings, body, .. } => {
             for binding in bindings {
                 sites.push(expected_site(unit, HostSiteKind::Binding));
                 census_host_expr(&binding.value, helpers, unit, sites)?;

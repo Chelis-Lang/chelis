@@ -2136,6 +2136,11 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         # accepted each denying claim. Both lanes silently accepted a denying
         # identity-callback result after evaluating its actual, and silently
         # accepted denying claims after selecting an already-produced value.
+        # The composed callback/body-selection rows already conformed on the
+        # measured base and close a coverage gap. C aggregate tuple projection
+        # rejected with `tuple-get` rather than the selected field's producer.
+        # The checked combined polymorphic fixture reached a silent Eval
+        # acceptance and a nonconforming C rejection before this slice.
         # Selection before production and rank-zero/no-claim cases were
         # conforming controls on the baseline and remain explicit receipts.
         _row(
@@ -2187,6 +2192,18 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             "cli_result_callable_selection.c_delayed_selection_guards_only_the_selected_value",
         ),
         _row(
+            "return.callback.composed_selection.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_result_callable_selection.eval_inherited_callback_claim_waits_for_body_selection",
+        ),
+        _row(
+            "return.callback.composed_selection.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_result_callable_selection.c_inherited_callback_claim_waits_for_body_selection",
+        ),
+        _row(
             "return.selected.before_production.eval",
             EXECUTES,
             EXECUTES,
@@ -2205,6 +2222,12 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             "cli_result_callable_selection.eval_tuple_projection_retains_only_the_selected_producer",
         ),
         _row(
+            "return.selected.tuple_projection.c",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_result_callable_selection.c_tuple_projection_retains_only_the_selected_producer",
+        ),
+        _row(
             "return.callback.aggregate_interface.eval",
             "nonconforming_rejection",
             EXECUTES,
@@ -2221,6 +2244,18 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             EXECUTES,
             EXECUTES,
             "cli_result_callable_selection.c_rank_zero_host_identity_without_a_claim_preserves_value_and_effects",
+        ),
+        _row(
+            "return.callback.polymorphic.combined.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_result_callable_selection.eval_combined_precision_rank_callback_claims_actualize_each_callsite",
+        ),
+        _row(
+            "return.callback.polymorphic.combined.c",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_result_callable_selection.c_combined_precision_rank_callback_claims_actualize_each_callsite",
         ),
         # chelis#1923 and chelis#1791: pipe application semantics.
         # `spec/02-surf-syntax.md` section 0.1 says a pipe IS first-argument

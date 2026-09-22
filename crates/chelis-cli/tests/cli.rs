@@ -2207,12 +2207,60 @@ fn build_c_tensor_grad_local_wrapper_over_function_param_builds() {
     );
     // [05-OP-33]: list ingress uses the one exact tagged constructor. There
     // is no untyped or dtype-named compatibility entry point.
+    // The retained invocation prepares the actual once before formal ingress;
+    // the tensor helper must consume that formal rather than reaching back to
+    // the source expression and evaluating it again.
+    let assignment_target = |rhs: &str, prefix: &str| {
+        let suffix = format!(" = {rhs};");
+        source
+            .lines()
+            .map(str::trim)
+            .find(|line| line.starts_with(prefix) && line.ends_with(&suffix))
+            .and_then(|line| line.split_once(" = "))
+            .map(|(lhs, _)| lhs.to_string())
+            .unwrap_or_else(|| panic!("expected `{prefix}* = {rhs};` in generated C:\n{source}"))
+    };
+    let prepared_line = source
+        .lines()
+        .map(str::trim)
+        .find(|line| {
+            line.starts_with("__retained_actual_") && line.contains(" = chelis_tensor_from_values(")
+        })
+        .unwrap_or_else(|| panic!("expected a prepared f32 tensor actual:\n{source}"));
+    let prepared = prepared_line
+        .split_once(" = ")
+        .map(|(lhs, _)| lhs.to_string())
+        .expect("prepared actual assignment");
+    let checked_actual = assignment_target(&prepared, "__chelis_entry_actual_");
+    let formal_value = assignment_target(&checked_actual, "__retained_actual_");
+    let formal_ingress = assignment_target(&formal_value, "__chelis_entry_arg_");
+    let tensor_input = assignment_target(&formal_ingress, "__tensor_arg0_");
+    let helper_input = source
+        .lines()
+        .map(str::trim)
+        .find(|line| {
+            line.starts_with("__inputs_") && line.ends_with(&format!("[0] = {tensor_input};"))
+        })
+        .unwrap_or_else(|| panic!("expected `{tensor_input}` as helper input 0:\n{source}"));
+    let ordered_markers = [
+        prepared_line.to_string(),
+        format!("{checked_actual} = {prepared};"),
+        format!("{formal_value} = {checked_actual};"),
+        format!("{formal_ingress} = {formal_value};"),
+        format!("{tensor_input} = {formal_ingress};"),
+        helper_input.to_string(),
+        "tensor_grad_local_wrapper__global__tensor_0__with_rng(__inputs_".to_string(),
+    ];
+    let mut cursor = 0;
+    for marker in ordered_markers {
+        let offset = source[cursor..]
+            .find(&marker)
+            .unwrap_or_else(|| panic!("expected ordered marker `{marker}`:\n{source}"));
+        cursor += offset + marker.len();
+    }
     assert!(
-        source.contains("chelis_tensor_from_values(")
-            && source.contains("CHELIS_DTYPE_F32")
-            && source.contains("__host_tensor_arg_1")
-            && source.contains("tensor_grad_local_wrapper__global__tensor_0"),
-        "expected local-wrapper grad to specialize into a tensor helper with a hoisted tensor arg:\n{source}"
+        prepared_line.contains("CHELIS_DTYPE_F32"),
+        "expected the prepared list actual to retain its f32 dtype:\n{source}"
     );
     assert!(
         !source.contains("chelis_tensor_from_value_list("),
@@ -2231,8 +2279,25 @@ fn build_c_tensor_grad_local_wrapper_over_function_param_builds() {
         "local-wrapper grad lowering must not degrade to fallback, unresolved builtins, or int locals:\n{source}"
     );
 
-    let status = gcc_compile_generated(&out_dir, "tensor_grad_local_wrapper.c");
+    let status = gcc_link_generated(
+        &out_dir,
+        "tensor_grad_local_wrapper.c",
+        "tensor_grad_local_wrapper",
+    );
     assert!(status.success(), "gcc failed with status {status}");
+    let run_output = StdCommand::new(out_dir.join("tensor_grad_local_wrapper"))
+        .output()
+        .expect("compiled binary should run");
+    assert!(
+        run_output.status.success(),
+        "compiled binary failed with status {}",
+        run_output.status
+    );
+    let stdout = String::from_utf8(run_output.stdout).expect("utf-8 stdout");
+    assert!(
+        stdout.contains("out = tensor(shape=[2], data=[-1.0, -1.0])"),
+        "unexpected local-wrapper gradient output:\n{stdout}"
+    );
 }
 
 /// chelis#405 oracle: host-lane scalar forward-mode AD. A top-level scalar

@@ -40,7 +40,7 @@ impl SignatureEntryPlan {
                     DimInfo::Named(name, _) if name != "*" => {
                         if let Some((_, canonical)) = first.iter().find(|(seen, _)| seen == name) {
                             guards.push(EntryExtentGuard::Named {
-                                claim: name.clone(),
+                                claim: crate::lower::extent_binder_label(name),
                                 canonical: *canonical,
                                 observed,
                             });
@@ -127,5 +127,22 @@ mod tests {
             )]);
             assert!(plan.guards().is_empty());
         }
+    }
+
+    #[test]
+    fn internal_rank_axis_identity_has_a_printable_guard_label() {
+        let internal = || DimInfo::Named("\0rank-axis:rest:0".into(), None);
+        let plan = SignatureEntryPlan::new([
+            input("first", vec![internal()]),
+            input("second", vec![internal()]),
+        ]);
+        assert_eq!(
+            plan.guards(),
+            &[EntryExtentGuard::Named {
+                claim: "rest[0]".into(),
+                canonical: (NodeId(0), 0),
+                observed: (NodeId(1), 0),
+            }]
+        );
     }
 }
