@@ -91,6 +91,22 @@ pub(crate) fn apply_shell_local_exclusions(
         return Ok(upstream.to_string());
     };
     let selectors = shell_local_exclusion_selectors(block)?;
+    apply_heading_exclusions(upstream, selectors)
+}
+
+/// Apply standalone shell-owned heading exclusions to the canonical AGENTS.md
+/// body. Selectors live outside the managed block so sync can replace the
+/// entire upstream contract while preserving the shell's controls and prose.
+pub(crate) fn apply_agents_exclusions(upstream: &str, document: &str) -> Result<String, String> {
+    let shell_owned = match managed_block::find(document, "agents-inheritance") {
+        Some(block) => format!("{}{}", &document[..block.span.0], &document[block.span.1..]),
+        None => document.to_string(),
+    };
+    let selectors = standalone_exclusion_selectors(&shell_owned)?;
+    apply_heading_exclusions(upstream, selectors)
+}
+
+fn apply_heading_exclusions(upstream: &str, selectors: Vec<&str>) -> Result<String, String> {
     if selectors.is_empty() {
         return Ok(upstream.to_string());
     }
@@ -175,6 +191,34 @@ pub(crate) fn apply_shell_local_exclusions(
     Ok(filtered)
 }
 
+/// Parse the optional exclusion span used in shell-owned AGENTS.md text.
+fn standalone_exclusion_selectors(document: &str) -> Result<Vec<&str>, String> {
+    let begin_count = document.matches(SHELL_LOCAL_EXCLUDE_BEGIN).count();
+    let end_count = document.matches(SHELL_LOCAL_EXCLUDE_END).count();
+    if begin_count == 0 && end_count == 0 {
+        return Ok(Vec::new());
+    }
+    if begin_count != 1 {
+        return Err(format!(
+            "malformed shell-local exclusion block (expected exactly one `{SHELL_LOCAL_EXCLUDE_BEGIN}`)"
+        ));
+    }
+    if end_count != 1 {
+        return Err(format!(
+            "malformed shell-local exclusion block (expected exactly one `{SHELL_LOCAL_EXCLUDE_END}`)"
+        ));
+    }
+    let begin = standalone_markdown_comment_offset(document, SHELL_LOCAL_EXCLUDE_BEGIN)?;
+    let end = standalone_markdown_comment_offset(document, SHELL_LOCAL_EXCLUDE_END)?;
+    if end <= begin + SHELL_LOCAL_EXCLUDE_BEGIN.len() {
+        return Err("shell-local exclusion end marker must follow its begin marker".into());
+    }
+    parse_exclusion_selector_lines(
+        &document[begin + SHELL_LOCAL_EXCLUDE_BEGIN.len()..end],
+        true,
+    )
+}
+
 /// Validate the outer shell-local suffix and return its exact section-heading
 /// exclusion selectors.
 fn shell_local_exclusion_selectors(block: &str) -> Result<Vec<&str>, String> {
@@ -210,10 +254,8 @@ fn shell_local_exclusion_selectors(block: &str) -> Result<Vec<&str>, String> {
             "malformed shell-local exclusion block (expected exactly one `{SHELL_LOCAL_EXCLUDE_END}`)"
         ));
     }
-    let begin = block
-        .find(SHELL_LOCAL_EXCLUDE_BEGIN)
-        .expect("count checked");
-    let end = block.find(SHELL_LOCAL_EXCLUDE_END).expect("count checked");
+    let begin = standalone_markdown_comment_offset(block, SHELL_LOCAL_EXCLUDE_BEGIN)?;
+    let end = standalone_markdown_comment_offset(block, SHELL_LOCAL_EXCLUDE_END)?;
     if begin <= SHELL_LOCAL_BEGIN.len()
         || end <= begin + SHELL_LOCAL_EXCLUDE_BEGIN.len()
         || end >= outer_end
@@ -223,8 +265,45 @@ fn shell_local_exclusion_selectors(block: &str) -> Result<Vec<&str>, String> {
         );
     }
 
+    parse_exclusion_selector_lines(&block[begin + SHELL_LOCAL_EXCLUDE_BEGIN.len()..end], false)
+}
+
+/// Locate a control marker only when Markdown parses it as its own HTML
+/// comment. Raw text search still owns missing/duplicate diagnostics; this
+/// check prevents examples in code fences or enclosing HTML blocks from
+/// becoming active configuration.
+fn standalone_markdown_comment_offset(document: &str, marker: &str) -> Result<usize, String> {
+    let offset = document.find(marker).expect("marker count checked");
+    let marker_end = offset + marker.len();
+    let line_start = document[..offset]
+        .rfind('\n')
+        .map_or(0, |newline| newline + 1);
+    let line_end = document[marker_end..]
+        .find('\n')
+        .map_or(document.len(), |newline| marker_end + newline);
+    let alone_on_line = document[line_start..line_end].trim_end_matches('\r').trim() == marker;
+    let own_html_event = Parser::new(document)
+        .into_offset_iter()
+        .any(|(event, range)| {
+            matches!(event, Event::Start(Tag::HtmlBlock))
+                && range.start <= offset
+                && marker_end <= range.end
+                && document[range].trim() == marker
+        });
+    if !alone_on_line || !own_html_event {
+        return Err(format!(
+            "`{marker}` must be a standalone Markdown comment outside fenced code and enclosing HTML blocks"
+        ));
+    }
+    Ok(offset)
+}
+
+fn parse_exclusion_selector_lines(
+    body: &str,
+    allow_document_title: bool,
+) -> Result<Vec<&str>, String> {
     let mut selectors = Vec::new();
-    for line in block[begin + SHELL_LOCAL_EXCLUDE_BEGIN.len()..end].lines() {
+    for line in body.lines() {
         let directive = line.trim();
         if directive.is_empty() {
             continue;
@@ -243,7 +322,7 @@ fn shell_local_exclusion_selectors(block: &str) -> Result<Vec<&str>, String> {
                 "shell-local exclusion selector {selector:?} is not an exact ATX heading"
             ));
         };
-        if level == 1 {
+        if level == 1 && !allow_document_title {
             return Err(format!(
                 "shell-local exclusion selector {selector:?} may not remove the skill title"
             ));
@@ -267,8 +346,9 @@ fn atx_heading_level(line: &str) -> Option<usize> {
     (level > 0 && level <= 6 && bytes.get(level) == Some(&b' ')).then_some(level)
 }
 
-/// Materialize `agent-skills/` from the embedded pinned skill set and wire the
-/// `.claude`/`.codex` skill-dir symlinks. Shared by `init` and `sync`.
+/// Materialize `agent-skills/` from the embedded pinned skill set and point
+/// `.claude/skills` and `.codex/skills` at that one tree. Shared by `init` and
+/// `sync`.
 ///
 /// Preserves any trailing shell-local block in each retained shared `SKILL.md`
 /// (chelis#653), repo-local domain skills declared in `[conform] local_skills`
@@ -396,8 +476,8 @@ pub fn materialize_skills(root: &Path) -> Result<Vec<String>, String> {
         ));
     }
 
-    symlink_dir(root, "../agent-skills", ".claude/skills")?;
-    symlink_dir(root, "../agent-skills", ".codex/skills")?;
+    symlink_file(root, "../agent-skills", ".claude/skills")?;
+    symlink_file(root, "../agent-skills", ".codex/skills")?;
     Ok(notices)
 }
 
@@ -445,7 +525,11 @@ fn prune_skill_drift(root: &Path, local_skills: &[String]) -> Result<Vec<String>
 }
 
 fn remove_path(path: &Path) -> Result<(), String> {
-    let res = if path.is_dir() {
+    let metadata =
+        fs::symlink_metadata(path).map_err(|e| format!("inspect {}: {e}", path.display()))?;
+    let res = if metadata.file_type().is_symlink() || metadata.is_file() {
+        fs::remove_file(path)
+    } else if metadata.is_dir() {
         fs::remove_dir_all(path)
     } else {
         fs::remove_file(path)
@@ -562,40 +646,42 @@ pub fn preflight_failure_message(verb: &str, root: &Path, gaps: &[PreflightGap])
 }
 
 /// Regenerate every managed block in the shell's documents to `version` (the
-/// pointer half of `conform sync`). Only fenced regions are touched.
+/// document half of `conform sync`). Only fenced regions are touched.
 pub fn sync_managed_blocks(root: &Path, version: &str) -> Result<(), String> {
-    // AGENTS.md :: agents-inheritance
-    resync_block(
-        root,
-        "AGENTS.md",
+    // Render both documents before the first write. A malformed or stale
+    // AGENTS.md selector therefore cannot leave the surface document restamped.
+    let agents_path = root.join("AGENTS.md");
+    let agents_existing = fs::read_to_string(&agents_path)
+        .map_err(|e| format!("read {}: {e}", agents_path.display()))?;
+    let agents_canonical = canonical::body("agents-inheritance")
+        .ok_or_else(|| "no canonical body for block \"agents-inheritance\"".to_string())?;
+    let agents_body = apply_agents_exclusions(agents_canonical, &agents_existing)?;
+    let agents_updated = managed_block::upsert(
+        &agents_existing,
         "agents-inheritance",
         version,
+        &agents_body,
         managed_block::Anchor::AfterHeading("## Repo Identity"),
-    )?;
-    // docs/CHELIS_SURFACE.md :: chelis-surface-header
-    resync_block(
-        root,
-        "docs/CHELIS_SURFACE.md",
+    );
+
+    let surface_path = root.join("docs/CHELIS_SURFACE.md");
+    let surface_existing = fs::read_to_string(&surface_path)
+        .map_err(|e| format!("read {}: {e}", surface_path.display()))?;
+    let surface_body = canonical::body("chelis-surface-header")
+        .ok_or_else(|| "no canonical body for block \"chelis-surface-header\"".to_string())?;
+    let surface_updated = managed_block::upsert(
+        &surface_existing,
         "chelis-surface-header",
         version,
+        surface_body,
         managed_block::Anchor::Top,
-    )?;
-    Ok(())
-}
+    );
 
-fn resync_block(
-    root: &Path,
-    rel: &str,
-    id: &str,
-    version: &str,
-    anchor: managed_block::Anchor,
-) -> Result<(), String> {
-    let path = root.join(rel);
-    let existing =
-        fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    let body = canonical::body(id).ok_or_else(|| format!("no canonical body for block {id:?}"))?;
-    let updated = managed_block::upsert(&existing, id, version, body, anchor);
-    fs::write(&path, updated).map_err(|e| format!("write {}: {e}", path.display()))
+    fs::write(&agents_path, agents_updated)
+        .map_err(|e| format!("write {}: {e}", agents_path.display()))?;
+    fs::write(&surface_path, surface_updated)
+        .map_err(|e| format!("write {}: {e}", surface_path.display()))?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------- templates
@@ -769,30 +855,22 @@ fn symlink_file(root: &Path, target: &str, link_rel: &str) -> Result<(), String>
 }
 
 #[cfg(unix)]
-fn symlink_dir(root: &Path, target: &str, link_rel: &str) -> Result<(), String> {
+fn symlink_generic(root: &Path, target: &str, link_rel: &str) -> Result<(), String> {
     let link = root.join(link_rel);
+    // Idempotent, including migration from the former materialized-directory
+    // layout: replace any existing filesystem entry at the link path.
+    if fs::symlink_metadata(&link).is_ok() {
+        remove_path(&link)?;
+    }
     if let Some(parent) = link.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
     }
-    symlink_generic(root, target, link_rel)
-}
-
-#[cfg(unix)]
-fn symlink_generic(root: &Path, target: &str, link_rel: &str) -> Result<(), String> {
-    let link = root.join(link_rel);
-    // Idempotent: replace an existing symlink/file at the link path.
-    let _ = fs::remove_file(&link);
     std::os::unix::fs::symlink(target, &link)
         .map_err(|e| format!("symlink {} -> {target}: {e}", link.display()))
 }
 
 #[cfg(not(unix))]
 fn symlink_file(_root: &Path, _target: &str, _link_rel: &str) -> Result<(), String> {
-    Err("conform init/sync requires a unix platform for symlinks".to_string())
-}
-
-#[cfg(not(unix))]
-fn symlink_dir(_root: &Path, _target: &str, _link_rel: &str) -> Result<(), String> {
     Err("conform init/sync requires a unix platform for symlinks".to_string())
 }
 

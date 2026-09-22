@@ -1,7 +1,7 @@
-//! Canonical bodies for the pointer managed blocks.
+//! Canonical bodies for the stamped managed blocks.
 //!
-//! Unlike the embedded skills (which mirror `agent-skills/`), these bodies are
-//! authored here and are their own source of truth — `conform sync` renders each
+//! The `agents-inheritance` body is generated from the root `AGENTS.md`; the
+//! other bodies are authored here. `conform sync` renders each
 //! into the corresponding shell document via [`crate::managed_block`], and
 //! `conform audit` checks the shell's block against the body for the shell's
 //! pinned version. Adding a block id means adding its `.md` under

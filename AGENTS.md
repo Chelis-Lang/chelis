@@ -302,7 +302,7 @@ pull request with no local command and no human approval. Do not mix such a chan
 code, and do not add a path to `scripts/openspec_acceptance.py`'s allowlist to make a
 change land. Automatic acceptance proves path and schema validity, not correctness.
 `README.md` has the workflow; do not run `openspec init`'s tool generation, because
-`.claude/skills` and `.codex/skills` are symlinks into `agent-skills/`.
+`.claude/skills` and `.codex/skills` are symlinks to `agent-skills/`.
 
 ## Change Hygiene
 
@@ -564,8 +564,8 @@ through reef, a Cargo workspace, or Docker.
 
 ## Pointers
 
-- **Shared skills** live in `agent-skills/`; `.claude/skills` and `.codex/skills` resolve
-  there, `.claude/commands/` and `.codex/commands/` stay byte-identical, and the
+- **Shared skills** live in `agent-skills/`; `.claude/skills` and `.codex/skills` are
+  symlinks to that one authored tree, `.claude/commands/` and `.codex/commands/` stay byte-identical, and the
   `red-team` alias is wired to `redteam-exec` with its fresh-round and verify modes. The
   set: `redteam-exec`, `spec-sync`, `phase-gate`, `backend-numerics`, `example-corpus`,
   `cli-surface`, `packaging-install`, `issue-resolution`.
@@ -576,8 +576,16 @@ through reef, a Cargo workspace, or Docker.
   `chelisup` binary, never `chelisup::install::install` in-process, because that helper
   copies `current_exe()` over the shim. Design:
   [`spec/design/chelis_packaging_and_install.md`](spec/design/chelis_packaging_and_install.md).
-- **Downstream shells** inherit this contract through a stamped pointer block and must
-  satisfy [`spec/design/shell_repo_contract.md`](spec/design/shell_repo_contract.md),
-  shipped in the toolchain as `chelis reef conform`. Contract changes land here first,
-  editing the doc and the conformance `MANIFEST`/`REGISTRY` in lockstep. §7.1 of that
-  doc is the audit a `conform bump` wave still owes after the mechanical starter runs.
+- **Downstream shells** inherit this complete contract through a stamped managed block
+  and must satisfy [`spec/design/shell_repo_contract.md`](spec/design/shell_repo_contract.md),
+  shipped in the toolchain as `chelis reef conform`. Full inheritance is the default,
+  but each shell decides which portions apply. Shell-owned additions stay outside the
+  block and should remain when they are relevant and current. To omit an inherited
+  section, put its exact ATX heading in a shell-owned span such as
+  `<!-- shell-local:exclude:begin -->`,
+  `<!-- ### Numeric Surface Discipline -->`, `<!-- shell-local:exclude:end -->`; sync
+  removes that heading and its section, while deleting the selector restores it. The
+  root `# Chelis Agent Contract` selector omits the entire inherited body.
+  Contract changes land here first, editing the doc and the conformance
+  `MANIFEST`/`REGISTRY` in lockstep. §7.1 of that doc is the audit a `conform bump` wave
+  still owes after the mechanical starter runs.

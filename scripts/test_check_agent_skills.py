@@ -19,10 +19,17 @@ class SkillContractTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         for name in SHARED_SKILLS:
-            for prefix in ("agent-skills", "crates/chelis-conformance/assets/skills"):
+            for prefix in (
+                "agent-skills",
+                "crates/chelis-conformance/assets/skills",
+            ):
                 path = self.root / prefix / name / "SKILL.md"
                 path.parent.mkdir(parents=True)
                 path.write_text(f"---\nname: {name}\ndescription: Review the named contract.\n---\n\n# Instructions\n")
+        for platform in (".claude", ".codex"):
+            directory = self.root / platform
+            directory.mkdir()
+            (directory / "skills").symlink_to("../agent-skills", target_is_directory=True)
         for platform in (".claude", ".codex"):
             path = self.root / platform / "commands/red-team.md"
             path.parent.mkdir(parents=True)
@@ -67,8 +74,19 @@ class SkillContractTests(unittest.TestCase):
         path = self.skill("crates/chelis-conformance/assets/skills")
         path.write_text(path.read_text() + "Outdated instructions.\n")
         self.assertTrue(check.check(self.root))
-        path.unlink()
-        self.assertTrue(check.check(self.root))
+
+    def test_missing_or_wrong_agent_surface_symlink_is_rejected(self):
+        for prefix in (".claude/skills", ".codex/skills"):
+            path = self.root / prefix
+            path.unlink()
+            self.assertTrue(check.check(self.root))
+            path.symlink_to("../missing", target_is_directory=True)
+            self.assertTrue(check.check(self.root))
+            path.unlink()
+            path.mkdir()
+            self.assertTrue(check.check(self.root))
+            path.rmdir()
+            path.symlink_to("../agent-skills", target_is_directory=True)
 
     def test_unfinished_instructions_are_rejected_even_when_copies_agree(self):
         paths = [self.skill(prefix) for prefix in (

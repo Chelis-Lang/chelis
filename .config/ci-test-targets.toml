@@ -3,6 +3,62 @@
 # are consumed by scripts/ci_change_owned.py and fail closed when stale.
 version = 3
 
+# chelis#845: shared skill source and generated agent symlinks are checked by
+# the script-unit skill metadata/link contract.
+[[path_rule]]
+prefix = ".claude/skills"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit verifies the Claude skill path is the canonical ../agent-skills symlink"
+tracking_issue = "chelis#845"
+
+[[path_rule]]
+prefix = ".codex/skills"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit verifies the Codex skill path is the canonical ../agent-skills symlink"
+tracking_issue = "chelis#845"
+
+[[path_rule]]
+prefix = "scripts/check_agent_skills.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the shared-skill metadata and discovery-link checker"
+tracking_issue = "chelis#845"
+
+[[path_rule]]
+prefix = "scripts/test_check_agent_skills.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit exercises positive and negative shared-skill link contracts"
+tracking_issue = "chelis#845"
+
+[[path_rule]]
+prefix = "scripts/regenerate_conformance_assets.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit checks deterministic regeneration of conformance assets and agent-surface links"
+tracking_issue = "chelis#845"
+
+[[path_rule]]
+prefix = "scripts/test_regenerate_conformance_assets.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit exercises conformance and agent-surface asset regeneration"
+tracking_issue = "chelis#845"
+
 # Binder and defsig contract changes can invalidate Surf and Deep fixtures
 # embedded anywhere in the chelis-types integration package. These reviewed
 # triggers promote every eligible chelis-types integration target into the

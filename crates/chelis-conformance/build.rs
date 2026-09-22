@@ -52,9 +52,9 @@ fn main() {
         println!("cargo:rerun-if-changed={}", path.display());
     }
 
-    // Managed-block canonical bodies are authored directly under
-    // assets/canonical/ (not mirrored from another repo file). Guard existence
-    // so a missing body surfaces here rather than at the include_str! site.
+    // Managed-block canonical bodies live under assets/canonical/. The agents
+    // body is generated from root AGENTS.md; other bodies are authored there.
+    // Guard existence so a missing body surfaces before include_str! expansion.
     let canonical = manifest_dir.join("assets").join("canonical");
     for id in ["agents-inheritance", "chelis-surface-header"] {
         let path = canonical.join(format!("{id}.md"));
