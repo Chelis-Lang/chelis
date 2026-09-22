@@ -2353,6 +2353,15 @@ cadence = "pull_request and push"
 reason = "the exact --fast stage list, its ordering and its summary run in script-unit"
 tracking_issue = "chelis#1824"
 
+[[path_rule]]
+prefix = "scripts/test_gate_local.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the local gate's stage selection and tool resolution run in script-unit"
+tracking_issue = "chelis#1824"
+
 # The rows below own the opaque-invariants corpus, whose only CI consumer
 # runs nightly: `chelis-cli::opaque_corpus_gate` runs each committed program
 # against the live binary, and it is not a standing_target, so it reaches CI
