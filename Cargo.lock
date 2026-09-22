@@ -115,8 +115,7 @@ dependencies = [
 [[package]]
 name = "arb-sys"
 version = "0.3.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e01e94dbcd294bbde22903b17f30bd7c5c732a0625db037919dde3a26ad890db"
+source = "git+https://github.com/Chelis-Lang/arb-sys?rev=691abe3e533f48c5c0f3e672c556d79493a651d1#691abe3e533f48c5c0f3e672c556d79493a651d1"
 dependencies = [
  "derivative",
  "flint-sys",

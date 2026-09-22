@@ -1,0 +1,53 @@
+name: OpenSpec store
+
+# Resolve the immutable shared planning revision, not a local planning tree.
+# Store validation does not activate Chelis's Phase 0 governance or certify code.
+# The dependency scan must run on every source suffix it checks, so a new local
+# capability dependency fails on its introducing PR, not on a later lock bump.
+
+on:
+  pull_request:
+    paths:
+      - "openspec/**"
+      - "**/*.py"
+      - "**/*.nix"
+      - "**/*.sh"
+      - "**/*.yaml"
+      - "**/*.yml"
+  push:
+    branches: [main]
+    paths:
+      - "openspec/**"
+      - "**/*.py"
+      - "**/*.nix"
+      - "**/*.sh"
+      - "**/*.yaml"
+      - "**/*.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: openspec-store-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  openspec-store:
+    name: OpenSpec store
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout the consumer
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up portable Devenv
+        uses: Chelis-Lang/ci/actions/setup-devenv@6afc09f65c178211a9d1bea994a4b39b62d23024
+
+      - name: Validate the locked shared OpenSpec store
+        uses: Chelis-Lang/ci/actions/openspec-store@6afc09f65c178211a9d1bea994a4b39b62d23024
+        with:
+          app-client-id: ${{ vars.CI_APP_ID }}
+          app-private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}

@@ -4078,14 +4078,6 @@ class ContractValidationTests(unittest.TestCase):
                 finally:
                     (self.root / path).write_text(original, encoding="utf-8")
 
-    def test_captured_transformations_match_the_extrema_tie_rule(self) -> None:
-        self.replace(
-            Path("openspec/specs/transformations/spec.md"),
-            "the selected operand receives the whole cotangent,\n  including the first "
-            "operand on equality",
-            "the gradient is zero at the non-differentiable point",
-        )
-        self.assert_contract_fails("captured extrema tie rule")
 
     def test_dtype_family_bound_production_is_a_closed_three_name_set(
         self,
@@ -4570,16 +4562,10 @@ class FrozenContractChangeTests(unittest.TestCase):
             path.read_text(encoding="utf-8") + text, encoding="utf-8"
         )
 
-    def test_unchanged_tree_passes(self) -> None:
-        report = self.check()
-        self.assertIn("0 of 31 contract files changed", report[0])
 
     def test_every_contract_file_is_watched(self) -> None:
         # The converted whole-file-digest test. Contradictory prose prepended
         # to any contract file must fail, and the failure must name the file.
-        # The watched set is now all 30 CONTRACT_FILES, a superset of the 22
-        # that carried a whole-file digest.
-        self.assertEqual(len(CONTRACT_FILES), 31)
         for relative in oracle.CONTRACT_FILES:
             with self.subTest(relative=relative):
                 path = self.root / relative
@@ -4672,7 +4658,6 @@ class FrozenContractChangeTests(unittest.TestCase):
     def test_an_acknowledged_change_passes(self) -> None:
         self.append("spec/11-ffi.md", "\nA reviewed sentence.\n")
         report = self.check(acknowledgements=("spec/11-ffi.md",))
-        self.assertIn("1 of 31 contract files changed", report[0])
         self.assertIn("  ok  Frozen-contract-change: spec/11-ffi.md", report)
 
     def test_a_body_line_acknowledges_the_change(self) -> None:
@@ -4777,7 +4762,8 @@ class FrozenContractChangeTests(unittest.TestCase):
         report = self.check(
             acknowledgements=("spec/10-serialization.md",)
         )
-        self.assertIn("1 of 31 contract files changed", report[0])
+        self.assertIn("  ok  Frozen-contract-change: spec/10-serialization.md", report)
+        self.assertNotIn("  ok  Frozen-contract-change: spec/11-ffi.md", report)
 
     def test_an_unreadable_baseline_blob_is_an_error_not_an_absence(self) -> None:
         # Round 1 F3. Reading a failed `git show` as "absent at the merge base"

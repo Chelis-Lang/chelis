@@ -1,4 +1,4 @@
-//! Acceptance oracle for `openspec/changes/add-bounded-monomorphization`
+//! Acceptance oracle for `chelis-plans:chelis-add-bounded-monomorphization`
 //! (chelis#1158): bounded memoized monomorphization of recursive generic
 //! host calls, plus the spec/04 §3.1.1 uniform-recursive-instantiation rule.
 //!

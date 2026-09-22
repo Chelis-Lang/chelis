@@ -122,10 +122,6 @@ CONTRACT_FILES = (
     "spec/design/runtime_representation.md",
     "docs/CHELIS_SURFACE.md",
     "docs/investigations/remediation_status_2026_08_04.md",
-    "openspec/specs/risc-primitives/spec.md",
-    "openspec/specs/serialization/spec.md",
-    "openspec/specs/transformations/spec.md",
-    "openspec/specs/type-system/spec.md",
     "spec/registry/builtin_semantic_identities.md",
     "spec/registry/c_scalar_carrier.md",
     "spec/registry/c_container_boundary.md",
@@ -1023,8 +1019,6 @@ def validate_normative_contract(
     spec11 = docs["spec/11-ffi.md"]
     ownership_design = docs["spec/design/compiled_value_ownership.md"]
     implicit_linearity = docs["spec/design/implicit_linearity.md"]
-    captured_risc = docs["openspec/specs/risc-primitives/spec.md"]
-    captured_transformations = docs["openspec/specs/transformations/spec.md"]
 
     atoms = [int(number) for number in OP_ATOM.findall(spec05)]
     counts = Counter(atoms)
@@ -2927,41 +2921,6 @@ def validate_normative_contract(
         violations,
     )
 
-    require_all(
-        captured_risc,
-        (
-            (
-                "`sub`, `max_elem`, and `min_elem` are Tier-1\nidentities",
-                "captured direct arithmetic identities",
-            ),
-            (
-                "it remains direct checked subtraction rather than becoming "
-                "`add(a, neg(b))`",
-                "captured direct sub lowering",
-            ),
-            (
-                "it remains direct selection rather than becoming "
-                "`neg(max_elem(neg(a), neg(b)))`",
-                "captured direct min_elem lowering",
-            ),
-            (
-                "first NaN in operand order with exact stored bits",
-                "captured extrema stored-bit selection",
-            ),
-        ),
-        violations,
-    )
-    require_all(
-        captured_transformations,
-        (
-            (
-                "the selected operand receives the whole cotangent,\n  including "
-                "the first operand on equality",
-                "captured extrema tie rule",
-            ),
-        ),
-        violations,
-    )
 
 
 def validate_schema_and_consumers(

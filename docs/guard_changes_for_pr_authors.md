@@ -200,6 +200,13 @@ add an unrelated mapping just to satisfy the planner. The standing test list is
 a reviewed coverage decision, not a list to extend for every new test. See
 [CI ownership and execution](ci_validation.md).
 
+A completely removed shared file may retire its routing row in the same change.
+The planner records `shared_path_deleted` only for a path proven present in the
+base tree and absent from the candidate; the local classifier checks the same
+base membership and working-tree absence. An added, modified, renamed-to, or
+still-present path still needs ownership. Retirement does not classify code as
+documentation or waive ordinary CI and protected-contract deletion checks.
+
 For a new executable example under `examples/`, add its per-file parity test.
 Pass its literal root path to the existing parity/check helper, directly or
 through an immutable owned-path local. Borrow it only when passing it to the

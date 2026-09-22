@@ -385,8 +385,7 @@ def git_tree(root: Path, commit: str) -> dict[str, File]:
 
 def needs_fragment(path: str) -> bool:
     normative = (bool(re.fullmatch(r"spec/[0-9]{2}-[^/]+\.md", path))
-                 or path.startswith("spec/registry/")
-                 or (path.startswith("openspec/") and "/specs/" in path and path.endswith("/spec.md")))
+                 or path.startswith("spec/registry/"))
     return normative or not is_doc_path(path)
 
 

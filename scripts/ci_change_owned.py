@@ -1240,6 +1240,21 @@ def make_plan(
         if classification == "docs":
             dispositions.append({"path": path, "status": status, "kind": "docs_only"})
             continue
+        if (
+            classification == "unclassified"
+            and side == "base"
+            and base_tracked_paths is not None
+            and path in base_tracked_paths
+            and path not in tracked_paths
+        ):
+            # A removed shared input has no candidate execution owner. Record
+            # its retirement, rather than retaining a dead rule or classifying
+            # the removal as prose. Package/test removals were handled above;
+            # ordinary CI and protected-contract removal checks still apply.
+            dispositions.append(
+                {"path": path, "status": status, "kind": "shared_path_deleted"}
+            )
+            continue
         if classification != "rule":
             raise ValueError(refused_path_message(classification, path))
         rule = matching_rules[0]
@@ -3673,6 +3688,7 @@ def classify_changed_paths(
     repo: Path = ROOT,
     config: Config | None = None,
     packages: Sequence[PackageInfo] | None = None,
+    base: str | None = None,
 ) -> list[tuple[str, str]]:
     """Every path the planner would refuse, as (path, disposition) pairs.
 
@@ -3705,8 +3721,16 @@ def classify_changed_paths(
                 f"workspace package roots: {error}"
             ) from error
     refused = []
+    base_paths = tracked_paths_at(repo, base) if base is not None else set()
     for path in sorted(set(paths)):
         disposition, _, _ = static_path_classification(path, packages, config)
+        if (
+            disposition == "unclassified"
+            and path in base_paths
+            and not (repo / path).exists()
+            and not (repo / path).is_symlink()
+        ):
+            continue
         if disposition in {"unclassified", "ambiguous_rule", "ambiguous_package"}:
             refused.append((path, disposition))
     return refused
@@ -4542,6 +4566,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         refused = classify_changed_paths(
             paths,
             config=read_config(args.config),
+            base=args.base if args.from_git else None,
         )
         for path, disposition in refused:
             print(

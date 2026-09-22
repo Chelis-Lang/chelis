@@ -141,6 +141,16 @@ tracking_issue = "chelis#1854"
 package = "chelis-cli"
 name = "issue_1582_vmap_std_scalar"
 
+# The dedicated changelog job exercises the release-fragment policy and CLI.
+[[path_rule]]
+prefix = "scripts/changelog.py"
+disposition = "owner"
+workflow = "changelog.yml"
+job = "changelog"
+cadence = "pull_request"
+reason = "the changelog job runs the CLI contract tests and evaluates the candidate's release-fragment policy"
+tracking_issue = "chelis#1627"
+
 # The diagnostic-kind producer-seal script has a dedicated pull-request job,
 # while its mutation helpers and command contracts are covered by script-unit.
 # Keep this exact so unrelated scripts receive no implied owner.
@@ -1603,49 +1613,22 @@ reason = "script-unit validates this workflow's flake-package contract and its r
 tracking_issue = "chelis#2232"
 
 [[path_rule]]
-prefix = ".github/workflows/openspec-autoland-controller.yml"
+prefix = ".github/workflows/openspec-store.yml"
 disposition = "owner"
-workflow = "ci.yml"
-job = "script-unit"
+workflow = "openspec-store.yml"
+job = "openspec-store"
 cadence = "pull_request and push"
-reason = "the trusted OpenSpec autoland controller boundary is locked by script-unit"
-tracking_issue = "chelis#2232"
+reason = "the shared store action verifies the consumer pointer, immutable checkout, and strict planning schema"
+tracking_issue = "chelis#733"
 
 [[path_rule]]
-prefix = ".github/workflows/openspec-autoland-signal.yml"
+prefix = "openspec/"
 disposition = "owner"
-workflow = "ci.yml"
-job = "script-unit"
+workflow = "openspec-store.yml"
+job = "openspec-store"
 cadence = "pull_request and push"
-reason = "the permissionless OpenSpec autoland signal boundary is locked by script-unit"
-tracking_issue = "chelis#2232"
-
-[[path_rule]]
-prefix = ".github/workflows/openspec-autoland-validate.yml"
-disposition = "owner"
-workflow = "ci.yml"
-job = "script-unit"
-cadence = "pull_request and push"
-reason = "the OpenSpec autoland validation and merge-worker contracts are locked by script-unit"
-tracking_issue = "chelis#2232"
-
-[[path_rule]]
-prefix = ".github/workflows/openspec-autoland.yml"
-disposition = "owner"
-workflow = "ci.yml"
-job = "script-unit"
-cadence = "pull_request and push"
-reason = "the OpenSpec autoland acceptance boundary and merge worker are locked by script-unit"
-tracking_issue = "chelis#2232"
-
-[[path_rule]]
-prefix = ".github/workflows/openspec-validate.yml"
-disposition = "owner"
-workflow = "ci.yml"
-job = "script-unit"
-cadence = "pull_request and push"
-reason = "the pinned OpenSpec validation action and its advisory mode are locked by script-unit"
-tracking_issue = "chelis#2232"
+reason = "the shared store action owns the consumer pointer and immutable revision lock"
+tracking_issue = "chelis#733"
 
 [[path_rule]]
 prefix = ".github/workflows/ownership-hip.yml"
@@ -2344,24 +2327,6 @@ workflow = "ci.yml"
 job = "script-unit"
 cadence = "pull_request and push"
 reason = "hosted Docs coverage and metadata-edit negative controls execute in script-unit"
-tracking_issue = "chelis#1824"
-
-[[path_rule]]
-prefix = "scripts/openspec_controller.py"
-disposition = "owner"
-workflow = "ci.yml"
-job = "script-unit"
-cadence = "pull_request and push"
-reason = "the required-context credential evidence is exercised by the OpenSpec controller script tests"
-tracking_issue = "chelis#1824"
-
-[[path_rule]]
-prefix = "scripts/test_openspec_controller.py"
-disposition = "owner"
-workflow = "ci.yml"
-job = "script-unit"
-cadence = "pull_request and push"
-reason = "the required-context credential evidence executes in script-unit"
 tracking_issue = "chelis#1824"
 
 [[path_rule]]

@@ -125,6 +125,8 @@ in
       cargo-nextest
       cmake
       git
+      # Vendored GMP needs m4 on cold local builds, not just CI.
+      m4
       mdbook
       pkg-config
       pyright

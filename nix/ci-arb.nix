@@ -7,13 +7,20 @@ let
   cargoLock = lib.importTOML (root + "/Cargo.lock");
   locked = name: lib.findFirst (package: package.name == name) null cargoLock.package;
   arb = locked "arb-sys";
+  arbRevision = lib.last (lib.splitString "#" (arb.source or ""));
+  # Fixed-output caches reuse a hash even when the requested revision changes.
+  # Require the lock to match the reviewed revision/hash pair before reuse.
+  arbPin = {
+    rev = "691abe3e533f48c5c0f3e672c556d79493a651d1";
+    hash = "sha256-6h/SdhNEVgVSD8DOlnJcSrAlc0LK1yc6GZNzzVkVHEg=";
+  };
   flint = locked "flint-sys";
   gmp = locked "gmp-mpfr-sys";
   compiler = "${pkgs.stdenv.cc}/bin/cc";
   cflags = "-std=gnu17 -fPIC";
 
   # Reuse the workspace's exact dependency graph, not a second Cargo resolution.
-  # This producer builds arb-sys itself, so only that root loses registry identity.
+  # This producer builds arb-sys itself, so only that root loses source identity.
   dependency =
     specification:
     let
@@ -64,10 +71,10 @@ let
   cache = pkgs.rustPlatform.buildRustPackage {
     pname = "chelis-ci-native-numeric-cache";
     version = arb.version;
-    src = pkgs.fetchurl {
-      name = "arb-sys-${arb.version}.tar.gz";
-      url = "https://static.crates.io/crates/arb-sys/arb-sys-${arb.version}.crate";
-      sha256 = arb.checksum;
+    src = pkgs.fetchFromGitHub {
+      owner = "Chelis-Lang";
+      repo = "arb-sys";
+      inherit (arbPin) rev hash;
     };
     cargoLock.lockFileContents = lockContents;
     cargoBuildFlags = [ "--locked" ];
@@ -75,15 +82,10 @@ let
     CC = compiler;
     CFLAGS = cflags;
     RUSTC_WRAPPER = "";
-    # The crate preserves its native checks and exact bundled sources. Correct
-    # its omitted MPFR prefix inside this producer, never in Cargo's registry.
+    # The pinned upstream source already supplies the bundled MPFR prefix.
     postPatch = ''
       cp ${lockFile} Cargo.lock
       chmod u+w Cargo.lock
-      substituteInPlace build.rs \
-        --replace-fail \
-        './configure --disable-shared --with-gmp={} --with-flint={}' \
-        './configure --disable-shared --with-gmp={0} --with-mpfr={0} --with-flint={1}'
     '';
     preBuild = ''
       # stdenv setup hooks replace CC; the sys-cache key must match CI exactly.
@@ -157,6 +159,10 @@ in
 assert lib.assertMsg (
   arb != null
   && arb.version == "0.3.6"
+  && builtins.match "[0-9a-f]{40}" arbRevision != null
+  && arbRevision == arbPin.rev
+  &&
+    (arb.source or "") == "git+https://github.com/Chelis-Lang/arb-sys?rev=${arbRevision}#${arbRevision}"
   && flint != null
   && flint.version == "0.7.3"
   && gmp != null

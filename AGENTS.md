@@ -184,8 +184,8 @@ For project-level questions, what Chelis is, what it is for, and what the roadma
 
 1. `spec/design/chelis_canonical_reference.md` controls cross-subject architecture and
    project boundaries.
-2. For a transferred chapter, its named `openspec/specs/<capability>/spec.md` controls
-   the subject.
+2. For a transferred chapter, its named capability in the pinned `chelis-plans`
+   store controls the subject.
 3. An untransferred `spec/00-12*.md` chapter controls its subject.
 4. `spec/design/chelis_project_plan.md` controls project sequence that a higher
    authority does not define.
@@ -193,8 +193,8 @@ For project-level questions, what Chelis is, what it is for, and what the roadma
 
 Language semantics belong in the numbered spec documents. A chapter transfers only
 through a reviewed change that records the transfer; no chapter has transferred, so the
-numbered chapters control and the captured `openspec/` capabilities are reference. If
-active documents disagree, correct the document that controls the subject. Do not add a
+numbered chapters control and the pinned store's captured `chelis-*` capabilities
+are reference. If active documents disagree, correct the document that controls the subject. Do not add a
 third explanation.
 
 ### Normative Specs Are Timeless Contracts
@@ -294,15 +294,16 @@ executable examples in `examples/`; and the active specs and current-state docs.
 
 ### OpenSpec
 
-`openspec/` is the OpenSpec planning and capability root. Planning there is optional,
-its validation does not gate merges, and the governance regime in
-`spec/design/spec_provenance.md` is not active. A branch that changes only OpenSpec
-documents lands by itself when pushed: `openspec-autoland` opens and merges an internal
-pull request with no local command and no human approval. Do not mix such a change with
-code, and do not add a path to `scripts/openspec_acceptance.py`'s allowlist to make a
-change land. Automatic acceptance proves path and schema validity, not correctness.
-`README.md` has the workflow; do not run `openspec init`'s tool generation, because
-`.claude/skills` and `.codex/skills` are symlinks to `agent-skills/`.
+Chelis plans live in [Chelis-Lang/openspec](https://github.com/Chelis-Lang/openspec),
+under `chelis-*` change and capability IDs. This checkout's `openspec/config.yaml`
+is only a `chelis-plans` store pointer; `openspec/store.lock.yaml` pins the revision
+validated by CI. Register the store before using `openspec`; a missing store is an
+error, not permission to recreate a local planning tree. Author and submit planning
+changes in a dedicated store worktree; implementation PRs cite the change ID and
+accepted store commit. Planning remains optional and Phase 0 remains inactive.
+`README.md` owns setup, review order, and the document-only acceptance boundary.
+Do not run `openspec init`'s tool generation: `.claude/skills` and `.codex/skills`
+are symlinks to `agent-skills/`.
 
 ## Change Hygiene
 
@@ -552,7 +553,7 @@ through reef, a Cargo workspace, or Docker.
 | `barnacle` | Standalone Dylint lint libraries maintained by the project. |
 | `arb-sys` | Rust bindings to the Arb arbitrary-precision library. |
 | `sand-dollar` | S3 cache configuration. |
-| `openspec` | OpenSpec tooling; no README. |
+| `openspec` | Shared OpenSpec planning store, including Chelis's `chelis-*` domain; no compiler or numbered-spec authority. |
 | `.github` | Default community health files for the organization. |
 | `website` | Astro monorepo for chelis.ch and cproof.ai. |
 | `gtm` | C Proof go-to-market: brand, content, sales deck, talk tooling. |

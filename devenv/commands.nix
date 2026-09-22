@@ -55,14 +55,6 @@ in
       exec = runPython "scripts/reap_orphans.py";
     };
 
-    # Deliberately NOT named `openspec`: that name belongs to the upstream
-    # CLI supplied by the ci consumer module, and shadowing it would break
-    # `openspec validate`, which this script itself invokes.
-    "openspec-submit" = {
-      description = "Submit an OpenSpec document change and wait for it to land";
-      package = config.languages.python.package;
-      exec = runPython "scripts/openspec_submit.py";
-    };
   }
   // lib.optionalAttrs pkgs.stdenv.isDarwin {
     "chelis-exec-preflight" = {

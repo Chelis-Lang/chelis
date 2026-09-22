@@ -634,99 +634,72 @@ workflow.
 
 ## Submitting an OpenSpec document change
 
-**Just push the branch.** A push that touches `openspec/**` on any branch
-other than `main` starts `openspec-autoland`: it classifies the pushed
-commit, opens an internal pull request when every changed path is an
-OpenSpec document, waits for the required checks on that exact commit, and
-merges it. Nothing local is required and no human approval is involved.
+Chelis's OpenSpec plans live in
+[`Chelis-Lang/openspec`](https://github.com/Chelis-Lang/openspec), the shared
+`chelis-plans` store. Change and capability IDs use the `chelis-` prefix.
+`openspec/config.yaml` points at that store; `openspec/store.lock.yaml` records
+the immutable store commit used by CI. There is no local planning tree.
+The numbered `spec/**` contracts, compiler, tests, and executable acceptance
+oracles remain in this repository. Planning is optional; this migration does
+not activate Phase 0 or make planning validation evidence of code correctness.
+
+Register a store checkout with OpenSpec 1.6.0 before working from a consumer:
 
 ```sh
-git switch -c openspec/add-thing
-# edit openspec/** only
-git commit -am "docs(openspec): add the thing"
-git push -u origin HEAD
+git clone git@github.com:Chelis-Lang/openspec.git /absolute/path/to/openspec
+openspec store register /absolute/path/to/openspec --id chelis-plans --json
+openspec doctor --json
 ```
+Before consumer validation, refuse any local `openspec/specs/` or
+`openspec/changes/` directory, even if empty or containing only ignored files
+such as `.DS_Store`. Preserve unpublished work elsewhere before removing
+obsolete directories. OpenSpec 1.6.0 treats these as a real local root, ignores
+the store declaration with a warning, and can exit successfully with no items.
+That warning or an empty validation is **not** shared-store acceptance.
 
-A push that touches anything outside the OpenSpec document set is
-classified `review`, nothing is written, and the change follows the
-ordinary path. Normative `openspec/specs/**` text is inside the document
-set, by explicit maintainer authorization.
 
-`openspec-submit` remains available inside Devenv as an optional local
-helper -- it validates before pushing and reports the outcome in your
-terminal -- but it is no longer how a change lands:
+Run `openspec doctor` from the Chelis checkout. It must report `chelis-plans`
+with `root.source: declared`. Registration chooses the local authoring
+checkout; it does **not** enforce the CI lock. For exact-revision validation,
+use an isolated store checkout at the full commit in `openspec/store.lock.yaml`
+and register it with a task-local `XDG_DATA_HOME`. Then run
+`openspec validate --all --strict --no-interactive` from Chelis. A missing store
+must fail rather than falling back to a local tree.
+
+Author plans in a dedicated worktree of the **store repository**, not here:
 
 ```sh
-openspec-submit --dry-run       # print the plan; write nothing
-openspec-submit                 # submit and wait for accepted or blocked
+openspec new change chelis-add-thing
+# edit that change's proposal, design, deltas, and tasks
+openspec validate chelis-add-thing --strict --no-interactive
 ```
 
-### One-time activation
+Push the store branch or use its optional `openspec-submit` Devenv command.
+The store owns document-only submission and autoland; no Chelis push submits a
+local plan. Autoland is limited to `chelis-*` planning documents, never tooling,
+schemas, configuration, other domains, or mixed code changes. The store's trusted
+workflows reuse `OPENSPEC_APP_ID` and `OPENSPEC_APP_PRIVATE_KEY`; no new App or
+installation is needed. An unavailable token blocks automatic acceptance;
+ordinary store pull requests remain the review path.
 
-Autoland is inert until two things are true. Both are maintainer actions
-outside any automated session.
+Merge the store plan first, then cite its change ID and full store commit in the
+implementation PR and update the consumer lock to that accepted revision. Keep
+the change active until its related implementation PRs merge; synchronize the
+capability deltas and archive it through the store afterward. Source paths in
+imported documents are relative to Chelis, with their import revision recorded
+in the store's migration evidence.
 
-**1. The workflow files must be on `main`.** `workflow_run` and
-`pull_request_target` only take effect from the default branch, so nothing
-runs until this change set lands there.
+The `OpenSpec store` workflow uses the pinned shared CI action to verify a
+read-only checkout of the locked commit, store identity/root selection, absence
+of local capability dependencies, and strict validation. It reuses
+`vars.CI_APP_ID` and `secrets.CI_APP_PRIVATE_KEY`, like the other private-input CI
+jobs. The pinned action mints a short-lived `Contents: read` token limited to
+`Chelis-Lang/openspec`. Store autoland keeps its existing `OPENSPEC_APP_*`
+credentials; compiler CI receives no permission to write plans.
 
-**2. The existing GitHub App installation must cover this repository.**
-
-A pull request opened with the built-in `GITHUB_TOKEN` raises no
-`pull_request` event, so the workflows publishing the required status
-checks never start and the pull request could never go green. Measured
-against this repository: `conformance.yml` runs only on `push: [main]` and
-`pull_request`, and `changelog.yml` has only `pull_request`, so
-`Hull Conformance Gate (Linux)` and `Changelog` can never appear.
-
-The controller therefore opens the pull request with a short-lived
-installation token, minted per run from **`chelis-openspec`**, a GitHub App
-dedicated to this mechanism -- `vars.OPENSPEC_APP_ID` and
-`secrets.OPENSPEC_APP_PRIVATE_KEY`. No token is stored:
-`actions/create-github-app-token` revokes it when the job ends.
-
-It is deliberately **not** the shared `CI_APP_*` App that
-`conformance-nightly.yml` and `ecosystem-drift.yml` use. Minting from that
-one returned HTTP 422, `The permissions requested are not granted to this
-installation`: its installation grants no pull-request write, and it exists
-for cross-repo reads. Widening it would give pull-request write to every
-workflow that already holds its key in order to fix one call in this one.
-The dedicated App's installation grants `contents: read`, `metadata: read`,
-and `pull requests: write`, and only the controller holds its key.
-
-The token is requested as narrowly as the action allows:
-
-| Scope | Value |
-|---|---|
-| `owner` | `${{ github.repository_owner }}` |
-| `repositories` | `${{ github.event.repository.name }}` (this repository only) |
-| Permission | `permission-pull-requests: write` and `permission-contents: read`, and nothing else |
-| Revocation | automatic at job end (`skip-token-revoke` deliberately unset) |
-
-`POST /repos/{owner}/{repo}/pulls` needs `Pull requests: write` to perform
-the write and `Contents: read` to resolve the head and base refs. A token
-without the second cannot see the branch and the call answers
-`422 Validation Failed` on `head` -- measured, on the third hosted run. The
-endpoint is called directly rather than through `gh pr create`, which would
-additionally read repository and branch metadata. The **Workflows**
-permission is *not* needed: it governs writing repository content, and this
-credential never pushes.
-
-Both `vars.OPENSPEC_APP_ID` and `secrets.OPENSPEC_APP_PRIVATE_KEY` are
-configured, and the App's installation grants `Pull requests: write` on
-this repository. If that grant is ever removed, the mint step fails with
-HTTP 422 and the controller writes nothing -- it never falls back to
-`GITHUB_TOKEN`.
-
-There is deliberately **no fallback**. A missing or insufficient credential
-is reported, not worked around.
-
-**Other current blockers.** A branch whose
-`.github`, `scripts`, Devenv, Nix, or toolchain content differs from
-`origin/main` is refused; rebase first.
-
-Outside Devenv, run `python3 scripts/openspec_submit.py` with a managed
-Python (see [Python and the gate](#python-and-the-gate)).
+See the store's
+[operations guide](https://github.com/Chelis-Lang/openspec/blob/main/docs/store-operations.md)
+for domain rules, acceptance deployment, registration recovery, and rollback.
 
 ## Project Structure
 

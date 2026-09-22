@@ -724,24 +724,9 @@ NON_GATE_WORKFLOWS = {
     # caches to hold the pool under the 10GB LRU budget; runs no per-PR gate
     # command. Out of gate.py scope by design.
     "cache-prune.yml",
-    # OpenSpec validation uses the pinned central action in advisory mode.
-    # It runs no cargo or Chelis command that the developer gate owns.
-    # It stays outside gate.py by design.
-    "openspec-validate.yml",
-    # OpenSpec autoland classifies an OpenSpec document change and asks
-    # GitHub to merge it. It runs the stdlib-only boundary classifier and
-    # the pinned central OpenSpec action, no cargo or Chelis command the
-    # developer gate owns. It is an actor rather than a gate and must not
-    # become a required check, so it stays outside gate.py by design.
-    "openspec-autoland.yml",
-    # Strict OpenSpec validation for the autoland path. Runs the pinned
-    # central OpenSpec action, no cargo or Chelis command the developer
-    # gate owns. Out of gate.py scope by design.
-    "openspec-autoland-validate.yml",
-    # The push signal and the trusted controller that reacts to it. Neither
-    # runs a cargo or Chelis command the developer gate owns.
-    "openspec-autoland-signal.yml",
-    "openspec-autoland-controller.yml",
+    # Shared planning validation checks the locked store through its pinned
+    # action; it runs no compiler command owned by the developer gate.
+    "openspec-store.yml",
 }
 
 
