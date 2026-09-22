@@ -35,6 +35,22 @@ use chelis_deep::ast::Expr;
 use chelis_ir::lower::SubexprLoweringContext;
 use chelis_unord::UnordMap;
 
+thread_local! {
+    /// Terminal-name index builds on this thread (chelis#2393): one per
+    /// scope that resolves a short name, never one per ask.
+    static TERMINAL_INDEX_BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn record_terminal_index_build() {
+    TERMINAL_INDEX_BUILDS.with(|builds| builds.set(builds.get() + 1));
+}
+
+/// Terminal-name index builds on this thread since the last call.
+#[cfg(test)]
+pub(super) fn take_terminal_index_builds() -> u64 {
+    TERMINAL_INDEX_BUILDS.with(|builds| builds.replace(0))
+}
+
 pub(super) struct ProgramScope {
     /// Every top-level definition in scope, library and new code, registered
     /// once by `register_top_level_defs` while the context is built.
@@ -54,6 +70,12 @@ pub(super) struct ProgramScope {
     /// before this a routed reduction re-folded the whole program, all of
     /// `chelis-std` included, on every call.
     routing_lowering_context: OnceCell<SubexprLoweringContext>,
+    /// Every definition key grouped by its terminal segment, each group
+    /// sorted (chelis#2393). A short or import-qualified reference resolves
+    /// through one group instead of sorting and scanning the whole linked
+    /// program on every ask, which the evaluator made up to four times per
+    /// application.
+    terminal_index: OnceCell<UnordMap<String, Vec<String>>>,
 }
 
 impl ProgramScope {
@@ -63,6 +85,7 @@ impl ProgramScope {
             type_env,
             sorted_defs: OnceCell::new(),
             routing_lowering_context: OnceCell::new(),
+            terminal_index: OnceCell::new(),
         }
     }
 
@@ -89,6 +112,31 @@ impl ProgramScope {
                 )
             })
             .clone()
+    }
+
+    /// The definition key a reference spelled `name` resolves to: the exact
+    /// key when one exists, otherwise the one key whose terminal segment is
+    /// `name`'s (`host_ops::terminal_name_matches`), and `None` when there is
+    /// no such key or more than one.
+    pub(super) fn resolve_def_key<'s>(&'s self, name: &'s str) -> Option<&'s str> {
+        if let Some((key, _)) = self.defs.get_key_value(name) {
+            return Some(key);
+        }
+        let index = self.terminal_index.get_or_init(|| {
+            record_terminal_index_build();
+            let mut index = UnordMap::<String, Vec<String>>::new();
+            for (key, _) in self.defs.to_sorted() {
+                index
+                    .entry(super::host_ops::terminal_name(key).to_owned())
+                    .or_default()
+                    .push(key.clone());
+            }
+            index
+        });
+        match index.get(super::host_ops::terminal_name(name))?.as_slice() {
+            [key] => Some(key),
+            _ => None,
+        }
     }
 
     /// The lowering context named-axis routing uses, built on first use and

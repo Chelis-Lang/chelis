@@ -304,6 +304,96 @@ struct DefLaneFacts {
 pub struct HostLoweringSession<'program> {
     program: &'program CheckedProgram,
     facts: DefLaneFacts,
+    /// Top-level `def` and `defsig` items by name, borrowed from the program
+    /// (chelis#2393). Resolving a short spelling used to walk every item and
+    /// compare terminal names, and the kernel decision does that per
+    /// application.
+    names: std::cell::OnceCell<TopLevelNameIndex>,
+}
+
+/// Name lookup tables over a program's top-level items, preserving the
+/// linear scans' rules: the first item with the exact name wins; otherwise a
+/// reference resolves only when exactly one item has its terminal segment.
+/// Entries are item positions rather than borrows, so the session stays
+/// covariant in its program lifetime.
+#[derive(Default)]
+struct TopLevelNameIndex {
+    defs: NameTable,
+    defsigs: NameTable,
+}
+
+/// A top-level item's position: an index into the program's expressions,
+/// then one child index per enclosing `module`.
+type ItemPath = Vec<usize>;
+
+#[derive(Default)]
+struct NameTable {
+    exact: UnordMap<String, ItemPath>,
+    by_terminal: UnordMap<String, Vec<ItemPath>>,
+}
+
+impl NameTable {
+    fn insert(&mut self, name: &str, path: &ItemPath) {
+        self.exact
+            .entry(name.to_owned())
+            .or_insert_with(|| path.clone());
+        self.by_terminal
+            .entry(terminal_name(name).to_owned())
+            .or_default()
+            .push(path.clone());
+    }
+
+    fn resolve(&self, name: &str) -> Option<&ItemPath> {
+        if let Some(found) = self.exact.get(name) {
+            return Some(found);
+        }
+        match self.by_terminal.get(terminal_name(name))?.as_slice() {
+            [found] => Some(found),
+            _ => None,
+        }
+    }
+}
+
+fn index_top_level_items(expr: &Expr, path: &mut ItemPath, index: &mut TopLevelNameIndex) {
+    if let ExprCarrier::DecodedNode(DeepTag::Module, _, children) = expr.carrier() {
+        for (position, child) in children.iter().enumerate().skip(1) {
+            path.push(position);
+            index_top_level_items(child, path, index);
+            path.pop();
+        }
+        return;
+    }
+    if let Some((name, _)) = named_item(expr, DeepTag::Def) {
+        index.defs.insert(name, path);
+    }
+    if let Some((name, _)) = named_item(expr, DeepTag::Defsig) {
+        index.defsigs.insert(name, path);
+    }
+}
+
+/// A `def`'s name and body, or a `defsig`'s name and signature, exactly as
+/// the scans they replace read them.
+fn named_item(expr: &Expr, wanted: DeepTag) -> Option<(&str, &Expr)> {
+    let (tag, _, kids) = stamped_parts(expr)?;
+    if tag != wanted {
+        return None;
+    }
+    let name = kids.first().and_then(symbol_name)?;
+    let value = match wanted {
+        DeepTag::Defsig => kids.last(),
+        _ => kids.get(1),
+    }?;
+    Some((name, value))
+}
+
+thread_local! {
+    static TOP_LEVEL_NAME_INDEX_BUILDS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Top-level name index builds on this thread since the last call.
+#[cfg(test)]
+fn take_top_level_name_index_builds() -> u64 {
+    TOP_LEVEL_NAME_INDEX_BUILDS.with(|builds| builds.replace(0))
 }
 
 impl<'program> HostLoweringSession<'program> {
@@ -313,12 +403,54 @@ impl<'program> HostLoweringSession<'program> {
         Self {
             program,
             facts: DefLaneFacts::default(),
+            names: std::cell::OnceCell::new(),
         }
     }
 
     /// The program this session derives its facts from.
     pub fn program(&self) -> &'program CheckedProgram {
         self.program
+    }
+
+    fn names(&self) -> &TopLevelNameIndex {
+        self.names.get_or_init(|| {
+            TOP_LEVEL_NAME_INDEX_BUILDS.with(|builds| builds.set(builds.get() + 1));
+            let mut index = TopLevelNameIndex::default();
+            let mut path = Vec::new();
+            for (position, expr) in self.program.exprs().iter().enumerate() {
+                path.push(position);
+                index_top_level_items(expr, &mut path, &mut index);
+                path.pop();
+            }
+            index
+        })
+    }
+
+    fn item_at(&self, path: &[usize]) -> Option<&'program Expr> {
+        let (first, rest) = path.split_first()?;
+        let mut item = self.program.exprs().get(*first)?;
+        for position in rest {
+            let ExprCarrier::DecodedNode(DeepTag::Module, _, children) = item.carrier() else {
+                return None;
+            };
+            item = children.get(*position)?;
+        }
+        Some(item)
+    }
+
+    /// [`find_top_level_def_named`] over this session's program, through the
+    /// name index.
+    fn def_named(&self, name: &str) -> Option<(&'program str, &'program Expr)> {
+        named_item(
+            self.item_at(self.names().defs.resolve(name)?)?,
+            DeepTag::Def,
+        )
+    }
+
+    /// The authored `defsig` signature a reference spelled `name` resolves to.
+    fn defsig_named(&self, name: &str) -> Option<&'program Expr> {
+        let path = self.names().defsigs.resolve(name)?;
+        named_item(self.item_at(path)?, DeepTag::Defsig).map(|(_, signature)| signature)
     }
 
     /// The checked subexpression-lowering context for this program.
@@ -4051,7 +4183,7 @@ fn host_def_kernel_product(
     // The declaration's own name is the key for every per-def fact (the
     // effect row, the call graph); a caller may hand in a shorter spelling
     // that `find_top_level_def_named` resolves.
-    let Some((canonical, body)) = find_top_level_def_named(program.exprs(), name) else {
+    let Some((canonical, body)) = program.def_named(name) else {
         return Ok(None);
     };
     let name = canonical;
@@ -6726,7 +6858,8 @@ fn lower_staged_host_plan(
                     {
                         callable_sources.get(&capture.value).cloned()
                     } else {
-                        find_top_level_def_named(program.exprs(), reference)
+                        program
+                            .def_named(reference)
                             .map(|(name, _)| name.to_owned())
                     }
                     .ok_or_else(|| {
@@ -12150,7 +12283,7 @@ fn lower_app_host_expr(
     // a user function with the same terminal spelling cannot acquire magic
     // behavior.
     if kids.len() == 2
-        && find_top_level_def_named(program.exprs(), &name).is_some_and(|(resolved, _)| {
+        && program.def_named(&name).is_some_and(|(resolved, _)| {
             matches!(
                 resolved,
                 "Pkg__chelis__std__Std__Io__Json__canonical_object_entries"
@@ -12459,7 +12592,7 @@ fn lower_app_host_expr(
     let callee_has_stages = if !callee_is_local_callable
         && !callee_is_polymorphic_precision
         && !callee_is_polymorphic_rank
-        && let Some((canonical, body)) = find_top_level_def_named(program.exprs(), &name)
+        && let Some((canonical, body)) = program.def_named(&name)
         && let Some(signature) = host_def_signature(canonical, body, None, program)
     {
         !matches!(
@@ -12872,7 +13005,8 @@ fn actualize_retained_host_contract(
         .ok_or_else(|| {
             host_expr_lowering_error(expr, "polymorphic invocation lost its authored signature")
         })?;
-    let checked_signature = find_top_level_def_named(program.exprs(), name)
+    let checked_signature = program
+        .def_named(name)
         .and_then(|(_, body)| checked_function_type_expr_parts(body))
         .unwrap_or_else(|| authored_signature.clone());
     let (authored_formals, authored_result) = authored_signature;
@@ -13527,7 +13661,7 @@ fn lower_named_retained_host_invocation(
     if is_inlining(name) {
         return Ok(None);
     }
-    let Some((canonical, body)) = find_top_level_def_named(program.exprs(), name) else {
+    let Some((canonical, body)) = program.def_named(name) else {
         return Ok(None);
     };
     let Some(signature) = host_def_signature(canonical, body, None, program) else {
@@ -13867,7 +14001,7 @@ fn lower_recursive_generic_call(
     // identity is the definition's own name, never the call site's spelling,
     // so a qualified and a short reference to one def intern one
     // specialization per instantiation (harden-bounded-monomorphization D4).
-    let Some((canonical_name, def_body)) = find_top_level_def_named(program.exprs(), name) else {
+    let Some((canonical_name, def_body)) = program.def_named(name) else {
         return Err(host_expr_lowering_error(
             app_expr,
             format!(
@@ -14511,7 +14645,7 @@ fn top_level_fn_is_nullary_generic_constructor_wrapper(
     if !params.is_empty() || !ret.is_unresolved() {
         return false;
     }
-    let Some(body) = find_top_level_def_expr(program.exprs(), name) else {
+    let Some(body) = program.def_named(name).map(|(_, body)| body) else {
         return false;
     };
     let Expr::List(fn_list, _) = body else {
@@ -15409,7 +15543,7 @@ fn top_level_fn_helper_summary_rejects(
     {
         return Ok(cached);
     }
-    let Some(body) = find_top_level_def_expr(program.exprs(), name) else {
+    let Some(body) = program.def_named(name).map(|(_, body)| body) else {
         return Ok(false);
     };
     // Like a type-polymorphic declaration, an unresolved source-rate
@@ -18220,10 +18354,13 @@ fn lookup_type_expr<'a>(type_env: &'a BTreeMap<String, Expr>, name: &str) -> Opt
     })
 }
 
-fn lookup_authored_defsig_type_expr(program: &HostLoweringSession<'_>, name: &str) -> Option<Expr> {
+/// The linear defsig scan the session's name index replaced (chelis#2393),
+/// kept as the reference the index is tested against.
+#[cfg(test)]
+fn scan_authored_defsig_type_expr(exprs: &[Expr], name: &str) -> Option<Expr> {
     let mut exact = None;
     let mut terminal_matches = Vec::new();
-    for expr in top_level_items(program.exprs()) {
+    for expr in top_level_items(exprs) {
         let Some((DeepTag::Defsig, _, kids)) = stamped_parts(expr) else {
             continue;
         };
@@ -18244,6 +18381,10 @@ fn lookup_authored_defsig_type_expr(program: &HostLoweringSession<'_>, name: &st
             .then(|| terminal_matches.into_iter().next())
             .flatten()
     })
+}
+
+fn lookup_authored_defsig_type_expr(program: &HostLoweringSession<'_>, name: &str) -> Option<Expr> {
+    program.defsig_named(name).cloned()
 }
 
 fn lookup_declared_type_expr(program: &HostLoweringSession<'_>, name: &str) -> Option<Expr> {
@@ -18291,6 +18432,7 @@ fn terminal_name(name: &str) -> &str {
         .unwrap_or(name)
 }
 
+#[cfg(test)]
 fn find_top_level_def_expr<'a>(exprs: &'a [Expr], name: &str) -> Option<&'a Expr> {
     find_top_level_def_named(exprs, name).map(|(_, body)| body)
 }
@@ -18299,6 +18441,9 @@ fn find_top_level_def_expr<'a>(exprs: &'a [Expr], name: &str) -> Option<&'a Expr
 /// declaration, returning the declaration's own name alongside the body.
 /// The declaration's name is the canonical identity for specialization
 /// interning (harden-bounded-monomorphization D4).
+/// The linear scan the session's name index replaced (chelis#2393), kept
+/// as the reference the index is tested against.
+#[cfg(test)]
 fn find_top_level_def_named<'a>(exprs: &'a [Expr], name: &str) -> Option<(&'a str, &'a Expr)> {
     let mut terminal_match = None;
     let mut terminal_is_ambiguous = false;
@@ -20760,7 +20905,7 @@ fn inline_call_type_subst(
     scope: &UnordMap<String, HostTypeTerm>,
 ) -> UnordMap<String, HostTypeTerm> {
     let mut subst = active_type_subst();
-    let Some((_, fn_expr)) = find_top_level_def_named(program.exprs(), name) else {
+    let Some((_, fn_expr)) = program.def_named(name) else {
         return subst;
     };
     let Some((generic_params, generic_ret)) = expr_fn_type(fn_expr) else {
@@ -22540,6 +22685,112 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
     /// harden-bounded-monomorphization D4: the interning identity is the
     /// definition's own name, so a short and a qualified spelling of one def
     /// produce one canonical key and one minted symbol per instantiation.
+    /// chelis#2393: the session's name index must resolve every spelling
+    /// exactly as the linear scans it replaced, over handcrafted collisions
+    /// and every program in the repository corpus that checks, and must be
+    /// built once per session.
+    ///
+    /// Evidentiary status: DISPOSITION LOCK for resolution (the rule is
+    /// unchanged) and REGRESSION TEST for the build count.
+    #[test]
+    fn issue_2393_name_index_resolves_like_the_scans() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut sources = vec![
+            "module Demo.Collide\n\
+             def x(a: f32) -> f32 = a\n\
+             def y(a: f32) -> f32 = x(a)\n"
+                .to_owned(),
+        ];
+        let mut stack = ["examples", "packages/chelis-std/src", "tests/corpus"]
+            .map(|dir| root.join(dir))
+            .to_vec();
+        while let Some(dir) = stack.pop() {
+            let mut entries = std::fs::read_dir(&dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect::<Vec<_>>();
+            entries.sort();
+            for path in entries {
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|ext| ext == "ch") {
+                    sources.push(std::fs::read_to_string(&path).unwrap());
+                }
+            }
+        }
+        let mut programs = sources
+            .iter()
+            .filter_map(|source| {
+                let decls = chelis_surf::parser::parse_str(source).ok()?;
+                let deep = chelis_surf::desugar::desugar_program(&decls).ok()?;
+                chelis_types::check_ir_program(&deep).ok()
+            })
+            .collect::<Vec<_>>();
+        // Collisions the corpus lacks: an ambiguous terminal across two
+        // spellings, a duplicate definition, and a defsig beside its def.
+        programs.push(parse_and_check(
+            "(defsig {} Demo.depth (a) (t-fn {} (t-var {} a) (t-prim {} i32)))\n\
+             (def {} Demo.depth (fn {} (params {} (x {type: (t-var {} a)})) (lit {type: (t-prim {} i32)} 1)))\n\
+             (def {} A__twin (fn {} (params {} (x {type: (t-prim {} i32)})) (var {} x)))\n\
+             (def {} B.twin (fn {} (params {} (x {type: (t-prim {} i32)})) (var {} x)))\n\
+             (def {} C__solo (fn {} (params {} (x {type: (t-prim {} i32)})) (var {} x)))\n",
+        ));
+        let mut compared = 0usize;
+        for checked in &programs {
+            let session = HostLoweringSession::new(checked);
+            take_top_level_name_index_builds();
+            let mut names = top_level_items(checked.exprs())
+                .into_iter()
+                .filter_map(|item| {
+                    named_item(item, DeepTag::Def).or_else(|| named_item(item, DeepTag::Defsig))
+                })
+                .map(|(name, _)| name.to_owned())
+                .collect::<Vec<_>>();
+            for name in names.clone() {
+                let terminal = terminal_name(&name).to_owned();
+                names.push(format!("Q__{terminal}"));
+                names.push(format!("Q.{terminal}"));
+                names.push(terminal);
+            }
+            names.push("definitely_missing".into());
+            for name in &names {
+                let indexed = session.def_named(name);
+                let scanned = find_top_level_def_named(checked.exprs(), name);
+                assert_eq!(
+                    indexed.map(|(key, body)| (key, body as *const Expr)),
+                    scanned.map(|(key, body)| (key, body as *const Expr)),
+                    "def resolution of `{name}`"
+                );
+                assert_eq!(
+                    lookup_authored_defsig_type_expr(&session, name),
+                    scan_authored_defsig_type_expr(checked.exprs(), name),
+                    "defsig resolution of `{name}`"
+                );
+                compared += 1;
+            }
+            assert!(take_top_level_name_index_builds() <= 1);
+        }
+        assert!(
+            programs.len() > 20,
+            "only {} programs checked",
+            programs.len()
+        );
+        assert!(compared > 1_000, "compared only {compared} spellings");
+        let collisions = programs.last().expect("handcrafted program");
+        let session = HostLoweringSession::new(collisions);
+        assert_eq!(session.def_named("twin"), None, "`twin` is ambiguous");
+        assert_eq!(
+            session.def_named("Z.solo").map(|(key, _)| key),
+            Some("C__solo")
+        );
+        assert_eq!(
+            session.def_named("depth").map(|(key, _)| key),
+            Some("Demo.depth")
+        );
+        assert!(session.defsig_named("depth").is_some());
+        assert_eq!(take_top_level_name_index_builds(), 1);
+    }
+
     #[test]
     fn mono_interning_identity_is_the_definitions_own_name() {
         let checked = parse_and_check(

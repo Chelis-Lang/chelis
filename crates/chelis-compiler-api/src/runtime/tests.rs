@@ -980,6 +980,81 @@ fn issue_2392_excluded_kernel_is_planned_once_per_helper() {
     );
 }
 
+/// chelis#2393: short-name resolution through the terminal index must agree
+/// with the linear scan it replaced, `terminal_name_matches` over every key
+/// with the exactly-one-match rule, for exact, short, qualified, ambiguous and
+/// absent spellings, and the index is built once per scope however many
+/// names are resolved.
+///
+/// Evidentiary status: DISPOSITION LOCK for the resolution table (the rule is
+/// unchanged) and REGRESSION TEST for the build count (the base had no index
+/// and scanned on every ask).
+#[test]
+fn issue_2393_terminal_index_resolves_like_the_scan() {
+    let keys = [
+        "A__x",
+        "B.x",
+        "A.b__y",
+        "y",
+        "C__y__z",
+        "Pkg__lib__Mod__w",
+        "Pkg.lib.Mod.v",
+        "u",
+        "Other__u",
+        "plain",
+    ];
+    let span = chelis_deep::Span::new(0, 0);
+    let defs = keys
+        .iter()
+        .map(|key| {
+            (
+                (*key).to_owned(),
+                Expr::Atom(chelis_deep::ast::Atom::Int(0), span),
+            )
+        })
+        .collect::<UnordMap<_, _>>();
+    let scope = ProgramScope::new(defs.clone(), UnordMap::new());
+    let scan = |name: &str| {
+        let sorted = defs.to_sorted();
+        let mut matches = sorted
+            .into_iter()
+            .filter(|(key, _)| terminal_name_matches(key, name))
+            .map(|(key, _)| key.clone());
+        let first = matches.next()?;
+        matches.next().is_none().then_some(first)
+    };
+    let mut queries = keys.iter().map(|key| (*key).to_owned()).collect::<Vec<_>>();
+    for short in ["x", "y", "z", "w", "v", "u", "b__y", "plain", "missing", ""] {
+        queries.push(short.to_owned());
+        queries.push(format!("Q__{short}"));
+        queries.push(format!("Q.{short}"));
+    }
+    super::program_scope::take_terminal_index_builds();
+    for query in &queries {
+        assert_eq!(
+            scope.resolve_def_key(query).map(str::to_owned),
+            if defs.contains_key(query.as_str()) {
+                Some(query.clone())
+            } else {
+                scan(query)
+            },
+            "resolution of `{query}`"
+        );
+    }
+    // Spot-check the table itself so a shared bug in both readings shows.
+    assert_eq!(scope.resolve_def_key("x"), None, "`x` is ambiguous");
+    assert_eq!(scope.resolve_def_key("z"), Some("C__y__z"));
+    assert_eq!(scope.resolve_def_key("Q.w"), Some("Pkg__lib__Mod__w"));
+    assert_eq!(scope.resolve_def_key("v"), Some("Pkg.lib.Mod.v"));
+    assert_eq!(scope.resolve_def_key("u"), Some("u"), "an exact key wins");
+    assert_eq!(scope.resolve_def_key("missing"), None);
+    assert_eq!(
+        super::program_scope::take_terminal_index_builds(),
+        1,
+        "the index is built once per scope, not once per ask"
+    );
+}
+
 /// chelis#2204: an anonymous `fn` captures the whole enclosing binding frame
 /// and the list combinators clone the callback once per element, so before
 /// this fix every element deep-copied every binding in scope, including

@@ -1252,22 +1252,9 @@ impl<'a> EvalContext<'a> {
     }
 
     pub(super) fn lookup_top_level_def(&self, name: &str) -> Option<(String, Expr)> {
-        self.program
-            .defs()
-            .get(name)
-            .cloned()
-            .map(|expr| (name.to_string(), expr))
-            .or_else(|| {
-                let sorted = self.program.defs().to_sorted();
-                let mut matches = sorted.into_iter().filter_map(|(key, value)| {
-                    terminal_name_matches(key, name).then_some((key, value))
-                });
-                let (key, value) = matches.next()?;
-                matches
-                    .next()
-                    .is_none()
-                    .then_some((key.clone(), value.clone()))
-            })
+        let key = self.program.resolve_def_key(name)?;
+        let body = self.program.defs().get(key)?;
+        Some((key.to_owned(), body.clone()))
     }
 
     fn lookup_declared_signature(&self, name: &str) -> Option<&Expr> {
