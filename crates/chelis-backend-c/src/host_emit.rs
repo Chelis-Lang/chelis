@@ -3280,18 +3280,21 @@ impl<'a> HostEmitter<'a> {
     ///    the same exact bit pattern the DAG lane bakes, so a template that
     ///    folds and one that does not sample identically.
     ///
-    ///    This fold is value-based and does NOT model an intermediate
-    ///    rounding: a bound spelled `cast(cast(x, f16), f32)` type-checks,
-    ///    and the evaluator applies both roundings while `static_float_bound`
-    ///    applies neither. The DAG lane's `lower::extract_f64_value` has the
-    ///    identical behavior, so the two compiled lanes agree with each other
-    ///    and both differ from `eval` on that spelling. The CLASS is
-    ///    pre-existing and owned outside this change (chelis#2316); the
-    ///    host-lane INSTANCE is new, because this lane previously refused to
-    ///    build at all. Reproducing the DAG lane's exact behavior is
-    ///    deliberate: correcting one lane alone would make template
-    ///    foldability observable again, which is the defect chelis#2120
-    ///    exists to remove.
+    ///    This fold honours every rounding in a bound's cast chain, so a
+    ///    bound spelled `cast(cast(x, f16), f32)` bakes the value `eval`
+    ///    computes. Both lanes stage a bound the same way — an integer leaf
+    ///    exact through i64, a float leaf at its source dtype until a cast
+    ///    finalizes it — and both reach `finalize_scalar` through the shared
+    ///    `chelis_types` cast primitives, so they take the same roundings in
+    ///    the same order (chelis#2316). The two stagings are separate
+    ///    readers of differently-shaped trees; they are NOT one function.
+    ///
+    ///    Keeping the lanes identical here is not stylistic. Correcting one
+    ///    lane alone makes template foldability observable again, which is
+    ///    the defect chelis#2120 exists to remove — a first revision of the
+    ///    chelis#2316 fix did exactly that, and its regression witnesses are
+    ///    `a_suffixed_literal_inside_a_narrowing_cast_agrees_across_lanes`
+    ///    and its siblings. Change both folds together or neither.
     ///
     /// The template's element values are never read — only its shape and
     /// dtype reach the output through `chelis_host_alloc_like` — which is
@@ -9813,8 +9816,8 @@ impl BinaryElementwiseFunc {
     }
 }
 
-/// chelis#2120: recover a `uniform_like` bound's exact source value from the
-/// host expression tree.
+/// Fold a `uniform_like` bound to the exact compile-time value the emitter
+/// bakes into the generated call (chelis#2120).
 ///
 /// The checker already restricts these bounds to static literals
 /// (`chelis-types` `infer::app_operand_dtype`, whose message is the
@@ -9824,18 +9827,99 @@ impl BinaryElementwiseFunc {
 /// between that gate and this emitter, and is rejected loudly rather than
 /// defaulted — silently substituting `[0, 1)` for an unreadable bound is the
 /// exact chelis#776 failure this must not reintroduce.
-fn static_float_bound(expr: Option<&HostExpr>) -> Option<f64> {
+///
+/// chelis#2316: the value is staged exactly as `chelis-ir`'s
+/// `static_controls::scalar` stages it — an integer leaf stays EXACT through
+/// i64 and a float leaf stays at its source dtype until a cast finalizes it —
+/// and every transition goes through the shared `chelis_types` cast
+/// primitives. Both lanes therefore apply the same roundings in the same
+/// order, which is the property chelis#2120 needs: a template that folds and
+/// one that does not must sample identically.
+///
+/// Two earlier revisions got this wrong in opposite directions. The first
+/// ignored a cast's target entirely, so a narrowing intermediate was dropped.
+/// The second finalized eagerly at every float cast and returned `None` for a
+/// non-float target — which broke a bound like `cast(3i32, f32)`, because host
+/// lowering expresses a literal's declared dtype by SYNTHESIZING a cast around
+/// the raw lexical value ([04-LIT-1], `chelis-ir/src/host.rs`). That
+/// synthesized `cast[i32]` is not a user-written narrowing cast; it is the
+/// literal's own type, and its value is exact.
+#[derive(Clone, Copy)]
+enum StagedBound {
+    /// An untyped lexical leaf: an integer that is still exact, or a float
+    /// literal that has not yet been finalized at any declared width.
+    Raw(chelis_types::RawScalar),
+    /// A value already finalized at a concrete dtype.
+    Typed(chelis_types::ScalarValue),
+}
+
+impl StagedBound {
+    /// Finalize at `target`, going through the same `chelis_types` primitives
+    /// `chelis-ir`'s typed fold uses.
+    fn finalize(self, target: Prim) -> Option<chelis_types::ScalarValue> {
+        match self {
+            StagedBound::Raw(raw) => chelis_types::cast_raw("uniform_like", raw, target).ok(),
+            StagedBound::Typed(value) => {
+                chelis_types::cast_scalar("uniform_like", value, target).ok()
+            }
+        }
+    }
+
+    fn negate(self) -> Option<Self> {
+        match self {
+            StagedBound::Raw(chelis_types::RawScalar::Int(v)) => Some(StagedBound::Raw(
+                chelis_types::RawScalar::Int(v.checked_neg()?),
+            )),
+            StagedBound::Raw(chelis_types::RawScalar::Float(v)) => {
+                Some(StagedBound::Raw(chelis_types::RawScalar::Float(-v)))
+            }
+            // A finalized value negates at its own width, not through f64.
+            StagedBound::Typed(value) => {
+                let prim = value.prim();
+                chelis_types::cast_raw(
+                    "uniform_like",
+                    chelis_types::RawScalar::Float(-value.as_f64_lossy()),
+                    prim,
+                )
+                .ok()
+                .map(StagedBound::Typed)
+            }
+        }
+    }
+}
+
+fn staged_bound(expr: Option<&HostExpr>) -> Option<StagedBound> {
     match &expr?.kind {
-        HostExprKind::Float(value) => Some(*value),
-        HostExprKind::Int(value) => Some(*value as f64),
-        HostExprKind::Builtin { name, args, .. } if name == "cast" => {
-            static_float_bound(args.first())
+        HostExprKind::Float(value) => {
+            Some(StagedBound::Raw(chelis_types::RawScalar::Float(*value)))
+        }
+        HostExprKind::Int(value) => Some(StagedBound::Raw(chelis_types::RawScalar::Int(*value))),
+        HostExprKind::Builtin { name, args, ty } if name == "cast" => {
+            let inner = staged_bound(args.first())?;
+            let (prim, surface) = checked_cast_abi_axis(ty).ok()?;
+            if surface != CheckedCastSurface::Scalar {
+                return None;
+            }
+            // Finalize at THIS cast's target, whatever it is. An integer
+            // target is a declared-dtype marker from host lowering, not a
+            // user-written truncation: the checker rejects an integer-target
+            // bound before emission (`PrecisionMismatch: expected f32`), so a
+            // non-float target reaching here is always the literal's own type.
+            Some(StagedBound::Typed(inner.finalize(prim)?))
         }
         HostExprKind::Builtin { name, args, .. } if name == "neg" => {
-            static_float_bound(args.first()).map(|value| -value)
+            staged_bound(args.first())?.negate()
         }
         _ => None,
     }
+}
+
+fn static_float_bound(expr: Option<&HostExpr>) -> Option<f64> {
+    // f32 is the emitted bound width; see the matching note at the
+    // `uniform_like` site in `chelis-ir`'s lowering.
+    staged_bound(expr)
+        .and_then(|staged| staged.finalize(Prim::F32))
+        .map(|value| value.as_f64_lossy())
 }
 
 /// The loud terminal for a `uniform_like` bound this emitter cannot fold.

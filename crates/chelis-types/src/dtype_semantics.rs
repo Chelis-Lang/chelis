@@ -3021,6 +3021,37 @@ pub fn compare_scalar_tensor(
     compare_tensors(op, &splat_storage(scalar, tensor.len()), tensor)
 }
 
+/// Round a compile-time float bound to `prim`'s exact value, the way the
+/// evaluator does when it stores one.
+///
+/// What a float-target `cast` does to a statically resolvable literal, for the
+/// legacy `extract_f64_value` fold that still serves the non-execution
+/// `dropout` arm.
+///
+/// `uniform_like` bounds do NOT come through here: they stage through
+/// `static_controls::scalar` (IR) and `StagedBound` (C), which reach the same
+/// `finalize_scalar` chokepoint via `cast_raw`/`cast_scalar`.
+///
+/// chelis#2316: both of them used to recurse THROUGH a `cast` and keep the
+/// innermost literal, on the premise recorded in `extract_f64_value`'s own
+/// doc comment that "a float-target cast preserves the numeric value". That
+/// holds for f32 and f64 and is false for every narrowing float target, so
+/// `cast(cast(0.30000001, f16), f32)` baked `0.30000001` where the program
+/// declares `0.300048828125` — a silent bound substitution of ~1600 f32 ULPs
+/// that both compiled lanes made identically while `eval` rounded correctly.
+///
+/// Returns `None` for a non-float target, matching the fold sites' existing
+/// contract that an integer-target cast is left unresolved and goes loud
+/// rather than baking a guessed truncation (chelis#776).
+pub fn round_float_bound(prim: Prim, value: f64) -> Option<f64> {
+    if !prim.is_float() {
+        return None;
+    }
+    finalize_scalar("cast", prim, RawScalar::Float(value))
+        .ok()
+        .map(|scalar| scalar.as_f64_lossy())
+}
+
 /// Finalize one wide intermediate into `prim` per the section C1 table,
 /// or trap. THE construction chokepoint for op results.
 pub fn finalize_scalar(
@@ -6458,5 +6489,103 @@ mod tests {
                 ..
             })
         ));
+    }
+}
+
+#[cfg(test)]
+mod round_float_bound_tests {
+    use super::{Prim, round_float_bound};
+
+    /// The chelis#2316 repro, at the value level. `cast(0.30000001, f16)` is
+    /// `0.300048828125`, and widening that to f32 keeps it — so the chain's
+    /// value is NOT the literal it started from. Both compiled fold sites used
+    /// to return the literal.
+    #[test]
+    fn f16_then_f32_keeps_the_f16_rounding() {
+        let inner = round_float_bound(Prim::F16, 0.30000001).expect("f16 is a float target");
+        assert_eq!(inner, 0.300048828125);
+        let widened = round_float_bound(Prim::F32, inner).expect("f32 is a float target");
+        assert_eq!((widened as f32).to_bits(), 0x3e99a000);
+        // What the broken fold baked instead: the untouched literal, whose f32
+        // image is 0x3e99999a. That is the exact constant chelis#2316 found in
+        // the emitted `chelis_uniform_sample_f32` call.
+        assert_ne!((widened as f32).to_bits(), 0x3e99999a_u32);
+    }
+
+    /// The high bound from the same repro.
+    #[test]
+    fn f16_then_f32_high_bound_matches_the_declared_value() {
+        let inner = round_float_bound(Prim::F16, 0.90000001).expect("f16 is a float target");
+        let widened = round_float_bound(Prim::F32, inner).expect("f32 is a float target");
+        assert_eq!(widened, 0.89990234375);
+        assert_eq!((widened as f32).to_bits(), 0x3f666000);
+    }
+
+    /// bf16 has fewer mantissa bits than f16, so it rounds further. This is
+    /// why the bf16 program diverged more than the f16 one.
+    #[test]
+    fn bf16_rounds_further_than_f16() {
+        let f16 = round_float_bound(Prim::F16, 0.30000001).expect("float target");
+        let bf16 = round_float_bound(Prim::Bf16, 0.30000001).expect("float target");
+        assert_ne!(f16, bf16);
+        assert!(
+            (bf16 - 0.30000001f64).abs() > (f16 - 0.30000001f64).abs(),
+            "bf16 {bf16} should be further from the source than f16 {f16}",
+        );
+    }
+
+    /// DISPOSITION LOCK: a target that cannot narrow the value returns it
+    /// unchanged, which is why a lone `cast(lit, f32)` bound always agreed
+    /// across lanes even with the broken fold.
+    #[test]
+    fn a_non_narrowing_target_is_the_identity() {
+        let v = 0.30000001192092896_f64; // already exactly f32-representable
+        assert_eq!(round_float_bound(Prim::F32, v), Some(v));
+        assert_eq!(round_float_bound(Prim::F64, v), Some(v));
+    }
+
+    /// Ties-to-even at the target width, per [04-NUM-2] / [04-NUM-14].
+    #[test]
+    fn rounding_is_ties_to_even_not_truncation() {
+        // A value just above an f16 midpoint must round up, not truncate down.
+        let up = round_float_bound(Prim::F16, 0.30004884).expect("float target");
+        assert!(
+            up >= 0.300048828125,
+            "expected round-to-nearest, got truncation: {up}",
+        );
+    }
+
+    /// NEGATIVE PARITY (chelis#776): an integer target is left unresolved so
+    /// the caller goes loud rather than baking a guessed truncation. Both fold
+    /// sites depend on this `None`.
+    #[test]
+    fn integer_and_bool_targets_are_unresolved() {
+        for prim in [
+            Prim::Int8,
+            Prim::Int16,
+            Prim::Int32,
+            Prim::Int64,
+            Prim::Bool,
+        ] {
+            assert_eq!(
+                round_float_bound(prim, 2.7),
+                None,
+                "{prim:?} must not resolve as a float bound",
+            );
+        }
+    }
+
+    /// Non-finite values are not bounds the emitter can bake; they must not
+    /// silently become a finite number.
+    #[test]
+    fn non_finite_values_do_not_become_finite() {
+        for v in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            if let Some(rounded) = round_float_bound(Prim::F32, v) {
+                assert!(
+                    !rounded.is_finite(),
+                    "non-finite {v} must not round to the finite {rounded}",
+                );
+            }
+        }
     }
 }
