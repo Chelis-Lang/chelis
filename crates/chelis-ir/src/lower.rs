@@ -2045,15 +2045,50 @@ impl LocalAscriptionBindingRegion {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TensorCallsiteSpecialization {
+    /// Checker-owned identities used while lowering the concrete body. These
+    /// are safe to compose across nested retained invocations; authored names
+    /// are declaration-local and deliberately excluded.
+    precision_substitutions: UnordMap<String, Prim>,
+    rank_substitutions: UnordMap<String, Vec<DimInfo>>,
+    dim_axis_positions: UnordMap<String, (usize, DimInfo)>,
+    /// Checked plus authored aliases used only to rebuild the current
+    /// declaration's parameter/result contracts.
+    claim_precision_substitutions: UnordMap<String, Prim>,
+    claim_rank_substitutions: UnordMap<String, Vec<DimInfo>>,
+}
+
+#[derive(Clone, Debug)]
 pub struct SubexprLoweringContext {
     program_types: Arc<BTreeMap<String, TensorType>>,
     program_defs: Arc<BTreeMap<String, Expr>>,
     program_signatures: Arc<BTreeMap<String, Expr>>,
     local_tensor_ascriptions: Arc<Vec<chelis_types::CheckedLocalTensorAscription>>,
+    tensor_specialization: TensorCallsiteSpecialization,
 }
 
 impl SubexprLoweringContext {
+    pub(crate) fn with_tensor_callsite_specialization(
+        &self,
+        specialization: TensorCallsiteSpecialization,
+    ) -> Self {
+        let mut tensor_specialization = self.tensor_specialization.clone();
+        tensor_specialization
+            .precision_substitutions
+            .merge(specialization.precision_substitutions);
+        tensor_specialization
+            .rank_substitutions
+            .merge(specialization.rank_substitutions);
+        tensor_specialization
+            .dim_axis_positions
+            .merge(specialization.dim_axis_positions);
+        Self {
+            tensor_specialization,
+            ..self.clone()
+        }
+    }
+
     pub fn new(
         checked_types: UnordMap<String, Expr>,
         definitions: UnordMap<String, Expr>,
@@ -2388,6 +2423,7 @@ pub(crate) fn prepare_subexpr_lowering_context(
         program_defs,
         program_signatures,
         local_tensor_ascriptions: Arc::new(Vec::new()),
+        tensor_specialization: TensorCallsiteSpecialization::default(),
     }
 }
 
@@ -2658,6 +2694,12 @@ pub(crate) fn try_lower_staged_host_region(
             LinearityInfo::default(),
         );
         ctx.local_tensor_ascriptions = context.local_tensor_ascriptions.clone();
+        ctx.prec_substitutions = context
+            .tensor_specialization
+            .precision_substitutions
+            .clone();
+        ctx.rank_substitutions = context.tensor_specialization.rank_substitutions.clone();
+        ctx.dim_axis_positions = context.tensor_specialization.dim_axis_positions.clone();
         ctx.host_program = Some(program);
         ctx.host_stage_status = status.clone();
         ctx.literal_result_claim_ownership = options.literal_result_claim_ownership;
@@ -2809,6 +2851,12 @@ fn lower_subexpr_program_inner_impl(
         LinearityInfo::default(),
     );
     ctx.local_tensor_ascriptions = context.local_tensor_ascriptions.clone();
+    ctx.prec_substitutions = context
+        .tensor_specialization
+        .precision_substitutions
+        .clone();
+    ctx.rank_substitutions = context.tensor_specialization.rank_substitutions.clone();
+    ctx.dim_axis_positions = context.tensor_specialization.dim_axis_positions.clone();
     #[cfg(feature = "lowering-trace")]
     {
         ctx.trace = trace.clone();
@@ -3194,7 +3242,7 @@ fn rank_axis_binder_key(rank: &str, axis: usize) -> String {
     format!("{INTERNAL_RANK_AXIS_BINDER_PREFIX}{rank}:{axis}")
 }
 
-fn extent_binder_label(binder: &str) -> String {
+pub(crate) fn extent_binder_label(binder: &str) -> String {
     let Some(rest) = binder.strip_prefix(INTERNAL_RANK_AXIS_BINDER_PREFIX) else {
         return binder.to_owned();
     };
@@ -4060,6 +4108,308 @@ fn activation_rank_substitutions(
     substitutions
 }
 
+/// Actualize one authored tensor result contract at a concrete call site.
+///
+/// This is the host/evaluator counterpart of the ordinary DAG inliner's
+/// activation setup.  It deliberately derives rank-spread widths and tensor
+/// precision from declared parameter types paired with checked actual types;
+/// the result value is not evidence for its own obligation.  Rebuilding the
+/// result through [`authored_tensor_claim_type`] then turns axes contributed
+/// by a rank spread back into binder identities, so concrete dimensions learned
+/// from an actual never become literal result claims.  Authored literal axes
+/// stay literal and therefore shift naturally around an expanded spread.
+pub fn actualize_authored_tensor_result_claim(
+    actualization_formals: &[Option<Expr>],
+    authored_formals: &[Option<Expr>],
+    actual_args: &[TensorType],
+    authored_result: &Expr,
+) -> Result<TensorType, String> {
+    tensor_callsite_specialization(actualization_formals, authored_formals, actual_args)?
+        .actualize_authored_tensor(authored_result)
+}
+
+/// Actualize the authored tensor parameters of one concrete invocation.
+///
+/// Unlike result-claim actualization, parameter actualization retains every
+/// authored named dimension (including the activation-local axes contributed
+/// by a rank spread).  [`crate::host::SignatureEntryPlan`] can therefore build
+/// the declaration's literal and repeated-name obligations from these types
+/// while the separately supplied runtime shapes remain the observed values.
+/// Concrete extents learned from an actual are never promoted into a declared
+/// entry obligation.
+pub fn actualize_authored_tensor_parameters(
+    actualization_formals: &[Option<Expr>],
+    authored_formals: &[Option<Expr>],
+    actual_args: &[TensorType],
+) -> Result<Vec<TensorType>, String> {
+    let specialization =
+        tensor_callsite_specialization(actualization_formals, authored_formals, actual_args)?;
+    authored_formals
+        .iter()
+        .map(|formal| {
+            specialization.actualize_authored_tensor(
+                formal.as_ref().ok_or_else(|| {
+                    "parameter actualization is missing a tensor formal".to_string()
+                })?,
+            )
+        })
+        .collect()
+}
+
+/// Resolve the tensor type variables owned by one concrete invocation.
+///
+/// The same validated map drives both the private host-to-DAG specialization
+/// handoff and authored result-claim rebuilding. Keeping one authority here
+/// prevents the executable body and its delayed result obligation from
+/// disagreeing about a rank spread or precision binder.
+pub(crate) fn tensor_callsite_specialization(
+    actualization_formals: &[Option<Expr>],
+    authored_formals: &[Option<Expr>],
+    actual_args: &[TensorType],
+) -> Result<TensorCallsiteSpecialization, String> {
+    if actualization_formals.len() != authored_formals.len()
+        || actualization_formals.len() != actual_args.len()
+    {
+        return Err(format!(
+            "result-claim actualization lost positional alignment: {} checked formals, {} \
+             authored formals, {} tensor actuals",
+            actualization_formals.len(),
+            authored_formals.len(),
+            actual_args.len()
+        ));
+    }
+
+    let dim_axis_positions = tensor_dim_axis_positions(actualization_formals, actual_args);
+    // The ordinary lowering substitution helpers are intentionally tolerant:
+    // speculative reads may drop an unresolved rank spread and duplicate
+    // variables are protected only by a debug assertion. Result-claim
+    // metadata has no later body node that can repair such a guess. Validate
+    // every formal binding here so this public helper is fallible in release
+    // builds too, including after an ambiguous anchored split. A rank binder
+    // fixes the number and identity of spread axes, not their runtime extents:
+    // equal-width runs share the first binding and the signature-entry plan
+    // remains responsible for comparing their observed sizes.
+    let mut checked_rank_bindings: UnordMap<String, Vec<DimInfo>> = UnordMap::new();
+    let mut authored_rank_bindings: UnordMap<String, Vec<DimInfo>> = UnordMap::new();
+    for ((formal, authored), actual) in actualization_formals
+        .iter()
+        .zip(authored_formals)
+        .zip(actual_args)
+    {
+        let (Some(formal), Some(authored)) = (formal, authored) else {
+            return Err("result-claim actualization is missing a tensor formal".to_string());
+        };
+        let formal_spreads = tensor_formal_dim_slots(formal)
+            .ok_or_else(|| "result-claim actualization received a non-tensor formal".to_string())?
+            .into_iter()
+            .filter_map(|slot| match slot {
+                DimSlot::Spread(name) => Some(name),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let authored_spreads = tensor_formal_dim_slots(authored)
+            .ok_or_else(|| "result-claim actualization received a non-tensor formal".to_string())?
+            .into_iter()
+            .filter_map(|slot| match slot {
+                DimSlot::Spread(name) => Some(name),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if formal_spreads.len() != authored_spreads.len() {
+            return Err(format!(
+                "result-claim actualization cannot align {} checked rank spreads with {} authored rank spreads",
+                formal_spreads.len(),
+                authored_spreads.len()
+            ));
+        }
+        let bindings =
+            try_extract_rank_var_bindings(formal, &actual.dims, &dim_axis_positions, true)
+                .map_err(|error| error.message().to_string())?;
+        for (name, authored_name) in formal_spreads.into_iter().zip(authored_spreads) {
+            let Some((_, run)) = bindings.iter().find(|(bound, _)| bound == &name) else {
+                return Err(format!(
+                    "result-claim actualization could not resolve rank spread `{name}`"
+                ));
+            };
+            match checked_rank_bindings.entry(name.clone()) {
+                chelis_unord::Entry::Occupied(previous) if previous.get().len() != run.len() => {
+                    return Err(format!(
+                        "result-claim actualization found conflicting bindings for rank spread `{name}`"
+                    ));
+                }
+                chelis_unord::Entry::Occupied(_) => {}
+                chelis_unord::Entry::Vacant(slot) => {
+                    slot.insert(run.clone());
+                }
+            }
+            match authored_rank_bindings.entry(authored_name.clone()) {
+                chelis_unord::Entry::Occupied(previous) if previous.get().len() != run.len() => {
+                    return Err(format!(
+                        "result-claim actualization found conflicting bindings for authored rank spread `{authored_name}`"
+                    ));
+                }
+                chelis_unord::Entry::Occupied(_) => {}
+                chelis_unord::Entry::Vacant(slot) => {
+                    slot.insert(run.clone());
+                }
+            }
+        }
+    }
+    for (name, checked) in checked_rank_bindings.to_sorted() {
+        if let Some(authored) = authored_rank_bindings.get(name)
+            && authored.len() != checked.len()
+        {
+            return Err(format!(
+                "result-claim actualization found conflicting checked/authored rank bindings for `{name}`"
+            ));
+        }
+    }
+    let rank_substitutions = checked_rank_bindings.clone();
+    let mut claim_rank_substitutions = checked_rank_bindings;
+    claim_rank_substitutions.merge(authored_rank_bindings);
+    for authored in authored_formals.iter().flatten() {
+        let authored_spreads = tensor_formal_dim_slots(authored)
+            .ok_or_else(|| "result-claim actualization received a non-tensor formal".to_string())?
+            .into_iter()
+            .filter_map(|slot| match slot {
+                DimSlot::Spread(name) => Some(name),
+                _ => None,
+            });
+        for name in authored_spreads {
+            if !claim_rank_substitutions.contains_key(&name) {
+                return Err(format!(
+                    "result-claim actualization could not resolve authored rank spread `{name}`"
+                ));
+            }
+        }
+    }
+    let checked_precision_substitutions =
+        tensor_prec_substitutions(actualization_formals, actual_args);
+    let authored_precision_substitutions = tensor_prec_substitutions(authored_formals, actual_args);
+    for (name, checked) in checked_precision_substitutions.to_sorted() {
+        if let Some(authored) = authored_precision_substitutions.get(name)
+            && authored != checked
+        {
+            return Err(format!(
+                "result-claim actualization found conflicting precision bindings for `{name}`"
+            ));
+        }
+    }
+    for (formals, label) in [
+        (actualization_formals, "checked"),
+        (authored_formals, "authored"),
+    ] {
+        let mut seen = UnordMap::new();
+        for (formal, actual) in formals.iter().zip(actual_args) {
+            let Some(formal) = formal else {
+                continue;
+            };
+            let Some(name) = formal_param_type_var_name(formal) else {
+                continue;
+            };
+            if let Some(previous) = seen.insert(name.clone(), actual.precision)
+                && previous != actual.precision
+            {
+                return Err(format!(
+                    "result-claim actualization found ambiguous {label} precision binding for `{name}`"
+                ));
+            }
+        }
+    }
+    let precision_substitutions = checked_precision_substitutions.clone();
+    let mut claim_precision_substitutions = checked_precision_substitutions;
+    claim_precision_substitutions.merge(authored_precision_substitutions);
+    Ok(TensorCallsiteSpecialization {
+        precision_substitutions,
+        rank_substitutions,
+        dim_axis_positions,
+        claim_precision_substitutions,
+        claim_rank_substitutions,
+    })
+}
+
+impl TensorCallsiteSpecialization {
+    /// Add precision evidence carried by non-tensor parameters of the same
+    /// invocation. A scalar `p` can specialize a tensor result's element
+    /// precision even when no tensor formal exists. Checked identities extend
+    /// executable body lowering; authored identities remain contract-local.
+    pub(crate) fn with_precision_evidence(
+        mut self,
+        checked: UnordMap<String, Prim>,
+        authored: UnordMap<String, Prim>,
+    ) -> Result<Self, String> {
+        for (name, precision) in checked.to_sorted() {
+            if let Some(existing) = self.precision_substitutions.get(name)
+                && existing != precision
+            {
+                return Err(format!(
+                    "result-claim actualization found conflicting checked precision evidence for `{name}`"
+                ));
+            }
+            self.precision_substitutions
+                .insert(name.clone(), *precision);
+            self.claim_precision_substitutions
+                .insert(name.clone(), *precision);
+        }
+        for (name, precision) in authored.to_sorted() {
+            if let Some(existing) = self.claim_precision_substitutions.get(name)
+                && existing != precision
+            {
+                return Err(format!(
+                    "result-claim actualization found conflicting authored precision evidence for `{name}`"
+                ));
+            }
+            self.claim_precision_substitutions
+                .insert(name.clone(), *precision);
+        }
+        Ok(self)
+    }
+
+    pub(crate) fn actualize_authored_tensor(
+        &self,
+        authored_result: &Expr,
+    ) -> Result<TensorType, String> {
+        let Some(slots) = tensor_formal_dim_slots(authored_result) else {
+            return Err("the authored result claim is not a tensor type".to_string());
+        };
+        for name in slots.into_iter().filter_map(|slot| match slot {
+            DimSlot::Spread(name) => Some(name),
+            _ => None,
+        }) {
+            if !self.claim_rank_substitutions.contains_key(&name) {
+                return Err(format!(
+                    "result-claim actualization could not resolve result rank spread `{name}`"
+                ));
+            }
+        }
+        if let Some(name) = extract_precision_var_name(authored_result)
+            && !self.claim_precision_substitutions.contains_key(&name)
+        {
+            return Err(format!(
+                "result-claim actualization could not resolve result precision `{name}`"
+            ));
+        }
+        // Parameter contracts may carry a transparent borrow wrapper. Rank
+        // and precision binding already classify `&tensor[...]` as the same
+        // tensor formal; normalize that wrapper before asking the concrete
+        // tensor extractor, which deliberately accepts only `t-tensor` at its
+        // top level.
+        let tensor_expr = match authored_result.carrier() {
+            ExprCarrier::DecodedNode(DeepTag::TRef, _, children) => children
+                .first()
+                .ok_or_else(|| "the authored tensor reference has no target type".to_string())?,
+            _ => authored_result,
+        };
+        let actualized = LowerCtx::try_extract_tensor_type_with_subst(
+            tensor_expr,
+            &self.claim_precision_substitutions,
+            &self.claim_rank_substitutions,
+        )
+        .ok_or_else(|| "the authored result claim is not a concrete tensor type".to_string())?;
+        authored_tensor_claim_type(authored_result, &actualized, &self.claim_rank_substitutions)
+    }
+}
+
 /// Bind each rank-var spread in a (possibly anchored, Tier-3) tensor-type
 /// formal to the run of the actual's concrete dims it covers, located by the
 /// named anchors between spreads — the lowering twin of the checker's
@@ -4079,17 +4429,31 @@ fn activation_rank_substitutions(
 /// recovered from the fixed position a concrete-rank caller recorded. This is
 /// the rank-spread analogue of the #388 recovery in
 /// [`LowerCtx::resolve_reduce_axis`]; both rely on the same map.
-fn extract_rank_var_bindings(
+enum RankBindingError {
+    Internal(String),
+    Fatal(String),
+}
+
+impl RankBindingError {
+    fn message(&self) -> &str {
+        match self {
+            Self::Internal(message) | Self::Fatal(message) => message,
+        }
+    }
+}
+
+fn try_extract_rank_var_bindings(
     expr: &Expr,
     actual_dims: &[DimInfo],
     dim_axis_positions: &UnordMap<String, (usize, DimInfo)>,
-) -> Vec<(String, Vec<DimInfo>)> {
+    allow_single_spread_width: bool,
+) -> Result<Vec<(String, Vec<DimInfo>)>, RankBindingError> {
     let Some(slots) = tensor_formal_dim_slots(expr) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
 
     if !slots.iter().any(|s| matches!(s, DimSlot::Spread(_))) {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     // Walk the slots against the actual dims, exactly as the checker's
@@ -4101,12 +4465,42 @@ fn extract_rank_var_bindings(
     let mut out: Vec<(String, Vec<DimInfo>)> = Vec::new();
     let mut gi = 0usize;
     let mut ri = 0usize;
+    let spread_count = slots
+        .iter()
+        .filter(|slot| matches!(slot, DimSlot::Spread(_)))
+        .count();
     while ri < slots.len() {
         if gi > n {
-            return out;
+            return Err(RankBindingError::Internal(format!(
+                "rank formal consumes more axes than its rank-{n} actual"
+            )));
         }
         match &slots[ri] {
             DimSlot::Spread(name) => {
+                // At a direct function-entry actualization boundary, one
+                // spread has a unique width even when the checked actual has
+                // erased every authored axis name: rank minus the fixed slots.
+                // Ordinary lowering keeps its stricter name/extent relocation
+                // behavior because an intervening reorder can make structural
+                // position stale. The result-claim caller passes `true` only
+                // for the eagerly prepared interface value itself.
+                if allow_single_spread_width && spread_count == 1 {
+                    let trailing_fixed = slots[ri + 1..].len();
+                    let Some(split) = n.checked_sub(trailing_fixed) else {
+                        return Err(RankBindingError::Internal(format!(
+                            "rank formal consumes more axes than its rank-{n} actual"
+                        )));
+                    };
+                    if split < gi {
+                        return Err(RankBindingError::Internal(format!(
+                            "rank formal consumes more axes than its rank-{n} actual"
+                        )));
+                    }
+                    out.push((name.clone(), actual_dims[gi..split].to_vec()));
+                    gi = split;
+                    ri += 1;
+                    continue;
+                }
                 let rest = &slots[ri + 1..];
                 match rest.iter().position(|s| !matches!(s, DimSlot::Spread(_))) {
                     Some(0) => {
@@ -4115,11 +4509,9 @@ fn extract_rank_var_bindings(
                             // The checker requires a named anchor after a spread,
                             // so this is unreachable for a checked program; fail
                             // loud in debug, bail in release.
-                            debug_assert!(
-                                false,
-                                "rank-spread anchor is not a named dim at lowering"
-                            );
-                            return out;
+                            return Err(RankBindingError::Internal(
+                                "rank-spread anchor is not a named dim at lowering".to_string(),
+                            ));
                         };
                         // Primary: locate the anchor by name in the (possibly
                         // still-symbolic) actual dims, exactly as the forward
@@ -4152,18 +4544,14 @@ fn extract_rank_var_bindings(
                                 // must not be absorbed by the C host-fallback
                                 // path into a generic grad-unsupported message.
                                 AnchorRecovery::AmbiguousAfterReorder => {
-                                    raise_fatal_lowering_error(
-                                        format!(
-                                            "rank-spread anchor `{anchor}` cannot be located: \
-                                             call-site monomorphization erased the name and an \
-                                             intervening axis-reorder (e.g. `permute`) left its \
-                                             recorded position stale; its recorded extent appears \
-                                             at multiple axes of the monomorphized actual. \
-                                             Refusing to split at a possibly-wrong axis (chelis#549)"
-                                        ),
-                                        None,
-                                        None,
-                                    )
+                                    return Err(RankBindingError::Fatal(format!(
+                                        "rank-spread anchor `{anchor}` cannot be located: \
+                                         call-site monomorphization erased the name and an \
+                                         intervening axis-reorder (e.g. `permute`) left its \
+                                         recorded position stale; its recorded extent appears \
+                                         at multiple axes of the monomorphized actual. \
+                                         Refusing to split at a possibly-wrong axis (chelis#549)"
+                                    )));
                                 }
                                 // Anchor absent by name AND not soundly
                                 // recoverable by position — the checker located it
@@ -4171,14 +4559,12 @@ fn extract_rank_var_bindings(
                                 // for a checked program. Fail loud (fail-closed)
                                 // rather than the former release-silent
                                 // `return out` partial binding.
-                                AnchorRecovery::Unrecorded => raise_lowering_error(
-                                    format!(
+                                AnchorRecovery::Unrecorded => {
+                                    return Err(RankBindingError::Internal(format!(
                                         "rank-spread anchor `{anchor}` absent from monomorphized \
                                          actual: internal rank-monomorphization error"
-                                    ),
-                                    None,
-                                    None,
-                                ),
+                                    )));
+                                }
                             },
                         };
                         out.push((name.clone(), actual_dims[gi..split].to_vec()));
@@ -4193,8 +4579,9 @@ fn extract_rank_var_bindings(
                     // Two adjacent spreads — the undetermined split is rejected at
                     // unification, so this never reaches a checked backend.
                     _ => {
-                        debug_assert!(false, "two adjacent rank spreads at lowering");
-                        return out;
+                        return Err(RankBindingError::Internal(
+                            "two adjacent rank spreads at lowering".to_string(),
+                        ));
                     }
                 }
             }
@@ -4204,7 +4591,24 @@ fn extract_rank_var_bindings(
             }
         }
     }
-    out
+    if gi > n {
+        return Err(RankBindingError::Internal(format!(
+            "rank formal consumes more axes than its rank-{n} actual"
+        )));
+    }
+    Ok(out)
+}
+
+fn extract_rank_var_bindings(
+    expr: &Expr,
+    actual_dims: &[DimInfo],
+    dim_axis_positions: &UnordMap<String, (usize, DimInfo)>,
+) -> Vec<(String, Vec<DimInfo>)> {
+    match try_extract_rank_var_bindings(expr, actual_dims, dim_axis_positions, false) {
+        Ok(bindings) => bindings,
+        Err(RankBindingError::Fatal(message)) => raise_fatal_lowering_error(message, None, None),
+        Err(RankBindingError::Internal(message)) => raise_lowering_error(message, None, None),
+    }
 }
 
 pub fn top_level_expr_is_lowered(
@@ -20783,6 +21187,7 @@ mod tests {
             program_defs: Arc::new(BTreeMap::new()),
             program_signatures: Arc::new(BTreeMap::new()),
             local_tensor_ascriptions: Arc::new(Vec::new()),
+            tensor_specialization: TensorCallsiteSpecialization::default(),
         };
         let (dag, _, trace) = try_lower_subexpr_program_with_ordered_inputs_and_trace(
             &expr,
@@ -21087,6 +21492,7 @@ mod tests {
             program_defs: Arc::new(BTreeMap::new()),
             program_signatures: Arc::new(BTreeMap::new()),
             local_tensor_ascriptions: Arc::new(vec![ascription.clone()]),
+            tensor_specialization: TensorCallsiteSpecialization::default(),
         };
 
         for decoded in [&binding, &node] {
@@ -24676,6 +25082,323 @@ mod tests {
             ]),
             "rank var `r` must bind to the actual arg's full shape vector"
         );
+    }
+
+    #[test]
+    fn authored_result_claim_actualization_preserves_only_authored_literals() {
+        let checked = vec![Some(parse_type_expr(
+            "(t-ref {} (t-tensor {} (d-name {} extent) (d-name {} first) \
+             (d-rank {} r0) (t-var {} t0)))",
+        ))];
+        let authored = vec![Some(parse_type_expr(
+            "(t-ref {} (t-tensor {} (d-name {} extent) (d-name {} first) \
+             (d-rank {} rest) (t-var {} p)))",
+        ))];
+        let actuals = vec![TensorType {
+            dims: vec![
+                DimInfo::Lit(2),
+                DimInfo::Lit(4),
+                DimInfo::Lit(5),
+                DimInfo::Lit(6),
+            ],
+            precision: Prim::F64,
+        }];
+
+        for (result, expected) in [
+            (
+                "(t-tensor {} (d-lit {} 3) (d-name {} first) \
+                 (d-rank {} rest) (t-var {} p))",
+                vec![
+                    DimInfo::Lit(3),
+                    DimInfo::Named("first".into(), None),
+                    DimInfo::Named(rank_axis_binder_key("rest", 0), None),
+                    DimInfo::Named(rank_axis_binder_key("rest", 1), None),
+                ],
+            ),
+            (
+                "(t-tensor {} (d-name {} first) (d-rank {} rest) \
+                 (d-lit {} 3) (t-var {} p))",
+                vec![
+                    DimInfo::Named("first".into(), None),
+                    DimInfo::Named(rank_axis_binder_key("rest", 0), None),
+                    DimInfo::Named(rank_axis_binder_key("rest", 1), None),
+                    DimInfo::Lit(3),
+                ],
+            ),
+        ] {
+            let actualized = actualize_authored_tensor_result_claim(
+                &checked,
+                &authored,
+                &actuals,
+                &parse_type_expr(result),
+            )
+            .expect("call-site claim actualizes");
+            assert_eq!(actualized.precision, Prim::F64);
+            assert_eq!(actualized.dims, expected);
+            assert_eq!(
+                actualized
+                    .dims
+                    .iter()
+                    .filter(|dim| matches!(dim, DimInfo::Lit(_)))
+                    .count(),
+                1,
+                "literal actual dimensions are not imported as result claims"
+            );
+        }
+    }
+
+    #[test]
+    fn scalar_precision_evidence_actualizes_a_tensor_result_and_body_context() {
+        let mut checked = UnordMap::new();
+        checked.insert("t349".to_string(), Prim::F64);
+        let mut authored = UnordMap::new();
+        authored.insert("p".to_string(), Prim::F64);
+        let specialization = tensor_callsite_specialization(&[], &[], &[])
+            .expect("an invocation without tensor parameters has empty rank evidence")
+            .with_precision_evidence(checked, authored)
+            .expect("scalar parameter precision specializes the tensor result");
+
+        assert_eq!(
+            specialization.precision_substitutions.get("t349"),
+            Some(&Prim::F64),
+            "checked scalar evidence reaches fresh tensor-helper lowering contexts"
+        );
+        assert_eq!(
+            specialization
+                .actualize_authored_tensor(&parse_type_expr(
+                    "(t-tensor {} (d-name {} n) (t-var {} p))",
+                ))
+                .expect("authored scalar evidence actualizes the tensor result"),
+            TensorType {
+                dims: vec![DimInfo::Named("n".into(), None)],
+                precision: Prim::F64,
+            }
+        );
+    }
+
+    #[test]
+    fn authored_result_claim_actualization_rejects_missing_or_ambiguous_bindings() {
+        let concrete = TensorType {
+            dims: vec![DimInfo::Lit(2)],
+            precision: Prim::F32,
+        };
+
+        let missing_rank = actualize_authored_tensor_result_claim(
+            &[Some(parse_type_expr(
+                "(t-tensor {} (d-name {} x) (t-prim {} f32))",
+            ))],
+            &[Some(parse_type_expr(
+                "(t-tensor {} (d-name {} x) (t-prim {} f32))",
+            ))],
+            std::slice::from_ref(&concrete),
+            &parse_type_expr("(t-tensor {} (d-rank {} rest) (t-prim {} f32))"),
+        )
+        .expect_err("an unbound result rank spread must fail closed");
+        assert!(missing_rank.contains("result rank spread `rest`"));
+
+        let too_short_for_single_spread = actualize_authored_tensor_result_claim(
+            &[Some(parse_type_expr(
+                "(t-tensor {} (d-name {} first) (d-rank {} r0) \
+                 (d-name {} extent) (t-prim {} f32))",
+            ))],
+            &[Some(parse_type_expr(
+                "(t-tensor {} (d-name {} first) (d-rank {} rest) \
+                 (d-name {} extent) (t-prim {} f32))",
+            ))],
+            std::slice::from_ref(&concrete),
+            &parse_type_expr(
+                "(t-tensor {} (d-name {} first) (d-rank {} rest) \
+                 (d-lit {} 3) (t-prim {} f32))",
+            ),
+        )
+        .expect_err("one spread cannot consume a negative-width run");
+        assert!(
+            too_short_for_single_spread.contains("consumes more axes"),
+            "{too_short_for_single_spread}"
+        );
+
+        let missing_precision = actualize_authored_tensor_result_claim(
+            &[Some(parse_type_expr(
+                "(t-tensor {} (d-name {} x) (t-prim {} f32))",
+            ))],
+            &[Some(parse_type_expr(
+                "(t-tensor {} (d-name {} x) (t-prim {} f32))",
+            ))],
+            std::slice::from_ref(&concrete),
+            &parse_type_expr("(t-tensor {} (d-name {} x) (t-var {} p))"),
+        )
+        .expect_err("an unbound result precision must fail without panicking");
+        assert!(missing_precision.contains("result precision `p`"));
+
+        let shared_rank = parse_type_expr("(t-tensor {} (d-rank {} r) (t-prim {} f32))");
+        let conflicting_rank = actualize_authored_tensor_result_claim(
+            &[Some(shared_rank.clone()), Some(shared_rank.clone())],
+            &[Some(shared_rank.clone()), Some(shared_rank.clone())],
+            &[
+                concrete.clone(),
+                TensorType {
+                    dims: vec![DimInfo::Lit(2), DimInfo::Lit(3)],
+                    precision: Prim::F32,
+                },
+            ],
+            &shared_rank,
+        )
+        .expect_err("one rank binder cannot have two widths");
+        assert!(conflicting_rank.contains("conflicting bindings for rank spread `r`"));
+
+        let conflicting_authored_alias = actualize_authored_tensor_result_claim(
+            &[
+                Some(parse_type_expr(
+                    "(t-tensor {} (d-rank {} checked0) (t-prim {} f32))",
+                )),
+                Some(parse_type_expr(
+                    "(t-tensor {} (d-rank {} checked1) (t-prim {} f32))",
+                )),
+            ],
+            &[Some(shared_rank.clone()), Some(shared_rank.clone())],
+            &[
+                concrete.clone(),
+                TensorType {
+                    dims: vec![DimInfo::Lit(2), DimInfo::Lit(3)],
+                    precision: Prim::F32,
+                },
+            ],
+            &shared_rank,
+        )
+        .expect_err("two checked binders cannot alias one authored rank at different widths");
+        assert!(
+            conflicting_authored_alias
+                .contains("conflicting bindings for authored rank spread `r`"),
+            "{conflicting_authored_alias}"
+        );
+
+        let shared_precision = parse_type_expr("(t-tensor {} (d-name {} x) (t-var {} p))");
+        let conflicting_precision = actualize_authored_tensor_result_claim(
+            &[
+                Some(shared_precision.clone()),
+                Some(shared_precision.clone()),
+            ],
+            &[
+                Some(shared_precision.clone()),
+                Some(shared_precision.clone()),
+            ],
+            &[
+                concrete,
+                TensorType {
+                    dims: vec![DimInfo::Lit(2)],
+                    precision: Prim::F64,
+                },
+            ],
+            &shared_precision,
+        )
+        .expect_err("one precision binder cannot have two dtypes");
+        assert!(conflicting_precision.contains("ambiguous checked precision binding for `p`"));
+
+        let ambiguous_anchor = actualize_authored_tensor_result_claim(
+            &[
+                Some(parse_type_expr(
+                    "(t-tensor {} (d-name {} seq) (t-prim {} f32))",
+                )),
+                Some(parse_type_expr(
+                    "(t-tensor {} (d-rank {} pre) (d-name {} seq) \
+                     (d-rank {} post) (t-prim {} f32))",
+                )),
+            ],
+            &[
+                Some(parse_type_expr(
+                    "(t-tensor {} (d-name {} seq) (t-prim {} f32))",
+                )),
+                Some(parse_type_expr(
+                    "(t-tensor {} (d-rank {} before) (d-name {} seq) \
+                     (d-rank {} after) (t-prim {} f32))",
+                )),
+            ],
+            &[
+                TensorType {
+                    dims: vec![DimInfo::Lit(2)],
+                    precision: Prim::F32,
+                },
+                TensorType {
+                    dims: vec![DimInfo::Lit(2), DimInfo::Lit(2), DimInfo::Lit(3)],
+                    precision: Prim::F32,
+                },
+            ],
+            &parse_type_expr(
+                "(t-tensor {} (d-rank {} before) (d-name {} seq) \
+                 (d-rank {} after) (t-prim {} f32))",
+            ),
+        )
+        .expect_err("a duplicated anchor extent cannot choose a rank split");
+        assert!(
+            ambiguous_anchor.contains("recorded extent appears at multiple axes"),
+            "{ambiguous_anchor}"
+        );
+    }
+
+    #[test]
+    fn authored_parameter_actualization_binds_shared_spread_width_not_runtime_extents() {
+        let shared = parse_type_expr("(t-tensor {} (d-rank {} r) (t-prim {} f32))");
+        let formals = vec![Some(shared.clone()), Some(shared)];
+        let actuals = vec![
+            TensorType {
+                dims: vec![DimInfo::Lit(3), DimInfo::Lit(2)],
+                precision: Prim::F32,
+            },
+            TensorType {
+                dims: vec![DimInfo::Lit(2), DimInfo::Lit(7)],
+                precision: Prim::F32,
+            },
+        ];
+
+        let actualized = actualize_authored_tensor_parameters(&formals, &formals, &actuals)
+            .expect("equal rank widths actualize before runtime entry equality guards");
+        let expected = vec![
+            DimInfo::Named(rank_axis_binder_key("r", 0), None),
+            DimInfo::Named(rank_axis_binder_key("r", 1), None),
+        ];
+        assert_eq!(actualized[0].dims, expected);
+        assert_eq!(actualized[1].dims, expected);
+    }
+
+    #[test]
+    fn authored_parameter_actualization_normalizes_borrowed_tensor_formals() {
+        let borrowed = parse_type_expr("(t-ref {} (t-tensor {} (d-name {} n) (t-var {} p)))");
+        let concrete = TensorType {
+            dims: vec![DimInfo::Lit(2)],
+            precision: Prim::F64,
+        };
+        let actualized = actualize_authored_tensor_parameters(
+            &[Some(borrowed.clone())],
+            &[Some(borrowed)],
+            std::slice::from_ref(&concrete),
+        )
+        .expect("a transparent borrow wrapper preserves tensor actualization");
+        assert_eq!(
+            actualized,
+            vec![TensorType {
+                dims: vec![DimInfo::Named("n".into(), None)],
+                precision: Prim::F64,
+            }]
+        );
+
+        let borrowed_spread =
+            parse_type_expr("(t-ref {} (t-tensor {} (d-rank {} rest) (t-prim {} f32)))");
+        let mismatch = actualize_authored_tensor_parameters(
+            &[Some(borrowed_spread.clone()), Some(borrowed_spread.clone())],
+            &[Some(borrowed_spread.clone()), Some(borrowed_spread)],
+            &[
+                TensorType {
+                    dims: vec![DimInfo::Lit(2)],
+                    precision: Prim::F32,
+                },
+                TensorType {
+                    dims: vec![DimInfo::Lit(2), DimInfo::Lit(3)],
+                    precision: Prim::F32,
+                },
+            ],
+        )
+        .expect_err("a borrow wrapper must not hide a conflicting spread width");
+        assert!(mismatch.contains("conflicting bindings for rank spread `rest`"));
     }
 
     /// chelis#373: `tensor_dim_axis_positions` records a fixed anchor offset

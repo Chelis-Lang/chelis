@@ -773,6 +773,11 @@ struct TensorHelperSink {
     /// ascription identities are artifact-local, so synthetic helper regions
     /// must select records by declaration as well as by source span.
     declaration_name: Option<String>,
+    /// Concrete rank/precision bindings for retained polymorphic invocation
+    /// bodies. This stack is private to one host-lowering traversal; payload
+    /// actuals are prepared before a frame is pushed, and nested invocations
+    /// restore the enclosing frame on every ordinary Result path.
+    tensor_specializations: Vec<crate::lower::TensorCallsiteSpecialization>,
     collect_execution: bool,
     collect_trace: bool,
 }
@@ -790,6 +795,7 @@ impl TensorHelperSink {
             helpers: Vec::new(),
             products: Vec::new(),
             declaration_name: None,
+            tensor_specializations: Vec::new(),
             collect_execution,
             collect_trace,
         }
@@ -1672,6 +1678,13 @@ pub enum HostExprKind<T = HostTypeTerm> {
         body: Box<HostExpr<T>>,
         ty: T,
     },
+    /// A retained/inlined function parameter after eager actual preparation.
+    /// The value is unchanged, but result-producer provenance restarts at the
+    /// function interface exactly as it does for a non-inlined parameter.
+    FormalIngress {
+        value: Box<HostExpr<T>>,
+        ty: T,
+    },
     Int(i64),
     Float(f64),
     Bool(bool),
@@ -1720,6 +1733,13 @@ pub enum HostExprKind<T = HostTypeTerm> {
         ty: T,
     },
     Let {
+        bindings: Vec<HostBinding<T>>,
+        body: Box<HostExpr<T>>,
+        ty: T,
+    },
+    /// A function invocation whose eager actual/formal bindings are outside
+    /// every inherited or locally authored result-claim spine.
+    RetainedInvocation {
         bindings: Vec<HostBinding<T>>,
         body: Box<HostExpr<T>>,
         ty: T,
@@ -1878,6 +1898,10 @@ fn resolve_host_expr(expr: HostExpr) -> Result<ConcreteHostExpr, crate::HostType
                 ty: ty.into_concrete()?,
             }
         }
+        HostExprKind::FormalIngress { value, ty } => ConcreteHostExprKind::FormalIngress {
+            value: Box::new(resolve_host_expr(*value)?),
+            ty: ty.into_concrete()?,
+        },
         HostExprKind::Int(value) => ConcreteHostExprKind::Int(value),
         HostExprKind::Float(value) => ConcreteHostExprKind::Float(value),
         HostExprKind::Bool(value) => ConcreteHostExprKind::Bool(value),
@@ -2003,6 +2027,16 @@ fn resolve_host_expr(expr: HostExpr) -> Result<ConcreteHostExpr, crate::HostType
             body: Box::new(resolve_host_expr(*body)?),
             ty: ty.into_concrete()?,
         },
+        HostExprKind::RetainedInvocation { bindings, body, ty } => {
+            ConcreteHostExprKind::RetainedInvocation {
+                bindings: bindings
+                    .into_iter()
+                    .map(resolve_host_binding)
+                    .collect::<Result<Vec<_>, _>>()?,
+                body: Box::new(resolve_host_expr(*body)?),
+                ty: ty.into_concrete()?,
+            }
+        }
         HostExprKind::Map { callback, list, ty } => ConcreteHostExprKind::Map {
             callback: resolve_host_callback(callback)?,
             list: Box::new(resolve_host_expr(*list)?),
@@ -3269,6 +3303,7 @@ fn host_callback_uses_builtin<T>(callback: &HostCallback<T>, builtin: &str) -> b
 fn host_body_uses_builtin<T>(expr: &HostExpr<T>, builtin: &str) -> bool {
     match &expr.kind {
         HostExprKind::ResultClaimScope { body, .. } => host_body_uses_builtin(body, builtin),
+        HostExprKind::FormalIngress { value, .. } => host_body_uses_builtin(value, builtin),
         HostExprKind::Builtin { name, args, .. } => {
             name == builtin || args.iter().any(|arg| host_body_uses_builtin(arg, builtin))
         }
@@ -3285,7 +3320,8 @@ fn host_body_uses_builtin<T>(expr: &HostExpr<T>, builtin: &str) -> bool {
             items.iter().any(|i| host_body_uses_builtin(i, builtin))
         }
         HostExprKind::AdtFieldAccess { base, .. } => host_body_uses_builtin(base, builtin),
-        HostExprKind::Let { bindings, body, .. } => {
+        HostExprKind::Let { bindings, body, .. }
+        | HostExprKind::RetainedInvocation { bindings, body, .. } => {
             bindings
                 .iter()
                 .any(|b| host_body_uses_builtin(&b.value, builtin))
@@ -3475,7 +3511,8 @@ fn body_callsite_span_per_helper(expr: &HostExpr) -> UnordMap<usize, Option<Stri
                 walk(then_expr, out);
                 walk(else_expr, out);
             }
-            HostExprKind::Let { bindings, body, .. } => {
+            HostExprKind::Let { bindings, body, .. }
+            | HostExprKind::RetainedInvocation { bindings, body, .. } => {
                 for binding in bindings {
                     walk(&binding.value, out);
                 }
@@ -3530,6 +3567,8 @@ fn body_callsite_span_per_helper(expr: &HostExpr) -> UnordMap<usize, Option<Stri
                 walk(seed, out);
                 walk(body, out);
             }
+            HostExprKind::ResultClaimScope { body, .. } => walk(body, out),
+            HostExprKind::FormalIngress { value, .. } => walk(value, out),
             _ => {}
         }
     }
@@ -3595,11 +3634,18 @@ fn detect_multiple_return_paths_rejection(function: &HostFunction) -> Option<Sum
                 arm_references_sparse_helper(then_expr, function)
                     || arm_references_sparse_helper(else_expr, function)
             }
-            HostExprKind::Let { body, bindings, .. } => {
+            HostExprKind::Let { body, bindings, .. }
+            | HostExprKind::RetainedInvocation { body, bindings, .. } => {
                 arm_references_sparse_helper(body, function)
                     || bindings
                         .iter()
                         .any(|b| arm_references_sparse_helper(&b.value, function))
+            }
+            HostExprKind::ResultClaimScope { body, .. } => {
+                arm_references_sparse_helper(body, function)
+            }
+            HostExprKind::FormalIngress { value, .. } => {
+                arm_references_sparse_helper(value, function)
             }
             _ => false,
         }
@@ -3792,7 +3838,8 @@ fn host_body_has_call_matching<T>(
         HostExprKind::Call { function, args, .. } => {
             function_matches(function) || args.iter().any(recurse)
         }
-        HostExprKind::Let { bindings, body, .. } => {
+        HostExprKind::Let { bindings, body, .. }
+        | HostExprKind::RetainedInvocation { bindings, body, .. } => {
             bindings.iter().any(|b| recurse(&b.value)) || recurse(body)
         }
         HostExprKind::If {
@@ -3828,6 +3875,8 @@ fn host_body_has_call_matching<T>(
         }
         HostExprKind::AdtConstruct { fields, .. } => fields.iter().any(recurse),
         HostExprKind::WithSeed { seed, body, .. } => recurse(seed) || recurse(body),
+        HostExprKind::ResultClaimScope { body, .. } => recurse(body),
+        HostExprKind::FormalIngress { value, .. } => recurse(value),
         _ => false,
     }
 }
@@ -5765,6 +5814,15 @@ fn try_lower_tensor_helper_call_inner(
         profile.tensor_helper_attempts += 1;
         profile.tensor_helper_input_nodes += deep_expr_nodes(expr);
     });
+    let specialized_context = (!tensor_helpers.tensor_specializations.is_empty()).then(|| {
+        let mut context = lowering_context
+            .cloned()
+            .unwrap_or_else(|| cached_subexpr_lowering_context(program));
+        for specialization in &tensor_helpers.tensor_specializations {
+            context = context.with_tensor_callsite_specialization(specialization.clone());
+        }
+        context
+    });
     let Some(product) = lower_tensor_helper_product(
         expr,
         program,
@@ -5772,7 +5830,7 @@ fn try_lower_tensor_helper_call_inner(
         &expected,
         tensor_helpers.collect_execution,
         tensor_helpers.collect_trace,
-        lowering_context,
+        specialized_context.as_ref().or(lowering_context),
     ) else {
         record_host_work(|profile| profile.tensor_helper_fallbacks += 1);
         return None;
@@ -6317,7 +6375,7 @@ fn lower_tensor_helper_with<T>(
         Err(diagnostic) if diagnostic.fatal => {
             crate::lower::raise_fatal_lowering_diagnostic(diagnostic)
         }
-        Err(_) => {
+        Err(_diagnostic) => {
             record_host_work(|profile| profile.tensor_helper_dag_rejections += 1);
             None
         }
@@ -6420,7 +6478,7 @@ fn lower_tensor_helper_product(
                 Err(diagnostic) if diagnostic.fatal => {
                     crate::lower::raise_fatal_lowering_diagnostic(diagnostic)
                 }
-                Err(_) => return None,
+                Err(_diagnostic) => return None,
             };
             let rebound =
                 remap_tensor_helper_dim_symbols(plan.dag_for_inspection(), scope, expected);
@@ -8714,6 +8772,9 @@ fn collect_named_callback_signatures(
         HostExprKind::ResultClaimScope { body, .. } => {
             collect_named_callback_signatures(body, out);
         }
+        HostExprKind::FormalIngress { value, .. } => {
+            collect_named_callback_signatures(value, out);
+        }
         HostExprKind::Call { args, .. }
         | HostExprKind::Builtin { args, .. }
         | HostExprKind::SignatureEntry { args, .. } => {
@@ -8768,7 +8829,8 @@ fn collect_named_callback_signatures(
                 collect_named_callback_signatures(default_expr, out);
             }
         }
-        HostExprKind::Let { bindings, body, .. } => {
+        HostExprKind::Let { bindings, body, .. }
+        | HostExprKind::RetainedInvocation { bindings, body, .. } => {
             for binding in bindings {
                 collect_named_callback_signatures(&binding.value, out);
             }
@@ -8879,6 +8941,9 @@ fn infer_callable_param_types_in_expr(
         HostExprKind::ResultClaimScope { body, .. } => {
             infer_callable_param_types_in_expr(body, unknown, out);
         }
+        HostExprKind::FormalIngress { value, .. } => {
+            infer_callable_param_types_in_expr(value, unknown, out);
+        }
         HostExprKind::Call {
             function,
             args,
@@ -8946,7 +9011,8 @@ fn infer_callable_param_types_in_expr(
                 infer_callable_param_types_in_expr(default_expr, unknown, out);
             }
         }
-        HostExprKind::Let { bindings, body, .. } => {
+        HostExprKind::Let { bindings, body, .. }
+        | HostExprKind::RetainedInvocation { bindings, body, .. } => {
             for binding in bindings {
                 infer_callable_param_types_in_expr(&binding.value, unknown, out);
             }
@@ -9015,6 +9081,14 @@ fn refine_host_expr_types(
             let body_ty = host_expr_type(body);
             if ty.is_unresolved() && !body_ty.is_unresolved() {
                 *ty = body_ty;
+                changed = true;
+            }
+        }
+        HostExprKind::FormalIngress { value, ty } => {
+            changed |= refine_host_expr_types(value, scope, signatures);
+            let value_ty = host_expr_type(value);
+            if ty.is_unresolved() && !value_ty.is_unresolved() {
+                *ty = value_ty;
                 changed = true;
             }
         }
@@ -9214,7 +9288,8 @@ fn refine_host_expr_types(
                 }
             }
         }
-        HostExprKind::Let { bindings, body, ty } => {
+        HostExprKind::Let { bindings, body, ty }
+        | HostExprKind::RetainedInvocation { bindings, body, ty } => {
             let mut local_scope = scope.clone();
             for binding in bindings.iter_mut() {
                 changed |= refine_host_expr_types(&mut binding.value, &mut local_scope, signatures);
@@ -12458,52 +12533,63 @@ fn lower_app_host_expr(
     // type-variable analogue of the precision/rank specialization paths
     // below, kept separate so those tensor-specific paths retain their own
     // lowering rules.
-    if (callee_is_polymorphic_precision || callee_is_polymorphic_rank)
-        && let Some(specialized) = inline_top_level_host_call(app_expr, program)
-    {
-        let pushed = push_inlining(&name);
+    if callee_is_polymorphic_precision || callee_is_polymorphic_rank {
         let definitions = adt_constructor_definitions(program);
         let specialized_ty =
             canonicalize_representation_erased_adt_args(explicit_ty.clone(), &definitions);
-        // chelis#2152: the inlined body keeps the callee's checked types, which
-        // name the callee's own type variables. The DAG lane actualizes a
-        // TENSOR precision from the concrete arguments by itself, but a host-
-        // lane node inside the body (a scalar `cast(k, p)`, for one) reads its
-        // type through the active substitution. Without one it stayed
-        // `TypeVariable` at every call site and was rejected as an unactualized
-        // cast target, even for a concrete f32 caller. Pin this call site's
-        // bindings exactly as a monomorphized specialization does.
-        let _subst_guard = ActiveTypeSubstGuard::push(inline_call_type_subst(
+        // chelis#2152: compute the inlined body's checked substitution while
+        // the caller map is active, but do not activate it while payload
+        // actuals are prepared. The retained path completes this map from the
+        // prepared values and scopes it only around the callee body. A
+        // recursive form that cannot retain its boundary still uses this
+        // legacy substitution around the fallback body below.
+        let fallback_substitution =
+            inline_call_type_subst(&name, &kids[1..], &explicit_ty, program, scope);
+        if let Some((retained, result_claim)) = lower_named_retained_host_invocation(
+            app_expr,
             &name,
-            &kids[1..],
-            &explicit_ty,
-            program,
-            scope,
-        ));
-        let lowered = lower_host_expr_with_expected(
-            &specialized,
+            &specialized_ty,
             program,
             scope,
             tensor_helpers,
-            (!specialized_ty.is_unresolved()).then_some(&specialized_ty),
-        );
-        if pushed {
-            pop_inlining(&name);
+            true,
+        )? {
+            return Ok(retain_actualized_result_claim(
+                retained,
+                result_claim.as_ref(),
+            ));
         }
-        return lowered;
+        // Recursive polymorphic forms cannot retain an inline body. Preserve
+        // the existing bounded-specialization/fail-closed fallthrough below.
+        if let Some(specialized) = inline_top_level_host_call(app_expr, program) {
+            let _subst_guard = ActiveTypeSubstGuard::push(fallback_substitution);
+            let pushed = push_inlining(&name);
+            let lowered = lower_host_expr_with_expected(
+                &specialized,
+                program,
+                scope,
+                tensor_helpers,
+                (!specialized_ty.is_unresolved()).then_some(&specialized_ty),
+            );
+            if pushed {
+                pop_inlining(&name);
+            }
+            return lowered;
+        }
     }
     if has_callable_params
-        && let Some(guarded) = lower_guarded_host_invocation(
+        && let Some((retained, _)) = lower_named_retained_host_invocation(
             app_expr,
             &name,
             &explicit_ty,
             program,
             scope,
             tensor_helpers,
+            true,
         )?
     {
         return Ok(retain_inlined_result_claim(
-            guarded,
+            retained,
             declared_fn_sig.as_ref(),
         ));
     }
@@ -12647,6 +12733,13 @@ fn retain_inlined_result_claim(
     let Some((_, HostTypeTerm::Tensor(result))) = signature else {
         return body;
     };
+    retain_actualized_result_claim(body, Some(result))
+}
+
+fn retain_actualized_result_claim(body: HostExpr, result: Option<&TensorType>) -> HostExpr {
+    let Some(result) = result else {
+        return body;
+    };
     let axes = result
         .dims
         .iter()
@@ -12659,14 +12752,345 @@ fn retain_inlined_result_claim(
     if axes.is_empty() {
         return body;
     }
+    let plan = HostResultClaimPlan {
+        result: result.clone(),
+    };
+    let HostExpr {
+        kind,
+        span_id,
+        merged_spans,
+    } = body;
+    if let HostExprKind::RetainedInvocation { bindings, body, ty } = kind {
+        // Actual preparation and signature entry are outside the result
+        // obligation. Only the callee body is on its result spine.
+        let scoped = HostExpr::new(HostExprKind::ResultClaimScope {
+            plan,
+            body,
+            ty: ty.clone(),
+        });
+        return HostExpr {
+            kind: HostExprKind::RetainedInvocation {
+                bindings,
+                body: Box::new(scoped),
+                ty,
+            },
+            span_id,
+            merged_spans,
+        };
+    }
+    let body = HostExpr {
+        kind,
+        span_id,
+        merged_spans,
+    };
     let ty = host_expr_type(&body);
     HostExpr::new(HostExprKind::ResultClaimScope {
-        plan: HostResultClaimPlan {
-            result: result.clone(),
-        },
+        plan,
         body: Box::new(body),
         ty,
     })
+}
+
+/// The authored literal axes in a result signature are obligations on the
+/// selected producer, not shape facts the body may assume while lowering.
+/// Keep the actualized rank and precision available to the specialized body,
+/// but erase those literals from its expected type. The unmodified result is
+/// retained separately by [`retain_actualized_result_claim`].
+fn result_claim_body_type(result: &TensorType) -> TensorType {
+    TensorType {
+        dims: result
+            .dims
+            .iter()
+            .map(|dim| match dim {
+                DimInfo::Lit(_) => DimInfo::Named("*".to_string(), None),
+                named => named.clone(),
+            })
+            .collect(),
+        precision: result.precision,
+    }
+}
+
+fn checked_function_type_expr_parts(expr: &Expr) -> Option<(Vec<Expr>, Expr)> {
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::Fn, metadata, _) => metadata
+            .ty()
+            .and_then(|ty| parse_fn_type_expr_parts(ty.expression())),
+        ExprCarrier::MetadataExpression(meta) => checked_function_type_expr_parts(&meta.expr),
+        _ => None,
+    }
+}
+
+/// Precision binders solved from this callee's own positional contracts.
+/// Keep this separate from `active_type_subst`: caller-owned names may share
+/// authored spellings, while checked identities are alpha-renamed per call.
+fn concrete_precision_evidence(
+    substitutions: &UnordMap<String, HostTypeTerm>,
+) -> UnordMap<String, Prim> {
+    substitutions
+        .to_sorted()
+        .into_iter()
+        .filter_map(|(name, term)| match term {
+            HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(precision)) => {
+                Some((name.clone(), *precision))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+struct ActualizedRetainedHostContract {
+    params: Vec<HostParam>,
+    result_claim: Option<TensorType>,
+    body_substitution: UnordMap<String, HostTypeTerm>,
+    tensor_specialization: crate::lower::TensorCallsiteSpecialization,
+}
+
+#[derive(Default)]
+struct RetainedHostPreparation {
+    actuals: Option<Vec<Option<HostExpr>>>,
+    tensor_specialization: Option<crate::lower::TensorCallsiteSpecialization>,
+}
+
+/// Actualize the tensor-bearing parts of one authored host invocation.
+///
+/// The call's checked argument types supply concrete rank and precision; the
+/// declaration supplies the identities and literal axes that own entry/result
+/// obligations. The returned parameter vector is private lowering metadata,
+/// not a change to the emitted function ABI.
+fn actualize_retained_host_contract(
+    expr: &Expr,
+    name: &str,
+    signature: &HostDefSignature,
+    program: &HostLoweringSession<'_>,
+    actual_types: &[HostTypeTerm],
+) -> Result<ActualizedRetainedHostContract, crate::lower::LowerDiagnostic> {
+    let app_args = as_list(expr)
+        .and_then(|app| children(app).split_first().map(|(_, args)| args))
+        .ok_or_else(|| host_expr_lowering_error(expr, "retained invocation lost its actuals"))?;
+    let authored_signature = lookup_declared_type_expr(program, name)
+        .and_then(|ty| parse_fn_type_expr_parts(&ty))
+        .ok_or_else(|| {
+            host_expr_lowering_error(expr, "polymorphic invocation lost its authored signature")
+        })?;
+    let checked_signature = find_top_level_def_named(program.exprs(), name)
+        .and_then(|(_, body)| checked_function_type_expr_parts(body))
+        .unwrap_or_else(|| authored_signature.clone());
+    let (authored_formals, authored_result) = authored_signature;
+    let (checked_formals, _) = checked_signature;
+    if app_args.len() != signature.params.len()
+        || authored_formals.len() != app_args.len()
+        || checked_formals.len() != app_args.len()
+        || actual_types.len() != app_args.len()
+    {
+        return Err(host_expr_lowering_error(
+            expr,
+            "polymorphic invocation lost positional signature alignment",
+        ));
+    }
+
+    // Authored binder names are local to this callee and need not equal the
+    // checker's alpha-renamed binder identities in `active_type_subst`.
+    // Derive their concrete precision/type bindings independently from the
+    // same actuals. Never merge this map into the active caller substitution:
+    // a raw authored name such as `p` is not globally unique.
+    let active_substitution = active_type_subst();
+    // `inline_call_type_subst` runs before effectful payload expressions have
+    // been lowered and can therefore see an unresolved block type. Complete
+    // the callee's checked namespace from the once-prepared actual types. The
+    // map begins with the caller bindings because substituted caller
+    // expressions still carry that namespace; checked callee identities are
+    // alpha-renamed and add only their own missing entries.
+    let mut checked_substitution = UnordMap::new();
+    for (checked, actual) in checked_formals.iter().zip(actual_types) {
+        if let Some(checked_term) = decode_expanded_host_type_expr(program, checked) {
+            solve_host_type_vars(&checked_term, actual, &mut checked_substitution);
+        }
+    }
+    let mut body_substitution = active_substitution.clone();
+    for (name, term) in checked_substitution.to_sorted() {
+        // Active caller identities remain authoritative for substituted
+        // caller expressions. Callee checked identities are alpha-renamed and
+        // ordinarily absent, but keeping the established existing-wins rule
+        // makes the namespace boundary structural rather than conventional.
+        body_substitution
+            .entry(name.clone())
+            .or_insert_with(|| term.clone());
+    }
+    let mut authored_substitution = UnordMap::new();
+    for (authored, actual_term) in authored_formals.iter().zip(actual_types) {
+        if let Some(authored_term) = decode_expanded_host_type_expr(program, authored) {
+            solve_host_type_vars(&authored_term, actual_term, &mut authored_substitution);
+        }
+    }
+    let mut params = signature
+        .params
+        .iter()
+        .map(|param| HostParam {
+            name: param.name.clone(),
+            ty: substitute_host_type_term(param.ty.clone(), &authored_substitution),
+        })
+        .collect::<Vec<_>>();
+    for (param, authored) in params.iter_mut().zip(&authored_formals) {
+        if !param.ty.is_unresolved() {
+            continue;
+        }
+        if let Some(authored_term) = decode_expanded_host_type_expr(program, authored)
+            .map(|term| substitute_host_type_term(term, &authored_substitution))
+            .filter(|term| !term.is_unresolved())
+        {
+            param.ty = authored_term;
+        }
+    }
+    let mut tensor_positions = Vec::new();
+    let mut checked_tensors = Vec::new();
+    let mut authored_tensors = Vec::new();
+    let mut actual_tensors = Vec::new();
+    for (index, ((authored, checked), actual)) in authored_formals
+        .iter()
+        .zip(&checked_formals)
+        .zip(app_args)
+        .enumerate()
+    {
+        let Some(authored_term) =
+            decode_expanded_host_type_expr(program, authored).filter(|term| {
+                matches!(
+                    term,
+                    HostTypeTerm::Tensor(_) | HostTypeTerm::PolymorphicTensor(_)
+                )
+            })
+        else {
+            continue;
+        };
+        let checked_term = decode_expanded_host_type_expr(program, checked)
+            .filter(|term| {
+                matches!(
+                    term,
+                    HostTypeTerm::Tensor(_) | HostTypeTerm::PolymorphicTensor(_)
+                )
+            })
+            .unwrap_or_else(|| authored_term.clone());
+        let actual_term = actual_types[index].clone();
+        let Some(actual_tensor) = tensor_type_from_host_input(&actual_term) else {
+            return Err(host_expr_lowering_error(
+                expr,
+                format!(
+                    "polymorphic tensor parameter `{}` has no concrete call-site tensor type",
+                    signature.params[index].name
+                ),
+            ));
+        };
+        let span = actual.span();
+        let checked_expr = host_type_syntax(&checked_term, span).ok_or_else(|| {
+            host_expr_lowering_error(expr, "could not reify checked tensor contract")
+        })?;
+        let authored_expr = host_type_syntax(&authored_term, span).ok_or_else(|| {
+            host_expr_lowering_error(expr, "could not reify authored tensor contract")
+        })?;
+        tensor_positions.push(index);
+        checked_tensors.push(Some(checked_expr));
+        authored_tensors.push(Some(authored_expr));
+        actual_tensors.push(actual_tensor);
+    }
+
+    let tensor_specialization = crate::lower::tensor_callsite_specialization(
+        &checked_tensors,
+        &authored_tensors,
+        &actual_tensors,
+    )
+    .and_then(|specialization| {
+        specialization.with_precision_evidence(
+            concrete_precision_evidence(&checked_substitution),
+            concrete_precision_evidence(&authored_substitution),
+        )
+    })
+    .map_err(|error| {
+        host_expr_lowering_error(
+            expr,
+            format!("could not actualize tensor invocation metadata: {error}"),
+        )
+    })?;
+
+    for (position, authored) in tensor_positions.iter().copied().zip(&authored_tensors) {
+        let actualized = tensor_specialization
+            .actualize_authored_tensor(authored.as_ref().expect("tensor contract"))
+            .map_err(|error| {
+                host_expr_lowering_error(
+                    expr,
+                    format!("could not actualize parameter result-claim metadata: {error}"),
+                )
+            })?;
+        params[position].ty = HostTypeTerm::Tensor(actualized);
+    }
+
+    let authored_result_term = decode_expanded_host_type_expr(program, &authored_result);
+    let result = match authored_result_term {
+        Some(HostTypeTerm::Tensor(result)) => Some(result),
+        Some(term @ HostTypeTerm::PolymorphicTensor(_)) => {
+            let result_expr = host_type_syntax(&term, authored_result.span()).ok_or_else(|| {
+                host_expr_lowering_error(expr, "could not reify authored result contract")
+            })?;
+            Some(
+                tensor_specialization
+                    .actualize_authored_tensor(&result_expr)
+                    .map_err(|error| {
+                        host_expr_lowering_error(
+                            expr,
+                            format!("could not actualize authored result claim: {error}"),
+                        )
+                    })?,
+            )
+        }
+        _ => None,
+    };
+    Ok(ActualizedRetainedHostContract {
+        params,
+        result_claim: result,
+        body_substitution,
+        tensor_specialization,
+    })
+}
+
+/// Lower every executable actual exactly once in the caller's type context.
+/// Callable values remain syntax because the host IR has no first-class
+/// function carrier; the retained invocation substitutes them directly after
+/// reifying their authored formal contract.
+fn prepare_retained_payload_actuals(
+    expr: &Expr,
+    name: &str,
+    signature: &HostDefSignature,
+    program: &HostLoweringSession<'_>,
+    scope: &UnordMap<String, HostTypeTerm>,
+    tensor_helpers: &mut TensorHelperSink,
+) -> Result<Vec<Option<HostExpr>>, crate::lower::LowerDiagnostic> {
+    let app_args = as_list(expr)
+        .and_then(|app| children(app).split_first().map(|(_, args)| args))
+        .ok_or_else(|| host_expr_lowering_error(expr, "retained invocation lost its actuals"))?;
+    let (authored_formals, _) = lookup_declared_type_expr(program, name)
+        .and_then(|ty| parse_fn_type_expr_parts(&ty))
+        .ok_or_else(|| {
+            host_expr_lowering_error(expr, "polymorphic invocation lost its authored signature")
+        })?;
+    if app_args.len() != signature.params.len() || authored_formals.len() != app_args.len() {
+        return Err(host_expr_lowering_error(
+            expr,
+            "polymorphic invocation lost positional signature alignment",
+        ));
+    }
+    app_args
+        .iter()
+        .zip(&authored_formals)
+        .zip(&signature.params)
+        .map(|((actual, authored), fallback)| {
+            let callable = decode_expanded_host_type_expr(program, authored)
+                .is_some_and(|term| matches!(term, HostTypeTerm::Fn(..)))
+                || matches!(fallback.ty, HostTypeTerm::Fn(..));
+            if callable {
+                Ok(None)
+            } else {
+                lower_host_expr(actual, program, scope, tensor_helpers).map(Some)
+            }
+        })
+        .collect()
 }
 
 /// Beta-reduce an anonymous call for structural shape evidence only.
@@ -12759,10 +13183,6 @@ impl<'a> RetainedHostInvocation<'a> {
             callable_entries,
             name: None,
         }
-    }
-
-    fn has_entry_obligations(&self) -> bool {
-        !self.entry.guards().is_empty() || self.callable_entries.iter().any(Option::is_some)
     }
 }
 
@@ -13086,19 +13506,24 @@ fn lower_inline_host_invocation(
         program,
         scope,
         tensor_helpers,
+        RetainedHostPreparation::default(),
     )
     .map(Some)
 }
 
 /// Keep the signature boundary which named body substitution otherwise erases.
-fn lower_guarded_host_invocation(
+/// The boundary is required even when its entry plan has no guards: eager
+/// payload preparation must still precede every effect in the substituted
+/// body, and returned formals must still acquire interface-load provenance.
+fn lower_named_retained_host_invocation(
     expr: &Expr,
     name: &str,
     expected: &HostTypeTerm,
     program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
-) -> Result<Option<HostExpr>, crate::lower::LowerDiagnostic> {
+    actualize_polymorphic_contract: bool,
+) -> Result<Option<(HostExpr, Option<TensorType>)>, crate::lower::LowerDiagnostic> {
     if is_inlining(name) {
         return Ok(None);
     }
@@ -13108,20 +13533,69 @@ fn lower_guarded_host_invocation(
     let Some(signature) = host_def_signature(canonical, body, None, program) else {
         return Ok(None);
     };
-    let mut invocation = RetainedHostInvocation::new(&signature.params, &signature.body_expr);
-    if !invocation.has_entry_obligations() {
-        return Ok(None);
-    }
+    let mut prepared_actuals = if actualize_polymorphic_contract {
+        Some(prepare_retained_payload_actuals(
+            expr,
+            canonical,
+            &signature,
+            program,
+            scope,
+            tensor_helpers,
+        )?)
+    } else {
+        None
+    };
+    let ActualizedRetainedHostContract {
+        params,
+        result_claim,
+        body_substitution,
+        tensor_specialization,
+    } = if let Some(prepared) = prepared_actuals.as_ref() {
+        let app_args = as_list(expr)
+            .and_then(|app| children(app).split_first().map(|(_, args)| args))
+            .expect("prepared retained invocation has aligned actuals");
+        let actual_types = prepared
+            .iter()
+            .zip(app_args)
+            .map(|(prepared, actual)| {
+                prepared.as_ref().map(host_expr_type).unwrap_or_else(|| {
+                    // Callable values are not executable payloads. Their
+                    // checked type is the only representation evidence needed
+                    // to instantiate a nested precision variable.
+                    expr_host_type(actual, program, scope)
+                })
+            })
+            .collect::<Vec<_>>();
+        actualize_retained_host_contract(expr, canonical, &signature, program, &actual_types)?
+    } else {
+        ActualizedRetainedHostContract {
+            params: signature.params.clone(),
+            result_claim: None,
+            body_substitution: active_type_subst(),
+            tensor_specialization: crate::lower::TensorCallsiteSpecialization::default(),
+        }
+    };
+    let mut invocation = RetainedHostInvocation::new(&params, &signature.body_expr);
     invocation.name = Some(name);
+    let actualized_expected = result_claim
+        .as_ref()
+        .map(result_claim_body_type)
+        .map(HostTypeTerm::Tensor);
+    let _body_substitution =
+        actualize_polymorphic_contract.then(|| ActiveTypeSubstGuard::push(body_substitution));
     lower_retained_host_invocation(
         expr,
         invocation,
-        Some(expected),
+        Some(actualized_expected.as_ref().unwrap_or(expected)),
         program,
         scope,
         tensor_helpers,
+        RetainedHostPreparation {
+            actuals: prepared_actuals.take(),
+            tensor_specialization: actualize_polymorphic_contract.then_some(tensor_specialization),
+        },
     )
-    .map(Some)
+    .map(|body| Some((body, result_claim)))
 }
 
 /// Evaluate payload actuals once in caller order, then execute the complete
@@ -13134,7 +13608,10 @@ fn lower_retained_host_invocation(
     program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
+    preparation: RetainedHostPreparation,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
+    let mut prepared_actuals = preparation.actuals;
+    let tensor_specialization = preparation.tensor_specialization;
     let Expr::List(call, span) = expr else {
         return Err(host_expr_lowering_error(
             expr,
@@ -13191,10 +13668,43 @@ fn lower_retained_host_invocation(
             substitutions.insert(formal.name.clone(), arg.clone());
             continue;
         }
-        let value = lower_host_expr(arg, program, scope, tensor_helpers)?;
+        let value = match prepared_actuals
+            .as_mut()
+            .and_then(|prepared| prepared.get_mut(index))
+            .and_then(Option::take)
+        {
+            Some(value) => value,
+            None if prepared_actuals.is_none() => {
+                lower_host_expr(arg, program, scope, tensor_helpers)?
+            }
+            None => {
+                return Err(host_expr_lowering_error(
+                    expr,
+                    format!(
+                        "retained payload `{}` was not prepared exactly once",
+                        formal.name
+                    ),
+                ));
+            }
+        };
         let ty = host_expr_type(&value);
         let mut serial = index;
-        let local = loop {
+        let actual_local = loop {
+            let candidate = format!("__chelis_entry_actual_{serial}");
+            if reserved.insert(candidate.clone()) {
+                break candidate;
+            }
+            serial += 1;
+        };
+        bindings.push(HostBinding {
+            name: actual_local.clone(),
+            display_name: None,
+            display_roots: Vec::new(),
+            ty: ty.clone(),
+            value,
+        });
+        local_scope.insert(actual_local.clone(), ty.clone());
+        let formal_local = loop {
             let candidate = format!("__chelis_entry_arg_{serial}");
             if reserved.insert(candidate.clone()) {
                 break candidate;
@@ -13202,15 +13712,21 @@ fn lower_retained_host_invocation(
             serial += 1;
         };
         bindings.push(HostBinding {
-            name: local.clone(),
+            name: formal_local.clone(),
             display_name: None,
             display_roots: Vec::new(),
             ty: ty.clone(),
-            value,
+            value: HostExpr::new(HostExprKind::FormalIngress {
+                value: Box::new(HostExpr::new(HostExprKind::Var(actual_local, ty.clone()))),
+                ty: ty.clone(),
+            }),
         });
-        local_scope.insert(local.clone(), ty.clone());
+        local_scope.insert(formal_local.clone(), ty.clone());
         if matches!(formal.ty, HostTypeTerm::Tensor(_)) {
-            observations.push(HostExpr::new(HostExprKind::Var(local.clone(), ty)));
+            observations.push(HostExpr::new(HostExprKind::Var(
+                formal_local.clone(),
+                ty.clone(),
+            )));
         }
         substitutions.insert(
             formal.name.clone(),
@@ -13218,8 +13734,11 @@ fn lower_retained_host_invocation(
                 List {
                     elements: vec![
                         Expr::Atom(Atom::Tag(DeepTag::Var), *span),
-                        Expr::Map(Metadata::default(), *span),
-                        Expr::Atom(Atom::Name(local), *span),
+                        Expr::Map(
+                            callable_type_metadata(host_type_syntax(&ty, *span).as_ref()),
+                            *span,
+                        ),
+                        Expr::Atom(Atom::Name(formal_local), *span),
                     ],
                 },
                 *span,
@@ -13256,6 +13775,9 @@ fn lower_retained_host_invocation(
         canonicalize_representation_erased_adt_args(expected.clone(), &definitions)
     });
     let pushed = invocation.name.is_some_and(push_inlining);
+    if let Some(specialization) = tensor_specialization.clone() {
+        tensor_helpers.tensor_specializations.push(specialization);
+    }
     let lowered = lower_host_expr_with_expected(
         &specialized,
         program,
@@ -13263,12 +13785,18 @@ fn lower_retained_host_invocation(
         tensor_helpers,
         expected.as_ref().filter(|ty| !ty.is_unresolved()),
     );
+    if tensor_specialization.is_some() {
+        tensor_helpers
+            .tensor_specializations
+            .pop()
+            .expect("retained invocation specialization stack");
+    }
     if pushed {
         pop_inlining(invocation.name.expect("named invocation"));
     }
     let body = lowered?;
     let ty = host_expr_type(&body);
-    Ok(HostExpr::new(HostExprKind::Let {
+    Ok(HostExpr::new(HostExprKind::RetainedInvocation {
         bindings,
         body: Box::new(body),
         ty,
@@ -18235,6 +18763,7 @@ fn host_expr_type(expr: &HostExpr) -> HostTypeTerm {
         | HostExprKind::MatchOption { ty, .. }
         | HostExprKind::MatchAdt { ty, .. }
         | HostExprKind::Let { ty, .. }
+        | HostExprKind::RetainedInvocation { ty, .. }
         | HostExprKind::Map { ty, .. }
         | HostExprKind::Filter { ty, .. }
         | HostExprKind::Fold { ty, .. }
@@ -18243,7 +18772,8 @@ fn host_expr_type(expr: &HostExpr) -> HostTypeTerm {
         | HostExprKind::FlatMap { ty, .. }
         | HostExprKind::WithSeed { ty, .. }
         | HostExprKind::TensorCall { ty, .. }
-        | HostExprKind::ResultClaimScope { ty, .. } => ty.clone(),
+        | HostExprKind::ResultClaimScope { ty, .. }
+        | HostExprKind::FormalIngress { ty, .. } => ty.clone(),
         HostExprKind::Unit | HostExprKind::SignatureEntry { .. } => HostTypeTerm::Unit,
     }
 }
@@ -18399,6 +18929,35 @@ fn force_host_expr_type(expr: HostExpr, ty: HostTypeTerm) -> HostExpr {
             list,
             ty,
         },
+        HostExprKind::RetainedInvocation {
+            bindings,
+            body,
+            ty: actual_ty,
+        } => {
+            let mut substitutions = UnordMap::new();
+            collect_host_type_variable_substitutions(&actual_ty, &ty, &mut substitutions);
+            collect_host_type_variable_substitutions(
+                &host_expr_type(&body),
+                &ty,
+                &mut substitutions,
+            );
+            let bindings = bindings
+                .into_iter()
+                .map(|binding| {
+                    let binding_ty = substitute_host_type_term(binding.ty, &substitutions);
+                    HostBinding {
+                        value: force_host_expr_type(binding.value, binding_ty.clone()),
+                        ty: binding_ty,
+                        ..binding
+                    }
+                })
+                .collect();
+            HostExprKind::RetainedInvocation {
+                bindings,
+                body: Box::new(force_host_expr_type(*body, ty.clone())),
+                ty,
+            }
+        }
         HostExprKind::Scan {
             callback,
             init,
@@ -18427,6 +18986,10 @@ fn force_host_expr_type(expr: HostExpr, ty: HostTypeTerm) -> HostExpr {
         HostExprKind::ResultClaimScope { plan, body, .. } => HostExprKind::ResultClaimScope {
             plan,
             body: Box::new(force_host_expr_type(*body, ty.clone())),
+            ty,
+        },
+        HostExprKind::FormalIngress { value, .. } => HostExprKind::FormalIngress {
+            value: Box::new(force_host_expr_type(*value, ty.clone())),
             ty,
         },
         other => other,

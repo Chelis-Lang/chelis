@@ -1706,8 +1706,7 @@ A `cast` takes the placement of the value it casts. Guards ready at the same
 source position are evaluated in declaration order. These constraints are the
 complete observable contract; a guard and an operation related by neither data
 dependence nor source order may be evaluated in either order.
-Every execution mode places guards by this rule. (This placement rule is not
-yet fully implemented across function boundaries; chelis#1945.)
+Every execution mode places guards by this rule.
 
 A runtime extent guard is a typed operation-precondition guard under
 [04-NUM-9] and is therefore itself the trap-producing primitive. A failing

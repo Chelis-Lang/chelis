@@ -1067,6 +1067,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
     ) -> Result<Value, OwnershipError> {
         match &expr.kind {
             ConcreteHostExprKind::ResultClaimScope { body, .. } => self.lower_expr(body, tail),
+            ConcreteHostExprKind::FormalIngress { value, .. } => self.lower_expr(value, tail),
             ConcreteHostExprKind::Int(value) => {
                 self.define(&ConcreteHostType::Int64, format!("literal {value}"))
             }
@@ -1274,7 +1275,8 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                 default_expr,
                 ty,
             } => self.lower_match_adt(scrutinee, arms, default_expr.as_deref(), ty),
-            ConcreteHostExprKind::Let { bindings, body, .. } => {
+            ConcreteHostExprKind::Let { bindings, body, .. }
+            | ConcreteHostExprKind::RetainedInvocation { bindings, body, .. } => {
                 self.push_scope();
                 let depth = self.depth();
                 for binding in bindings {
@@ -2511,6 +2513,7 @@ fn expr_type(expr: &ConcreteHostExpr) -> ConcreteHostType {
         | ConcreteHostExprKind::MatchOption { ty, .. }
         | ConcreteHostExprKind::MatchAdt { ty, .. }
         | ConcreteHostExprKind::Let { ty, .. }
+        | ConcreteHostExprKind::RetainedInvocation { ty, .. }
         | ConcreteHostExprKind::Map { ty, .. }
         | ConcreteHostExprKind::Filter { ty, .. }
         | ConcreteHostExprKind::Fold { ty, .. }
@@ -2519,7 +2522,8 @@ fn expr_type(expr: &ConcreteHostExpr) -> ConcreteHostType {
         | ConcreteHostExprKind::FlatMap { ty, .. }
         | ConcreteHostExprKind::WithSeed { ty, .. }
         | ConcreteHostExprKind::TensorCall { ty, .. }
-        | ConcreteHostExprKind::ResultClaimScope { ty, .. } => ty.clone(),
+        | ConcreteHostExprKind::ResultClaimScope { ty, .. }
+        | ConcreteHostExprKind::FormalIngress { ty, .. } => ty.clone(),
     }
 }
 

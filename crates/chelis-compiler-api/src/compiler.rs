@@ -1112,6 +1112,7 @@ fn project_host_program_to_entry(
             }
             ConcreteHostExprKind::AdtFieldAccess { base, .. } => collect_expr(base, bound, out),
             ConcreteHostExprKind::ResultClaimScope { body, .. } => collect_expr(body, bound, out),
+            ConcreteHostExprKind::FormalIngress { value, .. } => collect_expr(value, bound, out),
             ConcreteHostExprKind::If {
                 cond,
                 then_expr,
@@ -1151,7 +1152,8 @@ fn project_host_program_to_entry(
                     collect_expr(default_expr, bound, out);
                 }
             }
-            ConcreteHostExprKind::Let { bindings, body, .. } => {
+            ConcreteHostExprKind::Let { bindings, body, .. }
+            | ConcreteHostExprKind::RetainedInvocation { bindings, body, .. } => {
                 let mut scoped = bound.clone();
                 for binding in bindings {
                     collect_expr(&binding.value, &scoped, out);
@@ -5064,7 +5066,8 @@ pub fn reject_host_only_builtins(
                 scan_expr(then_expr, found);
                 scan_expr(else_expr, found);
             }
-            ConcreteHostExprKind::Let { bindings, body, .. } => {
+            ConcreteHostExprKind::Let { bindings, body, .. }
+            | ConcreteHostExprKind::RetainedInvocation { bindings, body, .. } => {
                 for binding in bindings {
                     scan_expr(&binding.value, found);
                 }
@@ -5132,6 +5135,8 @@ pub fn reject_host_only_builtins(
                 scan_expr(seed, found);
                 scan_expr(body, found);
             }
+            ConcreteHostExprKind::ResultClaimScope { body, .. } => scan_expr(body, found),
+            ConcreteHostExprKind::FormalIngress { value, .. } => scan_expr(value, found),
             _ => {}
         }
     }

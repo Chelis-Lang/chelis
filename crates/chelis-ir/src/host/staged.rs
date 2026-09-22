@@ -512,6 +512,9 @@ pub(super) fn resolve_callable_aliases(
         HostExprKind::ResultClaimScope { body, .. } => {
             resolve_callable_aliases(body, aliases);
         }
+        HostExprKind::FormalIngress { value, .. } => {
+            resolve_callable_aliases(value, aliases);
+        }
         HostExprKind::Var(name, _) => {
             if let Some(resolved) = aliases.get(name) {
                 *name = resolved.clone();
@@ -577,7 +580,8 @@ pub(super) fn resolve_callable_aliases(
                 resolve_callable_aliases(&mut arm.expr, &inner);
             }
         }
-        HostExprKind::Let { bindings, body, .. } => {
+        HostExprKind::Let { bindings, body, .. }
+        | HostExprKind::RetainedInvocation { bindings, body, .. } => {
             let mut inner = aliases.clone();
             for binding in bindings {
                 resolve_callable_aliases(&mut binding.value, &inner);

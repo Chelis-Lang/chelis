@@ -116,6 +116,76 @@ fn let_result_binding_index(bind_list: &Expr, body: &Expr) -> Option<usize> {
     found
 }
 
+#[derive(Clone, Copy)]
+struct SequentialEvalLetBinding<'expr> {
+    binding: &'expr Expr,
+    initializer: &'expr Expr,
+    layer: usize,
+}
+
+struct SequentialEvalLetChain<'expr> {
+    bindings: Vec<SequentialEvalLetBinding<'expr>>,
+    bind_expr: Expr,
+    body: &'expr Expr,
+}
+
+/// Flatten only the direct tail chain produced for sequential Surf bindings:
+/// `(let b0 (let b1 (... body)))`. Branches and other nested expressions are
+/// not traversed. This is the Eval counterpart of C host lowering's
+/// `sequential_host_let_chain`: a checked local ascription in a later layer
+/// must retain visibility of the producer in an earlier lexical layer.
+fn sequential_eval_let_chain(expr: &Expr) -> Option<SequentialEvalLetChain<'_>> {
+    let mut bindings = Vec::new();
+    let mut current = expr;
+    let mut layer = 0;
+    let body = loop {
+        let (DeepTag::Let, kids) = tagged_expr_children(current)? else {
+            return None;
+        };
+        let bind_expr = kids.first()?;
+        let (DeepTag::Bind, bind_kids) = tagged_expr_children(bind_expr)? else {
+            return None;
+        };
+        if !bind_kids.len().is_multiple_of(2) {
+            return None;
+        }
+        for pair in bind_kids.as_chunks::<2>().0 {
+            bindings.push(SequentialEvalLetBinding {
+                binding: &pair[0],
+                initializer: &pair[1],
+                layer,
+            });
+        }
+        let next = kids.get(1)?;
+        if matches!(tagged_expr_children(next), Some((DeepTag::Let, _))) {
+            current = next;
+            layer += 1;
+        } else {
+            break next;
+        }
+    };
+
+    let span = expr.span();
+    let mut bind_elements = vec![
+        Expr::Atom(Atom::Tag(DeepTag::Bind), span),
+        Expr::Map(Metadata::default(), span),
+    ];
+    for binding in &bindings {
+        bind_elements.push(binding.binding.clone());
+        bind_elements.push(binding.initializer.clone());
+    }
+    Some(SequentialEvalLetChain {
+        bindings,
+        bind_expr: Expr::List(
+            List {
+                elements: bind_elements,
+            },
+            span,
+        ),
+        body,
+    })
+}
+
 /// chelis#1739 and chelis#1771. A host function's declared literal result
 /// extents. Attribution belongs to the selected producing expression, not to
 /// the declaration: two branches may produce the result with different ops.
@@ -163,13 +233,7 @@ impl DeclaredResultClaim {
 /// annotation, so an aliased declaration carries the same verdict as its
 /// expansion and agrees with the C emitter, which reads the resolved ABI type.
 fn declared_literal_result_extents(declared: Option<&Expr>) -> Option<(usize, Vec<(usize, i64)>)> {
-    let stripped = strip_type_wrappers(declared?);
-    let list = as_list(stripped)?;
-    if tag(list) != Some(DeepTag::TTensor) {
-        return None;
-    }
-    let kids = children(list);
-    let (_, dim_exprs) = kids.split_last()?;
+    let (_, dim_exprs) = tensor_type_dim_exprs(declared?)?;
     let mut axes = Vec::new();
     for (axis, dim_expr) in dim_exprs.iter().enumerate() {
         let Some(dim_list) = as_list(dim_expr) else {
@@ -183,6 +247,15 @@ fn declared_literal_result_extents(declared: Option<&Expr>) -> Option<(usize, Ve
         }
     }
     (!axes.is_empty()).then_some((dim_exprs.len(), axes))
+}
+
+fn tensor_type_dim_exprs(expr: &Expr) -> Option<(&Expr, &[Expr])> {
+    let stripped = strip_type_wrappers(expr);
+    let list = as_list(stripped)?;
+    if tag(list) != Some(DeepTag::TTensor) {
+        return None;
+    }
+    children(list).split_last()
 }
 
 /// [05-HOST-4]: choose the first invalid host name in the declared order.
@@ -458,34 +531,15 @@ fn check_callable_invocation_contract(
     else {
         return Ok(());
     };
-    let mut entry_inputs = Vec::new();
-    let mut entry_shapes: Vec<&[usize]> = Vec::new();
-    for (index, (declared, arg)) in params.iter().zip(args).enumerate() {
-        let RuntimeValue::Tensor(tensor) = arg else {
-            continue;
-        };
-        let ty = match chelis_ir::host_type_state::decode_host_type(declared).ok() {
-            Some(chelis_ir::HostTypeTerm::Tensor(ty)) => Some(ty),
-            Some(chelis_ir::HostTypeTerm::PolymorphicTensor(_)) => declared_tensor_type_for_shape(
-                declared,
-                &tensor.value.shape,
-                tensor.precision,
-                true,
-            )
-            .ok(),
-            _ => None,
-        };
-        let Some(ty) = ty else {
-            continue;
+    let authored = params.iter().cloned().map(Some).collect::<Vec<_>>();
+    let actualized = actualize_tensor_entry_parameters(Some(params), &authored, args)?;
+    let mut entry_inputs = Vec::with_capacity(actualized.len());
+    let mut entry_shapes: Vec<&[usize]> = Vec::with_capacity(actualized.len());
+    for (index, ty) in actualized {
+        let RuntimeValue::Tensor(tensor) = &args[index] else {
+            unreachable!("entry actualization returns tensor arguments only");
         };
         let parameter = format!("arg{index}");
-        if ty.dims.len() != tensor.value.shape.len() {
-            return Err(format!(
-                "input `{parameter}` expected rank {}, got {}",
-                ty.dims.len(),
-                tensor.value.shape.len()
-            ));
-        }
         entry_inputs.push(chelis_ir::host::HostTensorInput {
             name: parameter,
             ty,
@@ -494,6 +548,75 @@ fn check_callable_invocation_contract(
     }
     let entry_plan = chelis_ir::host::SignatureEntryPlan::new(entry_inputs);
     check_signature_entry_plan(&entry_plan, &entry_shapes)
+}
+
+/// Rebuild tensor parameter declarations at one concrete invocation.
+///
+/// Runtime shapes determine rank-spread widths and dtypes, but their extents
+/// are observations rather than declarations: explicit literals and shared
+/// authored dimension identities remain the only entry obligations. This is
+/// also why two actuals for the same rank spread may disagree in extent and
+/// must reach [`check_signature_entry_plan`] instead of being rejected during
+/// specialization.
+fn actualize_tensor_entry_parameters(
+    checked_params: Option<&[Expr]>,
+    authored_params: &[Option<Expr>],
+    args: &[RuntimeValue],
+) -> Result<Vec<(usize, TensorType)>, String> {
+    let mut indices = Vec::new();
+    let mut actualization_formals = Vec::new();
+    let mut declaration_formals = Vec::new();
+    let mut actual_types = Vec::new();
+    for (index, arg) in args.iter().enumerate() {
+        let RuntimeValue::Tensor(tensor) = arg else {
+            continue;
+        };
+        let authored = authored_params
+            .get(index)
+            .and_then(Option::as_ref)
+            .filter(|formal| tensor_type_dim_exprs(formal).is_some());
+        let checked = checked_params
+            .and_then(|params| params.get(index))
+            .filter(|formal| tensor_type_dim_exprs(formal).is_some())
+            .or(authored);
+        let authored = authored.or(checked);
+        let (Some(checked), Some(authored)) = (checked, authored) else {
+            continue;
+        };
+        indices.push(index);
+        actualization_formals.push(Some(checked.clone()));
+        declaration_formals.push(Some(authored.clone()));
+        actual_types.push(TensorType {
+            dims: tensor
+                .value
+                .shape
+                .iter()
+                .copied()
+                .map(DimInfo::Lit)
+                .collect(),
+            precision: tensor.precision,
+        });
+    }
+    let types = chelis_ir::lower::actualize_authored_tensor_parameters(
+        &actualization_formals,
+        &declaration_formals,
+        &actual_types,
+    )
+    .map_err(|error| format!("host runtime: could not actualize entry contract: {error}"))?;
+    let actualized = indices.into_iter().zip(types).collect::<Vec<_>>();
+    for (index, ty) in &actualized {
+        let RuntimeValue::Tensor(tensor) = &args[*index] else {
+            unreachable!("entry actualization returns tensor arguments only");
+        };
+        if ty.dims.len() != tensor.value.shape.len() {
+            return Err(format!(
+                "input argument {index} expected rank {}, got {}",
+                ty.dims.len(),
+                tensor.value.shape.len()
+            ));
+        }
+    }
+    Ok(actualized)
 }
 
 fn render_shape(shape: &[usize]) -> String {
@@ -1737,10 +1860,12 @@ impl<'a> EvalContext<'a> {
             .map(|arg| self.static_type_expr_of(arg))
             .collect::<Vec<_>>();
         let result_type_expr = node.metadata.ty().map(|ty| ty.expression().clone());
-        let args = kids[1..]
-            .iter()
-            .map(|arg| self.eval_expr(arg))
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut args = Vec::with_capacity(kids.len().saturating_sub(1));
+        let mut arg_producers = Vec::with_capacity(kids.len().saturating_sub(1));
+        for arg in &kids[1..] {
+            args.push(self.eval_expr(arg)?);
+            arg_producers.push(self.result_producer.take());
+        }
 
         // #1764: a checked tensor call may specialize a dropout rate that
         // its standalone declaration cannot, including a generic cast.
@@ -1824,8 +1949,15 @@ impl<'a> EvalContext<'a> {
                     }
                 };
                 items.insert(0, args[0].clone());
+                let mut producers = match arg_producers.get(1).and_then(Option::as_ref) {
+                    Some(ResultProducer::Aggregate(children)) => children.clone(),
+                    _ => vec![None; items.len().saturating_sub(1)],
+                };
+                producers.insert(0, arg_producers.first().cloned().flatten());
+                self.result_producer = ResultProducer::aggregate(producers);
                 return Ok(RuntimeValue::List(items));
             }
+            self.result_producer = ResultProducer::aggregate(arg_producers);
             return Ok(RuntimeValue::Adt {
                 ctor: name.to_string(),
                 fields: args,
@@ -1836,10 +1968,36 @@ impl<'a> EvalContext<'a> {
         if let Some(name) = self.active_builtin_name(func) {
             let value =
                 self.eval_builtin(name, &args, &arg_type_exprs, result_type_expr.as_ref())?;
-            self.result_producer =
-                matches!(value, RuntimeValue::Tensor(_)).then(|| ResultProducer::tensor(name));
+            self.result_producer = if name == "index" {
+                let index = args.get(1).and_then(RuntimeValue::as_i64);
+                index
+                    .and_then(|index| usize::try_from(index).ok())
+                    .and_then(|index| {
+                        arg_producers
+                            .first()
+                            .and_then(Option::as_ref)
+                            .and_then(|producer| producer.child(index))
+                    })
+                    .filter(|producer| producer.matches_value(&value))
+            } else {
+                matches!(value, RuntimeValue::Tensor(_)).then(|| ResultProducer::tensor(name))
+            };
+            let producer = if name == "index" && claims.iter().any(|claim| !claim.axes.is_empty()) {
+                self.result_producer
+                    .as_ref()
+                    .and_then(ResultProducer::operation)
+                    .ok_or_else(|| {
+                        "host runtime: pending result claim reached a tensor without producer provenance"
+                            .to_string()
+                    })?
+            } else {
+                self.result_producer
+                    .as_ref()
+                    .and_then(ResultProducer::operation)
+                    .unwrap_or(name)
+            };
             for claim in claims {
-                claim.verdict(&value, name)?;
+                claim.verdict(&value, producer)?;
             }
             return Ok(value);
         }
@@ -1930,6 +2088,96 @@ impl<'a> EvalContext<'a> {
         Some(DeclaredResultClaim { rank, axes })
     }
 
+    /// Actualize a rank-polymorphic authored result at the invocation boundary.
+    ///
+    /// Argument evaluation has already completed, but the values have not yet
+    /// moved into the callee frame. Their concrete ranks and dtypes may bind
+    /// declaration variables; their literal sizes are evidence only for spread
+    /// width and never become result claims. A fixed-rank declaration retains
+    /// the established checked-signature path above.
+    fn declared_result_claim_at_callsite(
+        declared: Option<&Expr>,
+        checked_params: Option<&[Expr]>,
+        authored_params: &[Option<Expr>],
+        args: &[RuntimeValue],
+    ) -> Result<Option<DeclaredResultClaim>, String> {
+        let Some(declared) = declared else {
+            return Ok(None);
+        };
+        let Some((_, dim_exprs)) = tensor_type_dim_exprs(declared) else {
+            return Ok(Self::declared_result_claim(Some(declared)));
+        };
+        if !dim_exprs
+            .iter()
+            .any(|dim| dim.tag() == Some(DeepTag::DRank))
+        {
+            return Ok(Self::declared_result_claim(Some(declared)));
+        }
+        if !dim_exprs.iter().any(|dim| dim.tag() == Some(DeepTag::DLit)) {
+            return Ok(None);
+        }
+
+        let mut actualization_formals = Vec::new();
+        let mut claim_formals = Vec::new();
+        let mut actual_types = Vec::new();
+        for (index, arg) in args.iter().enumerate() {
+            let RuntimeValue::Tensor(tensor) = arg else {
+                continue;
+            };
+            let checked = checked_params
+                .and_then(|params| params.get(index))
+                .or_else(|| authored_params.get(index).and_then(Option::as_ref));
+            let authored = authored_params
+                .get(index)
+                .and_then(Option::as_ref)
+                .or(checked);
+            let (Some(checked), Some(authored)) = (checked, authored) else {
+                continue;
+            };
+            if tensor_type_dim_exprs(checked).is_none() || tensor_type_dim_exprs(authored).is_none()
+            {
+                continue;
+            }
+            actualization_formals.push(Some(checked.clone()));
+            claim_formals.push(Some(authored.clone()));
+            actual_types.push(TensorType {
+                dims: tensor
+                    .value
+                    .shape
+                    .iter()
+                    .copied()
+                    .map(DimInfo::Lit)
+                    .collect(),
+                precision: tensor.precision,
+            });
+        }
+        let actualized = chelis_ir::lower::actualize_authored_tensor_result_claim(
+            &actualization_formals,
+            &claim_formals,
+            &actual_types,
+            declared,
+        )
+        .map_err(|error| format!("host runtime: could not actualize result claim: {error}"))?;
+        let axes = actualized
+            .dims
+            .iter()
+            .enumerate()
+            .filter_map(|(axis, dim)| match dim {
+                DimInfo::Lit(required) => Some(
+                    i64::try_from(*required)
+                        .map(|required| (axis, required))
+                        .map_err(|_| "declared result extent exceeds the exact i64 range"),
+                ),
+                DimInfo::Named(_, _) => None,
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(str::to_string)?;
+        Ok((!axes.is_empty()).then_some(DeclaredResultClaim {
+            rank: actualized.dims.len(),
+            axes,
+        }))
+    }
+
     /// Evaluate a host function's body and discharge its declared-result claim
     /// at the source position of the operation that produces the returned
     /// value, which is what `spec/04-type-system.md` section 4.7's placement
@@ -2007,12 +2255,19 @@ impl<'a> EvalContext<'a> {
         node: EvalNode<'_>,
         claims: &[DeclaredResultClaim],
     ) -> Result<RuntimeValue, String> {
+        self.eval_let_with_claims(node, Some(claims))
+    }
+
+    fn eval_let_with_claims(
+        &mut self,
+        node: EvalNode<'_>,
+        claims: Option<&[DeclaredResultClaim]>,
+    ) -> Result<RuntimeValue, String> {
         let kids = node.children;
-        let (Some(bind_list_expr), Some(body)) = (kids.first(), kids.get(1)) else {
-            // A malformed let has no producing binding to guard; `eval_let`
-            // owns the diagnostic.
-            return self.eval_let(node);
-        };
+        let bind_list_expr = kids
+            .first()
+            .ok_or_else(|| "let missing bindings".to_string())?;
+        let body = kids.get(1).ok_or_else(|| "let missing body".to_string())?;
         let bind_node = match bind_list_expr.carrier() {
             ExprCarrier::DecodedNode(tag, metadata, children) => {
                 EvalNode::new(bind_list_expr, tag, metadata, children)
@@ -2022,16 +2277,19 @@ impl<'a> EvalContext<'a> {
             | ExprCarrier::Atom(_)
             | ExprCarrier::MetadataMap(_)
             | ExprCarrier::MetadataExpression(_)
-            | ExprCarrier::MalformedLegacyList(_) => return self.eval_let(node),
+            | ExprCarrier::MalformedLegacyList(_) => {
+                return Err("let missing bindings".to_string());
+            }
         };
         if bind_node.tag != DeepTag::Bind {
-            return self.eval_let(node);
+            return Err("let bindings malformed".to_string());
         }
-        let guarded = let_result_binding_index(bind_list_expr, body);
         let saved = self.bindings.clone();
         let saved_types = self.binding_types.clone();
+        // Restore both frame maps on every exit path (including bind or body
+        // evaluation errors) so a caught-and-continued error can never leak
+        // partial binds or stale binding types.
         let result = (|| {
-            let bind_kids = bind_node.children;
             let declaration_name = self
                 .active_declaration_names
                 .last()
@@ -2041,24 +2299,88 @@ impl<'a> EvalContext<'a> {
                 .session
                 .as_ref()
                 .map(chelis_ir::host::HostLoweringSession::checked_subexpr_lowering_context);
-            let local_regions = lowering
+
+            // Surf's sequential bindings desugar to a direct tail chain of
+            // nested Lets. A later local ascription can therefore name a
+            // producer in an earlier layer even though neither layer's Bind
+            // list alone contains the full alias path. C host lowering
+            // already flattens exactly this tail shape. Do the same here only
+            // when a checked region actually crosses layers; ordinary Lets
+            // retain their established recursive evaluation path.
+            let flattened = sequential_eval_let_chain(node.expr);
+            let flattened_regions = flattened
                 .as_ref()
-                .map(|context| {
-                    context.local_ascription_binding_regions(
-                        bind_list_expr,
-                        declaration_name.as_deref(),
-                    )
+                .and_then(|chain| {
+                    lowering.as_ref().map(|context| {
+                        context.local_ascription_binding_regions(
+                            &chain.bind_expr,
+                            declaration_name.as_deref(),
+                        )
+                    })
                 })
-                .unwrap_or_default()
-                .into_iter()
-                .map(|region| (region.producer_binding_index(), region))
-                .collect::<BTreeMap<_, _>>();
-            let mut index = 0;
-            while index + 1 < bind_kids.len() {
-                let name = symbol_name(&bind_kids[index])
+                .unwrap_or_default();
+            let crosses_nested_let = flattened.as_ref().is_some_and(|chain| {
+                flattened_regions.iter().any(|region| {
+                    let producer_layer = chain.bindings[region.producer_binding_index() / 2].layer;
+                    region
+                        .ascription_binding_indices()
+                        .iter()
+                        .any(|index| chain.bindings[*index / 2].layer != producer_layer)
+                })
+            });
+            let current_bindings = bind_node
+                .children
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| SequentialEvalLetBinding {
+                    binding: &pair[0],
+                    initializer: &pair[1],
+                    layer: 0,
+                })
+                .collect::<Vec<_>>();
+            let (let_bindings, planned_bind_expr, planned_body) = if crosses_nested_let {
+                let chain = flattened
+                    .as_ref()
+                    .expect("cross-layer local region requires a flattened let chain");
+                (&chain.bindings, &chain.bind_expr, chain.body)
+            } else {
+                (&current_bindings, bind_list_expr, body)
+            };
+            let guarded =
+                claims.and_then(|_| let_result_binding_index(planned_bind_expr, planned_body));
+            let local_regions = if crosses_nested_let {
+                flattened_regions
+            } else {
+                lowering
+                    .as_ref()
+                    .map(|context| {
+                        context.local_ascription_binding_regions(
+                            planned_bind_expr,
+                            declaration_name.as_deref(),
+                        )
+                    })
+                    .unwrap_or_default()
+            }
+            .into_iter()
+            .map(|region| (region.producer_binding_index(), region))
+            .collect::<BTreeMap<_, _>>();
+
+            for (ordinal, binding) in let_bindings.iter().enumerate() {
+                let index = ordinal * 2;
+                let name = symbol_name(binding.binding)
                     .ok_or_else(|| "let binding must bind a name".to_string())?;
-                let static_ty = self.static_type_expr_of(&bind_kids[index + 1]);
-                let local_claims = if guarded == Some(index) { claims } else { &[] };
+                // Record the bound expr's static type (checker-annotated
+                // `{type: ...}` on the value expr, or the source binding's
+                // known type for a bare var) so chelis#338 named-axis routing
+                // can recover named dims for let-bound tensors. The explicit
+                // `None` insert masks any same-named top-level type.
+                let static_ty = self.static_type_expr_of(binding.initializer);
+                let local_claims = if guarded == Some(index) {
+                    claims.unwrap_or(&[])
+                } else {
+                    &[]
+                };
                 let value = if let Some(region) = local_regions.get(&index) {
                     self.eval_checked_local_ascription_region(
                         lowering
@@ -2068,20 +2390,22 @@ impl<'a> EvalContext<'a> {
                         local_claims,
                     )?
                 } else if guarded == Some(index) {
-                    self.eval_under_result_claim(&bind_kids[index + 1], claims)?
+                    self.eval_under_result_claim(
+                        binding.initializer,
+                        claims.expect("guarded binding requires result claims"),
+                    )?
                 } else {
-                    self.eval_expr(&bind_kids[index + 1])?
+                    self.eval_expr(binding.initializer)?
                 };
                 let result_producer = self.result_producer.take();
                 self.binding_types.insert(name.to_string(), static_ty);
                 self.bindings
                     .insert_with_result_producer(name.to_string(), value, result_producer);
-                index += 2;
             }
-            if guarded.is_some() {
-                self.eval_expr(body)
-            } else {
-                self.eval_under_result_claim(body, claims)
+
+            match (claims, guarded) {
+                (Some(_), Some(_)) | (None, _) => self.eval_expr(planned_body),
+                (Some(claims), None) => self.eval_under_result_claim(planned_body, claims),
             }
         })();
         self.bindings = saved;
@@ -2194,85 +2518,7 @@ impl<'a> EvalContext<'a> {
     }
 
     fn eval_let(&mut self, node: EvalNode<'_>) -> Result<RuntimeValue, String> {
-        let kids = node.children;
-        let bind_expr = kids
-            .first()
-            .ok_or_else(|| "let missing bindings".to_string())?;
-        let bind_node = match bind_expr.carrier() {
-            ExprCarrier::DecodedNode(tag, metadata, children) => {
-                EvalNode::new(bind_expr, tag, metadata, children)
-            }
-            ExprCarrier::StructuralList(_)
-            | ExprCarrier::UndecodableHead(_, _, _)
-            | ExprCarrier::Atom(_)
-            | ExprCarrier::MetadataMap(_)
-            | ExprCarrier::MetadataExpression(_)
-            | ExprCarrier::MalformedLegacyList(_) => {
-                return Err("let missing bindings".to_string());
-            }
-        };
-        if bind_node.tag != DeepTag::Bind {
-            return Err("let bindings malformed".to_string());
-        }
-        let saved = self.bindings.clone();
-        let saved_types = self.binding_types.clone();
-        // Restore both frame maps on every exit path (including bind or
-        // body evaluation errors) so a caught-and-continued error can
-        // never leak partial binds or stale binding types.
-        let result = (|| {
-            let bind_kids = bind_node.children;
-            let declaration_name = self
-                .active_declaration_names
-                .last()
-                .or_else(|| self.resolving_top_levels.last())
-                .cloned();
-            let lowering = self
-                .session
-                .as_ref()
-                .map(chelis_ir::host::HostLoweringSession::checked_subexpr_lowering_context);
-            let local_regions = lowering
-                .as_ref()
-                .map(|context| {
-                    context.local_ascription_binding_regions(
-                        kids.first().expect("let bindings were checked above"),
-                        declaration_name.as_deref(),
-                    )
-                })
-                .unwrap_or_default()
-                .into_iter()
-                .map(|region| (region.producer_binding_index(), region))
-                .collect::<BTreeMap<_, _>>();
-            let mut index = 0;
-            while index + 1 < bind_kids.len() {
-                let name = symbol_name(&bind_kids[index])
-                    .ok_or_else(|| "let binding must bind a name".to_string())?;
-                // Record the bound expr's static type (checker-annotated
-                // `{type: ...}` on the value expr, or the source binding's
-                // known type for a bare var) so chelis#338 named-axis routing
-                // can recover named dims for let-bound tensors. The explicit
-                // `None` insert masks any same-named top-level type.
-                let static_ty = self.static_type_expr_of(&bind_kids[index + 1]);
-                let value = match local_regions.get(&index) {
-                    Some(region) => self.eval_checked_local_ascription_region(
-                        lowering
-                            .as_ref()
-                            .expect("a local region requires its lowering context"),
-                        region,
-                        &[],
-                    )?,
-                    None => self.eval_expr(&bind_kids[index + 1])?,
-                };
-                let result_producer = self.result_producer.take();
-                self.binding_types.insert(name.to_string(), static_ty);
-                self.bindings
-                    .insert_with_result_producer(name.to_string(), value, result_producer);
-                index += 2;
-            }
-            self.eval_expr(kids.get(1).ok_or_else(|| "let missing body".to_string())?)
-        })();
-        self.bindings = saved;
-        self.binding_types = saved_types;
-        result
+        self.eval_let_with_claims(node, None)
     }
 
     fn eval_tuple_get(&mut self, node: EvalNode<'_>) -> Result<RuntimeValue, String> {
@@ -2331,6 +2577,7 @@ impl<'a> EvalContext<'a> {
             kids.first()
                 .ok_or_else(|| "match missing scrutinee".to_string())?,
         )?;
+        let scrutinee_producer = self.result_producer.take();
         for arm in kids.iter().skip(1) {
             let arm_kids = match arm.carrier() {
                 ExprCarrier::DecodedNode(DeepTag::Arm, _, children) => children,
@@ -2354,11 +2601,12 @@ impl<'a> EvalContext<'a> {
             // Pattern-bound names carry no declared types; insert `None`
             // markers afterwards so they shadow rather than leak an outer
             // same-named binding's type into the arm body (chelis#338).
-            if pattern_matches(
+            if pattern_matches_with_result_producer(
                 &scrutinee,
                 &arm_kids[0],
                 &mut self.bindings,
                 &self.adt_fields,
+                scrutinee_producer.as_ref(),
             )? {
                 for (name, _) in self.bindings.to_sorted() {
                     if !saved.contains_key(name) {
@@ -2500,54 +2748,21 @@ impl<'a> EvalContext<'a> {
                     // extent as compiled lowering instead of looking up an
                     // unbound textual runtime name (chelis#1382).
                     let mut dimension_bindings: UnordMap<String, usize> = UnordMap::new();
-                    // Decode the declaration before observing actual dimensions. An
-                    // actualized parameter type is evidence about its value, not a
-                    // replacement for a literal or repeated signature obligation.
                     let checked_params = checked_signature
                         .as_ref()
                         .and_then(checked_function_children)
                         .and_then(|children| children.split_last())
                         .map(|(_, params)| params);
-                    let mut entry_inputs = Vec::new();
-                    let mut entry_shapes: Vec<&[usize]> = Vec::new();
-                    for (index, arg) in args.iter().enumerate() {
-                        let RuntimeValue::Tensor(tensor) = arg else {
-                            continue;
-                        };
-                        let declared =
-                            |expr: &Expr| match chelis_ir::host_type_state::decode_host_type(expr)
-                                .ok()?
-                            {
-                                chelis_ir::HostTypeTerm::Tensor(ty) => Some(ty),
-                                chelis_ir::HostTypeTerm::PolymorphicTensor(_) => {
-                                    declared_tensor_type_for_shape(
-                                        expr,
-                                        &tensor.value.shape,
-                                        tensor.precision,
-                                        true,
-                                    )
-                                    .ok()
-                                }
-                                _ => None,
-                            };
-                        let Some(ty) = param_types
-                            .get(index)
-                            .and_then(Option::as_ref)
-                            .and_then(declared)
-                            .or_else(|| {
-                                checked_params.and_then(|p| p.get(index)).and_then(declared)
-                            })
-                        else {
-                            continue;
+                    let actualized_entries =
+                        actualize_tensor_entry_parameters(checked_params, &param_types, &args)?;
+                    let mut entry_inputs = Vec::with_capacity(actualized_entries.len());
+                    let mut entry_shapes: Vec<&[usize]> =
+                        Vec::with_capacity(actualized_entries.len());
+                    for (index, ty) in actualized_entries {
+                        let RuntimeValue::Tensor(tensor) = &args[index] else {
+                            unreachable!("entry actualization returns tensor arguments only");
                         };
                         let parameter = params[index].clone();
-                        if ty.dims.len() != tensor.value.shape.len() {
-                            return Err(format!(
-                                "input `{parameter}` expected rank {}, got {}",
-                                ty.dims.len(),
-                                tensor.value.shape.len()
-                            ));
-                        }
                         for (dim, size) in ty.dims.iter().zip(&tensor.value.shape) {
                             if let DimInfo::Named(name, _) = dim
                                 && name != "*"
@@ -2616,6 +2831,25 @@ impl<'a> EvalContext<'a> {
                     // callee-owned binders shadow a same-spelled lexical
                     // binding instead of conflicting with it.
                     self.precision_bindings.merge(call_precisions);
+                    let checked_result = checked_signature
+                        .as_ref()
+                        .and_then(checked_function_children)
+                        .and_then(<[Expr]>::last);
+                    // A direct authored tensor retains its literal axes and
+                    // rank-spread identities. A named alias needs the checked
+                    // expansion, as in the established fixed-rank path.
+                    let declared_result = return_type.as_ref().and_then(|authored| {
+                        tensor_type_dim_exprs(authored)
+                            .is_some()
+                            .then_some(authored)
+                            .or(checked_result)
+                    });
+                    let declaration_claim = Self::declared_result_claim_at_callsite(
+                        declared_result,
+                        checked_params,
+                        &param_types,
+                        &args,
+                    )?;
                     // Dimension-name order is canonical for extending the callee frame.
                     for (name, size) in dimension_bindings.into_sorted() {
                         let size = i64::try_from(size).map_err(|_| {
@@ -2671,28 +2905,9 @@ impl<'a> EvalContext<'a> {
                     // return whose producing binding is followed by a `print`
                     // must trap before the print runs.
                     //
-                    // The CHECKED signature's result wins over the syntactic
-                    // annotation, because the two spell the same declaration
-                    // differently: `-> Row` for `type Row = tensor[3, f32]`
-                    // reaches `return_type` as a bare name and reaches the
-                    // checked signature as the resolved `t-tensor`. The C
-                    // emitter reads the resolved `HostAbiType::Tensor`, so
-                    // reading the syntax here made the two lanes disagree on
-                    // exactly the alias spelling (round 1 P1). `return_type`
-                    // remains the fallback for a closure the checker recorded
-                    // no signature for.
-                    let declared_result = return_type.as_ref().and_then(|authored| {
-                        checked_signature
-                            .as_ref()
-                            .and_then(checked_function_children)
-                            .and_then(<[Expr]>::last)
-                            .or(Some(authored))
-                    });
                     // Frames retain distinct declarations even when the literal
                     // values agree. Forwarding a frame does not append it again.
-                    let mut claims = Self::declared_result_claim(declared_result)
-                        .into_iter()
-                        .collect::<Vec<_>>();
+                    let mut claims = declaration_claim.into_iter().collect::<Vec<_>>();
                     claims.extend_from_slice(inherited_claims);
                     self.eval_under_result_claim(&body, &claims)
                 })();

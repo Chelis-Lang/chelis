@@ -16,11 +16,22 @@ use chelis_types::{
 use super::transforms::*;
 use super::*;
 
+#[cfg(test)]
 pub(super) fn pattern_matches(
     value: &RuntimeValue,
     pattern: &Expr,
     bindings: &mut Frame,
     adt_fields: &UnordMap<String, Vec<String>>,
+) -> Result<bool, String> {
+    pattern_matches_with_result_producer(value, pattern, bindings, adt_fields, None)
+}
+
+pub(super) fn pattern_matches_with_result_producer(
+    value: &RuntimeValue,
+    pattern: &Expr,
+    bindings: &mut Frame,
+    adt_fields: &UnordMap<String, Vec<String>>,
+    producer: Option<&ResultProducer>,
 ) -> Result<bool, String> {
     let (tag, kids) = match pattern.carrier() {
         ExprCarrier::DecodedNode(tag, _, children) => (tag, children),
@@ -34,7 +45,13 @@ pub(super) fn pattern_matches(
     match tag {
         DeepTag::PatVar => {
             if let Some(name) = kids.first().and_then(symbol_name) {
-                bindings.insert(name.to_string(), value.clone());
+                bindings.insert_with_result_producer(
+                    name.to_string(),
+                    value.clone(),
+                    producer
+                        .cloned()
+                        .filter(|producer| producer.matches_value(value)),
+                );
                 return Ok(true);
             }
             Ok(false)
@@ -72,8 +89,26 @@ pub(super) fn pattern_matches(
                             return Ok(false);
                         }
                         let tail = RuntimeValue::List(items[1..].to_vec());
-                        Ok(pattern_matches(&items[0], &kids[1], bindings, adt_fields)?
-                            && pattern_matches(&tail, &kids[2], bindings, adt_fields)?)
+                        let head_producer = producer.and_then(|producer| producer.child(0));
+                        let tail_producer = match producer {
+                            Some(ResultProducer::Aggregate(children)) => ResultProducer::aggregate(
+                                children.iter().skip(1).cloned().collect(),
+                            ),
+                            _ => None,
+                        };
+                        Ok(pattern_matches_with_result_producer(
+                            &items[0],
+                            &kids[1],
+                            bindings,
+                            adt_fields,
+                            head_producer.as_ref(),
+                        )? && pattern_matches_with_result_producer(
+                            &tail,
+                            &kids[2],
+                            bindings,
+                            adt_fields,
+                            tail_producer.as_ref(),
+                        )?)
                     }
                     _ => Ok(false),
                 };
@@ -87,8 +122,15 @@ pub(super) fn pattern_matches(
             if ctor != got || kids.len().saturating_sub(1) != fields.len() {
                 return Ok(false);
             }
-            for (subpat, field) in kids.iter().skip(1).zip(fields) {
-                if !pattern_matches(field, subpat, bindings, adt_fields)? {
+            for (index, (subpat, field)) in kids.iter().skip(1).zip(fields).enumerate() {
+                let field_producer = producer.and_then(|producer| producer.child(index));
+                if !pattern_matches_with_result_producer(
+                    field,
+                    subpat,
+                    bindings,
+                    adt_fields,
+                    field_producer.as_ref(),
+                )? {
                     return Ok(false);
                 }
             }
@@ -145,7 +187,14 @@ pub(super) fn pattern_matches(
                 let Some(field_value) = fields.get(index) else {
                     return Ok(false);
                 };
-                if !pattern_matches(field_value, pattern_expr, bindings, adt_fields)? {
+                let field_producer = producer.and_then(|producer| producer.child(index));
+                if !pattern_matches_with_result_producer(
+                    field_value,
+                    pattern_expr,
+                    bindings,
+                    adt_fields,
+                    field_producer.as_ref(),
+                )? {
                     return Ok(false);
                 }
             }
@@ -158,8 +207,14 @@ pub(super) fn pattern_matches(
             let Some(inner) = kids.get(1) else {
                 return Ok(false);
             };
-            if pattern_matches(value, inner, bindings, adt_fields)? {
-                bindings.insert(name.to_string(), value.clone());
+            if pattern_matches_with_result_producer(value, inner, bindings, adt_fields, producer)? {
+                bindings.insert_with_result_producer(
+                    name.to_string(),
+                    value.clone(),
+                    producer
+                        .cloned()
+                        .filter(|producer| producer.matches_value(value)),
+                );
                 Ok(true)
             } else {
                 Ok(false)
@@ -175,8 +230,15 @@ pub(super) fn pattern_matches(
             if items.len() != kids.len() {
                 return Ok(false);
             }
-            for (subpat, item) in kids.iter().zip(items) {
-                if !pattern_matches(item, subpat, bindings, adt_fields)? {
+            for (index, (subpat, item)) in kids.iter().zip(items).enumerate() {
+                let item_producer = producer.and_then(|producer| producer.child(index));
+                if !pattern_matches_with_result_producer(
+                    item,
+                    subpat,
+                    bindings,
+                    adt_fields,
+                    item_producer.as_ref(),
+                )? {
                     return Ok(false);
                 }
             }
