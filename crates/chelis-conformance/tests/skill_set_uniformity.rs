@@ -486,6 +486,7 @@ fn a_non_canonical_spelling_of_local_skills_is_honored_not_just_tolerated() {
         // Plant the repo-local domain skill only `local_skills` can legitimize.
         std::fs::create_dir_all(root.join("agent-skills/domain")).unwrap();
         std::fs::write(root.join("agent-skills/domain/SKILL.md"), "# domain\n").unwrap();
+        scaffold::materialize_skills(&root).expect("mirror declared local skill");
 
         let report = audit::audit(&root);
         assert_eq!(
@@ -539,6 +540,7 @@ fn the_recognized_conform_key_still_passes() {
         "# chelis-std\n",
     )
     .unwrap();
+    scaffold::materialize_skills(&root).expect("mirror declared local skill");
 
     let report = audit::audit(&root);
     assert_eq!(row(&report, "vendored-skills").verdict, Verdict::Pass);
@@ -572,6 +574,7 @@ fn recording_non_applicability_with_a_shell_local_block_passes_and_survives_sync
     let body = std::fs::read_to_string(&skill).unwrap();
     let note = "<!-- shell-local:begin -->\nNot applicable: this shell has no Chelis CLI surface.\n<!-- shell-local:end -->\n";
     std::fs::write(&skill, format!("{body}\n{note}")).unwrap();
+    scaffold::materialize_skills(&root).expect("mirror shell-local skill edit");
 
     assert!(
         audit::audit(&root).ok(),
@@ -588,21 +591,73 @@ fn recording_non_applicability_with_a_shell_local_block_passes_and_survives_sync
 
 #[test]
 fn the_uniform_set_is_exactly_the_pinned_set() {
-    // The set the contract calls uniform is the toolchain's embedded set, so a
-    // stamped shell carries all of it and nothing else.
+    // The set the contract calls uniform is the toolchain's embedded set. Each
+    // agent surface gets a real materialized copy so discovery does not depend
+    // on whether that agent follows a directory symlink.
     let tmp = tempfile::tempdir().unwrap();
     let root = stamp(tmp.path(), "uniform");
-    let mut present: Vec<String> = std::fs::read_dir(root.join("agent-skills"))
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .collect();
-    present.sort();
     let mut expected: Vec<String> = skills::SHARED_SKILLS
         .iter()
         .map(|s| s.to_string())
         .collect();
     expected.sort();
-    assert_eq!(present, expected);
+
+    for rel in ["agent-skills", ".claude/skills", ".codex/skills"] {
+        let surface = root.join(rel);
+        assert!(surface.is_dir(), "{rel} must be a directory");
+        assert!(!surface.is_symlink(), "{rel} must be a materialized copy");
+        let mut present: Vec<String> = std::fs::read_dir(&surface)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        present.sort();
+        assert_eq!(present, expected, "{rel}");
+        for skill in skills::SHARED_SKILLS {
+            let actual = std::fs::read_to_string(surface.join(skill).join("SKILL.md")).unwrap();
+            let canonical =
+                std::fs::read_to_string(root.join("agent-skills").join(skill).join("SKILL.md"))
+                    .unwrap();
+            assert_eq!(actual, canonical, "{rel}/{skill}/SKILL.md");
+        }
+    }
+}
+
+#[test]
+fn sync_repairs_each_materialized_agent_skill_surface() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = stamp(tmp.path(), "mirrors");
+
+    std::fs::write(
+        root.join(".codex/skills/spec-sync/SKILL.md"),
+        "forked codex copy\n",
+    )
+    .unwrap();
+    std::fs::remove_dir_all(root.join(".claude/skills/cli-surface")).unwrap();
+    std::fs::create_dir_all(root.join(".claude/skills/rogue")).unwrap();
+    std::fs::write(root.join(".claude/skills/rogue/SKILL.md"), "rogue copy\n").unwrap();
+
+    let report = audit::audit(&root);
+    assert_eq!(
+        report
+            .rows
+            .iter()
+            .find(|row| row.key == "vendored-skills")
+            .unwrap()
+            .verdict,
+        audit::Verdict::Fail
+    );
+
+    scaffold::materialize_skills(&root).expect("repair materialized skill surfaces");
+    assert!(audit::audit(&root).ok());
+    assert!(!root.join(".claude/skills/rogue").exists());
+    assert_eq!(
+        std::fs::read_to_string(root.join(".codex/skills/spec-sync/SKILL.md")).unwrap(),
+        std::fs::read_to_string(root.join("agent-skills/spec-sync/SKILL.md")).unwrap()
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join(".claude/skills/cli-surface/SKILL.md")).unwrap(),
+        std::fs::read_to_string(root.join("agent-skills/cli-surface/SKILL.md")).unwrap()
+    );
 }

@@ -19,7 +19,12 @@ class SkillContractTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         for name in SHARED_SKILLS:
-            for prefix in ("agent-skills", "crates/chelis-conformance/assets/skills"):
+            for prefix in (
+                "agent-skills",
+                "crates/chelis-conformance/assets/skills",
+                ".claude/skills",
+                ".codex/skills",
+            ):
                 path = self.root / prefix / name / "SKILL.md"
                 path.parent.mkdir(parents=True)
                 path.write_text(f"---\nname: {name}\ndescription: Review the named contract.\n---\n\n# Instructions\n")
@@ -67,6 +72,18 @@ class SkillContractTests(unittest.TestCase):
         path = self.skill("crates/chelis-conformance/assets/skills")
         path.write_text(path.read_text() + "Outdated instructions.\n")
         self.assertTrue(check.check(self.root))
+
+    def test_missing_or_stale_agent_surface_skill_is_rejected(self):
+        for prefix in (".claude/skills", ".codex/skills"):
+            path = self.skill(prefix)
+            original = path.read_text()
+            path.write_text(original + "Outdated instructions.\n")
+            self.assertTrue(check.check(self.root))
+            path.write_text(original)
+            path.unlink()
+            self.assertTrue(check.check(self.root))
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(original)
         path.unlink()
         self.assertTrue(check.check(self.root))
 

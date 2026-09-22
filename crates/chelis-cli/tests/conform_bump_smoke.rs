@@ -32,6 +32,10 @@ fn conform_sync_help_explains_skill_additions_and_removals() {
         .stdout(predicate::str::contains("local_skills"))
         .stdout(predicate::str::contains("excluded_skills"))
         .stdout(predicate::str::contains("shell-local:exclude"))
+        .stdout(predicate::str::contains(
+            "complete pinned root Chelis contract",
+        ))
+        .stdout(predicate::str::contains(".claude/skills"))
         .stdout(predicate::str::contains("outside managed regions"));
 
     Command::cargo_bin("chelis")
@@ -41,7 +45,9 @@ fn conform_sync_help_explains_skill_additions_and_removals() {
         .success()
         .stdout(predicate::str::contains("local_skills"))
         .stdout(predicate::str::contains("excluded_skills"))
-        .stdout(predicate::str::contains("shell-local:exclude"));
+        .stdout(predicate::str::contains("shell-local:exclude"))
+        .stdout(predicate::str::contains("complete pinned root contract"))
+        .stdout(predicate::str::contains("materialized copies"));
 }
 
 #[test]
@@ -71,10 +77,14 @@ fn conform_sync_applies_skill_additions_and_removals_together() {
         ));
 
     assert!(local.is_file(), "declared local addition must survive sync");
+    assert!(root.join(".claude/skills/shell-domain/SKILL.md").is_file());
+    assert!(root.join(".codex/skills/shell-domain/SKILL.md").is_file());
     assert!(
         !root.join("agent-skills/cli-surface").exists(),
         "declared embedded removal must survive sync"
     );
+    assert!(!root.join(".claude/skills/cli-surface").exists());
+    assert!(!root.join(".codex/skills/cli-surface").exists());
     assert!(chelis_conformance::audit::audit(&root).ok());
 }
 

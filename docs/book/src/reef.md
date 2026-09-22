@@ -55,8 +55,14 @@ typed error), but it is never required.
 
 `chelis reef conform sync` refreshes the toolchain-managed regions in a shell's
 `AGENTS.md` and `docs/CHELIS_SURFACE.md` and synchronizes `agent-skills/`.
-Shell-owned text outside the managed document regions remains in place. The
-shell can adjust the synchronized skill set in `reef.toml`:
+The `AGENTS.md` region contains the pinned toolchain's complete root Chelis
+agent contract. Shell-owned text outside the managed document regions remains
+in place. Sync also writes byte-identical real copies of `agent-skills/` to
+`.claude/skills/` and `.codex/skills/` so both agents discover the same set.
+Including the complete contract is the default. Each shell should review which
+parts apply, exclude irrelevant inherited sections, and keep its own guidance
+when it remains relevant and current. The shell can adjust the synchronized
+skill set in `reef.toml`:
 
 ```toml
 [conform]
@@ -68,6 +74,20 @@ excluded_skills = ["backend-numerics", "cli-surface"]
 embedded shared-skill names during sync; removing a name restores the current
 toolchain copy. Sync and audit reject unknown excluded names so misspellings and
 upstream renames are visible.
+
+To omit an irrelevant section of the inherited `AGENTS.md`, put an exact
+heading selector span anywhere outside its managed block:
+
+```markdown
+<!-- shell-local:exclude:begin -->
+<!-- ### Numeric Surface Discipline -->
+<!-- shell-local:exclude:end -->
+```
+
+Each selector removes the heading and its section through the next heading of
+equal or shallower depth. Removing the selector restores the current upstream
+section. Selecting `# Chelis Agent Contract` removes the whole inherited body.
+Shell-owned prose outside the managed block is never replaced.
 
 To keep a shared skill while removing irrelevant inherited sections, add exact
 heading selectors inside its trailing shell-local block:
@@ -87,9 +107,9 @@ Local additions remain here.
 
 Each comment-wrapped selector removes that heading and its section. Removing the
 selector restores the current upstream section. Sync and audit fail if a
-selector is missing, duplicated, malformed, or overlaps another selected section. Run
-`chelis reef conform sync --help` for the same configuration summary at the
-command line.
+selector is missing, duplicated, malformed, or overlaps another selected
+section. Run `chelis reef conform sync --help` for the same configuration
+summary at the command line.
 
 ## Install Paths
 

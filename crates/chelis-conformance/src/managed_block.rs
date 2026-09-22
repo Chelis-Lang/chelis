@@ -1,5 +1,5 @@
-//! Pointer "managed blocks" — the mechanism that replaces verbatim-copied
-//! upstream text with a stamped, hash-guarded region.
+//! Managed blocks carry stamped, hash-guarded upstream text in downstream
+//! documents.
 //!
 //! Downstream `AGENTS.md` / `docs/CHELIS_SURFACE.md` carry generated regions
 //! fenced by HTML comments (invisible when rendered, greppable in source):

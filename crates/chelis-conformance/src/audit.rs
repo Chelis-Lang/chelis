@@ -333,7 +333,23 @@ fn check_agents_md(ctx: &Ctx) -> Check {
     }
     // The managed inheritance block must be present, stamped to the pin, and
     // untampered.
-    check_managed_block(ctx, agents, "agents-inheritance", "AGENTS.md")
+    let canonical = canonical::body("agents-inheritance").expect("embedded AGENTS contract");
+    let expected = match crate::scaffold::apply_agents_exclusions(canonical, agents) {
+        Ok(expected) => expected,
+        Err(why) => {
+            return fail(
+                format!("AGENTS.md has an invalid shell-local exclusion block: {why}"),
+                "fix or remove the shell-owned exclusion block, then run `chelis reef conform sync`",
+            );
+        }
+    };
+    check_managed_block(
+        ctx,
+        agents,
+        "agents-inheritance",
+        "AGENTS.md",
+        Some(&expected),
+    )
 }
 
 fn check_reef_pin(ctx: &Ctx) -> Check {
@@ -472,6 +488,7 @@ fn check_chelis_surface(ctx: &Ctx) -> Check {
         &surface,
         "chelis-surface-header",
         "docs/CHELIS_SURFACE.md",
+        None,
     )
 }
 
@@ -1061,29 +1078,24 @@ fn check_vendored_skills(ctx: &Ctx) -> Check {
             }
         }
     }
+    for mirror in [".claude/skills", ".codex/skills"] {
+        if let Err(why) = identical_trees(&skills_dir, &ctx.root.join(mirror)) {
+            problems.push(format!("{mirror}: {why}"));
+        }
+    }
     if !problems.is_empty() {
         return fail(
             format!(
                 "vendored skills drifted from the pinned set: {}",
                 problems.join(", ")
             ),
-            "run `chelis reef conform sync` to re-materialize agent-skills/ from the toolchain. \
+            "run `chelis reef conform sync` to re-materialize agent-skills/, .claude/skills/, \
+             and .codex/skills/ from the toolchain. \
              Configure shell-owned additions with `[conform] local_skills` and embedded removals \
              with `[conform] excluded_skills`; use a trailing `<!-- shell-local:begin -->` block \
              to retain and amend a shared skill, with `shell-local:exclude` selectors for \
              inherited sections that should be omitted.",
         );
-    }
-    // Both tool-surface skill dirs must be symlinks that actually resolve to
-    // `agent-skills/` — a symlink to somewhere else (or a real dir) is not the
-    // materialized-pointer model.
-    for link in [".claude/skills", ".codex/skills"] {
-        if !symlink_targets_agent_skills(&ctx.root.join(link)) {
-            return fail(
-                format!("{link} is not a symlink to agent-skills/"),
-                format!("ln -s ../agent-skills {link}"),
-            );
-        }
     }
     pass()
 }
@@ -1162,7 +1174,13 @@ fn links_chelis_crates(cargo_toml: &str) -> bool {
 /// Shared managed-block freshness check: present, stamped to the reef pin,
 /// untampered (integrity vs its own fence hash), and — when stamped for the
 /// auditing version — byte-equal to the embedded canonical body.
-fn check_managed_block(ctx: &Ctx, doc: &str, id: &str, file: &str) -> Check {
+fn check_managed_block(
+    ctx: &Ctx,
+    doc: &str,
+    id: &str,
+    file: &str,
+    expected_body: Option<&str>,
+) -> Check {
     let Some(block) = managed_block::find(doc, id) else {
         return fail(
             format!("{file} has no managed block `{id}`"),
@@ -1196,7 +1214,7 @@ fn check_managed_block(ctx: &Ctx, doc: &str, id: &str, file: &str) -> Check {
     // (`block.version != AUDITOR_VERSION`) is spared here — no historical bodies
     // are embedded — but the version-stamp and integrity checks still apply.
     if block.version == AUDITOR_VERSION
-        && let Some(canon) = canonical::body(id)
+        && let Some(canon) = expected_body.or_else(|| canonical::body(id))
         && !block.matches_canonical(canon)
     {
         return fail(
@@ -1215,19 +1233,58 @@ fn read_opt(path: &Path) -> Option<String> {
     std::fs::read_to_string(path).ok()
 }
 
-/// Whether `path` is a symlink whose target's final component is
-/// `agent-skills` (i.e. it resolves to the shell's `agent-skills/` dir).
-fn symlink_targets_agent_skills(path: &Path) -> bool {
-    let is_symlink = std::fs::symlink_metadata(path)
-        .map(|m| m.file_type().is_symlink())
-        .unwrap_or(false);
-    if !is_symlink {
-        return false;
+fn identical_trees(expected: &Path, actual: &Path) -> Result<(), String> {
+    let expected_entries = tree_inventory(expected)?;
+    let actual_entries = tree_inventory(actual)?;
+    if expected_entries == actual_entries {
+        Ok(())
+    } else {
+        Err("is not a real, byte-identical copy of agent-skills/".to_string())
     }
-    std::fs::read_link(path)
-        .ok()
-        .and_then(|t| t.file_name().map(|s| s.to_os_string()))
-        .is_some_and(|name| name == "agent-skills")
+}
+
+fn tree_inventory(root: &Path) -> Result<BTreeMap<PathBuf, Option<Vec<u8>>>, String> {
+    let metadata =
+        std::fs::symlink_metadata(root).map_err(|e| format!("missing or unreadable ({e})"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("must be a real directory, not a symlink or file".to_string());
+    }
+    let mut inventory = BTreeMap::new();
+    collect_tree(root, root, &mut inventory)?;
+    Ok(inventory)
+}
+
+fn collect_tree(
+    root: &Path,
+    directory: &Path,
+    inventory: &mut BTreeMap<PathBuf, Option<Vec<u8>>>,
+) -> Result<(), String> {
+    let entries = std::fs::read_dir(directory)
+        .map_err(|e| format!("cannot read {} ({e})", directory.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("cannot read {} ({e})", directory.display()))?;
+        let path = entry.path();
+        let rel = path
+            .strip_prefix(root)
+            .expect("walk remains below root")
+            .to_path_buf();
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|e| format!("cannot inspect {} ({e})", path.display()))?;
+        if metadata.file_type().is_symlink() {
+            return Err(format!("contains symlink {}", rel.display()));
+        }
+        if metadata.is_dir() {
+            inventory.insert(rel, None);
+            collect_tree(root, &path, inventory)?;
+        } else if metadata.is_file() {
+            let bytes = std::fs::read(&path)
+                .map_err(|e| format!("cannot read {} ({e})", path.display()))?;
+            inventory.insert(rel, Some(bytes));
+        } else {
+            return Err(format!("contains unsupported entry {}", rel.display()));
+        }
+    }
+    Ok(())
 }
 
 /// `CLAUDE.md` must be a symlink whose target is (or resolves to) `AGENTS.md`.

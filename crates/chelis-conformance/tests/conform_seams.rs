@@ -50,14 +50,10 @@ fn declared_local_skill_survives_sync_and_audit() {
         audit::Verdict::Fail
     );
 
-    // Declare it; now §8 exempts it and sync preserves it.
+    // Declare it; sync preserves it and copies it to both agent surfaces.
     append(
         &root.join("reef.toml"),
         "\n[conform]\nlocal_skills = [\"chelis-std\"]\n",
-    );
-    assert!(
-        audit::audit(&root).ok(),
-        "declared local skill must not fail §8"
     );
     let notices = scaffold::materialize_skills(&root).unwrap();
     assert!(
@@ -68,6 +64,8 @@ fn declared_local_skill_survives_sync_and_audit() {
         !notices.iter().any(|n| n.contains("chelis-std")),
         "a declared local skill must not warn as pruned: {notices:?}"
     );
+    assert!(root.join(".claude/skills/chelis-std/SKILL.md").exists());
+    assert!(root.join(".codex/skills/chelis-std/SKILL.md").exists());
     assert!(audit::audit(&root).ok());
 }
 
@@ -119,12 +117,8 @@ fn shell_local_block_passes_audit_and_survives_sync() {
     let skill = root.join("agent-skills/example-corpus/SKILL.md");
     append(&skill, &format!("\n{BLOCK}"));
 
-    assert!(
-        audit::audit(&root).ok(),
-        "a well-formed shell-local block is exempt from §8"
-    );
-
-    // Sync regenerates the managed span but keeps the block verbatim.
+    // Sync regenerates the managed span, keeps the block verbatim, and updates
+    // both agent-surface copies before audit accepts the tree.
     let notices = scaffold::materialize_skills(&root).unwrap();
     assert!(
         notices.is_empty(),

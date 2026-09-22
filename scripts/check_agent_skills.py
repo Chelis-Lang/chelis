@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate shared skill metadata, embedded copies, and review command wrappers.
+"""Validate shared skill metadata, agent/embedded copies, and command wrappers.
 
 CI runs this on documentation-only changes as well as code changes. The
 Rust asset-drift and skill-uniformity tests separately exercise the compiled
@@ -16,9 +16,21 @@ import re
 import yaml
 
 try:
-    from .regenerate_conformance_assets import SHARED_SKILLS, is_stale, planned_skill_copies
+    from .regenerate_conformance_assets import (
+        SHARED_SKILLS,
+        agent_surface_layout_reasons,
+        is_stale,
+        planned_agent_surface_copies,
+        planned_skill_copies,
+    )
 except ImportError:
-    from regenerate_conformance_assets import SHARED_SKILLS, is_stale, planned_skill_copies
+    from regenerate_conformance_assets import (
+        SHARED_SKILLS,
+        agent_surface_layout_reasons,
+        is_stale,
+        planned_agent_surface_copies,
+        planned_skill_copies,
+    )
 
 
 class UniqueKeyLoader(yaml.SafeLoader):
@@ -94,7 +106,16 @@ def check(root: Path) -> list[str]:
         for src, dest in pairs:
             errors.extend(validate_skill(src))
             errors.extend(validate_skill(dest))
-        errors.extend(is_stale(pairs, root / "crates/chelis-conformance/assets/skills"))
+        surface_pairs = planned_agent_surface_copies(root)
+        for _, dest in surface_pairs:
+            errors.extend(validate_skill(dest))
+        errors.extend(
+            is_stale(
+                pairs + surface_pairs,
+                root / "crates/chelis-conformance/assets/skills",
+            )
+        )
+        errors.extend(agent_surface_layout_reasons(root))
     except (OSError, SystemExit) as exc:
         errors.append(str(exc))
     try:

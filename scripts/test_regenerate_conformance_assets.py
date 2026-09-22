@@ -58,6 +58,34 @@ class PlannedCopiesTests(unittest.TestCase):
                 f"dest escapes assets/skills/: {dest}",
             )
 
+    def test_agents_contract_is_an_embedded_canonical_copy(self):
+        pairs = regen.planned_canonical_copies(ROOT)
+        self.assertEqual(len(pairs), 1)
+        self.assertEqual(pairs[0][0], ROOT / "AGENTS.md")
+        self.assertTrue(
+            str(pairs[0][1]).endswith("assets/canonical/agents-inheritance.md")
+        )
+
+    def test_every_skill_is_copied_to_both_agent_surfaces(self):
+        pairs = regen.planned_agent_surface_copies(ROOT)
+        self.assertEqual(len(pairs), 2 * len(regen.SHARED_SKILLS))
+        destinations = {dest for _, dest in pairs}
+        for skill in regen.SHARED_SKILLS:
+            self.assertIn(ROOT / ".claude/skills" / skill / "SKILL.md", destinations)
+            self.assertIn(ROOT / ".codex/skills" / skill / "SKILL.md", destinations)
+
+    def test_agent_surfaces_must_be_real_directories(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "agent-skills").mkdir()
+            (root / ".claude").mkdir()
+            (root / ".codex").mkdir()
+            (root / ".claude/skills").symlink_to("../agent-skills", target_is_directory=True)
+            (root / ".codex/skills").mkdir()
+            reasons = regen.agent_surface_layout_reasons(root)
+            self.assertEqual(len(reasons), 1)
+            self.assertIn("symlink", reasons[0])
+
 
 class IsStaleTests(unittest.TestCase):
     def _fake_tree(self, tmp: Path):
@@ -103,7 +131,11 @@ class RoundTripTests(unittest.TestCase):
         # The committed assets must already be up to date: the regenerate script
         # in --check mode is a CI-safe guard, and this asserts the checked-in
         # tree matches the live agent-skills/.
-        pairs = regen.planned_skill_copies(ROOT)
+        pairs = (
+            regen.planned_skill_copies(ROOT)
+            + regen.planned_agent_surface_copies(ROOT)
+            + regen.planned_canonical_copies(ROOT)
+        )
         dest_root = ROOT / "crates" / "chelis-conformance" / "assets" / "skills"
         self.assertEqual(
             regen.is_stale(pairs, dest_root),
