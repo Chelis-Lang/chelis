@@ -207,7 +207,7 @@ struct Profile<'a> {
     /// does not depend on the `active` set. Replaying it is therefore exact,
     /// and it turns the per-call-site re-walk of a shared callee, which
     /// multiplied along every call chain, into one walk per distinct key.
-    completed: Vec<(WalkKey, bool)>,
+    completed: UnordMap<String, Vec<(WalkKey, bool)>>,
     /// Set once a walk leaves a name in `active` (see `poison_replay`).
     replay_poisoned: bool,
 }
@@ -257,11 +257,10 @@ impl<'a> Profile<'a> {
         if REFERENCE_WALK.with(std::cell::Cell::get) {
             return false;
         }
-        let Some(dropout) = self
-            .completed
-            .iter()
-            .find_map(|(done, dropout)| done.same_walk(key).then_some(*dropout))
-        else {
+        let Some(dropout) = self.completed.get(&key.name).and_then(|done| {
+            done.iter()
+                .find_map(|(done, dropout)| done.same_walk(key).then_some(*dropout))
+        }) else {
             return false;
         };
         self.dropout |= dropout;
@@ -286,7 +285,10 @@ impl<'a> Profile<'a> {
         let found = self.dropout;
         self.dropout |= before;
         if self.reason.is_none() && !self.replay_poisoned {
-            self.completed.push((key, found));
+            self.completed
+                .entry(key.name.clone())
+                .or_default()
+                .push((key, found));
         }
     }
 
@@ -614,7 +616,7 @@ pub(super) fn profile_excluding(
         dropout: false,
         reason: None,
         resource_policy,
-        completed: Vec::new(),
+        completed: UnordMap::new(),
         replay_poisoned: false,
     };
     let mut env = profile.fresh_environment();
