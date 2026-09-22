@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -49,8 +50,10 @@ def validate_environment(
         raise ContractFailure("KACHE_CONFIG is not set")
     config = Path(raw_config)
     expected_config = repo_root / ".kache.toml"
-    if not config.is_file() or not expected_config.is_file() or not config.samefile(
-        expected_config
+    if (
+        not config.is_file()
+        or not expected_config.is_file()
+        or not config.samefile(expected_config)
     ):
         raise ContractFailure(
             f"KACHE_CONFIG must select the repository policy: {raw_config}"
@@ -96,14 +99,34 @@ def run_checked(
 def write_probe_project(root: Path) -> None:
     (root / "src").mkdir(parents=True)
     (root / "Cargo.toml").write_text(
-        '[package]\nname = "kache-smoke"\nversion = "0.0.0"\n'
-        'edition = "2024"\n',
+        '[package]\nname = "kache-smoke"\nversion = "0.0.0"\nedition = "2024"\n',
         encoding="utf-8",
     )
     (root / "src/main.rs").write_text(
         'fn main() { println!("managed kache smoke"); }\n',
         encoding="utf-8",
     )
+
+
+def write_isolated_kache_config(
+    policy: str, destination: Path, cache_dir: Path
+) -> None:
+    """Retain compiler policy in a probe-owned store with no remote access."""
+
+    cache = tomllib.loads(policy).get("cache", {})
+    for field in ("local_store", "runtime_dir", "local_only"):
+        if field in cache:
+            raise ContractFailure(f"repository Kache policy already sets {field}")
+    lines = policy.splitlines(keepends=True)
+    cache_headers = [
+        index for index, line in enumerate(lines) if line.strip() == "[cache]"
+    ]
+    if cache_headers != [0]:
+        raise ContractFailure(
+            "repository Kache policy must contain one leading [cache] table"
+        )
+    lines.insert(1, f"local_store = {json.dumps(str(cache_dir))}\nlocal_only = true\n")
+    destination.write_text("".join(lines), encoding="utf-8")
 
 
 def main() -> int:
@@ -137,11 +160,18 @@ def main() -> int:
             '[build]\nrustc-wrapper = "/definitely/missing/host-kache"\n',
             encoding="utf-8",
         )
+        probe_config = temporary / "kache.toml"
+        write_isolated_kache_config(
+            managed.config.read_text(encoding="utf-8"),
+            probe_config,
+            temporary / "kache-cache",
+        )
         common = dict(os.environ)
         common.update(
             {
                 "HOME": str(home),
                 "XDG_CACHE_HOME": str(temporary / "xdg-cache"),
+                "KACHE_CONFIG": str(probe_config),
                 "CARGO_HOME": str(cargo_home),
                 "CARGO_INCREMENTAL": "0",
             }
@@ -171,9 +201,13 @@ def main() -> int:
             cwd=project,
         )
         if "All checks passed." not in doctor:
-            raise ContractFailure(f"healthy isolated doctor result was unclear:\n{doctor}")
+            raise ContractFailure(
+                f"healthy isolated doctor result was unclear:\n{doctor}"
+            )
 
-    print("managed Kache smoke: PASS (pinned wrapper, hostile config, no-cache control)")
+    print(
+        "managed Kache smoke: PASS (pinned wrapper, hostile config, no-cache control)"
+    )
     return 0
 
 
