@@ -355,8 +355,9 @@ impl<'a> Profile<'a> {
         } else {
             // A malformed named function stays in the active set, so every
             // later reference to it reads as recursion (the profile has always
-            // behaved this way). Walks recorded before that point assumed it was
-            // inactive, so none of them may be replayed from here on.
+            // behaved this way). The enclosing walks, which reached it while
+            // it was not yet active, would replay as if that were still so;
+            // nothing is recorded or replayed from here on.
             self.poison_replay();
         }
     }
@@ -757,8 +758,6 @@ mod tests {
         }
     }
 
-    /// Handcrafted programs aimed at each way a replayed walk could differ
-    /// from a fresh one. Each one also runs through the corpus differential.
     /// Deep-only fixtures for shapes Surf cannot spell. `m` has no
     /// parameter list, so the walk leaves it in the active set; `n` is then
     /// recorded before the second call to `n` re-reaches `m`, which the
@@ -768,6 +767,8 @@ mod tests {
          (def {} n (fn {} (params {} (x {})) (app {} (var {} m) (var {} x))))\n\
          (def {} root (fn {} (params {} (x {})) (app {} (var {} add) (app {} (var {} n) (var {} x)) (app {} (var {} n) (var {} x)))))\n"];
 
+    /// Handcrafted programs aimed at each way a replayed walk could differ
+    /// from a fresh one. Each one also runs through the corpus differential.
     const EXACTNESS_FIXTURES: &[&str] = &[
         // The same helper with a static and then a runtime rate: the key
         // must tell the two actuals apart, in either order.
@@ -1012,8 +1013,8 @@ mod tests {
     }
 
     /// A malformed named function stays in the active set for the rest of
-    /// the walk, so a walk recorded before it was reached must not be
-    /// replayed afterwards.
+    /// the walk, so the walk that first reached it must not be replayed: a
+    /// second call reaches it again and reads as recursion.
     #[test]
     fn malformed_named_function_disables_replay() {
         use crate::evaluation::{EvaluationProfile, LegacyEvaluationReason};
