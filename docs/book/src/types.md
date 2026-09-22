@@ -41,7 +41,8 @@ empty_matrix = to_tensor(empty_rows)
 
 These tensors have shapes `[0]` and `[2, 0]`, both with dtype `f64`.
 `eval --json` exposes the dtype even when there are no elements to print.
-Eval rejects unconstrained `to_tensor([])`; declare the List element type as above.
+Eval and `build --target c` reject unconstrained `to_tensor([])`; declare the List
+element type as above.
 A missing inner extent is an error; empty payloads do not supply shape evidence.
 
 ## A small typed program

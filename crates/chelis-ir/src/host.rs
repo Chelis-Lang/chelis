@@ -9277,22 +9277,6 @@ fn refine_host_expr_types(
             for arg in args.iter_mut() {
                 changed |= refine_host_expr_types(arg, scope, signatures);
             }
-            // An empty list remains genuinely underconstrained on its own,
-            // but `to_tensor([])` is a language-level empty tensor literal:
-            // its established checked/runtime representation is rank-1 f32.
-            // Resolve that context here, rather than teaching the generic
-            // empty-list state to manufacture an element type.
-            if name == "to_tensor"
-                && let Some(HostExpr {
-                    kind: HostExprKind::List(items, list_ty),
-                    ..
-                }) = args.first_mut()
-                && items.is_empty()
-                && list_ty.is_unresolved()
-            {
-                *list_ty = HostTypeTerm::List(Box::new(HostTypeTerm::Float32));
-                changed = true;
-            }
             // RT-4 F1: only override `ty` when the current value has
             // unresolved type variables. Previously this clobbered any
             // declared-type retag (e.g. a global binding annotated as
@@ -22928,11 +22912,20 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
     }
 
     #[test]
-    fn empty_to_tensor_uses_checked_default_before_concrete_resolution() {
+    fn unresolved_empty_to_tensor_rejects_before_concrete_resolution() {
         let checked = surf_check("result = numel(to_tensor([]))\n");
-        let compiled = try_lower_compiled_program(&checked)
-            .expect("the checked empty tensor default must resolve before codegen");
-        assert!(compiled.host.is_some());
+        let error = try_lower_compiled_program(&checked)
+            .expect_err("an empty tensor without a checked dtype must not reach codegen");
+        assert!(
+            error
+                .message
+                .contains("host type did not resolve before the code-generation boundary"),
+            "{error:?}"
+        );
+        assert!(
+            error.message.contains("unresolved host inference variable"),
+            "{error:?}"
+        );
     }
 
     #[test]
