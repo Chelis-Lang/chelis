@@ -1722,6 +1722,39 @@ class PlanningTests(unittest.TestCase):
             source_reader=sources.__getitem__,
         )
 
+    def test_removed_shared_path_retires_without_retaining_dead_routing(self) -> None:
+        path = "retired-tools/tool.py"
+        sources = fixture_sources()
+        tracked = set(sources) | {"scripts/tool.py"}
+        arguments = dict(
+            mode="push",
+            base_sha="a" * 40,
+            candidate_sha="b" * 40,
+            records=[
+                owned.ChangeRecord("D", path),
+                owned.ChangeRecord("M", "crates/p/tests/smoke.rs"),
+            ],
+            base_metadata=fixture_metadata(),
+            candidate_metadata=fixture_metadata(),
+            config=load_config(),
+            tracked_paths=tracked,
+            base_tracked_paths=tracked | {path},
+            source_reader=sources.__getitem__,
+        )
+        plan = owned.make_plan(**arguments)
+        self.assertEqual(plan["path_dispositions"][0],
+                         {"path": path, "status": "D", "kind": "shared_path_deleted"})
+        self.assertEqual(plan["change_owned"], ["p::smoke"])
+        for overrides in (
+            {"tracked_paths": tracked | {path}},
+            {"base_tracked_paths": tracked},
+            {"records": [owned.ChangeRecord("A", path)]},
+        ):
+            with self.subTest(overrides=overrides), self.assertRaisesRegex(
+                ValueError, "unclassified changed path"
+            ):
+                owned.make_plan(**(arguments | overrides))
+
     def test_direct_target_and_package_expansion_are_disjoint(self) -> None:
         plan = self.plan(
             [
@@ -2074,7 +2107,7 @@ class PlanningTests(unittest.TestCase):
 
     def test_mixed_code_and_new_prose_use_the_existing_docs_only_disposition(self) -> None:
         for path in ("changelog.d/new-fix.fixed.md", "docs/new-page.md",
-                     "spec/design/new-assessment.md", "openspec/changes/new/.openspec.yaml"):
+                     "spec/design/new-assessment.md"):
             with self.subTest(path=path):
                 plan = self.plan([owned.ChangeRecord("M", "crates/p/tests/smoke.rs"),
                                   owned.ChangeRecord("A", path)])
@@ -4810,6 +4843,29 @@ class ChangedPathClassificationTests(unittest.TestCase):
             config=self.config,
             packages=self.packages,
         )
+
+    def test_local_retirement_requires_base_membership_and_absence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _git_repo(root)
+            (root / "retired.json").write_text("{}")
+            _git_commit(root, "base")
+            subprocess.run(["git", "-C", str(root), "tag", "base"], check=True)
+            (root / "retired.json").unlink()
+            paths = ["retired.json", "unknown.json"]
+            self.assertEqual(
+                owned.classify_changed_paths(
+                    paths, repo=root, base="base", config=self.config, packages=()
+                ),
+                [("unknown.json", "unclassified")],
+            )
+            (root / "retired.json").symlink_to(root / "missing-target")
+            self.assertEqual(
+                owned.classify_changed_paths(
+                    paths, repo=root, base="base", config=self.config, packages=()
+                ),
+                [("retired.json", "unclassified"), ("unknown.json", "unclassified")],
+            )
 
     def test_a_routed_path_and_a_package_path_are_accepted(self) -> None:
         self.assertEqual(

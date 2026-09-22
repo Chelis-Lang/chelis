@@ -101,9 +101,10 @@ behavior change SHALL:
 5. link the active OpenSpec change from its implementation pull request.
 
 Implementation may begin only after the OpenSpec proposal and requirement
-deltas have been accepted into the repository. Acceptance of an OpenSpec plan
-is planning evidence only: it authorizes the planned change but does not prove
-implementation correctness.
+deltas have been accepted into `Chelis-Lang/openspec`, the shared `chelis-plans`
+store. The implementation PR cites the `chelis-*` change ID and accepted store
+commit; the consumer lock binds that revision. Acceptance is planning evidence
+only: it authorizes the planned change but does not prove implementation correctness.
 
 An implementation agent SHALL name the active OpenSpec change and the specific
 requirement or design section it implements. “Follow the spec” without an
@@ -111,46 +112,36 @@ addressable requirement is not a valid implementation claim.
 
 ### Automated acceptance of OpenSpec documents
 
-The maintainer authorized automated acceptance for OpenSpec document paths,
-including normative capability specifications under `openspec/specs/`.
+The maintainer authorized automated acceptance for Chelis OpenSpec document
+paths. Those documents now belong to the `chelis-*` domain in
+`Chelis-Lang/openspec`, including its captured capabilities and archives.
+The compiler repository keeps only a store pointer and immutable revision lock;
+no numbered chapter transfers authority as a consequence of this move.
 
-The mechanism is implemented and **deployed, but not yet proven**. What
-exists is the whole path: an ordinary push to a branch starts
-`openspec-autoland`, which classifies the pushed commit with default-branch
-code, opens an internal pull request, waits for the required checks on that
-exact commit, and merges it. Nothing is approved and no protection is
-bypassed.
+The store owns submission and autoland. Its trusted default/base code classifies
+raw Git objects, opens an internal pull request for an eligible document-only
+push, waits for required checks on the exact head, and performs an ordinary merge.
+It submits no approval and bypasses no protection. Tooling, policy, configuration,
+schemas, mixed changes, and other store domains retain ordinary review.
 
-The workflow files are on the default branch, which is what makes
-`workflow_run` and `pull_request_target` take effect. The credential is a
-short-lived, repository-scoped token minted per run from `chelis-openspec`,
-a GitHub App dedicated to this mechanism (`vars.OPENSPEC_APP_ID`,
-`secrets.OPENSPEC_APP_PRIVATE_KEY`), revoked at job end and never stored.
-Its installation must grant `Pull requests: write` and `Contents: read` on
-this repository: the first performs the write, the second lets
-`POST /pulls` resolve the head and base refs. It is deliberately not the
-shared `CI_APP_*` App, whose installation grants no pull-request write and
-whose key several workflows already hold. Without a working credential the
-controller reports the push blocked and writes nothing, because a pull
-request opened with the built-in token starts none of the required checks
-and could never merge. `README.md` carries the details.
+Deployment requires those workflows on the store's default branch and a
+dedicated `chelis-openspec` App installation granting `Pull requests: write`
+and `Contents: read` on the store. Its `OPENSPEC_APP_*` credential is distinct
+from the read-only `CHELIS_OPENSPEC_APP_*` credential with which consumer CI
+fetches the store. Missing credentials block the corresponding operation,
+with no built-in-token fallback. See the store operations guide linked from
+`README.md` for deployment and recovery.
 
-Deployed is not proven. Until a hosted document push is observed opening a
-pull request and merging it, the create call and the merge call remain
-unverified, and the change's own acceptance oracle stays open.
-
-The authorization narrows the earlier rule that implementation waits on a
-*human* review queue, because that rule bought nothing here: an OpenSpec
-document has no build and no executable behavior, so approving one adds
-latency without adding evidence. It authorizes no mechanism that could land
-anything outside the document set.
+Moving the implementation does not prove its hosted create/merge calls.
+Acceptance evidence must name the store head and observed hosted results;
+the earlier compiler-repository deployment is not proof of store deployment.
 
 Four limits are unchanged by that authorization:
 
 - **Implementation code is not covered.** A change touching any path outside
   the document set follows the ordinary review and test path. So does a change
   touching the acceptance policy itself: the classifier, its workflow, the
-  submission command, the consumer checker, and `openspec/config.yaml`.
+  submission command, store pointer/lock, and shared configuration or schemas.
 - **Automated acceptance is not correctness evidence.** It proves the path
   boundary and schema validity. It proves nothing about whether the wording is
   right, and it is never assurance about the implementation.
@@ -163,10 +154,11 @@ Four limits are unchanged by that authorization:
   needs an approving identity, it is a dedicated one scoped to the document
   paths, never a repository-wide relaxation.
 
-The executable contract is the `openspec-validation` capability. The
-implementation is `scripts/openspec_acceptance.py`,
-`scripts/openspec_controller.py`, `scripts/openspec_merge.py`,
-`scripts/openspec_submit.py`, and the `openspec-autoland*` workflows.
+The executable contract is the store's `chelis-openspec-validation` capability.
+The `scripts/openspec_{acceptance,controller,merge,submit}.py` implementation
+and `openspec-autoland*` workflows live in `Chelis-Lang/openspec`, not Chelis.
+Chelis's store action validates the pinned planning revision without enforcing
+Phase 0 lifecycle, citation, or ordering policy on compiler changes.
 
 ## OpenSpec boundary
 

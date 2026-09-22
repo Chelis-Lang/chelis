@@ -229,18 +229,6 @@ def source_contracts() -> tuple[SourceContract, ...]:
             ("sub is a derived built-in, lowered to add(a, neg(b))",),
         ),
         SourceContract(
-            "current captured direct arithmetic narrative",
-            "openspec/changes/capture-risc-primitives/specs/risc-primitives/spec.md",
-            (
-                "it remains a direct `RiscOp::Sub` identity during IR construction",
-                "it remains a direct `RiscOp::MinElem` selection identity",
-            ),
-            (
-                "it becomes `add(a, neg(b))` during IR construction",
-                "with `sub` decomposed rather than present as a node",
-            ),
-        ),
-        SourceContract(
             "current canonical direct arithmetic narrative",
             "spec/design/chelis_canonical_reference.md",
             ("`sub` and `min_elem` are direct Tier-1 RISC identities",),

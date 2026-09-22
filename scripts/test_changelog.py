@@ -312,8 +312,7 @@ class ChangelogTests(unittest.TestCase):
 
     def test_non_docs_and_normative_specs_need_fragment(self):
         paths = ["crates/compiler/src/lib.rs", "scripts/helper.py", "tests/example.rs",
-                 ".github/workflows/ci.yml", "spec/00-context.md", "spec/registry/ops.md",
-                 "openspec/specs/parser/spec.md", "openspec/changes/parser/specs/parser/spec.md"]
+                 ".github/workflows/ci.yml", "spec/00-context.md", "spec/registry/ops.md"]
         for path in paths:
             with self.subTest(path=path):
                 self.git("reset", "--hard", self.base)

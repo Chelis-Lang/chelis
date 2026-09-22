@@ -47,15 +47,6 @@ class IsDocPathTests(unittest.TestCase):
         # mdBook theme asset) is prose-adjacent; the Docs job still runs.
         self.assertTrue(m.is_doc_path("docs/book/theme/custom.css"))
 
-    def test_openspec_changes_prefix_is_doc(self):
-        self.assertTrue(
-            m.is_doc_path("openspec/changes/add-thing/proposal.md")
-        )
-        # `openspec new change` always writes this non-Markdown metadata
-        # file; without the prefix rule it alone forces the full matrix.
-        self.assertTrue(
-            m.is_doc_path("openspec/changes/add-thing/.openspec.yaml")
-        )
 
     def test_code_paths_are_not_doc(self):
         for p in (
@@ -66,8 +57,9 @@ class IsDocPathTests(unittest.TestCase):
             "packages/chelis-std/tests/foo.ch",
             "docsignore",  # sibling, not under docs/
             "readme.md.rs",  # .rs wins; not a doc
-            "openspec/config.yaml",  # tool config, not one change
-            "openspec/changesets/x.yaml",  # sibling, not under changes/
+            "openspec/config.yaml",
+            "openspec/store.lock.yaml",
+            "openspec/changes/add-thing/.openspec.yaml",
         ):
             self.assertFalse(m.is_doc_path(p), p)
 

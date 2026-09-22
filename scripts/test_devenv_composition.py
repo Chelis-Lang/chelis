@@ -25,7 +25,6 @@ EXPECTED_COMMANDS = {
     "chelis-gate": "scripts/gate.py",
     "chelis-ci-shell": "scripts/ci_devenv.py",
     "chelis-reap-orphans": "scripts/reap_orphans.py",
-    "openspec-submit": "scripts/openspec_submit.py",
     "chelis-exec-preflight": "scripts/preflight_exec_probe.py",
     "chelis-z3-test": "scripts/z3_test.py",
     "chelis-hip-test": "scripts/hip_test.py",
@@ -143,9 +142,7 @@ def parse_commands_module(text: str) -> DevenvCommands:
     blocks = {
         name: body
         for _, name, body in re.findall(
-            # `openspec-submit` is deliberately not `chelis-`-prefixed and
-            # must not be named `openspec`, which is the upstream CLI.
-            r'(?ms)^(\s+)"((?:chelis|openspec)-[^"]+)" = \{\n(.*?)^\1\};$',
+            r'(?ms)^(\s+)"([^"]+)" = \{\n(.*?)^\1\};$',
             text,
         )
     }
@@ -188,7 +185,6 @@ def parse_contributor_docs(text: str) -> None:
     required = (
         "chelis-gate",
         "chelis-reap-orphans",
-        "openspec-submit",
         "chelis-exec-preflight",
         "chelis-z3-test",
         "chelis-hip-test",
