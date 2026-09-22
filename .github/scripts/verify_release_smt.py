@@ -32,7 +32,6 @@ Fail condition (feature-less binary, i.e. the regression we guard):
 Usage:
   verify_release_smt.py <path-to-chelis-binary>
   verify_release_smt.py --tarball <path-to-staged-release.tar.gz>
-  verify_release_smt.py --runner <pinned-runtime-executable> <path-to-chelis-binary>
 
 The `--tarball` form unpacks a staged release `.tar.gz` and verifies the
 EXTRACTED (stripped) `bin/chelis` -- the most faithful chelis#422 guard,
@@ -78,7 +77,7 @@ def scale_half(u: Unit) -> Unit = Unit { value: (u.value * 0.5) }
 SMT_DISABLED_MARKER = "requires the smt-enabled build"
 
 
-def run_prove(chelis: Path, src: Path, *, runner: Path | None = None) -> str:
+def run_prove(chelis: Path, src: Path) -> str:
     """Run `chelis prove --json --tier auto <src>` and return stdout.
 
     `prove` exits nonzero only on a property *failure*; an all-pass run
@@ -87,8 +86,6 @@ def run_prove(chelis: Path, src: Path, *, runner: Path | None = None) -> str:
     a crash (no stdout, or unparseable) is.
     """
     cmd = [str(chelis), "prove", "--json", "--tier", "auto", str(src)]
-    if runner is not None:
-        cmd.insert(0, str(runner))
     print("+ " + " ".join(cmd))
     try:
         proc = subprocess.run(
@@ -132,7 +129,7 @@ def record_is_cvc5_smt(record: dict) -> bool:
     return False
 
 
-def verify_binary(chelis: Path, *, runner: Path | None = None) -> int:
+def verify_binary(chelis: Path) -> int:
     """Run the cvc5-discharge probe against `chelis` and return an exit code.
 
     See the module docstring for the exit-code meanings (0 pass; 3 no
@@ -142,7 +139,7 @@ def verify_binary(chelis: Path, *, runner: Path | None = None) -> int:
     with tempfile.TemporaryDirectory(prefix="chelis_smt_verify_") as tmp:
         src = Path(tmp) / "probe.ch"
         src.write_text(PROBE_PROGRAM)
-        stdout = run_prove(chelis, src, runner=runner)
+        stdout = run_prove(chelis, src)
 
     print(stdout, end="" if stdout.endswith("\n") else "\n")
 
@@ -195,7 +192,7 @@ def find_chelis_in_tree(root: Path) -> Path | None:
     return any_chelis[0] if any_chelis else None
 
 
-def extract_and_verify_tarball(tarball: Path, *, runner: Path | None = None) -> int:
+def extract_and_verify_tarball(tarball: Path) -> int:
     """Unpack a staged release `.tar.gz` and verify the EXTRACTED
     (stripped) `bin/chelis` discharges via cvc5 -- the most faithful
     chelis#422 guard (verify the artifact actually shipped, not a
@@ -220,7 +217,7 @@ def extract_and_verify_tarball(tarball: Path, *, runner: Path | None = None) -> 
             return 2
         chelis.chmod(0o755)
         print(f"verify_release_smt: verifying extracted artifact {chelis}")
-        return verify_binary(chelis.resolve(), runner=runner)
+        return verify_binary(chelis.resolve())
 
 
 def main() -> int:
@@ -240,16 +237,10 @@ def main() -> int:
             "verified (the most faithful chelis#422 guard)"
         ),
     )
-    parser.add_argument(
-        "--runner",
-        type=Path,
-        help="execute the binary through this pinned runtime executable (no shell parsing)",
-    )
     args = parser.parse_args()
-    runner = args.runner.resolve() if args.runner is not None else None
 
     if args.tarball is not None:
-        return extract_and_verify_tarball(args.tarball.resolve(), runner=runner)
+        return extract_and_verify_tarball(args.tarball.resolve())
 
     chelis = args.chelis.resolve()
     if not chelis.exists():
@@ -258,7 +249,7 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
-    return verify_binary(chelis, runner=runner)
+    return verify_binary(chelis)
 
 
 if __name__ == "__main__":

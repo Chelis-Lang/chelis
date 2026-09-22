@@ -116,7 +116,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("operation", nargs="?", choices=("activate", "capture", "run"), default="activate")
     parser.add_argument("destination", nargs="?", type=Path)
-    parser.add_argument("--profile", choices=("ci", "ci-smt", "ci-glibc231"), default="ci")
+    parser.add_argument("--profile", choices=("ci", "ci-smt"), default="ci")
+    parser.add_argument(
+        "--hosted", action="store_true",
+        help="realize the GitHub-hosted twin, which public binary caches serve",
+    )
     args = parser.parse_args()
     if args.operation == "capture":
         if args.destination is None:
@@ -127,10 +131,12 @@ def main() -> int:
         if args.destination is None:
             parser.error("run requires an Actions command file")
         run_step(args.destination)
+    # Both hosted lanes share one twin: the hosted SMT lane links the prebuilt
+    # cvc5 asset from the workflow instead of realizing the Nix solver closure.
     return activate(
         ROOT, os.environ["CHELIS_DEVENV_BIN"],
         Path(os.environ["GITHUB_ENV"]), Path(os.environ["GITHUB_PATH"]),
-        profile=args.profile,
+        profile="ci-hosted" if args.hosted else args.profile,
     )
 
 

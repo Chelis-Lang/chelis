@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 import venv
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -151,6 +152,18 @@ class ProjectActivationTests(unittest.TestCase):
         failed = subprocess.run(command, env=env, capture_output=True, text=True)
         self.assertNotEqual(failed.returncode, 0)
         self.assertFalse(capture.exists())
+
+    def test_hosted_runners_realize_the_public_cache_twin_of_every_profile(self):
+        seen = []
+        with unittest.mock.patch.object(
+            ci_devenv, "activate", side_effect=lambda *a, profile: seen.append(profile) or 0,
+        ), unittest.mock.patch.dict(
+            os.environ, {"CHELIS_DEVENV_BIN": "devenv", "GITHUB_ENV": "env", "GITHUB_PATH": "path"},
+        ):
+            for argv in (["--profile", "ci-smt"], ["--profile", "ci-smt", "--hosted"], ["--hosted"]):
+                with unittest.mock.patch.object(sys, "argv", ["ci_devenv.py", *argv]):
+                    self.assertEqual(ci_devenv.main(), 0)
+        self.assertEqual(seen, ["ci-smt", "ci-hosted", "ci-hosted"])
 
 
 if __name__ == "__main__":

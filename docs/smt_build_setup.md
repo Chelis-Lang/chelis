@@ -94,31 +94,37 @@ required CI: `--features smt`, `carcara`, `z3`, the cvc5+Z3 cross-engine
 oracle, `clarabel`, the production `smt clarabel` config, Gappa
 `--check-only`, the Arb certifier, and `--features arb`.
 
-The full workflow retains its existing `shared-key: smt-smt-build` Cargo
-cache and durable CVC5 prebuilt store. Devenv-backed CI uses a recipe-prefixed
-Cargo namespace instead: already-linked outputs must not cross native-provider
-boundaries merely because the shared-key name is the same.
+The full workflow restores the same `shared-key: smt-smt-build` cargo cache as
+the fast smoke lane. The key intentionally matches the old required
+`smt-build` job cache namespace (`key: smt` plus job id `smt-build`) so the
+split can reuse the existing cvc5 build cache while making that cache stable
+across the smoke and full-prove jobs. The split removes the full proof corpus
+from the required context; it must not make the optional lane cold-build cvc5
+before reaching its proof steps.
+
+The required `smt-build` job realizes the `ci-smt` Devenv profile only on the
+self-hosted runner, which substitutes it from the private Nix cache:
+`nix/ci-cvc5.nix` builds the locked CVC5 1.3.1, GMP, CaDiCaL and LibPoly
+archive/header tree, and Cargo consumes its `CVC5_DIR` without rebuilding it.
+The job's Devenv-prefixed Cargo namespace keeps those outputs apart from the
+native full-prove lane. GitHub-hosted runs of the same job realize the
+`ci-hosted` twin, which public caches serve, and link the prebuilt cvc5 stores
+described next, exactly as before.
 
 ### Durable prebuilt cvc5 (chelis#583 + follow-up)
 
-The required `smt-build` and `smt-build-glibc231` lanes use the `ci-smt` and
-`ci-glibc231` Devenv profiles. `nix/ci-cvc5.nix` builds the locked CVC5,
-GMP, CaDiCaL and LibPoly archive/header tree; Cargo consumes `CVC5_DIR`
-without rebuilding it. Self-hosted workers restore the signed Tunnet Nix
-cache before realization and publish the realized closure afterward.
-Hosted cache misses may build that closure from source. Both jobs allow
-90 minutes total for cold realization; the compatibility job still limits
-its release Cargo build step to 30 minutes. These safety limits do not meet
-or replace the under-15-minute full self-hosted acceptance target.
-
-The nightly Darwin and full-prove lanes retain `scripts/ci_cvc5_cache.py`.
-Their prebuilt tree uses two stores, tried in order:
+Building cvc5 from source is ~22 minutes of CMake/make. The SMT lanes must
+never pay that on the per-PR path, so every SMT lane (the required `smt-build`,
+the Linux `smt-build-glibc231` and nightly `smt-build-darwin-arm64` lanes, and
+`smt-full-prove.yml`) LINKS a prebuilt cvc5 instead of rebuilding it. The
+prebuilt tree is held in TWO stores, tried in order, driven by
+`scripts/ci_cvc5_cache.py`:
 
 1. **Durable Release asset (primary).** `.github/workflows/build-cvc5.yml`
    builds cvc5 from source once per (cvc5-sys version, namespace) and publishes
    `<store-key>.tar.gz` + a `.sha256` sidecar to a
    `cvc5-prebuilt-cvc5sys<version>` **prerelease** tag (deliberately not `v*`,
-   so it never triggers `release.yml`). Each such lane's **`fetch`** step
+   so it never triggers `release.yml`). Each SMT lane's **`fetch`** step
    downloads the asset, verifies the sha256 BEFORE extraction, rejects unsafe
    tar members, and re-checks every required path. A Release asset has **no
    10GB Actions-cache LRU budget, no 7-day idle TTL, and no branch scope**, so
@@ -199,21 +205,18 @@ caches. A failed open-PR lookup fail-safes to no PR pruning (never mass-delete
 on error); manual dispatch is dry-run unless `apply` is set.
 `scripts/test_ci_cache_prune.py` covers the deletion policy.
 
-The Linux `smt-build-glibc231` companion uses a pinned Nix glibc 2.31/GCC 9
-ABI rather than a job container. Its native Cargo build scripts load LLVM 11
-libclang from that same ABI; current Cargo, Python and CMake remain host
-tools. After the unchanged release CLI build, the job checks the GLIBC
-symbol ceiling and runs the real CVC5 discharge verifier through the checked
-old interpreter. The runner preserves `current_exe` for contained solver
-workers. The profile is CLI-only: it does not make modern Python or arbitrary
-workspace features compatible with glibc 2.31.
-
-The nightly `smt-build-darwin-arm64` companion remains on `macos-latest`.
-The frozen `build-cvc5.yml` and `release.yml` glibc-2.31 producers retain
-their digest-pinned Python 3.11 Bullseye image and `ci_apt_get.py
---debian-bullseye-snapshot`. That bootstrap replaces moving apt sources with
-the immutable `20260901T000000Z` Debian and Debian Security snapshots.
-Python 3.11 supplies `tomllib` without a separate moving PyPI bootstrap.
+Two companion prove-in-CI lanes, `smt-build-glibc231` (a digest-pinned
+Python 3.11 Bullseye container) and `smt-build-darwin-arm64` (`macos-latest`), build
+`chelis-cli --features smt` on the other two release targets and run
+the post-build verifier. They prove cvc5 builds on those toolchains
+before `release.yml` ships the feature there (chelis#422). The
+Bullseye lane uses the same pinned container digest in `ci.yml`,
+`build-cvc5.yml`, and `release.yml`; the image supplies Python, git, curl,
+and CA certificates before checkout. After checkout, `ci_apt_get.py
+--debian-bullseye-snapshot` replaces every moving apt source with the
+immutable `20260901T000000Z` Debian and Debian Security snapshots before
+installing build dependencies. Python 3.11 also lets cvc5 use `tomllib`
+without a separate moving PyPI bootstrap.
 
 ### Darwin validation cadence
 

@@ -2,7 +2,7 @@ name: Set up project CI
 description: Restore signed Nix inputs before realizing the project, then attach its compiler cache.
 inputs:
   profile:
-    description: Project profile (ci, ci-smt, or the isolated ci-glibc231 release CLI ABI).
+    description: Project profile (ci or ci-smt). GitHub-hosted runners realize its public-cache twin.
     required: false
     default: ci
 outputs:
@@ -27,7 +27,15 @@ runs:
       shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
       env:
         PROJECT_CI_PROFILE: ${{ inputs.profile }}
-      run: python scripts/ci_devenv.py --profile "$PROJECT_CI_PROFILE"
+      # GitHub-hosted runners cannot reach the private cache, so they realize
+      # the twin profile that public binary caches serve instead of building
+      # the native libraries from source.
+      run: |
+        activation=(--profile "$PROJECT_CI_PROFILE")
+        if [ "${RUNNER_ENVIRONMENT:-github-hosted}" != self-hosted ]; then
+          activation+=(--hosted)
+        fi
+        python scripts/ci_devenv.py "${activation[@]}"
 
     - name: Attach the realized compiler cache
       if: runner.environment == 'self-hosted'
