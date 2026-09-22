@@ -1165,7 +1165,7 @@ def validate_normative_contract(
     require_all(
         spec10,
         (
-            ("Schema version 15 is explicitly\npresent", "wire v15 presence"),
+            ("Schema version 16 is explicitly\npresent", "wire v16 presence"),
             ("the only accepted version", "wire current-version exactness"),
             ("There is no versionless default", "wire versionless rejection"),
             ("versionless default, legacy migration", "wire migration rejection"),

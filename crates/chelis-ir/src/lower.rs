@@ -14648,15 +14648,22 @@ impl<'program> LowerCtx<'program> {
                 if self.if_branch_depth > 0 {
                     return self.reject_indirect_branch_fail(app_span);
                 }
-                // At depth 0 `fail` is a whole-value abort owned by the host
-                // lane, which traps correctly and discards this placeholder.
+                // Depth 0 means no enclosing `if` branch. OUTSIDE a
+                // transform that is a whole-value abort the host lane owns:
+                // it traps correctly and this placeholder is discarded.
                 //
-                // "Depth 0" is load-bearing and was once wrong: a statically
-                // pruned branch also reached here at depth 0, and there the
-                // placeholder was NOT discarded — it became the transformed
-                // function's result. `lower_if` now rejects that case before
-                // lowering the branch, so the only depth-0 arrivals left are
-                // genuine whole-value aborts.
+                // INSIDE a transform it is NOT covered, and this is a known
+                // hole rather than a justified absence: a `fail` that never
+                // passes through a branch is unguarded by construction,
+                // because the depth counter is the only gate. `grad` over
+                // `sum(add(x, fail("m")), 0i32)` still returns the
+                // placeholder's zero as an operand — chelis#2371.
+                //
+                // Closing it needs a signal the lowerer does not have, namely
+                // whether the DAG being built will actually be consumed. The
+                // depth counter cannot supply it: an earlier version of this
+                // comment claimed the only depth-0 arrivals left were genuine
+                // whole-value aborts, which is false.
                 // The message argument is NOT lowered. It is a string, and
                 // the DAG has no string vocabulary: the nodes it produced
                 // were discarded here and dropped by DCE, so their only
@@ -19051,11 +19058,16 @@ impl<'program> LowerCtx<'program> {
     /// the program succeeded and returned zero.
     fn reject_static_taken_fail(&self, elems: &[Expr], message: &str) -> NodeId {
         raise_lowering_error(
+            // Deliberately describes the `if`, not the function. The rejection
+            // is a lowering-time decision, so it also fires when this `if`
+            // sits inside a runtime branch the forward program never takes --
+            // in which case the function as a whole does NOT abort on every
+            // execution, and saying so would be false.
             format!(
-                "this `if` always selects its `fail({message:?})` branch, so the function \
-                 aborts on every execution and has no value to differentiate or batch \
-                 (chelis#1464). A transformed function must produce a value: move the \
-                 abort outside the transform, or make the branch total."
+                "this `if` always selects its `fail({message:?})` branch, so it has no \
+                 value on any path and cannot be differentiated or batched \
+                 (chelis#1464). Move the abort outside the transform, or make the \
+                 branch total."
             ),
             elems.first().map(Expr::span),
             self.current_span_id.clone(),
@@ -19104,7 +19116,10 @@ impl<'program> LowerCtx<'program> {
         trap_on_true: bool,
         elems: &[Expr],
     ) -> LoweredValue {
-        let which = if trap_on_true { "then" } else { "else" };
+        // The fallback is the arm that is NOT the `fail`: when the guard
+        // traps on true the `fail` is the `then` arm, so the surviving value
+        // came from `else`.
+        let which = if trap_on_true { "else" } else { "then" };
         let fallback = self.expect_runtime_if_branch(fallback, which, elems);
         let (cond, trap_on_true) = self.guard_fire_condition(cond, trap_on_true);
         let out_ty = self
