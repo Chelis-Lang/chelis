@@ -1544,7 +1544,12 @@ transition debt. Exact path/kind/owner registration, wrong-path/kind/owner
 negatives and the existing unregistered load/store mutation preserve the
 closed inventory. The Phase 0 execution leg binds them to C claim failures,
 aggregate and Option projection, interface ingress and repeated public-call
-arena lifetime. The frozen foundation and active-debt rows therefore do not
+arena lifetime. Nested `Cons` execution additionally requires an O(1)
+invocation-arena suffix view before both cloning and consuming List skips, so
+pattern lowering and direct immutable `skip` preserve the selected child
+without copying each remaining origin array or reading a consumed payload.
+The frozen foundation and
+active-debt rows therefore do not
 grow, and their reviewed digest stays fixed; only the code-derived final-form
 and execution manifest changes.
 

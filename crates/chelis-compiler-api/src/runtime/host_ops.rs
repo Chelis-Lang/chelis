@@ -90,12 +90,8 @@ pub(super) fn pattern_matches_with_result_producer(
                         }
                         let tail = RuntimeValue::List(items[1..].to_vec());
                         let head_producer = producer.and_then(|producer| producer.child(0));
-                        let tail_producer = match producer {
-                            Some(ResultProducer::Aggregate(children)) => ResultProducer::aggregate(
-                                children.iter().skip(1).cloned().collect(),
-                            ),
-                            _ => None,
-                        };
+                        let tail_producer =
+                            producer.and_then(|producer| producer.aggregate_suffix(1));
                         Ok(pattern_matches_with_result_producer(
                             &items[0],
                             &kids[1],

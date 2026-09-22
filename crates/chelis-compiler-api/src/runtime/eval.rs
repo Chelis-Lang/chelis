@@ -1968,9 +1968,10 @@ impl<'a> EvalContext<'a> {
         if let Some(name) = self.active_builtin_name(func) {
             let value =
                 self.eval_builtin(name, &args, &arg_type_exprs, result_type_expr.as_ref())?;
-            self.result_producer = if name == "index" {
-                let index = args.get(1).and_then(RuntimeValue::as_i64);
-                index
+            self.result_producer = match name {
+                "index" => args
+                    .get(1)
+                    .and_then(RuntimeValue::as_i64)
                     .and_then(|index| usize::try_from(index).ok())
                     .and_then(|index| {
                         arg_producers
@@ -1978,9 +1979,29 @@ impl<'a> EvalContext<'a> {
                             .and_then(Option::as_ref)
                             .and_then(|producer| producer.child(index))
                     })
-                    .filter(|producer| producer.matches_value(&value))
-            } else {
-                matches!(value, RuntimeValue::Tensor(_)).then(|| ResultProducer::tensor(name))
+                    .filter(|producer| producer.matches_value(&value)),
+                "skip" => {
+                    let count = args.get(1).and_then(RuntimeValue::as_i64).ok_or_else(|| {
+                        "skip count disappeared after successful builtin evaluation".to_string()
+                    })?;
+                    if count < 0 {
+                        return Err(
+                            "negative skip count passed successful builtin evaluation".to_string()
+                        );
+                    }
+                    // On a target whose usize is narrower than i64, a valid
+                    // non-negative count that cannot convert is above every
+                    // addressable List length and therefore selects no suffix.
+                    let producer = match usize::try_from(count) {
+                        Ok(count) => arg_producers
+                            .first()
+                            .and_then(Option::as_ref)
+                            .and_then(|producer| producer.aggregate_suffix(count)),
+                        Err(_) => None,
+                    };
+                    producer.filter(|producer| producer.matches_value(&value))
+                }
+                _ => matches!(value, RuntimeValue::Tensor(_)).then(|| ResultProducer::tensor(name)),
             };
             let producer = if name == "index" && claims.iter().any(|claim| !claim.axes.is_empty()) {
                 self.result_producer

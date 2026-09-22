@@ -2151,6 +2151,7 @@ typedef struct __chelis_host_result_origin {
     const char *op;
     const char *trap;
     int64_t child_count;
+    const struct __chelis_host_result_origin *const *child_view;
     const struct __chelis_host_result_origin *children[];
 } __chelis_host_result_origin;
 
@@ -2186,6 +2187,7 @@ static __chelis_host_result_origin *__chelis_host_result_origin_alloc(__chelis_h
     node->op = NULL;
     node->trap = NULL;
     node->child_count = child_count;
+    node->child_view = NULL;
     arena->head = node;
     return node;
 }
@@ -2211,16 +2213,35 @@ static const __chelis_host_result_origin *__chelis_host_result_origin_aggregate(
     if (!any) return NULL;
     __chelis_host_result_origin *node = __chelis_host_result_origin_alloc(arena, child_count);
     for (int64_t i = 0; i < child_count; ++i) node->children[i] = children[i];
+    node->child_view = node->children;
     return node;
 }
 
 static const __chelis_host_result_origin *__chelis_host_result_origin_child(const __chelis_host_result_origin *origin, int64_t index) {
     if (origin == NULL) return NULL;
-    if (origin->child_count < 0 || index < 0 || index >= origin->child_count) {
+    if (origin->child_count < 0 || index < 0 || index >= origin->child_count || origin->child_view == NULL) {
         fprintf(stderr, "host runtime: aggregate result producer provenance does not match the projected value\n");
         abort();
     }
-    return origin->children[index];
+    return origin->child_view[index];
+}
+
+static const __chelis_host_result_origin *__chelis_host_result_origin_list_suffix(__chelis_host_result_origin_arena *arena, const __chelis_host_result_origin *origin, int64_t count) {
+    if (origin == NULL || count == 0) return origin;
+    // The runtime owns skip's negative-count diagnostic. Preserve that
+    // ordering instead of replacing it with an internal metadata failure.
+    if (count < 0) return origin;
+    if (origin->child_count < 0 || origin->child_view == NULL) {
+        fprintf(stderr, "host runtime: aggregate result producer provenance does not match the projected value\n");
+        abort();
+    }
+    if (count >= origin->child_count) return NULL;
+    // This is an immutable view over another node in the same invocation
+    // arena. Flattening the view keeps repeated Cons-tail decomposition O(1).
+    __chelis_host_result_origin *suffix = __chelis_host_result_origin_alloc(arena, 0);
+    suffix->child_count = origin->child_count - count;
+    suffix->child_view = origin->child_view + count;
+    return suffix;
 }
 
 static const __chelis_host_result_origin **__chelis_host_result_origin_children(int64_t count) {
@@ -5781,6 +5802,15 @@ impl<'a> HostEmitter<'a> {
                 } else {
                     "chelis_list_drop"
                 };
+                // Build the immutable metadata view before the consuming
+                // entry point can release or advance the source payload.
+                self.lines.push(format!(
+                    "{}{} = __chelis_host_result_origin_list_suffix(__chelis_origin_arena, {}, {});",
+                    self.indent,
+                    result_origin_name(target),
+                    result_origin_name(&arg_vars[0].0),
+                    arg_vars[1].0
+                ));
                 self.lines.push(format!(
                     "{}{target} = {entry}({}, {});",
                     self.indent, arg_vars[0].0, arg_vars[1].0

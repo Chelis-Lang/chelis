@@ -2197,7 +2197,9 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
                 "cargo", "nextest", "run", "-p", "chelis-cli",
                 "--test", "issue_1771_callable_selected_result_claims", "-E",
                 "test(c_aggregate_interface_ingress_stamps_each_tensor_field_as_load) | "
+                "test(c_direct_list_skip_retains_selected_tail_producer) | "
                 "test(c_list_and_adt_projection_retains_selected_producer) | "
+                "test(c_nested_list_pattern_retains_selected_tail_producer) | "
                 "test(c_option_projection_distinguishes_local_and_formal_origins) | "
                 "test(c_aggregate_origin_arena_is_fresh_for_repeated_public_calls)",
             ),

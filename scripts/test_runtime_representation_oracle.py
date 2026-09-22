@@ -1107,7 +1107,9 @@ class ManifestTests(unittest.TestCase):
         self.assertTrue(any(
             "issue_1771_callable_selected_result_claims" in command
             and "c_aggregate_interface_ingress_stamps_each_tensor_field_as_load" in command
+            and "c_direct_list_skip_retains_selected_tail_producer" in command
             and "c_list_and_adt_projection_retains_selected_producer" in command
+            and "c_nested_list_pattern_retains_selected_tail_producer" in command
             and "c_option_projection_distinguishes_local_and_formal_origins" in command
             and "c_aggregate_origin_arena_is_fresh_for_repeated_public_calls" in command
             for command in commands

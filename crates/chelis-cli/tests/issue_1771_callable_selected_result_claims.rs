@@ -1098,6 +1098,199 @@ fn assert_aggregate_projection_provenance(native: bool) {
     }
 }
 
+fn nested_list_pattern_source(x: &str, y: &str) -> String {
+    format!(
+        "def select_second[n, m](x: tensor[n, 4, f32], y: tensor[m, 4, f32]) -> tensor[3, f32] ! {{ IO }} = {{\n\
+         _ = print(\"before-pattern\")\n\
+         values: List[tensor[*, f32]] = [diagonal(x, 0i32, 1i32), cumsum(diagonal(y, 0i32, 1i32), 0i32)]\n\
+         selected = match values with {{\n\
+         | Cons(_, Cons(value, Nil)) => value\n\
+         | _ => to_tensor([9.0f32, 8.0f32, 7.0f32])\n\
+         }}\n\
+         _ = print(\"after-pattern\")\n\
+         selected\n\
+         }}\n\
+         out = select_second(to_tensor({x}), to_tensor({y}))\n"
+    )
+}
+
+fn borrowed_list_tail_source(x: &str, y: &str) -> String {
+    format!(
+        "x = to_tensor({x})\n\
+         y = to_tensor({y})\n\
+         values: List[tensor[*, f32]] = [diagonal(x, 0i32, 1i32), cumsum(diagonal(y, 0i32, 1i32), 0i32)]\n\
+         def select_second() -> tensor[3, f32] ! {{ IO }} = {{\n\
+         _ = print(\"before-pattern\")\n\
+         selected = match values with {{\n\
+         | Cons(_, Cons(value, Nil)) => value\n\
+         | _ => to_tensor([9.0f32, 8.0f32, 7.0f32])\n\
+         }}\n\
+         _ = print(\"after-pattern\")\n\
+         selected\n\
+         }}\n\
+         out = select_second()\n"
+    )
+}
+
+fn assert_nested_list_pattern_provenance(native: bool) {
+    for (x, y, selected_agrees) in [
+        (THREE_BY_FOUR, THREE_BY_FOUR, true),
+        // A mismatching unselected neighbour must not claim the result.
+        (TWO_BY_FOUR, THREE_BY_FOUR, true),
+        (THREE_BY_FOUR, TWO_BY_FOUR, false),
+    ] {
+        for (path, source, producer) in [
+            ("nested Cons", nested_list_pattern_source(x, y), "cumsum"),
+            // A captured List is a genuine interface load and cannot be
+            // consumed. Its nested pattern exercises cloning skip.
+            ("captured Cons", borrowed_list_tail_source(x, y), "load"),
+        ] {
+            let (ok, output) = run(&source, native);
+            assert_eq!(ok, selected_agrees, "{path}: {source}\n{output}");
+            assert_eq!(output.matches("before-pattern").count(), 1, "{output}");
+            assert_eq!(
+                output.matches("after-pattern").count(),
+                usize::from(selected_agrees),
+                "{output}"
+            );
+            if selected_agrees {
+                assert!(
+                    output.contains("out = tensor(shape=[3], data=[1.0, 7.0, 18.0])"),
+                    "{output}"
+                );
+                assert!(!output.contains("numeric trap:"), "{output}");
+            } else {
+                assert_claim(&output, producer, 2);
+                assert!(!output.contains("pending result claim"), "{output}");
+            }
+        }
+    }
+}
+
+fn assert_native_list_pattern_skip_routes() {
+    for (name, source, expected_borrowed, expected_owned) in [
+        (
+            "owned_list_pattern",
+            nested_list_pattern_source(TWO_BY_FOUR, THREE_BY_FOUR),
+            0,
+            2,
+        ),
+        (
+            "borrowed_list_pattern",
+            borrowed_list_tail_source(TWO_BY_FOUR, THREE_BY_FOUR),
+            1,
+            1,
+        ),
+    ] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source_path = dir.path().join(format!("{name}.ch"));
+        let output_dir = dir.path().join("c");
+        fs::write(&source_path, &source).expect("fixture");
+        let built = Command::cargo_bin("chelis")
+            .expect("chelis")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args(["build", "--allow-style-violations"])
+            .arg(&source_path)
+            .args(["--target", "c", "-o"])
+            .arg(&output_dir)
+            .output()
+            .expect("build");
+        assert!(
+            built.status.success(),
+            "{source}\n{}{}",
+            String::from_utf8_lossy(&built.stdout),
+            String::from_utf8_lossy(&built.stderr)
+        );
+        let generated_name = format!("{name}.c");
+        let generated = fs::read_to_string(output_dir.join(&generated_name)).expect("generated C");
+        let borrowed = generated.matches(" = chelis_list_drop(").count();
+        let owned = generated.matches(" = chelis_list_drop_owned(").count();
+        assert_eq!(
+            (borrowed, owned),
+            (expected_borrowed, expected_owned),
+            "{generated}"
+        );
+        let suffix_sites = generated
+            .match_indices(" = __chelis_host_result_origin_list_suffix(")
+            .map(|(offset, _)| offset)
+            .collect::<Vec<_>>();
+        let mut drop_sites = generated
+            .match_indices(" = chelis_list_drop(")
+            .chain(generated.match_indices(" = chelis_list_drop_owned("))
+            .map(|(offset, _)| offset)
+            .collect::<Vec<_>>();
+        drop_sites.sort_unstable();
+        assert_eq!(suffix_sites.len(), drop_sites.len(), "{generated}");
+        assert!(
+            suffix_sites
+                .iter()
+                .zip(&drop_sites)
+                .all(|(suffix, drop)| suffix < drop),
+            "origin suffixes must be built before either runtime drop:\n{generated}"
+        );
+        assert!(
+            common::link_generated(&output_dir, &generated_name, name).success(),
+            "link {name}"
+        );
+        let executed = StdCommand::new(output_dir.join(name))
+            .output()
+            .expect("execute native fixture");
+        let output = format!(
+            "{}{}",
+            String::from_utf8_lossy(&executed.stdout),
+            String::from_utf8_lossy(&executed.stderr)
+        );
+        assert!(executed.status.success(), "{source}\n{output}");
+        assert!(
+            output.contains("out = tensor(shape=[3], data=[1.0, 7.0, 18.0])"),
+            "{output}"
+        );
+    }
+}
+
+fn direct_list_skip_source(x: &str, y: &str) -> String {
+    format!(
+        "def select_second[n, m](x: tensor[n, 4, f32], y: tensor[m, 4, f32]) -> tensor[3, f32] ! {{ IO }} = {{\n\
+         _ = print(\"before-skip\")\n\
+         values: List[tensor[*, f32]] = [diagonal(x, 0i32, 1i32), cumsum(diagonal(y, 0i32, 1i32), 0i32)]\n\
+         tail = skip(values, 1i64)\n\
+         selected = index(tail, 0i64)\n\
+         _ = print(\"after-skip\")\n\
+         selected\n\
+         }}\n\
+         out = select_second(to_tensor({x}), to_tensor({y}))\n"
+    )
+}
+
+fn assert_direct_list_skip_provenance(native: bool) {
+    for (x, y, selected_agrees) in [
+        (THREE_BY_FOUR, THREE_BY_FOUR, true),
+        // The skipped producer must not claim the selected tail element.
+        (TWO_BY_FOUR, THREE_BY_FOUR, true),
+        (THREE_BY_FOUR, TWO_BY_FOUR, false),
+    ] {
+        let source = direct_list_skip_source(x, y);
+        let (ok, output) = run(&source, native);
+        assert_eq!(ok, selected_agrees, "{source}\n{output}");
+        assert_eq!(output.matches("before-skip").count(), 1, "{output}");
+        assert_eq!(
+            output.matches("after-skip").count(),
+            usize::from(selected_agrees),
+            "{output}"
+        );
+        if selected_agrees {
+            assert!(
+                output.contains("out = tensor(shape=[3], data=[1.0, 7.0, 18.0])"),
+                "{output}"
+            );
+            assert!(!output.contains("numeric trap:"), "{output}");
+        } else {
+            assert_claim(&output, "cumsum", 2);
+            assert!(!output.contains("pending result claim"), "{output}");
+        }
+    }
+}
+
 fn direct_tail_list_source(select_second: bool, selected_agrees: bool) -> String {
     let selected = if selected_agrees {
         THREE_BY_FOUR
@@ -1590,6 +1783,12 @@ fn c_aggregate_origin_arena_is_fresh_for_repeated_public_calls() {
          def choose[n, m](x: tensor[n, 4, f32], y: tensor[m, 4, f32], second: bool) -> tensor[3, f32] = {\n\
          pair = make(x, y)\n\
          if second then pair.1 else pair.0\n\
+         }\n\
+         def choose_tail[n, m](x: tensor[n, 4, f32], y: tensor[m, 4, f32]) -> tensor[3, f32] = {\n\
+         values: List[tensor[*, f32]] = [diagonal(x, 0i32, 1i32), diagonal(x, 0i32, 1i32), cumsum(diagonal(y, 0i32, 1i32), 0i32)]\n\
+         once = skip(values, 1i64)\n\
+         twice = skip(once, 1i64)\n\
+         index(twice, 0i64)\n\
          }\n",
     )
     .expect("fixture");
@@ -1610,6 +1809,7 @@ fn c_aggregate_origin_arena_is_fresh_for_repeated_public_calls() {
 
     let make = common::authored_c_symbol("make");
     let choose = common::authored_c_symbol("choose");
+    let choose_tail = common::authored_c_symbol("choose_tail");
     let harness = format!(
         "#define main generated_main\n\
          #include \"arena_lifetime.c\"\n\
@@ -1626,6 +1826,9 @@ fn c_aggregate_origin_arena_is_fresh_for_repeated_public_calls() {
              chelis_tensor *right = {choose}(two, three, true);\n\
              if (chelis_tensor_rank(right) != 1 || chelis_tensor_shape(right, 0) != 3) return 3;\n\
              chelis_tensor_release(right);\n\
+             chelis_tensor *tail = {choose_tail}(two, three);\n\
+             if (chelis_tensor_rank(tail) != 1 || chelis_tensor_shape(tail, 0) != 3) return 4;\n\
+             chelis_tensor_release(tail);\n\
          }}\n\
          chelis_tensor_release(three);\n\
          chelis_tensor_release(two);\n\
@@ -1676,6 +1879,27 @@ fn eval_list_and_adt_projection_retains_selected_producer() {
 #[test]
 fn c_list_and_adt_projection_retains_selected_producer() {
     assert_aggregate_projection_provenance(true);
+}
+
+#[test]
+fn eval_nested_list_pattern_retains_selected_tail_producer() {
+    assert_nested_list_pattern_provenance(false);
+}
+
+#[test]
+fn c_nested_list_pattern_retains_selected_tail_producer() {
+    assert_nested_list_pattern_provenance(true);
+    assert_native_list_pattern_skip_routes();
+}
+
+#[test]
+fn eval_direct_list_skip_retains_selected_tail_producer() {
+    assert_direct_list_skip_provenance(false);
+}
+
+#[test]
+fn c_direct_list_skip_retains_selected_tail_producer() {
+    assert_direct_list_skip_provenance(true);
 }
 
 #[test]
