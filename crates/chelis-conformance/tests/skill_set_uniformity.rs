@@ -591,9 +591,8 @@ fn recording_non_applicability_with_a_shell_local_block_passes_and_survives_sync
 
 #[test]
 fn the_uniform_set_is_exactly_the_pinned_set() {
-    // The set the contract calls uniform is the toolchain's embedded set. Each
-    // agent surface gets a real materialized copy so discovery does not depend
-    // on whether that agent follows a directory symlink.
+    // The set the contract calls uniform is the toolchain's embedded set.
+    // Both agent discovery paths point at the same authoritative tree.
     let tmp = tempfile::tempdir().unwrap();
     let root = stamp(tmp.path(), "uniform");
     let mut expected: Vec<String> = skills::SHARED_SKILLS
@@ -602,39 +601,34 @@ fn the_uniform_set_is_exactly_the_pinned_set() {
         .collect();
     expected.sort();
 
-    for rel in ["agent-skills", ".claude/skills", ".codex/skills"] {
+    let mut present: Vec<String> = std::fs::read_dir(root.join("agent-skills"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    present.sort();
+    assert_eq!(present, expected, "agent-skills");
+
+    for rel in [".claude/skills", ".codex/skills"] {
         let surface = root.join(rel);
-        assert!(surface.is_dir(), "{rel} must be a directory");
-        assert!(!surface.is_symlink(), "{rel} must be a materialized copy");
-        let mut present: Vec<String> = std::fs::read_dir(&surface)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .collect();
-        present.sort();
-        assert_eq!(present, expected, "{rel}");
-        for skill in skills::SHARED_SKILLS {
-            let actual = std::fs::read_to_string(surface.join(skill).join("SKILL.md")).unwrap();
-            let canonical =
-                std::fs::read_to_string(root.join("agent-skills").join(skill).join("SKILL.md"))
-                    .unwrap();
-            assert_eq!(actual, canonical, "{rel}/{skill}/SKILL.md");
-        }
+        assert!(surface.is_symlink(), "{rel} must be a symlink");
+        assert_eq!(
+            std::fs::read_link(&surface).unwrap(),
+            std::path::Path::new("../agent-skills"),
+            "{rel}"
+        );
     }
 }
 
 #[test]
-fn sync_repairs_each_materialized_agent_skill_surface() {
+fn sync_repairs_each_agent_skill_symlink() {
     let tmp = tempfile::tempdir().unwrap();
     let root = stamp(tmp.path(), "mirrors");
 
-    std::fs::write(
-        root.join(".codex/skills/spec-sync/SKILL.md"),
-        "forked codex copy\n",
-    )
-    .unwrap();
-    std::fs::remove_dir_all(root.join(".claude/skills/cli-surface")).unwrap();
+    std::fs::remove_file(root.join(".codex/skills")).unwrap();
+    std::os::unix::fs::symlink("../other-skills", root.join(".codex/skills")).unwrap();
+    std::fs::remove_file(root.join(".claude/skills")).unwrap();
     std::fs::create_dir_all(root.join(".claude/skills/rogue")).unwrap();
     std::fs::write(root.join(".claude/skills/rogue/SKILL.md"), "rogue copy\n").unwrap();
 
@@ -649,15 +643,15 @@ fn sync_repairs_each_materialized_agent_skill_surface() {
         audit::Verdict::Fail
     );
 
-    scaffold::materialize_skills(&root).expect("repair materialized skill surfaces");
+    scaffold::materialize_skills(&root).expect("repair skill symlinks");
     assert!(audit::audit(&root).ok());
-    assert!(!root.join(".claude/skills/rogue").exists());
-    assert_eq!(
-        std::fs::read_to_string(root.join(".codex/skills/spec-sync/SKILL.md")).unwrap(),
-        std::fs::read_to_string(root.join("agent-skills/spec-sync/SKILL.md")).unwrap()
-    );
-    assert_eq!(
-        std::fs::read_to_string(root.join(".claude/skills/cli-surface/SKILL.md")).unwrap(),
-        std::fs::read_to_string(root.join("agent-skills/cli-surface/SKILL.md")).unwrap()
-    );
+    for rel in [".claude/skills", ".codex/skills"] {
+        let surface = root.join(rel);
+        assert!(surface.is_symlink(), "{rel}");
+        assert_eq!(
+            std::fs::read_link(surface).unwrap(),
+            std::path::Path::new("../agent-skills"),
+            "{rel}"
+        );
+    }
 }

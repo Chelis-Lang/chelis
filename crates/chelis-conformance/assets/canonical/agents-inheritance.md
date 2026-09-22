@@ -302,7 +302,7 @@ pull request with no local command and no human approval. Do not mix such a chan
 code, and do not add a path to `scripts/openspec_acceptance.py`'s allowlist to make a
 change land. Automatic acceptance proves path and schema validity, not correctness.
 `README.md` has the workflow; do not run `openspec init`'s tool generation, because
-`.claude/skills` and `.codex/skills` are toolchain-managed copies of `agent-skills/`.
+`.claude/skills` and `.codex/skills` are symlinks to `agent-skills/`.
 
 ## Change Hygiene
 
@@ -565,7 +565,7 @@ through reef, a Cargo workspace, or Docker.
 ## Pointers
 
 - **Shared skills** live in `agent-skills/`; `.claude/skills` and `.codex/skills` are
-  byte-identical materialized copies, `.claude/commands/` and `.codex/commands/` stay byte-identical, and the
+  symlinks to that one authored tree, `.claude/commands/` and `.codex/commands/` stay byte-identical, and the
   `red-team` alias is wired to `redteam-exec` with its fresh-round and verify modes. The
   set: `redteam-exec`, `spec-sync`, `phase-gate`, `backend-numerics`, `example-corpus`,
   `cli-surface`, `packaging-install`, `issue-resolution`.

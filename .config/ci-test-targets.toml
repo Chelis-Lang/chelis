@@ -3,15 +3,15 @@
 # are consumed by scripts/ci_change_owned.py and fail closed when stale.
 version = 3
 
-# chelis#845: shared skill source and generated agent surfaces are checked by
-# the script-unit skill metadata/copy contract.
+# chelis#845: shared skill source and generated agent symlinks are checked by
+# the script-unit skill metadata/link contract.
 [[path_rule]]
 prefix = ".claude/skills"
 disposition = "owner"
 workflow = "ci.yml"
 job = "script-unit"
 cadence = "pull_request and push"
-reason = "script-unit verifies every Claude skill copy is a real byte-identical materialization of agent-skills"
+reason = "script-unit verifies the Claude skill path is the canonical ../agent-skills symlink"
 tracking_issue = "chelis#845"
 
 [[path_rule]]
@@ -20,7 +20,7 @@ disposition = "owner"
 workflow = "ci.yml"
 job = "script-unit"
 cadence = "pull_request and push"
-reason = "script-unit verifies every Codex skill copy is a real byte-identical materialization of agent-skills"
+reason = "script-unit verifies the Codex skill path is the canonical ../agent-skills symlink"
 tracking_issue = "chelis#845"
 
 [[path_rule]]
@@ -29,7 +29,7 @@ disposition = "owner"
 workflow = "ci.yml"
 job = "script-unit"
 cadence = "pull_request and push"
-reason = "script-unit executes the shared-skill metadata and copy checker"
+reason = "script-unit executes the shared-skill metadata and discovery-link checker"
 tracking_issue = "chelis#845"
 
 [[path_rule]]
@@ -38,7 +38,7 @@ disposition = "owner"
 workflow = "ci.yml"
 job = "script-unit"
 cadence = "pull_request and push"
-reason = "script-unit exercises positive and negative shared-skill copy contracts"
+reason = "script-unit exercises positive and negative shared-skill link contracts"
 tracking_issue = "chelis#845"
 
 [[path_rule]]
@@ -47,7 +47,7 @@ disposition = "owner"
 workflow = "ci.yml"
 job = "script-unit"
 cadence = "pull_request and push"
-reason = "script-unit checks deterministic regeneration of conformance and agent-surface copies"
+reason = "script-unit checks deterministic regeneration of conformance assets and agent-surface links"
 tracking_issue = "chelis#845"
 
 [[path_rule]]

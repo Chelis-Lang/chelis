@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate shared skill metadata, agent/embedded copies, and command wrappers.
+"""Validate shared skill metadata, discovery links, embedded copies, and wrappers.
 
 CI runs this on documentation-only changes as well as code changes. The
 Rust asset-drift and skill-uniformity tests separately exercise the compiled
@@ -20,7 +20,6 @@ try:
         SHARED_SKILLS,
         agent_surface_layout_reasons,
         is_stale,
-        planned_agent_surface_copies,
         planned_skill_copies,
     )
 except ImportError:
@@ -28,7 +27,6 @@ except ImportError:
         SHARED_SKILLS,
         agent_surface_layout_reasons,
         is_stale,
-        planned_agent_surface_copies,
         planned_skill_copies,
     )
 
@@ -106,12 +104,9 @@ def check(root: Path) -> list[str]:
         for src, dest in pairs:
             errors.extend(validate_skill(src))
             errors.extend(validate_skill(dest))
-        surface_pairs = planned_agent_surface_copies(root)
-        for _, dest in surface_pairs:
-            errors.extend(validate_skill(dest))
         errors.extend(
             is_stale(
-                pairs + surface_pairs,
+                pairs,
                 root / "crates/chelis-conformance/assets/skills",
             )
         )

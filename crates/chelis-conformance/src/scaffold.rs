@@ -346,8 +346,8 @@ fn atx_heading_level(line: &str) -> Option<usize> {
     (level > 0 && level <= 6 && bytes.get(level) == Some(&b' ')).then_some(level)
 }
 
-/// Materialize `agent-skills/` from the embedded pinned skill set and copy the
-/// resulting tree to `.claude/skills` and `.codex/skills`. Shared by `init` and
+/// Materialize `agent-skills/` from the embedded pinned skill set and point
+/// `.claude/skills` and `.codex/skills` at that one tree. Shared by `init` and
 /// `sync`.
 ///
 /// Preserves any trailing shell-local block in each retained shared `SKILL.md`
@@ -476,8 +476,8 @@ pub fn materialize_skills(root: &Path) -> Result<Vec<String>, String> {
         ));
     }
 
-    mirror_tree(root, "agent-skills", ".claude/skills")?;
-    mirror_tree(root, "agent-skills", ".codex/skills")?;
+    symlink_file(root, "../agent-skills", ".claude/skills")?;
+    symlink_file(root, "../agent-skills", ".codex/skills")?;
     Ok(notices)
 }
 
@@ -535,50 +535,6 @@ fn remove_path(path: &Path) -> Result<(), String> {
         fs::remove_file(path)
     };
     res.map_err(|e| format!("remove {}: {e}", path.display()))
-}
-
-fn mirror_tree(root: &Path, source_rel: &str, destination_rel: &str) -> Result<(), String> {
-    let source = root.join(source_rel);
-    let destination = root.join(destination_rel);
-    if fs::symlink_metadata(&destination).is_ok() {
-        remove_path(&destination)?;
-    }
-    copy_tree(&source, &destination)
-}
-
-fn copy_tree(source: &Path, destination: &Path) -> Result<(), String> {
-    let metadata =
-        fs::symlink_metadata(source).map_err(|e| format!("inspect {}: {e}", source.display()))?;
-    if metadata.file_type().is_symlink() {
-        return Err(format!(
-            "cannot materialize skill mirror from symlink {}",
-            source.display()
-        ));
-    }
-    if metadata.is_file() {
-        if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
-        }
-        fs::copy(source, destination).map(|_| ()).map_err(|e| {
-            format!(
-                "copy {} to {}: {e}",
-                source.display(),
-                destination.display()
-            )
-        })
-    } else if metadata.is_dir() {
-        fs::create_dir_all(destination)
-            .map_err(|e| format!("mkdir {}: {e}", destination.display()))?;
-        let entries = fs::read_dir(source)
-            .map_err(|e| format!("read directory {}: {e}", source.display()))?;
-        for entry in entries {
-            let entry = entry.map_err(|e| format!("read directory {}: {e}", source.display()))?;
-            copy_tree(&entry.path(), &destination.join(entry.file_name()))?;
-        }
-        Ok(())
-    } else {
-        Err(format!("unsupported skill-tree entry {}", source.display()))
-    }
 }
 
 /// The documents `conform sync` / `conform bump` **restamp in place** and
@@ -901,8 +857,14 @@ fn symlink_file(root: &Path, target: &str, link_rel: &str) -> Result<(), String>
 #[cfg(unix)]
 fn symlink_generic(root: &Path, target: &str, link_rel: &str) -> Result<(), String> {
     let link = root.join(link_rel);
-    // Idempotent: replace an existing symlink/file at the link path.
-    let _ = fs::remove_file(&link);
+    // Idempotent, including migration from the former materialized-directory
+    // layout: replace any existing filesystem entry at the link path.
+    if fs::symlink_metadata(&link).is_ok() {
+        remove_path(&link)?;
+    }
+    if let Some(parent) = link.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+    }
     std::os::unix::fs::symlink(target, &link)
         .map_err(|e| format!("symlink {} -> {target}: {e}", link.display()))
 }

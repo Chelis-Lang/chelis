@@ -66,25 +66,33 @@ class PlannedCopiesTests(unittest.TestCase):
             str(pairs[0][1]).endswith("assets/canonical/agents-inheritance.md")
         )
 
-    def test_every_skill_is_copied_to_both_agent_surfaces(self):
-        pairs = regen.planned_agent_surface_copies(ROOT)
-        self.assertEqual(len(pairs), 2 * len(regen.SHARED_SKILLS))
-        destinations = {dest for _, dest in pairs}
-        for skill in regen.SHARED_SKILLS:
-            self.assertIn(ROOT / ".claude/skills" / skill / "SKILL.md", destinations)
-            self.assertIn(ROOT / ".codex/skills" / skill / "SKILL.md", destinations)
-
-    def test_agent_surfaces_must_be_real_directories(self):
+    def test_agent_surfaces_must_link_to_the_authored_tree(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            (root / "agent-skills").mkdir()
             (root / ".claude").mkdir()
             (root / ".codex").mkdir()
             (root / ".claude/skills").symlink_to("../agent-skills", target_is_directory=True)
-            (root / ".codex/skills").mkdir()
+            (root / ".codex/skills").symlink_to("../agent-skills", target_is_directory=True)
+            self.assertEqual(regen.agent_surface_layout_reasons(root), [])
+
+            (root / ".codex/skills").unlink()
+            (root / ".codex/skills").symlink_to("../other", target_is_directory=True)
             reasons = regen.agent_surface_layout_reasons(root)
             self.assertEqual(len(reasons), 1)
-            self.assertIn("symlink", reasons[0])
+            self.assertIn("../agent-skills", reasons[0])
+
+    def test_agent_surface_link_regeneration_replaces_legacy_layouts(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / ".claude/skills/legacy").mkdir(parents=True)
+            (root / ".codex").mkdir()
+            (root / ".codex/skills").symlink_to("../other", target_is_directory=True)
+
+            regen.materialize_agent_surface_links(root)
+
+            for surface in (root / ".claude/skills", root / ".codex/skills"):
+                self.assertTrue(surface.is_symlink(), surface)
+                self.assertEqual(surface.readlink(), Path("../agent-skills"))
 
 
 class IsStaleTests(unittest.TestCase):
@@ -133,7 +141,6 @@ class RoundTripTests(unittest.TestCase):
         # tree matches the live agent-skills/.
         pairs = (
             regen.planned_skill_copies(ROOT)
-            + regen.planned_agent_surface_copies(ROOT)
             + regen.planned_canonical_copies(ROOT)
         )
         dest_root = ROOT / "crates" / "chelis-conformance" / "assets" / "skills"

@@ -57,8 +57,9 @@ typed error), but it is never required.
 `AGENTS.md` and `docs/CHELIS_SURFACE.md` and synchronizes `agent-skills/`.
 The `AGENTS.md` region contains the pinned toolchain's complete root Chelis
 agent contract. Shell-owned text outside the managed document regions remains
-in place. Sync also writes byte-identical real copies of `agent-skills/` to
-`.claude/skills/` and `.codex/skills/` so both agents discover the same set.
+in place. Sync also points `.claude/skills` and `.codex/skills` at the one
+materialized `agent-skills/` tree with `../agent-skills` symlinks so both agents
+discover the same set without duplicated copies.
 Including the complete contract is the default. Each shell should review which
 parts apply, exclude irrelevant inherited sections, and keep its own guidance
 when it remains relevant and current. The shell can adjust the synchronized

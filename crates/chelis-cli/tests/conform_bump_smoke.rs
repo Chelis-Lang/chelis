@@ -48,7 +48,7 @@ fn conform_sync_help_explains_skill_additions_and_removals() {
         .stdout(predicate::str::contains("excluded_skills"))
         .stdout(predicate::str::contains("shell-local:exclude"))
         .stdout(predicate::str::contains("complete pinned root contract"))
-        .stdout(predicate::str::contains("materialized copies"))
+        .stdout(predicate::str::contains("symlink"))
         .stdout(predicate::str::contains("standalone Markdown comments"));
 }
 

@@ -50,7 +50,7 @@ fn declared_local_skill_survives_sync_and_audit() {
         audit::Verdict::Fail
     );
 
-    // Declare it; sync preserves it and copies it to both agent surfaces.
+    // Declare it; sync preserves it and both agent symlinks expose it.
     append(
         &root.join("reef.toml"),
         "\n[conform]\nlocal_skills = [\"chelis-std\"]\n",
@@ -118,7 +118,7 @@ fn shell_local_block_passes_audit_and_survives_sync() {
     append(&skill, &format!("\n{BLOCK}"));
 
     // Sync regenerates the managed span, keeps the block verbatim, and updates
-    // both agent-surface copies before audit accepts the tree.
+    // both agent-surface symlinks before audit accepts the tree.
     let notices = scaffold::materialize_skills(&root).unwrap();
     assert!(
         notices.is_empty(),

@@ -2,7 +2,7 @@
 //!
 //! `scripts/regenerate_conformance_assets.py` copies `agent-skills/` into
 //! `assets/skills/`, which `src/skills.rs` embeds via `include_str!`. This test
-//! asserts the embedded bytes, both agent-surface copies, the `SHARED_SKILLS`
+//! asserts the embedded bytes, both agent-surface symlinks, the `SHARED_SKILLS`
 //! list, and the live `agent-skills/` directory agree. A forgotten re-run (or a hand-edited
 //! embedded copy, or a skill added/removed upstream) fails here with a pointer
 //! back at the regenerate script — the same guarantee `chelis-std-bundle`'s
@@ -68,16 +68,15 @@ fn embedded_skills_match_repo() {
         let path = root.join(surface);
         let metadata =
             std::fs::symlink_metadata(&path).unwrap_or_else(|e| panic!("inspect {path:?}: {e}"));
-        assert!(metadata.is_dir() && !metadata.file_type().is_symlink());
-        for (name, body) in EMBEDDED_SKILLS {
-            let copy = path.join(name).join("SKILL.md");
-            let live =
-                std::fs::read_to_string(&copy).unwrap_or_else(|e| panic!("read {copy:?}: {e}"));
-            assert_eq!(
-                live, *body,
-                "{surface}/{name}/SKILL.md is stale; run `{regen}`"
-            );
-        }
+        assert!(
+            metadata.file_type().is_symlink(),
+            "{surface} is not a symlink"
+        );
+        assert_eq!(
+            std::fs::read_link(&path).unwrap(),
+            std::path::Path::new("../agent-skills"),
+            "{surface} must point to the one authored skill tree"
+        );
     }
 }
 

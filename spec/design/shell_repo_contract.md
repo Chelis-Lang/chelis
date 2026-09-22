@@ -407,12 +407,12 @@ toolchain selected explicitly, then audit every item below:
   skill-specific overrides, described below. A thin
   `agent-skills/UPSTREAM.toml` records the stamp. This replaces the older
   hand-vendored copy, which drifted silently.
-- `.claude/skills` and `.codex/skills` are real, byte-identical materialized
-  copies of `agent-skills/`;
+- `.claude/skills` and `.codex/skills` are `../agent-skills` symlinks to the one
+  materialized skill tree;
   `.claude/commands/` and `.codex/commands/` wrappers stay mirrored; the
   `red-team` alias stays wired to `redteam-exec` (per monorepo `AGENTS.md`
-  §Pointers, Shared skills). `conform sync` rebuilds both skill copies and
-  `conform audit` rejects a missing, symlinked, stale, or forked copy.
+  §Pointers, Shared skills). `conform sync` restores both symlinks and
+  `conform audit` rejects a missing, non-symlinked, or misdirected surface.
 - Because the set is materialized from the pinned toolchain, it is always in
   lockstep with the monorepo at the shell's pin after applying the shell's
   declared additions, whole-skill exclusions, and section selectors — a shell
@@ -545,7 +545,7 @@ self-audit.
 | 11 | `tests_neg/` + runner, in CI | MUST | §6 | `tests_neg/`, `scripts/run_negative_tests.py` |
 | 12 | `tests_blocked/` + runner, in CI | MUST once a blocker exists | §5 | `tests_blocked/`, `scripts/run_blocked_probes.py` |
 | 13 | Pin Bump Checklist in AGENTS.md | MUST | §7 | `AGENTS.md` §Pin Bump Checklist |
-| 14 | Declared shared-skill subset + validated local additions/section exclusions + materialized skill copies + mirrored commands | MUST | §8 | `reef.toml [conform]`, `agent-skills/`, `.claude/skills`, `.codex/skills` |
+| 14 | Declared shared-skill subset + validated local additions/section exclusions + agent skill symlinks + mirrored commands | MUST | §8 | `reef.toml [conform]`, `agent-skills/`, `.claude/skills`, `.codex/skills` |
 | 15 | Parity harness (own uv project, checked-in goldens, oracle guards) | MUST if external oracles | §9 | `parity/` |
 | 16 | ≥2-config acceptance for new public surface | MUST | §9 | `spec/vision.md` amendments |
 | 17 | Scaffolding Drift Rule in AGENTS.md | MUST | §10 | `AGENTS.md` §Scaffolding Drift Rule |
@@ -570,7 +570,7 @@ populates row 12) → vendor skills (row 14) → run the full local gate.
 | `tests_neg/` + runner (§6) | ✓ | ✗ | ✗ |
 | `tests_blocked/` + runner (§5) | ✓ | ✗ | ✗ |
 | Pin Bump Checklist (§7) | ✓ | ✗ | ✗ |
-| Vendored shared skills + agent-surface copies (§8) | ✓ | ✓ | ✓ |
+| Vendored shared skills + agent-surface symlinks (§8) | ✓ | ✓ | ✓ |
 | Parity harness as uv project (§9) | ✓ | partial | partial |
 
 nautilus and coral predate this contract; their gap rows are the standing

@@ -1079,7 +1079,7 @@ fn check_vendored_skills(ctx: &Ctx) -> Check {
         }
     }
     for mirror in [".claude/skills", ".codex/skills"] {
-        if let Err(why) = identical_trees(&skills_dir, &ctx.root.join(mirror)) {
+        if let Err(why) = exact_relative_symlink(&ctx.root.join(mirror), "../agent-skills") {
             problems.push(format!("{mirror}: {why}"));
         }
     }
@@ -1089,8 +1089,8 @@ fn check_vendored_skills(ctx: &Ctx) -> Check {
                 "vendored skills drifted from the pinned set: {}",
                 problems.join(", ")
             ),
-            "run `chelis reef conform sync` to re-materialize agent-skills/, .claude/skills/, \
-             and .codex/skills/ from the toolchain. \
+            "run `chelis reef conform sync` to re-materialize agent-skills/ and restore \
+             the .claude/skills and .codex/skills symlinks. \
              Configure shell-owned additions with `[conform] local_skills` and embedded removals \
              with `[conform] excluded_skills`; use a trailing `<!-- shell-local:begin -->` block \
              to retain and amend a shared skill, with `shell-local:exclude` selectors for \
@@ -1233,56 +1233,18 @@ fn read_opt(path: &Path) -> Option<String> {
     std::fs::read_to_string(path).ok()
 }
 
-fn identical_trees(expected: &Path, actual: &Path) -> Result<(), String> {
-    let expected_entries = tree_inventory(expected)?;
-    let actual_entries = tree_inventory(actual)?;
-    if expected_entries == actual_entries {
-        Ok(())
-    } else {
-        Err("is not a real, byte-identical copy of agent-skills/".to_string())
+fn exact_relative_symlink(link: &Path, expected: &str) -> Result<(), String> {
+    let metadata = std::fs::symlink_metadata(link)
+        .map_err(|e| format!("missing or unreadable symlink ({e})"))?;
+    if !metadata.file_type().is_symlink() {
+        return Err(format!("must be a symlink to {expected}"));
     }
-}
-
-fn tree_inventory(root: &Path) -> Result<BTreeMap<PathBuf, Option<Vec<u8>>>, String> {
-    let metadata =
-        std::fs::symlink_metadata(root).map_err(|e| format!("missing or unreadable ({e})"))?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err("must be a real directory, not a symlink or file".to_string());
-    }
-    let mut inventory = BTreeMap::new();
-    collect_tree(root, root, &mut inventory)?;
-    Ok(inventory)
-}
-
-fn collect_tree(
-    root: &Path,
-    directory: &Path,
-    inventory: &mut BTreeMap<PathBuf, Option<Vec<u8>>>,
-) -> Result<(), String> {
-    let entries = std::fs::read_dir(directory)
-        .map_err(|e| format!("cannot read {} ({e})", directory.display()))?;
-    for entry in entries {
-        let entry = entry.map_err(|e| format!("cannot read {} ({e})", directory.display()))?;
-        let path = entry.path();
-        let rel = path
-            .strip_prefix(root)
-            .expect("walk remains below root")
-            .to_path_buf();
-        let metadata = std::fs::symlink_metadata(&path)
-            .map_err(|e| format!("cannot inspect {} ({e})", path.display()))?;
-        if metadata.file_type().is_symlink() {
-            return Err(format!("contains symlink {}", rel.display()));
-        }
-        if metadata.is_dir() {
-            inventory.insert(rel, None);
-            collect_tree(root, &path, inventory)?;
-        } else if metadata.is_file() {
-            let bytes = std::fs::read(&path)
-                .map_err(|e| format!("cannot read {} ({e})", path.display()))?;
-            inventory.insert(rel, Some(bytes));
-        } else {
-            return Err(format!("contains unsupported entry {}", rel.display()));
-        }
+    let target = std::fs::read_link(link).map_err(|e| format!("cannot read symlink ({e})"))?;
+    if target != Path::new(expected) {
+        return Err(format!(
+            "points to {}, expected {expected}",
+            target.display()
+        ));
     }
     Ok(())
 }

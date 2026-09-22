@@ -859,8 +859,8 @@ enum ConformCommand {
     /// reapplied while its local block is preserved. Standalone AGENTS.md
     /// selectors are applied to the complete pinned root contract in the same
     /// way. Selector control markers must be standalone Markdown comments,
-    /// outside code fences and enclosing HTML blocks. Both agent skill
-    /// directories are rebuilt as materialized copies.
+    /// outside code fences and enclosing HTML blocks. `.claude/skills` and
+    /// `.codex/skills` are restored as `../agent-skills` symlinks.
     Bump {
         /// Target chelis version (bare `X.Y.Z`).
         version: String,
@@ -5001,7 +5001,7 @@ fn cmd_reef_conform(command: ConformCommand) -> Result<(), Box<dyn std::error::E
                 "the managed blocks in AGENTS.md / docs/CHELIS_SURFACE.md",
             )?;
             println!(
-                "synced managed blocks + skill copies to chelis {version} at {}",
+                "synced managed blocks + skill links to chelis {version} at {}",
                 root.display()
             );
         }
@@ -5050,7 +5050,7 @@ fn cmd_reef_conform(command: ConformCommand) -> Result<(), Box<dyn std::error::E
                 &written,
                 "the managed blocks in AGENTS.md / docs/CHELIS_SURFACE.md",
             )?;
-            println!("restamped managed blocks + skill copies to chelis {version}");
+            println!("restamped managed blocks + skill links to chelis {version}");
 
             // Offline gate, categorized (chelis#655). A failure on a row whose
             // artifact the bump itself writes (its pins/managed-block stamps/

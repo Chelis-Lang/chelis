@@ -5,9 +5,10 @@ The `chelis-conformance` crate embeds canonical content into the chelis binary
 at compile time (`include_str!`), mirroring `chelis-std-bundle`. The repo files
 under `agent-skills/` and the root `AGENTS.md` are the source of truth for the
 *content*; the committed
-copies under `.claude/skills/`, `.codex/skills/`, and
-`crates/chelis-conformance/assets/` are generated copies. This script rebuilds
-them from the repo files so the surfaces cannot drift by hand.
+copies under `crates/chelis-conformance/assets/` are generated copies.
+`.claude/skills` and `.codex/skills` are generated symlinks to the one authored
+`agent-skills/` tree. This script rebuilds both forms so the surfaces cannot
+drift by hand.
 
 `crates/chelis-conformance/tests/asset_drift_tripwire.rs` asserts the embedded
 bytes equal the live repo files, so a forgotten re-run fails the build with a
@@ -80,25 +81,34 @@ def planned_skill_copies(root: Path) -> list[tuple[Path, Path]]:
     return pairs
 
 
-def planned_agent_surface_copies(root: Path) -> list[tuple[Path, Path]]:
-    """Return copies that expose every shared skill to Claude and Codex."""
-    pairs: list[tuple[Path, Path]] = []
-    for skill in SHARED_SKILLS:
-        source = root / "agent-skills" / skill / "SKILL.md"
-        for surface in (root / ".claude" / "skills", root / ".codex" / "skills"):
-            pairs.append((source, surface / skill / "SKILL.md"))
-    return pairs
-
-
 def agent_surface_layout_reasons(root: Path) -> list[str]:
-    """Reject pointer layouts where real materialized directories are required."""
+    """Require both agent discovery paths to link to the authored skill tree."""
     reasons = []
     for surface in (root / ".claude" / "skills", root / ".codex" / "skills"):
-        if surface.is_symlink():
-            reasons.append(f"agent skill surface is a symlink, not a real directory: {surface}")
-        elif not surface.is_dir():
-            reasons.append(f"agent skill surface is missing or not a directory: {surface}")
+        if not surface.is_symlink():
+            reasons.append(f"agent skill surface is not a symlink: {surface}")
+            continue
+        try:
+            target = surface.readlink()
+        except OSError as exc:
+            reasons.append(f"cannot read agent skill surface symlink {surface}: {exc}")
+            continue
+        if target != Path("../agent-skills"):
+            reasons.append(
+                f"agent skill surface {surface} points to {target}, expected ../agent-skills"
+            )
     return reasons
+
+
+def materialize_agent_surface_links(root: Path) -> None:
+    """Replace legacy copies or pointers with the canonical discovery symlinks."""
+    for surface in (root / ".claude" / "skills", root / ".codex" / "skills"):
+        if surface.is_symlink() or surface.is_file():
+            surface.unlink()
+        elif surface.exists():
+            shutil.rmtree(surface)
+        surface.parent.mkdir(parents=True, exist_ok=True)
+        surface.symlink_to("../agent-skills", target_is_directory=True)
 
 
 def planned_canonical_copies(root: Path) -> list[tuple[Path, Path]]:
@@ -146,9 +156,8 @@ def main() -> int:
     root = repo_root()
     dest_skills = root / "crates" / "chelis-conformance" / "assets" / "skills"
     skill_pairs = planned_skill_copies(root)
-    surface_pairs = planned_agent_surface_copies(root)
     canonical_pairs = planned_canonical_copies(root)
-    pairs = skill_pairs + surface_pairs + canonical_pairs
+    pairs = skill_pairs + canonical_pairs
 
     if args.check:
         reasons = is_stale(pairs, dest_skills) + agent_surface_layout_reasons(root)
@@ -169,17 +178,13 @@ def main() -> int:
     reasons_before = is_stale(pairs, dest_skills) + agent_surface_layout_reasons(root)
     if dest_skills.exists():
         shutil.rmtree(dest_skills)
-    for surface in (root / ".claude" / "skills", root / ".codex" / "skills"):
-        if surface.is_symlink() or surface.is_file():
-            surface.unlink()
-        elif surface.exists():
-            shutil.rmtree(surface)
     for src, dest in skill_pairs:
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(src, dest)
-    for src, dest in surface_pairs + canonical_pairs:
+    for src, dest in canonical_pairs:
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(src, dest)
+    materialize_agent_surface_links(root)
 
     if reasons_before:
         print(f"regenerated {len(pairs)} embedded conformance file(s); changes:")
