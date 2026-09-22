@@ -956,6 +956,12 @@ jobs:
         with:
           ref: ${{ needs.changes.outputs.candidate_sha }}
 
+      # The ci-glibc231 profile realizes its own compiler, runtime and CVC5
+      # closure; free ~25-30 GB first, as the other hosted build lanes do.
+      - name: Free disk space (Ubuntu)
+        if: runner.environment == 'github-hosted'
+        uses: ./.github/actions/free-disk-space
+
       - name: Set up project CI
         id: build-cache
         uses: ./.github/actions/setup-project-ci
