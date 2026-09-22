@@ -39,5 +39,5 @@ jobs:
       - name: Validate the locked shared OpenSpec store
         uses: Chelis-Lang/ci/actions/openspec-store@6afc09f65c178211a9d1bea994a4b39b62d23024
         with:
-          app-client-id: ${{ vars.CHELIS_OPENSPEC_APP_CLIENT_ID }}
-          app-private-key: ${{ secrets.CHELIS_OPENSPEC_APP_PRIVATE_KEY }}
+          app-client-id: ${{ vars.CI_APP_ID }}
+          app-private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}

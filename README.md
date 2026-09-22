@@ -670,10 +670,10 @@ openspec validate chelis-add-thing --strict --no-interactive
 Push the store branch or use its optional `openspec-submit` Devenv command.
 The store owns document-only submission and autoland; no Chelis push submits a
 local plan. Autoland is limited to `chelis-*` planning documents, never tooling,
-schemas, configuration, other domains, or mixed code changes. It requires the
-store's trusted workflows and dedicated App installation to be deployed.
-An unavailable credential blocks automatic acceptance; ordinary store pull
-requests remain the review path.
+schemas, configuration, other domains, or mixed code changes. The store's trusted
+workflows reuse `OPENSPEC_APP_ID` and `OPENSPEC_APP_PRIVATE_KEY`; no new App or
+installation is needed. An unavailable token blocks automatic acceptance;
+ordinary store pull requests remain the review path.
 
 Merge the store plan first, then cite its change ID and full store commit in the
 implementation PR and update the consumer lock to that accepted revision. Keep
@@ -684,11 +684,11 @@ in the store's migration evidence.
 
 The `OpenSpec store` workflow uses the pinned shared CI action to verify a
 read-only checkout of the locked commit, store identity/root selection, absence
-of local capability dependencies, and strict validation. It requires
-`vars.CHELIS_OPENSPEC_APP_CLIENT_ID` and
-`secrets.CHELIS_OPENSPEC_APP_PRIVATE_KEY`: the existing **read-only store App**,
-not the `OPENSPEC_APP_*` credential used by store autoland. The App reads only
-`Chelis-Lang/openspec`; do not broaden compiler CI's token to write plans.
+of local capability dependencies, and strict validation. It reuses
+`vars.CI_APP_ID` and `secrets.CI_APP_PRIVATE_KEY`, like the other private-input CI
+jobs. The pinned action mints a short-lived `Contents: read` token limited to
+`Chelis-Lang/openspec`. Store autoland keeps its existing `OPENSPEC_APP_*`
+credentials; compiler CI receives no permission to write plans.
 
 See the store's
 [operations guide](https://github.com/Chelis-Lang/openspec/blob/main/docs/store-operations.md)
