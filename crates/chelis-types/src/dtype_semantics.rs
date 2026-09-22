@@ -2994,10 +2994,13 @@ pub fn compare_scalar_tensor(
 /// Round a compile-time float bound to `prim`'s exact value, the way the
 /// evaluator does when it stores one.
 ///
-/// THE single definition of what a float-target `cast` does to a statically
-/// resolvable literal. Both compiled fold sites — `chelis-ir`'s
-/// `extract_f64_value` and `chelis-backend-c`'s `static_float_bound` — call
-/// this instead of carrying the rule themselves.
+/// What a float-target `cast` does to a statically resolvable literal, for the
+/// legacy `extract_f64_value` fold that still serves the non-execution
+/// `dropout` arm.
+///
+/// `uniform_like` bounds do NOT come through here: they stage through
+/// `static_controls::scalar` (IR) and `StagedBound` (C), which reach the same
+/// `finalize_scalar` chokepoint via `cast_raw`/`cast_scalar`.
 ///
 /// chelis#2316: both of them used to recurse THROUGH a `cast` and keep the
 /// innermost literal, on the premise recorded in `extract_f64_value`'s own

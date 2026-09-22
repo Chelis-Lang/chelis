@@ -17997,23 +17997,33 @@ impl<'program> LowerCtx<'program> {
         })
     }
 
-    /// Raise chelis#776's loud refusal when a `uniform_like` bound is wrapped
-    /// in a cast whose target is not a float.
+    /// Raise chelis#776's loud refusal when a `uniform_like` bound contains a
+    /// cast whose target is not a float, at ANY depth.
     ///
     /// The typed fold would resolve such a cast to an exact value, but a
     /// dtype-changing cast must not launder the bound contract. Every `cast`
     /// this lane sees is author-written: a Deep `lit` carries its declared
-    /// dtype as `type:` metadata, never as a wrapper node.
+    /// dtype as `type:` metadata, never as a wrapper node. The host lane must
+    /// NOT copy this guard — there a literal's declared dtype IS a synthesized
+    /// cast ([04-LIT-1]), and refusing it broke `cast(3i32, f32)`.
+    ///
+    /// Depth matters because this is positioned as a CHECKER-INDEPENDENT
+    /// backstop: `uniform_like_integer_cast_bound_fails_loudly` reaches it
+    /// through `parse_and_lower_unchecked`. The base fold returned `None` for
+    /// an integer target at any depth; an outermost-only guard would quietly
+    /// narrow that to one level while still being described as a backstop.
+    /// `is_static_numeric_bound` also rejects these on every user ingress, so
+    /// this is defence in depth, not the only gate.
     fn reject_integer_target_bound_cast(&self, expr: &Expr, arg_desc: &str) {
-        let Some((DeepTag::Cast, _, kids)) = stamped_parts(expr) else {
+        let Some((tag, _, kids)) = stamped_parts(expr) else {
             return;
         };
-        let Some(target) = kids.get(1) else {
-            return;
-        };
-        let resolved = Self::try_extract_prim(target)
-            .or_else(|| static_controls::type_prim(target, &self.prec_substitutions));
-        if resolved.is_some_and(|prim| !prim.is_float()) {
+        if tag == DeepTag::Cast
+            && let Some(target) = kids.get(1)
+            && Self::try_extract_prim(target)
+                .or_else(|| static_controls::type_prim(target, &self.prec_substitutions))
+                .is_some_and(|prim| !prim.is_float())
+        {
             raise_fatal_lowering_error(
                 format!(
                     "`uniform_like` requires a statically-resolvable {arg_desc}; a cast to a non-float dtype cannot carry one (Chelis-Lang/chelis#776)"
@@ -18021,6 +18031,11 @@ impl<'program> LowerCtx<'program> {
                 Some(expr.span()),
                 expr.span_id().map(ToOwned::to_owned),
             )
+        }
+        // Walking every child is the conservative reading: an extra visit can
+        // only find a cast this rule already forbids.
+        for kid in kids {
+            self.reject_integer_target_bound_cast(kid, arg_desc);
         }
     }
 

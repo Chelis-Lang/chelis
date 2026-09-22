@@ -47,14 +47,17 @@
 //!
 //! ## Why one shared helper
 //!
-//! The rounding now lives once, in
-//! `chelis_types::dtype_semantics::round_float_bound`, called by both fold
-//! sites. The checker's `is_static_numeric_bound` documents itself as
-//! MIRRORING the lowering, and that mirroring is the mechanism of this defect:
-//! three copies of one rule drift. The lane-parity tests below would still pass
-//! with two independent-but-currently-equal implementations, so the exact
-//! per-dtype rounding is pinned directly by the unit tests beside
-//! `round_float_bound` in `chelis-types/src/dtype_semantics.rs`.
+//! Both lanes stage a bound identically — an integer leaf exact through i64, a
+//! float leaf at its source dtype until a cast finalizes it — and both reach
+//! `finalize_scalar` through the shared `chelis_types` cast primitives
+//! (`cast_raw` / `cast_scalar`). They remain two readers of differently-shaped
+//! trees, not one function: Deep carries a literal's dtype as `type:` metadata
+//! while host lowering synthesizes a `cast` node for it, so a single reader is
+//! not available. What is shared is the rule they apply.
+//!
+//! That residual duplication is why the three-way lane-parity tests below
+//! matter: they compare `eval` against BOTH baked constants, so the two
+//! stagings cannot drift apart without a test failing.
 //!
 //! ## Test roles
 //!
@@ -148,6 +151,29 @@ fn c_sampled(program: &str, name: &str) -> Vec<f64> {
         String::from_utf8_lossy(&run.stderr),
     );
     parse_tensor_data(&String::from_utf8_lossy(&run.stdout), "sampled")
+}
+
+/// Build to C and return the generated source, for assertions about the exact
+/// constants the emitter bakes rather than about the values a draw produces.
+fn build_generated_c(program: &str, name: &str) -> String {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join(format!("{name}.ch"));
+    let out_dir = dir.path().join(format!("{name}-out"));
+    write_file(&path, program);
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    std::fs::read_to_string(out_dir.join(format!("{name}.c"))).expect("generated C")
 }
 
 fn assert_f32_bit_parity(eval: &[f64], c: &[f64], context: &str) {
@@ -406,10 +432,40 @@ fn integer_suffixed_bounds_at_every_width_agree_across_lanes() {
 ///
 /// `9007199791611905` is beyond f64's exactly-representable integer range, so
 /// the legacy `*n as f64` detour lost a bit and BOTH lanes baked `0x5a000000`
-/// where `eval` gives `0x5a000001`. Routing both folds through the staged
-/// `chelis_types` cast primitives keeps the integer exact through i64 and
-/// closes it.
+/// where `eval` gives `0x5a000001`.
+///
+/// This asserts the BAKED CONSTANT, not the drawn samples. An earlier version
+/// compared samples and was vacuous: with a high bound of `1.0e17`, a 1-ULP
+/// shift in a `~9e15` low bound is absorbed by `fma(high - low, u, low)` and
+/// never reaches the output, so the test passed with the fix reverted. The
+/// emitted constant is the only place this defect is observable, and it is the
+/// only executable witness for the integer-exactness half of the fix — the
+/// `round_float_bound` unit tests take an `f64` and structurally cannot cover
+/// it.
 #[test]
 fn an_exact_integer_source_bound_does_not_detour_through_f64() {
-    assert_both_lanes_match_eval("9007199791611905f32", "1.0e17f32", "exactint");
+    for (program, name) in [
+        (
+            dag_lane_program("9007199791611905f32", "1.0e17f32"),
+            "exactint_dag",
+        ),
+        (
+            host_lane_program("9007199791611905f32", "1.0e17f32"),
+            "exactint_host",
+        ),
+    ] {
+        let source = build_generated_c(&program, name);
+        // Match the constant, not its wrapper: the DAG lane spells it
+        // `0x5a000001u` and the host lane `UINT32_C(0x5a000001)`.
+        assert!(
+            source.contains("0x5a000001"),
+            "[{name}] [04-LIT-1]: the exact integer bound must reach f32 \
+             without an f64 detour, so the baked low bound must be \
+             0x5a000001. Generated C did not contain it.",
+        );
+        assert!(
+            !source.contains("0x5a000000"),
+            "[{name}] baked 0x5a000000 — the f64 detour lost a bit",
+        );
+    }
 }

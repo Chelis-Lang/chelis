@@ -3142,11 +3142,12 @@ impl<'a> HostEmitter<'a> {
     ///
     ///    This fold honours every rounding in a bound's cast chain, so a
     ///    bound spelled `cast(cast(x, f16), f32)` bakes the value `eval`
-    ///    computes. Both compiled lanes route their rounding through
-    ///    `chelis_types::dtype_semantics::round_float_bound`, and the IR
-    ///    lane additionally finalizes a `lit` at its own declared dtype
-    ///    before the chain applies, so the two folds take the same roundings
-    ///    in the same order (chelis#2316).
+    ///    computes. Both lanes stage a bound the same way — an integer leaf
+    ///    exact through i64, a float leaf at its source dtype until a cast
+    ///    finalizes it — and both reach `finalize_scalar` through the shared
+    ///    `chelis_types` cast primitives, so they take the same roundings in
+    ///    the same order (chelis#2316). The two stagings are separate
+    ///    readers of differently-shaped trees; they are NOT one function.
     ///
     ///    Keeping the lanes identical here is not stylistic. Correcting one
     ///    lane alone makes template foldability observable again, which is
