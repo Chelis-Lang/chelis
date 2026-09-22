@@ -1753,6 +1753,12 @@ jobs:
       - name: Validate package SKILL and mdBook examples
         run: cargo test -p chelis-e2e --test skill_suite
 
+      - name: Install mdBook
+        if: runner.environment == 'github-hosted'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: mdbook@0.5.2
+
       - name: Build mdBook
         run: mdbook build docs/book
 

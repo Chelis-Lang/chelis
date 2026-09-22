@@ -107,9 +107,8 @@ self-hosted runner, which substitutes it from the private Nix cache:
 `nix/ci-cvc5.nix` builds the locked CVC5 1.3.1, GMP, CaDiCaL and LibPoly
 archive/header tree, and Cargo consumes its `CVC5_DIR` without rebuilding it.
 The job's Devenv-prefixed Cargo namespace keeps those outputs apart from the
-native full-prove lane. GitHub-hosted runs of the same job realize the
-`ci-hosted` twin, which public caches serve, and link the prebuilt cvc5 stores
-described next, exactly as before.
+native full-prove lane. GitHub-hosted runs of the same job keep main's toolchain and link the
+prebuilt cvc5 stores described next, exactly as before.
 
 ### Durable prebuilt cvc5 (chelis#583 + follow-up)
 

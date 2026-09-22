@@ -37,23 +37,8 @@ def capture(destination: Path) -> None:
     print(CAPTURE_MARKER, flush=True)
 
 
-def hosted_kache_config(policy: Path, destination: Path) -> None:
-    """Keep the repository compiler-cache policy without its mesh remote.
-
-    GitHub-hosted runners are not Tunnet members, and the policy's `ignore_env`
-    intentionally ignores `KACHE_LOCAL_ONLY`; a separate local-only config
-    selected through `KACHE_CONFIG` is the documented offline mode."""
-    lines = policy.read_text(encoding="utf-8").splitlines(keepends=True)
-    if not lines or lines[0].strip() != "[cache]" or any(
-        line.partition("=")[0].strip() == "local_only" for line in lines
-    ):
-        raise ValueError("repository Kache policy must open with [cache] and not set local_only")
-    destination.write_text("".join([lines[0], "local_only = true\n", *lines[1:]]), encoding="utf-8")
-
-
 def activate(
-    root: Path, devenv: str, github_env: Path, github_path: Path, *,
-    profile: str = "ci", kache_config: Path | None = None,
+    root: Path, devenv: str, github_env: Path, github_path: Path, *, profile: str = "ci",
 ) -> int:
     """Commit the shell environment only after a successful captured entry."""
     with tempfile.TemporaryDirectory(prefix="chelis-ci-entry-") as temporary:
@@ -92,8 +77,6 @@ exec python "$2" capture "$3"
             print(f"project Devenv activation failed: {result.returncode}", file=sys.stderr)
             return (128 - result.returncode if result.returncode < 0 else result.returncode) or 1
         values = json.loads(destination.read_text(encoding="utf-8"))
-        if kache_config is not None:
-            values["KACHE_CONFIG"] = str(kache_config)
         # GitHub's native Node actions must keep the host loader's libraries.
         # Only repository command subprocesses consume the Nix runtime path.
         values["CHELIS_CI_LIBRARY_PATH"] = values.pop("LD_LIBRARY_PATH", "")
@@ -134,10 +117,6 @@ def main() -> int:
     parser.add_argument("operation", nargs="?", choices=("activate", "capture", "run"), default="activate")
     parser.add_argument("destination", nargs="?", type=Path)
     parser.add_argument("--profile", choices=("ci", "ci-smt"), default="ci")
-    parser.add_argument(
-        "--hosted", action="store_true",
-        help="realize the GitHub-hosted twin, which public binary caches serve",
-    )
     args = parser.parse_args()
     if args.operation == "capture":
         if args.destination is None:
@@ -148,17 +127,10 @@ def main() -> int:
         if args.destination is None:
             parser.error("run requires an Actions command file")
         run_step(args.destination)
-    # Both hosted lanes share one twin: the hosted SMT lane links the prebuilt
-    # cvc5 asset from the workflow instead of realizing the Nix solver closure.
-    kache_config = None
-    if args.hosted:
-        kache_config = Path(os.environ["RUNNER_TEMP"]) / "chelis-kache-hosted.toml"
-        hosted_kache_config(ROOT / ".kache.toml", kache_config)
     return activate(
         ROOT, os.environ["CHELIS_DEVENV_BIN"],
         Path(os.environ["GITHUB_ENV"]), Path(os.environ["GITHUB_PATH"]),
-        profile="ci-hosted" if args.hosted else args.profile,
-        kache_config=kache_config,
+        profile=args.profile,
     )
 
 

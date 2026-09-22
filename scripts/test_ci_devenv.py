@@ -6,12 +6,10 @@ import os
 import shlex
 import shutil
 from pathlib import Path
-import re
 import subprocess
 import sys
 import tempfile
 import unittest
-import unittest.mock
 import venv
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -41,7 +39,7 @@ class ProjectActivationTests(unittest.TestCase):
         )
         self.wrapper.chmod(0o700)
 
-    def activate(self, body, **options):
+    def activate(self, body):
         shell_environment = (
             f"export DEVENV_DOTFILE={shlex.quote(str(self.state))}\n"
             f"export DEVENV_STATE={shlex.quote(str(self.state))}\n"
@@ -58,9 +56,7 @@ class ProjectActivationTests(unittest.TestCase):
             "    raise SystemExit(0)\n" + body
         )
         self.devenv.chmod(0o700)
-        return ci_devenv.activate(
-            self.root, str(self.devenv), self.output, self.path_output, **options
-        )
+        return ci_devenv.activate(self.root, str(self.devenv), self.output, self.path_output)
 
     def initialize_body(self):
         receipt = self.state / "load-exports"
@@ -155,41 +151,6 @@ class ProjectActivationTests(unittest.TestCase):
         failed = subprocess.run(command, env=env, capture_output=True, text=True)
         self.assertNotEqual(failed.returncode, 0)
         self.assertFalse(capture.exists())
-
-    def test_hosted_runners_realize_the_public_cache_twin_without_the_mesh_remote(self):
-        seen = []
-
-        def record(*_, profile, kache_config):
-            seen.append((profile, kache_config))
-            return 0
-
-        with unittest.mock.patch.object(ci_devenv, "activate", side_effect=record), \
-                unittest.mock.patch.dict(os.environ, {
-                    "CHELIS_DEVENV_BIN": "devenv", "GITHUB_ENV": "env", "GITHUB_PATH": "path",
-                    "RUNNER_TEMP": str(self.root),
-                }):
-            for argv in (["--profile", "ci-smt"], ["--profile", "ci-smt", "--hosted"], ["--hosted"]):
-                with unittest.mock.patch.object(sys, "argv", ["ci_devenv.py", *argv]):
-                    self.assertEqual(ci_devenv.main(), 0)
-        derived = self.root / "chelis-kache-hosted.toml"
-        self.assertEqual(seen, [("ci-smt", None), ("ci-hosted", derived), ("ci-hosted", derived)])
-        # The repository policy keeps its mesh remote and ignores KACHE_LOCAL_ONLY;
-        # the hosted copy turns the remote off and changes nothing else.
-        policy = (ci_devenv.ROOT / ".kache.toml").read_text(encoding="utf-8")
-        self.assertIn("[cache.remote]", policy)
-        self.assertEqual(
-            derived.read_text(encoding="utf-8"),
-            policy.replace("[cache]\n", "[cache]\nlocal_only = true\n", 1),
-        )
-        with self.assertRaises(ValueError):
-            ci_devenv.hosted_kache_config(derived, self.root / "twice.toml")
-
-    def test_hosted_activation_publishes_the_local_only_kache_config(self):
-        config = self.root / "kache-hosted.toml"
-        config.write_text("[cache]\nlocal_only = true\n")
-        self.assertEqual(self.activate(self.initialize_body(), kache_config=config), 0)
-        published = self.output.read_text()
-        self.assertRegex(published, rf"KACHE_CONFIG<<CHELIS_ENV_[0-9a-f]+\n{re.escape(str(config))}\n")
 
 
 if __name__ == "__main__":

@@ -322,13 +322,13 @@ retains concurrent-entry safety.
 `devenv.nix` imports seven local configuration modules. `devenv.yaml` defines
 the inputs and CLI options.
 
-GitHub acceptance jobs activate one CI profile once, require a fresh shell
-initialization receipt, and run subsequent command files with `chelis-ci-shell run`.
-Hosted runners realize `ci-hosted`, which public binary caches serve; the
-self-hosted runner realizes `ci` or `ci-smt`, which add the Nix-built numerics,
-the static OpenBLAS provider and the CVC5 closure from the private cache.
-This reuses the project toolchain without repeated shell entry and scopes Nix
-runtime libraries to repository commands rather than native GitHub actions.
+Self-hosted acceptance jobs activate the `ci` or `ci-smt` profile once, require
+a fresh shell initialization receipt, and run subsequent command files with
+`chelis-ci-shell run`. This reuses the project toolchain without repeated shell
+entry and scopes Nix runtime libraries to repository commands rather than
+native GitHub actions. GitHub-hosted jobs keep main's rustup, apt and uv
+toolchain and run the same command files through plain shims; they realize no
+Devenv profile because they cannot reach the private cache.
 The Linux Nix package job uses the protected runner group only for manual
 dispatch on `main`; release and branch runs stay hosted. Its shared cache
 finalizer publishes declared, realized check outputs and verifies signed

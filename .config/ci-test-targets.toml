@@ -1859,6 +1859,24 @@ reason = "the discovered script suite runs the project activation regression cas
 tracking_issue = "chelis#2241"
 
 [[path_rule]]
+prefix = "scripts/ci_hosted_commands.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "every hosted job enters its commands through these shims; the script suite proves the command file, gate and interpreter contract"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "scripts/test_ci_hosted_commands.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the discovered script suite runs the hosted command shim regression cases"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
 prefix = ".github/actions/setup-project-ci/"
 disposition = "owner"
 workflow = "ci.yml"

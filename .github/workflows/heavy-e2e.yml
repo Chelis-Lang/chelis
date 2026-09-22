@@ -46,12 +46,8 @@ jobs:
         if: runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@0b5faba5025fade929194b46a9e52e43fec63462
-
-      - name: Activate project CI environment
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
-        run: python scripts/ci_devenv.py --hosted
+      - name: Set up project CI
+        uses: ./.github/actions/setup-project-ci
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
@@ -105,12 +101,8 @@ jobs:
         if: runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@0b5faba5025fade929194b46a9e52e43fec63462
-
-      - name: Activate project CI environment
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
-        run: python scripts/ci_devenv.py --hosted
+      - name: Set up project CI
+        uses: ./.github/actions/setup-project-ci
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
@@ -165,12 +157,8 @@ jobs:
         if: runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@0b5faba5025fade929194b46a9e52e43fec63462
-
-      - name: Activate project CI environment
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
-        run: python scripts/ci_devenv.py --hosted
+      - name: Set up project CI
+        uses: ./.github/actions/setup-project-ci
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
@@ -246,12 +234,8 @@ jobs:
         if: runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@0b5faba5025fade929194b46a9e52e43fec63462
-
-      - name: Activate project CI environment
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
-        run: python scripts/ci_devenv.py --hosted
+      - name: Set up project CI
+        uses: ./.github/actions/setup-project-ci
 
       - name: Install Python binding dependencies
         run: uv pip install --python "$PYO3_PYTHON" -r bindings/python/pyproject.toml
@@ -346,12 +330,8 @@ jobs:
         if: runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@0b5faba5025fade929194b46a9e52e43fec63462
-
-      - name: Activate project CI environment
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
-        run: python scripts/ci_devenv.py --hosted
+      - name: Set up project CI
+        uses: ./.github/actions/setup-project-ci
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
@@ -384,12 +364,8 @@ jobs:
         if: runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@0b5faba5025fade929194b46a9e52e43fec63462
-
-      - name: Activate project CI environment
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
-        run: python scripts/ci_devenv.py --hosted
+      - name: Set up project CI
+        uses: ./.github/actions/setup-project-ci
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
@@ -427,12 +403,8 @@ jobs:
         if: runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@0b5faba5025fade929194b46a9e52e43fec63462
-
-      - name: Activate project CI environment
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
-        run: python scripts/ci_devenv.py --hosted
+      - name: Set up project CI
+        uses: ./.github/actions/setup-project-ci
 
       - name: Install Python binding dependencies
         run: uv pip install --python "$PYO3_PYTHON" -r bindings/python/pyproject.toml
@@ -477,12 +449,8 @@ jobs:
         if: runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@0b5faba5025fade929194b46a9e52e43fec63462
-
-      - name: Activate project CI environment
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
-        run: python scripts/ci_devenv.py --hosted
+      - name: Set up project CI
+        uses: ./.github/actions/setup-project-ci
 
       # Phase A's wire capacity leg executes the Python binding facade, so the
       # venv needs that facade's declared dependencies. Reading them from the
@@ -528,12 +496,8 @@ jobs:
         if: runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@0b5faba5025fade929194b46a9e52e43fec63462
-
-      - name: Activate project CI environment
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
-        run: python scripts/ci_devenv.py --hosted
+      - name: Set up project CI
+        uses: ./.github/actions/setup-project-ci
 
       - name: Install Python binding dependencies
         run: uv pip install --python "$PYO3_PYTHON" -r bindings/python/pyproject.toml
@@ -603,12 +567,8 @@ jobs:
         if: runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@0b5faba5025fade929194b46a9e52e43fec63462
-
-      - name: Activate project CI environment
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
-        run: python scripts/ci_devenv.py --hosted
+      - name: Set up project CI
+        uses: ./.github/actions/setup-project-ci
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
@@ -646,12 +606,8 @@ jobs:
         if: runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@0b5faba5025fade929194b46a9e52e43fec63462
-
-      - name: Activate project CI environment
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
-        run: python scripts/ci_devenv.py --hosted
+      - name: Set up project CI
+        uses: ./.github/actions/setup-project-ci
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
