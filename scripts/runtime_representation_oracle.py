@@ -229,6 +229,21 @@ TYPED_NONNUMERIC_BACKEND_FINAL_FORMS = (
         "load-store-template",
         "CEmitter::emit_where",
     ),
+    # chelis#1464 / [05-OP-68]: the guarded abort reads its condition as the
+    # Bool stored bits it is -- `const uint8_t*` compared against zero -- and
+    # carries the fallback through `emit_realize`. Both spellings are the same
+    # typed-nonnumeric final forms `emit_where` already registers, for the same
+    # reason: no numeric interpretation is placed on either operand.
+    (
+        "crates/chelis-backend-c/src/emit.rs",
+        "backend-element-spelling",
+        "CEmitter::emit_guarded_fail",
+    ),
+    (
+        "crates/chelis-backend-c/src/emit.rs",
+        "load-store-template",
+        "CEmitter::emit_guarded_fail",
+    ),
     (
         "crates/chelis-backend-hip/src/emit.rs",
         "backend-element-spelling",

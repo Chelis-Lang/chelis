@@ -179,7 +179,7 @@ use crate::emitted_expr::{BinaryOperator, EmittedExpr, UnaryOperator};
 /// Emit a C string literal whose bytes are unambiguous in every following
 /// lexical context. Fixed-width three-digit octal escapes preserve embedded
 /// NUL and cannot absorb an adjacent decimal or hexadecimal digit.
-fn c_utf8_byte_literal(value: &str) -> String {
+pub(crate) fn c_utf8_byte_literal(value: &str) -> String {
     let mut literal = String::from("\"");
     for byte in value.as_bytes() {
         literal.push_str(&format!("\\{byte:03o}"));

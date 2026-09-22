@@ -854,6 +854,62 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                     }
                 }
             }
+            // chelis#1464 / [05-OP-68]: the guard's own contract, checked
+            // here so a malformed abort node cannot reach a backend. An
+            // empty message is rejected because the atom forbids a
+            // synthesized or defaulted one.
+            RiscOp::GuardedFail { message, .. } => {
+                if arity != 2 {
+                    errors.push(format!(
+                        "guarded_fail at node {} has {} inputs (expected 2)",
+                        node.id.0, arity
+                    ));
+                } else if let (Some(condition), Some(_)) =
+                    (dag.get(node.inputs[0]), dag.get(node.inputs[1]))
+                {
+                    if condition.output_type.precision != Prim::Bool {
+                        errors.push(format!(
+                            "guarded_fail at node {} condition must be Bool",
+                            node.id.0
+                        ));
+                    }
+                    if condition.output_type.dims.len() > 1 {
+                        errors.push(format!(
+                            "guarded_fail at node {} condition must be rank-0, or rank-1 \
+                             when mapped over a batch axis",
+                            node.id.0
+                        ));
+                    }
+                    // Structural equality, deliberately NOT the semantic
+                    // helper the sibling arms use. [05-OP-68] says the result
+                    // has EXACTLY the fallback's shape and dtype, and
+                    // `guarded_fail_value` builds it from that node's own
+                    // type, so exact equality is both the rule and the
+                    // construction.
+                    //
+                    // The semantic helper is vacuous here: `axis_sources`
+                    // attributes this op's output axes to slot 1, so the
+                    // guard and its fallback always share an axis origin and
+                    // the comparison succeeds for any dims at all. It passed
+                    // a `[3]` fallback under a `[4]` result until a negative
+                    // test caught it.
+                    let fallback_type = dag
+                        .get(node.inputs[1])
+                        .map(|fallback| fallback.output_type.clone());
+                    if fallback_type.as_ref() != Some(&node.output_type) {
+                        errors.push(format!(
+                            "guarded_fail at node {} must have exactly its fallback's type",
+                            node.id.0
+                        ));
+                    }
+                }
+                if message.is_empty() {
+                    errors.push(format!(
+                        "guarded_fail at node {} has an empty message",
+                        node.id.0
+                    ));
+                }
+            }
             RiscOp::Where => {
                 if arity != 3 {
                     errors.push(format!(
@@ -3048,6 +3104,243 @@ mod tests {
         forward_source: NodeId,
         forward_activation: NodeId,
         cotangent: NodeId,
+    }
+
+    /// chelis#1464 / [05-OP-68]: the guard's own contract. Every rule the
+    /// atom states gets a negative control here, because a malformed abort
+    /// node reaching a backend is how the placeholder class came back.
+    mod guarded_fail {
+        use super::*;
+
+        fn bool_scalar() -> TensorType {
+            TensorType {
+                dims: Vec::new(),
+                precision: Prim::Bool,
+            }
+        }
+
+        /// A well-formed guard: rank-0 bool condition, fallback carrying the
+        /// result type, non-empty message.
+        fn well_formed() -> Dag {
+            let mut dag = Dag::new();
+            let cond = dag.add_node(
+                RiscOp::synth_const(Prim::Bool, 1.0),
+                vec![],
+                bool_scalar(),
+                None,
+            );
+            let fallback = dag.add_node(
+                RiscOp::synth_const(Prim::F32, 2.0),
+                vec![],
+                scalar_f32(),
+                None,
+            );
+            dag.add_node(
+                RiscOp::GuardedFail {
+                    message: "boom".to_string(),
+                    trap_on_true: true,
+                },
+                vec![cond, fallback],
+                scalar_f32(),
+                None,
+            );
+            dag
+        }
+
+        #[test]
+        fn a_well_formed_guard_verifies() {
+            assert!(
+                verify(&well_formed()).is_empty(),
+                "the positive control must be clean, or the negatives below prove nothing"
+            );
+        }
+
+        #[test]
+        fn an_empty_message_is_rejected() {
+            let mut dag = Dag::new();
+            let cond = dag.add_node(
+                RiscOp::synth_const(Prim::Bool, 1.0),
+                vec![],
+                bool_scalar(),
+                None,
+            );
+            let fallback = dag.add_node(
+                RiscOp::synth_const(Prim::F32, 2.0),
+                vec![],
+                scalar_f32(),
+                None,
+            );
+            dag.add_node(
+                RiscOp::GuardedFail {
+                    message: String::new(),
+                    trap_on_true: true,
+                },
+                vec![cond, fallback],
+                scalar_f32(),
+                None,
+            );
+            let errors = verify(&dag);
+            assert!(
+                errors.iter().any(|error| error.contains("empty message")),
+                "[05-OP-68] forbids a synthesized or defaulted message; got: {errors:?}"
+            );
+        }
+
+        #[test]
+        fn a_non_bool_condition_is_rejected() {
+            let mut dag = Dag::new();
+            let cond = dag.add_node(
+                RiscOp::synth_const(Prim::F32, 1.0),
+                vec![],
+                scalar_f32(),
+                None,
+            );
+            let fallback = dag.add_node(
+                RiscOp::synth_const(Prim::F32, 2.0),
+                vec![],
+                scalar_f32(),
+                None,
+            );
+            dag.add_node(
+                RiscOp::GuardedFail {
+                    message: "boom".to_string(),
+                    trap_on_true: true,
+                },
+                vec![cond, fallback],
+                scalar_f32(),
+                None,
+            );
+            let errors = verify(&dag);
+            assert!(
+                errors
+                    .iter()
+                    .any(|error| error.contains("condition must be Bool")),
+                "the atom admits bool alone for the condition; got: {errors:?}"
+            );
+        }
+
+        #[test]
+        fn a_condition_above_rank_one_is_rejected() {
+            let mut dag = Dag::new();
+            let cond = dag.add_node(
+                RiscOp::synth_const(Prim::Bool, 1.0),
+                vec![],
+                tensor_ty(&[2, 2], Prim::Bool),
+                None,
+            );
+            let fallback = dag.add_node(
+                RiscOp::synth_const(Prim::F32, 2.0),
+                vec![],
+                scalar_f32(),
+                None,
+            );
+            dag.add_node(
+                RiscOp::GuardedFail {
+                    message: "boom".to_string(),
+                    trap_on_true: true,
+                },
+                vec![cond, fallback],
+                scalar_f32(),
+                None,
+            );
+            let errors = verify(&dag);
+            assert!(
+                errors.iter().any(|error| error.contains("must be rank-0")),
+                "rank-0, or rank-1 when mapped over a batch axis, is the admitted set; \
+                 got: {errors:?}"
+            );
+        }
+
+        #[test]
+        fn a_batched_rank_one_condition_is_admitted() {
+            // The negative above must not over-reject the `vmap` form.
+            let mut dag = Dag::new();
+            let cond = dag.add_node(
+                RiscOp::synth_const(Prim::Bool, 1.0),
+                vec![],
+                tensor_ty(&[2], Prim::Bool),
+                None,
+            );
+            let fallback = dag.add_node(
+                RiscOp::synth_const(Prim::F32, 2.0),
+                vec![],
+                tensor_ty(&[2], Prim::F32),
+                None,
+            );
+            dag.add_node(
+                RiscOp::GuardedFail {
+                    message: "boom".to_string(),
+                    trap_on_true: true,
+                },
+                vec![cond, fallback],
+                tensor_ty(&[2], Prim::F32),
+                None,
+            );
+            assert!(
+                !verify(&dag)
+                    .iter()
+                    .any(|error| error.contains("guarded_fail")),
+                "a mapped rank-1 condition is admitted by [05-OP-68]"
+            );
+        }
+
+        #[test]
+        fn a_wrong_arity_is_rejected() {
+            let mut dag = Dag::new();
+            let cond = dag.add_node(
+                RiscOp::synth_const(Prim::Bool, 1.0),
+                vec![],
+                bool_scalar(),
+                None,
+            );
+            dag.add_node(
+                RiscOp::GuardedFail {
+                    message: "boom".to_string(),
+                    trap_on_true: true,
+                },
+                vec![cond],
+                scalar_f32(),
+                None,
+            );
+            let errors = verify(&dag);
+            assert!(
+                errors.iter().any(|error| error.contains("expected 2")),
+                "the guard takes exactly (condition, fallback); got: {errors:?}"
+            );
+        }
+
+        #[test]
+        fn a_result_type_differing_from_the_fallback_is_rejected() {
+            let mut dag = Dag::new();
+            let cond = dag.add_node(
+                RiscOp::synth_const(Prim::Bool, 1.0),
+                vec![],
+                bool_scalar(),
+                None,
+            );
+            let fallback = dag.add_node(
+                RiscOp::synth_const(Prim::F32, 2.0),
+                vec![],
+                tensor_ty(&[3], Prim::F32),
+                None,
+            );
+            dag.add_node(
+                RiscOp::GuardedFail {
+                    message: "boom".to_string(),
+                    trap_on_true: true,
+                },
+                vec![cond, fallback],
+                tensor_ty(&[4], Prim::F32),
+                None,
+            );
+            let errors = verify(&dag);
+            assert!(
+                errors
+                    .iter()
+                    .any(|error| error.contains("must have exactly its fallback's type")),
+                "the guard is type-transparent: the result IS the fallback; got: {errors:?}"
+            );
+        }
     }
 
     fn mapped_fixture() -> MappedFixture {

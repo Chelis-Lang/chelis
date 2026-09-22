@@ -23,9 +23,9 @@ before consuming any package or symbol metadata.
 
 ## 3. Compiler API Wire Contract
 
-WireDag JSON is an exact-version contract. Schema version 15 is explicitly
+WireDag JSON is an exact-version contract. Schema version 16 is explicitly
 present in every payload and is the only accepted version. A missing version,
-versions 1 through 14, and every future version are decode errors before any IR
+versions 1 through 15, and every future version are decode errors before any IR
 node is consumed. There is no versionless default, legacy migration, additive-
 variant tolerance, or best-effort compatibility path.
 
@@ -163,7 +163,7 @@ int64 node. The decoder enforces the owner matrix from
 `spec/05-risc-primitives.md` §2.4.1, the source rank and dtype, the normalized
 axis range, and the exact input cardinality before IR construction.
 
-Every tagged variant must be known to the version 15 decoder. `OneHot` remains only a transient
+Every tagged variant must be known to the version 16 decoder. `OneHot` remains only a transient
 IR/specialization marker and backends must not receive it after specialization.
 
 Execution-value envelopes carry the independently required exact

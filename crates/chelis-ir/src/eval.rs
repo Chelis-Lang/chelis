@@ -3374,6 +3374,32 @@ where
                 &values[&node.inputs[1]],
                 &values[&node.inputs[2]],
             )?,
+            // chelis#1464 / [05-OP-68]: the guard fires BEFORE the fallback
+            // is carried, so a taken abort never produces a value. Returning
+            // the message as an evaluation error is what makes the evaluator
+            // agree with the compiled lane's `chelis_fail`.
+            RiscOp::GuardedFail {
+                message,
+                trap_on_true,
+            } => {
+                let condition = &values[&node.inputs[0]];
+                if condition.prim() != Prim::Bool {
+                    return Err("guarded_fail: condition must have bool storage".into());
+                }
+                let condition_values = condition
+                    .storage()
+                    .to_i64_exact_vec()
+                    .expect("sealed bool storage has an exact integer view");
+                // A batched condition aborts when ANY mapped element fires
+                // ([05-OP-68]); an unbatched condition has exactly one.
+                if condition_values
+                    .into_iter()
+                    .any(|selected| (selected != 0) == *trap_on_true)
+                {
+                    return Err(message.clone());
+                }
+                values[&node.inputs[1]].clone()
+            }
             RiscOp::Sum { axis, accumulator } => reduce(
                 &values[&node.inputs[0]],
                 *axis,

@@ -238,6 +238,19 @@ fn grad_dag_checked_impl(
                         live[template.0] = true;
                     }
                 }
+                // chelis#1464 / [05-OP-68]: input 0 is the guard's firing
+                // predicate, a control edge, and input 1 is the value the
+                // result carries. Only the fallback is on the gradient path.
+                // The predicate conjoins the enclosing branch path, so it is
+                // built from `Logical` nodes; treating the control edge as
+                // live would reject a program whose gradient is perfectly
+                // well defined, exactly as the `UniformLike` note above
+                // describes for its activation edge.
+                RiscOp::GuardedFail { .. } => {
+                    if let Some(fallback) = node.inputs.get(1) {
+                        live[fallback.0] = true;
+                    }
+                }
                 // A comparison contributes an exact zero cotangent to both
                 // operands. Its predicate may control differentiable float
                 // selection, but the arithmetic that formed the predicate is
@@ -399,6 +412,7 @@ pub fn risc_op_name(op: &RiscOp) -> &'static str {
         RiscOp::Compare(kind) => kind.surf_name(),
         RiscOp::Logical(kind) => kind.surf_name(),
         RiscOp::Where => "where",
+        RiscOp::GuardedFail { .. } => "guarded_fail",
         RiscOp::MaxElem => "max_elem",
         RiscOp::MinElem => "min_elem",
         RiscOp::ExtremaAdjoint { .. } => "extrema_adjoint",
@@ -914,6 +928,30 @@ fn compute_adjoints(
             Some(vec![(a, za), (b, zb)])
         }
         RiscOp::Logical(_) => None,
+        // chelis#1464 / [05-OP-68]: the condition is discrete and takes zero
+        // cotangent (spec/06 §2.10.1). The fallback takes the result's
+        // cotangent UNCHANGED — not a `Where`-style masked cotangent —
+        // because whenever the forward program produced a result at all, that
+        // result was the fallback: the other path aborted. The forward
+        // `GuardedFail` node stays live in the forward DAG, so the abort is
+        // still evaluated and still fires; differentiation does not speculate
+        // past it ([05-OP-68] Result, spec/06 §5.2).
+        RiscOp::GuardedFail { .. } => {
+            // The fallback takes the result's cotangent unchanged: whenever
+            // the forward program produced a result at all, that result WAS
+            // the fallback.
+            //
+            // The condition is deliberately absent rather than paired with
+            // an explicit zero. Omitting it IS the zero cotangent of
+            // spec/06 2.10.1 — no contribution is queued — and it keeps the
+            // backward walk out of the condition subgraph entirely. That
+            // matters because the guard's firing predicate conjoins the
+            // enclosing branch path (chelis#1464), so it contains `Logical`
+            // nodes, and `Logical` is non-differentiable: materializing a
+            // zero for the condition would make AD descend into it and
+            // reject a program whose gradient is perfectly well defined.
+            Some(vec![(node.inputs[1], g)])
+        }
         RiscOp::Where => {
             let condition = node.inputs[0];
             let then_value = node.inputs[1];

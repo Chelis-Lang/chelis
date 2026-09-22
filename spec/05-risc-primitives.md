@@ -3534,6 +3534,45 @@ path even though bare `round` under `grad` remains a structural
 >
 > Accumulator: None. The operation performs no arithmetic.
 
+#### Guarded abort identity
+
+> **[05-OP-68]** Signature: `guarded_fail(condition,fallback)` carries a
+> compile-time abort message. `condition` is a rank-0 bool; `fallback` is a
+> value of any active tensor element dtype, and the result has exactly the
+> fallback's shape and dtype. The message is part of the operation's
+> identity, not a runtime operand, so the operation takes no string value.
+>
+> Domain: Every active tensor element dtype is admitted for the fallback by
+> exact carry; the operation reads no element and performs no conversion.
+> The condition admits bool alone. A batched condition, as produced by
+> mapping the operation over a batch axis, admits a rank-1 bool whose extent
+> is the mapped extent.
+>
+> Result: When the condition is false, the result is the fallback's stored
+> bits unchanged, with no conversion, narrowing, or widening. When the
+> condition is true, the operation aborts with its message and produces no
+> result. A batched condition aborts when any mapped element is true; the
+> message does not identify the element. The abort is observable under
+> spec/06 section 5.2 and may not be removed or reordered with respect to
+> another observable effect (not fully implemented: chelis#2368). The
+> fallback is an ordinary operand and is evaluated under the usual rules, so
+> an operand that traps on its own may trap before the guard reports; the
+> guard orders aborts, it does not suppress its operand's.
+>
+> Failure: A non-bool condition, a condition of rank other than the admitted
+> rank-0 or mapped rank-1, and a fallback whose dtype is not an active
+> tensor element dtype are each type errors. An empty message is a type
+> error; the message is never synthesized or defaulted.
+>
+> Adjoint: The condition is discrete and receives zero cotangent under
+> spec/06 section 2.10.1. The fallback receives the result's cotangent
+> unchanged, because when the forward program produced a result it was the
+> fallback. The aborting path contributes no cotangent, and the operation is
+> not differentiated through a taken abort: the program has no result to
+> differentiate.
+>
+> Accumulator: None. The operation performs no arithmetic.
+
 #### Higher-order List identities
 
 > **[05-OP-55]** Signature: `map(f,xs)` maps T->U over List[T]; `filter(f,xs)` and

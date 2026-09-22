@@ -1767,6 +1767,12 @@ impl CEmitter {
             }
             RiscOp::Logical(kind) => self.emit_logical(id, *kind, &node.inputs, &node.output_type),
             RiscOp::Where => self.emit_where(id, &node.inputs, &node.output_type),
+            RiscOp::GuardedFail {
+                message,
+                trap_on_true,
+            } => {
+                self.emit_guarded_fail(id, &node.inputs, &node.output_type, message, *trap_on_true)
+            }
             RiscOp::Neg => self.emit_unary(id, UnaryEmission::Neg, &node.inputs, &node.output_type),
             RiscOp::Recip => self.emit_recip(id, &node.inputs, &node.output_type),
             RiscOp::Exp => self.emit_unary_func(id, "expf", &node.inputs, &node.output_type),
@@ -3741,6 +3747,52 @@ impl CEmitter {
     }
 
     // ---- Stored-bit conditional selection ----
+    /// chelis#1464 / [05-OP-68]: emit the guard as a real abort, not a
+    /// selected value. The check runs BEFORE the fallback is carried, so a
+    /// taken abort never produces a result — which is what makes the
+    /// compiled lane agree with the evaluator instead of both quietly
+    /// returning a placeholder.
+    ///
+    /// The message is a compile-time part of the node's identity, so it is
+    /// emitted as a byte literal through the same fixed-width octal escaper
+    /// the host lane uses. That escaper is immune to the `\u{...}` class of
+    /// defect because it never reproduces a source escape spelling.
+    fn emit_guarded_fail(
+        &mut self,
+        id: usize,
+        inputs: &[NodeId],
+        ty: &TensorType,
+        message: &str,
+        trap_on_true: bool,
+    ) {
+        let condition = inputs[0].0;
+        let fires = if trap_on_true { "!=" } else { "==" };
+        // A batched condition aborts when ANY mapped element fires; an
+        // unbatched condition has exactly one element, so the same loop
+        // serves both without a rank special case. Deliberately NOT an
+        // OpenMP parallel loop: the first firing element must win
+        // deterministically.
+        self.line(&format!(
+            "for (int64_t i = 0; i < t{condition}_size; i++) {{"
+        ));
+        self.indent += 1;
+        self.line(&format!(
+            "if (((const uint8_t*)t{condition}_data)[i] {fires} UINT8_C(0)) {{"
+        ));
+        self.indent += 1;
+        self.line(&format!(
+            "chelis_fail(chelis_string_from_utf8((const uint8_t *){}, INT64_C({})));",
+            crate::host_emit::c_utf8_byte_literal(message),
+            message.len()
+        ));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        // The guard did not fire, so the result is the fallback unchanged.
+        self.emit_realize(id, &inputs[1..], ty);
+    }
+
     fn emit_where(&mut self, id: usize, inputs: &[NodeId], ty: &TensorType) {
         let condition = inputs[0].0;
         let then_value = inputs[1].0;
