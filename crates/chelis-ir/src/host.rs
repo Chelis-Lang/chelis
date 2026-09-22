@@ -263,7 +263,7 @@ struct DefLaneFacts {
     /// whose miss costs a full callee lowering (chelis#1835).
     helper_summary_rejects: RefCell<UnordMap<String, bool>>,
     /// Program-wide: the top-level fn call graph.
-    call_graph: RefCell<Option<BTreeMap<String, BTreeSet<String>>>>,
+    call_graph: RefCell<Option<Arc<BTreeMap<String, BTreeSet<String>>>>>,
     /// Program-wide: every top-level definition body by name.
     program_defs: RefCell<Option<Arc<BTreeMap<String, Expr>>>>,
     /// Program-wide: the checker's effect row per definition.
@@ -15530,9 +15530,11 @@ fn expr_calls_summary_rejecting_top_level_fn(
     Ok(false)
 }
 
+/// Shared rather than cloned per ask: the kernel decision reads it on every
+/// application, and a clone copied every caller's callee set (chelis#2392).
 fn top_level_fn_call_graph(
     program: &HostLoweringSession<'_>,
-) -> BTreeMap<String, BTreeSet<String>> {
+) -> Arc<BTreeMap<String, BTreeSet<String>>> {
     if let Some(cached) = program.facts.call_graph.borrow().clone() {
         return cached;
     }
@@ -15553,6 +15555,7 @@ fn top_level_fn_call_graph(
             (name.clone(), callees)
         })
         .collect();
+    let graph = Arc::new(graph);
     *program.facts.call_graph.borrow_mut() = Some(graph.clone());
     graph
 }

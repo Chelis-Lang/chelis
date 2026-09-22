@@ -627,6 +627,7 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
         session: Some(chelis_ir::host::HostLoweringSession::new(eval_program)),
         active_declaration_names: Vec::new(),
         def_kernels: UnordMap::new(),
+        excluded_def_kernels: UnordMap::new(),
         transcript: Vec::new(),
         transcript_capture: crate::transcript_capture::current_transcript_capture(),
         resolving_top_levels: Vec::new(),
@@ -1086,6 +1087,11 @@ struct EvalContext<'a> {
     /// kernel is re-lowered per application and never cached (see
     /// `EvalContext::def_kernel`).
     def_kernels: UnordMap<String, Option<std::sync::Arc<DefEvaluationKernel>>>,
+    /// The same decision for an application under an execution exclusion,
+    /// which plans through the legacy kernel entry. Cached on the same terms
+    /// as `def_kernels`: a Random-drawing kernel depends on the stream
+    /// position and is re-lowered per application (chelis#2392).
+    excluded_def_kernels: UnordMap<String, Option<std::sync::Arc<DefEvaluationKernel>>>,
     transcript: Vec<String>,
     transcript_capture: Option<crate::TranscriptCapture>,
     resolving_top_levels: Vec<String>,

@@ -158,6 +158,7 @@ fn issue_1125_eval_raw_expr(expr: &Expr) -> Result<RuntimeValue, String> {
         session: None,
         active_declaration_names: Vec::new(),
         def_kernels: UnordMap::new(),
+        excluded_def_kernels: UnordMap::new(),
         transcript: Vec::new(),
         transcript_capture: None,
         resolving_top_levels: Vec::new(),
@@ -254,6 +255,7 @@ fn issue_1125_eval_checked_root(
         session: Some(chelis_ir::host::HostLoweringSession::new(checked)),
         active_declaration_names: Vec::new(),
         def_kernels: UnordMap::new(),
+        excluded_def_kernels: UnordMap::new(),
         transcript: Vec::new(),
         transcript_capture: None,
         resolving_top_levels: Vec::new(),
@@ -908,6 +910,76 @@ fn issue_2059_execution_profile_defs_snapshot_is_program_scoped() {
     );
 }
 
+/// Evaluate `source` and return its `result` binding with the number of
+/// kernel plannings performed under an execution exclusion.
+fn excluded_kernel_plannings(source: &str) -> (String, u64) {
+    let checked = checked_surf(source);
+    let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
+    let inputs = HostEvaluationInputs {
+        roots: &empty_tensors,
+        bindings: None,
+    };
+    super::eval::take_excluded_def_kernel_plannings();
+    let outcome =
+        evaluate_host_program_with_library_and_types(&checked, None, None, inputs, None, None)
+            .expect("#2392 fixture evaluates");
+    let plannings = super::eval::take_excluded_def_kernel_plannings();
+    let result = outcome
+        .host_bindings
+        .get("result")
+        .map(render_value)
+        .expect("#2392 fixture binds `result`");
+    (result, plannings)
+}
+
+/// chelis#2392: a recursive definition is `RecursiveControl`, so its whole
+/// dynamic extent runs under an execution exclusion. `def_kernel` used to
+/// skip its memo there and re-plan every applied helper per application.
+/// A helper that draws no Random is now planned once however many times the
+/// recursion applies it, while a drawing helper, whose kernel depends on the
+/// stream position, is still planned per application.
+///
+/// Evidentiary status: REGRESSION TEST for the non-drawing row (it fails on
+/// the base, where the count grows with the depth) and DISPOSITION LOCK for
+/// the drawing row (unchanged behaviour the memo must not break).
+#[test]
+fn issue_2392_excluded_kernel_is_planned_once_per_helper() {
+    let program = |depth: i64| {
+        format!(
+            "def double(x: tensor[4, f32]) -> tensor[4, f32] = add(x, x)\n\
+             def walk(n: i64, x: tensor[4, f32]) -> tensor[4, f32] = if eq(n, 0i64) then x else walk(sub(n, 1i64), double(x))\n\
+             result = tensor_to_scalar(sum(walk({depth}i64, to_tensor([1.0f32, 0.0f32, 0.0f32, 0.0f32])), 0i32))\n"
+        )
+    };
+    let (shallow, shallow_plannings) = excluded_kernel_plannings(&program(4));
+    let (deep, deep_plannings) = excluded_kernel_plannings(&program(12));
+    assert_eq!(shallow, "16.0");
+    assert_eq!(deep, "4096.0");
+    assert!(
+        shallow_plannings >= 1,
+        "the fixture must reach the excluded kernel decision"
+    );
+    assert_eq!(
+        shallow_plannings, deep_plannings,
+        "excluded plannings must not grow with the number of applications"
+    );
+
+    let drawing = |depth: i64| {
+        format!(
+            "def thin(x: tensor[4, f32]) -> tensor[4, f32] ! {{ Random }} = add(x, uniform_like(x, 0.0f32, 1.0f32))\n\
+             def walk(n: i64, x: tensor[4, f32]) -> tensor[4, f32] ! {{ Random }} = if eq(n, 0i64) then x else walk(sub(n, 1i64), thin(x))\n\
+             result = with seed(7i64) {{ tensor_to_scalar(sum(walk({depth}i64, to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32])), 0i32)) }}\n"
+        )
+    };
+    let (_, shallow_draws) = excluded_kernel_plannings(&drawing(4));
+    let (_, deep_draws) = excluded_kernel_plannings(&drawing(12));
+    assert_eq!(
+        deep_draws - shallow_draws,
+        8,
+        "a Random-drawing kernel is re-planned on every application"
+    );
+}
+
 /// chelis#2204: an anonymous `fn` captures the whole enclosing binding frame
 /// and the list combinators clone the callback once per element, so before
 /// this fix every element deep-copied every binding in scope, including
@@ -1070,6 +1142,7 @@ fn dropout_entered_error_prefix_and_nested_handler_unwind_preserve_parent() {
         session: Some(chelis_ir::host::HostLoweringSession::new(&checked)),
         active_declaration_names: Vec::new(),
         def_kernels: UnordMap::new(),
+        excluded_def_kernels: UnordMap::new(),
         transcript: Vec::new(),
         transcript_capture: None,
         resolving_top_levels: Vec::new(),
@@ -1963,6 +2036,7 @@ fn eval_deep_with_bindings(
         session: None,
         active_declaration_names: Vec::new(),
         def_kernels: UnordMap::new(),
+        excluded_def_kernels: UnordMap::new(),
         transcript: Vec::new(),
         transcript_capture: None,
         resolving_top_levels: Vec::new(),

@@ -62,6 +62,24 @@ pub(crate) fn reset_execution_profile_defs_snapshots() {
     EXECUTION_PROFILE_DEFS_SNAPSHOTS.with(|builds| builds.set(0));
 }
 
+thread_local! {
+    /// Kernel plannings `def_kernel` performed under an execution exclusion
+    /// (chelis#2392). An excluded recursive program applies its helpers
+    /// many times; each non-drawing helper is planned once however often it
+    /// is applied.
+    static EXCLUDED_DEF_KERNEL_PLANNINGS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn record_excluded_def_kernel_planning() {
+    EXCLUDED_DEF_KERNEL_PLANNINGS.with(|plannings| plannings.set(plannings.get() + 1));
+}
+
+/// Excluded kernel plannings on this thread since the last reset.
+#[cfg(test)]
+pub(crate) fn take_excluded_def_kernel_plannings() -> u64 {
+    EXCLUDED_DEF_KERNEL_PLANNINGS.with(|plannings| plannings.replace(0))
+}
+
 /// Resolve a returned alias to the name it reads outside its local let chain.
 /// Bindings are consumed backwards so every initializer sees only earlier
 /// bindings; an alias retains its producer even after that name is shadowed.
@@ -865,7 +883,11 @@ impl<'a> EvalContext<'a> {
         name: &str,
     ) -> Result<Option<Arc<DefEvaluationKernel>>, String> {
         if self.execution_exclusion.is_some() {
-            return self
+            if let Some(cached) = self.excluded_def_kernels.get(name) {
+                return Ok(cached.clone());
+            }
+            record_excluded_def_kernel_planning();
+            let kernel = self
                 .session
                 .as_ref()
                 .map(|session| {
@@ -884,7 +906,15 @@ impl<'a> EvalContext<'a> {
                         .flatten()
                         .map(|kernel| Arc::new(DefEvaluationKernel::Legacy(kernel)))
                 })
-                .map_err(|diagnostic| diagnostic.to_string());
+                .map_err(|diagnostic| diagnostic.to_string())?;
+            if !kernel
+                .as_ref()
+                .is_some_and(|kernel| kernel_draws_random(kernel.kernel_for_inspection()))
+            {
+                self.excluded_def_kernels
+                    .insert(name.to_string(), kernel.clone());
+            }
+            return Ok(kernel);
         }
         if let Some(cached) = self.def_kernels.get(name) {
             return Ok(cached.clone());
@@ -5040,6 +5070,7 @@ mod legacy_capture_order_tests {
             session: Some(chelis_ir::host::HostLoweringSession::new(checked)),
             active_declaration_names: Vec::new(),
             def_kernels: UnordMap::new(),
+            excluded_def_kernels: UnordMap::new(),
             transcript: Vec::new(),
             transcript_capture: None,
             resolving_top_levels: Vec::new(),
