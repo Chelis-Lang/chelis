@@ -4,7 +4,7 @@
 
 use chelis_unord::{UnordMap, UnordSet};
 use std::any::Any;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::{Arc, OnceLock};
@@ -2378,13 +2378,17 @@ impl SubexprLoweringContext {
         bound: &[(String, TensorType)],
         resource_policy: crate::evaluation::ResourcePolicy,
     ) -> crate::evaluation::EvaluationProfile {
-        let defs = self
-            .program_defs
-            .iter()
-            .filter(|(name, _)| !bound.iter().any(|(bound, _)| bound == *name))
-            .map(|(name, body)| (name.clone(), body.clone()))
-            .collect();
-        static_controls::profile(expr, &defs, bound, resource_policy)
+        // A bound input shadows a same-named definition throughout the walk.
+        // The classifier hides it by name instead of copying every other
+        // definition body per ask (chelis#2391).
+        let excluded = bound.iter().map(|(name, _)| name.clone()).collect();
+        static_controls::profile_excluding(
+            expr,
+            &self.program_defs,
+            &excluded,
+            bound,
+            resource_policy,
+        )
     }
 }
 
@@ -4630,6 +4634,7 @@ pub fn top_level_lowering_map(
     let types = LowerabilityTypes {
         signatures: &top_level_sigs,
         dtype_bound_names: &dtype_bound_names,
+        body_profiles: RefCell::default(),
     };
     let mut cache = BTreeMap::new();
     let mut visiting = UnordSet::new();
@@ -4677,6 +4682,7 @@ pub fn top_level_lowering_map_with_context(
     let types = LowerabilityTypes {
         signatures: &top_level_sigs,
         dtype_bound_names: &dtype_bound_names,
+        body_profiles: RefCell::default(),
     };
     let mut cache = library.lowered_names.clone();
     let mut visiting = UnordSet::new();
@@ -4778,6 +4784,7 @@ pub fn expr_is_dag_lowerable(expr: &Expr, program: &CheckedProgram) -> bool {
     let types = LowerabilityTypes {
         signatures: &top_level_sigs,
         dtype_bound_names: &dtype_bound_names,
+        body_profiles: RefCell::default(),
     };
     let mut cache = BTreeMap::new();
     let mut visiting = UnordSet::new();
@@ -5443,6 +5450,30 @@ fn collect_top_level_sigs_from_expr(expr: &Expr, sigs: &mut BTreeMap<String, Exp
 struct LowerabilityTypes<'a> {
     signatures: &'a BTreeMap<String, Expr>,
     dtype_bound_names: &'a BTreeMap<String, UnordSet<String>>,
+    /// Per definition name, the static-controls profile of its body against
+    /// the one definition table this classification reads. `def_is_lowered`
+    /// and every call site of a definition ask for the same answer, and the
+    /// classifier walks the whole reachable call graph, so each definition is
+    /// profiled once per lowering-map computation (chelis#2391).
+    body_profiles: RefCell<UnordMap<String, crate::evaluation::EvaluationProfile>>,
+}
+
+impl LowerabilityTypes<'_> {
+    fn body_profile(
+        &self,
+        name: &str,
+        body: &Expr,
+        top_level_defs: &BTreeMap<String, Expr>,
+    ) -> crate::evaluation::EvaluationProfile {
+        if let Some(profile) = self.body_profiles.borrow().get(name) {
+            return *profile;
+        }
+        let profile = evaluation_profile_from_defs(body, top_level_defs);
+        self.body_profiles
+            .borrow_mut()
+            .insert(name.to_owned(), profile);
+        profile
+    }
 }
 
 fn def_is_lowered(
@@ -5490,7 +5521,7 @@ fn def_is_lowered(
                         .is_some_and(|result| result.tag() == Some(DeepTag::TTensor))
             })
         }) && matches!(
-            evaluation_profile_from_defs(body, top_level_defs),
+            types.body_profile(name, body, top_level_defs),
             crate::evaluation::EvaluationProfile::Legacy(
                 crate::evaluation::LegacyEvaluationReason::RuntimeRate
             )
@@ -5581,7 +5612,7 @@ fn expr_depends_on_nonlowerable_name(
                 type_expr_has_precision_var(ty)
                     || type_expr_has_rank_var(ty)
                     || fn_type_has_bounded_scalar_var(ty, types.dtype_bound_names.get(&name))
-            }) || (evaluation_profile_from_defs(body, top_level_defs)
+            }) || (types.body_profile(&name, body, top_level_defs)
                 == crate::evaluation::EvaluationProfile::Legacy(
                     crate::evaluation::LegacyEvaluationReason::RuntimeRate,
                 )
@@ -6305,6 +6336,24 @@ pub fn evaluation_profile_sorted(
     program_defs: &BTreeMap<String, Expr>,
 ) -> crate::evaluation::EvaluationProfile {
     evaluation_profile_from_defs(expr, program_defs)
+}
+
+/// [`evaluation_profile_sorted`] with every name in `shadowed` treated as
+/// absent from `program_defs`, as a copy of the table without those names
+/// would classify, for a caller whose bindings shadow same-named
+/// definitions (chelis#2391 retired the per-ask copy).
+pub fn evaluation_profile_sorted_shadowing(
+    expr: &Expr,
+    program_defs: &BTreeMap<String, Expr>,
+    shadowed: &UnordSet<String>,
+) -> crate::evaluation::EvaluationProfile {
+    static_controls::profile_excluding(
+        expr,
+        program_defs,
+        shadowed,
+        &[],
+        crate::evaluation::ResourcePolicy::Legacy,
+    )
 }
 
 fn evaluation_profile_from_defs(
@@ -21793,6 +21842,7 @@ mod tests {
         let types = LowerabilityTypes {
             signatures: &signatures,
             dtype_bound_names: &dtype_bound_names,
+            body_profiles: RefCell::default(),
         };
         let mut cache = BTreeMap::from([("bad".into(), false)]);
         expr_depends_on_nonlowerable_name(

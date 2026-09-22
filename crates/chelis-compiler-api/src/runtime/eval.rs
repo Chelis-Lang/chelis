@@ -62,6 +62,24 @@ pub(crate) fn reset_execution_profile_defs_snapshots() {
     EXECUTION_PROFILE_DEFS_SNAPSHOTS.with(|builds| builds.set(0));
 }
 
+thread_local! {
+    /// Kernel plannings `def_kernel` performed under an execution exclusion
+    /// (chelis#2392). An excluded recursive program applies its helpers
+    /// many times; each non-drawing helper is planned once however often it
+    /// is applied.
+    static EXCLUDED_DEF_KERNEL_PLANNINGS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn record_excluded_def_kernel_planning() {
+    EXCLUDED_DEF_KERNEL_PLANNINGS.with(|plannings| plannings.set(plannings.get() + 1));
+}
+
+/// Excluded kernel plannings on this thread since the last reset.
+#[cfg(test)]
+pub(crate) fn take_excluded_def_kernel_plannings() -> u64 {
+    EXCLUDED_DEF_KERNEL_PLANNINGS.with(|plannings| plannings.replace(0))
+}
+
 /// Resolve a returned alias to the name it reads outside its local let chain.
 /// Bindings are consumed backwards so every initializer sees only earlier
 /// bindings; an alias retains its producer even after that name is shadowed.
@@ -780,14 +798,12 @@ impl<'a> EvalContext<'a> {
         // A bound parameter shadows a same-named top-level def, so it must not
         // reach the classifier. Collisions are rare (parameters are named
         // `acc`, `x`, ...), so the common path classifies against the shared
-        // snapshot with no per-ask clone; only a genuine collision pays for a
-        // filtered copy, preserving the original shadowing semantics exactly.
+        // snapshot; a genuine collision hides the shadowed names from the
+        // classifier by name, which is exactly what a filtered copy of the
+        // table did, without the copy (chelis#2391).
         if bound.iter().any(|name| snapshot.contains_key(name)) {
-            let mut filtered = (*snapshot).clone();
-            for name in bound {
-                filtered.remove(name);
-            }
-            chelis_ir::lower::evaluation_profile_sorted(expr, &filtered)
+            let shadowed = bound.iter().cloned().collect();
+            chelis_ir::lower::evaluation_profile_sorted_shadowing(expr, &snapshot, &shadowed)
         } else {
             chelis_ir::lower::evaluation_profile_sorted(expr, &snapshot)
         }
@@ -867,7 +883,11 @@ impl<'a> EvalContext<'a> {
         name: &str,
     ) -> Result<Option<Arc<DefEvaluationKernel>>, String> {
         if self.execution_exclusion.is_some() {
-            return self
+            if let Some(cached) = self.excluded_def_kernels.get(name) {
+                return Ok(cached.clone());
+            }
+            record_excluded_def_kernel_planning();
+            let kernel = self
                 .session
                 .as_ref()
                 .map(|session| {
@@ -886,7 +906,15 @@ impl<'a> EvalContext<'a> {
                         .flatten()
                         .map(|kernel| Arc::new(DefEvaluationKernel::Legacy(kernel)))
                 })
-                .map_err(|diagnostic| diagnostic.to_string());
+                .map_err(|diagnostic| diagnostic.to_string())?;
+            if !kernel
+                .as_ref()
+                .is_some_and(|kernel| kernel_draws_random(kernel.kernel_for_inspection()))
+            {
+                self.excluded_def_kernels
+                    .insert(name.to_string(), kernel.clone());
+            }
+            return Ok(kernel);
         }
         if let Some(cached) = self.def_kernels.get(name) {
             return Ok(cached.clone());
@@ -1224,22 +1252,9 @@ impl<'a> EvalContext<'a> {
     }
 
     pub(super) fn lookup_top_level_def(&self, name: &str) -> Option<(String, Expr)> {
-        self.program
-            .defs()
-            .get(name)
-            .cloned()
-            .map(|expr| (name.to_string(), expr))
-            .or_else(|| {
-                let sorted = self.program.defs().to_sorted();
-                let mut matches = sorted.into_iter().filter_map(|(key, value)| {
-                    terminal_name_matches(key, name).then_some((key, value))
-                });
-                let (key, value) = matches.next()?;
-                matches
-                    .next()
-                    .is_none()
-                    .then_some((key.clone(), value.clone()))
-            })
+        let key = self.program.resolve_def_key(name)?;
+        let body = self.program.defs().get(key)?;
+        Some((key.to_owned(), body.clone()))
     }
 
     fn lookup_declared_signature(&self, name: &str) -> Option<&Expr> {
@@ -5042,6 +5057,7 @@ mod legacy_capture_order_tests {
             session: Some(chelis_ir::host::HostLoweringSession::new(checked)),
             active_declaration_names: Vec::new(),
             def_kernels: UnordMap::new(),
+            excluded_def_kernels: UnordMap::new(),
             transcript: Vec::new(),
             transcript_capture: None,
             resolving_top_levels: Vec::new(),

@@ -289,7 +289,7 @@ pub(super) fn terminal_name_matches(full_name: &str, short_name: &str) -> bool {
     full_name == short_name || terminal_name(full_name) == terminal_name(short_name)
 }
 
-fn terminal_name(name: &str) -> &str {
+pub(super) fn terminal_name(name: &str) -> &str {
     name.rsplit_once("__")
         .map(|(_, tail)| tail)
         .or_else(|| name.rsplit_once('.').map(|(_, tail)| tail))

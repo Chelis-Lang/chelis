@@ -136,15 +136,162 @@ impl Environment {
     }
 }
 
+/// What a named definition's walk read from its caller: the definition, each
+/// actual's static scalar and precision, and whether the body sits under a
+/// `grad` (only zero versus nonzero depth is observable, through
+/// `HigherOrderAd`). A named definition starts from a fresh environment, so
+/// with the fixed definition table and resource policy these are every input
+/// its walk has (chelis#2391).
+struct WalkKey {
+    name: String,
+    under_grad: bool,
+    scalars: Vec<Option<StagedScalar>>,
+    precisions: Vec<Option<Prim>>,
+}
+
+impl WalkKey {
+    fn same_walk(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.under_grad == other.under_grad
+            && self.precisions == other.precisions
+            && self.scalars.len() == other.scalars.len()
+            && self
+                .scalars
+                .iter()
+                .zip(&other.scalars)
+                .all(|(lhs, rhs)| match (lhs, rhs) {
+                    (None, None) => true,
+                    (Some(lhs), Some(rhs)) => identical_scalar(lhs, rhs),
+                    _ => false,
+                })
+    }
+}
+
+/// Bit-level identity of two staged scalars. A NaN is never identical to
+/// anything, so a NaN actual always re-walks: a missed replay costs time,
+/// a wrong one would change a classification.
+fn identical_scalar(lhs: &StagedScalar, rhs: &StagedScalar) -> bool {
+    match (lhs, rhs) {
+        (
+            StagedScalar::Raw(chelis_types::RawScalar::Int(lhs)),
+            StagedScalar::Raw(chelis_types::RawScalar::Int(rhs)),
+        ) => lhs == rhs,
+        (
+            StagedScalar::Raw(chelis_types::RawScalar::Float(lhs)),
+            StagedScalar::Raw(chelis_types::RawScalar::Float(rhs)),
+        ) => !lhs.is_nan() && lhs.to_bits() == rhs.to_bits(),
+        (StagedScalar::Typed(lhs), StagedScalar::Typed(rhs)) => {
+            lhs.prim() == rhs.prim()
+                && !lhs.as_f64_lossy().is_nan()
+                && lhs.as_i64_exact() == rhs.as_i64_exact()
+                && lhs.as_f64_lossy().to_bits() == rhs.as_f64_lossy().to_bits()
+        }
+        _ => false,
+    }
+}
+
 struct Profile<'a> {
     defs: &'a BTreeMap<String, Expr>,
+    /// Names the caller's bindings shadow. They read as absent from `defs`
+    /// everywhere in the walk, callee bodies included, exactly as a copy of
+    /// `defs` with these names removed would (chelis#2391 retired that copy).
+    excluded: &'a UnordSet<String>,
     active: BTreeSet<String>,
     dropout: bool,
     reason: Option<crate::evaluation::LegacyEvaluationReason>,
     resource_policy: crate::evaluation::ResourcePolicy,
+    /// Named-definition walks that finished without a reason, with the
+    /// dropout they found. Once any reason is recorded the profile's answer
+    /// is fixed and the walk stops, so a walk that finishes reason-free met
+    /// no recursion edge (each one records `RecursiveControl`) and its result
+    /// does not depend on the `active` set. Replaying it is therefore exact,
+    /// and it turns the per-call-site re-walk of a shared callee, which
+    /// multiplied along every call chain, into one walk per distinct key.
+    completed: UnordMap<String, Vec<(WalkKey, bool)>>,
+    /// Set once a walk leaves a name in `active` (see `poison_replay`).
+    replay_poisoned: bool,
 }
 
-impl Profile<'_> {
+#[cfg(test)]
+thread_local! {
+    /// Classifier invocations (`profile_excluding` calls).
+    static PROFILE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Named-definition body walks actually performed (not replayed).
+    static BODY_WALKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Disable replay and the early stop, so tests can compare against the
+    /// walk as it was before chelis#2391.
+    static REFERENCE_WALK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn reference_walk() -> bool {
+    REFERENCE_WALK.with(std::cell::Cell::get)
+}
+
+#[cfg(not(test))]
+fn reference_walk() -> bool {
+    false
+}
+
+impl<'a> Profile<'a> {
+    fn def(&self, name: &str) -> Option<&'a Expr> {
+        if self.excluded.contains(name) {
+            return None;
+        }
+        self.defs.get(name)
+    }
+
+    fn has_def(&self, name: &str) -> bool {
+        self.def(name).is_some()
+    }
+
+    fn fresh_environment(&self) -> Environment {
+        Environment {
+            shadowed_neg: self.has_def("neg"),
+            ..Environment::default()
+        }
+    }
+
+    fn replay(&mut self, key: &WalkKey) -> bool {
+        #[cfg(test)]
+        if REFERENCE_WALK.with(std::cell::Cell::get) {
+            return false;
+        }
+        let Some(dropout) = self.completed.get(&key.name).and_then(|done| {
+            done.iter()
+                .find_map(|(done, dropout)| done.same_walk(key).then_some(*dropout))
+        }) else {
+            return false;
+        };
+        self.dropout |= dropout;
+        true
+    }
+
+    fn poison_replay(&mut self) {
+        self.completed.clear();
+        self.replay_poisoned = true;
+    }
+
+    /// Walk a named definition's body at most once per key.
+    fn walk_named(&mut self, key: WalkKey, walk: impl FnOnce(&mut Self)) {
+        if self.replay(&key) {
+            return;
+        }
+        #[cfg(test)]
+        BODY_WALKS.with(|walks| walks.set(walks.get() + 1));
+        let before = self.dropout;
+        self.dropout = false;
+        walk(self);
+        let found = self.dropout;
+        self.dropout |= before;
+        if self.reason.is_none() && !self.replay_poisoned {
+            self.completed
+                .entry(key.name.clone())
+                .or_default()
+                .push((key, found));
+        }
+    }
+
     fn callable(&self, expr: &Expr, env: &Environment) -> Option<Closure> {
         if stamped_parts(expr).is_some_and(|(tag, _, _)| tag == DeepTag::Fn) {
             return Some(Closure {
@@ -160,14 +307,11 @@ impl Profile<'_> {
         if env.bound.contains(&name) {
             return None;
         }
-        let function = self.defs.get(&name)?;
+        let function = self.def(&name)?;
         stamped_parts(function).filter(|(tag, _, _)| *tag == DeepTag::Fn)?;
         Some(Closure {
             function: function.clone(),
-            environment: Rc::new(Environment {
-                shadowed_neg: self.defs.contains_key("neg"),
-                ..Environment::default()
-            }),
+            environment: Rc::new(self.fresh_environment()),
             name: Some(name),
         })
     }
@@ -184,19 +328,56 @@ impl Profile<'_> {
         for arg in args {
             self.visit(arg, caller_depth, caller);
         }
-        if let Some(name) = &closure.name
-            && !self.active.insert(name.clone())
-        {
+        if self.reason.is_some() && !reference_walk() {
+            return;
+        }
+        let Some(name) = closure.name.clone() else {
+            self.apply_body(&closure, args, body_depth, caller);
+            return;
+        };
+        if !self.active.insert(name.clone()) {
             self.reason.get_or_insert(Reason::RecursiveControl);
             return;
         }
+        let key = WalkKey {
+            name: name.clone(),
+            under_grad: body_depth != 0,
+            scalars: args.iter().map(|arg| caller.scalar(arg)).collect(),
+            precisions: args.iter().map(|arg| caller.precision(arg)).collect(),
+        };
+        // A replayed walk was well formed when it was recorded.
+        let mut walked = true;
+        self.walk_named(key, |profile| {
+            walked = profile.apply_body(&closure, args, body_depth, caller);
+        });
+        if walked {
+            self.active.remove(&name);
+        } else {
+            // A malformed named function stays in the active set, so every
+            // later reference to it reads as recursion (the profile has always
+            // behaved this way). The enclosing walks, which reached it while
+            // it was not yet active, would replay as if that were still so;
+            // nothing is recorded or replayed from here on.
+            self.poison_replay();
+        }
+    }
+
+    fn apply_body(
+        &mut self,
+        closure: &Closure,
+        args: &[Expr],
+        body_depth: usize,
+        caller: &Environment,
+    ) -> bool {
         let (_, _, kids) = stamped_parts(&closure.function).expect("resolved function");
         let Some((DeepTag::Params, _, params)) = kids.first().and_then(stamped_parts) else {
             // No parameter environment can be inferred from a malformed
             // function; its owning Deep/lowering boundary diagnoses it.
-            return;
+            return false;
         };
-        let Some(body) = kids.get(1) else { return };
+        let Some(body) = kids.get(1) else {
+            return false;
+        };
         let mut env = (*closure.environment).clone();
         // The lowerer has no general lexical closure carrier. A captured
         // scalar with a different caller binding is no longer proven static
@@ -245,13 +426,17 @@ impl Profile<'_> {
             }
         }
         self.visit(body, body_depth, &env);
-        if let Some(name) = closure.name {
-            self.active.remove(&name);
-        }
+        true
     }
 
     fn visit(&mut self, expr: &Expr, depth: usize, env: &Environment) {
         use crate::evaluation::LegacyEvaluationReason as Reason;
+        // The first recorded reason is the profile's answer (`profile` reads
+        // it before `dropout`, and every write is `get_or_insert`), so nothing
+        // the rest of the walk could find changes the result.
+        if self.reason.is_some() && !reference_walk() {
+            return;
+        }
         let Some((tag, metadata, kids)) = stamped_parts(expr) else {
             return;
         };
@@ -276,7 +461,7 @@ impl Profile<'_> {
         }
         if let Some(("dropout", args)) = app_var_name_and_args(expr)
             && !env.bound.contains("dropout")
-            && !self.defs.contains_key("dropout")
+            && !self.has_def("dropout")
         {
             self.dropout = true;
             if args.get(1).and_then(|rate| env.scalar(rate)).is_none() {
@@ -288,20 +473,20 @@ impl Profile<'_> {
                 self.apply(closure, &[], depth, depth, env);
             } else if let Some(name) = bare_var_name(expr)
                 && !env.bound.contains(&name)
-                && let Some(body) = self.defs.get(&name)
+                && let Some(body) = self.def(&name)
                 && bare_var_name(body).as_ref() != Some(&name)
             {
                 // Preserve the original profile's traversal of referenced
                 // effecting declarations, not only function definitions.
                 if self.active.insert(name.clone()) {
-                    self.visit(
-                        body,
-                        depth,
-                        &Environment {
-                            shadowed_neg: self.defs.contains_key("neg"),
-                            ..Environment::default()
-                        },
-                    );
+                    let key = WalkKey {
+                        name: name.clone(),
+                        under_grad: depth != 0,
+                        scalars: Vec::new(),
+                        precisions: Vec::new(),
+                    };
+                    let environment = self.fresh_environment();
+                    self.walk_named(key, |profile| profile.visit(body, depth, &environment));
                     self.active.remove(&name);
                 } else {
                     self.reason.get_or_insert(Reason::RecursiveControl);
@@ -409,18 +594,33 @@ pub(super) fn profile(
     inputs: &[(String, TensorType)],
     resource_policy: crate::evaluation::ResourcePolicy,
 ) -> crate::evaluation::EvaluationProfile {
+    profile_excluding(expr, defs, &UnordSet::new(), inputs, resource_policy)
+}
+
+/// [`profile`] over `defs` with every name in `excluded` treated as absent
+/// from the table, which is what a caller whose bindings shadow those
+/// definitions needs, without copying the table per ask.
+pub(super) fn profile_excluding(
+    expr: &Expr,
+    defs: &BTreeMap<String, Expr>,
+    excluded: &UnordSet<String>,
+    inputs: &[(String, TensorType)],
+    resource_policy: crate::evaluation::ResourcePolicy,
+) -> crate::evaluation::EvaluationProfile {
     use crate::evaluation::{EvaluationProfile, LegacyEvaluationReason};
+    #[cfg(test)]
+    PROFILE_CALLS.with(|calls| calls.set(calls.get() + 1));
     let mut profile = Profile {
         defs,
+        excluded,
         active: BTreeSet::new(),
         dropout: false,
         reason: None,
         resource_policy,
+        completed: UnordMap::new(),
+        replay_poisoned: false,
     };
-    let mut env = Environment {
-        shadowed_neg: defs.contains_key("neg"),
-        ..Environment::default()
-    };
+    let mut env = profile.fresh_environment();
     for (name, ty) in inputs {
         env.bind(name, None, Some(ty.precision));
     }
@@ -501,5 +701,331 @@ mod tests {
         .unwrap();
         assert!(scalar(&expr, &UnordMap::new(), &UnordMap::new(), true).is_some());
         assert!(scalar(&expr, &UnordMap::new(), &UnordMap::new(), false).is_none());
+    }
+
+    fn surf_program(source: &str) -> Option<Vec<Expr>> {
+        let declarations = chelis_surf::parser::parse_str(source).ok()?;
+        let desugared = chelis_surf::desugar::desugar_program(&declarations).ok()?;
+        // A checked program carries the type metadata the precision facts
+        // read; a file that does not check alone (an import, a library
+        // module) still exercises the walk's control structure unchecked.
+        Some(match chelis_types::check_typed_program(&desugared) {
+            Ok(checked) => checked.exprs().to_vec(),
+            Err(_) => desugared,
+        })
+    }
+
+    /// A handcrafted fixture must check, so its actuals carry the precision
+    /// facts a replay key compares.
+    fn surf_defs(source: &str) -> BTreeMap<String, Expr> {
+        let declarations = chelis_surf::parser::parse_str(source).expect("fixture parses");
+        let desugared =
+            chelis_surf::desugar::desugar_program(&declarations).expect("fixture desugars");
+        let checked = chelis_types::check_typed_program(&desugared)
+            .unwrap_or_else(|error| panic!("fixture checks: {error:?}"));
+        collect_top_level_defs(checked.exprs())
+    }
+
+    fn as_reference<T>(run: impl FnOnce() -> T) -> T {
+        REFERENCE_WALK.with(|flag| flag.set(true));
+        let result = run();
+        REFERENCE_WALK.with(|flag| flag.set(false));
+        result
+    }
+
+    fn body_walks<T>(run: impl FnOnce() -> T) -> (T, usize) {
+        BODY_WALKS.with(|walks| walks.set(0));
+        let result = run();
+        (result, BODY_WALKS.with(std::cell::Cell::get))
+    }
+
+    fn legacy_profile(
+        expr: &Expr,
+        defs: &BTreeMap<String, Expr>,
+    ) -> crate::evaluation::EvaluationProfile {
+        profile(expr, defs, &[], crate::evaluation::ResourcePolicy::Legacy)
+    }
+
+    fn collect_apps<'e>(expr: &'e Expr, out: &mut Vec<&'e Expr>) {
+        let Some((tag, _, kids)) = stamped_parts(expr) else {
+            return;
+        };
+        if tag == DeepTag::App {
+            out.push(expr);
+        }
+        for kid in kids {
+            collect_apps(kid, out);
+        }
+    }
+
+    /// Deep-only fixtures for shapes Surf cannot spell. `m` has no
+    /// parameter list, so the walk leaves it in the active set; `n` is then
+    /// recorded before the second call to `n` re-reaches `m`, which the
+    /// original walk reports as recursion. Replay must not skip that second
+    /// walk (the round-1 red team's reproduction for `poison_replay`).
+    const DEEP_EXACTNESS_FIXTURES: &[&str] = &["(def {} m (fn {} (lit {} 1) (lit {} 2)))\n\
+         (def {} n (fn {} (params {} (x {})) (app {} (var {} m) (var {} x))))\n\
+         (def {} root (fn {} (params {} (x {})) (app {} (var {} add) (app {} (var {} n) (var {} x)) (app {} (var {} n) (var {} x)))))\n"];
+
+    /// Handcrafted programs aimed at each way a replayed walk could differ
+    /// from a fresh one. Each one also runs through the corpus differential.
+    const EXACTNESS_FIXTURES: &[&str] = &[
+        // The same helper with a static and then a runtime rate: the key
+        // must tell the two actuals apart, in either order.
+        "def thin(x: tensor[4, f32], r: f32) -> tensor[4, f32] ! { Random } = dropout(x, r)\n\
+         def static_first(x: tensor[4, f32], y: f32) -> tensor[4, f32] ! { Random } = add(thin(x, 0.5f32), thin(x, y))\n\
+         def runtime_first(x: tensor[4, f32], y: f32) -> tensor[4, f32] ! { Random } = add(thin(x, y), thin(x, 0.5f32))\n\
+         def static_twice(x: tensor[4, f32]) -> tensor[4, f32] ! { Random } = add(thin(x, 0.5f32), thin(x, 0.25f32))\n\
+         def typed_runtime(x: tensor[4, f32], y: f32) -> tensor[4, f32] ! { Random } = add(thin(x, 0.5f32), thin(x, mul(y, 1.0f32)))\n\
+         def narrow(x: tensor[4, f32], n: i32) -> tensor[4, f32] ! { Random } = dropout(x, cast(cast(n, i8), f32))\n\
+         def fits_then_overflows(x: tensor[4, f32]) -> tensor[4, f32] ! { Random } = add(narrow(x, 1i32), narrow(x, 1000i32))\n\
+         def keep_generic[p: Float](x: tensor[4, p]) -> tensor[4, p] ! { Random } = dropout(x, cast(0.5, p))\n\
+         def typed_then_untyped(x: tensor[4, f32]) -> tensor[4, f32] ! { Random } = add(keep_generic(add(x, x)), keep_generic(x))\n",
+        // Recursion reached after a sibling helper was walked and recorded.
+        "def leaf(x: tensor[f32]) -> tensor[f32] = add(x, x)\n\
+         def ping(x: tensor[f32]) -> tensor[f32] = add(leaf(x), pong(x))\n\
+         def pong(x: tensor[f32]) -> tensor[f32] = ping(leaf(x))\n",
+        // A helper holding a `grad`, reached first at depth zero and then
+        // under an outer `grad`, where the same body is higher-order AD.
+        "def inner(x: tensor[f32]) -> tensor[f32] = mul(x, x)\n\
+         def uses_grad(x: tensor[f32]) -> tensor[f32] = grad(inner)(x)\n\
+         def outer(x: tensor[f32]) -> tensor[f32] = add(uses_grad(x), grad(uses_grad)(x))\n",
+        // Shadowing: a definition named like a caller binding, and `neg`.
+        "def neg(x: f32) -> f32 = x\n\
+         def rate() -> f32 = 0.5f32\n\
+         def scaled(x: tensor[4, f32]) -> tensor[4, f32] ! { Random } = dropout(x, neg(0.5f32))\n\
+         def reads(x: tensor[4, f32]) -> tensor[4, f32] ! { Random } = add(scaled(x), dropout(x, rate()))\n",
+    ];
+
+    /// chelis#2391: replay and the early stop are optimisations, so every
+    /// classification must equal the walk they replaced, and the named
+    /// exclusion must equal the filtered table copy it replaced.
+    #[test]
+    fn memoised_profile_matches_the_reference_walk_over_the_corpus() {
+        use crate::evaluation::{EvaluationProfile, ResourcePolicy};
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut sources = EXACTNESS_FIXTURES
+            .iter()
+            .map(|source| (format!("fixture:{}", &source[..24]), (*source).to_owned()))
+            .collect::<Vec<_>>();
+        let mut stack = [
+            "examples",
+            "packages/chelis-std",
+            "tests/corpus",
+            "crates/chelis-cli/tests/fixtures",
+        ]
+        .map(|dir| root.join(dir))
+        .to_vec();
+        while let Some(dir) = stack.pop() {
+            let mut entries = std::fs::read_dir(&dir)
+                .unwrap_or_else(|error| panic!("{}: {error}", dir.display()))
+                .map(|entry| entry.unwrap().path())
+                .collect::<Vec<_>>();
+            entries.sort();
+            for path in entries {
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|ext| ext == "ch") {
+                    sources.push((
+                        path.display().to_string(),
+                        std::fs::read_to_string(&path).unwrap(),
+                    ));
+                }
+            }
+        }
+        let mut programs = DEEP_EXACTNESS_FIXTURES
+            .iter()
+            .map(|source| {
+                let exprs = chelis_deep::parser::parse_str(source).expect("Deep fixture parses");
+                (format!("deep fixture:{}", &source[..24]), exprs)
+            })
+            .collect::<Vec<_>>();
+        programs.extend(
+            sources
+                .iter()
+                .filter_map(|(origin, source)| Some((origin.clone(), surf_program(source)?))),
+        );
+        let mut compared = 0usize;
+        let mut outcomes = BTreeMap::<String, usize>::new();
+        for (origin, exprs) in &programs {
+            let defs = collect_top_level_defs(exprs);
+            let names = defs.keys().cloned().collect::<Vec<_>>();
+            let mut shadowed = names.iter().step_by(3).cloned().collect::<UnordSet<_>>();
+            shadowed.insert("neg".into());
+            shadowed.insert("dropout".into());
+            let filtered = defs
+                .iter()
+                .filter(|(name, _)| !shadowed.contains(*name))
+                .map(|(name, body)| (name.clone(), body.clone()))
+                .collect::<BTreeMap<_, _>>();
+            let mut asks = defs.values().collect::<Vec<_>>();
+            for body in defs.values() {
+                collect_apps(body, &mut asks);
+            }
+            for expr in asks {
+                for policy in [ResourcePolicy::Legacy, ResourcePolicy::RecordRequirements] {
+                    let memoised = profile(expr, &defs, &[], policy);
+                    let reference = as_reference(|| profile(expr, &defs, &[], policy));
+                    assert_eq!(memoised, reference, "{origin}: {:?}", expr.span());
+                    let excluded = profile_excluding(expr, &defs, &shadowed, &[], policy);
+                    let copied = as_reference(|| profile(expr, &filtered, &[], policy));
+                    assert_eq!(excluded, copied, "{origin} (shadowed): {:?}", expr.span());
+                    compared += 1;
+                    let label = match memoised {
+                        EvaluationProfile::Legacy(reason) => format!("{reason:?}"),
+                        other => format!("{other:?}"),
+                    };
+                    *outcomes.entry(label).or_default() += 1;
+                }
+            }
+        }
+        // A corpus that silently stopped parsing would compare nothing and
+        // pass; require volume and every outcome the fixtures aim at.
+        assert!(compared > 2_000, "compared only {compared} classifications");
+        for expected in [
+            "FixedControl",
+            "RuntimeRate",
+            "RecursiveControl",
+            "HigherOrderAd",
+            "NoDropout",
+        ] {
+            assert!(
+                outcomes.get(expected).is_some_and(|count| *count > 0),
+                "no {expected} classification in the corpus: {outcomes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn replay_key_distinguishes_a_static_rate_from_a_runtime_one() {
+        use crate::evaluation::{EvaluationProfile, LegacyEvaluationReason};
+        let defs = surf_defs(EXACTNESS_FIXTURES[0]);
+        for (name, expected) in [
+            (
+                "static_first",
+                EvaluationProfile::Legacy(LegacyEvaluationReason::RuntimeRate),
+            ),
+            (
+                "runtime_first",
+                EvaluationProfile::Legacy(LegacyEvaluationReason::RuntimeRate),
+            ),
+            ("static_twice", EvaluationProfile::FixedControl),
+            (
+                "typed_runtime",
+                EvaluationProfile::Legacy(LegacyEvaluationReason::RuntimeRate),
+            ),
+            (
+                "fits_then_overflows",
+                EvaluationProfile::Legacy(LegacyEvaluationReason::RuntimeRate),
+            ),
+            (
+                "typed_then_untyped",
+                EvaluationProfile::Legacy(LegacyEvaluationReason::RuntimeRate),
+            ),
+        ] {
+            assert_eq!(legacy_profile(&defs[name], &defs), expected, "{name}");
+        }
+    }
+
+    /// chelis#2391: a helper shared along a call chain is walked once per
+    /// distinct key, not once per path. `h10` reaches `h0` along 2^10 paths.
+    #[test]
+    fn shared_callee_is_walked_once_per_key() {
+        use crate::evaluation::{EvaluationProfile, LegacyEvaluationReason};
+        let mut source = String::from("def h0(x: tensor[f32]) -> tensor[f32] = add(x, x)\n");
+        for level in 1..=10 {
+            let below = level - 1;
+            source.push_str(&format!(
+                "def h{level}(x: tensor[f32]) -> tensor[f32] = add(h{below}(x), h{below}(x))\n"
+            ));
+        }
+        let defs = surf_defs(&source);
+        let (memoised, walks) = body_walks(|| legacy_profile(&defs["h10"], &defs));
+        let (reference, reference_walks) =
+            body_walks(|| as_reference(|| legacy_profile(&defs["h10"], &defs)));
+        assert_eq!(
+            memoised,
+            EvaluationProfile::Legacy(LegacyEvaluationReason::NoDropout)
+        );
+        assert_eq!(memoised, reference);
+        assert_eq!(
+            reference_walks,
+            (1 << 11) - 2,
+            "the unmemoised walk is exponential"
+        );
+        assert_eq!(walks, 10, "each of h0..h9 is walked once");
+    }
+
+    /// The first reason fixes the answer, so a recursive program stops at
+    /// its first recursion edge instead of exhausting the call graph.
+    #[test]
+    fn walk_stops_at_the_first_reason() {
+        use crate::evaluation::{EvaluationProfile, LegacyEvaluationReason};
+        let mut source = String::from(
+            "def spin(x: tensor[f32]) -> tensor[f32] = spin(x)\n\
+             def h0(x: tensor[f32]) -> tensor[f32] = add(x, x)\n",
+        );
+        for level in 1..=10 {
+            let below = level - 1;
+            source.push_str(&format!(
+                "def h{level}(x: tensor[f32]) -> tensor[f32] = add(h{below}(x), h{below}(x))\n"
+            ));
+        }
+        source.push_str("def root(x: tensor[f32]) -> tensor[f32] = add(spin(x), h10(x))\n");
+        let defs = surf_defs(&source);
+        let (memoised, walks) = body_walks(|| legacy_profile(&defs["root"], &defs));
+        assert_eq!(
+            memoised,
+            EvaluationProfile::Legacy(LegacyEvaluationReason::RecursiveControl)
+        );
+        assert_eq!(walks, 1, "only `spin` is entered");
+    }
+
+    /// chelis#2391: `def_is_lowered` and every call site of a definition ask
+    /// for the same body profile; one lowering-map computation profiles each
+    /// definition at most once. Before, every one of the `callers * calls`
+    /// call sites re-profiled `shared` and walked its whole call graph.
+    #[test]
+    fn lowering_map_profiles_each_definition_once() {
+        let callers = 20;
+        let calls = 5;
+        let mut source = String::from("def shared(x: tensor[f32]) -> tensor[f32] = add(x, x)\n");
+        for caller in 0..callers {
+            let body = (0..calls).fold("x".to_owned(), |acc, _| format!("shared({acc})"));
+            source.push_str(&format!(
+                "def caller{caller}(x: tensor[f32]) -> tensor[f32] = {body}\n"
+            ));
+        }
+        let declarations = chelis_surf::parser::parse_str(&source).expect("fixture parses");
+        let desugared =
+            chelis_surf::desugar::desugar_program(&declarations).expect("fixture desugars");
+        let checked = chelis_types::check_typed_program(&desugared).expect("fixture checks");
+        PROFILE_CALLS.with(|count| count.set(0));
+        let lowered = top_level_lowering_map(checked.exprs(), checked.type_env());
+        let asked = PROFILE_CALLS.with(std::cell::Cell::get);
+        assert_eq!(lowered.len(), callers + 1);
+        assert!(
+            asked <= callers + 1,
+            "{asked} classifier calls for {} definitions",
+            callers + 1
+        );
+        assert!(asked > 0, "the lowering map no longer asks the classifier");
+    }
+
+    /// A malformed named function stays in the active set for the rest of
+    /// the walk, so the walk that first reached it must not be replayed: a
+    /// second call reaches it again and reads as recursion.
+    #[test]
+    fn malformed_named_function_disables_replay() {
+        use crate::evaluation::{EvaluationProfile, LegacyEvaluationReason};
+        let exprs = chelis_deep::parser::parse_str(DEEP_EXACTNESS_FIXTURES[0]).unwrap();
+        let defs = collect_top_level_defs(&exprs);
+        let memoised = legacy_profile(&defs["root"], &defs);
+        let reference = as_reference(|| legacy_profile(&defs["root"], &defs));
+        assert_eq!(
+            reference,
+            EvaluationProfile::Legacy(LegacyEvaluationReason::RecursiveControl)
+        );
+        assert_eq!(memoised, reference);
     }
 }

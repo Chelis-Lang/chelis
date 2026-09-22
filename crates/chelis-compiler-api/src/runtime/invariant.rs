@@ -826,6 +826,7 @@ pub(crate) fn revalidate_adt_value(
         session: None,
         active_declaration_names: Vec::new(),
         def_kernels: UnordMap::new(),
+        excluded_def_kernels: UnordMap::new(),
         transcript: Vec::new(),
         transcript_capture: None,
         resolving_top_levels: Vec::new(),
