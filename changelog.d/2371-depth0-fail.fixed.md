@@ -7,8 +7,9 @@ aborts with the authored message in both lanes. Previously `grad` over
 rather than replacing it. The same route through a helper, a whole
 transformed body, `vmap`, a `where` arm, and a statically-selected `match`
 arm ([#2369](https://github.com/Chelis-Lang/chelis/issues/2369)) is fixed
-with it, and `fail("")` is now rejected by name instead of becoming a
-placeholder. Two shapes remain: a message that is not a compile-time literal
+with it, and `fail("")` no longer becomes a placeholder — `chelis eval`
+names the [05-OP-68] empty-message rule, while `chelis build` reports the
+pre-existing generic host-lowering message rather than that rule. Two shapes remain: a message that is not a compile-time literal
 ([#2383](https://github.com/Chelis-Lang/chelis/issues/2383)), and a guard
 whose result is never consumed, which dead-code elimination still removes
 ([#2368](https://github.com/Chelis-Lang/chelis/issues/2368)). Part of

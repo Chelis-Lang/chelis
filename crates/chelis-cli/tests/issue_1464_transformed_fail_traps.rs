@@ -566,8 +566,11 @@ fn an_empty_literal_message_is_rejected_not_placeholdered() {
 
 #[test]
 fn a_fail_inside_a_where_arm_aborts_on_the_false_direction_too() {
-    // The PR claimed "both directions" and tested one. Arguments are
-    // call-by-value, so the helper traps whichever way the condition goes.
+    // "Both directions" here means both INPUT values, not two lowering
+    // paths: the arm is a call, evaluated call-by-value at depth 0, so both
+    // inputs traverse the same path and no mutation separates this from its
+    // twin (chelis#2384 review, FG). It is kept because the value-level
+    // claim is the one a user reads.
     let source = "module Repro.WhereFailFalse\n\
          def boom(x: tensor[1, f32]) -> tensor[1, f32] = fail(\"where false boom\")\n\
          def loss(x: tensor[1, f32]) -> tensor[f32] = \
@@ -577,10 +580,58 @@ fn a_fail_inside_a_where_arm_aborts_on_the_false_direction_too() {
     assert_taken_in_both_lanes(source, "where_fail_false", "where false boom");
 }
 
-/// The negative control for the four above: a `fail` with no enclosing `if`
-/// and NO transform is still the host lane's whole-value abort, and must keep
-/// working exactly as before. Breaking this is how an earlier attempt at this
-/// class went wrong.
+/// chelis#2369: a `fail` in a statically-selected `match` arm. `lower_match`
+/// never touches `if_branch_depth`, so the arm is lowered at depth 0 — which
+/// is correct, because static arm selection lowers ONLY the selected arm, so
+/// a `fail` reached there genuinely is unconditional.
+///
+/// This PR fixes it as a side effect of the depth-0 guard. chelis#2369's own
+/// acceptance requires a negative control for a `fail` in an unselected arm,
+/// and the claim had no test until this pair.
+fn match_arm_fail(picked: &str, message: &str) -> String {
+    format!(
+        "module Repro.MatchArmFail\n\
+         type Mode =\n\
+           | ModeA\n\
+           | ModeB\n\
+         def pick() -> Mode = {picked}\n\
+         def loss(x: tensor[2, f32]) -> f32 = match pick() with {{\n\
+             | ModeA => fail(\"{message}\")\n\
+             | ModeB => tensor_to_scalar(sum(mul(&x, &x), cast(0, i32)))\n\
+           }}\n\
+         out = grad(loss)(to_tensor([cast(1.0, f32), cast(2.0, f32)]))\n"
+    )
+}
+
+#[test]
+fn a_fail_in_a_statically_selected_match_arm_aborts_in_both_lanes() {
+    assert_taken_in_both_lanes(
+        &match_arm_fail("ModeA", "MATCH ARM BOOM"),
+        "match_arm_selected",
+        "MATCH ARM BOOM",
+    );
+}
+
+#[test]
+fn a_fail_in_an_unselected_match_arm_still_differentiates() {
+    // grad of sum(x*x) is 2x. The `fail` arm is never lowered, so nothing
+    // about it may reach the answer.
+    assert_untaken_in_both_lanes(
+        &match_arm_fail("ModeB", "UNSELECTED BOOM"),
+        "match_arm_unselected",
+        "data=[2.0, 4.0]",
+    );
+}
+
+/// A `fail` with no enclosing `if` and NO transform is still the host lane's
+/// whole-value abort.
+///
+/// Honest about its reach: it does NOT guard the depth-0 lowering this change
+/// touches. Untransformed programs never reach that site, so reverting the
+/// guard or rejecting every depth-0 `fail` both leave this test green
+/// (measured — chelis#2384 review, FF). What it does guard is a *different*
+/// implementation shape: one that routed the host lane through DAG lowering,
+/// which is how an earlier attempt at this class went wrong.
 #[test]
 fn a_fail_with_no_if_and_no_transform_is_unchanged() {
     let source = "module Repro.PlainFail\n\

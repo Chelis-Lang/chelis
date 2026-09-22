@@ -15090,9 +15090,13 @@ impl<'program> LowerCtx<'program> {
                 // they do not reach DAG lowering at all. The host lane owns
                 // an entry-level `fail` and emits the abort itself, and an
                 // untransformed tensor body stops at host emission before a
-                // DAG is built. Measured, not assumed (chelis#2384 review,
-                // F5) — the whole `examples/` corpus is byte-identical
-                // across this change.
+                // DAG is built. Measured, not assumed: an untransformed
+                // `fail("")` battery is NOT rejected here, and the generated
+                // C carries a direct host-emitted `chelis_fail` — that is
+                // what shows the site is never reached. (The `examples/`
+                // corpus is byte-identical across this change too, but it
+                // contains no `fail` at all, so it cannot distinguish this
+                // change from any other; chelis#2384 review, FE.)
                 //
                 // The placeholder becomes the guard's fallback. It is
                 // unreachable whenever the guard is evaluated, but NOT
