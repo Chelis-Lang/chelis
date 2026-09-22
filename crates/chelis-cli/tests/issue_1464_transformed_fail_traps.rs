@@ -532,6 +532,51 @@ fn a_fail_inside_a_where_arm_aborts_in_both_lanes() {
     assert_taken_in_both_lanes(source, "where_fail", "where boom");
 }
 
+/// chelis#2371 / chelis#2384 F1: `fail("")` IS a compile-time literal, so
+/// it must not fall into the non-literal residue and become a placeholder.
+/// [05-OP-68] makes an empty message a type error, and `lower_if` already
+/// rejects the branch spelling by name — this pins the same rule and the
+/// same diagnostic in the depth-0 position.
+///
+/// A mutation check found this branch had zero coverage: deleting the
+/// emptiness handling left all tests green.
+#[test]
+fn an_empty_literal_message_is_rejected_not_placeholdered() {
+    let source = "module Repro.EmptyOperand\n\
+         def loss(x: tensor[1, f32]) -> tensor[f32] = \
+         sum(add(x, fail(\"\")), cast(0, i32))\n\
+         out = grad(loss)(to_tensor([cast(3.0, f32)]))\n";
+    let evaluated = eval(source, "empty_literal_operand");
+    let stdout = String::from_utf8_lossy(&evaluated.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&evaluated.stderr).into_owned();
+    assert!(
+        !evaluated.status.success(),
+        "an empty-message fail must not produce a value: stdout={stdout}"
+    );
+    assert!(
+        !stdout.contains("data=[1.0]"),
+        "the placeholder must not reach the output: {stdout}"
+    );
+    assert!(
+        stderr.contains("has no message to report"),
+        "the diagnostic must name the empty-message rule, not the non-literal \
+         residue; got: {stderr}"
+    );
+}
+
+#[test]
+fn a_fail_inside_a_where_arm_aborts_on_the_false_direction_too() {
+    // The PR claimed "both directions" and tested one. Arguments are
+    // call-by-value, so the helper traps whichever way the condition goes.
+    let source = "module Repro.WhereFailFalse\n\
+         def boom(x: tensor[1, f32]) -> tensor[1, f32] = fail(\"where false boom\")\n\
+         def loss(x: tensor[1, f32]) -> tensor[f32] = \
+         sum(where(gt(&x, to_tensor([cast(0.5, f32)])), boom(copy(x)), mul(&x, &x)), \
+         cast(0, i32))\n\
+         out = grad(loss)(to_tensor([cast(0.1, f32)]))\n";
+    assert_taken_in_both_lanes(source, "where_fail_false", "where false boom");
+}
+
 /// The negative control for the four above: a `fail` with no enclosing `if`
 /// and NO transform is still the host lane's whole-value abort, and must keep
 /// working exactly as before. Breaking this is how an earlier attempt at this
@@ -542,17 +587,11 @@ fn a_fail_with_no_if_and_no_transform_is_unchanged() {
          def boom(x: tensor[1, f32]) -> tensor[f32] = fail(\"plain boom\")\n\
          def loss(x: tensor[1, f32]) -> tensor[f32] = boom(x)\n\
          out = loss(to_tensor([cast(3.0, f32)]))\n";
-    let evaluated = eval(source, "plain_fail");
-    let stderr = String::from_utf8_lossy(&evaluated.stderr).into_owned();
-    assert!(
-        !evaluated.status.success(),
-        "an untransformed fail must still abort: stdout={}",
-        String::from_utf8_lossy(&evaluated.stdout)
-    );
-    assert!(
-        stderr.contains("plain boom"),
-        "the host lane must still carry the message; got: {stderr}"
-    );
+    // Both lanes: the claim this control protects is "outside a transform,
+    // no behaviour change", and the compiled lane is where a regression
+    // would actually reach a user. The census canary covers the C lane only
+    // for a DYNAMIC message, so nothing else pins the literal path here.
+    assert_taken_in_both_lanes(source, "plain_fail", "plain boom");
 }
 
 #[test]

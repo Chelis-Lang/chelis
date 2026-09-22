@@ -15081,11 +15081,25 @@ impl<'program> LowerCtx<'program> {
                 // The fix does not need the "is a transform consuming this
                 // DAG?" signal the lowerer lacks. Because the `fail` is
                 // unconditional here, an [05-OP-68] guard whose condition is
-                // a constant `true` is exactly equivalent to it: outside a
-                // transform the guard is discarded with the rest of the DAG,
-                // and inside one it fires and aborts with the authored
-                // message. The placeholder becomes the guard's fallback,
-                // where it is unreachable by construction.
+                // a constant `true` is equivalent to it wherever the guard
+                // is reached: it fires and aborts with the authored message.
+                //
+                // Untransformed programs are unaffected for a reason worth
+                // stating precisely, because the previous comment here got
+                // its mechanism wrong and that is why this issue existed:
+                // they do not reach DAG lowering at all. The host lane owns
+                // an entry-level `fail` and emits the abort itself, and an
+                // untransformed tensor body stops at host emission before a
+                // DAG is built. Measured, not assumed (chelis#2384 review,
+                // F5) — the whole `examples/` corpus is byte-identical
+                // across this change.
+                //
+                // The placeholder becomes the guard's fallback. It is
+                // unreachable whenever the guard is evaluated, but NOT
+                // unreachable in general: if the guard's result is never
+                // consumed, DCE removes the guard and the fallback is what
+                // remains. That is chelis#2368, and it is why this change
+                // does not close chelis#2371 on its own.
                 //
                 // The depth check above stays: at depth > 0 the `fail` is
                 // conditional on its branch, so an always-true guard would
@@ -15115,12 +15129,20 @@ impl<'program> LowerCtx<'program> {
                     fallback_ty.clone(),
                     self.current_span_id.clone(),
                 );
-                let Some(message) = args.first().and_then(|arg| self.static_string_arg(arg)) else {
+                let literal_message = args.first().and_then(|arg| self.static_string_arg(arg));
+                if literal_message.as_deref() == Some("") {
+                    // Same rule and same diagnostic whichever position the
+                    // `fail` is written in. [05-OP-68] never synthesizes or
+                    // defaults a message, and `lower_if` already rejects the
+                    // branch spelling by name.
+                    return self.reject_empty_fail_message(Some(app_span));
+                }
+                let Some(message) = literal_message else {
                     // A non-literal message has no compile-time identity, so
-                    // there is no guard to build. Outside a transform the
-                    // host lane still owns the abort and this placeholder is
-                    // discarded; inside one it remains chelis#2371's
-                    // residue, now narrowed to the dynamic-message case.
+                    // there is no guard to build. Outside a transform the host
+                    // lane still owns the abort; inside one this is
+                    // chelis#2371's residue, narrowed to the dynamic-message
+                    // case and tracked by chelis#2383.
                     return fallback;
                 };
                 let condition = self.dag.add_node(
@@ -19610,15 +19632,20 @@ impl<'program> LowerCtx<'program> {
         )
     }
 
-    /// chelis#1464 / [05-OP-68]: `fail("")` as an `if` branch. The atom
-    /// makes an empty message a type error and forbids synthesizing one, so
-    /// there is no message to carry and no guard to build.
-    fn reject_empty_fail_message(&self, elems: &[Expr]) -> NodeId {
+    /// chelis#1464 / [05-OP-68]: `fail("")`, in either position — as an `if`
+    /// branch, or unconditionally inside a transform. The atom makes an empty
+    /// message a type error and forbids synthesizing one, so there is no
+    /// message to carry and no guard to build.
+    ///
+    /// Takes a span rather than the enclosing form because the two callers
+    /// have different ones, and because the rule is about the `fail`, not
+    /// about where it was written (chelis#2384 review, F1).
+    fn reject_empty_fail_message(&self, span: Option<Span>) -> NodeId {
         raise_lowering_error(
             "`fail(\"\")` has no message to report. A guarded abort carries its message \
              as part of its identity and never synthesizes or defaults one ([05-OP-68]); \
              give the `fail` a non-empty message.",
-            elems.first().map(Expr::span),
+            span,
             self.current_span_id.clone(),
         )
     }
@@ -19696,7 +19723,17 @@ impl<'program> LowerCtx<'program> {
             return None;
         }
         match kids.first()? {
-            Expr::Atom(Atom::Str(message), _) if !message.is_empty() => Some(message.clone()),
+            // An empty message is RETURNED, not filtered out, and the caller
+            // rejects it by name. `fail_message_of` does the same, and says
+            // why: filtering sends `fail("")` to whatever the caller does
+            // with "no literal message" — which here was the silent
+            // placeholder, i.e. chelis#2371's own defect surviving for a
+            // message that IS a compile-time literal.
+            //
+            // The first version of this helper re-introduced exactly the
+            // filtering shape the chelis#1464 review had already rejected
+            // once (chelis#2384 review, F1).
+            Expr::Atom(Atom::Str(message), _) => Some(message.clone()),
             _ => None,
         }
     }
@@ -19828,7 +19865,9 @@ impl<'program> LowerCtx<'program> {
         let then_fail = self.fail_message_of(then_expr);
         let else_fail = self.fail_message_of(else_expr);
         if then_fail.as_deref() == Some("") || else_fail.as_deref() == Some("") {
-            return LoweredValue::Node(self.reject_empty_fail_message(elems));
+            return LoweredValue::Node(
+                self.reject_empty_fail_message(elems.first().map(Expr::span)),
+            );
         }
         match (&then_fail, &else_fail) {
             // The surviving branch is still an `if` branch, so it is lowered
