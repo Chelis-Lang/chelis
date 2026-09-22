@@ -245,11 +245,14 @@ disposition before asserting #1354 closure.
    expectations in #2394. Prove ordinary Cargo and separate package derivations,
    including Python's extension, can supply matching descriptors. This additive
    producer slice changes no selector and does not close the bug.
-2. Build shared resolution, live-source freshness, verified staging/receipts and
-   harness adapters in #2395. Independently deliver native package assembly,
+2. Build shared resolution, live-source freshness, verified staging/receipts,
+   harness adapters and the isolated-checkout source/dependency mutation/rebuild
+   support for both production witnesses in #2395. Independently deliver native package assembly,
    installer validation and source-free package evidence in #2396 using #2394's
    decoder/comparison contract. Both consume the same identity rule.
 3. Activate CLI production and CLI-owned harnesses in #2397 after #2395 and #2396.
+   Re-execute #2396's installed canary/relocation witness with the activated CLI
+   under sealed provenance, including crossed bundles rejected during staging.
    Activate Python in #2398 after #2395, with its own matching wheel producer.
    Python compilation and persisted-artifact load admission are one vertical slice;
    no new native cache subsystem is required. Each consumer ships with its matching
@@ -265,10 +268,15 @@ disposition before asserting #1354 closure.
    setup/assertions as acceptance. The superseded draft is not an implementation
    umbrella. `tasks.md` maps the delivery issues to the complete obligations.
 6. #2395 owns shared oracle/receipt machinery; subsequent scopes supply their rows.
-   Scoped runs report their bounded coverage, and a missing mandatory row cannot
-   produce a green full aggregate. Strictly validate the plan and execute the
-   complete oracle/adversarial controls against the integrated implementation,
-   then inspect exact-head hosted/package receipts before closing #1354.
+   During delivery, register bounded core/consumer command owners with explicitly
+   scoped evidence, not an incomplete full oracle that must pass. #1354 owns final
+   registration/activation and execution of the canonical unfiltered full-aggregate
+   acceptance command after all mandatory rows exist. A scoped green status never
+   substitutes for that invocation, and missing mandatory rows fail it. Keep the
+   existing hosted-versus-local/manual evidence boundary without adding hosted wheel
+   or interpreter lanes. Strictly validate the plan and execute the complete oracle/
+   adversarial controls against the integrated implementation, then inspect exact-head
+   hosted/package receipts before closing #1354.
 
 This is producer-first, per-consumer activation, not weaker compatibility or reduced
 acceptance. Unmigrated consumers keep the parent bug open. Every activated consumer
