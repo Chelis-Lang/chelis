@@ -137,8 +137,7 @@ fn tag(expr: &Expr) -> Option<DeepTag> {
         | ExprCarrier::UndecodableHead(_, _, _)
         | ExprCarrier::Atom(_)
         | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_)
-        | ExprCarrier::MalformedLegacyList(_) => None,
+        | ExprCarrier::MetadataExpression(_) => None,
     }
 }
 
@@ -151,8 +150,7 @@ fn children(expr: &Expr) -> &[Expr] {
         | ExprCarrier::UndecodableHead(_, _, _)
         | ExprCarrier::Atom(_)
         | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_)
-        | ExprCarrier::MalformedLegacyList(_) => &[],
+        | ExprCarrier::MetadataExpression(_) => &[],
     }
 }
 
@@ -167,8 +165,7 @@ fn var_name(expr: &Expr) -> Option<&str> {
         | ExprCarrier::UndecodableHead(_, _, _)
         | ExprCarrier::Atom(_)
         | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_)
-        | ExprCarrier::MalformedLegacyList(_) => None,
+        | ExprCarrier::MetadataExpression(_) => None,
     }
 }
 
@@ -184,8 +181,7 @@ fn free_var_name(expr: &Expr) -> Option<&str> {
         | ExprCarrier::UndecodableHead(_, _, _)
         | ExprCarrier::Atom(_)
         | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_)
-        | ExprCarrier::MalformedLegacyList(_) => None,
+        | ExprCarrier::MetadataExpression(_) => None,
     }
 }
 
@@ -233,19 +229,12 @@ fn fn_parts(fn_node: &Expr) -> Option<(String, &Expr)> {
 /// The name of the single binder in the `params` node. The binder may be
 /// a bare symbol, an exact `(var {} name)`, or an exact annotated
 /// parameter pair whose first element is the name symbol and whose
-/// second element is its metadata map. The pair may use the legacy
-/// `Expr::List` carrier or the stamped structural `Expr::BareList`.
+/// second element is its metadata map (a structural `Expr::BareList`).
+/// An unknown form's head is syntax, not a binder.
 fn binder_name(expr: &Expr) -> Option<String> {
     match expr.carrier() {
         ExprCarrier::Atom(Atom::Name(s)) => Some(s.clone()),
         ExprCarrier::DecodedNode(_, _, _) => var_name(expr).map(str::to_string),
-        ExprCarrier::UndecodableHead(head, _, []) => match expr {
-            // Preserve the transitional typed-parameter spelling accepted by
-            // the old List reader. An UnknownForm head is syntax, not a binder.
-            Expr::List(_, _) => Some(head.to_string()),
-            Expr::UnknownForm(_) => None,
-            _ => unreachable!("undecodable carrier must retain its source variant"),
-        },
         ExprCarrier::StructuralList([Expr::Atom(Atom::Name(name), _), Expr::Map(_, _)]) => {
             Some(name.clone())
         }
@@ -253,8 +242,7 @@ fn binder_name(expr: &Expr) -> Option<String> {
         | ExprCarrier::StructuralList(_)
         | ExprCarrier::Atom(_)
         | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_)
-        | ExprCarrier::MalformedLegacyList(_) => None,
+        | ExprCarrier::MetadataExpression(_) => None,
     }
 }
 
@@ -311,19 +299,10 @@ fn collect_free_vars(expr: &Expr, binder: &str, out: &mut Vec<String>) {
                 collect_free_vars(child, binder, out);
             }
         }
-        ExprCarrier::UndecodableHead(_, _, children) => {
-            if matches!(expr, Expr::List(_, _)) {
-                for child in children {
-                    collect_free_vars(child, binder, out);
-                }
-            }
-        }
-        ExprCarrier::MalformedLegacyList(list) => {
-            for child in list.elements.iter().skip(2) {
-                collect_free_vars(child, binder, out);
-            }
-        }
-        ExprCarrier::StructuralList(_)
+        // An unknown form is outside the predicate grammar, which
+        // `predicate_in_grammar` reports; its children are not read.
+        ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::StructuralList(_)
         | ExprCarrier::Atom(_)
         | ExprCarrier::MetadataMap(_)
         | ExprCarrier::MetadataExpression(_) => {}
@@ -364,9 +343,7 @@ fn check_in_grammar(expr: &Expr) -> Result<(), PredGrammarError> {
             Err(PredGrammarError::DisallowedNode(node_desc(expr)))
         }
         ExprCarrier::DecodedNode(_, _, _) => check_decoded_in_grammar(expr),
-        ExprCarrier::StructuralList(_)
-        | ExprCarrier::UndecodableHead(_, _, _)
-        | ExprCarrier::MalformedLegacyList(_) => {
+        ExprCarrier::StructuralList(_) | ExprCarrier::UndecodableHead(_, _, _) => {
             Err(PredGrammarError::DisallowedNode(node_desc(expr)))
         }
     }
@@ -437,15 +414,10 @@ fn node_desc(expr: &Expr) -> String {
         ExprCarrier::MetadataExpression(_) => "meta-expr".to_string(),
         ExprCarrier::DecodedNode(tag, _, _) => format!("`{}` node", tag.as_str()),
         ExprCarrier::StructuralList(_) => "bare list".to_string(),
-        ExprCarrier::UndecodableHead(head, _, _) => match expr {
-            Expr::List(_, _) => "malformed list".to_string(),
-            // chelis#731 / [04-TOT-3]: preserve the undecodable head so the
-            // checker diagnostic names the malformed tag instead of
-            // collapsing every future form into one generic grammar error.
-            Expr::UnknownForm(_) => format!("unknown form `{head}`"),
-            _ => unreachable!("undecodable carrier must retain its source variant"),
-        },
-        ExprCarrier::MalformedLegacyList(_) => "malformed list".to_string(),
+        // chelis#731 / [04-TOT-3]: preserve the undecodable head so the
+        // checker diagnostic names the malformed tag instead of collapsing
+        // every future form into one generic grammar error.
+        ExprCarrier::UndecodableHead(head, _, _) => format!("unknown form `{head}`"),
     }
 }
 
