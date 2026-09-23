@@ -3170,8 +3170,8 @@ pub(super) fn expect_float_control(
 ) -> Result<ScalarValue, String> {
     match args.get(index) {
         Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_float() => Ok(payload.value()),
-        other => Err(format!(
-            "{op} expects a float scalar control at index {index}, got {other:?}"
+        _ => Err(format!(
+            "{op} expects a float scalar control at index {index}"
         )),
     }
 }
