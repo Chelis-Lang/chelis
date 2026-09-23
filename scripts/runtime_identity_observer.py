@@ -343,7 +343,7 @@ def build_execution(program, arguments):
 
 def clean_probe_args(args):
     result = []
-    flags = {"--target", "--cfg", "--check-cfg", "-C"}
+    flags = {"--target", "--sysroot", "--cfg", "--check-cfg", "-C"}
     index = 0
     while index < len(args):
         arg = args[index]
@@ -455,9 +455,10 @@ def target_codegen(real_rustc, args):
     # `native` and an omitted -Ctarget-cpu are requests, not effective CPUs.
     # Read the backend's observed target facts from a retained public function.
     flags = []
-    target = one(args, "--target")
-    if target:
-        flags.extend(["--target", target])
+    for name in ("--target", "--sysroot"):
+        value = one(args, name)
+        if value:
+            flags.extend([name, value])
     for value in values(args, "-C"):
         if value.partition("=")[0] not in {"incremental", "metadata", "extra-filename"}:
             flags.extend(["-C", value])
@@ -521,7 +522,7 @@ def collect_unit(real_rustc, args):
     libraries = enumerate_files(library_dir)
     if not libraries:
         raise ObservationError(f"empty compiler target library directory: {library_dir}")
-    roots.append({"physical": str(library_dir), "inventory": {"logical_prefix": f"toolchain/{triple}/sysroot", "files": libraries, "explicitly_required": libraries.copy(), "class": "toolchain"}, "fixed": True})
+    roots.append({"physical": str(library_dir), "inventory": {"logical_prefix": f"toolchain/{triple}/sysroot", "files": libraries, "explicitly_required": libraries.copy(), "class": "toolchain"}})
     dependencies = []
     for external in values(args, "--extern"):
         name, separator, artifact = external.partition("=")
@@ -724,10 +725,24 @@ def output_paths(real_rustc, args):
     out = one(args, "--out-dir")
     if not out:
         raise ObservationError("compiler output directory is unobservable")
-    names = probe([real_rustc, *args, "--print=file-names"]).splitlines()
+    emit = one(args, "--emit", "link")
+    naming_args = args
+    if "link" not in emit and "metadata" in emit:
+        # Metadata uses the compiler's library basename even for binary and
+        # cdylib checks. Ask rustc for that name; do not guess from crate names.
+        naming_args = []
+        index = 0
+        while index < len(args):
+            if args[index] == "--crate-type":
+                index += 2
+            elif args[index].startswith("--crate-type="):
+                index += 1
+            else:
+                naming_args.append(args[index]); index += 1
+        naming_args.append("--crate-type=rlib")
+    names = probe([real_rustc, *naming_args, "--print=file-names"]).splitlines()
     outputs = [str((Path(out) / name).absolute()) for name in names]
     # Metadata-only cargo check produces .rmeta rather than the printed .rlib.
-    emit = one(args, "--emit", "link")
     if "link" not in emit:
         outputs = [str(Path(path).with_suffix(".rmeta")) for path in outputs if path.endswith(".rlib")]
     elif "metadata" in emit:
@@ -737,42 +752,6 @@ def output_paths(real_rustc, args):
     return outputs
 
 
-def augment_dep_info(args, receipt):
-    if os.environ.get("CHELIS_IDENTITY_BACKEND") != "cargo" or receipt.get("errors"):
-        return
-    emit = one(args, "--emit", "").split(",")
-    dep_info = next((item for item in emit if item.split("=", 1)[0] == "dep-info"), None)
-    if dep_info is None:
-        return
-    if "=" in dep_info:
-        path = Path(dep_info.split("=", 1)[1])
-    else:
-        options = dict(value.partition("=")[::2] for value in values(args, "-C"))
-        path = Path(one(args, "--out-dir")) / (one(args, "--crate-name") + options.get("extra-filename", "") + ".d")
-    required = {item["logical_path"] for item in receipt["required_inputs"]}
-    watched = set()
-    for root in receipt["roots"]:
-        physical = Path(root["physical"])
-        prefix = root["inventory"]["logical_prefix"].rstrip("/")
-        watched.update(str(physical / name) for name in root["inventory"]["files"]
-                       if (prefix + "/" + name if prefix else name) in required)
-        if not root.get("fixed"):
-            for directory, dirs, _ in os.walk(physical):
-                dirs[:] = [name for name in dirs if name not in {".git", "target", ".venv", ".devenv", "node_modules"}]
-                watched.add(str(Path(directory)))
-    generated = {str(Path(os.environ["OUT_DIR"]) / name) for name in ("chelis_runtime_identity.bin", "chelis_runtime_identity_provenance.bin")} if os.environ.get("OUT_DIR") else set()
-    def escape(value):
-        return value.replace("\\", "\\\\").replace(" ", "\\ ").replace("#", "\\#")
-    lines = []
-    for line in path.read_text().splitlines():
-        if ": " in line and not line.startswith("#"):
-            target, dependencies = line.split(": ", 1)
-            inputs = set(shlex.split(dependencies)) - generated
-            line = target + ": " + " ".join(escape(name) for name in sorted(inputs | watched))
-        elif any(line == escape(name) + ":" for name in generated):
-            continue
-        lines.append(line)
-    path.write_text("\n".join(lines) + "\n")
 
 
 def observe_rustc(real_rustc, args):
@@ -836,7 +815,9 @@ def observe_rustc(real_rustc, args):
     code = subprocess.call(command, close_fds=False)
     if code:
         return code
-    augment_dep_info(args, receipt)
+    # Keep rustc's dep-info an honest compiler-read source inventory. Producer
+    # hooks watch their source trees; receipt validation separately invalidates
+    # changed transitive inputs and directory membership before accepting reuse.
     if role:
         graph_recipe(receipt if role == "runtime" else find_runtime(receipt))
         for output in outputs:

@@ -83,9 +83,12 @@ def event_receipt(event, state):
         binding = state / "bindings" / (observer.key(filename) + ".json")
         if binding.exists():
             paths.add(observer.load(binding)["observation"])
-        index = state / "output-digests" / actual
-        for binding in index.glob("*.json"):
-            paths.add(observer.load(binding)["observation"])
+        else:
+            # An exact path binding is stronger than historical byte matches.
+            # Only otherwise-unbound Cargo uplifted paths need the digest index.
+            index = state / "output-digests" / actual
+            for binding in index.glob("*.json"):
+                paths.add(observer.load(binding)["observation"])
         matches = set()
         for path in paths:
             receipt = observer.load(path)

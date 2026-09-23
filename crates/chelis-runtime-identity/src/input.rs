@@ -114,7 +114,10 @@ pub fn plan_inputs(roots: &[InventoryRoot]) -> Result<Vec<RequiredInput>, InputE
             }
         }
         for path in &root.files {
-            if !required.contains(path.as_str()) && !selected(path) {
+            if root.class != InputClass::Toolchain
+                && !required.contains(path.as_str())
+                && !selected(path)
+            {
                 continue;
             }
             let logical = if root.logical_prefix.is_empty() {

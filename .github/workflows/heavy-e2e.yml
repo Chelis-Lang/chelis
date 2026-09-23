@@ -151,6 +151,9 @@ jobs:
           echo "PYO3_PYTHON=$GITHUB_WORKSPACE/.venv/bin/python" >> "$GITHUB_ENV"
           echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
 
+      - name: Verify pure-core architecture on this native platform
+        run: cargo nextest run -p chelis-runtime-identity --test architecture_contract --no-fail-fast --no-tests fail
+
       # No workspace test/oracle runs here: the exact two ignored rows build
       # their own producers, and missing native prerequisites are failures.
       - name: Execute both real native producer scenarios

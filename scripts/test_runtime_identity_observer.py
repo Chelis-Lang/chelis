@@ -19,6 +19,7 @@ import runtime_identity_observer as observer
 import runtime_identity_build as driver
 
 HELPER = os.environ.get("CHELIS_IDENTITY_TEST_HELPER")
+RUSTC = shutil.which(os.environ.get("RUSTC", "rustc"))
 
 
 class ObservationFailureTests(unittest.TestCase):
@@ -120,6 +121,70 @@ class ObservationFailureTests(unittest.TestCase):
             observer.atomic(observer.binding(path), {"artifact": path, "observation": str(receipt)})
         with self.assertRaisesRegex(observer.ObservationError, "different compilation receipts"):
             driver.event_receipt({"filenames": paths}, self.root / "state")
+
+    def test_exact_binding_is_not_ambiguous_with_equal_historical_outputs(self):
+        receipts = []
+        artifacts = [self.root / "old.rlib", self.root / "current.rlib"]
+        manifest = str(self.root / "Cargo.toml")
+        for number, artifact in enumerate(artifacts):
+            artifact.write_bytes(b"identical compiled bytes")
+            receipt = self.root / f"receipt-{number}.json"
+            receipts.append(str(receipt))
+            checksum = observer.digest(artifact.read_bytes())
+            observer.atomic(receipt, {"manifest_path": manifest, "outputs": [
+                {"path": str(artifact), "digest": checksum}]})
+            observer.atomic(observer.binding(artifact), {"artifact": str(artifact), "observation": str(receipt)})
+            observer.atomic(self.root / "state/output-digests" / checksum / f"{number}.json", {"observation": str(receipt)})
+        event = {"filenames": [str(artifacts[1])], "manifest_path": manifest}
+        self.assertEqual(driver.event_receipt(event, self.root / "state"), receipts[1])
+        event["filenames"].append(str(artifacts[0]))
+        with self.assertRaisesRegex(observer.ObservationError, "different compilation receipts"):
+            driver.event_receipt(event, self.root / "state")
+
+    @unittest.skipUnless(HELPER and RUSTC, "requires compiled adapter and native rustc")
+    def test_mutating_explicit_sysroot_invalidates_cached_observation(self):
+        subject = self.root / "subject"
+        subject.mkdir()
+        (subject / "Cargo.toml").write_text('[package]\nname="sysroot-probe"\nversion="0.0.0"\nedition="2021"\n[workspace]\n')
+        source = subject / "lib.rs"
+        source.write_text("pub fn width() -> usize { core::mem::size_of::<u64>() }\n")
+        standard = Path(observer.probe([RUSTC, "--print=target-libdir"]).strip())
+        sysroot = self.root / "custom-sysroot"
+        libraries = sysroot / "lib/rustlib" / standard.parent.name / "lib"
+        libraries.mkdir(parents=True)
+        for original in standard.iterdir():
+            (libraries / original.name).symlink_to(original, target_is_directory=original.is_dir())
+        os.environ.update({"CARGO_MANIFEST_DIR": str(subject), "CARGO_PKG_NAME": "sysroot-probe",
+                           "CARGO_PKG_VERSION": "0.0.0", "CHELIS_IDENTITY_PACKAGE_SOURCE": "path:.",
+                           "CHELIS_IDENTITY_WORKSPACE": str(subject)})
+        receipt = observer.collect_unit(RUSTC, [str(source), "--crate-name", "sysroot_probe",
+                                               "--crate-type", "lib", "--sysroot=" + str(sysroot)])
+        observer.check_receipt(receipt)
+        added = libraries / "new-library.rlib"
+        added.write_bytes(b"new sysroot inventory member")
+        with self.assertRaisesRegex(observer.ObservationError, "stale source/input inventory"):
+            observer.check_receipt(receipt)
+        added.unlink()
+        observer.check_receipt(receipt)
+        core_libraries = list(libraries.glob("libcore-*.rlib"))
+        self.assertEqual(len(core_libraries), 1)
+        core_libraries[0].unlink()
+        core_libraries[0].write_bytes(b"changed cached sysroot input")
+        with self.assertRaisesRegex(observer.ObservationError, "stale source/input inventory"):
+            observer.check_receipt(receipt)
+
+    @unittest.skipUnless(RUSTC, "requires native rustc")
+    def test_metadata_only_binary_outputs_match_compiler_artifact_events(self):
+        source = self.root / "main.rs"
+        source.write_text("fn main() {}\n")
+        arguments = [str(source), "--crate-name", "identity_check", "--crate-type", "bin",
+                     "--emit=dep-info,metadata", "--out-dir", str(self.root), "-Cextra-filename=-check",
+                     "--error-format=json", "--json=artifacts"]
+        compiled = subprocess.run([RUSTC, *arguments], capture_output=True, text=True, check=True)
+        events = [json.loads(line) for line in compiled.stderr.splitlines()]
+        emitted = {event["artifact"] for event in events if event.get("emit") == "metadata"}
+        self.assertEqual(set(observer.output_paths(RUSTC, arguments)), emitted)
+        self.assertTrue(all(not observer.is_native_producer("cli", path) for path in emitted))
 
     def test_cargo_launcher_rejects_recursive_real_cargo(self):
         destination = self.root / "bin"

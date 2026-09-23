@@ -75,10 +75,12 @@ let
       name = "chelis";
       src = source;
       cargo = toolchain;
+      # Generate the optional dependency edges used by the private feature
+      # control too. Actual producer features are selected below, not here.
       additionalCargoNixArgs = [
         "--no-default-features"
         "--features"
-        "chelis-cli/smt,chelis-python/extension-module"
+        "chelis-cli/smt,chelis-python/extension-module,chelis-runtime/ownership-ledger"
       ];
     }).overrideAttrs
       (_: {
