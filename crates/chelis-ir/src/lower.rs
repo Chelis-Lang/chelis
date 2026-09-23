@@ -1971,8 +1971,8 @@ fn try_lower_subexpr_evaluation_with_ordered_inputs_impl(
     execution: &crate::evaluation::RandomExecutionContext,
     options: SubexprLoweringOptions,
 ) -> Result<crate::evaluation::EvaluationPlan, LowerDiagnostic> {
-    if let crate::evaluation::EvaluationProfile::Legacy(reason) = context
-        .evaluation_profile_with_resource_policy(expr, &scoped_types, options.resource_policy)
+    if let crate::evaluation::EvaluationProfile::Legacy(reason) =
+        context.spine_profile_with_resource_policy(expr, &scoped_types, options.resource_policy)
         && reason != crate::evaluation::LegacyEvaluationReason::NoDropout
     {
         return Err(LowerDiagnostic::new(
@@ -2372,6 +2372,25 @@ impl SubexprLoweringContext {
             expr,
             bound,
             crate::evaluation::ResourcePolicy::RecordRequirements,
+        )
+    }
+
+    /// Plan admission: whether the execution spine may lower `expr` (see
+    /// `static_controls::spine_profile_excluding`), with bound inputs
+    /// shadowing same-named definitions as in the dispatch profile.
+    fn spine_profile_with_resource_policy(
+        &self,
+        expr: &Expr,
+        bound: &[(String, TensorType)],
+        resource_policy: crate::evaluation::ResourcePolicy,
+    ) -> crate::evaluation::EvaluationProfile {
+        let excluded = bound.iter().map(|(name, _)| name.clone()).collect();
+        static_controls::spine_profile_excluding(
+            expr,
+            &self.program_defs,
+            &excluded,
+            bound,
+            resource_policy,
         )
     }
 
@@ -8023,9 +8042,6 @@ struct LowerCtx<'program> {
     execution_scope: crate::evaluation::ScopeId,
     resource_policy: crate::evaluation::ResourcePolicy,
     evaluation_entries: Vec<EvaluationEntry>,
-    /// `program_defs`' draw reachability, derived on the first evaluation
-    /// declaration this context classifies (chelis#2405).
-    evaluation_draw_reach: Option<static_controls::DrawReach>,
     execution_node_owners: UnordMap<NodeId, usize>,
     execution_dependencies: BTreeSet<usize>,
     evaluation_entry_roots: Option<BTreeMap<String, NodeId>>,
@@ -8177,7 +8193,6 @@ impl<'program> LowerCtx<'program> {
             execution_scope: crate::evaluation::ScopeId(0),
             resource_policy: crate::evaluation::ResourcePolicy::Legacy,
             evaluation_entries: Vec::new(),
-            evaluation_draw_reach: None,
             execution_node_owners: UnordMap::new(),
             execution_dependencies: BTreeSet::new(),
             evaluation_entry_roots: None,
@@ -8904,10 +8919,16 @@ impl<'program> LowerCtx<'program> {
             .expect("evaluation lowering owns execution metadata")
             .spine
             .full_occurrence_count();
-        let reach = self
-            .evaluation_draw_reach
-            .get_or_insert_with(|| static_controls::DrawReach::new(&self.program_defs));
-        let profile = evaluation_profile_from_defs(expr, &self.program_defs, reach);
+        // Whether this declaration is lowered with the execution spine is a
+        // spine-admission question, not a dispatch one: draw-free structure
+        // the spine cannot carry keeps the compatibility route (chelis#2405).
+        let profile = static_controls::spine_profile_excluding(
+            expr,
+            &self.program_defs,
+            &UnordSet::new(),
+            &[],
+            crate::evaluation::ResourcePolicy::Legacy,
+        );
         let compatibility = !matches!(
             profile,
             crate::evaluation::EvaluationProfile::FixedControl

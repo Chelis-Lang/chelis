@@ -740,6 +740,42 @@ pub(super) fn profile_excluding(
     if !reach.may_draw(expr, defs, excluded) {
         return EvaluationProfile::Legacy(LegacyEvaluationReason::NoDropout);
     }
+    walk(expr, defs, excluded, inputs, resource_policy)
+}
+
+/// Whether the execution spine may lower `expr`: the walk's own answer, with
+/// every reason it records whether or not a draw is reachable.
+///
+/// This is a different question from [`profile_excluding`]. The spine
+/// records draws, seed-scope controls and declaration roots while a plan
+/// is lowered, and it can do so only for control structure it lowers
+/// statically: a runtime `if` or `match`, recursion, a `vmap`, a nested
+/// `grad`, a Resource scope or a runtime seed is structure it cannot carry,
+/// draw or no draw (a nested draw-free `grad` loses its source nodes, for
+/// one). Every consumer that decides whether to lower with the spine, that
+/// is plan admission and the evaluation program's per-declaration choice,
+/// asks this; every consumer that decides how a reachable `dropout`
+/// executes asks [`profile_excluding`] (chelis#2405).
+pub(super) fn spine_profile_excluding(
+    expr: &Expr,
+    defs: &BTreeMap<String, Expr>,
+    excluded: &UnordSet<String>,
+    inputs: &[(String, TensorType)],
+    resource_policy: crate::evaluation::ResourcePolicy,
+) -> crate::evaluation::EvaluationProfile {
+    #[cfg(test)]
+    PROFILE_CALLS.with(|calls| calls.set(calls.get() + 1));
+    walk(expr, defs, excluded, inputs, resource_policy)
+}
+
+fn walk(
+    expr: &Expr,
+    defs: &BTreeMap<String, Expr>,
+    excluded: &UnordSet<String>,
+    inputs: &[(String, TensorType)],
+    resource_policy: crate::evaluation::ResourcePolicy,
+) -> crate::evaluation::EvaluationProfile {
+    use crate::evaluation::{EvaluationProfile, LegacyEvaluationReason};
     let mut profile = Profile {
         defs,
         excluded,
@@ -1201,6 +1237,55 @@ mod tests {
             ("beside", true),
         ] {
             assert_eq!(reach.reaches(name), reaches, "{name}");
+        }
+    }
+
+    /// chelis#2405: spine admission and dispatch are different questions.
+    /// Draw-free structure the execution spine cannot lower, such as a
+    /// nested `grad` or a runtime `if`, dispatches as `NoDropout` but keeps
+    /// its reason for spine admission, exactly as the walk reports it.
+    ///
+    /// Evidentiary status: REGRESSION TEST for the nested-`grad` row (the
+    /// round-1 P1: spine admission read the dispatch answer and admitted a
+    /// draw-free nested `grad`, whose lowering then failed).
+    #[test]
+    fn spine_admission_keeps_every_reason_for_draw_free_code() {
+        use crate::evaluation::{EvaluationProfile, LegacyEvaluationReason as Reason};
+        let defs = surf_defs(
+            "def cube(z: tensor[4, f32]) -> tensor[f32] = sum(mul(mul(copy(z), copy(z)), z), 0i32)\n\
+             def slope(y: tensor[4, f32]) -> tensor[f32] = sum(grad(cube)(y), 0i32)\n\
+             def hess(x: tensor[4, f32]) -> tensor[4, f32] = grad(slope)(x)\n\
+             def countdown(n: i64) -> i64 = if eq(n, 0i64) then 0i64 else countdown(sub(n, 1i64))\n\
+             def keep(x: tensor[4, f32]) -> tensor[4, f32] ! { Random } = dropout(x, 0.5f32)\n",
+        );
+        let reach = DrawReach::new(&defs);
+        let policy = crate::evaluation::ResourcePolicy::Legacy;
+        for (name, spine) in [
+            ("hess", EvaluationProfile::Legacy(Reason::HigherOrderAd)),
+            (
+                "countdown",
+                EvaluationProfile::Legacy(Reason::DynamicControl),
+            ),
+            ("slope", EvaluationProfile::Legacy(Reason::NoDropout)),
+            ("keep", EvaluationProfile::FixedControl),
+        ] {
+            let body = &defs[name];
+            let excluded = UnordSet::new();
+            assert_eq!(
+                spine_profile_excluding(body, &defs, &excluded, &[], policy),
+                spine,
+                "{name}"
+            );
+            let dispatch = profile_excluding(body, &defs, &reach, &excluded, &[], policy);
+            if reach.reaches(name) {
+                assert_eq!(dispatch, spine, "{name}: a drawing body asks one walk");
+            } else {
+                assert_eq!(
+                    dispatch,
+                    EvaluationProfile::Legacy(Reason::NoDropout),
+                    "{name}"
+                );
+            }
         }
     }
 

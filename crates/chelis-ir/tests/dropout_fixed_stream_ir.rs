@@ -440,8 +440,10 @@ fn source_profile_names_exclusions_before_plan_construction() {
     }
 }
 
-/// chelis#2405: every exclusion reason says why a reachable draw cannot be
-/// planned, so runtime control that reaches no draw is `NoDropout`.
+/// chelis#2405: for dispatch, every exclusion reason says why a reachable
+/// draw cannot be planned, so runtime control that reaches no draw is
+/// `NoDropout`. Plan admission is a different question, whether the
+/// execution spine can lower the source, and it still refuses that control.
 #[test]
 fn source_profile_of_draw_free_control_is_no_dropout() {
     use chelis_ir::evaluation::{EvaluationProfile, LegacyEvaluationReason as Reason};
@@ -457,6 +459,24 @@ fn source_profile_of_draw_free_control_is_no_dropout() {
             chelis_ir::lower::evaluation_profile(&expression, &UnordMap::new()),
             EvaluationProfile::Legacy(Reason::NoDropout),
             "{source}"
+        );
+        let context = RandomExecutionContext::new(RandomLoweringState {
+            seed: Some(42),
+            counter: 9,
+        });
+        let error = chelis_ir::lower::try_lower_subexpr_evaluation_plan(
+            &expression,
+            UnordMap::new(),
+            UnordMap::new(),
+            UnordMap::new(),
+            &context,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .message
+                .contains("outside the fixed-control evaluation profile: DynamicControl"),
+            "{source}: {error:?}"
         );
     }
 }

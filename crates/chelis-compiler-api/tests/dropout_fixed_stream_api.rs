@@ -1616,3 +1616,63 @@ fn plan_less_dropout_under_grad_of_dynamic_control_or_vmap_is_refused() {
         );
     }
 }
+
+const CUBE_SLOPE_HESS: &str = "def cube(z: tensor[4, f32]) -> tensor[f32] = sum(mul(mul(copy(z), copy(z)), z), 0i32)\ndef slope(y: tensor[4, f32]) -> tensor[f32] = sum(grad(cube)(y), 0i32)\ndef hess(x: tensor[4, f32]) -> tensor[4, f32] = grad(slope)(x)\n";
+
+/// chelis#2405 round 1: a draw-free nested `grad` has no draw to plan, but
+/// the execution spine still cannot lower it, so the evaluation program
+/// keeps it on the compatibility route. Admitting it to the spine failed
+/// the whole program, even when the Hessian helper was never called.
+///
+/// Evidentiary status: REGRESSION TEST (both rows fail on the round-1 head
+/// with "execution spine lost source node").
+#[test]
+fn issue_2405_draw_free_nested_grad_is_not_admitted_to_the_spine() {
+    let unused = format!(
+        "{CUBE_SLOPE_HESS}def main() = add(to_tensor([1.0f32, 2.0f32]), to_tensor([3.0f32, 4.0f32]))\n"
+    );
+    let result = eval_selected(request(&unused), &["main".into()])
+        .unwrap_or_else(|error| panic!("{unused}\n{error:?}"));
+    assert_eq!(tensor(&result, "main"), vec![4.0, 6.0]);
+
+    let used = format!(
+        "{CUBE_SLOPE_HESS}def main() = {{\n x = to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32])\n hess(x)\n}}\n"
+    );
+    let result = eval_selected(request(&used), &["main".into()])
+        .unwrap_or_else(|error| panic!("{used}\n{error:?}"));
+    assert_eq!(tensor(&result, "main"), vec![6.0, 12.0, 18.0, 24.0]);
+}
+
+/// chelis#2405 round 1: the same through a Reef library. A context package
+/// exporting a draw-free Hessian must not break its importers, including
+/// one that only calls an unrelated export.
+///
+/// Evidentiary status: REGRESSION TEST (every row fails on the round-1
+/// head).
+#[test]
+fn issue_2405_library_exporting_a_draw_free_hessian_keeps_its_importers() {
+    use chelis_compiler_api::compiler::eval_in_context;
+    use chelis_compiler_api::{COMPILER_VERSION, compile_reef_context};
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::create_dir(directory.path().join("src")).unwrap();
+    std::fs::write(directory.path().join("reef.toml"), format!("[package]\nname = \"hessian\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"Probe\"\n")).unwrap();
+    std::fs::write(
+        directory.path().join("src/calc.ch"),
+        format!("module Probe.Calc\nexport (cube, hess)\n{CUBE_SLOPE_HESS}"),
+    )
+    .unwrap();
+    let context = compile_reef_context(directory.path(), directory.path()).unwrap();
+    let decoded =
+        chelis_compiler_api::context::CompiledContext::decode(&context.encode().unwrap()).unwrap();
+    let cube_only = "module Probe.Client\nimport Probe.Calc (cube)\ndef main() = tensor_to_scalar(cube(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32])))\n";
+    let both = "module Probe.Client\nimport Probe.Calc (cube, hess)\ndef main() = {\n x = to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32])\n (tensor_to_scalar(cube(copy(x))), hess(x))\n}\n";
+    for context in [&context, &decoded] {
+        let result = eval_in_context(context, cube_only)
+            .unwrap_or_else(|error| panic!("{cube_only}\n{error:?}"));
+        assert_eq!(scalar_root(&result, "main"), 100.0);
+        let result =
+            eval_in_context(context, both).unwrap_or_else(|error| panic!("{both}\n{error:?}"));
+        assert_eq!(scalar_root(&result, "main.0"), 100.0);
+        assert_eq!(tensor(&result, "main.1"), vec![6.0, 12.0, 18.0, 24.0]);
+    }
+}
