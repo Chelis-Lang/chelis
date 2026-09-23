@@ -190,6 +190,13 @@ def invocation_environment():
     return {name: digest(os.fsencode(value)) for name, value in os.environ.items()}
 
 
+def cargo_output_files(event):
+    # Cargo also reports directory-valued debug bundles. They are not linkable
+    # compiler outputs (rustc --print=file-names does not report them). Native
+    # files must still all bind; missing files are retained here and fail reads.
+    return [filename for filename in event["filenames"] if not Path(filename).is_dir()]
+
+
 def check_receipt(receipt, captured_by_path=None):
     if receipt.get("protocol") != 1:
         raise ObservationError("unsupported observation receipt")
@@ -213,7 +220,7 @@ def check_receipt(receipt, captured_by_path=None):
         if sorted(event["features"]) != sorted(receipt["unit"]["features"]):
             raise ObservationError("Cargo artifact features differ from actual rustc cfg")
         expected = {item["digest"] for item in receipt["outputs"] if not item["path"].endswith(".identity-real")}
-        actual = {digest(Path(filename).read_bytes()) for filename in event["filenames"]}
+        actual = {digest(Path(filename).read_bytes()) for filename in cargo_output_files(event)}
         if expected != actual:
             raise ObservationError("Cargo artifact event does not bind the observed output bytes")
 

@@ -51,6 +51,25 @@ class ObservationFailureTests(unittest.TestCase):
         with self.assertRaisesRegex(observer.ObservationError, "changed compiler output"):
             observer.check_receipt(receipt)
 
+    def test_debug_directory_cannot_supply_a_native_output_binding(self):
+        artifact = self.root / "program"
+        artifact.write_bytes(b"native compiler output")
+        symbols = self.root / "program.dSYM"
+        symbols.mkdir()
+        (symbols / "symbols").write_bytes(b"debug information")
+        receipt = self.root / "receipt.json"
+        observer.atomic(receipt, {"protocol": 1, "errors": [], "outputs": [
+            {"path": str(artifact), "digest": observer.digest(artifact.read_bytes())}]})
+        observer.atomic(observer.binding(artifact), {"artifact": str(artifact), "observation": str(receipt)})
+        event = {"filenames": [str(artifact), str(symbols)]}
+        self.assertEqual(driver.event_receipt(event, self.root / "state"), str(receipt))
+        artifact.write_bytes(b"unobserved replacement")
+        self.assertIsNone(driver.event_receipt(event, self.root / "state"))
+        artifact.unlink()
+        with self.assertRaises(FileNotFoundError):
+            driver.event_receipt(event, self.root / "state")
+        self.assertIsNone(driver.event_receipt({"filenames": [str(symbols)]}, self.root / "state"))
+
     def test_missing_output_is_not_a_cache_hit(self):
         receipt = {"protocol": 1, "errors": [], "outputs": [{"path": str(self.root / "missing.rlib"), "digest": "0" * 64}]}
         with self.assertRaises(FileNotFoundError):

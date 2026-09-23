@@ -74,7 +74,7 @@ def metadata_arguments(arguments):
 
 def event_receipt(event, state):
     found = None
-    for filename in event["filenames"]:
+    for filename in observer.cargo_output_files(event):
         actual = observer.digest(Path(filename).read_bytes())
         # Cargo uplifts both primary libraries and build-script executables.
         # Join the exact reported bytes to indexed compiler observations; never
