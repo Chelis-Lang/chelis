@@ -7,9 +7,9 @@
 //! its leading symbol string. The IN-MEMORY form is decode-once
 //! (`spec/design/checker_totality.md` §C4 item 2, executing [#730]'s
 //! §C4.2 doctrine that raw strings exist only at serialization
-//! boundaries). The parser stamps the tag as `Atom::Tag(DeepTag)` at
-//! element 0, so after parsing the tag string does not exist in the tree
-//! and a consumer cannot dispatch on it. [`List::tag`] is the only
+//! boundaries). The stamper decodes the tag into a [`crate::node::Node`],
+//! so after parsing the tag string does not exist in the tree and a
+//! consumer cannot dispatch on it. [`crate::node::Node::tag`] is the
 //! dispatch accessor; printers and serializers regenerate the string
 //! through [`DeepTag::as_str`] at the boundary only.
 //!
@@ -26,18 +26,17 @@
 //! [`DeepTag::parse`] is the decode side of that boundary: the parser's
 //! stamping pass and the `find_raw_vocabulary_tag` invariant use it, and
 //! raw-string entry points call it directly. It is NOT the dispatch path -
-//! decode-once means dispatch reads the already-stamped [`List::tag`].
+//! decode-once means dispatch reads the already-stamped
+//! [`crate::node::Node::tag`].
 //! `parse` returning `None` is the raw-string entry verdict: the string is
 //! outside the closed vocabulary and the caller owns the loud rejection
 //! (§C1.2). Compiler-internal pre-expansion tags such as `defmacro` and
 //! `macro-invoke` are deliberately outside this vocabulary (spec/03
 //! §1.1.2 macro boundary rule) and do not parse.
-//!
-//! [`List::tag`]: crate::ast::List::tag
 
 /// One tag of the closed Deep vocabulary (`spec/03-deep-syntax.md` §2.10).
 ///
-/// Serde note: the enum appears inside `Atom::Tag`, which the typecheck
+/// Serde note: the enum appears inside `Node`, which the typecheck
 /// cache serializes as part of `Expr`; the cache envelope's format/build
 /// identity check invalidates old entries across representation changes,
 /// so no cross-version decode path exists or is wanted.

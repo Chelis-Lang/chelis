@@ -190,17 +190,21 @@ fn splice_changes_only_the_body_slot() {
     let spliced = splice_function_body(&module, "economoist.growth.gordon_pv", new_body).unwrap();
     let spliced_def = resolved_def(&spliced, "economoist.growth.gordon_pv");
 
-    let (orig_elems, spliced_elems) = (def_elements(&original_def), def_elements(spliced_def));
-    assert_eq!(orig_elems.len(), spliced_elems.len());
+    let (orig, spliced) = (def_parts(&original_def), def_parts(spliced_def));
+    assert_eq!(orig.child_count(), spliced.child_count());
 
-    // def tag, def metadata (elements[1]), and bare name (elements[2]) are
-    // structurally identical.
-    assert_eq!(orig_elems[0], spliced_elems[0], "def tag changed");
-    assert_eq!(orig_elems[1], spliced_elems[1], "def metadata changed");
-    assert_eq!(orig_elems[2], spliced_elems[2], "def name changed");
+    // def tag, def metadata, and bare name (child 0) are structurally
+    // identical.
+    assert_eq!(orig.tag(), spliced.tag(), "def tag changed");
+    assert_eq!(orig.meta(), spliced.meta(), "def metadata changed");
+    assert_eq!(
+        orig.children_slice()[0],
+        spliced.children_slice()[0],
+        "def name changed"
+    );
 
-    // The fn node differs only at the body slot.
-    assert_fn_differs_only_in_body(&orig_elems[3], &spliced_elems[3]);
+    // The fn node (child 1) differs only at the body slot.
+    assert_fn_differs_only_in_body(&orig.children_slice()[1], &spliced.children_slice()[1]);
 }
 
 /// The same metadata-only invariant against a property def carrying
@@ -224,16 +228,24 @@ fn splice_preserves_property_chelis_role_metadata() {
     let spliced = splice_function_body(&module, name, new_body).unwrap();
     let spliced_def = resolved_def(&spliced, name);
 
-    let (orig_elems, spliced_elems) = (def_elements(&original_def), def_elements(spliced_def));
+    let (orig_node, spliced_node) = (def_parts(&original_def), def_parts(spliced_def));
 
     // def metadata (chelis_role, property_preconditions,
     // property_quantifiers, property_source_kind) survives verbatim.
     assert_eq!(
-        orig_elems[1], spliced_elems[1],
+        orig_node.meta(),
+        spliced_node.meta(),
         "property def metadata (chelis_role et al.) changed"
     );
-    assert_eq!(orig_elems[2], spliced_elems[2], "property def name changed");
-    assert_fn_differs_only_in_body(&orig_elems[3], &spliced_elems[3]);
+    assert_eq!(
+        orig_node.children_slice()[0],
+        spliced_node.children_slice()[0],
+        "property def name changed"
+    );
+    assert_fn_differs_only_in_body(
+        &orig_node.children_slice()[1],
+        &spliced_node.children_slice()[1],
+    );
 
     // The new body landed; the old `and`-of-comparisons body is gone.
     let body = function_body(spliced_def).expect("body present");
@@ -312,9 +324,9 @@ fn deeppath_resolve_mut_rejects_stamped_node_borrow() {
 #[test]
 fn splice_rejects_invalid_successor_body_transactionally() {
     let module = parse(GROWTH);
-    let invalid = Expr::Atom(Atom::Tag(DeepTag::Lit), chelis_deep::Span::new(0, 0));
+    let invalid = Expr::Atom(Atom::Name("lit".to_string()), chelis_deep::Span::new(0, 0));
     let error = splice_function_body(&module, "economoist.growth.gordon_pv", invalid)
-        .expect_err("a RuntimeExpr Tag atom must not cross the successor rewrite gate");
+        .expect_err("a RuntimeExpr name atom must not cross the successor rewrite gate");
     assert!(matches!(error, ResolveError::InvalidStampedRewrite { .. }));
     assert_eq!(
         parse(GROWTH),
@@ -421,11 +433,6 @@ fn resolve_with_no_module_returns_no_module() {
 
 // ── Local test helpers over the public AST ───────────────────────────
 
-/// Declarations begin at `module.elements[3]` (after the `module` tag,
-/// its metadata map, and the module name), so a 0-based declaration index
-/// addresses `elements[3 + decl_index]`.
-const MODULE_DECLS_START: usize = 3;
-
 /// Resolve a function by qualified name and return its `(def ...)` node.
 fn resolved_def<'a>(module: &'a [Expr], qualified_name: &str) -> &'a Expr {
     let decl_index = resolve_function(module, qualified_name)
@@ -436,44 +443,24 @@ fn resolved_def<'a>(module: &'a [Expr], qualified_name: &str) -> &'a Expr {
 
 fn def_node(module: &[Expr], decl_index: usize) -> &Expr {
     match &module[0] {
-        Expr::List(module_list, _) => {
-            let node = &module_list.elements[MODULE_DECLS_START + decl_index];
-            assert_is_def(node);
-            node
-        }
         Expr::Node(node, _) if node.tag() == DeepTag::Module => {
             // Node children: [0]=name, [1..]=decls; decl_index is relative to decls
             let node = &node.children_slice()[1 + decl_index];
-            assert_is_def(node);
+            def_parts(node);
             node
         }
-        _ => panic!("expected module list or Node"),
+        _ => panic!("expected module Node"),
     }
 }
 
-fn assert_is_def(node: &Expr) {
-    match node {
-        Expr::List(list, _) => {
-            assert!(
-                matches!(list.elements.first(), Some(Expr::Atom(Atom::Tag(t), _)) if *t == DeepTag::Def),
-                "expected a def node"
-            );
-        }
+/// The stamped `(def ...)` node behind `def`.
+fn def_parts(def: &Expr) -> &chelis_deep::node::Node {
+    match def {
         Expr::Node(n, _) => {
             assert_eq!(n.tag(), DeepTag::Def, "expected a def node");
+            n
         }
-        _ => panic!("expected def list or Node"),
-    }
-}
-
-fn def_elements(def: &Expr) -> Vec<Expr> {
-    match def {
-        Expr::List(list, _) => list.elements.clone(),
-        Expr::Node(node, span) => {
-            // Reconstruct the canonical List form: [tag, meta, children...]
-            node.to_list(*span).elements
-        }
-        _ => panic!("expected def list or Node"),
+        _ => panic!("expected def Node"),
     }
 }
 
@@ -481,16 +468,6 @@ fn def_elements(def: &Expr) -> Vec<Expr> {
 /// everywhere except the body slot.
 fn assert_fn_differs_only_in_body(orig_fn: &Expr, spliced_fn: &Expr) {
     match (orig_fn, spliced_fn) {
-        (Expr::List(orig, _), Expr::List(spliced, _)) => {
-            assert_eq!(orig.elements.len(), spliced.elements.len());
-            assert_eq!(orig.elements[0], spliced.elements[0], "fn tag changed");
-            assert_eq!(orig.elements[1], spliced.elements[1], "fn metadata changed");
-            assert_eq!(orig.elements[2], spliced.elements[2], "params changed");
-            assert_ne!(
-                orig.elements[3], spliced.elements[3],
-                "body slot did not change"
-            );
-        }
         (Expr::Node(orig, _), Expr::Node(spliced, _)) => {
             assert_eq!(orig.tag(), spliced.tag(), "fn tag changed");
             assert_eq!(orig.meta(), spliced.meta(), "fn metadata changed");

@@ -24,15 +24,10 @@
 //! stopped agreeing with it.
 
 use crate::annotations::{Metadata, MetadataKey};
-use crate::ast::{Atom, Expr, List};
+use crate::ast::{Atom, Expr};
 use crate::tag::DeepTag;
 
-/// The parts of a stamped node, read through either carrier.
-///
-/// chelis#1107: a node reaches here as `Expr::List` or as the typed
-/// `Expr::Node`, and a reader that knows only one silently declines the
-/// other. Both are read here so the fold cannot depend on which producer
-/// built the tree.
+/// The parts of a stamped node.
 fn stamped(expr: &Expr) -> Option<(DeepTag, &Metadata, &[Expr])> {
     match expr.carrier() {
         crate::ExprCarrier::DecodedNode(tag, metadata, children) => Some((tag, metadata, children)),
@@ -40,8 +35,7 @@ fn stamped(expr: &Expr) -> Option<(DeepTag, &Metadata, &[Expr])> {
         | crate::ExprCarrier::UndecodableHead(_, _, _)
         | crate::ExprCarrier::Atom(_)
         | crate::ExprCarrier::MetadataMap(_)
-        | crate::ExprCarrier::MetadataExpression(_)
-        | crate::ExprCarrier::MalformedLegacyList(_) => None,
+        | crate::ExprCarrier::MetadataExpression(_) => None,
     }
 }
 
@@ -71,7 +65,12 @@ fn unary_param(stage: &Expr) -> Option<&str> {
 /// Insertion stays outside every binder and before every other argument.
 /// General lambdas retain ordinary application semantics: even one use of a
 /// parameter can be conditional, deferred, shadowed, or preceded by effects.
-fn fold_stage(stage: &Expr, acc: Expr) -> Expr {
+///
+/// `None` when the stage cannot be an application's callee: a pipe stage is
+/// an inference-bypass child, so a hand-built `Pipe` node can carry a bare
+/// name there, which no `app` node admits. The pipe then stays unfolded for
+/// the consumers' fail-closed pipe rejection.
+fn fold_stage(stage: &Expr, acc: Expr) -> Option<Expr> {
     if let Some(param) = unary_param(stage)
         && let Some((_, _, stage_kids)) = stamped(stage)
         && let Some(body) = stage_kids.get(1)
@@ -97,7 +96,7 @@ fn fold_stage(stage: &Expr, acc: Expr) -> Expr {
         {
             let mut children = args.to_vec();
             children[input] = acc;
-            return rebuild(body, tag, meta, children);
+            return Some(rebuild(body, tag, meta, children));
         }
     }
     // This origin marker is valid only inside a pipe (spec/03 [03-META-1/2]).
@@ -113,32 +112,13 @@ fn fold_stage(stage: &Expr, acc: Expr) -> Expr {
     // The synthesized application carries the STAGE's span and metadata, so
     // a diagnostic about it points at the stage the user wrote, and any key
     // a later pass mints from the span lands on the node it expects.
-    //
-    // It also carries the stage's CARRIER. chelis#1107 cuts both ways: a
-    // reader that knows one carrier declines the other, so a fold that reads
-    // both and always WRITES the typed one hands every list-carrier consumer
-    // a node it cannot match. The host expression lowerer is one such
-    // consumer, and a typed `app` reached its catch-all as "no
-    // host-expression lowering rule exists for this checked form" across the
-    // whole grad suite. Matching the stage keeps the synthesized node in the
-    // carrier its siblings are already in.
     let (meta, span) = match stamped(&stage) {
         Some((_, meta, _)) => (meta.clone(), stage.span()),
         None => (Metadata::default(), stage.span()),
     };
-    let children = vec![stage.clone(), acc];
-    match &stage {
-        Expr::Node(..) => Expr::node(DeepTag::App, meta, children, span),
-        _ => Expr::List(
-            List {
-                elements: std::iter::once(Expr::Atom(Atom::Tag(DeepTag::App), span))
-                    .chain(std::iter::once(Expr::Map(meta, span)))
-                    .chain(children)
-                    .collect(),
-            },
-            span,
-        ),
-    }
+    crate::node::Node::try_new(DeepTag::App, meta, vec![stage, acc])
+        .ok()
+        .map(|node| Expr::Node(Box::new(node), span))
 }
 
 #[cfg(test)]
@@ -162,7 +142,6 @@ fn expr_nodes(expr: &Expr) -> usize {
     1 + match expr {
         Expr::Atom(_, _) | Expr::Map(_, _) => 0,
         Expr::MetaExpr(meta, _) => expr_nodes(&meta.expr),
-        Expr::List(list, _) => list.elements.iter().map(expr_nodes).sum(),
         Expr::Node(node, _) => node.children_slice().iter().map(expr_nodes).sum(),
         Expr::BareList(elements, _) => elements.iter().map(expr_nodes).sum(),
         Expr::UnknownForm(data) => data.children.iter().map(expr_nodes).sum(),
@@ -189,10 +168,7 @@ pub(crate) fn reset_fold_copied_nodes() {
 /// would survive a top-down pass and reach a consumer that no longer has an
 /// arm for it.
 ///
-/// A subtree with no pipe in it is returned unchanged, and a rebuilt one
-/// keeps its original carrier (chelis#1107): this pass must not turn a
-/// `List` tree into a `Node` tree as a side effect, because the carrier is
-/// observable to printers, validators and the stamping rules.
+/// A subtree with no pipe in it is returned unchanged.
 pub fn fold_pipes(expr: &Expr) -> Expr {
     fold_changed(expr).unwrap_or_else(|| copied(expr))
 }
@@ -264,23 +240,12 @@ fn fold_children(kids: &[Expr]) -> Option<Vec<Expr>> {
     )
 }
 
-/// Rebuild `expr` with new children, in the carrier it arrived in.
+/// Rebuild the stamped node `expr` with new children.
 fn rebuild(expr: &Expr, tag: DeepTag, meta: &Metadata, children: Vec<Expr>) -> Expr {
-    match expr {
-        Expr::List(_, span) => Expr::List(
-            List {
-                elements: std::iter::once(Expr::Atom(Atom::Tag(tag), *span))
-                    .chain(std::iter::once(Expr::Map(meta.clone(), *span)))
-                    .chain(children)
-                    .collect(),
-            },
-            *span,
-        ),
-        _ => Expr::node(tag, meta.clone(), children, expr.span()),
-    }
+    Expr::node(tag, meta.clone(), children, expr.span())
 }
 
-/// Fold one already-child-folded `Pipe` expression, in either carrier.
+/// Fold one already-child-folded `Pipe` expression.
 fn fold_one(pipe: &Expr) -> Option<Expr> {
     let (tag, _, kids) = stamped(pipe)?;
     if tag != DeepTag::Pipe {
@@ -289,7 +254,7 @@ fn fold_one(pipe: &Expr) -> Option<Expr> {
     let (seed, stages) = kids.split_first()?;
     let mut acc = seed.clone();
     for stage in stages {
-        acc = fold_stage(stage, acc);
+        acc = fold_stage(stage, acc)?;
     }
     Some(acc)
 }
@@ -314,7 +279,6 @@ fn is_var(expr: &Expr, name: &str) -> bool {
 fn mentions_name(expr: &Expr, name: &str) -> bool {
     match expr {
         Expr::Atom(Atom::Name(found), _) => found == name,
-        Expr::List(list, _) => list.elements.iter().any(|child| mentions_name(child, name)),
         Expr::Node(node, _) => node
             .children_slice()
             .iter()
@@ -469,7 +433,7 @@ mod tests {
         assert_eq!(fold_program_pipes(&exprs), exprs);
     }
 
-    /// Transitional carriers retain their contents when there is no pipe.
+    /// Structural carriers retain their contents when there is no pipe.
     #[test]
     fn a_transitional_variant_is_passed_through() {
         let span = crate::span::Span::new(0, 0);
@@ -481,21 +445,10 @@ mod tests {
     }
 
     /// A parameter outside the first argument is not moved into the body.
-    /// Assert exact structure through both stamped carriers; execution rows
-    /// check the lexical and eager-evaluation consequences at the CLI.
+    /// Assert exact structure; execution rows check the lexical and
+    /// eager-evaluation consequences at the CLI.
     #[test]
-    fn general_lambda_stages_remain_applications_in_both_carriers() {
-        fn typed(expr: &Expr) -> Expr {
-            match stamped(expr) {
-                Some((tag, meta, kids)) => Expr::node(
-                    tag,
-                    meta.clone(),
-                    kids.iter().map(typed).collect(),
-                    expr.span(),
-                ),
-                None => expr.clone(),
-            }
-        }
+    fn general_lambda_stages_remain_applications() {
         for body in [
             "(fn {} (params {} y) (var {} p))",
             "(if {} (lit {} false) (var {} p) (lit {} 7))",
@@ -504,15 +457,42 @@ mod tests {
             "(app {} (var {} add) (var {} p) (fn {} (params {} y) (var {} p)))",
         ] {
             let source = format!("(pipe {{}} (var {{}} xs) (fn {{}} (params {{}} p) {body}))");
-            let parsed = parse_str(&source).expect("parse").remove(0);
-            for pipe in [parsed.clone(), typed(&parsed)] {
-                let (_, _, kids) = stamped(&pipe).expect("pipe");
-                let actual = fold_pipes(&pipe);
-                let (tag, _, args) = stamped(&actual).expect("application");
-                assert_eq!(tag, DeepTag::App);
-                assert_eq!(args, &[kids[1].clone(), kids[0].clone()], "{source}");
-            }
+            let pipe = parse_str(&source).expect("parse").remove(0);
+            let (_, _, kids) = stamped(&pipe).expect("pipe");
+            let actual = fold_pipes(&pipe);
+            let (tag, _, args) = stamped(&actual).expect("application");
+            assert_eq!(tag, DeepTag::App);
+            assert_eq!(args, &[kids[1].clone(), kids[0].clone()], "{source}");
         }
+    }
+
+    /// A pipe stage is an inference-bypass child, so a hand-built `Pipe`
+    /// node admits a bare name there, which no `app` node admits as its
+    /// callee. The fold leaves that pipe in place for the consumers'
+    /// fail-closed rejection instead of building an invalid application.
+    /// Negative control: the same pipe with a `var` stage folds.
+    #[test]
+    fn a_bare_name_stage_is_left_unfolded() {
+        let span = crate::span::Span::new(0, 0);
+        let seed = parse_str("(var {} xs)").expect("parse").remove(0);
+        let bare_stage = Expr::Atom(Atom::Name("f".to_string()), span);
+        let pipe = Expr::node(
+            DeepTag::Pipe,
+            Metadata::default(),
+            vec![seed.clone(), bare_stage],
+            span,
+        );
+        assert_eq!(fold_pipes(&pipe), pipe);
+
+        let var_stage = parse_str("(var {} f)").expect("parse").remove(0);
+        let pipe = Expr::node(
+            DeepTag::Pipe,
+            Metadata::default(),
+            vec![seed, var_stage],
+            span,
+        );
+        let (tag, _, _) = stamped(&fold_pipes(&pipe)).expect("application");
+        assert_eq!(tag, DeepTag::App);
     }
 
     /// A stage that shadows the pipe parameter does not capture it.
