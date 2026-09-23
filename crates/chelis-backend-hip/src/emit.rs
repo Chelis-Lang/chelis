@@ -5737,8 +5737,6 @@ mod tests {
         );
     }
 
-    /// Issue #251 (parallel #248): `uniform_like` `low` / `high` args must
-    /// emit through `chelis_f32_from_bits`, not a lossy `{:.8}f` literal.
     /// `uniform_like(template, low, high)` as the first draw of a `with
     /// seed(seed)` region in the graph, whose key the HIP lane computes.
     fn scoped_uniform(
@@ -5788,6 +5786,8 @@ mod tests {
         )
     }
 
+    /// Issue #251 (parallel #248): `uniform_like` `low` / `high` args must
+    /// emit through `chelis_f32_from_bits`, not a lossy `{:.8}f` literal.
     /// The reproducer `1e-40` collapses to `0.0f` under `%.8`.
     #[test]
     fn issue_251_uniform_like_args_emit_exact_bit_pattern() {
