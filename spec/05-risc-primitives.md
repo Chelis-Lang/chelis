@@ -1036,8 +1036,7 @@ compile-time-only alias.
 > `stop_gradient` does not count), `grad` rejects with
 > `AdRejectionReason::RandomSelectionParameter`; otherwise the rate receives
 > the exact zero cotangent. The mask comparison itself has zero cotangent.
-> The operation has no accumulator parameter. (The typed rejection is not yet
-> implemented; chelis#2421.)
+> The operation has no accumulator parameter.
 
 > **[05-RNG-1]** Every conforming evaluation of a `with seed(N)` program
 > produces byte-identical random results for the same seed, dynamic

@@ -2,13 +2,15 @@
 
 Tracker: chelis#2413. Evidence: `docs/investigations/randomness_assessment_2026_09_22.md`.
 
+Status: phases 1, 2, 3 and 5 are implemented; phase 3 carries the key-operand IR with the `DrawKey` bridge and wire schema 17. Phases 4 and 6 are open.
+
 This document plans how the implementation reaches the randomness semantics the numbered spec already decides:
 - `spec/04-type-system.md` §7.1 (the `Random` effect and `with seed`);
 - `spec/05-risc-primitives.md` [05-RNG-1], [05-OP-8] and [05-OP-37];
 - spec/06 §2.11 and §3.2;
 - spec/07 §2.
 
-It decides no language semantics. Where it restates a rule, the numbered spec wins. The one normative change it needs, to spec/10 §3.2's wire layout, lands with phase 3.
+It decides no language semantics. Where it restates a rule, the numbered spec wins. The one normative change it needs, to spec/10 §3.2's wire layout, landed with phase 3.
 
 On 2026-09-23 Chelis decided to move to explicit single-use keys (`randomness_explicit_keys.md`). Phases 1 to 3, 5 and 6 below are shared by both designs. Phase 3's key-operand IR is the explicit-key IR, with a bridge that computes today's counter keys until the switch. No new counter-only ordinal machinery is built (new activation counting, `vmap` and `par` bases), because keys remove ordinals.
 
