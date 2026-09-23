@@ -5,8 +5,7 @@ runtime name `dropout`", including on programs that `chelis build` runs,
 because the caller's control flow became an execution exclusion inherited by
 every call beneath it. Each definition and each `dropout` call now decides
 from its own body, as compiled C does. The draws follow [05-RNG-1] and match
-compiled C wherever C runs the program. Control flow that reaches no random
-draw is no longer classified at all, and programs without `dropout` produce
+compiled C wherever C runs the program. Programs without `dropout` produce
 the same values as before.
 
 A `dropout` that has no fixed-control plan, which is the case under `vmap`
