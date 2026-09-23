@@ -1,0 +1,253 @@
+--- a/dune
++++ b/dune
+@@ -34,6 +34,7 @@
+   BorrowCheck
+   Builtin
+   Collections
++  CollectionContracts
+   Config
+   ConstStrings
+   Contexts
+--- a/PrePasses.ml
++++ b/PrePasses.ml
+@@ -3298,7 +3298,9 @@
+   let crate = replace_static crate in
+   let crate = remove_vtables crate in
+   let crate = rename_type_vars crate in
++  let collection_evidence = crate in
+   let crate = resolve_modeled_defaults crate in
+   let crate = simplify_trait_calls crate in
++  let crate = CollectionContracts.check ~evidence:collection_evidence crate in
+   [%ltrace "After pre-passes:\n" ^ Print.crate_to_string crate ^ "\n"];
+   crate
+--- /dev/null
++++ b/llbc/CollectionContracts.ml
+@@ -0,0 +1,228 @@
++(** Admission for the value-only collection models. Rust's collectors observe
++    size_hint at allocation/specialization-dependent points. Erasing capacity is
++    sound only when those calls are total and unobservable and the selected
++    consumer has the same callback schedule as repeated next. This is a closed
++    provenance check, not an effect guess based on a method's name or body. *)
++open Types
++open Expressions
++open LlbcAst
++open Errors
++
++let prefix = "_root_.Aeneas.Std."
++let iterator = prefix ^ "core.iter.traits.iterator.Iterator"
++let into_iterator = prefix ^ "core.iter.traits.collect.IntoIterator"
++let from_iterator = prefix ^ "core.iter.traits.collect.FromIterator"
++let extend = prefix ^ "core.iter.traits.collect.Extend"
++let step = prefix ^ "core.iter.range.Step"
++
++let check ~(evidence : crate) (crate : crate) : crate =
++  if Config.backend () <> Config.Lean then crate
++  else
++    let mctx = NameMatcher.ctx_from_crate evidence in
++    let rec native_name name =
++      match List.rev name with
++      | PeInstantiated _ :: rest -> native_name (List.rev rest)
++      | _ -> name
++    in
++    let trait_name id =
++      let decl = TraitDeclId.Map.find id evidence.trait_decls in
++      Option.map
++        (fun (info : Pure.builtin_trait_decl_info) -> info.extract_name)
++        (ExtractBuiltin.find_trait_decl_info mctx (native_name decl.item_meta.name))
++    in
++    let ref_name (tr : trait_ref) =
++      trait_name tr.trait_decl_ref.binder_value.id
++    in
++    let impl_name (impl : trait_impl) =
++      let decl = TraitDeclId.Map.find impl.impl_trait.id evidence.trait_decls in
++      Option.map
++        (fun (info : Pure.builtin_trait_impl_info) -> info.extract_name)
++        (ExtractBuiltin.find_trait_impl_info mctx (native_name decl.item_meta.name)
++           impl.impl_trait.generics)
++    in
++    let fun_name (decl : fun_decl) =
++      Option.map
++        (fun (info : Pure.builtin_fun_info) -> info.extract_name)
++        (ExtractBuiltin.NameMatcherMap.find_opt mctx decl.item_meta.name
++           (ExtractBuiltin.builtin_funs_map ()))
++    in
++    let reject span reason =
++      [%craise] span
++        ("E_UNSUPPORTED_COLLECTION: " ^ reason
++       ^ ". The value-only Vec/BTree collection model cannot preserve native "
++       ^ "size_hint/consumer dispatch for this dictionary. Use an explicit "
++       ^ "next-driven production loop, or provide a reviewed collector model "
++       ^ "with the required capacity and specialization semantics.")
++    in
++    (* Recover native dispatch identity, not the borrowed-state ABI. Structured
++       specializations still retain their real methods and giveback signatures.
++       Apply the same binder substitution as normalize_modeled_trait_specializations. *)
++    let implementations = TraitImplId.Map.values evidence.trait_impls in
++    let rec native_impl span (reference : trait_impl_ref) =
++      let impl = TraitImplId.Map.find reference.id evidence.trait_impls in
++      match List.rev impl.item_meta.name with
++      | PeInstantiated shape :: rest -> (
++          let name = List.rev rest in
++          match List.find_opt
++                  (fun (original : trait_impl) -> original.item_meta.name = name)
++                  implementations with
++          | None -> reject span "missing native collection specialization identity"
++          | Some original ->
++              let generics =
++                Substitute.apply_args_to_binder reference.generics
++                  Substitute.generic_args_substitute shape
++              in
++              native_impl span { id = original.def_id; generics })
++      | _ -> reference
++    in
++    let resolve span (tr : trait_ref) =
++      match tr.kind with
++      | TraitImpl reference ->
++          let reference = native_impl span reference in
++          let impl = TraitImplId.Map.find reference.id evidence.trait_impls in
++          let generics = reference.generics in
++          let subst =
++            [%add_loc] Substitute.make_subst_from_generics (Some span)
++              impl.generics generics (TraitImpl reference)
++          in
++          let parents =
++            List.map (Substitute.trait_ref_substitute subst)
++              impl.implied_trait_refs
++          in
++          (impl, generics.trait_refs, parents)
++      | _ -> reject span "unresolved generic or projected collection dictionary"
++    in
++    let one span name refs =
++      match List.filter (fun tr -> ref_name tr = Some name) refs with
++      | [ tr ] -> tr
++      | _ -> reject span ("missing or ambiguous " ^ name ^ " evidence")
++    in
++    let rec check_iterator span seen (tr : trait_ref) =
++      let impl, args, _ = resolve span tr in
++      if List.mem tr seen then
++        reject span "recursive iterator evidence without a finite source";
++      let seen = tr :: seen in
++      let check_base () = check_iterator span seen (one span iterator args) in
++      match impl_name impl with
++      | Some name when
++          List.mem name
++            (List.map (( ^ ) iterator)
++               [ "SliceIter"; "ArrayIntoIter"; "VecIntoIter"; "BTreeIter";
++                 "BTreeIntoIter"; "Chunks"; "ChunksExact"; "Windows";
++                 "Once"; "Chars" ]) -> ()
++      | Some name when
++          List.mem name
++            (List.map (( ^ ) iterator)
++               [ "Mut"; "Map"; "Copied"; "Cloned"; "Enumerate";
++                 "Filter"; "FilterMap" ]) -> check_base ()
++      | Some name when name = iterator ^ "Range" ->
++          let step_ref = one span step args in
++          let step_impl, _, _ = resolve span step_ref in
++          if not
++               (List.mem (impl_name step_impl)
++                  [ Some (prefix ^ "core.iter.range.StepUsize");
++                    Some (prefix ^ "core.iter.range.StepI32") ])
++          then reject span "custom range Step callbacks"
++      (* Restricted Charon roots need not retain a custom iterator's unsafe
++         specialization markers. Even an inherited size_hint is therefore
++         insufficient evidence for its native collector consumer. *)
++      | _ ->
++          reject span
++            ("unreviewed iterator hint or collector specialization in "
++            ^ Print.name_to_string (Print.crate_to_fmt_env evidence)
++                impl.item_meta.name)
++    in
++    let check_into span tr =
++      let _, _, parents = resolve span tr in
++      check_iterator span [] (one span iterator parents)
++    in
++    let modeled_collectors =
++      List.map (( ^ ) prefix)
++        [ "core.iter.traits.collect.FromIteratorVec";
++          "core.iter.traits.collect.FromIteratorBTreeMap";
++          "core.iter.traits.collect.FromIteratorBTreeSet" ]
++    in
++    let rec needs_check span seen tr =
++      let impl, args, _ = resolve span tr in
++      if List.mem tr seen then
++        reject span "recursive collector dictionary";
++      let seen = tr :: seen in
++      match impl_name impl with
++      | Some name when List.mem name modeled_collectors -> true
++      | Some name when name = prefix ^ "core.iter.traits.collect.FromIteratorResult" ->
++          needs_check span seen (one span from_iterator args)
++      | Some _ -> reject span "unreviewed modeled FromIterator dispatch"
++      | None ->
++          (* Its real Rust body is translated and independently checked below.
++             A wrapper is not permission to ignore a generic collector call. *)
++          (match List.assoc_opt "from_iter" impl.methods with
++          | Some method_ref -> (
++              match
++                (FunDeclId.Map.find method_ref.binder_value.id evidence.fun_decls).body
++              with
++              | StructuredBody _ -> false
++              | _ -> reject span "opaque custom FromIterator implementation")
++          | None -> reject span "missing custom FromIterator implementation")
++    in
++    let check_ptr span (ptr : fn_ptr) =
++      let check_collect args =
++        let target = one span from_iterator args.trait_refs in
++        if needs_check span [] target then
++          check_iterator span []
++            (one span iterator args.trait_refs)
++      in
++      let check_collection_input args =
++        check_into span (one span into_iterator args.trait_refs)
++      in
++      match ptr.kind with
++      | FunId (FRegular id) ->
++          let decl = FunDeclId.Map.find id crate.fun_decls in
++          (match fun_name decl with
++          | Some name when
++              name = prefix ^ "core.iter.traits.iterator.Iterator.collect.default" ->
++              check_collect ptr.generics
++          | Some name when
++              List.mem name
++                (List.map (( ^ ) prefix)
++                   [ "alloc.vec.FromIteratorVec.from_iter";
++                     "alloc.collections.btree.map.FromIteratorBTreeMap.from_iter";
++                     "alloc.collections.btree.set.FromIteratorBTreeSet.from_iter";
++                     "alloc.vec.ExtendVec.extend" ]) ->
++              check_collection_input ptr.generics
++          | Some name when name = prefix ^ "core.result.FromIteratorResult.from_iter" ->
++              if needs_check span [] (one span from_iterator ptr.generics.trait_refs) then
++                check_collection_input ptr.generics
++          | _ -> ())
++      | TraitMethod (tr, "from_iter", _) when ref_name tr = Some from_iterator ->
++          if needs_check span [] tr then
++            check_collection_input ptr.generics
++      | TraitMethod (tr, "extend", _) when ref_name tr = Some extend ->
++          let impl, _, _ = resolve span tr in
++          (match impl_name impl with
++          | Some name when name = prefix ^ "alloc.vec.ExtendVec" ->
++              check_collection_input ptr.generics
++          | Some _ -> reject span "unreviewed modeled Extend dispatch"
++          | None -> ())
++      | TraitMethod (tr, "collect", _) when ref_name tr = Some iterator ->
++          let target = one span from_iterator ptr.generics.trait_refs in
++          if needs_check span [] target then
++            check_iterator span [] tr
++      | _ -> ()
++    in
++    FunDeclId.Map.iter
++      (fun _ (decl : fun_decl) ->
++        if Option.is_none (fun_name decl) then
++          match decl.body with
++          | StructuredBody body ->
++              let visitor =
++                object
++                  inherit [_] iter_statement as super
++                  method! visit_fn_ptr span ptr = check_ptr span ptr
++                  method! visit_statement _ st =
++                    super#visit_statement st.span st
++                end
++              in
++              visitor#visit_block decl.item_meta.span body.body
++          | _ -> ())
++      crate.fun_decls;
++    crate

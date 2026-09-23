@@ -20,7 +20,8 @@
       "verification/aeneas-loop-continuations.patch",
       "verification/aeneas-trait-models.patch",
       "verification/aeneas-shared-borrows.patch",
-      "verification/aeneas-floating-scalars.patch"
+      "verification/aeneas-floating-scalars.patch",
+      "verification/aeneas-collection-contract.patch"
     ]
   },
   "charon": {

@@ -356,8 +356,9 @@ impl Spine {
                                 "execution rewrite reordered an existing source node".into()
                             );
                         }
-                        steps.extend((next..=node.0).map(|index| FullStep::Node(NodeId(index))));
-                        next = node.0 + 1;
+                        let end = node.0 + 1;
+                        steps.extend((next..end).map(|index| FullStep::Node(NodeId(index))));
+                        next = end;
                     }
                     event => steps.push(event),
                 }
@@ -376,8 +377,9 @@ impl Spine {
                                 "execution rewrite reordered an existing source node".into()
                             );
                         }
-                        steps.extend((next..=node.0).map(|index| Step::Node(NodeId(index))));
-                        next = node.0 + 1;
+                        let end = node.0 + 1;
+                        steps.extend((next..end).map(|index| Step::Node(NodeId(index))));
+                        next = end;
                     }
                     control => steps.push(control),
                 }

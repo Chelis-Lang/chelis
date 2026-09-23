@@ -60,12 +60,7 @@ fn eval_dag_root_values(dag: &Dag, inputs: &UnordMap<String, TensorValue>) -> Ve
         .expect("eval succeeds");
     roots
         .iter()
-        .map(|id| {
-            values
-                .get(id)
-                .cloned()
-                .unwrap_or_else(|| TensorValue::scalar(0.0))
-        })
+        .map(|id| values.get(id).cloned().expect("evaluated root has a value"))
         .collect()
 }
 
@@ -443,6 +438,176 @@ fn lowered_library_dag_matches_lower_program() {
         assert_eq!(na.inputs, nb.inputs);
         assert_eq!(na.output_type, nb.output_type);
     }
+}
+
+#[test]
+fn shadowed_host_value_lowers_and_references_follow_source_order() {
+    let (_, ctx, lib_checked) = check_lib("(def {} value (lit {} \"host\"))");
+    let library = lower_program_to_library(&lib_checked);
+    let new_checked = check_with_ctx(
+        &ctx,
+        "
+        (defsig {} value (t-prim {} i32))
+        (def {} value (lit {type: (t-prim {} i32)} 2))
+        (def {} z_copy (var {} value))
+        (def {} a_last (lit {type: (t-prim {} i32)} 3))
+        ",
+    );
+    let dag = lower_program_with_context(&library, &new_checked);
+    let values = eval_dag_root_values(&dag, &UnordMap::new());
+    assert_eq!(
+        values
+            .iter()
+            .map(TensorValue::to_f64_lossy_vec)
+            .collect::<Vec<_>>(),
+        vec![vec![2.0], vec![2.0], vec![3.0]],
+    );
+
+    // The replacement must not rewrite the cached library's classification.
+    let original_reference = check_with_ctx(&ctx, "(def {} original (var {} value))");
+    let original_dag = lower_program_with_context(&library, &original_reference);
+    assert!(original_dag.roots().is_empty());
+    assert!(library.dag().roots().is_empty());
+
+    // Redefinition alone is not permission to change the checked type.
+    assert!(
+        check_ir_with_context(
+            &ctx,
+            &parse("(def {} value (lit {type: (t-prim {} i32)} 2))"),
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn shadowed_tensor_value_does_not_reclassify_materialized_or_lexically_bound_values() {
+    let (_, ctx, lib_checked) = check_lib(
+        "
+        (def {} value (lit {type: (t-prim {} i32)} 1))
+        (def {} snapshot (var {} value))
+        (defsig {} identity (t-fn {} (t-prim {} i32) (t-prim {} i32)))
+        (def {} identity
+          (fn {} (params {} (value {type: (t-prim {} i32)})) (var {} value)))
+        ",
+    );
+    let library = lower_program_to_library(&lib_checked);
+    let library_roots = library.dag().roots().to_vec();
+    let new_checked = check_with_ctx(
+        &ctx,
+        "
+        (defsig {} value (t-prim {} string))
+        (def {} value (lit {} \"host\"))
+        (def {} host_reference (var {} value))
+        (def {} kept (var {} snapshot))
+        (def {} called
+          (app {} (var {} identity) (lit {type: (t-prim {} i32)} 9)))
+        ",
+    );
+    let dag = lower_program_with_context(&library, &new_checked);
+    let new_roots = &dag.roots()[library_roots.len()..];
+    let values = eval_tensor_roots_with(&dag, new_roots, |_| None).expect("new roots evaluate");
+    assert_eq!(
+        new_roots
+            .iter()
+            .map(|root| values[root].to_f64_lossy_vec())
+            .collect::<Vec<_>>(),
+        vec![vec![1.0], vec![9.0]],
+    );
+    assert_eq!(library.dag().roots(), library_roots);
+
+    let original_reference = check_with_ctx(&ctx, "(def {} original (var {} value))");
+    let original_dag = lower_program_with_context(&library, &original_reference);
+    let root = *original_dag.roots().last().expect("original scalar root");
+    let values = eval_tensor_roots_with(&original_dag, &[root], |_| None)
+        .expect("original library binding evaluates");
+    assert_eq!(values[&root].to_f64_lossy_vec(), vec![1.0]);
+}
+
+#[test]
+fn shadowed_callable_reclassifies_transitive_library_calls() {
+    // Primitive-scalar arithmetic intentionally belongs to the host lane;
+    // rank-zero tensors exercise an actual host-to-DAG callable replacement.
+    let (_, ctx, lib_checked) = check_lib(
+        "
+        (defsig {} source
+          (t-fn {} (t-tensor {} (t-prim {} i32)) (t-tensor {} (t-prim {} i32))))
+        (def {} source
+          (fn {} (params {} (x {type: (t-tensor {} (t-prim {} i32))}))
+            (block {} (lit {} \"host\") (var {} x))))
+        (defsig {} bridge
+          (t-fn {} (t-tensor {} (t-prim {} i32)) (t-tensor {} (t-prim {} i32))))
+        (def {} bridge
+          (fn {} (params {} (x {type: (t-tensor {} (t-prim {} i32))}))
+            (app {} (var {} source) (var {} x))))
+        (defsig {} outer
+          (t-fn {} (t-tensor {} (t-prim {} i32)) (t-tensor {} (t-prim {} i32))))
+        (def {} outer
+          (fn {} (params {} (x {type: (t-tensor {} (t-prim {} i32))}))
+            (app {} (var {} bridge) (var {} x))))
+        ",
+    );
+    let library = lower_program_to_library(&lib_checked);
+    let new_checked = check_with_ctx(
+        &ctx,
+        "
+        (def {} source
+          (fn {} (params {} (x {type: (t-tensor {} (t-prim {} i32))}))
+            (app {} (var {} add) (var {} x)
+              (lit {type: (t-tensor {} (t-prim {} i32))} 1))))
+        (def {} result
+          (app {} (var {} outer) (lit {type: (t-tensor {} (t-prim {} i32))} 4)))
+        ",
+    );
+    let dag = lower_program_with_context(&library, &new_checked);
+    let root = *dag
+        .roots()
+        .last()
+        .expect("transitive call contributes a root");
+    let values = eval_tensor_roots_with(&dag, &[root], |_| None)
+        .expect("transitive call has no unresolved parameter inputs");
+    assert_eq!(values[&root].to_f64_lossy_vec(), vec![5.0]);
+}
+
+#[test]
+fn host_replacement_excludes_transitive_library_calls_from_new_roots() {
+    let (_, ctx, lib_checked) = check_lib(
+        "
+        (defsig {} source (t-fn {} (t-prim {} i32) (t-prim {} i32)))
+        (def {} source
+          (fn {} (params {} (x {type: (t-prim {} i32)})) (var {} x)))
+        (defsig {} bridge (t-fn {} (t-prim {} i32) (t-prim {} i32)))
+        (def {} bridge
+          (fn {} (params {} (x {type: (t-prim {} i32)}))
+            (app {} (var {} source) (var {} x))))
+        (defsig {} outer (t-fn {} (t-prim {} i32) (t-prim {} i32)))
+        (def {} outer
+          (fn {} (params {} (x {type: (t-prim {} i32)}))
+            (app {} (var {} bridge) (var {} x))))
+        ",
+    );
+    let library = lower_program_to_library(&lib_checked);
+    let new_checked = check_with_ctx(
+        &ctx,
+        "
+        (def {} source
+          (fn {} (params {} (x {type: (t-prim {} i32)}))
+            (block {} (lit {} \"host\") (var {} x))))
+        (def {} host_result
+          (app {} (var {} outer) (lit {type: (t-prim {} i32)} 4)))
+        (def {} tensor_result (lit {type: (t-prim {} i32)} 7))
+        ",
+    );
+    let dag = lower_program_with_context(&library, &new_checked);
+    let new_roots = &dag.roots()[library.dag().roots().len()..];
+    let values = eval_tensor_roots_with(&dag, new_roots, |_| None)
+        .expect("unaffected tensor root evaluates");
+    assert_eq!(
+        new_roots
+            .iter()
+            .map(|root| values[root].to_f64_lossy_vec())
+            .collect::<Vec<_>>(),
+        vec![vec![7.0]],
+    );
 }
 
 // Quiet unused-warning for the helper — only the named-roots variant is

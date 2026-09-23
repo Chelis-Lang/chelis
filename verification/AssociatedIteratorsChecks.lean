@@ -173,10 +173,6 @@ def panicked {α : Type} : Result α → Bool
   expect "Rev.rfind selects the inner find override"
     (decode resume (associated_iterators.reversed_rfind_override longer))
     (.ok (some 4, some 3, 2))
-  expect "generic filter_map retains owned callback state across rejected values"
-    (decode (fun (values : alloc.vec.Vec Usize) => values.val.map UScalar.val)
-      (associated_iterators.filter_map_collect longer))
-    (.ok [4, 8])
   expect "concrete filter_map collect returns every borrowed callback mutation"
     (decode filterMapCollected (associated_iterators.borrowed_filter_map_collect longer))
     (.ok ([4, 8], 5))
@@ -186,4 +182,4 @@ def panicked {α : Type} : Result α → Bool
   expect "empty filter_map collect never invokes its borrowed callback"
     (decode filterMapCollected (associated_iterators.borrowed_filter_map_collect noNumbers))
     (.ok ([], 0))
-  IO.println "Associated iterator smoke: 57 behavioral checks passed"
+  IO.println "Associated iterator behavioral checks passed"

@@ -138,23 +138,17 @@ impl ExecutionMetadata {
 
     pub(crate) fn remap(&mut self, remap: &UnordMap<NodeId, NodeId>) -> Result<(), String> {
         self.spine.remap(remap)?;
-        self.sites = self
-            .sites
-            .to_sorted()
-            .into_iter()
-            .map(|(node, site)| {
-                remap
-                    .get(node)
-                    .copied()
-                    .map(|mapped| (mapped, *site))
-                    .ok_or_else(|| {
-                        format!(
-                            "evaluation plan lost random node {} during remapping",
-                            node.0
-                        )
-                    })
-            })
-            .collect::<Result<_, _>>()?;
+        let mut sites = UnordMap::new();
+        for (node, &site) in self.sites.to_sorted() {
+            let mapped = remap.get(node).copied().ok_or_else(|| {
+                format!(
+                    "evaluation plan lost random node {} during remapping",
+                    node.0
+                )
+            })?;
+            sites.insert(mapped, site);
+        }
+        self.sites = sites;
         Ok(())
     }
 

@@ -12046,7 +12046,7 @@
 +end Aeneas.Std
 --- /dev/null
 +++ b/backends/lean/Aeneas/Std/FloatFmt.lean
-@@ -0,0 +1,126 @@
+@@ -0,0 +1,187 @@
 +import Aeneas.Std.Float
 +import Aeneas.Std.Scalar.Fmt
 +
@@ -12092,49 +12092,110 @@
 +  | fuel + 1, c, e =>
 +    if c != 0 && c % 10 == 0 then trimDecimal fuel (c / 10) (e + 1) else (c, e)
 +
-+def fixedDecimal (coefficient : Nat) (scale : Int) (minimumPrecision : Nat := 0) : String :=
-+  let text := digits coefficient
-+  let point := (text.length : Int) + scale
-+  let (whole, fraction) :=
-+    if point ≤ 0 then ("0", repeatChar '0' (-point).toNat ++ text)
-+    else if point ≥ text.length then (text ++ repeatChar '0' (point.toNat - text.length), "")
-+    else (String.ofList (text.toList.take point.toNat), String.ofList (text.toList.drop point.toNat))
-+  let fraction := fraction ++ repeatChar '0' (minimumPrecision - fraction.length)
-+  whole ++ (if fraction.isEmpty then "" else "." ++ fraction)
++/-- The pinned flt2dec renderer retains Copy/Zero boundaries. In particular,
++    decimal points and exponents are not part of an atomic digit-buffer write. -/
++inductive FloatPart where
++  | copy (text : String)
++  | zero (count : Nat)
 +
-+def scientificDecimal (coefficient : Nat) (scale : Int) : String :=
++def FloatPart.length : FloatPart → Nat
++  | .copy text => text.utf8ByteSize
++  | .zero count => count
++
++def writeFloatParts : List FloatPart → Formatter → Outcome
++  | [], fmt => .ok (.Ok (), fmt)
++  | part :: rest, fmt =>
++    let written := match part with
++      | .copy text => fmt.append text
++      | .zero count =>
++        thenFormat (writeRepeated (repeatChar '0' 64) (count / 64) fmt) (fun fmt =>
++          if count % 64 == 0 then .ok (.Ok (), fmt)
++          else fmt.append (repeatChar '0' (count % 64)))
++    thenFormat written (writeFloatParts rest)
++
++def Formatter.padFloat (fmt : Formatter) (sign : String) (parts : List FloatPart) : Outcome :=
++  let content : Callback := fun fmt =>
++    if sign.isEmpty then writeFloatParts parts fmt
++    else thenFormat (fmt.append sign) (writeFloatParts parts)
++  let o := fmt.options
++  let length := parts.foldl (fun length part => length + part.length) 0
++  if o.width == 0 then content fmt
++  else if o.bit 24 then
++    -- Unlike pad_integral, pad_formatted_parts writes even an empty sign here.
++    thenFormat (fmt.append sign) (fun fmt =>
++      let fmt := { fmt with options := o.zeroPadded }
++      let padding := o.width - sign.utf8ByteSize - length
++      if padding == 0 then do
++        let (status, fmt) ← writeFloatParts parts fmt
++        .ok (status, { fmt with options := o })
++      else thenFormat (writeFill '0' padding fmt) (fun fmt =>
++        thenFormat (writeFloatParts parts fmt) (fun fmt =>
++          .ok (.Ok (), { fmt with options := o }))))
++  else fmt.padWith (o.width - sign.utf8ByteSize - length) true content
++
++def zeroDecimalParts (precision : Nat) : List FloatPart :=
++  if precision == 0 then [.copy "0"] else [.copy "0.", .zero precision]
++
++def fixedDecimalParts (text : String) (scale : Int) (minimumPrecision : Nat := 0) :
++    List FloatPart :=
++  let point := (text.length : Int) + scale
++  if point ≤ 0 then
++    [.copy "0.", .zero (-point).toNat, .copy text,
++      .zero (minimumPrecision - text.length - (-point).toNat)]
++  else if point < text.length then
++    [.copy (String.ofList (text.toList.take point.toNat)), .copy ".",
++      .copy (String.ofList (text.toList.drop point.toNat)),
++      .zero (minimumPrecision - (text.length - point.toNat))]
++  else
++    [.copy text, .zero (point.toNat - text.length)] ++
++      if minimumPrecision == 0 then [] else [.copy ".", .zero minimumPrecision]
++
++def scientificDecimalParts (coefficient : Nat) (scale : Int) : List FloatPart :=
 +  let text := digits coefficient
-+  let first := String.ofList (text.toList.take 1)
-+  let rest := String.ofList (text.toList.drop 1)
-+  first ++ (if rest.isEmpty then "" else "." ++ rest) ++ "e" ++
-+    toString (scale + (text.length : Int) - 1)
++  let exponent := scale + (text.length : Int) - 1
++  [.copy (String.ofList (text.toList.take 1))] ++
++    (if text.length == 1 then [] else [.copy ".", .copy (String.ofList (text.toList.drop 1))]) ++
++    [.copy (if exponent < 0 then "e-" else "e"), .copy (digits exponent.natAbs)]
++
++/-- Exact mode's buffer bound comes from flt2dec::estimate_max_buf_len and its
++    decoded binary exponent. Extra requested precision is a separate Zero part,
++    not an extension of the Copy buffer. -/
++def exactDecimalParts {f} (x : BinaryFloat f) (n d precision : Nat) : List FloatPart :=
++  if x.isZero then zeroDecimalParts precision
++  else
++    let binaryExponent : Int := ((max 1 x.exponent : Nat) : Int) - (f.bias : Int) -
++      (f.fractionBits : Int) - (if x.exponent != 0 && x.fraction == 0 then 2 else 1)
++    let maxLength := 21 + (if binaryExponent < 0 then 12 else 5) * binaryExponent.natAbs / 16
++    let scale := max (-(precision : Int)) (decimalExponent n d + 1 - (maxLength : Int))
++    let coefficient := roundDecimal n d scale
++    if coefficient == 0 then zeroDecimalParts precision
++    else
++      let text := digits coefficient
++      let dropped := text.length - maxLength
++      fixedDecimalParts (if dropped == 0 then text else String.ofList (text.toList.take maxLength))
++        (scale + (dropped : Int)) precision
 +
 +/-- Rust Display is shortest fixed decimal; Debug uses one fractional digit in
 +    fixed notation and scientific notation below 1e-4 or at/above 1e16. Explicit
 +    precision uses correctly rounded fixed decimal for both traits. Half's own
 +    traits delegate to f32, so their callers cast before entering this model. -/
 +def floatFormat {f} (debug : Bool) (x : BinaryFloat f) (fmt : Formatter) : Outcome := do
-+  if x.isNaN then
-+    let options := fmt.options
-+    let flags := options.flags - if options.bit 21 then 2 ^ 21 else 0
-+    let (status, f) ← ({ fmt with options := { options with flags } } : Formatter).padIntegral false "" "NaN"
-+    return (status, { f with options })
-+  if x.isInfinite then
-+    return ← fmt.padIntegral x.sign "" "inf"
++  let sign := if x.isNaN then "" else if x.sign then "-" else if fmt.options.bit 21 then "+" else ""
++  if x.isNaN then return ← fmt.padFloat sign [.copy "NaN"]
++  if x.isInfinite then return ← fmt.padFloat sign [.copy "inf"]
 +  let (n, d) := x.ratio
-+  let text ← if fmt.options.bit 28 then
-+      let p := fmt.options.precision
-+      .ok (fixedDecimal (roundDecimal n d (-(p : Int))) (-(p : Int)) p)
-+    else if x.isZero then .ok (if debug then "0.0" else "0")
++  let parts ← if fmt.options.bit 28 then
++      .ok (exactDecimalParts x n d fmt.options.precision)
++    else if x.isZero then .ok (zeroDecimalParts (if debug then 1 else 0))
 +    else do
 +      let (c, e) ← shortestDecimal x n d (decimalExponent n d) 17 1
 +      let (c, e) := trimDecimal 17 c e
 +      let lower := BinaryFloat.round f false 1 10000
 +      let upper := BinaryFloat.round f false (10 ^ 16) 1
 +      if debug && (BinaryFloat.lt x.abs lower || BinaryFloat.le upper x.abs) then
-+        .ok (scientificDecimal c e)
-+      else .ok (fixedDecimal c e (if debug then 1 else 0))
-+  fmt.padIntegral x.sign "" text
++        .ok (scientificDecimalParts c e)
++      else .ok (fixedDecimalParts (digits c) e (if debug then 1 else 0))
++  fmt.padFloat sign parts
 +
 +@[rust_fun "core::fmt::float::{core::fmt::Debug<f32>}::fmt"]
 +def DebugF32.fmt (x : F32) (fmt : Formatter) : Outcome := floatFormat true x fmt
@@ -12185,7 +12246,7 @@
  import Aeneas.Std.Scalar.LeadingZeros
 --- a/backends/lean/Aeneas/Std/Core/Fmt.lean
 +++ b/backends/lean/Aeneas/Std/Core/Fmt.lean
-@@ -1,152 +1,474 @@
+@@ -1,152 +1,510 @@
  import Aeneas.Std.Core.Core
  import Aeneas.Std.Core.Result
  import Aeneas.Std.Array.Array
@@ -12215,7 +12276,9 @@
 +  if h : bytes.length ≤ Usize.max then Str.toString ⟨bytes, h⟩ else .fail .panic
 +
 +/-- A writer is explicit so a callback's Rust fmt::Error and an extraction failure
-+    remain distinct. `output` is the observable writer state. -/
++    remain distinct. `output` is the observable writer state. This callback models
++    `write_str` with the default UTF-8 `write_char`; custom `fmt::Write` trait
++    implementations (including `write_char` overrides) have no extraction mapping. -/
  @[rust_type "core::fmt::Formatter"]
 -axiom core.fmt.Formatter : Type
 +structure Formatter where
@@ -12261,27 +12324,61 @@
 +  let (status, output) ← fmt.write fmt.output text
 +  .ok (status, { fmt with output, lineStart })
  
-+def Formatter.pad (fmt : Formatter) (s : String) (numeric : Bool := false) : Outcome :=
-+  let o := fmt.options
-+  let width := if o.bit 27 then o.width else 0
-+  let n := width - s.length
-+  let alignment := o.flags / 2 ^ 29 % 4
-+  let left := if alignment == 0 then 0 else if alignment == 1 then n
-+    else if alignment == 2 then n / 2 else if numeric then n else 0
-+  let fill := Char.ofNat (o.flags % 2 ^ 21)
-+  fmt.append (repeatChar fill left ++ s ++ repeatChar fill (n - left))
++/-- Rust's default `Write::write_char` makes one UTF-8 `write_str` call.
++    Padding must keep those calls separate, including when a writer fails. -/
++def writeRepeated (text : String) : Nat → Formatter → Outcome
++  | 0, fmt => .ok (.Ok (), fmt)
++  | n + 1, fmt => thenFormat (fmt.append text) (writeRepeated text n)
  
 --- TODO: this is a simplistic model
 -@[rust_type "core::fmt::Arguments"]
 -def core.fmt.Arguments : Type := Unit
-+def Formatter.padIntegral (fmt : Formatter) (negative : Bool) (basePrefix digits : String) : Outcome :=
-+  let sign := if negative then "-" else if fmt.options.bit 21 then "+" else ""
-+  let basePrefix := if fmt.options.bit 23 then basePrefix else ""
-+  if fmt.options.bit 24 then
-+    let width := if fmt.options.bit 27 then fmt.options.width else 0
-+    fmt.append (sign ++ basePrefix ++ repeatChar '0' (width - sign.length - basePrefix.length - digits.length) ++ digits)
-+  else fmt.pad (sign ++ basePrefix ++ digits) true
++def writeFill (fill : Char) (n : Nat) : Callback :=
++  writeRepeated (String.singleton fill) n
  
++def Formatter.padWith (fmt : Formatter) (padding : Nat) (numeric : Bool)
++    (content : Callback) : Outcome :=
++  let o := fmt.options
++  let alignment := o.flags / 2 ^ 29 % 4
++  let left := if alignment == 0 then 0 else if alignment == 1 then padding
++    else if alignment == 2 then padding / 2 else if numeric then padding else 0
++  let fill := Char.ofNat (o.flags % 2 ^ 21)
++  thenFormat (writeFill fill left fmt) (fun fmt =>
++    thenFormat (content fmt) (writeFill fill (padding - left)))
++
++def Formatter.pad (fmt : Formatter) (s : String) (numeric : Bool := false) : Outcome :=
++  let width := if fmt.options.bit 27 then fmt.options.width else 0
++  fmt.padWith (width - s.length) numeric (fun fmt => fmt.append s)
++
++def Options.zeroPadded (o : Options) : Options :=
++  let flags := o.flags - o.flags % 2 ^ 21 - (o.flags / 2 ^ 29 % 4) * 2 ^ 29 +
++    '0'.toNat + 2 ^ 29
++  { o with flags }
++
++/-- `pad_integral` writes sign, optional prefix (even an empty one), and the
++    complete digit buffer separately. Zero-fill moves sign/prefix before padding;
++    ordinary alignment puts them after pre-padding and before post-padding. -/
++def Formatter.padIntegral (fmt : Formatter) (negative : Bool) (basePrefix digits : String) : Outcome :=
++  let o := fmt.options
++  let sign : Option Char := if negative then some '-' else if o.bit 21 then some '+' else none
++  let writePrefix : Callback := fun fmt =>
++    thenFormat (match sign with
++      | none => .ok (.Ok (), fmt)
++      | some c => fmt.append (String.singleton c)) (fun fmt =>
++        if o.bit 23 then fmt.append basePrefix else .ok (.Ok (), fmt))
++  let content : Callback := fun fmt =>
++    thenFormat (writePrefix fmt) (fun fmt => fmt.append digits)
++  let length := digits.utf8ByteSize + (if sign.isSome then 1 else 0) +
++    (if o.bit 23 then basePrefix.length else 0)
++  let padding := o.width - length
++  if padding == 0 then content fmt
++  else if o.bit 24 then
++    let fmt := { fmt with options := o.zeroPadded }
++    thenFormat (writePrefix fmt) (fun fmt =>
++      thenFormat (writeFill '0' padding fmt) (fun fmt =>
++        thenFormat (fmt.append digits) (fun fmt => .ok (.Ok (), { fmt with options := o }))))
++  else fmt.padWith padding true content
++
 +@[rust_trait "core::fmt::Debug"]
 +structure Debug (T : Type u) where
 +  fmt : T → Formatter → Outcome
@@ -12474,27 +12571,17 @@
 -  fmt := core.fmt.DebugShared.fmt DebugInst
 -}
 +abbrev DebugValue := Dyn (fun T : Type => Debug T)
++
++def debugValue (x : DebugValue) : Callback := x.inst.fmt x.value
++
++def Formatter.indented (fmt : Formatter) (indent : Nat) (k : Callback) : Outcome := do
++  let (status, f) ← k { fmt with indent }
++  .ok (status, { f with indent := fmt.indent })
  
 -@[reducible, rust_trait_impl "core::fmt::Debug<()>"]
 -def core.fmt.DebugUnit : core.fmt.Debug Unit := {
 -  fmt := core.fmt.DebugUnit.fmt
 -}
-+def debugValue (x : DebugValue) : Callback := x.inst.fmt x.value
- 
--@[reducible, rust_trait_impl "core::fmt::Debug<bool>"]
--def core.fmt.DebugBool : core.fmt.Debug Bool := {
--  fmt := core.fmt.DebugBool.fmt
--}
-+def Formatter.indented (fmt : Formatter) (indent : Nat) (k : Callback) : Outcome := do
-+  let (status, f) ← k { fmt with indent }
-+  .ok (status, { f with indent := fmt.indent })
- 
--@[rust_fun "core::fmt::rt::{core::fmt::rt::Argument<'0>}::new_display"]
--def core.fmt.rt.Argument.new_display
--  {T : Type} (_DisplayInst : core.fmt.Display T) :
--  T → Result core.fmt.rt.Argument :=
--  -- TODO: we should at least call the `fmt` method somewhere
--  fun _ => Result.ok ()
 +/-- All builders share Rust's separators and short-circuiting behavior. Pretty
 +    indentation is writer state, so embedded newlines are indented as well. -/
 +def debugEntries {T : Type u} (pretty : Bool) (render : T → Callback) :
@@ -12545,18 +12632,27 @@
 +def DebugBool.fmt (x : Bool) (fmt : Formatter) : Outcome :=
 +  let text := if x then "true" else "false"
 +  fmt.pad (if fmt.options.bit 28 then String.ofList (text.toList.take fmt.options.precision) else text)
-+@[reducible, rust_trait_impl "core::fmt::Debug<bool>"]
+ @[reducible, rust_trait_impl "core::fmt::Debug<bool>"]
+-def core.fmt.DebugBool : core.fmt.Debug Bool := {
+-  fmt := core.fmt.DebugBool.fmt
+-}
 +def DebugBool : Debug Bool := ⟨DebugBool.fmt⟩
 +@[rust_fun "core::fmt::{core::fmt::Display<bool>}::fmt"]
 +def DisplayBool.fmt := DebugBool.fmt
 +@[reducible, rust_trait_impl "core::fmt::Display<bool>"]
 +def DisplayBool : Display Bool := ⟨DisplayBool.fmt⟩
-+
+ 
+-@[rust_fun "core::fmt::rt::{core::fmt::rt::Argument<'0>}::new_display"]
+-def core.fmt.rt.Argument.new_display
+-  {T : Type} (_DisplayInst : core.fmt.Display T) :
+-  T → Result core.fmt.rt.Argument :=
+-  -- TODO: we should at least call the `fmt` method somewhere
+-  fun _ => Result.ok ()
 +@[rust_fun "core::fmt::{core::fmt::Debug<()>}::fmt"]
 +def DebugUnit.fmt (_ : Unit) (fmt : Formatter) : Outcome := fmt.append "()"
 +@[reducible, rust_trait_impl "core::fmt::Debug<()>"]
 +def DebugUnit : Debug Unit := ⟨DebugUnit.fmt⟩
-+
+ 
 +@[rust_fun "core::fmt::{core::fmt::Formatter<'a>}::debug_struct_field1_finish"]
 +def Formatter.debug_struct_field1_finish (fmt : Formatter) (name n0 : Str)
 +    (v0 : DebugValue) : Outcome := do

@@ -113,7 +113,14 @@ pub fn dropped_entries() -> Vec<(u32, u32, u32)> {
     snapshot(&map)
 }
 
-pub fn remove_and_lookup() -> (Option<u32>, Option<u32>, Option<u32>, bool, bool, Vec<(u32, u32, u32)>) {
+pub fn remove_and_lookup() -> (
+    Option<u32>,
+    Option<u32>,
+    Option<u32>,
+    bool,
+    bool,
+    Vec<(u32, u32, u32)>,
+) {
     let mut map = populated();
     let found = match map.get(&2u32) {
         Some(value) => Some(*value),
@@ -206,7 +213,9 @@ pub struct WrappedMap<K, V> {
 
 impl<K: Ord, V> FromIterator<(K, V)> for WrappedMap<K, V> {
     fn from_iter<T: IntoIterator<Item = (K, V)>>(iter: T) -> Self {
-        Self { inner: iter.into_iter().collect() }
+        Self {
+            inner: iter.into_iter().collect(),
+        }
     }
 }
 
@@ -226,7 +235,10 @@ impl<'a> IntoIterator for CountedSource<'a> {
 
     fn into_iter(self) -> Self::IntoIter {
         *self.polls += 10;
-        CountedItems { polls: self.polls, remaining: self.length }
+        CountedItems {
+            polls: self.polls,
+            remaining: self.length,
+        }
     }
 }
 
@@ -247,7 +259,10 @@ impl Iterator for CountedItems<'_> {
 
 pub fn delegated_collection_state(length: u32) -> (Vec<(u32, u32)>, u32) {
     let mut polls = 0;
-    let source = CountedSource { polls: &mut polls, length };
+    let source = CountedSource {
+        polls: &mut polls,
+        length,
+    };
     let map: WrappedMap<u32, u32> = WrappedMap::from_iter(source);
     let entries = map.inner.into_iter().collect();
     (entries, polls)
@@ -347,20 +362,54 @@ mod tests {
     fn map_observations() {
         let original = vec![(1, 10, 100), (2, 20, 200), (3, 30, 300)];
         assert_eq!(ordered_insert(), original);
-        assert_eq!(equivalent_replacement(), (Some(200), vec![(1, 10, 100), (2, 20, 250), (3, 30, 300)]));
-        assert_eq!(occupied_restoration(), vec![(1, 10, 100), (2, 20, 211), (3, 30, 300)]);
-        assert_eq!(vacant_restoration(), vec![(1, 10, 100), (2, 40, 411), (3, 30, 300), (4, 50, 511)]);
+        assert_eq!(
+            equivalent_replacement(),
+            (Some(200), vec![(1, 10, 100), (2, 20, 250), (3, 30, 300)])
+        );
+        assert_eq!(
+            occupied_restoration(),
+            vec![(1, 10, 100), (2, 20, 211), (3, 30, 300)]
+        );
+        assert_eq!(
+            vacant_restoration(),
+            vec![(1, 10, 100), (2, 40, 411), (3, 30, 300), (4, 50, 511)]
+        );
         assert_eq!(dropped_entries(), original);
-        assert_eq!(remove_and_lookup(), (Some(200), Some(200), None, false, true, vec![(1, 10, 100), (3, 30, 300)]));
+        assert_eq!(
+            remove_and_lookup(),
+            (
+                Some(200),
+                Some(200),
+                None,
+                false,
+                true,
+                vec![(1, 10, 100), (3, 30, 300)]
+            )
+        );
         assert_eq!(missing_lookup(), None);
         assert_eq!(shared_exhaustion(), (true, true, true, true, true));
         assert_eq!(owned_exhaustion(), (true, true, Some((1, 10)), true, true));
         assert_eq!(owned_collect(), vec![(1, 10), (2, 20), (3, 30)]);
         assert_eq!(shared_collect(), vec![(1, 10), (2, 20), (3, 30)]);
         // February's stable bulk-build keeps the last KEY as well as its value.
-        assert_eq!(duplicate_from_iterator(), vec![(1, 88, 150), (2, 99, 250), (3, 30, 300)]);
+        assert_eq!(
+            duplicate_from_iterator(),
+            vec![(1, 88, 150), (2, 99, 250), (3, 30, 300)]
+        );
         assert!(empty_from_iterator());
-        assert_eq!(wrapped_entry_restoration(), (1, vec![(1, 10, 100), (2, 20, 211), (3, 30, 300), (4, 40, 411), (5, 50, 513)]));
+        assert_eq!(
+            wrapped_entry_restoration(),
+            (
+                1,
+                vec![
+                    (1, 10, 100),
+                    (2, 20, 211),
+                    (3, 30, 300),
+                    (4, 40, 411),
+                    (5, 50, 513)
+                ]
+            )
+        );
         assert_eq!(zipped_iterator_callbacks(), (1, 1, 1, 1));
         assert_eq!(delegated_collection_state(2), (vec![(1, 10), (2, 20)], 13));
         assert_eq!(delegated_collection_state(0), (vec![], 11));

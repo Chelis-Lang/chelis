@@ -150,6 +150,146 @@ pub fn writer_failure() -> (bool, String) {
 mod tests {
     use super::*;
 
+    fn check_writer_prefixes(
+        expected: &[&str],
+        render: impl Fn(&mut BoundedWriter) -> fmt::Result,
+    ) {
+        for (limit, &output) in expected.iter().enumerate() {
+            let mut writer = BoundedWriter {
+                output: String::new(),
+                limit,
+            };
+            let result = render(&mut writer);
+            assert_eq!(result.is_err(), limit + 1 < expected.len(), "limit {limit}");
+            assert_eq!(writer.output, output, "limit {limit}");
+        }
+    }
+
+    #[test]
+    fn padding_keeps_partial_output_at_every_writer_boundary() {
+        check_writer_prefixes(&["", " ", "  ", "   ", "   x"], |w| write!(w, "{:>4}", "x"));
+        check_writer_prefixes(&["", "", "ab", "ab ", "ab  "], |w| write!(w, "{:<4}", "ab"));
+        check_writer_prefixes(
+            &[
+                "",
+                "",
+                "",
+                "猫",
+                "猫x",
+                "猫x",
+                "猫x",
+                "猫x猫",
+                "猫x猫",
+                "猫x猫",
+                "猫x猫猫",
+            ],
+            |w| write!(w, "{:猫^4}", "x"),
+        );
+        check_writer_prefixes(&["", " ", "  ", "  ", "  ", "  ", "  ", "  é猫"], |w| {
+            write!(w, "{:>4.2}", "é猫x")
+        });
+    }
+
+    #[test]
+    fn integral_sign_prefix_and_zero_fill_fail_independently() {
+        check_writer_prefixes(&["", " ", "  ", "  -", "  -", "  -42"], |w| {
+            write!(w, "{:5}", -42)
+        });
+        check_writer_prefixes(
+            &["", " ", "  ", "  -", "  -", "  -42", "  -42 ", "  -42  "],
+            |w| write!(w, "{:^7}", -42),
+        );
+        check_writer_prefixes(
+            &[
+                "", " ", "  ", "   ", "   +", "   +", "   +0x", "   +0x", "   +0x2a",
+            ],
+            |w| write!(w, "{:+#8x}", 42u16),
+        );
+        check_writer_prefixes(
+            &[
+                "", "+", "+", "+0x", "+0x0", "+0x00", "+0x000", "+0x000", "+0x0002a",
+            ],
+            |w| write!(w, "{:猫<+#08x}", 42u16),
+        );
+        check_writer_prefixes(&["", "+", "+", "+0x", "+0x", "+0x2a"], |w| {
+            write!(w, "{:+#02x}", 42u16)
+        });
+    }
+
+    #[test]
+    fn floating_parts_preserve_errors_without_integral_prefix_writes() {
+        check_writer_prefixes(
+            &[
+                "", "-", "-0", "-00", "-000", "-000", "-00012", "-00012.", "-00012.5",
+            ],
+            |w| write!(w, "{:08.1}", -12.5),
+        );
+        check_writer_prefixes(
+            &[
+                "", " ", " -", " -", " -12", " -12.", " -12.5", " -12.5 ", " -12.5  ",
+            ],
+            |w| write!(w, "{:^8.1}", -12.5),
+        );
+        check_writer_prefixes(&["", "5", "5", "5e-", "5e-", "5e-", "5e-324"], |w| {
+            write!(w, "{:?}", f64::from_bits(1))
+        });
+        for (limit, zeros) in [(65, 0), (66, 64), (71, 64), (72, 70)] {
+            let mut writer = BoundedWriter {
+                output: String::new(),
+                limit,
+            };
+            assert_eq!(write!(writer, "{:.70}", 0.0).is_err(), limit < 72);
+            assert_eq!(writer.output, format!("0.{}", "0".repeat(zeros)));
+        }
+        // Precision beyond the native Copy buffer becomes Zero parts, even for
+        // nonzero floats. 1.0f64's decoded exponent gives a 61-byte digit buffer.
+        let mut writer = BoundedWriter {
+            output: String::new(),
+            limit: 70,
+        };
+        assert!(write!(writer, "{:.80}", 1.0f64).is_err());
+        assert_eq!(writer.output, format!("1.{}", "0".repeat(60)));
+    }
+
+    #[test]
+    fn empty_prefix_and_partially_failing_callback_are_not_coalesced() {
+        struct RejectsEmpty(String);
+        impl Write for RejectsEmpty {
+            fn write_str(&mut self, text: &str) -> fmt::Result {
+                if text.is_empty() {
+                    return Err(fmt::Error);
+                }
+                self.0.push_str(text);
+                Ok(())
+            }
+        }
+        let mut writer = RejectsEmpty(String::new());
+        assert!(write!(writer, "{:+#}", 42).is_err());
+        assert_eq!(writer.0, "+");
+        let mut writer = RejectsEmpty(String::new());
+        assert!(write!(writer, "{:+#}", 1.5).is_ok());
+        assert_eq!(writer.0, "+1.5");
+        let mut writer = RejectsEmpty(String::new());
+        assert!(write!(writer, "{:04}", 1.5).is_err());
+        assert_eq!(writer.0, "");
+
+        struct PartialPrefix(String);
+        impl Write for PartialPrefix {
+            fn write_str(&mut self, text: &str) -> fmt::Result {
+                assert!(!self.0.ends_with('!'), "called writer after its error");
+                if text == "0x" {
+                    self.0.push_str("0!");
+                    return Err(fmt::Error);
+                }
+                self.0.push_str(text);
+                Ok(())
+            }
+        }
+        let mut writer = PartialPrefix(String::new());
+        assert!(write!(writer, "{:+#08x} suffix", 42u16).is_err());
+        assert_eq!(writer.0, "+0!");
+    }
+
     #[test]
     fn production_templates_and_unicode_are_observable() {
         assert_eq!(

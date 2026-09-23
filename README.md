@@ -50,6 +50,14 @@ variables. The original scalar-surface and explicit-binder rejection tests, the 
 substituted-binder regression, and the full all-feature workspace suite pass without
 weakening the production checker or the oracle assertions.
 
+Context-checked extensions require their bound library or explicit composition before
+isolated lowering. DAG, evaluation, library, C, and trace entry points reject detached
+extensions; cloning or inspecting a lowered product does not remove that provenance.
+Contextual lowering invalidates shadowed declaration/signature classifications and
+dependent library callables while retaining already-materialized library values.
+Lowered-library caches preserve the original signatures and dtype binder metadata;
+older serialized caches missing that metadata must be regenerated.
+
 See [ARCHITECTURE.md](ARCHITECTURE.md) for API boundaries and the formal correspondence obligations.
 
 ## Rust to Lean extraction
@@ -161,6 +169,14 @@ The local Aeneas patches are also applied by the flake:
   their pure type constructors, preserving higher-order constructor calls.
   Monadic constructors are qualified so Rust methods such as `Result::ok` cannot
   shadow generated successful returns.
+- `verification/aeneas-collection-contract.patch` enforces the supported collection
+  domain before translation. Modeled `Vec`/B-tree collection and vector extension
+  require reviewed standard iterator dictionaries, recursively through supported
+  adapters and `Result` collectors. Custom iterators, unresolved generic dictionaries,
+  and unreviewed consumers fail with `E_UNSUPPORTED_COLLECTION`; they do not produce
+  a guessed successful result or a replacement Lean panic.
+  Structured specializations retain their real borrowed-state ABI; admission follows
+  their original Rust implementation identity and instantiated dictionary arguments.
 - `verification/aeneas-stdlib-models.patch` supplies the checked Lean models and
   generated builtin metadata: slice windows/chunks and borrowed accessors;
   shared and mutable vector iteration; owned array iteration; double-ended,
@@ -189,8 +205,8 @@ loop instead of recursive `find_map` closures. This preserves the first successf
 input's provenance while avoiding unsupported recursive closure dictionaries.
 
 The patched Charon, Charon-ML, and Aeneas packages build through Nix. The packaged
-compiler passes all 25 native/Lean model fixtures,
-plus 1,099 native/Lean floating observations. The loop fixture checks 43 outcomes,
+compiler passes all 25 native/Lean model fixtures, 16 per-root collector rejection
+checks, and 1,099 native/Lean floating observations. The loop fixture checks 43 outcomes,
 including mixed exits, nested returns, panic propagation, nested shared iteration,
 constructor payloads after shared wildcard arms, and preservation of optional
 owners on first-iteration and later errors.
@@ -213,18 +229,22 @@ compiling both the callable definitions and their generated types.
 Comparison checks preserve vector and boxed `ne` overrides and verify that
 slice-array length mismatches do not invoke element comparators.
 String checks exercise UTF-8 bytes, embedded NULs, empty values, ownership and
-separator placement. Sequence checks cover removal bounds, non-fused extension,
-captured-state giveback, stable duplicate ordering and callback failures.
+separator placement. Sequence checks cover removal bounds, non-fused explicit append,
+admitted extension with captured-state giveback, stable duplicate ordering and callback failures.
 Formatting checks compile the extracted formatting calls and compare their
-rendered text with native Rust cases. They also compile a large literal template
-under a constrained elaboration recursion depth.
+rendered text with native Rust cases. Bounded-writer checks preserve each Unicode
+padding write, integral sign/prefix/digit boundaries, floating Copy/Zero parts,
+and partial output when a callback fails. They also compile a large literal template
+under a constrained elaboration recursion depth. The formatter callback models
+`write_str` and default UTF-8 `write_char`; custom Rust `fmt::Write` implementations
+and `write_char` overrides have no extraction mapping.
 Stable sorting uses a merge-sort schedule, not the pinned implementation's exact
 comparison/key invocation order or count. Correspondence through this model
 requires schedule-independent comparison and key callbacks.
 `Result` collection checks cover early collectors, polling after an error,
 specialized `try_fold` dispatch, source and callback restoration, and effectful
-`by_ref` overrides. Collection delegates to the supplied `FromIterator` rather
-than precollecting values or forcing fused iterator behavior.
+`by_ref` overrides. For admitted calls, collection delegates to the supplied
+`FromIterator` rather than precollecting values or forcing fused iterator behavior.
 Use the built Lean library from the patched `aeneas-source` package, not the
 unmodified upstream library:
 
@@ -237,6 +257,22 @@ The runner executes each native fixture, extracts fresh LLBC and Lean with the
 pinned tools, compiles the generated module, and executes its Lean checks.
 `--model projection_iterator_state` selects one regression; `--model` is repeatable.
 Temporary models are removed after each run.
+
+`--model collection_contracts` exercises explicit rejection as well as native
+counterexamples. Generic map/set and associated-iterator delegates that exceed the
+new contract retain their native tests and have per-root rejection checks; they are
+not counted as successful generated Lean observations.
+
+The admitted collector inputs are standard slice, array, vector and B-tree
+iterators, chunks/windows, once, chars, and `usize`/`i32` ranges. Mutable references,
+map, copied/cloned, enumerate, filter and filter-map recursively require an admitted
+source. This restriction applies to modeled collection/extension, not to every use
+of an iterator. Other consumers such as Zip, Take, Chain and inclusive ranges remain
+unreviewed at this boundary. Even a custom iterator inheriting default `size_hint`
+is rejected: restricted Charon roots do not establish absence of unsafe specialization
+markers. Capacity, allocation-failure timing, destructor effects and pointer identity
+are still outside the value-only collection model; comparator/key callbacks retain
+the separate schedule-independence obligation above.
 
 The extraction command invokes the real production code, includes reachable bodies from
 all retained crates, treats translation warnings as errors, forces a fresh root-package
@@ -259,7 +295,8 @@ proof or Lean acceptance gate.
 
 ### Verification status and remaining boundaries
 
-The packaged compiler passes the 25-model native/Lean matrix described above.
+The packaged compiler passes the 25-model native/Lean matrix and all 16 unsupported
+collector rejection checks described above.
 The former AD blockers for slice windows/chunks, B-tree iteration and mutable
 entries, generic iterator dispatch, and recursive formatting/comparison
 dictionaries are covered by the patched models and extraction regressions.
@@ -270,6 +307,13 @@ strict joins, abort-on-error, and warnings-as-errors enabled. The unmodified
 generated `ChelisIr.lean` compiles to `ChelisIr.olean` against the patched Lean
 library, without extra command-line stack overrides. The acceptance run reports
 only a naming-style warning for `__build_unimplemented_rejection`.
+This acceptance includes the fail-closed collector gate and the concrete production
+AD/verifier refactors; the public generic `UnordMap::FromIterator` is unchanged.
+
+The [patch dependency audit and source proposal](ARCHITECTURE.md#production-ad-patch-audit-and-source-proposal)
+record remaining dependencies and the limits of that audit. The
+[explicit-state runtime proposal](ARCHITECTURE.md#explicit-state-cutover-proposal)
+describes the TLS/unwind cutover; it is a design, not an implemented replacement.
 
 Whole `chelis_pipeline_core` extraction is still blocked before LLBC generation:
 Charon rejects the thread-local reference reached through

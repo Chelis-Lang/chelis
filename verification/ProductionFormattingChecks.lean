@@ -46,6 +46,27 @@ private def checkFailure (label : String) (r : Result String) : IO Unit :=
   | .fail .panic => pure ()
   | _ => throw (IO.userError (label ++ ": expected panic"))
 
+private def checkWriterOutput (label expected : String) (failed : Bool) (r : Outcome) : IO Unit :=
+  match r with
+  | .ok (status, fmt) =>
+    let actualFailed := match status with | .Err _ => true | .Ok () => false
+    unless actualFailed == failed && fmt.output == expected do
+      throw (IO.userError s!"{label}: expected ({failed}, {repr expected}), got ({actualFailed}, {repr fmt.output})")
+  | _ => throw (IO.userError (label ++ ": unexpected extraction failure"))
+
+private def boundedWriter (limit : Nat) (options : Options := {}) : Formatter := {
+  options
+  write := fun output text =>
+    if output.utf8ByteSize + text.utf8ByteSize > limit then .ok (.Err (), output)
+    else .ok (.Ok (), output ++ text)
+}
+
+private def checkWriterPrefixes (label : String) (expected : List String)
+    (options : Options) (render : Callback) : IO Unit := do
+  for (output, limit) in expected.zipIdx do
+    checkWriterOutput s!"{label}, capacity {limit}" output (decide (limit + 1 < expected.length))
+      (render (boundedWriter limit options))
+
 private def template (code : List U8) (args : List rt.Argument) : Result String :=
   alloc.fmt.format (.template code args)
 
@@ -168,6 +189,73 @@ private def fails : rt.Argument := .placeholder (fun fmt =>
       ⟨Unit, DebugBox debugDiverges, ()⟩ with
   | .div => pure ()
   | _ => throw (IO.userError "recursive debug callback divergence was swallowed")
+
+#eval do
+  checkWriterPrefixes "right string padding" ["", " ", "  ", "   ", "   x"]
+    { flags := 0x20000020 + 2^27, width := 4 } (DisplayStr.fmt (toStr "x"))
+  checkWriterPrefixes "left string padding" ["", "", "ab", "ab ", "ab  "]
+    { flags := 0x20 + 2^27, width := 4 } (DisplayStr.fmt (toStr "ab"))
+  checkWriterPrefixes "Unicode center padding"
+    ["", "", "", "猫", "猫x", "猫x", "猫x", "猫x猫", "猫x猫", "猫x猫", "猫x猫猫"]
+    { flags := '猫'.toNat + 2^30 + 2^27, width := 4 } (DisplayStr.fmt (toStr "x"))
+  checkWriterPrefixes "precision keeps Unicode content atomic"
+    ["", " ", "  ", "  ", "  ", "  ", "  ", "  é猫"]
+    { flags := 0x20000020 + 2^27 + 2^28, width := 4, precision := 2 }
+    (DisplayStr.fmt (toStr "é猫x"))
+  checkWriterPrefixes "numeric default right alignment" ["", " ", "  ", "  -", "  -", "  -42"]
+    { flags := 0x60000020 + 2^27, width := 5 } (DisplayI32.fmt ((-42)#i32))
+  checkWriterPrefixes "numeric center padding"
+    ["", " ", "  ", "  -", "  -", "  -42", "  -42 ", "  -42  "]
+    { flags := 0x40000020 + 2^27, width := 7 } (DisplayI32.fmt ((-42)#i32))
+  checkWriterPrefixes "hex sign and prefix after padding"
+    ["", " ", "  ", "   ", "   +", "   +", "   +0x", "   +0x", "   +0x2a"]
+    { flags := 0x60000020 + 2^21 + 2^23 + 2^27, width := 8 }
+    (LowerHexU16.fmt 42#u16)
+  checkWriterPrefixes "zero fill overrides Unicode left alignment"
+    ["", "+", "+", "+0x", "+0x0", "+0x00", "+0x000", "+0x000", "+0x0002a"]
+    { flags := '猫'.toNat + 2^21 + 2^23 + 2^24 + 2^27, width := 8 }
+    (LowerHexU16.fmt 42#u16)
+  checkWriterPrefixes "sign and prefix without padding" ["", "+", "+", "+0x", "+0x", "+0x2a"]
+    { flags := 0x60000020 + 2^21 + 2^23 + 2^24 + 2^27, width := 2 }
+    (LowerHexU16.fmt 42#u16)
+  let value := BinaryFloat.round .binary64 true 25 2
+  checkWriterPrefixes "floating sign, zeros, and decimal parts"
+    ["", "-", "-0", "-00", "-000", "-000", "-00012", "-00012.", "-00012.5"]
+    { flags := 0x60000020 + 2^24 + 2^27 + 2^28, width := 8, precision := 1 }
+    (DisplayF64.fmt value)
+  checkWriterPrefixes "floating center padding"
+    ["", " ", " -", " -", " -12", " -12.", " -12.5", " -12.5 ", " -12.5  "]
+    { flags := 0x40000020 + 2^27 + 2^28, width := 8, precision := 1 }
+    (DisplayF64.fmt value)
+  checkWriterPrefixes "floating exponent parts" ["", "5", "5", "5e-", "5e-", "5e-", "5e-324"]
+    {} (DebugF64.fmt (BinaryFloat.ofNat .binary64 1))
+  for (limit, zeros) in ([(65, 0), (66, 64), (71, 64), (72, 70)] : List (Nat × Nat)) do
+    checkWriterOutput s!"floating zero block, capacity {limit}" ("0." ++ repeatChar '0' zeros)
+      (decide (limit < 72)) (DisplayF64.fmt (BinaryFloat.ofNat .binary64 0)
+        (boundedWriter limit { flags := 0x60000020 + 2^28, precision := 70 }))
+  checkWriterOutput "floating exact Copy buffer before zero extension" ("1." ++ repeatChar '0' 60)
+    true (DisplayF64.fmt (BinaryFloat.ofNat .binary64 0x3ff0000000000000)
+      (boundedWriter 70 { flags := 0x60000020 + 2^28, precision := 80 }))
+  let rejectsEmpty : Formatter := {
+    options := { flags := 0x60000020 + 2^21 + 2^23 }
+    write := fun output text =>
+      if text.isEmpty then .ok (.Err (), output) else .ok (.Ok (), output ++ text)
+  }
+  checkWriterOutput "alternate decimal empty prefix" "+" true (DisplayI32.fmt 42#i32 rejectsEmpty)
+  checkWriterOutput "floating alternate has no integral prefix" "+1.5" false
+    (DisplayF64.fmt (BinaryFloat.round .binary64 false 3 2) rejectsEmpty)
+  checkWriterOutput "zero-padded float writes its empty sign" "" true
+    (DisplayF64.fmt (BinaryFloat.round .binary64 false 3 2)
+      { rejectsEmpty with options := { flags := 0x60000020 + 2^24 + 2^27, width := 4 } })
+  let partialPrefix : Formatter := {
+    options := { flags := 0x60000020 + 2^21 + 2^23 + 2^24 + 2^27, width := 8 }
+    write := fun output text =>
+      if output.endsWith "!" then .fail .panic
+      else if text == "0x" then .ok (.Err (), output ++ "0!")
+      else .ok (.Ok (), output ++ text)
+  }
+  checkWriterOutput "partially failing prefix stops number and suffix" "+0!" true
+    (thenFormat (LowerHexU16.fmt 42#u16 partialPrefix) (fun fmt => fmt.append " suffix"))
 
 #eval do
   check "f32 shortest" "0.1" (rendered (DebugF32.fmt (BinaryFloat.ofNat .binary32 0x3dcccccd) {}))

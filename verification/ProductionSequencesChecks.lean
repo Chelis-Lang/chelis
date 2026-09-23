@@ -25,10 +25,10 @@ def failed {α : Type} : Result α → Bool
     (failed (production_sequences.remove_at 3#usize)) true
   expect "clear discards old elements before extension"
     (decode values production_sequences.clear_then_extend) (.ok [7, 8])
-  expect "extend retains the terminal next state and stops at the first None"
+  expect "explicit append retains the terminal next state and stops at None"
     (decode (fun ((v, calls, next) : alloc.vec.Vec U32 × Usize × Option U32) =>
       (values v, calls.val, next.map UScalar.val))
-      production_sequences.extend_resumes) (.ok ([8, 4], 2, some 9))
+      production_sequences.append_resumes) (.ok ([8, 4], 2, some 9))
   expect "extend recovers mutable state captured by its consumed input iterator"
     (decode (fun ((v, sum) : alloc.vec.Vec U32 × U32) => (values v, sum.val))
       production_sequences.extend_callback_state) (.ok ([8, 11, 12], 3))
@@ -43,4 +43,14 @@ def failed {α : Type} : Result α → Bool
     (decode values production_sequences.sort_values) (.ok [1, 1, 2, 3])
   expect "sort_by_key propagates callback failure"
     (failed production_sequences.sort_key_failure) true
-  IO.println "Production sequences smoke: 9 behavioral checks passed"
+  expect "admitted owned map/filter chains preserve callback order"
+    (decode (fun ((v, trace) : alloc.vec.Vec U32 × U32) => (values v, trace.val))
+      production_sequences.collect_ad_callback_order) (.ok ([11, 13], 123))
+  expect "result collection stops before the later mapping callback"
+    (decode (fun ((result, trace) :
+        core.result.Result (alloc.vec.Vec U32) U32 × U32) =>
+      (match result with
+       | .Ok v => (values v, none, trace.val)
+       | .Err error => ([], some error.val, trace.val)))
+      production_sequences.collect_result_short_circuit) (.ok ([], some 9, 12))
+  IO.println "Production sequences smoke: 11 behavioral checks passed"

@@ -205,6 +205,58 @@ gradient alongside `d(x*x)/dx = 4` at `x = 2`, and cancellation-token restoratio
 a caught unwind with isolation on a second thread. These are concrete boundary checks,
 not universal proofs.
 
+### Explicit-state cutover proposal
+
+This is a design, not an implemented runtime replacement. Keep one production
+implementation: no `_for_lean` checker, global-to-constant substitution, or opaque
+successful fallback.
+
+The extraction boundary should separate an explicit invocation state from a native
+runtime shell. Reuse `HostLoweringSession`, `LowerCtx`, and the authoritative
+`DiagnosticSink` rather than introducing a second cache or diagnostic authority.
+Checked-program/library provenance, local tensor obligations, and root manifests
+remain inputs with their existing seals; an invocation state must not mint them.
+
+| Existing state | Proposed owner | Required behavior |
+| --- | --- | --- |
+| `GROUP_CTX`, opacity context, linked-program provenance | Checker invocation frames | Save and restore the previous frame, including reentrant checking and exceptional exit. Keep provenance construction at the trusted link boundary. |
+| `INLINING_STACK`, tensor-helper preflight stack, `ACTIVE_TYPE_SUBST` | Lowering invocation frames | Preserve push/pop order and the current specialization's bindings. Do not share mutable frames between threads. |
+| `MONO_SPECIALIZATIONS` and `MonoProbeGuard` | Host lowering session plus scoped probe snapshot | Preserve entry initialization, completion order, and rollback of speculative definitions and in-progress entries. Rollback restores the outer snapshot; it does not clear it. |
+| Panic-suppression flags | Explicit per-thread shell state | Preserve clear-to-false behavior and the explicit re-enable in `raise_fatal_lowering_diagnostic`; do not apply a uniform restore-previous rule. |
+| Cancellation token identity and relaxed loads | Native runtime services | Keep shared token identity and the original polling points. A frozen entry Boolean is not equivalent to cancellation arriving during a check. |
+| Atomic host-inference IDs, persistent thread counters, panic hook | Native runtime services | Preserve allocation/observation order and lifetime across invocations, including native ID wrapping or an explicit no-wrap bound. Resetting a global ID supply per run can invalidate identity comparisons. |
+| Stack growth, depth guards, first stack-bail record | Native resource boundary | Preserve the first reported site/span and normal-versus-abort behavior. Arbitrary Lean fuel is not a replacement for native stack availability. |
+
+Migration order:
+
+1. Thread the existing state through one subsystem's complete call graph, retaining
+   the public native shell and removing that subsystem's TLS reads. Mutable state
+   belongs to the invocation; immutable checked-program facts can remain borrowed.
+   Do not clone the entire program or runtime state at every recursive call.
+2. Make scope entry and exit explicit, with separate restore, clear, and rollback
+   operations matching the table. First preserve the existing panic boundary.
+   Converting a control panic into `Result` is a separate behavioral change:
+   hooks and destructors can distinguish normal return from unwinding.
+3. Relate native runtime events to the stateful core: cancellation loads at the same
+   sites, ID-allocation events, stack checks, diagnostics, and exits. Concurrent atomic
+   observations must satisfy the native memory model, not an arbitrary Boolean
+   stream or an assumed immediately synchronized flag.
+4. Keep successful return, semantic rejection, unsupported DAG lowering, unwinding,
+   and non-unwinding abort distinct. The panic hook observes state before stack
+   unwinding; finalizers then run in order; `catch_lowering` maps the payload only
+   after unwinding. Preserve `panic_payload_to_lower_diagnostic` at the wrapper
+   boundary. Unknown panics must not become a successful result or host fallback.
+5. Extract and relate the stateful inner fragment. A separate wrapper relation is
+   still required for the public entry point; retaining a native shell is not
+   full-core extraction.
+
+Acceptance for that future cutover: identical ordered roots, values and diagnostics
+on success/rejection; nested cancellation/link/opacity restoration; suppression
+clear/re-enable behavior across nested catches; speculative monomorphization rollback
+without leaked definitions; cancellation during a run and isolation across threads;
+unchanged panic-hook/finalizer order and first stack-bail receipt. Existing native
+checks are the baseline, not permission to erase runtime observations.
+
 ## Extraction status
 
 `verification/extract.py` is a reproducible model-generation attempt, not a proof checker.
@@ -215,26 +267,110 @@ make unknown externals fail in strict-warning mode and normalize function-return
 loop continuations without joining uninitialized return slots. Independent branches
 remain joined. Exact revisions and patches are recorded in `verification/toolchain.json`.
 
-The diagnostic AD slice produces LLBC and completes its loop prepasses. An equivalent
-ordered search in `shape_source_for_axis` removes the recursive closure-dictionary
-cycle. Extraction now stops at the opaque borrowed type `core::slice::iter::Windows`.
-The actual AD closure also contains unmodeled `Chunks`, B-tree iterators, and mutable
-B-tree entry types; isolated extractions reproduce these failures. Their ownership
-structure and operations need explicit library models, not relaxed region checks.
-The full core still fails at Charon's TLS boundary.
+The AD closure now has explicit models for slice windows/chunks, ordered B-tree
+iteration/entries, recursive trait dictionaries, formatting and floating operations.
+The ordered `shape_source_for_axis` search avoids the former recursive
+closure-dictionary cycle. Collection admission is narrower than Rust's generic API:
+unsupported hints and consumer specializations are rejected before model generation.
 
-Generated extractor regression models compile and execute in Lean, including returned
-mutable borrows and independent branches before returning loops. No production Lean
-model, bridge theorem or acceptance result is claimed.
+The packaged regression matrix generates, compiles and executes 25 native/Lean
+models, checks 16 deliberately rejected collector roots, and compares 1,099 floating
+observations. Production AD generation and Lean acceptance are recorded in
+[README.md](README.md#verification-status-and-remaining-boundaries). Neither those
+checks nor compilation supply a Rust/Lean/LaCaDiLE correspondence theorem.
 
-Backend library assumptions require their own audit. In the pinned Aeneas
-`Aeneas/Std/Core/Fmt.lean`, `core.fmt.Formatter` is an axiom and formatting arguments
-are modeled as `Unit`. Strict unknown-external diagnostics do not detect such known
-builtin abstractions. Lean compilation alone therefore cannot establish faithful
-diagnostics or axiom-free correspondence; acceptance must audit the used assumptions
-against the stated observation relation.
+The full core remains blocked before LLBC generation at Charon's
+`mir::Rvalue::ThreadLocalRef`, reached through
+`chelis_ir::lower::SUPPRESS_LOWERING_PANIC_OUTPUT`. An accepted AD slice is not
+whole-core extraction.
+
+The patched formatter has explicit arguments and callback state, including partial
+output on writer failure; it no longer uses the upstream erased formatter model.
+Backend assumptions still need a separate audit. Allocation/capacity, destructor and
+pointer observations, callback scheduling restrictions, runtime resources and
+numerical relations cannot be discharged by strict unknown-external checks or Lean
+compilation alone.
 
 The native integration smoke exercised real preparation, type/effect/linearity checking,
 lowering, strict evaluation, reverse AD and independent ownership verification on a
 squared-norm program: input `[2, 3]`, primal `13`, gradient `[4, 6]`. That execution checks
 the stripped library integration; it is not evidence of universal correspondence.
+
+## Production AD patch audit and source proposal
+
+The audit target is the real `chelis_ir::grad::grad_dag_checked` dependency closure,
+not a rewritten AD example. The inventory is fourteen packaged patches: six Charon,
+one Charon-ML, six Aeneas compiler, and one Lean stdlib patch. Evidence combines the
+fresh production LLBC/generated Lean with executable model regressions. No
+leave-one-patch-out ablation was performed: reachability of a feature does not prove
+that every hunk supporting it is indispensable.
+
+| Patch group | Production evidence and decision |
+| --- | --- |
+| Charon box initialization | Boxed dimension expressions, cloning and payload formatting remain in AD. Keep initializer reconstruction; removing a few collectors does not remove these representations. Necessity of every hunk for this root is unmeasured. |
+| Charon closure clauses, local trait bounds, closure regions, hidden traits; Charon-ML binders | AD still uses concrete iterator closures, associated types, borrowed state and nested trait dictionaries. Keep the metadata/identity fixes rather than replace ordinary Rust traits with a parallel implementation. |
+| Charon nonlocal continuations; Aeneas loop continuations | Production verification, graph traversal and remapping contain loops and early errors. Preserve their continuation and cleanup semantics; the model regressions exercise mixed exits and returned borrows. |
+| Aeneas trait models and shared borrows | DAG access, mutable collection entries, borrowed iteration and recursively formatted/compared payloads remain reachable. Source cleanup does not justify weakening projection or region checks. |
+| Aeneas floating scalars | AD has bit-exact floating constants and floating operations. Retain the numerical models and their explicit float relation; native/Lean samples are not a universal numerical proof. |
+| Lean stdlib | Actual AD uses windows/chunks, vector operations, ordered tree iteration/entries and extensive formatting. Model these operations rather than erase diagnostics or mark their implementations opaque. |
+| Strict warnings and collection contract | These are acceptance guards, not inconveniences to refactor away. Unknown externals and unsupported collector dictionaries must prevent acceptance. |
+
+Keeping these patch families is a conservative dependency decision, not a claim that
+the patch set is minimal. In particular, the old generated AD model referenced
+`FromIteratorBTreeMap` through the generic `UnordMap` collector; this was not evidence
+that arbitrary iterator callbacks matched native collection.
+The audited production LLBC after the cutover has no `chelis_unord` `from_iter`
+method. The unrelated
+`dag::map_node_symbolic_bindings` is not reachable from this AD root and was left
+unchanged. These are reachability observations, not executed-call counts.
+
+The fresh AD LLBC contains 1,387 function declarations. Its generated Lean has 283
+distinct explicit `Aeneas.Std` references, including 48 `FromIteratorVec` occurrences,
+one `FromIteratorBTreeSet`, no `FromIteratorBTreeMap`, 285 `alloc.fmt.format`
+occurrences and 26 `F64.ofBits` occurrences. Windows/chunks and B-tree
+iteration/entry operations remain. These textual counts explain why the collector
+cutover does not eliminate the stdlib, formatting or numerical model dependencies.
+
+### Applied concrete source cutover
+
+The first strict collector attempts rejected actual production Chain consumers,
+inclusive-range extension, and the verifier's generic B-tree collector. The following
+changes address those source boundaries without changing the public generic
+`UnordMap::FromIterator` implementation:
+
+| Production location | Change and preserved observation |
+| --- | --- |
+| `grad.rs` | Five concrete map-building sites use ordered insertion: topology positions, requested gradients, execution sites, pruned gradient nodes and remapping. Small private helpers isolate the first three loops from the traversal's large borrowed state. Keys are `NodeId`/`usize`, so equal keys have identical representations; source order and last-value behavior are retained. |
+| `evaluation.rs`, `ExecutionMetadata::remap` | Build a temporary map and commit only after successful remapping. Keep the first missing-node diagnostic and the original ordering relative to spine remapping. |
+| `axis_sources.rs`, `output_axis_sources` | Replace three Chain collectors with preallocated vectors and supported extension/push operations. Keep OneHot, batched matmul and Gather axis provenance, order and malformed-rank fallback. |
+| `verify.rs` | Build expected matmul dimensions without Chain, reserving the full size. The four bound-validation callers pass concrete owned input-slot vectors to `check_exact_bound_inputs`; paired bounds use a concrete traversal helper. Per-node checks are separate from graph traversal, preserving node/diagnostic order and the local-ascription early exit. |
+| `execution_spine.rs`, `Spine::complete` | Replace inclusive ranges with equivalent half-open ranges. The existing `node.0 < dag.len()` guard makes the endpoint increment safe; scheduling order and control/drop weaving remain unchanged. |
+
+The intermediate generic verifier loop failed extraction with an unbound loop type
+parameter. Its unnecessary generic boundary was removed, not hidden behind an opaque
+model. The resulting concrete helpers extract and compile in Lean; an executable
+smoke preserves mixed bound variants, repeated slot indices, input order and empty
+input. The AD helper split keeps independent construction loops out of the
+large traversal context. The verifier likewise calls a private per-node function
+instead of carrying all operation-specific branches through the graph loop's symbolic
+join. Neither change disables strict joins or invariant checks.
+
+Native regressions support value/diagnostic preservation under the stated runtime
+relation; this is not an allocator-trace equivalence or a universal proof.
+Ordered insertion can cost more than bulk tree
+construction. A generic collect-to-insert rewrite is not justified: arbitrary equal
+keys can have different representations, and custom iterator hints, comparator
+callbacks, drops and native specialization can be observable.
+
+### Further source simplification
+
+Keep idiomatic supported iterators and the existing ordered `shape_source_for_axis`
+search. Do not replace every adapter with a loop. The AD model's large formatting
+closure suggests a possible structured-diagnostic core with a separate renderer,
+but that would change the extraction boundary: retaining native diagnostics requires
+an explicit renderer relation, including partial writes. It is a proposal, not an
+implemented shortcut or a reason to drop formatting from the accepted root.
+
+Runtime-state extraction is the separate cutover described above. Compiler metadata
+repairs, strict admission, numerical semantics and ownership checks remain required
+obligations regardless of how small the extracted source becomes.

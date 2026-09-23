@@ -648,6 +648,9 @@ pub struct LoweredLibrary {
     /// Authored declarations retain their binder spelling independently of
     /// inferred expression metadata. Exact definition names own these scopes.
     program_signatures: BTreeMap<String, Expr>,
+    /// Dtype bounds belong to authored signatures, not their erased tensor
+    /// types. Retain them when a shadow invalidates a callable's classification.
+    dtype_bound_names: BTreeMap<String, UnordSet<String>>,
     /// Library declared types, keyed by name. Used to resolve unbound
     /// `(var libname)` Load types when the new-code expression's metadata
     /// is `default_type`.
@@ -1215,6 +1218,7 @@ fn lower_program_to_library_inner(
         symbol_table,
         program_defs,
         program_signatures,
+        dtype_bound_names: collect_top_level_dtype_bound_names(program.exprs()),
         program_types,
         local_tensor_ascriptions: program.local_tensor_ascriptions().to_vec(),
         linearity: program.linearity().clone(),
@@ -4200,11 +4204,11 @@ pub fn top_level_lowering_map(
     cache
 }
 
-/// Phase G helper: compute `top_level_lowering_map` for new code with
-/// the library's pre-computed `lowered_names` seeded into the cache.
-/// This makes new-code defs that reference library functions inherit the
-/// same lowered-vs-host classification they'd get in monolithic mode
-/// (where library defs live alongside new ones in `top_level_defs`).
+/// Compute contextual lowering decisions, reusing only valid library entries.
+/// Replaced definitions and signatures invalidate their own decisions and the
+/// library callables that transitively reference them. Already materialized
+/// library values retain their bindings; callable bodies are inlined in the
+/// composed scope and must be classified against that same scope.
 ///
 /// The returned map covers BOTH library + new-code names so callers can
 /// look up either; downstream filters slice to new-code-only as needed.
@@ -4213,25 +4217,56 @@ pub fn top_level_lowering_map_with_context(
     new_exprs: &[Expr],
     new_type_env: &BTreeMap<String, Expr>,
 ) -> BTreeMap<String, bool> {
+    let new_defs = collect_top_level_defs(new_exprs);
+    let new_sigs = collect_top_level_sigs(new_exprs);
+    let mut cache = library.lowered_names.clone();
+    {
+        let mut dependents: BTreeMap<String, Vec<&str>> = BTreeMap::new();
+        for (name, body) in &library.program_defs {
+            if !new_defs.contains_key(name)
+                && new_type_env
+                    .get(name)
+                    .is_some_and(|ty| ty.tag() == Some(DeepTag::TFn))
+            {
+                for dependency in chelis_types::linearity::free_runtime_variables(body) {
+                    dependents.entry(dependency).or_default().push(name);
+                }
+            }
+        }
+        let mut pending = new_defs
+            .keys()
+            .chain(new_sigs.keys())
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let mut invalidated = BTreeSet::new();
+        while let Some(name) = pending.pop() {
+            if invalidated.insert(name) {
+                cache.remove(name);
+                if let Some(names) = dependents.get(name) {
+                    pending.extend(names.iter().copied());
+                }
+            }
+        }
+    }
+
+    let mut top_level_sigs = library.program_signatures.clone();
+    let mut dtype_bound_names = library.dtype_bound_names.clone();
+    for name in new_defs.keys() {
+        // A replacement has its own signature/binder scope. Without a new
+        // signature its checked contextual type is authoritative.
+        top_level_sigs.remove(name);
+        dtype_bound_names.remove(name);
+    }
+    top_level_sigs.extend(new_sigs);
+    dtype_bound_names.extend(collect_top_level_dtype_bound_names(new_exprs));
     let mut top_level_defs = library.program_defs.clone();
-    for (name, body) in collect_top_level_defs(new_exprs) {
-        top_level_defs.insert(name, body);
-    }
-    let mut top_level_sigs = collect_top_level_sigs(new_exprs);
-    let dtype_bound_names = collect_top_level_dtype_bound_names(new_exprs);
-    // Library declared types feed `lookup_declared_type_expr`; merge
-    // them in so a library def's signature is reachable when the new
-    // code's body references it.
-    for (name, ty_expr) in &library.program_types {
-        top_level_sigs
-            .entry(name.clone())
-            .or_insert_with(|| ty_expr_to_deep(ty_expr));
-    }
+    top_level_defs.extend(new_defs);
     let types = LowerabilityTypes {
         signatures: &top_level_sigs,
         dtype_bound_names: &dtype_bound_names,
     };
-    let mut cache = library.lowered_names.clone();
+    // The checked contextual environment already includes retained library
+    // types. Do not reconstruct signatures from lossy library TensorTypes.
     let mut visiting = UnordSet::new();
     for name in top_level_defs.keys() {
         if cache.contains_key(name) {
@@ -4248,76 +4283,6 @@ pub fn top_level_lowering_map_with_context(
         cache.insert(name.clone(), lowered);
     }
     cache
-}
-
-/// Inverse of `LowerCtx::type_from_type_expr` — used by
-/// `top_level_lowering_map_with_context` to feed library types into the
-/// `top_level_sigs` map. Lossy on dim variables (we project to the
-/// scalar return type) since `def_is_lowered` only looks at
-/// `type_is_never_lowerable`, which inspects the t-fn return type.
-fn ty_expr_to_deep(ty: &TensorType) -> Expr {
-    use chelis_deep::Span;
-    use chelis_deep::ast::{Atom, Metadata};
-    let span = Span::new(0, 0);
-    let prim = match ty.precision {
-        chelis_types::types::Prim::F32 => "f32",
-        chelis_types::types::Prim::F64 => "f64",
-        chelis_types::types::Prim::F16 => "f16",
-        chelis_types::types::Prim::Bf16 => "bf16",
-        // E2 (WS-A0 RT-1 fixup): per spec/04-type-system.md §1.1.1
-        // f8e4m3 is deferred and the type checker must reject it
-        // before lowering. If a TensorType reaches this Deep
-        // re-encoder with f8e4m3 precision, the upstream rejection
-        // has a hole — panic rather than emit a `(t-prim {} f8e4m3)`
-        // node into lowered IR.
-        chelis_types::types::Prim::F8e4m3 => panic!(
-            "f8e4m3 is deferred per spec/04-type-system.md §1.1.1 and \
-             should have been rejected upstream"
-        ),
-        chelis_types::types::Prim::Int8 => "i8",
-        chelis_types::types::Prim::Int16 => "i16",
-        chelis_types::types::Prim::Int32 => "i32",
-        chelis_types::types::Prim::Int64 => "i64",
-        chelis_types::types::Prim::Bool => "bool",
-        chelis_types::types::Prim::String => "string",
-    };
-    // Decode-once (chelis#731 Phase 3): this is a PROGRAMMATIC producer
-    // running in the lowerer, downstream of both `parser::stamp_tags` and
-    // the desugarer, so nothing upstream will stamp element 0 for it. It
-    // must therefore construct through the typed node constructor. Spelling
-    // these heads as `Atom::Name("t-prim")` put raw vocabulary strings
-    // into the in-memory tree, and the typed readers below (`list.tag()`)
-    // then took their untagged policy for them instead of the `TPrim` /
-    // `TTensor` arms.
-    //
-    // #908 compatibility: `type_is_never_lowerable` and related functions
-    // match on `Expr::List`. `Expr::node()` now produces `Expr::Node`,
-    // which those functions don't handle. Construct as `Expr::List`
-    // directly so the lowering classifier continues to work.
-    let prim_node = Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::TPrim), span),
-                Expr::Map(Metadata::default(), span),
-                Expr::Atom(Atom::Name(prim.into()), span),
-            ],
-        },
-        span,
-    );
-    if ty.dims.is_empty() {
-        prim_node
-    } else {
-        Expr::List(
-            List {
-                elements: vec![
-                    Expr::Atom(Atom::Tag(DeepTag::TTensor), span),
-                    Expr::Map(Metadata::default(), span),
-                    prim_node,
-                ],
-            },
-            span,
-        )
-    }
 }
 
 pub fn expr_is_dag_lowerable(expr: &Expr, program: &CheckedProgram) -> bool {
@@ -24595,61 +24560,6 @@ mod regression_tests {
     use crate::dag::{DimInfo, NodeId, RiscOp};
     use crate::verify;
     use chelis_types::types::Prim;
-
-    /// E2 (WS-A0 RT-1 fixup): `ty_expr_to_deep` must panic on
-    /// f8e4m3 with the §1.1.1 message rather than emitting a
-    /// `(t-prim {} f8e4m3)` node into lowered Deep.
-    #[test]
-    #[should_panic(expected = "f8e4m3 is deferred per spec/04-type-system.md §1.1.1")]
-    fn ty_expr_to_deep_panics_on_f8e4m3_per_spec_1_1_1() {
-        let ty = crate::dag::TensorType {
-            dims: vec![DimInfo::Lit(4)],
-            precision: Prim::F8e4m3,
-        };
-        let _ = ty_expr_to_deep(&ty);
-    }
-
-    /// rt-c2e7c23d F3: `ty_expr_to_deep` is a programmatic producer running
-    /// INSIDE the lowerer, downstream of both `parser::stamp_tags` and the
-    /// desugarer, so nothing upstream will stamp element 0 on its output. It
-    /// spelled `t-prim` / `t-tensor` as `Atom::Name`, which put raw
-    /// vocabulary strings back into the in-memory tree and made the typed
-    /// readers below take their untagged policy for these nodes.
-    ///
-    /// The standing decode-once invariant covers PARSED and DESUGARED trees
-    /// (`chelis-deep` and `chelis-surf`); this is the assertion that extends
-    /// it past the synthesis boundary, which is where the escape was.
-    #[test]
-    fn ty_expr_to_deep_carries_no_raw_vocabulary_tag_strings() {
-        for (ty, expected) in [
-            (
-                crate::dag::TensorType {
-                    dims: vec![],
-                    precision: Prim::F32,
-                },
-                DeepTag::TPrim,
-            ),
-            (
-                crate::dag::TensorType {
-                    dims: vec![DimInfo::Lit(4)],
-                    precision: Prim::Int64,
-                },
-                DeepTag::TTensor,
-            ),
-        ] {
-            let expr = ty_expr_to_deep(&ty);
-            assert_eq!(
-                chelis_deep::validate::find_raw_vocabulary_tag(std::slice::from_ref(&expr)),
-                None,
-                "a synthesized type node must not carry a raw vocabulary tag string"
-            );
-            assert_eq!(
-                expr.tag(),
-                Some(expected),
-                "the typed readers must see the decoded tag, not the untagged policy"
-            );
-        }
-    }
 
     fn parse_and_lower(src: &str) -> Dag {
         let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");

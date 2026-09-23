@@ -562,14 +562,12 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
 
         // `indices.dims ++ [vocab]`.
         RiscOp::OneHot { vocab } => match input_rank(dag, node, 0) {
-            Some(operand_rank) => or_op_computed(
-                (0..operand_rank)
-                    .map(|axis| pass_through(id, 0, axis))
-                    .chain(std::iter::once(literal(*vocab)))
-                    .collect(),
-                id,
-                rank,
-            ),
+            Some(operand_rank) => {
+                let mut sources = Vec::with_capacity(operand_rank + 1);
+                sources.extend((0..operand_rank).map(|axis| pass_through(id, 0, axis)));
+                sources.push(literal(*vocab));
+                or_op_computed(sources, id, rank)
+            }
             None => op_computed(id, rank),
         },
 
@@ -639,10 +637,13 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
                 .into_iter()
                 .find(|slot| input_rank(dag, node, *slot) == Some(rank));
             match operand {
-                Some(slot) if rank >= 2 && batch == rank - 2 => (0..batch)
-                    .map(|axis| pass_through(id, slot, axis))
-                    .chain((batch..rank).map(|axis| AxisSource::OpComputed { op: id, axis }))
-                    .collect(),
+                Some(slot) if rank >= 2 && batch == rank - 2 => {
+                    let mut sources = Vec::with_capacity(rank);
+                    sources.extend((0..batch).map(|axis| pass_through(id, slot, axis)));
+                    sources
+                        .extend((batch..rank).map(|axis| AxisSource::OpComputed { op: id, axis }));
+                    sources
+                }
                 _ => op_computed(id, rank),
             }
         }
@@ -651,15 +652,14 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
         // (`spec/05` section 3.5): every output axis is an input axis of one
         // of the two operands.
         RiscOp::Gather { axis } => match (input_rank(dag, node, 0), input_rank(dag, node, 1)) {
-            (Some(values_rank), Some(indices_rank)) if *axis < values_rank => or_op_computed(
-                (0..*axis)
-                    .map(|leading| pass_through(id, 0, leading))
-                    .chain((0..indices_rank).map(|index| pass_through(id, 1, index)))
-                    .chain((*axis + 1..values_rank).map(|trailing| pass_through(id, 0, trailing)))
-                    .collect(),
-                id,
-                rank,
-            ),
+            (Some(values_rank), Some(indices_rank)) if *axis < values_rank => {
+                let mut sources = Vec::with_capacity(values_rank - 1 + indices_rank);
+                sources.extend((0..*axis).map(|leading| pass_through(id, 0, leading)));
+                sources.extend((0..indices_rank).map(|index| pass_through(id, 1, index)));
+                sources
+                    .extend((*axis + 1..values_rank).map(|trailing| pass_through(id, 0, trailing)));
+                or_op_computed(sources, id, rank)
+            }
             _ => op_computed(id, rank),
         },
 

@@ -14,7 +14,7 @@ pub fn clear_then_extend() -> Vec<u32> {
 }
 
 // Deliberately non-fused: the terminal next call mutates externally retained
-// state, and extension must stop at the first None without consuming 9.
+// state, and the explicit append loop must stop at None without consuming 9.
 pub struct Probe {
     pub calls: usize,
 }
@@ -33,10 +33,12 @@ impl Iterator for Probe {
     }
 }
 
-pub fn extend_resumes() -> (Vec<u32>, usize, Option<u32>) {
+pub fn append_resumes() -> (Vec<u32>, usize, Option<u32>) {
     let mut values = Vec::from([8]);
     let mut probe = Probe { calls: 0 };
-    values.extend(&mut probe);
+    while let Some(item) = probe.next() {
+        values.push(item);
+    }
     let terminal_calls = probe.calls;
     (values, terminal_calls, probe.next())
 }
@@ -86,6 +88,36 @@ pub fn sort_key_failure() -> Vec<u32> {
     values
 }
 
+pub fn collect_ad_callback_order() -> (Vec<u32>, u32) {
+    let mut trace = 0;
+    let values = Vec::from([1, 2, 3])
+        .into_iter()
+        .map(|item| {
+            trace = trace * 10 + item;
+            item
+        })
+        .map(|item| item + 10)
+        .filter_map(|item| if item == 12 { None } else { Some(item) })
+        .collect();
+    (values, trace)
+}
+
+pub fn collect_result_short_circuit() -> (Result<Vec<u32>, u32>, u32) {
+    let mut trace = 0;
+    let values = [1, 2, 3]
+        .into_iter()
+        .map(|item| {
+            trace = trace * 10 + item;
+            if item == 2 {
+                Err(9)
+            } else {
+                Ok(item)
+            }
+        })
+        .collect();
+    (values, trace)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -98,10 +130,16 @@ mod tests {
     }
 
     #[test]
-    fn extension_stops_at_none_and_preserves_callback_state() {
-        assert_eq!(extend_resumes(), (vec![8, 4], 2, Some(9)));
+    fn explicit_append_and_admitted_extension_preserve_callback_state() {
+        assert_eq!(append_resumes(), (vec![8, 4], 2, Some(9)));
         assert_eq!(extend_callback_state(), (vec![8, 11, 12], 3));
         assert!(std::panic::catch_unwind(extend_failure).is_err());
+    }
+
+    #[test]
+    fn admitted_collectors_preserve_callback_order_and_short_circuit() {
+        assert_eq!(collect_ad_callback_order(), (vec![11, 13], 123));
+        assert_eq!(collect_result_short_circuit(), (Err(9), 12));
     }
 
     #[test]

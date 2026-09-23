@@ -44,16 +44,20 @@ impl LoweredLibrary {
 
 /// Lower a checked library carrier without target-specific emission.
 pub fn lower_library(library: &CheckedLibrary) -> Result<LoweredLibrary, CoreLowerError> {
+    require_isolated_program(library.program())?;
     chelis_ir::lower::try_lower_program_to_library(library.program())
         .map(|inner| LoweredLibrary { inner })
         .map_err(CoreLowerError::Lower)
 }
 
 /// Lower an isolated checked compilation.
+///
+/// Uncomposed contextual extensions are rejected, including detached clones.
 pub fn lower_checked(
     checked: CheckedCompilation,
     mode: LoweringMode,
 ) -> Result<LoweredCompilation, CoreLowerError> {
+    require_isolated_program(checked.program())?;
     let lower_result =
         chelis_ir::lower::try_lower_program_to_library(checked.program()).map(LoweredProgram::from);
     finish_isolated_lowering(checked, mode, lower_result)
@@ -78,6 +82,7 @@ pub fn lower_checked_for_c_execution(
     ),
     CoreLowerError,
 > {
+    require_isolated_program(checked.program())?;
     let (_, host) =
         chelis_ir::host::try_lower_execution_program_with_manifest(checked.program(), manifest)
             .map_err(CoreLowerError::Lower)?;
@@ -99,6 +104,7 @@ pub fn lower_checked_for_c_execution_with_trace(
     ),
     CoreLowerError,
 > {
+    require_isolated_program(checked.program())?;
     let (_, host) = chelis_ir::host::try_lower_execution_program_with_manifest_and_trace(
         checked.program(),
         manifest,
@@ -163,6 +169,7 @@ fn finish_c_execution_lowering(
 pub fn lower_checked_for_evaluation(
     checked: &CheckedCompilation,
 ) -> Result<chelis_ir::lower::EvaluationProgram, CoreLowerError> {
+    require_isolated_program(checked.program())?;
     chelis_ir::lower::try_lower_program_to_evaluation_library(checked.program())
         .map(|library| library.program().clone())
         .map_err(CoreLowerError::Lower)
@@ -189,6 +196,14 @@ pub fn lower_checked_with_evaluation_context(
         checked.extension().program(),
     )
     .map_err(CoreLowerError::Lower)
+}
+
+fn require_isolated_program(program: &chelis_types::CheckedProgram) -> Result<(), CoreLowerError> {
+    if program.context_library_proof_id().is_some() {
+        Err(CoreLowerError::ContextRequired)
+    } else {
+        Ok(())
+    }
 }
 
 struct LoweredProgram {

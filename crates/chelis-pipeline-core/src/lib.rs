@@ -54,7 +54,8 @@
 //! let _ = bind_checked_library;
 //! ```
 //!
-//! Contextual success cannot discard its library binding:
+//! Contextual success has no consuming extension accessor. Borrowed inspection
+//! and clones retain provenance and are rejected by isolated lowering:
 //!
 //! ```compile_fail
 //! use chelis_pipeline_core::ContextCheckedCompilation;
@@ -134,6 +135,209 @@ mod tests {
     fn checked(source: &str) -> CheckedCompilation {
         complete_checks(accepted_analysis(source), SemanticContext::Isolated)
             .expect("the fixture must pass semantic checks")
+    }
+
+    const CONTEXT_LIBRARY: &str =
+        "(def {} lib_const (lit {type: (t-tensor {} (t-prim {} f32))} 7.0))";
+    const CONTEXT_EXTENSION: &str = "
+        (def {} y
+          (app {type: (t-tensor {} (t-prim {} f32))}
+            (var {} mul)
+            (var {type: (t-tensor {} (t-prim {} f32))} lib_const)
+            (lit {type: (t-tensor {} (t-prim {} f32))} 3.0)))";
+
+    fn context_checked(library: &CheckedLibrary) -> ContextCheckedCompilation<'_> {
+        complete_context_checks(
+            analyze_prepared_with_library(prepared(CONTEXT_EXTENSION), library).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn manifest(checked: &CheckedCompilation) -> chelis_types::manifest::RootManifest {
+        let realizability = chelis_effects::realizability::infer_realizability(
+            checked.program(),
+            &[chelis_types::types::Prim::F32],
+        );
+        chelis_effects::realizability::compute_root_manifest(checked.program(), &realizability)
+    }
+
+    fn assert_isolated_lowering_rejects(checked: &CheckedCompilation) {
+        assert!(matches!(
+            lower_checked_for_evaluation(checked),
+            Err(CoreLowerError::ContextRequired)
+        ));
+        let manifest = manifest(checked);
+        for mode in [
+            LoweringMode::Strict,
+            LoweringMode::AllowHostOnly,
+            LoweringMode::AllowHostBackend,
+        ] {
+            assert!(matches!(
+                lower_checked(checked.clone(), mode),
+                Err(CoreLowerError::ContextRequired)
+            ));
+            assert!(matches!(
+                lower_checked_for_c_execution(checked.clone(), &manifest, mode),
+                Err(CoreLowerError::ContextRequired)
+            ));
+            #[cfg(feature = "lowering-trace")]
+            assert!(matches!(
+                lower_checked_for_c_execution_with_trace(checked.clone(), &manifest, mode),
+                Err(CoreLowerError::ContextRequired)
+            ));
+        }
+    }
+
+    fn injected_library_input(name: &str) -> Option<chelis_ir::eval::TensorValue> {
+        (name == "lib_const").then(|| chelis_ir::eval::TensorValue::scalar(100.0))
+    }
+
+    fn assert_sealed_dag_result(lowered: &LoweredCompilation) {
+        let root = *lowered.named_roots().get(&IrName::new("y")).unwrap();
+        let values = chelis_ir::eval::eval_tensor_roots_with_strict(
+            lowered.dag(),
+            &[root],
+            injected_library_input,
+        )
+        .unwrap();
+        assert_eq!(values[&root].to_f64_lossy_vec(), vec![21.0]);
+    }
+
+    fn assert_sealed_evaluation_result(program: chelis_ir::lower::EvaluationProgram) {
+        let selected = program.select_roots(&["y".to_owned()]).unwrap();
+        let mut context = chelis_ir::evaluation::RandomExecutionContext::new(
+            chelis_ir::host::RandomLoweringState {
+                seed: None,
+                counter: 0,
+            },
+        );
+        let values = chelis_ir::eval::eval_tensor_plan_with_strict(
+            selected.plan(),
+            &mut context,
+            injected_library_input,
+        )
+        .unwrap();
+        assert_eq!(
+            values[&selected.roots()["y"]].to_f64_lossy_vec(),
+            vec![21.0]
+        );
+    }
+
+    #[test]
+    fn detached_context_extensions_reject_every_isolated_lowering_entrypoint() {
+        let library = check_prepared_library(prepared(CONTEXT_LIBRARY)).unwrap();
+        let contextual = context_checked(&library);
+        assert_isolated_lowering_rejects(contextual.extension());
+        let detached = contextual.extension().clone();
+        drop(contextual);
+        drop(library);
+        assert_isolated_lowering_rejects(&detached);
+    }
+
+    #[test]
+    fn contextual_lowered_products_cannot_be_relowered_without_their_library() {
+        let library = check_prepared_library(prepared(CONTEXT_LIBRARY)).unwrap();
+        let lowered_library = lower_library(&library).unwrap();
+        let lowered = lower_checked_with_context(
+            context_checked(&library),
+            &lowered_library,
+            LoweringMode::Strict,
+        )
+        .unwrap();
+        assert_sealed_dag_result(&lowered);
+        assert_isolated_lowering_rejects(lowered.checked());
+        let parts = lowered.into_parts();
+        assert_isolated_lowering_rejects(&parts.checked);
+    }
+
+    #[test]
+    fn bound_and_composed_programs_keep_library_values_sealed() {
+        let library = check_prepared_library(prepared(CONTEXT_LIBRARY)).unwrap();
+        let evaluation_library =
+            chelis_ir::lower::try_lower_program_to_evaluation_library(library.program()).unwrap();
+        assert_sealed_evaluation_result(
+            lower_checked_with_evaluation_context(&context_checked(&library), &evaluation_library)
+                .unwrap(),
+        );
+
+        let composed = context_checked(&library).compose();
+        let isolated = checked(&format!("{CONTEXT_LIBRARY}\n{CONTEXT_EXTENSION}"));
+        for checked in [composed, isolated] {
+            assert_sealed_evaluation_result(lower_checked_for_evaluation(&checked).unwrap());
+            let manifest = manifest(&checked);
+            assert_sealed_dag_result(
+                &lower_checked(checked.clone(), LoweringMode::Strict).unwrap(),
+            );
+            let (lowered, _, _) =
+                lower_checked_for_c_execution(checked.clone(), &manifest, LoweringMode::Strict)
+                    .unwrap();
+            assert_sealed_dag_result(&lowered);
+            #[cfg(feature = "lowering-trace")]
+            {
+                let (lowered, _, _) = lower_checked_for_c_execution_with_trace(
+                    checked.clone(),
+                    &manifest,
+                    LoweringMode::Strict,
+                )
+                .unwrap();
+                assert_sealed_dag_result(&lowered);
+            }
+        }
+    }
+
+    #[test]
+    fn library_extensions_require_composition_before_library_lowering() {
+        let library = check_prepared_library(prepared(CONTEXT_LIBRARY)).unwrap();
+        let extension =
+            analyze_prepared_library_with_base(prepared(CONTEXT_EXTENSION), &library).unwrap();
+        assert!(matches!(
+            validate_cached_library(
+                extension.type_env().clone(),
+                extension.analysis().program().clone(),
+            ),
+            Err(LibraryRejection::ContextMismatch)
+        ));
+
+        let composed = complete_context_library_checks(extension).unwrap();
+        let composed =
+            validate_cached_library(composed.type_env().clone(), composed.program().clone())
+                .unwrap();
+        let lowered = lower_library(&composed).unwrap();
+        let values = chelis_ir::eval::eval_tensor_roots_with_strict(
+            lowered.dag(),
+            lowered.dag().roots(),
+            injected_library_input,
+        )
+        .unwrap();
+        let root = lowered.dag().roots().last().unwrap();
+        assert_eq!(values[root].to_f64_lossy_vec(), vec![21.0]);
+    }
+
+    #[test]
+    fn shadowed_host_declaration_retains_its_new_tensor_root() {
+        let library =
+            check_prepared_library(prepared(r#"(def {} value (lit {} "host"))"#)).unwrap();
+        let lowered_library = lower_library(&library).unwrap();
+        let analysis = analyze_prepared_with_library(
+            prepared(
+                "(defsig {} value (t-prim {} i32))
+                 (def {} value (lit {type: (t-prim {} i32)} 2))",
+            ),
+            &library,
+        )
+        .unwrap();
+        let lowered = lower_checked_with_context(
+            complete_context_checks(analysis).unwrap(),
+            &lowered_library,
+            LoweringMode::Strict,
+        )
+        .unwrap();
+        let root = *lowered.named_roots().get(&IrName::new("value")).unwrap();
+        assert_eq!(lowered.dag().roots(), &[root]);
+        let values =
+            chelis_ir::eval::eval_tensor_roots_with_strict(lowered.dag(), &[root], |_| None)
+                .unwrap();
+        assert_eq!(values[&root].to_f64_lossy_vec(), vec![2.0]);
     }
 
     #[test]

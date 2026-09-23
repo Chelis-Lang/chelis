@@ -56,6 +56,9 @@ pub fn check_prepared_library(
 
 /// Parse cached library products into a checked library proof.
 ///
+/// Cached programs must already include every required library definition;
+/// an uncomposed extension cannot be adopted as a standalone library.
+///
 /// The stored `LibraryProofId` is checked for self-consistency: the cached
 /// `TypeEnv` and `CheckedProgram` must agree on it and their declared-type maps
 /// must match. It is NOT recomputed from the decoded source. The identity is
@@ -72,7 +75,9 @@ pub fn validate_cached_library(
     cached_type_env: TypeEnv,
     cached_program: CheckedProgram,
 ) -> Result<CheckedLibrary, LibraryRejection> {
-    if !cached_type_env.matches_checked_program(&cached_program) {
+    if cached_program.context_library_proof_id().is_some()
+        || !cached_type_env.matches_checked_program(&cached_program)
+    {
         return Err(LibraryRejection::ContextMismatch);
     }
     let effected = chelis_effects::check_program(&cached_program)

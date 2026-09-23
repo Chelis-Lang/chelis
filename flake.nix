@@ -57,6 +57,7 @@
                 ./verification/aeneas-trait-models.patch
                 ./verification/aeneas-shared-borrows.patch
                 ./verification/aeneas-floating-scalars.patch
+                ./verification/aeneas-collection-contract.patch
               ];
             });
             rust = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;

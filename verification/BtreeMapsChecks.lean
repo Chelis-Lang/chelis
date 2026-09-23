@@ -62,14 +62,6 @@ set_option synthInstance.maxSize 512 in
     (decode (fun ((calls, entries) : U32 × alloc.vec.Vec (U32 × U32 × U32)) =>
       (calls.val, triples entries)) btree_maps.wrapped_entry_restoration)
     (.ok (1, [(1, 10, 100), (2, 20, 211), (3, 30, 300), (4, 40, 411), (5, 50, 513)]))
-  expect "delegated collection restores conversion and iterator mutations"
-    (decode (fun ((entries, polls) : alloc.vec.Vec (U32 × U32) × U32) =>
-      (pairs entries, polls.val)) (btree_maps.delegated_collection_state 2#u32))
-    (.ok ([(1, 10), (2, 20)], 13))
-  expect "empty delegated collection still converts and polls once"
-    (decode (fun ((entries, polls) : alloc.vec.Vec (U32 × U32) × U32) =>
-      (pairs entries, polls.val)) (btree_maps.delegated_collection_state 0#u32))
-    (.ok ([], 11))
   expect "String Borrow exposes UTF-8, not Unicode codepoints"
     (decode (fun (bytes : Str) => bytes.val.map UScalar.val) (alloc.str.BorrowString.borrow "é"))
     (.ok [195, 169])

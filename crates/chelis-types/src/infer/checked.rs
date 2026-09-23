@@ -2200,6 +2200,14 @@ impl CheckedProgram {
         self.library_proof_id
     }
 
+    /// The exact library required to lower this uncomposed checked extension.
+    ///
+    /// Cloning and metadata passes preserve this provenance. Successful
+    /// composition incorporates the library definitions and clears it.
+    pub fn context_library_proof_id(&self) -> Option<LibraryProofId> {
+        self.context_library_proof_id
+    }
+
     pub(crate) fn bind_context_library_proof(&mut self, proof_id: Option<LibraryProofId>) {
         self.context_library_proof_id = proof_id;
     }

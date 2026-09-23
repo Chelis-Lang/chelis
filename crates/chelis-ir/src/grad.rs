@@ -516,12 +516,7 @@ fn grad_dag_result(
 
     // Walk forward topological order in reverse.
     let topo = forward.topological_order();
-    let topo_positions: UnordMap<NodeId, usize> = topo
-        .iter()
-        .copied()
-        .enumerate()
-        .map(|(position, node)| (node, position))
-        .collect();
+    let topo_positions = topological_positions(&topo);
     for &node_id in topo.iter().rev() {
         let grad_out = if node_id == output {
             seed
@@ -577,10 +572,7 @@ fn grad_dag_result(
         }
     }
 
-    let grad_nodes = wrt
-        .iter()
-        .filter_map(|&id| adjoints.get(&id).map(|&g| (id, g)))
-        .collect::<UnordMap<_, _>>();
+    let grad_nodes = requested_gradients(wrt, &adjoints);
 
     dag.add_root(output);
     for (_, &grad) in grad_nodes.to_sorted() {
@@ -610,16 +602,7 @@ fn grad_dag_result(
         // An unrequested backward cotangent may disappear. Forward entry
         // sites and source-order obligations may not. Only this AD pruning
         // boundary is allowed to remove a generated, unused replay.
-        execution.sites = execution
-            .sites
-            .to_sorted()
-            .into_iter()
-            .filter(|(node, site)| {
-                !matches!(site, crate::evaluation::RandomSite::Replay { .. })
-                    || remap.contains_key(node)
-            })
-            .map(|(node, site)| (*node, *site))
-            .collect();
+        execution.sites = retained_random_sites(&execution.sites, &remap);
         execution.remap(&remap)?;
         execution.complete(&dag)?;
     }
@@ -649,6 +632,42 @@ fn grad_dag_result(
         output_node,
         grad_nodes,
     })
+}
+
+fn topological_positions(topo: &[NodeId]) -> UnordMap<NodeId, usize> {
+    let mut positions = UnordMap::new();
+    for (position, &node) in topo.iter().enumerate() {
+        positions.insert(node, position);
+    }
+    positions
+}
+
+fn requested_gradients(
+    wrt: &[NodeId],
+    adjoints: &UnordMap<NodeId, NodeId>,
+) -> UnordMap<NodeId, NodeId> {
+    let mut gradients = UnordMap::new();
+    for &id in wrt {
+        if let Some(&gradient) = adjoints.get(&id) {
+            gradients.insert(id, gradient);
+        }
+    }
+    gradients
+}
+
+fn retained_random_sites(
+    sites: &UnordMap<NodeId, crate::evaluation::RandomSite>,
+    remap: &UnordMap<NodeId, NodeId>,
+) -> UnordMap<NodeId, crate::evaluation::RandomSite> {
+    let mut retained = UnordMap::new();
+    for (&node, &site) in sites.to_sorted() {
+        if !matches!(site, crate::evaluation::RandomSite::Replay { .. })
+            || remap.contains_key(&node)
+        {
+            retained.insert(node, site);
+        }
+    }
+    retained
 }
 
 /// Combine one forward value's incoming cotangent contributions in the exact
@@ -801,26 +820,21 @@ fn prune_to_requested_outputs(
         }
     }
 
-    let new_grad_nodes = grad_nodes
-        .to_sorted()
-        .into_iter()
-        .filter_map(|(old_wrt, old_grad)| {
-            id_map
-                .get(&old_grad.0)
-                .copied()
-                .map(|new_grad| (*old_wrt, new_grad))
-        })
-        .collect();
+    let mut new_grad_nodes = UnordMap::new();
+    for (&old_wrt, old_grad) in grad_nodes.to_sorted() {
+        if let Some(&new_grad) = id_map.get(&old_grad.0) {
+            new_grad_nodes.insert(old_wrt, new_grad);
+        }
+    }
 
     let new_output = *id_map
         .get(&output.0)
         .unwrap_or_else(|| panic!("output node {output:?} missing after grad pruning"));
 
-    let remap = id_map
-        .into_sorted()
-        .into_iter()
-        .map(|(old, new)| (NodeId(old), new))
-        .collect();
+    let mut remap = UnordMap::new();
+    for (old, new) in id_map.into_sorted() {
+        remap.insert(NodeId(old), new);
+    }
     (new_dag, new_output, new_grad_nodes, remap)
 }
 

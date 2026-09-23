@@ -125,6 +125,8 @@ impl std::error::Error for LibraryRejection {}
 /// A lower-layer failure from core lowering and exact root construction.
 #[derive(Debug)]
 pub enum CoreLowerError {
+    /// An uncomposed extension requires its bound library for lowering.
+    ContextRequired,
     Lower(LowerDiagnostic),
     RootCount {
         context: RootCountContext,
@@ -136,6 +138,10 @@ pub enum CoreLowerError {
 impl fmt::Display for CoreLowerError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ContextRequired => write!(
+                formatter,
+                "context-checked extensions require contextual lowering or composition"
+            ),
             Self::Lower(diagnostic) => write!(formatter, "{diagnostic}"),
             Self::RootCount {
                 context,
@@ -512,6 +518,8 @@ impl<'library> ContextCheckedCompilation<'library> {
         self.library
     }
 
+    /// Inspect the extension without erasing its required library provenance.
+    /// Clones remain ineligible for isolated lowering until composed.
     pub fn extension(&self) -> &CheckedCompilation {
         &self.extension
     }
@@ -522,6 +530,9 @@ impl<'library> ContextCheckedCompilation<'library> {
 }
 
 /// A program that passed type, effect, and linearity checks.
+///
+/// Context-checked extensions retain their required library provenance even
+/// when cloned or recovered from lowered products.
 #[derive(Debug, Clone)]
 pub struct CheckedCompilation {
     pub(crate) expanded_deep: Vec<DeepExpr>,
@@ -577,6 +588,7 @@ pub struct LoweredCompilation {
 }
 
 impl LoweredCompilation {
+    /// Inspect the checked source, retaining any contextual library requirement.
     pub fn checked(&self) -> &CheckedCompilation {
         &self.checked
     }
@@ -597,6 +609,7 @@ impl LoweredCompilation {
         &self.forward_node_index
     }
 
+    /// Separate the products without erasing the checked source's provenance.
     pub fn into_parts(self) -> LoweredParts {
         LoweredParts {
             checked: self.checked,
