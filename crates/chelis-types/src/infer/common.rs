@@ -2434,6 +2434,7 @@ pub(super) fn infer_top_level(
                 .into_iter()
                 .map(|(variable, _)| (*variable, subst.tvar_restriction(*variable)))
                 .collect();
+        env.set_active_declared_type_bounds(declared_dtype_bounds.clone());
         let mut body_env = env.clone();
         body_env.set_type_resolution_scope(
             binder_names.map(|_| &declared_binder_identities),

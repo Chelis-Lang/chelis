@@ -226,6 +226,15 @@ pub struct Env {
     /// source name across that gap.
     #[serde(skip)]
     active_declared_type_names: UnordMap<TypeVar, String>,
+    /// The dtype-family bound each of those binders was AUTHORED with, read
+    /// before the body is inferred (`None` for an unbounded binder).
+    ///
+    /// [04-INF-6] quantifies a binder over the instantiations its declaration
+    /// admits, so a body rule that must hold at every instantiation (a literal
+    /// pattern's, chelis#2442) reads this snapshot rather than the variable's
+    /// current restriction, which a body constraint may already have narrowed.
+    #[serde(skip)]
+    active_declared_type_bounds: UnordMap<TypeVar, Option<TypeVarRestriction>>,
     /// chelis#397/#469: provenance of `let`-bound `int`-valued names, so a
     /// runtime `expand` size built from a `let` binding can be checked for
     /// materializability. Cloned at every lexical scope boundary along with
@@ -683,6 +692,38 @@ impl Env {
     /// inventing a name (spec/04 [04-FIT-10]).
     pub(crate) fn active_declared_type_names(&self) -> &UnordMap<TypeVar, String> {
         &self.active_declared_type_names
+    }
+
+    /// Park the authored dtype-family bound of each binder in
+    /// [`Self::active_declared_type_names`].
+    pub(crate) fn set_active_declared_type_bounds(
+        &mut self,
+        bounds: UnordMap<TypeVar, Option<TypeVarRestriction>>,
+    ) {
+        self.active_declared_type_bounds = bounds;
+    }
+
+    /// The authored binder of the definition now being inferred that `var`
+    /// currently denotes, with its source name and authored bound. `None` for
+    /// a variable no authored binder resolves to, which is a flexible
+    /// inference variable rather than a rigid binder.
+    pub(crate) fn authored_type_binder(
+        &self,
+        var: TypeVar,
+        subst: &Subst,
+    ) -> Option<(&str, Option<TypeVarRestriction>)> {
+        self.active_declared_type_names
+            .to_sorted()
+            .into_iter()
+            .find(|(declared, _)| subst.apply(&Type::Var(**declared)) == Type::Var(var))
+            .map(|(declared, name)| {
+                let bound = self
+                    .active_declared_type_bounds
+                    .get(declared)
+                    .copied()
+                    .flatten();
+                (name.as_str(), bound)
+            })
     }
 
     /// Instantiate a scheme into the caller's inference substitution so

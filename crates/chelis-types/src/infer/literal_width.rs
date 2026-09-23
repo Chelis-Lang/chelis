@@ -56,17 +56,17 @@ pub(super) fn render_numeric_atom(atom: &deep::Atom) -> String {
 }
 
 /// The [04-LIT-2] rejection for a literal bound at one concrete float dtype.
+///
+/// The dtype is always narrower than `f64`: the lexer rejects a non-finite
+/// `f64` body, and every `i64` atom is finite at `f64`. So a finite `f64`
+/// value always exists for the suggestion's cast.
 pub(super) fn non_finite_literal_error(atom: &deep::Atom, prim: Prim) -> CheckError {
     let literal = render_numeric_atom(atom);
     let dtype = prim.name();
-    let suggestion = if prim == Prim::F64 {
-        "write a finite value; no dtype is wider than `f64`".to_string()
-    } else {
-        format!(
-            "use a float dtype wide enough to hold the value, or cast a finite wider value \
-             (`cast({literal}f64, {dtype})`) if an infinity is intended"
-        )
-    };
+    let suggestion = format!(
+        "use a float dtype wide enough to hold the value, or cast a finite wider value \
+         (`cast({literal}f64, {dtype})`) if an infinity is intended"
+    );
     CheckError::new(
         CheckErrorKind::TypeMismatch,
         format!(
