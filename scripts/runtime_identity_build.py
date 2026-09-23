@@ -120,9 +120,23 @@ def event_receipt(event, state):
     return next(iter(found))
 
 
-def validate_artifact_event(receipt, event):
+def surface_producer_receipt(receipt, producer_role):
+    """A CLI/Python wrapper may have inputs unrelated to runtime identity.
+
+    Its retained record is still acceptable only after the observer derived it
+    from one exact runtime dependency and bound it to this compiler output.
+    """
+    return (
+        producer_role in {"cli", "python"}
+        and receipt.get("role") == producer_role
+        and isinstance(receipt.get("descriptor"), dict)
+        and isinstance(receipt.get("unit"), dict)
+    )
+
+
+def validate_artifact_event(receipt, event, *, allow_surface_errors=False):
     """Bind a reported Cargo artifact to the observed compiler unit and bytes."""
-    if receipt.get("errors"):
+    if receipt.get("errors") and not allow_surface_errors:
         raise observer.ObservationError(
             "incomplete compiler observation: " + "; ".join(receipt["errors"])
         )
@@ -293,14 +307,22 @@ def run(cargo, arguments):
                             if producer_package:
                                 raise
                             continue
-                        if receipt.get("errors"):
+                        surface_receipt = (
+                            requires_producer_observation
+                            and surface_producer_receipt(receipt, producer_role)
+                        )
+                        if receipt.get("errors") and not surface_receipt:
                             if requires_producer_observation:
                                 raise observer.ObservationError(
                                     "incomplete producer observation: "
                                     + "; ".join(receipt["errors"])
                                 )
                             continue
-                        validate_artifact_event(receipt, event)
+                        validate_artifact_event(
+                            receipt,
+                            event,
+                            allow_surface_errors=surface_receipt,
+                        )
                         for output in receipt["outputs"]:
                             observer.atomic(state / "events" / environment["CHELIS_IDENTITY_SESSION"] / (observer.key(output["path"]) + ".json"), event)
                         if receipt.get("role") and any(

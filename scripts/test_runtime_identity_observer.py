@@ -175,6 +175,49 @@ class ObservationFailureTests(unittest.TestCase):
         ):
             driver.validate_artifact_event(receipt, event)
 
+    def test_surface_producer_binds_exact_output_despite_unrelated_wrapper_inputs(self):
+        original = self.root / "chelis-hash"
+        uplift = self.root / "chelis"
+        original.write_bytes(b"observed CLI")
+        shutil.copyfile(original, uplift)
+        checksum = observer.digest(original.read_bytes())
+        receipt = self.root / "surface-receipt.json"
+        value = {
+            "protocol": 1,
+            "role": "cli",
+            "descriptor": {"schema_version": 1},
+            "unit": {"target_name": "chelis", "features": ["default"]},
+            "errors": [
+                "CHELIS_IDENTITY_UNOBSERVABLE_NATIVE: native linker inputs "
+                "outside the runtime closure"
+            ],
+            "outputs": [{"path": str(original), "digest": checksum}],
+        }
+        observer.atomic(receipt, value)
+        observer.atomic(
+            self.root / "state/output-digests" / checksum / "binding.json",
+            {"observation": str(receipt)},
+        )
+        event = {
+            "features": ["default"],
+            "filenames": [str(uplift)],
+            "target": {"kind": ["bin"], "name": "chelis"},
+        }
+        self.assertEqual(
+            driver.event_receipt(event, self.root / "state"), str(receipt)
+        )
+        self.assertTrue(driver.surface_producer_receipt(value, "cli"))
+        driver.validate_artifact_event(value, event, allow_surface_errors=True)
+        with self.assertRaisesRegex(
+            observer.ObservationError, "incomplete compiler observation"
+        ):
+            driver.validate_artifact_event(value, event)
+        event["features"].append("changed")
+        with self.assertRaisesRegex(observer.ObservationError, "feature is absent"):
+            driver.validate_artifact_event(
+                value, event, allow_surface_errors=True
+            )
+
     def test_cached_dependency_receipt_needs_no_synthetic_cargo_event(self):
         artifact = self.root / "libdependency.rlib"
         artifact.write_bytes(b"exact cached dependency")

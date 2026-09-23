@@ -846,8 +846,23 @@ def observe_rustc(real_rustc, args):
         receipt = collect_unit(real_rustc, args, workspace_wrapper)
     except (OSError, KeyError, ValueError, ObservationError) as error:
         errors.append(str(error))
-        # Unrelated native CLI dependencies must not impose identity requirements.
-        receipt = {"protocol": 1, "dependencies": [], "outputs": [], "errors": errors}
+        receipt = {
+            "protocol": 1,
+            "dependencies": [],
+            "outputs": [],
+            "errors": errors,
+            # A surface producer's own unit is outside the runtime identity
+            # closure, but Cargo must still bind its uplifted native output to
+            # this exact rustc target and feature selection.
+            "unit": {
+                "target_name": one(args, "--crate-name"),
+                "features": sorted(
+                    value.split('"', 2)[1]
+                    for value in values(args, "--cfg")
+                    if value.startswith('feature="') and value.endswith('"')
+                ),
+            },
+        }
         for external in values(args, "--extern"):
             try:
                 name, separator, artifact = external.partition("=")
