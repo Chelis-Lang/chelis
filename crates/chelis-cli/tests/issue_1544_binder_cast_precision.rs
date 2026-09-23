@@ -92,6 +92,11 @@ fn assert_native(name: &str, source: &str, expected: &str) {
 /// The round-5 P1 witness, in Deep. Its resugared Surf is character-for-character
 /// the scalar witness this suite already documents; the only difference is that
 /// the `lit` carries its `type` stamp TWICE.
+///
+/// `2.00000001` rounds to exactly `2.0` at the f32 source default, so the cast
+/// to `i64` is exact; bound at f64 instead, the cast would trap `Domain`. The
+/// witness must be finite at every member of the binder's family, f16
+/// included ([04-LIT-2]), which rules out the larger `16777217.0`.
 const DUPLICATED_TYPE_STAMP: &str = "(module {surf_path: \"Bind.Main\"}\n\
      bind.main\n\
      (export {} main)\n\
@@ -100,7 +105,7 @@ const DUPLICATED_TYPE_STAMP: &str = "(module {surf_path: \"Bind.Main\"}\n\
        (fn {} (params {} (x {type: (t-var {} p)}))\n\
          (app {} (var {} add) (var {} x)\n\
            (cast {}\n\
-             (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p), type: (t-var {} p)} 16777217.0)\n\
+             (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p), type: (t-var {} p)} 2.00000001)\n\
              (t-var {} p)))))\n\
      (defsig {} main (t-fn {} (t-prim {} i64)))\n\
      (def {} main (fn {} (params {}) (app {} (var {} addk) (lit {type: (t-prim {} i64)} 0)))))\n";
@@ -116,7 +121,7 @@ fn a_single_type_stamp_gives_one_answer_on_both_lanes() {
 
     let interpreted = text(&run(root, &["eval", "--file", "dup_type.dp"]));
     assert!(
-        interpreted.contains("main = 16777216"),
+        interpreted.contains("main = 2\n"),
         "eval must apply the f32 narrow: {interpreted}"
     );
 
@@ -145,8 +150,8 @@ fn a_single_type_stamp_gives_one_answer_on_both_lanes() {
         .expect("compiled binary should run");
     let native = String::from_utf8_lossy(&native.stdout).to_string();
     assert!(
-        native.contains("main = 16777216"),
-        "compiled C must agree with eval, not return 16777217: {native}"
+        native.contains("main = 2\n"),
+        "compiled C must agree with eval, not trap on the f64 value: {native}"
     );
 }
 
@@ -165,7 +170,7 @@ const DUPLICATED_TYPE_STAMP_TENSOR: &str = "(module {surf_path: \"Bind.Main\"}\n
            (app {} (var {} insert)\n\
              (app {} (var {} scalar_to_tensor)\n\
                (cast {}\n\
-                 (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p), type: (t-var {} p)} 16777217.0)\n\
+                 (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p), type: (t-var {} p)} 2.00000001)\n\
                  (t-var {} p)))\n\
              (cast {} (lit {surf_literal_style: \"unsuffixed\", type: (t-prim {} i32)} 0) (t-prim {} i32))\n\
              (cast {} (lit {surf_literal_style: \"unsuffixed\", type: (t-prim {} i64)} 1) (t-prim {} i64))))))\n\
@@ -185,7 +190,7 @@ fn a_single_type_stamp_gives_one_answer_on_the_tensor_lane() {
     let unit = root.join("dup_tensor.dp");
     fs::write(&unit, single_type_stamp(DUPLICATED_TYPE_STAMP_TENSOR)).expect("write fixture");
 
-    let expected = "main = tensor(shape=[1], data=[16777216])";
+    let expected = "main = tensor(shape=[1], data=[2])";
     let interpreted = text(&run(root, &["eval", "--file", "dup_tensor.dp"]));
     assert!(
         interpreted.contains(expected),
@@ -212,7 +217,7 @@ fn a_single_type_stamp_gives_one_answer_on_the_tensor_lane() {
     let native = String::from_utf8_lossy(&native.stdout).to_string();
     assert!(
         native.contains(expected),
-        "compiled C must agree with eval, not return 16777217: {native}"
+        "compiled C must agree with eval, not trap on the f64 value: {native}"
     );
 }
 
@@ -288,8 +293,8 @@ fn adopted_integer_literals_must_fit_every_family_member() {
 #[test]
 fn numeric_cross_family_float_literal_preserves_source_default() {
     for (literal, expected, name) in [
-        ("16777217.0", "16777216", "positive"),
-        ("-16777217.0", "-16777216", "negative"),
+        ("2.00000001", "2", "positive"),
+        ("-2.00000001", "-2", "negative"),
     ] {
         let source = format!(
             "module Bind.Main\nexport (main)\n\
@@ -300,22 +305,33 @@ fn numeric_cross_family_float_literal_preserves_source_default() {
     }
 
     let tensor = "module Bind.Main\nexport (main)\n\
-                  def addk[p: Numeric](x: tensor[1, p]) -> tensor[1, p] = add(x, insert(scalar_to_tensor(cast(16777217.0, p)), cast(0, i32), cast(1, i64)))\n\
+                  def addk[p: Numeric](x: tensor[1, p]) -> tensor[1, p] = add(x, insert(scalar_to_tensor(cast(2.00000001, p)), cast(0, i32), cast(1, i64)))\n\
                   def main() -> tensor[1, i64] = addk(to_tensor([0i64]))\n";
     assert_native(
         "tensor_cross_family",
         tensor,
-        "main = tensor(shape=[1], data=[16777216])",
+        "main = tensor(shape=[1], data=[2])",
     );
 }
 
+/// [04-LIT-2]: an adopted float literal binds at every member of the family,
+/// so it must be finite at each; 1e10 rounds to infinity at f16. A cast of an
+/// already-bound `f64` value is an operation and stays total.
 #[test]
-fn float_family_literal_finalization_remains_total() {
-    let source = "module Bind.Main\nexport (main)\n\
-                  def value[p: Float](x: p) -> p = cast(10000000000.0, p)\n\
-                  def main() -> f16 = value(0.0f16)\n";
-    let (_dir, root) = package("float_range", source);
-    success(&run(&root, &["check", "src/main.ch"]));
+fn float_family_literal_must_be_finite_at_every_member() {
+    reject(
+        "module Bind.Main\nexport (main)\n\
+         def value[p: Float](x: p) -> p = cast(10000000000.0, p)\n\
+         def main() -> f16 = value(0.0f16)\n",
+        "[04-LIT-2]",
+    );
+    let (_dir, root) = package(
+        "float_range",
+        "module Bind.Main\nexport (main)\n\
+         def value[p: Float](x: p) -> p = cast(10000000000.0f64, p)\n\
+         def main() -> f16 = value(0.0f16)\n",
+    );
+    assert!(eval(&root).contains("main = inf"));
 }
 
 #[test]

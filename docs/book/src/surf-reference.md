@@ -123,7 +123,10 @@ loss_fn = fn (w, b) -> mse_loss(predict(x, w, b), y)
   `31400000000.0`. Default type `f32`. You may write a longer body that decodes
   to the same value — a constant transcribed from a reference at published
   precision, say `0.319381530f64` — and `chelis fmt` prints the shortest
-  spelling for it.
+  spelling for it. A float literal must be finite at the type it binds at:
+  `70000.0f16` and an unsuffixed `1e40` (an `f32`) are rejected because they
+  round to infinity there. A cast of a finite wider value,
+  `cast(70000.0f32, f16)`, is an operation and does yield infinity.
 - A literal can carry a precision suffix that binds it exactly: float suffixes `f32 f64
   bf16 f16` (for example `42.0f32`, `1.0f64`), integer suffixes `i8
   i16 i32 i64` (int tokens only). The suffix must follow the digits with no space.

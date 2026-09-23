@@ -123,6 +123,7 @@ mod expr_pattern;
 pub(crate) mod expr_record;
 mod expr_transform;
 mod grad_selector;
+mod literal_width;
 mod operand_deferral;
 mod program;
 pub(crate) mod recursion;

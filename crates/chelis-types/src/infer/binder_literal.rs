@@ -75,6 +75,35 @@ pub(super) fn validate_binder_literal_adoption_in_program(
                                     .to_string(),
                             ],
                         ));
+                    } else if adopting_binder == Some(binder)
+                        && let (Some(source), Some(family)) = (source, family)
+                        && source.admitted_by(family)
+                        && let Some(atom) = source.numeric_atom()
+                        && let Some(member) = super::literal_width::non_finite_float_member(
+                            super::declared_type::restriction_for_family(family),
+                            atom,
+                        )
+                    {
+                        // [04-LIT-2] at every instantiation: the float analogue of
+                        // the integer range rule above.
+                        let literal = super::literal_width::render_numeric_atom(atom);
+                        errors.push(CheckError::new(
+                            CheckErrorKind::TypeMismatch,
+                            format!(
+                                "literal `{literal}` in `{name}` cannot bind to `{binder}: {}`: \
+                                 [04-INF-6] makes `{binder}` denote every admissible \
+                                 instantiation, and at {} the literal rounds to infinity, \
+                                 which no literal denotes (spec/04-type-system.md [04-LIT-2], \
+                                 section 5.6)",
+                                family.surf_name(),
+                                member.name(),
+                            ),
+                            vec![format!(
+                                "use a value finite at every member of the family, narrow the \
+                                 declaration's dtype domain, or cast a finite `f64` value \
+                                 (`cast({literal}f64, {binder})`) if an infinity is intended"
+                            )],
+                        ));
                     } else if !source.is_some_and(|source| {
                         adopting_binder == Some(binder)
                             && family.is_some_and(|family| source.admitted_by(family))

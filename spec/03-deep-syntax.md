@@ -917,10 +917,12 @@ unsuffixed canonical numeric pattern token, including `-0.0` and the full
 | String | Double-quoted; named Surf escapes where available, otherwise minimal lowercase `\u{h}` for control scalars | Printable-character and named-escape Unicode aliases are not canonical |
 | Boolean | `true` / `false` | |
 
-Canonical Deep contains no non-finite float literal. Producers that construct
-Deep programmatically must reject NaN and infinity before serialization;
-Deep-to-Surf resugaring reports either as unrepresentable rather than emitting
-an invalid Surf token.
+Canonical Deep contains no non-finite float literal. Nor does it contain a
+`lit` whose value is non-finite at its declared primitive
+(`spec/04-type-system.md` [04-LIT-2]), such as a float atom `70000.0` typed
+`f16`. Producers that construct Deep programmatically must reject NaN and
+infinity before serialization; Deep-to-Surf resugaring reports either as
+unrepresentable rather than emitting an invalid Surf token.
 
 Every valid Deep string atom has a Surf representation. Resugaring uses the
 single P11 spelling: printable Unicode remains literal, the six named escapes
@@ -954,11 +956,9 @@ any consumer may rely on it.
 
 **Literal default rule.** An unsuffixed integer literal binds at type
 `i32` (i.e. its `lit` node carries `{type: (t-prim {} i32)}`); an
-unsuffixed float literal binds at type `f32`. The lexer accepts i64/f64
-ranges so that out-of-range literals produce a useful diagnostic before
-defaulting; the desugarer/type-checker narrows the value to `i32` /
-`f32` before Deep is materialized. See `spec/04-type-system.md` §5.3 for
-the type-system statement. The narrowing is overridable only by an
+unsuffixed float literal binds at type `f32`, under
+`spec/04-type-system.md` [04-LIT-2]. See `spec/04-type-system.md` §5.3 for
+the type-system statement. The default is overridable only by an
 explicit literal suffix (§6.4.1), the contextual tensor-literal inference
 rule (`spec/02-surf-syntax.md` §P10b), or an explicit `cast`.
 
