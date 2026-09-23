@@ -385,7 +385,7 @@ fn plan_less_dropout(node: NodeId) -> String {
         chelis_types::unsupported::Stage::Runtime,
         chelis_types::unimplemented_rejection!(
             2413,
-            "`dropout` under `vmap` (chelis#2409), or under `grad` of a function whose draw sits under runtime control, is not yet supported on this path"
+            "this draw was reached in a region lowered without a fixed-control plan, so it has no [05-RNG-1] key; drawing in such a region is not yet supported"
         ),
     )
     .to_string()

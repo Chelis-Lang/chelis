@@ -990,6 +990,57 @@ fn issue_2392_kernel_under_recursion_is_planned_once_per_helper() {
     );
 }
 
+/// Evaluate `source` and return its `result` binding with the number of
+/// classification definition tables built.
+fn evaluation_definition_builds(source: &str) -> (String, u64) {
+    let checked = checked_surf(source);
+    let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
+    let inputs = HostEvaluationInputs {
+        roots: &empty_tensors,
+        bindings: None,
+    };
+    chelis_ir::lower::reset_evaluation_definition_builds();
+    let outcome =
+        evaluate_host_program_with_library_and_types(&checked, None, None, inputs, None, None)
+            .expect("#2405 transform fixture evaluates");
+    let builds = chelis_ir::lower::evaluation_definition_builds();
+    let result = outcome
+        .host_bindings
+        .get("result")
+        .map(render_value)
+        .expect("#2405 transform fixture binds `result`");
+    (result, builds)
+}
+
+/// chelis#2405 round 2: a `grad` applied beneath recursion classifies its
+/// application against the scope's one definition snapshot. The retired
+/// exclusion used to skip that classification; before this receipt each
+/// application copied the whole table and derived its draw reachability
+/// again, so the count grew with the recursion depth.
+///
+/// Evidentiary status: REGRESSION TEST (the count is `depth + 1` when the
+/// transform classifies against a per-application copy).
+#[test]
+fn issue_2405_recursive_grad_builds_one_definition_snapshot() {
+    let program = |depth: i64| {
+        format!(
+            "def loss(x: tensor[4, f32]) -> tensor[f32] = sum(mul(copy(x), x), 0i32)\n\
+             def descend(n: i64, x: tensor[4, f32]) -> tensor[4, f32] = if eq(n, 0i64) then x else descend(sub(n, 1i64), sub(copy(x), grad(loss)(x)))\n\
+             result = tensor_to_scalar(sum(descend({depth}i64, to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32])), 0i32))\n"
+        )
+    };
+    // Each step maps x to x - 2x = -x.
+    let (shallow, shallow_builds) = evaluation_definition_builds(&program(4));
+    let (deep, deep_builds) = evaluation_definition_builds(&program(13));
+    assert_eq!(shallow, "10.0");
+    assert_eq!(deep, "-10.0");
+    assert_eq!(
+        (shallow_builds, deep_builds),
+        (1, 1),
+        "one program-scoped definition snapshot, however many `grad` applications"
+    );
+}
+
 /// chelis#2393: short-name resolution through the terminal index must agree
 /// with the linear scan it replaced, `terminal_name_matches` over every key
 /// with the exactly-one-match rule, for exact, short, qualified, ambiguous and

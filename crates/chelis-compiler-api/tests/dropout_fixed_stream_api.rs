@@ -1541,7 +1541,7 @@ fn legacy_unit_uniform(seed: u64, ordinal: u64, count: u64) -> Vec<f32> {
 ///
 /// Evidentiary status: DISPOSITION LOCK (the base produces these bits too).
 #[test]
-fn uniform_draws_beneath_draw_free_recursion_keep_their_stream() {
+fn uniform_draws_beneath_recursion_keep_their_stream() {
     let source = "def draw(x: tensor[4, f32]) -> tensor[4, f32] ! { Random } = uniform_like(x, 0.0f32, 1.0f32)\ndef walk(n: i64, x: tensor[4, f32]) -> tensor[4, f32] ! { Random } = if eq(n, 0i64) then x else add(draw(copy(x)), walk(sub(n, 1i64), x))\ndef main() = with seed(7i64) {\n x = to_tensor([0.0f32, 0.0f32, 0.0f32, 0.0f32])\n a = walk(3i64, copy(x))\n b = draw(copy(x))\n c = uniform_like(x, 0.0f32, 1.0f32)\n (a, b, c)\n}\n";
     let result = eval_selected(request(source), &["main".into()])
         .unwrap_or_else(|error| panic!("{error:?}"));
@@ -1675,4 +1675,24 @@ fn issue_2405_library_exporting_a_draw_free_hessian_keeps_its_importers() {
         assert_eq!(scalar_root(&result, "main.0"), 100.0);
         assert_eq!(tensor(&result, "main.1"), vec![6.0, 12.0, 18.0, 24.0]);
     }
+}
+
+/// chelis#2405 round 2: a transform whose target is a captured local
+/// closure classifies against a definition table that includes the closure,
+/// so a draw inside it is still seen and planned. The scope's cached
+/// snapshot, which the uncaptured case reads, does not contain the closure.
+///
+/// Evidentiary status: DISPOSITION LOCK (it passes before and after the
+/// round-2 change, and fails if the cached snapshot is read for a captured
+/// closure).
+#[test]
+fn grad_of_a_captured_drawing_closure_still_sees_its_draw() {
+    let ones = ones32();
+    let source = format!(
+        "def main() = with seed(42i64) {{\n x = to_tensor([{ones}])\n keep = fn (v: tensor[32, f32]) -> sum(dropout(v, 0.5f32), 0i32)\n g = grad(keep)(copy(x))\n next = dropout(x, 0.5f32)\n (g, next)\n}}\n"
+    );
+    let result = eval_selected(request(&source), &["main".into()])
+        .unwrap_or_else(|error| panic!("{source}\n{error:?}"));
+    assert_eq!(tensor(&result, "main.0"), mask(0));
+    assert_eq!(tensor(&result, "main.1"), mask(1));
 }

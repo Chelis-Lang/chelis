@@ -33,6 +33,22 @@ thread_local! {
     /// `prepare_subexpr_lowering_context` folds every definition it admits,
     /// so this rises once per context prepared, never once per definition.
     static PROGRAM_DEF_FOLD_PASSES: Cell<u64> = const { Cell::new(0) };
+    /// Counts [`EvaluationDefinitions`] built on this thread (chelis#2405).
+    /// Each build copies a definition table and derives its draw
+    /// reachability, so a program-scoped caller builds one per program.
+    static EVALUATION_DEFINITION_BUILDS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// [`EvaluationDefinitions`] built on this thread since the last reset: a
+/// counted receipt that a caller classifying per application reads one
+/// program-scoped table rather than copying one per ask.
+pub fn evaluation_definition_builds() -> u64 {
+    EVALUATION_DEFINITION_BUILDS.with(Cell::get)
+}
+
+/// Reset [`evaluation_definition_builds`] for this thread.
+pub fn reset_evaluation_definition_builds() {
+    EVALUATION_DEFINITION_BUILDS.with(|builds| builds.set(0));
 }
 
 /// Whole-program definition folds on this thread since the last reset.
@@ -6382,6 +6398,7 @@ pub struct EvaluationDefinitions {
 
 impl EvaluationDefinitions {
     pub fn new(defs: BTreeMap<String, Expr>) -> Self {
+        EVALUATION_DEFINITION_BUILDS.with(|builds| builds.set(builds.get() + 1));
         let reach = static_controls::DrawReach::new(&defs);
         Self { defs, reach }
     }
