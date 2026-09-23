@@ -638,7 +638,11 @@ class SchemaTests(unittest.TestCase):
         for rule in config.path_rules:
             if rule.owner is not None:
                 workflow = (root / ".github/workflows" / rule.owner.workflow).read_text()
-                self.assertIn(f"\n  {rule.owner.job}:\n", workflow)
+                if workflow.startswith("{"):
+                    # ownership-hip.yml is authored as JSON, a YAML subset.
+                    self.assertIn(rule.owner.job, json.loads(workflow)["jobs"])
+                else:
+                    self.assertIn(f"\n  {rule.owner.job}:\n", workflow)
         by_path = {rule.prefix: rule for rule in config.path_rules}
         dual_consumer_examples = {
             "examples/kinded_nominal_dimensions.ch": (
