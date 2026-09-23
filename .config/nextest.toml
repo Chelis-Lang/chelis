@@ -249,3 +249,4 @@ slow-timeout = { period = "60s", terminate-after = 150 }
 
 [profile.runtime-identity-producers.junit]
 path = "junit.xml"
+store-success-output = true

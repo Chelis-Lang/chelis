@@ -67,6 +67,225 @@ cadence = "pull_request and push"
 reason = "the standing adapter_failures target runs this Python suite with the real helper, including core-backed cached-observation checks"
 tracking_issue = "chelis#2394"
 
+# chelis#2394: migrated build inputs and callers retain their actual execution
+# owners. Script-unit ownership below covers the named Python contracts, not
+# an implied execution of each standalone oracle's complete compiler matrix.
+[[path_rule]]
+prefix = "nix/packages.nix"
+disposition = "owner"
+workflow = "nix-packages.yml"
+job = "nix-linux-x86-64"
+cadence = "workflow_dispatch and published release"
+reason = "the native flake check set builds the package graph, including independently observed runtime, CLI and Python producers"
+tracking_issue = "chelis#2394"
+
+[[path_rule]]
+prefix = "nix/runtime-identity.nix"
+disposition = "owner"
+workflow = "nix-packages.yml"
+job = "nix-linux-x86-64"
+cadence = "workflow_dispatch and published release"
+reason = "the native flake check set executes the compiler-observing builder adapter imported by the package graph"
+tracking_issue = "chelis#2394"
+
+[[path_rule]]
+prefix = "nix/source.nix"
+disposition = "owner"
+workflow = "nix-packages.yml"
+job = "nix-linux-x86-64"
+cadence = "workflow_dispatch and published release"
+reason = "the native flake check set builds packages from the filtered workspace source supplied by this expression"
+tracking_issue = "chelis#2394"
+
+[[path_rule]]
+prefix = "scripts/capacity_census_typed.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "script-nightly"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "NativeOwnerIntegration executes generate_rustdoc_json for chelis-python and chelis-abi; lightweight enumerator contracts also run in PR script-unit"
+tracking_issue = "chelis#2394"
+
+[[path_rule]]
+prefix = "scripts/capacity_census_wire_local.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "dtype-phase3-oracle"
+cadence = "daily and workflow_dispatch"
+reason = "capacity_census_wire executes the registered LocalPublicationControls compiler expansion and local DTO rejection controls"
+tracking_issue = "chelis#2048"
+
+[[path_rule]]
+prefix = "scripts/compiler_front_end_performance.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "integration-support"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "the integration support gate executes the front-end structural complexity and parity oracle"
+tracking_issue = "chelis#1205"
+
+[[path_rule]]
+prefix = "scripts/compiler_pipeline_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "test_compiler_pipeline_oracle exercises command selection and failure propagation; this does not claim hosted execution of the complete standalone pipeline oracle"
+tracking_issue = "chelis#2394"
+
+[[path_rule]]
+prefix = "scripts/darwin_tree_sitter_smoke.py"
+disposition = "owner"
+workflow = "nix-packages.yml"
+job = "nix-darwin-arm64"
+cadence = "workflow_dispatch and published release"
+reason = "devenv test executes the Darwin tree-sitter task on the native Darwin worker"
+tracking_issue = "chelis#2394"
+
+[[path_rule]]
+prefix = "scripts/dtype_builtin_atom_closure_oracle.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "integration-support"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "the integration support gate executes the builtin atom closure oracle"
+tracking_issue = "chelis#1294"
+
+[[path_rule]]
+prefix = "scripts/dtype_capacity_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "test_dtype_capacity_oracle exercises receipt validation, source identity and failed-build rejection; this does not claim a completed capacity prerequisite oracle"
+tracking_issue = "chelis#1288"
+
+[[path_rule]]
+prefix = "scripts/dtype_count_device_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "test_dtype_count_device_oracle exercises structural command selection and mutation restoration and drift rejection; no hardware execution is implied"
+tracking_issue = "chelis#1291"
+
+[[path_rule]]
+prefix = "scripts/dtype_count_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "test_dtype_count_oracle exercises the count command manifest and first-failure propagation, not the complete standalone compiler matrix"
+tracking_issue = "chelis#1287"
+
+[[path_rule]]
+prefix = "scripts/dtype_phase0_oracle.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "dtype-phase3-oracle"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "the Phase 3 manifest imports Phase 0 obligations into its executed flattened nextest union and inherited non-test legs"
+tracking_issue = "chelis#729"
+
+[[path_rule]]
+prefix = "scripts/dtype_phase1_oracle.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "dtype-phase3-oracle"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "the Phase 3 manifest imports Phase 1 obligations into its executed flattened nextest union and inherited non-test legs"
+tracking_issue = "chelis#729"
+
+[[path_rule]]
+prefix = "scripts/dtype_phase2_oracle.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "dtype-phase3-oracle"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "the Phase 3 manifest imports Phase 2 obligations into its executed flattened nextest union and inherited non-test legs"
+tracking_issue = "chelis#729"
+
+[[path_rule]]
+prefix = "scripts/dtype_relu_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "test_dtype_relu_oracle executes source-contract mutations and runner failure controls, not the complete standalone compiler or hardware matrix"
+tracking_issue = "chelis#1313"
+
+[[path_rule]]
+prefix = "scripts/hash_order_determinism_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "test_hash_order_determinism_oracle exercises command registration, first-failure propagation and rejected arguments, not the complete standalone oracle"
+tracking_issue = "chelis#2394"
+
+[[path_rule]]
+prefix = "scripts/hash_order_phase_a_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "test_hash_order_phase_a_oracle exercises the component roster and runner success and failure controls, not the complete standalone oracle"
+tracking_issue = "chelis#2394"
+
+[[path_rule]]
+prefix = "scripts/hip_test.py"
+disposition = "owner"
+workflow = "ownership-hip.yml"
+job = "phase3"
+cadence = "workflow_dispatch on an exact commit with real HIP hardware"
+reason = "ownership_hip_ci runs the Phase 3 require-hip oracle, whose caller-byte and program-owned reuse fixtures execute this wrapper"
+tracking_issue = "chelis#1214"
+
+[[path_rule]]
+prefix = "scripts/loud_unsupported_phase2_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "test_loud_unsupported_phase2_oracle executes endpoint and mutation controls; the standing liveness nightly does not execute this complete oracle"
+tracking_issue = "chelis#2394"
+
+[[path_rule]]
+prefix = "scripts/loud_unsupported_phase3_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "test_loud_unsupported_phase3_oracle exercises the command manifest and first-failure propagation, not the complete standalone oracle"
+tracking_issue = "chelis#2394"
+
+[[path_rule]]
+prefix = "scripts/regenerate_chelis_std_bundle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "lint-rust"
+cadence = "pull_request and push"
+reason = "the lint-and-unit gate executes the real std bundle generator with --debug --check"
+tracking_issue = "chelis#2394"
+
+[[path_rule]]
+prefix = "scripts/test_release_workflow_pyo3_isolation.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "PR script discovery executes the release target dependency checks, including the CLI smt feature graph"
+tracking_issue = "chelis#422"
+
+[[path_rule]]
+prefix = "scripts/z3_test.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "test_z3_test exercises library discovery, override precedence and link-environment construction; this does not claim execution of the Devenv-only solver wrapper command"
+tracking_issue = "chelis#2394"
+
 # chelis#845: shared skill source and generated agent symlinks are checked by
 # the script-unit skill metadata/link contract.
 [[path_rule]]
