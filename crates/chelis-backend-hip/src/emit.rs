@@ -782,7 +782,7 @@ impl HipEmitter {
             if self.reduction_inlined.contains(&node.id.0) {
                 continue;
             }
-            if Self::read_only_at_emission(node, dag) {
+            if self.is_emission_literal(node) {
                 continue;
             }
             match &node.op {
@@ -2135,7 +2135,7 @@ impl HipEmitter {
                 .unwrap_or_else(|| panic!("op {:?} has no kernel name", node.op)))
         };
         match &node.op {
-            RiscOp::Const { .. } if Self::read_only_at_emission(node, dag) => {}
+            RiscOp::Const { .. } if self.is_emission_literal(node) => {}
             RiscOp::Const { value } => {
                 self.emit_const(id, value.as_f64_lossy(), &node.output_type)?
             }
@@ -3044,19 +3044,13 @@ impl HipEmitter {
         self.line("}");
     }
 
-    /// A constant only draw keys read: the literal seed of a `with seed`
-    /// region, which [`Self::record_scoped_draw_key`] reads at emission, so it
-    /// has no device value.
-    fn read_only_at_emission(node: &DagNode, dag: VerifiedDagView<'_>) -> bool {
-        matches!(node.op, RiscOp::Const { .. }) && {
-            let mut consumers = dag
-                .nodes()
-                .iter()
-                .filter(|consumer| consumer.inputs.contains(&node.id))
-                .peekable();
-            consumers.peek().is_some()
-                && consumers.all(|consumer| matches!(consumer.op, RiscOp::DrawKey { .. }))
-        }
+    /// A constant the storage plan gives no storage because only draw
+    /// emission reads it, as a literal: a `with seed` region's seed and a
+    /// draw's bounds, which [`Self::record_scoped_draw_key`] and
+    /// [`Self::keyed_uniform_like_parameters`] fold into the launch.
+    fn is_emission_literal(&self, node: &DagNode) -> bool {
+        matches!(node.op, RiscOp::Const { .. })
+            && *self.plan.node_kind(node.id) == NodeMemoryKind::Skipped
     }
 
     /// The HIP lane's counter-stream bridge
@@ -5245,6 +5239,8 @@ impl HipEmitter {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     fn emit_test_dag(
@@ -5891,6 +5887,65 @@ mod tests {
         assert_ne!(expected[0], expected[1]);
         assert_eq!(entry_keys("extern \"C\" void test_fn("), expected);
         assert_eq!(entry_keys("extern \"C\" void test_fn_device("), expected);
+    }
+
+    /// A draw's seed and literal bounds are read only while the draw is
+    /// emitted, so they take no device slot, fill launch or release, and
+    /// every owner and slot an entry point names is one it declares.
+    ///
+    /// Evidentiary status: REGRESSION TEST. At dcc9256c4 the storage plan
+    /// gave the seed a slot and an owner that the emitter never declared, so
+    /// the host entry released an undeclared `o_t` and `chelis_slot`, and
+    /// each bound was filled on the device by `kernel_fill_f32`.
+    #[test]
+    fn scoped_draw_literals_take_no_device_storage() {
+        fn used_and_declared(body: &str, prefix: &str) -> (BTreeSet<String>, BTreeSet<String>) {
+            let mut used = BTreeSet::new();
+            let mut declared = BTreeSet::new();
+            let bytes = body.as_bytes();
+            for (start, _) in body.match_indices(prefix) {
+                let identifier_before = start > 0
+                    && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_');
+                let digits = body[start + prefix.len()..]
+                    .bytes()
+                    .take_while(u8::is_ascii_digit)
+                    .count();
+                if identifier_before || digits == 0 {
+                    continue;
+                }
+                let name = &body[start..start + prefix.len() + digits];
+                used.insert(name.to_string());
+                if body[..start].ends_with("chelis_device_tensor_owner *") {
+                    declared.insert(name.to_string());
+                }
+            }
+            (used, declared)
+        }
+        for ty in [vec_f32(8), vec_f64(8)] {
+            let mut dag = Dag::new();
+            let like = dag.add_node(
+                RiscOp::Load {
+                    name: "like".into(),
+                },
+                vec![],
+                ty.clone(),
+                None,
+            );
+            let first = scoped_uniform(&mut dag, like, ty.clone(), (0.0, 1.0), 7);
+            let second = scoped_uniform(&mut dag, first, ty.clone(), (-1.0, 1.0), 7);
+            dag.add_root(second);
+            let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
+            let entries = hip.split("extern \"C\" void ").skip(1).collect::<Vec<_>>();
+            assert_eq!(entries.len(), 2, "{hip}");
+            for entry in entries {
+                assert!(!entry.contains("kernel_fill_f32"), "{entry}");
+                for prefix in ["o_t", "chelis_slot"] {
+                    let (used, declared) = used_and_declared(entry, prefix);
+                    assert!(!used.is_empty(), "{entry}");
+                    assert_eq!(used, declared, "{prefix} names in:\n{entry}");
+                }
+            }
+        }
     }
 
     #[test]

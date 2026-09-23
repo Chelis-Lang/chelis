@@ -576,7 +576,10 @@ fn build_storage_plan(
     dag: VerifiedDagView<'_>,
     lane: StorageLaneKind,
 ) -> Result<BuiltStoragePlan, OwnershipError> {
-    let skipped = dag.reduction_inlined_fused_elems();
+    let mut skipped = dag.reduction_inlined_fused_elems();
+    if lane == StorageLaneKind::Hip {
+        skipped.extend(hip_emission_literals(dag));
+    }
     let mut placements = classify_nodes(dag, lane, &skipped);
     let owner_of = compute_owner_map(&placements);
     let destructively_dropped = destructively_dropped_owners(&placements, &owner_of);
@@ -596,6 +599,44 @@ fn build_storage_plan(
         reusable,
         max_live_bytes,
     ))
+}
+
+/// The constants the HIP emitter reads only as literals while it emits a draw:
+/// a draw key's seed and controls, and a `uniform_like`'s bounds, which the
+/// emitter folds into the key it computes and the kernel's arguments. Such a
+/// constant has no device value, so it takes no slot and no lifetime. A
+/// constant any other operation, dependency or root reads keeps its storage.
+fn hip_emission_literals(dag: VerifiedDagView<'_>) -> Vec<NodeId> {
+    // `None` until a read is seen; then whether every read is a literal one.
+    let mut literal_only = vec![None::<bool>; dag.len()];
+    let mut read = |input: NodeId, literal: bool| {
+        if let Some(entry) = literal_only.get_mut(input.0) {
+            *entry = Some(entry.unwrap_or(true) && literal);
+        }
+    };
+    for node in dag.nodes() {
+        for (slot, input) in node.inputs.iter().enumerate() {
+            let literal = match node.op {
+                RiscOp::DrawKey { .. } => true,
+                RiscOp::UniformLike => matches!(slot, 1 | 2),
+                _ => false,
+            };
+            read(*input, literal);
+        }
+        for dependency in node.shape_deps.iter().chain(&node.result_claim_deps) {
+            read(*dependency, false);
+        }
+    }
+    for root in dag.roots() {
+        read(*root, false);
+    }
+    dag.nodes()
+        .iter()
+        .filter(|node| {
+            matches!(node.op, RiscOp::Const { .. }) && literal_only[node.id.0] == Some(true)
+        })
+        .map(|node| node.id)
+        .collect()
 }
 
 fn classify_nodes(
