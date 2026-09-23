@@ -141,6 +141,68 @@ class ObservationFailureTests(unittest.TestCase):
         with self.assertRaisesRegex(observer.ObservationError, "different compilation receipts"):
             driver.event_receipt(event, self.root / "state")
 
+    def test_artifact_event_must_match_observed_features_and_output_bytes(self):
+        artifact = self.root / "libunit.rlib"
+        artifact.write_bytes(b"observed compiler output")
+        receipt = {
+            "unit": {"features": ["build-script-cfg", "selected"]},
+            "outputs": [
+                {
+                    "path": str(artifact),
+                    "digest": observer.digest(artifact.read_bytes()),
+                }
+            ],
+        }
+        event = {
+            "features": ["selected"],
+            "filenames": [str(artifact)],
+        }
+        driver.validate_artifact_event(receipt, event)
+        event["features"] = ["different"]
+        with self.assertRaisesRegex(
+            observer.ObservationError, "feature is absent"
+        ):
+            driver.validate_artifact_event(receipt, event)
+        event["features"] = ["selected"]
+        receipt["outputs"].append(
+            {
+                "path": str(self.root / "unreported.rlib"),
+                "digest": observer.digest(b"unreported compiler output"),
+            }
+        )
+        with self.assertRaisesRegex(
+            observer.ObservationError, "does not bind"
+        ):
+            driver.validate_artifact_event(receipt, event)
+
+    def test_cached_dependency_receipt_needs_no_synthetic_cargo_event(self):
+        artifact = self.root / "libdependency.rlib"
+        artifact.write_bytes(b"exact cached dependency")
+        receipt = {
+            "protocol": 1,
+            "errors": [],
+            "outputs": [
+                {
+                    "path": str(artifact),
+                    "digest": observer.digest(artifact.read_bytes()),
+                }
+            ],
+            "roots": [],
+            "required_inputs": [],
+            "captured": [],
+            "ambient_environment": [],
+        }
+        os.environ["CHELIS_IDENTITY_BACKEND"] = "cargo"
+        with (
+            patch.object(observer, "capture", return_value=([], [])),
+            patch.object(
+                observer,
+                "cargo_event",
+                side_effect=AssertionError("cached dependencies have no Cargo event"),
+            ),
+        ):
+            observer.check_receipt(receipt)
+
     @unittest.skipUnless(HELPER and RUSTC, "requires compiled adapter and native rustc")
     def test_mutating_explicit_sysroot_invalidates_cached_observation(self):
         subject = self.root / "subject"
@@ -292,6 +354,13 @@ class ObservationFailureTests(unittest.TestCase):
         receipt = self.root / "build-receipt.json"
         observer.atomic(receipt, {"outputs": [{"path": str(original), "digest": observer.digest(original.read_bytes())}]})
         observer.atomic(self.root / "state/output-digests" / observer.digest(original.read_bytes()) / "binding.json", {"observation": str(receipt)})
+        ordinary_event = {
+            "filenames": [str(uplift)],
+            "target": {"kind": ["lib"], "name": "unrelated"},
+        }
+        self.assertIsNone(
+            driver.event_receipt(ordinary_event, self.root / "state")
+        )
         event = {"filenames": [str(uplift)], "target": {"kind": ["custom-build"]}}
         self.assertEqual(driver.event_receipt(event, self.root / "state"), str(receipt))
         uplift.write_bytes(b"another script")

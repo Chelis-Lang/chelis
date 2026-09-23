@@ -281,15 +281,6 @@ def check_receipt(receipt, captured_by_path=None):
         for variable in ambient:
             if current_environment.get(variable["name"]) != variable["digest"]:
                 raise ObservationError(f"changed build input environment {variable['name']}")
-    if os.environ.get("CHELIS_IDENTITY_BACKEND") == "cargo" and receipt["outputs"] and not receipt.get("installed"):
-        artifact = receipt["outputs"][0]["path"]
-        event = cargo_event("events", artifact)
-        if sorted(event["features"]) != sorted(receipt["unit"]["features"]):
-            raise ObservationError("Cargo artifact features differ from actual rustc cfg")
-        expected = {item["digest"] for item in receipt["outputs"] if not item["path"].endswith(".identity-real")}
-        actual = {digest(Path(filename).read_bytes()) for filename in cargo_output_files(event)}
-        if expected != actual:
-            raise ObservationError("Cargo artifact event does not bind the observed output bytes")
 
 
 def import_dependencies():

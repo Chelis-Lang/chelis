@@ -81,17 +81,28 @@ def event_receipt(event, state):
         # infer their origin from a directory scan, a salt, or modification time.
         paths = set()
         binding = state / "bindings" / (observer.key(filename) + ".json")
-        if binding.exists():
+        exact_binding = binding.exists()
+        if exact_binding:
             paths.add(observer.load(binding)["observation"])
         else:
-            # An exact path binding is stronger than historical byte matches.
-            # Only otherwise-unbound Cargo uplifted paths need the digest index.
+            # Cargo can uplift compiler outputs to a different path. Digest
+            # lookup is safe only when the event still names the observed
+            # target; build-script uplift predates that target-name binding.
             index = state / "output-digests" / actual
-            for binding in index.glob("*.json"):
-                paths.add(observer.load(binding)["observation"])
+            for candidate in index.glob("*.json"):
+                paths.add(observer.load(candidate)["observation"])
         matches = set()
         for path in paths:
             receipt = observer.load(path)
+            if (
+                not exact_binding
+                and "custom-build" not in event.get("target", {}).get("kind", [])
+                and (
+                    receipt.get("unit", {}).get("target_name")
+                    != event.get("target", {}).get("name")
+                )
+            ):
+                continue
             if not any(output["digest"] == actual for output in receipt["outputs"]):
                 continue
             if event.get("manifest_path") and receipt.get("manifest_path") != event["manifest_path"]:
@@ -107,6 +118,33 @@ def event_receipt(event, state):
     if len(found) != 1:
         raise observer.ObservationError("Cargo artifact bytes have ambiguous compilation observations")
     return next(iter(found))
+
+
+def validate_artifact_event(receipt, event):
+    """Bind a reported Cargo artifact to the observed compiler unit and bytes."""
+    if receipt.get("errors"):
+        raise observer.ObservationError(
+            "incomplete compiler observation: " + "; ".join(receipt["errors"])
+        )
+    if not isinstance(receipt.get("unit"), dict):
+        raise observer.ObservationError("compiler observation lacks its unit")
+    if not set(event["features"]).issubset(receipt["unit"]["features"]):
+        raise observer.ObservationError(
+            "Cargo artifact feature is absent from actual rustc cfg"
+        )
+    expected = {
+        item["digest"]
+        for item in receipt["outputs"]
+        if not item["path"].endswith(".identity-real")
+    }
+    actual = {
+        observer.digest(Path(filename).read_bytes())
+        for filename in observer.cargo_output_files(event)
+    }
+    if expected != actual:
+        raise observer.ObservationError(
+            "Cargo artifact event does not bind the observed output bytes"
+        )
 
 
 def run(cargo, arguments):
@@ -199,7 +237,7 @@ def run(cargo, arguments):
     elif not original_format.startswith("json"):
         raise observer.ObservationError("managed builds support Cargo JSON or default rendered diagnostics")
     failures = []
-    producers = []
+    producers = {}
     proc = subprocess.Popen([cargo, *command_args], env=environment, stdout=subprocess.PIPE, close_fds=False)
     assert proc.stdout is not None
     try:
@@ -225,7 +263,29 @@ def run(cargo, arguments):
                     for filename in event["filenames"]:
                         observer.atomic(state / "events" / environment["CHELIS_IDENTITY_SESSION"] / (observer.key(filename) + ".json"), event)
                     receipt_path = event_receipt(event, state)
-                    producer_package = next((package["name"] for package in metadata["packages"] if package["id"] == event["package_id"]), "") in {"chelis-runtime", "chelis-cli", "chelis-python"}
+                    producer_name = next(
+                        (
+                            package["name"]
+                            for package in metadata["packages"]
+                            if package["id"] == event["package_id"]
+                        ),
+                        "",
+                    )
+                    producer_role = {
+                        "chelis-runtime": "runtime",
+                        "chelis-cli": "cli",
+                        "chelis-python": "python",
+                    }.get(producer_name)
+                    producer_package = producer_role is not None
+                    requires_producer_observation = (
+                        producer_package
+                        and not event["profile"].get("test")
+                        and "custom-build" not in event["target"]["kind"]
+                        and any(
+                            observer.is_native_producer(producer_role, filename)
+                            for filename in observer.cargo_output_files(event)
+                        )
+                    )
                     if receipt_path:
                         try:
                             receipt = observer.load(receipt_path)
@@ -233,12 +293,28 @@ def run(cargo, arguments):
                             if producer_package:
                                 raise
                             continue
+                        if receipt.get("errors"):
+                            if requires_producer_observation:
+                                raise observer.ObservationError(
+                                    "incomplete producer observation: "
+                                    + "; ".join(receipt["errors"])
+                                )
+                            continue
+                        validate_artifact_event(receipt, event)
                         for output in receipt["outputs"]:
                             observer.atomic(state / "events" / environment["CHELIS_IDENTITY_SESSION"] / (observer.key(output["path"]) + ".json"), event)
-                        if receipt.get("role"):
-                            producers.append((receipt_path, event))
-                    elif producer_package and not event["profile"].get("test") and "custom-build" not in event["target"]["kind"]:
-                        raise observer.ObservationError("CHELIS_IDENTITY_MISSING_OBSERVATION: cached producer has no exact observation; rebuild in a clean managed target")
+                        if receipt.get("role") and any(
+                            observer.is_native_producer(
+                                receipt["role"], output["path"]
+                            )
+                            for output in receipt["outputs"]
+                        ):
+                            producers[receipt_path] = event
+                    elif requires_producer_observation:
+                        raise observer.ObservationError(
+                            "CHELIS_IDENTITY_MISSING_OBSERVATION: cached producer "
+                            "has no exact observation; rebuild in a clean managed target"
+                        )
                 elif event.get("reason") == "build-script-executed":
                     observer.atomic(state / "build-events" / environment["CHELIS_IDENTITY_SESSION"] / (observer.key(event["out_dir"]) + ".json"), event)
             except (OSError, ValueError, KeyError, observer.ObservationError) as error:
@@ -246,10 +322,10 @@ def run(cargo, arguments):
         code = proc.wait()
         if code:
             return code
-        # Fresh Cargo units require the same current source/output evidence as a
-        # newly compiled one. Validation executes only after the event stream is
-        # drained, so -j1 and concurrent rustc jobs cannot deadlock.
-        for receipt_path, event in producers:
+        # Validate complete native producer graphs after draining the event
+        # stream. Cached dependencies need no synthetic Cargo event: each
+        # current rustc invocation already binds their exact observed bytes.
+        for receipt_path, event in producers.items():
             verification = subprocess.run([str(helper), "validate-observation", receipt_path], env=environment, check=False)
             if verification.returncode:
                 failures.append(f"stale/corrupt producer observation: {event['package_id']}")
