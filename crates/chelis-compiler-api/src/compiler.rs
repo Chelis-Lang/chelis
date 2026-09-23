@@ -1902,7 +1902,10 @@ fn resolve_in_context_entry<'a>(
     })?;
     let mut scoped = compiled.dag.clone();
     scoped.set_roots(vec![root]);
-    let scoped = chelis_ir::optimize::project_program_roots(&scoped);
+    let scoped = chelis_ir::optimize::project_program_roots(
+        &scoped,
+        &compiled.random_regions.entered_by([selected.as_str()]),
+    );
     Ok(Some((selected.as_str(), scoped)))
 }
 
@@ -2867,6 +2870,7 @@ fn compile_rewritten_decls_in_context(
         tensor_root_names: new_tensor_root_names,
         named_roots: lowered_parts.named_roots,
         forward_node_index: lowered_parts.forward_node_index,
+        random_regions: lowered_parts.random_regions,
         library_runtime: Some(library_runtime),
     })
 }
@@ -3101,7 +3105,10 @@ fn eval_compiled(
     let tensor_values = if roots.is_empty() {
         UnordMap::new()
     } else {
-        eval::eval_tensor_roots_with_strict(&compiled.dag, &roots, |name| {
+        let entered = compiled
+            .random_regions
+            .entered_by(tensor_entries.iter().map(|entry| entry.def_name.as_str()));
+        eval::eval_program_roots_with_strict(&compiled.dag, &roots, &entered, |name| {
             bindings.get(name).cloned()
         })
         .map_err(eval_stage_error)?
@@ -3517,6 +3524,10 @@ struct CompiledSource {
     tensor_root_names: crate::pipeline::TensorRootNames,
     named_roots: crate::pipeline::NamedRoots,
     forward_node_index: crate::pipeline::ForwardNodeIndex,
+    /// The `with seed` regions each definition's activation enters. `dag`
+    /// holds every definition's activation, so evaluating or projecting
+    /// selected roots keeps exactly the regions their activations enter.
+    random_regions: chelis_ir::lower::RandomRegionOwners,
     /// Phase G' — optional library context payload threaded into the
     /// host evaluator so library `def` names resolve at runtime when
     /// new code calls them. `None` on the monolithic `compile_source`
@@ -4050,6 +4061,7 @@ fn compile_source_scoped_mode(
         tensor_root_names: root_metadata.tensor_names().clone(),
         named_roots: lowered_parts.named_roots,
         forward_node_index: lowered_parts.forward_node_index,
+        random_regions: lowered_parts.random_regions,
         library_runtime: None,
     })
 }

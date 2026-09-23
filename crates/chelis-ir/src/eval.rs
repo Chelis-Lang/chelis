@@ -2387,7 +2387,26 @@ where
 /// executed regions: a draw key runs when its value is reachable or another
 /// draw of its `with seed` region runs (`Dag::unlive_scoped_draw_peers`).
 fn live_mask_for_roots(dag: &Dag, roots: &[NodeId]) -> Vec<bool> {
-    live_mask_from(dag, roots.to_vec())
+    live_mask_entering(dag, roots, &std::collections::BTreeSet::new())
+}
+
+/// The nodes `roots` need over a graph of several activations, plus every
+/// draw key of the `with seed` regions their activations enter
+/// ([`crate::lower::RandomRegionOwners::entered_by`]), read or not.
+fn live_mask_entering(
+    dag: &Dag,
+    roots: &[NodeId],
+    entered: &std::collections::BTreeSet<u32>,
+) -> Vec<bool> {
+    let mut stack = roots.to_vec();
+    stack.extend(dag.nodes().iter().filter_map(|node| match node.op {
+        RiscOp::DrawKey {
+            handler: crate::dag::RandomHandler::Scoped { instance },
+            ..
+        } if entered.contains(&instance) => Some(node.id),
+        _ => None,
+    }));
+    live_mask_from(dag, stack)
 }
 
 /// The nodes one activation of `dag` runs for `roots`: every draw key
@@ -4311,6 +4330,34 @@ where
     }
     reject_drop_roots(dag, roots)?;
     let live = live_mask_for_roots(dag, roots);
+    eval_tensor_internal(
+        dag,
+        EvaluationScope::Roots { live: &live, roots },
+        true,
+        load_input,
+    )
+    .map(|evaluated| evaluated.values)
+}
+
+/// [`eval_tensor_roots_with_strict`] over a lowered program, whose graph
+/// holds every top-level definition's activation. The draws of the `entered`
+/// regions run whether or not a root reads them, so their controls validate
+/// and trap (spec/06 §5.2); the draws of activations the roots do not run
+/// are not evaluated.
+pub fn eval_program_roots_with_strict<F>(
+    dag: &Dag,
+    roots: &[NodeId],
+    entered: &std::collections::BTreeSet<u32>,
+    load_input: F,
+) -> Result<UnordMap<NodeId, TensorValue>, String>
+where
+    F: FnMut(&str) -> Option<TensorValue>,
+{
+    if roots.is_empty() {
+        return eval_tensor_roots_with_strict(dag, roots, load_input);
+    }
+    reject_drop_roots(dag, roots)?;
+    let live = live_mask_entering(dag, roots, entered);
     eval_tensor_internal(
         dag,
         EvaluationScope::Roots { live: &live, roots },

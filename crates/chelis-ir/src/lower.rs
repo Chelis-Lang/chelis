@@ -809,6 +809,15 @@ fn assert_decode_once_in_env(site: &str, env: &BTreeMap<String, Expr>) {
 pub fn try_lower_program_to_library(
     program: &CheckedProgram,
 ) -> Result<LoweredLibrary, LowerDiagnostic> {
+    try_lower_program_to_library_with_random_regions(program).map(|(library, _)| library)
+}
+
+/// [`try_lower_program_to_library`] with the [`RandomRegionOwners`] that
+/// root selection over the lowered program needs. The regions are not part
+/// of the cached carrier.
+pub fn try_lower_program_to_library_with_random_regions(
+    program: &CheckedProgram,
+) -> Result<(LoweredLibrary, RandomRegionOwners), LowerDiagnostic> {
     assert_checked_library_boundary(program);
     catch_lowering(|| {
         lower_program_to_library_inner(
@@ -837,7 +846,7 @@ pub(crate) fn try_lower_program_to_library_with_trace(
     // failed lowering discards all partial observations with its contexts.
     catch_lowering(|| {
         let collector = crate::lowering_trace::Collector::new();
-        let library = lower_program_to_library_inner(program, Some(collector.clone()));
+        let (library, _) = lower_program_to_library_inner(program, Some(collector.clone()));
         (library, collector.finish())
     })
 }
@@ -845,7 +854,7 @@ pub(crate) fn try_lower_program_to_library_with_trace(
 fn lower_program_to_library_inner(
     program: &CheckedProgram,
     #[cfg(feature = "lowering-trace")] trace: Option<crate::lowering_trace::Collector>,
-) -> LoweredLibrary {
+) -> (LoweredLibrary, RandomRegionOwners) {
     let detail_profile = std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL")
         .map(|v| v == "1")
         .unwrap_or(false);
@@ -898,6 +907,7 @@ fn lower_program_to_library_inner(
     }
     log_sub("lower_ctx_new", &mut sub_t);
     let mut last_dag_size: usize = ctx.dag.len();
+    let mut random_regions = RandomRegionOwners::default();
     // Same reasoning as the assertions_loop above: prefer the
     // precomputed `lowered_names` over a fresh `top_level_expr_is_lowered`
     // rebuild for non-named decls (these are non-`def` top-levels like
@@ -917,7 +927,9 @@ fn lower_program_to_library_inner(
             // For pre-flight gate counting, we want to know how often
             // top_level_expr_is_lowered fires (each call rebuilds the
             // lowering map — quadratic).
+            let first_region = ctx.next_random_instance;
             ctx.lower_top_level(expr);
+            random_regions.record(expr, first_region..ctx.next_random_instance);
             if let Some(t0) = t0 {
                 let elapsed = t0.elapsed();
                 let nodes = ctx.dag.len();
@@ -947,9 +959,13 @@ fn lower_program_to_library_inner(
     }
     log_sub("flatten_bindings", &mut sub_t);
 
-    // A program's top-level definitions are independently executed regions,
-    // so an unreached region's draws are not kept alive by the others.
-    let (dce_dag, remap) = crate::optimize::project_program_roots_with_remap(&ctx.dag);
+    // A program's top-level definitions are independently executed
+    // activations. The graph keeps every region a root's activation enters,
+    // read or not, and no other activation keeps a draw alive.
+    let (dce_dag, remap) = crate::optimize::project_program_roots_with_remap(
+        &ctx.dag,
+        &random_regions.entered_by_roots(&ctx.rootless_defs),
+    );
     log_sub("dce", &mut sub_t);
     let (copy_dag, linear_remap) = insert_copy_nodes_for_consuming_fanout(&dce_dag);
     log_sub("implicit_copy_nodes", &mut sub_t);
@@ -984,7 +1000,7 @@ fn lower_program_to_library_inner(
         .collect();
     log_sub("renumber_symbol_table", &mut sub_t);
 
-    LoweredLibrary {
+    let library = LoweredLibrary {
         dag: linear_dag,
         symbol_table,
         program_defs,
@@ -995,7 +1011,8 @@ fn lower_program_to_library_inner(
         lowered_names,
         rootless_defs: ctx.rootless_defs,
         library_proof_id: program.library_proof_id(),
-    }
+    };
+    (library, random_regions)
 }
 
 fn insert_copy_nodes_for_consuming_fanout(dag: &Dag) -> (Dag, UnordMap<NodeId, NodeId>) {
@@ -1204,6 +1221,97 @@ pub fn lower_program_with_context(library: &LoweredLibrary, new_program: &Checke
 pub struct ComposedLowering {
     pub dag: Dag,
     pub rootless_defs: BTreeSet<String>,
+    /// The new-code definitions' `with seed` regions. Library definitions
+    /// come from a cached carrier that records none.
+    pub random_regions: RandomRegionOwners,
+}
+
+/// The `with seed` regions each top-level definition's lowering opened,
+/// recorded as the [`crate::dag::RandomHandler::Scoped`] instances it
+/// allocated (`spec/design/randomness_counter_stream.md` §2).
+///
+/// A lowered program holds every definition's activation in one graph, so a
+/// draw whose value nothing reads is still owed by the activation that
+/// lowered it: it takes its ordinal and validates its controls, and a trap
+/// there is an observation (spec/06 §5.2). Selecting roots keeps the regions
+/// their activations enter and no others, so an unrelated definition's
+/// draws never run.
+#[derive(Debug, Clone, Default)]
+pub struct RandomRegionOwners {
+    definitions: BTreeMap<String, DefinitionRegions>,
+}
+
+#[derive(Debug, Clone)]
+struct DefinitionRegions {
+    instances: std::ops::Range<u32>,
+    /// A value declaration's activation runs where it is referenced; a
+    /// function's body is inlined into each caller's own activation.
+    value: bool,
+    references: Vec<String>,
+}
+
+impl RandomRegionOwners {
+    fn record(&mut self, expr: &Expr, instances: std::ops::Range<u32>) {
+        let Some((DeepTag::Def, _, kids)) = stamped_parts(expr) else {
+            return;
+        };
+        let Some(name) = kids.first().and_then(symbol_name) else {
+            return;
+        };
+        let value = !matches!(
+            kids.get(1).and_then(stamped_parts),
+            Some((DeepTag::Fn, _, _))
+        );
+        self.definitions.insert(
+            name.to_string(),
+            DefinitionRegions {
+                instances,
+                value,
+                references: chelis_types::linearity::free_runtime_variables(expr),
+            },
+        );
+    }
+
+    /// The regions an activation of the named definitions enters: each
+    /// definition's own, and those of every value declaration its body
+    /// references, directly or through a function it calls. A root name's
+    /// `.N` projection suffix names its definition.
+    pub fn entered_by<'a>(&self, roots: impl IntoIterator<Item = &'a str>) -> BTreeSet<u32> {
+        let mut entered = BTreeSet::new();
+        let mut visited = BTreeSet::new();
+        let mut pending = roots
+            .into_iter()
+            .map(|root| (root.split('.').next().unwrap_or(root), true))
+            .collect::<Vec<_>>();
+        while let Some((name, selected)) = pending.pop() {
+            let Some(regions) = self.definitions.get(name) else {
+                continue;
+            };
+            if selected || regions.value {
+                entered.extend(regions.instances.clone());
+            }
+            if visited.insert(name) {
+                pending.extend(
+                    regions
+                        .references
+                        .iter()
+                        .map(|reference| (reference.as_str(), false)),
+                );
+            }
+        }
+        entered
+    }
+
+    /// Every definition that contributes a root: the regions a lowered
+    /// program keeps before any root is selected.
+    fn entered_by_roots(&self, rootless: &BTreeSet<String>) -> BTreeSet<u32> {
+        self.entered_by(
+            self.definitions
+                .keys()
+                .filter(|name| !rootless.contains(*name))
+                .map(String::as_str),
+        )
+    }
 }
 
 pub fn try_lower_program_with_context(
@@ -1291,6 +1399,25 @@ fn lower_program_with_context_inner(
     // values live again, so we strip them and re-normalize Copy/Drop across
     // the combined DAG below.
     let (library_dag, library_remap) = strip_drop_nodes(&library.dag);
+    // New-code regions continue after the library's, so every region in the
+    // composed graph keeps a distinct instance.
+    let last_library_region = library_dag
+        .nodes()
+        .iter()
+        .filter_map(|node| match node.op {
+            RiscOp::DrawKey {
+                handler: crate::dag::RandomHandler::Scoped { instance },
+                ..
+            } => Some(instance),
+            _ => None,
+        })
+        .max();
+    ctx.next_random_instance = match last_library_region {
+        Some(last) => last
+            .checked_add(1)
+            .expect("scoped Random handler instances fit u32"),
+        None => 0,
+    };
     ctx.dag = library_dag;
     for (name, node_id) in library.symbol_table.to_sorted() {
         if let Some(mapped) = library_remap.get(node_id).copied() {
@@ -1299,12 +1426,15 @@ fn lower_program_with_context_inner(
         }
     }
 
+    let mut random_regions = RandomRegionOwners::default();
     for_each_top_level_item(new_program.exprs(), &mut |expr| {
         if top_level_expr_name(expr).and_then(|name| lowered_names.get(name).copied()) == Some(true)
             || (top_level_expr_name(expr).is_none()
                 && top_level_expr_is_lowered(expr, new_program.exprs(), new_type_env))
         {
+            let first_region = ctx.next_random_instance;
             ctx.lower_top_level(expr);
+            random_regions.record(expr, first_region..ctx.next_random_instance);
         }
     });
 
@@ -1319,6 +1449,7 @@ fn lower_program_with_context_inner(
     ComposedLowering {
         dag,
         rootless_defs: ctx.rootless_defs,
+        random_regions,
     }
 }
 

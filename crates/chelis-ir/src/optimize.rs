@@ -1,6 +1,7 @@
 //! Basic DAG optimization passes.
 
 use chelis_unord::UnordMap;
+use std::collections::BTreeSet;
 
 use crate::dag::{ComparisonKind, Dag, LogicalKind, NodeId, RiscOp};
 
@@ -277,37 +278,59 @@ pub(crate) fn dead_code_eliminate_with_retained(
 
 /// Which draw keys a dead-code pass keeps (`spec/design/randomness_counter_stream.md` §2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DrawLiveness {
+enum DrawLiveness<'a> {
     /// The graph is one activation, a kernel or helper body run once per
     /// call: every draw key executes, because an unused draw still takes its
     /// handler's ordinal.
     Activation,
-    /// The graph holds several independently executed regions, such as a
-    /// program's top-level definitions. A draw key executes when its value is
-    /// reachable from the kept roots or another draw of its `with seed` region
-    /// does; an inherited draw that nothing reaches belongs to a region that
-    /// does not execute.
-    Program,
+    /// The graph holds several independently executed activations, such as
+    /// a program's top-level definitions. Every draw key of an `entered`
+    /// `with seed` region executes, and so does every draw of a region whose
+    /// draw is reachable from the kept roots; an inherited draw that nothing
+    /// reaches belongs to an activation that does not execute.
+    Program { entered: &'a BTreeSet<u32> },
+}
+
+impl DrawLiveness<'_> {
+    fn observes(self, op: &RiscOp) -> bool {
+        match (self, op) {
+            (Self::Activation, RiscOp::DrawKey { .. }) => true,
+            (
+                Self::Program { entered },
+                RiscOp::DrawKey {
+                    handler: crate::dag::RandomHandler::Scoped { instance },
+                    ..
+                },
+            ) => entered.contains(instance),
+            _ => false,
+        }
+    }
 }
 
 /// [`dead_code_eliminate`] over a graph that holds several independently
-/// executed regions, such as a lowered program or its projection onto
-/// selected entry roots. A region's draws survive together when the region
-/// executes; draws of regions no kept root reaches are removed.
-pub fn project_program_roots(dag: &Dag) -> Dag {
-    project_program_roots_with_remap(dag).0
+/// executed activations, such as a lowered program or its projection onto
+/// selected entry roots. `entered` names the `with seed` regions the kept
+/// roots' activations enter ([`crate::lower::RandomRegionOwners::entered_by`]);
+/// their draws survive whether or not a root reads them. A region's draws
+/// survive together when the region executes; draws of activations no kept
+/// root runs are removed.
+pub fn project_program_roots(dag: &Dag, entered: &BTreeSet<u32>) -> Dag {
+    project_program_roots_with_remap(dag, entered).0
 }
 
 /// [`project_program_roots`] with the `old_id -> new_id` remapping.
-pub fn project_program_roots_with_remap(dag: &Dag) -> (Dag, UnordMap<NodeId, NodeId>) {
-    dead_code_eliminate_impl(dag, &[], true, DrawLiveness::Program)
+pub fn project_program_roots_with_remap(
+    dag: &Dag,
+    entered: &BTreeSet<u32>,
+) -> (Dag, UnordMap<NodeId, NodeId>) {
+    dead_code_eliminate_impl(dag, &[], true, DrawLiveness::Program { entered })
 }
 
 fn dead_code_eliminate_impl(
     dag: &Dag,
     retained: &[NodeId],
     implicit_observations: bool,
-    draws: DrawLiveness,
+    draws: DrawLiveness<'_>,
 ) -> (Dag, UnordMap<NodeId, NodeId>) {
     let n = dag.len();
     if n == 0 {
@@ -328,13 +351,9 @@ fn dead_code_eliminate_impl(
     }
     for node in dag.nodes() {
         // A draw key is effectful: it advances its handler even when its key
-        // is never read, so in one activation it is an observation like a
-        // Store.
-        let observed = match node.op {
-            RiscOp::Store { .. } => true,
-            RiscOp::DrawKey { .. } => draws == DrawLiveness::Activation,
-            _ => false,
-        };
+        // is never read, so in an activation that runs it is an observation
+        // like a Store.
+        let observed = matches!(node.op, RiscOp::Store { .. }) || draws.observes(&node.op);
         // chelis#2368: an unconditional effect is live regardless of
         // `implicit_observations`. A projected slice may legitimately drop an
         // unrelated `Store`, but never an abort: [05-OP-68] says it may not

@@ -1414,24 +1414,118 @@ fn nonunit_cotangent_matches_same_seed_finite_differences() {
     }
 }
 
-/// DISPOSITION LOCK, not a conformance claim. Selecting `selected` does not
-/// evaluate the declaration it references only through a dead binding, so
-/// `sampled`'s invalid rate does not trap. That is the chelis#2440 class, a
-/// discarded trapping computation eliminated against spec/06 §5.2, which the
-/// selected-root graph applies to a draw's validation as to any other trap.
-/// When that class is fixed this assertion flips to the trap.
+/// spec/06 §5.2 with [05-OP-37]: a draw inside an activation the selected
+/// root runs validates its rate and traps whether or not anything reads its
+/// result. The rows are the selected root's own handler (as a value root and
+/// as a function root), a discarded inner handler, a discarded call of a
+/// helper with its own handler, and a declaration the root references only
+/// through a dead binding, both as an inlined function and as a value
+/// declaration. The uniform row is [05-OP-8]'s bound check.
+///
+/// Evidentiary status: REGRESSION TEST. At 3b5f029d8 every row returned the
+/// root's value, because a region with no live draw was dropped as unreached.
 #[test]
-fn selected_declaration_drops_a_dead_reference_to_an_effecting_declaration() {
-    let source = "x: tensor[32, f32] = x\nsampled = with seed(42i64) { dropout(x, 1.0f32) }\nselected = {\n dead = sampled\n copy(x)\n}\nunrelated = with seed(7i64) { dropout(x, 0.5f32) }\n";
+fn a_selected_activations_discarded_draws_still_validate_and_trap() {
+    let rows = [
+        (
+            "own handler, value root",
+            "x: tensor[32, f32] = x\nselected = with seed(42i64) {\n dead = dropout(copy(x), 1.0f32)\n copy(x)\n}\n",
+            "numeric trap: domain in dropout at f32",
+        ),
+        (
+            "own handler, function root",
+            "def selected(x: tensor[32, f32]) -> tensor[32, f32] = with seed(42i64) {\n dead = dropout(copy(x), 1.0f32)\n x\n}\n",
+            "numeric trap: domain in dropout at f32",
+        ),
+        (
+            "discarded inner handler",
+            "x: tensor[32, f32] = x\nselected = with seed(42i64) {\n dead = with seed(9i64) { dropout(copy(x), 1.0f32) }\n dropout(copy(x), 0.5f32)\n}\n",
+            "numeric trap: domain in dropout at f32",
+        ),
+        (
+            "discarded helper with its own handler",
+            "def h(v: tensor[32, f32]) -> tensor[32, f32] = with seed(9i64) {\n dead = dropout(copy(v), 1.0f32)\n v\n}\ndef selected(x: tensor[32, f32]) -> tensor[32, f32] = with seed(42i64) {\n a = h(copy(x))\n dropout(x, 0.5f32)\n}\n",
+            "numeric trap: domain in dropout at f32",
+        ),
+        (
+            "dead reference to a function declaration",
+            "def sampled(x: tensor[32, f32]) -> tensor[32, f32] = with seed(42i64) { dropout(x, 1.0f32) }\ndef selected(x: tensor[32, f32]) -> tensor[32, f32] = {\n dead = sampled(copy(x))\n x\n}\n",
+            "numeric trap: domain in dropout at f32",
+        ),
+        (
+            "dead reference to a value declaration",
+            "x: tensor[32, f32] = x\nsampled = with seed(42i64) { dropout(x, 1.0f32) }\nselected = {\n dead = sampled\n copy(x)\n}\nunrelated = with seed(7i64) { dropout(x, 0.5f32) }\n",
+            "numeric trap: domain in dropout at f32",
+        ),
+        (
+            "discarded uniform with reversed bounds",
+            "x: tensor[32, f32] = x\nselected = with seed(42i64) {\n dead = uniform_like(copy(x), 1.0f32, 0.0f32)\n copy(x)\n}\n",
+            "numeric trap: domain in uniform_like at f32",
+        ),
+    ];
+    for (row, source, trap) in rows {
+        let error = eval_selected(request(source), &["selected".into()])
+            .map(|result| format!("{:?}", result.roots))
+            .expect_err(row);
+        assert!(
+            error.errors.iter().any(|error| error.message == trap),
+            "{row}: {error:?}"
+        );
+    }
+}
+
+/// The complement of the trap rows: selecting one root never runs another
+/// declaration's activation, so its invalid rate does not trap and its draws
+/// take no ordinal of the selected stream.
+#[test]
+fn an_unselected_declarations_invalid_draw_does_not_run() {
+    let source = "x: tensor[32, f32] = x\nselected = with seed(42i64) { dropout(copy(x), 0.5f32) }\nunrelated = with seed(42i64) { dropout(x, 1.0f32) }\n";
     let result = eval_selected(request(source), &["selected".into()]).unwrap();
-    assert_eq!(tensor(&result, "selected"), vec![1.0; 32]);
-    let result = eval_selected(request(source), &["unrelated".into()]).unwrap();
-    assert!(
-        result
-            .roots
-            .iter()
-            .any(|root| root.name.as_deref() == Some("unrelated"))
-    );
+    assert_eq!(tensor(&result, "selected"), mask(0));
+    let source = "def unrelated(y: tensor[32, f32]) -> tensor[32, f32] = with seed(42i64) { dropout(y, 1.0f32) }\ndef selected(x: tensor[32, f32]) -> tensor[32, f32] = with seed(42i64) {\n dead = dropout(copy(x), 0.5f32)\n dropout(x, 0.5f32)\n}\n";
+    let result = eval_selected(request(source), &["selected".into()]).unwrap();
+    assert_eq!(tensor(&result, "selected"), mask(1));
+}
+
+/// [05-RNG-1]: keeping a selected activation's discarded draws shifts no
+/// ordinal. A discarded draw takes the ordinal it owns, and a helper's
+/// discarded draw is taken on the stream it inherits.
+#[test]
+fn a_selected_activations_discarded_draws_keep_their_ordinals() {
+    let helper_dead_only = "def h(v: tensor[32, f32]) -> tensor[32, f32] ! { Random } = {\n dead = dropout(copy(v), 0.5f32)\n v\n}\n";
+    let rows = [
+        (
+            "value root, discarded then live",
+            "x: tensor[32, f32] = x\nselected = with seed(42i64) {\n dead = dropout(copy(x), 0.5f32)\n dropout(copy(x), 0.5f32)\n}\n".to_string(),
+            mask(1),
+        ),
+        (
+            "inherited helper whose only draw is discarded",
+            format!("{helper_dead_only}def selected(x: tensor[32, f32]) -> tensor[32, f32] = with seed(42i64) {{\n a = h(copy(x))\n dropout(x, 0.5f32)\n}}\n"),
+            mask(1),
+        ),
+        (
+            "discarded call of an inherited helper",
+            "def h(v: tensor[32, f32]) -> tensor[32, f32] ! { Random } = dropout(v, 0.5f32)\ndef selected(x: tensor[32, f32]) -> tensor[32, f32] = with seed(42i64) {\n dead = h(copy(x))\n dropout(x, 0.5f32)\n}\n".to_string(),
+            mask(1),
+        ),
+        (
+            "inherited helper, discarded then live",
+            "def h(v: tensor[32, f32]) -> tensor[32, f32] ! { Random } = {\n dead = dropout(copy(v), 0.5f32)\n dropout(v, 0.5f32)\n}\ndef selected(x: tensor[32, f32]) -> tensor[32, f32] = with seed(42i64) { h(x) }\n".to_string(),
+            mask(1),
+        ),
+        (
+            "runtime if whose unselected arm draws",
+            "def pick(v: tensor[32, f32], flag: bool) -> tensor[32, f32] ! { Random } = if flag then dropout(v, 0.5f32) else v\ndef selected(x: tensor[32, f32]) -> tensor[32, f32] = with seed(42i64) {\n flag = lt(tensor_to_scalar(sum(copy(x), 0i32)), 0.0f32)\n a = pick(copy(x), flag)\n add(a, dropout(x, 0.5f32))\n}\n".to_string(),
+            mask(0).iter().map(|value| value + 1.0).collect(),
+        ),
+    ];
+    assert_ne!(mask(0), mask(1), "the ordinal rows must discriminate");
+    for (row, source, expected) in rows {
+        let result = eval_selected(request(&source), &["selected".into()])
+            .unwrap_or_else(|error| panic!("{row}\n{error:?}"));
+        assert_eq!(tensor(&result, "selected"), expected, "{row}");
+    }
 }
 
 #[test]

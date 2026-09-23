@@ -4,7 +4,7 @@ use std::fmt;
 use chelis_deep::Expr as DeepExpr;
 use chelis_ir::Dag;
 use chelis_ir::dag::NodeId;
-use chelis_ir::lower::LowerDiagnostic;
+use chelis_ir::lower::{LowerDiagnostic, RandomRegionOwners};
 use chelis_types::{CheckedProgram, FitnessReport, InferResult, TypeEnv};
 
 /// A closed policy for nonfatal lowering failures.
@@ -565,6 +565,7 @@ pub struct LoweredParts {
     pub dag: Dag,
     pub named_roots: NamedRoots,
     pub forward_node_index: ForwardNodeIndex,
+    pub random_regions: RandomRegionOwners,
 }
 
 /// A checked program and its lowered DAG products.
@@ -574,6 +575,7 @@ pub struct LoweredCompilation {
     pub(crate) dag: Dag,
     pub(crate) named_roots: NamedRoots,
     pub(crate) forward_node_index: ForwardNodeIndex,
+    pub(crate) random_regions: RandomRegionOwners,
 }
 
 impl LoweredCompilation {
@@ -597,12 +599,19 @@ impl LoweredCompilation {
         &self.forward_node_index
     }
 
+    /// The `with seed` regions each definition's activation enters, which a
+    /// projection of [`Self::dag`] onto selected roots keeps.
+    pub fn random_regions(&self) -> &RandomRegionOwners {
+        &self.random_regions
+    }
+
     pub fn into_parts(self) -> LoweredParts {
         LoweredParts {
             checked: self.checked,
             dag: self.dag,
             named_roots: self.named_roots,
             forward_node_index: self.forward_node_index,
+            random_regions: self.random_regions,
         }
     }
 }
