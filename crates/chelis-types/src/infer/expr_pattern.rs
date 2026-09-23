@@ -90,14 +90,12 @@ pub(super) fn infer_match(
                 if !empty_guard {
                     let guard_ty =
                         infer_expr(guard, &mut arm_env, vg, subst, adt_reg, errors, product);
-                    let resolved_guard = subst.apply(&guard_ty);
-                    if !matches!(resolved_guard, Type::Prim(Prim::Bool) | Type::Error(_)) {
-                        errors.push(CheckError::new(
-                            CheckErrorKind::TypeMismatch,
-                            format!("match arm guard must be bool, got {resolved_guard}"),
-                            vec![],
-                        ));
-                    }
+                    super::expr_function::require_bool_condition(
+                        &guard_ty,
+                        "match arm guard",
+                        subst,
+                        errors,
+                    );
                 }
 
                 let body_ty = infer_expr(

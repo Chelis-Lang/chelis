@@ -587,6 +587,24 @@ out = grad(fwd_guard)(to_tensor([1.0f32, 2.0f32]))
     assert!(build_stderr.contains(message), "{build_stderr}");
 }
 
+/// REGRESSION TEST (chelis#2444). A guard over a dtype-generic `eq` checks,
+/// and each specialization selects by the guard in both lanes. On the base sha
+/// the program was rejected as "match arm guard must be bool, got ?N".
+#[test]
+fn a_dtype_generic_guard_checks_and_selects_in_eval_and_c() {
+    let source = r#"
+def is_zero[p: Numeric](x: p) -> i32 =
+  match x with {
+    | v if eq(v, cast(0, p)) => 1
+    | _ => 0
+  }
+a = is_zero(0.0f32)
+b = is_zero(0i64)
+c = is_zero(3i32)
+"#;
+    assert_lanes_print(source, "dtype_generic_guard", &["a = 1", "b = 1", "c = 0"]);
+}
+
 /// `n` guarded `Some` arms in a row, then an unguarded `Some` and `None`.
 fn guarded_chain(n: usize) -> String {
     let mut source = "def band(o: Option[i64]) -> i64 =\n  match o with {\n".to_string();

@@ -661,6 +661,30 @@ pub(super) fn infer_let(
     infer_expr(&kids[1], &mut let_env, vg, subst, adt_reg, errors, product)
 }
 
+/// The obligation every condition position owes: an `if` condition and a
+/// `match` arm guard each require a `bool`, discharged by unifying with it.
+///
+/// chelis#2444: the guard used to apply the substitution and require the
+/// result to already be `bool`, so a condition whose type was still pending
+/// (an `eq` over a dtype-binder operand, which could yet be a `bool` scalar or
+/// a `bool` tensor) was rejected as a guard and accepted as an `if` condition.
+/// One function makes the two positions one rule; only the position named in
+/// the diagnostic differs.
+pub(super) fn require_bool_condition(
+    cond_ty: &Type,
+    position: &str,
+    subst: &mut Subst,
+    errors: &mut DiagnosticSink<'_>,
+) {
+    if unify(cond_ty, &Type::Prim(Prim::Bool), subst).is_err() {
+        errors.push(CheckError::new(
+            CheckErrorKind::TypeMismatch,
+            format!("{position} must be bool, got {}", subst.apply(cond_ty)),
+            vec![],
+        ));
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_if(
     expr: &deep::Expr,
@@ -683,15 +707,7 @@ pub(super) fn infer_if(
     }
 
     let cond_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
-
-    // Condition should be bool (or tensor[D, bool])
-    if let Err(_te) = unify(&cond_ty, &Type::Prim(Prim::Bool), subst) {
-        errors.push(CheckError::new(
-            CheckErrorKind::TypeMismatch,
-            format!("if condition must be bool, got {}", subst.apply(&cond_ty)),
-            vec![],
-        ));
-    }
+    require_bool_condition(&cond_ty, "if condition", subst, errors);
 
     let then_ty = infer_expr(&kids[1], env, vg, subst, adt_reg, errors, product);
     let else_ty = infer_expr(&kids[2], env, vg, subst, adt_reg, errors, product);
