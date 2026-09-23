@@ -1512,22 +1512,20 @@ fn issue_2405_unrelated_match_leaves_dropout_on_the_handled_stream() {
     }
 }
 
-// Independent transcription of the legacy `uniform_like` fold that eval and
-// emitted C share (`seed ^ ordinal * golden`, then the splitmix finaliser
-// over `seed ^ index * golden`), never an evaluator helper. With bounds 0 and
-// 1 the drawn value is the f32 unit itself.
-fn legacy_unit_uniform(seed: u64, ordinal: u64, count: u64) -> Vec<f32> {
-    const GOLDEN: u64 = 0x9e37_79b9_7f4a_7c15;
-    let effective = seed ^ ordinal.wrapping_mul(GOLDEN);
+// Independent transcription of [05-RNG-1] and [05-OP-8] for `uniform_like`
+// over [0, 1), never an evaluator helper: the drawn value is the unit value
+// rounded to f32.
+fn spec_unit_uniform(seed: u64, ordinal: u64, count: u64) -> Vec<f32> {
+    fn mix(mut x: u64) -> u64 {
+        x = x.wrapping_add(0x9e3779b97f4a7c15);
+        x = (x ^ (x >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+        x = (x ^ (x >> 27)).wrapping_mul(0x94d049bb133111eb);
+        x ^ (x >> 31)
+    }
     (0..count)
         .map(|index| {
-            let mut x = effective ^ index.wrapping_mul(GOLDEN);
-            x ^= x >> 30;
-            x = x.wrapping_mul(0xbf58476d1ce4e5b9);
-            x ^= x >> 27;
-            x = x.wrapping_mul(0x94d049bb133111eb);
-            x ^= x >> 31;
-            ((x >> 11) as f64 / 9007199254740992.0) as f32
+            let word = mix(seed ^ mix(ordinal).rotate_left(17) ^ mix(index).rotate_left(41));
+            ((word >> 11) as f64 / 9007199254740992.0) as f32
         })
         .collect()
 }
@@ -1535,21 +1533,30 @@ fn legacy_unit_uniform(seed: u64, ordinal: u64, count: u64) -> Vec<f32> {
 /// chelis#2405 retired the execution exclusion that a recursive program's
 /// helpers used to run under, so a drawing helper beneath recursion now
 /// takes the planned kernel entry instead of the legacy one. Its
-/// `uniform_like` draws must be unchanged, bit for bit: the same fold, one
-/// ordinal per application in execution order, and the counter carried to
-/// the draws that follow.
+/// `uniform_like` draws take one ordinal per application in execution order,
+/// and the counter carries to the draws that follow: `a` sums the draws at
+/// ordinals 0 to 2, and `b` and `c` are ordinals 3 and 4.
 ///
-/// Evidentiary status: DISPOSITION LOCK (the base produces these bits too).
+/// Evidentiary status: DISPOSITION LOCK for the ordinals (chelis#2405's base
+/// consumed the same ones). The values are [05-RNG-1]'s since chelis#2408;
+/// the pinned bits are exact-rational evaluations from the assessment's
+/// `rng_ref.py uniform 7 ORDINAL 4 0 1 f32`.
 #[test]
 fn uniform_draws_beneath_recursion_keep_their_stream() {
     let source = "def draw(x: tensor[4, f32]) -> tensor[4, f32] ! { Random } = uniform_like(x, 0.0f32, 1.0f32)\ndef walk(n: i64, x: tensor[4, f32]) -> tensor[4, f32] ! { Random } = if eq(n, 0i64) then x else add(draw(copy(x)), walk(sub(n, 1i64), x))\ndef main() = with seed(7i64) {\n x = to_tensor([0.0f32, 0.0f32, 0.0f32, 0.0f32])\n a = walk(3i64, copy(x))\n b = draw(copy(x))\n c = uniform_like(x, 0.0f32, 1.0f32)\n (a, b, c)\n}\n";
     let result = eval_selected(request(source), &["main".into()])
         .unwrap_or_else(|error| panic!("{error:?}"));
     let draws = (0..5)
-        .map(|ordinal| legacy_unit_uniform(7, ordinal, 4))
+        .map(|ordinal| spec_unit_uniform(7, ordinal, 4))
         .collect::<Vec<_>>();
-    let bits = |values: &[f64]| {
+    let bits = |values: &[f32]| {
         values
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>()
+    };
+    let observed = |root: &str| {
+        tensor(&result, root)
             .iter()
             .map(|value| (*value as f32).to_bits())
             .collect::<Vec<_>>()
@@ -1557,22 +1564,28 @@ fn uniform_draws_beneath_recursion_keep_their_stream() {
     let walked = (0..4)
         .map(|index| draws[0][index] + (draws[1][index] + draws[2][index]))
         .collect::<Vec<_>>();
-    assert_eq!(
-        bits(&tensor(&result, "main.0")),
-        walked
-            .iter()
-            .map(|value| value.to_bits())
-            .collect::<Vec<_>>()
-    );
-    for (root, ordinal) in [("main.1", 3), ("main.2", 4)] {
+    for (root, expected, pinned) in [
+        (
+            "main.0",
+            bits(&walked),
+            [0x3f2e_b639, 0x4022_8700, 0x3f70_aea6, 0x3fac_e925],
+        ),
+        (
+            "main.1",
+            bits(&draws[3]),
+            [0x3edf_9140, 0x3d0d_592a, 0x3f12_e0b1, 0x3f72_3538],
+        ),
+        (
+            "main.2",
+            bits(&draws[4]),
+            [0x3f0f_dbaa, 0x3f2e_03e3, 0x3f4f_a3f4, 0x3d21_7fa8],
+        ),
+    ] {
         assert_eq!(
-            bits(&tensor(&result, root)),
-            draws[ordinal]
-                .iter()
-                .map(|value| value.to_bits())
-                .collect::<Vec<_>>(),
-            "{root}"
+            expected, pinned,
+            "{root}: the transcription and rng_ref.py agree"
         );
+        assert_eq!(observed(root), expected, "{root}");
     }
 }
 

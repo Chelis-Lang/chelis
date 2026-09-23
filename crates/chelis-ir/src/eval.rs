@@ -391,19 +391,6 @@ fn plan_less_dropout(node: NodeId) -> String {
     .to_string()
 }
 
-/// The legacy value-kernel unit sampler (`seed ^ index * golden`, then the
-/// splitmix finaliser). The tests keep it as the witness of the old affine.
-#[cfg(test)]
-fn dropout_sample(seed: u64, index: u64) -> f64 {
-    let mut x = seed ^ index.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    x ^= x >> 30;
-    x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    x ^= x >> 27;
-    x = x.wrapping_mul(0x94D0_49BB_1331_11EB);
-    x ^= x >> 31;
-    ((x >> 11) as f64) / ((1u64 << 53) as f64)
-}
-
 fn uniform_like(
     shape: &[usize],
     low: f64,
