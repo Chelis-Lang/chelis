@@ -11,8 +11,8 @@ per-PR integration gate. `.config/nextest.toml` carries three profiles:
   - `ci` excludes that same set plus every complete test binary named by a
     Phase 0-3 oracle `--test` argument;
   - `nightly` carries the EXACT SAME set as a positive filter, and the
-    profile remains a manual heavy selection. The hosted Linux Extended
-    Validation workflow runs the full workspace with `--ignore-default-filter`.
+    profile remains a manual heavy selection. The Linux Extended Validation
+    workflow runs the full workspace with `--ignore-default-filter`.
 
 This file locks the original workspace/nightly split plus the delegation
 contract for binaries named by oracle `--test` arguments. Selector-based
