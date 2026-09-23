@@ -65,7 +65,7 @@ const WELL_TYPED: &str = "add(cast(1.0, f32), cast(2.0, f32))";
 const MASKED_ERROR: &str = "add(cast(1.0, f32), cast(2, i64))";
 
 /// Mirror of `should_attach_type_metadata`'s exclusion list
-/// (crates/chelis-types/src/infer.rs). A List node whose tag is NOT in
+/// (crates/chelis-types/src/infer.rs). A node whose tag is NOT in
 /// this set gets a `type:` stamp during annotation unless its type
 /// inferred to `Type::Error`. If that list changes, this mirror must
 /// change in the same PR (the control corpus goes red otherwise, which
@@ -116,22 +116,15 @@ const NON_TYPE_STAMPED_TAGS: &[&str] = &[
     "d-lit",
 ];
 
-fn tag_of(list: &deep::List) -> Option<&str> {
-    match list.elements.first() {
-        Some(deep::Expr::Atom(deep::Atom::Name(s), _)) => Some(s.as_str()),
-        _ => None,
-    }
-}
-
 /// The `(t-var {} _)` shape `type_to_deep_expr` produces for `Type::Error`.
 fn is_error_type_stamp(expr: &deep::Expr) -> bool {
-    let deep::Expr::List(list, _) = expr else {
+    let deep::Expr::Node(node, _) = expr else {
         return false;
     };
-    tag_of(list) == Some("t-var")
+    node.tag().as_str() == "t-var"
         && matches!(
-            list.elements.get(2),
-            Some(deep::Expr::Atom(deep::Atom::Name(s), _)) if s == "_"
+            node.children_slice(),
+            [deep::Expr::Atom(deep::Atom::Name(s), _)] if s == "_"
         )
 }
 
@@ -172,12 +165,10 @@ fn collect_tree_traces(expr: &deep::Expr, path: &str, check_stamp: bool, out: &m
                 }
             });
         }
-        deep::Expr::List(list, _) => {
-            let tag = tag_of(list);
-            if check_stamp
-                && let (Some(tag), Some(deep::Expr::Map(meta, _))) = (tag, list.elements.get(1))
-                && !NON_TYPE_STAMPED_TAGS.contains(&tag)
-            {
+        deep::Expr::Node(node, _) => {
+            let tag = node.tag().as_str();
+            let meta = node.meta();
+            if check_stamp && !NON_TYPE_STAMPED_TAGS.contains(&tag) {
                 match meta.ty() {
                     None => out.push(format!(
                         "{path}/{tag}: stamp-eligible node with no `type:` stamp \
@@ -190,23 +181,34 @@ fn collect_tree_traces(expr: &deep::Expr, path: &str, check_stamp: bool, out: &m
                     Some(_) => {}
                 }
             }
-            let label = tag.unwrap_or("<untagged>");
-            let child_check = tag != Some("params");
-            for (index, element) in list.elements.iter().enumerate() {
+            // Paths keep the written-form indices: the metadata map is
+            // element 1 and child `i` is element `i + 2`.
+            let child_check = tag != "params";
+            meta.visit_syntax(&mut |key, value| {
+                if key.spelling() != "type" {
+                    collect_tree_traces(
+                        value,
+                        &format!("{path}/{tag}[1].{}", key.spelling()),
+                        child_check,
+                        out,
+                    );
+                }
+            });
+            for (index, child) in node.children_slice().iter().enumerate() {
                 collect_tree_traces(
-                    element,
-                    &format!("{path}/{label}[{index}]"),
+                    child,
+                    &format!("{path}/{tag}[{}]", index + 2),
                     child_check,
                     out,
                 );
             }
         }
-        // Bridge: reconstruct List so type-stamp checking works unchanged (#908)
-        deep::Expr::Node(node, span) => {
-            let bridged = deep::Expr::List(node.to_list(*span), *span);
-            collect_tree_traces(&bridged, path, check_stamp, out);
+        deep::Expr::BareList(elements, _) => {
+            for (index, element) in elements.iter().enumerate() {
+                collect_tree_traces(element, &format!("{path}/<untagged>[{index}]"), true, out);
+            }
         }
-        deep::Expr::BareList(_, _) | deep::Expr::UnknownForm(_) => {}
+        deep::Expr::UnknownForm(_) => {}
     }
 }
 

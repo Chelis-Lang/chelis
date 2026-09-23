@@ -37,11 +37,6 @@ fn collect_one(expr: &Expr, acc: &mut Vec<String>) {
     }
     match expr {
         Expr::Atom(..) => {}
-        Expr::List(list, _) => {
-            for child in &list.elements {
-                collect_one(child, acc);
-            }
-        }
         Expr::Map(meta, _) => {
             meta.visit_syntax(&mut |_, value| collect_one(value, acc));
         }
