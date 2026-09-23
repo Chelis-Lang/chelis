@@ -9666,7 +9666,11 @@ fn lower_match_host_expr(
             // body destructures again under its own names. Every failure exit
             // of that second destructuring is unreachable. Emitting the rest
             // once per exit would compound: the rest can hold further arms,
-            // or a body that is itself a match.
+            // or a body that is itself a match. The test has already matched
+            // the pattern's literals, so the second destructuring does not
+            // test them again: that test would only add a branch to the arm,
+            // and an owned ADT scrutinee is not released on a branching arm
+            // (chelis#2458).
             Some(test_plan) => {
                 let test = compile_host_pattern(
                     &test_plan,
@@ -9678,7 +9682,7 @@ fn lower_match_host_expr(
                     &mut names,
                 );
                 let selected = compile_host_pattern(
-                    &arm.plan,
+                    &arm.plan.without_literal_tests(),
                     scrutinee_var.clone(),
                     arm.body,
                     no_arm_selected(),
@@ -9811,6 +9815,54 @@ enum HostPatternPlan {
 }
 
 impl HostPatternPlan {
+    /// The same pattern with every literal test removed, for destructuring a
+    /// value already known to match it.
+    fn without_literal_tests(&self) -> Self {
+        match self {
+            Self::Literal(_) => Self::Wild,
+            Self::As {
+                source_name,
+                lowered_name,
+                ty,
+                inner,
+            } => Self::As {
+                source_name: source_name.clone(),
+                lowered_name: lowered_name.clone(),
+                ty: ty.clone(),
+                inner: Box::new(inner.without_literal_tests()),
+            },
+            Self::ListCons {
+                head,
+                tail,
+                element_ty,
+                list_ty,
+            } => Self::ListCons {
+                head: Box::new(head.without_literal_tests()),
+                tail: Box::new(tail.without_literal_tests()),
+                element_ty: element_ty.clone(),
+                list_ty: list_ty.clone(),
+            },
+            Self::Tuple(items) => Self::Tuple(
+                items
+                    .iter()
+                    .map(|(item, ty)| (item.without_literal_tests(), ty.clone()))
+                    .collect(),
+            ),
+            Self::OptionSome { inner, inner_ty } => Self::OptionSome {
+                inner: Box::new(inner.without_literal_tests()),
+                inner_ty: inner_ty.clone(),
+            },
+            Self::Adt { ctor, fields } => Self::Adt {
+                ctor: ctor.clone(),
+                fields: fields
+                    .iter()
+                    .map(|(index, field, ty)| (*index, field.without_literal_tests(), ty.clone()))
+                    .collect(),
+            },
+            Self::Wild | Self::Bind { .. } | Self::ListNil | Self::OptionNone => self.clone(),
+        }
+    }
+
     /// How many places [`compile_host_pattern`] puts its failure
     /// continuation for this pattern.
     fn failure_exits(&self) -> usize {
