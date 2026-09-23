@@ -1575,3 +1575,44 @@ fn uniform_draws_beneath_draw_free_recursion_keep_their_stream() {
         );
     }
 }
+
+/// chelis#2405: `grad` of a function whose draw sits under runtime control,
+/// and `vmap` of a drawing function, lower their `dropout` without a
+/// fixed-control plan. The evaluator refuses that draw loudly. Before the
+/// fence it returned a mask from the pre-[05-RNG-1] formula, and retiring
+/// the inherited exclusion had removed the unrelated error that used to hide
+/// that value behind a later draw.
+///
+/// Evidentiary status: REGRESSION TEST (every row returns values, not an
+/// error, without the fence).
+#[test]
+fn plan_less_dropout_under_grad_of_dynamic_control_or_vmap_is_refused() {
+    let ones = ones32();
+    let row = "[1.0f32, 1.0f32, 1.0f32, 1.0f32]";
+    let vmap_keep =
+        "def keep(x: tensor[4, f32]) -> tensor[4, f32] ! { Random } = dropout(x, 0.5f32)\n";
+    for source in [
+        format!(
+            "def loss(x: tensor[32, f32]) -> tensor[f32] ! {{ Random }} = if gt(tensor_to_scalar(sum(copy(x), 0i32)), 0.0f32) then sum(dropout(x, 0.5f32), 0i32) else sum(x, 0i32)\ndef main() = with seed(42i64) {{\n x = to_tensor([{ones}])\n g = grad(loss)(copy(x))\n after = dropout(x, 0.5f32)\n (g, after)\n}}\n"
+        ),
+        format!(
+            "{vmap_keep}def main() = with seed(42i64) {{\n xs = to_tensor([{row}, {row}, {row}])\n ys = vmap(keep)(xs)\n after = dropout(to_tensor({row}), 0.5f32)\n (ys, after)\n}}\n"
+        ),
+        format!(
+            "{vmap_keep}def main() = with seed(42i64) {{\n xs = to_tensor([{row}, {row}, {row}])\n vmap(keep)(xs)\n}}\n"
+        ),
+    ] {
+        let error = eval_selected(request(&source), &["main".into()]).unwrap_err();
+        assert_eq!(error.stage, "eval", "{source}\n{error:?}");
+        assert!(
+            error.errors.iter().any(|error| {
+                error.message.contains("unsupported: op `dropout` on ")
+                    && error
+                        .message
+                        .contains("without a fixed-control plan (runtime)")
+                    && error.message.contains("unimplemented chelis#2413")
+            }),
+            "{source}\n{error:?}"
+        );
+    }
+}

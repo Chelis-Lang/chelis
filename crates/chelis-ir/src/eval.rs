@@ -370,28 +370,30 @@ fn cast_trunc_value(input: &TensorValue, dst: Prim) -> Result<TensorValue, Strin
     Ok(TensorValue::from_storage(input.shape.clone(), storage))
 }
 
-fn dropout(input: &TensorValue, rate: f64, seed: u64, prim: Prim) -> Result<TensorValue, String> {
-    let keep_scale = if rate >= 1.0 {
-        0.0
-    } else {
-        1.0 / (1.0 - rate.max(0.0))
-    };
-    let data = input
-        .to_f64_lossy_vec()
-        .into_iter()
-        .enumerate()
-        .map(|(index, value)| {
-            let sample = dropout_sample(seed, index as u64);
-            if sample < rate {
-                0.0
-            } else {
-                value * keep_scale
-            }
-        })
-        .collect();
-    finalize_wide("dropout", prim, input.shape.clone(), data)
+/// A `dropout` node reached without a fixed-control plan frame has no
+/// [05-RNG-1] key: its graph seed pre-mixes an ordinal fixed at lowering
+/// time, and the formula that used to consume it was not [05-OP-37]. The
+/// evaluator refuses it rather than return a mask the spec does not define
+/// (chelis#2405). Every [05-OP-37] draw runs through `ExecutionFrame::dropout`.
+fn plan_less_dropout(node: NodeId) -> String {
+    chelis_types::unsupported::Unsupported::new(
+        chelis_types::unsupported::UnsupportedKind::Op("dropout".into()),
+        format!(
+            "tensor graph node {} evaluated without a fixed-control plan",
+            node.0
+        ),
+        chelis_types::unsupported::Stage::Runtime,
+        chelis_types::unimplemented_rejection!(
+            2413,
+            "`dropout` under `vmap` (chelis#2409), or under `grad` of a function whose draw sits under runtime control, is not yet supported on this path"
+        ),
+    )
+    .to_string()
 }
 
+/// The legacy value-kernel unit sampler (`seed ^ index * golden`, then the
+/// splitmix finaliser). The tests keep it as the witness of the old affine.
+#[cfg(test)]
 fn dropout_sample(seed: u64, index: u64) -> f64 {
     let mut x = seed ^ index.wrapping_mul(0x9E37_79B9_7F4A_7C15);
     x ^= x >> 30;
@@ -3313,7 +3315,7 @@ where
             }
             RiscOp::Dropout { rate, seed } => match execution.as_deref_mut() {
                 Some(frame) => frame.dropout(node.id, &values[&node.inputs[0]], *rate, *seed)?,
-                None => dropout(&values[&node.inputs[0]], *rate, *seed, out_prim)?,
+                None => return Err(plan_less_dropout(node.id)),
             },
             RiscOp::MaxElem => binary_elementwise(
                 ElementwiseBinOp::Max,
@@ -5703,8 +5705,12 @@ mod tests {
         );
     }
 
+    /// chelis#2405: a `dropout` lowered without a fixed-control plan is
+    /// refused, never evaluated with the pre-[05-RNG-1] formula. The plan
+    /// path's determinism and seed sensitivity are pinned in
+    /// `tests/dropout_fixed_stream_ir.rs`.
     #[test]
-    fn lowered_dropout_is_deterministic_for_same_seed() {
+    fn lowered_dropout_without_a_plan_is_refused() {
         let src = r#"
             (def {} x (lit {type: (t-tensor {} (d-lit {} 32) (t-prim {} f32))} 1.0))
             (def {} y
@@ -5713,42 +5719,18 @@ mod tests {
                 (app {} (var {} dropout) (var {} x) (lit {type: (t-prim {} f32)} 0.5))))
         "#;
         let dag = lower(src);
-        let vals_a = eval_tensor(&dag, &UnordMap::new()).unwrap();
-        let vals_b = eval_tensor(&dag, &UnordMap::new()).unwrap();
-        let out_a = vals_a.get(dag.roots().last().expect("DAG root")).unwrap();
-        let out_b = vals_b.get(dag.roots().last().expect("DAG root")).unwrap();
-        assert_eq!(out_a, out_b);
-        assert!(out_a.to_f64_lossy_vec().contains(&0.0));
-        assert!(out_a.to_f64_lossy_vec().iter().any(|value| *value > 0.0));
-    }
-
-    #[test]
-    fn lowered_dropout_changes_with_different_seed() {
-        let src_a = r#"
-            (def {} x (lit {type: (t-tensor {} (d-lit {} 32) (t-prim {} f32))} 1.0))
-            (def {} y
-              (handle-effect {effect: random}
-                (lit {type: (t-prim {} i64)} 42)
-                (app {} (var {} dropout) (var {} x) (lit {type: (t-prim {} f32)} 0.5))))
-        "#;
-        let src_b = r#"
-            (def {} x (lit {type: (t-tensor {} (d-lit {} 32) (t-prim {} f32))} 1.0))
-            (def {} y
-              (handle-effect {effect: random}
-                (lit {type: (t-prim {} i64)} 43)
-                (app {} (var {} dropout) (var {} x) (lit {type: (t-prim {} f32)} 0.5))))
-        "#;
-        let dag_a = lower(src_a);
-        let dag_b = lower(src_b);
-        let out_a = eval_tensor(&dag_a, &UnordMap::new())
-            .unwrap()
-            .remove(&NodeId(dag_a.len() - 1))
-            .unwrap();
-        let out_b = eval_tensor(&dag_b, &UnordMap::new())
-            .unwrap()
-            .remove(&NodeId(dag_b.len() - 1))
-            .unwrap();
-        assert_ne!(out_a, out_b);
+        assert!(
+            dag.nodes()
+                .iter()
+                .any(|node| matches!(node.op, RiscOp::Dropout { .. }))
+        );
+        let error = eval_tensor(&dag, &UnordMap::new()).unwrap_err();
+        assert!(
+            error.starts_with("unsupported: op `dropout` on tensor graph node ")
+                && error.contains("evaluated without a fixed-control plan (runtime)")
+                && error.contains("unimplemented chelis#2413"),
+            "{error}"
+        );
     }
 
     #[test]
