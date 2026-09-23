@@ -57,11 +57,10 @@ fn agreed_diagnostics(source: &str) -> Vec<String> {
 
 const SHAPE: &str = "type Shape =\n  | Circle(f32)\n  | Square(f32)\n";
 
-/// REGRESSION TEST. Each program leaves a variant covered only by a guarded
-/// arm, and each checked with no diagnostic on the base sha (53ecab5a6).
-#[test]
-fn a_variant_covered_only_by_a_guarded_arm_is_missing() {
-    let cases = [
+/// `(program, variant the checker must report missing)`: each leaves a
+/// variant covered only by a guarded arm.
+fn guarded_only_programs() -> Vec<(String, &'static str)> {
+    vec![
         (
             "def big(o: Option[i64]) -> i32 =\n  match o with {\n    | Some(v) if gt(v, 10i64) => 1\n    | None => 3\n  }\n"
                 .to_string(),
@@ -79,8 +78,28 @@ fn a_variant_covered_only_by_a_guarded_arm_is_missing() {
             ),
             "\"Circle\"",
         ),
-    ];
-    for (source, missing) in cases {
+        // A guarded irrefutable arm alone covers nothing at all.
+        (
+            format!(
+                "{SHAPE}def any_shape(s: Shape, c: bool) -> i32 =\n  match s with {{\n    | whole if c => 1\n  }}\n"
+            ),
+            "\"Circle\", \"Square\"",
+        ),
+    ]
+}
+
+/// The same program with an unguarded wildcard arm appended before the
+/// closing brace of its `match`.
+fn with_fallback(program: &str) -> String {
+    let close = program.rfind("  }\n").expect("the match closes");
+    format!("{}    | _ => 0\n{}", &program[..close], &program[close..])
+}
+
+/// REGRESSION TEST. Each program leaves a variant covered only by a guarded
+/// arm, and each checked with no diagnostic on the base sha (6d1a9d513).
+#[test]
+fn a_variant_covered_only_by_a_guarded_arm_is_missing() {
+    for (source, missing) in guarded_only_programs() {
         let diagnostics = agreed_diagnostics(&source);
         assert!(
             diagnostics.iter().any(|message| {
@@ -91,19 +110,27 @@ fn a_variant_covered_only_by_a_guarded_arm_is_missing() {
     }
 }
 
-/// Disposition lock. The same guarded arms beside an unguarded arm for each
-/// variant still check clean, as they did on the base sha, and the guard is
-/// still typed.
+/// Disposition lock. The same programs check clean once an unguarded
+/// wildcard arm follows, as they did on the base sha, so the guard is still
+/// typed and the guarded arm still binds for its guard and body.
 #[test]
-fn guarded_arms_beside_unguarded_coverage_check_clean() {
+fn the_same_programs_with_an_unguarded_fallback_check_clean() {
+    for (source, _) in guarded_only_programs() {
+        let source = with_fallback(&source);
+        let diagnostics = agreed_diagnostics(&source);
+        assert!(diagnostics.is_empty(), "{source}\ngot {diagnostics:?}");
+    }
+}
+
+/// Disposition lock. A guarded arm followed by an unguarded arm for the same
+/// constructor checks clean, as it did on the base sha.
+#[test]
+fn a_guarded_arm_then_an_unguarded_arm_for_the_same_constructor_checks_clean() {
     let cases = [
         "def big(o: Option[i64]) -> i32 =\n  match o with {\n    | Some(v) if gt(v, 10i64) => 1\n    | Some(v) => 2\n    | None => 3\n  }\n"
             .to_string(),
         format!(
             "{SHAPE}def classify(s: Shape) -> i32 =\n  match s with {{\n    | Circle(r) if gt(r, 1.0) => 1\n    | Circle(r) => 2\n    | Square(w) => 3\n  }}\n"
-        ),
-        format!(
-            "{SHAPE}def any_shape(s: Shape, c: bool) -> i32 =\n  match s with {{\n    | whole if c => 1\n    | _ => 3\n  }}\n"
         ),
     ];
     for source in cases {

@@ -62,8 +62,10 @@ fn build_output(source: &str, name: &str) -> Output {
         .expect("build should run")
 }
 
-/// Build to C and return the emitted body of the authored definition `def`.
-fn emitted_body(source: &str, name: &str, def: &str) -> String {
+/// Build to C and return the number of lines in the emitted body of the
+/// authored definition `def`. Lines, not bytes: the emitter indents each
+/// nested block, so bytes grow faster than the code does as nesting deepens.
+fn emitted_body_lines(source: &str, name: &str, def: &str) -> usize {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join(format!("{name}.ch"));
     let out_dir = dir.path().join(format!("{name}-out"));
@@ -78,7 +80,7 @@ fn emitted_body(source: &str, name: &str, def: &str) -> String {
     let emitted = std::fs::read_to_string(out_dir.join(format!("{name}.c"))).expect("emitted C");
     let rest = authored_host_body_definition(&emitted, def);
     let end = rest.find("\n}\n").expect("the definition is terminated");
-    rest[..end].to_string()
+    rest[..end].lines().count()
 }
 
 /// Build, link and run a program that is expected to trap: the build and
@@ -343,9 +345,10 @@ wrapped_empty = wrapped_none(Wrap(None))
 
 /// REGRESSION TEST (chelis#2446, chelis#2445). A match on each scalar dtype
 /// the literal path did not list, with and without a guard, builds, runs and
-/// agrees with eval. On the base sha every program was rejected at build with
-/// "an Option match has no `Some` arm", and eval printed `f = 50` or `f = 30`
-/// because it ignored the guard.
+/// agrees with eval. On the base sha every such program was rejected at build
+/// with "an Option match has no `Some` arm", and eval printed `f = 50` or
+/// `f = 30` because it ignored the guard. `f64`, which the literal path did
+/// list, is the control that the planner keeps it working.
 #[test]
 fn every_scalar_dtype_scrutinee_lowers_in_c_and_agrees_with_eval() {
     for dtype in ["i8", "i16", "i32"] {
@@ -377,7 +380,7 @@ f = guarded(3{dtype})
             &["a = 20", "b = 30", "c = 0", "d = 20", "e = 50", "f = 0"],
         );
     }
-    for dtype in ["f16", "bf16"] {
+    for dtype in ["f16", "bf16", "f64"] {
         let source = format!(
             r#"
 def pick(x: {dtype}) -> i32 =
@@ -516,6 +519,11 @@ a = trap_guard(0)
 /// coverage for a scalar scrutinee, so this reaches both lanes. On the base
 /// sha eval printed `a = 1` and C rejected the program for lacking a default
 /// arm.
+///
+/// This pins the run-time failure of a program that the section 3.2 Match
+/// rule's exhaustiveness premise rejects. When chelis#2455 makes the checker
+/// enforce coverage for scalar scrutinees, this program stops checking and
+/// the test must change with it.
 #[test]
 fn a_match_whose_guards_all_fail_fails_in_eval_and_c() {
     let source = r#"
@@ -620,19 +628,17 @@ fn guarded_chain(n: usize) -> String {
 /// Disposition lock on the C lowering's size. Each guarded `Some` arm has two
 /// failure exits, its pattern and its guard; placing the rest of the match at
 /// both would double the emitted body with every arm. The arm is decided by a
-/// `bool` test instead, so doubling the arms roughly doubles the body. Placing
-/// the rest at both exits emits 8 copies of the tail for 3 arms and 64 for 6,
-/// which this ratio rejects; at 10 arms that lowering did not finish in nine
-/// minutes.
+/// `bool` test instead, so doubling the arms roughly doubles the body's lines.
+/// Placing the rest at both exits emits 8 copies of the tail for 3 arms and 64
+/// for 6, which this ratio rejects; at 10 arms that lowering did not finish in
+/// nine minutes.
 #[test]
 fn a_chain_of_guarded_constructor_arms_lowers_at_linear_size() {
-    let short = emitted_body(&guarded_chain(3), "guarded_chain_3", "band");
-    let long = emitted_body(&guarded_chain(6), "guarded_chain_6", "band");
+    let short = emitted_body_lines(&guarded_chain(3), "guarded_chain_3", "band");
+    let long = emitted_body_lines(&guarded_chain(6), "guarded_chain_6", "band");
     assert!(
-        long.len() < 3 * short.len(),
-        "6 guarded arms emitted {} bytes against {} for 3",
-        long.len(),
-        short.len()
+        long < 3 * short,
+        "6 guarded arms emitted {long} lines against {short} for 3"
     );
     let source = format!(
         "{}a = band(Some(0i64))\nb = band(Some(4i64))\nc = band(Some(5i64))\nd = band(Some(40i64))\ne = band(None)\n",
@@ -643,4 +649,78 @@ fn a_chain_of_guarded_constructor_arms_lowers_at_linear_size() {
         "guarded_chain_run",
         &["a = 1", "b = 5", "c = 6", "d = 99", "e = 0"],
     );
+}
+
+/// A match nested `depth` levels deep through its fallback arm, in the two
+/// shapes the round-1 review measured: `| (i, i) => i | _ => match ...` over a
+/// tuple, and `| Wrap(Some(i)) => i | _ => match ...` over a constructor.
+/// The innermost fallback is `-1`.
+fn nested_fallback(shape: &str, depth: usize) -> String {
+    let (header, scrutinee, head): (&str, &str, fn(usize) -> String) = match shape {
+        "tuple" => ("def f(p: (i32, i32)) -> i32 =\n", "p", |i| {
+            format!("({i}, {i})")
+        }),
+        "wrap" => (
+            "type Wrap =\n  | Wrap(Option[i32])\ndef f(w: Wrap) -> i32 =\n",
+            "w",
+            |i| format!("Wrap(Some({i}))"),
+        ),
+        other => panic!("unknown shape {other}"),
+    };
+    let mut source = header.to_string();
+    let mut indent = "  ".to_string();
+    for level in 0..depth {
+        source.push_str(&format!("{indent}match {scrutinee} with {{\n"));
+        source.push_str(&format!("{indent}  | {} => {level}\n", head(level)));
+        source.push_str(&format!("{indent}  | _ =>\n"));
+        indent.push_str("    ");
+    }
+    source.push_str(&format!("{indent}-1\n"));
+    for _ in 0..depth {
+        indent.truncate(indent.len() - 4);
+        source.push_str(&format!("{indent}  }}\n"));
+    }
+    source
+}
+
+/// The C lowering's size across nesting, for one [`nested_fallback`] shape,
+/// and the two lanes' agreement at depth 6. Each arm's pattern has two failure exits (tuple) or three
+/// (constructor), and the fallback holds the next nested match. Placing the
+/// fallback at every exit multiplies the copies with each level, so the lines
+/// added per two levels would grow by 4 (tuple) or 9 (constructor) times from
+/// depth 4 to depth 6; emitted once, the fallback adds the same lines at every
+/// level. `af79d27a2` placed it at every exit and fails this for both shapes;
+/// the round-1 review measured 3.5 MB of C for the constructor at depth 6.
+fn assert_nested_fallback_is_linear(shape: &str, hit: &str, miss: &str) {
+    let [d2, d4, d6] = [2, 4, 6].map(|depth| {
+        emitted_body_lines(
+            &nested_fallback(shape, depth),
+            &format!("nested_{shape}_{depth}"),
+            "f",
+        )
+    });
+    assert!(
+        d6 - d4 < 2 * (d4 - d2),
+        "{shape}: {d2}, {d4} and {d6} lines at depths 2, 4 and 6"
+    );
+    let source = format!("{}a = f({hit})\nb = f({miss})\n", nested_fallback(shape, 6));
+    assert_lanes_print(
+        &source,
+        &format!("nested_{shape}_run"),
+        &["a = 5", "b = -1"],
+    );
+}
+
+/// REGRESSION TEST. On `af79d27a2` the body had 233, 1091 and 4523 lines at
+/// depths 2, 4 and 6.
+#[test]
+fn nested_tuple_fallback_matches_lower_at_linear_size() {
+    assert_nested_fallback_is_linear("tuple", "(5, 5)", "(99, 99)");
+}
+
+/// REGRESSION TEST. On `af79d27a2` the body had 338, 3218 and 29138 lines at
+/// depths 2, 4 and 6: the constructor pattern has three failure exits.
+#[test]
+fn nested_constructor_fallback_matches_lower_at_linear_size() {
+    assert_nested_fallback_is_linear("wrap", "Wrap(Some(5))", "Wrap(None)");
 }

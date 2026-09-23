@@ -9582,7 +9582,7 @@ fn lower_match_host_expr(
     // arms (chelis#2445) and send every scalar it did not list, and every
     // tuple, into the Option path (chelis#2446).
     let mut names = HostMatchNameSupply::new(match_expr, scope);
-    let mut planned = Vec::new();
+    let mut arms = Vec::new();
     for arm in kids.iter().skip(1) {
         let Some((DeepTag::Arm, _, arm_kids)) = stamped_parts(arm) else {
             return Err(host_expr_lowering_error(
@@ -9600,26 +9600,9 @@ fn lower_match_host_expr(
             ExprCarrier::StructuralList([]) => None,
             _ => Some(guard),
         };
-        let plan = plan_host_pattern(pattern, &scrutinee_ty, program, match_expr, &mut names)?;
-        planned.push((pattern, guard, body, plan));
-    }
-    // Whether the rest of the match after each arm tests another arm: the
-    // next arm has a guard or a refutable pattern.
-    let rest_tests_an_arm = (0..planned.len())
-        .map(|index| {
-            planned
-                .get(index + 1)
-                .is_some_and(|(_, guard, _, plan)| guard.is_some() || plan.failure_exits() > 0)
-        })
-        .collect::<Vec<_>>();
-    let mut arms = Vec::with_capacity(planned.len());
-    for ((pattern, guard, body, plan), rest_tests_an_arm) in
-        planned.into_iter().zip(rest_tests_an_arm)
-    {
         arms.push(lower_host_match_arm(
             match_expr,
-            (pattern, guard, body, plan),
-            rest_tests_an_arm,
+            (pattern, guard, body),
             &scrutinee_ty,
             program,
             scope,
@@ -9657,9 +9640,8 @@ fn lower_match_host_expr(
     let mut decision = no_arm_selected();
     for arm in arms.into_iter().rev() {
         decision = match arm.test {
-            // The rest of the match sits at each failure exit of the pattern
-            // and at a `false` guard. There is at most one such exit, or the
-            // rest selects no further arm by a test, so copies cannot compound.
+            // The rest of the match sits at the one failure exit of the
+            // pattern or at a `false` guard, so it is emitted at most once.
             None => {
                 let success = match arm.guard {
                     Some(guard) => HostExpr::new(HostExprKind::If {
@@ -9680,10 +9662,11 @@ fn lower_match_host_expr(
                 )
             }
             // Otherwise a `bool` test decides the arm, so the rest of the
-            // match, which tests further arms, is emitted once rather than
-            // once per exit, and the body destructures again under its own
-            // names. Every failure exit of that second destructuring is
-            // unreachable.
+            // match is still emitted once rather than once per exit, and the
+            // body destructures again under its own names. Every failure exit
+            // of that second destructuring is unreachable. Emitting the rest
+            // once per exit would compound: the rest can hold further arms,
+            // or a body that is itself a match.
             Some(test_plan) => {
                 let test = compile_host_pattern(
                     &test_plan,
@@ -9731,8 +9714,7 @@ struct LoweredHostMatchArm {
     plan: HostPatternPlan,
     /// A second plan of the same pattern, under fresh names, that decides the
     /// arm as a `bool` together with the guard. `None` when the pattern and
-    /// guard together have at most one failure exit, or when the rest of the
-    /// match tests no further arm.
+    /// guard together have at most one failure exit.
     test: Option<HostPatternPlan>,
     /// The lowered guard, in the scope of `test` when there is one and of
     /// `plan` otherwise.
@@ -9743,8 +9725,7 @@ struct LoweredHostMatchArm {
 #[allow(clippy::too_many_arguments)]
 fn lower_host_match_arm(
     match_expr: &Expr,
-    (pattern, guard, body, plan): (&Expr, Option<&Expr>, &Expr, HostPatternPlan),
-    rest_tests_an_arm: bool,
+    (pattern, guard, body): (&Expr, Option<&Expr>, &Expr),
     scrutinee_ty: &HostTypeTerm,
     program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
@@ -9765,7 +9746,8 @@ fn lower_host_match_arm(
         let renamed = rename_bound_names(expr, &renames, &UnordSet::new());
         lower_host_expr_with_expected_opt(&renamed, program, &scoped, tensor_helpers, expected)
     };
-    let test = (rest_tests_an_arm && plan.failure_exits() + usize::from(guard.is_some()) > 1)
+    let plan = plan_host_pattern(pattern, scrutinee_ty, program, match_expr, names)?;
+    let test = (plan.failure_exits() + usize::from(guard.is_some()) > 1)
         .then(|| plan_host_pattern(pattern, scrutinee_ty, program, match_expr, names))
         .transpose()?;
     let guard = guard

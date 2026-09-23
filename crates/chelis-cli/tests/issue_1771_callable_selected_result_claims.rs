@@ -1168,18 +1168,24 @@ fn assert_nested_list_pattern_provenance(native: bool) {
 }
 
 fn assert_native_list_pattern_skip_routes() {
+    // `Cons(_, Cons(value, Nil))` has three failure exits, so C lowering
+    // decides the arm with a `bool` test and the selected body destructures
+    // again ([04-PAT-2], chelis#2445): each fixture takes two tail skips in
+    // the test and two in the body. In the owned fixture the test's first skip
+    // borrows, because the body still reads the list; in the borrowed fixture
+    // both first skips borrow the top-level list.
     for (name, source, expected_borrowed, expected_owned) in [
         (
             "owned_list_pattern",
             nested_list_pattern_source(TWO_BY_FOUR, THREE_BY_FOUR),
-            0,
-            2,
+            1,
+            3,
         ),
         (
             "borrowed_list_pattern",
             borrowed_list_tail_source(TWO_BY_FOUR, THREE_BY_FOUR),
-            1,
-            1,
+            2,
+            2,
         ),
     ] {
         let dir = tempfile::tempdir().expect("tempdir");

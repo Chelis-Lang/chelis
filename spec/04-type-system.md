@@ -459,12 +459,12 @@ reannotation, and linearity annotation.
 
 The type checker verifies that `match` expressions cover all variants. Missing variants are a type error, not a warning.
 
-A top-level irrefutable arm covers the match: a bare variable pattern
-(`| x =>`) or an as-pattern whose inner pattern is irrefutable
-(`| q @ x =>`, `| q @ _ =>`). The coverage applies at the arm level
-only; a variable pattern NESTED inside a constructor or record pattern
-does not cover the other variants. An arm with a guard covers nothing,
-because its guard can be `false` ([04-PAT-2]).
+A top-level irrefutable arm without a guard covers the match: a bare
+variable pattern (`| x =>`) or an as-pattern whose inner pattern is
+irrefutable (`| q @ x =>`, `| q @ _ =>`). The coverage applies at the arm
+level only; a variable pattern NESTED inside a constructor or record pattern
+does not cover the other variants. A guarded arm covers nothing
+([04-PAT-2]).
 
 Coverage is a separate question from whether a pattern is admissible at the
 scrutinee type at all.
@@ -500,18 +500,21 @@ implemented: chelis#2438.)
 > and its guard, if it has one, evaluates to `true`; the `match` evaluates to
 > the selected arm's body, evaluated in that arm's scope. A guard is evaluated
 > only after its arm's pattern has matched, in the arm's scope: every name the
-> pattern binds is visible to it, bound to the part of the scrutinee it
-> matched, as is every name visible at the `match`. A guard has type `bool`,
-> under the same obligation as an `if` condition (§3.2). When a guard evaluates
-> to `false`, its arm is not selected, the bindings its pattern introduced are
-> discarded, and matching continues with the next arm. No guard is evaluated
-> for an arm whose pattern did not match or for any arm after the selected
-> one, and a guard whose evaluation traps makes the `match` trap rather than
-> reading as `false`. An arm without a guard carries `()` in the Deep guard
-> slot (`spec/03-deep-syntax.md` §2.3) and is selected whenever its pattern
-> matches. Every execution lane SHALL implement this rule: a lane that cannot
-> lower a guarded arm SHALL reject the program with a diagnostic, and SHALL NOT
-> drop the guard, drop the arm, or select an arm whose guard is `false`.
+> pattern binds is visible to it, bound to the part of the scrutinee it matched,
+> as is every name visible at the `match`. A guard has type `bool`, under the
+> same obligation as an `if` condition (§3.2). When a guard evaluates to
+> `false`, its arm is not selected, the bindings its pattern introduced are
+> discarded, and matching continues with the next arm. No guard is evaluated for
+> an arm whose pattern did not match or for any arm after the selected one, and
+> a guard whose evaluation traps makes the `match` trap rather than reading as
+> `false`. Because a guard can be `false`, a guarded arm contributes nothing to
+> the coverage §2.4 requires: a top-level irrefutable arm covers the match only
+> when it has no guard, and a variant is covered only by an arm without a guard.
+> An arm without a guard carries `()` in the Deep guard slot
+> (`spec/03-deep-syntax.md` §2.3) and is selected whenever its pattern matches.
+> Every execution lane SHALL implement this rule: a lane that cannot lower a
+> guarded arm SHALL reject the program with a diagnostic, and SHALL NOT drop the
+> guard, drop the arm, or select an arm whose guard is `false`.
 
 ### 2.5 Opaque Types
 
