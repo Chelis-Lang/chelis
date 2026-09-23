@@ -1,6 +1,6 @@
 use chelis_deep::{
-    Atom, DeepTag, Expr, List, Metadata, Span, UnknownFormData,
-    metadata::same_semantic_type_syntax, parse_and_stamp_type,
+    Atom, Expr, Metadata, Span, UnknownFormData, metadata::same_semantic_type_syntax,
+    parse_and_stamp_type,
 };
 
 fn parse_type_at_offset(source: &str, offset: usize) -> Expr {
@@ -8,23 +8,21 @@ fn parse_type_at_offset(source: &str, offset: usize) -> Expr {
         .unwrap_or_else(|error| panic!("valid type syntax {source:?}: {error}"))
 }
 
-fn legacy_list_root(expr: &Expr) -> Expr {
+/// The same text as a structural list: its tag spelled as a head name,
+/// then its metadata map and children.
+fn bare_list_root(expr: &Expr) -> Expr {
     let Expr::Node(node, span) = expr else {
         panic!("fixture must be a stamped node: {expr:?}");
     };
     let mut elements = vec![
-        Expr::Atom(Atom::Tag(node.tag()), Span::new(span.offset + 1, 1)),
+        Expr::Atom(
+            Atom::Name(node.tag().as_str().to_string()),
+            Span::new(span.offset + 1, 1),
+        ),
         Expr::Map(node.meta().clone(), Span::new(span.offset + 2, 2)),
     ];
     elements.extend(node.children_slice().iter().cloned());
-    Expr::List(List { elements }, *span)
-}
-
-fn bare_list_root(expr: &Expr) -> Expr {
-    let Expr::List(list, span) = legacy_list_root(expr) else {
-        unreachable!("legacy_list_root returns a list")
-    };
-    Expr::BareList(list.elements, span)
+    Expr::BareList(elements, *span)
 }
 
 #[test]
@@ -132,7 +130,7 @@ fn semantic_type_syntax_erases_the_complete_top_level_span_namespace() {
 }
 
 #[test]
-fn semantic_type_syntax_accepts_only_the_typed_and_transitional_list_carriers() {
+fn semantic_type_syntax_accepts_only_the_typed_carrier() {
     for name in ["f8e4m3", "f8e5m2"] {
         for source in [
             format!("(t-prim {{doc: \"same\"}} {name})"),
@@ -142,9 +140,9 @@ fn semantic_type_syntax_accepts_only_the_typed_and_transitional_list_carriers() 
             ),
         ] {
             let node = parse_type_at_offset(&source, 0);
-            let list = legacy_list_root(&node);
-            assert!(same_semantic_type_syntax(&node, &list), "{source}");
-            assert!(same_semantic_type_syntax(&list, &node), "{source}");
+            let respanned = parse_type_at_offset(&source, 17);
+            assert!(same_semantic_type_syntax(&node, &respanned), "{source}");
+            assert!(same_semantic_type_syntax(&respanned, &node), "{source}");
 
             let bare = bare_list_root(&node);
             assert!(
@@ -153,20 +151,6 @@ fn semantic_type_syntax_accepts_only_the_typed_and_transitional_list_carriers() 
             );
         }
     }
-
-    let malformed = Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::TPrim), Span::new(0, 1)),
-                Expr::Atom(Atom::Name("f8e4m3".into()), Span::new(1, 7)),
-            ],
-        },
-        Span::new(0, 8),
-    );
-    assert!(
-        !same_semantic_type_syntax(&parse_type_at_offset("(t-prim {} f8e4m3)", 0), &malformed),
-        "a malformed legacy list must remain independent"
-    );
 
     let unknown = Expr::UnknownForm(Box::new(UnknownFormData {
         head: "t-prim".into(),

@@ -6,9 +6,9 @@
 //! `infer_expr`'s `BareList` arm used to infer each child and return the LAST
 //! child's type, which for the empty list is `Type::Unit`, and count the node
 //! as typed. That made the two checker ingresses disagree about the same
-//! program: `check_ir_program` normalizes `BareList` into a tagless
-//! `Expr::List` before inference and rejects it on the unknown-tag arm, while
-//! `check_typed_program` walks stamped Deep directly and accepted
+//! program: `check_ir_program` then normalized `BareList` into a tagless
+//! legacy list before inference and rejected it on the unknown-tag arm, while
+//! `check_typed_program` walked stamped Deep directly and accepted
 //! `(def {} f ())` with zero errors. The permissive side scored a form with no
 //! honest type as checked -- the chelis#873-shape fail-open.
 //!
@@ -33,8 +33,7 @@ fn stamped(source: &str) -> Vec<Expr> {
     parse_and_stamp(source).unwrap_or_else(|e| panic!("fixture must stamp: {source}\n{e}"))
 }
 
-/// Errors from the stamped-Deep ingress, which preserves `Expr::BareList`
-/// rather than normalizing it to `Expr::List` first.
+/// Errors from the stamped-Deep ingress.
 fn typed_errors(exprs: &[Expr]) -> Vec<CheckError> {
     match check_typed_program(exprs) {
         Ok(_) => Vec::new(),

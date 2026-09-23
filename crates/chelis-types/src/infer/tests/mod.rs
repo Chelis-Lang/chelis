@@ -62,54 +62,6 @@ fn structural_child_stamp_roles_match_owner_positions() {
     }
 }
 
-/// chelis#873 / loud_unsupported.md section C1 rule 4, for decode-once's
-/// third structural token. Stamping is positional and `children()` skips
-/// elements 0-1, so no SOURCE program can put an `Atom::Tag` in
-/// expression position - which is exactly why the arm needs a canary
-/// rather than a comment. Built programmatically, the way the rule says
-/// to prove a path you believe is dead.
-///
-/// The sibling arms (`Symbol`, `Keyword`) are covered from source by
-/// `bare_atom_expression_position_scores_below_one` in the CLI corpus;
-/// this is the one arm that cannot be reached that way.
-#[test]
-fn tag_atom_in_expression_position_is_a_loud_malformed_form() {
-    let program = vec![node_expr(
-        DeepTag::Def,
-        vec![
-            symbol_expr("x"),
-            deep::Expr::Atom(deep::Atom::Tag(DeepTag::App), zero_span()),
-        ],
-    )];
-    let result = infer_program(&program);
-    assert!(
-        result.errors.iter().any(|error| {
-            matches!(error.kind, CheckErrorKind::MalformedForm)
-                && error.message.contains("a decoded tag atom `app`")
-                && error.message.contains("outside a list's tag position")
-        }),
-        "a tag atom in expression position must raise, not type as a value; got: {:?}",
-        result.errors
-    );
-}
-
-/// Negative parity: the same tag in its OWN position is ordinary
-/// structure and must not trip the arm above. Without this, the canary
-/// could pass for an over-broad reason.
-#[test]
-fn tag_atom_in_tag_position_is_not_a_malformed_form() {
-    let program = vec![node_expr(DeepTag::App, vec![])];
-    let result = infer_program(&program);
-    assert!(
-        !result
-            .errors
-            .iter()
-            .any(|error| error.message.contains("outside a list's tag position")),
-        "a stamped tag at element 0 is structure, not a bare atom; got: {:?}",
-        result.errors
-    );
-}
-
 fn check(src: &str) -> InferResult {
     let exprs = chelis_deep::parser::parse_str(src).unwrap();
     infer_program(&exprs)
@@ -284,18 +236,11 @@ fn infer_surf(src: &str) -> InferResult {
 
 fn missing_shape_sensitive_app(expr: &deep::Expr) -> Option<String> {
     match expr {
-        deep::Expr::List(list, _) => {
-            if get_tag(list) == Some(DeepTag::App)
-                && is_shape_sensitive_app(list)
-                && !list
-                    .elements
-                    .get(1)
-                    .and_then(|expr| match expr {
-                        deep::Expr::Map(meta, _) => Some(meta),
-                        _ => None,
-                    })
-                    .is_some_and(|meta| meta.ty().is_some())
-            {
+        deep::Expr::Map(map, _) => map.find_expression(missing_shape_sensitive_app),
+        deep::Expr::MetaExpr(meta, _) => missing_shape_sensitive_app(&meta.expr)
+            .or_else(|| meta.metadata.find_expression(missing_shape_sensitive_app)),
+        deep::Expr::Node(node, _) => {
+            if is_shape_sensitive_app(node) && node.meta().ty().is_none() {
                 return Some(
                     chelis_deep::printer::print_canonical(std::slice::from_ref(expr))
                         .replace('\n', " ")
@@ -303,17 +248,6 @@ fn missing_shape_sensitive_app(expr: &deep::Expr) -> Option<String> {
                         .to_string(),
                 );
             }
-            for child in &list.elements {
-                if let Some(missing) = missing_shape_sensitive_app(child) {
-                    return Some(missing);
-                }
-            }
-            None
-        }
-        deep::Expr::Map(map, _) => map.find_expression(missing_shape_sensitive_app),
-        deep::Expr::MetaExpr(meta, _) => missing_shape_sensitive_app(&meta.expr)
-            .or_else(|| meta.metadata.find_expression(missing_shape_sensitive_app)),
-        deep::Expr::Node(node, _) => {
             if let Some(missing) = node.meta().find_expression(missing_shape_sensitive_app) {
                 return Some(missing);
             }
@@ -342,9 +276,9 @@ fn missing_shape_sensitive_app(expr: &deep::Expr) -> Option<String> {
     }
 }
 
-fn is_shape_sensitive_app(list: &deep::List) -> bool {
-    get_tag(list) == Some(DeepTag::App)
-        && ir_builtin_name(list).is_some_and(super::is_ir_shape_sensitive_builtin)
+fn is_shape_sensitive_app(node: &DeepNode) -> bool {
+    node.tag() == DeepTag::App
+        && ir_builtin_name(node).is_some_and(super::is_ir_shape_sensitive_builtin)
 }
 
 fn check_ok(src: &str) {
@@ -377,24 +311,10 @@ fn check_err(src: &str, expected_kind: CheckErrorKind) {
 /// Build a left-nested `app` chain of `depth` distinct names directly in
 /// Deep, for the recursion-depth guard tests.
 fn deep_app_chain_node(depth: usize) -> deep::Expr {
-    let sym = |s: &str| deep::Expr::Atom(deep::Atom::Name(s.to_string()), Span::new(0, 0));
-    let meta = || deep::Expr::Map(deep::Metadata::default(), Span::new(0, 0));
-    let var = |n: &str| {
-        deep::Expr::List(
-            deep::List {
-                elements: vec![sym("var"), meta(), sym(n)],
-            },
-            Span::new(0, 0),
-        )
-    };
+    let var = |n: &str| stamped_node_expr(DeepTag::Var, vec![symbol_expr(n)]);
     let mut e = var("f0");
     for i in 1..=depth {
-        e = deep::Expr::List(
-            deep::List {
-                elements: vec![sym("app"), meta(), e, var(&format!("f{i}"))],
-            },
-            Span::new(0, 0),
-        );
+        e = stamped_node_expr(DeepTag::App, vec![e, var(&format!("f{i}"))]);
     }
     e
 }
@@ -924,7 +844,7 @@ fn tuple_get_index_reads_bare_atom_and_lit_node() {
     let bare = deep::Expr::Atom(deep::Atom::Int(2), zero_span());
     assert_eq!(tuple_get_index(&bare), Some(2));
     // `lit` node wrapping an `Int` atom (the Surf `.N` desugar).
-    let lit = node_expr(
+    let lit = stamped_node_expr(
         DeepTag::Lit,
         vec![deep::Expr::Atom(deep::Atom::Int(2), zero_span())],
     );
@@ -933,10 +853,10 @@ fn tuple_get_index_reads_bare_atom_and_lit_node() {
     let negative = deep::Expr::Atom(deep::Atom::Int(-1), zero_span());
     assert_eq!(tuple_get_index(&negative), None);
     // A non-`Int` payload (symbol) is not an index.
-    let symbolic = node_expr(DeepTag::Lit, vec![symbol_expr("nope")]);
+    let symbolic = stamped_node_expr(DeepTag::Lit, vec![symbol_expr("nope")]);
     assert_eq!(tuple_get_index(&symbolic), None);
     // A non-`lit` list tag is not an index.
-    let other = node_expr(DeepTag::Var, vec![symbol_expr("t")]);
+    let other = stamped_node_expr(DeepTag::Var, vec![symbol_expr("t")]);
     assert_eq!(tuple_get_index(&other), None);
 }
 

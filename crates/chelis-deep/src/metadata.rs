@@ -279,7 +279,6 @@ impl<'a> View<'a> {
     fn list(self) -> Option<Vec<Self>> {
         match self.scalar() {
             Self::Raw(RawExpr::List(v, _)) => Some(v.iter().map(Self::Raw).collect()),
-            Self::Ast(Expr::List(v, _)) => Some(v.elements.iter().map(Self::Ast).collect()),
             Self::Ast(Expr::BareList(v, _)) => Some(v.iter().map(Self::Ast).collect()),
             Self::Value(V::Source(v)) => Some(
                 std::iter::once(Self::Name(v.name.value(), v.name.span()))
@@ -380,11 +379,7 @@ impl<'a> View<'a> {
             }),
             _ => {
                 let list = self.list()?;
-                let head = *list.first()?;
-                let tag = match head {
-                    Self::Ast(Expr::Atom(Atom::Tag(tag), _)) => Some(*tag),
-                    _ => DeepTag::parse(head.name()?),
-                };
+                let tag = DeepTag::parse(list.first()?.name()?);
                 Some(Parts {
                     tag,
                     meta: list.get(1)?.map()?,
@@ -667,8 +662,8 @@ fn type_shape_error(root: View<'_>) -> Option<String> {
 /// Compare two complete Deep type-syntax trees by semantic content.
 ///
 /// This is the canonical generated-copy identity used by checker ownership
-/// classification. It accepts stamped `Node` trees and the exact transitional
-/// `List` carrier, rejects malformed or non-type carriers, recursively ignores
+/// classification. It accepts stamped `Node` trees, rejects non-type
+/// carriers, recursively ignores
 /// AST/token spans and source-only `span`, `span_*`, `loc`, and `source`
 /// metadata, and retains every other metadata key and payload.
 pub fn same_semantic_type_syntax(left: &Expr, right: &Expr) -> bool {
@@ -700,14 +695,6 @@ fn canonical_type_syntax(root: &Expr) -> bool {
 
         let (tag, children) = match value {
             Expr::Node(node, _) => (node.tag(), node.children_slice()),
-            Expr::List(list, _) => match list.elements.as_slice() {
-                [
-                    Expr::Atom(Atom::Tag(tag), _),
-                    Expr::Map(_, _),
-                    children @ ..,
-                ] => (*tag, children),
-                _ => return false,
-            },
             Expr::Atom(_, _)
             | Expr::Map(_, _)
             | Expr::MetaExpr(_, _)
@@ -809,11 +796,7 @@ fn same_syntax<'a, 'b>(a: View<'a>, b: View<'b>) -> bool {
             }
             continue;
         }
-        match (a, b) {
-            (View::Ast(Expr::Atom(Atom::Tag(a), _)), View::Ast(Expr::Atom(Atom::Tag(b), _)))
-                if a == b => {}
-            _ => return false,
-        }
+        return false;
     }
     true
 }

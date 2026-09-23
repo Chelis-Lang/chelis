@@ -7,43 +7,40 @@
 //! ## Node shapes
 //!
 //! A module renders to `(module {} <dotted.lower.name> decls...)`: the
-//! `module` tag is at `elements[0]`, its metadata map at `elements[1]`,
-//! the flattened lowercase dotted module name at `elements[2]`, and the
-//! top-level declarations follow at `elements[3..]`. A function
+//! flattened lowercase dotted module name is the `module` node's child 0,
+//! and the top-level declarations follow as children `1..`. A function
 //! definition renders to `(def {meta} <bare-name> (fn {} (params {} ...)
-//! BODY))`, so the function body slot is `def.elements[3].elements[3]`:
-//! `elements[3]` is the `(fn ...)` node and the body is that node's
-//! `elements[3]` (after the `fn` tag, its metadata map, and the
-//! `(params {} ...)` node). The def metadata at `elements[1]` carries
-//! producer annotations such as `chelis_role` on property defs and must
-//! survive a body rewrite untouched.
+//! BODY))`, so the function body slot is child 1 of the def's child 1: the
+//! def's child 1 is the `(fn ...)` node, whose child 0 is the
+//! `(params {} ...)` node and whose child 1 is the body. The def metadata
+//! carries producer annotations such as `chelis_role` on property defs and
+//! must survive a body rewrite untouched.
 //!
 //! A top-level `name: T = expr` value binding renders to a bare
 //! `(def {} name expr)` value node with no `(fn ...)` child. That is not
 //! a function-with-body, and resolving it as a function is a structured
 //! error rather than an out-of-bounds index.
 
-use crate::ast::{Atom, Expr, List};
+use crate::ast::{Atom, Expr};
 use crate::tag::DeepTag;
 
-/// The element index of the function body inside a `(fn {} (params {} ...)
-/// BODY)` node: the `fn` tag is at 0, its metadata map at 1, the
-/// `(params {} ...)` node at 2, and the body at 3.
-const FN_BODY_INDEX: usize = 3;
+/// The child index of the function body inside a `(fn {} (params {} ...)
+/// BODY)` node: the `(params {} ...)` node is child 0 and the body child 1.
+const FN_BODY_CHILD: usize = 1;
 
-/// The element index of the `(fn ...)` node inside a `(def {meta} <name>
-/// (fn ...))` function definition: the `def` tag is at 0, its metadata
-/// map at 1, the bare function name at 2, and the `(fn ...)` node at 3.
-const DEF_FN_INDEX: usize = 3;
+/// The child index of the `(fn ...)` node inside a `(def {meta} <name>
+/// (fn ...))` function definition: the bare function name is child 0 and
+/// the `(fn ...)` node child 1.
+const DEF_FN_CHILD: usize = 1;
 
-/// The element index of the module name symbol inside a `(module {}
-/// <name> decls...)` node: the `module` tag is at 0, its metadata map at
-/// 1, and the flattened lowercase dotted name at 2.
-const MODULE_NAME_INDEX: usize = 2;
+/// The child index at which a module's top-level declarations begin, after
+/// the module name at child 0.
+const MODULE_DECLS_START_CHILD: usize = 1;
 
-/// The element index at which a module's top-level declarations begin,
-/// after the `module` tag, its metadata map, and the module name.
-const MODULE_DECLS_START: usize = 3;
+/// The number of text elements before a node's first child: its tag and
+/// its metadata map. [`PathError::OutOfBounds`] reports the text element
+/// index, so a caller can find the slot in the printed Deep form.
+const NODE_HEADER_ELEMENTS: usize = 2;
 
 /// A single step in a [`DeepPath`].
 ///
@@ -57,10 +54,9 @@ pub enum PathSegment {
     /// Enter the body slot of a function definition. From a `(def {meta}
     /// <name> (fn {} (params {} ...) BODY))` node this addresses `BODY`.
     Body,
-    /// Index into the children of the current list node, where child 0 is
-    /// the first element after the tag and metadata map (i.e. the
-    /// `elements[2..]` slice). For `(app {} f a b)`, `Child(0)` addresses
-    /// `f`, `Child(1)` addresses `a`, and so on.
+    /// Index into the children of the current node, where child 0 is the
+    /// first element after the tag and metadata map. For `(app {} f a b)`,
+    /// `Child(0)` addresses `f`, `Child(1)` addresses `a`, and so on.
     Child(usize),
 }
 
@@ -113,20 +109,6 @@ impl DeepPath {
         }
         Ok(current)
     }
-
-    /// Resolve this path to a mutable reference in the deprecated legacy
-    /// List carrier.
-    ///
-    /// Stamped [`Expr::Node`] values reject mutable borrowing: successor
-    /// nodes must be rewritten through a transactional API that revalidates
-    /// the complete candidate before commit.
-    pub fn resolve_mut<'a>(&self, def: &'a mut Expr) -> Result<&'a mut Expr, PathError> {
-        let mut current = def;
-        for (depth, segment) in self.segments.iter().enumerate() {
-            current = step_mut(current, segment, depth)?;
-        }
-        Ok(current)
-    }
 }
 
 fn step<'a>(node: &'a Expr, segment: &PathSegment, depth: usize) -> Result<&'a Expr, PathError> {
@@ -141,58 +123,14 @@ fn step<'a>(node: &'a Expr, segment: &PathSegment, depth: usize) -> Result<&'a E
             }
             function_body(node).ok_or(PathError::BodyNeedsFnAddressing { depth })
         }
-        PathSegment::Child(index) => {
-            // For Expr::List: elements[2 + index] (skip tag + meta)
-            // For Expr::Node: children_slice()[index] (no tag/meta)
-            match node {
-                Expr::List(list, _) => {
-                    let element_index = 2 + index;
-                    list.elements
-                        .get(element_index)
-                        .ok_or(PathError::OutOfBounds {
-                            depth,
-                            index: element_index,
-                        })
-                }
-                Expr::Node(n, _) => n
-                    .children_slice()
-                    .get(*index)
-                    .ok_or(PathError::OutOfBounds {
-                        depth,
-                        index: 2 + index,
-                    }),
-                _ => Err(PathError::NotAList { depth }),
-            }
-        }
-    }
-}
-
-fn step_mut<'a>(
-    node: &'a mut Expr,
-    segment: &PathSegment,
-    depth: usize,
-) -> Result<&'a mut Expr, PathError> {
-    match segment {
-        PathSegment::Body => {
-            if !is_tagged(node, DeepTag::Def) {
-                return Err(PathError::NotAtDef { depth });
-            }
-            if matches!(node, Expr::Node(..)) {
-                return Err(PathError::StampedNodeNeedsTransactionalRewrite { depth });
-            }
-            function_body_mut(node).ok_or(PathError::BodyNeedsFnAddressing { depth })
-        }
         PathSegment::Child(index) => match node {
-            Expr::List(list, _) => {
-                let element_index = 2 + index;
-                list.elements
-                    .get_mut(element_index)
-                    .ok_or(PathError::OutOfBounds {
-                        depth,
-                        index: element_index,
-                    })
-            }
-            Expr::Node(..) => Err(PathError::StampedNodeNeedsTransactionalRewrite { depth }),
+            Expr::Node(n, _) => n
+                .children_slice()
+                .get(*index)
+                .ok_or(PathError::OutOfBounds {
+                    depth,
+                    index: NODE_HEADER_ELEMENTS + index,
+                }),
             _ => Err(PathError::NotAList { depth }),
         },
     }
@@ -220,19 +158,14 @@ pub enum PathError {
     /// A computed element index was out of bounds at the given path depth.
     #[error("path step {depth}: child index {index} is out of bounds")]
     OutOfBounds { depth: usize, index: usize },
-
-    /// Mutable references into a validated successor Node would bypass its
-    /// constructor invariant.
-    #[error("path step {depth}: stamped nodes require a transactional rewrite")]
-    StampedNodeNeedsTransactionalRewrite { depth: usize },
 }
 
 /// A located function definition within a module.
 #[derive(Debug, Clone)]
 pub struct ResolvedFunction {
     /// Index of the `(def ...)` node among the module's top-level
-    /// declarations (`module.elements[3..]`), i.e. relative to the first
-    /// declaration after the module name.
+    /// declarations, i.e. relative to the first declaration after the
+    /// module name.
     pub decl_index: usize,
     /// The fully-qualified Deep name of the function: the lowercase
     /// dotted module prefix joined to the bare function name with a dot
@@ -392,9 +325,8 @@ pub fn resolve_function(
 /// preserving the def metadata, the bare name, the fn metadata, and the
 /// params verbatim. Returns the full rewritten module program.
 ///
-/// Everything outside `def.elements[{DEF_FN_INDEX}].elements[{FN_BODY_INDEX}]`
-/// of the resolved function is left byte-identical under canonical
-/// printing; only the function body changes.
+/// Everything outside the body slot of the resolved function is left
+/// byte-identical under canonical printing; only the function body changes.
 pub fn splice_function_body(
     module_exprs: &[Expr],
     qualified_name: &str,
@@ -638,84 +570,38 @@ pub fn module_has_defsig_for(module_exprs: &[Expr], qualified_name: &str) -> boo
 
 /// Borrow the body subtree of a function `(def ...)` node, if present.
 pub fn function_body(def: &Expr) -> Option<&Expr> {
-    match def {
-        Expr::List(def_list, _) => {
-            let fn_list = match def_list.elements.get(DEF_FN_INDEX)? {
-                Expr::List(fl, _) => fl,
-                _ => return None,
-            };
-            if tag(fn_list) != Some(DeepTag::Fn) {
-                return None;
-            }
-            fn_list.elements.get(FN_BODY_INDEX)
-        }
-        Expr::Node(node, _) if node.tag() == DeepTag::Def => {
-            // Node children: [0]=name binder, [1]=fn node
-            let fn_expr = node.children_slice().get(DEF_FN_INDEX - 2)?;
-            match fn_expr {
-                Expr::Node(fn_node, _) if fn_node.tag() == DeepTag::Fn => {
-                    // Fn children: [0]=params, [1]=body
-                    fn_node.children_slice().get(FN_BODY_INDEX - 2)
-                }
-                Expr::List(fn_list, _) if tag(fn_list) == Some(DeepTag::Fn) => {
-                    fn_list.elements.get(FN_BODY_INDEX)
-                }
-                _ => None,
-            }
-        }
-        _ => None,
+    let Expr::Node(node, _) = def else {
+        return None;
+    };
+    if node.tag() != DeepTag::Def {
+        return None;
     }
-}
-
-/// Mutably borrow the body subtree of a deprecated legacy-List function.
-/// Successor Nodes are deliberately excluded because returning `&mut Expr`
-/// would bypass `Node` validation.
-fn function_body_mut(def: &mut Expr) -> Option<&mut Expr> {
-    match def {
-        Expr::List(def_list, _) => {
-            let fn_list = match def_list.elements.get_mut(DEF_FN_INDEX)? {
-                Expr::List(fl, _) => fl,
-                _ => return None,
-            };
-            if tag(fn_list) != Some(DeepTag::Fn) {
-                return None;
-            }
-            fn_list.elements.get_mut(FN_BODY_INDEX)
+    match node.children_slice().get(DEF_FN_CHILD)? {
+        Expr::Node(fn_node, _) if fn_node.tag() == DeepTag::Fn => {
+            fn_node.children_slice().get(FN_BODY_CHILD)
         }
         _ => None,
     }
 }
 
 /// Replace a function body without ever exposing mutable access to a
-/// successor Node's children. Nested Nodes are rebuilt inside-out and each
+/// stamped Node's children. Nested Nodes are rebuilt inside-out and each
 /// candidate is validated before commit.
 fn replace_function_body(def: &mut Expr, new_body: Expr) -> Result<(), crate::node::NodeError> {
     match def {
-        Expr::List(..) => {
-            let body = function_body_mut(def).expect("resolved legacy function has a body slot");
-            *body = new_body;
-            Ok(())
-        }
         Expr::Node(def_node, _) if def_node.tag() == DeepTag::Def => {
-            let fn_index = DEF_FN_INDEX - 2;
             let mut fn_expr = def_node
                 .children_slice()
-                .get(fn_index)
+                .get(DEF_FN_CHILD)
                 .expect("resolved stamped function has an fn child")
                 .clone();
             match &mut fn_expr {
                 Expr::Node(fn_node, _) if fn_node.tag() == DeepTag::Fn => {
-                    fn_node.try_replace_child(FN_BODY_INDEX - 2, new_body)?;
-                }
-                Expr::List(fn_list, _) if tag(fn_list) == Some(DeepTag::Fn) => {
-                    *fn_list
-                        .elements
-                        .get_mut(FN_BODY_INDEX)
-                        .expect("resolved legacy fn child has a body slot") = new_body;
+                    fn_node.try_replace_child(FN_BODY_CHILD, new_body)?;
                 }
                 _ => unreachable!("resolve_function accepted a non-function child"),
             }
-            def_node.try_replace_child(fn_index, fn_expr)
+            def_node.try_replace_child(DEF_FN_CHILD, fn_expr)
         }
         _ => unreachable!("resolve_function returned a non-def expression"),
     }
@@ -723,37 +609,15 @@ fn replace_function_body(def: &mut Expr, new_body: Expr) -> Result<(), crate::no
 
 // ── Local AST helpers over the public chelis-deep AST ────────────────
 
-fn tag(list: &List) -> Option<DeepTag> {
-    list.tag()
-}
-
-/// Return the tag of an expression if it is a tagged node (List or Node).
+/// Return the tag of an expression if it is a tagged node.
 fn expr_tag(expr: &Expr) -> Option<DeepTag> {
     match expr {
-        Expr::List(list, _) => list.tag(),
         Expr::Node(node, _) => Some(node.tag()),
         _ => None,
     }
 }
 
-#[allow(dead_code)]
-fn as_tagged_list(_expr: &Expr, _expected_tag: DeepTag) -> Option<&List> {
-    match _expr {
-        Expr::List(list, _) => (tag(list) == Some(_expected_tag)).then_some(list),
-        _ => None,
-    }
-}
-
-#[allow(dead_code)]
-fn as_tagged_list_mut(_expr: &mut Expr, _expected_tag: DeepTag) -> Option<&mut List> {
-    match _expr {
-        Expr::List(list, _) => (tag(list) == Some(_expected_tag)).then_some(list),
-        _ => None,
-    }
-}
-
-/// Check if an expression is a tagged node (either List or Node form) with
-/// the expected tag.
+/// Check if an expression is a tagged node with the expected tag.
 fn is_tagged(expr: &Expr, expected_tag: DeepTag) -> bool {
     expr_tag(expr) == Some(expected_tag)
 }
@@ -772,20 +636,11 @@ fn count_modules(exprs: &[Expr]) -> usize {
         .count()
 }
 
-/// The flattened lowercase dotted module name. In canonical form
-/// `(module {} <name> decls...)` the module tag is at `elements[0]`, the
-/// metadata map at `elements[1]`, and the name symbol at `elements[2]`.
-/// For Node form, children[0] is the name.
+/// The flattened lowercase dotted module name: child 0 of a
+/// `(module {} <name> decls...)` node.
 fn module_name(module: &Expr) -> Option<String> {
     match module {
-        Expr::List(list, _) if list.tag() == Some(DeepTag::Module) => {
-            match list.elements.get(MODULE_NAME_INDEX) {
-                Some(Expr::Atom(Atom::Name(name), _)) => Some(name.clone()),
-                _ => None,
-            }
-        }
         Expr::Node(node, _) if node.tag() == DeepTag::Module => {
-            // Node children: [0]=name, [1..]=decls
             match node.children_slice().first() {
                 Some(Expr::Atom(Atom::Name(name), _)) => Some(name.clone()),
                 _ => None,
@@ -795,35 +650,23 @@ fn module_name(module: &Expr) -> Option<String> {
     }
 }
 
-/// The module's top-level declarations (`module.elements[3..]`), after the
-/// `module` tag, its metadata map, and the module name. For Node form,
-/// this is children[1..] (after the name binder at children[0]).
+/// The module's top-level declarations: its children after the module name.
 fn decls(module: &Expr) -> &[Expr] {
     match module {
-        Expr::List(list, _) if list.elements.len() > MODULE_DECLS_START => {
-            &list.elements[MODULE_DECLS_START..]
-        }
-        Expr::Node(node, _) if node.tag() == DeepTag::Module && node.children_slice().len() > 1 => {
-            &node.children_slice()[1..]
+        Expr::Node(node, _)
+            if node.tag() == DeepTag::Module
+                && node.children_slice().len() > MODULE_DECLS_START_CHILD =>
+        {
+            &node.children_slice()[MODULE_DECLS_START_CHILD..]
         }
         _ => &[],
     }
 }
 
-/// The bare name of a `(def {meta} <name> ...)` or `(defsig {meta} <name> ...)`
-/// node. For List form, it's at `elements[2]`. For Node form, it's at
-/// `children[0]` (the binder).
-fn def_name(def: &List) -> Option<&str> {
-    match def.elements.get(2) {
-        Some(Expr::Atom(Atom::Name(name), _)) => Some(name.as_str()),
-        _ => None,
-    }
-}
-
-/// Same as `def_name` but accepts an Expr (either List or Node form).
+/// The bare name of a `(def {meta} <name> ...)` or `(defsig {meta} <name>
+/// ...)` node: its child 0 (the binder).
 fn expr_def_name(expr: &Expr) -> Option<&str> {
     match expr {
-        Expr::List(list, _) => def_name(list),
         Expr::Node(node, _) if node.tag() == DeepTag::Def || node.tag() == DeepTag::Defsig => {
             match node.children_slice().first() {
                 Some(Expr::Atom(Atom::Name(name), _)) => Some(name.as_str()),
@@ -834,70 +677,32 @@ fn expr_def_name(expr: &Expr) -> Option<&str> {
     }
 }
 
-/// True when a `(def ...)` node is a function definition: its child at
-/// `elements[3]` is a `(fn ...)` node. A value binding `(def {} name
-/// expr)` has a non-`fn` child (or no child at that index) and is not a
-/// function.
-fn def_is_function(def: &List) -> bool {
-    matches!(
-        def.elements.get(DEF_FN_INDEX),
-        Some(Expr::List(fn_list, _)) if tag(fn_list) == Some(DeepTag::Fn)
-    ) || matches!(
-        def.elements.get(DEF_FN_INDEX),
-        Some(Expr::Node(fn_node, _)) if fn_node.tag() == DeepTag::Fn
-    )
-}
-
-/// Same as `def_is_function` but accepts an Expr (either List or Node form).
+/// True when a `(def ...)` node is a function definition: its child 1 is a
+/// `(fn ...)` node. A value binding `(def {} name expr)` has a non-`fn`
+/// child there and is not a function.
 fn expr_def_is_function(expr: &Expr) -> bool {
     match expr {
-        Expr::List(list, _) => def_is_function(list),
-        Expr::Node(node, _) if node.tag() == DeepTag::Def => {
-            // Node children: [0]=name, [1]=fn node
-            matches!(
-                node.children_slice().get(1),
-                Some(Expr::Node(fn_node, _)) if fn_node.tag() == DeepTag::Fn
-            ) || matches!(
-                node.children_slice().get(1),
-                Some(Expr::List(fn_list, _)) if tag(fn_list) == Some(DeepTag::Fn)
-            )
-        }
+        Expr::Node(node, _) if node.tag() == DeepTag::Def => matches!(
+            node.children_slice().get(DEF_FN_CHILD),
+            Some(Expr::Node(fn_node, _)) if fn_node.tag() == DeepTag::Fn
+        ),
         _ => false,
     }
 }
 
 /// True when a function `(def ...)` node has a body slot to splice: its
-/// `(fn {} (params {} ...) BODY)` child carries a body at `FN_BODY_INDEX`.
-/// A hand-built `(def {} f (fn {} (params {})))` is a well-tagged function
-/// with no body, so this returns `false` even though [`def_is_function`]
+/// `(fn {} (params {} ...) BODY)` child carries a body at [`FN_BODY_CHILD`].
+/// A def whose fn node has no body is a well-tagged function with nothing to
+/// splice, so this returns `false` even though [`expr_def_is_function`]
 /// returns `true`. Resolving such a def reports
 /// [`ResolveError::MalformedFunction`] rather than letting a later body
 /// splice index past the end of the fn node.
-fn def_has_body(def: &List) -> bool {
-    match def.elements.get(DEF_FN_INDEX) {
-        Some(Expr::List(fn_list, _)) if tag(fn_list) == Some(DeepTag::Fn) => {
-            fn_list.elements.len() > FN_BODY_INDEX
-        }
-        Some(Expr::Node(fn_node, _)) if fn_node.tag() == DeepTag::Fn => {
-            fn_node.children_slice().len() > (FN_BODY_INDEX - 2)
-        }
-        _ => false,
-    }
-}
-
-/// Same as `def_has_body` but accepts an Expr (either List or Node form).
 fn expr_def_has_body(expr: &Expr) -> bool {
     match expr {
-        Expr::List(list, _) => def_has_body(list),
         Expr::Node(node, _) if node.tag() == DeepTag::Def => {
-            // Node children: [0]=name, [1]=fn node
-            match node.children_slice().get(1) {
+            match node.children_slice().get(DEF_FN_CHILD) {
                 Some(Expr::Node(fn_node, _)) if fn_node.tag() == DeepTag::Fn => {
-                    // Fn children: [0]=params, [1]=body
-                    fn_node.children_slice().len() > (FN_BODY_INDEX - 2)
-                }
-                Some(Expr::List(fn_list, _)) if tag(fn_list) == Some(DeepTag::Fn) => {
-                    fn_list.elements.len() > FN_BODY_INDEX
+                    fn_node.children_slice().len() > FN_BODY_CHILD
                 }
                 _ => false,
             }
@@ -908,13 +713,11 @@ fn expr_def_has_body(expr: &Expr) -> bool {
 
 /// Edit the module's declaration Vec in place and revalidate before commit.
 ///
-/// The closure receives `(decl_start_offset, &mut Vec<Expr>)` where
-/// `decl_start_offset` is the index at which declarations begin in that Vec:
-/// - For `Expr::List`: `MODULE_DECLS_START` (declarations at `elements[3..]`)
-/// - For `Expr::Node`: `1` (declarations at `children[1..]`, after the name binder)
-///
-/// The caller uses `decl_start_offset + decl_index` to address a specific decl.
-/// `Ok(None)` means the program slice contains no module.
+/// The closure receives `(decl_start_offset, &mut Vec<Expr>)` where the Vec
+/// is the module node's children and `decl_start_offset` is the index at
+/// which declarations begin in it ([`MODULE_DECLS_START_CHILD`], after the
+/// name binder). The caller uses `decl_start_offset + decl_index` to address
+/// a specific decl. `Ok(None)` means the program slice contains no module.
 fn edit_module_decls<R>(
     program: &mut [Expr],
     edit: impl FnOnce(usize, &mut Vec<Expr>) -> R,
@@ -926,12 +729,11 @@ fn edit_module_decls<R>(
         return Ok(None);
     };
     match module {
-        Expr::List(list, _) => Ok(Some(edit(MODULE_DECLS_START, &mut list.elements))),
         Expr::Node(node, _) => {
             // Work on a detached candidate and commit only after the complete
             // Module node revalidates.
             let mut children = node.children_slice().to_vec();
-            let result = edit(1, &mut children);
+            let result = edit(MODULE_DECLS_START_CHILD, &mut children);
             node.try_replace_children(children)?;
             Ok(Some(result))
         }
@@ -1122,14 +924,7 @@ mod tests {
                     node.children_slice().first(),
                 );
             }
-            Expr::List(orig, _) => {
-                assert!(
-                    matches!(orig.elements.get(2), Some(Expr::Atom(Atom::Name(s), _)) if s == "x"),
-                    "original body var should still name `x`, got {:?}",
-                    orig.elements.get(2),
-                );
-            }
-            _ => panic!("expected Node or List var body"),
+            _ => panic!("expected Node var body"),
         }
     }
 

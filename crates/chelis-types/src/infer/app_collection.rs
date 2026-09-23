@@ -5,7 +5,7 @@
 use super::*;
 
 pub(super) fn collection_helper_type_error(
-    expr: &deep::Expr,
+    node: &DeepNode,
     helper: &str,
     contract: &str,
     te: TypeError,
@@ -17,7 +17,7 @@ pub(super) fn collection_helper_type_error(
     };
     CheckError::new(
         kind,
-        with_macro_provenance(expr, format!("{helper} {contract}; {}", te.message)),
+        with_node_provenance(node, format!("{helper} {contract}; {}", te.message)),
         suggestions,
     )
 }

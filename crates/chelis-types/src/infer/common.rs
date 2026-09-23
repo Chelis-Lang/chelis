@@ -5,26 +5,12 @@
 
 use super::*;
 
-pub(super) fn get_tag(list: &deep::List) -> Option<DeepTag> {
-    list.tag()
-}
-
-pub(super) fn children(list: &deep::List) -> &[deep::Expr] {
-    if list.elements.len() > 2 {
-        &list.elements[2..]
-    } else {
-        &[]
-    }
-}
-
-/// Observe a decoded vocabulary node without changing its physical carrier.
+/// Observe a decoded vocabulary node's tag, metadata and children.
 ///
-/// `Expr::List` remains available only for legacy/programmatic callers during
-/// the #1023 migration. Stamped compiler ingress uses `Expr::Node`; readers at
-/// semantic boundaries must preserve that carrier instead of rebuilding a
-/// `List` through `Node::to_list`.
-// Transitional E5b adapter: carrier classification is centralized in
-// `Expr::carrier`; the follow-on call-site migration removes this Option edge.
+/// A vocabulary node has the single spelling `Expr::Node` whatever its
+/// ingress (chelis#1125), so this is the `DecodedNode` arm of
+/// [`deep::Expr::carrier`] as an `Option` for readers that decline every other
+/// carrier alike.
 pub(super) fn stamped_parts(
     expr: &deep::Expr,
 ) -> Option<(DeepTag, &deep::Metadata, &[deep::Expr])> {
@@ -34,8 +20,7 @@ pub(super) fn stamped_parts(
         | deep::ExprCarrier::UndecodableHead(_, _, _)
         | deep::ExprCarrier::Atom(_)
         | deep::ExprCarrier::MetadataMap(_)
-        | deep::ExprCarrier::MetadataExpression(_)
-        | deep::ExprCarrier::MalformedLegacyList(_) => None,
+        | deep::ExprCarrier::MetadataExpression(_) => None,
     }
 }
 
@@ -48,12 +33,12 @@ pub(super) fn stamped_parts(
 /// tagged-children count) per §C2 -- the calibration example is the Deep
 /// parser's own "found unknown tag ..." message.
 pub(super) fn malformed_form(
-    list: &deep::List,
+    node: &DeepNode,
     tag: &str,
     expected: &str,
     errors: &mut DiagnosticSink<'_>,
 ) -> Type {
-    let found = children(list).len();
+    let found = node.child_count();
     report(
         errors,
         CheckError::new(
@@ -117,7 +102,7 @@ pub(super) fn report_builtin_arity_bare(
 
 pub(super) fn report_builtin_arity(
     errors: &mut DiagnosticSink<'_>,
-    list: &deep::List,
+    node: &DeepNode,
     builtin: &str,
     expected: usize,
     got: usize,
@@ -126,8 +111,8 @@ pub(super) fn report_builtin_arity(
         errors,
         CheckError::new(
             CheckErrorKind::ArityMismatch,
-            with_macro_provenance(
-                &deep::Expr::List(list.clone(), zero_span()),
+            with_node_provenance(
+                node,
                 format!(
                     "builtin `{builtin}` expects {expected} argument(s), got {got} \
                      (chelis#731 [04-TOT-3])"
@@ -230,16 +215,6 @@ pub(super) fn expr_is_neg_var(expr: &deep::Expr) -> bool {
         if kids.first().and_then(symbol_name) == Some("neg"))
 }
 
-/// Get metadata map from element[1] of a list.
-pub(super) fn get_meta(list: &deep::List) -> Option<&deep::Metadata> {
-    if list.elements.len() > 1
-        && let deep::Expr::Map(meta, _) = &list.elements[1]
-    {
-        return Some(meta);
-    }
-    None
-}
-
 /// True when a `deftype` node carries `opaque: true` metadata
 /// (RFC D-META; the key is unprefixed language semantics).
 pub(super) fn deftype_opaque_meta(meta: &deep::Metadata) -> bool {
@@ -259,6 +234,18 @@ pub(super) fn with_macro_provenance(expr: &deep::Expr, message: String) -> Strin
         return message;
     };
     format!("{message} (in expansion of {source})")
+}
+
+/// [`with_macro_provenance`] for a node the caller already holds: the
+/// provenance is the node's own `source` metadata.
+pub(super) fn with_node_provenance(node: &DeepNode, message: String) -> String {
+    let Some(source) = node.meta().source() else {
+        return message;
+    };
+    format!(
+        "{message} (in expansion of {})",
+        chelis_deep::printer::print_macro_source(source)
+    )
 }
 
 // chelis#317 constructor-scope invariant (read before touching the helpers
@@ -421,8 +408,8 @@ pub(super) fn check_error_kind_from_type_error_kind(kind: &TypeErrorKind) -> Che
 pub(super) fn extract_string_literal(expr: &deep::Expr) -> Option<String> {
     match expr {
         deep::Expr::Atom(deep::Atom::Str(value), _) => Some(value.clone()),
-        deep::Expr::List(list, _) if get_tag(list) == Some(DeepTag::Lit) => {
-            children(list).first().and_then(|child| match child {
+        deep::Expr::Node(node, _) if node.tag() == DeepTag::Lit => {
+            node.children_slice().first().and_then(|child| match child {
                 deep::Expr::Atom(deep::Atom::Str(value), _) => Some(value.clone()),
                 _ => None,
             })
@@ -592,7 +579,7 @@ pub(super) fn param_bound_dims(decl_ty: &Type) -> Vec<Dim> {
 pub(crate) fn decide_shape_route(
     route: crate::unify::ShapeRoute,
     operand: &Type,
-    list: &deep::List,
+    node: &DeepNode,
     vg: &mut VarGen,
     subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
@@ -625,7 +612,7 @@ pub(crate) fn decide_shape_route(
             errors,
             CheckError::new(
                 CheckErrorKind::TypeMismatch,
-                with_macro_provenance(&deep::Expr::List(list.clone(), zero_span()), message),
+                with_node_provenance(node, message),
                 vec![],
             ),
         ),
@@ -1289,7 +1276,6 @@ pub(super) fn precollect_type_resolution_env(
             declarations.insert(name.to_string(), (Vec::new(), kids[1..].iter().collect()));
         } else {
             let params = match params_expr {
-                deep::Expr::List(list, _) => list.elements.as_slice(),
                 deep::Expr::BareList(elements, _) => elements.as_slice(),
                 _ => continue,
             };
@@ -1968,12 +1954,6 @@ pub(super) fn collect_declarations(
                     return;
                 }
                 let params = match &kids[1] {
-                    deep::Expr::List(list, _) => list
-                        .elements
-                        .iter()
-                        .filter_map(symbol_name)
-                        .map(str::to_string)
-                        .collect::<Vec<_>>(),
                     deep::Expr::BareList(elements, _) => elements
                         .iter()
                         .filter_map(symbol_name)
@@ -2222,28 +2202,18 @@ pub(super) fn check_rank_body_discipline(
     errors: &mut DiagnosticSink<'_>,
 ) {
     stack_guard!("check_rank_body_discipline", expr);
-    // chelis#1107 amendment: bridge a stamped `Expr::Node` one level and
-    // recurse. The walk re-enters per child, so each nested Node is bridged in
-    // turn -- without this the §4.2 rank-body-discipline check returned at the
-    // first node and never ran on the stamped ingress.
-    if let deep::Expr::Node(node, span) = expr {
-        let bridged = deep::Expr::List(node.to_list(*span), *span);
-        check_rank_body_discipline(def_name, &bridged, user_def_names, errors);
-        return;
-    }
-    // chelis#1107 amendment (justified-safe, not routed): the `Node` bridge
-    // directly above re-enters with a `List`, so this reader only ever sees
-    // the `List` carrier.
-    let deep::Expr::List(list, _) = expr else {
+    // Only decoded nodes carry calls; structural lists, unknown forms,
+    // metadata and atoms hold none this discipline reads.
+    let Some((tag, _, kids)) = stamped_parts(expr) else {
         return;
     };
-    match get_tag(list) {
+    match tag {
         // Function-taking transforms apply a *referenced* user function across
         // the opaque rank. That callee is not inlined here, so its body can
         // transpose/reshape undetected — reject outright (spec §4.2).
         // `jit`/`realize`/`cast`/`copy` wrap an *inline* expression that the
         // recursion below still checks, so they are not rejected here.
-        Some(t @ (DeepTag::Grad | DeepTag::Vmap)) => {
+        t @ (DeepTag::Grad | DeepTag::Vmap) => {
             errors.push(CheckError::new(
                 CheckErrorKind::DimensionMismatch,
                 format!(
@@ -2255,7 +2225,7 @@ pub(super) fn check_rank_body_discipline(
                 vec![],
             ));
         }
-        Some(DeepTag::App) => match children(list).first().and_then(app_var_name) {
+        DeepTag::App => match kids.first().and_then(app_var_name) {
             // A user-defined `def` of this name — possibly SHADOWING an
             // Identity builtin (`def relu(x) = permute(x,1,0)`). The call
             // resolves to the user def, whose body is not proven rank-safe, so
@@ -2336,7 +2306,7 @@ pub(super) fn check_rank_body_discipline(
         _ => {}
     }
     // Recurse so nested calls (in let/if/match/lambda bodies, args) are checked.
-    for child in &list.elements {
+    for child in kids {
         check_rank_body_discipline(def_name, child, user_def_names, errors);
     }
 }
@@ -2367,7 +2337,6 @@ pub(super) fn infer_top_level(
         // is a loud rejection; the raw-string boundary names an unknown
         // symbol head when there is one.
         let named = match expr {
-            deep::Expr::List(list, _) => list.unknown_tag_symbol().unwrap_or("<untagged-list>"),
             deep::Expr::UnknownForm(data) => data.head.as_str(),
             _ => "<untagged-list>",
         };

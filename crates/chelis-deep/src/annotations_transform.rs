@@ -2,7 +2,7 @@
 //! to expression transformations; genuine variable references retain Var shape.
 use crate::annotations::*;
 use crate::{
-    Atom, DeepTag, Expr, List, MetaExpr,
+    Atom, DeepTag, Expr, MetaExpr,
     metadata::{MetadataError, MetadataRole},
 };
 
@@ -14,19 +14,6 @@ pub(crate) fn parts(
     let span = expr.span();
     let (actual, metadata, children) = match expr {
         Expr::Node(node, _) => node.into_parts(),
-        Expr::List(mut list, _) => {
-            if list.elements.len() < 2 {
-                return Err(invalid(key, span, "the declared structural node"));
-            }
-            let children = list.elements.split_off(2);
-            let Expr::Map(metadata, _) = list.elements.pop().expect("two elements") else {
-                return Err(invalid(key, span, "structural annotations"));
-            };
-            let Expr::Atom(Atom::Tag(tag), _) = list.elements.pop().expect("one tag") else {
-                return Err(invalid(key, span, "a decoded vocabulary tag"));
-            };
-            (tag, metadata, children)
-        }
         _ => return Err(invalid(key, span, "the declared structural node")),
     };
     if actual != tag {
@@ -87,7 +74,7 @@ impl PropertyBinder {
                 (name, Metadata::default(), BinderSpelling::Name, span)
             }
             Expr::MetaExpr(meta, _) => (*meta.expr, meta.metadata, BinderSpelling::Prefix, span),
-            Expr::BareList(items, _) | Expr::List(List { elements: items }, _) => {
+            Expr::BareList(items, _) => {
                 let [name, Expr::Map(metadata, metadata_span)]: [Expr; 2] =
                     items.try_into().map_err(|_| {
                         invalid("property_quantifiers", span, "a name and annotation map")
@@ -169,10 +156,6 @@ impl Expr {
             Expr::Map(meta, _) => meta.extensions(),
             Expr::MetaExpr(meta, _) => meta.metadata.extensions(),
             Expr::UnknownForm(data) => data.meta.extensions(),
-            Expr::List(list, _) => match list.elements.get(1) {
-                Some(Expr::Map(meta, _)) => meta.extensions(),
-                _ => return Ok(self),
-            },
             Expr::BareList(items, _) => match items.as_slice() {
                 [_, Expr::Map(meta, _)] => meta.extensions(),
                 _ => return Ok(self),
@@ -198,10 +181,6 @@ impl Expr {
             Expr::Map(meta, _) => Some(meta),
             Expr::MetaExpr(meta, _) => Some(&mut meta.metadata),
             Expr::UnknownForm(data) => Some(&mut data.meta),
-            Expr::List(list, _) => match list.elements.get_mut(1) {
-                Some(Expr::Map(meta, _)) => Some(meta),
-                _ => None,
-            },
             Expr::BareList(items, _) => match items.as_mut_slice() {
                 [_, Expr::Map(meta, _)] => Some(meta),
                 _ => None,

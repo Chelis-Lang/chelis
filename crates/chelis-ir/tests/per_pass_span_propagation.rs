@@ -1039,7 +1039,6 @@ fn s3_oracle_lowering_then_optimization_passes() {
                 acc.insert(s.to_owned());
             }
             match expr {
-                Expr::List(list, _) => list.elements.iter().for_each(|child| walk(child, acc)),
                 Expr::Node(node, _) => {
                     node.meta().visit_syntax(&mut |_, value| walk(value, acc));
                     node.children_slice()

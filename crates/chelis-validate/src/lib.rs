@@ -148,7 +148,6 @@ fn is_linker_format_name(name: &str) -> bool {
 fn deep_node_parts(expr: &chelis_deep::ast::Expr) -> Option<(DeepTag, &[chelis_deep::ast::Expr])> {
     match expr {
         chelis_deep::ast::Expr::Node(node, _) => Some((node.tag(), node.children_slice())),
-        chelis_deep::ast::Expr::List(list, _) => Some((list.tag()?, list.elements.get(2..)?)),
         _ => None,
     }
 }
@@ -309,11 +308,6 @@ fn deep_program_projection(source: &str, exprs: &[chelis_deep::Expr]) -> String 
             Expr::Node(node, _) => {
                 metadata(node.meta(), bytes);
                 for child in node.children_slice() {
-                    visit(child, bytes);
-                }
-            }
-            Expr::List(list, _) => {
-                for child in &list.elements {
                     visit(child, bytes);
                 }
             }

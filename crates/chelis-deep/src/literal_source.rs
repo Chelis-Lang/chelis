@@ -145,9 +145,6 @@ pub fn visit_binder_literal_uses<'a>(
             Expr::Map(meta, _) => {
                 meta.visit_expressions(&mut |value, _| stack.push((value, None)));
             }
-            Expr::List(list, _) => {
-                stack.extend(list.elements.iter().rev().map(|child| (child, None)));
-            }
             Expr::BareList(children, _) => {
                 stack.extend(children.iter().rev().map(|child| (child, None)));
             }
@@ -189,13 +186,6 @@ pub fn exact_type_variable_name(expr: &Expr) -> Option<&str> {
 fn node_parts(expr: &Expr) -> Option<(DeepTag, &Metadata, &[Expr])> {
     match expr {
         Expr::Node(node, _) => Some((node.tag(), node.meta(), node.children_slice())),
-        Expr::List(list, _) => {
-            let tag = list.tag()?;
-            let Expr::Map(meta, _) = list.elements.get(1)? else {
-                return None;
-            };
-            Some((tag, meta, list.elements.get(2..).unwrap_or_default()))
-        }
         _ => None,
     }
 }

@@ -31,26 +31,23 @@ use chelis_deep::parser::parse_str;
 use chelis_deep::path::{ResolveError, splice_function_body, spliced_function_def};
 use chelis_deep::span::Span;
 use chelis_deep::tag::DeepTag;
-use chelis_deep::{Atom, Expr, List, MetaExpr, Metadata, UnknownFormData};
+use chelis_deep::{Atom, Expr, MetaExpr, Metadata, UnknownFormData};
 
 fn sp() -> Span {
     Span::new(0, 0)
 }
 
-/// A pre-decode-once node: a closed-vocabulary tag surviving as a raw
-/// `Atom::Name` head instead of a stamped `Atom::Tag`. This is the payload
-/// every attack tries to smuggle past the gate.
+/// A pre-decode-once node: a closed-vocabulary tag surviving as a raw head
+/// string instead of a stamped `Node`. The stamper builds a `Node` for every
+/// decodable head, so only a hand-built `UnknownForm` carries one. This is
+/// the payload every attack tries to smuggle past the gate.
 fn raw(tag: &str) -> Expr {
-    Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Name(tag.to_string()), sp()),
-                Expr::Map(Metadata::default(), sp()),
-                Expr::Atom(Atom::Int(0), sp()),
-            ],
-        },
-        sp(),
-    )
+    Expr::UnknownForm(Box::new(UnknownFormData {
+        head: tag.to_string(),
+        meta: Metadata::default(),
+        children: vec![Expr::Atom(Atom::Int(0), sp())],
+        span: sp(),
+    }))
 }
 
 /// A clean stamped node, for positions an attack needs to look legitimate.

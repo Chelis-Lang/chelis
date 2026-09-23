@@ -796,11 +796,6 @@ fn parameter_name(expr: &DeepExpr) -> Option<String> {
         DeepExpr::Atom(Atom::Name(name), _) => Some(name.clone()),
         DeepExpr::MetaExpr(meta, _) => parameter_name(&meta.expr),
         DeepExpr::BareList(elements, _) => elements.first().and_then(atom_name).map(str::to_string),
-        DeepExpr::List(list, _) => list
-            .elements
-            .first()
-            .and_then(atom_name)
-            .map(str::to_string),
         _ => None,
     }
 }
@@ -838,12 +833,6 @@ fn reject_extensions(expr: &DeepExpr) -> Result<(), ResugarError> {
         DeepExpr::Node(node, span) => {
             metadata(node.meta(), *span)?;
             for child in node.children_slice() {
-                reject_extensions(child)?;
-            }
-            Ok(())
-        }
-        DeepExpr::List(list, _) => {
-            for child in &list.elements {
                 reject_extensions(child)?;
             }
             Ok(())
@@ -1186,12 +1175,8 @@ fn strip_matching_param_type(param: &DeepExpr, expected_type: &DeepExpr) -> Deep
                 )
             }
         }
-        DeepExpr::List(list, span) if list.tag().is_none() => {
-            strip_matching_param_type_items(&list.elements, *span, expected_type, false)
-                .unwrap_or_else(|| param.clone())
-        }
         DeepExpr::BareList(items, span) => {
-            strip_matching_param_type_items(items, *span, expected_type, true)
+            strip_matching_param_type_items(items, *span, expected_type)
                 .unwrap_or_else(|| param.clone())
         }
         _ => param.clone(),
@@ -1202,7 +1187,6 @@ fn strip_matching_param_type_items(
     items: &[DeepExpr],
     span: Span,
     expected_type: &DeepExpr,
-    bare: bool,
 ) -> Option<DeepExpr> {
     let [name, DeepExpr::Map(meta, map_span)] = items else {
         return None;
@@ -1217,11 +1201,7 @@ fn strip_matching_param_type_items(
         return Some(name.clone());
     }
     let items = vec![name.clone(), DeepExpr::Map(metadata, *map_span)];
-    Some(if bare {
-        DeepExpr::BareList(items, span)
-    } else {
-        DeepExpr::List(chelis_deep::ast::List { elements: items }, span)
-    })
+    Some(DeepExpr::BareList(items, span))
 }
 
 fn same_deep_shape(left: &DeepExpr, right: &DeepExpr) -> bool {
@@ -1378,21 +1358,6 @@ fn normalize_roundtrip_value_inner(
     match expr {
         DeepExpr::Atom(..) => expr.clone(),
         DeepExpr::Node(..) => unreachable!("typed Deep nodes are handled above"),
-        DeepExpr::List(list, span) => DeepExpr::List(
-            chelis_deep::ast::List {
-                elements: list
-                    .elements
-                    .iter()
-                    .map(|item| {
-                        normalize_roundtrip_expr_with_context(
-                            item,
-                            SurfaceMetadataContext::default(),
-                        )
-                    })
-                    .collect(),
-            },
-            *span,
-        ),
         DeepExpr::Map(meta, span) => DeepExpr::Map(
             normalize_roundtrip_meta(meta, None, SurfaceMetadataContext::default()),
             *span,
@@ -2694,26 +2659,6 @@ fn node_ref(expr: &DeepExpr) -> Result<NodeRef<'_>, ResugarError> {
             children: node.children_slice(),
             span: *span,
         },
-        DeepExpr::List(list, span) => {
-            let Some(DeepExpr::Atom(Atom::Tag(tag), _)) = list.elements.first() else {
-                return Err(ResugarError::ExpectedNode {
-                    found: describe_deep(expr),
-                });
-            };
-            let Some(DeepExpr::Map(meta, _)) = list.elements.get(1) else {
-                return Err(ResugarError::InvalidChild {
-                    tag: tag.as_str(),
-                    index: 1,
-                    expected: "a metadata map",
-                });
-            };
-            NodeRef {
-                tag: *tag,
-                meta,
-                children: &list.elements[2..],
-                span: *span,
-            }
-        }
         _ => {
             return Err(ResugarError::ExpectedNode {
                 found: describe_deep(expr),
@@ -3075,9 +3020,6 @@ fn resugar_literal_impl(
         (DeepExpr::BareList(items, _), None) if items.is_empty() => {
             return Ok(Expr::Tuple(Vec::new(), node.span));
         }
-        (DeepExpr::List(list, _), None) if list.elements.is_empty() => {
-            return Ok(Expr::Tuple(Vec::new(), node.span));
-        }
         _ => {
             return Err(ResugarError::InvalidChild {
                 tag: node.tag.as_str(),
@@ -3176,7 +3118,6 @@ fn validate_literal_type(node: &NodeRef<'_>) -> Result<(), ResugarError> {
             !integer_source && cast_target_name(ty).is_some()
         }
         (DeepExpr::BareList(items, _), DeepTag::TUnit) => !integer_source && items.is_empty(),
-        (DeepExpr::List(list, _), DeepTag::TUnit) => !integer_source && list.elements.is_empty(),
         _ => false,
     };
     if compatible {
@@ -3852,10 +3793,6 @@ fn deep_mentions_free_name(expr: &DeepExpr, name: &str) -> bool {
                     .iter()
                     .any(|child| deep_mentions_free_name(child, name))
         }
-        DeepExpr::List(list, _) => list
-            .elements
-            .iter()
-            .any(|element| deep_mentions_free_name(element, name)),
         DeepExpr::Map(meta, _) => meta_mentions_free_name(meta, name),
         DeepExpr::MetaExpr(meta, _) => {
             meta_mentions_free_name(&meta.metadata, name)
@@ -4044,7 +3981,6 @@ fn reject_non_finite_float(expr: &DeepExpr) -> Result<(), ResugarError> {
 fn structural_items(expr: &DeepExpr) -> Option<&[DeepExpr]> {
     match expr {
         DeepExpr::BareList(items, _) => Some(items),
-        DeepExpr::List(list, _) if list.tag().is_none() => Some(&list.elements),
         _ => None,
     }
 }
@@ -4484,7 +4420,6 @@ fn is_constructor_name(name: &str) -> bool {
 fn describe_deep(expr: &DeepExpr) -> String {
     match expr {
         DeepExpr::Atom(_, _) => "an atom".to_string(),
-        DeepExpr::List(_, _) => "an untagged list".to_string(),
         DeepExpr::Map(_, _) => "a metadata map".to_string(),
         DeepExpr::MetaExpr(_, _) => "a legacy metadata wrapper".to_string(),
         DeepExpr::Node(_, _) => "a typed node".to_string(),

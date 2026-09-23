@@ -28,11 +28,6 @@ fn collect_span_ids_one(expr: &Expr, acc: &mut Vec<String>) {
         acc.push(id.to_string());
     }
     match expr {
-        Expr::List(list, _) => {
-            for child in &list.elements {
-                collect_span_ids_one(child, acc);
-            }
-        }
         Expr::Node(node, _) => {
             // Recurse into metadata values
             node.meta()

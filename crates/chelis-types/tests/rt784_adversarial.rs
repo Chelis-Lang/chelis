@@ -26,40 +26,34 @@ use chelis_types::{InferResult, check_ir_program};
 
 // ── Part A helpers (Deep source, mirror issue_778 clobber test) ───────────
 
-fn list_tag(expr: &Expr) -> Option<&str> {
-    let Expr::List(list, _) = expr else {
-        return None;
-    };
+fn node_tag(expr: &Expr) -> Option<&str> {
     // Decode-once: the spelling comes from the decoded tag, never a raw
-    // element-0 string.
-    list.tag().map(|tag| tag.as_str())
+    // head string.
+    expr.tag().map(|tag| tag.as_str())
 }
 
 fn node_type_meta(expr: &Expr) -> Option<&Expr> {
-    let Expr::List(list, _) = expr else {
+    let Expr::Node(node, _) = expr else {
         return None;
     };
-    let Some(Expr::Map(meta, _)) = list.elements.get(1) else {
-        return None;
-    };
-    meta.ty().map(|ty| ty.expression())
+    node.meta().ty().map(|ty| ty.expression())
 }
 
 fn app_callee_name(expr: &Expr) -> Option<&str> {
-    if list_tag(expr) != Some("app") {
+    if node_tag(expr) != Some("app") {
         return None;
     }
-    let Expr::List(list, _) = expr else {
+    let Expr::Node(app, _) = expr else {
         return None;
     };
-    let callee = list.elements.get(2)?;
-    if list_tag(callee) != Some("var") {
+    let callee = app.children_slice().first()?;
+    if node_tag(callee) != Some("var") {
         return None;
     }
-    let Expr::List(var_list, _) = callee else {
+    let Expr::Node(var, _) = callee else {
         return None;
     };
-    match var_list.elements.get(2) {
+    match var.children_slice().first() {
         Some(Expr::Atom(Atom::Name(name), _)) => Some(name.as_str()),
         _ => None,
     }
@@ -68,11 +62,6 @@ fn app_callee_name(expr: &Expr) -> Option<&str> {
 fn visit<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
     f(expr);
     match expr {
-        Expr::List(list, _) => {
-            for child in &list.elements {
-                visit(child, f);
-            }
-        }
         Expr::Map(map, _) => {
             map.visit_expressions(&mut |value, _| visit(value, f));
         }
@@ -122,7 +111,7 @@ fn writeback_type_tags(src: &str, callee: &str) -> Vec<String> {
             if app_callee_name(node) == Some(callee)
                 && let Some(ty) = node_type_meta(node)
             {
-                tags.push(list_tag(ty).unwrap_or("<none>").to_string());
+                tags.push(node_tag(ty).unwrap_or("<none>").to_string());
             }
         });
     }

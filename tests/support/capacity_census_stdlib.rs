@@ -1,6 +1,7 @@
 //! C6 stdlib discovery: compiler-linked names and resolved declared types.
 
 use super::*;
+use chelis_deep::node::Node;
 use chelis_deep::role::{ChildStampRole, child_stamp_role};
 use chelis_types::types::{NominalArg, TensorPrec, Type, TypeVar};
 use chelis_types::{DeclaredSignature, DeclaredTypeSurface};
@@ -346,8 +347,8 @@ fn symbol(expr: &Expr) -> Option<&str> {
     }
 }
 
-fn declared_surface_type(declaration: &List) -> &Expr {
-    let children = &declaration.elements[2..];
+fn declared_surface_type(declaration: &Node) -> &Expr {
+    let children = declaration.children_slice();
     let mut types = children.iter().enumerate().filter_map(|(index, child)| {
         (child_stamp_role(DeepTag::Defsig, index, children.len()) == ChildStampRole::Type)
             .then_some(child)
@@ -362,18 +363,16 @@ fn declared_surface_type(declaration: &List) -> &Expr {
     ty
 }
 
-fn declarations(exprs: &[Expr]) -> Vec<List> {
+fn declarations(exprs: &[Expr]) -> Vec<&Node> {
     let mut result = Vec::new();
     for expr in exprs {
-        let list = match expr {
-            Expr::List(list, _) => list.clone(),
-            Expr::Node(node, span) => node.to_list(*span),
-            _ => panic!("unresolved stdlib declaration shape"),
+        let Expr::Node(node, _) = expr else {
+            panic!("unresolved stdlib declaration shape");
         };
-        if list.tag() == Some(DeepTag::Module) {
-            result.extend(declarations(&list.elements[3..]));
+        if node.tag() == DeepTag::Module {
+            result.extend(declarations(&node.children_slice()[1..]));
         } else {
-            result.push(list);
+            result.push(node.as_ref());
         }
     }
     result
@@ -399,34 +398,35 @@ fn rows_for_source(
             .clone(),
         None => name.to_string(),
     };
-    for declaration in &declarations {
+    for &declaration in &declarations {
         match declaration.tag() {
-            Some(DeepTag::Export) => {
+            DeepTag::Export => {
                 source_exports.extend(
-                    declaration.elements[2..]
+                    declaration
+                        .children_slice()
                         .iter()
                         .filter_map(symbol)
                         .map(str::to_string),
                 );
             }
-            Some(DeepTag::Def) => {
-                values.insert(symbol(&declaration.elements[2]).expect("def name"));
+            DeepTag::Def => {
+                values.insert(symbol(&declaration.children_slice()[0]).expect("def name"));
             }
-            Some(DeepTag::Defsig) => {
+            DeepTag::Defsig => {
                 signatures.insert(
-                    symbol(&declaration.elements[2]).expect("defsig name"),
+                    symbol(&declaration.children_slice()[0]).expect("defsig name"),
                     declaration,
                 );
             }
-            Some(DeepTag::Deftype) => {
-                let name = symbol(&declaration.elements[2]).expect("deftype name");
+            DeepTag::Deftype => {
+                let name = symbol(&declaration.children_slice()[0]).expect("deftype name");
                 let summary = closure
                     .summaries
                     .get(&internal(name))
                     .expect("resolved ADT");
                 let domains = summary.reachable.declaration_domains();
                 if !domains.is_empty() {
-                    let shape = declaration.elements[3..]
+                    let shape = declaration.children_slice()[1..]
                         .iter()
                         .map(chelis_deep::printer::print_expr_flat)
                         .collect::<Vec<_>>()
@@ -454,11 +454,7 @@ fn rows_for_source(
         if closure.signature(signature, false).prims.is_empty() {
             continue;
         }
-        let bounds = if let Expr::Map(meta, _) = &declaration.elements[1] {
-            chelis_deep::decode_dtype_bounds(meta)
-        } else {
-            vec![]
-        };
+        let bounds = chelis_deep::decode_dtype_bounds(declaration.meta());
         let prefix = if bounds.is_empty() {
             String::new()
         } else {

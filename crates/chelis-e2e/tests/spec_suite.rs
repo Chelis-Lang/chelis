@@ -7,7 +7,7 @@ use chelis_unord::UnordMap;
 use std::io::Write;
 use std::process::Command;
 
-use chelis_deep::ast::{Atom, Expr};
+use chelis_deep::ast::Expr;
 use chelis_e2e::pipeline::compile_surf;
 use chelis_ir::dag::{Dag, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_scalar, eval_tensor, eval_tensor_roots_with_strict};
@@ -150,25 +150,9 @@ fn spec_deep_3tuple_format() {
         chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
 
     fn check_3tuple(expr: &Expr) {
+        // A tagged node is an `Expr::Node`, whose metadata map is a
+        // structural field, so the walk checks the nested forms it reaches.
         match expr {
-            Expr::List(list, _) => {
-                if list.elements.len() >= 2
-                    && matches!(
-                        list.elements.first(),
-                        Some(Expr::Atom(Atom::Name(_) | Atom::Tag(_), _))
-                    )
-                {
-                    // Second element must be a map (metadata).
-                    assert!(
-                        matches!(list.elements.get(1), Some(Expr::Map(_, _))),
-                        "tagged node must have metadata map at element[1], got: {:?}",
-                        list.elements.get(1)
-                    );
-                }
-                for child in &list.elements {
-                    check_3tuple(child);
-                }
-            }
             Expr::MetaExpr(meta, _) => {
                 check_3tuple(&meta.expr);
                 meta.metadata.visit_syntax(&mut |_, v| check_3tuple(v));

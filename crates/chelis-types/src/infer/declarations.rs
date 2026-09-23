@@ -202,10 +202,6 @@ pub(super) fn detect_forged_linker_names(exprs: &[deep::Expr], errors: &mut Diag
                 ),
             ),
             None => match expr {
-                deep::Expr::List(list, _) => (
-                    children(list),
-                    list.unknown_tag_symbol() == Some("defmacro"),
-                ),
                 deep::Expr::UnknownForm(data) => {
                     (data.children.as_slice(), data.head == "defmacro")
                 }
@@ -1093,9 +1089,9 @@ fn collect_top_level_references(
         deep::Expr::MetaExpr(meta, _) => {
             collect_top_level_references(&meta.expr, vertex_by_name, bound, references)
         }
-        deep::Expr::List(list, _) => match get_tag(list) {
-            Some(DeepTag::App) => {
-                let kids = children(list);
+        deep::Expr::Node(node, _) => match node.tag() {
+            DeepTag::App => {
+                let kids = node.children_slice();
                 if let Some(callee) = kids.first().and_then(var_name_expr)
                     && vertex_by_name.contains_key(callee)
                     && !is_bound_name(callee, bound)
@@ -1111,8 +1107,8 @@ fn collect_top_level_references(
                     collect_top_level_references(argument, vertex_by_name, bound, references);
                 }
             }
-            Some(DeepTag::Var) => {
-                if let Some(name) = children(list).first().and_then(symbol_name)
+            DeepTag::Var => {
+                if let Some(name) = node.children_slice().first().and_then(symbol_name)
                     && vertex_by_name.contains_key(name)
                     && !is_bound_name(name, bound)
                 {
@@ -1122,8 +1118,8 @@ fn collect_top_level_references(
                     });
                 }
             }
-            Some(DeepTag::Fn) => {
-                let kids = children(list);
+            DeepTag::Fn => {
+                let kids = node.children_slice();
                 if kids.len() >= 2 {
                     bound.push(
                         param_source_infos(&kids[0])
@@ -1137,8 +1133,8 @@ fn collect_top_level_references(
                     bound.pop();
                 }
             }
-            Some(DeepTag::Let) => {
-                let kids = children(list);
+            DeepTag::Let => {
+                let kids = node.children_slice();
                 if kids.len() < 2 {
                     return;
                 }
@@ -1167,8 +1163,8 @@ fn collect_top_level_references(
                 collect_top_level_references(&kids[1], vertex_by_name, bound, references);
                 bound.pop();
             }
-            Some(DeepTag::Match) => {
-                let kids = children(list);
+            DeepTag::Match => {
+                let kids = node.children_slice();
                 if let Some(scrutinee) = kids.first() {
                     collect_top_level_references(scrutinee, vertex_by_name, bound, references);
                 }
@@ -1192,15 +1188,11 @@ fn collect_top_level_references(
                 }
             }
             _ => {
-                for child in children(list) {
+                for child in node.children_slice() {
                     collect_top_level_references(child, vertex_by_name, bound, references);
                 }
             }
         },
-        deep::Expr::Node(node, span) => {
-            let bridged = deep::Expr::List(node.to_list(*span), *span);
-            collect_top_level_references(&bridged, vertex_by_name, bound, references);
-        }
         deep::Expr::BareList(elements, _) => {
             for child in elements {
                 collect_top_level_references(child, vertex_by_name, bound, references);
@@ -1768,35 +1760,25 @@ pub(super) fn param_has_consuming_use_inner(
             type_headers,
             errors,
         ),
-        deep::Expr::List(list, _) if list.unknown_tag_symbol() == Some("drop") => {
-            // Legacy internal `drop` spelling, outside the vocabulary;
-            // recognized at the raw-string boundary.
-            children(list)
-                .first()
-                .is_some_and(|child| expr_mentions_unshadowed_name(child, param, bound))
-        }
-        deep::Expr::List(list, _) => match get_tag(list) {
-            Some(DeepTag::Var) => {
-                var_name_list(list) == Some(param) && !is_bound_name(param, bound)
-            }
-            Some(DeepTag::Borrow) | Some(DeepTag::Copy) => {
-                children(list).first().is_some_and(|child| {
-                    param_nested_consuming_use(
-                        child,
-                        param,
-                        bound,
-                        available_signatures,
-                        type_env,
-                        type_headers,
-                        errors,
-                    )
-                })
-            }
-            Some(DeepTag::Realize) => children(list)
+        deep::Expr::Node(node, _) => match node.tag() {
+            DeepTag::Var => var_name_node(node) == Some(param) && !is_bound_name(param, bound),
+            DeepTag::Borrow | DeepTag::Copy => node.children_slice().first().is_some_and(|child| {
+                param_nested_consuming_use(
+                    child,
+                    param,
+                    bound,
+                    available_signatures,
+                    type_env,
+                    type_headers,
+                    errors,
+                )
+            }),
+            DeepTag::Realize => node
+                .children_slice()
                 .first()
                 .is_some_and(|child| expr_mentions_unshadowed_name(child, param, bound)),
-            Some(DeepTag::App) => app_consumes_param(
-                list,
+            DeepTag::App => app_consumes_param(
+                node,
                 param,
                 bound,
                 available_signatures,
@@ -1810,7 +1792,7 @@ pub(super) fn param_has_consuming_use_inner(
             // and `app_consumes_param` above asks the question once. The arm
             // that used to sit here peered through the desugarer's stage
             // lambda to ask the same thing a second way. Fail closed.
-            Some(DeepTag::Pipe) => {
+            DeepTag::Pipe => {
                 report(
                     errors,
                     CheckError::new(
@@ -1824,8 +1806,8 @@ pub(super) fn param_has_consuming_use_inner(
                 );
                 true
             }
-            Some(DeepTag::Fn) => {
-                let kids = children(list);
+            DeepTag::Fn => {
+                let kids = node.children_slice();
                 if kids.len() < 2 {
                     return false;
                 }
@@ -1834,8 +1816,8 @@ pub(super) fn param_has_consuming_use_inner(
                 }
                 false
             }
-            Some(DeepTag::Let) => {
-                let kids = children(list);
+            DeepTag::Let => {
+                let kids = node.children_slice();
                 if kids.len() < 2 {
                     return false;
                 }
@@ -1876,8 +1858,8 @@ pub(super) fn param_has_consuming_use_inner(
                 bound.pop();
                 result
             }
-            Some(DeepTag::Match) => {
-                let kids = children(list);
+            DeepTag::Match => {
+                let kids = node.children_slice();
                 if kids
                     .first()
                     .is_some_and(|scrutinee| expr_mentions_unshadowed_name(scrutinee, param, bound))
@@ -1916,7 +1898,7 @@ pub(super) fn param_has_consuming_use_inner(
                 }
                 false
             }
-            _ => children(list).iter().any(|child| {
+            _ => node.children_slice().iter().any(|child| {
                 param_has_consuming_use_inner(
                     child,
                     param,
@@ -1928,19 +1910,6 @@ pub(super) fn param_has_consuming_use_inner(
                 )
             }),
         },
-        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
-        deep::Expr::Node(node, span) => {
-            let bridged = deep::Expr::List(node.to_list(*span), *span);
-            param_has_consuming_use_inner(
-                &bridged,
-                param,
-                bound,
-                available_signatures,
-                type_env,
-                type_headers,
-                errors,
-            )
-        }
         deep::Expr::BareList(elems, _) => elems.iter().any(|child| {
             param_has_consuming_use_inner(
                 child,
@@ -1990,7 +1959,7 @@ pub(super) fn param_nested_consuming_use(
 }
 
 pub(super) fn app_consumes_param(
-    list: &deep::List,
+    node: &DeepNode,
     param: &str,
     bound: &mut Vec<UnordSet<String>>,
     available_signatures: &UnordMap<String, Type>,
@@ -1998,7 +1967,7 @@ pub(super) fn app_consumes_param(
     type_headers: &TypeResolutionEnv,
     errors: &mut DiagnosticSink<'_>,
 ) -> bool {
-    let kids = children(list);
+    let kids = node.children_slice();
     let callee = kids.first().and_then(var_name_expr);
     if let Some(func) = kids.first()
         && !matches!(callee, Some(name) if name != param)
@@ -2094,10 +2063,10 @@ pub(super) fn expr_mentions_unshadowed_name(
             map.any_syntax(&mut |value| expr_mentions_unshadowed_name(value, name, bound))
         }
         deep::Expr::MetaExpr(meta, _) => expr_mentions_unshadowed_name(&meta.expr, name, bound),
-        deep::Expr::List(list, _) => match get_tag(list) {
-            Some(DeepTag::Var) => var_name_list(list) == Some(name) && !is_bound_name(name, bound),
-            Some(DeepTag::Fn) => {
-                let kids = children(list);
+        deep::Expr::Node(node, _) => match node.tag() {
+            DeepTag::Var => var_name_node(node) == Some(name) && !is_bound_name(name, bound),
+            DeepTag::Fn => {
+                let kids = node.children_slice();
                 if kids.len() < 2 {
                     return false;
                 }
@@ -2111,15 +2080,11 @@ pub(super) fn expr_mentions_unshadowed_name(
                 bound.pop();
                 result
             }
-            _ => children(list)
+            _ => node
+                .children_slice()
                 .iter()
                 .any(|child| expr_mentions_unshadowed_name(child, name, bound)),
         },
-        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
-        deep::Expr::Node(node, span) => {
-            let bridged = deep::Expr::List(node.to_list(*span), *span);
-            expr_mentions_unshadowed_name(&bridged, name, bound)
-        }
         deep::Expr::BareList(elems, _) => elems
             .iter()
             .any(|child| expr_mentions_unshadowed_name(child, name, bound)),
@@ -2387,7 +2352,6 @@ pub(super) fn validate_deferred_opaque_uses(
 pub(super) fn param_source_infos(expr: &deep::Expr) -> Vec<(String, bool)> {
     let params = match expr {
         deep::Expr::Node(node, _) if node.tag() == DeepTag::Params => node.children_slice(),
-        deep::Expr::List(list, _) if get_tag(list) == Some(DeepTag::Params) => children(list),
         deep::Expr::BareList(elements, _) => elements.as_slice(),
         _ => return Vec::new(),
     };
@@ -2400,11 +2364,6 @@ pub(super) fn param_source_infos(expr: &deep::Expr) -> Vec<(String, bool)> {
                     return None;
                 };
                 Some((name.clone(), meta.metadata.ty().is_some()))
-            }
-            deep::Expr::List(param_list, _) => {
-                let name = param_list.elements.first().and_then(symbol_name)?;
-                let written = get_meta(param_list).is_some_and(|meta| meta.ty().is_some());
-                Some((name.to_string(), written))
             }
             deep::Expr::BareList(elements, _) => {
                 let name = elements.first().and_then(symbol_name)?;
@@ -2470,11 +2429,11 @@ pub(super) fn var_name_expr(expr: &deep::Expr) -> Option<&str> {
         .and_then(symbol_name)
 }
 
-pub(super) fn var_name_list(list: &deep::List) -> Option<&str> {
-    if get_tag(list) != Some(DeepTag::Var) {
+pub(super) fn var_name_node(node: &DeepNode) -> Option<&str> {
+    if node.tag() != DeepTag::Var {
         return None;
     }
-    children(list).first().and_then(symbol_name)
+    node.children_slice().first().and_then(symbol_name)
 }
 
 pub(super) fn borrow_inner_for_signature(expr: &deep::Expr) -> Option<&deep::Expr> {
@@ -2521,27 +2480,6 @@ pub(super) fn body_is_literal_self_ref_shape(body: &deep::Expr, name: &str) -> b
                 return node.tag() == DeepTag::Var
                     && node.children_slice().first().and_then(symbol_name) == Some(name);
             }
-            deep::Expr::List(list, _) => {
-                // Surf `x = (x : T)` desugars to a `var` node carrying `type`
-                // metadata, which the arms above and below recognize. A
-                // symbol-headed `(ascribe x T)` / `(: x T)` list is a legacy
-                // hand-written Deep spelling outside the closed vocabulary;
-                // it is still unwrapped here so a `defsig`-backed self
-                // reference in that form keeps its external-input reading.
-                if matches!(list.unknown_tag_symbol(), Some("ascribe" | ":")) {
-                    match children(list).first() {
-                        Some(inner) => current = inner,
-                        None => return false,
-                    }
-                    continue;
-                }
-                match get_tag(list) {
-                    Some(DeepTag::Var) => {
-                        return children(list).first().and_then(symbol_name) == Some(name);
-                    }
-                    _ => return false,
-                }
-            }
             _ => return false,
         }
     }
@@ -2553,17 +2491,8 @@ pub(super) fn param_name_for_refs(param: &deep::Expr) -> Option<String> {
         deep::Expr::Atom(deep::Atom::Name(name), _) => Some(name.clone()),
         deep::Expr::Atom(_, _) => None,
         deep::Expr::MetaExpr(meta, _) => param_name_for_refs(&meta.expr),
-        // A Deep param is `(name {type: ...})` — a List with the name as
-        // the FIRST element and the meta map as the second. `children()`
-        // skips first two (tag + meta) and returns nothing for a 2-elem
-        // list, so read elements[0] directly.
-        deep::Expr::List(list, _) => list
-            .elements
-            .first()
-            .and_then(symbol_name)
-            .map(str::to_string),
-        // Stamped symbol-headed structural lists preserve the same positional
-        // entry without inventing a vocabulary tag.
+        // A Deep param `(name {type: ...})` is a structural list with the
+        // name as the FIRST element and the meta map as the second.
         deep::Expr::BareList(elements, _) => {
             elements.first().and_then(symbol_name).map(str::to_string)
         }

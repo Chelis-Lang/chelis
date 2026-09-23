@@ -3,15 +3,13 @@
 use super::*;
 
 #[test]
-fn deep_param_rejects_unknown_form_but_keeps_legacy_name_head() {
+fn deep_param_rejects_unknown_form_but_reads_a_structural_param() {
     let span = deep_span();
-    let legacy = DeepExpr::List(
-        DeepList {
-            elements: vec![
-                DeepExpr::Atom(DeepAtom::Name("x".into()), span),
-                DeepExpr::Map(Metadata::default(), span),
-            ],
-        },
+    let structural = DeepExpr::BareList(
+        vec![
+            DeepExpr::Atom(DeepAtom::Name("x".into()), span),
+            DeepExpr::Map(Metadata::default(), span),
+        ],
         span,
     );
     let unknown = DeepExpr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
@@ -20,22 +18,20 @@ fn deep_param_rejects_unknown_form_but_keeps_legacy_name_head() {
         children: Vec::new(),
         span,
     }));
-    let malformed = DeepExpr::List(
-        DeepList {
-            elements: vec![
-                DeepExpr::Atom(DeepAtom::Name("x".into()), span),
-                DeepExpr::Atom(DeepAtom::Int(0), span),
-            ],
-        },
+    let malformed = DeepExpr::BareList(
+        vec![
+            DeepExpr::Atom(DeepAtom::Name("x".into()), span),
+            DeepExpr::Atom(DeepAtom::Int(0), span),
+        ],
         span,
     );
 
-    let param = deep_param(&legacy).expect("legacy inline param remains readable");
+    let param = deep_param(&structural).expect("structural inline param is readable");
     assert_eq!(param.name, "x");
     assert!(param.ty.is_none());
     assert!(deep_param(&unknown).is_none());
     let malformed =
-        deep_param(&malformed).expect("malformed legacy inline param retains prior binder");
+        deep_param(&malformed).expect("malformed structural inline param retains its binder");
     assert_eq!(malformed.name, "x");
     assert!(malformed.ty.is_none());
 }

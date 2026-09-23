@@ -79,14 +79,6 @@ pub(super) fn expr_shape_type_fact(
             }
             None
         }
-        deep::Expr::List(list, _) => {
-            if get_tag(list) == Some(DeepTag::Var)
-                && let Some(name) = children(list).first().and_then(symbol_name)
-            {
-                return type_env.get(name).cloned();
-            }
-            None
-        }
         deep::Expr::MetaExpr(meta, _) => expr_shape_type_fact(&meta.expr, type_env),
         _ => None,
     }

@@ -71,9 +71,16 @@ fn assert_mutated_adt_rejects_on_both_ingresses(program: &[chelis_deep::Expr], l
     assert_eq!(typed, ir, "{label}: carrier mutation must preserve parity");
 }
 
+/// A malformed variant or field can no longer be spelled as a vocabulary
+/// node (the stamped `Node` constructor rejects it), so the mutation uses the
+/// carriers that remain admissible in those slots: an undecodable head and a
+/// structural list. Both programs must reject, with identical diagnostics on
+/// the two checker entries. The field mutation is rejected by the field
+/// reader itself; the variant mutation is rejected through `make`'s use of
+/// the constructor the dropped variant would have declared.
 #[test]
-fn adt_variant_and_field_readers_fail_closed_on_malformed_legacy_carriers() {
-    use chelis_deep::{Atom, DeepTag, Expr, List, Span};
+fn adt_non_node_variant_and_field_carriers_reject_with_entry_parity() {
+    use chelis_deep::{Atom, Expr, Span, UnknownFormData};
 
     let source = "(deftype {} Pair () \
                     (variant {} Pair (field {} value (t-prim {} i32))))\n\
@@ -84,18 +91,14 @@ fn adt_variant_and_field_readers_fail_closed_on_malformed_legacy_carriers() {
         chelis_deep::parse_and_stamp_file(source).expect("variant fixture stamps");
     replace_deftype_variant(
         &mut malformed_variant,
-        Expr::List(
-            List {
-                elements: vec![
-                    Expr::Atom(Atom::Tag(DeepTag::Variant), span),
-                    Expr::Atom(Atom::Name("not-metadata".into()), span),
-                    Expr::Atom(Atom::Name("Pair".into()), span),
-                ],
-            },
+        Expr::UnknownForm(Box::new(UnknownFormData {
+            head: "not-a-variant".into(),
+            meta: chelis_deep::Metadata::default(),
+            children: vec![Expr::Atom(Atom::Name("Pair".into()), span)],
             span,
-        ),
+        })),
     );
-    assert_mutated_adt_rejects_on_both_ingresses(&malformed_variant, "malformed legacy variant");
+    assert_mutated_adt_rejects_on_both_ingresses(&malformed_variant, "undecodable variant");
 
     let mut malformed_field =
         chelis_deep::parse_and_stamp_file(source).expect("field fixture stamps");
@@ -119,22 +122,15 @@ fn adt_variant_and_field_readers_fail_closed_on_malformed_legacy_carriers() {
         };
         field.children_slice()[1].clone()
     };
-    variant_children[1] = Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::Field), span),
-                Expr::Atom(Atom::Name("not-metadata".into()), span),
-                Expr::Atom(Atom::Name("value".into()), span),
-                field_type,
-            ],
-        },
+    variant_children[1] = Expr::BareList(
+        vec![Expr::Atom(Atom::Name("value".into()), span), field_type],
         span,
     );
     replace_deftype_variant(
         &mut malformed_field,
         Expr::node(variant_tag, variant_meta, variant_children, variant_span),
     );
-    assert_mutated_adt_rejects_on_both_ingresses(&malformed_field, "malformed legacy field");
+    assert_mutated_adt_rejects_on_both_ingresses(&malformed_field, "structural field");
 }
 
 #[test]

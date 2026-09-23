@@ -160,7 +160,6 @@ impl OpaqueInvariant {
 fn tag(expr: &Expr) -> Option<DeepTag> {
     match expr.carrier() {
         ExprCarrier::DecodedNode(tag, _, _) => Some(tag),
-        ExprCarrier::MalformedLegacyList(list) => list.tag(),
         ExprCarrier::StructuralList(_)
         | ExprCarrier::UndecodableHead(_, _, _)
         | ExprCarrier::Atom(_)
@@ -172,16 +171,11 @@ fn tag(expr: &Expr) -> Option<DeepTag> {
 fn children(expr: &Expr) -> &[Expr] {
     match expr.carrier() {
         ExprCarrier::DecodedNode(_, _, children) => children,
-        ExprCarrier::UndecodableHead(_, _, children) if matches!(expr, Expr::List(_, _)) => {
-            children
-        }
-        ExprCarrier::MalformedLegacyList(list) if list.elements.len() >= 2 => &list.elements[2..],
         ExprCarrier::StructuralList(_)
         | ExprCarrier::UndecodableHead(_, _, _)
         | ExprCarrier::Atom(_)
         | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_)
-        | ExprCarrier::MalformedLegacyList(_) => &[],
+        | ExprCarrier::MetadataExpression(_) => &[],
     }
 }
 
@@ -195,13 +189,6 @@ fn symbol_text(expr: &Expr) -> Option<&str> {
 fn annotations(expr: &Expr) -> Option<&chelis_deep::Metadata> {
     match expr.carrier() {
         ExprCarrier::DecodedNode(_, metadata, _) => Some(metadata),
-        ExprCarrier::UndecodableHead(_, metadata, _) if matches!(expr, Expr::List(_, _)) => {
-            Some(metadata)
-        }
-        ExprCarrier::MalformedLegacyList(list) => match list.elements.get(1) {
-            Some(Expr::Map(metadata, _)) => Some(metadata),
-            _ => None,
-        },
         ExprCarrier::StructuralList(_)
         | ExprCarrier::UndecodableHead(_, _, _)
         | ExprCarrier::Atom(_)
@@ -303,9 +290,7 @@ fn opaque_invariant_from_deftype(
     // either, this is not an invariant-carrying opaque type -> skip.
     let metadata = annotations(deftype)?;
     metadata.opaque()?;
-    let predicate =
-        crate::deep_compat::normalize_nodes_to_lists(&[metadata.invariant()?.to_expression()])
-            .remove(0);
+    let predicate = metadata.invariant()?.to_expression();
 
     // From here it IS an invariant-carrying opaque type. ANY failure to model
     // its representation is a covered-or-rejected ERROR, never a silent skip.
@@ -406,16 +391,8 @@ fn predicate_binder(fn_node: &Expr) -> Option<String> {
         ExprCarrier::StructuralList(elements) => {
             elements.first().and_then(symbol_text).map(str::to_string)
         }
-        ExprCarrier::UndecodableHead(head, _, _) if matches!(first, Expr::List(_, _)) => {
-            Some(head.to_string())
-        }
-        ExprCarrier::UndecodableHead(_, _, _) => None,
-        ExprCarrier::MalformedLegacyList(list) => list
-            .elements
-            .first()
-            .and_then(symbol_text)
-            .map(str::to_string),
-        ExprCarrier::DecodedNode(_, _, _)
+        ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::DecodedNode(_, _, _)
         | ExprCarrier::Atom(_)
         | ExprCarrier::MetadataMap(_)
         | ExprCarrier::MetadataExpression(_) => None,
@@ -1820,15 +1797,12 @@ fn sym(s: &str) -> Expr {
     Expr::Atom(Atom::Name(s.to_string()), span0())
 }
 fn node(tag: &str, kids: Vec<Expr>) -> Expr {
-    let mut elements = vec![
-        Expr::Atom(
-            Atom::Tag(DeepTag::parse(tag).expect("vocabulary builder")),
-            span0(),
-        ),
-        Expr::Map(Default::default(), span0()),
-    ];
-    elements.extend(kids);
-    Expr::List(chelis_deep::ast::List { elements }, span0())
+    Expr::node(
+        DeepTag::parse(tag).expect("vocabulary builder"),
+        Default::default(),
+        kids,
+        span0(),
+    )
 }
 fn record_node(children_after_tag: Vec<Expr>) -> Expr {
     node("record", children_after_tag)
@@ -1850,12 +1824,7 @@ fn typed_lit(prim: &str, value: Expr) -> Expr {
     entries.replace(M::Type(
         TypeSyntax::try_new(node("t-prim", vec![sym(prim)])).expect("primitive type"),
     ));
-    Expr::List(
-        chelis_deep::ast::List {
-            elements: vec![sym("lit"), Expr::Map(entries, span0()), value],
-        },
-        span0(),
-    )
+    Expr::node(DeepTag::Lit, entries, vec![value], span0())
 }
 fn float_lit(v: f64, prim: &str) -> Expr {
     typed_lit(prim, Expr::Atom(Atom::Float(v), span0()))
@@ -1972,7 +1941,7 @@ fn match_some_else(scrut: Expr, bind: &str, some_body: Expr, else_body: Expr) ->
                         "pat-ctor",
                         vec![sym("Some"), node("pat-var", vec![sym(bind)])],
                     ),
-                    Expr::List(chelis_deep::ast::List { elements: vec![] }, span0()),
+                    Expr::BareList(vec![], span0()),
                     some_body,
                 ],
             ),
@@ -1980,7 +1949,7 @@ fn match_some_else(scrut: Expr, bind: &str, some_body: Expr, else_body: Expr) ->
                 "arm",
                 vec![
                     node("pat-wild", vec![]),
-                    Expr::List(chelis_deep::ast::List { elements: vec![] }, span0()),
+                    Expr::BareList(vec![], span0()),
                     else_body,
                 ],
             ),
@@ -2055,36 +2024,14 @@ fn inject_into_module_with_source(exprs: &[Expr], type_name: &str, def: Expr) ->
         if !injected
             && tag(&stripped) == Some(DeepTag::Module)
             && module_defines(&stripped, type_name)
+            && let Expr::Node(node, span) = &stripped
         {
-            match &stripped {
-                // The probe `def` this module receives is built in the
-                // deprecated legacy `List` carrier (see `node` above), so it
-                // cannot be pushed under a stamped `Module` Node: that node
-                // revalidates its whole subtree and rejects a raw
-                // closed-vocabulary tag below the gate. Inject into the
-                // module's canonical List form instead. The result is printed
-                // and reparsed by `eval_selected` immediately below, so the
-                // carrier is transient and the emitted text is unchanged.
-                Expr::Node(node, span) => {
-                    let mut elements = vec![
-                        Expr::Atom(Atom::Tag(node.tag()), *span),
-                        Expr::Map(node.meta().clone(), *span),
-                    ];
-                    elements.extend(node.children_slice().iter().cloned());
-                    elements.push(def.clone());
-                    out.push(Expr::List(chelis_deep::ast::List { elements }, *span));
-                    injected = true;
-                    continue;
-                }
-                Expr::List(list, span) => {
-                    let mut elements = list.elements.clone();
-                    elements.push(def.clone());
-                    out.push(Expr::List(chelis_deep::ast::List { elements }, *span));
-                    injected = true;
-                    continue;
-                }
-                _ => {}
-            }
+            // Append the probe `def` as the module's last declaration.
+            let mut children = node.children_slice().to_vec();
+            children.push(def.clone());
+            out.push(Expr::node(node.tag(), node.meta().clone(), children, *span));
+            injected = true;
+            continue;
         }
         out.push(stripped);
     }
@@ -2114,19 +2061,6 @@ fn strip_invariant_metadata(expr: &Expr) -> Expr {
                 Box::new(chelis_deep::node::Node::new(tag, meta, children)),
                 *span,
             )
-        }
-        Expr::List(list, span) => {
-            let mut elements: Vec<Expr> =
-                list.elements.iter().map(strip_invariant_metadata).collect();
-            if list.tag() == Some(DeepTag::Deftype)
-                && let Some(Expr::Map(map, mspan)) = elements.get(1)
-            {
-                let mut metadata = map.clone();
-                metadata.remove(K::Invariant);
-                metadata.remove(K::InvariantAmenability);
-                elements[1] = Expr::Map(metadata, *mspan);
-            }
-            Expr::List(chelis_deep::ast::List { elements }, *span)
         }
         Expr::BareList(elements, span) => Expr::BareList(
             elements.iter().map(strip_invariant_metadata).collect(),

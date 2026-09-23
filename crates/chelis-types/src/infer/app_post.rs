@@ -24,7 +24,7 @@ fn declared_result_literal(
     result_axis: usize,
     result_rank: usize,
     expected_result: Option<&Type>,
-    list: &deep::List,
+    node: &DeepNode,
     env: &Env,
     vg: &mut VarGen,
     adt_reg: &AdtRegistry,
@@ -56,9 +56,7 @@ fn declared_result_literal(
         return Some(found);
     }
 
-    let owner = deep::Expr::List(list.clone(), zero_span());
-    let (_, meta, _) = stamped_parts(&owner)?;
-    let declared = meta.ty().map(|value| value.expression())?;
+    let declared = node.meta().ty().map(|value| value.expression())?;
     let checkpoint = errors.checkpoint();
     let resolved = resolve_deep_type(
         declared,
@@ -87,7 +85,7 @@ fn reject_unreachable_diagonal_extent(
     inferred: &Type,
     axis1: usize,
     axis2: usize,
-    list: &deep::List,
+    node: &DeepNode,
     env: &Env,
     vg: &mut VarGen,
     adt_reg: &AdtRegistry,
@@ -103,7 +101,7 @@ fn reject_unreachable_diagonal_extent(
         result_axis,
         inferred_dims.len(),
         expected_result,
-        list,
+        node,
         env,
         vg,
         adt_reg,
@@ -117,8 +115,8 @@ fn reject_unreachable_diagonal_extent(
         errors,
         CheckError::new(
             CheckErrorKind::DimensionMismatch,
-            with_macro_provenance(
-                &deep::Expr::List(list.clone(), zero_span()),
+            with_node_provenance(
+                node,
                 format!(
                     "diagonal declares the smaller selected extent ([05-OP-33]): \
                      axis {source_axis} is literal {bound}, so the result extent is \
@@ -135,7 +133,7 @@ fn reject_unreachable_diagonal_extent(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn finish_unified_app(
-    list: &deep::List,
+    node: &DeepNode,
     kids: &[deep::Expr],
     func_name: Option<String>,
     arg_tys: Vec<Type>,
@@ -184,10 +182,10 @@ pub(super) fn finish_unified_app(
     // the operand settles.
     let dtype_site = func_name
         .as_deref()
-        .map(|fname| DtypeAdmissibilitySite::new(list, kids, fname, env));
+        .map(|fname| DtypeAdmissibilitySite::new(node, kids, fname, env));
 
     if let Some(rejected) = validate_numeric_and_reduction_arguments(
-        list,
+        node,
         kids,
         &func_name,
         &arg_tys,
@@ -203,7 +201,7 @@ pub(super) fn finish_unified_app(
     }
 
     if let Some(rejected) = reject_inadmissible_operand_dtypes(
-        list,
+        node,
         kids,
         func_name.as_deref(),
         &arg_tys,
@@ -219,7 +217,7 @@ pub(super) fn finish_unified_app(
     }
 
     if let Some(result) = integer_binop_result_type(
-        list,
+        node,
         func_name.as_deref(),
         &arg_tys,
         vg,
@@ -411,7 +409,7 @@ pub(super) fn finish_unified_app(
             "scatter_elements" if owes_shape_replay => {
                 checked_route_observed = true;
                 product.defer_shape_check(
-                    DeferredShapeRule::ScatterElements { list: list.clone() },
+                    DeferredShapeRule::ScatterElements { node: node.clone() },
                     kids[1..].to_vec(),
                     arg_tys.clone(),
                     result_ty.clone(),
@@ -462,8 +460,8 @@ pub(super) fn finish_unified_app(
                         errors,
                         CheckError::new(
                             CheckErrorKind::TypeMismatch,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
+                            with_node_provenance(
+                                node,
                                 format!(
                                     "{} requires tensor[D, bool] arguments, got tensor[D, {}]",
                                     fname,
@@ -479,8 +477,8 @@ pub(super) fn finish_unified_app(
                         errors,
                         CheckError::new(
                             CheckErrorKind::TypeMismatch,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
+                            with_node_provenance(
+                                node,
                                 format!("{} requires bool arguments, got {}", fname, other),
                             ),
                             vec!["Logical ops only work on bool values".to_string()],
@@ -533,7 +531,7 @@ pub(super) fn finish_unified_app(
     }
 
     if let Some(ref fname) = func_name {
-        let site = UnresolvedOperandSite::new(list, kids, fname.as_str(), env);
+        let site = UnresolvedOperandSite::new(node, kids, fname.as_str(), env);
         match fname.as_str() {
             "print" => {
                 return Type::Unit;
@@ -557,8 +555,8 @@ pub(super) fn finish_unified_app(
                                 errors,
                                 CheckError::new(
                                     CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
+                                    with_node_provenance(
+                                        node,
                                         format!("fail expects string input, got {other}"),
                                     ),
                                     vec![],
@@ -579,7 +577,7 @@ pub(super) fn finish_unified_app(
                 // happens only on an empty argument list, so the generic path
                 // below runs exactly as it did before the move.
                 if let Some(result) = string_route_result(
-                    name, list, &arg_tys, &result_ty, &site, product, subst, errors,
+                    name, node, &arg_tys, &result_ty, &site, product, subst, errors,
                 ) {
                     return result;
                 }
@@ -606,8 +604,8 @@ pub(super) fn finish_unified_app(
                                 errors,
                                 CheckError::new(
                                     CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
+                                    with_node_provenance(
+                                        node,
                                         format!("rank expects tensor input, got {other}"),
                                     ),
                                     vec![],
@@ -634,8 +632,8 @@ pub(super) fn finish_unified_app(
                                 errors,
                                 CheckError::new(
                                     CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
+                                    with_node_provenance(
+                                        node,
                                         format!("shape expects tensor input, got {other}"),
                                     ),
                                     vec![],
@@ -658,8 +656,8 @@ pub(super) fn finish_unified_app(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::DimensionMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!("shape requires non-negative axis, got {axis}"),
                                 ),
                                 vec![],
@@ -673,8 +671,8 @@ pub(super) fn finish_unified_app(
                                 errors,
                                 CheckError::new(
                                     CheckErrorKind::DimensionMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
+                                    with_node_provenance(
+                                        node,
                                         format!(
                                             "shape axis {axis} is out of bounds for rank {} tensor",
                                             dims.len()
@@ -706,8 +704,8 @@ pub(super) fn finish_unified_app(
                                 errors,
                                 CheckError::new(
                                     CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
+                                    with_node_provenance(
+                                        node,
                                         format!("shape expects i32 axis, got {other}"),
                                     ),
                                     vec![],
@@ -736,8 +734,8 @@ pub(super) fn finish_unified_app(
                                 errors,
                                 CheckError::new(
                                     CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
+                                    with_node_provenance(
+                                        node,
                                         format!("numel expects tensor input, got {other}"),
                                     ),
                                     vec![],
@@ -756,8 +754,8 @@ pub(super) fn finish_unified_app(
                                     errors,
                                     CheckError::new(
                                         CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
+                                        with_node_provenance(
+                                            node,
                                             "tensor_to_scalar expects a rank-0 tensor".to_string(),
                                         ),
                                         vec![],
@@ -780,8 +778,8 @@ pub(super) fn finish_unified_app(
                                 errors,
                                 CheckError::new(
                                     CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
+                                    with_node_provenance(
+                                        node,
                                         format!(
                                             "tensor_to_scalar expects tensor input, got {other}"
                                         ),
@@ -811,8 +809,8 @@ pub(super) fn finish_unified_app(
                                 errors,
                                 CheckError::new(
                                     CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
+                                    with_node_provenance(
+                                        node,
                                         format!(
                                             "scalar_to_tensor expects scalar numeric/bool input, got {other}"
                                         ),
@@ -826,15 +824,15 @@ pub(super) fn finish_unified_app(
             }
             "einsum" => {
                 if arg_tys.len() != 3 {
-                    return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 3, arg_tys.len());
                 }
                 let Some(equation) = kids.get(1).and_then(extract_string_literal) else {
                     return report(
                         errors,
                         CheckError::new(
                             CheckErrorKind::TypeMismatch,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
+                            with_node_provenance(
+                                node,
                                 "einsum expects a string equation as its first argument"
                                     .to_string(),
                             ),
@@ -847,8 +845,8 @@ pub(super) fn finish_unified_app(
                         errors,
                         CheckError::new(
                             CheckErrorKind::TypeMismatch,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
+                            with_node_provenance(
+                                node,
                                 "einsum ellipsis support is deferred in 3h".to_string(),
                             ),
                             vec![],
@@ -859,10 +857,10 @@ pub(super) fn finish_unified_app(
             }
             "gather" => {
                 if arg_tys.len() != 3 {
-                    return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 3, arg_tys.len());
                 }
                 if let Err(err) =
-                    reject_non_int32_axis("gather", &subst.apply(&arg_tys[2]), list, errors)
+                    reject_non_int32_axis("gather", &subst.apply(&arg_tys[2]), node, errors)
                 {
                     return err;
                 }
@@ -876,7 +874,7 @@ pub(super) fn finish_unified_app(
                 return decide_shape_route(
                     route,
                     &type_for_readonly_check(&arg_tys[0], subst),
-                    list,
+                    node,
                     vg,
                     subst,
                     errors,
@@ -884,7 +882,7 @@ pub(super) fn finish_unified_app(
             }
             "where" => {
                 if arg_tys.len() != 3 {
-                    return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 3, arg_tys.len());
                 }
                 let cond_ty = type_for_readonly_check(&arg_tys[0], subst);
                 let then_ty = type_for_readonly_check(&arg_tys[1], subst);
@@ -903,8 +901,8 @@ pub(super) fn finish_unified_app(
                                 errors,
                                 CheckError::new(
                                     CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
+                                    with_node_provenance(
+                                        node,
                                         format!(
                                             "where expects cond/both branches to have matching tensor shapes and branch precision, got {cond_ty}, {then_ty}, and {else_ty}"
                                         ),
@@ -929,8 +927,8 @@ pub(super) fn finish_unified_app(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!(
                                         "where expects a bool tensor condition and matching tensor branches, got {cond_ty}, {then_ty}, and {else_ty}"
                                     ),
@@ -943,7 +941,7 @@ pub(super) fn finish_unified_app(
             }
             "cumsum" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
                 }
                 let cumsum_operand = type_for_readonly_check(&arg_tys[0], subst);
                 let _axis = match resolve_builtin_axis(
@@ -951,7 +949,7 @@ pub(super) fn finish_unified_app(
                     kids.get(2),
                     &subst.apply(&arg_tys[1]),
                     &cumsum_operand,
-                    list,
+                    node,
                     errors,
                 ) {
                     Ok(axis) => axis,
@@ -970,8 +968,8 @@ pub(super) fn finish_unified_app(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!("cumsum expects tensor input, got {other}"),
                                 ),
                                 vec![],
@@ -982,7 +980,7 @@ pub(super) fn finish_unified_app(
             }
             "diagonal" => {
                 if arg_tys.len() != 3 {
-                    return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 3, arg_tys.len());
                 }
                 let diagonal_operand = type_for_readonly_check(&arg_tys[0], subst);
                 let axis1 = match resolve_axis_pair_member(
@@ -991,7 +989,7 @@ pub(super) fn finish_unified_app(
                     &subst.apply(&arg_tys[1]),
                     &diagonal_operand,
                     0,
-                    list,
+                    node,
                     errors,
                 ) {
                     Ok(axis) => axis,
@@ -1003,7 +1001,7 @@ pub(super) fn finish_unified_app(
                     &subst.apply(&arg_tys[2]),
                     &diagonal_operand,
                     1,
-                    list,
+                    node,
                     errors,
                 ) {
                     Ok(axis) => axis,
@@ -1023,7 +1021,7 @@ pub(super) fn finish_unified_app(
                             &ty,
                             axis1,
                             axis2,
-                            list,
+                            node,
                             env,
                             vg,
                             adt_reg,
@@ -1040,10 +1038,7 @@ pub(super) fn finish_unified_app(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    message,
-                                ),
+                                with_node_provenance(node, message),
                                 vec![],
                             ),
                         );
@@ -1052,11 +1047,11 @@ pub(super) fn finish_unified_app(
             }
             "trace" => {
                 if arg_tys.len() != 3 {
-                    return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 3, arg_tys.len());
                 }
                 for idx in [1usize, 2] {
                     if let Err(err) =
-                        reject_non_int32_axis("trace", &subst.apply(&arg_tys[idx]), list, errors)
+                        reject_non_int32_axis("trace", &subst.apply(&arg_tys[idx]), node, errors)
                     {
                         return err;
                     }
@@ -1068,7 +1063,7 @@ pub(super) fn finish_unified_app(
                 return decide_shape_route(
                     route,
                     &type_for_readonly_check(&arg_tys[0], subst),
-                    list,
+                    node,
                     vg,
                     subst,
                     errors,
@@ -1076,7 +1071,7 @@ pub(super) fn finish_unified_app(
             }
             "clamp" => {
                 if arg_tys.len() != 3 {
-                    return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 3, arg_tys.len());
                 }
                 let input_ty = type_for_readonly_check(&arg_tys[0], subst);
                 let low_ty = type_for_readonly_check(&arg_tys[1], subst);
@@ -1098,8 +1093,8 @@ pub(super) fn finish_unified_app(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!(
                                         "clamp expects tensor input plus scalar-tensor or matching-shape tensor bounds of the same precision, got {input_ty}, {low_ty}, and {high_ty}"
                                     ),
@@ -1122,8 +1117,8 @@ pub(super) fn finish_unified_app(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!(
                                         "clamp expects tensor input and tensor bounds, got {input_ty}, {low_ty}, and {high_ty}"
                                     ),
@@ -1136,7 +1131,7 @@ pub(super) fn finish_unified_app(
             }
             "sort" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
                 }
                 let sort_operand = type_for_readonly_check(&arg_tys[0], subst);
                 let _axis = match resolve_builtin_axis(
@@ -1144,7 +1139,7 @@ pub(super) fn finish_unified_app(
                     kids.get(2),
                     &subst.apply(&arg_tys[1]),
                     &sort_operand,
-                    list,
+                    node,
                     errors,
                 ) {
                     Ok(axis) => axis,
@@ -1166,8 +1161,8 @@ pub(super) fn finish_unified_app(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!("sort expects tensor input, got {other}"),
                                 ),
                                 vec![],
@@ -1178,10 +1173,10 @@ pub(super) fn finish_unified_app(
             }
             "scatter" => {
                 if arg_tys.len() != 5 {
-                    return report_builtin_arity(errors, list, fname, 5, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 5, arg_tys.len());
                 }
                 if let Err(err) =
-                    reject_non_int32_axis("scatter", &subst.apply(&arg_tys[3]), list, errors)
+                    reject_non_int32_axis("scatter", &subst.apply(&arg_tys[3]), node, errors)
                 {
                     return err;
                 }
@@ -1199,7 +1194,7 @@ pub(super) fn finish_unified_app(
                 return decide_shape_route(
                     route,
                     &subst.apply(&arg_tys[0]),
-                    list,
+                    node,
                     vg,
                     subst,
                     errors,
@@ -1207,12 +1202,12 @@ pub(super) fn finish_unified_app(
             }
             "scatter_replace" => {
                 if arg_tys.len() != 4 {
-                    return report_builtin_arity(errors, list, fname, 4, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 4, arg_tys.len());
                 }
                 if let Err(err) = reject_non_int32_axis(
                     "scatter_replace",
                     &subst.apply(&arg_tys[3]),
-                    list,
+                    node,
                     errors,
                 ) {
                     return err;
@@ -1227,14 +1222,14 @@ pub(super) fn finish_unified_app(
                 return decide_shape_route(
                     route,
                     &subst.apply(&arg_tys[0]),
-                    list,
+                    node,
                     vg,
                     subst,
                     errors,
                 );
             }
             "scatter_elements" => {
-                return check_scatter_elements(list, kids, &arg_tys, result_ty, subst, errors);
+                return check_scatter_elements(node, kids, &arg_tys, result_ty, subst, errors);
             }
             "len" => {
                 if let Some(first_arg) = arg_tys.first() {
@@ -1257,8 +1252,8 @@ pub(super) fn finish_unified_app(
                                 errors,
                                 CheckError::new(
                                     CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
+                                    with_node_provenance(
+                                        node,
                                         format!(
                                             "len auto-borrows its List/Dict argument, so an explicit `&` is not a \
                                          supported surface form: write `len(xs)`, not `len(&xs)` (got &{inner})"
@@ -1273,8 +1268,8 @@ pub(super) fn finish_unified_app(
                                 errors,
                                 CheckError::new(
                                     CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
+                                    with_node_provenance(
+                                        node,
                                         format!("len expects List or Dict input, got {other}"),
                                     ),
                                     vec![],
@@ -1286,7 +1281,7 @@ pub(super) fn finish_unified_app(
             }
             "index" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
                 }
                 let list_arg = subst.apply(&arg_tys[0]);
                 let index_arg = subst.apply(&arg_tys[1]);
@@ -1302,8 +1297,8 @@ pub(super) fn finish_unified_app(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!("index expects i64 index, got {other}"),
                                 ),
                                 vec![],
@@ -1324,8 +1319,8 @@ pub(super) fn finish_unified_app(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!(
                                         "index auto-borrows its List argument, so an explicit `&` is not a \
                                      supported surface form: write `index(xs, i)`, not `index(&xs, i)` (got &{inner})"
@@ -1340,8 +1335,8 @@ pub(super) fn finish_unified_app(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!("index expects List input, got {other}"),
                                 ),
                                 vec![],
@@ -1352,7 +1347,7 @@ pub(super) fn finish_unified_app(
             }
             "append" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
                 }
                 let list_arg = subst.apply(&arg_tys[0]);
                 let value_arg = subst.apply(&arg_tys[1]);
@@ -1372,8 +1367,8 @@ pub(super) fn finish_unified_app(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!("append expects List input, got {other}"),
                                 ),
                                 vec![],
@@ -1384,7 +1379,7 @@ pub(super) fn finish_unified_app(
             }
             "concat" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
                 }
                 let lhs = subst.apply(&arg_tys[0]);
                 let rhs = subst.apply(&arg_tys[1]);
@@ -1394,7 +1389,7 @@ pub(super) fn finish_unified_app(
                     matches!(&rhs, Type::Adt(name, args) if name == "List" && args.len() == 1);
                 if lhs_is_list
                     && !rhs_is_list
-                    && let Err(err) = reject_non_int32_axis("concat", &rhs, list, errors)
+                    && let Err(err) = reject_non_int32_axis("concat", &rhs, node, errors)
                 {
                     return err;
                 }
@@ -1425,10 +1420,7 @@ pub(super) fn finish_unified_app(
                                     errors,
                                     CheckError::new(
                                         CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            message,
-                                        ),
+                                        with_node_provenance(node, message),
                                         vec![],
                                     ),
                                 );
@@ -1460,8 +1452,8 @@ pub(super) fn finish_unified_app(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!(
                                         "concat expects matching List inputs, got {lhs} and {rhs}"
                                     ),
@@ -1474,7 +1466,7 @@ pub(super) fn finish_unified_app(
             }
             "split" => {
                 if arg_tys.len() != 3 {
-                    return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 3, arg_tys.len());
                 }
                 let tensor_ty = type_for_readonly_check(&arg_tys[0], subst);
                 let axis_ty = subst.apply(&arg_tys[1]);
@@ -1482,7 +1474,7 @@ pub(super) fn finish_unified_app(
                 // The pre-guard predicate here was `precision.is_integer()`,
                 // the same acceptance hole `concat` carried: it admitted an
                 // i64 axis while `sum` rejected one.
-                if let Err(err) = reject_non_int32_axis("split", &axis_ty, list, errors) {
+                if let Err(err) = reject_non_int32_axis("split", &axis_ty, node, errors) {
                     return err;
                 }
                 match (tensor_ty, sizes_ty) {
@@ -1501,8 +1493,8 @@ pub(super) fn finish_unified_app(
                                     errors,
                                     CheckError::new(
                                         CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
+                                        with_node_provenance(
+                                            node,
                                             "split expects List[int] sizes".to_string(),
                                         ),
                                         vec![],
@@ -1523,8 +1515,8 @@ pub(super) fn finish_unified_app(
                                         errors,
                                         CheckError::new(
                                             CheckErrorKind::TypeMismatch,
-                                            with_macro_provenance(
-                                                &deep::Expr::List(list.clone(), zero_span()),
+                                            with_node_provenance(
+                                                node,
                                                 format!(
                                                     "split axis {raw} out of bounds for rank {}",
                                                     dims.len()
@@ -1558,8 +1550,8 @@ pub(super) fn finish_unified_app(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!(
                                         "split expects tensor input and List[int] sizes, got {tensor_ty} and {sizes_ty}"
                                     ),
@@ -1572,7 +1564,7 @@ pub(super) fn finish_unified_app(
             }
             "take" | "skip" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
                 }
                 let op_name = func_name.as_deref().unwrap_or("collection helper");
                 let list_arg = subst.apply(&arg_tys[0]);
@@ -1589,8 +1581,8 @@ pub(super) fn finish_unified_app(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!("{op_name} expects integer count, got {other}"),
                                 ),
                                 vec![],
@@ -1611,8 +1603,8 @@ pub(super) fn finish_unified_app(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!("{op_name} expects List input, got {other}"),
                                 ),
                                 vec![],
@@ -1623,7 +1615,7 @@ pub(super) fn finish_unified_app(
             }
             "chunk" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
                 }
                 let list_arg = subst.apply(&arg_tys[0]);
                 let count_arg = subst.apply(&arg_tys[1]);
@@ -1639,8 +1631,8 @@ pub(super) fn finish_unified_app(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!("chunk expects integer size, got {other}"),
                                 ),
                                 vec![],
@@ -1664,8 +1656,8 @@ pub(super) fn finish_unified_app(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!("chunk expects List input, got {other}"),
                                 ),
                                 vec![],
@@ -1676,7 +1668,7 @@ pub(super) fn finish_unified_app(
             }
             "range" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
                 }
                 for arg_ty in &arg_tys {
                     match subst.apply(arg_ty) {
@@ -1688,8 +1680,8 @@ pub(super) fn finish_unified_app(
                                 errors,
                                 CheckError::new(
                                     CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
+                                    with_node_provenance(
+                                        node,
                                         format!("range expects integer arguments, got {other}"),
                                     ),
                                     vec![],
@@ -1702,7 +1694,7 @@ pub(super) fn finish_unified_app(
             }
             "map" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
                 }
                 let elem_ty = vg.fresh_type();
                 let out_ty = vg.fresh_type();
@@ -1724,10 +1716,9 @@ pub(super) fn finish_unified_app(
             }
             "filter" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
                 }
                 let elem_ty = vg.fresh_type();
-                let list_expr = deep::Expr::List(list.clone(), zero_span());
                 if let Err(te) = unify(
                     &subst.apply(&arg_tys[0]),
                     &Type::Fn(vec![elem_ty.clone()], Box::new(Type::Prim(Prim::Bool))),
@@ -1736,7 +1727,7 @@ pub(super) fn finish_unified_app(
                     return report(
                         errors,
                         collection_helper_type_error(
-                            &list_expr,
+                            node,
                             "filter",
                             "expects a callback that returns bool",
                             te,
@@ -1754,11 +1745,10 @@ pub(super) fn finish_unified_app(
             }
             "fold" => {
                 if arg_tys.len() != 3 {
-                    return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 3, arg_tys.len());
                 }
                 let acc_ty = vg.fresh_type();
                 let elem_ty = vg.fresh_type();
-                let list_expr = deep::Expr::List(list.clone(), zero_span());
                 if let Err(te) = unify(
                     &subst.apply(&arg_tys[0]),
                     &Type::Fn(
@@ -1770,7 +1760,7 @@ pub(super) fn finish_unified_app(
                     return report(
                         errors,
                         collection_helper_type_error(
-                            &list_expr,
+                            node,
                             "fold",
                             "expects a callback whose accumulator/result type matches the initial accumulator",
                             te,
@@ -1781,7 +1771,7 @@ pub(super) fn finish_unified_app(
                     return report(
                         errors,
                         collection_helper_type_error(
-                            &list_expr,
+                            node,
                             "fold",
                             "expects a callback whose accumulator/result type matches the initial accumulator",
                             te,
@@ -1799,11 +1789,10 @@ pub(super) fn finish_unified_app(
             }
             "scan" => {
                 if arg_tys.len() != 3 {
-                    return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 3, arg_tys.len());
                 }
                 let acc_ty = vg.fresh_type();
                 let elem_ty = vg.fresh_type();
-                let list_expr = deep::Expr::List(list.clone(), zero_span());
                 if let Err(te) = unify(
                     &subst.apply(&arg_tys[0]),
                     &Type::Fn(
@@ -1815,7 +1804,7 @@ pub(super) fn finish_unified_app(
                     return report(
                         errors,
                         collection_helper_type_error(
-                            &list_expr,
+                            node,
                             "scan",
                             "expects a callback whose accumulator/result type matches the initial accumulator",
                             te,
@@ -1826,7 +1815,7 @@ pub(super) fn finish_unified_app(
                     return report(
                         errors,
                         collection_helper_type_error(
-                            &list_expr,
+                            node,
                             "scan",
                             "expects a callback whose accumulator/result type matches the initial accumulator",
                             te,
@@ -1853,17 +1842,16 @@ pub(super) fn finish_unified_app(
                 // that at execution time. At type-check time we accept
                 // any Type::Prim and let unification do the rest.
                 if arg_tys.len() != 3 {
-                    return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 3, arg_tys.len());
                 }
                 let elem_ty = vg.fresh_type();
                 let i64 = Type::Prim(Prim::Int64);
-                let list_expr = deep::Expr::List(list.clone(), zero_span());
                 // arg 0: initial accumulator of type T.
                 if let Err(te) = unify(&subst.apply(&arg_tys[0]), &elem_ty.clone(), subst) {
                     return report(
                         errors,
                         collection_helper_type_error(
-                            &list_expr,
+                            node,
                             "tensor_scan",
                             "expects an initial value whose type matches the callback element type",
                             te,
@@ -1882,7 +1870,7 @@ pub(super) fn finish_unified_app(
                     return report(
                         errors,
                         collection_helper_type_error(
-                            &list_expr,
+                            node,
                             "tensor_scan",
                             "expects a callback (T, i64) -> T",
                             te,
@@ -1894,7 +1882,7 @@ pub(super) fn finish_unified_app(
                     return report(
                         errors,
                         collection_helper_type_error(
-                            &list_expr,
+                            node,
                             "tensor_scan",
                             "expects a length `n: i64`",
                             te,
@@ -1923,8 +1911,8 @@ pub(super) fn finish_unified_app(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &list_expr,
+                                with_node_provenance(
+                                    node,
                                     format!(
                                         "tensor_scan element type must be a scalar primitive, got {other}"
                                     ),
@@ -1938,10 +1926,9 @@ pub(super) fn finish_unified_app(
             }
             "partition" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
                 }
                 let elem_ty = vg.fresh_type();
-                let list_expr = deep::Expr::List(list.clone(), zero_span());
                 if let Err(te) = unify(
                     &subst.apply(&arg_tys[0]),
                     &Type::Fn(vec![elem_ty.clone()], Box::new(Type::Prim(Prim::Bool))),
@@ -1950,7 +1937,7 @@ pub(super) fn finish_unified_app(
                     return report(
                         errors,
                         collection_helper_type_error(
-                            &list_expr,
+                            node,
                             "partition",
                             "expects a callback that returns bool",
                             te,
@@ -1969,7 +1956,7 @@ pub(super) fn finish_unified_app(
             }
             "flat_map" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
                 }
                 let elem_ty = vg.fresh_type();
                 let out_elem_ty = vg.fresh_type();
@@ -2021,8 +2008,8 @@ pub(super) fn finish_unified_app(
                                         errors,
                                         CheckError::new(
                                             CheckErrorKind::TypeMismatch,
-                                            with_macro_provenance(
-                                                &deep::Expr::List(list.clone(), zero_span()),
+                                            with_node_provenance(
+                                                node,
                                                 format!(
                                                     "flatten expects List[List[T]] input, got List[{other}]"
                                                 ),
@@ -2042,8 +2029,8 @@ pub(super) fn finish_unified_app(
                                 errors,
                                 CheckError::new(
                                     CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
+                                    with_node_provenance(
+                                        node,
                                         format!("flatten expects List[List[T]] input, got {other}"),
                                     ),
                                     vec![],
@@ -2055,7 +2042,7 @@ pub(super) fn finish_unified_app(
             }
             "zip" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
                 }
                 let lhs = subst.apply(&arg_tys[0]);
                 let rhs = subst.apply(&arg_tys[1]);
@@ -2085,8 +2072,8 @@ pub(super) fn finish_unified_app(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!("zip expects List inputs, got {lhs} and {rhs}"),
                                 ),
                                 vec![],
@@ -2113,8 +2100,8 @@ pub(super) fn finish_unified_app(
                                 errors,
                                 CheckError::new(
                                     CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
+                                    with_node_provenance(
+                                        node,
                                         format!("enumerate expects List input, got {other}"),
                                     ),
                                     vec![],
@@ -2146,11 +2133,8 @@ pub(super) fn finish_unified_app(
                                                 errors,
                                                 CheckError::new(
                                                     CheckErrorKind::TypeMismatch,
-                                                    with_macro_provenance(
-                                                        &deep::Expr::List(
-                                                            list.clone(),
-                                                            zero_span(),
-                                                        ),
+                                                    with_node_provenance(
+                                                        node,
                                                         format!(
                                                             "dict_of keys must be i64 or string, got {other}"
                                                         ),
@@ -2179,8 +2163,8 @@ pub(super) fn finish_unified_app(
                                         errors,
                                         CheckError::new(
                                             CheckErrorKind::TypeMismatch,
-                                            with_macro_provenance(
-                                                &deep::Expr::List(list.clone(), zero_span()),
+                                            with_node_provenance(
+                                                node,
                                                 format!(
                                                     "dict_of expects List[(K, V)] input, got List[{other}]"
                                                 ),
@@ -2200,8 +2184,8 @@ pub(super) fn finish_unified_app(
                                 errors,
                                 CheckError::new(
                                     CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
+                                    with_node_provenance(
+                                        node,
                                         format!("dict_of expects List input, got {other}"),
                                     ),
                                     vec![],
@@ -2213,7 +2197,7 @@ pub(super) fn finish_unified_app(
             }
             "dict_get" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
                 }
                 match (subst.apply(&arg_tys[0]), subst.apply(&arg_tys[1])) {
                     (Type::Adt(name, args), key_ty) if name == "Dict" && args.len() == 2 => {
@@ -2233,8 +2217,8 @@ pub(super) fn finish_unified_app(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!(
                                         "dict_get expects Dict[K, V] and K, got {dict_ty} and {key_ty}"
                                     ),
@@ -2247,7 +2231,7 @@ pub(super) fn finish_unified_app(
             }
             "dict_contains" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
                 }
                 match (subst.apply(&arg_tys[0]), subst.apply(&arg_tys[1])) {
                     (Type::Adt(name, args), key_ty) if name == "Dict" && args.len() == 2 => {
@@ -2267,8 +2251,8 @@ pub(super) fn finish_unified_app(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!(
                                         "dict_contains expects Dict[K, V] and K, got {dict_ty} and {key_ty}"
                                     ),
@@ -2281,7 +2265,7 @@ pub(super) fn finish_unified_app(
             }
             "dict_remove" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
                 }
                 match (subst.apply(&arg_tys[0]), subst.apply(&arg_tys[1])) {
                     (Type::Adt(name, args), key_ty) if name == "Dict" && args.len() == 2 => {
@@ -2304,8 +2288,8 @@ pub(super) fn finish_unified_app(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!(
                                         "dict_remove expects Dict[K, V] and K, got {dict_ty} and {key_ty}"
                                     ),
@@ -2318,7 +2302,7 @@ pub(super) fn finish_unified_app(
             }
             "dict_insert" => {
                 if arg_tys.len() != 3 {
-                    return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 3, arg_tys.len());
                 }
                 match (
                     subst.apply(&arg_tys[0]),
@@ -2352,8 +2336,8 @@ pub(super) fn finish_unified_app(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!(
                                         "dict_insert expects Dict[K, V], K, and V, got {dict_ty}, {key_ty}, and {value_ty}"
                                     ),
@@ -2366,7 +2350,7 @@ pub(super) fn finish_unified_app(
             }
             "dict_merge" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
                 }
                 match (subst.apply(&arg_tys[0]), subst.apply(&arg_tys[1])) {
                     (Type::Adt(lhs_name, lhs_args), Type::Adt(rhs_name, rhs_args))
@@ -2400,8 +2384,8 @@ pub(super) fn finish_unified_app(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!(
                                         "dict_merge expects matching Dict inputs, got {lhs_ty} and {rhs_ty}"
                                     ),
@@ -2427,8 +2411,8 @@ pub(super) fn finish_unified_app(
                                 errors,
                                 CheckError::new(
                                     CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
+                                    with_node_provenance(
+                                        node,
                                         format!("dict_keys expects Dict input, got {other}"),
                                     ),
                                     vec![],
@@ -2453,8 +2437,8 @@ pub(super) fn finish_unified_app(
                                 errors,
                                 CheckError::new(
                                     CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
+                                    with_node_provenance(
+                                        node,
                                         format!("dict_values expects Dict input, got {other}"),
                                     ),
                                     vec![],
@@ -2482,8 +2466,8 @@ pub(super) fn finish_unified_app(
                                 errors,
                                 CheckError::new(
                                     CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
+                                    with_node_provenance(
+                                        node,
                                         format!("dict_entries expects Dict input, got {other}"),
                                     ),
                                     vec![],
@@ -2530,8 +2514,8 @@ pub(super) fn finish_unified_app(
                                     errors,
                                     CheckError::new(
                                         CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
+                                        with_node_provenance(
+                                            node,
                                             format!("to_tensor expects List input, got {resolved}"),
                                         ),
                                         vec![],
@@ -2559,8 +2543,8 @@ pub(super) fn finish_unified_app(
                                 errors,
                                 CheckError::new(
                                     CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
+                                    with_node_provenance(
+                                        node,
                                         format!(
                                             "to_tensor expects numeric or bool elements at the innermost level, got {inner}"
                                         ),
@@ -2574,8 +2558,8 @@ pub(super) fn finish_unified_app(
                                 errors,
                                 CheckError::new(
                                     CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
+                                    with_node_provenance(
+                                        node,
                                         format!("to_tensor expects List input, got {resolved}"),
                                     ),
                                     vec![],
@@ -2594,8 +2578,8 @@ pub(super) fn finish_unified_app(
                                     errors,
                                     CheckError::new(
                                         CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
+                                        with_node_provenance(
+                                            node,
                                             format!(
                                                 "to_list expects a rank-1 tensor, got rank {} tensor",
                                                 dims.len()
@@ -2627,8 +2611,8 @@ pub(super) fn finish_unified_app(
                                     errors,
                                     CheckError::new(
                                         CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
+                                        with_node_provenance(
+                                            node,
                                             format!(
                                                 "to_list expects numeric or bool tensor input, got {precision:?}"
                                             ),
@@ -2648,8 +2632,8 @@ pub(super) fn finish_unified_app(
                                 errors,
                                 CheckError::new(
                                     CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
+                                    with_node_provenance(
+                                        node,
                                         format!("to_list expects Tensor input, got {other}"),
                                     ),
                                     vec![],
@@ -2661,7 +2645,7 @@ pub(super) fn finish_unified_app(
             }
             "pad_sequences" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
                 }
                 let seqs_ty = subst.apply(&arg_tys[0]);
                 let pad_ty = subst.apply(&arg_tys[1]);
@@ -2697,8 +2681,8 @@ pub(super) fn finish_unified_app(
                                             errors,
                                             CheckError::new(
                                                 CheckErrorKind::TypeMismatch,
-                                                with_macro_provenance(
-                                                    &deep::Expr::List(list.clone(), zero_span()),
+                                                with_node_provenance(
+                                                    node,
                                                     format!(
                                                         "pad_sequences expects numeric nested lists, got {other}"
                                                     ),
@@ -2714,8 +2698,8 @@ pub(super) fn finish_unified_app(
                                     errors,
                                     CheckError::new(
                                         CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
+                                        with_node_provenance(
+                                            node,
                                             format!(
                                                 "pad_sequences expects List[List[T]], got List[{other}]"
                                             ),
@@ -2735,8 +2719,8 @@ pub(super) fn finish_unified_app(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!(
                                         "pad_sequences expects List[List[T]] input, got {other}"
                                     ),
@@ -2749,7 +2733,7 @@ pub(super) fn finish_unified_app(
             }
             "pad_sequences_to" => {
                 if arg_tys.len() != 3 {
-                    return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 3, arg_tys.len());
                 }
                 let seqs_ty = subst.apply(&arg_tys[0]);
                 let width_ty = subst.apply(&arg_tys[1]);
@@ -2766,7 +2750,8 @@ pub(super) fn finish_unified_app(
                 // `Dim::Wildcard` (the runtime validates the value).
                 // `extract_int_for_dim` (not `extract_int_literal`)
                 // is the cast-aware extractor used for dim contexts.
-                let width_dim = children(list)
+                let width_dim = node
+                    .children_slice()
                     .get(2)
                     .and_then(extract_int_for_dim)
                     .filter(|width| *width > 0)
@@ -2803,8 +2788,8 @@ pub(super) fn finish_unified_app(
                                             errors,
                                             CheckError::new(
                                                 CheckErrorKind::TypeMismatch,
-                                                with_macro_provenance(
-                                                    &deep::Expr::List(list.clone(), zero_span()),
+                                                with_node_provenance(
+                                                    node,
                                                     format!(
                                                         "pad_sequences_to expects numeric nested lists, got {other}"
                                                     ),
@@ -2820,8 +2805,8 @@ pub(super) fn finish_unified_app(
                                     errors,
                                     CheckError::new(
                                         CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
+                                        with_node_provenance(
+                                            node,
                                             format!(
                                                 "pad_sequences_to expects List[List[T]], got List[{other}]"
                                             ),
@@ -2841,8 +2826,8 @@ pub(super) fn finish_unified_app(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!(
                                         "pad_sequences_to expects List[List[T]] input, got {other}"
                                     ),
@@ -2881,13 +2866,13 @@ pub(super) fn finish_unified_app(
                 ]);
             }
             "round_to" => {
-                return check_round_to_builtin_signature(list, &arg_tys, subst, errors);
+                return check_round_to_builtin_signature(node, &arg_tys, subst, errors);
             }
             // Host-lane CSV I/O (chelis#903): parse/serialize plus column
             // accessors over the canonical List[Dict[string,string]] table.
             "parse_csv" | "to_csv" | "csv_f64s" | "csv_ints" | "csv_strs" | "csv_nrows"
             | "csv_cols" | "csv_f64" | "csv_int" | "csv_str" => {
-                return check_csv_builtin_signature(fname, list, &arg_tys, subst, errors);
+                return check_csv_builtin_signature(fname, node, &arg_tys, subst, errors);
             }
             _ => {}
         }

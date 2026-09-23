@@ -29,40 +29,34 @@ const CONV2D_SRC: &str = r#"
            (var {} conv) (var {} x) (var {} k) (app {} (var {} Cons) (lit {type: (t-prim {} i64)} 1) (app {} (var {} Cons) (lit {type: (t-prim {} i64)} 1) (var {} Nil))) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} i64)} 0) (lit {type: (t-prim {} i64)} 0)) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} i64)} 0) (lit {type: (t-prim {} i64)} 0)) (var {} Nil)))))
 "#;
 
-fn list_tag(expr: &Expr) -> Option<&str> {
-    let Expr::List(list, _) = expr else {
-        return None;
-    };
+fn node_tag(expr: &Expr) -> Option<&str> {
     // Decode-once: the spelling comes from the decoded tag, never a raw
-    // element-0 string.
-    list.tag().map(|tag| tag.as_str())
+    // head string.
+    expr.tag().map(|tag| tag.as_str())
 }
 
 fn node_type_meta(expr: &Expr) -> Option<&Expr> {
-    let Expr::List(list, _) = expr else {
+    let Expr::Node(node, _) = expr else {
         return None;
     };
-    let Some(Expr::Map(meta, _)) = list.elements.get(1) else {
-        return None;
-    };
-    meta.ty().map(|ty| ty.expression())
+    node.meta().ty().map(|ty| ty.expression())
 }
 
 fn app_callee_name(expr: &Expr) -> Option<&str> {
-    if list_tag(expr) != Some("app") {
+    if node_tag(expr) != Some("app") {
         return None;
     }
-    let Expr::List(list, _) = expr else {
+    let Expr::Node(app, _) = expr else {
         return None;
     };
-    let callee = list.elements.get(2)?;
-    if list_tag(callee) != Some("var") {
+    let callee = app.children_slice().first()?;
+    if node_tag(callee) != Some("var") {
         return None;
     }
-    let Expr::List(var_list, _) = callee else {
+    let Expr::Node(var, _) = callee else {
         return None;
     };
-    match var_list.elements.get(2) {
+    match var.children_slice().first() {
         Some(Expr::Atom(Atom::Name(name), _)) => Some(name.as_str()),
         _ => None,
     }
@@ -71,11 +65,6 @@ fn app_callee_name(expr: &Expr) -> Option<&str> {
 fn visit<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
     f(expr);
     match expr {
-        Expr::List(list, _) => {
-            for child in &list.elements {
-                visit(child, f);
-            }
-        }
         Expr::Map(map, _) => {
             map.visit_expressions(&mut |value, _| visit(value, f));
         }
@@ -114,20 +103,19 @@ fn visit<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
     }
 }
 
-/// Count the dimension children of a `t-tensor` type node (everything after
-/// the tag+meta except the trailing `t-prim` precision node).
+/// Count the dimension children of a `t-tensor` type node (every child
+/// except the trailing `t-prim` precision node).
 fn tensor_type_dim_count(ty: &Expr) -> Option<usize> {
-    if list_tag(ty) != Some("t-tensor") {
+    if node_tag(ty) != Some("t-tensor") {
         return None;
     }
-    let Expr::List(list, _) = ty else {
+    let Expr::Node(node, _) = ty else {
         return None;
     };
-    let dims = list
-        .elements
+    let dims = node
+        .children_slice()
         .iter()
-        .skip(2)
-        .filter(|child| list_tag(child) != Some("t-prim"))
+        .filter(|child| node_tag(child) != Some("t-prim"))
         .count();
     Some(dims)
 }
@@ -156,7 +144,7 @@ fn conv_error_operand_does_not_clobber_concrete_annotation() {
     );
     for ty in &conv_types {
         assert_eq!(
-            list_tag(ty),
+            node_tag(ty),
             Some("t-tensor"),
             "conv written-back type must stay a concrete t-tensor (not a bare t-var), got {ty:?}"
         );

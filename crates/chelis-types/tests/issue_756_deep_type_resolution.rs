@@ -12,8 +12,6 @@
 //! spec/04-type-system.md §10 [04-TOT-2];
 //! spec/design/checker_totality.md §C3.1.
 
-mod support;
-
 use chelis_types::errors::CheckErrorKind;
 use chelis_types::types::Type;
 use chelis_types::{build_type_env_from_library, check_ir_program, check_ir_with_context};
@@ -460,7 +458,7 @@ fn malformed_canonical_primitive_reports_once_at_every_type_consumer() {
 
 #[test]
 fn independent_rhs_and_malformed_let_ascription_each_report_once() {
-    let exprs = support::parse_unchecked_legacy(
+    let exprs = parse(
         "(def {} bad
            (let {} (bind {} value
              (var {type: (t-prim {} missing_dtype)} missing))
@@ -498,7 +496,7 @@ fn independent_rhs_and_malformed_let_ascription_each_report_once() {
 
 #[test]
 fn prebound_failure_is_owned_by_its_exact_duplicate_name_declaration() {
-    let exprs = support::parse_unchecked_legacy(
+    let exprs = parse(
         "(def {} duplicate (var {} missing))
          (def {} duplicate (lit {type: (t-prim {} missing_dtype)} 1.0))",
     );

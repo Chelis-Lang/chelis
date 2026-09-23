@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 
 use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind};
 use chelis_deep::Span;
-use chelis_deep::ast::{Atom, Expr, List, Metadata};
+use chelis_deep::ast::{Atom, Expr, Metadata};
 use chelis_types::types::{Prim, Type};
 use chelis_types::{ScalarValue, scalar_from_f64, scalar_from_i64};
 
@@ -418,23 +418,19 @@ pub fn run_surf_source_obligations(
 /// if it does not type-check; `Ok(Ran(..))` otherwise.
 ///
 /// This entry and the CLI's `chelis prove foo.dp` path (`run_deep_obligations`)
-/// reach the same engine but do NOT hand it the same representation, and this
-/// comment used to claim they were the identical path (chelis#1125 PP7): the
-/// route below normalizes through `deep_compat::parse_file_to_lists`, so the
-/// engine sees `Expr::List`, while the CLI passes `parse_and_stamp_file`
-/// output straight through, so the engine sees `Expr::Node`. That difference
-/// used to change the answer -- the engine's readers decoded only the list
-/// carrier, so the CLI's obligation could not lower and fell through to Tier
-/// C while tide's proved at Tier B. Those readers now decode both carriers
-/// ([04-TOT-5]), so the two routes agree on the outcome; they are still two
-/// routes, and neither this comment nor a reader in the engine may assume
-/// which carrier arrives.
+/// hand the engine the same representation: both parse with
+/// `parse_and_stamp_file` and pass the stamped tree straight through, and a
+/// Deep node has the single spelling `Expr::Node` (chelis#1125). An earlier
+/// version of this comment claimed the two were identical while this route
+/// still normalized to the deleted list spelling; the engine's readers then
+/// decoded only that spelling, so the CLI's obligation fell through to Tier C
+/// while tide's proved at Tier B (PP7).
 pub fn run_deep_source_obligations(
     source: &str,
     options: &ObligationRunOptions,
 ) -> Result<ObligationRunResult, String> {
-    let exprs = crate::deep_compat::parse_file_to_lists(source)
-        .map_err(|error| format!("parse: {error}"))?;
+    let exprs =
+        chelis_deep::parse_and_stamp_file(source).map_err(|error| format!("parse: {error}"))?;
     let sigs: BTreeMap<String, Type> = match chelis_types::check_typed_program(&exprs) {
         Ok(checked) => checked
             .signature_inference()
@@ -1568,7 +1564,7 @@ fn eval_scalar_const(source: &str, name: &str) -> Option<f64> {
     // An in-module constant may be a value binding (`(var name)`) or a
     // zero-argument constant function (`(app (var name))`, the desugaring
     // of `def eps() -> f32 = 0.01`).
-    let exprs: Vec<Expr> = crate::deep_compat::parse_file_to_lists(source)
+    let exprs: Vec<Expr> = chelis_deep::parse_and_stamp_file(source)
         .ok()?
         .iter()
         .map(strip_invariant_meta)
@@ -1670,11 +1666,16 @@ fn inject_const_probe(exprs: &[Expr], def: Expr) -> Vec<Expr> {
     for expr in exprs {
         if !injected
             && list_tag(expr) == Some(DeepTag::Module)
-            && let Expr::List(l, span) = expr
+            && let Expr::Node(module, span) = expr
         {
-            let mut elements = l.elements.clone();
-            elements.push(def.clone());
-            out.push(Expr::List(List { elements }, *span));
+            let mut children = module.children_slice().to_vec();
+            children.push(def.clone());
+            out.push(Expr::node(
+                module.tag(),
+                module.meta().clone(),
+                children,
+                *span,
+            ));
             injected = true;
         } else {
             out.push(expr.clone());
@@ -1720,29 +1721,11 @@ fn inject_into_defining_module(exprs: &[Expr], type_name: &str, new_defs: Vec<Ex
             return true;
         }
         match expr.carrier() {
-            ExprCarrier::DecodedNode(_, _, children) => match expr {
-                Expr::List(list, _) => list
-                    .elements
-                    .iter()
-                    .any(|child| module_defines(child, type_name)),
-                Expr::Node(_, _) => children
-                    .iter()
-                    .any(|child| module_defines(child, type_name)),
-                _ => unreachable!(),
-            },
-            ExprCarrier::UndecodableHead(_, _, _) => match expr {
-                Expr::List(list, _) => list
-                    .elements
-                    .iter()
-                    .any(|child| module_defines(child, type_name)),
-                Expr::UnknownForm(_) => false,
-                _ => unreachable!(),
-            },
-            ExprCarrier::MalformedLegacyList(list) => list
-                .elements
+            ExprCarrier::DecodedNode(_, _, children) => children
                 .iter()
                 .any(|child| module_defines(child, type_name)),
-            ExprCarrier::StructuralList(_)
+            ExprCarrier::UndecodableHead(_, _, _)
+            | ExprCarrier::StructuralList(_)
             | ExprCarrier::Atom(_)
             | ExprCarrier::MetadataMap(_)
             | ExprCarrier::MetadataExpression(_) => false,
@@ -1754,11 +1737,16 @@ fn inject_into_defining_module(exprs: &[Expr], type_name: &str, new_defs: Vec<Ex
         if !injected
             && list_tag(expr) == Some(DeepTag::Module)
             && module_defines(expr, type_name)
-            && let Expr::List(l, span) = expr
+            && let Expr::Node(module, span) = expr
         {
-            let mut elements = l.elements.clone();
-            elements.extend(new_defs.clone());
-            out.push(Expr::List(List { elements }, *span));
+            let mut children = module.children_slice().to_vec();
+            children.extend(new_defs.clone());
+            out.push(Expr::node(
+                module.tag(),
+                module.meta().clone(),
+                children,
+                *span,
+            ));
             injected = true;
         } else {
             out.push(expr.clone());
@@ -2064,7 +2052,7 @@ fn inject_into_module_stripped(
     type_name: &str,
     defs: Vec<Expr>,
 ) -> Result<Vec<Expr>, String> {
-    let exprs = crate::deep_compat::parse_file_to_lists(module_source)
+    let exprs = chelis_deep::parse_and_stamp_file(module_source)
         .map_err(|error| format!("reparse module: {error}"))?;
     let stripped: Vec<Expr> = exprs.iter().map(strip_invariant_meta).collect();
     Ok(inject_into_defining_module(&stripped, type_name, defs))
@@ -2074,17 +2062,22 @@ fn inject_into_module_stripped(
 /// recursively (keeps `opaque: true`).
 fn strip_invariant_meta(expr: &Expr) -> Expr {
     match expr {
-        Expr::List(list, span) => {
-            let mut elements: Vec<Expr> = list.elements.iter().map(strip_invariant_meta).collect();
-            if list.tag() == Some(DeepTag::Deftype)
-                && let Some(Expr::Map(map, mspan)) = elements.get(1)
-            {
-                let mut metadata = map.clone();
+        Expr::Node(node, span) => {
+            let mut metadata = node.meta().clone();
+            if node.tag() == DeepTag::Deftype {
                 metadata.remove(K::Invariant);
                 metadata.remove(K::InvariantAmenability);
-                elements[1] = Expr::Map(metadata, *mspan);
             }
-            Expr::List(List { elements }, *span)
+            let children = node
+                .children_slice()
+                .iter()
+                .map(strip_invariant_meta)
+                .collect();
+            Expr::node(node.tag(), metadata, children, *span)
+        }
+        // A structural list is walked as the untagged list it replaced was.
+        Expr::BareList(elements, span) => {
+            Expr::BareList(elements.iter().map(strip_invariant_meta).collect(), *span)
         }
         other => other.clone(),
     }
@@ -2183,15 +2176,12 @@ fn deep_sym(s: &str) -> Expr {
     Expr::Atom(Atom::Name(s.to_string()), Span::new(0, 0))
 }
 fn deep_node(tag: &str, children: Vec<Expr>) -> Expr {
-    let mut elements = vec![
-        Expr::Atom(
-            Atom::Tag(DeepTag::parse(tag).expect("vocabulary builder")),
-            Span::new(0, 0),
-        ),
-        Expr::Map(Metadata::default(), Span::new(0, 0)),
-    ];
-    elements.extend(children);
-    Expr::List(List { elements }, Span::new(0, 0))
+    Expr::node(
+        DeepTag::parse(tag).expect("vocabulary builder"),
+        Metadata::default(),
+        children,
+        Span::new(0, 0),
+    )
 }
 fn deep_var(name: &str) -> Expr {
     deep_node("var", vec![deep_sym(name)])
@@ -2202,12 +2192,7 @@ fn deep_typed_lit(type_prim: &str, value: Expr) -> Expr {
         TypeSyntax::try_new(deep_node("t-prim", vec![deep_sym(type_prim)]))
             .expect("primitive type"),
     ));
-    Expr::List(
-        List {
-            elements: vec![deep_sym("lit"), Expr::Map(entries, Span::new(0, 0)), value],
-        },
-        Span::new(0, 0),
-    )
+    Expr::node(DeepTag::Lit, entries, vec![value], Span::new(0, 0))
 }
 /// A width-appropriate integer literal Deep expr: an i32 literal for the
 /// default width, otherwise an i32 literal cast to the target width
@@ -2226,7 +2211,6 @@ fn deep_bool_lit(v: bool) -> Expr {
 fn list_tag(expr: &Expr) -> Option<DeepTag> {
     match expr.carrier() {
         ExprCarrier::DecodedNode(tag, _, _) => Some(tag),
-        ExprCarrier::MalformedLegacyList(list) => list.tag(),
         ExprCarrier::StructuralList(_)
         | ExprCarrier::UndecodableHead(_, _, _)
         | ExprCarrier::Atom(_)
@@ -2237,16 +2221,11 @@ fn list_tag(expr: &Expr) -> Option<DeepTag> {
 fn node_children(expr: &Expr) -> &[Expr] {
     match expr.carrier() {
         ExprCarrier::DecodedNode(_, _, children) => children,
-        ExprCarrier::UndecodableHead(_, _, children) if matches!(expr, Expr::List(_, _)) => {
-            children
-        }
-        ExprCarrier::MalformedLegacyList(list) if list.elements.len() >= 2 => &list.elements[2..],
         ExprCarrier::StructuralList(_)
         | ExprCarrier::UndecodableHead(_, _, _)
         | ExprCarrier::Atom(_)
         | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_)
-        | ExprCarrier::MalformedLegacyList(_) => &[],
+        | ExprCarrier::MetadataExpression(_) => &[],
     }
 }
 fn sym_text(expr: &Expr) -> Option<&str> {
@@ -2261,9 +2240,7 @@ fn binder_name(expr: &Expr) -> Option<&str> {
         ExprCarrier::Atom(Atom::Name(name)) => Some(name.as_str()),
         ExprCarrier::MetadataExpression(meta) => sym_text(&meta.expr),
         ExprCarrier::StructuralList(elements) => elements.first().and_then(sym_text),
-        ExprCarrier::UndecodableHead(head, _, _) if matches!(expr, Expr::List(_, _)) => Some(head),
         ExprCarrier::UndecodableHead(_, _, _) => None,
-        ExprCarrier::MalformedLegacyList(list) => list.elements.first().and_then(sym_text),
         ExprCarrier::DecodedNode(_, _, _) | ExprCarrier::Atom(_) | ExprCarrier::MetadataMap(_) => {
             None
         }
@@ -2374,8 +2351,14 @@ mod finding_tests {
             ctor_name: ctor_name.to_string(),
             fields: vec![(field.to_string(), FieldType::Scalar("f32".to_string()))],
             // Never read by the flatten helpers under test; a placeholder
-            // `fn` node keeps the struct well-formed.
-            predicate: deep_node("fn", vec![]),
+            // `(fn (params p) true)` keeps the struct well-formed.
+            predicate: deep_node(
+                "fn",
+                vec![
+                    deep_node("params", vec![deep_sym("p")]),
+                    deep_bool_lit(true),
+                ],
+            ),
             binder: "p".to_string(),
             amenability: PredAmenability::Linear,
         }

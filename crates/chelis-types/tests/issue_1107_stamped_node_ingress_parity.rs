@@ -3,14 +3,16 @@
 //! Spec authority: spec/design/checker_totality.md §C1.1/§C1.2 and
 //! spec/04-type-system.md §10 [04-TOT-1].
 //!
-//! `check_ir_program` normalizes `Expr::Node` into `Expr::List` before
-//! inference (`normalize_nodes_to_lists`), while `check_typed_program` walks
-//! the stamped tree directly. `infer_expr`'s Node bridge rebuilds only the node
-//! it dispatches on — `Node::to_list` is shallow — so on the typed ingress
-//! every CHILD of a bridged node is still an `Expr::Node`. Any reader that
-//! destructured `Expr::List` and fell through on anything else therefore
-//! skipped its input on one ingress and read it on the other, and the two
-//! ingresses returned different verdicts for the same program.
+//! `check_ir_program` used to normalize `Expr::Node` into the legacy list
+//! carrier before inference, while `check_typed_program` walked the stamped
+//! tree directly. `infer_expr`'s Node bridge rebuilt only the node it
+//! dispatched on, so on the typed ingress every CHILD of a bridged node was
+//! still an `Expr::Node`. Any reader that destructured the legacy list and fell
+//! through on anything else therefore skipped its input on one ingress and read
+//! it on the other, and the two ingresses returned different verdicts for the
+//! same program. The legacy list carrier is now deleted (chelis#1125), so both
+//! ingresses hand the checker the same stamped tree; these rows keep the two
+//! entries' verdicts pinned to each other and to the expected outcome.
 //!
 //! The reported symptom (#1107) was the `record` / `record-update` kv-value
 //! slot: no field of a record literal was type-checked at all on the stamped
@@ -544,9 +546,8 @@ fn uniform_like_literal_bounds_are_accepted_on_both_ingresses() {
 // names and does range-check an in-range literal.
 //
 // Every row below runs the SAME six programs through `agreed_diagnostics`,
-// which drives `check_typed_program` (stamped) and `check_ir_program`
-// (normalizing) over one stamped parse and asserts the diagnostic sets are
-// equal.
+// which drives `check_typed_program` and `check_ir_program` over one stamped
+// parse and asserts the diagnostic sets are equal.
 
 /// PP7 row 1, REGRESSION TEST (red before the `infer/expr.rs` repair, green
 /// after): `infer_lit`'s `type:` metadata reader destructured the metadata

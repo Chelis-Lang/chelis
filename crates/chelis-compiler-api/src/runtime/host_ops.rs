@@ -39,8 +39,7 @@ pub(super) fn pattern_matches_with_result_producer(
         | ExprCarrier::UndecodableHead(_, _, _)
         | ExprCarrier::Atom(_)
         | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_)
-        | ExprCarrier::MalformedLegacyList(_) => return Ok(false),
+        | ExprCarrier::MetadataExpression(_) => return Ok(false),
     };
     match tag {
         DeepTag::PatVar => {
@@ -159,8 +158,7 @@ pub(super) fn pattern_matches_with_result_producer(
                     | ExprCarrier::UndecodableHead(_, _, _)
                     | ExprCarrier::Atom(_)
                     | ExprCarrier::MetadataMap(_)
-                    | ExprCarrier::MetadataExpression(_)
-                    | ExprCarrier::MalformedLegacyList(_) => {
+                    | ExprCarrier::MetadataExpression(_) => {
                         return Err("pat-record field must be a decoded `kv` node".to_string());
                     }
                 };
@@ -247,33 +245,22 @@ pub(super) fn pattern_matches_with_result_producer(
 pub(crate) fn collect_adt_ctor_fields(exprs: &[Expr]) -> UnordMap<String, Vec<String>> {
     let mut out = UnordMap::new();
     for expr in top_level_items(exprs) {
-        let Expr::List(list, _) = expr else {
+        let Some((DeepTag::Deftype, kids)) = tagged_expr_children(expr) else {
             continue;
         };
-        if tag(list) != Some(DeepTag::Deftype) {
-            continue;
-        }
-        let kids = children(list);
         for variant in kids.iter().skip(2) {
-            let Some(variant_list) = as_list(variant) else {
+            let Some((DeepTag::Variant, variant_kids)) = tagged_expr_children(variant) else {
                 continue;
             };
-            if tag(variant_list) != Some(DeepTag::Variant) {
-                continue;
-            }
-            let variant_kids = children(variant_list);
             let Some(ctor) = variant_kids.first().and_then(symbol_name) else {
                 continue;
             };
             let mut fields = Vec::new();
             for field in variant_kids.iter().skip(1) {
-                let Some(field_list) = as_list(field) else {
+                let Some((DeepTag::Field, field_kids)) = tagged_expr_children(field) else {
                     continue;
                 };
-                if tag(field_list) != Some(DeepTag::Field) {
-                    continue;
-                }
-                if let Some(name) = children(field_list).first().and_then(symbol_name) {
+                if let Some(name) = field_kids.first().and_then(symbol_name) {
                     fields.push(name.to_string());
                 }
             }
@@ -727,8 +714,7 @@ pub(super) fn tensor_bool_unop(
 /// exactly when the expression is a `t-tensor` whose element type is an
 /// active tensor dtype.
 pub(super) fn declared_tensor_prim(expr: &Expr) -> Option<Prim> {
-    let list = as_list(expr)?;
-    if tag(list) != Some(DeepTag::TTensor) {
+    if expr.tag() != Some(DeepTag::TTensor) {
         return None;
     }
     extract_prim_from_type_expr(expr)

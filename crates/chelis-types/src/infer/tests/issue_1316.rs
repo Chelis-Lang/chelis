@@ -315,19 +315,19 @@ fn issue_1316_each_public_driver_builds_one_shared_plan() {
 }
 
 #[test]
-fn issue_1316_malformed_group_rejects_in_both_drivers() {
-    let malformed = vec![node_expr(
-        DeepTag::Def,
-        vec![
-            symbol_expr("broken"),
-            node_expr(
-                DeepTag::Fn,
-                vec![node_expr(DeepTag::Params, vec![symbol_expr("x")])],
-            ),
-        ],
-    )];
-    assert!(check_typed_program(&malformed).is_err());
-    assert!(check_ir_program(&malformed).is_err());
+fn issue_1316_malformed_group_is_rejected_before_either_driver() {
+    // A `fn` without a body cannot reach either driver: the node constructor
+    // enforces `fn`'s two-child arity, and the parser builds through it.
+    let params = stamped_node_expr(DeepTag::Params, vec![symbol_expr("x")]);
+    assert!(matches!(
+        DeepNode::try_new(DeepTag::Fn, deep::Metadata::default(), vec![params]),
+        Err(chelis_deep::node::NodeError::ArityViolation {
+            tag: DeepTag::Fn,
+            actual: 1,
+            ..
+        })
+    ));
+    assert!(chelis_deep::parser::parse_str("(def {} broken (fn {} (params {} x)))").is_err());
 }
 
 #[test]

@@ -35,7 +35,7 @@ fn surf_source_span(expr: &deep::Expr) -> Span {
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_fn(
-    list: &deep::List,
+    node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
     subst: &mut Subst,
@@ -44,9 +44,9 @@ pub(super) fn infer_fn(
     product: &mut InferenceProduct,
     declaration_diagnostic_owner: Option<&DeclarationDiagnosticOwner>,
 ) -> Type {
-    let kids = children(list);
+    let kids = node.children_slice();
     if kids.is_empty() {
-        return malformed_form(list, "fn", "parameters and a body", errors);
+        return malformed_form(node, "fn", "parameters and a body", errors);
     }
 
     // kids[0] = (params {} x1 ... xn)
@@ -98,7 +98,7 @@ pub(super) fn infer_fn(
     let body = if kids.len() > 1 {
         &kids[1]
     } else {
-        return malformed_form(list, "fn", "a body expression", errors);
+        return malformed_form(node, "fn", "a body expression", errors);
     };
     let body_ty = infer_expr(body, &mut fn_env, vg, subst, adt_reg, errors, product);
 
@@ -275,17 +275,6 @@ pub(super) fn infer_def_body_with_sig(
         }
     };
 
-    if kids.len() < 2 {
-        // chelis#1107 amendment (justified-safe, not routed): reached only
-        // when the `fn` has fewer than two children. `arity_contract(Fn)` is
-        // `Fixed(2)` and `Node::validate` enforces it at construction, so a
-        // stamped `Node` is never short -- only a legacy `List` carrier can
-        // land here.
-        let deep::Expr::List(fn_list, _) = body else {
-            unreachable!("validated Node::Fn satisfies its arity contract")
-        };
-        return malformed_form(fn_list, "fn", "parameters and a body", errors);
-    }
     let params = extract_params_with_ownership(
         &kids[0],
         parameter_annotation_ownership,
@@ -348,7 +337,6 @@ pub(super) fn infer_def_body_with_sig(
 fn canonical_parameter_elements(expr: &deep::Expr) -> Option<&[deep::Expr]> {
     match expr {
         deep::Expr::Node(node, _) if node.tag() == DeepTag::Params => Some(node.children_slice()),
-        deep::Expr::List(list, _) if get_tag(list) == Some(DeepTag::Params) => Some(children(list)),
         _ => None,
     }
 }
@@ -356,8 +344,6 @@ fn canonical_parameter_elements(expr: &deep::Expr) -> Option<&[deep::Expr]> {
 fn parameter_elements(expr: &deep::Expr) -> Option<&[deep::Expr]> {
     match expr {
         deep::Expr::Node(node, _) if node.tag() == DeepTag::Params => Some(node.children_slice()),
-        deep::Expr::List(list, _) if get_tag(list) == Some(DeepTag::Params) => Some(children(list)),
-        deep::Expr::List(list, _) => Some(list.elements.as_slice()),
         deep::Expr::BareList(elements, _) => Some(elements.as_slice()),
         _ => None,
     }
@@ -366,12 +352,6 @@ fn parameter_elements(expr: &deep::Expr) -> Option<&[deep::Expr]> {
 fn parameter_type_syntax(expr: &deep::Expr) -> Option<&deep::Expr> {
     match expr {
         deep::Expr::MetaExpr(meta, _) => meta.metadata.ty().map(|value| value.expression()),
-        deep::Expr::List(list, _) => list.elements.get(1).and_then(|meta| {
-            let deep::Expr::Map(meta, _) = meta else {
-                return None;
-            };
-            meta.ty().map(|value| value.expression())
-        }),
         deep::Expr::BareList(elements, _) => elements.get(1).and_then(|meta| {
             let deep::Expr::Map(meta, _) = meta else {
                 return None;
@@ -431,21 +411,7 @@ fn extract_params_with_ownership(
                     .flatten();
                 params.push((name.to_string(), annotation));
             }
-            deep::Expr::List(param_list, _) => {
-                // Typed param: (name {type: T}).
-                let Some(name) = param_list.elements.first().and_then(symbol_name) else {
-                    continue;
-                };
-                let annotation = (!verified_copy)
-                    .then(|| match param_list.elements.get(1) {
-                        Some(deep::Expr::Map(meta, _)) => meta
-                            .ty()
-                            .and_then(|value| resolve_annotation(value.expression())),
-                        _ => None,
-                    })
-                    .flatten();
-                params.push((name.to_string(), annotation));
-            }
+            // Typed param: (name {type: T}).
             deep::Expr::BareList(elements, _) => {
                 let Some(name) = elements.first().and_then(symbol_name) else {
                     continue;
@@ -475,7 +441,7 @@ fn extract_params_with_ownership(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_let(
-    list: &deep::List,
+    node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
     subst: &mut Subst,
@@ -483,9 +449,9 @@ pub(super) fn infer_let(
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
 ) -> Type {
-    let kids = children(list);
+    let kids = node.children_slice();
     if kids.len() < 2 {
-        return malformed_form(list, "let", "bindings and a body", errors);
+        return malformed_form(node, "let", "bindings and a body", errors);
     }
 
     // kids[0] = (bind {} x1 e1 x2 e2 ...)
@@ -697,7 +663,8 @@ pub(super) fn infer_let(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_if(
-    list: &deep::List,
+    expr: &deep::Expr,
+    node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
     subst: &mut Subst,
@@ -705,10 +672,10 @@ pub(super) fn infer_if(
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
 ) -> Type {
-    let kids = children(list);
+    let kids = node.children_slice();
     if kids.len() < 3 {
         return malformed_form(
-            list,
+            node,
             "if",
             "a condition, a then-branch, and an else-branch",
             errors,
@@ -733,11 +700,11 @@ pub(super) fn infer_if(
         Ok(()) => subst.apply(&then_ty),
         Err(te) => {
             let mut e: CheckError = te.into();
-            if let Some(id) = list_span_id(list) {
+            if let Some(id) = node_span_id(node) {
                 e.span_offset = parse_span_offset(id);
                 e.span_id = Some(id.to_string());
             } else {
-                let off = span_of_list(list).offset;
+                let off = expr.span().offset;
                 if off > 0 {
                     e.span_offset = Some(off);
                 }

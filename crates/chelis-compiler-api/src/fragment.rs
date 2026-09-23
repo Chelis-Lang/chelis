@@ -366,14 +366,14 @@ mod tests {
         let def = module
             .iter()
             .find_map(|expr| {
-                let Expr::List(list, _) = expr else {
+                let Expr::Node(node, _) = expr else {
                     return None;
                 };
-                let is_module = list.tag() == Some(DeepTag::Module);
-                if !is_module {
+                if node.tag() != DeepTag::Module {
                     return None;
                 }
-                list.elements.get(3 + resolved.decl_index)
+                // Child 0 is the module name; declarations follow it.
+                node.children_slice().get(1 + resolved.decl_index)
             })
             .expect("def node")
             .clone();

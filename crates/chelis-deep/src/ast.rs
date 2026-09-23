@@ -9,15 +9,6 @@ use crate::tag::DeepTag;
 pub enum Expr {
     /// An atomic value (symbol, number, string, keyword, bool).
     Atom(Atom, Span),
-    /// A parenthesized list `(tag {} children...)`.
-    ///
-    /// **DEPRECATED**: No producer creates this variant anymore. All paths
-    /// produce `Expr::Node`, `Expr::BareList`, or `Expr::UnknownForm`.
-    /// The match arms on this variant are dead code awaiting removal.
-    /// See chelis#1028.
-    /// Legacy list representation — no producer creates this variant.
-    /// Retained during migration; will be deleted when all consumers are migrated.
-    List(List, Span),
     /// An inline metadata map `{key: value, ...}` or `{}`.
     Map(Metadata, Span),
     /// A metadata-annotated expression `^{k1 v1 ...} expr` (legacy, kept for compat).
@@ -47,18 +38,19 @@ pub struct UnknownFormData {
 
 /// A total borrowed view of an admitted Deep expression carrier.
 ///
-/// Readers use this accessor instead of independently matching `Expr::Node`
-/// and the transitional `Expr::List`. Every non-node carrier has a distinct
-/// variant, so declining one is an explicit match arm rather than a silent
-/// `Option::None`.
+/// Every carrier has a distinct variant, so a reader that declines one says
+/// so in an explicit match arm rather than through a silent `Option::None`.
+/// Each variant has exactly one source: a vocabulary node has the single
+/// spelling `Expr::Node` whatever its ingress (chelis#1125).
 #[derive(Debug, Clone, Copy)]
 pub enum ExprCarrier<'a> {
-    /// A decoded vocabulary node, whether carried by `Expr::Node` or by a
-    /// well-formed transitional `Expr::List`.
+    /// A decoded vocabulary node (`Expr::Node`).
     DecodedNode(DeepTag, &'a Metadata, &'a [Expr]),
-    /// A structural list whose first element has no vocabulary-head role.
+    /// A structural list whose first element has no vocabulary-head role
+    /// (`Expr::BareList`).
     StructuralList(&'a [Expr]),
-    /// A head that was considered for vocabulary decoding but did not decode.
+    /// A head that was considered for vocabulary decoding but did not decode
+    /// (`Expr::UnknownForm`).
     UndecodableHead(&'a str, &'a Metadata, &'a [Expr]),
     /// An atomic leaf.
     Atom(&'a Atom),
@@ -66,44 +58,28 @@ pub enum ExprCarrier<'a> {
     MetadataMap(&'a Metadata),
     /// A legacy metadata wrapper around another expression.
     MetadataExpression(&'a MetaExpr),
-    /// A transitional tagged list that lacks the required metadata-map slot.
-    MalformedLegacyList(&'a List),
 }
 
 impl Expr {
     /// Construct a canonical tagged node `(tag {meta} children...)` with a
     /// decoded tag. This is the typed producer entry point (decode-once,
     /// chelis#731 Phase 3): programmatic Deep construction goes through
-    /// here (or stamps `Atom::Tag` directly) so the in-memory tree never
-    /// carries a vocabulary tag as a string.
+    /// here so the in-memory tree never carries a vocabulary tag as a
+    /// string.
     pub fn node(tag: DeepTag, meta: Metadata, children: Vec<Expr>, span: Span) -> Expr {
         Expr::Node(Box::new(crate::node::Node::new(tag, meta, children)), span)
     }
 
     /// Borrow this expression through the carrier-total reader interface.
     ///
-    /// The accessor performs the transitional `List` decode once and exposes
-    /// every other admitted representation as a distinct enum variant. A
-    /// semantic reader must therefore state what it does with carriers it
-    /// cannot consume instead of inheriting an implicit catch-all.
+    /// Every admitted representation is a distinct enum variant. A semantic
+    /// reader must therefore state what it does with carriers it cannot
+    /// consume instead of inheriting an implicit catch-all.
     pub fn carrier(&self) -> ExprCarrier<'_> {
         match self {
             Expr::Node(node, _) => {
                 ExprCarrier::DecodedNode(node.tag(), node.meta(), node.children_slice())
             }
-            Expr::List(list, _) => match list.elements.as_slice() {
-                [
-                    Expr::Atom(Atom::Tag(tag), _),
-                    Expr::Map(metadata, _),
-                    children @ ..,
-                ] => ExprCarrier::DecodedNode(*tag, metadata, children),
-                [
-                    Expr::Atom(Atom::Name(head), _),
-                    Expr::Map(metadata, _),
-                    children @ ..,
-                ] => ExprCarrier::UndecodableHead(head, metadata, children),
-                _ => ExprCarrier::MalformedLegacyList(list),
-            },
             Expr::BareList(elements, _) => ExprCarrier::StructuralList(elements),
             Expr::UnknownForm(data) => {
                 ExprCarrier::UndecodableHead(&data.head, &data.meta, &data.children)
@@ -125,7 +101,6 @@ impl Expr {
     pub fn span(&self) -> Span {
         match self {
             Expr::Atom(_, s)
-            | Expr::List(_, s)
             | Expr::Map(_, s)
             | Expr::MetaExpr(_, s)
             | Expr::Node(_, s)
@@ -153,10 +128,9 @@ impl Expr {
     /// `Some("")` to `None`.
     ///
     /// Returns `None` for structural lists, atoms, bare maps, legacy
-    /// `MetaExpr` nodes, malformed legacy lists, metadata-bearing carriers
-    /// whose map has no `span` key, or `span` values that are not string
-    /// literals (those are shape errors callers handle separately, not a
-    /// missing span).
+    /// `MetaExpr` nodes, metadata-bearing carriers whose map has no `span`
+    /// key, or `span` values that are not string literals (those are shape
+    /// errors callers handle separately, not a missing span).
     pub fn span_id(&self) -> Option<&str> {
         let meta = match self.carrier() {
             ExprCarrier::DecodedNode(_, metadata, _)
@@ -171,43 +145,10 @@ impl Expr {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Atom {
     Name(String),
-    /// A decoded closed-vocabulary Deep tag at a node's tag position
-    /// (element 0). Stamped once by the parser or a typed constructor
-    /// (decode-once, chelis#731 Phase 3): after parsing, the tag string
-    /// does not exist in the in-memory tree, so no consumer can dispatch
-    /// on it; printers and serializers regenerate the string via
-    /// [`DeepTag::as_str`] at the serialization boundary only.
-    Tag(DeepTag),
     Int(i64),
     Float(f64),
     Str(String),
     Bool(bool),
-}
-
-/// A flat list view of an expression's elements.
-///
-/// **DEPRECATED**: This struct only exists because `Expr::List` has not yet
-/// been fully removed. New code should use `Expr::Node` (via
-/// `crate::node::Node`) instead.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct List {
-    pub elements: Vec<Expr>,
-}
-
-impl List {
-    pub fn tag(&self) -> Option<DeepTag> {
-        match self.elements.first() {
-            Some(Expr::Atom(Atom::Tag(tag), _)) => Some(*tag),
-            _ => None,
-        }
-    }
-
-    pub fn unknown_tag_symbol(&self) -> Option<&str> {
-        match self.elements.first() {
-            Some(Expr::Atom(Atom::Name(symbol), _)) => Some(symbol.as_str()),
-            _ => None,
-        }
-    }
 }
 
 /// Which rung of the chelis#759 cast ladder a `cast` node selects.
@@ -300,21 +241,6 @@ pub fn strip_metadata(expr: &Expr) -> Expr {
         Expr::Atom(..) => expr.clone(),
         Expr::Map(_, span) => Expr::Map(Metadata::default(), *span),
         Expr::MetaExpr(meta, _) => strip_metadata(&meta.expr),
-        Expr::List(list, span) => {
-            let elements = list
-                .elements
-                .iter()
-                .enumerate()
-                .map(|(index, element)| {
-                    if index == 1 && matches!(element, Expr::Map(..)) {
-                        Expr::Map(Metadata::default(), element.span())
-                    } else {
-                        strip_metadata(element)
-                    }
-                })
-                .collect();
-            Expr::List(List { elements }, *span)
-        }
         Expr::Node(node, span) => {
             use crate::node::Node;
             let children: Vec<Expr> = node

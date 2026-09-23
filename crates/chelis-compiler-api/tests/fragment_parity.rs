@@ -79,18 +79,18 @@ fn render_body(surf_source: &str, function_name: &str) -> Expr {
 /// Return the `decl_index`-th declaration inside the single `(module ...)`
 /// node, borrowed from the program slice.
 fn module_decl(expr: &Expr, decl_index: usize) -> Option<&Expr> {
-    let Expr::List(list, _) = expr else {
+    let Expr::Node(node, _) = expr else {
         return None;
     };
-    if !is_tag(list, "module") {
+    if !is_tag(node, "module") {
         return None;
     }
-    // module.elements: [tag, meta, name, decls...]; decls start at index 3.
-    list.elements.get(3 + decl_index)
+    // module children: [name, decls...]; decls start at child 1.
+    node.children_slice().get(1 + decl_index)
 }
 
-fn is_tag(list: &chelis_deep::List, tag: &str) -> bool {
-    matches!(list.tag(), Some(t) if t.as_str() == tag)
+fn is_tag(node: &chelis_deep::node::Node, tag: &str) -> bool {
+    node.tag().as_str() == tag
 }
 
 /// Flatten `(module ...)` wrappers into a bare decl list, mirroring
@@ -98,10 +98,10 @@ fn is_tag(list: &chelis_deep::List, tag: &str) -> bool {
 fn flatten_modules(exprs: &[Expr]) -> Vec<Expr> {
     let mut out = Vec::new();
     for expr in exprs {
-        if let Expr::List(list, _) = expr
-            && is_tag(list, "module")
+        if let Expr::Node(node, _) = expr
+            && is_tag(node, "module")
         {
-            out.extend(flatten_modules(&list.elements[3..]));
+            out.extend(flatten_modules(&node.children_slice()[1..]));
             continue;
         }
         out.push(expr.clone());
@@ -241,10 +241,10 @@ fn module_decls(module: &[Expr]) -> Vec<Expr> {
     module
         .iter()
         .find_map(|expr| {
-            let Expr::List(list, _) = expr else {
+            let Expr::Node(node, _) = expr else {
                 return None;
             };
-            is_tag(list, "module").then(|| list.elements[3..].to_vec())
+            is_tag(node, "module").then(|| node.children_slice()[1..].to_vec())
         })
         .expect("single module node")
 }
