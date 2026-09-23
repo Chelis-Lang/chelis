@@ -910,13 +910,6 @@
       "disposition": "gated_on_binding"
     },
     {
-      "file": "expr.rs",
-      "function": "infer_expr_with_type_metadata_ownership",
-      "ordinal": 2,
-      "pattern": "Type::Var(tv)",
-      "disposition": "gated_on_binding"
-    },
-    {
       "file": "expr_pattern.rs",
       "function": "check_literal_pattern",
       "ordinal": 1,
