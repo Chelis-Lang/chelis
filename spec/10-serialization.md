@@ -273,7 +273,7 @@ Each reads the key without consuming it. An activation is an earlier-node
 reference under §3.4, not another template.
 
 `key` is a structural precision with no literal carrier: every key is the
-rank-zero output of a `DrawKey` node, consumed by exactly one `UniformLike` or
+rank-zero output of a `DrawKey` node, consumed by at most one `UniformLike` or
 `Dropout` and otherwise read only by that draw's replays. `DrawKey` carries
 its `handler`, its `draw` (`uniform_like` or `dropout`) and the draw's
 template or input `dtype`. An `inherited` handler takes the next ordinal of

@@ -1,8 +1,8 @@
 //! spec/10 §§3.2–3.4 (wire v17) and [05-OP-8/37]: random nodes carry no
 //! fields; their controls and key are operands. Every key is produced by a
 //! `DrawKey` and consumed at most once; adjoint replays read a key without
-//! consuming it. These tests exercise codecs and object admission, not random
-//! kernel output.
+//! consuming it, and no key is a graph root or a shape dependency. These tests
+//! exercise codecs and object admission, not random kernel output.
 use chelis_compiler_api::schema::{
     CheckRequest, LowerRequest, SourceKind, WIRE_DAG_SCHEMA_VERSION, WireDag, WireDagDecodeError,
     WireDagNode,
@@ -166,6 +166,45 @@ fn a_key_is_consumed_once_and_only_by_a_random_primitive() {
     let rate = input(&dag, dropout, 1);
     not_drawn["nodes"][dropout]["inputs"][2] = json!(rate);
     rejects_domain(&not_drawn, "produced by a draw key");
+}
+
+/// spec/10 §3.2: every key is the output of a `DrawKey`, read only by its
+/// one consuming draw and that draw's replays. The IR verifier rejects each
+/// payload below; the codec admitted all three roots and the stray producer.
+///
+/// Evidentiary status: REGRESSION TEST. At dcc9256c4 `from_validated_json`
+/// accepted the key-precision load, that load as a root, the rooted draw key
+/// and the key shape dependency.
+#[test]
+fn a_key_is_drawn_and_never_a_root_or_a_dependency() {
+    let dag = lower(HANDLED, "sample");
+    let dropout = first(&dag, "dropout");
+    let key = input(&dag, dropout, 2);
+
+    // A key-precision node that no draw key produced, left unconsumed.
+    let mut stray = dag.clone();
+    let id = stray["nodes"].as_array().unwrap().len();
+    stray["nodes"].as_array_mut().unwrap().push(
+        json!({"shape_deps":[],"span_id":null,"merged_spans":[],"id":id,
+        "op":{"kind":"load","name":"k"},"inputs":[],
+        "output_type":{"dims":[],"precision":"key"}}),
+    );
+    rejects_domain(&stray, "only a draw key produces a key");
+
+    // The same stray key as a root.
+    let mut stray_root = stray.clone();
+    stray_root["roots"].as_array_mut().unwrap().push(json!(id));
+    rejects_domain(&stray_root, "only a draw key produces a key");
+
+    // A consumed draw key as a root.
+    let mut key_root = dag.clone();
+    key_root["roots"].as_array_mut().unwrap().push(json!(key));
+    rejects_domain(&key_root, "a key is never a graph root");
+
+    // A key as a shape dependency of its own consumer.
+    let mut key_dependency = dag.clone();
+    key_dependency["nodes"][dropout]["shape_deps"] = json!([key]);
+    rejects_domain(&key_dependency, "a key is never a shape dependency");
 }
 
 #[test]

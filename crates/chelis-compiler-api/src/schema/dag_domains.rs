@@ -209,9 +209,17 @@ fn same_as_data_shape(template: &WireDagNode, cotangent: &WireDagNode) -> bool {
             .all(|(a, b)| wire_dim_info_equal(a, b))
 }
 
-/// Each key is consumed by at most one `UniformLike` or `Dropout`; adjoint
-/// replays read a key without consuming it, and no other operation reads one.
+/// spec/10 §3.2's key rules: every key is the output of a `DrawKey`, consumed
+/// by at most one `UniformLike` or `Dropout` and otherwise read only by that
+/// draw's adjoint replays, never by another operation, a shape dependency or
+/// the graph's roots.
 fn keys_are_consumed_once(dag: &WireDag) -> Result<()> {
+    let is_key = |id: &u64| {
+        usize::try_from(*id)
+            .ok()
+            .and_then(|index| dag.nodes.get(index))
+            .is_some_and(|source| source.output_type.precision == "key")
+    };
     let mut consumed = std::collections::BTreeSet::new();
     for node in &dag.nodes {
         for (slot, id) in node.inputs.iter().enumerate() {
@@ -242,6 +250,15 @@ fn keys_are_consumed_once(dag: &WireDag) -> Result<()> {
                 _ => return Err(reject("a key reaches an operation that does not take one")),
             }
         }
+        if node.shape_deps.iter().any(is_key) {
+            return Err(reject("a key is never a shape dependency"));
+        }
+        if node.output_type.precision == "key" && !matches!(node.op, WireRiscOp::DrawKey { .. }) {
+            return Err(reject("only a draw key produces a key"));
+        }
+    }
+    if dag.roots.iter().any(is_key) {
+        return Err(reject("a key is never a graph root"));
     }
     Ok(())
 }
