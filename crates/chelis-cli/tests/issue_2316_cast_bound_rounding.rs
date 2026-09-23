@@ -413,7 +413,9 @@ fn a_f64_suffixed_literal_inside_a_narrowing_cast_agrees_across_lanes() {
 /// foldability observable through buildability.
 #[test]
 fn an_integer_suffixed_literal_bound_builds_and_agrees_across_lanes() {
-    assert_both_lanes_match_eval("cast(3i32, f32)", "0.9f32", "i32lit");
+    // [05-OP-8] requires `low <= high` before the draw, so the high bound
+    // sits above the integer-cast low bound.
+    assert_both_lanes_match_eval("cast(3i32, f32)", "3.9f32", "i32lit");
 }
 
 /// The same shape at the other integer widths the synthesized cast can carry.
@@ -423,7 +425,7 @@ fn an_integer_suffixed_literal_bound_builds_and_agrees_across_lanes() {
 #[test]
 fn integer_suffixed_bounds_at_every_width_agree_across_lanes() {
     for (suffix, tag) in [("3i8", "i8lit"), ("3i16", "i16lit"), ("3i64", "i64lit")] {
-        assert_both_lanes_match_eval(&format!("cast({suffix}, f32)"), "0.9f32", tag);
+        assert_both_lanes_match_eval(&format!("cast({suffix}, f32)"), "3.9f32", tag);
     }
 }
 

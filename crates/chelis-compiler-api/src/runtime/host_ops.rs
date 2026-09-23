@@ -3160,23 +3160,31 @@ pub(super) fn builtin_name(expr: &Expr) -> Option<&str> {
     BUILTIN_NAMES.contains(&name).then_some(name)
 }
 
+/// A random control argument as its own tagged scalar: no f64 funnel, no
+/// integer admission. The checker gives a dropout rate the input's dtype and
+/// the uniform bounds f32 (chelis#1295).
+pub(super) fn expect_float_control(
+    args: &[RuntimeValue],
+    index: usize,
+    op: &str,
+) -> Result<ScalarValue, String> {
+    match args.get(index) {
+        Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_float() => Ok(payload.value()),
+        other => Err(format!(
+            "{op} expects a float scalar control at index {index}, got {other:?}"
+        )),
+    }
+}
+
 /// Validate `[05-OP-8]`'s bounds for `template` before the caller takes a
-/// draw key, so a failed validation consumes no ordinal. The bounds reach the
-/// host lane as the checker's f32 scalars (chelis#1295).
+/// draw key, so a failed validation consumes no ordinal.
 pub(super) fn prepare_uniform_like(
     template: &RuntimeTensorValue,
-    low: f64,
-    high: f64,
+    low: ScalarValue,
+    high: ScalarValue,
 ) -> Result<PreparedUniformLike, String> {
-    let bound =
-        |value| scalar_from_f64("uniform_like", Prim::F32, value).map_err(|trap| trap.to_string());
-    PreparedUniformLike::new(
-        template.precision,
-        template.value.len(),
-        bound(low)?,
-        bound(high)?,
-    )
-    .map_err(|error| error.to_string())
+    PreparedUniformLike::new(template.precision, template.value.len(), low, high)
+        .map_err(|error| error.to_string())
 }
 
 /// Fill `template`'s shape and dtype with the prepared `[05-OP-8]` draw keyed
@@ -3217,7 +3225,8 @@ mod uniform_like_affine_tests {
     }
 
     fn draw(template: &RuntimeTensorValue, low: f64, high: f64) -> RuntimeTensorValue {
-        let prepared = prepare_uniform_like(template, low, high).unwrap();
+        let bound = |value| scalar_from_f64("test", Prim::F32, value).unwrap();
+        let prepared = prepare_uniform_like(template, bound(low), bound(high)).unwrap();
         uniform_like_value(template, &prepared, RandomKey::from_counter(42, 0)).unwrap()
     }
 

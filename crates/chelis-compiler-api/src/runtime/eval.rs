@@ -1723,6 +1723,16 @@ impl<'a> EvalContext<'a> {
         {
             return self.eval_named_axis_reduction_app("dropout", kids);
         }
+        // Any other dropout the host walk reaches (a runtime rate, dynamic
+        // control, recursion) draws here from the interpreter's handler.
+        if var_name(func) == Some("dropout") && self.active_builtin_symbol("dropout") {
+            let mut args = Vec::with_capacity(kids.len().saturating_sub(1));
+            for arg in &kids[1..] {
+                args.push(self.eval_expr(arg)?);
+            }
+            self.result_producer = None;
+            return self.eval_dropout_builtin(&args);
+        }
 
         // chelis#338 site A: a reduction whose axis argument is a bare
         // `(var name)` names a *dimension* of the operand, not a runtime
@@ -2932,6 +2942,32 @@ impl<'a> EvalContext<'a> {
         }
     }
 
+    /// The active handler's next [05-RNG-1] key, advancing its ordinal. A
+    /// draw outside every handler is an internal error: the checker rejects
+    /// an unhandled Random effect, and no draw falls back to seed 0.
+    fn next_random_key(&mut self, op: &str) -> Result<chelis_types::RandomKey, String> {
+        let seed = self
+            .random_seed
+            .ok_or_else(|| format!("internal: {op} was evaluated outside every Random handler"))?;
+        let counter = self.random_counter;
+        self.random_counter = self.random_counter.saturating_add(1);
+        Ok(chelis_types::RandomKey::from_counter(seed, counter))
+    }
+
+    /// [05-OP-37] in the host walk: the rate is the input dtype's tagged
+    /// scalar, validated before the draw consumes its ordinal.
+    fn eval_dropout_builtin(&mut self, args: &[RuntimeValue]) -> Result<RuntimeValue, String> {
+        let input = expect_tensor_arg(args, 0)?;
+        let rate = expect_float_control(args, 1, "dropout")?;
+        let prepared = chelis_types::PreparedDropout::new(input.value.storage(), rate)
+            .map_err(|error| error.to_string())?;
+        let key = self.next_random_key("dropout")?;
+        let storage = prepared.apply(key).map_err(|error| error.to_string())?;
+        Ok(RuntimeValue::Tensor(RuntimeTensorValue::new(
+            IrTensorValue::from_storage(input.value.shape.clone(), storage),
+        )))
+    }
+
     fn eval_builtin(
         &mut self,
         name: &str,
@@ -2998,18 +3034,14 @@ impl<'a> EvalContext<'a> {
             "lte" => ordered_compare(args, CompareOp::Lte),
             "uniform_like" => {
                 let template = expect_tensor_arg(args, 0)?;
-                let low = expect_float_arg(args, 1)?;
-                let high = expect_float_arg(args, 2)?;
+                let low = expect_float_control(args, 1, "uniform_like")?;
+                let high = expect_float_control(args, 2, "uniform_like")?;
                 // [05-OP-8]: the bounds validate before the draw consumes
                 // its ordinal.
                 let prepared = prepare_uniform_like(&template, low, high)?;
-                let seed = self.random_seed.unwrap_or(0);
-                let counter = self.random_counter;
-                self.random_counter = self.random_counter.saturating_add(1);
+                let key = self.next_random_key("uniform_like")?;
                 Ok(RuntimeValue::Tensor(uniform_like_value(
-                    &template,
-                    &prepared,
-                    chelis_types::RandomKey::from_counter(seed, counter),
+                    &template, &prepared, key,
                 )?))
             }
             // Logical ops dispatch on the actual argument shape: scalar
@@ -4952,7 +4984,8 @@ mod legacy_capture_order_tests {
         let RuntimeValue::Tensor(template) = zeros() else {
             unreachable!()
         };
-        let prepared = prepare_uniform_like(&template, 0.0, 1.0).unwrap();
+        let bound = |value| chelis_types::scalar_from_f64("test", Prim::F32, value).unwrap();
+        let prepared = prepare_uniform_like(&template, bound(0.0), bound(1.0)).unwrap();
         RuntimeValue::Tensor(
             uniform_like_value(
                 &template,

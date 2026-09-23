@@ -84,17 +84,15 @@ fn compiled_static_rate_exported_library_call_survives_context_decode() {
     }
 }
 
+// chelis#2411: a runtime rate is an ordinary [05-OP-37] operand. The call
+// used to be refused; it now draws ordinal 0 of the handler, which the
+// independent reference below recomputes from the spec text.
 #[test]
-fn concrete_runtime_rate_actual_is_not_frozen_from_its_evaluated_value() {
+fn concrete_runtime_rate_actual_draws_the_conforming_stream() {
     let source = "def keep(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = dropout(x, rate)\ndef main() = with seed(42i64) { keep(to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32]), tensor_to_scalar(scalar_to_tensor(0.5f32))) }\n";
-    let error = eval_selected(request(source), &["main".into()]).unwrap_err();
-    assert!(
-        error
-            .errors
-            .iter()
-            .any(|error| error.message.contains("dropout")),
-        "{error:?}"
-    );
+    let result = eval_selected(request(source), &["main".into()])
+        .unwrap_or_else(|error| panic!("{error:?}"));
+    assert_eq!(tensor(&result, "main"), mask(0)[..4]);
 }
 
 #[test]
@@ -250,8 +248,10 @@ fn a_local_callable_still_shadows_the_generic_dropout_definition() {
     assert_eq!(tensor(&result, "main.1"), mask(0)[..4]);
 }
 
+// chelis#2411: a generic runtime rate draws the conforming stream at its own
+// dtype's arithmetic width; it was refused before.
 #[test]
-fn generic_runtime_rate_is_not_specialized_from_its_evaluated_value() {
+fn generic_runtime_rate_draws_the_conforming_stream() {
     for dtype in ["f32", "f64"] {
         for definition in [
             "def keep[p: Float](x: tensor[4, p]) -> tensor[4, p] = dropout(x, cast(tensor_to_scalar(scalar_to_tensor(0.5f32)), p))".to_string(),
@@ -260,13 +260,13 @@ fn generic_runtime_rate_is_not_specialized_from_its_evaluated_value() {
         ] {
             let callee = if definition.contains("def run") { "run" } else { "keep" };
             let source = format!("{definition}\ndef main() = with seed(42i64) {{ {callee}(to_tensor([1.0{dtype}, 1.0{dtype}, 1.0{dtype}, 1.0{dtype}])) }}");
-            let error = eval_selected(request(&source), &["main".into()]).unwrap_err();
-            // These sources passed checking and reach the existing excluded
-            // evaluator lane; a parse/type error cannot satisfy the control.
-            assert_eq!(error.stage, "eval", "{error:?}");
-            assert_eq!(error.errors.len(), 1, "{error:?}");
-            assert_eq!(error.errors[0].message, "unknown runtime name `dropout`");
-            assert!(error.transcript.is_empty());
+            let result = eval_selected(request(&source), &["main".into()])
+                .unwrap_or_else(|error| panic!("{source}\n{error:?}"));
+            assert_eq!(
+                tensor(&result, "main"),
+                mask_at_width(42, 0, dtype == "f64")[..4],
+                "{source}"
+            );
         }
     }
 }
@@ -935,6 +935,25 @@ fn checked_extent_dropout_helper_keeps_result_claim_and_source_trap_order() {
 // Independent transcription of [05-RNG-1], never an evaluator helper.
 fn mask(ordinal: u64) -> Vec<f64> {
     mask_with_seed(42, ordinal)
+}
+
+/// [05-OP-37] with rate 0.5 over ones: the f64 comparison reads the exact
+/// unit, every narrower dtype its f32 rounding.
+fn mask_at_width(seed: u64, ordinal: u64, exact: bool) -> Vec<f64> {
+    fn mix(mut x: u64) -> u64 {
+        x = x.wrapping_add(0x9e3779b97f4a7c15);
+        x = (x ^ (x >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+        x = (x ^ (x >> 27)).wrapping_mul(0x94d049bb133111eb);
+        x ^ (x >> 31)
+    }
+    (0..32)
+        .map(|index| {
+            let word = mix(seed ^ mix(ordinal).rotate_left(17) ^ mix(index).rotate_left(41));
+            let unit = (word >> 11) as f64 / 9007199254740992.0;
+            let unit = if exact { unit } else { f64::from(unit as f32) };
+            if unit < 0.5 { 0.0 } else { 2.0 }
+        })
+        .collect()
 }
 
 fn mask_with_seed(seed: u64, ordinal: u64) -> Vec<f64> {
