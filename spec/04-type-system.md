@@ -494,6 +494,24 @@ scrutinee type at all.
 (Matching a float pattern at the scrutinee's width is not yet fully
 implemented: chelis#2438.)
 
+> **[04-PAT-2]** A `match` evaluates its scrutinee once and tries its arms in
+> declaration order. An arm is selected when its pattern matches the scrutinee
+> and its guard, if it has one, evaluates to `true`; the `match` evaluates to
+> the selected arm's body, evaluated in that arm's scope. A guard is evaluated
+> only after its arm's pattern has matched, in the arm's scope: every name the
+> pattern binds is visible to it, bound to the part of the scrutinee it
+> matched, as is every name visible at the `match`. A guard has type `bool`,
+> under the same obligation as an `if` condition (§3.2). When a guard evaluates
+> to `false`, its arm is not selected, the bindings its pattern introduced are
+> discarded, and matching continues with the next arm. No guard is evaluated
+> for an arm whose pattern did not match or for any arm after the selected
+> one, and a guard whose evaluation traps makes the `match` trap rather than
+> reading as `false`. An arm without a guard carries `()` in the Deep guard
+> slot (`spec/03-deep-syntax.md` §2.3) and is selected whenever its pattern
+> matches. Every execution lane SHALL implement this rule: a lane that cannot
+> lower a guarded arm SHALL reject the program with a diagnostic, and SHALL NOT
+> drop the guard, drop the arm, or select an arm whose guard is `false`.
+
 ### 2.5 Opaque Types
 
 A `deftype` carrying `opaque: true` metadata (Surf: the `@opaque`
@@ -1065,7 +1083,8 @@ guard.
 **Match:**
 ```
     Γ ⊢ e : τₛ
-    For each (arm {} pᵢ () bᵢ):
+    For each (arm {} pᵢ gᵢ bᵢ):
+        Γ, bindings(pᵢ, τₛ) ⊢ gᵢ : bool      when gᵢ is not ()
         Γ, bindings(pᵢ, τₛ) ⊢ bᵢ : τᵣ
     patterns {pᵢ} are exhaustive over τₛ
     ──────────────────────────────────────
@@ -1075,7 +1094,9 @@ guard.
 `bindings(p, τₛ)` is defined only when `p` is admissible at the scrutinee type
 `τₛ`. An inadmissible pattern is a type error at its own arm, not an arm that
 contributes no bindings. A `pat-lit` binds nothing and contributes exactly one
-constraint on `τₛ`, which [04-PAT-1] states.
+constraint on `τₛ`, which [04-PAT-1] states. A guard `gᵢ` carries the
+obligation an `if` condition does, discharged by unifying its type with
+`bool`; [04-PAT-2] states what it does at run time.
 
 **Pipe:**
 ```
