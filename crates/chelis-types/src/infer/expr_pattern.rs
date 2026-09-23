@@ -44,6 +44,10 @@ pub(super) fn infer_match(
     let mut result_ty: Option<Type> = None;
     let mut covered_variants: Vec<String> = Vec::new();
     let mut has_wildcard = false;
+    // chelis#2442: an arm's whole pattern sits against the scrutinee itself,
+    // so a repair may name the scrutinee when it is a variable.
+    let site = super::declarations::var_name_expr(&kids[0])
+        .map_or(PatternSite::Other, PatternSite::ArmOfVariable);
 
     for arm_expr in &kids[1..] {
         if let Some((DeepTag::Arm, _, arm_kids)) = stamped_parts(arm_expr) {
@@ -62,6 +66,7 @@ pub(super) fn infer_match(
                 }
                 pattern_bindings(
                     pat,
+                    site,
                     &scrutinee_ty,
                     &mut arm_env,
                     vg,
@@ -177,6 +182,7 @@ fn visit_sub_patterns_untyped(
         let fresh = vg.fresh_type();
         pattern_bindings(
             sub_pat,
+            PatternSite::Other,
             &fresh,
             env,
             vg,
@@ -207,6 +213,7 @@ pub(super) fn top_level_arm_is_irrefutable(pat: &deep::Expr) -> bool {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn pattern_bindings(
     pat: &deep::Expr,
+    site: PatternSite<'_>,
     scrutinee_ty: &Type,
     env: &mut Env,
     vg: &mut VarGen,
@@ -270,7 +277,16 @@ pub(super) fn pattern_bindings(
                     literal_pattern_atom,
                     errors,
                 ) {
-                    check_literal_pattern(pat, atom, scrutinee_ty, env, subst, adt_reg, errors);
+                    check_literal_pattern(
+                        pat,
+                        atom,
+                        site,
+                        scrutinee_ty,
+                        env,
+                        subst,
+                        adt_reg,
+                        errors,
+                    );
                 }
             }
             DeepTag::PatCtor => {
@@ -356,6 +372,7 @@ pub(super) fn pattern_bindings(
                             let resolved = subst.apply(&arg_types[i]);
                             pattern_bindings(
                                 sub_pat,
+                                PatternSite::Other,
                                 &resolved,
                                 env,
                                 vg,
@@ -391,6 +408,7 @@ pub(super) fn pattern_bindings(
                 if kids.len() >= 2 {
                     pattern_bindings(
                         &kids[1],
+                        PatternSite::Other,
                         scrutinee_ty,
                         env,
                         vg,
@@ -592,6 +610,7 @@ pub(super) fn pattern_bindings(
                             };
                             pattern_bindings(
                                 &kv_kids[1],
+                                PatternSite::Other,
                                 &field_ty,
                                 env,
                                 vg,
@@ -664,6 +683,7 @@ pub(super) fn pattern_bindings(
                     };
                     pattern_bindings(
                         sub_pat,
+                        PatternSite::Other,
                         &elem_ty,
                         env,
                         vg,
@@ -706,7 +726,14 @@ impl LiteralPatternAtom<'_> {
     fn rendered(&self) -> String {
         match self {
             LiteralPatternAtom::Integer(value) => value.to_string(),
-            LiteralPatternAtom::Float(value) => render_float_value(*value),
+            LiteralPatternAtom::Float(value) => {
+                let printed = value.to_string();
+                if printed.contains(['.', 'e', 'E', 'n', 'i']) {
+                    printed
+                } else {
+                    format!("{printed}.0")
+                }
+            }
             LiteralPatternAtom::Bool(value) => value.to_string(),
             LiteralPatternAtom::Str(value) => format!("{value:?}"),
         }
@@ -775,9 +802,11 @@ fn literal_pattern_atom(value: &deep::Expr) -> Option<LiteralPatternAtom<'_>> {
 /// chelis#2442: a scrutinee whose type is a rigid authored binder is decided
 /// too, at every instantiation the binder admits
 /// ([`check_literal_pattern_at_binder`]).
+#[allow(clippy::too_many_arguments)]
 fn check_literal_pattern(
     pat: &deep::Expr,
     atom: LiteralPatternAtom<'_>,
+    site: PatternSite<'_>,
     scrutinee_ty: &Type,
     env: &Env,
     subst: &Subst,
@@ -802,7 +831,7 @@ fn check_literal_pattern(
     match &resolved {
         Type::Var(var) => {
             if let Some((binder, bound)) = env.authored_type_binder(*var, subst) {
-                check_literal_pattern_at_binder(pat, &atom, binder, bound, errors);
+                check_literal_pattern_at_binder(pat, &atom, site, binder, bound, errors);
             }
             return;
         }
@@ -939,6 +968,19 @@ fn family_members(family: TypeVarRestriction) -> impl Iterator<Item = Prim> {
         .filter(move |prim| family.admits(*prim))
 }
 
+/// Where a literal pattern sits, which decides how its repair can be spelled
+/// (chelis#2442).
+#[derive(Clone, Copy)]
+pub(super) enum PatternSite<'a> {
+    /// The arm's whole pattern, against a scrutinee that is the variable named
+    /// here: a comparison can run in an `if` ahead of the match.
+    ArmOfVariable(&'a str),
+    /// Any other position: nested in a tuple, record, constructor, or
+    /// as-pattern, or the whole pattern of an arm whose scrutinee is not a
+    /// variable. No expression names the matched value there.
+    Other,
+}
+
 /// chelis#2442: [04-PAT-1] against a rigid authored binder.
 ///
 /// [04-INF-6] makes the binder denote every instantiation its declaration
@@ -951,11 +993,12 @@ fn family_members(family: TypeVarRestriction) -> impl Iterator<Item = Prim> {
 ///
 /// The repair never adds a conversion to the pattern: a literal pattern
 /// carries no suffix and no cast. It names a spelling that checks and matches
-/// exactly the scrutinee values equal to the literal at every member, without
-/// a cast that can trap ([`binder_pattern_repair`]).
+/// exactly the values equal to the literal at every member, without a cast
+/// that can trap ([`binder_pattern_repair`]).
 fn check_literal_pattern_at_binder(
     pat: &deep::Expr,
     atom: &LiteralPatternAtom<'_>,
+    site: PatternSite<'_>,
     binder: &str,
     bound: Option<TypeVarRestriction>,
     errors: &mut DiagnosticSink<'_>,
@@ -973,7 +1016,7 @@ fn check_literal_pattern_at_binder(
                 atom.family(),
                 atom.rendered(),
             ),
-            vec![unbounded_binder_pattern_repair(atom, binder)],
+            vec![unbounded_binder_pattern_repair(atom, site, binder)],
         );
         return;
     };
@@ -1009,22 +1052,25 @@ fn check_literal_pattern_at_binder(
             family.family_name(),
             member.name(),
         ),
-        vec![binder_pattern_repair(atom, binder, family)],
+        vec![binder_pattern_repair(atom, site, binder, family)],
     );
 }
 
 /// The repair for a literal pattern under an unbounded binder: declare the
 /// family the pattern's own kind denotes, and, when the pattern is still
 /// refused there, that family's repair too.
-fn unbounded_binder_pattern_repair(atom: &LiteralPatternAtom<'_>, binder: &str) -> String {
+fn unbounded_binder_pattern_repair(
+    atom: &LiteralPatternAtom<'_>,
+    site: PatternSite<'_>,
+    binder: &str,
+) -> String {
     let family = match atom {
         LiteralPatternAtom::Integer(_) => TypeVarRestriction::ActiveInt,
         LiteralPatternAtom::Float(_) => TypeVarRestriction::ActiveFloat,
         LiteralPatternAtom::Bool(_) | LiteralPatternAtom::Str(_) => {
             return format!(
-                "No dtype family contains {}; give the scrutinee {} in place of `{binder}`",
+                "No dtype family contains {}; write that type in place of `{binder}`",
                 atom.admissible_primitives(),
-                atom.admissible_scrutinee(),
             );
         }
     };
@@ -1036,7 +1082,7 @@ fn unbounded_binder_pattern_repair(atom: &LiteralPatternAtom<'_>, binder: &str) 
     if family_members(family).any(|member| literal_pattern_failure_at(member, atom).is_some()) {
         format!(
             "{declare}. The pattern is refused there too: {}",
-            binder_pattern_repair(atom, binder, family)
+            binder_pattern_repair(atom, site, binder, family)
         )
     } else {
         declare
@@ -1085,6 +1131,12 @@ impl PatternValue {
         }
     }
 
+    /// The value as a float literal body, spelled the way [04-LIT-2]'s
+    /// diagnostics spell one (`70000.0`, `3.4e38`).
+    fn float_body(self) -> String {
+        super::literal_width::render_numeric_atom(&deep::Atom::Float(self.as_f64()))
+    }
+
     /// Whether `prim` holds this value exactly: an integer width holds it when
     /// it is an integer in range, and a float width when binding the literal
     /// there ([04-LIT-2]'s one finalization) leaves it unchanged.
@@ -1110,43 +1162,34 @@ impl PatternValue {
     }
 }
 
-/// A float value as a literal body: it keeps a fractional part so it reads as
-/// a float, and `70000.0` does not read as the integer `70000`.
-fn render_float_value(value: f64) -> String {
-    let printed = value.to_string();
-    if printed.contains(['.', 'e', 'E', 'n', 'i']) {
-        printed
-    } else {
-        format!("{printed}.0")
-    }
-}
-
 /// chelis#2442: what to write instead of a literal pattern a bounded binder
 /// refuses.
 ///
-/// Every repair checks under the binder and matches exactly the scrutinee
-/// values equal to the literal, at every member of the family, with no cast
-/// that can trap. The value `V` decides which:
+/// Every repair checks under the binder and matches exactly the values equal
+/// to the literal, at every member of the family, with no cast that can
+/// trap. The value `V` decides which:
 ///
 /// - no member holds `V` exactly (a fractional value under `Int`, a boolean
 ///   under any family): the arm matches nothing at any instantiation, so the
 ///   repair deletes it;
-/// - every member holds `V` exactly under `Int` or `Float`: the pattern in the
-///   family's own kind (`| 0.0 =>` for `| 0 =>` under `Float`);
+/// - every member holds `V` exactly under `Int` or `Float`: the literal in the
+///   family's own kind (`0.0` for `0` under `Float`);
 /// - every member holds `V` exactly under `Numeric`, so `V` is an integer in
-///   `i8`'s range: the comparison `eq(x, cast(V, p))`, which binds `V`
+///   `i8`'s range: the comparison `eq(v, cast(V, p))`, which binds `V`
 ///   exactly at every member;
-/// - otherwise, a comparison that widens the scrutinee to the family's widest
+/// - otherwise, a comparison that widens the value to the family's widest
 ///   member, where it converts without trapping and `V` is exact:
-///   `eq(cast(x, i64), Vi64)` under `Int`, `eq(cast(x, f64), Vf64)` under
+///   `eq(cast(v, i64), Vi64)` under `Int`, `eq(cast(v, f64), Vf64)` under
 ///   `Float` and `Numeric`. Under `Numeric` an `i64` wider than `2^53` rounds
 ///   at `f64`; it can only land on a `V` whose magnitude is between `2^53`
 ///   and `2^63`, and for that value no trap-free comparison is exact, so the
 ///   repair narrows the binder instead.
 ///
-/// A comparison is placed in an `if` ahead of the match ([`compare_before_match`]).
+/// Where the comparison goes depends on the pattern's site
+/// ([`comparison_repair`]).
 fn binder_pattern_repair(
     atom: &LiteralPatternAtom<'_>,
+    site: PatternSite<'_>,
     binder: &str,
     family: TypeVarRestriction,
 ) -> String {
@@ -1172,22 +1215,24 @@ fn binder_pattern_repair(
     match (family, value.as_integer()) {
         (TypeVarRestriction::ActiveInt, Some(integer)) if held_everywhere => {
             return format!(
-                "Write the pattern as an integer, `| {integer} =>`, which denotes the same \
-                 value exactly at every member of `Int`; {no_suffix}"
+                "Write the literal as an integer, `{integer}`, which denotes the same value \
+                 exactly at every member of `Int`; {no_suffix}"
             );
         }
         (TypeVarRestriction::ActiveFloat, _) if held_everywhere => {
             return format!(
-                "Write the pattern as a float, `| {} =>`, which denotes the same value \
-                 exactly at every member of `Float`; {no_suffix}",
-                render_float_value(value.as_f64()),
+                "Write the literal as a float, `{}`, which denotes the same value exactly at \
+                 every member of `Float`; {no_suffix}",
+                value.float_body(),
             );
         }
         (TypeVarRestriction::ActiveNumeric, Some(integer)) if held_everywhere => {
             return format!(
-                "Compare before the match: {}. `cast({integer}, {binder})` binds {integer} \
+                "Compare instead of matching: {}. `cast({integer}, {binder})` binds {integer} \
                  exactly at every member of `Numeric`; {no_suffix}",
-                compare_before_match(&format!("eq(x, cast({integer}, {binder}))")),
+                comparison_repair(site, |subject| {
+                    format!("eq({subject}, cast({integer}, {binder}))")
+                }),
             );
         }
         _ => {}
@@ -1214,32 +1259,43 @@ fn binder_pattern_repair(
                     atom.rendered(),
                 );
             }
-            (
-                Prim::F64,
-                format!("{}f64", render_float_value(value.as_f64())),
-            )
+            (Prim::F64, format!("{}f64", value.float_body()))
         }
     };
     let widest = widest.name();
     format!(
-        "Compare at `{widest}` before the match: {}. Every member of `{family_name}` \
+        "Compare at `{widest}` instead of matching: {}. Every member of `{family_name}` \
          converts to `{widest}` without trapping, and the comparison holds exactly when the \
          value is `{}`; {no_suffix}",
-        compare_before_match(&format!("eq(cast(x, {widest}), {spelled})")),
+        comparison_repair(site, |subject| {
+            format!("eq(cast({subject}, {widest}), {spelled})")
+        }),
         atom.rendered(),
     )
 }
 
-/// A repair's comparison, placed in an `if` ahead of the match: the literal
-/// arm's body becomes the `then` branch and the remaining arms stay in the
-/// `else` match. A guard would say the same thing, but the eval and C lanes
-/// ignore a guard at run time (chelis#2445), so a guard repair would check
-/// clean and then answer wrongly.
-fn compare_before_match(condition: &str) -> String {
-    format!(
-        "`if {condition} then <this arm's body> else match x with {{ <the other arms> }}`, \
-         with `x` the value this pattern matched"
-    )
+/// Where a repair's comparison goes, written by `comparison` for the
+/// expression that names the matched value.
+///
+/// When the literal is the arm's whole pattern against a variable, that
+/// variable names the value, so the comparison runs in an `if` ahead of the
+/// match and the literal arm's body becomes its `then` branch. Anywhere else
+/// nothing names the value, so the literal's position is bound to a fresh
+/// variable and the comparison moves into the arm's body. A guard would say
+/// the same thing, but the eval and C lanes ignore a guard at run time
+/// (chelis#2445), so a guard repair would check clean and then answer wrongly.
+fn comparison_repair(site: PatternSite<'_>, comparison: impl Fn(&str) -> String) -> String {
+    match site {
+        PatternSite::ArmOfVariable(scrutinee) => format!(
+            "`if {} then <this arm's body> else match {scrutinee} with {{ <the other arms> }}`",
+            comparison(scrutinee),
+        ),
+        PatternSite::Other => format!(
+            "put a fresh variable `v` where the literal is, and in the arm's body write \
+             `if {} then <this arm's body> else <what the remaining arms give>`",
+            comparison("v"),
+        ),
+    }
 }
 
 /// Push one [04-PAT-1] rejection, located at the pattern node so downstream

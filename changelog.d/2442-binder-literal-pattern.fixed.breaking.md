@@ -11,10 +11,14 @@ Each rejection names the binder, its family, and the member where the
 pattern fails. It also names a repair that checks under the binder and
 matches exactly the values equal to the literal, with no cast that can trap:
 
-- the pattern in the family's own kind, such as `| 0.0 =>`;
-- a comparison in an `if` ahead of the match, over the literal bound at the
-  binder, such as `if eq(x, cast(0, p)) then ...`, or over the scrutinee
-  widened to `i64` or `f64`, such as `if eq(cast(x, i64), 300i64) then ...`;
+- the literal in the family's own kind, such as `0.0` for `0` under
+  `Float`;
+- a comparison over the literal bound at the binder, such as
+  `eq(x, cast(0, p))`, or over the value widened to `i64` or `f64`, such as
+  `eq(cast(x, i64), 300i64)`. When the literal is an arm's whole pattern and
+  the scrutinee is a variable, the comparison goes in an `if` ahead of the
+  match, over that variable. Anywhere else, the literal's position is bound
+  to a fresh variable and the comparison goes in the arm's body;
 - deleting an arm that no instantiation can match.
 
 See [#2442](https://github.com/Chelis-Lang/chelis/issues/2442).

@@ -118,9 +118,19 @@ const BOUNDED_REJECTIONS: &[(&str, &str, &str, &str)] = &[
         "`if eq(cast(x, f64), 70000.0f64) then",
     ),
     ("[p: Numeric]", "0", "`f32`", "`if eq(x, cast(0, p)) then"),
-    // A family that admits the same value in its own kind gets that pattern.
-    ("[p: Float]", "0", "`f32`", "`| 0.0 =>`"),
-    ("[p: Int]", "1.0", "`i8`", "`| 1 =>`"),
+    // A family that admits the same value in its own kind gets that literal.
+    (
+        "[p: Float]",
+        "0",
+        "`f32`",
+        "Write the literal as a float, `0.0`,",
+    ),
+    (
+        "[p: Int]",
+        "1.0",
+        "`i8`",
+        "Write the literal as an integer, `1`,",
+    ),
     // A value every member holds exactly, under Numeric, whatever its kind.
     (
         "[p: Numeric]",
@@ -128,7 +138,14 @@ const BOUNDED_REJECTIONS: &[(&str, &str, &str, &str)] = &[
         "`i8`",
         "`if eq(x, cast(-1, p)) then",
     ),
-    // A value some member cannot hold exactly widens instead.
+    // A value some member cannot hold exactly widens instead. A large float
+    // is spelled in exponent form, as [04-LIT-2]'s diagnostics spell it.
+    (
+        "[p: Float]",
+        "3.4e38",
+        "`f16`",
+        "`if eq(cast(x, f64), 3.4e38f64) then",
+    ),
     (
         "[p: Float]",
         "257",
@@ -209,8 +226,14 @@ fn an_unbounded_binder_refuses_every_literal_pattern() {
     let rows: &[(&str, &str)] = &[
         ("1", "Declare `p: Int`"),
         ("1.5", "Declare `p: Float`"),
-        ("true", "give the scrutinee the `bool` type"),
-        ("\"a\"", "give the scrutinee the `string` type"),
+        (
+            "true",
+            "No dtype family contains `bool`; write that type in place of `p`",
+        ),
+        (
+            "\"a\"",
+            "No dtype family contains `string`; write that type in place of `p`",
+        ),
     ];
     for (pattern, repair_fragment) in rows {
         let (message, repair) = sole_pattern_rejection(&binder_program("[p]", pattern));
@@ -253,6 +276,67 @@ fn the_binder_is_decided_through_aliases_nesting_and_signatures() {
         assert!(
             message.contains("`p: Int`") && message.contains("at `i8`"),
             "got {message} for:\n{program}"
+        );
+    }
+}
+
+/// The repair names the matched value only where an expression names it.
+///
+/// When the literal is the arm's whole pattern and the scrutinee is a
+/// variable, the comparison runs in an `if` ahead of the match over that
+/// variable, by its own name. Anywhere else no expression names the value: a
+/// nested position, an as-pattern, or a scrutinee that is a call. There the
+/// repair binds the position to a fresh variable and compares that in the
+/// arm's body, so it never spells a comparison over the wrong value.
+#[test]
+fn the_repair_names_the_matched_value_only_where_an_expression_names_it() {
+    // A scrutinee variable not named `x` is spelled by its own name.
+    let (_, repair) = sole_pattern_rejection(
+        "def f[p: Int](n: p) -> i32 =\n  match n with {\n    | 300 => 1\n    | _ => 0\n  }\n",
+    );
+    assert!(
+        repair.contains(
+            "`if eq(cast(n, i64), 300i64) then <this arm's body> else match n with \
+             { <the other arms> }`"
+        ),
+        "got {repair}"
+    );
+
+    let elsewhere: &[(&str, &str)] = &[
+        (
+            "type Tag[a] =\n  | Tag(a)\n\ndef f[p: Numeric](o: Tag[p]) -> i32 =\n  match o with {\n    | Tag(0) => 1\n    | _ => 0\n  }\n",
+            "`if eq(v, cast(0, p)) then",
+        ),
+        (
+            "def f[p: Numeric](o: Option[p]) -> i32 =\n  match o with {\n    | Some(0) => 1\n    | _ => 0\n  }\n",
+            "`if eq(v, cast(0, p)) then",
+        ),
+        (
+            "def f[p: Int](x: p, n: i32) -> i32 =\n  match (x, n) with {\n    | (300, _) => 1\n    | _ => 0\n  }\n",
+            "`if eq(cast(v, i64), 300i64) then",
+        ),
+        (
+            "type Tag[a] =\n  | Tag(a)\n\ndef f[p: Int](t: Tag[p]) -> i32 =\n  match t with {\n    | Tag(300) => 1\n    | _ => 0\n  }\n",
+            "`if eq(cast(v, i64), 300i64) then",
+        ),
+        (
+            "def f[p: Int](x: p) -> i32 =\n  match add(x, x) with {\n    | 300 => 1\n    | _ => 0\n  }\n",
+            "`if eq(cast(v, i64), 300i64) then",
+        ),
+        (
+            "def f[p: Int](x: p) -> i32 =\n  match x with {\n    | q @ 300 => 1\n    | _ => 0\n  }\n",
+            "`if eq(cast(v, i64), 300i64) then",
+        ),
+    ];
+    for (program, comparison) in elsewhere {
+        let (_, repair) = sole_pattern_rejection(program);
+        assert!(
+            repair.contains("put a fresh variable `v` where the literal is")
+                && repair.contains(comparison)
+                && repair.contains("else <what the remaining arms give>`")
+                && !repair.contains(" with {"),
+            "the repair must bind the literal's position rather than name a scrutinee, \
+             got {repair} for:\n{program}"
         );
     }
 }

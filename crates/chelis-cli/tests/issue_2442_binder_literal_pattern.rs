@@ -204,8 +204,8 @@ fn spellings(repair: &str) -> impl Iterator<Item = &str> {
 }
 
 /// The program `repair` asks for, with the literal arm's body `1` and the
-/// other arm `| _ => 0`: a deleted arm, a declared bound, a replacement
-/// pattern, or a comparison in an `if` ahead of the match, each applied when
+/// other arm `| _ => 0`: a deleted arm, a declared bound, a respelled
+/// literal, or a comparison in an `if` ahead of the match, each applied when
 /// the repair names it.
 fn apply_repair(case: &Case, repair: &str, calls: &[(&str, i32)]) -> String {
     let binders = match repair.split_once("Declare `p: ") {
@@ -215,7 +215,10 @@ fn apply_repair(case: &Case, repair: &str, calls: &[(&str, i32)]) -> String {
         }
         None => case.binders.to_string(),
     };
-    let pattern = spellings(repair).find(|span| span.starts_with("| ") && span.ends_with("=>"));
+    let literal = repair
+        .starts_with("Write the literal as ")
+        .then(|| spellings(repair).next())
+        .flatten();
     let condition = spellings(repair).find_map(|span| {
         span.strip_prefix("if ")
             .and_then(|rest| rest.split_once(" then "))
@@ -223,8 +226,8 @@ fn apply_repair(case: &Case, repair: &str, calls: &[(&str, i32)]) -> String {
     });
     let (before_match, arm) = if repair.contains("delete it") {
         (String::new(), String::new())
-    } else if let Some(pattern) = pattern {
-        (String::new(), format!("    {pattern} 1\n"))
+    } else if let Some(literal) = literal {
+        (String::new(), literal_arm(literal))
     } else if let Some(condition) = condition {
         (format!("if {condition} then 1 else "), String::new())
     } else {
