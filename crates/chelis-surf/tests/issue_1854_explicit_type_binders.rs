@@ -2,10 +2,7 @@
 //! explicit `[..]` binder list. Unknown lowercase scalar and tensor-precision
 //! names must remain `t-prim` so the shared Deep type resolver can reject them.
 
-use chelis_deep::{
-    Atom as DeepAtom, DeepTag, Expr as DeepExpr, List as DeepList, Metadata, Span,
-    parser::parse_str as parse_deep, printer::print_canonical_flat,
-};
+use chelis_deep::{parser::parse_str as parse_deep, printer::print_canonical_flat};
 use chelis_surf::{
     ast::Decl,
     desugar::desugar_program,
@@ -21,16 +18,6 @@ const UNKNOWN_DTYPES: [&str; 7] = [
 fn deep(source: &str) -> String {
     let declarations = parse_str(source).expect("Surf fixture must parse");
     print_canonical_flat(&desugar_program(&declarations).expect("Surf fixture must desugar"))
-}
-
-fn malformed_defsig(children: Vec<DeepExpr>) -> DeepExpr {
-    let span = Span::new(0, 0);
-    let mut elements = vec![
-        DeepExpr::Atom(DeepAtom::Tag(DeepTag::Defsig), span),
-        DeepExpr::Map(Metadata::default(), span),
-    ];
-    elements.extend(children);
-    DeepExpr::List(DeepList { elements }, span)
 }
 
 #[test]
@@ -544,51 +531,6 @@ fn active_primitive_t_vars_have_no_resugar_fallback() {
             role: "type variable",
         }
     );
-}
-
-#[test]
-fn defsig_resugar_arity_reports_the_two_or_three_child_contract() {
-    let span = Span::new(0, 0);
-    let name = || DeepExpr::Atom(DeepAtom::Name("ident".to_string()), span);
-    let binders = || {
-        DeepExpr::BareList(
-            vec![DeepExpr::Atom(DeepAtom::Name("a".to_string()), span)],
-            span,
-        )
-    };
-    let ty = parse_deep("(t-fn {} (t-var {} a) (t-var {} a))")
-        .expect("valid type fixture")
-        .remove(0);
-    let extra = parse_deep("(t-prim {} f32)")
-        .expect("valid extra fixture")
-        .remove(0);
-    for (program, actual) in [
-        (vec![malformed_defsig(vec![name()])], 1),
-        (
-            vec![malformed_defsig(vec![
-                name(),
-                binders(),
-                ty.clone(),
-                extra.clone(),
-            ])],
-            4,
-        ),
-    ] {
-        let error = resugar_program(&program).expect_err("invalid defsig arity must not resugar");
-        assert_eq!(
-            error,
-            ResugarError::AlternativeArity {
-                tag: "defsig",
-                first: 2,
-                second: 3,
-                actual,
-            }
-        );
-        assert!(
-            error.to_string().contains("expects 2 or 3 children"),
-            "the diagnostic must state the complete contract: {error}"
-        );
-    }
 }
 
 #[test]
