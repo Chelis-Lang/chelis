@@ -150,3 +150,21 @@ fn a_nested_empty_list_is_not_tested_again() {
         "a = 100\n",
     );
 }
+
+/// REGRESSION TEST. On `8fe79201a` the selected pass kept `whole` but turned
+/// the `Box(3, _)` under it into a wildcard, so the test consumed the
+/// scrutinee inside its own branch: the ledger ended with 300 live owners, and
+/// `leaks --atExit` counted 800 leaked blocks.
+#[test]
+fn an_as_pattern_keeps_its_constructor_in_the_selected_pass() {
+    assert_balanced(
+        "as_pattern_constructor",
+        &repeated(
+            "type Wrapped =\n  | Box(i64, string)\n  | NoBox\n",
+            "whole @ Box(3, _)",
+            "i64",
+            "Box(3i64, \"y\")",
+        ),
+        "a = 100\n",
+    );
+}

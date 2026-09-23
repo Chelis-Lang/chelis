@@ -9953,6 +9953,9 @@ impl HostPatternPlan {
     fn binding_pass(&self) -> Self {
         match self {
             Self::Literal(_) => Self::Wild,
+            // `whole @ Box(3, _)` names the whole value; the constructor
+            // under it is still the top.
+            Self::As { .. } => self.map_sub_patterns(Self::binding_pass),
             _ => self.map_sub_patterns(Self::bound_part),
         }
     }
