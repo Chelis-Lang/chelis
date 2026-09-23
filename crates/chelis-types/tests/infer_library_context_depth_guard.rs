@@ -23,7 +23,8 @@
 //! See docs/investigations/wi1_infer_recursion_depth.md and the
 //! `STACK_RED_ZONE_BYTES` doc-comment in crates/chelis-types/src/infer.rs.
 
-use chelis_deep::ast::{Atom, Expr, List, Metadata};
+use chelis_deep::DeepTag;
+use chelis_deep::ast::{Atom, Expr, Metadata};
 use chelis_deep::span::Span;
 use chelis_types::{
     TypeEnv, build_compiled_library_context, build_compiled_library_context_with_base,
@@ -33,28 +34,18 @@ fn sym(s: &str) -> Expr {
     Expr::Atom(Atom::Name(s.to_string()), Span::new(0, 0))
 }
 
-fn empty_meta() -> Expr {
-    Expr::Map(Metadata::default(), Span::new(0, 0))
+fn node(tag: DeepTag, children: Vec<Expr>) -> Expr {
+    Expr::node(tag, Metadata::default(), children, Span::new(0, 0))
 }
 
 /// `(var name)`.
 fn var(name: &str) -> Expr {
-    Expr::List(
-        List {
-            elements: vec![sym("var"), empty_meta(), sym(name)],
-        },
-        Span::new(0, 0),
-    )
+    node(DeepTag::Var, vec![sym(name)])
 }
 
 /// `(app func arg)`.
 fn app(func: Expr, arg: Expr) -> Expr {
-    Expr::List(
-        List {
-            elements: vec![sym("app"), empty_meta(), func, arg],
-        },
-        Span::new(0, 0),
-    )
+    node(DeepTag::App, vec![func, arg])
 }
 
 /// A left-nested curried application of `depth` distinct names:
@@ -73,24 +64,9 @@ fn deep_app_chain(depth: usize) -> Expr {
 /// library-compile pipeline (inference, precision/invariant validation,
 /// annotation) runs over it.
 fn library_with_body(body: Expr) -> Vec<Expr> {
-    let params = Expr::List(
-        List {
-            elements: vec![sym("params"), empty_meta()],
-        },
-        Span::new(0, 0),
-    );
-    let func = Expr::List(
-        List {
-            elements: vec![sym("fn"), empty_meta(), params, body],
-        },
-        Span::new(0, 0),
-    );
-    let def = Expr::List(
-        List {
-            elements: vec![sym("def"), empty_meta(), sym("lib_main"), func],
-        },
-        Span::new(0, 0),
-    );
+    let params = node(DeepTag::Params, Vec::new());
+    let func = node(DeepTag::Fn, vec![params, body]);
+    let def = node(DeepTag::Def, vec![sym("lib_main"), func]);
     vec![def]
 }
 

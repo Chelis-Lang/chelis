@@ -4,14 +4,12 @@
 //!
 //! The first carrier is the ordinary unstamped tree produced by Surf
 //! desugaring or Deep parsing. Every row admitted by the stamped file boundary
-//! is also printed canonically and rerun in that carrier. The one legacy
-//! malformed-form control runs through all four checker entries and separately
-//! proves the stamped constructor rejects it at admission. No row is ignored.
+//! is also printed canonically and rerun in that carrier. The one
+//! malformed-arity control has no in-memory spelling (the stamped `Node`
+//! constructor is the only way to build a vocabulary node), so its row proves
+//! that both Deep text ingresses reject it at admission. No row is ignored.
 
-use chelis_deep::{
-    Atom, DeepTag, Expr, List, Metadata, Span, parse_and_stamp_file,
-    parser::parse_str as parse_deep, printer,
-};
+use chelis_deep::{Expr, parse_and_stamp_file, parser::parse_str as parse_deep, printer};
 use chelis_surf::{desugar::desugar_program, parser::parse_str as parse_surf};
 use chelis_types::errors::CheckError;
 use chelis_types::{
@@ -23,13 +21,15 @@ use chelis_types::{
 enum Source {
     Surf(&'static str),
     Deep(&'static str),
-    LegacyMalformedDef,
+    /// Deep text that no admitted carrier can represent.
+    MalformedDeep(&'static str),
 }
 
 #[derive(Clone, Copy)]
 enum Expected {
     Accept,
     Reject(&'static str),
+    RejectAtAdmission(&'static str),
 }
 
 #[derive(Clone, Copy)]
@@ -48,18 +48,8 @@ fn unstamped(source: Source) -> Vec<Expr> {
         }
         Source::Deep(source) => parse_deep(source)
             .unwrap_or_else(|error| panic!("Deep fixture must parse:\n{source}\n{error}")),
-        Source::LegacyMalformedDef => {
-            let span = Span::new(0, 0);
-            vec![Expr::List(
-                List {
-                    elements: vec![
-                        Expr::Atom(Atom::Tag(DeepTag::Def), span),
-                        Expr::Map(Metadata::default(), span),
-                        Expr::Atom(Atom::Name("only_name".to_string()), span),
-                    ],
-                },
-                span,
-            )]
+        Source::MalformedDeep(source) => {
+            panic!("malformed Deep has no admitted carrier:\n{source}")
         }
     }
 }
@@ -150,29 +140,42 @@ fn assert_entry_parity(row: Row, carrier: &str, exprs: &[Expr]) -> Vec<String> {
 }
 
 fn assert_row(row: Row) {
+    if let Source::MalformedDeep(source) = row.source {
+        let Expected::RejectAtAdmission(needle) = row.expected else {
+            panic!("{}: malformed Deep can only reject at admission", row.name);
+        };
+        let lenient = parse_deep(source)
+            .expect_err("the lenient Deep ingress must reject wrong known-tag arity");
+        assert!(
+            lenient.to_string().contains(needle),
+            "{}: unexpected lenient-admission error: {lenient}",
+            row.name
+        );
+        let file = parse_and_stamp_file(source)
+            .expect_err("the stamped file ingress must reject wrong known-tag arity");
+        assert!(
+            file.to_string().contains(needle),
+            "{}: unexpected stamped-admission error: {file}",
+            row.name
+        );
+        return;
+    }
     let plain = unstamped(row.source);
     let plain_diagnostics = assert_entry_parity(row, "unstamped", &plain);
-    match row.source {
-        Source::LegacyMalformedDef => {
-            let canonical = printer::print_canonical(&plain);
-            let error = parse_and_stamp_file(&canonical)
-                .expect_err("the stamped constructor must reject wrong known-tag arity");
-            assert!(
-                error.to_string().contains("wrong child count"),
-                "unexpected stamped-admission error: {error}"
-            );
-        }
-        Source::Surf(_) | Source::Deep(_) => {
-            let stamped = stamped(&plain);
-            let stamped_diagnostics = assert_entry_parity(row, "stamped", &stamped);
-            assert_eq!(
-                stamped_diagnostics, plain_diagnostics,
-                "{}: admitted carriers must preserve ordered diagnostics",
-                row.name
-            );
-        }
-    }
+    let stamped = stamped(&plain);
+    let stamped_diagnostics = assert_entry_parity(row, "stamped", &stamped);
+    assert_eq!(
+        stamped_diagnostics, plain_diagnostics,
+        "{}: admitted carriers must preserve ordered diagnostics",
+        row.name
+    );
     match row.expected {
+        Expected::RejectAtAdmission(needle) => {
+            panic!(
+                "{}: an admitted source cannot expect admission rejection {needle:?}",
+                row.name
+            )
+        }
         Expected::Accept => assert!(
             plain_diagnostics.is_empty(),
             "{} must remain accepted: {plain_diagnostics:#?}",
@@ -310,8 +313,8 @@ const ROWS: &[Row] = &[
     },
     Row {
         name: "malformed Deep arity remains rejected",
-        source: Source::LegacyMalformedDef,
-        expected: Expected::Reject("MalformedForm"),
+        source: Source::MalformedDeep("(def {} only_name)\n"),
+        expected: Expected::RejectAtAdmission("wrong child count"),
     },
     Row {
         name: "literal reduction axis bounds remain checked",

@@ -1,6 +1,7 @@
 //! [03-META-1]: typed payload admission and checker placement defenses.
 use chelis_deep::annotations::{DtypeBounds, MetadataValue as M, RuntimeExpression};
-use chelis_deep::{Atom, DeepTag, Expr, List, Metadata, Span};
+use chelis_deep::node::Node;
+use chelis_deep::{Atom, DeepTag, Expr, Metadata, Span};
 const SPAN: Span = Span { offset: 0, len: 0 };
 fn verdicts(source: &str) -> Vec<Vec<chelis_types::errors::CheckError>> {
     verdicts_for(&chelis_deep::parser::parse_str(source).unwrap())
@@ -50,12 +51,6 @@ fn checked_effect_replacement_also_checks_metadata_before_publication() {
         .unwrap();
     let mut changed = checked.exprs().to_vec();
     match &mut changed[0] {
-        Expr::List(list, _) => {
-            let Expr::Map(meta, _) = &mut list.elements[1] else {
-                panic!("metadata slot")
-            };
-            meta.remove(chelis_deep::annotations::MetadataKey::Doc);
-        }
         Expr::Node(node, _) => {
             let mut meta = node.meta().clone();
             meta.remove(chelis_deep::annotations::MetadataKey::Doc);
@@ -80,34 +75,25 @@ fn metadata_admission_precedes_inference_on_every_checker_session() {
         let error = chelis_deep::parser::parse_str(source).unwrap_err();
         assert!(error.to_string().contains(key), "{error}");
     }
-    // Legacy Lists can still assemble a locally misplaced, well-shaped payload.
-    // Every checker ingress must reject it before resolving the unbound body.
+    // A locally misplaced, well-shaped payload has no admitted carrier: the
+    // programmatic `Node` constructor checks placement before any checker
+    // session can resolve the unbound body.
     let metadata = Metadata::from(M::DtypeBounds(DtypeBounds::try_new([], SPAN).unwrap()));
-    let expr = Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::Def), SPAN),
-                Expr::Map(metadata, SPAN),
-                Expr::Atom(Atom::Name("f".into()), SPAN),
-                Expr::node(
-                    DeepTag::Var,
-                    Metadata::default(),
-                    vec![Expr::Atom(Atom::Name("missing".into()), SPAN)],
-                    SPAN,
-                ),
-            ],
-        },
-        SPAN,
-    );
-    for errors in verdicts_for(&[expr]) {
-        assert_eq!(errors.len(), 1, "{errors:?}");
-        assert!(matches!(
-            errors[0].kind,
-            chelis_types::errors::CheckErrorKind::MalformedForm
-        ));
-        assert!(errors[0].message.contains("dtype_bounds"));
-        assert!(errors[0].span_offset.is_some());
-    }
+    let error = Node::try_new(
+        DeepTag::Def,
+        metadata,
+        vec![
+            Expr::Atom(Atom::Name("f".into()), SPAN),
+            Expr::node(
+                DeepTag::Var,
+                Metadata::default(),
+                vec![Expr::Atom(Atom::Name("missing".into()), SPAN)],
+                SPAN,
+            ),
+        ],
+    )
+    .expect_err("a def cannot carry dtype_bounds");
+    assert!(error.to_string().contains("dtype_bounds"), "{error}");
 }
 
 #[test]
@@ -118,40 +104,41 @@ fn valid_metadata_remains_admissible_on_every_checker_session() {
 }
 
 #[test]
-fn nested_legacy_expression_roles_are_checked_before_publication() {
-    let list = |tag, children: Vec<Expr>| {
-        let mut elements = vec![
-            Expr::Atom(Atom::Tag(tag), SPAN),
-            Expr::Map(Metadata::default(), SPAN),
-        ];
-        elements.extend(children);
-        Expr::List(List { elements }, SPAN)
-    };
-    for valid in [true, false] {
-        let name = Expr::Atom(Atom::Name("missing".into()), SPAN);
-        let callee = if valid {
-            list(DeepTag::Var, vec![name])
-        } else {
-            name
-        };
-        let payload = RuntimeExpression::try_new(list(DeepTag::App, vec![callee]));
-        assert_eq!(payload.is_ok(), valid);
-        if let Ok(payload) = payload {
-            let metadata = Metadata::from(M::PropertySeed(payload));
-            let expr = Expr::List(
-                List {
-                    elements: vec![
-                        Expr::Atom(Atom::Tag(DeepTag::Def), SPAN),
-                        Expr::Map(metadata, SPAN),
-                        Expr::Atom(Atom::Name("f".into()), SPAN),
-                        list(DeepTag::Lit, vec![Expr::Atom(Atom::Int(1), SPAN)]),
-                    ],
-                },
+fn nested_expression_roles_are_checked_before_publication() {
+    let node = |tag, children: Vec<Expr>| Node::try_new(tag, Metadata::default(), children);
+    let name = || Expr::Atom(Atom::Name("missing".into()), SPAN);
+
+    // A bare name in the callee slot has no admitted carrier: the Node
+    // constructor rejects it before any payload or checker can see it.
+    let error =
+        node(DeepTag::App, vec![name()]).expect_err("a bare callee name is not an expression");
+    assert!(error.to_string().contains("missing"), "{error}");
+
+    let callee = Expr::Node(
+        Box::new(node(DeepTag::Var, vec![name()]).expect("var node")),
+        SPAN,
+    );
+    let app = Expr::Node(
+        Box::new(node(DeepTag::App, vec![callee]).expect("app node")),
+        SPAN,
+    );
+    let payload = RuntimeExpression::try_new(app).expect("a stamped app is a runtime payload");
+    let metadata = Metadata::from(M::PropertySeed(payload));
+    let expr = Expr::node(
+        DeepTag::Def,
+        metadata,
+        vec![
+            Expr::Atom(Atom::Name("f".into()), SPAN),
+            Expr::node(
+                DeepTag::Lit,
+                Metadata::default(),
+                vec![Expr::Atom(Atom::Int(1), SPAN)],
                 SPAN,
-            );
-            for errors in verdicts_for(&[expr]) {
-                assert!(errors.is_empty(), "{errors:?}");
-            }
-        }
+            ),
+        ],
+        SPAN,
+    );
+    for errors in verdicts_for(&[expr]) {
+        assert!(errors.is_empty(), "{errors:?}");
     }
 }

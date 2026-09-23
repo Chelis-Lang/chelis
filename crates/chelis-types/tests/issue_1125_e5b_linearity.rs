@@ -1,7 +1,6 @@
 //! chelis#1125 PP7/E5b: the linearity reader uses the shared total carrier
 //! view without changing binding-generation or diagnostic semantics.
 
-use chelis_deep::{Atom, Expr, List, Metadata};
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
 use chelis_types::{CheckedProgram, check_ir_program, check_linearity, check_typed_program};
@@ -10,14 +9,13 @@ use std::collections::BTreeSet;
 use syn::ext::IdentExt;
 use syn::visit::{self, Visit};
 
-const CARRIER_ROLES: [&str; 7] = [
+const CARRIER_ROLES: [&str; 6] = [
     "DecodedNode",
     "StructuralList",
     "UndecodableHead",
     "Atom",
     "MetadataMap",
     "MetadataExpression",
-    "MalformedLegacyList",
 ];
 
 fn ident_is(ident: &syn::Ident, expected: &str) -> bool {
@@ -28,15 +26,6 @@ fn path_ends_with(path: &syn::Path, expected: &str) -> bool {
     path.segments
         .last()
         .is_some_and(|segment| ident_is(&segment.ident, expected))
-}
-
-fn path_is(path: &syn::Path, expected: &[&str]) -> bool {
-    path.segments.len() == expected.len()
-        && path
-            .segments
-            .iter()
-            .zip(expected)
-            .all(|(segment, expected)| ident_is(&segment.ident, expected))
 }
 
 fn direct_carrier_call(expr: &syn::Expr) -> bool {
@@ -93,19 +82,8 @@ fn macro_findings(mac: &syn::Macro) -> Vec<String> {
     let mut spellings = Vec::new();
     token_spellings(mac.tokens.clone(), &mut spellings);
     let mut findings = Vec::new();
-    for (reserved, message) in [
-        ("carrier", "carrier access hidden inside a macro"),
-        ("to_list", "Node-to-List bridge hidden inside a macro"),
-    ] {
-        if spellings.iter().any(|spelling| spelling == reserved) {
-            findings.push(message.to_string());
-        }
-    }
-    if spellings
-        .windows(4)
-        .any(|window| window == ["Expr", ":", ":", "List"])
-    {
-        findings.push("legacy Expr::List construction hidden inside a macro".to_string());
+    if spellings.iter().any(|spelling| spelling == "carrier") {
+        findings.push("carrier access hidden inside a macro".to_string());
     }
     findings
 }
@@ -154,9 +132,6 @@ fn carrier_totality_findings(source: &str) -> Vec<String> {
         fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
             if ident_is(&call.method, "carrier") {
                 self.carrier_references += 1;
-            } else if ident_is(&call.method, "to_list") {
-                self.findings
-                    .push("Node-to-List bridge in a semantic reader".to_string());
             }
             visit::visit_expr_method_call(self, call);
         }
@@ -168,18 +143,6 @@ fn carrier_totality_findings(source: &str) -> Vec<String> {
                 self.carrier_references += 1;
             }
             visit::visit_expr_path(self, path);
-        }
-
-        fn visit_path(&mut self, path: &'ast syn::Path) {
-            if path_ends_with(path, "to_list") {
-                self.findings
-                    .push("Node-to-List bridge in a semantic reader".to_string());
-            }
-            if path_is(path, &["Expr", "List"]) {
-                self.findings
-                    .push("legacy Expr::List construction in a semantic reader".to_string());
-            }
-            visit::visit_path(self, path);
         }
 
         fn visit_macro(&mut self, mac: &'ast syn::Macro) {
@@ -205,56 +168,18 @@ fn carrier_totality_findings(source: &str) -> Vec<String> {
     scan.findings
 }
 
-fn legacy_metadata(metadata: &Metadata) -> Metadata {
-    metadata
-        .map_expressions(&mut |value, _| legacy_expr(value))
-        .expect("legacy fixture preserves metadata payloads")
+#[derive(Clone, Copy)]
+enum Entry {
+    Ir,
+    Typed,
 }
 
-fn legacy_expr(expr: &Expr) -> Expr {
-    match expr {
-        Expr::Atom(_, _) => expr.clone(),
-        Expr::List(list, span) => Expr::List(
-            List {
-                elements: list.elements.iter().map(legacy_expr).collect(),
-            },
-            *span,
-        ),
-        Expr::Map(metadata, span) => Expr::Map(legacy_metadata(metadata), *span),
-        Expr::MetaExpr(metadata_expr, span) => Expr::MetaExpr(
-            chelis_deep::MetaExpr {
-                metadata: legacy_metadata(&metadata_expr.metadata),
-                expr: Box::new(legacy_expr(&metadata_expr.expr)),
-            },
-            *span,
-        ),
-        Expr::Node(node, span) => {
-            let mut elements = Vec::with_capacity(node.child_count() + 2);
-            elements.push(Expr::Atom(Atom::Tag(node.tag()), *span));
-            elements.push(Expr::Map(legacy_metadata(node.meta()), *span));
-            elements.extend(node.children_slice().iter().map(legacy_expr));
-            Expr::List(List { elements }, *span)
-        }
-        Expr::BareList(elements, span) => {
-            Expr::BareList(elements.iter().map(legacy_expr).collect(), *span)
-        }
-        Expr::UnknownForm(data) => Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
-            head: data.head.clone(),
-            meta: legacy_metadata(&data.meta),
-            children: data.children.iter().map(legacy_expr).collect(),
-            span: data.span,
-        })),
-    }
-}
-
-fn checked_program(source: &str, legacy: bool) -> CheckedProgram {
+fn checked_program(source: &str, entry: Entry) -> CheckedProgram {
     let declarations = parse_str(source).expect("Surf fixture parses");
-    let successor = desugar_program(&declarations).expect("Surf fixture must desugar");
-    if legacy {
-        let legacy = successor.iter().map(legacy_expr).collect::<Vec<_>>();
-        check_ir_program(&legacy).expect("legacy fixture type-checks")
-    } else {
-        check_typed_program(&successor).expect("successor fixture type-checks")
+    let program = desugar_program(&declarations).expect("Surf fixture must desugar");
+    match entry {
+        Entry::Ir => check_ir_program(&program).expect("IR entry type-checks the fixture"),
+        Entry::Typed => check_typed_program(&program).expect("typed entry type-checks the fixture"),
     }
 }
 
@@ -269,7 +194,7 @@ fn ordered_linearity_diagnostics(program: &CheckedProgram) -> Vec<String> {
 }
 
 #[test]
-fn nested_destructure_alias_single_consume_matches_successor_and_legacy() {
+fn nested_destructure_alias_single_consume_matches_across_entries() {
     let source = r#"
 def ok(pair: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] =
   {
@@ -281,17 +206,14 @@ def ok(pair: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] =
   }
 "#;
 
-    let successor = ordered_linearity_diagnostics(&checked_program(source, false));
-    let legacy = ordered_linearity_diagnostics(&checked_program(source, true));
-    assert!(successor.is_empty(), "positive control: {successor:?}");
-    assert_eq!(
-        successor, legacy,
-        "carrier choice must not change acceptance"
-    );
+    let typed = ordered_linearity_diagnostics(&checked_program(source, Entry::Typed));
+    let ir = ordered_linearity_diagnostics(&checked_program(source, Entry::Ir));
+    assert!(typed.is_empty(), "positive control: {typed:?}");
+    assert_eq!(typed, ir, "checker entry choice must not change acceptance");
 }
 
 #[test]
-fn nested_destructure_alias_reuse_preserves_diagnostic_order_across_carriers() {
+fn nested_destructure_alias_reuse_preserves_diagnostic_order_across_entries() {
     let source = r#"
 def bad(pair: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] =
   {
@@ -303,24 +225,24 @@ def bad(pair: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] =
   }
 "#;
 
-    let successor = ordered_linearity_diagnostics(&checked_program(source, false));
-    let legacy = ordered_linearity_diagnostics(&checked_program(source, true));
+    let typed = ordered_linearity_diagnostics(&checked_program(source, Entry::Typed));
+    let ir = ordered_linearity_diagnostics(&checked_program(source, Entry::Ir));
     assert_eq!(
-        successor, legacy,
+        typed, ir,
         "binding identity, diagnostic ownership, and order must match"
     );
     assert!(
-        successor.iter().any(|message| {
+        typed.iter().any(|message| {
             message.contains("[UseAfterConsume]")
                 && message.contains("variable `left`")
                 && message.contains("consumed by realize")
         }),
-        "negative control must retain the component/alias consume diagnostic: {successor:?}"
+        "negative control must retain the component/alias consume diagnostic: {typed:?}"
     );
 }
 
 #[test]
-fn linearity_reader_has_only_role_total_carrier_matches_and_no_node_bridge() {
+fn linearity_reader_has_only_role_total_carrier_matches() {
     let source = include_str!("../src/linearity.rs");
 
     let carrier_findings = carrier_totality_findings(source);
@@ -335,7 +257,6 @@ fn linearity_reader_has_only_role_total_carrier_matches_and_no_node_bridge() {
         "ExprCarrier::Atom",
         "ExprCarrier::MetadataMap",
         "ExprCarrier::MetadataExpression",
-        "ExprCarrier::MalformedLegacyList",
     ] {
         assert!(
             source.contains(disposition),
@@ -406,14 +327,6 @@ fn decoded_parts(expr: &Expr) -> Option<(DeepTag, &Metadata, &[Expr])> {
         ExprCarrier::DecodedNode(tag, metadata, children) => Some((tag, metadata, children)),
         _ => None,
     }
-}
-"#,
-        r#"
-macro_rules! legacy {
-    ($node:expr) => {{
-        let _ = $node.to_list();
-        Expr::List(Default::default(), Default::default())
-    }};
 }
 "#,
         r#"

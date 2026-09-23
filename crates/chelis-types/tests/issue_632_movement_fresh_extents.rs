@@ -16,7 +16,7 @@
 //! Spec: `spec/04-type-system.md` §4.7 (identity-only symbolic
 //! pass-through note), `spec/05-risc-primitives.md` §2.4.1.
 
-use chelis_deep::ast::{Atom, List};
+use chelis_deep::ast::Atom;
 use chelis_deep::{Expr, printer::print_canonical};
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
@@ -48,20 +48,16 @@ fn expect_clean(src: &str, what: &str) -> Vec<Expr> {
     }
 }
 
-fn list_tag(list: &List) -> Option<&str> {
-    // Decode-once: the spelling comes from the decoded tag, never a raw
-    // element-0 string.
-    list.tag().map(|tag| tag.as_str())
-}
-
 fn var_name(expr: &Expr) -> Option<&str> {
-    let Expr::List(list, _) = expr else {
+    // Decode-once: the spelling comes from the decoded tag, never a raw
+    // head string.
+    let Expr::Node(node, _) = expr else {
         return None;
     };
-    if list_tag(list) != Some("var") {
+    if node.tag().as_str() != "var" {
         return None;
     }
-    match list.elements.get(2) {
+    match node.children_slice().first() {
         Some(Expr::Atom(Atom::Name(name), _)) => Some(name.as_str()),
         _ => None,
     }
@@ -72,17 +68,20 @@ fn var_name(expr: &Expr) -> Option<&str> {
 /// `(t-tensor {} (d-name {} *) (d-lit {} 2) (t-prim {} f32))`.
 fn stamped_app_type(exprs: &[Expr], builtin: &str) -> Option<String> {
     fn walk(expr: &Expr, builtin: &str) -> Option<String> {
-        let Expr::List(list, _) = expr else {
-            return None;
+        let children = match expr {
+            Expr::Node(node, _) => {
+                if node.tag().as_str() == "app"
+                    && node.children_slice().first().and_then(var_name) == Some(builtin)
+                    && let Some(ty) = node.meta().ty().map(|ty| ty.expression())
+                {
+                    return Some(print_canonical(std::slice::from_ref(ty)));
+                }
+                node.children_slice()
+            }
+            Expr::BareList(elements, _) => elements.as_slice(),
+            _ => return None,
         };
-        if list_tag(list) == Some("app")
-            && list.elements.get(2).and_then(var_name) == Some(builtin)
-            && let Some(Expr::Map(meta, _)) = list.elements.get(1)
-            && let Some(ty) = meta.ty().map(|ty| ty.expression())
-        {
-            return Some(print_canonical(std::slice::from_ref(ty)));
-        }
-        list.elements.iter().find_map(|kid| walk(kid, builtin))
+        children.iter().find_map(|kid| walk(kid, builtin))
     }
     exprs.iter().find_map(|expr| walk(expr, builtin))
 }

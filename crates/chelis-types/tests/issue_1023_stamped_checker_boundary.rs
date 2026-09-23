@@ -6,40 +6,6 @@
 use chelis_deep::{DeepTag, Expr, Metadata, Span, parse_and_stamp};
 use chelis_types::{check_linearity, check_typed_program, errors::CheckErrorKind};
 
-fn assert_no_legacy_list(expr: &Expr) {
-    match expr {
-        Expr::List(_, _) => panic!("checker output normalized stamped Deep back to Expr::List"),
-        Expr::Node(node, _) => {
-            node.meta()
-                .visit_expressions(&mut |value, _| assert_no_legacy_list(value));
-            for child in node.children_slice() {
-                assert_no_legacy_list(child);
-            }
-        }
-        Expr::BareList(elements, _) => {
-            for child in elements {
-                assert_no_legacy_list(child);
-            }
-        }
-        Expr::UnknownForm(data) => {
-            data.meta
-                .visit_expressions(&mut |value, _| assert_no_legacy_list(value));
-            for child in &data.children {
-                assert_no_legacy_list(child);
-            }
-        }
-        Expr::Map(map, _) => {
-            map.visit_expressions(&mut |value, _| assert_no_legacy_list(value));
-        }
-        Expr::MetaExpr(meta, _) => {
-            meta.metadata
-                .visit_expressions(&mut |value, _| assert_no_legacy_list(value));
-            assert_no_legacy_list(&meta.expr);
-        }
-        Expr::Atom(_, _) => {}
-    }
-}
-
 /// Push a metadata entry onto the first stamped node carrying `tag`.
 ///
 /// The stamped carrier hands out no mutable borrow of its children or
@@ -93,7 +59,7 @@ fn push_meta_on_first_node(expr: &mut Expr, tag: DeepTag, entry: Metadata) -> bo
             found
         }
         Expr::MetaExpr(meta, _) => push_meta_on_first_node(&mut meta.expr, tag, entry),
-        Expr::Atom(_, _) | Expr::List(_, _) => false,
+        Expr::Atom(_, _) => false,
     }
 }
 
@@ -108,9 +74,6 @@ fn accepted_stamped_program_stays_stamped_through_checker_output() {
         matches!(checked.annotated_exprs().first(), Some(Expr::Node(..))),
         "top-level stamped declaration must remain a Node"
     );
-    for expr in checked.annotated_exprs() {
-        assert_no_legacy_list(expr);
-    }
 }
 
 #[test]
