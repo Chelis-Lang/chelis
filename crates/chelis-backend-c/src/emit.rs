@@ -22,19 +22,12 @@ use chelis_types::{CheckedCastKind, CheckedCastPlan, ElementRef, NumericTrap, Sc
 
 use crate::memory::{MemoryPlan, NodeMemoryKind};
 
+/// Fixed-control dropout's keyed unit, over the `[05-RNG-1]` stream helpers
+/// that every translation unit emits before it.
 pub(crate) const FIXED_DROPOUT_HELPERS: &[&str] = &[
     "/* CHELIS_DROPOUT_HELPERS_BEGIN */",
-    "static inline uint64_t chelis_dropout_mix(uint64_t value) {",
-    "    value += 0x9E3779B97F4A7C15ULL;",
-    "    value = (value ^ (value >> 30)) * 0xBF58476D1CE4E5B9ULL;",
-    "    value = (value ^ (value >> 27)) * 0x94D049BB133111EBULL;",
-    "    return value ^ (value >> 31);",
-    "}",
     "static inline double chelis_dropout_unit(uint64_t seed, uint64_t ordinal, uint64_t index) {",
-    "    uint64_t call = chelis_dropout_mix(ordinal);",
-    "    uint64_t element = chelis_dropout_mix(index);",
-    "    uint64_t word = chelis_dropout_mix(seed ^ ((call << 17) | (call >> 47)) ^ ((element << 41) | (element >> 23)));",
-    "    return (double)(word >> 11) / (double)(1ULL << 53);",
+    "    return chelis_random_unit(chelis_random_key(seed, ordinal), index);",
     "}",
     "static inline float chelis_dropout_unit_f32(uint64_t seed, uint64_t ordinal, uint64_t index) {",
     "    return (float)chelis_dropout_unit(seed, ordinal, index);",
@@ -576,39 +569,42 @@ impl CEmitter {
         if e.math_lib != crate::MathLib::None {
             e.line("#include \"chelis_math.h\"");
         }
+        // The C port of the Random effect's one kernel boundary
+        // (chelis#2408): `chelis_random_key` is `chelis_types::random_draw_key`
+        // and `chelis_random_unit` is `[05-RNG-1]`'s unit value of the word
+        // under a draw key. The `[05-OP-8]` samplers take a draw key, never a
+        // seed. `host_emit`'s `append_uniform_sample_helper` carries the same
+        // lines, and a unit test there holds the two copies equal.
         e.line("/* CHELIS_UNIFORM_HELPERS_BEGIN */");
+        e.line("static inline uint64_t chelis_random_mix(uint64_t value) {");
+        e.line("    value += 0x9E3779B97F4A7C15ULL;");
+        e.line("    value = (value ^ (value >> 30)) * 0xBF58476D1CE4E5B9ULL;");
+        e.line("    value = (value ^ (value >> 27)) * 0x94D049BB133111EBULL;");
+        e.line("    return value ^ (value >> 31);");
+        e.line("}");
+        e.line("static inline uint64_t chelis_random_key(uint64_t seed, uint64_t ordinal) {");
+        e.line("    uint64_t call = chelis_random_mix(ordinal);");
+        e.line("    return seed ^ ((call << 17) | (call >> 47));");
+        e.line("}");
+        e.line("static inline double chelis_random_unit(uint64_t key, uint64_t index) {");
+        e.line("    uint64_t element = chelis_random_mix(index);");
+        e.line("    uint64_t word = chelis_random_mix(key ^ ((element << 41) | (element >> 23)));");
+        e.line("    return (double)(word >> 11) / (double)(1ULL << 53);");
+        e.line("}");
+        // chelis#770: one explicit correctly-rounded FMA rather than
+        // `low + (high - low) * (float)unit`, which `-ffp-contract` would
+        // contract or not depending on flags. `fmaf` is IEEE correctly
+        // rounded on every target and bit-identical to the evaluator's
+        // `f32::mul_add`.
         e.line(
-            "static inline float chelis_uniform_sample_f32(uint64_t seed, uint64_t index, float low, float high) {",
+            "static inline float chelis_uniform_sample_f32(uint64_t key, uint64_t index, float low, float high) {",
         );
-        e.line("    uint64_t x = seed ^ (index * 0x9E3779B97F4A7C15ULL);");
-        e.line("    x ^= x >> 30;");
-        e.line("    x *= 0xBF58476D1CE4E5B9ULL;");
-        e.line("    x ^= x >> 27;");
-        e.line("    x *= 0x94D049BB133111EBULL;");
-        e.line("    x ^= x >> 31;");
-        e.line("    double unit = (double)(x >> 11) / (double)(1ULL << 53);");
-        // chelis#770: emit the affine as one explicit correctly-rounded FMA
-        // rather than `low + (high - low) * (float)unit`. The latter is
-        // contracted into an FMA under `-ffp-contract=fast` (the default with
-        // `-march=native`) but left as two roundings under `-ffp-contract=off`,
-        // so its output was compile-flag-dependent (1 ULP on some elements) —
-        // a real RNG-determinism hole. `fmaf` is IEEE correctly-rounded on all
-        // targets (hardware or software), making the sampler flag-independent
-        // and bit-identical to the host evaluator's `f32::mul_add`. Keep this
-        // line byte-identical to `host_emit.rs`'s copy.
-        e.line("    return fmaf(high - low, (float)unit, low);");
+        e.line("    return fmaf(high - low, (float)chelis_random_unit(key, index), low);");
         e.line("}");
         e.line(
-            "static inline double chelis_uniform_sample_f64(uint64_t seed, uint64_t index, double low, double high) {",
+            "static inline double chelis_uniform_sample_f64(uint64_t key, uint64_t index, double low, double high) {",
         );
-        e.line("    uint64_t x = seed ^ (index * 0x9E3779B97F4A7C15ULL);");
-        e.line("    x ^= x >> 30;");
-        e.line("    x *= 0xBF58476D1CE4E5B9ULL;");
-        e.line("    x ^= x >> 27;");
-        e.line("    x *= 0x94D049BB133111EBULL;");
-        e.line("    x ^= x >> 31;");
-        e.line("    double unit = (double)(x >> 11) / (double)(1ULL << 53);");
-        e.line("    return fma(high - low, unit, low);");
+        e.line("    return fma(high - low, chelis_random_unit(key, index), low);");
         e.line("}");
         e.line("/* CHELIS_UNIFORM_HELPERS_END */");
         if execution.is_some() {
@@ -630,8 +626,8 @@ impl CEmitter {
         e.line("    return 1;");
         e.line("}");
         e.line("#endif");
-        e.line("#ifndef CHELIS_EFFECTIVE_UNIFORM_SEED");
-        e.line("#define CHELIS_EFFECTIVE_UNIFORM_SEED(seed) (seed)");
+        e.line("#ifndef CHELIS_EFFECTIVE_UNIFORM_KEY");
+        e.line("#define CHELIS_EFFECTIVE_UNIFORM_KEY(key) (key)");
         e.line("#endif");
         e.line("");
         let needs_checked_cast_conversion_helpers = dag.nodes().iter().any(|node| {
@@ -4678,7 +4674,7 @@ impl CEmitter {
         self.emit_slot_wrapper(id, ty);
         if let UniformSeed::Saved(draw) = seed {
             let draw = draw.index();
-            self.line(&format!("uint64_t t{id}_seed = __chelis_draw_seed_{draw} ^ (__chelis_draw_ordinal_{draw} * 0x9E3779B97F4A7C15ULL);"));
+            self.line(&format!("uint64_t t{id}_key = chelis_random_key(__chelis_draw_seed_{draw}, __chelis_draw_ordinal_{draw});"));
         } else if let UniformSeed::Legacy(seed) = seed {
             if let Some(activation) = inputs.get(1) {
                 // The activation is a rank-0 Bool predicate, and chelis#1308's
@@ -4694,11 +4690,11 @@ impl CEmitter {
                     activation.0
                 ));
                 self.line(&format!(
-                "uint64_t t{id}_seed = t{id}_active ? CHELIS_EFFECTIVE_UNIFORM_SEED({seed}ULL) : {seed}ULL;"
+                "uint64_t t{id}_key = t{id}_active ? CHELIS_EFFECTIVE_UNIFORM_KEY({seed}ULL) : {seed}ULL;"
             ));
             } else {
                 self.line(&format!(
-                    "uint64_t t{id}_seed = CHELIS_EFFECTIVE_UNIFORM_SEED({seed}ULL);"
+                    "uint64_t t{id}_key = CHELIS_EFFECTIVE_UNIFORM_KEY({seed}ULL);"
                 ));
             }
         }
@@ -4717,18 +4713,18 @@ impl CEmitter {
                 let low_wide_bits = (Self::f64_to_f32_truncate(low) as f64).to_bits();
                 let high_wide_bits = (Self::f64_to_f32_truncate(high) as f64).to_bits();
                 self.line(&format!(
-                    "((double*)t{id}_data)[i] = chelis_uniform_sample_f64(t{id}_seed, (uint64_t)i, chelis_f64_from_bits(UINT64_C(0x{low_wide_bits:016x})), chelis_f64_from_bits(UINT64_C(0x{high_wide_bits:016x})));"
+                    "((double*)t{id}_data)[i] = chelis_uniform_sample_f64(t{id}_key, (uint64_t)i, chelis_f64_from_bits(UINT64_C(0x{low_wide_bits:016x})), chelis_f64_from_bits(UINT64_C(0x{high_wide_bits:016x})));"
                 ));
             }
             Prim::F32 => {
                 self.line(&format!(
-                    "((float*)t{id}_data)[i] = chelis_uniform_sample_f32(t{id}_seed, (uint64_t)i, {low_f32}, {high_f32});"
+                    "((float*)t{id}_data)[i] = chelis_uniform_sample_f32(t{id}_key, (uint64_t)i, {low_f32}, {high_f32});"
                 ));
             }
             Prim::F16 | Prim::Bf16 => {
                 let store = Self::f32_to_reduced_fn(ty.precision);
                 self.line(&format!(
-                    "((uint16_t*)t{id}_data)[i] = {store}(chelis_uniform_sample_f32(t{id}_seed, (uint64_t)i, {low_f32}, {high_f32}));"
+                    "((uint16_t*)t{id}_data)[i] = {store}(chelis_uniform_sample_f32(t{id}_key, (uint64_t)i, {low_f32}, {high_f32}));"
                 ));
             }
             other => panic!(
@@ -9143,7 +9139,7 @@ mod tests {
         // read of the one-byte allocation is out of bounds and
         // platform-divergent (the Linux-only RNG parity break on PR #1302).
         assert!(c.contains("((const uint8_t*)t1_data)[0] != 0"));
-        assert!(c.contains("? CHELIS_EFFECTIVE_UNIFORM_SEED(11ULL) : 11ULL"));
+        assert!(c.contains("? CHELIS_EFFECTIVE_UNIFORM_KEY(11ULL) : 11ULL"));
         assert!(!c.contains("((float*)t1_data)[0] != 0.0f"));
         assert!(!c.contains("((bool*)t1_data)"));
     }

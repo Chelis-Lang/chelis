@@ -406,13 +406,13 @@ fn uniform_like(
     shape: &[usize],
     low: f64,
     high: f64,
-    seed: u64,
+    key: u64,
     prim: Prim,
 ) -> Result<TensorValue, String> {
     let low_f = low as f32;
     let high_f = high as f32;
     let values = (0..numel(shape))
-        .map(|index| uniform_sample(prim, low_f, high_f, seed, index as u64))
+        .map(|index| uniform_sample(prim, low_f, high_f, key, index as u64))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|err| err.to_string())?;
     Ok(TensorValue::from_storage(
@@ -3294,11 +3294,12 @@ where
                 } else {
                     None
                 };
-                // One legacy value-kernel seed fold for both planned keys
-                // and activation-gated legacy execution. No canonical
-                // UniformLike numeric claim is made by plan admission.
-                let effective_seed = key.map_or(*seed, |(raw_seed, path_random_counter)| {
-                    raw_seed ^ path_random_counter.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                // Planned and activation-gated draws carry the handler seed
+                // and take their ordinal at execution; an ungated legacy node
+                // carries the [05-RNG-1] draw key its lowering fixed. An
+                // inactive gated draw's values are discarded by its blend.
+                let draw_key = key.map_or(*seed, |(raw_seed, ordinal)| {
+                    chelis_types::random_draw_key(raw_seed, ordinal)
                 });
                 if execution.is_none() && key.is_some() {
                     path_random_counter = path_random_counter.saturating_add(1);
@@ -3307,7 +3308,7 @@ where
                     &values[&node.inputs[0]].shape.clone(),
                     *low,
                     *high,
-                    effective_seed,
+                    draw_key,
                     out_prim,
                 )?
             }
@@ -4510,9 +4511,15 @@ mod tests {
             })
             .expect("path-sensitive Random DAG evaluates");
         assert_eq!(next, 8, "only the active draw consumes an ordinal");
-        let expected_seed = 17 ^ 7_u64.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-        let expected = uniform_like(&[2], 0.0, 1.0, expected_seed, Prim::F32).unwrap();
-        assert_eq!(values[&executed], expected);
+        let expected = |ordinal: u64| {
+            TensorValue::from_vec(
+                vec![2],
+                (0..2)
+                    .map(|index| f64::from(spec_uniform_unit(17, ordinal, index) as f32))
+                    .collect(),
+            )
+        };
+        assert_eq!(values[&executed], expected(7));
         let skipped_expected = uniform_like(&[2], 0.0, 1.0, 17, Prim::F32).unwrap();
         assert_eq!(values[&skipped], skipped_expected);
 
@@ -4522,11 +4529,7 @@ mod tests {
             })
             .expect("legacy Random progress retains its saturation boundary");
         assert_eq!(next, u64::MAX);
-        let expected_seed = 17 ^ u64::MAX.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-        assert_eq!(
-            values[&executed],
-            uniform_like(&[2], 0.0, 1.0, expected_seed, Prim::F32).unwrap()
-        );
+        assert_eq!(values[&executed], expected(u64::MAX));
         assert_eq!(values[&skipped], skipped_expected);
     }
 
@@ -5751,70 +5754,67 @@ mod tests {
         assert_ne!(out_a, out_b);
     }
 
+    // [05-RNG-1] transcribed from the spec text, never the kernel.
+    fn spec_uniform_splitmix64(x: u64) -> u64 {
+        let mut z = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    fn spec_uniform_key(seed: u64, ordinal: u64) -> u64 {
+        seed ^ spec_uniform_splitmix64(ordinal).rotate_left(17)
+    }
+
+    fn spec_uniform_unit(seed: u64, ordinal: u64, index: u64) -> f64 {
+        let word = spec_uniform_splitmix64(
+            spec_uniform_key(seed, ordinal) ^ spec_uniform_splitmix64(index).rotate_left(41),
+        );
+        (word >> 11) as f64 / (1_u64 << 53) as f64
+    }
+
     #[test]
     fn uniform_like_f32_affine_mirrors_c_f32_sampler() {
         // chelis#770: the affine is a single correctly-rounded FMA
         // (`span_f.mul_add(unit_f, low_f)`), conforming to the compiled C
-        // sampler `chelis_uniform_sample_f32` (which the default toolchain
-        // contracts to the same FMA). seed=42, shape=[8], [2,5).
-        let out = uniform_like(&[8], 2.0, 5.0, 42, Prim::F32).unwrap();
-        // elem[4]: where the OLD f64 affine diverged from the C f32 sampler by
-        // 1 ULP (the #735 sweep: eval 0x404215a9 vs C 0x404215aa).
-        assert_eq!(
-            out.to_f64_lossy_vec()[4].to_bits(),
-            (f32::from_bits(0x404215aa) as f64).to_bits(),
-            "elem[4] must be the C f32 sampler value (0x404215aa)",
-        );
-        let old_f64_affine = 2.0 + (5.0 - 2.0) * dropout_sample(42, 4);
-        assert_eq!((old_f64_affine as f32).to_bits(), 0x404215a9);
-        assert_ne!(
-            (out.to_f64_lossy_vec()[4] as f32).to_bits(),
-            (old_f64_affine as f32).to_bits()
-        );
-        // elem[6]/[7]: where a single-rounding FMA and a plain two-rounding
-        // `low_f + span_f * unit_f` disagree by 1 ULP. Pin the FMA values and
-        // show the two-rounding form does NOT reproduce elem[6] — this is the
-        // exact bit the compiled C lane flips between `-ffp-contract=fast`
-        // (FMA, 0x408f5273) and `-ffp-contract=off` (two roundings, 0x408f5274).
-        assert_eq!(
-            out.to_f64_lossy_vec()[6].to_bits(),
-            (f32::from_bits(0x408f5273) as f64).to_bits(),
-            "elem[6] must be the single-rounding FMA value (0x408f5273)",
-        );
-        assert_eq!(
-            out.to_f64_lossy_vec()[7].to_bits(),
-            (f32::from_bits(0x403ec1e7) as f64).to_bits(),
-            "elem[7] must be the single-rounding FMA value (0x403ec1e7)",
-        );
-        let unit6 = dropout_sample(42, 6) as f32;
-        let two_rounding_6 = 2.0f32 + (5.0f32 - 2.0f32) * unit6;
-        assert_eq!(two_rounding_6.to_bits(), 0x408f5274);
-        assert_ne!(
-            (out.to_f64_lossy_vec()[6] as f32).to_bits(),
-            two_rounding_6.to_bits()
-        );
+        // sampler `chelis_uniform_sample_f32`. Seed 42, ordinal 0, shape [8],
+        // [2,5); the bits are exact-rational evaluations of [05-RNG-1] and
+        // [05-OP-8] (`rng_ref.py uniform 42 0 8 2 5 f32`, chelis#2408).
+        let out = uniform_like(&[8], 2.0, 5.0, spec_uniform_key(42, 0), Prim::F32).unwrap();
+        let bits = |index: usize| (out.to_f64_lossy_vec()[index] as f32).to_bits();
+        // elem[6]: where an f64 affine rounded to f32 lands 1 ULP away.
+        assert_eq!(bits(6), 0x4068_3468);
+        let old_f64_affine = 2.0 + (5.0 - 2.0) * spec_uniform_unit(42, 0, 6);
+        assert_eq!((old_f64_affine as f32).to_bits(), 0x4068_3467);
+        // elem[2]: where a plain two-rounding `low_f + span_f * unit_f`
+        // disagrees by 1 ULP, the bit the compiled C lane would flip between
+        // `-ffp-contract=fast` and `-ffp-contract=off` without `fmaf`.
+        assert_eq!(bits(2), 0x401c_b39d);
+        let two_rounding_2 = 2.0f32 + (5.0f32 - 2.0f32) * (spec_uniform_unit(42, 0, 2) as f32);
+        assert_eq!(two_rounding_2.to_bits(), 0x401c_b39c);
+        assert_eq!(bits(7), 0x401b_f5fc);
     }
 
     #[test]
     fn uniform_like_f32_affine_negative_range_is_f32() {
-        // chelis#770: negative range at unit level (the C cross-lane path
-        // can't be driven with a bare negative literal — a separate lowering
-        // gap). seed=42, index=3, low=-3.0, high=-1.0 → 0xc010167a.
-        let out = uniform_like(&[8], -3.0, -1.0, 42, Prim::F32).unwrap();
+        // chelis#770: negative range, seed 42, ordinal 0, index 3, [-3, -1).
+        let out = uniform_like(&[8], -3.0, -1.0, spec_uniform_key(42, 0), Prim::F32).unwrap();
         assert_eq!(
             out.to_f64_lossy_vec()[3].to_bits(),
-            (f32::from_bits(0xc010167a) as f64).to_bits(),
+            (f32::from_bits(0xc03b_a886) as f64).to_bits(),
         );
     }
 
     #[test]
     fn uniform_like_f64_uses_the_f64_affine() {
-        let out = uniform_like(&[8], 2.0, 5.0, 42, Prim::F64).unwrap();
-        let expected = (5.0f64 - 2.0).mul_add(dropout_sample(42, 4), 2.0);
+        let out = uniform_like(&[8], 2.0, 5.0, spec_uniform_key(42, 0), Prim::F64).unwrap();
+        let expected = (5.0f64 - 2.0).mul_add(spec_uniform_unit(42, 0, 4), 2.0);
+        assert_eq!(expected.to_bits(), 0x4000_bff3_3038_5719);
         assert_eq!(out.to_f64_lossy_vec()[4].to_bits(), expected.to_bits());
         assert_ne!(
             out.to_f64_lossy_vec()[4].to_bits(),
-            (f32::from_bits(0x404215aa) as f64).to_bits(),
+            (f32::from_bits(0x4005_ff9a) as f64).to_bits(),
+            "f64 samples must not be widened f32 values"
         );
     }
 

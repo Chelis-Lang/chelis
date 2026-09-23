@@ -879,8 +879,8 @@ impl ExecutionFrame<'_> {
             return Ok(None);
         }
         let key = self.enter(node, seed)?;
-        // Return the actual key; the evaluator's existing legacy UniformLike
-        // numerical path owns its seed folding and value kernel.
+        // The evaluator derives the [05-RNG-1] draw key from this seed and
+        // ordinal through the shared kernel boundary.
         Ok(Some((key.seed, key.ordinal)))
     }
 }

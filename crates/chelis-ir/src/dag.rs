@@ -673,6 +673,11 @@ pub enum RiscOp {
     UniformLike {
         low: f64,
         high: f64,
+        /// The handler seed's bits when the draw takes its ordinal at
+        /// execution (a fixed-control plan site, or a draw gated by an
+        /// activation input). Otherwise the `[05-RNG-1]` draw key
+        /// (`chelis_types::random_draw_key`) that the legacy lowering fixed
+        /// from the handler seed and a lowering-time ordinal.
         seed: u64,
     },
     Dropout {

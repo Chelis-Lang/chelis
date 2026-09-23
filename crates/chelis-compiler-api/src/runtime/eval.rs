@@ -3131,7 +3131,7 @@ impl<'a> EvalContext<'a> {
                     &template,
                     low,
                     high,
-                    seed ^ counter.wrapping_mul(0x9E37_79B9_7F4A_7C15),
+                    chelis_types::random_draw_key(seed, counter),
                 )))
             }
             // Logical ops dispatch on the actual argument shape: scalar
@@ -5092,7 +5092,7 @@ mod legacy_capture_order_tests {
             &template,
             0.0,
             1.0,
-            seed ^ counter.wrapping_mul(0x9E37_79B9_7F4A_7C15),
+            chelis_types::random_draw_key(seed, counter),
         ))
     }
 

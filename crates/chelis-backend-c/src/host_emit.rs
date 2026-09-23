@@ -243,6 +243,10 @@ pub(crate) fn emit_host_abi_program(
     body.push(String::new());
     append_uniform_sample_helper(&mut body);
     body.push(String::new());
+    // Fixed-control dropout helpers are known to be needed only after the
+    // function bodies are emitted; they go here, after the random stream
+    // they are built on.
+    let fixed_dropout_helpers_at = body.len();
     #[cfg(feature = "native-random-observer")]
     {
         crate::random_observer::append_support(&mut body);
@@ -474,8 +478,10 @@ pub(crate) fn emit_host_abi_program(
         let mut fixed_helpers = Vec::new();
         append_fixed_dropout_helpers(&mut fixed_helpers);
         fixed_helpers.push(String::new());
-        fixed_helpers.extend(body);
-        body = fixed_helpers;
+        body.splice(
+            fixed_dropout_helpers_at..fixed_dropout_helpers_at,
+            fixed_helpers,
+        );
     }
 
     if !program.globals.is_empty() {
@@ -788,55 +794,54 @@ fn function_specializations(program: &HostProgram) -> UnordMap<String, HostFunct
         .collect()
 }
 
+/// The `[05-RNG-1]` stream and `[05-OP-8]` samplers, byte-identical to the
+/// block `CEmitter` prepends to a standalone kernel (chelis#2408), then the
+/// host frame that supplies a draw key at run time.
 fn append_uniform_sample_helper(out: &mut Vec<String>) {
-    out.push(
-        "static inline float chelis_uniform_sample_f32(uint64_t seed, uint64_t index, float low, float high) {"
-            .to_string(),
-    );
-    out.push("    uint64_t x = seed ^ (index * 0x9E3779B97F4A7C15ULL);".to_string());
-    out.push("    x ^= x >> 30;".to_string());
-    out.push("    x *= 0xBF58476D1CE4E5B9ULL;".to_string());
-    out.push("    x ^= x >> 27;".to_string());
-    out.push("    x *= 0x94D049BB133111EBULL;".to_string());
-    out.push("    x ^= x >> 31;".to_string());
-    out.push("    double unit = (double)(x >> 11) / (double)(1ULL << 53);".to_string());
-    // chelis#770: one explicit correctly-rounded FMA, flag-independent and
-    // bit-identical to the host evaluator's `f32::mul_add`. Byte-identical to
-    // the `emit.rs` copy (see the rationale there).
-    out.push("    return fmaf(high - low, (float)unit, low);".to_string());
-    out.push("}".to_string());
-    out.push(
-        "static inline double chelis_uniform_sample_f64(uint64_t seed, uint64_t index, double low, double high) {"
-            .to_string(),
-    );
-    out.push("    uint64_t x = seed ^ (index * 0x9E3779B97F4A7C15ULL);".to_string());
-    out.push("    x ^= x >> 30;".to_string());
-    out.push("    x *= 0xBF58476D1CE4E5B9ULL;".to_string());
-    out.push("    x ^= x >> 27;".to_string());
-    out.push("    x *= 0x94D049BB133111EBULL;".to_string());
-    out.push("    x ^= x >> 31;".to_string());
-    out.push("    double unit = (double)(x >> 11) / (double)(1ULL << 53);".to_string());
-    out.push("    return fma(high - low, unit, low);".to_string());
-    out.push("}".to_string());
+    for line in [
+        "static inline uint64_t chelis_random_mix(uint64_t value) {",
+        "    value += 0x9E3779B97F4A7C15ULL;",
+        "    value = (value ^ (value >> 30)) * 0xBF58476D1CE4E5B9ULL;",
+        "    value = (value ^ (value >> 27)) * 0x94D049BB133111EBULL;",
+        "    return value ^ (value >> 31);",
+        "}",
+        "static inline uint64_t chelis_random_key(uint64_t seed, uint64_t ordinal) {",
+        "    uint64_t call = chelis_random_mix(ordinal);",
+        "    return seed ^ ((call << 17) | (call >> 47));",
+        "}",
+        "static inline double chelis_random_unit(uint64_t key, uint64_t index) {",
+        "    uint64_t element = chelis_random_mix(index);",
+        "    uint64_t word = chelis_random_mix(key ^ ((element << 41) | (element >> 23)));",
+        "    return (double)(word >> 11) / (double)(1ULL << 53);",
+        "}",
+        "static inline float chelis_uniform_sample_f32(uint64_t key, uint64_t index, float low, float high) {",
+        "    return fmaf(high - low, (float)chelis_random_unit(key, index), low);",
+        "}",
+        "static inline double chelis_uniform_sample_f64(uint64_t key, uint64_t index, double low, double high) {",
+        "    return fma(high - low, chelis_random_unit(key, index), low);",
+        "}",
+    ] {
+        out.push(line.to_string());
+    }
     out.push(
         "typedef struct { uint64_t seed; uint64_t counter; int active; } chelis_rng_state;"
             .to_string(),
     );
     out.push(
-        "static inline uint64_t chelis_effective_uniform_seed(chelis_rng_state *state, uint64_t baked_seed) {".to_string(),
+        "static inline uint64_t chelis_effective_uniform_key(chelis_rng_state *state, uint64_t baked_key) {".to_string(),
     );
     // Advance a frame value and commit it as a whole. The private pointer
     // transports invocation state; it is not an element-storage view.
     out.push("    chelis_rng_state current = *state;".to_string());
     out.push("    if (!current.active) {".to_string());
-    out.push("        return baked_seed;".to_string());
+    out.push("        return baked_key;".to_string());
     out.push("    }".to_string());
     out.push("    uint64_t counter = current.counter++;".to_string());
     out.push("    *state = current;".to_string());
-    out.push("    return current.seed ^ (counter * 0x9E3779B97F4A7C15ULL);".to_string());
+    out.push("    return chelis_random_key(current.seed, counter);".to_string());
     out.push("}".to_string());
     out.push(
-        "#define CHELIS_EFFECTIVE_UNIFORM_SEED(seed) chelis_effective_uniform_seed(__chelis_rng, seed)"
+        "#define CHELIS_EFFECTIVE_UNIFORM_KEY(key) chelis_effective_uniform_key(__chelis_rng, key)"
             .to_string(),
     );
 }
@@ -3482,17 +3487,17 @@ impl<'a> HostEmitter<'a> {
     /// uniform draw in the C HOST lane.
     ///
     /// The tensor-DAG lane has its own arm (`emit::emit_uniform_like`) and
-    /// bakes the handler seed into the kernel. The host lane cannot: its
+    /// bakes the draw key into the kernel. The host lane cannot: its
     /// seed lives in `__chelis_rng`, installed by `HostExprKind::WithSeed`,
     /// and the draw ordinal is consumed at run time by
-    /// `chelis_effective_uniform_seed`. This is the FIRST host-lane ordinal
+    /// `chelis_effective_uniform_key`. This is the FIRST host-lane ordinal
     /// consumer, so the two rules below are what keep it in step with
     /// `chelis eval` (`chelis-compiler-api` `runtime/eval.rs` `"uniform_like"`):
     ///
     /// 1. **Exactly one ordinal per application, read after the arguments.**
     ///    `arg_vars` are already emitted when this runs, matching the
     ///    evaluator's left-to-right argument evaluation followed by its
-    ///    `random_counter` read. `CHELIS_EFFECTIVE_UNIFORM_SEED` is invoked
+    ///    `random_counter` read. `CHELIS_EFFECTIVE_UNIFORM_KEY` is invoked
     ///    once, into a temporary, and never inside the element loop.
     /// 2. **Bounds are re-folded from the structural `args`, not read from
     ///    `arg_vars`.** The checker already guarantees static literal bounds
@@ -3577,10 +3582,10 @@ impl<'a> HostEmitter<'a> {
         // top-level binding with an unhandled `Random` is a hard check error,
         // but an exported `def` carrying one is not, and its generated
         // wrapper initializes `__chelis_rng` inactive. Abort there rather
-        // than let `chelis_effective_uniform_seed` silently return the baked
+        // than let `chelis_effective_uniform_key` silently return the baked
         // operand without advancing the counter, which would both return the
         // wrong value and desync every later draw in the scope.
-        let seed = self.next_temp("uniform_seed");
+        let key = self.next_temp("uniform_key");
         self.lines.push(format!(
             "{}if (__chelis_rng == NULL || !__chelis_rng->active) {{",
             self.indent
@@ -3592,7 +3597,7 @@ impl<'a> HostEmitter<'a> {
         self.lines.push(format!("{}    abort();", self.indent));
         self.lines.push(format!("{}}}", self.indent));
         self.lines.push(format!(
-            "{}uint64_t {seed} = CHELIS_EFFECTIVE_UNIFORM_SEED(0ULL);",
+            "{}uint64_t {key} = CHELIS_EFFECTIVE_UNIFORM_KEY(0ULL);",
             self.indent
         ));
 
@@ -3612,7 +3617,7 @@ impl<'a> HostEmitter<'a> {
         // element. `chelis_f32_to_f16`/`_bf16` are `static inline` in
         // `chelis_runtime.h`, which every emitted translation unit includes.
         let sample_f32 = format!(
-            "chelis_uniform_sample_f32({seed}, (uint64_t)i, {low_f32_expr}, {high_f32_expr})"
+            "chelis_uniform_sample_f32({key}, (uint64_t)i, {low_f32_expr}, {high_f32_expr})"
         );
         for (macro_name, elem_t, sampled) in [
             (
@@ -3624,7 +3629,7 @@ impl<'a> HostEmitter<'a> {
                 chelis_vocab::RuntimeDType::F64.c_macro(),
                 "double",
                 format!(
-                    "chelis_uniform_sample_f64({seed}, (uint64_t)i, {low_f64_expr}, {high_f64_expr})"
+                    "chelis_uniform_sample_f64({key}, (uint64_t)i, {low_f64_expr}, {high_f64_expr})"
                 ),
             ),
             (
@@ -10459,6 +10464,51 @@ fn sparse_symbol_expr(
 #[cfg(test)]
 mod expression_dispatch_tests {
     use super::*;
+
+    // chelis#2408: the standalone kernel prelude and the host translation unit
+    // each carry the C port of the Random stream. They must be one port.
+    #[test]
+    fn host_random_stream_helpers_are_the_standalone_kernel_prelude() {
+        let mut dag = chelis_ir::dag::Dag::new();
+        let ty = TensorType {
+            dims: vec![chelis_ir::dag::DimInfo::Lit(2)],
+            precision: Prim::F32,
+        };
+        let template = dag.add_node(
+            chelis_ir::dag::RiscOp::Load {
+                name: "template".into(),
+            },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let draw = dag.add_node(
+            chelis_ir::dag::RiscOp::UniformLike {
+                low: 0.0,
+                high: 1.0,
+                seed: 7,
+            },
+            vec![template],
+            ty,
+            None,
+        );
+        dag.add_root(draw);
+        let verified = crate::testing::verified_dag(&dag, crate::CodegenOptions::default())
+            .expect("uniform DAG verifies");
+        let kernel = CEmitter::emit_dag(verified, "draw").expect("uniform DAG emits");
+        let prelude = kernel
+            .split("/* CHELIS_UNIFORM_HELPERS_BEGIN */\n")
+            .nth(1)
+            .and_then(|rest| rest.split("/* CHELIS_UNIFORM_HELPERS_END */").next())
+            .expect("the kernel carries the Random prelude");
+        let mut host = Vec::new();
+        append_uniform_sample_helper(&mut host);
+        let host = host.join("\n");
+        assert!(
+            prelude.contains("chelis_random_key") && host.starts_with(prelude.trim_end()),
+            "kernel prelude:\n{prelude}\nhost helpers:\n{host}"
+        );
+    }
 
     #[test]
     fn source_main_keeps_its_module_abi_after_linker_qualification() {

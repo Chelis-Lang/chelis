@@ -163,27 +163,27 @@ __device__ chelis_u16 chelis_f32_to_f16(float value) {
 }
 ";
 
-/// Device-side helpers needed only by uniform random kernels.
+/// Device-side helpers needed only by uniform random kernels: the HIP port
+/// of `chelis_types::dtype_semantics`'s `[05-RNG-1]` word and `[05-OP-8]`
+/// samplers (chelis#2408). A sampler takes the draw key the lowering baked,
+/// never a seed.
 pub const NUMERIC_DEVICE_HELPERS: &str = "\
-__device__ float chelis_uniform_sample_f32(unsigned long long seed, unsigned long long index, float low, float high) {
-    unsigned long long x = seed ^ (index * 0x9E3779B97F4A7C15ULL);
-    x ^= x >> 30;
-    x *= 0xBF58476D1CE4E5B9ULL;
-    x ^= x >> 27;
-    x *= 0x94D049BB133111EBULL;
-    x ^= x >> 31;
-    double unit = (double)(x >> 11) / (double)(1ULL << 53);
-    return fmaf(high - low, (float)unit, low);
+__device__ unsigned long long chelis_random_mix(unsigned long long value) {
+    value += 0x9E3779B97F4A7C15ULL;
+    value = (value ^ (value >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    value = (value ^ (value >> 27)) * 0x94D049BB133111EBULL;
+    return value ^ (value >> 31);
 }
-__device__ double chelis_uniform_sample_f64(unsigned long long seed, unsigned long long index, double low, double high) {
-    unsigned long long x = seed ^ (index * 0x9E3779B97F4A7C15ULL);
-    x ^= x >> 30;
-    x *= 0xBF58476D1CE4E5B9ULL;
-    x ^= x >> 27;
-    x *= 0x94D049BB133111EBULL;
-    x ^= x >> 31;
-    double unit = (double)(x >> 11) / (double)(1ULL << 53);
-    return fma(high - low, unit, low);
+__device__ double chelis_random_unit(unsigned long long key, unsigned long long index) {
+    unsigned long long element = chelis_random_mix(index);
+    unsigned long long word = chelis_random_mix(key ^ ((element << 41) | (element >> 23)));
+    return (double)(word >> 11) / (double)(1ULL << 53);
+}
+__device__ float chelis_uniform_sample_f32(unsigned long long key, unsigned long long index, float low, float high) {
+    return fmaf(high - low, (float)chelis_random_unit(key, index), low);
+}
+__device__ double chelis_uniform_sample_f64(unsigned long long key, unsigned long long index, double low, double high) {
+    return fma(high - low, chelis_random_unit(key, index), low);
 }
 ";
 
@@ -1388,12 +1388,12 @@ pub fn uniform_like(rank: usize, kernel_name: &str, kind: ElemKind) -> String {
     format!(
         "{DEVICE_HELPERS}{NUMERIC_DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}(
-    {ty} low, {ty} high, unsigned long long seed,
+    {ty} low, {ty} high, unsigned long long key,
     {ty} *out, {out_shape}, chelis_device_metadata out_ndim, chelis_device_metadata out_size) {{
 {build_out_sh}
   chelis_device_metadata i = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= out_size) return;
-  out[i] = {sampler}(seed, (unsigned long long)i, low, high);
+  out[i] = {sampler}(key, (unsigned long long)i, low, high);
 }}
 ",
         out_shape = shape_params(rank, "out"),
