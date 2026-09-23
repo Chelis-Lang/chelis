@@ -3,6 +3,11 @@ mod dlpack;
 mod native_tensor;
 mod source_json;
 
+#[cfg(not(test))]
+mod runtime_identity {
+    include!(concat!(env!("OUT_DIR"), "/chelis_runtime_identity.rs"));
+}
+
 use compiler_json::{CheckJson, CompileJson, DesugarJson, EvalBindingsJson, EvalJson};
 use dlpack::{
     DLPackCapsule, DLPackDevice, DLPackDeviceRequest, DLPackRequest, DLPackStreamRequest,

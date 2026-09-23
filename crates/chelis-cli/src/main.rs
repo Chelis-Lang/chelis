@@ -6,6 +6,11 @@ mod eval_timeout;
 mod prove;
 mod style_gate;
 
+#[cfg(not(test))]
+mod runtime_identity {
+    include!(concat!(env!("OUT_DIR"), "/chelis_runtime_identity.rs"));
+}
+
 use chelis_compiler_api::compiler::{BuildTarget, CompilerError};
 use chelis_compiler_api::schema::{
     CheckDirectoryEntry, CheckDirectoryReport, CheckResult, Diagnostic, EntryPath, EvalRequest,

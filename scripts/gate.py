@@ -247,6 +247,8 @@ DIAGNOSTIC_ENVIRONMENT = (
     "DEVENV_STATE",
     "CARGO_TARGET_DIR",
     "CARGO_HUSKY_DONT_INSTALL_HOOKS",
+    "CHELIS_IDENTITY_REAL_CARGO",
+    "CHELIS_IDENTITY_PROVENANCE",
     ORACLE_BINARY_ENV,
     "CARGO_HOME",
     "RUSTUP_HOME",
@@ -2924,6 +2926,8 @@ def _rerun_command(
     for name in (
         "CARGO_TARGET_DIR",
         "CARGO_HUSKY_DONT_INSTALL_HOOKS",
+        "CHELIS_IDENTITY_REAL_CARGO",
+        "CHELIS_IDENTITY_PROVENANCE",
         # Without this the printed rerun of a failed oracle stage would
         # build its own binary and so would not reproduce the failure.
         ORACLE_BINARY_ENV,
@@ -2932,11 +2936,21 @@ def _rerun_command(
         value = environment.get(name)
         if value:
             assignments.append(f"{name}={shlex.quote(value)}")
+    # The task-owned PATH launcher is removed when this gate exits. A pasted
+    # Cargo rerun must enter the durable driver, not fall back to raw Cargo.
+    rerun = command
+    if command and command[0] == "cargo" and environment.get("CHELIS_IDENTITY_REAL_CARGO"):
+        rerun = [
+            environment["PYO3_PYTHON"],
+            str(REPO_ROOT / "scripts/runtime_identity_build.py"),
+            "--cargo", environment["CHELIS_IDENTITY_REAL_CARGO"], "--",
+            *command[1:],
+        ]
     return (
         f"cd {shlex.quote(str(repo_root))} && env "
         + " ".join(assignments)
         + " "
-        + shlex.join(command)
+        + shlex.join(rerun)
     )
 
 
@@ -3050,7 +3064,21 @@ def run_commands(
             executable=current_executable,
             repo_root=repo_root,
         )
-    except ValueError as exc:
+        from observed_cargo import observed_cargo_environment
+
+        # Keep setup out of gate_environment: listing/importing and preflight
+        # environment computation must not write launchers or bootstrap builds.
+        with observed_cargo_environment(
+            environment,
+            python=Path(environment["PYO3_PYTHON"]),
+            required=any(command and command[0] == "cargo" for command in commands),
+        ) as environment:
+            return _run_commands_observed(
+                commands, environment=environment, stage_label=stage_label,
+                repo_root=repo_root, failure_root=failure_root,
+                output=output, error=error, report=report,
+            )
+    except (ValueError, OSError) as exc:
         # Not "Python setup" any more: `gate_environment` also rejects a
         # cross-worktree CARGO_TARGET_DIR and an unusable explicit handoff.
         print(f"gate: environment setup failed: {exc}", file=error)
@@ -3058,6 +3086,19 @@ def run_commands(
             report.termination = "environment"
             report.exit_code = EXIT_ENVIRONMENT
         return EXIT_ENVIRONMENT
+
+
+def _run_commands_observed(
+    commands: list[list[str]],
+    *,
+    environment: dict[str, str],
+    stage_label: str,
+    repo_root: Path,
+    failure_root: Path | None,
+    output,
+    error,
+    report: GateReport | None,
+) -> int:
 
     # chelis#1322: hand the oracle the `chelis` this list builds before it.
     # An explicit caller setting is authoritative and is never replaced,

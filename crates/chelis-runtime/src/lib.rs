@@ -32,6 +32,11 @@ use metadata::{
 };
 mod ownership_ledger;
 
+#[cfg(not(test))]
+mod runtime_identity {
+    include!(concat!(env!("OUT_DIR"), "/chelis_runtime_identity.rs"));
+}
+
 #[cfg(test)]
 mod runtime_dtype_contract_tests;
 

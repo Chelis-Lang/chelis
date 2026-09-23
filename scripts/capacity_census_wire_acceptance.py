@@ -270,14 +270,16 @@ def execute_acceptance_controls(root: Path, target: Path):
 
 
 if __name__ == "__main__":
-    try:
-        if sys.argv[1:] == ["descriptor-controls"]:
-            selection = descriptor_controls()
-        elif sys.argv[1:] == ["authority-controls"]:
-            selection = authority_controls()
-        else:
-            raise ValueError("expected descriptor-controls or authority-controls")
-        print(json.dumps(asdict(run_python_tests(ROOT, selection)), sort_keys=True))
-    except (RuntimeError, ValueError, OSError) as error:
-        print(f"wire acceptance controls failed: {error}", file=sys.stderr)
-        raise SystemExit(1) from error
+    from observed_cargo import observed_cargo
+    with observed_cargo():
+        try:
+            if sys.argv[1:] == ["descriptor-controls"]:
+                selection = descriptor_controls()
+            elif sys.argv[1:] == ["authority-controls"]:
+                selection = authority_controls()
+            else:
+                raise ValueError("expected descriptor-controls or authority-controls")
+            print(json.dumps(asdict(run_python_tests(ROOT, selection)), sort_keys=True))
+        except (RuntimeError, ValueError, OSError) as error:
+            print(f"wire acceptance controls failed: {error}", file=sys.stderr)
+            raise SystemExit(1) from error

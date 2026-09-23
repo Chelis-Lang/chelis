@@ -87,6 +87,12 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Observe native Cargo producers
+        run: uv run --managed-python --python 3.11 --no-project python scripts/ci_runtime_identity.py --provenance source-worktree
+
       - name: Compute cvc5 store dir
         id: cvc5key
         run: python3 scripts/ci_cvc5_cache.py key --namespace linux-x86_64
@@ -143,6 +149,12 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Observe native Cargo producers
+        run: uv run --managed-python --python 3.11 --no-project python scripts/ci_runtime_identity.py --provenance source-worktree
+
       - name: Compute cvc5 store dir
         id: cvc5key
         run: python3 scripts/ci_cvc5_cache.py key --namespace linux-glibc231
@@ -189,6 +201,12 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Observe native Cargo producers
+        run: uv run --managed-python --python 3.11 --no-project python scripts/ci_runtime_identity.py --provenance source-worktree
 
       - name: Compute cvc5 store dir
         id: cvc5key

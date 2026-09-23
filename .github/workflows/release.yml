@@ -76,8 +76,16 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Observe shipping Cargo producers
+        run: uv run --managed-python --python 3.11 --no-project python scripts/ci_runtime_identity.py --provenance sealed-distribution
+
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: runtime-identity-v1-sealed
 
       # `--features smt` links cvc5 so the shipped `chelis prove` uses
       # the SMT solver instead of degrading to the solver-free fuzz path
@@ -210,8 +218,16 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Observe shipping Cargo producers
+        run: uv run --managed-python --python 3.11 --no-project python scripts/ci_runtime_identity.py --provenance sealed-distribution
+
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: runtime-identity-v1-sealed
 
       # See the linux-x86_64 job for the WI-11 GMP-not-CLN rationale and the
       # chelis#1004 fetch-retry rationale.
@@ -350,8 +366,16 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Observe shipping Cargo producers
+        run: uv run --managed-python --python 3.11 --no-project python scripts/ci_runtime_identity.py --provenance sealed-distribution
+
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: runtime-identity-v1-sealed
 
       # See the linux-x86_64 job for the WI-11 GMP-not-CLN rationale and the
       # chelis#1004 fetch-retry rationale.

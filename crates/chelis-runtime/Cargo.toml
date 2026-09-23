@@ -26,6 +26,10 @@ libc.workspace = true
 memmap2 = "0.9"
 num-bigint = "0.4"
 
+[build-dependencies]
+chelis-runtime-identity.workspace = true
+chelis-runtime-identity-build.workspace = true
+
 [dev-dependencies]
 # Test-only: the byte-equality lock against the reference renderer
 # (`chelis_types::observation::format_element`). The production staticlib

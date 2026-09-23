@@ -101,6 +101,8 @@ in
   # .cargo/config.toml while the Devenv shell is active.
   env = {
     PYO3_PYTHON = "${config.env.DEVENV_STATE}/venv/bin/python";
+    CHELIS_IDENTITY_REAL_CARGO = "${config.languages.rust.toolchainPackage}/bin/cargo";
+    CHELIS_IDENTITY_PROVENANCE = "source-worktree";
     RUSTC_WRAPPER = "${patchedKache}/bin/kache";
     CARGO_BUILD_RUSTC_WRAPPER = "${patchedKache}/bin/kache";
     RUSTC_WORKSPACE_WRAPPER = "";

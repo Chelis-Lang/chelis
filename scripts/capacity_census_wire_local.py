@@ -367,4 +367,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from observed_cargo import observed_cargo
+    with observed_cargo():
+        raise SystemExit(main())

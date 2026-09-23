@@ -15,6 +15,8 @@ assertion failures unless an explicit different success condition is given.
 
 | Test | Crate | Manual command | Prerequisite | Owning phase |
 |---|---|---|---|---|
+| `real_producers_closure_independence_provenance_and_cached_units` | `chelis-runtime-identity` | `python3 scripts/runtime_identity_build.py --cargo "$CHELIS_IDENTITY_REAL_CARGO" -- nextest run -p chelis-runtime-identity --test producer_contract --profile runtime-identity-producers --ignore-default-filter --run-ignored only --no-tests fail --no-fail-fast --test-threads=1 -E 'test(/^real_producers_closure_independence_provenance_and_cached_units$/)'` | Native Linux/macOS and the [producer setup below](#runtime-identity-producer-acceptance); actual runtime/CLI/Python builds, independent closure mutations, provenance and cached-unit controls must all pass; missing prerequisites fail | chelis#2394; `heavy-e2e.yml` / `runtime-identity-producers` native matrix |
+| `alternate_real_compiler_changes_the_toolchain_dimension` | `chelis-runtime-identity` | `python3 scripts/runtime_identity_build.py --cargo "$CHELIS_IDENTITY_REAL_CARGO" -- nextest run -p chelis-runtime-identity --test producer_contract --profile runtime-identity-producers --ignore-default-filter --run-ignored only --no-tests fail --no-fail-fast --test-threads=1 -E 'test(/^alternate_real_compiler_changes_the_toolchain_dimension$/)'` | Same native setup plus `CHELIS_IDENTITY_TEST_ALTERNATE_RUSTC` naming a genuinely different installed native compiler; changed runtime and CLI identities must agree with each other and reject the baseline; missing or identical compiler fails, never skips | chelis#2394; `heavy-e2e.yml` / `runtime-identity-producers` native matrix |
 | `device_entry_execution` CPU-fixture suite | `chelis-backend-hip` | `cargo build -p chelis-runtime --features ownership-ledger && CHELIS_RUNTIME_LIB="$PWD/target/debug/libchelis_runtime.a" cargo nextest run -p chelis-backend-hip --test device_entry_execution --run-ignored only` | C/C++ toolchain; expected: all six generated-entry execution and mutation rows pass against the exact-head runtime archive | Runtime representation Phase 2 |
 | `device_owner_contract` pinned-runtime rows | `chelis-backend-hip` | `cargo build -p chelis-runtime --features ownership-ledger && CHELIS_RUNTIME_LIB="$PWD/target/debug/libchelis_runtime.a" cargo nextest run -p chelis-backend-hip --test device_owner_contract --run-ignored only` | C/C++ toolchain; expected: both owner execution/rejection rows pass against the exact-head runtime archive; the unignored public-header row remains in the ordinary suite | Runtime representation Phase 2 |
 | `g1_add_consts_gpu` | `chelis-backend-hip` | `cargo test -p chelis-backend-hip --test gpu_correctness g1_add_consts_gpu -- --ignored --test-threads=1` | HIP-capable GPU + `hipcc` / `hiprtc` (Fedora/ROCm available locally; see [`local_hip_environment.md`](local_hip_environment.md)) | 1a |
@@ -96,6 +98,60 @@ assertion failures unless an explicit different success condition is given.
 | `build_c_list_combinator_program_has_zero_definitely_lost_under_valgrind` | `chelis-cli` | `cargo test -p chelis-cli --test cli build_c_list_combinator_program_has_zero_definitely_lost_under_valgrind -- --ignored --nocapture` | `valgrind` and `gcc` on the PATH (Linux; unavailable on macOS arm64, and installed in no CI job). Expected: valgrind reports **0 bytes definitely lost** for a compiled `map`/`filter` pipeline, with no suppression file. This is the standing leak oracle for chelis#943's in-place accumulation claim; the default `build_c_runs_iter_foundation_and_matches_eval_output` test separately locks all five `map`/`filter`/`scan`/`partition`/`flat_map` emit paths to the in-place helpers. The valgrind gate runs in no continuous job, so it must be run by hand when the combinator emit paths or `chelis_list_*` change. | chelis#2333 |
 | `cooperative_unwind_precedes_the_backstop_on_an_idle_box` | `chelis-cli` | `cargo nextest run -p chelis-cli --test issue_914_eval_timeout cooperative_unwind_precedes_the_backstop_on_an_idle_box -- --ignored` | An otherwise idle box: one-minute load average below the core count. Expected: `chelis eval --timeout 2` on a slow program unwinds cooperatively, so stderr carries the documented timeout message and NOT the watchdog's `forced exit` suffix. This is a quality-of-implementation property with a load precondition the default suite cannot hold, which is why it is ignored rather than asserted in CI (chelis#1607). | chelis#1607 |
 | `a_starved_box_falls_back_to_the_forced_exit` | `chelis-cli` | `cargo nextest run -p chelis-cli --test issue_914_eval_timeout a_starved_box_falls_back_to_the_forced_exit --test-threads=1 -- --ignored` | An otherwise idle box to start with. The row oversubscribes every core tenfold for a few seconds and will make the machine briefly unresponsive, so run it alone. Expected: the watchdog's hard-exit backstop fires and stderr carries both the documented prefix and the `forced exit` suffix. The negative twin of the row above: without it, deleting every cancellation poll would leave that row green on a fast box. | chelis#1607 |
+
+## Runtime identity producer acceptance
+
+This is producer-only chelis#2394 acceptance, not runtime selection. Production
+selectors remain unchanged and chelis#1354 is not resolved. Core canonicalization,
+native decoding, comparison, `architecture_contract`, and the build adapter's
+`adapter_failures` remain ordinary acceptance. The entirely ignored
+`producer_contract` target is excluded from change-owned/package-expansion
+execution; do not treat an empty ordinary run as producer evidence or invoke
+the heavy suite from its own nested Cargo builds.
+
+The daily 03:17 UTC and manually dispatched `heavy-e2e.yml` workflow owns both
+ignored rows on `ubuntu-latest` and Apple Silicon `macos-latest`. It installs a
+real second Rust compiler (1.97.0, distinct from the repository's 1.98.0 pin),
+not a wrapper with a forged version. Both scenarios are mandatory. These owner
+commands describe required acceptance, not a claim that a particular candidate
+has passed them.
+
+Run from the repository root on native Linux or macOS with the README's C/C++
+compiler, CMake, libclang, native numerical-library prerequisites, cargo-nextest,
+uv-managed Python 3.11 with libpython, and enough disk for isolated runtime,
+CLI and Python producer builds. macOS needs the Xcode Command Line Tools; Linux
+needs the development libraries listed in the workflow. No cross-target or
+hardware-accelerator substitute is supported by these scenarios. Prepare a
+non-Devenv shell before using either full command in the table:
+
+```sh
+export CHELIS_IDENTITY_REAL_CARGO="$(rustup which cargo)"
+export CHELIS_IDENTITY_PROVENANCE=source-worktree
+export PYO3_PYTHON="$(uv python find 3.11)"
+export PATH="$(dirname "$PYO3_PYTHON"):$PATH"
+rustup toolchain install 1.97.0 --profile minimal
+export CHELIS_IDENTITY_TEST_ALTERNATE_RUSTC="$(rustup which --toolchain 1.97.0 rustc)"
+```
+
+The selected Python must also be available as `python3` to fixture subprocesses.
+Keep its libpython discoverable when loading native Python artifacts (the CI
+owner uses `scripts/ci_setup_uv_python.py` for platform library paths). In an
+active Devenv shell, retain the managed `cargo` shim, real-Cargo and Python
+exports supplied by Devenv; provision a genuinely different supported native
+compiler and set `CHELIS_IDENTITY_TEST_ALTERNATE_RUSTC` to its absolute path.
+Then replace the table's `python3 scripts/runtime_identity_build.py --cargo
+"$CHELIS_IDENTITY_REAL_CARGO" --` prefix with `cargo`.
+
+Manual shipping builds use the same managed entrypoint with
+`CHELIS_IDENTITY_PROVENANCE=sealed-distribution`, never an omitted or inferred
+mode. The first scenario itself exercises both provenance modes.
+
+Separately, run `nix build .#checks.x86_64-linux.runtime-identity-producers
+--print-build-logs` on native Linux, or
+`nix build .#checks.aarch64-darwin.runtime-identity-producers --print-build-logs`
+on Apple Silicon macOS. That independent Nix check compares separate producer
+derivations. It does not execute these Cargo mutation scenarios, prove selector
+closure, or replace either native owner.
 
 ## Developer-environment acceptance gates
 

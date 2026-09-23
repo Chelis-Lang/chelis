@@ -112,6 +112,8 @@ let
       requiredWorkspaceMembers = [
         "chelis-cli"
         "chelis-runtime"
+        "chelis-python"
+        "chelis-runtime-identity-build"
         "chelisup"
       ];
       missingWorkspaceMembers = builtins.filter (
@@ -185,6 +187,84 @@ let
         touch "$out"
       '';
 
+  # Producer-only boundary: exact installed outputs are resolved from verified
+  # compiler receipts, never from the distribution's first-found archive.
+  runtimeIdentityMissingInput = pkgs.testers.testBuildFailure built.runtimeIdentityProducerControls.missingInputRuntimeCrate;
+  runtimeIdentityProducers =
+    pkgs.runCommand "runtime-identity-producers"
+      {
+        nativeBuildInputs = [ pkgs.python311 ];
+      }
+      ''
+        observer=${built.identityObserver}/bin/chelis-runtime-identity-build
+        # The installed observer and receipt closure must suffice on a machine
+        # that never had a workspace checkout or compiler observation state.
+        unset CHELIS_IDENTITY_WORKSPACE CHELIS_IDENTITY_STATE
+        unset CHELIS_IDENTITY_DEPENDENCIES CHELIS_IDENTITY_DIRECT_DEPENDENCIES
+        unset CHELIS_IDENTITY_BUILD_DEPENDENCIES CHELIS_IDENTITY_BUILD_SCRIPT
+        export CHELIS_IDENTITY_PYTHON="${pkgs.python311}/bin/python3"
+        mkdir installed-consumer
+        cd installed-consumer
+        runtime="$("$observer" producer-artifact --lib-dir ${built.runtimeCrate.lib} --kind runtime)"
+        cli="$("$observer" producer-artifact --lib-dir ${built.compilerCrate.lib} --kind cli)"
+        python="$("$observer" producer-artifact --lib-dir ${built.pythonCrate.lib} --kind python)"
+        changed_runtime="$("$observer" producer-artifact \
+          --lib-dir ${built.runtimeIdentityProducerControls.changedRuntimeCrate.lib} --kind runtime)"
+        mkdir -p "$out"
+        "$observer" inspect runtime "$runtime" > "$out/runtime.json"
+        "$observer" inspect cli "$cli" > "$out/cli.json"
+        "$observer" inspect python "$python" > "$out/python.json"
+        "$observer" inspect runtime "$changed_runtime" > "$out/ownership-ledger-runtime.json"
+        "$observer" verify-producers --runtime "$runtime" --cli "$cli" --python "$python"
+        python3 - "$observer" "$changed_runtime" "$cli" "$python" "$out" \
+          ${runtimeIdentityMissingInput.out} <<'PY'
+        import json
+        import re
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        observer, changed_runtime, cli, python, output, failed = sys.argv[1:]
+        output, failed = Path(output), Path(failed)
+        descriptors = {
+            kind: json.loads((output / f"{kind}.json").read_text())
+            for kind in ("runtime", "cli", "python", "ownership-ledger-runtime")
+        }
+        # verify-producers stops at the first mismatch. Independently decoded
+        # CLI/Python equality makes that same rejection apply to both consumers.
+        if not descriptors["runtime"] == descriptors["cli"] == descriptors["python"]:
+            raise SystemExit("matching runtime/CLI/Python expectations differ")
+        if descriptors["ownership-ledger-runtime"]["features"] == descriptors["runtime"]["features"]:
+            raise SystemExit("ownership-ledger did not change the runtime feature identity")
+        crossed = subprocess.run(
+            [observer, "verify-producers", "--runtime", changed_runtime, "--cli", cli, "--python", python],
+            text=True, capture_output=True, check=False,
+        )
+        (output / "crossed-recipe.stdout").write_text(crossed.stdout)
+        (output / "crossed-recipe.stderr").write_text(crossed.stderr)
+        mismatch = re.fullmatch(
+            r"runtime identity: runtime identity mismatch: \[([A-Za-z, ]+)\]\n?",
+            crossed.stderr,
+        )
+        if crossed.returncode != 1 or mismatch is None or "Features" not in mismatch[1].split(", "):
+            raise SystemExit(f"crossed recipe did not fail for feature identity: {crossed}")
+
+        # testBuildFailure alone accepts any failed builder. Demand the exact
+        # producer diagnostic for the deliberately withheld per-crate header.
+        log = (failed / "testBuildFailure.log").read_text()
+        exit_code = (failed / "testBuildFailure.exit").read_text().strip()
+        failures = [line for line in log.splitlines() if line.startswith("runtime identity:")]
+        if exit_code != "1" or len(failures) != 1 or not re.fullmatch(
+            r"runtime identity: missing declared build input /[^\n]*/chelis-source/"
+            r"crates/chelis-runtime/include/chelis_runtime\.h",
+            failures[0],
+        ):
+            raise SystemExit(f"missing-input build did not fail for its required header:\n{log}")
+        (output / "missing-required-input.log").write_text(log)
+        (output / "missing-required-input.exit").write_text(exit_code + "\n")
+        PY
+      '';
+
   chelisupBehavior = pkgs.runCommand "chelisup-behavior" { } ''
     ${packages.chelisup}/bin/chelisup --help >/dev/null
     touch "$out"
@@ -223,6 +303,7 @@ let
           ${./contracts.nix} \
           ${./cvc5.nix} \
           ${./packages.nix} \
+          ${./runtime-identity.nix} \
           ${./source.nix}
         touch "$out"
       '';
@@ -239,6 +320,7 @@ let
     lockParity
     nixFormat
     runtimeConsumer
+    runtimeIdentityProducers
     runtimeShape
   ];
   native = pkgs.runCommand "chelis-native-contracts" { } ''
@@ -263,8 +345,10 @@ in
     native
     nixFormat
     runtimeConsumer
+    runtimeIdentityProducers
     runtimeShape
     ;
+  runtime-identity-producers = runtimeIdentityProducers;
   chelis = packages.chelis;
   chelis-runtime = packages.chelis-runtime;
   chelisup = packages.chelisup;

@@ -8,10 +8,13 @@ let
   # Build-facing subset only: prose edits must not invalidate packages.
   # This source feeds automatic graph generation and package behavior checks.
   defaultRoots = [
+    ".cargo"
     "Cargo.lock"
     "Cargo.toml"
     "crates"
+    "grammars"
     "rust-toolchain.toml"
+    "scripts"
     "tree-sitter-chelis"
   ];
   allowedRoots = if includeRoots == null then defaultRoots else includeRoots;
@@ -34,7 +37,12 @@ let
       name = baseNameOf pathString;
     in
     pathString == rootString
-    || (lib.elem top allowedRoots && !(lib.elem name rejectedNames) && lib.cleanSourceFilter path type);
+    || (
+      lib.elem top allowedRoots
+      && !(lib.elem name rejectedNames)
+      && lib.cleanSourceFilter path type
+      && (top != "scripts" || relative == "scripts" || relative == "scripts/runtime_identity_observer.py")
+    );
 in
 lib.cleanSourceWith {
   name = "chelis-source";

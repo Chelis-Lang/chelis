@@ -100,9 +100,14 @@ jobs:
         working-directory: chelis
         run: python3 scripts/ci_setup_uv_python.py
 
+      - name: Observe native Cargo producers
+        working-directory: chelis
+        run: uv run --managed-python --python 3.11 --no-project python scripts/ci_runtime_identity.py --provenance source-worktree
+
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: runtime-identity-v1
           workspaces: chelis
 
       - name: Build chelis (release)

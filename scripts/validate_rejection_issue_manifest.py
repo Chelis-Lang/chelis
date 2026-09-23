@@ -118,4 +118,6 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    from observed_cargo import observed_cargo
+    with observed_cargo():
+        sys.exit(main())

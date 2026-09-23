@@ -1,0 +1,6 @@
+[package]
+name = "fixture-consumer-bridge"
+version = "0.1.0"
+edition = "2021"
+[dependencies]
+fixture-runtime-input = { path = "../input", features = ["boosted"] }

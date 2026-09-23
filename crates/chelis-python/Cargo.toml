@@ -18,6 +18,7 @@ extension-module = ["pyo3/extension-module"]
 chelis-abi.workspace = true
 chelis-backend-c.workspace = true
 chelis-compiler-api.workspace = true
+chelis-runtime.workspace = true
 chelis-vocab.workspace = true
 libc = "0.2"
 libloading = "0.8"
@@ -26,6 +27,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 sha2 = "0.10"
 tempfile = "3"
+
+[build-dependencies]
+chelis-runtime-identity.workspace = true
+chelis-runtime-identity-build.workspace = true
 
 [dev-dependencies]
 assert_cmd = "2"

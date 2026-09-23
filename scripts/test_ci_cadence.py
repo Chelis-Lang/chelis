@@ -274,12 +274,20 @@ def unattended_nextest_profiles():
         if source.name.startswith("test_"):
             continue
         text = source.read_text()
-        # Whole-file, because `scripts/gate.py` spells the flag and its value
-        # on separate list elements. Gated on the file mentioning nextest at
-        # all, which is what keeps a Devenv or Cargo `--profile` out.
-        if "nextest" not in text:
-            continue
-        found.update(PROFILE_CALL.findall(text))
+        if source.suffix == ".yml":
+            # A toolchain-install step's `rustup --profile` is not a nextest
+            # selection merely because another step in its workflow runs tests.
+            commands = [
+                step.get("run", "")
+                for job in yaml.safe_load(text).get("jobs", {}).values()
+                for step in job.get("steps", [])
+            ]
+        else:
+            # Python drivers spell the flag and value on separate list elements.
+            commands = [text]
+        for command in commands:
+            if "nextest" in command:
+                found.update(PROFILE_CALL.findall(command))
     return found
 
 

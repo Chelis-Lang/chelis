@@ -1,17 +1,8 @@
 """Guard that release.yml's `cargo build -p <target>` lines don't pull pyo3.
 
-`release.yml` (the tag-triggered release workflow) builds `chelis-cli` and
-`chelis-runtime` as release binaries. PR #184 added `.cargo/config.toml`'s
-`PYO3_PYTHON=.venv/bin/python` setting and the per-job `Install uv` +
-`scripts/ci_setup_uv_python.py` steps in `ci.yml` / `heavy-e2e.yml`, but
-**not** in `release.yml`. The argument for keeping `release.yml` uv-free
-is that its targets don't transitively pull pyo3, so pyo3-build-config
-never runs there.
-
-If a future change adds `chelis-python` (or any other pyo3-pulling crate)
-as a dep of `chelis-cli` or `chelis-runtime`, that argument breaks: the
-tag-push release build would fail at link time, and the breakage would
-be invisible until the next release tag.
+The shipped CLI and runtime must remain independent of Python bindings.
+Release jobs provision managed Python solely to observe native Cargo builds;
+that build-time interpreter does not authorize a PyO3 runtime dependency.
 
 This test asserts the invariant by parsing `release.yml` for `cargo build -p X`
 lines and confirming `cargo tree -p X` reports no pyo3-dep for each X.
@@ -64,9 +55,6 @@ def crate_has_pyo3_dep(crate: str, *, features: str | None = None) -> bool:
 
 
 class ReleaseWorkflowPyo3IsolationTest(unittest.TestCase):
-    def test_release_workflow_exists(self) -> None:
-        self.assertTrue(RELEASE_WORKFLOW.is_file(), f"{RELEASE_WORKFLOW} not found")
-
     def test_extract_release_targets_finds_expected_set(self) -> None:
         # Sanity check the parser: release.yml builds chelis-cli +
         # chelis-runtime (the toolchain tarball) and chelisup (the bare
@@ -90,10 +78,8 @@ class ReleaseWorkflowPyo3IsolationTest(unittest.TestCase):
                 self.assertFalse(
                     crate_has_pyo3_dep(crate),
                     f"`cargo tree -p {crate}` reports a pyo3 dep. "
-                    "release.yml relies on these targets being pyo3-free; "
-                    "either remove pyo3 from the dep graph, or add the uv "
-                    "setup (Install uv + scripts/ci_setup_uv_python.py) to "
-                    "release.yml's jobs.",
+                    "release targets must stay PyO3-free; remove the Python "
+                    "binding dependency from the shipping graph.",
                 )
 
     @unittest.skipUnless(
@@ -104,17 +90,14 @@ class ReleaseWorkflowPyo3IsolationTest(unittest.TestCase):
         # chelis#422 (WS-4): release.yml builds `chelis-cli --features
         # smt`. The smt feature pulls cvc5 (no pyo3) plus chelis-tide's
         # smt forward, but a future feature edit could introduce a
-        # pyo3-pulling crate, which would break the uv-free release build
-        # at link time. Vet the smt graph explicitly, not just the
-        # default one above.
+        # pyo3-pulling crate, violating the shipping dependency contract.
+        # Vet the smt graph explicitly, not just the default one above.
         if "chelis-cli" not in extract_release_targets(RELEASE_WORKFLOW):
             self.skipTest("release.yml does not build chelis-cli")
         self.assertFalse(
             crate_has_pyo3_dep("chelis-cli", features="smt"),
             "`cargo tree -p chelis-cli --features smt` reports a pyo3 dep. "
-            "release.yml builds chelis-cli --features smt uv-free; either "
-            "remove pyo3 from the smt dep graph, or add the uv setup to "
-            "release.yml's jobs.",
+            "the shipping CLI smt graph must remain PyO3-free.",
         )
 
 

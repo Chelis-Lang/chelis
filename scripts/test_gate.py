@@ -26,7 +26,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import nullcontext, redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -1257,6 +1257,9 @@ class ListOutputTests(unittest.TestCase):
             root = Path(tmp)
             with mock.patch.object(
                 gate.subprocess, "Popen", side_effect=fake_popen
+            ), mock.patch(
+                "observed_cargo.observed_cargo_environment",
+                side_effect=lambda environment, **_kwargs: nullcontext(environment),
             ):
                 result = gate.run_commands(
                     commands,

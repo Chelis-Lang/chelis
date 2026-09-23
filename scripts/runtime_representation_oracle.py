@@ -2662,8 +2662,10 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    try:
-        raise SystemExit(main())
-    except OracleFailure as error:
-        phase = sys.argv[sys.argv.index("--phase") + 1] if "--phase" in sys.argv else "?"
-        raise SystemExit(f"RUNTIME REPRESENTATION PHASE {phase}: FAIL: {error}") from error
+    from observed_cargo import observed_cargo
+    with observed_cargo():
+        try:
+            raise SystemExit(main())
+        except OracleFailure as error:
+            phase = sys.argv[sys.argv.index("--phase") + 1] if "--phase" in sys.argv else "?"
+            raise SystemExit(f"RUNTIME REPRESENTATION PHASE {phase}: FAIL: {error}") from error

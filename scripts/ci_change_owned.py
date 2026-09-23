@@ -4684,16 +4684,18 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    try:
-        raise SystemExit(main())
-    except (
-        ValueError,
-        KeyError,
-        OSError,
-        subprocess.CalledProcessError,
-        json.JSONDecodeError,
-        tomllib.TOMLDecodeError,
-        ET.ParseError,
-    ) as error:
-        print(f"CHANGE-OWNED CI: FAIL: {error}", file=sys.stderr)
-        raise SystemExit(1)
+    from observed_cargo import observed_cargo
+    with observed_cargo():
+        try:
+            raise SystemExit(main())
+        except (
+            ValueError,
+            KeyError,
+            OSError,
+            subprocess.CalledProcessError,
+            json.JSONDecodeError,
+            tomllib.TOMLDecodeError,
+            ET.ParseError,
+        ) as error:
+            print(f"CHANGE-OWNED CI: FAIL: {error}", file=sys.stderr)
+            raise SystemExit(1)

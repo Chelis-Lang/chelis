@@ -175,6 +175,45 @@ Required failure text shape:
 - it must mention `CHELIS_RUNTIME_DIR`
 - it must tell the user to install Chelis correctly or set the environment variable
 
+### Runtime identity producers
+
+`spec/08-backends.md` §2.1 and `spec/11-ffi.md` §1.4 own the identity and
+provenance contract. The producer slice (#2394; shared plan
+`chelis-produce-runtime-artifact-identity`) does not replace the discovery
+policy above or establish selector correctness for #1354.
+
+`chelis-runtime-identity` owns data-only input planning, canonical descriptors,
+typed errors, native-section decoding and exact comparison. Its public ports
+accept captured values, never filesystem/process/environment providers.
+`chelis-runtime-identity-build` owns observation and generated writes; the
+Cargo driver and separate crate2nix derivations use that same adapter/core pair.
+Producer build scripts declare their role but never invoke Cargo.
+
+The Cargo entrypoint observes actual rustc units and build-script executions,
+binds exact Cargo artifacts to compiler-output bytes, and checks cached inputs
+and output digests. Compiler dependency metadata includes the observed source
+inventory and directory membership so additions and deletions trigger rebuilds.
+An unmanaged or stale target must be rebuilt under the managed driver; there is
+no fallback descriptor and no automatic deletion of a user's target directory.
+Commands and explicit provenance requirements are in `README.md` and
+`docs/manual_gates.md`.
+
+Runtime, CLI and Python records use separate native section roles. Retained
+source-worktree provenance includes the captured recipe and physical root map;
+sealed provenance binds the source digest without retaining those roots.
+The core exports `derive_descriptor`, `decode_archive`, `decode_image`,
+`decode_archive_provenance`, `decode_image_provenance` and `compare` for later
+verifier/package owners. Archive-byte digests and compiler-image IDs remain
+separate evidence.
+
+Acceptance is the architecture/producer suite on native Linux and macOS plus
+both separate-derivation Nix checks, not ordinary green unit tests. See
+`docs/phase_oracles.md` and `docs/manual_gates.md`. Package transformation,
+selection, staging, native execution and issue #1354 closure remain with the
+later children. Reverting producer support requires reverting its build hooks,
+managed entrypoints and Nix wiring together; removing observation while leaving
+hooks active deliberately fails closed.
+
 ## Execution Plan
 
 1. land this spec and sync active planning docs

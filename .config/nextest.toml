@@ -235,3 +235,17 @@ fail-fast = false
 
 [profile.runtime-representation.junit]
 path = "junit.xml"
+
+# chelis#2394: entirely ignored native producer scenarios have a dedicated
+# explicit owner, not ordinary empty coverage. Use --run-ignored only,
+# --ignore-default-filter and --no-tests fail with the exact producer target.
+# Do not put this suite in the ordinary/nightly partition or an oracle that
+# its nested Cargo producer builds could launch again.
+[profile.runtime-identity-producers]
+inherits = "default"
+fail-fast = false
+test-threads = 1
+slow-timeout = { period = "60s", terminate-after = 150 }
+
+[profile.runtime-identity-producers.junit]
+path = "junit.xml"

@@ -43,6 +43,12 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Observe native Cargo producers
+        run: uv run --managed-python --python 3.11 --no-project python scripts/ci_runtime_identity.py --provenance source-worktree
+
       # ROBUSTNESS NOTE (darwin SMT warm-cache masks cold build): Swatinem's
       # cache restores a previously-built cvc5 from target/, AND the
       # chelis#583 cvc5 cache below restores a prebuilt libcvc5.a, so on a
@@ -92,6 +98,7 @@ jobs:
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: runtime-identity-v1
           key: smt-darwin-arm64
           cache-on-failure: true
 
@@ -161,9 +168,13 @@ jobs:
       - name: Create uv-managed venv + wire libpython rpath
         run: python3 scripts/ci_setup_uv_python.py
 
+      - name: Observe native Cargo producers
+        run: uv run --managed-python --python 3.11 --no-project python scripts/ci_runtime_identity.py --provenance source-worktree
+
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: runtime-identity-v1
           shared-key: macos-workspace
           save-if: ${{ matrix.shard == 1 }}
 

@@ -309,8 +309,10 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except (OracleError, registry.RegistryError, OSError, ValueError, KeyError, StopIteration) as error:
-        print(f"DTYPE BUILTIN ATOM CLOSURE ORACLE: FAIL: {error}", file=sys.stderr)
-        sys.exit(1)
+    from observed_cargo import observed_cargo
+    with observed_cargo():
+        try:
+            main()
+        except (OracleError, registry.RegistryError, OSError, ValueError, KeyError, StopIteration) as error:
+            print(f"DTYPE BUILTIN ATOM CLOSURE ORACLE: FAIL: {error}", file=sys.stderr)
+            sys.exit(1)

@@ -409,6 +409,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    from ci_timing import subprocesses
-    with subprocesses():
-        sys.exit(main())
+    from observed_cargo import observed_cargo
+    with observed_cargo():
+        from ci_timing import subprocesses
+        with subprocesses():
+            sys.exit(main())

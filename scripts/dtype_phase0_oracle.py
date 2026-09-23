@@ -107,4 +107,6 @@ def run_oracle() -> None:
 
 
 if __name__ == "__main__":
-    run_oracle()
+    from observed_cargo import observed_cargo
+    with observed_cargo():
+        run_oracle()

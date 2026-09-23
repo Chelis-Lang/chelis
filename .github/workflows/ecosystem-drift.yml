@@ -76,8 +76,13 @@ jobs:
       - name: Create uv-managed venv + wire libpython rpath
         run: python3 scripts/ci_setup_uv_python.py
 
+      - name: Observe native Cargo producers
+        run: uv run --managed-python --python 3.11 --no-project python scripts/ci_runtime_identity.py --provenance source-worktree
+
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: runtime-identity-v1
 
       - name: Build chelis-cli (release)
         run: cargo build --release -p chelis-cli
@@ -528,6 +533,11 @@ jobs:
         working-directory: chelis
         run: python3 scripts/ci_setup_uv_python.py
 
+      - name: Observe sibling Cargo producers
+        if: matrix.type == 'cargo' && matrix.needs_chelis_sibling
+        working-directory: chelis
+        run: uv run --managed-python --python 3.11 --no-project python scripts/ci_runtime_identity.py --provenance source-worktree
+
       # hydronnx's fixture generation runs `uv run` directly; ensure uv exists
       # even when there is no chelis sibling needing the venv setup above.
       - name: Install uv (fixture generation)
@@ -538,6 +548,7 @@ jobs:
         if: matrix.type == 'cargo'
         uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: ${{ matrix.needs_chelis_sibling && 'runtime-identity-v1' || 'v0-rust' }}
           workspaces: shell
           shared-key: drift-${{ matrix.repo }}
           cache-on-failure: false

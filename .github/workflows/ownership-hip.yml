@@ -44,6 +44,10 @@
           "run": "uv run --managed-python --python 3.11 --no-project python scripts/ci_setup_uv_python.py"
         },
         {
+          "name": "Observe native Cargo producers",
+          "run": "uv run --managed-python --python 3.11 --no-project python scripts/ci_runtime_identity.py --provenance source-worktree"
+        },
+        {
           "name": "Execute the authoritative hardware oracle",
           "run": ".venv/bin/python scripts/ownership_hip_ci.py"
         },

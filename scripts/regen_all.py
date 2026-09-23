@@ -694,4 +694,6 @@ def main(
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    from observed_cargo import observed_cargo
+    with observed_cargo():
+        sys.exit(main(sys.argv[1:]))

@@ -52,6 +52,10 @@ walkdir = "2"
 default = ["chelis-prove"]
 smt = ["chelis-prove/smt", "chelis-tide/smt"]
 
+[build-dependencies]
+chelis-runtime-identity.workspace = true
+chelis-runtime-identity-build.workspace = true
+
 [dev-dependencies]
 assert_cmd = "2"
 cargo-husky = { version = "1", default-features = false, features = ["user-hooks"] }

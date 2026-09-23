@@ -38,6 +38,11 @@ runs:
       shell: bash
       run: python3 scripts/ci_setup_uv_python.py
 
+    - name: Observe native Cargo producers
+      if: runner.environment == 'github-hosted'
+      shell: bash
+      run: uv run --managed-python --python 3.11 --no-project python scripts/ci_runtime_identity.py --provenance source-worktree
+
     - name: Publish the hosted project commands
       if: runner.environment == 'github-hosted'
       shell: bash

@@ -102,6 +102,14 @@ metadata is decoded or the library is opened. This discriminant selects the
 callable ABI and is distinct from execution-value and DAG schema versions. Tensor
 metadata retains the exact extent and dtype contracts above.
 
+The Python extension's expected runtime identity is produced independently under
+spec/08 §2.1. It is not recovered from a discovered static archive, an adjacent CLI,
+or a compiler-image cache key. Required build-input observation failures reject
+production rather than yielding a weak expectation. Source-worktree and sealed
+provenance are explicit, separate from descriptor compatibility; losing a source
+root does not change the provenance mode. Runtime identity is separate from this
+callable metadata discriminant and does not relax descriptor or ownership checks.
+
 `project_root` supplies Reef dependency context. `compile_and_load` discovers
 a root from an importing Surf source unless explicitly disabled; an explicit
 nonempty root selects that context. Evaluation from raw text requires an
@@ -117,6 +125,13 @@ explicitly instead of silently using a different scope.
 Generated C headers and runtime support expose compiled Chelis artifacts to C
 and C++. The published declarations and ownership rules govern that boundary
 independently of the runtime implementation language.
+
+The runtime archive and shipped public runtime headers share the identity contract
+in spec/08 §2.1. Its private retained record is build metadata, not an additional
+public C function or a callable ABI version change. Record decoding neither loads
+nor executes an archive and rejects missing, duplicate, malformed, truncated or
+unsupported records. Producer agreement alone does not certify later archive
+selection, native linking or execution.
 
 ### 2.1 Compiled value ownership
 

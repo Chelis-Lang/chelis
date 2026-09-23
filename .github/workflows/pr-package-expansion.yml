@@ -162,10 +162,15 @@ jobs:
         if: steps.shard-selection.outputs.has_targets == 'true'
         run: python3 scripts/ci_setup_uv_python.py
 
+      - name: Observe native Cargo producers
+        if: steps.shard-selection.outputs.has_targets == 'true'
+        run: uv run --managed-python --python 3.11 --no-project python scripts/ci_runtime_identity.py --provenance source-worktree
+
       - name: Restore cargo registry and build cache
         if: steps.shard-selection.outputs.has_targets == 'true'
         uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: runtime-identity-v1
           shared-key: linux-workspace
           save-if: false
 

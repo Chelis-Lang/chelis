@@ -21,7 +21,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import nullcontext, redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -492,6 +492,10 @@ class SummaryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             patches = [
                 mock.patch.object(gate.subprocess, "Popen", side_effect=fake_popen),
+                mock.patch(
+                    "observed_cargo.observed_cargo_environment",
+                    side_effect=lambda environment, **_kwargs: nullcontext(environment),
+                ),
                 mock.patch.object(gate, "_git_output", fake_git_output),
                 mock.patch.object(gate, "_git_facts", lambda: dict(CANNED_GIT_FACTS)),
                 mock.patch.object(gate, "run_probe", _canned_probe),
@@ -1182,6 +1186,10 @@ class LeaseTests(unittest.TestCase):
         fake_popen, launched = _popen_stub()
         with tempfile.TemporaryDirectory() as tmp, \
                 mock.patch.object(gate.subprocess, "Popen", side_effect=fake_popen), \
+                mock.patch(
+                    "observed_cargo.observed_cargo_environment",
+                    side_effect=lambda environment, **_kwargs: nullcontext(environment),
+                ), \
                 mock.patch.object(gate, "_git_facts", lambda: dict(CANNED_GIT_FACTS)), \
                 redirect_stdout(io.StringIO()):
             rc = gate.main(["integration", "--support-only"], environ=_isolated_environ(tmp))

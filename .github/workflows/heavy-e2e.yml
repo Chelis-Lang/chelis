@@ -91,6 +91,85 @@ jobs:
         if: always() && matrix.shard == 1
         run: cargo test -p chelis-cli --test chelis_std_self_test_corpus -- --ignored --nocapture
 
+  # Producer-only #2394 proof. Neither this job nor the independent Nix
+  # runtime-identity-producers check changes production runtime selection.
+  runtime-identity-producers:
+    name: Runtime Identity Producers (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 240
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CHELIS_IDENTITY_PROVENANCE: source-worktree
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space (Ubuntu)
+        if: runner.os == 'Linux'
+        uses: ./.github/actions/free-disk-space
+
+      - name: Install Linux native prerequisites
+        if: runner.os == 'Linux'
+        run: python3 scripts/ci_apt_get.py gcc g++ clang cmake libclang-dev libopenblas-dev libgmp-dev libmpfr-dev
+
+      - name: Install macOS native prerequisites
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "arm64"
+          brew list cmake >/dev/null 2>&1 || brew install cmake
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install a different real native Rust compiler
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.97.0 --profile minimal
+          echo "CHELIS_IDENTITY_TEST_ALTERNATE_RUSTC=$(rustup which --toolchain 1.97.0 rustc)" >> "$GITHUB_ENV"
+          rustc --version --verbose
+          rustup run 1.97.0 rustc --version --verbose
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv + wire libpython rpath
+        run: python3 scripts/ci_setup_uv_python.py
+
+      - name: Observe native Cargo producers
+        run: uv run --managed-python --python 3.11 --no-project python scripts/ci_runtime_identity.py --provenance source-worktree
+
+      - name: Pin Python for isolated producer checkouts
+        run: |
+          echo "PYO3_PYTHON=$GITHUB_WORKSPACE/.venv/bin/python" >> "$GITHUB_ENV"
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+
+      # No workspace test/oracle runs here: the exact two ignored rows build
+      # their own producers, and missing native prerequisites are failures.
+      - name: Execute both real native producer scenarios
+        run: >-
+          cargo nextest run -p chelis-runtime-identity --test producer_contract
+          --profile runtime-identity-producers --ignore-default-filter
+          --run-ignored only --no-tests fail --no-fail-fast --test-threads=1
+          -E 'test(/^real_producers_closure_independence_provenance_and_cached_units$/)
+          + test(/^alternate_real_compiler_changes_the_toolchain_dimension$/)'
+
+      - name: Upload producer acceptance JUnit
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: junit-runtime-identity-producers-${{ matrix.os }}
+          path: target/nextest/runtime-identity-producers/junit.xml
+          if-no-files-found: error
+          retention-days: 14
+
   native-random-observer-debt:
     name: Native Random Observer Debt
     runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}

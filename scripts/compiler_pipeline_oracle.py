@@ -309,9 +309,17 @@ def run_oracle(
 
 
 def main() -> int:
+    from observed_cargo import observed_cargo_environment
+
     try:
-        run_oracle()
-    except OracleFailure as error:
+        # This oracle also supports a rustup toolchain not yet on PATH.
+        # Resolve that existing fallback before installing the observer.
+        environment = oracle_environment()
+        with observed_cargo_environment(
+            environment, python=Path(environment["PYO3_PYTHON"]), required=True
+        ) as environment:
+            run_oracle(environment=environment)
+    except (OracleFailure, ValueError, OSError) as error:
         print(f"compiler pipeline oracle: FAIL: {error}", file=sys.stderr)
         return 1
     return 0

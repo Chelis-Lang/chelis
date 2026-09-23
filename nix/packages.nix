@@ -7,14 +7,15 @@
 }:
 let
   source = import ./source.nix { inherit lib root; };
-  crateSource = import ./source.nix {
-    inherit lib root;
-    includeRoots = [
-      "crates"
-      "grammars"
-      "tree-sitter-chelis"
-    ];
-  };
+  workspaceMembers = builtins.listToAttrs (
+    map (
+      member:
+      let
+        package = lib.importTOML (source + "/${member}/Cargo.toml");
+      in
+      lib.nameValuePair package.package.name member
+    ) manifest.workspace.members
+  );
   manifest = lib.importTOML (source + "/Cargo.toml");
   version = manifest.workspace.package.version;
   crate2nixManifest = lib.importTOML (crate2nix + "/crate2nix/Cargo.toml");
@@ -23,37 +24,50 @@ let
     crate2nixManifest.package.version;
   crate2nixTools = pkgs.callPackage (crate2nix + "/tools.nix") { };
   toolchain = pkgs.rust-bin.fromRustupToolchainFile (source + "/rust-toolchain.toml");
-  buildRustCrateForPkgs =
+  unobservedBuildRustCrateForPkgs =
     cratePkgs:
     cratePkgs.buildRustCrate.override {
       cargo = toolchain;
       rustc = toolchain;
-      defaultCrateOverrides = cratePkgs.defaultCrateOverrides // {
-        "chelis-cli" = attrs: {
-          src = crateSource;
-          sourceRoot = "chelis-source/crates/chelis-cli";
+      # All local crates see the same complete filtered workspace, including
+      # root manifests, toolchain, ABI headers and sibling build inputs.
+      defaultCrateOverrides =
+        cratePkgs.defaultCrateOverrides
+        // lib.mapAttrs (_: member: _: {
+          src = source;
+          sourceRoot = "chelis-source/${member}";
+          workspace_member = ".";
+        }) workspaceMembers
+        // {
+          # Avoid buildRustCrate's Cargo-metadata autodetection for Git sources.
+          "arb-sys" = _: {
+            workspace_member = ".";
+          };
+          "carcara" = _: {
+            workspace_member = "carcara";
+          };
+          "cvc5-sys" = attrs: {
+            nativeBuildInputs = (attrs.nativeBuildInputs or [ ]) ++ [
+              pkgs.llvmPackages.libclang
+              pkgs.pkg-config
+            ];
+            CVC5_DIR = "${cvc5.dir}";
+            LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
+          };
+          "pyo3-build-config" =
+            attrs:
+            (cratePkgs.defaultCrateOverrides."pyo3-build-config" or (_: { })) attrs
+            // {
+              PYO3_PYTHON = "${cratePkgs.python311}/bin/python3";
+            };
+          "chelis-python" = attrs: {
+            src = source;
+            sourceRoot = "chelis-source/${workspaceMembers.chelis-python}";
+            workspace_member = ".";
+            PYO3_PYTHON = "${cratePkgs.python311}/bin/python3";
+            buildInputs = (attrs.buildInputs or [ ]) ++ [ cratePkgs.python311 ];
+          };
         };
-        "chelis-compiler-api" = attrs: {
-          src = crateSource;
-          sourceRoot = "chelis-source/crates/chelis-compiler-api";
-        };
-        "chelis-cove" = attrs: {
-          src = crateSource;
-          sourceRoot = "chelis-source/crates/chelis-cove";
-        };
-        "cvc5-sys" = attrs: {
-          nativeBuildInputs = (attrs.nativeBuildInputs or [ ]) ++ [
-            pkgs.llvmPackages.libclang
-            pkgs.pkg-config
-          ];
-          CVC5_DIR = "${cvc5.dir}";
-          LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
-        };
-        "tree-sitter-chelis" = attrs: {
-          src = crateSource;
-          sourceRoot = "chelis-source/tree-sitter-chelis";
-        };
-      };
     };
   generatedCargoNix =
     assert crate2nixVersion == "0.15.0";
@@ -64,21 +78,108 @@ let
       additionalCargoNixArgs = [
         "--no-default-features"
         "--features"
-        "chelis-cli/smt"
+        "chelis-cli/smt,chelis-python/extension-module"
       ];
     }).overrideAttrs
       (_: {
         CARGO_NET_OFFLINE = "true";
       });
+  # The observer has no runtime dependency. Bootstrap it through an entirely
+  # unobserved graph; never recursively depend on its own compiler wrapper.
+  bootstrapGraph = import generatedCargoNix {
+    inherit pkgs;
+    buildRustCrateForPkgs = unobservedBuildRustCrateForPkgs;
+    rootFeatures = [ ];
+  };
+  identityObserver = bootstrapGraph.workspaceMembers."chelis-runtime-identity-build".build.override {
+    features = [ ];
+  };
+  observeBuilder = import ./runtime-identity.nix {
+    inherit
+      lib
+      source
+      toolchain
+      workspaceMembers
+      ;
+    observer = identityObserver;
+  };
+  buildRustCrateForPkgs =
+    cratePkgs: observeBuilder cratePkgs (unobservedBuildRustCrateForPkgs cratePkgs);
   cargoGraph = import generatedCargoNix {
     inherit buildRustCrateForPkgs pkgs;
     rootFeatures = [ ];
   };
-  compilerCrate = cargoGraph.workspaceMembers."chelis-cli".build.override {
-    features = [ "smt" ];
-  };
-  runtimeCrate = cargoGraph.workspaceMembers."chelis-runtime".build.override {
-    features = [ ];
+  # Resolve both real consumer roots together, as one Cargo invocation would.
+  # The synthetic root is resolver input only: no crate or descriptor is built
+  # for it, and every selected producer retains its own derivation and receipts.
+  producerRoot = "chelis-runtime-identity-producers";
+  producerGraphFor =
+    runtimeFeatures:
+    cargoGraph.internal.builtRustCratesWithFeatures {
+      packageId = producerRoot;
+      features = [ ];
+      runTests = false;
+      buildRustCrateForPkgsFunc = buildRustCrateForPkgs;
+      crateConfigs = cargoGraph.internal.crates // {
+        ${producerRoot} = {
+          dependencies = [
+            {
+              name = "chelis-cli";
+              packageId = cargoGraph.workspaceMembers."chelis-cli".packageId;
+              features = [ "smt" ];
+              usesDefaultFeatures = false;
+            }
+            {
+              name = "chelis-python";
+              packageId = cargoGraph.workspaceMembers."chelis-python".packageId;
+              features = [ "extension-module" ];
+              usesDefaultFeatures = false;
+            }
+          ]
+          ++ lib.optional (runtimeFeatures != [ ]) {
+            name = "chelis-runtime";
+            packageId = cargoGraph.workspaceMembers."chelis-runtime".packageId;
+            features = runtimeFeatures;
+            usesDefaultFeatures = false;
+          };
+        };
+      };
+    };
+  producerGraph = producerGraphFor [ ];
+  compilerCrate = producerGraph.crates.${cargoGraph.workspaceMembers."chelis-cli".packageId};
+  pythonCrate = producerGraph.crates.${cargoGraph.workspaceMembers."chelis-python".packageId};
+  runtimeDependency =
+    consumer:
+    let
+      dependencies = builtins.filter (
+        dependency: dependency.crateName == "chelis-runtime"
+      ) consumer.dependencies;
+    in
+    assert lib.assertMsg (
+      builtins.length dependencies == 1
+    ) "each consumer producer must declare exactly one runtime dependency";
+    builtins.head dependencies;
+  runtimeCrate =
+    assert lib.assertMsg (
+      (runtimeDependency compilerCrate).drvPath == (runtimeDependency pythonCrate).drvPath
+    ) "the CLI and Python producers must consume the same resolved runtime unit";
+    runtimeDependency compilerCrate;
+  # These real producer variants are private acceptance inputs, not packages.
+  # Resolve the changed feature through the same graph, including its optional
+  # dependencies, rather than modifying a compiled archive or its receipt.
+  runtimeIdentityProducerControls = {
+    changedRuntimeCrate =
+      let
+        graph = producerGraphFor [ "ownership-ledger" ];
+      in
+      runtimeDependency graph.crates.${cargoGraph.workspaceMembers."chelis-cli".packageId};
+    missingInputRuntimeCrate = runtimeCrate.overrideAttrs (_: {
+      src = lib.cleanSourceWith {
+        name = "chelis-source";
+        src = "${source}";
+        filter = path: _: toString path != "${source}/crates/chelis-runtime/include/chelis_runtime.h";
+      };
+    });
   };
   chelisupCrate = cargoGraph.workspaceMembers."chelisup".build.override {
     features = [ ];
@@ -88,8 +189,9 @@ let
     install -Dm755 ${compilerCrate}/bin/chelis $out/bin/chelis
   '';
   runtime = pkgs.runCommand "chelis-runtime-${version}" { } ''
-    artifact="$(find ${runtimeCrate.lib}/lib -type f -name 'libchelis_runtime-*.a' -print -quit)"
-    test -n "$artifact"
+    export CHELIS_IDENTITY_PYTHON="${pkgs.python311}/bin/python3"
+    artifact="$(${identityObserver}/bin/chelis-runtime-identity-build producer-artifact \
+      --lib-dir ${runtimeCrate.lib} --kind runtime)"
     install -Dm444 "$artifact" $out/lib/libchelis_runtime.a
     mkdir -p $out/include
     ${lib.concatMapStringsSep "\n" (header: ''
@@ -244,8 +346,11 @@ in
     compilerCrate
     crate2nixVersion
     generatedCargoNix
+    identityObserver
+    pythonCrate
     runtime
     runtimeCrate
+    runtimeIdentityProducerControls
     source
     toolchain
     version

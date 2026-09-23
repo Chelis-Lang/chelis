@@ -143,18 +143,28 @@ consistently:
   outside the gate fall back to it. Do not invoke the gate through
   `.venv/bin/python`; the `uv run` form above is the gate's own fallback, not a
   routine invocation.
-- **Direct cargo commands:** `.cargo/config.toml` defaults `PYO3_PYTHON` to
-  `.venv/bin/python`, so a checkout with the environment above builds as is. A
-  worktree without its own `.venv` points PyO3 at uv's managed interpreter
-  instead:
+- **Manual Cargo builds outside Devenv:** use the managed producer entrypoint
+  with explicit provenance. `.cargo/config.toml` defaults `PYO3_PYTHON` to
+  `.venv/bin/python`; a worktree without that venv can point at uv's managed
+  interpreter instead. From the repository root:
 
   ```sh
-  PYO3_PYTHON="$(uv python find 3.11)" cargo build --workspace
-  PYO3_PYTHON="$(uv python find 3.11)" cargo nextest run -p chelis-compiler-api
+  export CHELIS_IDENTITY_PROVENANCE=source-worktree
+  export CHELIS_IDENTITY_REAL_CARGO="$(rustup which cargo)"
+  export PYO3_PYTHON="$(uv python find 3.11)"
+  uv run --managed-python --python 3.11 --no-project python scripts/runtime_identity_build.py --cargo "$CHELIS_IDENTITY_REAL_CARGO" -- build --workspace
+  uv run --managed-python --python 3.11 --no-project python scripts/runtime_identity_build.py --cargo "$CHELIS_IDENTITY_REAL_CARGO" -- nextest run -p chelis-compiler-api
   ```
 
   An explicit `PYO3_PYTHON` is authoritative. A missing configured path fails
   with setup guidance instead of silently falling back.
+  `--cargo` must name the real toolchain executable, not a Cargo shim.
+  Choose `sealed-distribution` instead of `source-worktree` only when building
+  a shipping artifact; provenance is mandatory and is not inferred from paths.
+  The gate and repository script callers install their managed Cargo launcher;
+  an active Devenv shell already supplies its managed `cargo` shim, so keep
+  using ordinary `cargo ...` there. An unmanaged producer invocation fails
+  rather than emitting an unobserved identity.
 
 Install Python dependencies into the venv as needed:
 
@@ -491,6 +501,13 @@ Run the complete check set for the native system:
 nix flake check --print-build-logs
 ```
 
+The independent native Nix producer-equality check is
+`nix build .#checks.<system>.runtime-identity-producers --print-build-logs`
+(`x86_64-linux` or `aarch64-darwin`). It compares records from separate producer
+derivations; it is not a substitute for the two Cargo producer scenarios in
+[`docs/manual_gates.md`](docs/manual_gates.md#runtime-identity-producer-acceptance).
+Neither check changes production runtime selection or closes chelis#1354.
+
 Nix is an additive source-build channel. It does not create the version store that release toolchains use.
 
 `chelisup` remains the release installer and version router. Use `chelisup` when a project needs release pins or side-by-side toolchains.
@@ -527,22 +544,28 @@ for `cargo build` on every platform: see Python and the gate above for the
 `.venv` and `PYO3_PYTHON` forms. Inside Devenv the activated `.devenv/state/venv`
 environment satisfies the same requirement.
 
+Outside Devenv, use the explicit provenance and real Cargo selection above:
+
 ```sh
-cargo build --workspace
-cargo test --workspace
+uv run --managed-python --python 3.11 --no-project python scripts/runtime_identity_build.py --cargo "$CHELIS_IDENTITY_REAL_CARGO" -- build --workspace
+uv run --managed-python --python 3.11 --no-project python scripts/runtime_identity_build.py --cargo "$CHELIS_IDENTITY_REAL_CARGO" -- test --workspace
 ```
 
-`cargo test --workspace` covers the compiler, evaluator, backend, and spec
-regressions.
+Inside Devenv, the equivalent commands are `cargo build --workspace` and
+`cargo test --workspace` through its existing managed shim. The ordinary suite
+covers compiler, evaluator, backend, spec, and runtime-identity core/architecture
+regressions. The two ignored real producer scenarios have separate native Linux
+and macOS owners and [manual commands](docs/manual_gates.md#runtime-identity-producer-acceptance);
+ordinary test success does not certify them.
 
 The `chelis` binary referenced throughout the docs is built from this
 workspace, not installed separately:
 
 ```sh
-cargo build -p chelis-cli
+uv run --managed-python --python 3.11 --no-project python scripts/runtime_identity_build.py --cargo "$CHELIS_IDENTITY_REAL_CARGO" -- build -p chelis-cli
 target/debug/chelis --help
 # or, without a separate build step:
-cargo run -p chelis-cli --bin chelis -- --help
+uv run --managed-python --python 3.11 --no-project python scripts/runtime_identity_build.py --cargo "$CHELIS_IDENTITY_REAL_CARGO" -- run -p chelis-cli --bin chelis -- --help
 ```
 
 `--fast` is the pre-push gate: fix-in-place, run before every push. `--local`

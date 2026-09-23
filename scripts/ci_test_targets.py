@@ -290,9 +290,11 @@ def run(root: Path = ROOT, *, candidate_sha: str | None = None) -> None:
 
 
 if __name__ == "__main__":
-    try:
-        run()
-    except (ValueError, KeyError, OSError, ET.ParseError, subprocess.CalledProcessError) as error:
-        print(f"CI FAST: FAIL: {error}", file=sys.stderr)
-        sys.exit(1)
-    print("CI FAST: PASS")
+    from observed_cargo import observed_cargo
+    with observed_cargo():
+        try:
+            run()
+        except (ValueError, KeyError, OSError, ET.ParseError, subprocess.CalledProcessError) as error:
+            print(f"CI FAST: FAIL: {error}", file=sys.stderr)
+            sys.exit(1)
+        print("CI FAST: PASS")

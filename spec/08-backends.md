@@ -117,6 +117,62 @@ inherit that invocation's active handler as [05-RNG-1] requires. Reentrant and
 concurrent public invocations do not share mutable Random state. Private context transport does not change authored public
 function declarations or the four-argument public tensor ABI.
 
+### 2.1 Runtime artifact identity
+
+A runtime build SHALL carry a versioned, canonical, domain-separated SHA-256
+descriptor of its runtime recipe. Compatibility is exact descriptor equality;
+a release version, pathname, filename hash, modification time, or compiler image
+identity SHALL NOT substitute for that descriptor. Its compatibility dimensions are:
+
+- The complete runtime source and declared build-input closure: logical paths and
+  bytes, relevant dirty or untracked inputs, transitive local dependencies,
+  manifests and lock resolution, build scripts and their declared generated or
+  configuration inputs, and resolved external dependency identities and checksums.
+- The complete shipped public runtime-header closure and its ABI identity.
+- The actual target specification/triple and effective target CPU and features.
+- The effective runtime and dependency feature closure, including explicitly
+  selected `ownership-ledger` instrumentation.
+- Directly observed runtime optimization, debug information, debug assertions,
+  panic strategy, rustflags reaching compilation, and Cargo debug/release profile
+  class. A profile name or a reconstruction of Cargo configuration files is not
+  an observation. Overflow-check, LTO, codegen-unit and custom-profile-name
+  settings are not separate compatibility dimensions.
+- The compiler identity and code-affecting native/build tool inputs.
+
+Absolute checkout locations and timestamps are not compatibility inputs. The
+runtime recipe, rather than unrelated compiler features or a host build script's
+recipe, governs these dimensions. Missing or unrecordable required inputs SHALL
+fail production; they SHALL NOT be omitted or filled with inferred defaults.
+
+Build-level observation MAY supply compilation-unit facts that package build
+scripts cannot observe. Reused build inputs SHALL be bound to the actual cached
+compilation units and validated before reuse. Cache filenames, prior successful
+builds, or matching source timestamps do not establish that binding. Additions,
+deletions and content changes in the required input closure SHALL invalidate the
+affected production. No producing build script invokes Cargo recursively.
+
+The runtime compilation SHALL emit one private retained identity record in its
+native archive. Its decoder SHALL parse the archive and native object sections,
+without executing the candidate, and distinguish missing, duplicate (including
+identical duplicates), malformed, truncated and unsupported records. The complete
+archive-byte digest is separate from the embedded descriptor. A post-build scan or
+adjacent sidecar SHALL NOT relabel an existing archive with current source identity.
+
+CLI and Python extension builds SHALL derive their expected runtime descriptors
+independently from complete observed runtime inputs, without adopting a candidate
+archive's descriptor or another compiler's expectation. They SHALL emit explicit
+source-worktree or sealed-distribution provenance separately from compatibility.
+Source-worktree provenance identifies its required source root and runtime recipe;
+an unavailable root requires rebuilding and SHALL NOT select sealed mode.
+Sealed production still requires complete inputs at build time, but does not require
+the build checkout at consumption. Neither producer evidence nor provenance alone
+establishes that a later native artifact was selected, staged, linked or executed.
+
+The record does not add a C callable or change callable metadata
+`abi_version: 2` (spec/11 §1.4). Producer acceptance and subsequent consumer
+enforcement are separate claims; producer support alone does not certify the
+existing archive selectors or a source-free installed package.
+
 ## 3. Phase 1: HIP Backend
 
 The GPU plan is Futhark-style source-to-source compilation:
