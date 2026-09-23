@@ -222,8 +222,9 @@ let
         "$observer" verify-producers --runtime "$runtime" --cli "$cli" --python "$python"
         python3 - "$observer" "$runtime" "$changed_runtime" "$cli" "$python" "$out" \
           ${runtimeIdentityMissingInput.out} "${pkgs.stdenv.hostPlatform.system}" <<'PY'
-        import json
         import hashlib
+        import json
+        import re
         import subprocess
         import sys
         from pathlib import Path
