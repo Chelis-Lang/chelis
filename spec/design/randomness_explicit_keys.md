@@ -32,7 +32,7 @@ The counter stream is the special case of this design in which the compiler pick
 
 Here `derive(k, j) = splitmix64(k XOR rotl64(splitmix64(j), 29))`. These are LaCaDiLE PR #80's definitions, so the language and the model agree bit for bit. The derivation is a finalised mix, never a bare XOR of per-index terms: a chained `fold_in(fold_in(k, a), b)` would otherwise be symmetric in `a` and `b`, the defect #2408 found in the older `uniform_like` mixing.
 
-**Keys are affine: each key is used at most once.** Passing a key to a random primitive, `split` or `fold_in` consumes it. The rule is stated on the category, not per container. A value that is a key, or that contains one (a tuple, record, list, data type or `tensor[n, key]`), cannot be borrowed, cannot be copied (whether by an explicit or a compiler-inserted `copy`), and has no read that leaves it live. A key is reached only by consuming its holder:
+**Keys are affine: each key is used at most once.** Passing a key to a random primitive, `split` or `fold_in` consumes it. The rule is stated on the category, not per container. A value that is a key, or that contains one (a tuple, record, list, data type, `tensor[n, key]`, or a closure that captures a key), cannot be borrowed, cannot be copied (whether by an explicit or a compiler-inserted `copy`), and has no read that leaves it live. A key is reached only by consuming its holder:
 - a destructuring `match` or `let` pattern;
 - `vmap` over a key axis, which gives each row to one application;
 - a key-consuming operation.

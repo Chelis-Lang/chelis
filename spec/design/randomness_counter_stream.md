@@ -10,7 +10,7 @@ This document plans how the implementation reaches the randomness semantics the 
 
 It decides no language semantics. Where it restates a rule, the numbered spec wins. The one normative change it needs, to spec/10 §3.2's wire layout, lands with phase 3.
 
-On 2026-09-23 Chelis decided to move to explicit single-use keys (`randomness_explicit_keys.md`). Phases 1 to 3, 5 and 6 below are shared by both designs. Phase 3's key-operand IR is the explicit-key IR, with a bridge that computes today's counter keys until the switch. The counter-only ordinal machinery in §2 and phase 4 (activation counting, `vmap` and `par` bases) is not built, because keys remove ordinals.
+On 2026-09-23 Chelis decided to move to explicit single-use keys (`randomness_explicit_keys.md`). Phases 1 to 3, 5 and 6 below are shared by both designs. Phase 3's key-operand IR is the explicit-key IR, with a bridge that computes today's counter keys until the switch. No new counter-only ordinal machinery is built (new activation counting, `vmap` and `par` bases), because keys remove ordinals.
 
 ## 1. Where the implementation stands
 
@@ -51,7 +51,7 @@ This boundary is also the one the explicit-key design needs; only the supplier o
 - `Dropout[x, rate, key(, active)]`;
 - `UniformLike[template, low, high, key(, active)]`.
 
-Rate and bounds are ordinary scalar operands of dtype `p`, as [05-OP-8] and [05-OP-37] say. `key` is a new non-numeric dtype (`Prim::Key`) with an opaque carrier (`RandomKey` in `dtype_semantics.rs`), and kernels are pure once they have their key. The optional Bool `active` input keeps an unselected `where`-lowered arm from validating, and so trapping on, a runtime control. It does not count ordinals.
+Rate and bounds are ordinary scalar operands of dtype `p`, as [05-OP-8] and [05-OP-37] say. `key` is a new non-numeric dtype (`Prim::Key`) with an opaque carrier (`RandomKey` in `dtype_semantics.rs`), and kernels are pure once they have their key. The optional Bool `active` input keeps an unselected `where`-lowered arm from validating, and so trapping on, a runtime control.
 
 The verifier adds three rules:
 - each key value has at most one consuming use;
@@ -65,7 +65,7 @@ This is the explicit-key IR. Only the key source changes at the switch.
 - in the DAG evaluator, a `RandomFrame` argument;
 - in generated C, today's `chelis_rng_state`.
 
-`DrawKey` is effectful: a DCE root, never merged, never folded or recomputed, and ordered as today. It takes its kernel's controls as ordering inputs, and advances the frame only after they validate, preserving [05-OP-37]'s "validation consumes no ordinal". A scoped `with seed` inside a kernel carries its literal seed.
+`DrawKey` is effectful: a DCE root, never merged, never folded or recomputed, and ordered as today. It advances the frame exactly when today's lowering consumes an ordinal. Where lowering attaches today's `random_path_condition` (`lower.rs`, the AD transform subcontexts), `DrawKey` carries it as an activation and advances only when it is true; nowhere else is an activation added. It takes its kernel's controls as ordering inputs and, when active, advances the frame only after they validate, preserving [05-OP-37]'s "validation consumes no ordinal". When inactive, it neither validates nor advances. A scoped `with seed` inside a kernel carries its literal seed.
 
 `vmap` over a function that draws is refused with a typed #2409 rejection in both lanes until the switch defines it. Today eval draws at seed 0, and C draws one batched ordinal. Both are silently non-conforming, so they become loud.
 
