@@ -769,10 +769,9 @@ fn literal_pattern_atom(value: &deep::Expr) -> Option<LiteralPatternAtom<'_>> {
 ///    or function scrutinee admits no literal pattern);
 /// 2. the atom's family disagrees with the scrutinee primitive's family under
 ///    [04-LIT-1]'s closed pairing;
-/// 3. an integer pattern lies outside the scrutinee integer width's range,
-///    under the same range rule spec/04 §5.3 and §5.6 apply to a literal bound
-///    at that type. A float primitive has no such range: finalization at a
-///    float width is total under [04-NUM-1].
+/// 3. the pattern's value at the scrutinee's primitive is out of range (an
+///    integer width) or non-finite (a float width), under [04-LIT-2]'s rule for
+///    a literal bound at that type.
 ///
 /// A literal pattern selects no width, because a `pat-lit` has no precision
 /// slot and admits no suffix (spec/02 §P10a), so an unsuffixed integer pattern
@@ -867,6 +866,28 @@ fn check_literal_pattern(
                 "integer literal pattern `{literal}` is outside the `{}` range \
                  [{low}, {high}], so this arm could never match \
                  (spec/04-type-system.md [04-PAT-1], section 5.3)",
+                prim.name(),
+            ),
+            vec![format!(
+                "Use a value the scrutinee's `{}` width can hold, or widen the scrutinee",
+                prim.name(),
+            )],
+        );
+    }
+
+    // [04-LIT-2]: a float pattern binds at the scrutinee's float width, and an
+    // infinity there is not a literal.
+    if let LiteralPatternAtom::Float(value) = &atom
+        && super::literal_width::literal_is_non_finite_at(*prim, &deep::Atom::Float(*value))
+    {
+        report_literal_pattern_error(
+            pat,
+            errors,
+            format!(
+                "float literal pattern `{}` rounds to infinity at `{}`, the scrutinee's \
+                 dtype, and no literal denotes an infinity \
+                 (spec/04-type-system.md [04-PAT-1], [04-LIT-2])",
+                atom.rendered(),
                 prim.name(),
             ),
             vec![format!(

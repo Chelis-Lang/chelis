@@ -2443,6 +2443,14 @@ fn activation_live_mask(dag: &Dag, roots: &[NodeId]) -> Vec<bool> {
 
 fn live_mask_from(dag: &Dag, mut stack: Vec<NodeId>) -> Vec<bool> {
     let mut live = vec![false; dag.len()];
+    // chelis#2368: effect nodes are live because they are effects, not
+    // because a value reaches them.
+    stack.extend(
+        dag.nodes()
+            .iter()
+            .filter(|node| node.op.is_unconditional_effect())
+            .map(|node| node.id),
+    );
     loop {
         while let Some(id) = stack.pop() {
             if live[id.0] {

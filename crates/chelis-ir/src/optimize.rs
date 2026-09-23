@@ -347,7 +347,12 @@ fn dead_code_eliminate_impl(
             RiscOp::DrawKey { .. } => draws == DrawLiveness::Activation,
             _ => false,
         };
-        if implicit_observations && observed {
+        // chelis#2368: an unconditional effect is live regardless of
+        // `implicit_observations`. A projected slice may legitimately drop an
+        // unrelated `Store`, but never an abort: [05-OP-68] says it may not
+        // be removed, and a slice that silently skipped one would report a
+        // successful result for a program that aborts.
+        if (implicit_observations && observed) || node.op.is_unconditional_effect() {
             live[node.id.0] = true;
         }
     }

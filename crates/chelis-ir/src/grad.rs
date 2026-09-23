@@ -877,9 +877,14 @@ fn prune_to_requested_outputs(
         live[root.0] = true;
     }
     for node in dag.nodes() {
-        // A forward draw key advances its handler whether or not the pruned
-        // gradient reads its key.
-        if matches!(node.op, RiscOp::Store { .. } | RiscOp::DrawKey { .. }) {
+        // chelis#2368: `Store` and every unconditional effect. grad has its
+        // own pruner, separate from `optimize::dead_code_eliminate`, so the
+        // seed has to be repeated here — the definition is shared even where
+        // the loop is not. A forward draw key advances its handler whether or
+        // not the pruned gradient reads its key.
+        if matches!(node.op, RiscOp::Store { .. } | RiscOp::DrawKey { .. })
+            || node.op.is_unconditional_effect()
+        {
             live[node.id.0] = true;
         }
     }

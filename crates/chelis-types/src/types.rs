@@ -186,6 +186,10 @@ impl Ord for Prim {
 }
 
 impl Prim {
+    /// The active float dtypes of `spec/04-type-system.md` §1.1, the one list
+    /// [`Prim::is_float`] and every float-family enumeration read.
+    pub const ACTIVE_FLOATS: [Prim; 4] = [Prim::F32, Prim::F64, Prim::F16, Prim::Bf16];
+
     /// Parse a primitive type from its canonical name.
     pub fn parse_name(s: &str) -> Option<Prim> {
         match s {
@@ -271,7 +275,7 @@ impl Prim {
     /// `f8e4m3` is deferred (§1.1.1) and is NOT a float for any active
     /// classification purpose.
     pub fn is_float(&self) -> bool {
-        matches!(self, Prim::F32 | Prim::F64 | Prim::F16 | Prim::Bf16)
+        Self::ACTIVE_FLOATS.contains(self)
     }
 
     /// True for any numeric precision in the active set, including `f8e4m3`

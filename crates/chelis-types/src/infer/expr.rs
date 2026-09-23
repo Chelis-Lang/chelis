@@ -1096,6 +1096,19 @@ pub(super) fn infer_lit(
                     ),
                 );
             }
+            // [04-LIT-2]: the literal binds at this float primitive by one
+            // finalization, and an infinity there is not a literal. The
+            // resolved metadata is the same for a suffix, the §5.3 default,
+            // every §5.6 position, and hand-written Deep, so this one check
+            // covers each ingress.
+            if let Some(deep::Expr::Atom(atom, _)) = value_atom
+                && super::literal_width::literal_is_non_finite_at(*prim, atom)
+            {
+                return report(
+                    errors,
+                    super::literal_width::non_finite_literal_error(atom, *prim),
+                );
+            }
         } else if integer_source_marker {
             return report(
                 errors,
@@ -1172,7 +1185,18 @@ pub(super) fn infer_lit(
                     Type::Prim(Prim::Int32)
                 }
             }
-            deep::Expr::Atom(deep::Atom::Float(_), _) => Type::Prim(Prim::F32),
+            deep::Expr::Atom(atom @ deep::Atom::Float(_), _) => {
+                // [04-LIT-2] at the §5.3 default, for Deep producers that
+                // omit the `type: f32` ascription.
+                if super::literal_width::literal_is_non_finite_at(Prim::F32, atom) {
+                    report(
+                        errors,
+                        super::literal_width::non_finite_literal_error(atom, Prim::F32),
+                    )
+                } else {
+                    Type::Prim(Prim::F32)
+                }
+            }
             deep::Expr::Atom(deep::Atom::Bool(_), _) => Type::Prim(Prim::Bool),
             deep::Expr::Atom(deep::Atom::Str(_), _) => Type::Prim(Prim::String),
             _ => malformed_form(node, "lit", "a scalar atom value", errors),

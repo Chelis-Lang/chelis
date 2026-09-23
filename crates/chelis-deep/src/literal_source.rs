@@ -2,10 +2,14 @@
 
 use crate::{Atom, DeepTag, DtypeFamily, Expr, Metadata};
 
-/// Whether a numeric atom is valid at every applicable member of a family.
+/// Whether a numeric atom's kind adopts a family and, for an integer atom,
+/// whether it fits every signed member's range. Whether a value is finite at
+/// each float member is not decided here: the checker's `[04-LIT-2]` rule
+/// finalizes the atom at each member with the dtype-semantics authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LiteralFamilyFit {
-    /// The atom kind and value are valid across the family.
+    /// The atom kind adopts the family, and an integer atom is in range for
+    /// every signed member.
     Fits,
     /// The atom kind does not adopt this family.
     IncompatibleKind,
