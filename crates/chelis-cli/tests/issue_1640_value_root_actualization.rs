@@ -101,13 +101,15 @@ fn scalar_witness_constructors_actualize_rank_zero_and_rank_two() {
 
 #[test]
 fn value_roots_keep_distinct_instantiations_and_bool_results_do_not_seed_dtype() {
-    let source = "def f[p: Float](xs: tensor[1, p]) -> tensor[1, bool] = gt(xs, insert(scalar_to_tensor(cast(16777217.0, p)), 0i32, shape(xs, 0i32)))\na = f(to_tensor([16777217.0f32]))\nb = f(to_tensor([16777217.0f64]))\nc = f(to_tensor([16777218.0f64]))\n";
+    // 1.000000001 rounds to 1.0 at f32 and stays distinct at f64. The witness
+    // must be finite at every `Float` member, f16 included ([04-LIT-2]).
+    let source = "def f[p: Float](xs: tensor[1, p]) -> tensor[1, bool] = gt(xs, insert(scalar_to_tensor(cast(1.000000001, p)), 0i32, shape(xs, 0i32)))\na = f(to_tensor([1.000000001f32]))\nb = f(to_tensor([1.000000001f64]))\nc = f(to_tensor([1.000000002f64]))\n";
     assert_lanes(
         source,
         &[("a", &["false"]), ("b", &["false"]), ("c", &["true"])],
     );
-    let source = "def f[p: Float](witness: p) -> tensor[p] = scalar_to_tensor(cast(16777217.0, p))\na = f(0.0f32)\nb = f(0.0f64)\n";
-    assert_lanes(source, &[("a", &["16777216.0"]), ("b", &["16777217.0"])]);
+    let source = "def f[p: Float](witness: p) -> tensor[p] = scalar_to_tensor(cast(1.000000001, p))\na = f(0.0f32)\nb = f(0.0f64)\n";
+    assert_lanes(source, &[("a", &["1.0"]), ("b", &["1.000000001"])]);
 }
 
 #[test]

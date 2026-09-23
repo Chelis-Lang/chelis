@@ -151,8 +151,12 @@ fn adopted_integer_literals_fit_every_family_member() {
             );
         }
     }
+    // [04-LIT-2]: a float literal adopted by a `Float` binder must also be
+    // finite at every member of the family. 65504 is f16's largest value; 1e10
+    // rounds to infinity there.
+    assert_surf("def f[p: Float](x: p) -> p = cast(65504.0, p)\n", None);
     assert_surf(
         "def f[p: Float](x: p) -> p = cast(10000000000.0, p)\n",
-        None,
+        Some("[04-LIT-2]"),
     );
 }

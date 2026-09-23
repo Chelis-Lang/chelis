@@ -886,15 +886,15 @@ canonical token, so a transcribed reference constant is repaired by
 This allowance does not admit malformed separators, a non-canonical decimal
 body on an integer-bodied literal, a suffix with different type/adoption
 meaning, or a token whose decoded value is non-finite.
-Surf has no infinity or NaN literal.
+Surf has no infinity or NaN literal. A token that decodes to a finite value
+is still not a literal of a dtype at which that value is non-finite
+(`spec/04-type-system.md` [04-LIT-2]): `1e40` at the `f32` default and
+`70000.0f16` are rejected.
 
 **Literal default rule (authoritative):** an unsuffixed integer literal binds
-at type `i32`; an unsuffixed float literal binds at type `f32`. The lexer
-parses unsuffixed literals at i64/f64 precision so that out-of-range literals
-can be diagnosed before defaulting; the desugarer/type-checker then narrows
-the value to `i32` (for integer tokens) or `f32` (for float tokens) before
-Deep is materialized. The narrowing is the **user-facing contract** and is
-non-overridable except by:
+at type `i32`; an unsuffixed float literal binds at type `f32`, each under
+`spec/04-type-system.md` [04-LIT-2]. The default is the **user-facing
+contract** and is non-overridable except by:
 
 1. an explicit literal suffix (P10a)
 2. the contextual tensor-literal inference rule (P10b) when the literal
@@ -950,7 +950,9 @@ program prints the decimal body. §0.1's retraction law does not require
 An integer body binds at the suffix width, so its admissible range is that
 width's, not the body's: a body whose exact value rounds to infinity at the
 declared width is rejected as non-finite, exactly as `1e400` is. `65504f16`
-binds; `65520f16` does not.
+binds; `65520f16` does not. A decimal body is held to the same width
+(`spec/04-type-system.md` [04-LIT-2]): `65504.0f16` binds; `65520.0f16` does
+not.
 
 No radix body carries a float suffix (`spec/04-type-system.md` §5.5). That
 holds for a hexadecimal body even though every float suffix is spelled in hex
@@ -1013,7 +1015,9 @@ positions is exactly:
 3. the body expression of a function with a declared return type that is a
    tensor type, when the body is itself a tensor literal
 4. the first argument of an explicit `cast(literal, p)` expression — the
-   literals bind at `p`
+   literals bind at `p`, which may also be a dtype-family-bounded type binder;
+   the literal then binds at each admissible instantiation
+   (`spec/04-type-system.md` §5.6)
 
 Position 4 applies to a bare scalar numeric literal as well as to a
 tensor-literal body: `cast(1.1, f64)` binds the decimal at

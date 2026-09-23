@@ -477,11 +477,10 @@ scrutinee type at all.
 > primitive, requires `lit` metadata that a `pat-lit` cannot carry and therefore
 > does not arise in pattern position. A literal pattern SHALL NOT be admitted
 > against a non-primitive scrutinee: a tensor, nominal, tuple, record, or
-> function scrutinee admits no literal pattern. A numeric literal pattern whose
-> value lies outside the range of the scrutinee's primitive type SHALL be
-> rejected, under the same range rule §5.3 and §5.6 apply to a literal bound at
-> that type; a float primitive has no such range, because finalization at a
-> float width is total under [04-NUM-1]. Each violation SHALL be a
+> function scrutinee admits no literal pattern. A numeric literal pattern binds
+> at the scrutinee's primitive type under [04-LIT-2] and SHALL be rejected when
+> its value there is out of range or non-finite, as a literal bound at that
+> type in expression position is. Each violation SHALL be a
 > `TypeMismatch` located at the offending pattern, at every checker ingress and
 > before any evaluation or lowering lane runs; an implementation SHALL NOT admit
 > the arm as merely unreachable, drop it, or defer the diagnostic to a lane. A
@@ -491,6 +490,9 @@ scrutinee type at all.
 > unsuffixed integer pattern is admissible against every integer primitive and
 > an unsuffixed float pattern against every float primitive, and §5.3's literal
 > default does not apply in pattern position.
+
+(Matching a float pattern at the scrutinee's width is not yet fully
+implemented: chelis#2438.)
 
 ### 2.5 Opaque Types
 
@@ -1935,12 +1937,9 @@ type. A bare `[1, 2, 3]` in an unannotated position is `tensor[3, i32]`, not
 `tensor[3, f32]`, not `tensor[3, f64]`. Programs that need a wider literal
 type must say so via suffix, declared element type, or `cast`.
 
-The default is the **user-facing contract**. The lexer parses an unsuffixed
-integer or float literal token at i64/f64 precision so that out-of-range
-literals can be diagnosed before defaulting; the desugarer/type-check
-narrows the literal to `i32` (for integer tokens) or `f32` (for float
-tokens) before Deep is materialized. The narrowing is mechanical and
-non-overridable except by the three mechanisms above.
+The default is the **user-facing contract** and is non-overridable except by
+the three mechanisms above. Whichever dtype they select, the literal binds
+there under [04-LIT-2].
 
 > **[04-LIT-1]** A primitive literal's Deep value atom SHALL agree with its
 > declared primitive family: integer atoms denote only integer primitives,
@@ -1953,6 +1952,19 @@ non-overridable except by the three mechanisms above.
 > first. Every producer SHALL emit one of these canonical forms and every
 > consumer SHALL reject an unmarked contradiction or a malformed marker.
 > `spec/03-deep-syntax.md` §6.4 defines the canonical Deep forms.
+
+> **[04-LIT-2]** A numeric literal SHALL bind at its dtype by one
+> finalization of its value there. Its dtype is its suffix (§5.5), the §5.3
+> default, the element type of a §5.6 adopting position, each admissible
+> instantiation of a dtype binder it adopts under §5.6, or, for a literal
+> pattern, the scrutinee's primitive ([04-PAT-1]). An integer dtype admits
+> the value exactly or rejects the literal, and a float dtype rounds it per
+> [04-NUM-2]. A literal whose value at any of its dtypes is out of range or
+> non-finite SHALL be rejected at every ingress before any evaluation or
+> lowering lane runs. Rounding a nonzero value to zero or to a subnormal is
+> ordinary rounding, not a rejection. An explicit `cast` of an already-bound
+> value is an operation under [04-NUM-14], not a literal, and may produce an
+> infinity.
 
 ### 5.4 Precision Compatibility Table
 
@@ -2005,8 +2017,9 @@ is [04-LIT-1]'s suffix-bound cross-family form, an exact Int atom marked
 `literal_source: integer`; it SHALL NOT be finalized through `f64`. Both are
 canonical Surf, and `chelis fmt` preserves the body it was given rather than
 converting between them; Deep-to-Surf output follows
-`spec/03-deep-syntax.md` §6.3.2 instead. An integer body whose exact value
-rounds to infinity at the declared width is not a literal of that type.
+`spec/03-deep-syntax.md` §6.3.2 instead. A body, integer or decimal, whose
+value rounds to infinity at the declared width is not a literal of that type
+([04-LIT-2]).
 Integer-typed suffixes (`i8`, `i16`, `i32`, `i64`) attach to integer literal
 tokens only; `1.0i8` is a parse error.
 
@@ -2056,7 +2069,8 @@ exactly:
 3. the body expression of a function with a declared return type that is a
    tensor type, when the body is a tensor literal
 4. the first argument of a `cast(literal, p)` expression, where `p` is a
-   precision type literal — the literal body adopts `p`
+   precision type literal or a dtype-family-bounded type binder
+   ([04-DTYPE-2]) — the literal body adopts `p`
 
 Position 4 applies to a **bare scalar numeric literal** as well as to a
 tensor-literal body. `cast(1.1, f64)` binds the decimal `1.1`
@@ -2064,8 +2078,14 @@ at `f64` — exactly `0x3ff199999999999a` — it does NOT narrow to the §5.3
 `f32` default and then widen (which would yield the f32-truncation value
 `1.100000023841858`). Likewise `cast(3000000000, i64)` binds the literal
 at `i64`, which is what makes the §5.3 out-of-i32-range escape hatch
-work. The adoption re-binds the literal at `p` and the §5.6 range checks
-apply at `p`: `cast(2147483648, i32)` is still a range error. Adoption
+work. The adoption re-binds the literal at `p`, and [04-LIT-2]'s range and
+finiteness checks apply at `p`: `cast(2147483648, i32)` is still a range
+error, and `cast(70000.0, f16)` is rejected because 70000 rounds to infinity
+at `f16`, whereas `cast(70000.0f32, f16)` casts a finite `f32` value and
+yields infinity under [04-NUM-14]. For a binder `p`, the literal binds at
+each admissible instantiation ([04-INF-6]), so those checks apply at every
+member of `p`'s family: `cast(300, p)` under `p: Int` and
+`cast(70000.0, p)` under `p: Float` are rejected at the declaration. Adoption
 is limited to unsuffixed numeric literals with a numeric `p` of matching
 kind: a suffixed literal binds at its suffix (§5.5; `cast(1.1f32, f64)`
 widens the f32 value), and a float literal under an integer `p` keeps the
