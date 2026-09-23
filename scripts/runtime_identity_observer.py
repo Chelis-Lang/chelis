@@ -384,12 +384,13 @@ def normalized_flags(args, mappings):
 def compiler_inputs(real_rustc, args, roots, manifest_dir, workspace, out):
     """Ask rustc for the actual expanded input closure before record emission."""
     if out and (Path(out, "chelis-runtime-identity-producer.json").exists() or os.environ.get("CHELIS_IDENTITY_ROLE")):
-        generated = Path(out, "chelis_runtime_identity.rs")
-        if not generated.exists():
-            generated.parent.mkdir(parents=True, exist_ok=True)
-            # Input discovery has no native output. The actual compile cannot
-            # start until emit_producer replaces this with a derived record.
-            generated.write_text("", encoding="utf-8")
+        for name in ("chelis_runtime_identity.bin", "chelis_runtime_identity_provenance.bin"):
+            generated = Path(out, name)
+            if not generated.exists():
+                generated.parent.mkdir(parents=True, exist_ok=True)
+                # This dep-info-only probe emits no native output. Production
+                # cannot start until emit_producer writes the derived bytes.
+                generated.write_bytes(b"")
     fd, temporary = tempfile.mkstemp(suffix=".d", dir=state())
     os.close(fd)
     filtered = []
@@ -418,7 +419,7 @@ def compiler_inputs(real_rustc, args, roots, manifest_dir, workspace, out):
         path = Path(os.path.abspath(name))
         if path.resolve() != Path(name).resolve():
             raise ObservationError(f"compiler input traverses a noncanonical directory symlink: {name}")
-        if out and path == Path(out, "chelis_runtime_identity.rs"):
+        if out and path.parent == Path(out) and path.name in {"chelis_runtime_identity.bin", "chelis_runtime_identity_provenance.bin"}:
             continue
         matched = False
         for root in roots:
@@ -704,16 +705,8 @@ def emit_producer(receipt, role, out):
     else:
         raise ObservationError("explicit source-worktree or sealed-distribution provenance is required")
     result = helper("core-derive", {"recipe": recipe, "captured": captured, "kind": role, "provenance": provenance})
-    elf = {"runtime": ".chelis.runtime.id", "cli": ".chelis.runtime.expect.cli", "python": ".chelis.runtime.expect.python"}[role]
-    macho = {"runtime": "__ch_rt_id", "cli": "__ch_rt_cli", "python": "__ch_rt_py"}[role]
-    symbol = "RUNTIME_IDENTITY_RECORD" if role == "runtime" else "EXPECTED_RUNTIME_RECORD"
-    def retained(name, data, elf_section, macho_section, exported):
-        return f'#[used]\n#[unsafe(export_name = "{exported}")]\n#[cfg_attr(target_vendor = "apple", unsafe(link_section = "__DATA,{macho_section}"))]\n#[cfg_attr(not(target_vendor = "apple"), unsafe(link_section = "{elf_section}"))]\npub static {name}: [u8; {len(data)}] = {data!r};\n'
-    text = retained(symbol, result["record"], elf, macho, symbol)
-    provenance_elf = {"runtime": ".chelis.runtime.provenance", "cli": ".chelis.runtime.provenance.cli", "python": ".chelis.runtime.provenance.python"}[role]
-    provenance_macho = {"runtime": "__ch_rt_prov", "cli": "__ch_prv_cli", "python": "__ch_prv_py"}[role]
-    text += retained("RUNTIME_BUILD_PROVENANCE", result["provenance"], provenance_elf, provenance_macho, "CHELIS_BUILD_PROVENANCE_" + role.upper())
-    Path(out, "chelis_runtime_identity.rs").write_text(text, encoding="utf-8")
+    Path(out, "chelis_runtime_identity.bin").write_bytes(bytes(result["record"]))
+    Path(out, "chelis_runtime_identity_provenance.bin").write_bytes(bytes(result["provenance"]))
     receipt["descriptor"] = result["descriptor"]
 
 
@@ -760,16 +753,16 @@ def augment_dep_info(args, receipt):
             for directory, dirs, _ in os.walk(physical):
                 dirs[:] = [name for name in dirs if name not in {".git", "target", ".venv", ".devenv", "node_modules"}]
                 watched.add(str(Path(directory)))
-    generated = str(Path(os.environ["OUT_DIR"]) / "chelis_runtime_identity.rs") if os.environ.get("OUT_DIR") else None
+    generated = {str(Path(os.environ["OUT_DIR"]) / name) for name in ("chelis_runtime_identity.bin", "chelis_runtime_identity_provenance.bin")} if os.environ.get("OUT_DIR") else set()
     def escape(value):
         return value.replace("\\", "\\\\").replace(" ", "\\ ").replace("#", "\\#")
     lines = []
     for line in path.read_text().splitlines():
         if ": " in line and not line.startswith("#"):
             target, dependencies = line.split(": ", 1)
-            inputs = {name for name in shlex.split(dependencies) if name != generated}
+            inputs = set(shlex.split(dependencies)) - generated
             line = target + ": " + " ".join(escape(name) for name in sorted(inputs | watched))
-        elif generated and line == escape(generated) + ":":
+        elif any(line == escape(name) + ":" for name in generated):
             continue
         lines.append(line)
     path.write_text("\n".join(lines) + "\n")

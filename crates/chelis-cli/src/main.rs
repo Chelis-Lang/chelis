@@ -8,7 +8,31 @@ mod style_gate;
 
 #[cfg(not(test))]
 mod runtime_identity {
-    include!(concat!(env!("OUT_DIR"), "/chelis_runtime_identity.rs"));
+    #[used]
+    #[unsafe(export_name = "EXPECTED_RUNTIME_RECORD")]
+    #[cfg_attr(target_vendor = "apple", unsafe(link_section = "__DATA,__ch_rt_cli"))]
+    #[cfg_attr(
+        not(target_vendor = "apple"),
+        unsafe(link_section = ".chelis.runtime.expect.cli")
+    )]
+    static RECORD: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/chelis_runtime_identity.bin"))
+        .len()] = *include_bytes!(concat!(env!("OUT_DIR"), "/chelis_runtime_identity.bin"));
+
+    #[used]
+    #[unsafe(export_name = "CHELIS_BUILD_PROVENANCE_CLI")]
+    #[cfg_attr(target_vendor = "apple", unsafe(link_section = "__DATA,__ch_prv_cli"))]
+    #[cfg_attr(
+        not(target_vendor = "apple"),
+        unsafe(link_section = ".chelis.runtime.provenance.cli")
+    )]
+    static PROVENANCE: [u8; include_bytes!(concat!(
+        env!("OUT_DIR"),
+        "/chelis_runtime_identity_provenance.bin"
+    ))
+    .len()] = *include_bytes!(concat!(
+        env!("OUT_DIR"),
+        "/chelis_runtime_identity_provenance.bin"
+    ));
 }
 
 use chelis_compiler_api::compiler::{BuildTarget, CompilerError};

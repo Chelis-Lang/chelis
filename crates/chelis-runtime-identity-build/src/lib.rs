@@ -11,7 +11,7 @@ impl fmt::Display for BuildError {
 }
 impl Error for BuildError {}
 
-/// Declare a producer; the managed compiler observer supplies its generated Rust.
+/// Declare a producer; the managed compiler observer supplies retained record bytes.
 /// This hook deliberately performs no Cargo invocation and derives no identity.
 pub fn declare_producer(kind: RecordKind) -> Result<(), BuildError> {
     if env::var("CHELIS_IDENTITY_PROTOCOL").as_deref() != Ok("1") {

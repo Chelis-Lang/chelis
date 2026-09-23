@@ -34,7 +34,31 @@ mod ownership_ledger;
 
 #[cfg(not(test))]
 mod runtime_identity {
-    include!(concat!(env!("OUT_DIR"), "/chelis_runtime_identity.rs"));
+    #[used]
+    #[unsafe(export_name = "RUNTIME_IDENTITY_RECORD")]
+    #[cfg_attr(target_vendor = "apple", unsafe(link_section = "__DATA,__ch_rt_id"))]
+    #[cfg_attr(
+        not(target_vendor = "apple"),
+        unsafe(link_section = ".chelis.runtime.id")
+    )]
+    static RECORD: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/chelis_runtime_identity.bin"))
+        .len()] = *include_bytes!(concat!(env!("OUT_DIR"), "/chelis_runtime_identity.bin"));
+
+    #[used]
+    #[unsafe(export_name = "CHELIS_BUILD_PROVENANCE_RUNTIME")]
+    #[cfg_attr(target_vendor = "apple", unsafe(link_section = "__DATA,__ch_rt_prov"))]
+    #[cfg_attr(
+        not(target_vendor = "apple"),
+        unsafe(link_section = ".chelis.runtime.provenance")
+    )]
+    static PROVENANCE: [u8; include_bytes!(concat!(
+        env!("OUT_DIR"),
+        "/chelis_runtime_identity_provenance.bin"
+    ))
+    .len()] = *include_bytes!(concat!(
+        env!("OUT_DIR"),
+        "/chelis_runtime_identity_provenance.bin"
+    ));
 }
 
 #[cfg(test)]
