@@ -14,23 +14,26 @@ pub(crate) fn validate_path(path: &str) -> Result<(), InputError> {
     Ok(())
 }
 
+/// Path components whose contents are never runtime identity inputs.
+pub const UNSELECTED_COMPONENTS: [&str; 11] = [
+    ".git",
+    "target",
+    ".venv",
+    ".devenv",
+    "node_modules",
+    "tests",
+    "test",
+    "benches",
+    "bench",
+    "examples",
+    "example",
+];
+
 fn selected(path: &str) -> bool {
-    if path.split('/').any(|part| {
-        matches!(
-            part,
-            ".git"
-                | "target"
-                | ".venv"
-                | ".devenv"
-                | "node_modules"
-                | "tests"
-                | "test"
-                | "benches"
-                | "bench"
-                | "examples"
-                | "example"
-        )
-    }) {
+    if path
+        .split('/')
+        .any(|part| UNSELECTED_COMPONENTS.contains(&part))
+    {
         return false;
     }
     let name = path.rsplit('/').next().unwrap_or(path);

@@ -22,6 +22,7 @@ EXPECTED_IMPORTS = (
     "./devenv/smoke-tests.nix",
 )
 EXPECTED_COMMANDS = {
+    "cargo": "scripts/runtime_identity_build.py",
     "chelis-gate": "scripts/gate.py",
     "chelis-ci-shell": "scripts/ci_devenv.py",
     "chelis-reap-orphans": "scripts/reap_orphans.py",

@@ -201,7 +201,7 @@ let
         # that never had a workspace checkout or compiler observation state.
         unset CHELIS_IDENTITY_WORKSPACE CHELIS_IDENTITY_STATE
         unset CHELIS_IDENTITY_DEPENDENCIES CHELIS_IDENTITY_DIRECT_DEPENDENCIES
-        unset CHELIS_IDENTITY_BUILD_DEPENDENCIES CHELIS_IDENTITY_BUILD_SCRIPT
+        unset CHELIS_IDENTITY_BUILD_DEPENDENCIES
         export CHELIS_IDENTITY_PYTHON="${pkgs.python311}/bin/python3"
         mkdir installed-consumer
         cd installed-consumer

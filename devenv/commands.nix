@@ -21,7 +21,7 @@ let
   # DEVENV_STATE is read at run time rather than interpolated, so the store
   # script names no worktree and still works when it is reached from outside a
   # Devenv shell, where there is no venv and sys.executable is already correct.
-  runPython = relativePath: fixedArgs: ''
+  runPython = relativePath: ''
     import os
     import sys
 
@@ -32,37 +32,35 @@ let
         activated = os.path.join(state, "venv", "bin", "python")
         if os.access(activated, os.X_OK):
             interpreter = activated
-    os.execv(interpreter, [interpreter, script, *${builtins.toJSON fixedArgs}, *sys.argv[1:]])
+    os.execv(interpreter, [interpreter, script, *sys.argv[1:]])
   '';
 in
 {
   scripts = {
+    # The driver reads the real Cargo from CHELIS_IDENTITY_REAL_CARGO, which
+    # devenv/toolchains.nix exports with the managed provenance.
     "cargo" = {
       description = "Run Cargo with complete runtime identity observation";
       package = config.languages.python.package;
-      exec = runPython "scripts/runtime_identity_build.py" [
-        "--cargo"
-        "${config.languages.rust.toolchainPackage}/bin/cargo"
-        "--"
-      ];
+      exec = runPython "scripts/runtime_identity_build.py";
     };
 
     "chelis-gate" = {
       description = "Run the Chelis repository gate";
       package = config.languages.python.package;
-      exec = runPython "scripts/gate.py" [ ];
+      exec = runPython "scripts/gate.py";
     };
 
     "chelis-ci-shell" = {
       description = "Activate or run commands in the Chelis CI environment";
       package = config.languages.python.package;
-      exec = runPython "scripts/ci_devenv.py" [ ];
+      exec = runPython "scripts/ci_devenv.py";
     };
 
     "chelis-reap-orphans" = {
       description = "List or remove orphaned Chelis build processes";
       package = config.languages.python.package;
-      exec = runPython "scripts/reap_orphans.py" [ ];
+      exec = runPython "scripts/reap_orphans.py";
     };
 
   }
@@ -70,20 +68,20 @@ in
     "chelis-exec-preflight" = {
       description = "Check macOS first-exec health";
       package = config.languages.python.package;
-      exec = runPython "scripts/preflight_exec_probe.py" [ ];
+      exec = runPython "scripts/preflight_exec_probe.py";
     };
   }
   // lib.optionalAttrs pkgs.stdenv.isLinux {
     "chelis-z3-test" = {
       description = "Run tests against a prebuilt Z3 library";
       package = config.languages.python.package;
-      exec = runPython "scripts/z3_test.py" [ ];
+      exec = runPython "scripts/z3_test.py";
     };
 
     "chelis-hip-test" = {
       description = "Run HIP tests with the reconciled local environment";
       package = config.languages.python.package;
-      exec = runPython "scripts/hip_test.py" [ ];
+      exec = runPython "scripts/hip_test.py";
     };
   };
 }

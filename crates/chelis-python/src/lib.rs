@@ -3,7 +3,8 @@ mod dlpack;
 mod native_tensor;
 mod source_json;
 
-#[cfg(not(test))]
+// Rustdoc documents this crate without compiling it, so no observed record exists.
+#[cfg(not(any(test, doc)))]
 mod runtime_identity {
     #[used]
     #[unsafe(export_name = "EXPECTED_RUNTIME_RECORD")]

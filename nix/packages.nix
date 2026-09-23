@@ -80,7 +80,11 @@ let
       additionalCargoNixArgs = [
         "--no-default-features"
         "--features"
-        "chelis-cli/smt,chelis-python/extension-module,chelis-runtime/ownership-ledger"
+        (lib.concatStringsSep "," [
+          "chelis-cli/smt"
+          "chelis-python/extension-module"
+          "chelis-runtime/ownership-ledger"
+        ])
       ];
     }).overrideAttrs
       (_: {

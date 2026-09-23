@@ -598,8 +598,15 @@ class NixSourceContractTests(unittest.TestCase):
             source,
             cargo_nix_exists=(REPO_ROOT / "Cargo.nix").exists(),
         )
-        self.assertIn('workspaceMembers."chelis-cli".build', packages)
-        self.assertIn('workspaceMembers."chelis-runtime".build', packages)
+        # The CLI and Python producers resolve together through the generated
+        # graph, and the runtime package is the one unit both of them consume.
+        self.assertIn("cargoGraph.internal.builtRustCratesWithFeatures", packages)
+        for member in ("chelis-cli", "chelis-python"):
+            self.assertIn(
+                f'producerGraph.crates.${{cargoGraph.workspaceMembers."{member}".packageId}}',
+                packages,
+            )
+        self.assertIn("runtimeDependency compilerCrate", packages)
         self.assertIn('workspaceMembers."chelisup".build', packages)
         self.assertIn('features = [ "smt" ];', packages)
         self.assertNotIn("buildRustPackage", packages)
@@ -661,17 +668,27 @@ class NixSourceContractTests(unittest.TestCase):
 
     def test_workspace_source_overrides_preserve_external_compile_assets(self) -> None:
         packages = (REPO_ROOT / "nix" / "packages.nix").read_text(encoding="utf-8")
-        expected_roots = {
-            "chelis-cli": "chelis-source/crates/chelis-cli",
-            "chelis-compiler-api": "chelis-source/crates/chelis-compiler-api",
-            "chelis-cove": "chelis-source/crates/chelis-cove",
-            "tree-sitter-chelis": "chelis-source/tree-sitter-chelis",
-        }
-        for crate, source_root in expected_roots.items():
-            with self.subTest(crate=crate):
-                self.assertIn(f'"{crate}" = attrs:', packages)
-                self.assertIn(f'sourceRoot = "{source_root}";', packages)
-        self.assertEqual(packages.count("src = crateSource;"), len(expected_roots))
+        source = (REPO_ROOT / "nix" / "source.nix").read_text(encoding="utf-8")
+        manifest = tomllib.loads((REPO_ROOT / "Cargo.toml").read_text(encoding="utf-8"))
+        # Every workspace member builds from the filtered repository source,
+        # rooted at its own directory, so compile assets outside that directory
+        # (sibling crates, grammars, the tree-sitter grammar) remain present.
+        self.assertRegex(
+            packages,
+            r'lib\.mapAttrs \(_: member: _: \{\s*src = source;\s*'
+            r'sourceRoot = "chelis-source/\$\{member\}";',
+        )
+        self.assertIn("manifest.workspace.members", packages)
+        for member in (
+            "crates/chelis-cli",
+            "crates/chelis-compiler-api",
+            "crates/chelis-cove",
+            "tree-sitter-chelis",
+        ):
+            with self.subTest(member=member):
+                self.assertIn(member, manifest["workspace"]["members"])
+        for root in ('"crates"', '"grammars"', '"tree-sitter-chelis"'):
+            self.assertIn(root, source)
 
     def test_repository_lint_has_no_generated_graph_exclusion(self) -> None:
         policy = (REPO_ROOT / "chelis-lint.toml").read_text(encoding="utf-8")

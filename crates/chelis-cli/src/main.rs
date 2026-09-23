@@ -6,7 +6,8 @@ mod eval_timeout;
 mod prove;
 mod style_gate;
 
-#[cfg(not(test))]
+// Rustdoc documents this crate without compiling it, so no observed record exists.
+#[cfg(not(any(test, doc)))]
 mod runtime_identity {
     #[used]
     #[unsafe(export_name = "EXPECTED_RUNTIME_RECORD")]

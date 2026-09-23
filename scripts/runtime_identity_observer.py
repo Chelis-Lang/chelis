@@ -274,7 +274,8 @@ def check_receipt(receipt, captured_by_path=None):
             raise ObservationError(f"changed compiler output: {output['path']}")
     required, captured = capture(refreshed_roots(receipt["roots"]), captured_by_path)
     if required != receipt["required_inputs"] or captured != receipt["captured"]:
-        raise ObservationError(f"stale source/input inventory: {receipt['unit']['package']['name']}; rebuild in a clean managed target")
+        name = receipt["unit"]["package"]["name"]
+        raise ObservationError(f"stale source/input inventory: {name}; Cargo does not track this input, so run `cargo clean -p {name}` and rebuild")
     ambient = receipt.get("ambient_environment", []) if not receipt.get("installed") else []
     if ambient:
         current_environment = invocation_environment()
@@ -333,6 +334,25 @@ def package_facts():
 
 def execution_path(out):
     return state() / "executions" / (key(out) + ".json")
+
+
+def unit_out_dir(crate_name):
+    """Return OUT_DIR only when Cargo supplied it to this unit.
+
+    Cargo sets OUT_DIR when compiling a package that has a build script, never
+    for the build script itself, and never clears one. Any other value is
+    inherited from an enclosing process, such as a test that runs a nested
+    build, and names another unit's outputs and producer declaration.
+    """
+    out = os.environ.get("OUT_DIR")
+    if not out or os.environ.get("CHELIS_IDENTITY_BACKEND") != "cargo":
+        return out
+    if crate_name == "build_script_build":
+        return None
+    import tomllib
+    manifest_dir = Path(os.environ["CARGO_MANIFEST_DIR"]).absolute()
+    package = tomllib.loads((manifest_dir / "Cargo.toml").read_text()).get("package", {})
+    return out if package.get("build", (manifest_dir / "build.rs").exists()) else None
 
 
 def build_execution(program, arguments):
@@ -395,7 +415,6 @@ def build_execution(program, arguments):
     declarations.update({"receipt": str(compiled_path), "stdout": lines, "configuration_environment": [{"name": name, "value": environment.get(name)} for name in ("DEBUG", "OPT_LEVEL", "PROFILE", "TARGET", "HOST")]})
     out = os.environ["OUT_DIR"]
     atomic(execution_path(out), declarations)
-    atomic(state() / "build-execution.json", declarations)
     return 0
 
 
@@ -607,7 +626,7 @@ def collect_unit(
             dependencies.append({"name": name, "observation": str(receipt_for(artifact))})
     build = None
     execution = None
-    out = os.environ.get("OUT_DIR")
+    out = unit_out_dir(one(args, "--crate-name"))
     ambient = []
     if out and kind != "build_script" and manifest["package"].get("build", (manifest_dir / "build.rs").exists()) and execution_path(out).exists():
         execution = load(execution_path(out))
@@ -794,8 +813,18 @@ def emit_producer(receipt, role, out):
     else:
         raise ObservationError("explicit source-worktree or sealed-distribution provenance is required")
     result = helper("core-derive", {"recipe": recipe, "captured": captured, "kind": role, "provenance": provenance})
-    Path(out, "chelis_runtime_identity.bin").write_bytes(bytes(result["record"]))
-    Path(out, "chelis_runtime_identity_provenance.bin").write_bytes(bytes(result["provenance"]))
+    record = Path(out, "chelis_runtime_identity.bin")
+    retained_provenance = Path(out, "chelis_runtime_identity_provenance.bin")
+    record.write_bytes(bytes(result["record"]))
+    retained_provenance.write_bytes(bytes(result["provenance"]))
+    # rustc includes these bytes in the compilation this wrapper precedes, which
+    # Cargo stamped before they were written. Date them to the declaration the
+    # build script wrote before that stamp, or every later build is dirty.
+    declaration = Path(out, "chelis-runtime-identity-producer.json")
+    if declaration.exists():
+        stamp = declaration.stat()
+        for path in (record, retained_provenance):
+            os.utime(path, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
     receipt["descriptor"] = result["descriptor"]
 
 
@@ -833,6 +862,16 @@ def output_paths(real_rustc, args):
     return outputs
 
 
+def build_script_launcher(helper, real):
+    """Return the executable text that replaces an observed build script.
+
+    A managed build observes the script's execution. An unmanaged Cargo that
+    reuses the same target runs the original script unchanged.
+    """
+    helper, real = shlex.quote(str(helper)), shlex.quote(str(real))
+    return ("#!/bin/sh\n"
+            f'if [ "${{CHELIS_IDENTITY_PROTOCOL:-}}" != 1 ]; then exec {real} "$@"; fi\n'
+            f'exec {helper} observe-build-script {real} "$@"\n')
 
 
 def observe_rustc(real_rustc, args):
@@ -871,7 +910,7 @@ def observe_rustc(real_rustc, args):
                 receipt["dependencies"].append({"name": name, "observation": str(receipt_for(artifact))})
             except (OSError, KeyError, IndexError, ObservationError):
                 pass
-    out = os.environ.get("OUT_DIR")
+    out = unit_out_dir(one(args, "--crate-name"))
     if receipt.get("errors"):
         # Observation failure stays attached to the unit, but standard links
         # metadata must still reach unrelated consumer build scripts.
@@ -925,8 +964,7 @@ def observe_rustc(real_rustc, args):
         binary = Path(outputs[0])
         real = Path(str(binary) + ".identity-real")
         os.replace(binary, real)
-        launcher = "#!/bin/sh\nexec " + shlex.quote(os.environ["CHELIS_IDENTITY_HELPER"]) + " observe-build-script " + shlex.quote(str(real)) + ' "$@"\n'
-        binary.write_text(launcher)
+        binary.write_text(build_script_launcher(os.environ["CHELIS_IDENTITY_HELPER"], real))
         binary.chmod(0o755)
         outputs.append(str(real))
     receipt["outputs"] = [{"path": output, "digest": digest(Path(output).read_bytes())} for output in outputs]
@@ -934,8 +972,6 @@ def observe_rustc(real_rustc, args):
     for output in receipt["outputs"]:
         atomic(binding(output["path"]), {"artifact": output["path"], "observation": str(path)})
         atomic(state() / "output-digests" / output["digest"] / (key(path) + ".json"), {"observation": str(path)})
-    if one(args, "--crate-name") == "build_script_build":
-        atomic(state() / "build-script.json", receipt)
     return 0
 
 

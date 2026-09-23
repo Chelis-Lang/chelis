@@ -218,6 +218,37 @@ class ObservationFailureTests(unittest.TestCase):
                 value, event, allow_surface_errors=True
             )
 
+    def test_managed_build_resolves_one_compiler_from_the_workspace(self):
+        workspace = self.root / "workspace"
+        workspace.mkdir()
+        pinned = self.root / "pinned" / "bin" / "rustc"
+        pinned.parent.mkdir(parents=True)
+        pinned.write_text("#!/bin/sh\n")
+        pinned.chmod(0o755)
+        proxies = self.root / "proxies"
+        proxies.mkdir()
+        # Like a rustup proxy, answer from the working directory's toolchain.
+        proxy = proxies / "rustc"
+        proxy.write_text(
+            "#!/bin/sh\n"
+            f'if [ "$(pwd -P)" = "{workspace.resolve()}" ]; then echo "{pinned.parent.parent}"; '
+            f'else echo "{self.root / "registry-default"}"; fi\n'
+        )
+        proxy.chmod(0o755)
+        environment = {"PATH": str(proxies)}
+        self.assertEqual(
+            driver.exact_compiler(environment, workspace, ["build"]), str(pinned)
+        )
+        environment["RUSTC"] = "/configured/rustc"
+        self.assertEqual(
+            driver.exact_compiler(environment, workspace, ["build"]),
+            "/configured/rustc",
+        )
+        del environment["RUSTC"]
+        proxy.write_text(f'#!/bin/sh\necho "{self.root / "missing"}"\n')
+        with self.assertRaisesRegex(observer.ObservationError, "absent from its sysroot"):
+            driver.exact_compiler(environment, workspace, ["build"])
+
     def test_cached_dependency_receipt_needs_no_synthetic_cargo_event(self):
         artifact = self.root / "libdependency.rlib"
         artifact.write_bytes(b"exact cached dependency")
@@ -327,6 +358,76 @@ class ObservationFailureTests(unittest.TestCase):
         destination = self.root / "bin"
         with self.assertRaisesRegex(observer.ObservationError, "cannot target itself"):
             driver.install_cargo_launcher(destination, real_cargo=destination / "cargo", python="/usr/bin/python3")
+
+    def test_cargo_launcher_imports_its_driver_under_safe_path(self):
+        # Native census workers export PYTHONSAFEPATH=1 to their Cargo children.
+        launcher = driver.install_cargo_launcher(self.root / "bin", real_cargo=shutil.which("true"), python=sys.executable)
+        completed = subprocess.run([str(launcher), "--version"], env={"PATH": os.defpath, "PYTHONSAFEPATH": "1"},
+                                   capture_output=True, text=True, check=False)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_driver_passes_cargo_options_through_unchanged(self):
+        record = self.root / "argv"
+        cargo = self.root / "real-cargo"
+        cargo.write_text("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CHELIS_TEST_ARGV\"\n")
+        cargo.chmod(0o755)
+        os.environ.update({"CHELIS_IDENTITY_REAL_CARGO": str(cargo), "CHELIS_TEST_ARGV": str(record)})
+        for arguments, forwarded in (
+            (["--version"], ["--version"]),
+            (["-V"], ["-V"]),
+            (["--help"], ["--help"]),
+            (["--cargo", str(cargo), "--", "--version"], ["--version"]),
+        ):
+            with self.subTest(arguments=arguments):
+                self.assertEqual(driver.main(arguments), 0)
+                self.assertEqual(record.read_text().splitlines(), forwarded)
+
+    def test_observed_build_script_runs_unchanged_without_managed_protocol(self):
+        real = self.root / "build_script_build.identity-real"
+        real.write_text('#!/bin/sh\necho "real $*"\n')
+        helper = self.root / "helper"
+        helper.write_text('#!/bin/sh\necho "observed $*"\n')
+        launcher = self.root / "build_script_build"
+        launcher.write_text(observer.build_script_launcher(helper, real))
+        for path in (real, helper, launcher):
+            path.chmod(0o755)
+        unmanaged = subprocess.run([str(launcher), "argument"], env={"PATH": os.defpath},
+                                   capture_output=True, text=True, check=True)
+        self.assertEqual(unmanaged.stdout, "real argument\n")
+        managed = subprocess.run([str(launcher), "argument"], env={"PATH": os.defpath, "CHELIS_IDENTITY_PROTOCOL": "1"},
+                                 capture_output=True, text=True, check=True)
+        self.assertEqual(managed.stdout, f"observed observe-build-script {real} argument\n")
+
+    def test_inherited_out_dir_is_not_attributed_to_another_unit(self):
+        package = self.root / "package"
+        package.mkdir()
+        (package / "Cargo.toml").write_text('[package]\nname = "subject"\nversion = "0.0.0"\n')
+        out = self.root / "enclosing-test-out"
+        os.environ.update({"CHELIS_IDENTITY_BACKEND": "cargo", "CARGO_MANIFEST_DIR": str(package), "OUT_DIR": str(out)})
+        # Cargo supplies OUT_DIR only to a package with a build script.
+        self.assertIsNone(observer.unit_out_dir("subject"))
+        (package / "build.rs").write_text("fn main() {}\n")
+        self.assertEqual(observer.unit_out_dir("subject"), str(out))
+        # It never supplies a package's OUT_DIR to that package's build script.
+        self.assertIsNone(observer.unit_out_dir("build_script_build"))
+
+    def test_retained_record_is_not_newer_than_its_producer_declaration(self):
+        # Cargo stamps a unit before this wrapper writes the bytes rustc then
+        # includes; a newer included file would make every later build dirty.
+        output = self.root / "out"
+        output.mkdir()
+        declaration = output / "chelis-runtime-identity-producer.json"
+        declaration.write_text("{}")
+        os.utime(declaration, ns=(1_000_000_000, 1_000_000_000))
+        os.environ.update({"CHELIS_IDENTITY_PROVENANCE": "source-worktree", "CHELIS_IDENTITY_WORKSPACE": str(self.root)})
+        derived = {"record": [1, 2], "provenance": [3], "descriptor": {}}
+        with patch.object(observer, "graph_recipe", return_value=({}, [], [])), \
+                patch.object(observer, "helper", return_value=derived):
+            observer.emit_producer({}, "runtime", output)
+        for name, content in (("chelis_runtime_identity.bin", b"\x01\x02"), ("chelis_runtime_identity_provenance.bin", b"\x03")):
+            retained = output / name
+            self.assertEqual(retained.read_bytes(), content)
+            self.assertLessEqual(retained.stat().st_mtime_ns, declaration.stat().st_mtime_ns)
 
     def test_clippy_workspace_compiler_is_observed_only_for_workspace_members(self):
         member = self.root / "member"

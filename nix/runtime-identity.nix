@@ -79,11 +79,6 @@ let
         ${bindings "build-dependencies" attrs.completeBuildDeps}
         export PATH="${rustcWrapper}/bin:$PATH"
       '';
-      postConfigure = (attrs.postConfigure or "") + ''
-        if test -f "$CHELIS_IDENTITY_STATE/build-script.json"; then
-          export CHELIS_IDENTITY_BUILD_SCRIPT="$CHELIS_IDENTITY_STATE/build-script.json"
-        fi
-      '';
       preBuild = (attrs.preBuild or "") + ''
         # buildRustCrate renames rustc's underscore binary name to its declared
         # Cargo target name. Bind that exact move before installation/fixup.

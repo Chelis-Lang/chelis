@@ -7,7 +7,6 @@ not replaced by observer chatter. No unstable unit graph or archive search.
 """
 from __future__ import annotations
 
-import argparse
 import json
 import os
 from pathlib import Path
@@ -16,7 +15,18 @@ import subprocess
 import sys
 import tempfile
 
+if __name__ == "__main__":
+    # PYTHONSAFEPATH excludes script-directory discovery, and Cargo launchers
+    # inherit it from callers such as the capacity census native workers.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 import runtime_identity_observer as observer
+
+# Every built-in command that compiles or documents crates runs build scripts,
+# so producer hooks and observed build-script launchers need the protocol.
+MANAGED_COMMANDS = frozenset({"build", "b", "check", "c", "test", "t", "run", "r", "rustc", "bench", "doc", "d", "rustdoc"})
+# Documentation units run rustdoc, never rustc, and retain no producer record.
+DOCUMENTATION_COMMANDS = frozenset({"doc", "d", "rustdoc"})
 
 
 def install_cargo_launcher(directory, *, real_cargo, python):
@@ -161,12 +171,35 @@ def validate_artifact_event(receipt, event, *, allow_surface_errors=False):
         )
 
 
+def exact_compiler(environment, workspace, arguments):
+    """Return the one rustc every unit of a managed build uses.
+
+    Without an explicit compiler, a rustup proxy selects a toolchain from each
+    rustc invocation's directory. A registry crate that ships its own toolchain
+    file, or a nested Cargo that did not inherit its parent's toolchain
+    override, then compiles with a different rustc than its dependents.
+    Resolve once from the workspace, honoring an explicit `+toolchain`.
+    """
+    configured = environment.get("RUSTC") or environment.get("CARGO_BUILD_RUSTC")
+    if configured:
+        return configured
+    toolchain = arguments[:1] if arguments and arguments[0].startswith("+") else []
+    proc = subprocess.run(["rustc", *toolchain, "--print", "sysroot"], cwd=workspace, env=environment,
+                          text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    if proc.returncode:
+        raise observer.ObservationError("cannot resolve the workspace compiler: " + proc.stderr.strip())
+    compiler = Path(proc.stdout.strip()) / "bin" / "rustc"
+    if not compiler.is_file():
+        raise observer.ObservationError(f"workspace compiler is absent from its sysroot: {compiler}")
+    return str(compiler)
+
+
 def run(cargo, arguments):
     environment = dict(os.environ)
     # Cargo help, metadata, fmt, clean, version and external workspaces retain the
     # original behavior; declaring a managed producer still requires this driver.
     command = cargo_command(arguments)
-    if command not in {"build", "b", "check", "c", "test", "t", "run", "r", "rustc", "bench"}:
+    if command not in MANAGED_COMMANDS:
         external = shutil.which("cargo-" + command) if command else None
         if external:
             # Cargo overwrites CARGO with its own executable when dispatching
@@ -202,7 +235,12 @@ def run(cargo, arguments):
     bootstrap_env.pop("RUSTC_WORKSPACE_WRAPPER", None)
     bootstrap_env["RUSTFLAGS"] = ""
     bootstrap_env["CARGO_ENCODED_RUSTFLAGS"] = ""
-    compiler = bootstrap_env.get("RUSTC") or bootstrap_env.get("CARGO_BUILD_RUSTC") or "rustc"
+    compiler = exact_compiler(environment, workspace, arguments)
+    environment["RUSTC"] = bootstrap_env["RUSTC"] = compiler
+    # Documentation units read the metadata this exact compiler writes.
+    rustdoc = Path(compiler).with_name("rustdoc")
+    if not (environment.get("RUSTDOC") or environment.get("CARGO_BUILD_RUSTDOC")) and rustdoc.is_absolute() and rustdoc.is_file():
+        environment["RUSTDOC"] = str(rustdoc)
     host = next((line.removeprefix("host: ") for line in observer.probe([compiler, "-vV"]).splitlines() if line.startswith("host: ")), None)
     if not host:
         raise observer.ObservationError("helper bootstrap compiler does not report its host")
@@ -293,6 +331,7 @@ def run(cargo, arguments):
                     producer_package = producer_role is not None
                     requires_producer_observation = (
                         producer_package
+                        and command not in DOCUMENTATION_COMMANDS
                         and not event["profile"].get("test")
                         and "custom-build" not in event["target"]["kind"]
                         and any(
@@ -361,23 +400,28 @@ def run(cargo, arguments):
         os.unlink(environment_path)
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--cargo", default=os.environ.get("CHELIS_IDENTITY_REAL_CARGO"))
-    parser.add_argument("arguments", nargs=argparse.REMAINDER)
-    options = parser.parse_args()
-    args = options.arguments
-    if args[:1] == ["--"]:
-        args = args[1:]
-    cargo = options.cargo or shutil.which("cargo")
-    if not cargo:
-        parser.error("a real Cargo executable is required")
-    if Path(cargo).resolve() == Path(__file__).resolve():
-        parser.error("--cargo must not recurse into the identity driver")
+def main(arguments=None):
+    # Only a leading --cargo selection belongs to this driver. Everything else,
+    # including Cargo's own --help and --version, reaches Cargo unchanged.
+    args = list(sys.argv[1:] if arguments is None else arguments)
+    selected = os.environ.get("CHELIS_IDENTITY_REAL_CARGO")
     try:
+        if args[:1] == ["--cargo"]:
+            if len(args) == 1:
+                raise observer.ObservationError("--cargo requires a Cargo executable")
+            selected, args = args[1], args[2:]
+        elif args and args[0].startswith("--cargo="):
+            selected, args = args[0].split("=", 1)[1], args[1:]
+        if args[:1] == ["--"]:
+            args = args[1:]
+        cargo = selected or shutil.which("cargo")
+        if not cargo:
+            raise observer.ObservationError("a real Cargo executable is required")
+        if Path(cargo).resolve() == Path(__file__).resolve():
+            raise observer.ObservationError("--cargo must not recurse into the identity driver")
         with open(cargo, "rb") as stream:
             prefix = stream.read(512)
-        if b"chelis-runtime-identity-cargo-launcher" in prefix or (options.cargo is None and prefix.startswith(b"#!")):
+        if b"chelis-runtime-identity-cargo-launcher" in prefix or (selected is None and prefix.startswith(b"#!")):
             raise observer.ObservationError("PATH cargo is a launcher; --cargo or CHELIS_IDENTITY_REAL_CARGO must name actual Cargo")
         return run(cargo, args)
     except (OSError, KeyError, ValueError, observer.ObservationError) as error:

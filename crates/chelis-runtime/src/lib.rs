@@ -32,7 +32,8 @@ use metadata::{
 };
 mod ownership_ledger;
 
-#[cfg(not(test))]
+// Rustdoc documents this crate without compiling it, so no observed record exists.
+#[cfg(not(any(test, doc)))]
 mod runtime_identity {
     #[used]
     #[unsafe(export_name = "RUNTIME_IDENTITY_RECORD")]
