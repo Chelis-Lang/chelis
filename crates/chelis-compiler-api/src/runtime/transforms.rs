@@ -452,7 +452,7 @@ impl<'a> EvalContext<'a> {
             ));
         }
 
-        let profile = self.execution_profile(&app_expr, &program_defs);
+        let profile = chelis_ir::lower::evaluation_profile(&app_expr, &program_defs);
         // #1821/#1920: inference renames result dimensions (n -> d43),
         // while invocation witnesses retain the authored parameter binders.
         // Give both routes the declared signature alongside checked types,

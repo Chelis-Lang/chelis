@@ -158,13 +158,11 @@ fn issue_1125_eval_raw_expr(expr: &Expr) -> Result<RuntimeValue, String> {
         session: None,
         active_declaration_names: Vec::new(),
         def_kernels: UnordMap::new(),
-        excluded_def_kernels: UnordMap::new(),
         transcript: Vec::new(),
         transcript_capture: None,
         resolving_top_levels: Vec::new(),
         random_seed: None,
         random_counter: 0,
-        execution_exclusion: None,
         cancel: None,
     };
     ctx.eval_expr(expr)
@@ -255,13 +253,11 @@ fn issue_1125_eval_checked_root(
         session: Some(chelis_ir::host::HostLoweringSession::new(checked)),
         active_declaration_names: Vec::new(),
         def_kernels: UnordMap::new(),
-        excluded_def_kernels: UnordMap::new(),
         transcript: Vec::new(),
         transcript_capture: None,
         resolving_top_levels: Vec::new(),
         random_seed: None,
         random_counter: 0,
-        execution_exclusion: None,
         cancel: None,
     };
     ctx.resolve_top_level(root)
@@ -855,6 +851,11 @@ fn issue_1829_interpreter_entry_bounds_kernel_decision_probes() {
 /// the `APPLICATIONS` applications; the per-call clone is what this receipt
 /// pins out. The `snapshots >= 1` guard keeps the receipt from passing while
 /// measuring nothing, mirroring the #1829 tensor row's own guard.
+///
+/// chelis#2405 retired the per-closure admission. The ask that remains per
+/// application is the applied top-level definition's own profile, so each
+/// application now calls `step`, and a second receipt holds that profile to
+/// one derivation however many times `step` is applied.
 #[test]
 fn issue_2059_execution_profile_defs_snapshot_is_program_scoped() {
     const HELPERS: usize = 40;
@@ -866,12 +867,13 @@ fn issue_2059_execution_profile_defs_snapshot_is_program_scoped() {
     for level in 0..HELPERS {
         source.push_str(&format!("def helper{level}(x: i64) -> i64 = add(x, x)\n"));
     }
+    source.push_str("def step(acc: i64, x: i64) -> i64 = add(acc, x)\n");
     // One closure, applied once per list element by `fold`. Each application
-    // routes through `admit_execution_profile`. `result` is a top-level value
-    // binding so the interpreter evaluates it rather than binding the fold's
-    // callable as a thunk.
+    // applies the top-level `step`, which asks for its profile. `result` is a
+    // top-level value binding so the interpreter evaluates it rather than
+    // binding the fold's callable as a thunk.
     source.push_str(&format!(
-        "result = fold(fn (acc: i64, x: i64) -> add(acc, x), \
+        "result = fold(fn (acc: i64, x: i64) -> step(acc, x), \
          cast(0, i64), range(cast(0, i64), cast({APPLICATIONS}, i64)))\n"
     ));
 
@@ -882,10 +884,12 @@ fn issue_2059_execution_profile_defs_snapshot_is_program_scoped() {
         bindings: None,
     };
     super::eval::reset_execution_profile_defs_snapshots();
+    super::program_scope::take_def_profile_derivations();
     let outcome =
         evaluate_host_program_with_library_and_types(&checked, None, None, inputs, None, None)
             .expect("#2059 fixture evaluates");
     let snapshots = super::eval::execution_profile_defs_snapshots();
+    let derivations = super::program_scope::take_def_profile_derivations();
 
     let result = outcome
         .host_bindings
@@ -908,22 +912,27 @@ fn issue_2059_execution_profile_defs_snapshot_is_program_scoped() {
          across all {APPLICATIONS} closure applications; {snapshots} builds means the per-call \
          clone regressed"
     );
+    assert_eq!(
+        derivations, 1,
+        "#2405: `step`'s own profile must be derived once and reused across all \
+         {APPLICATIONS} applications; {derivations} derivations means it is asked per call"
+    );
 }
 
 /// Evaluate `source` and return its `result` binding with the number of
-/// kernel plannings performed under an execution exclusion.
-fn excluded_kernel_plannings(source: &str) -> (String, u64) {
+/// definition kernel plannings performed.
+fn def_kernel_plannings(source: &str) -> (String, u64) {
     let checked = checked_surf(source);
     let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
     let inputs = HostEvaluationInputs {
         roots: &empty_tensors,
         bindings: None,
     };
-    super::eval::take_excluded_def_kernel_plannings();
+    super::eval::take_def_kernel_plannings();
     let outcome =
         evaluate_host_program_with_library_and_types(&checked, None, None, inputs, None, None)
             .expect("#2392 fixture evaluates");
-    let plannings = super::eval::take_excluded_def_kernel_plannings();
+    let plannings = super::eval::take_def_kernel_plannings();
     let result = outcome
         .host_bindings
         .get("result")
@@ -932,18 +941,19 @@ fn excluded_kernel_plannings(source: &str) -> (String, u64) {
     (result, plannings)
 }
 
-/// chelis#2392: a recursive definition is `RecursiveControl`, so its whole
-/// dynamic extent runs under an execution exclusion. `def_kernel` used to
-/// skip its memo there and re-plan every applied helper per application.
-/// A helper that draws no Random is now planned once however many times the
-/// recursion applies it, while a drawing helper, whose kernel depends on the
-/// stream position, is still planned per application.
+/// chelis#2392: a recursive program applies its helpers many times.
+/// `def_kernel` used to skip its memo beneath a recursive caller and re-plan
+/// every applied helper per application. A helper that draws no Random is
+/// planned once however many times the recursion applies it, while a drawing
+/// helper, whose kernel depends on the stream position, is still planned per
+/// application. chelis#2405 retired the inherited execution exclusion this
+/// counted beneath, so the receipt now counts every planning.
 ///
 /// Evidentiary status: REGRESSION TEST for the non-drawing row (it fails on
-/// the base, where the count grows with the depth) and DISPOSITION LOCK for
-/// the drawing row (unchanged behaviour the memo must not break).
+/// the #2392 base, where the count grows with the depth) and DISPOSITION LOCK
+/// for the drawing row (unchanged behaviour the memo must not break).
 #[test]
-fn issue_2392_excluded_kernel_is_planned_once_per_helper() {
+fn issue_2392_kernel_under_recursion_is_planned_once_per_helper() {
     let program = |depth: i64| {
         format!(
             "def double(x: tensor[4, f32]) -> tensor[4, f32] = add(x, x)\n\
@@ -951,17 +961,17 @@ fn issue_2392_excluded_kernel_is_planned_once_per_helper() {
              result = tensor_to_scalar(sum(walk({depth}i64, to_tensor([1.0f32, 0.0f32, 0.0f32, 0.0f32])), 0i32))\n"
         )
     };
-    let (shallow, shallow_plannings) = excluded_kernel_plannings(&program(4));
-    let (deep, deep_plannings) = excluded_kernel_plannings(&program(12));
+    let (shallow, shallow_plannings) = def_kernel_plannings(&program(4));
+    let (deep, deep_plannings) = def_kernel_plannings(&program(12));
     assert_eq!(shallow, "16.0");
     assert_eq!(deep, "4096.0");
     assert!(
         shallow_plannings >= 1,
-        "the fixture must reach the excluded kernel decision"
+        "the fixture must reach the kernel decision"
     );
     assert_eq!(
         shallow_plannings, deep_plannings,
-        "excluded plannings must not grow with the number of applications"
+        "plannings must not grow with the number of applications"
     );
 
     let drawing = |depth: i64| {
@@ -971,8 +981,8 @@ fn issue_2392_excluded_kernel_is_planned_once_per_helper() {
              result = with seed(7i64) {{ tensor_to_scalar(sum(walk({depth}i64, to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32])), 0i32)) }}\n"
         )
     };
-    let (_, shallow_draws) = excluded_kernel_plannings(&drawing(4));
-    let (_, deep_draws) = excluded_kernel_plannings(&drawing(12));
+    let (_, shallow_draws) = def_kernel_plannings(&drawing(4));
+    let (_, deep_draws) = def_kernel_plannings(&drawing(12));
     assert_eq!(
         deep_draws - shallow_draws,
         8,
@@ -1217,13 +1227,11 @@ fn dropout_entered_error_prefix_and_nested_handler_unwind_preserve_parent() {
         session: Some(chelis_ir::host::HostLoweringSession::new(&checked)),
         active_declaration_names: Vec::new(),
         def_kernels: UnordMap::new(),
-        excluded_def_kernels: UnordMap::new(),
         transcript: Vec::new(),
         transcript_capture: None,
         resolving_top_levels: Vec::new(),
         random_seed: Some(42),
         random_counter: 5,
-        execution_exclusion: None,
         cancel: None,
     };
     let argument = RuntimeValue::Tensor(RuntimeTensorValue::new(IrTensorValue::from_storage(
@@ -2111,13 +2119,11 @@ fn eval_deep_with_bindings(
         session: None,
         active_declaration_names: Vec::new(),
         def_kernels: UnordMap::new(),
-        excluded_def_kernels: UnordMap::new(),
         transcript: Vec::new(),
         transcript_capture: None,
         resolving_top_levels: Vec::new(),
         random_seed: None,
         random_counter: 0,
-        execution_exclusion: None,
         cancel: None,
     };
     for (name, value) in args {

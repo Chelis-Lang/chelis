@@ -190,6 +190,125 @@ fn identical_scalar(lhs: &StagedScalar, rhs: &StagedScalar) -> bool {
     }
 }
 
+/// The Random primitives that draw from the handled stream.
+const DRAW_PRIMITIVES: [&str; 2] = ["dropout", "uniform_like"];
+
+/// Visit every variable name the profile walk could read: the `var` nodes of
+/// the decoded tree the walk descends. Stops at the first `Break`.
+fn for_each_var_name<'e>(
+    expr: &'e Expr,
+    visit: &mut impl FnMut(&'e str) -> std::ops::ControlFlow<()>,
+) -> std::ops::ControlFlow<()> {
+    let Some((tag, _, kids)) = stamped_parts(expr) else {
+        return std::ops::ControlFlow::Continue(());
+    };
+    if tag == DeepTag::Var
+        && let Some(name) = kids.first().and_then(symbol_name)
+    {
+        visit(name)?;
+    }
+    for kid in kids {
+        for_each_var_name(kid, visit)?;
+    }
+    std::ops::ControlFlow::Continue(())
+}
+
+/// Which definitions of one program can reach a Random draw by naming it:
+/// a definition reaches one when its body names a draw primitive, or names a
+/// definition that reaches one. Every body the profile walk enters is the
+/// expression itself or a definition named from walked code, so an
+/// expression that reaches no draw this way has no `dropout` for the walk to
+/// find, and no reason the walk could record is about one.
+///
+/// The fact is computed once per definition table (chelis#2405). Asking it
+/// is a scan of the asked expression's own names, never a walk of the call
+/// graph. `uniform_like` counts as a draw, so a program that draws only
+/// through it keeps the walk and the classification it had before.
+#[derive(Debug, Default)]
+pub(crate) struct DrawReach {
+    reaching: UnordSet<String>,
+}
+
+impl DrawReach {
+    pub(crate) fn new(defs: &BTreeMap<String, Expr>) -> Self {
+        let mut callers = UnordMap::<&str, Vec<&str>>::new();
+        let mut pending = Vec::new();
+        for (name, body) in defs {
+            let _ = for_each_var_name(body, &mut |mentioned| {
+                if DRAW_PRIMITIVES.contains(&mentioned) {
+                    pending.push(name.as_str());
+                } else if defs.contains_key(mentioned) {
+                    callers.entry(mentioned).or_default().push(name.as_str());
+                }
+                std::ops::ControlFlow::Continue(())
+            });
+        }
+        let mut reaching = UnordSet::new();
+        while let Some(name) = pending.pop() {
+            if reaching.insert(name.to_owned())
+                && let Some(names) = callers.get(name)
+            {
+                pending.extend(names.iter().copied());
+            }
+        }
+        Self { reaching }
+    }
+
+    /// Whether the named definition reaches a draw.
+    pub(crate) fn reaches(&self, name: &str) -> bool {
+        self.reaching.contains(name)
+    }
+
+    /// Whether `expr` reaches a draw when every name in `excluded` reads as
+    /// absent from `defs`, exactly as the walk reads that table. Removing
+    /// definitions only removes paths, and every definition on a path to a
+    /// draw is itself reaching, so the per-table fact stays exact unless an
+    /// excluded name is a reaching definition. That rare collision follows
+    /// the names from `expr` instead.
+    fn may_draw(
+        &self,
+        expr: &Expr,
+        defs: &BTreeMap<String, Expr>,
+        excluded: &UnordSet<String>,
+    ) -> bool {
+        use std::ops::ControlFlow;
+        if !excluded
+            .to_sorted()
+            .into_iter()
+            .any(|name| self.reaches(name))
+        {
+            return for_each_var_name(expr, &mut |name| {
+                if DRAW_PRIMITIVES.contains(&name) || self.reaches(name) {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            })
+            .is_break();
+        }
+        let mut seen = BTreeSet::new();
+        let mut pending = vec![expr];
+        while let Some(expr) = pending.pop() {
+            let found = for_each_var_name(expr, &mut |name| {
+                if DRAW_PRIMITIVES.contains(&name) {
+                    return ControlFlow::Break(());
+                }
+                if !excluded.contains(name)
+                    && let Some((name, body)) = defs.get_key_value(name)
+                    && seen.insert(name.as_str())
+                {
+                    pending.push(body);
+                }
+                ControlFlow::Continue(())
+            });
+            if found.is_break() {
+                return true;
+            }
+        }
+        false
+    }
+}
+
 struct Profile<'a> {
     defs: &'a BTreeMap<String, Expr>,
     /// Names the caller's bindings shadow. They read as absent from `defs`
@@ -588,13 +707,20 @@ impl<'a> Profile<'a> {
     }
 }
 
+/// Classify `expr` against `defs`, whose draw reachability is `reach`.
+///
+/// Code that reaches no Random draw is `NoDropout` whatever its control
+/// flow: every other reason says why a reachable `dropout` cannot run in a
+/// fixed-control plan, and a runtime `if`, `match` or recursion that reaches
+/// no draw has none to plan (chelis#2405).
 pub(super) fn profile(
     expr: &Expr,
     defs: &BTreeMap<String, Expr>,
+    reach: &DrawReach,
     inputs: &[(String, TensorType)],
     resource_policy: crate::evaluation::ResourcePolicy,
 ) -> crate::evaluation::EvaluationProfile {
-    profile_excluding(expr, defs, &UnordSet::new(), inputs, resource_policy)
+    profile_excluding(expr, defs, reach, &UnordSet::new(), inputs, resource_policy)
 }
 
 /// [`profile`] over `defs` with every name in `excluded` treated as absent
@@ -603,6 +729,7 @@ pub(super) fn profile(
 pub(super) fn profile_excluding(
     expr: &Expr,
     defs: &BTreeMap<String, Expr>,
+    reach: &DrawReach,
     excluded: &UnordSet<String>,
     inputs: &[(String, TensorType)],
     resource_policy: crate::evaluation::ResourcePolicy,
@@ -610,6 +737,9 @@ pub(super) fn profile_excluding(
     use crate::evaluation::{EvaluationProfile, LegacyEvaluationReason};
     #[cfg(test)]
     PROFILE_CALLS.with(|calls| calls.set(calls.get() + 1));
+    if !reach.may_draw(expr, defs, excluded) {
+        return EvaluationProfile::Legacy(LegacyEvaluationReason::NoDropout);
+    }
     let mut profile = Profile {
         defs,
         excluded,
@@ -658,10 +788,12 @@ mod tests {
             .unwrap()
             .pop()
             .unwrap();
+            let defs = BTreeMap::from([("draw".into(), body)]);
             assert_eq!(
                 profile(
                     &reference,
-                    &BTreeMap::from([("draw".into(), body)]),
+                    &defs,
+                    &DrawReach::new(&defs),
                     &[],
                     crate::evaluation::ResourcePolicy::Legacy,
                 ),
@@ -743,7 +875,13 @@ mod tests {
         expr: &Expr,
         defs: &BTreeMap<String, Expr>,
     ) -> crate::evaluation::EvaluationProfile {
-        profile(expr, defs, &[], crate::evaluation::ResourcePolicy::Legacy)
+        profile(
+            expr,
+            defs,
+            &DrawReach::new(defs),
+            &[],
+            crate::evaluation::ResourcePolicy::Legacy,
+        )
     }
 
     fn collect_apps<'e>(expr: &'e Expr, out: &mut Vec<&'e Expr>) {
@@ -762,13 +900,17 @@ mod tests {
     /// parameter list, so the walk leaves it in the active set; `n` is then
     /// recorded before the second call to `n` re-reaches `m`, which the
     /// original walk reports as recursion. Replay must not skip that second
-    /// walk (the round-1 red team's reproduction for `poison_replay`).
+    /// walk (the round-1 red team's reproduction for `poison_replay`). The
+    /// second call's argument draws, so the root reaches a draw and is
+    /// walked at all (chelis#2405).
     const DEEP_EXACTNESS_FIXTURES: &[&str] = &["(def {} m (fn {} (lit {} 1) (lit {} 2)))\n\
          (def {} n (fn {} (params {} (x {})) (app {} (var {} m) (var {} x))))\n\
-         (def {} root (fn {} (params {} (x {})) (app {} (var {} add) (app {} (var {} n) (var {} x)) (app {} (var {} n) (var {} x)))))\n"];
+         (def {} root (fn {} (params {} (x {})) (app {} (var {} add) (app {} (var {} n) (var {} x)) (app {} (var {} n) (app {} (var {} dropout) (var {} x) (lit {} 0.5))))))\n"];
 
     /// Handcrafted programs aimed at each way a replayed walk could differ
-    /// from a fresh one. Each one also runs through the corpus differential.
+    /// from a fresh one. Each one also runs through the corpus differential,
+    /// and each reaches a draw, since code that reaches none is never walked
+    /// (chelis#2405).
     const EXACTNESS_FIXTURES: &[&str] = &[
         // The same helper with a static and then a runtime rate: the key
         // must tell the two actuals apart, in either order.
@@ -782,14 +924,14 @@ mod tests {
          def keep_generic[p: Float](x: tensor[4, p]) -> tensor[4, p] ! { Random } = dropout(x, cast(0.5, p))\n\
          def typed_then_untyped(x: tensor[4, f32]) -> tensor[4, f32] ! { Random } = add(keep_generic(add(x, x)), keep_generic(x))\n",
         // Recursion reached after a sibling helper was walked and recorded.
-        "def leaf(x: tensor[f32]) -> tensor[f32] = add(x, x)\n\
-         def ping(x: tensor[f32]) -> tensor[f32] = add(leaf(x), pong(x))\n\
-         def pong(x: tensor[f32]) -> tensor[f32] = ping(leaf(x))\n",
+        "def leaf(x: tensor[4, f32]) -> tensor[4, f32] ! { Random } = dropout(x, 0.5f32)\n\
+         def ping(x: tensor[4, f32]) -> tensor[4, f32] ! { Random } = add(leaf(x), pong(x))\n\
+         def pong(x: tensor[4, f32]) -> tensor[4, f32] ! { Random } = ping(leaf(x))\n",
         // A helper holding a `grad`, reached first at depth zero and then
         // under an outer `grad`, where the same body is higher-order AD.
         "def inner(x: tensor[f32]) -> tensor[f32] = mul(x, x)\n\
          def uses_grad(x: tensor[f32]) -> tensor[f32] = grad(inner)(x)\n\
-         def outer(x: tensor[f32]) -> tensor[f32] = add(uses_grad(x), grad(uses_grad)(x))\n",
+         def outer(x: tensor[f32]) -> tensor[f32] ! { Random } = add(add(uses_grad(x), grad(uses_grad)(x)), dropout(x, 0.5f32))\n",
         // Shadowing: a definition named like a caller binding, and `neg`.
         "def neg(x: f32) -> f32 = x\n\
          def rate() -> f32 = 0.5f32\n\
@@ -858,17 +1000,20 @@ mod tests {
                 .filter(|(name, _)| !shadowed.contains(*name))
                 .map(|(name, body)| (name.clone(), body.clone()))
                 .collect::<BTreeMap<_, _>>();
+            let reach = DrawReach::new(&defs);
+            let filtered_reach = DrawReach::new(&filtered);
             let mut asks = defs.values().collect::<Vec<_>>();
             for body in defs.values() {
                 collect_apps(body, &mut asks);
             }
             for expr in asks {
                 for policy in [ResourcePolicy::Legacy, ResourcePolicy::RecordRequirements] {
-                    let memoised = profile(expr, &defs, &[], policy);
-                    let reference = as_reference(|| profile(expr, &defs, &[], policy));
+                    let memoised = profile(expr, &defs, &reach, &[], policy);
+                    let reference = as_reference(|| profile(expr, &defs, &reach, &[], policy));
                     assert_eq!(memoised, reference, "{origin}: {:?}", expr.span());
-                    let excluded = profile_excluding(expr, &defs, &shadowed, &[], policy);
-                    let copied = as_reference(|| profile(expr, &filtered, &[], policy));
+                    let excluded = profile_excluding(expr, &defs, &reach, &shadowed, &[], policy);
+                    let copied =
+                        as_reference(|| profile(expr, &filtered, &filtered_reach, &[], policy));
                     assert_eq!(excluded, copied, "{origin} (shadowed): {:?}", expr.span());
                     compared += 1;
                     let label = match memoised {
@@ -927,26 +1072,31 @@ mod tests {
         }
     }
 
+    /// A chain of `h{level}` helpers over `h0`, which draws, so the chain is
+    /// walked at all (chelis#2405).
+    fn drawing_chain() -> String {
+        let mut source = String::from(
+            "def h0(x: tensor[4, f32]) -> tensor[4, f32] ! { Random } = dropout(x, 0.5f32)\n",
+        );
+        for level in 1..=10 {
+            let below = level - 1;
+            source.push_str(&format!(
+                "def h{level}(x: tensor[4, f32]) -> tensor[4, f32] ! {{ Random }} = add(h{below}(x), h{below}(x))\n"
+            ));
+        }
+        source
+    }
+
     /// chelis#2391: a helper shared along a call chain is walked once per
     /// distinct key, not once per path. `h10` reaches `h0` along 2^10 paths.
     #[test]
     fn shared_callee_is_walked_once_per_key() {
-        use crate::evaluation::{EvaluationProfile, LegacyEvaluationReason};
-        let mut source = String::from("def h0(x: tensor[f32]) -> tensor[f32] = add(x, x)\n");
-        for level in 1..=10 {
-            let below = level - 1;
-            source.push_str(&format!(
-                "def h{level}(x: tensor[f32]) -> tensor[f32] = add(h{below}(x), h{below}(x))\n"
-            ));
-        }
-        let defs = surf_defs(&source);
+        use crate::evaluation::EvaluationProfile;
+        let defs = surf_defs(&drawing_chain());
         let (memoised, walks) = body_walks(|| legacy_profile(&defs["h10"], &defs));
         let (reference, reference_walks) =
             body_walks(|| as_reference(|| legacy_profile(&defs["h10"], &defs)));
-        assert_eq!(
-            memoised,
-            EvaluationProfile::Legacy(LegacyEvaluationReason::NoDropout)
-        );
+        assert_eq!(memoised, EvaluationProfile::FixedControl);
         assert_eq!(memoised, reference);
         assert_eq!(
             reference_walks,
@@ -961,17 +1111,11 @@ mod tests {
     #[test]
     fn walk_stops_at_the_first_reason() {
         use crate::evaluation::{EvaluationProfile, LegacyEvaluationReason};
-        let mut source = String::from(
-            "def spin(x: tensor[f32]) -> tensor[f32] = spin(x)\n\
-             def h0(x: tensor[f32]) -> tensor[f32] = add(x, x)\n",
+        let mut source = String::from("def spin(x: tensor[4, f32]) -> tensor[4, f32] = spin(x)\n");
+        source.push_str(&drawing_chain());
+        source.push_str(
+            "def root(x: tensor[4, f32]) -> tensor[4, f32] ! { Random } = add(spin(x), h10(x))\n",
         );
-        for level in 1..=10 {
-            let below = level - 1;
-            source.push_str(&format!(
-                "def h{level}(x: tensor[f32]) -> tensor[f32] = add(h{below}(x), h{below}(x))\n"
-            ));
-        }
-        source.push_str("def root(x: tensor[f32]) -> tensor[f32] = add(spin(x), h10(x))\n");
         let defs = surf_defs(&source);
         let (memoised, walks) = body_walks(|| legacy_profile(&defs["root"], &defs));
         assert_eq!(
@@ -1010,6 +1154,91 @@ mod tests {
             callers + 1
         );
         assert!(asked > 0, "the lowering map no longer asks the classifier");
+    }
+
+    /// chelis#2405: a runtime `if`, `match` or recursion that reaches no
+    /// Random draw is `NoDropout`, and is not walked. Control that reaches a
+    /// `dropout`, or only a `uniform_like`, keeps the reason it had.
+    ///
+    /// Evidentiary status: REGRESSION TEST for the draw-free rows (the base
+    /// reports `DynamicControl` for each) and DISPOSITION LOCK for the
+    /// drawing rows.
+    #[test]
+    fn control_that_reaches_no_draw_is_no_dropout() {
+        use crate::evaluation::{EvaluationProfile, LegacyEvaluationReason as Reason};
+        let defs = surf_defs(
+            "type Mode = | Train | Infer\n\
+             def scale(m: Mode) -> f32 =\n  match m with {\n    | Train => 2.0f32\n    | Infer => 1.0f32\n  }\n\
+             def countdown(n: i64) -> i64 = if eq(n, 0i64) then 0i64 else countdown(sub(n, 1i64))\n\
+             def keep(x: tensor[4, f32]) -> tensor[4, f32] ! { Random } = dropout(x, 0.5f32)\n\
+             def rep(x: tensor[4, f32], n: i64) -> tensor[4, f32] ! { Random } = if eq(n, 0i64) then x else rep(keep(x), sub(n, 1i64))\n\
+             def spread(x: tensor[4, f32], n: i64) -> tensor[4, f32] ! { Random } = if eq(n, 0i64) then x else spread(uniform_like(x, 0.0f32, 1.0f32), sub(n, 1i64))\n\
+             def beside(x: tensor[4, f32], m: Mode) -> tensor[4, f32] ! { Random } = { s = scale(m)\n keep(x) }\n",
+        );
+        let no_dropout = EvaluationProfile::Legacy(Reason::NoDropout);
+        let dynamic = EvaluationProfile::Legacy(Reason::DynamicControl);
+        for (name, expected) in [
+            ("scale", no_dropout),
+            ("countdown", no_dropout),
+            ("keep", EvaluationProfile::FixedControl),
+            ("rep", dynamic),
+            ("spread", dynamic),
+            ("beside", dynamic),
+        ] {
+            let (profile, walks) = body_walks(|| legacy_profile(&defs[name], &defs));
+            assert_eq!(profile, expected, "{name}");
+            if profile == no_dropout {
+                assert_eq!(walks, 0, "{name} reaches no draw and is not walked");
+            }
+        }
+        let reach = DrawReach::new(&defs);
+        for (name, reaches) in [
+            ("scale", false),
+            ("countdown", false),
+            ("keep", true),
+            ("rep", true),
+            ("spread", true),
+            ("beside", true),
+        ] {
+            assert_eq!(reach.reaches(name), reaches, "{name}");
+        }
+    }
+
+    /// A parameter that shadows a reaching definition hides that path, as a
+    /// copy of the table without the definition would (chelis#2405).
+    #[test]
+    fn shadowed_reaching_definition_is_not_a_path_to_a_draw() {
+        use crate::evaluation::{EvaluationProfile, LegacyEvaluationReason as Reason};
+        let defs = surf_defs(
+            "def keep(x: tensor[4, f32]) -> tensor[4, f32] ! { Random } = dropout(x, 0.5f32)\n\
+             def pass(x: tensor[4, f32]) -> tensor[4, f32] ! { Random } = keep(x)\n\
+             def pick(x: tensor[4, f32], c: bool) -> tensor[4, f32] ! { Random } = if c then pass(x) else x\n",
+        );
+        let reach = DrawReach::new(&defs);
+        let body = &defs["pick"];
+        let policy = crate::evaluation::ResourcePolicy::Legacy;
+        assert_eq!(
+            profile_excluding(body, &defs, &reach, &UnordSet::new(), &[], policy),
+            EvaluationProfile::Legacy(Reason::DynamicControl)
+        );
+        for shadowed in ["keep", "pass"] {
+            let excluded = UnordSet::from_iter([shadowed.to_owned()]);
+            let filtered = defs
+                .iter()
+                .filter(|(name, _)| name.as_str() != shadowed)
+                .map(|(name, body)| (name.clone(), body.clone()))
+                .collect::<BTreeMap<_, _>>();
+            assert_eq!(
+                profile_excluding(body, &defs, &reach, &excluded, &[], policy),
+                EvaluationProfile::Legacy(Reason::NoDropout),
+                "{shadowed}"
+            );
+            assert_eq!(
+                profile(body, &filtered, &DrawReach::new(&filtered), &[], policy),
+                EvaluationProfile::Legacy(Reason::NoDropout),
+                "{shadowed}"
+            );
+        }
     }
 
     /// A malformed named function stays in the active set for the rest of

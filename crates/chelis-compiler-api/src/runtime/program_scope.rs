@@ -27,12 +27,13 @@
 //! back into `runtime/mod.rs`, or that adds a `&mut` accessor here, silently
 //! restores the defect and that build stops failing.
 
-use std::cell::OnceCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use chelis_deep::ast::Expr;
-use chelis_ir::lower::SubexprLoweringContext;
+use chelis_ir::evaluation::EvaluationProfile;
+use chelis_ir::lower::{EvaluationDefinitions, SubexprLoweringContext};
 use chelis_unord::UnordMap;
 
 thread_local! {
@@ -43,6 +44,18 @@ thread_local! {
 
 fn record_terminal_index_build() {
     TERMINAL_INDEX_BUILDS.with(|builds| builds.set(builds.get() + 1));
+}
+
+thread_local! {
+    /// Definition-body profiles derived on this thread (chelis#2405): one
+    /// per definition key per scope, never one per application.
+    static DEF_PROFILE_DERIVATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Definition-body profiles derived on this thread since the last call.
+#[cfg(test)]
+pub(super) fn take_def_profile_derivations() -> u64 {
+    DEF_PROFILE_DERIVATIONS.with(|derivations| derivations.replace(0))
 }
 
 /// Terminal-name index builds on this thread since the last call.
@@ -61,10 +74,15 @@ pub(super) struct ProgramScope {
     /// the same way the C backend does. Empty when no library context is
     /// present (e.g. unit tests that don't need transform support).
     type_env: UnordMap<String, Expr>,
-    /// The sorted definition table the execution-profile classifier reads
-    /// (chelis#2059). Admission runs on every closure application and would
-    /// otherwise re-sort and deep-clone every definition per call.
-    sorted_defs: OnceCell<Rc<BTreeMap<String, Expr>>>,
+    /// The sorted definition table the execution-profile classifier reads,
+    /// with its draw reachability (chelis#2059, chelis#2405). Classification
+    /// is asked per application and would otherwise re-sort and deep-clone
+    /// every definition per call.
+    sorted_defs: OnceCell<Rc<EvaluationDefinitions>>,
+    /// Each definition body's own profile, by definition key. The ask at
+    /// every application of a top-level definition reads this instead of
+    /// scanning, or walking, the body again (chelis#2405).
+    def_profiles: RefCell<UnordMap<String, EvaluationProfile>>,
     /// The subexpression lowering context named-axis routing lowers through
     /// (chelis#2207). Preparing one folds the pipes in every definition, so
     /// before this a routed reduction re-folded the whole program, all of
@@ -84,6 +102,7 @@ impl ProgramScope {
             defs,
             type_env,
             sorted_defs: OnceCell::new(),
+            def_profiles: RefCell::default(),
             routing_lowering_context: OnceCell::new(),
             terminal_index: OnceCell::new(),
         }
@@ -99,19 +118,36 @@ impl ProgramScope {
 
     /// The sorted definition snapshot, built on first use and reused for the
     /// scope's lifetime (chelis#2059).
-    pub(super) fn sorted_defs(&self) -> Rc<BTreeMap<String, Expr>> {
+    pub(super) fn sorted_defs(&self) -> Rc<EvaluationDefinitions> {
         self.sorted_defs
             .get_or_init(|| {
                 super::eval::record_defs_snapshot_build();
-                Rc::new(
+                Rc::new(EvaluationDefinitions::new(
                     self.defs
                         .to_sorted()
                         .into_iter()
                         .map(|(name, expr)| (name.clone(), expr.clone()))
                         .collect::<BTreeMap<String, Expr>>(),
-                )
+                ))
             })
             .clone()
+    }
+
+    /// The profile of definition `key`'s own body against this scope's
+    /// definitions, derived once per key. `None` when `key` names no
+    /// definition.
+    pub(super) fn def_evaluation_profile(&self, key: &str) -> Option<EvaluationProfile> {
+        if let Some(profile) = self.def_profiles.borrow().get(key) {
+            return Some(*profile);
+        }
+        let definitions = self.sorted_defs();
+        let profile =
+            chelis_ir::lower::evaluation_profile_sorted(definitions.get(key)?, &definitions);
+        DEF_PROFILE_DERIVATIONS.with(|derivations| derivations.set(derivations.get() + 1));
+        self.def_profiles
+            .borrow_mut()
+            .insert(key.to_owned(), profile);
+        Some(profile)
     }
 
     /// The definition key a reference spelled `name` resolves to: the exact

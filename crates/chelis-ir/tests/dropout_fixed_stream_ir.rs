@@ -413,12 +413,6 @@ fn source_profile_names_exclusions_before_plan_construction() {
             "(app {} (var {} dropout) (var {} x) (var {} rate))".into(),
             Reason::RuntimeRate,
         ),
-        // An excluded pure declaration must not become NoDropout and then
-        // silently join a selected fixed-control declaration's plan.
-        (
-            "(if {} (var {} condition) (var {} x) (var {} y))".into(),
-            Reason::DynamicControl,
-        ),
     ] {
         let expression = chelis_deep::parser::parse_str(&source)
             .unwrap()
@@ -443,6 +437,27 @@ fn source_profile_names_exclusions_before_plan_construction() {
         .unwrap_err();
         assert!(error.message.contains(&format!("{reason:?}")), "{error:?}");
         assert_eq!(context.state().counter, 9);
+    }
+}
+
+/// chelis#2405: every exclusion reason says why a reachable draw cannot be
+/// planned, so runtime control that reaches no draw is `NoDropout`.
+#[test]
+fn source_profile_of_draw_free_control_is_no_dropout() {
+    use chelis_ir::evaluation::{EvaluationProfile, LegacyEvaluationReason as Reason};
+    for source in [
+        "(if {} (var {} condition) (var {} x) (var {} y))",
+        "(match {} (var {} mode) (arm {} (pat-wild {}) () (var {} x)))",
+    ] {
+        let expression = chelis_deep::parser::parse_str(source)
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(
+            chelis_ir::lower::evaluation_profile(&expression, &UnordMap::new()),
+            EvaluationProfile::Legacy(Reason::NoDropout),
+            "{source}"
+        );
     }
 }
 

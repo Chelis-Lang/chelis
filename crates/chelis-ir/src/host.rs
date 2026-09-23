@@ -21704,6 +21704,18 @@ def main(x: tensor[4, f32]) -> tensor[4, f32] = with seed(0i64) {
                 .is_none(),
             "a no-Dropout entry stays on the legacy DAG path"
         );
+
+        // chelis#2405: runtime control that reaches no draw has no Dropout
+        // execution to reject.
+        let control = surf_check(
+            "def main(x: tensor[4, f32], c: bool) -> tensor[4, f32] = if c then x else neg(x)",
+        );
+        assert!(
+            lower_named_tensor_entry_execution_plan(&control, "main")
+                .expect("draw-free control is not a Dropout rejection")
+                .is_none(),
+            "a draw-free entry with runtime control stays on the legacy DAG path"
+        );
     }
 
     #[test]

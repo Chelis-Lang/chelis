@@ -348,7 +348,7 @@ impl<'a> EvalContext<'a> {
                  (spec/05-risc-primitives.md SS3.6)"
             )));
         }
-        let profile = self.execution_profile_over_program(routed_expr);
+        let profile = self.program_evaluation_profile(routed_expr);
         // The lowering universe of a routed reduction is the program's own
         // type environment and definition table, both fixed for this
         // evaluation context. Both branches below used to hand those two

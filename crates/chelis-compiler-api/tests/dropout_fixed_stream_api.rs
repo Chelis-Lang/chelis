@@ -1248,33 +1248,29 @@ fn dropout_failure_preserves_only_the_executed_output_prefix() {
 }
 
 #[test]
-fn runtime_rate_and_dynamic_control_keep_explicit_legacy_dispatch() {
+fn runtime_rate_keeps_explicit_legacy_dispatch_and_dynamic_control_does_not() {
     let ones = std::iter::repeat_n("1.0f32", 32)
         .collect::<Vec<_>>()
         .join(", ");
-    for (helper, stage, diagnostic) in [
-        (
-            "def excluded(x: tensor[32, f32], rate: f32) = (dropout(x, rate), 7i64)\ndef main() = with seed(42i64) { excluded(to_tensor(ONES), 0.5f32) }\n",
-            "lower",
-            "requires a statically-resolvable rate",
-        ),
-        (
-            "def draw(x: tensor[32, f32]) -> tensor[32, f32] = dropout(x, 0.5f32)\ndef excluded(x: tensor[32, f32], condition: bool) = if condition then (draw(x), 7i64) else (x, 7i64)\ndef main() = with seed(42i64) { excluded(to_tensor(ONES), true) }\n",
-            "eval",
-            "unknown runtime name `dropout`",
-        ),
-    ] {
-        let source = helper.replace("ONES", &format!("[{ones}]"));
-        let error = eval_selected(request(&source), &["main".into()]).unwrap_err();
-        assert_eq!(error.stage, stage, "{error:?}");
-        assert!(
-            error
-                .errors
-                .iter()
-                .any(|error| error.message.contains(diagnostic)),
-            "{error:?}"
-        );
-    }
+    let source = format!(
+        "def excluded(x: tensor[32, f32], rate: f32) = (dropout(x, rate), 7i64)\ndef main() = with seed(42i64) {{ excluded(to_tensor([{ones}]), 0.5f32) }}\n"
+    );
+    let error = eval_selected(request(&source), &["main".into()]).unwrap_err();
+    assert_eq!(error.stage, "lower", "{error:?}");
+    assert!(
+        error.errors.iter().any(|error| error
+            .message
+            .contains("requires a statically-resolvable rate")),
+        "{error:?}"
+    );
+    // chelis#2405: a dynamic caller no longer excludes its fixed-rate helper,
+    // which runs its own plan on the handled stream.
+    let source = format!(
+        "def draw(x: tensor[32, f32]) -> tensor[32, f32] = dropout(x, 0.5f32)\ndef dynamic(x: tensor[32, f32], condition: bool) = if condition then (draw(x), 7i64) else (x, 7i64)\ndef main() = with seed(42i64) {{ dynamic(to_tensor([{ones}]), true) }}\n"
+    );
+    let result = eval_selected(request(&source), &["main".into()])
+        .unwrap_or_else(|error| panic!("{error:?}"));
+    assert_eq!(tensor(&result, "main.0"), mask(0));
 }
 
 #[test]
@@ -1433,4 +1429,149 @@ fn constant_loss_preserves_dead_forward_draw_and_every_zero_gradient_coordinate(
     assert_eq!(gradient, vec![0.0; 32]);
     assert!(gradient.iter().all(|value| value.to_bits() == 0));
     assert_eq!(tensor(&result, "main.1"), mask(1));
+}
+
+fn ones32() -> String {
+    std::iter::repeat_n("1.0f32", 32)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn scalar_root(result: &EvalResult, name: &str) -> f64 {
+    let root = result
+        .roots
+        .iter()
+        .find(|root| root.name.as_deref() == Some(name))
+        .unwrap();
+    let ExecutionValue::Scalar { value } = &root.value else {
+        panic!("{root:?}")
+    };
+    value.get().as_f64_lossy()
+}
+
+/// chelis#2405: a fixed-rate draw beneath a recursive or dynamic caller runs
+/// on the handled stream. The caller's control flow used to become an
+/// execution exclusion inherited by every nested dispatch, which sent the
+/// draw to the host interpreter's builtin table, where `dropout` does not
+/// exist, and eval failed with "unknown runtime name `dropout`" on programs
+/// the C lane runs.
+///
+/// Evidentiary status: REGRESSION TEST (each row fails on the base with that
+/// error).
+#[test]
+fn issue_2405_dropout_beneath_recursion_and_runtime_if_runs_on_the_handled_stream() {
+    let ones = ones32();
+    let recursion = format!(
+        "def rep(x: tensor[32, f32], n: i64) -> tensor[32, f32] ! {{ Random }} = if eq(n, 0i64) then x else rep(dropout(x, 0.5f32), sub(n, 1i64))\ndef main() = with seed(42i64) {{\n x = to_tensor([{ones}])\n r = rep(copy(x), 3i64)\n after = dropout(x, 0.5f32)\n (r, after)\n}}\n"
+    );
+    let result = eval_selected(request(&recursion), &["main".into()])
+        .unwrap_or_else(|error| panic!("{recursion}\n{error:?}"));
+    let kept = (0..32)
+        .map(|index| mask(0)[index] * mask(1)[index] * mask(2)[index])
+        .collect::<Vec<_>>();
+    assert!(kept.contains(&8.0) && kept.contains(&0.0));
+    assert_eq!(tensor(&result, "main.0"), kept);
+    assert_eq!(tensor(&result, "main.1"), mask(3));
+
+    // An untaken branch holding the draw consumes no ordinal; a taken one
+    // consumes one.
+    for (flag, first, next) in [("false", vec![1.0; 32], 0), ("true", mask(0), 1)] {
+        let branch = format!(
+            "def pick(x: tensor[32, f32], flag: bool) -> tensor[32, f32] ! {{ Random }} = if flag then dropout(x, 0.5f32) else x\ndef main() = with seed(42i64) {{\n x = to_tensor([{ones}])\n a = pick(copy(x), {flag})\n b = dropout(x, 0.5f32)\n (a, b)\n}}\n"
+        );
+        let result = eval_selected(request(&branch), &["main".into()])
+            .unwrap_or_else(|error| panic!("{branch}\n{error:?}"));
+        assert_eq!(tensor(&result, "main.0"), first, "{flag}");
+        assert_eq!(tensor(&result, "main.1"), mask(next), "{flag}");
+    }
+}
+
+/// chelis#2405: a `match` in a definition that draws nothing no longer
+/// removes `dropout` from the rest of the program, whether the draw sits
+/// beside the call inside the handler or in a separate handler.
+///
+/// Evidentiary status: REGRESSION TEST (both rows fail on the base with
+/// "unknown runtime name `dropout`").
+#[test]
+fn issue_2405_unrelated_match_leaves_dropout_on_the_handled_stream() {
+    let ones = ones32();
+    let scale = "type Mode = | Train | Infer\ndef scale(m: Mode) -> f32 =\n  match m with {\n    | Train => 2.0f32\n    | Infer => 1.0f32\n  }\n";
+    for main in [
+        format!(
+            "def main() = with seed(42i64) {{\n x = to_tensor([{ones}])\n s = scale(Train)\n d = dropout(x, 0.5f32)\n (d, s)\n}}\n"
+        ),
+        format!(
+            "def main() = {{\n s = scale(Train)\n d = with seed(42i64) {{ dropout(to_tensor([{ones}]), 0.5f32) }}\n (d, s)\n}}\n"
+        ),
+    ] {
+        let source = format!("{scale}{main}");
+        let result = eval_selected(request(&source), &["main".into()])
+            .unwrap_or_else(|error| panic!("{source}\n{error:?}"));
+        assert_eq!(tensor(&result, "main.0"), mask(0));
+        assert_eq!(scalar_root(&result, "main.1"), 2.0);
+    }
+}
+
+// Independent transcription of the legacy `uniform_like` fold that eval and
+// emitted C share (`seed ^ ordinal * golden`, then the splitmix finaliser
+// over `seed ^ index * golden`), never an evaluator helper. With bounds 0 and
+// 1 the drawn value is the f32 unit itself.
+fn legacy_unit_uniform(seed: u64, ordinal: u64, count: u64) -> Vec<f32> {
+    const GOLDEN: u64 = 0x9e37_79b9_7f4a_7c15;
+    let effective = seed ^ ordinal.wrapping_mul(GOLDEN);
+    (0..count)
+        .map(|index| {
+            let mut x = effective ^ index.wrapping_mul(GOLDEN);
+            x ^= x >> 30;
+            x = x.wrapping_mul(0xbf58476d1ce4e5b9);
+            x ^= x >> 27;
+            x = x.wrapping_mul(0x94d049bb133111eb);
+            x ^= x >> 31;
+            ((x >> 11) as f64 / 9007199254740992.0) as f32
+        })
+        .collect()
+}
+
+/// chelis#2405 retired the execution exclusion that a recursive program's
+/// helpers used to run under, so a drawing helper beneath recursion now
+/// takes the planned kernel entry instead of the legacy one. Its
+/// `uniform_like` draws must be unchanged, bit for bit: the same fold, one
+/// ordinal per application in execution order, and the counter carried to
+/// the draws that follow.
+///
+/// Evidentiary status: DISPOSITION LOCK (the base produces these bits too).
+#[test]
+fn uniform_draws_beneath_draw_free_recursion_keep_their_stream() {
+    let source = "def draw(x: tensor[4, f32]) -> tensor[4, f32] ! { Random } = uniform_like(x, 0.0f32, 1.0f32)\ndef walk(n: i64, x: tensor[4, f32]) -> tensor[4, f32] ! { Random } = if eq(n, 0i64) then x else add(draw(copy(x)), walk(sub(n, 1i64), x))\ndef main() = with seed(7i64) {\n x = to_tensor([0.0f32, 0.0f32, 0.0f32, 0.0f32])\n a = walk(3i64, copy(x))\n b = draw(copy(x))\n c = uniform_like(x, 0.0f32, 1.0f32)\n (a, b, c)\n}\n";
+    let result = eval_selected(request(source), &["main".into()])
+        .unwrap_or_else(|error| panic!("{error:?}"));
+    let draws = (0..5)
+        .map(|ordinal| legacy_unit_uniform(7, ordinal, 4))
+        .collect::<Vec<_>>();
+    let bits = |values: &[f64]| {
+        values
+            .iter()
+            .map(|value| (*value as f32).to_bits())
+            .collect::<Vec<_>>()
+    };
+    let walked = (0..4)
+        .map(|index| draws[0][index] + (draws[1][index] + draws[2][index]))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        bits(&tensor(&result, "main.0")),
+        walked
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>()
+    );
+    for (root, ordinal) in [("main.1", 3), ("main.2", 4)] {
+        assert_eq!(
+            bits(&tensor(&result, root)),
+            draws[ordinal]
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            "{root}"
+        );
+    }
 }

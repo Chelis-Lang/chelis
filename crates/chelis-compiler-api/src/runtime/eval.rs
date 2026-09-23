@@ -6,7 +6,9 @@ use chelis_deep::ast::{Atom, Expr, ExprCarrier, List};
 use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::TensorValue as IrTensorValue;
 use chelis_ir::evaluation::RandomExecutionContext;
-use chelis_ir::host::{HostDefKernel, RandomLoweringState, host_def_evaluation_plan};
+use chelis_ir::host::{
+    HostDefEvaluationPlan, HostDefKernel, RandomLoweringState, host_def_evaluation_plan,
+};
 use chelis_ir::tier2;
 use chelis_types::{
     CompareOp, ElementRef, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, StorageView, types::Prim,
@@ -63,21 +65,20 @@ pub(crate) fn reset_execution_profile_defs_snapshots() {
 }
 
 thread_local! {
-    /// Kernel plannings `def_kernel` performed under an execution exclusion
-    /// (chelis#2392). An excluded recursive program applies its helpers
-    /// many times; each non-drawing helper is planned once however often it
-    /// is applied.
-    static EXCLUDED_DEF_KERNEL_PLANNINGS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Kernel plannings `def_kernel` performed (chelis#2392). A recursive
+    /// program applies its helpers many times; each non-drawing helper is
+    /// planned once however often it is applied.
+    static DEF_KERNEL_PLANNINGS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
-fn record_excluded_def_kernel_planning() {
-    EXCLUDED_DEF_KERNEL_PLANNINGS.with(|plannings| plannings.set(plannings.get() + 1));
+fn record_def_kernel_planning() {
+    DEF_KERNEL_PLANNINGS.with(|plannings| plannings.set(plannings.get() + 1));
 }
 
-/// Excluded kernel plannings on this thread since the last reset.
+/// Kernel plannings on this thread since the last reset.
 #[cfg(test)]
-pub(crate) fn take_excluded_def_kernel_plannings() -> u64 {
-    EXCLUDED_DEF_KERNEL_PLANNINGS.with(|plannings| plannings.replace(0))
+pub(crate) fn take_def_kernel_plannings() -> u64 {
+    DEF_KERNEL_PLANNINGS.with(|plannings| plannings.replace(0))
 }
 
 /// Resolve a returned alias to the name it reads outside its local let chain.
@@ -724,89 +725,25 @@ fn source_call_with_checked_argument_types(node: EvalNode<'_>, types: &[Option<E
 }
 
 impl<'a> EvalContext<'a> {
-    pub(super) fn execution_profile(
-        &self,
-        expr: &Expr,
-        defs: &UnordMap<String, Expr>,
-    ) -> chelis_ir::evaluation::EvaluationProfile {
-        self.execution_exclusion.map_or_else(
-            || chelis_ir::lower::evaluation_profile(expr, defs),
-            chelis_ir::evaluation::EvaluationProfile::Legacy,
-        )
-    }
-
-    /// [`Self::execution_profile`] over the program's own definitions.
+    /// The classification of `expr` against the program's own definitions.
     ///
     /// `chelis_ir::lower::evaluation_profile` sorts and deep-clones the whole
     /// definition table it is handed, so asking it per call costs a program
     /// copy per ask. Every caller that classifies against the unmodified
-    /// program reads the program-scoped snapshot instead (chelis#2059 built
-    /// that snapshot for the admission path; chelis#2207 routes the remaining
-    /// asks through it). A caller whose definition universe differs from the
-    /// program's, as a transform's captured closures do, still needs
-    /// [`Self::execution_profile`].
-    pub(super) fn execution_profile_over_program(
-        &self,
-        expr: &Expr,
-    ) -> chelis_ir::evaluation::EvaluationProfile {
-        self.execution_exclusion.map_or_else(
-            || self.program_evaluation_profile(expr),
-            chelis_ir::evaluation::EvaluationProfile::Legacy,
-        )
-    }
-
-    /// The unexcluded classification of `expr` against the program's
-    /// definitions, read from the program-scoped snapshot. Callers that
-    /// already test `execution_exclusion` themselves use this directly.
+    /// program reads the program-scoped snapshot instead (chelis#2059,
+    /// chelis#2207). A caller whose definition universe differs from the
+    /// program's, as a transform's captured closures do, classifies against
+    /// that universe itself.
+    ///
+    /// Each site decides from the expression it is about to run, never from
+    /// an enclosing caller's classification (chelis#2405): a definition whose
+    /// own body is fixed-control gets its plan beneath a recursive or
+    /// dynamic caller, as the C lane decides each definition by its own body.
     pub(super) fn program_evaluation_profile(
         &self,
         expr: &Expr,
     ) -> chelis_ir::evaluation::EvaluationProfile {
         chelis_ir::lower::evaluation_profile_sorted(expr, &self.program.sorted_defs())
-    }
-
-    fn admit_execution_profile(&mut self, expr: &Expr, bound: &[String]) {
-        use chelis_ir::evaluation::{EvaluationProfile, LegacyEvaluationReason};
-        // An excluded caller already determines every nested dispatch. Avoid
-        // copying the program definitions for a classification that would
-        // immediately return this same inherited reason (chelis#2020).
-        if self.execution_exclusion.is_some() {
-            return;
-        }
-        if let EvaluationProfile::Legacy(reason) =
-            self.classify_execution_profile_over_program(expr, bound)
-            && !matches!(
-                reason,
-                LegacyEvaluationReason::NoDropout | LegacyEvaluationReason::LegacyApi
-            )
-        {
-            self.execution_exclusion = Some(reason);
-        }
-    }
-
-    /// Classify `expr`'s execution profile against every top-level def, minus
-    /// the caller's own `bound` parameters (which shadow same-named defs).
-    /// Callers must have already handled `execution_exclusion`; this is the
-    /// classification itself, taken over the program-scoped sorted-def snapshot
-    /// so it does not re-clone every definition on each ask (chelis#2059).
-    fn classify_execution_profile_over_program(
-        &self,
-        expr: &Expr,
-        bound: &[String],
-    ) -> chelis_ir::evaluation::EvaluationProfile {
-        let snapshot = self.program.sorted_defs();
-        // A bound parameter shadows a same-named top-level def, so it must not
-        // reach the classifier. Collisions are rare (parameters are named
-        // `acc`, `x`, ...), so the common path classifies against the shared
-        // snapshot; a genuine collision hides the shadowed names from the
-        // classifier by name, which is exactly what a filtered copy of the
-        // table did, without the copy (chelis#2391).
-        if bound.iter().any(|name| snapshot.contains_key(name)) {
-            let shadowed = bound.iter().cloned().collect();
-            chelis_ir::lower::evaluation_profile_sorted_shadowing(expr, &snapshot, &shadowed)
-        } else {
-            chelis_ir::lower::evaluation_profile_sorted(expr, &snapshot)
-        }
     }
 
     /// Resolve a builtin only when ordinary lexical lookup did not select a
@@ -842,8 +779,6 @@ impl<'a> EvalContext<'a> {
         let saved = std::mem::take(&mut self.bindings);
         let saved_types = std::mem::take(&mut self.binding_types);
         let saved_precisions = std::mem::take(&mut self.precision_bindings);
-        let saved_exclusion = self.execution_exclusion;
-        self.admit_execution_profile(&expr, &[]);
         // A checked function alias carries the callable, including a nullary
         // one. Evaluating its bare var as a value thunk would replace that
         // callable with its result before the alias is ever invoked.
@@ -858,7 +793,6 @@ impl<'a> EvalContext<'a> {
         } else {
             self.eval_expr(&expr)
         };
-        self.execution_exclusion = saved_exclusion;
         self.bindings = saved;
         self.binding_types = saved_types;
         self.precision_bindings = saved_precisions;
@@ -881,54 +815,25 @@ impl<'a> EvalContext<'a> {
     pub(super) fn def_kernel(
         &mut self,
         name: &str,
-    ) -> Result<Option<Arc<DefEvaluationKernel>>, String> {
-        if self.execution_exclusion.is_some() {
-            if let Some(cached) = self.excluded_def_kernels.get(name) {
-                return Ok(cached.clone());
-            }
-            record_excluded_def_kernel_planning();
-            let kernel = self
-                .session
-                .as_ref()
-                .map(|session| {
-                    chelis_ir::host::host_def_kernel(
-                        session,
-                        name,
-                        Some(RandomLoweringState {
-                            seed: self.random_seed,
-                            counter: self.random_counter,
-                        }),
-                    )
-                })
-                .transpose()
-                .map(|kernel| {
-                    kernel
-                        .flatten()
-                        .map(|kernel| Arc::new(DefEvaluationKernel::Legacy(kernel)))
-                })
-                .map_err(|diagnostic| diagnostic.to_string())?;
-            if !kernel
-                .as_ref()
-                .is_some_and(|kernel| kernel_draws_random(kernel.kernel_for_inspection()))
-            {
-                self.excluded_def_kernels
-                    .insert(name.to_string(), kernel.clone());
-            }
-            return Ok(kernel);
-        }
+    ) -> Result<Option<Arc<HostDefEvaluationPlan>>, String> {
         if let Some(cached) = self.def_kernels.get(name) {
             return Ok(cached.clone());
         }
         let Some(session) = self.session.as_ref() else {
             return Ok(None);
         };
+        record_def_kernel_planning();
         let random = RandomLoweringState {
             seed: self.random_seed,
             counter: self.random_counter,
         };
+        // The decision reads `name`'s own body and profile, whatever called
+        // it: a fixed-control body is planned beneath a recursive or dynamic
+        // caller, and a body that cannot be planned is walked by the host
+        // interpreter (chelis#2405).
         let kernel = host_def_evaluation_plan(session, name, &RandomExecutionContext::new(random))
             .map_err(|diagnostic| diagnostic.to_string())?
-            .map(|plan| Arc::new(DefEvaluationKernel::Planned(plan)));
+            .map(Arc::new);
         let context_bound = kernel
             .as_ref()
             .is_some_and(|kernel| kernel.plan().is_some() || kernel.staged_plan().is_some());
@@ -952,7 +857,7 @@ impl<'a> EvalContext<'a> {
     fn apply_def_kernel(
         &mut self,
         name: &str,
-        kernel: &DefEvaluationKernel,
+        kernel: &HostDefEvaluationPlan,
         params: &[String],
         args: Vec<RuntimeValue>,
         inherited_claims: &[DeclaredResultClaim],
@@ -1830,11 +1735,11 @@ impl<'a> EvalContext<'a> {
 
         // Fixed-rate dropout is not in the legacy host builtin table. Admit
         // only its named fixed-control source profile, stage the operand once,
-        // and use the same lowering/plan core as named-axis primitives. An
-        // excluded runtime-rate call keeps its previous dispatch unchanged.
+        // and use the same lowering/plan core as named-axis primitives. A
+        // runtime-rate call keeps its previous dispatch unchanged. The call's
+        // own profile decides, whatever its callers' control flow.
         if var_name(func) == Some("dropout")
             && self.active_builtin_symbol("dropout")
-            && self.execution_exclusion.is_none()
             && self.program_evaluation_profile(node.expr)
                 == chelis_ir::evaluation::EvaluationProfile::FixedControl
         {
@@ -1886,13 +1791,17 @@ impl<'a> EvalContext<'a> {
         // its standalone declaration cannot, including a generic cast.
         // Route before the callee frame forgets those source actuals; the
         // existing planner resolves precision from checked argument types.
-        if self.execution_exclusion.is_none()
-            && let Some(callee) = var_name(func)
-            && let Some((resolved, def_expr)) = self.lookup_top_level_def(callee)
-            && self.program_evaluation_profile(&def_expr)
-                == chelis_ir::evaluation::EvaluationProfile::Legacy(
+        // The declaration's own profile is read by key, so this ask costs no
+        // body clone or scan on the ordinary application path.
+        if let Some(callee) = var_name(func)
+            && self
+                .program
+                .resolve_def_key(callee)
+                .and_then(|key| self.program.def_evaluation_profile(key))
+                == Some(chelis_ir::evaluation::EvaluationProfile::Legacy(
                     chelis_ir::evaluation::LegacyEvaluationReason::RuntimeRate,
-                )
+                ))
+            && let Some((resolved, def_expr)) = self.lookup_top_level_def(callee)
             && self.bindings.get(callee).is_none_or(|value| {
                 matches!(value,
                 RuntimeValue::Closure { def_name: Some(name), .. } if name == &resolved)
@@ -2702,19 +2611,13 @@ impl<'a> EvalContext<'a> {
                 check_callable_invocation_contract(contract, &args)?;
             }
         }
-        let saved_exclusion = self.execution_exclusion;
-        if let RuntimeValue::Closure { body, params, .. } = &callable {
-            self.admit_execution_profile(body, params);
-        }
-        let result = self.apply_resolved_callable_with_arg_types_impl(
+        self.apply_resolved_callable_with_arg_types_impl(
             callable,
             args,
             arg_type_exprs,
             result_type_expr,
             claims,
-        );
-        self.execution_exclusion = saved_exclusion;
-        result
+        )
     }
 
     fn apply_resolved_callable_with_arg_types_impl(
@@ -5057,13 +4960,11 @@ mod legacy_capture_order_tests {
             session: Some(chelis_ir::host::HostLoweringSession::new(checked)),
             active_declaration_names: Vec::new(),
             def_kernels: UnordMap::new(),
-            excluded_def_kernels: UnordMap::new(),
             transcript: Vec::new(),
             transcript_capture: None,
             resolving_top_levels: Vec::new(),
             random_seed: Some(42),
             random_counter: 5,
-            execution_exclusion: None,
             cancel: None,
         }
     }
@@ -5110,9 +5011,7 @@ mod legacy_capture_order_tests {
         let kernel = ctx
             .def_kernel(name)?
             .expect("baseline admits real helper kernel");
-        let DefEvaluationKernel::Planned(product) = kernel.as_ref() else {
-            panic!("ordinary admission must retain the profile wrapper")
-        };
+        let product = kernel.as_ref();
         assert_eq!(
             product.profile(),
             EvaluationProfile::Legacy(LegacyEvaluationReason::NoDropout)
@@ -5513,7 +5412,6 @@ mod legacy_capture_order_tests {
                     );
                 }
                 assert_eq!((ctx.random_seed, ctx.random_counter), (Some(42), 5));
-                assert!(ctx.execution_exclusion.is_none());
                 assert!(ctx.transcript.is_empty());
             }
         }
