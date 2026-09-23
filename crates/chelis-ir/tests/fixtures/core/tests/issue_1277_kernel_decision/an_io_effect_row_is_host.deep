@@ -1,0 +1,18 @@
+(defsig {}
+  f
+  (n)
+  (t-fn {}
+    (t-tensor {} (d-var {} n) (t-prim {} f32))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))))
+
+(def {}
+  f
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (let {span: "surf:48..70"}
+      (bind {destructure: true}
+        __chelis_tmp0
+        (app {span: "surf:56..64"}
+          (var {span: "surf:56..61"} print)
+          (var {span: "surf:62..63"} x)))
+      (var {span: "surf:67..68"} x))))

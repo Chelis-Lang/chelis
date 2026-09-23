@@ -1,0 +1,9 @@
+(defsig {} f (t-fn {} (t-adt {} Dict (t-prim {} string) (t-prim {} i32))))
+
+(def {}
+  f
+  (fn {}
+    (params {})
+    (app {span: "surf:31..42"}
+      (var {span: "surf:31..38"} dict_of)
+      (var {span: "surf:39..41"} Nil))))

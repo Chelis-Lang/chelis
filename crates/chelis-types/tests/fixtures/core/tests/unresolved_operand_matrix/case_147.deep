@@ -1,0 +1,47 @@
+(deftype {}
+  Shape
+  ()
+  (variant {}
+    Circle
+    (field {} r (t-tensor {} (d-lit {} 4) (d-lit {} 3) (t-prim {} f32))))
+  (variant {}
+    Square
+    (field {} s (t-tensor {} (d-lit {} 4) (d-lit {} 3) (t-prim {} f32)))))
+
+(defsig {}
+  apply_s
+  (b)
+  (t-fn {}
+    (t-fn {} (t-adt {} Shape) (t-var {} b))
+    (t-adt {} Shape)
+    (t-var {} b)))
+
+(def {}
+  apply_s
+  (fn {}
+    (params {} (f {type: (t-var {} _)}) (r {type: (t-var {} _)}))
+    (app {span: "surf:134..138"}
+      (var {span: "surf:134..135"} f)
+      (var {span: "surf:136..137"} r))))
+
+(defsig {}
+  probe
+  (t-fn {}
+    (t-tensor {} (d-lit {} 4) (d-lit {} 3) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 3) (t-prim {} f32))))
+
+(def {}
+  probe
+  (fn {}
+    (params {} (t {type: (t-var {} _)}))
+    (app {span: "surf:191..238"}
+      (var {span: "surf:191..198"} apply_s)
+      (fn {span: "surf:199..220"}
+        (params {} q)
+        (app {span: "surf:209..220"}
+          (var {span: "surf:209..212"} sum)
+          (access {span: "surf:213..216"} (var {span: "surf:213..214"} q) r)
+          (lit {span: "surf:218..219", type: (t-prim {} i32)} 0)))
+      (record {span: "surf:222..237"}
+        Circle
+        (kv {} r (var {span: "surf:234..235"} t))))))

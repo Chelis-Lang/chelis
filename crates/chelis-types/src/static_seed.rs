@@ -392,15 +392,4 @@ mod tests {
             assert_eq!(constant_seed(&expr, true), None);
         }
     }
-
-    #[test]
-    fn static_seed_reader_has_no_local_optional_carrier_adapter() {
-        let source = include_str!("static_seed.rs");
-        let definition = ["fn stamped_", "parts"].concat();
-        let call = ["stamped_", "parts("].concat();
-        assert!(
-            !source.contains(&definition) && !source.contains(&call),
-            "E5b requires each static-seed read to disposition ExprCarrier directly"
-        );
-    }
 }

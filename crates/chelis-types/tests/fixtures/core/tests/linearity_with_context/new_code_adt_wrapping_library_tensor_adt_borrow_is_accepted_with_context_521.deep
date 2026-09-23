@@ -1,0 +1,6 @@
+(deftype {}
+  Inner
+  (n)
+  (variant {}
+    Inner
+    (field {} values (t-tensor {} (d-var {} n) (t-prim {} f32)))))

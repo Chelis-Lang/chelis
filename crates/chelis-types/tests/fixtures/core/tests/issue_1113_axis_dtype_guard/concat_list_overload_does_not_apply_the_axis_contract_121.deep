@@ -1,0 +1,22 @@
+(def {}
+  xs
+  (app {span: "surf:6..16"}
+    (var {} Cons)
+    (lit {span: "surf:7..10", type: (t-prim {} f32)} 1.0)
+    (app {}
+      (var {} Cons)
+      (lit {span: "surf:12..15", type: (t-prim {} f32)} 2.0)
+      (var {} Nil))))
+
+(def {}
+  ys
+  (app {span: "surf:22..44"}
+    (var {span: "surf:22..28"} concat)
+    (var {span: "surf:29..31"} xs)
+    (app {span: "surf:33..43"}
+      (var {} Cons)
+      (lit {span: "surf:34..37", type: (t-prim {} f32)} 3.0)
+      (app {}
+        (var {} Cons)
+        (lit {span: "surf:39..42", type: (t-prim {} f32)} 4.0)
+        (var {} Nil)))))

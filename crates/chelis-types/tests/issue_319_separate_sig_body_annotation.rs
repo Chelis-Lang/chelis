@@ -20,26 +20,18 @@
 //! actual annotation rather than its surface formatting.
 
 use chelis_deep::{Atom, Expr};
-use chelis_surf::{desugar::desugar_program, parser::parse_str};
+
 use chelis_types::check_ir_program;
 
 // ─── structural Deep AST helpers ─────────────────────────────────────────
 
 fn list_tag(expr: &Expr) -> Option<&str> {
-    let Expr::List(list, _) = expr else {
-        return None;
-    };
-    // Decode-once: the spelling comes from the decoded tag, never a raw
-    // element-0 string.
-    list.tag().map(|tag| tag.as_str())
+    expr.tag().map(|tag| tag.as_str())
 }
 
 /// The `type:` metadata value of a node whose element 1 is a meta map.
 fn node_type_meta(expr: &Expr) -> Option<&Expr> {
-    let Expr::List(list, _) = expr else {
-        return None;
-    };
-    let Some(Expr::Map(meta, _)) = list.elements.get(1) else {
+    let chelis_deep::ExprCarrier::DecodedNode(_, meta, _) = expr.carrier() else {
         return None;
     };
     meta.ty().map(|ty| ty.expression())
@@ -48,21 +40,18 @@ fn node_type_meta(expr: &Expr) -> Option<&Expr> {
 /// The builtin callee name of an `(app {…} (var {…} <name>) …)` node, or
 /// `None` when `expr` is not such an app.
 fn app_callee_name(expr: &Expr) -> Option<&str> {
-    if list_tag(expr) != Some("app") {
-        return None;
-    }
-    let Expr::List(list, _) = expr else {
-        return None;
-    };
-    let callee = list.elements.get(2)?;
-    if list_tag(callee) != Some("var") {
-        return None;
-    }
-    let Expr::List(var_list, _) = callee else {
+    let chelis_deep::ExprCarrier::DecodedNode(chelis_deep::DeepTag::App, _, children) =
+        expr.carrier()
+    else {
         return None;
     };
-    match var_list.elements.get(2) {
-        Some(Expr::Atom(Atom::Name(name), _)) => Some(name.as_str()),
+    let chelis_deep::ExprCarrier::DecodedNode(chelis_deep::DeepTag::Var, _, callee) =
+        children.first()?.carrier()
+    else {
+        return None;
+    };
+    match callee.first()? {
+        Expr::Atom(Atom::Name(name), _) => Some(name.as_str()),
         _ => None,
     }
 }
@@ -115,18 +104,16 @@ fn visit<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
 }
 
 fn is_named_def(expr: &Expr, def_name: &str) -> bool {
-    if list_tag(expr) != Some("def") {
-        return false;
-    }
-    let Expr::List(list, _) = expr else {
+    let chelis_deep::ExprCarrier::DecodedNode(chelis_deep::DeepTag::Def, _, children) =
+        expr.carrier()
+    else {
         return false;
     };
-    matches!(list.elements.get(2), Some(Expr::Atom(Atom::Name(name), _)) if name == def_name)
+    matches!(children.first(), Some(Expr::Atom(Atom::Name(name), _)) if name == def_name)
 }
 
 fn checked_def(src: &str, def_name: &str) -> Expr {
-    let decls = parse_str(src).expect("surf parse");
-    let deep = desugar_program(&decls);
+    let deep: Vec<chelis_deep::Expr> = serde_json::from_str(src).expect("lossless core fixture");
     let checked = check_ir_program(&deep).expect("check");
     checked
         .exprs()
@@ -167,28 +154,17 @@ fn any_app_type_is_bare_tvar(def: &Expr) -> bool {
     found
 }
 
-const SEPARATE_SIG_SDPA: &str = "\
-sig sdpa[s, d, p: Float]: tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, s, p] -> tensor[s, d, p]
-def sdpa(q, k, v, scale) = {
-  kt = permute(k, 1, 0)
-  scores = matmul(q, kt)
-  weights = softmax(mul(scores, scale), -1)
-  matmul(weights, v)
-}
-";
+const SEPARATE_SIG_SDPA: &str = include_str!(
+    "fixtures/core/tests/issue_319_separate_sig_body_annotation/SEPARATE_SIG_SDPA.0.json"
+);
 
 // The inline reimplementation the issue points at: identical body, but
 // concrete `f32` parameter annotations written inline on the `def` (no
 // separate `sig`). The ordinary annotation path already resolves its body
 // to tensor types.
-const INLINE_TYPED_SDPA: &str = "\
-def sdpa[s, d](q: tensor[s, d, f32], k: tensor[s, d, f32], v: tensor[s, d, f32], scale: tensor[s, s, f32]) -> tensor[s, d, f32] = {
-  kt = permute(k, 1, 0)
-  scores = matmul(q, kt)
-  weights = softmax(mul(scores, scale), -1)
-  matmul(weights, v)
-}
-";
+const INLINE_TYPED_SDPA: &str = include_str!(
+    "fixtures/core/tests/issue_319_separate_sig_body_annotation/INLINE_TYPED_SDPA.0.json"
+);
 
 #[test]
 fn issue_319_separate_sig_body_permute_is_a_tensor_not_bare_tvar() {

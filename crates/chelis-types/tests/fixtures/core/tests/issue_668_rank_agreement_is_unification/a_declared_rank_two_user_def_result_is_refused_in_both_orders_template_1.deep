@@ -1,0 +1,44 @@
+(module {surf_path: "Repro.UserDef"}
+  repro.userdef
+  (defsig {}
+    g
+    (a b)
+    (t-fn {}
+      (t-tensor {} (d-var {} a) (d-var {} b) (t-prim {} f32))
+      (t-tensor {} (d-var {} a) (d-var {} b) (t-prim {} f32))))
+  (def {}
+    g
+    (fn {}
+      (params {} (y {type: (t-var {} _)}))
+      (var {} y)))
+  (defsig {}
+    f
+    (n u)
+    (t-fn {}
+      (t-tensor {} (d-var {} n) (t-prim {} f32))
+      (t-tensor {} (d-var {} u) (t-prim {} f32))))
+  (def {}
+    f
+    (fn {}
+      (params {} x)
+      (let {}
+        (bind {}
+          s
+          (app {}
+            (var {} stride)
+            (var {} x)
+            (lit {type: (t-prim {} i64)} 2)))
+        (let {}
+          (bind {}
+            e
+            (app {}
+              (var {} insert)
+              (var {} x)
+              (lit {surf_literal_style: "explicit", type: (t-prim {} i32)} 0)
+              (lit {type: (t-prim {} i64)} 2)))
+          (app {}
+            (var {} add)
+            (app {}
+              (var {} g)
+              (var {} e))
+            (var {} s)))))))

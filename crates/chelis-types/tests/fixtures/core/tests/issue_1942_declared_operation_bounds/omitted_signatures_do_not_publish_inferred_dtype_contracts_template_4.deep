@@ -1,0 +1,7 @@
+(def {} source (fn {} (params {}) (var {} sin)))
+
+(def {}
+  make
+  (fn {}
+    (params {})
+    (app {} (var {} source))))

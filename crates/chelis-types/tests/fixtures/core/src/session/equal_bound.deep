@@ -1,0 +1,13 @@
+(defsig {dtype_bounds: {p: BOUND}}
+  equal
+  (p)
+  (t-fn {} (t-var {} p) (t-var {} p) (t-prim {} bool)))
+
+(def {}
+  equal
+  (fn {}
+    (params {} x y)
+    (app {span: "surf:53..60"}
+      (var {span: "surf:53..55"} eq)
+      (var {span: "surf:56..57"} x)
+      (var {span: "surf:58..59"} y))))

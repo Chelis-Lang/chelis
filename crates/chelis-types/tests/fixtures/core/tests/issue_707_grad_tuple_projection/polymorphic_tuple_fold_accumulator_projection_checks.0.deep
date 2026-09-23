@@ -1,0 +1,70 @@
+(defsig {}
+  f
+  (n)
+  (t-fn {}
+    (t-tensor {} (d-var {} n) (t-prim {} f32))
+    (t-tuple {} (t-tensor {} (d-var {} n) (t-prim {} f32)) (t-prim {} i64))))
+
+(def {}
+  f
+  (fn {}
+    (params {} (xs {type: (t-var {} _)}))
+    (let {span: "surf:56..319"}
+      (bind {}
+        idxs
+        (app {span: "surf:67..103"}
+          (var {span: "surf:67..72"} range)
+          (cast {span: "surf:73..85"}
+            (lit {span: "surf:78..79", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 0)
+            (t-prim {} i64))
+          (app {span: "surf:87..102"}
+            (var {span: "surf:87..92"} numel)
+            (copy {span: "surf:93..101"} (var {span: "surf:98..100"} xs)))))
+      (let {}
+        (bind {}
+          state0
+          (tuple {span: "surf:115..195"}
+            (app {span: "surf:116..180"}
+              (var {span: "surf:116..125"} to_tensor)
+              (app {span: "surf:126..179"}
+                (var {span: "surf:126..129"} map)
+                (fn {span: "surf:130..159"}
+                  (params {} (x {type: (t-prim {} f32)}))
+                  (cast {span: "surf:145..159"}
+                    (lit {span: "surf:150..153", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 0.0)
+                    (t-prim {} f32)))
+                (app {span: "surf:161..178"}
+                  (var {span: "surf:161..168"} to_list)
+                  (copy {span: "surf:169..177"}
+                    (var {span: "surf:174..176"} xs)))))
+            (cast {span: "surf:182..194"}
+              (lit {span: "surf:187..188", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 0)
+              (t-prim {} i64))))
+        (let {}
+          (bind {}
+            step
+            (fn {span: "surf:205..290"}
+              (params {} state i)
+              (let {span: "surf:222..290"}
+                (bind {}
+                  acc
+                  (tuple-get {span: "surf:234..241"}
+                    (var {span: "surf:234..239"} state)
+                    (lit {type: (t-prim {} i32)} 0)))
+                (let {}
+                  (bind {}
+                    total
+                    (tuple-get {span: "surf:254..261"}
+                      (var {span: "surf:254..259"} state)
+                      (lit {type: (t-prim {} i32)} 1)))
+                  (tuple {span: "surf:266..286"}
+                    (var {span: "surf:267..270"} acc)
+                    (app {span: "surf:272..285"}
+                      (var {span: "surf:272..275"} add)
+                      (var {span: "surf:276..281"} total)
+                      (var {span: "surf:283..284"} i)))))))
+          (app {span: "surf:293..317"}
+            (var {span: "surf:293..297"} fold)
+            (var {span: "surf:298..302"} step)
+            (var {span: "surf:304..310"} state0)
+            (var {span: "surf:312..316"} idxs)))))))

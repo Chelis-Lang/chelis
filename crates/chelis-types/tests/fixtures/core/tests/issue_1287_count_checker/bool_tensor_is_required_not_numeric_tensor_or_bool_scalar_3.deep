@@ -1,0 +1,10 @@
+(defsig {} bad (t-fn {} (t-prim {} bool) (t-tensor {} (t-prim {} i64))))
+
+(def {}
+  bad
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:34..45"}
+      (var {span: "surf:34..39"} count)
+      (var {span: "surf:40..41"} x)
+      (lit {span: "surf:43..44", type: (t-prim {} i32)} 0))))

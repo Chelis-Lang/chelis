@@ -1,0 +1,7 @@
+(module {surf_path: "Demo.Root"}
+  demo.root
+  (def {}
+    value
+    (cast {span: "surf:25..37"}
+      (lit {span: "surf:30..31", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 7)
+      (t-prim {} i64))))

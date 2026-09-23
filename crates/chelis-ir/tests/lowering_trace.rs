@@ -1,6 +1,8 @@
 //! Spec-derived acceptance tests for the opt-in trace, not an AD certificate.
 
 #[cfg(feature = "lowering-trace")]
+use chelis_deep::parser::parse_str;
+#[cfg(feature = "lowering-trace")]
 use chelis_ir::dag::{Dag, RiscOp};
 #[cfg(feature = "lowering-trace")]
 use chelis_ir::lower::try_lower_program_to_library;
@@ -9,19 +11,14 @@ use chelis_ir::lowering_trace::{
     BoundaryKind, ContextId, ContextKind, try_lower_program_to_library_with_trace,
 };
 #[cfg(feature = "lowering-trace")]
-use chelis_surf::{desugar::desugar_program, parser::parse_str};
-#[cfg(feature = "lowering-trace")]
 use chelis_types::{CheckedProgram, check_typed_program};
 
 #[cfg(feature = "lowering-trace")]
-const SQUARE: &str = r#"
-def loss(x: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(mul(x, x), 0))
-def derivative(x: tensor[3, f32]) -> tensor[3, f32] = grad(loss)(x)
-"#;
+const SQUARE: &str = include_str!("fixtures/core/tests/lowering_trace/square_0.dp");
 
 #[cfg(feature = "lowering-trace")]
 fn checked(source: &str) -> CheckedProgram {
-    let deep = desugar_program(&parse_str(source).expect("parse fixture"));
+    let deep = parse_str(source).expect("parse fixture");
     let program = check_typed_program(&deep).expect("check fixture types");
     let program = chelis_effects::check_program(&program).expect("check fixture effects");
     chelis_types::check_linearity(&program).expect("check fixture linearity")
@@ -37,29 +34,15 @@ fn same_dag(left: &Dag, right: &Dag) {
     );
 }
 
-// The feature-enabled support lane below owns the trace oracle. The generic
-// change-owned lane lists directly modified integration targets without
-// features, so retain one active feature-off test instead of compiling an
-// empty integration binary.
-#[cfg(not(feature = "lowering-trace"))]
-#[test]
-fn feature_off_lane_defers_to_the_feature_owned_trace_oracle() {}
-
 #[cfg(feature = "lowering-trace")]
 #[test]
 fn execution_trace_captures_the_actual_ad_call_without_replaying_seed_controls() {
     use chelis_ir::execution_spine::{SourceKind, Step};
     use chelis_ir::lower::try_lower_program_to_evaluation_library;
     use chelis_ir::lowering_trace::try_lower_program_to_evaluation_library_with_trace;
-    let program = checked(
-        r#"
-def loss(x: tensor[32, f32]) -> f32 = with seed(42i64) {
-  identity = with seed(42i64) { x }
-  tensor_to_scalar(sum(dropout(identity, 0.5f32), 0))
-}
-def derivative(x: tensor[32, f32]) -> tensor[32, f32] = grad(loss)(x)
-"#,
-    );
+    let program = checked(include_str!(
+        "fixtures/core/tests/lowering_trace/execution_trace_captures_the_actual_ad_call_without_replaying_seed_controls_1.dp"
+    ));
     let ordinary = try_lower_program_to_evaluation_library(&program).unwrap();
     let (observed, trace) = try_lower_program_to_evaluation_library_with_trace(&program).unwrap();
     assert_eq!(
@@ -142,14 +125,9 @@ def derivative(x: tensor[32, f32]) -> tensor[32, f32] = grad(loss)(x)
 #[test]
 fn selected_source_census_keeps_draw_free_dependencies_and_excludes_siblings() {
     use chelis_ir::execution_spine::{Control, SourceKind};
-    let program = checked(
-        r#"
-x: tensor[32, f32] = x
-empty_scope = with seed(7i64) { x }
-unrelated = with seed(99i64) { x }
-sample = with seed(42i64) { dropout(empty_scope, 0.0f32) }
-"#,
-    );
+    let program = checked(include_str!(
+        "fixtures/core/tests/lowering_trace/selected_source_census_keeps_draw_free_dependencies_and_excludes_siblings_2.dp"
+    ));
     let library = chelis_ir::lower::try_lower_program_to_evaluation_library(&program).unwrap();
     let selected = library.program().select_roots(&["sample".into()]).unwrap();
     let seeds = selected
@@ -184,13 +162,9 @@ sample = with seed(42i64) { dropout(empty_scope, 0.0f32) }
 fn selecting_a_draw_free_region_retains_controls_without_changing_dispatch() {
     use chelis_ir::evaluation::{EvaluationProfile, LegacyEvaluationReason};
     use chelis_ir::execution_spine::{Control, SourceKind};
-    let program = checked(
-        r#"
-x: tensor[2, f32] = x
-selected = with seed(7i64) { with seed(7i64) { x } }
-unrelated = with seed(99i64) { x }
-"#,
-    );
+    let program = checked(include_str!(
+        "fixtures/core/tests/lowering_trace/selecting_a_draw_free_region_retains_controls_without_changing_dispatch_3.dp"
+    ));
     let library = chelis_ir::lower::try_lower_program_to_evaluation_library(&program).unwrap();
     let names = ["selected".into()];
     assert_eq!(
@@ -227,9 +201,9 @@ unrelated = with seed(99i64) { x }
     assert_eq!((context.state().seed, context.state().counter), (None, 23));
     assert!(library.program().select_roots(&["missing".into()]).is_err());
 
-    let excluded = checked(
-        "def choose(x: tensor[2, f32], flag: bool) -> tensor[2, f32] = if flag then x else x\n",
-    );
+    let excluded = checked(include_str!(
+        "fixtures/core/tests/lowering_trace/selecting_a_draw_free_region_retains_controls_without_changing_dispatch_4.dp"
+    ));
     let library = chelis_ir::lower::try_lower_program_to_evaluation_library(&excluded).unwrap();
     assert!(!library.library_for_inspection().lowered_names()["choose"]);
     assert!(library.program().select_roots(&["choose".into()]).is_err());
@@ -239,27 +213,29 @@ unrelated = with seed(99i64) { x }
 #[test]
 fn context_composition_retains_declared_controls_without_confusing_local_aliases() {
     use chelis_ir::execution_spine::{Control, SourceKind};
-    let source = r#"
-x: tensor[32, f32] = x
-empty_scope = with seed(7i64) { x }
-unrelated = with seed(99i64) { x }
-"#;
-    let deep = desugar_program(&parse_str(source).unwrap());
+    let source = include_str!(
+        "fixtures/core/tests/lowering_trace/context_composition_retains_declared_controls_without_confusing_local_aliases_5.dp"
+    );
+    let deep = parse_str(source).unwrap();
     let env = chelis_types::build_type_env_from_library(&deep).unwrap();
     let library =
         chelis_ir::lower::try_lower_program_to_evaluation_library(&checked(source)).unwrap();
     let original = bincode::serialize(library.library_for_inspection()).unwrap();
     for (body, expected) in [
         (
-            "sample = with seed(42i64) { dropout(empty_scope, 0.0f32) }",
+            include_str!(
+                "fixtures/core/tests/lowering_trace/context_composition_retains_declared_controls_without_confusing_local_aliases_6.dp"
+            ),
             vec![7, 42],
         ),
         (
-            "sample = {\n empty_scope = x\n with seed(42i64) { dropout(empty_scope, 0.0f32) }\n}",
+            include_str!(
+                "fixtures/core/tests/lowering_trace/context_composition_retains_declared_controls_without_confusing_local_aliases_7.dp"
+            ),
             vec![42],
         ),
     ] {
-        let deep = desugar_program(&parse_str(body).unwrap());
+        let deep = parse_str(body).unwrap();
         let program = chelis_types::check_ir_with_context(&env, &deep).unwrap();
         let program = chelis_effects::check_program(&program).unwrap();
         let program = chelis_types::check_linearity(&program).unwrap();
@@ -303,14 +279,8 @@ unrelated = with seed(99i64) { x }
 #[cfg(feature = "lowering-trace")]
 #[test]
 fn trace_preserves_the_ordinary_library_and_actual_normalization() {
-    let program = checked(&format!(
-        r#"{SQUARE}
-def pair(x: tensor[3, f32]) -> (tensor[3, f32], tensor[3, f32]) = (x, x)
-def dead(x: tensor[3, f32]) -> tensor[3, f32] = {{
-  unused = mul(x, x)
-  x
-}}
-"#
+    let program = checked(include_str!(
+        "fixtures/core/tests/lowering_trace/trace_preserves_the_ordinary_library_and_actual_normalization.dp"
     ));
     let ordinary = try_lower_program_to_library(&program).unwrap();
     let (observed, trace) = try_lower_program_to_library_with_trace(&program).unwrap();
@@ -439,10 +409,9 @@ fn empty_and_repeated_invocations_do_not_leak_capture_state() {
 #[cfg(feature = "lowering-trace")]
 #[test]
 fn rejected_ad_keeps_its_diagnostic_instead_of_returning_a_trace() {
-    let source = r#"
-def loss(x: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(floor(x), 0))
-def derivative(x: tensor[3, f32]) -> tensor[3, f32] = grad(loss)(x)
-"#;
+    let source = include_str!(
+        "fixtures/core/tests/lowering_trace/rejected_ad_keeps_its_diagnostic_instead_of_returning_a_trace_9.dp"
+    );
     let program = checked(source);
     let ordinary = try_lower_program_to_library(&program).unwrap_err();
     let observed = try_lower_program_to_library_with_trace(&program).unwrap_err();
@@ -456,10 +425,9 @@ def derivative(x: tensor[3, f32]) -> tensor[3, f32] = grad(loss)(x)
 #[cfg(feature = "lowering-trace")]
 #[test]
 fn multiple_wrt_inputs_keep_their_forward_order_and_distinct_results() {
-    let source = r#"
-def loss(x: tensor[3, f32], y: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(mul(x, y), 0))
-def derivative(x: tensor[3, f32], y: tensor[3, f32]) -> (tensor[3, f32], tensor[3, f32]) = grad(loss)(x, y)
-"#;
+    let source = include_str!(
+        "fixtures/core/tests/lowering_trace/multiple_wrt_inputs_keep_their_forward_order_and_distinct_results_10.dp"
+    );
     let (_, trace) = try_lower_program_to_library_with_trace(&checked(source)).unwrap();
     let grad = &trace.gradients[0];
     assert_eq!(grad.wrt.len(), 2);
@@ -492,13 +460,10 @@ def derivative(x: tensor[3, f32], y: tensor[3, f32]) -> (tensor[3, f32], tensor[
 #[cfg(feature = "lowering-trace")]
 #[test]
 fn nested_gradients_have_distinct_contexts_and_actual_parent_links() {
-    let source = format!(
-        r#"{SQUARE}
-def first(x: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(grad(loss)(x), 0))
-def second(x: tensor[3, f32]) -> tensor[3, f32] = grad(first)(x)
-"#
+    let source = include_str!(
+        "fixtures/core/tests/lowering_trace/nested_gradients_have_distinct_contexts_and_actual_parent_links.dp"
     );
-    let (_, trace) = try_lower_program_to_library_with_trace(&checked(&source)).unwrap();
+    let (_, trace) = try_lower_program_to_library_with_trace(&checked(source)).unwrap();
     assert_eq!(trace.gradients.len(), 4);
     let nested = trace
         .gradients
@@ -521,10 +486,9 @@ def second(x: tensor[3, f32]) -> tensor[3, f32] = grad(first)(x)
 #[cfg(feature = "lowering-trace")]
 #[test]
 fn shaped_zero_materialization_is_not_fabricated_in_the_raw_ad_result() {
-    let source = r#"
-def constant(x: tensor[3, f32]) -> f32 = 1.0f32
-def derivative(x: tensor[3, f32]) -> tensor[3, f32] = grad(constant)(x)
-"#;
+    let source = include_str!(
+        "fixtures/core/tests/lowering_trace/shaped_zero_materialization_is_not_fabricated_in_the_raw_ad_result_12.dp"
+    );
     let (library, trace) = try_lower_program_to_library_with_trace(&checked(source)).unwrap();
     let grad = &trace.gradients[0];
     assert_eq!(grad.wrt.len(), 1);
@@ -555,10 +519,9 @@ def derivative(x: tensor[3, f32]) -> tensor[3, f32] = grad(constant)(x)
 #[cfg(feature = "lowering-trace")]
 #[test]
 fn host_only_definitions_do_not_fabricate_graph_observations() {
-    let source = r#"
-def filled[n](x: tensor[n, f32]) -> tensor[n, f32] =
-  expand(to_tensor([3.0f32]), 0, cast(shape(&x, 0), i64))
-"#;
+    let source = include_str!(
+        "fixtures/core/tests/lowering_trace/host_only_definitions_do_not_fabricate_graph_observations_13.dp"
+    );
     let (library, trace) = try_lower_program_to_library_with_trace(&checked(source)).unwrap();
     assert!(library.dag().nodes().is_empty());
     assert!(trace.gradients.is_empty());
@@ -570,10 +533,9 @@ def filled[n](x: tensor[n, f32]) -> tensor[n, f32] =
 #[cfg(feature = "lowering-trace")]
 #[test]
 fn application_preserves_formal_names_when_caller_names_differ() {
-    let source = r#"
-def loss(x: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(mul(x, x), 0))
-def derivative(y: tensor[3, f32]) -> tensor[3, f32] = grad(loss)(y)
-"#;
+    let source = include_str!(
+        "fixtures/core/tests/lowering_trace/application_preserves_formal_names_when_caller_names_differ_14.dp"
+    );
     let program = checked(source);
     let (library, trace) = try_lower_program_to_library_with_trace(&program).unwrap();
     same_dag(
@@ -601,16 +563,9 @@ def derivative(y: tensor[3, f32]) -> tensor[3, f32] = grad(loss)(y)
 #[cfg(feature = "lowering-trace")]
 #[test]
 fn host_structured_results_are_not_reported_as_observed_applications() {
-    let source = r#"
-type Mixed = | Mixed { t: tensor[2, f32], n: i32 }
-def loss(p: Mixed) -> f32 = match p with {
-  | Mixed { t, n: _ } => tensor_to_scalar(sum(t, 0))
-}
-def derivative(x: tensor[2, f32]) -> tensor[2, f32] = {
-  g = grad(loss)(Mixed { t: x, n: 3 })
-  g.t
-}
-"#;
+    let source = include_str!(
+        "fixtures/core/tests/lowering_trace/host_structured_results_are_not_reported_as_observed_applications_15.dp"
+    );
     let program = checked(source);
     let (library, trace) = try_lower_program_to_library_with_trace(&program).unwrap();
     same_dag(
@@ -630,10 +585,9 @@ def derivative(x: tensor[2, f32]) -> tensor[2, f32] = {
 #[cfg(feature = "lowering-trace")]
 #[test]
 fn specialization_records_both_named_and_actual_dimension_types() {
-    let source = r#"
-def loss[n](x: tensor[n, f32]) -> f32 = tensor_to_scalar(sum(mul(x, x), 0))
-def derivative(y: tensor[3, f32]) -> tensor[3, f32] = grad(loss)(y)
-"#;
+    let source = include_str!(
+        "fixtures/core/tests/lowering_trace/specialization_records_both_named_and_actual_dimension_types_16.dp"
+    );
     let (_, trace) = try_lower_program_to_library_with_trace(&checked(source)).unwrap();
     assert_eq!(trace.gradients.len(), 1);
     let application = trace.gradients[0].application.as_ref().unwrap();
@@ -659,10 +613,9 @@ def derivative(y: tensor[3, f32]) -> tensor[3, f32] = grad(loss)(y)
 #[cfg(feature = "lowering-trace")]
 #[test]
 fn selected_wrt_does_not_drop_the_other_argument_binding() {
-    let source = r#"
-def loss(x: tensor[3, f32], y: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(mul(x, y), 0))
-def derivative(x: tensor[3, f32], y: tensor[3, f32]) -> tensor[3, f32] = grad(loss, wrt=x)(x, y)
-"#;
+    let source = include_str!(
+        "fixtures/core/tests/lowering_trace/selected_wrt_does_not_drop_the_other_argument_binding_17.dp"
+    );
     let (_, trace) = try_lower_program_to_library_with_trace(&checked(source)).unwrap();
     let grad = &trace.gradients[0];
     let application = grad.application.as_ref().unwrap();
@@ -722,7 +675,9 @@ fn completed_application_snapshots_do_not_alias_later_mutations() {
 #[cfg(feature = "lowering-trace")]
 #[test]
 fn full_integer_constants_keep_bits_beyond_the_f64_exact_range() {
-    let source = "def values() -> tensor[2, i64] = [9007199254740993, -9007199254740993]\n";
+    let source = include_str!(
+        "fixtures/core/tests/lowering_trace/full_integer_constants_keep_bits_beyond_the_f64_exact_range_18.dp"
+    );
     let (library, trace) = try_lower_program_to_library_with_trace(&checked(source)).unwrap();
     for dag in [
         &trace.normalization.before_dce,
@@ -763,12 +718,9 @@ fn full_integer_constants_keep_bits_beyond_the_f64_exact_range() {
 #[cfg(feature = "lowering-trace")]
 #[test]
 fn unresolved_and_vectorized_gradients_are_explicit_boundaries() {
-    let source = r#"
-def unknown(model: tensor[3, f32] -> f32, x: tensor[3, f32]) -> tensor[3, f32] = {
-  target = fn (v: tensor[3, f32]) -> model(v)
-  grad(target, wrt=v)(x)
-}
-"#;
+    let source = include_str!(
+        "fixtures/core/tests/lowering_trace/unresolved_and_vectorized_gradients_are_explicit_boundaries_19.dp"
+    );
     let (library, trace) = try_lower_program_to_library_with_trace(&checked(source)).unwrap();
     assert!(library.rootless_defs().contains("unknown"));
     assert!(trace.gradients.is_empty());
@@ -784,23 +736,51 @@ def unknown(model: tensor[3, f32] -> f32, x: tensor[3, f32]) -> tensor[3, f32] =
 
     for (transform, result_type, boundary, context) in [
         (
-            "vmap(loss)",
-            "tensor[2, f32]",
+            "(vmap {} (var {} loss) (lit {type: (t-prim {} i32)} 0))",
+            "(t-tensor {} (d-lit {} 2) (t-prim {} f32))",
             BoundaryKind::Vmap,
             ContextKind::Vmap,
         ),
         (
-            "vmap(grad(loss))",
-            "tensor[2, 3, f32]",
+            "(vmap {} (grad {} (var {} loss)) (lit {type: (t-prim {} i32)} 0))",
+            "(t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))",
             BoundaryKind::VmapGradient,
             ContextKind::VmapGradient,
         ),
     ] {
         let source = format!(
-            r#"
-def loss(x: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(mul(x, x), 0))
-def mapped(x: tensor[2, 3, f32]) -> {result_type} = x |> {transform}
-"#
+            r#"(defsig {{}}
+          loss
+          (t-fn {{}} (t-tensor {{}} (d-lit {{}} 3) (t-prim {{}} f32)) (t-prim {{}} f32)))
+        
+        (def {{}}
+          loss
+          (fn {{}}
+            (params {{}} (x {{type: (t-var {{}} _)}}))
+            (app {{span: "surf:38..73"}}
+              (var {{span: "surf:38..54"}} tensor_to_scalar)
+              (app {{span: "surf:55..72"}}
+                (var {{span: "surf:55..58"}} sum)
+                (app {{span: "surf:59..68"}}
+                  (var {{span: "surf:59..62"}} mul)
+                  (var {{span: "surf:63..64"}} x)
+                  (var {{span: "surf:66..67"}} x))
+                (lit {{span: "surf:70..71", type: (t-prim {{}} i32)}} 0)))))
+        
+        (defsig {{}}
+          mapped
+          (t-fn {{}}
+            (t-tensor {{}} (d-lit {{}} 2) (d-lit {{}} 3) (t-prim {{}} f32))
+            {result_type}))
+        
+        (def {{}}
+          mapped
+          (fn {{}}
+            (params {{}} (x {{type: (t-var {{}} _)}}))
+            (pipe {{span: "surf:123..141"}}
+              (var {{span: "surf:123..124"}} x)
+              {transform})))
+        "#
         );
         let program = checked(&source);
         let (library, trace) = try_lower_program_to_library_with_trace(&program).unwrap();

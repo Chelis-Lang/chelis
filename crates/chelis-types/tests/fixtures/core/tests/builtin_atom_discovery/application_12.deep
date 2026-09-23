@@ -1,0 +1,28 @@
+(def {}
+  equal
+  (fn {}
+    (params {} x y)
+    (app {span: "surf:17..24"}
+      (var {span: "surf:17..19"} eq)
+      (var {span: "surf:20..21"} x)
+      (var {span: "surf:22..23"} y))))
+
+(def {}
+  a
+  (app {span: "surf:29..39"}
+    (var {span: "surf:29..34"} equal)
+    (lit {span: "surf:35..36", type: (t-prim {} i32)} 1)
+    (lit {span: "surf:37..38", type: (t-prim {} i32)} 1)))
+
+(def {}
+  b
+  (app {span: "surf:44..58"}
+    (var {span: "surf:44..49"} equal)
+    (app {span: "surf:50..53"}
+      (var {} Cons)
+      (lit {span: "surf:51..52", type: (t-prim {} i32)} 1)
+      (var {} Nil))
+    (app {span: "surf:54..57"}
+      (var {} Cons)
+      (lit {span: "surf:55..56", type: (t-prim {} i32)} 1)
+      (var {} Nil))))

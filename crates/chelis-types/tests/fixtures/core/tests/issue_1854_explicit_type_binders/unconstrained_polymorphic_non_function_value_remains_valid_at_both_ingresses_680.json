@@ -1,0 +1,265 @@
+[
+  {
+    "List": [
+      {
+        "elements": [
+          {
+            "Atom": [
+              {
+                "Tag": "Defsig"
+              },
+              {
+                "offset": 0,
+                "len": 0
+              }
+            ]
+          },
+          {
+            "Map": [
+              {
+                "entries": []
+              },
+              {
+                "offset": 0,
+                "len": 0
+              }
+            ]
+          },
+          {
+            "Atom": [
+              {
+                "Name": "empty"
+              },
+              {
+                "offset": 0,
+                "len": 0
+              }
+            ]
+          },
+          {
+            "List": [
+              {
+                "elements": [
+                  {
+                    "Atom": [
+                      {
+                        "Name": "p"
+                      },
+                      {
+                        "offset": 0,
+                        "len": 0
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "offset": 0,
+                "len": 0
+              }
+            ]
+          },
+          {
+            "List": [
+              {
+                "elements": [
+                  {
+                    "Atom": [
+                      {
+                        "Tag": "TAdt"
+                      },
+                      {
+                        "offset": 14,
+                        "len": 7
+                      }
+                    ]
+                  },
+                  {
+                    "Map": [
+                      {
+                        "entries": []
+                      },
+                      {
+                        "offset": 14,
+                        "len": 7
+                      }
+                    ]
+                  },
+                  {
+                    "Atom": [
+                      {
+                        "Name": "List"
+                      },
+                      {
+                        "offset": 0,
+                        "len": 0
+                      }
+                    ]
+                  },
+                  {
+                    "List": [
+                      {
+                        "elements": [
+                          {
+                            "Atom": [
+                              {
+                                "Tag": "TVar"
+                              },
+                              {
+                                "offset": 19,
+                                "len": 1
+                              }
+                            ]
+                          },
+                          {
+                            "Map": [
+                              {
+                                "entries": []
+                              },
+                              {
+                                "offset": 19,
+                                "len": 1
+                              }
+                            ]
+                          },
+                          {
+                            "Atom": [
+                              {
+                                "Name": "p"
+                              },
+                              {
+                                "offset": 0,
+                                "len": 0
+                              }
+                            ]
+                          }
+                        ]
+                      },
+                      {
+                        "offset": 19,
+                        "len": 1
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "offset": 14,
+                "len": 7
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "offset": 0,
+        "len": 0
+      }
+    ]
+  },
+  {
+    "List": [
+      {
+        "elements": [
+          {
+            "Atom": [
+              {
+                "Tag": "Def"
+              },
+              {
+                "offset": 0,
+                "len": 0
+              }
+            ]
+          },
+          {
+            "Map": [
+              {
+                "entries": []
+              },
+              {
+                "offset": 0,
+                "len": 0
+              }
+            ]
+          },
+          {
+            "Atom": [
+              {
+                "Name": "empty"
+              },
+              {
+                "offset": 0,
+                "len": 0
+              }
+            ]
+          },
+          {
+            "List": [
+              {
+                "elements": [
+                  {
+                    "Atom": [
+                      {
+                        "Tag": "Var"
+                      },
+                      {
+                        "offset": 0,
+                        "len": 0
+                      }
+                    ]
+                  },
+                  {
+                    "Map": [
+                      {
+                        "entries": [
+                          [
+                            "span",
+                            {
+                              "Atom": [
+                                {
+                                  "Str": "surf:30..32"
+                                },
+                                {
+                                  "offset": 0,
+                                  "len": 0
+                                }
+                              ]
+                            }
+                          ]
+                        ]
+                      },
+                      {
+                        "offset": 0,
+                        "len": 0
+                      }
+                    ]
+                  },
+                  {
+                    "Atom": [
+                      {
+                        "Name": "Nil"
+                      },
+                      {
+                        "offset": 0,
+                        "len": 0
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "offset": 0,
+                "len": 0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "offset": 0,
+        "len": 0
+      }
+    ]
+  }
+]

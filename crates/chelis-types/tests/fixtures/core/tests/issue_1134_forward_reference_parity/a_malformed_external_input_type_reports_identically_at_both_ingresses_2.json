@@ -1,0 +1,197 @@
+[
+  {
+    "List": [
+      {
+        "elements": [
+          {
+            "Atom": [
+              {
+                "Tag": "Defsig"
+              },
+              {
+                "offset": 0,
+                "len": 0
+              }
+            ]
+          },
+          {
+            "Map": [
+              {
+                "entries": []
+              },
+              {
+                "offset": 0,
+                "len": 0
+              }
+            ]
+          },
+          {
+            "Atom": [
+              {
+                "Name": "x"
+              },
+              {
+                "offset": 0,
+                "len": 0
+              }
+            ]
+          },
+          {
+            "List": [
+              {
+                "elements": [
+                  {
+                    "Atom": [
+                      {
+                        "Tag": "TAdt"
+                      },
+                      {
+                        "offset": 3,
+                        "len": 7
+                      }
+                    ]
+                  },
+                  {
+                    "Map": [
+                      {
+                        "entries": []
+                      },
+                      {
+                        "offset": 3,
+                        "len": 7
+                      }
+                    ]
+                  },
+                  {
+                    "Atom": [
+                      {
+                        "Name": "Unknown"
+                      },
+                      {
+                        "offset": 0,
+                        "len": 0
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "offset": 3,
+                "len": 7
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "offset": 0,
+        "len": 0
+      }
+    ]
+  },
+  {
+    "List": [
+      {
+        "elements": [
+          {
+            "Atom": [
+              {
+                "Tag": "Def"
+              },
+              {
+                "offset": 0,
+                "len": 0
+              }
+            ]
+          },
+          {
+            "Map": [
+              {
+                "entries": []
+              },
+              {
+                "offset": 0,
+                "len": 0
+              }
+            ]
+          },
+          {
+            "Atom": [
+              {
+                "Name": "x"
+              },
+              {
+                "offset": 0,
+                "len": 0
+              }
+            ]
+          },
+          {
+            "List": [
+              {
+                "elements": [
+                  {
+                    "Atom": [
+                      {
+                        "Tag": "Var"
+                      },
+                      {
+                        "offset": 0,
+                        "len": 0
+                      }
+                    ]
+                  },
+                  {
+                    "Map": [
+                      {
+                        "entries": [
+                          [
+                            "span",
+                            {
+                              "Atom": [
+                                {
+                                  "Str": "surf:13..14"
+                                },
+                                {
+                                  "offset": 0,
+                                  "len": 0
+                                }
+                              ]
+                            }
+                          ]
+                        ]
+                      },
+                      {
+                        "offset": 0,
+                        "len": 0
+                      }
+                    ]
+                  },
+                  {
+                    "Atom": [
+                      {
+                        "Name": "x"
+                      },
+                      {
+                        "offset": 0,
+                        "len": 0
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "offset": 0,
+                "len": 0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "offset": 0,
+        "len": 0
+      }
+    ]
+  }
+]

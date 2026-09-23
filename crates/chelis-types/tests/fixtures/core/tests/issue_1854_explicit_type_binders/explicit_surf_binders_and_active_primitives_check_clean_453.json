@@ -1,0 +1,427 @@
+[
+  {
+    "List": [
+      {
+        "elements": [
+          {
+            "Atom": [
+              {
+                "Tag": "Defsig"
+              },
+              {
+                "offset": 0,
+                "len": 0
+              }
+            ]
+          },
+          {
+            "Map": [
+              {
+                "entries": []
+              },
+              {
+                "offset": 0,
+                "len": 0
+              }
+            ]
+          },
+          {
+            "Atom": [
+              {
+                "Name": "ident"
+              },
+              {
+                "offset": 0,
+                "len": 0
+              }
+            ]
+          },
+          {
+            "List": [
+              {
+                "elements": [
+                  {
+                    "Atom": [
+                      {
+                        "Tag": "TFn"
+                      },
+                      {
+                        "offset": 0,
+                        "len": 0
+                      }
+                    ]
+                  },
+                  {
+                    "Map": [
+                      {
+                        "entries": []
+                      },
+                      {
+                        "offset": 0,
+                        "len": 0
+                      }
+                    ]
+                  },
+                  {
+                    "List": [
+                      {
+                        "elements": [
+                          {
+                            "Atom": [
+                              {
+                                "Tag": "TPrim"
+                              },
+                              {
+                                "offset": 13,
+                                "len": 3
+                              }
+                            ]
+                          },
+                          {
+                            "Map": [
+                              {
+                                "entries": []
+                              },
+                              {
+                                "offset": 13,
+                                "len": 3
+                              }
+                            ]
+                          },
+                          {
+                            "Atom": [
+                              {
+                                "Name": "f32"
+                              },
+                              {
+                                "offset": 0,
+                                "len": 0
+                              }
+                            ]
+                          }
+                        ]
+                      },
+                      {
+                        "offset": 13,
+                        "len": 3
+                      }
+                    ]
+                  },
+                  {
+                    "List": [
+                      {
+                        "elements": [
+                          {
+                            "Atom": [
+                              {
+                                "Tag": "TPrim"
+                              },
+                              {
+                                "offset": 21,
+                                "len": 3
+                              }
+                            ]
+                          },
+                          {
+                            "Map": [
+                              {
+                                "entries": []
+                              },
+                              {
+                                "offset": 21,
+                                "len": 3
+                              }
+                            ]
+                          },
+                          {
+                            "Atom": [
+                              {
+                                "Name": "f32"
+                              },
+                              {
+                                "offset": 0,
+                                "len": 0
+                              }
+                            ]
+                          }
+                        ]
+                      },
+                      {
+                        "offset": 21,
+                        "len": 3
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "offset": 0,
+                "len": 0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "offset": 0,
+        "len": 0
+      }
+    ]
+  },
+  {
+    "List": [
+      {
+        "elements": [
+          {
+            "Atom": [
+              {
+                "Tag": "Def"
+              },
+              {
+                "offset": 0,
+                "len": 0
+              }
+            ]
+          },
+          {
+            "Map": [
+              {
+                "entries": []
+              },
+              {
+                "offset": 0,
+                "len": 0
+              }
+            ]
+          },
+          {
+            "Atom": [
+              {
+                "Name": "ident"
+              },
+              {
+                "offset": 0,
+                "len": 0
+              }
+            ]
+          },
+          {
+            "List": [
+              {
+                "elements": [
+                  {
+                    "Atom": [
+                      {
+                        "Tag": "Fn"
+                      },
+                      {
+                        "offset": 0,
+                        "len": 0
+                      }
+                    ]
+                  },
+                  {
+                    "Map": [
+                      {
+                        "entries": []
+                      },
+                      {
+                        "offset": 0,
+                        "len": 0
+                      }
+                    ]
+                  },
+                  {
+                    "List": [
+                      {
+                        "elements": [
+                          {
+                            "Atom": [
+                              {
+                                "Tag": "Params"
+                              },
+                              {
+                                "offset": 0,
+                                "len": 0
+                              }
+                            ]
+                          },
+                          {
+                            "Map": [
+                              {
+                                "entries": []
+                              },
+                              {
+                                "offset": 0,
+                                "len": 0
+                              }
+                            ]
+                          },
+                          {
+                            "List": [
+                              {
+                                "elements": [
+                                  {
+                                    "Atom": [
+                                      {
+                                        "Name": "x"
+                                      },
+                                      {
+                                        "offset": 0,
+                                        "len": 0
+                                      }
+                                    ]
+                                  },
+                                  {
+                                    "Map": [
+                                      {
+                                        "entries": [
+                                          [
+                                            "type",
+                                            {
+                                              "List": [
+                                                {
+                                                  "elements": [
+                                                    {
+                                                      "Atom": [
+                                                        {
+                                                          "Tag": "TVar"
+                                                        },
+                                                        {
+                                                          "offset": 0,
+                                                          "len": 0
+                                                        }
+                                                      ]
+                                                    },
+                                                    {
+                                                      "Map": [
+                                                        {
+                                                          "entries": []
+                                                        },
+                                                        {
+                                                          "offset": 0,
+                                                          "len": 0
+                                                        }
+                                                      ]
+                                                    },
+                                                    {
+                                                      "Atom": [
+                                                        {
+                                                          "Name": "_"
+                                                        },
+                                                        {
+                                                          "offset": 0,
+                                                          "len": 0
+                                                        }
+                                                      ]
+                                                    }
+                                                  ]
+                                                },
+                                                {
+                                                  "offset": 0,
+                                                  "len": 0
+                                                }
+                                              ]
+                                            }
+                                          ]
+                                        ]
+                                      },
+                                      {
+                                        "offset": 0,
+                                        "len": 0
+                                      }
+                                    ]
+                                  }
+                                ]
+                              },
+                              {
+                                "offset": 0,
+                                "len": 0
+                              }
+                            ]
+                          }
+                        ]
+                      },
+                      {
+                        "offset": 0,
+                        "len": 0
+                      }
+                    ]
+                  },
+                  {
+                    "List": [
+                      {
+                        "elements": [
+                          {
+                            "Atom": [
+                              {
+                                "Tag": "Var"
+                              },
+                              {
+                                "offset": 0,
+                                "len": 0
+                              }
+                            ]
+                          },
+                          {
+                            "Map": [
+                              {
+                                "entries": [
+                                  [
+                                    "span",
+                                    {
+                                      "Atom": [
+                                        {
+                                          "Str": "surf:27..28"
+                                        },
+                                        {
+                                          "offset": 0,
+                                          "len": 0
+                                        }
+                                      ]
+                                    }
+                                  ]
+                                ]
+                              },
+                              {
+                                "offset": 0,
+                                "len": 0
+                              }
+                            ]
+                          },
+                          {
+                            "Atom": [
+                              {
+                                "Name": "x"
+                              },
+                              {
+                                "offset": 0,
+                                "len": 0
+                              }
+                            ]
+                          }
+                        ]
+                      },
+                      {
+                        "offset": 0,
+                        "len": 0
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "offset": 0,
+                "len": 0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "offset": 0,
+        "len": 0
+      }
+    ]
+  }
+]

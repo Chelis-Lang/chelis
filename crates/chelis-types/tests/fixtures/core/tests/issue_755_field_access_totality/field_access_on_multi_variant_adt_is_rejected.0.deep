@@ -1,0 +1,13 @@
+(deftype {}
+  Shape
+  ()
+  (variant {} Circle (t-prim {} f32))
+  (variant {} Square (t-prim {} f32)))
+
+(defsig {} f (t-fn {} (t-adt {} Shape) (t-prim {} f32)))
+
+(def {}
+  f
+  (fn {}
+    (params {} (s {type: (t-var {} _)}))
+    (access {span: "surf:66..74"} (var {span: "surf:66..67"} s) radius)))

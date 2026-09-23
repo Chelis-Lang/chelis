@@ -1,0 +1,48 @@
+(defsig {}
+  roundtrip
+  (n)
+  (t-fn {}
+    (t-ref {} (t-tensor {} (d-var {} n) (d-lit {} 4) (t-prim {} f32)))
+    (t-tensor {} (d-var {} n) (d-lit {} 4) (t-prim {} f32))))
+
+(def {}
+  roundtrip
+  (fn {}
+    (params {} x)
+    (app {span: "surf:78..199"}
+      (var {span: "surf:78..85"} reshape)
+      (app {span: "surf:86..147"}
+        (var {span: "surf:86..93"} reshape)
+        (var {span: "surf:94..95"} x)
+        (app {span: "surf:97..146"}
+          (var {} Cons)
+          (cast {span: "surf:98..131"}
+            (app {span: "surf:103..125"}
+              (var {span: "surf:103..108"} shape)
+              (var {span: "surf:109..110"} x)
+              (cast {span: "surf:112..124"}
+                (lit {span: "surf:117..118", surf_literal_style: "unsuffixed", type: (t-prim {} i32)} 0)
+                (t-prim {} i32)))
+            (t-prim {} i64))
+          (app {}
+            (var {} Cons)
+            (cast {span: "surf:133..145"}
+              (lit {span: "surf:138..139", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 4)
+              (t-prim {} i64))
+            (var {} Nil))))
+      (app {span: "surf:149..198"}
+        (var {} Cons)
+        (cast {span: "surf:150..183"}
+          (app {span: "surf:155..177"}
+            (var {span: "surf:155..160"} shape)
+            (var {span: "surf:161..162"} x)
+            (cast {span: "surf:164..176"}
+              (lit {span: "surf:169..170", surf_literal_style: "unsuffixed", type: (t-prim {} i32)} 0)
+              (t-prim {} i32)))
+          (t-prim {} i64))
+        (app {}
+          (var {} Cons)
+          (cast {span: "surf:185..197"}
+            (lit {span: "surf:190..191", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 4)
+            (t-prim {} i64))
+          (var {} Nil))))))

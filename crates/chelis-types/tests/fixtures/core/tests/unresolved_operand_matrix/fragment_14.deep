@@ -1,0 +1,4 @@
+(app {span: "surf:16..29"}
+    (var {span: "surf:16..20"} mean)
+    (var {span: "surf:21..22"} x)
+    (lit {span: "surf:24..28", surf_literal_style: "explicit", type: (t-prim {} i32)} 0))

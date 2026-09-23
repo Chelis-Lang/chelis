@@ -1,0 +1,30 @@
+(defsig {dtype_bounds: {p: int}}
+  countdown
+  (p)
+  (t-fn {} (t-var {} p) (t-var {} p) (t-var {} p)))
+
+(def {}
+  countdown
+  (fn {}
+    (params {} current stop)
+    (if {span: "surf:67..131"}
+      (app {span: "surf:70..88"}
+        (var {span: "surf:70..73"} gte)
+        (var {span: "surf:74..81"} current)
+        (var {span: "surf:83..87"} stop))
+      (var {span: "surf:94..101"} current)
+      (app {span: "surf:107..131"}
+        (var {span: "surf:107..116"} countdown)
+        (var {span: "surf:117..124"} current)
+        (var {span: "surf:126..130"} stop)))))
+
+(defsig {} probe (t-fn {} (t-prim {} bf16) (t-prim {} bf16)))
+
+(def {}
+  probe
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:161..176"}
+      (var {span: "surf:161..170"} countdown)
+      (var {span: "surf:171..172"} x)
+      (var {span: "surf:174..175"} x))))

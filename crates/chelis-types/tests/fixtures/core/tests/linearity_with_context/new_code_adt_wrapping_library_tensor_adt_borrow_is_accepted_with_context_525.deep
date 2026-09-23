@@ -1,0 +1,28 @@
+(deftype {}
+  Outer
+  (n)
+  (variant {} Outer (field {} inner (t-adt {} Inner (t-var {} n)))))
+
+(defsig {}
+  borrow_outer
+  (n)
+  (t-fn {} (t-ref {} (t-adt {} Outer (t-var {} n))) (t-prim {} bool)))
+
+(def {}
+  borrow_outer
+  (fn {}
+    (params {} o)
+    (lit {span: "surf:109..113", type: (t-prim {} bool)} true)))
+
+(defsig {}
+  consume_outer
+  (n)
+  (t-fn {} (t-adt {} Outer (t-var {} n)) (t-prim {} bool)))
+
+(def {}
+  consume_outer
+  (fn {}
+    (params {} (o {type: (t-var {} _)}))
+    (app {span: "surf:158..174"}
+      (var {span: "surf:158..170"} borrow_outer)
+      (borrow {span: "surf:171..173"} (var {span: "surf:172..173"} o)))))

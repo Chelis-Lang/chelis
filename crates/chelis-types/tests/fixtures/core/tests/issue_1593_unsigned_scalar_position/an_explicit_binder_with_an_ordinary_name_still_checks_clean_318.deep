@@ -1,0 +1,14 @@
+(module {surf_path: "P.M"}
+  p.m
+  (export {} f)
+  (defsig {}
+    f
+    (p)
+    (t-fn {}
+      (t-tensor {} (d-lit {} 3) (t-var {} p))
+      (t-tensor {} (d-lit {} 3) (t-var {} p))))
+  (def {}
+    f
+    (fn {}
+      (params {} (x {type: (t-var {} _)}))
+      (var {span: "surf:66..67"} x))))

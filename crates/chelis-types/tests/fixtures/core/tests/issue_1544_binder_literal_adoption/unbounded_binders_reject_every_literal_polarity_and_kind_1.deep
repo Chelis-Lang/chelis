@@ -1,0 +1,9 @@
+(defsig {} f (p) (t-fn {} (t-var {} p) (t-var {} p)))
+
+(def {}
+  f
+  (fn {}
+    (params {} x)
+    (cast {span: "surf:28..40"}
+      (lit {span: "surf:33..36", type: (t-prim {} f32)} 0.1)
+      (t-var {} p))))

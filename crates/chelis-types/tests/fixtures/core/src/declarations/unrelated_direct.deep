@@ -1,0 +1,18 @@
+(module {surf_path: "UnrelatedDirect"}
+  unrelateddirect
+  (def {} unrelated (var {span: "surf:36..41"} later))
+  (def {}
+    root
+    (app {span: "surf:50..65"}
+      (var {span: "surf:50..62"} read_current)
+      (lit {span: "surf:63..64", type: (t-prim {} i32)} 0)))
+  (def {} later (lit {span: "surf:76..83", type: (t-prim {} i32)} 5))
+  (defsig {} read_current (t-fn {} (t-prim {} i32) (t-prim {} i32)))
+  (def {}
+    read_current
+    (fn {}
+      (params {} (n {type: (t-var {} _)}))
+      (app {span: "surf:120..133"}
+        (var {span: "surf:120..123"} add)
+        (var {span: "surf:124..125"} n)
+        (var {span: "surf:127..132"} later)))))

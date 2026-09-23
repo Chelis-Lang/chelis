@@ -1,0 +1,34 @@
+(defsig {}
+  add_axis
+  (rest)
+  (t-fn {}
+    (t-ref {} (t-tensor {} (d-rank {} rest) (t-prim {} f32)))
+    (t-tensor {} (d-rank {} rest) (d-name {} one) (t-prim {} f32))))
+
+(def {}
+  add_axis
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:74..94"}
+      (var {span: "surf:74..80"} insert)
+      (var {span: "surf:81..82"} x)
+      (var {span: "surf:84..87"} one)
+      (lit {span: "surf:89..93", type: (t-prim {} i64)} 1))))
+
+(defsig {}
+  a2
+  (t-fn {}
+    (t-ref {} (t-tensor {} (d-name {} batch) (d-name {} seq) (t-prim {} f32)))
+    (t-tensor {}
+      (d-name {} batch)
+      (d-name {} seq)
+      (d-name {} one)
+      (t-prim {} f32))))
+
+(def {}
+  a2
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:165..176"}
+      (var {span: "surf:165..173"} add_axis)
+      (var {span: "surf:174..175"} x))))

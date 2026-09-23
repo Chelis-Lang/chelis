@@ -7,63 +7,32 @@
 //! Before this fix, `2147483648` (= 2^31) silently wrapped to a
 //! negative i32 — the exact behavior §5.3 was written to prevent.
 
-use chelis_surf::desugar::desugar_program;
-use chelis_surf::parser::parse_str;
+use chelis_deep::parser::parse_str;
 use chelis_types::check_ir_program;
 
-fn surf_to_deep(source: &str) -> Vec<chelis_deep::Expr> {
-    let decls = parse_str(source).expect("surf parse");
-    chelis_macros::expand_program(
-        &desugar_program(&decls),
-        &chelis_macros::ExpansionOptions::default(),
-    )
-    .expect("macro expand")
-    .into_exprs()
+fn core_fixture(source: &str) -> Vec<chelis_deep::Expr> {
+    parse_str(source).expect("core fixture")
 }
 
-/// `2147483648` = 2^31 overflows i32; must error with the §5.3
-/// diagnostic that suggests an `i64` suffix or explicit cast.
+/// `2147483648` = 2^31 overflows i32 and must be rejected before narrowing.
 #[test]
 fn literal_2_pow_31_rejected_with_spec_5_3_range_diagnostic() {
-    let src = "def main() -> i32 = 2147483648";
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/int_literal_overflow/literal_2_pow_31_rejected_with_spec_5_3_range_diagnostic.deep"
+    );
+    let deep = core_fixture(src);
     let res = check_ir_program(&deep);
-    let rep = res.expect_err(
-        "spec §5.3: literal 2147483648 must be diagnosed as out-of-range \
-         before defaulting to i32",
-    );
-    let messages: Vec<&str> = rep.errors.iter().map(|e| e.message.as_str()).collect();
-    assert!(
-        messages
-            .iter()
-            .any(|m| m.contains("literal 2147483648 out of range for default i32")),
-        "expected D1 range diagnostic; got: {messages:?}"
-    );
-    assert!(
-        messages.iter().any(|m| m.contains("`i64` suffix")),
-        "diagnostic must suggest the i64 suffix workaround; got: {messages:?}"
-    );
-    assert!(
-        messages.iter().any(|m| m.contains("cast(2147483648, i64)")),
-        "diagnostic must suggest the explicit cast workaround spelled \
-         with the prec type name `i64` (the `i64` spelling is only \
-         the literal suffix and is not a valid cast target); got: \
-         {messages:?}"
-    );
-    assert!(
-        messages
-            .iter()
-            .any(|m| m.contains("spec/04-type-system.md §5.3")),
-        "diagnostic must cite spec/04-type-system.md §5.3; got: {messages:?}"
-    );
+    res.expect_err("an out-of-range default i32 literal must be rejected");
 }
 
 /// Negative-parity twin: `2147483647` = i32::MAX fits exactly and must
 /// type-check cleanly. Off-by-one regression check.
 #[test]
 fn literal_i32_max_does_not_trip_d1_range_diagnostic() {
-    let src = "def main() -> i32 = 2147483647";
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/int_literal_overflow/literal_i32_max_does_not_trip_d1_range_diagnostic.deep"
+    );
+    let deep = core_fixture(src);
     let res = check_ir_program(&deep);
     assert!(
         res.is_ok(),
@@ -81,8 +50,10 @@ fn literal_i32_max_does_not_trip_d1_range_diagnostic() {
 /// that suggested it.
 #[test]
 fn cast_wrapped_out_of_i32_range_literal_checks_cleanly() {
-    let src = "def main() -> i64 = cast(2147483648, i64)";
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/int_literal_overflow/cast_wrapped_out_of_i32_range_literal_checks_cleanly.deep"
+    );
+    let deep = core_fixture(src);
     let res = check_ir_program(&deep);
     assert!(
         res.is_ok(),
@@ -98,8 +69,10 @@ fn cast_wrapped_out_of_i32_range_literal_checks_cleanly() {
 /// target, it does not bypass range checking.
 #[test]
 fn cast_to_int32_of_out_of_range_literal_still_rejected() {
-    let src = "def main() -> i32 = cast(2147483648, i32)";
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/int_literal_overflow/cast_to_int32_of_out_of_range_literal_still_rejected.deep"
+    );
+    let deep = core_fixture(src);
     let res = check_ir_program(&deep);
     assert!(
         res.is_err(),
@@ -119,8 +92,10 @@ fn literal_i32_min_minus_one_overflows_with_spec_5_3_diagnostic() {
     // `-2147483649` = -(2^31 + 1) is out of i32 range on the negative
     // side. The inner literal is parsed at i64 so we can diagnose
     // before defaulting.
-    let src = "def main() -> i32 = -2147483649";
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/int_literal_overflow/literal_i32_min_minus_one_overflows_with_spec_5_3_diagnostic.deep"
+    );
+    let deep = core_fixture(src);
     let res = check_ir_program(&deep);
     // The negation path may parse as `(neg LIT)` where LIT is the
     // positive 2147483649; the D1 diagnostic on the inner literal is

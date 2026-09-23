@@ -1,0 +1,38 @@
+(deftype {}
+  PairBox
+  ()
+  (variant {} PairBox (t-prim {} string) (t-prim {} string)))
+
+(defsig {} choose (t-fn {} (t-adt {} PairBox) (t-prim {} string)))
+
+(def {}
+  choose
+  (fn {}
+    (params {} (b {type: (t-var {} _)}))
+    (match {span: "surf:79..215"}
+      (var {span: "surf:85..86"} b)
+      (arm {}
+        (pat-ctor {} PairBox (pat-var {} left) (pat-var {} right))
+        (app {span: "surf:122..150"}
+          (var {span: "surf:122..137"} string_contains)
+          (var {span: "surf:138..142"} left)
+          (var {span: "surf:144..149"} right))
+        (var {span: "surf:154..158"} left))
+      (arm {}
+        (pat-ctor {} PairBox (pat-var {} left) (pat-var {} right))
+        ()
+        (app {span: "surf:187..213"}
+          (var {span: "surf:187..200"} string_concat)
+          (var {span: "surf:201..205"} left)
+          (var {span: "surf:207..212"} right))))))
+
+(def {}
+  left
+  (app {span: "surf:223..248"}
+    (var {span: "surf:223..229"} choose)
+    (app {span: "surf:230..247"}
+      (var {span: "surf:230..237"} PairBox)
+      (lit {span: "surf:238..241", type: (t-prim {} string)} "a")
+      (lit {span: "surf:243..246", type: (t-prim {} string)} "b"))))
+
+(def {} right (lit {span: "surf:257..266", type: (t-prim {} string)} "outside"))

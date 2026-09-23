@@ -1,0 +1,11 @@
+(defsig {}
+  my_loader
+  (t-fn {eff: (effects {})} (t-prim {} string) (t-prim {} string)))
+
+(def {}
+  my_loader
+  (fn {}
+    (params {} (p {type: (t-var {} _)}))
+    (app {span: "surf:43..54"}
+      (var {span: "surf:43..51"} lib_load)
+      (var {span: "surf:52..53"} p))))

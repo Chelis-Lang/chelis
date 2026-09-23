@@ -1,0 +1,42 @@
+(deftype {}
+  Column
+  (n a)
+  (variant {} Column (t-tensor {} (d-var {} n) (t-var {} a))))
+
+(deftype {} Hamt (a) (variant {} Leaf (field {} value (t-var {} a))))
+
+(deftype {}
+  Frame
+  (n a)
+  (variant {}
+    Frame
+    (field {} cols (t-adt {} Hamt (t-adt {} Column (t-var {} n) (t-var {} a))))))
+
+(defsig {} singleton (a) (t-fn {} (t-var {} a) (t-adt {} Hamt (t-var {} a))))
+
+(def {}
+  singleton
+  (fn {}
+    (params {} (value {type: (t-var {} _)}))
+    (record {span: "surf:175..189"}
+      Leaf
+      (kv {} value (var {span: "surf:182..187"} value)))))
+
+(defsig {}
+  from_column
+  (n a)
+  (t-fn {}
+    (t-adt {} Column (t-var {} n) (t-var {} a))
+    (t-adt {} Frame (t-var {} n) (t-var {} a))))
+
+(def {}
+  from_column
+  (fn {}
+    (params {} (column {type: (t-var {} _)}))
+    (record {span: "surf:253..286"}
+      Frame
+      (kv {}
+        cols
+        (app {span: "surf:267..284"}
+          (var {span: "surf:267..276"} singleton)
+          (var {span: "surf:277..283"} column))))))

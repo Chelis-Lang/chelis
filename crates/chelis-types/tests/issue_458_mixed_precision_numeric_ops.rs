@@ -28,9 +28,6 @@
 //! can never reappear. No "did not panic" assertions: every test pins the
 //! error kind and the operand precisions in the diagnostic.
 
-use chelis_macros::{ExpansionOptions, expand_program};
-use chelis_surf::desugar::desugar_program;
-use chelis_surf::parser::parse_str;
 use chelis_types::check_ir_program;
 use chelis_types::errors::CheckErrorKind;
 
@@ -38,11 +35,8 @@ use chelis_types::errors::CheckErrorKind;
 /// `(kind, message)` pairs of any diagnostics. An empty vector means the
 /// program type-checked cleanly.
 fn check_diagnostics(source: &str) -> Vec<(CheckErrorKind, String)> {
-    let decls = parse_str(source).expect("surf parse");
-    let exprs = expand_program(&desugar_program(&decls), &ExpansionOptions::default())
-        .expect("macro expand")
-        .into_exprs();
-    match check_ir_program(&exprs) {
+    let deep = chelis_deep::parse_and_stamp_file(source).expect("Deep fixture");
+    match check_ir_program(&deep) {
         Ok(_) => Vec::new(),
         Err(rep) => rep
             .errors
@@ -64,7 +58,9 @@ fn is_precision_mismatch(diags: &[(CheckErrorKind, String)]) -> bool {
 /// bound var).
 #[test]
 fn issue_458_div_f32_literal_over_i32_bound_var_is_precision_mismatch() {
-    let diags = check_diagnostics("def recip_n(n: i32) -> f32 = div(1.0, n)");
+    let diags = check_diagnostics(include_str!(
+        "fixtures/core/tests/issue_458_mixed_precision_numeric_ops/issue_458_div_f32_literal_over_i32_bound_var_is_precision_mismatch_1.deep"
+    ));
     assert!(
         !diags.is_empty(),
         "spec §5.1/§5.2: div(f32, i32-bound-var) must be a type error \
@@ -89,7 +85,9 @@ fn issue_458_div_f32_literal_over_i32_bound_var_is_precision_mismatch() {
 /// same diagnostic.
 #[test]
 fn issue_458_div_f32_literal_over_i32_literal_rejects_not_folds_to_quarter() {
-    let diags = check_diagnostics("out = div(1.0, 4)");
+    let diags = check_diagnostics(include_str!(
+        "fixtures/core/tests/issue_458_mixed_precision_numeric_ops/issue_458_div_f32_literal_over_i32_literal_rejects_not_folds_to_quarter_1.deep"
+    ));
     assert!(
         !diags.is_empty(),
         "spec §5.1: div(1.0, 4) is a mixed (f32, i32) pair and must be a type \
@@ -112,8 +110,12 @@ fn issue_458_div_f32_literal_over_i32_literal_rejects_not_folds_to_quarter() {
 /// divergence here is exactly the check↔eval gap #458 reported.
 #[test]
 fn issue_458_literal_and_bound_var_div_reject_identically() {
-    let literal = check_diagnostics("out = div(1.0, 4)");
-    let bound = check_diagnostics("def recip_n(n: i32) -> f32 = div(1.0, n)");
+    let literal = check_diagnostics(include_str!(
+        "fixtures/core/tests/issue_458_mixed_precision_numeric_ops/issue_458_literal_and_bound_var_div_reject_identically_1.deep"
+    ));
+    let bound = check_diagnostics(include_str!(
+        "fixtures/core/tests/issue_458_mixed_precision_numeric_ops/issue_458_literal_and_bound_var_div_reject_identically_2.deep"
+    ));
     let literal_msgs: Vec<&String> = literal.iter().map(|(_, m)| m).collect();
     let bound_msgs: Vec<&String> = bound.iter().map(|(_, m)| m).collect();
     assert_eq!(
@@ -129,7 +131,9 @@ fn issue_458_literal_and_bound_var_div_reject_identically() {
 /// so the only reason it rejects is the §5.1 precision rule, not §5.4).
 #[test]
 fn issue_458_add_f32_literal_over_i32_bound_var_is_precision_mismatch() {
-    let diags = check_diagnostics("def bump(n: i32) -> f32 = add(1.0, n)");
+    let diags = check_diagnostics(include_str!(
+        "fixtures/core/tests/issue_458_mixed_precision_numeric_ops/issue_458_add_f32_literal_over_i32_bound_var_is_precision_mismatch_1.deep"
+    ));
     assert!(
         is_precision_mismatch(&diags),
         "spec §5.1: add(f32, i32) must be a PrecisionMismatch (no implicit \
@@ -144,7 +148,9 @@ fn issue_458_add_f32_literal_over_i32_bound_var_is_precision_mismatch() {
 /// blocking those programs outright.
 #[test]
 fn issue_458_explicit_cast_n_to_f32_typechecks() {
-    let diags = check_diagnostics("def recip_n(n: i32) -> f32 = div(1.0, cast(n, f32))");
+    let diags = check_diagnostics(include_str!(
+        "fixtures/core/tests/issue_458_mixed_precision_numeric_ops/issue_458_explicit_cast_n_to_f32_typechecks_1.deep"
+    ));
     assert!(
         diags.is_empty(),
         "the explicit-cast fix div(1.0, cast(n, f32)) must type-check cleanly \

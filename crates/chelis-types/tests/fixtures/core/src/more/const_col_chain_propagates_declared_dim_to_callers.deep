@@ -1,0 +1,65 @@
+(defsig {}
+  const_col
+  (n)
+  (t-fn {}
+    (t-tensor {} (d-var {} n) (t-prim {} f32))
+    (t-prim {} f64)
+    (t-tensor {} (d-var {} n) (d-lit {} 1) (t-prim {} f64))))
+
+(def {}
+  const_col
+  (fn {}
+    (params {} (spots {type: (t-var {} _)}) (v {type: (t-var {} _)}))
+    (let {span: "surf:72..215"}
+      (bind {}
+        nn
+        (cast {span: "surf:81..124"}
+          (app {span: "surf:86..118"}
+            (var {span: "surf:86..91"} shape)
+            (copy {span: "surf:92..103"} (var {span: "surf:97..102"} spots))
+            (cast {span: "surf:105..117"}
+              (lit {span: "surf:110..111", surf_literal_style: "unsuffixed", type: (t-prim {} i32)} 0)
+              (t-prim {} i32)))
+          (t-prim {} i64)))
+      (app {span: "surf:127..213"}
+        (var {span: "surf:127..134"} reshape)
+        (app {span: "surf:135..192"}
+          (var {span: "surf:135..144"} to_tensor)
+          (app {span: "surf:145..191"}
+            (var {span: "surf:145..148"} map)
+            (fn {span: "surf:149..165"}
+              (params {} (i {type: (t-prim {} i64)}))
+              (var {span: "surf:164..165"} v))
+            (app {span: "surf:167..190"}
+              (var {span: "surf:167..172"} range)
+              (cast {span: "surf:173..185"}
+                (lit {span: "surf:178..179", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 0)
+                (t-prim {} i64))
+              (var {span: "surf:187..189"} nn))))
+        (app {span: "surf:194..212"}
+          (var {} Cons)
+          (var {span: "surf:195..197"} nn)
+          (app {}
+            (var {} Cons)
+            (cast {span: "surf:199..211"}
+              (lit {span: "surf:204..205", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 1)
+              (t-prim {} i64))
+            (var {} Nil)))))))
+
+(defsig {}
+  caller
+  (n)
+  (t-fn {}
+    (t-tensor {} (d-var {} n) (t-prim {} f32))
+    (t-tensor {} (d-var {} n) (d-lit {} 1) (t-prim {} f64))))
+
+(def {}
+  caller
+  (fn {}
+    (params {} (spots {type: (t-var {} _)}))
+    (app {span: "surf:276..308"}
+      (var {span: "surf:276..285"} const_col)
+      (var {span: "surf:286..291"} spots)
+      (cast {span: "surf:293..307"}
+        (lit {span: "surf:298..301", surf_literal_style: "unsuffixed", type: (t-prim {} f64)} 1.0)
+        (t-prim {} f64)))))

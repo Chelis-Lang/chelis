@@ -2,39 +2,13 @@
 resolver = "3"
 members = [
     "crates/chelis-unord",
-    "crates/chelis-repr-inventory",
     "crates/chelis-vocab",
-    "crates/chelis-abi",
-    "crates/chelis-prove",
-    "crates/chelis-runtime",
-    "crates/chelis-compiler-api",
     "crates/chelis-pipeline-core",
-    "crates/chelis-version",
-    "crates/chelis-image-id",
-    "crates/chelis-python",
-    "crates/chelis-shell",
-    "crates/chelis-std-bundle",
-    "crates/chelis-conformance",
-    "crates/chelis-reef",
     "crates/chelis-deep",
     "crates/chelis-pred",
-    "crates/chelis-macros",
-    "crates/chelis-surf",
     "crates/chelis-types",
     "crates/chelis-effects",
     "crates/chelis-ir",
-    "crates/chelis-backend-c",
-    "crates/chelis-backend-hip",
-    "crates/chelis-backend-metal",
-    "crates/chelis-validate",
-    "crates/chelis-lint",
-    "crates/chelis-tide",
-    "crates/chelis-lsp",
-    "crates/chelis-cove",
-    "crates/chelis-cli",
-    "crates/chelis-e2e",
-    "crates/chelisup",
-    "tree-sitter-chelis",
 ]
 
 [workspace.package]
@@ -44,62 +18,25 @@ license = "MIT"
 repository = "https://github.com/Chelis-Lang/chelis"
 
 [workspace.lints.rust]
-# An undeclared `cfg` name is a compile error, not a warning. Cargo passes
-# `--check-cfg` for every declared feature, so this makes the workspace's
-# configuration space exactly "declared features x supported hosts": finite,
-# enumerable, and coverable by a Clippy matrix. Without it, `#[cfg(anything)]`
-# compiles under `cargo rustc -- --cfg anything` and is invisible to a Clippy
-# run that does not pass that flag, which is the hole
-# spec/design/hash_order_determinism.md C2.3 exists to close.
+# Keep the core's feature/configuration space explicit.
 unexpected_cfgs = "deny"
 
 [workspace.dependencies]
 chelis-unord = { path = "crates/chelis-unord" }
 chelis-vocab = { path = "crates/chelis-vocab" }
-chelis-abi = { path = "crates/chelis-abi" }
-chelis-image-id = { path = "crates/chelis-image-id" }
 chelis-deep = { path = "crates/chelis-deep" }
 chelis-pred = { path = "crates/chelis-pred" }
-chelis-runtime = { path = "crates/chelis-runtime" }
-chelis-compiler-api = { path = "crates/chelis-compiler-api" }
 chelis-pipeline-core = { path = "crates/chelis-pipeline-core" }
-chelis-shell = { path = "crates/chelis-shell" }
-chelis-std-bundle = { path = "crates/chelis-std-bundle" }
-chelis-conformance = { path = "crates/chelis-conformance" }
-chelis-reef = { path = "crates/chelis-reef" }
-chelis-macros = { path = "crates/chelis-macros" }
-chelis-surf = { path = "crates/chelis-surf" }
 chelis-types = { path = "crates/chelis-types" }
 chelis-effects = { path = "crates/chelis-effects" }
 chelis-ir = { path = "crates/chelis-ir" }
-chelis-backend-c = { path = "crates/chelis-backend-c" }
-chelis-backend-hip = { path = "crates/chelis-backend-hip" }
-chelis-backend-metal = { path = "crates/chelis-backend-metal" }
-chelis-validate = { path = "crates/chelis-validate" }
-chelis-lint = { path = "crates/chelis-lint" }
-chelis-tide = { path = "crates/chelis-tide" }
-chelis-lsp = { path = "crates/chelis-lsp" }
-chelis-cove = { path = "crates/chelis-cove" }
 
 thiserror = "2"
 miette = { version = "7", features = ["fancy"] }
 serde = { version = "1", features = ["derive", "rc"] }
-libc = "0.2"
 half = { version = "2", features = ["serde"] }
 stacker = "0.1"
-# Source-scanning invariant tests parse Rust with syn (e.g. the
-# stack_guard! walker-coverage test in chelis-types). Dev-only.
-syn = { version = "2", features = ["full", "visit", "extra-traits"] }
-quote = "1"
-ryu = "1"
 
-# `sha2` is hot in dev builds, not just release: the compiled-context cache
-# hashes source digests and cache-envelope payloads on every process that
-# consults it, and chelis#1156's build fingerprint falls back to a whole-image
-# SHA-256 when the running image carries no linker build id. At the dev
-# profile's default `opt-level = 0` the SHA-256 compression function runs about
-# 25 MB/s here; at `opt-level = 3` it runs about 563 MB/s, a ~20x difference
-# that is the gap between a usable and an unusable fallback. This affects only
-# how the dependency is compiled, never what it computes.
+# Library identities hash canonical accepted source during ordinary core use.
 [profile.dev.package.sha2]
 opt-level = 3

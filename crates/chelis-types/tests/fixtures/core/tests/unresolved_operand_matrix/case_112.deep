@@ -1,0 +1,11 @@
+(defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32)))
+
+(def {}
+  f
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:23..36"}
+      (var {span: "surf:23..27"} sqrt)
+      (app {span: "surf:28..35"}
+        (var {span: "surf:28..32"} nope)
+        (var {span: "surf:33..34"} x)))))

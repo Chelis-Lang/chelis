@@ -1,0 +1,24 @@
+(module {surf_path: "M"}
+  m
+  (defsig {} helper (t-fn {} (t-prim {} f32) (t-prim {} f32)))
+  (def {}
+    helper
+    (fn {}
+      (params {} (x {type: (t-var {} _)}))
+      (var {span: "surf:37..38"} x)))
+  (deftype {invariant: (fn {}
+                          (params {} p)
+                          (app {span: "surf:61..83"}
+                            (var {} gte)
+                            (app {span: "surf:61..76"}
+                              (var {span: "surf:61..67"} helper)
+                              (access {span: "surf:68..75"}
+                                (var {span: "surf:68..69"} p)
+                                value))
+                            (lit {span: "surf:80..83", type: (t-prim {} f32)} 0.0))),
+             invariant_amenability: "opaque",
+             opaque: true
+           }
+    Probability
+    ()
+    (variant {} Probability (field {} value (t-prim {} f32)))))

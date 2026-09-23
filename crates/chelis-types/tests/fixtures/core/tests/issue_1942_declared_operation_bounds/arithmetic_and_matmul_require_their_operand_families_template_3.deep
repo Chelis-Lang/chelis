@@ -1,0 +1,15 @@
+(defsig {dtype_bounds: {p: float}}
+  g
+  (p)
+  (t-fn {}
+    (t-tensor {} (d-lit {} 2) (d-lit {} 2) (t-var {} p))
+    (t-tensor {} (d-lit {} 2) (d-lit {} 2) (t-var {} p))))
+
+(def {}
+  g
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {}
+      (var {} matmul)
+      (var {} x)
+      (var {} x))))

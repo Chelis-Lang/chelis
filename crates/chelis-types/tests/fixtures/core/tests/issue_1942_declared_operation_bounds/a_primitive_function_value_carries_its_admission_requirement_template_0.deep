@@ -1,0 +1,33 @@
+(defsig {}
+  apply_it
+  (t-fn {}
+    (t-fn {}
+      (t-ref {} (t-tensor {} (d-lit {} 3) (t-prim {} __CORE_ARG_0__)))
+      (t-prim {} i32)
+      (t-tensor {} (t-prim {} __CORE_ARG_0__)))
+    (t-tensor {} (d-lit {} 3) (t-prim {} __CORE_ARG_0__))
+    (t-tensor {} (t-prim {} __CORE_ARG_0__))))
+
+(def {}
+  apply_it
+  (fn {}
+    (params {} (f {type: (t-var {} _)}) (x {type: (t-var {} _)}))
+    (app {}
+      (var {} f)
+      (var {} x)
+      (lit {surf_literal_style: "explicit", type: (t-prim {} i32)} 0))))
+
+(defsig {}
+  g
+  (t-fn {}
+    (t-tensor {} (d-lit {} 3) (t-prim {} __CORE_ARG_0__))
+    (t-tensor {} (t-prim {} __CORE_ARG_0__))))
+
+(def {}
+  g
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {}
+      (var {} apply_it)
+      (var {} mean)
+      (var {} x))))

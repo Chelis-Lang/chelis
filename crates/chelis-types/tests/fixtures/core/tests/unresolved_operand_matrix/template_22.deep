@@ -1,0 +1,48 @@
+(defsig {}
+  apply_p
+  (b)
+  (t-fn {}
+    (t-fn {}
+      (t-tuple {}
+        (t-tensor {} (d-lit {} 4) (d-lit {} 3) (t-prim {} f32))
+        (t-prim {} i32))
+      (t-var {} b))
+    (t-tuple {}
+      (t-tensor {} (d-lit {} 4) (d-lit {} 3) (t-prim {} f32))
+      (t-prim {} i32))
+    (t-var {} b)))
+
+(def {}
+  apply_p
+  (fn {}
+    (params {} (f {type: (t-var {} _)}) (r {type: (t-var {} _)}))
+    (app {span: "surf:87..91"}
+      (var {span: "surf:87..88"} f)
+      (var {span: "surf:89..90"} r))))
+
+(defsig {}
+  probe
+  (t-fn {}
+    (t-tensor {} (d-lit {} 4) (d-lit {} 3) (t-prim {} f32))
+    @@declared@@))
+
+(def {}
+  probe
+  (fn {}
+    (params {} (t {type: (t-var {} _)}))
+    (app {span: "surf:145..213"}
+      (var {span: "surf:145..152"} apply_p)
+      (fn {span: "surf:153..201"}
+        (params {} q)
+        (match {span: "surf:163..201"}
+          (var {span: "surf:169..170"} q)
+          (arm {}
+            (pat-tuple {} (pat-var {} a) (pat-var {} k))
+            ()
+            (app {span: "surf:190..199"}
+              (var {span: "surf:190..193"} sum)
+              (var {span: "surf:194..195"} a)
+              (lit {span: "surf:197..198", type: (t-prim {} i32)} 0)))))
+      (tuple {span: "surf:203..212"}
+        (var {span: "surf:204..205"} t)
+        (lit {span: "surf:207..211", surf_literal_style: "explicit", type: (t-prim {} i32)} 1)))))

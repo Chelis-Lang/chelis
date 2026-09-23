@@ -1,0 +1,261 @@
+(defsig {}
+  bs_price
+  (t-fn {}
+    (t-prim {} f64)
+    (t-prim {} f64)
+    (t-prim {} f64)
+    (t-prim {} f64)
+    (t-prim {} f64)
+    (t-prim {} f64)))
+
+(def {}
+  bs_price
+  (fn {}
+    (params {}
+      (spot {type: (t-var {} _)})
+      (strike {type: (t-var {} _)})
+      (rate {type: (t-var {} _)})
+      (sigma {type: (t-var {} _)})
+      (time {type: (t-var {} _)}))
+    (let {span: "surf:80..403"}
+      (bind {}
+        root_time
+        (app {span: "surf:96..106"}
+          (var {span: "surf:96..100"} sqrt)
+          (var {span: "surf:101..105"} time)))
+      (let {}
+        (bind {}
+          vol_root_time
+          (app {span: "surf:125..146"}
+            (var {span: "surf:125..128"} mul)
+            (var {span: "surf:129..134"} sigma)
+            (var {span: "surf:136..145"} root_time)))
+        (let {}
+          (bind {}
+            carry
+            (app {span: "surf:157..217"}
+              (var {span: "surf:157..160"} mul)
+              (app {span: "surf:161..210"}
+                (var {span: "surf:161..164"} add)
+                (var {span: "surf:165..169"} rate)
+                (app {span: "surf:171..209"}
+                  (var {span: "surf:171..174"} mul)
+                  (cast {span: "surf:175..189"}
+                    (lit {span: "surf:180..183", surf_literal_style: "unsuffixed", type: (t-prim {} f64)} 0.5)
+                    (t-prim {} f64))
+                  (app {span: "surf:191..208"}
+                    (var {span: "surf:191..194"} mul)
+                    (var {span: "surf:195..200"} sigma)
+                    (var {span: "surf:202..207"} sigma))))
+              (var {span: "surf:212..216"} time)))
+          (let {}
+            (bind {}
+              discount
+              (app {span: "surf:231..256"}
+                (var {span: "surf:231..234"} exp)
+                (app {span: "surf:235..255"}
+                  (var {span: "surf:235..238"} neg)
+                  (app {span: "surf:239..254"}
+                    (var {span: "surf:239..242"} mul)
+                    (var {span: "surf:243..247"} rate)
+                    (var {span: "surf:249..253"} time)))))
+            (let {}
+              (bind {}
+                d1
+                (app {span: "surf:264..318"}
+                  (var {span: "surf:264..267"} div)
+                  (app {span: "surf:268..302"}
+                    (var {span: "surf:268..271"} add)
+                    (app {span: "surf:272..294"}
+                      (var {span: "surf:272..275"} log)
+                      (app {span: "surf:276..293"}
+                        (var {span: "surf:276..279"} div)
+                        (var {span: "surf:280..284"} spot)
+                        (var {span: "surf:286..292"} strike)))
+                    (var {span: "surf:296..301"} carry))
+                  (var {span: "surf:304..317"} vol_root_time)))
+              (let {}
+                (bind {}
+                  d2
+                  (app {span: "surf:326..348"}
+                    (var {span: "surf:326..329"} sub)
+                    (var {span: "surf:330..332"} d1)
+                    (var {span: "surf:334..347"} vol_root_time)))
+                (app {span: "surf:351..401"}
+                  (var {span: "surf:351..354"} sub)
+                  (app {span: "surf:355..368"}
+                    (var {span: "surf:355..358"} mul)
+                    (var {span: "surf:359..363"} spot)
+                    (var {span: "surf:365..367"} d1))
+                  (app {span: "surf:370..400"}
+                    (var {span: "surf:370..373"} mul)
+                    (app {span: "surf:374..395"}
+                      (var {span: "surf:374..377"} mul)
+                      (var {span: "surf:378..384"} strike)
+                      (var {span: "surf:386..394"} discount))
+                    (var {span: "surf:397..399"} d2)))))))))))
+
+(defsig {}
+  bs_total
+  (t-fn {}
+    (t-tensor {} (d-lit {} 3) (t-prim {} f64))
+    (t-prim {} f64)
+    (t-prim {} f64)
+    (t-prim {} f64)
+    (t-prim {} f64)
+    (t-prim {} f64)))
+
+(def {}
+  bs_total
+  (fn {}
+    (params {}
+      (spots {type: (t-var {} _)})
+      (strike {type: (t-var {} _)})
+      (rate {type: (t-var {} _)})
+      (sigma {type: (t-var {} _)})
+      (time {type: (t-var {} _)}))
+    (let {span: "surf:497..665"}
+      (bind {}
+        xs
+        (app {span: "surf:506..526"}
+          (var {span: "surf:506..513"} to_list)
+          (copy {span: "surf:514..525"} (var {span: "surf:519..524"} spots))))
+      (let {}
+        (bind {}
+          prices
+          (app {span: "surf:538..606"}
+            (var {span: "surf:538..541"} map)
+            (fn {span: "surf:542..601"}
+              (params {} (spot {type: (t-prim {} f64)}))
+              (app {span: "surf:560..601"}
+                (var {span: "surf:560..568"} bs_price)
+                (var {span: "surf:569..573"} spot)
+                (var {span: "surf:575..581"} strike)
+                (var {span: "surf:583..587"} rate)
+                (var {span: "surf:589..594"} sigma)
+                (var {span: "surf:596..600"} time)))
+            (var {span: "surf:603..605"} xs)))
+        (app {span: "surf:609..663"}
+          (var {span: "surf:609..625"} tensor_to_scalar)
+          (app {span: "surf:626..662"}
+            (var {span: "surf:626..629"} sum)
+            (app {span: "surf:630..647"}
+              (var {span: "surf:630..639"} to_tensor)
+              (var {span: "surf:640..646"} prices))
+            (cast {span: "surf:649..661"}
+              (lit {span: "surf:654..655", surf_literal_style: "unsuffixed", type: (t-prim {} i32)} 0)
+              (t-prim {} i32))))))))
+
+(defsig {}
+  bs_total_one
+  (t-fn {}
+    (t-tensor {} (d-lit {} 1) (t-prim {} f64))
+    (t-prim {} f64)
+    (t-prim {} f64)
+    (t-prim {} f64)
+    (t-prim {} f64)
+    (t-prim {} f64)))
+
+(def {}
+  bs_total_one
+  (fn {}
+    (params {}
+      (spots {type: (t-var {} _)})
+      (strike {type: (t-var {} _)})
+      (rate {type: (t-var {} _)})
+      (sigma {type: (t-var {} _)})
+      (time {type: (t-var {} _)}))
+    (let {span: "surf:763..931"}
+      (bind {}
+        xs
+        (app {span: "surf:772..792"}
+          (var {span: "surf:772..779"} to_list)
+          (copy {span: "surf:780..791"} (var {span: "surf:785..790"} spots))))
+      (let {}
+        (bind {}
+          prices
+          (app {span: "surf:804..872"}
+            (var {span: "surf:804..807"} map)
+            (fn {span: "surf:808..867"}
+              (params {} (spot {type: (t-prim {} f64)}))
+              (app {span: "surf:826..867"}
+                (var {span: "surf:826..834"} bs_price)
+                (var {span: "surf:835..839"} spot)
+                (var {span: "surf:841..847"} strike)
+                (var {span: "surf:849..853"} rate)
+                (var {span: "surf:855..860"} sigma)
+                (var {span: "surf:862..866"} time)))
+            (var {span: "surf:869..871"} xs)))
+        (app {span: "surf:875..929"}
+          (var {span: "surf:875..891"} tensor_to_scalar)
+          (app {span: "surf:892..928"}
+            (var {span: "surf:892..895"} sum)
+            (app {span: "surf:896..913"}
+              (var {span: "surf:896..905"} to_tensor)
+              (var {span: "surf:906..912"} prices))
+            (cast {span: "surf:915..927"}
+              (lit {span: "surf:920..921", surf_literal_style: "unsuffixed", type: (t-prim {} i32)} 0)
+              (t-prim {} i32))))))))
+
+(defsig {}
+  bs_total_one_delta
+  (t-fn {}
+    (t-tensor {} (d-lit {} 1) (t-prim {} f64))
+    (t-prim {} f64)
+    (t-prim {} f64)
+    (t-prim {} f64)
+    (t-prim {} f64)
+    (t-prim {} f64)))
+
+(def {}
+  bs_total_one_delta
+  (fn {}
+    (params {}
+      (spots {type: (t-var {} _)})
+      (strike {type: (t-var {} _)})
+      (rate {type: (t-var {} _)})
+      (sigma {type: (t-var {} _)})
+      (time {type: (t-var {} _)}))
+    (app {span: "surf:1037..1137"}
+      (var {span: "surf:1037..1053"} tensor_to_scalar)
+      (app {span: "surf:1054..1136"}
+        (var {span: "surf:1054..1057"} sum)
+        (app {span: "surf:1058..1121"}
+          (grad {span: "surf:1058..1087", wrt: (var {} spots)}
+            (var {span: "surf:1063..1075"} bs_total_one)
+            (lit {type: (t-prim {} i32)} 0))
+          (var {span: "surf:1088..1093"} spots)
+          (var {span: "surf:1095..1101"} strike)
+          (var {span: "surf:1103..1107"} rate)
+          (var {span: "surf:1109..1114"} sigma)
+          (var {span: "surf:1116..1120"} time))
+        (cast {span: "surf:1123..1135"}
+          (lit {span: "surf:1128..1129", surf_literal_style: "unsuffixed", type: (t-prim {} i32)} 0)
+          (t-prim {} i32))))))
+
+(def {}
+  out
+  (app {span: "surf:1145..1291"}
+    (grad {span: "surf:1145..1180", wrt: (var {} spots)}
+      (var {span: "surf:1150..1168"} bs_total_one_delta)
+      (lit {type: (t-prim {} i32)} 0))
+    (app {span: "surf:1184..1213"}
+      (var {span: "surf:1184..1193"} to_tensor)
+      (app {span: "surf:1194..1212"}
+        (var {} Cons)
+        (cast {span: "surf:1195..1211"}
+          (lit {span: "surf:1200..1205", surf_literal_style: "unsuffixed", type: (t-prim {} f64)} 100.0)
+          (t-prim {} f64))
+        (var {} Nil)))
+    (cast {span: "surf:1217..1233"}
+      (lit {span: "surf:1222..1227", surf_literal_style: "unsuffixed", type: (t-prim {} f64)} 100.0)
+      (t-prim {} f64))
+    (cast {span: "surf:1237..1252"}
+      (lit {span: "surf:1242..1246", surf_literal_style: "unsuffixed", type: (t-prim {} f64)} 0.05)
+      (t-prim {} f64))
+    (cast {span: "surf:1256..1270"}
+      (lit {span: "surf:1261..1264", surf_literal_style: "unsuffixed", type: (t-prim {} f64)} 0.3)
+      (t-prim {} f64))
+    (cast {span: "surf:1274..1289"}
+      (lit {span: "surf:1279..1283", surf_literal_style: "unsuffixed", type: (t-prim {} f64)} 1.25)
+      (t-prim {} f64))))

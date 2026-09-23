@@ -1,0 +1,25 @@
+(defsig {dtype_bounds: {p: float}}
+  f
+  (p)
+  (t-fn {} (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-var {} p)) (t-var {} _)))
+
+(def {}
+  f
+  (fn {}
+    (params {} (xs {type: (t-var {} _)}))
+    (app {span: "surf:39..117"}
+      (var {span: "surf:39..41"} gt)
+      (var {span: "surf:42..44"} xs)
+      (app {span: "surf:46..116"}
+        (var {span: "surf:46..52"} insert)
+        (app {span: "surf:53..103"}
+          (var {span: "surf:53..59"} insert)
+          (app {span: "surf:60..90"}
+            (var {span: "surf:60..76"} scalar_to_tensor)
+            (cast {span: "surf:77..89"}
+              (lit {span: "surf:82..85", surf_literal_style: "unsuffixed", type: (t-var {} p)} 0.1)
+              (t-var {} p)))
+          (lit {span: "surf:92..96", surf_literal_style: "explicit", type: (t-prim {} i32)} 0)
+          (lit {span: "surf:98..102", type: (t-prim {} i64)} 3))
+        (lit {span: "surf:105..109", surf_literal_style: "explicit", type: (t-prim {} i32)} 0)
+        (lit {span: "surf:111..115", type: (t-prim {} i64)} 2)))))

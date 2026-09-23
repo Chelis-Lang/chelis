@@ -1,0 +1,17 @@
+(module {surf_path: "IndirectLaterDiagnostic"}
+  indirectlaterdiagnostic
+  (def {}
+    u
+    (app {span: "surf:36..43"}
+      (var {span: "surf:36..40"} ping)
+      (lit {span: "surf:41..42", type: (t-prim {} i32)} 1)))
+  (def {} v1 (lit {span: "surf:50..51", type: (t-prim {} i32)} 5))
+  (defsig {} ping (t-fn {} (t-prim {} i32) (t-prim {} i32)))
+  (def {}
+    ping
+    (fn {}
+      (params {} (n {type: (t-var {} _)}))
+      (app {span: "surf:79..89"}
+        (var {span: "surf:79..82"} add)
+        (var {span: "surf:83..84"} n)
+        (var {span: "surf:86..88"} v1)))))

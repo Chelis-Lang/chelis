@@ -1,0 +1,57 @@
+(module {surf_path: "Repro.Conv2dWellTyped"}
+  repro.conv2dwelltyped
+  (defsig {}
+    f
+    (t-fn {}
+      (t-tensor {}
+        (d-lit {} 1)
+        (d-lit {} 3)
+        (d-lit {} 8)
+        (d-lit {} 8)
+        (t-prim {} f32))
+      (t-tensor {}
+        (d-lit {} 4)
+        (d-lit {} 3)
+        (d-lit {} 3)
+        (d-lit {} 3)
+        (t-prim {} f32))
+      (t-tensor {}
+        (d-lit {} 2)
+        (d-lit {} 4)
+        (d-lit {} 6)
+        (d-lit {} 6)
+        (t-prim {} f32))))
+  (def {}
+    f
+    (fn {}
+      (params {} (x {type: (t-var {} _)}) (k {type: (t-var {} _)}))
+      (let {span: "surf:123..209"}
+        (bind {}
+          y
+          (app {span: "surf:129..150"}
+            (var {span: "surf:129..135"} expand)
+            (var {span: "surf:136..137"} x)
+            (lit {span: "surf:139..143", surf_literal_style: "explicit", type: (t-prim {} i32)} 0)
+            (lit {span: "surf:145..149", type: (t-prim {} i64)} 2)))
+        (app {span: "surf:151..207"}
+          (var {span: "surf:151..155"} conv)
+          (borrow {span: "surf:156..158"} (var {span: "surf:157..158"} y))
+          (borrow {span: "surf:160..162"} (var {span: "surf:161..162"} k))
+          (app {span: "surf:164..176"}
+            (var {} Cons)
+            (lit {span: "surf:165..169", type: (t-prim {} i64)} 1)
+            (app {}
+              (var {} Cons)
+              (lit {span: "surf:171..175", type: (t-prim {} i64)} 1)
+              (var {} Nil)))
+          (app {span: "surf:178..206"}
+            (var {} Cons)
+            (tuple {span: "surf:179..191"}
+              (lit {span: "surf:180..184", type: (t-prim {} i64)} 0)
+              (lit {span: "surf:186..190", type: (t-prim {} i64)} 0))
+            (app {}
+              (var {} Cons)
+              (tuple {span: "surf:193..205"}
+                (lit {span: "surf:194..198", type: (t-prim {} i64)} 0)
+                (lit {span: "surf:200..204", type: (t-prim {} i64)} 0))
+              (var {} Nil))))))))

@@ -1,0 +1,27 @@
+(defsig {} g (t-fn {} (t-prim {} f32) (t-prim {} f32)))
+
+(def {}
+  g
+  (fn {}
+    (params {} (n {type: (t-var {} _)}))
+    (app {span: "surf:23..34"}
+      (var {span: "surf:23..26"} add)
+      (lit {span: "surf:27..30", type: (t-prim {} f32)} 1.0)
+      (var {span: "surf:32..33"} n))))
+
+(defsig {} r (t-prim {} f32))
+
+(def {}
+  r
+  (match {span: "surf:45..92"}
+    (app {span: "surf:51..57"}
+      (var {span: "surf:51..52"} g)
+      (lit {span: "surf:53..56", type: (t-prim {} f32)} 2.0))
+    (arm {}
+      (pat-lit {} 1)
+      ()
+      (lit {span: "surf:74..77", type: (t-prim {} f32)} 1.5))
+    (arm {}
+      (pat-wild {})
+      ()
+      (lit {span: "surf:87..90", type: (t-prim {} f32)} 2.5))))

@@ -1,0 +1,57 @@
+(defsig {}
+  f
+  (t-fn {}
+    (t-tensor {}
+      (d-lit {} 1)
+      (d-lit {} 2)
+      (d-lit {} 4)
+      (d-lit {} 4)
+      (t-prim {} f32))
+    (t-tensor {}
+      (d-lit {} 3)
+      (d-lit {} 2)
+      (d-lit {} 3)
+      (d-lit {} 3)
+      (t-prim {} f32))
+    (t-tensor {}
+      (d-lit {} 3)
+      (d-lit {} 5)
+      (d-lit {} 3)
+      (d-lit {} 3)
+      (t-prim {} f32))
+    (t-tensor {}
+      (d-lit {} 1)
+      (d-lit {} 3)
+      (d-lit {} 2)
+      (d-lit {} 2)
+      (t-prim {} f32))))
+
+(def {}
+  f
+  (fn {}
+    (params {}
+      (x {type: (t-var {} _)})
+      (w {type: (t-var {} _)})
+      (bad {type: (t-var {} _)}))
+    (app {span: "surf:121..175"}
+      (var {span: "surf:121..125"} conv)
+      (var {span: "surf:126..127"} x)
+      (var {span: "surf:129..130"} w)
+      (app {span: "surf:132..144"}
+        (var {} Cons)
+        (lit {span: "surf:133..137", type: (t-prim {} i64)} 1)
+        (app {}
+          (var {} Cons)
+          (lit {span: "surf:139..143", type: (t-prim {} i64)} 1)
+          (var {} Nil)))
+      (app {span: "surf:146..174"}
+        (var {} Cons)
+        (tuple {span: "surf:147..159"}
+          (lit {span: "surf:148..152", type: (t-prim {} i64)} 0)
+          (lit {span: "surf:154..158", type: (t-prim {} i64)} 0))
+        (app {}
+          (var {} Cons)
+          (tuple {span: "surf:161..173"}
+            (lit {span: "surf:162..166", type: (t-prim {} i64)} 0)
+            (lit {span: "surf:168..172", type: (t-prim {} i64)} 0))
+          (var {} Nil))))))

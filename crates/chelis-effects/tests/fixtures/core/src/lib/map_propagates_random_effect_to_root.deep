@@ -1,0 +1,89 @@
+(defsig {}
+  step
+  (t-fn {}
+    (t-tensor {} (d-lit {} 8) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 8) (t-prim {} f32))))
+
+(def {}
+  step
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:49..64"}
+      (var {span: "surf:49..56"} dropout)
+      (var {span: "surf:57..58"} x)
+      (lit {span: "surf:60..63", type: (t-prim {} f32)} 0.5))))
+
+(defsig {} xs (t-adt {} List (t-tensor {} (d-lit {} 8) (t-prim {} f32))))
+
+(def {}
+  xs
+  (app {span: "surf:92..242"}
+    (var {} Cons)
+    (app {span: "surf:97..165",
+           type: (t-tensor {} (d-lit {} 8) (t-prim {} f32))
+         }
+      (var {span: "surf:97..106"} to_tensor)
+      (app {span: "surf:107..147"}
+        (var {} Cons)
+        (lit {span: "surf:108..111", type: (t-prim {} f32)} 1.0)
+        (app {}
+          (var {} Cons)
+          (lit {span: "surf:113..116", type: (t-prim {} f32)} 2.0)
+          (app {}
+            (var {} Cons)
+            (lit {span: "surf:118..121", type: (t-prim {} f32)} 3.0)
+            (app {}
+              (var {} Cons)
+              (lit {span: "surf:123..126", type: (t-prim {} f32)} 4.0)
+              (app {}
+                (var {} Cons)
+                (lit {span: "surf:128..131", type: (t-prim {} f32)} 5.0)
+                (app {}
+                  (var {} Cons)
+                  (lit {span: "surf:133..136", type: (t-prim {} f32)} 6.0)
+                  (app {}
+                    (var {} Cons)
+                    (lit {span: "surf:138..141", type: (t-prim {} f32)} 7.0)
+                    (app {}
+                      (var {} Cons)
+                      (lit {span: "surf:143..146", type: (t-prim {} f32)} 8.0)
+                      (var {} Nil))))))))))
+    (app {}
+      (var {} Cons)
+      (app {span: "surf:171..239",
+             type: (t-tensor {} (d-lit {} 8) (t-prim {} f32))
+           }
+        (var {span: "surf:171..180"} to_tensor)
+        (app {span: "surf:181..221"}
+          (var {} Cons)
+          (lit {span: "surf:182..185", type: (t-prim {} f32)} 8.0)
+          (app {}
+            (var {} Cons)
+            (lit {span: "surf:187..190", type: (t-prim {} f32)} 7.0)
+            (app {}
+              (var {} Cons)
+              (lit {span: "surf:192..195", type: (t-prim {} f32)} 6.0)
+              (app {}
+                (var {} Cons)
+                (lit {span: "surf:197..200", type: (t-prim {} f32)} 5.0)
+                (app {}
+                  (var {} Cons)
+                  (lit {span: "surf:202..205", type: (t-prim {} f32)} 4.0)
+                  (app {}
+                    (var {} Cons)
+                    (lit {span: "surf:207..210", type: (t-prim {} f32)} 3.0)
+                    (app {}
+                      (var {} Cons)
+                      (lit {span: "surf:212..215", type: (t-prim {} f32)} 2.0)
+                      (app {}
+                        (var {} Cons)
+                        (lit {span: "surf:217..220", type: (t-prim {} f32)} 1.0)
+                        (var {} Nil))))))))))
+      (var {} Nil))))
+
+(def {}
+  ys
+  (app {span: "surf:248..261"}
+    (var {span: "surf:248..251"} map)
+    (var {span: "surf:252..256"} step)
+    (var {span: "surf:258..260"} xs)))

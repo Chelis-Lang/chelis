@@ -1,0 +1,9 @@
+(defsig {} caller (t-fn {} (t-prim {} i32) (t-prim {} i32)))
+
+(def {}
+  caller
+  (fn {}
+    (params {} (n {type: (t-var {} _)}))
+    (app {span: "surf:28..38"}
+      (var {span: "surf:28..35"} missing)
+      (var {span: "surf:36..37"} n))))

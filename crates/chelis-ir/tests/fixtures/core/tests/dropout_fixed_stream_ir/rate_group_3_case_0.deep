@@ -1,0 +1,15 @@
+(defsig {}
+  sample
+  (t-fn {}
+    (t-tensor {} (d-lit {} 8) (t-prim {} f32))
+    (t-prim {} f32)
+    (t-tensor {} (d-lit {} 8) (t-prim {} f32))))
+
+(def {}
+  sample
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (rate {type: (t-var {} _)}))
+    (app {span: "surf:61..77"}
+      (var {span: "surf:61..68"} dropout)
+      (var {span: "surf:69..70"} x)
+      (var {span: "surf:72..76"} rate))))

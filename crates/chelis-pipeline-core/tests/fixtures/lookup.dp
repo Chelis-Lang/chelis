@@ -1,0 +1,14 @@
+(defsig {}
+  out
+  (n)
+  (t-fn {}
+    (t-tensor {} (d-var {} n) (t-prim {} f32))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))))
+
+(def {}
+  out
+  (fn {}
+    (params {} (input {type: (t-var {} _)}))
+    (app {span: "surf:54..65"}
+      (var {span: "surf:54..58"} relu)
+      (var {span: "surf:59..64"} input))))

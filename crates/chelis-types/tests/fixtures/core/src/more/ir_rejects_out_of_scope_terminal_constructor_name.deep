@@ -1,0 +1,19 @@
+(deftype {}
+  Pkg__chelis__std__Std__Nn__Generate__KVCache
+  (a)
+  (variant {}
+    Pkg__chelis__std__Std__Nn__Generate__KVCache
+    (t-adt {} List (t-var {} a))))
+
+(defsig {}
+  make_cache
+  (p)
+  (t-fn {} (t-adt {} Pkg__chelis__std__Std__Nn__Generate__KVCache (t-var {} p))))
+
+(def {}
+  make_cache
+  (fn {}
+    (params {})
+    (app {span: "surf:184..195"}
+      (var {span: "surf:184..191"} KVCache)
+      (var {span: "surf:192..194"} Nil))))

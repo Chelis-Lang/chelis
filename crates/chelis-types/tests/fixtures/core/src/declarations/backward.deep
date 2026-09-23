@@ -1,0 +1,17 @@
+(module {surf_path: "Backward"}
+  backward
+  (def {} v1 (lit {span: "surf:22..23", type: (t-prim {} i32)} 5))
+  (def {}
+    u
+    (app {span: "surf:29..36"}
+      (var {span: "surf:29..33"} ping)
+      (lit {span: "surf:34..35", type: (t-prim {} i32)} 1)))
+  (defsig {} ping (t-fn {} (t-prim {} i32) (t-prim {} i32)))
+  (def {}
+    ping
+    (fn {}
+      (params {} (n {type: (t-var {} _)}))
+      (app {span: "surf:64..74"}
+        (var {span: "surf:64..67"} add)
+        (var {span: "surf:68..69"} n)
+        (var {span: "surf:71..73"} v1)))))

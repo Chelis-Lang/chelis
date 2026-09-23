@@ -1,0 +1,17 @@
+(def {}
+  y
+  (app {span: "surf:5..53", type: (t-tensor {} (d-lit {} 4) (t-prim {} f64))}
+    (var {span: "surf:5..14"} to_tensor)
+    (app {span: "surf:15..35"}
+      (var {} Cons)
+      (lit {span: "surf:16..19", type: (t-prim {} f32)} 1.0)
+      (app {}
+        (var {} Cons)
+        (lit {span: "surf:21..24", type: (t-prim {} f32)} 2.0)
+        (app {}
+          (var {} Cons)
+          (lit {span: "surf:26..29", type: (t-prim {} f32)} 3.0)
+          (app {}
+            (var {} Cons)
+            (lit {span: "surf:31..34", type: (t-prim {} f32)} 4.0)
+            (var {} Nil)))))))

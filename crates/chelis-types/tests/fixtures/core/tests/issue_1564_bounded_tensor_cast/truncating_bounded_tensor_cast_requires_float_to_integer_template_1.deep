@@ -1,0 +1,33 @@
+(defsig {dtype_bounds: {p: int}}
+  f
+  (p)
+  (t-fn {}
+    (t-tensor {} (d-lit {} 2) (t-prim {} f32))
+    (t-var {} p)
+    (t-tensor {} (d-lit {} 2) (t-var {} p))))
+
+(def {}
+  f
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (witness {type: (t-var {} _)}))
+    (cast {}
+      (var {} x)
+      (t-var {} p)
+      trunc)))
+
+(def {}
+  out
+  (app {}
+    (var {} f)
+    (app {}
+      (var {} to_tensor)
+      (app {}
+        (var {} Cons)
+        (lit {surf_literal_style: "explicit", type: (t-prim {} f32)} 1.5)
+        (app {}
+          (var {} Cons)
+          (app {}
+            (var {} neg)
+            (lit {surf_literal_style: "explicit", type: (t-prim {} f32)} 2.5))
+          (var {} Nil))))
+    (lit {type: (t-prim {} i64)} 0)))

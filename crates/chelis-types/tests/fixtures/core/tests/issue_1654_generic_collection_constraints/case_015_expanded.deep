@@ -1,0 +1,7 @@
+(def {} measure (var {span: "surf:10..13"} len))
+
+(def {}
+  out
+  (app {span: "surf:20..33"}
+    (var {span: "surf:20..27"} measure)
+    (lit {span: "surf:28..32", type: (t-prim {} i64)} 1)))

@@ -1,0 +1,108 @@
+(defsig {}
+  attention
+  (t-fn {}
+    (t-tensor {}
+      (d-lit {} 1)
+      (d-lit {} 2)
+      (d-lit {} 2)
+      (d-lit {} 1)
+      (t-prim {} f32))
+    (t-tensor {}
+      (d-lit {} 1)
+      (d-lit {} 2)
+      (d-lit {} 3)
+      (d-lit {} 1)
+      (t-prim {} f32))
+    (t-tensor {}
+      (d-lit {} 1)
+      (d-lit {} 2)
+      (d-lit {} 3)
+      (d-lit {} 2)
+      (t-prim {} f32))
+    (t-tensor {}
+      (d-lit {} 1)
+      (d-lit {} 2)
+      (d-lit {} 2)
+      (d-lit {} 3)
+      (t-prim {} bool))
+    (t-prim {} f32)
+    (t-tensor {}
+      (d-lit {} 1)
+      (d-lit {} 2)
+      (d-lit {} 2)
+      (d-lit {} 2)
+      (t-prim {} f32))))
+
+(def {}
+  attention
+  (fn {}
+    (params {}
+      (q {type: (t-var {} _)})
+      (k {type: (t-var {} _)})
+      (v {type: (t-var {} _)})
+      (mask {type: (t-var {} _)})
+      (scale {type: (t-var {} _)}))
+    (app {span: "surf:151..399"}
+      (var {span: "surf:151..157"} matmul)
+      (app {span: "surf:158..396"}
+        (var {span: "surf:158..165"} softmax)
+        (app {span: "surf:166..393"}
+          (var {span: "surf:166..171"} where)
+          (var {span: "surf:172..176"} mask)
+          (app {span: "surf:177..294"}
+            (var {span: "surf:177..180"} mul)
+            (app {span: "surf:181..209"}
+              (var {span: "surf:181..187"} matmul)
+              (var {span: "surf:188..189"} q)
+              (app {span: "surf:190..208"}
+                (var {span: "surf:190..197"} permute)
+                (var {span: "surf:198..199"} k)
+                (lit {span: "surf:200..201", type: (t-prim {} i32)} 0)
+                (lit {span: "surf:202..203", type: (t-prim {} i32)} 1)
+                (lit {span: "surf:204..205", type: (t-prim {} i32)} 3)
+                (lit {span: "surf:206..207", type: (t-prim {} i32)} 2)))
+            (app {span: "surf:210..293"}
+              (var {span: "surf:210..216"} insert)
+              (app {span: "surf:217..285"}
+                (var {span: "surf:217..223"} insert)
+                (app {span: "surf:224..277"}
+                  (var {span: "surf:224..230"} insert)
+                  (app {span: "surf:231..269"}
+                    (var {span: "surf:231..237"} insert)
+                    (app {span: "surf:238..261"}
+                      (var {span: "surf:238..254"} scalar_to_tensor)
+                      (var {span: "surf:255..260"} scale))
+                    (lit {span: "surf:262..263", type: (t-prim {} i32)} 0)
+                    (lit {span: "surf:264..268", type: (t-prim {} i64)} 1))
+                  (lit {span: "surf:270..271", type: (t-prim {} i32)} 1)
+                  (lit {span: "surf:272..276", type: (t-prim {} i64)} 2))
+                (lit {span: "surf:278..279", type: (t-prim {} i32)} 2)
+                (lit {span: "surf:280..284", type: (t-prim {} i64)} 2))
+              (lit {span: "surf:286..287", type: (t-prim {} i32)} 3)
+              (lit {span: "surf:288..292", type: (t-prim {} i64)} 3)))
+          (app {span: "surf:295..392"}
+            (var {span: "surf:295..301"} insert)
+            (app {span: "surf:302..384"}
+              (var {span: "surf:302..308"} insert)
+              (app {span: "surf:309..376"}
+                (var {span: "surf:309..315"} insert)
+                (app {span: "surf:316..368"}
+                  (var {span: "surf:316..322"} insert)
+                  (app {span: "surf:323..360"}
+                    (var {span: "surf:323..339"} scalar_to_tensor)
+                    (app {span: "surf:340..359"}
+                      (var {span: "surf:340..343"} div)
+                      (app {span: "surf:344..351"}
+                        (var {} neg)
+                        (lit {span: "surf:345..351", surf_literal_style: "explicit", type: (t-prim {} f32)} 1.0))
+                      (lit {span: "surf:352..358", surf_literal_style: "explicit", type: (t-prim {} f32)} 0.0)))
+                  (lit {span: "surf:361..362", type: (t-prim {} i32)} 0)
+                  (lit {span: "surf:363..367", type: (t-prim {} i64)} 1))
+                (lit {span: "surf:369..370", type: (t-prim {} i32)} 1)
+                (lit {span: "surf:371..375", type: (t-prim {} i64)} 2))
+              (lit {span: "surf:377..378", type: (t-prim {} i32)} 2)
+              (lit {span: "surf:379..383", type: (t-prim {} i64)} 2))
+            (lit {span: "surf:385..386", type: (t-prim {} i32)} 3)
+            (lit {span: "surf:387..391", type: (t-prim {} i64)} 3)))
+        (lit {span: "surf:394..395", type: (t-prim {} i32)} 3))
+      (var {span: "surf:397..398"} v))))

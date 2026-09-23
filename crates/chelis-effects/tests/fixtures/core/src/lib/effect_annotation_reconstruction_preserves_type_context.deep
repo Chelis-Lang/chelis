@@ -1,0 +1,10 @@
+(defsig {} add_one (t-fn {} (t-prim {} i32) (t-prim {} i32)))
+
+(def {}
+  add_one
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:29..38"}
+      (var {span: "surf:29..32"} add)
+      (var {span: "surf:33..34"} x)
+      (lit {span: "surf:36..37", type: (t-prim {} i32)} 1))))

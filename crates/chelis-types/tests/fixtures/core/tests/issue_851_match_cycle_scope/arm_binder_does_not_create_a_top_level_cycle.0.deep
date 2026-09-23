@@ -1,0 +1,22 @@
+(deftype {} Box () (variant {} Wrap (t-prim {} string)))
+
+(defsig {} unwrap (t-fn {} (t-adt {} Box) (t-prim {} string)))
+
+(def {}
+  unwrap
+  (fn {}
+    (params {} (b {type: (t-var {} _)}))
+    (match {span: "surf:60..99"}
+      (var {span: "surf:66..67"} b)
+      (arm {}
+        (pat-ctor {} Wrap (pat-var {} text))
+        ()
+        (var {span: "surf:93..97"} text)))))
+
+(def {}
+  text
+  (app {span: "surf:107..125"}
+    (var {span: "surf:107..113"} unwrap)
+    (app {span: "surf:114..124"}
+      (var {span: "surf:114..118"} Wrap)
+      (lit {span: "surf:119..123", type: (t-prim {} string)} "hi"))))

@@ -1,0 +1,23 @@
+(let {span: "surf:16..82"}
+    (bind {}
+      y
+      (var {span: "surf:23..24"} x))
+    (let {}
+      (bind {}
+        x
+        (app {span: "surf:30..65"}
+          (var {span: "surf:30..39"} to_tensor)
+          (app {span: "surf:40..64"}
+            (var {} Cons)
+            (lit {span: "surf:41..47", surf_literal_style: "explicit", type: (t-prim {} f32)} 1.0)
+            (app {}
+              (var {} Cons)
+              (lit {span: "surf:49..55", surf_literal_style: "explicit", type: (t-prim {} f32)} 2.0)
+              (app {}
+                (var {} Cons)
+                (lit {span: "surf:57..63", surf_literal_style: "explicit", type: (t-prim {} f32)} 3.0)
+                (var {} Nil))))))
+      (app {span: "surf:67..80"}
+        (var {span: "surf:67..71"} mean)
+        (var {span: "surf:72..73"} y)
+        (lit {span: "surf:75..79", surf_literal_style: "explicit", type: (t-prim {} i32)} 0))))

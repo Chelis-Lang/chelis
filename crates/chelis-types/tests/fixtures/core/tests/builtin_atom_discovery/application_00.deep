@@ -1,0 +1,11 @@
+(def {}
+  a
+  (app {span: "surf:4..15"}
+    (var {span: "surf:4..7"} len)
+    (app {span: "surf:8..14"}
+      (var {} Cons)
+      (lit {span: "surf:9..10", type: (t-prim {} i32)} 1)
+      (app {}
+        (var {} Cons)
+        (lit {span: "surf:12..13", type: (t-prim {} i32)} 2)
+        (var {} Nil)))))

@@ -1,0 +1,5 @@
+(def {}
+  contents
+  (app {span: "surf:11..35"}
+    (var {span: "surf:11..20"} read_file)
+    (lit {span: "surf:21..34", type: (t-prim {} string)} "dataset.txt")))

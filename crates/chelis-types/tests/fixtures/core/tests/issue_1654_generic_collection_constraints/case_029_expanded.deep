@@ -1,0 +1,8 @@
+(def {} ignore (fn {} (params {} f x) (var {span: "surf:19..20"} x)))
+
+(def {}
+  out
+  (app {span: "surf:27..44"}
+    (var {span: "surf:27..33"} ignore)
+    (var {span: "surf:34..37"} len)
+    (lit {span: "surf:39..43", type: (t-prim {} i64)} 1)))

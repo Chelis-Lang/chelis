@@ -1,0 +1,18 @@
+(module {surf_path: "Frag.Honest"}
+  frag.honest
+  (export {} entry)
+  (defsig {}
+    entry
+    (t-fn {}
+      (t-tensor {} (d-lit {} 8) (t-prim {} f32))
+      (t-tensor {} (d-lit {} 8) (t-prim {} f32))))
+  (def {}
+    entry
+    (fn {}
+      (params {} (x {type: (t-var {} _)}))
+      (handle-effect {effect: random, span: "surf:85..120"}
+        (lit {span: "surf:95..99", type: (t-prim {} i64)} 7)
+        (app {span: "surf:101..120"}
+          (var {span: "surf:103..110"} dropout)
+          (var {span: "surf:111..112"} x)
+          (lit {span: "surf:114..117", type: (t-prim {} f32)} 0.5))))))

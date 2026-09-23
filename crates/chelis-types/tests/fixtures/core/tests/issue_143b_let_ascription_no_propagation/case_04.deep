@@ -1,0 +1,15 @@
+(defsig {}
+  caller
+  (t-fn {}
+    (t-ref {} (t-tensor {} (d-lit {} 2) (t-prim {} f32)))
+    (t-ref {} (t-tensor {} (d-lit {} 2) (t-prim {} f32)))))
+
+(def {}
+  caller
+  (fn {}
+    (params {} (t {type: (t-var {} _)}))
+    (let {span: "surf:55..93"}
+      (bind {}
+        x
+        (var {span: "surf:82..83", surf_binding_type: "explicit", type: (t-ref {} (t-tensor {} (d-lit {} 3) (t-prim {} f32)))} t))
+      (var {span: "surf:88..89"} x))))

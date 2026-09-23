@@ -1,0 +1,27 @@
+(defsig {} ident (t-fn {} (t-prim {} i64) (t-prim {} i64)))
+
+(def {}
+  ident
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (var {span: "surf:27..28"} x)))
+
+(defsig {}
+  g
+  (a n)
+  (t-fn {}
+    (t-tensor {} (d-var {} n) (t-prim {} f32))
+    (t-prim {} i64)
+    (t-tensor {} (d-var {} a) (d-var {} n) (t-prim {} f32))))
+
+(def {}
+  g
+  (fn {}
+    (params {} (b {type: (t-var {} _)}) (k {type: (t-var {} _)}))
+    (app {span: "surf:91..113"}
+      (var {span: "surf:91..97"} insert)
+      (var {span: "surf:98..99"} b)
+      (lit {span: "surf:101..102", type: (t-prim {} i32)} 0)
+      (app {span: "surf:104..112"}
+        (var {span: "surf:104..109"} ident)
+        (var {span: "surf:110..111"} k)))))

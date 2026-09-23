@@ -1,0 +1,16 @@
+(def {} op (var {span: "surf:5..11"} concat))
+
+(defsig {} out (t-adt {} List (t-prim {} string)))
+
+(def {}
+  out
+  (app {span: "surf:32..50"}
+    (var {span: "surf:32..34"} op)
+    (app {span: "surf:35..41"}
+      (var {} Cons)
+      (lit {span: "surf:36..40", type: (t-prim {} i64)} 1)
+      (var {} Nil))
+    (app {span: "surf:43..49"}
+      (var {} Cons)
+      (lit {span: "surf:44..48", type: (t-prim {} i64)} 2)
+      (var {} Nil))))

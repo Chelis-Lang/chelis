@@ -1,0 +1,13 @@
+(defsig {dtype_bounds: {p: float}}
+  g
+  (p)
+  (t-fn {} (t-tensor {} (d-lit {} 3) (t-var {} p)) (t-tensor {} (t-var {} p))))
+
+(def {}
+  g
+  (fn {}
+    (params {} x)
+    (app {}
+      (var {} mean)
+      (var {} x)
+      (lit {surf_literal_style: "explicit", type: (t-prim {} i32)} 0))))

@@ -1,0 +1,12 @@
+(def {}
+  sample
+  (let {span: "surf:9..80"}
+    (bind {}
+      empty_scope
+      (var {span: "surf:26..27"} x))
+    (handle-effect {effect: random, span: "surf:29..78"}
+      (lit {span: "surf:39..44", type: (t-prim {} i64)} 42)
+      (app {span: "surf:46..78"}
+        (var {span: "surf:48..55"} dropout)
+        (var {span: "surf:56..67"} empty_scope)
+        (lit {span: "surf:69..75", surf_literal_style: "explicit", type: (t-prim {} f32)} 0.0)))))

@@ -1,0 +1,74 @@
+(defsig {} inc (t-fn {} (t-prim {} i64) (t-prim {} i64)))
+
+(def {}
+  inc
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:26..46"}
+      (var {span: "surf:26..29"} add)
+      (var {span: "surf:30..31"} x)
+      (cast {span: "surf:33..45"}
+        (lit {span: "surf:38..39", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 1)
+        (t-prim {} i64)))))
+
+(defsig {} xs (t-adt {} List (t-prim {} i64)))
+
+(def {}
+  xs
+  (app {span: "surf:63..105"}
+    (var {} Cons)
+    (cast {span: "surf:64..76"}
+      (lit {span: "surf:69..70", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 1)
+      (t-prim {} i64))
+    (app {}
+      (var {} Cons)
+      (cast {span: "surf:78..90"}
+        (lit {span: "surf:83..84", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 2)
+        (t-prim {} i64))
+      (app {}
+        (var {} Cons)
+        (cast {span: "surf:92..104"}
+          (lit {span: "surf:97..98", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 3)
+          (t-prim {} i64))
+        (var {} Nil)))))
+
+(def {}
+  mapped
+  (app {span: "surf:115..127"}
+    (var {span: "surf:115..118"} map)
+    (var {span: "surf:119..122"} inc)
+    (var {span: "surf:124..126"} xs)))
+
+(def {}
+  filtered
+  (app {span: "surf:139..208"}
+    (var {span: "surf:139..145"} filter)
+    (fn {span: "surf:146..199"}
+      (params {} (x {type: (t-prim {} i64)}))
+      (app {span: "surf:161..199"}
+        (var {span: "surf:161..163"} eq)
+        (app {span: "surf:164..184"}
+          (var {span: "surf:164..167"} mod)
+          (var {span: "surf:168..169"} x)
+          (cast {span: "surf:171..183"}
+            (lit {span: "surf:176..177", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 2)
+            (t-prim {} i64)))
+        (cast {span: "surf:186..198"}
+          (lit {span: "surf:191..192", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 0)
+          (t-prim {} i64))))
+    (var {span: "surf:201..207"} mapped)))
+
+(def {}
+  total
+  (app {span: "surf:217..283"}
+    (var {span: "surf:217..221"} fold)
+    (fn {span: "surf:222..258"}
+      (params {} (acc {type: (t-prim {} i64)}) (x {type: (t-prim {} i64)}))
+      (app {span: "surf:247..258"}
+        (var {span: "surf:247..250"} add)
+        (var {span: "surf:251..254"} acc)
+        (var {span: "surf:256..257"} x)))
+    (cast {span: "surf:260..272"}
+      (lit {span: "surf:265..266", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 0)
+      (t-prim {} i64))
+    (var {span: "surf:274..282"} filtered)))

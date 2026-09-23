@@ -1,0 +1,13 @@
+(defsig {} input (t-tensor {} (d-lit {} 2) (t-prim {} f64)))
+
+(def {} input (var {span: "surf:24..29"} input))
+
+(defsig {} other (t-tensor {} (d-lit {} 2) (t-prim {} f64)))
+
+(def {} other (var {span: "surf:54..59"} other))
+
+(def {}
+  values
+  (app {span: "surf:69..83"}
+    (var {span: "surf:69..76"} to_list)
+    (var {span: "surf:77..82"} input)))

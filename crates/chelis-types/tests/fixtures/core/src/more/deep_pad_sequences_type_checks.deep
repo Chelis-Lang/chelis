@@ -1,0 +1,35 @@
+(defsig {} tokens (t-adt {} List (t-adt {} List (t-prim {} i64))))
+
+(def {}
+  tokens
+  (app {span: "surf:27..73"}
+    (var {} Cons)
+    (app {span: "surf:28..56"}
+      (var {} Cons)
+      (cast {span: "surf:29..41"}
+        (lit {span: "surf:34..35", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 1)
+        (t-prim {} i64))
+      (app {}
+        (var {} Cons)
+        (cast {span: "surf:43..55"}
+          (lit {span: "surf:48..49", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 2)
+          (t-prim {} i64))
+        (var {} Nil)))
+    (app {}
+      (var {} Cons)
+      (app {span: "surf:58..72"}
+        (var {} Cons)
+        (cast {span: "surf:59..71"}
+          (lit {span: "surf:64..65", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 3)
+          (t-prim {} i64))
+        (var {} Nil))
+      (var {} Nil))))
+
+(def {}
+  padded
+  (app {span: "surf:83..118"}
+    (var {span: "surf:83..96"} pad_sequences)
+    (var {span: "surf:97..103"} tokens)
+    (cast {span: "surf:105..117"}
+      (lit {span: "surf:110..111", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 0)
+      (t-prim {} i64))))

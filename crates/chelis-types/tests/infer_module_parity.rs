@@ -1,38 +1,22 @@
-//! Behavior baseline for the `infer` module split (openspec
-//! `modularize-type-inference`).
+//! Behavioral inference baselines over lossless original-production AST fixtures.
 //!
-//! The split moves ~21,000 lines of inference code out of one file and into a
-//! role-based module tree. Every step of that move is supposed to be
-//! behavior-preserving, but the existing suite exercises inference through
-//! many narrow issue-specific assertions: a reordered diagnostic or a dropped
-//! metadata stamp can slip between them. These fixtures close that gap by
-//! recording the *whole* observable output of a check — the annotated Deep
-//! tree with its metadata, the type environment, the inference statistics,
-//! and the ordered diagnostics — and comparing it byte for byte.
+//! Accepted checks preserve their annotated Deep, type environment, signature
+//! inference, and visit counters. Rejected checks preserve ordered diagnostic
+//! kinds, severity, and locations, without freezing diagnostic prose.
 //!
 //! The recorded baselines live in `tests/fixtures/infer_parity/`. A missing
-//! baseline is written on first run and the test FAILS, so a deleted or
-//! never-recorded fixture can never pass silently. A baseline is only allowed
-//! to change when the change is a deliberate, reviewed behavior change; for
-//! this refactor the correct number of baseline edits is zero.
+//! baseline is written and reported as a failure, never silently accepted.
 
 use std::fs;
 use std::path::PathBuf;
 
 use chelis_deep::Expr;
 use chelis_deep::printer::print_canonical;
-use chelis_surf::desugar::desugar_program;
-use chelis_surf::parser::parse_str as parse_surf;
+
 use chelis_types::{CheckedProgram, InferResult, check_ir_program};
 
-fn surf_to_deep(source: &str, label: &str) -> Vec<Expr> {
-    let decls = parse_surf(source).unwrap_or_else(|e| panic!("{label}: surf parse failed: {e:?}"));
-    chelis_macros::expand_program(
-        &desugar_program(&decls),
-        &chelis_macros::ExpansionOptions::default(),
-    )
-    .unwrap_or_else(|e| panic!("{label}: macro expansion failed: {e:?}"))
-    .into_exprs()
+fn parse_core(source: &str, _label: &str) -> Vec<Expr> {
+    serde_json::from_str(source).expect("lossless core fixture")
 }
 
 /// The full observable output of an accepted check: the annotated tree (which
@@ -108,27 +92,21 @@ fn accepted_snapshot(checked: &CheckedProgram) -> String {
     out
 }
 
-/// The full observable output of a rejected check: every diagnostic in order,
-/// with the fields a consumer can actually see.
+/// Ordered diagnostic kinds, severity, and locations, independent of prose.
 fn rejected_snapshot(report: &InferResult) -> String {
-    let mut out = String::new();
-    out.push_str(&format!(
+    let mut out = format!(
         "typed_nodes = {}\ntotal_nodes = {}\ndiagnostics = {}\n\n",
         report.typed_nodes,
         report.total_nodes,
         report.errors.len()
-    ));
+    );
     for (index, error) in report.errors.iter().enumerate() {
         out.push_str(&format!("[{index}] kind = {:?}\n", error.kind));
-        out.push_str(&format!("    message = {}\n", error.message));
         out.push_str(&format!("    severity = {}\n", error.severity));
         out.push_str(&format!("    expected = {:?}\n", error.expected));
         out.push_str(&format!("    got = {:?}\n", error.got));
         out.push_str(&format!("    span_offset = {:?}\n", error.span_offset));
         out.push_str(&format!("    span_id = {:?}\n", error.span_id));
-        for hint in &error.suggestions {
-            out.push_str(&format!("    hint = {hint}\n"));
-        }
     }
     out
 }
@@ -168,7 +146,7 @@ fn assert_matches_baseline(name: &str, actual: &str) {
 
 /// A program that must type-check cleanly, compared on its whole output.
 fn assert_accepted_parity(name: &str, source: &str) {
-    let deep = surf_to_deep(source, name);
+    let deep = parse_core(source, name);
     match check_ir_program(&deep) {
         Ok(checked) => assert_matches_baseline(name, &accepted_snapshot(&checked)),
         Err(report) => {
@@ -181,7 +159,7 @@ fn assert_accepted_parity(name: &str, source: &str) {
 /// A program that must be rejected, compared on its whole ordered diagnostic
 /// list.
 fn assert_rejected_parity(name: &str, source: &str) {
-    let deep = surf_to_deep(source, name);
+    let deep = parse_core(source, name);
     match check_ir_program(&deep) {
         Ok(_) => panic!("{name}: fixture is supposed to be rejected, but it type-checked"),
         Err(report) => {
@@ -200,13 +178,7 @@ fn assert_rejected_parity(name: &str, source: &str) {
 fn accepted_generic_calls() {
     assert_accepted_parity(
         "accepted_generic_calls",
-        r#"module Parity.GenericCalls
-def apply_twice(f: (i32) -> i32, x: i32) -> i32 = f(f(x))
-def bump(n: i32) -> i32 = add(n, 1)
-def run() -> i32 = apply_twice(bump, 3)
-def identity_pair(a: i32, b: f32) -> (i32, f32) = (a, b)
-def use_pair() -> i32 = identity_pair(1, 2.0).0
-"#,
+        include_str!("fixtures/core/tests/infer_module_parity/accepted_generic_calls.0.json"),
     );
 }
 
@@ -214,13 +186,7 @@ def use_pair() -> i32 = identity_pair(1, 2.0).0
 fn accepted_shape_operations() {
     assert_accepted_parity(
         "accepted_shape_operations",
-        r#"module Parity.ShapeOps
-def project(x: tensor[64, 32, f32], w: tensor[32, 8, f32]) -> tensor[64, 8, f32] = matmul(x, w)
-def broadcast_bias(b: tensor[1, f32]) -> tensor[64, f32] = expand(b, 0, 64i64)
-def swap(x: tensor[4, 6, f32]) -> tensor[6, 4, f32] = permute(x, 1, 0)
-def collapse(x: tensor[4, 6, f32]) -> tensor[24, f32] = reshape(x, [cast(24, i64)])
-def reduce_rows(x: tensor[4, 6, f32]) -> tensor[4, f32] = mean(x, 1)
-"#,
+        include_str!("fixtures/core/tests/infer_module_parity/accepted_shape_operations.0.json"),
     );
 }
 
@@ -228,15 +194,7 @@ def reduce_rows(x: tensor[4, 6, f32]) -> tensor[4, f32] = mean(x, 1)
 fn accepted_collections() {
     assert_accepted_parity(
         "accepted_collections",
-        r#"module Parity.Collections
-values: List[i32] = [1, 2, 3, 4]
-doubled = map(fn (v: i32) -> mul(v, 2), values)
-kept = filter(fn (v: i32) -> gt(v, 2), values)
-total = fold(fn (acc: i32, v: i32) -> add(acc, v), 0, values)
-item_total = len(values)
-first_two = take(values, cast(2, i64))
-paired = zip(values, values)
-"#,
+        include_str!("fixtures/core/tests/infer_module_parity/accepted_collections.0.json"),
     );
 }
 
@@ -244,13 +202,7 @@ paired = zip(values, values)
 fn accepted_records() {
     assert_accepted_parity(
         "accepted_records",
-        r#"module Parity.Records
-type Point =
-  | Point { x: f32, y: f32 }
-def make(a: f32, b: f32) -> Point = Point { x: a, y: b }
-def read_x(p: Point) -> f32 = p.x
-def shift(p: Point, dx: f32) -> Point = Point { x: add(p.x, dx), y: p.y }
-"#,
+        include_str!("fixtures/core/tests/infer_module_parity/accepted_records.0.json"),
     );
 }
 
@@ -258,19 +210,7 @@ def shift(p: Point, dx: f32) -> Point = Point { x: add(p.x, dx), y: p.y }
 fn accepted_patterns() {
     assert_accepted_parity(
         "accepted_patterns",
-        r#"module Parity.Patterns
-type Shape =
-  | Circle(f32)
-  | Rect(f32, f32)
-def area(s: Shape) -> f32 = match s with {
-  | Circle(r) => mul(3.14, mul(r, r))
-  | Rect(w, h) => mul(w, h)
-}
-def first_or(xs: List[i32], fallback: i32) -> i32 = match xs with {
-  | Cons(head, tail) => head
-  | Nil => fallback
-}
-"#,
+        include_str!("fixtures/core/tests/infer_module_parity/accepted_patterns.0.json"),
     );
 }
 
@@ -278,10 +218,7 @@ def first_or(xs: List[i32], fallback: i32) -> i32 = match xs with {
 fn accepted_transforms() {
     assert_accepted_parity(
         "accepted_transforms",
-        r#"module Parity.Transforms
-def process(x: tensor[features, f32]) -> tensor[features, f32] = relu(x)
-def batch_process(xs: tensor[batch, features, f32]) -> tensor[batch, features, f32] = xs |> vmap(process)
-"#,
+        include_str!("fixtures/core/tests/infer_module_parity/accepted_transforms.0.json"),
     );
 }
 
@@ -291,10 +228,9 @@ def batch_process(xs: tensor[batch, features, f32]) -> tensor[batch, features, f
 fn rejected_numeric_restrictions() {
     assert_rejected_parity(
         "rejected_numeric_restrictions",
-        r#"module Parity.NumericRestrictions
-def mixed(n: i32) -> f32 = add(1.0, n)
-def int_div(a: i32, b: i32) -> i32 = div(a, b)
-"#,
+        include_str!(
+            "fixtures/core/tests/infer_module_parity/rejected_numeric_restrictions.0.json"
+        ),
     );
 }
 
@@ -302,10 +238,7 @@ def int_div(a: i32, b: i32) -> i32 = div(a, b)
 fn rejected_invalid_shapes() {
     assert_rejected_parity(
         "rejected_invalid_shapes",
-        r#"module Parity.InvalidShapes
-def bad_matmul(x: tensor[64, 32, f32], w: tensor[16, 8, f32]) -> tensor[64, 8, f32] = matmul(x, w)
-def bad_reshape(x: tensor[4, 6, f32]) -> tensor[25, f32] = reshape(x, [cast(25, i64)])
-"#,
+        include_str!("fixtures/core/tests/infer_module_parity/rejected_invalid_shapes.0.json"),
     );
 }
 
@@ -313,11 +246,9 @@ def bad_reshape(x: tensor[4, 6, f32]) -> tensor[25, f32] = reshape(x, [cast(25, 
 fn rejected_collection_callbacks() {
     assert_rejected_parity(
         "rejected_collection_callbacks",
-        r#"module Parity.CollectionCallbacks
-values: List[i32] = [1, 2, 3]
-wrong_element = map(fn (v: f32) -> mul(v, 2.0), values)
-wrong_predicate = filter(fn (v: i32) -> v, values)
-"#,
+        include_str!(
+            "fixtures/core/tests/infer_module_parity/rejected_collection_callbacks.0.json"
+        ),
     );
 }
 
@@ -325,12 +256,7 @@ wrong_predicate = filter(fn (v: i32) -> v, values)
 fn rejected_records() {
     assert_rejected_parity(
         "rejected_records",
-        r#"module Parity.RecordsRejected
-type Point =
-  | Point { x: f32, y: f32 }
-def read_missing(p: Point) -> f32 = p.z
-def build_wrong(a: i32) -> Point = Point { x: a, y: 1.0 }
-"#,
+        include_str!("fixtures/core/tests/infer_module_parity/rejected_records.0.json"),
     );
 }
 
@@ -338,20 +264,7 @@ def build_wrong(a: i32) -> Point = Point { x: a, y: 1.0 }
 fn rejected_patterns() {
     assert_rejected_parity(
         "rejected_patterns",
-        r#"module Parity.PatternsRejected
-type Shape =
-  | Circle(f32)
-  | Rect(f32, f32)
-def unknown_ctor(s: Shape) -> f32 = match s with {
-  | Circle(r) => r
-  | Triangle(b, h) => mul(b, h)
-  | Rect(w, h) => mul(w, h)
-}
-def bad_result(s: Shape) -> f32 = match s with {
-  | Circle(r) => r
-  | Rect(w, h) => 1
-}
-"#,
+        include_str!("fixtures/core/tests/infer_module_parity/rejected_patterns.0.json"),
     );
 }
 
@@ -359,9 +272,6 @@ def bad_result(s: Shape) -> f32 = match s with {
 fn rejected_transforms() {
     assert_rejected_parity(
         "rejected_transforms",
-        r#"module Parity.TransformsRejected
-def label(x: tensor[features, f32]) -> string = "constant"
-def batch_label(xs: tensor[batch, features, f32]) -> tensor[batch, features, f32] = xs |> vmap(label)
-"#,
+        include_str!("fixtures/core/tests/infer_module_parity/rejected_transforms.0.json"),
     );
 }

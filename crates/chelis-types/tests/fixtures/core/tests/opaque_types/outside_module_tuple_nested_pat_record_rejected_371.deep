@@ -1,0 +1,17 @@
+(module {surf_path: "Agent.Strategy"}
+  agent.strategy
+  (defsig {} peek (t-fn {} (t-adt {} Probability) (t-prim {} f32)))
+  (def {}
+    peek
+    (fn {}
+      (params {} (p {type: (t-var {} _)}))
+      (match {span: "surf:56..116"}
+        (tuple {span: "surf:62..68"}
+          (var {span: "surf:63..64"} p)
+          (lit {span: "surf:66..67", type: (t-prim {} i32)} 0))
+        (arm {}
+          (pat-tuple {}
+            (pat-record {} Probability (kv {} value (pat-var {} v)))
+            (pat-wild {}))
+          ()
+          (var {span: "surf:113..114"} v))))))

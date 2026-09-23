@@ -1,0 +1,15 @@
+(def {}
+  lam
+  (fn {}
+    (params {})
+    (fn {span: "surf:12..60"}
+      (params {} q)
+      (match {span: "surf:22..60"}
+        (var {span: "surf:28..29"} q)
+        (arm {}
+          (pat-tuple {} (pat-var {} a) (pat-var {} k))
+          ()
+          (app {span: "surf:49..58"}
+            (var {span: "surf:49..52"} sum)
+            (var {span: "surf:53..54"} a)
+            (lit {span: "surf:56..57", type: (t-prim {} i32)} 0)))))))

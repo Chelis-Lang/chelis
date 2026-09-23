@@ -1,0 +1,15 @@
+(match {span: "surf:10..108"}
+    @BODY@
+    (arm {}
+      (pat-ctor {} Cons (pat-var {} head) (pat-var {} tail))
+      ()
+      (app {span: "surf:57..72"}
+        (var {span: "surf:57..60"} sum)
+        (var {span: "surf:61..65"} head)
+        (var {span: "surf:66..71"} fixed)))
+    (arm {}
+      (pat-ctor {} Nil)
+      ()
+      (app {span: "surf:82..106"}
+        (var {span: "surf:82..98"} scalar_to_tensor)
+        (lit {span: "surf:99..105", surf_literal_style: "explicit", type: (t-prim {} f32)} 0.0))))

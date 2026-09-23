@@ -1,0 +1,8 @@
+(def {} op (var {span: "surf:5..10"} index))
+
+(def {}
+  out
+  (app {span: "surf:17..31"}
+    (var {span: "surf:17..19"} op)
+    (lit {span: "surf:20..24", type: (t-prim {} i64)} 1)
+    (lit {span: "surf:26..30", type: (t-prim {} i64)} 0)))

@@ -1,0 +1,12 @@
+(def {} measure (var {span: "surf:10..13"} len))
+
+(defsig {} out (t-prim {} i64))
+
+(def {}
+  out
+  (app {span: "surf:25..40"}
+    (var {span: "surf:25..32"} measure)
+    (app {span: "surf:33..39"}
+      (var {} Cons)
+      (lit {span: "surf:34..38", type: (t-prim {} i64)} 1)
+      (var {} Nil))))

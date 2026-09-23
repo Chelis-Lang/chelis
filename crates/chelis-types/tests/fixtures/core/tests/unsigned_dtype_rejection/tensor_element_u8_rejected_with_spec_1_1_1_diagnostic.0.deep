@@ -1,0 +1,39 @@
+(defsig {} main (t-fn {} (t-tensor {} (d-lit {} 3) (t-prim {} i32))))
+
+(def {}
+  main
+  (fn {}
+    (params {})
+    (cast {span: "surf:31..62"}
+      (app {span: "surf:36..56"}
+        (var {span: "surf:36..45"} to_tensor)
+        (app {span: "surf:46..55"}
+          (var {} Cons)
+          (lit {span: "surf:47..48", type: (t-prim {} i32)} 1)
+          (app {}
+            (var {} Cons)
+            (lit {span: "surf:50..51", type: (t-prim {} i32)} 2)
+            (app {}
+              (var {} Cons)
+              (lit {span: "surf:53..54", type: (t-prim {} i32)} 3)
+              (var {} Nil)))))
+      (t-prim {} i32))))
+
+(defsig {} stash (t-fn {} (t-tensor {} (d-lit {} 3) (t-prim {} u8))))
+
+(def {}
+  stash
+  (fn {}
+    (params {})
+    (app {span: "surf:94..114"}
+      (var {span: "surf:94..103"} to_tensor)
+      (app {span: "surf:104..113"}
+        (var {} Cons)
+        (lit {span: "surf:105..106", type: (t-prim {} i32)} 1)
+        (app {}
+          (var {} Cons)
+          (lit {span: "surf:108..109", type: (t-prim {} i32)} 2)
+          (app {}
+            (var {} Cons)
+            (lit {span: "surf:111..112", type: (t-prim {} i32)} 3)
+            (var {} Nil)))))))

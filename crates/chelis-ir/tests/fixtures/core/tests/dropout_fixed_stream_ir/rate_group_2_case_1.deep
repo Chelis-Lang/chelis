@@ -1,0 +1,56 @@
+(defsig {dtype_bounds: {p: float}}
+  keep
+  (p)
+  (t-fn {}
+    (t-tensor {} (d-lit {} 8) (t-var {} p))
+    (t-var {} p)
+    (t-tensor {} (d-lit {} 8) (t-var {} p))))
+
+(def {}
+  keep
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (rate {type: (t-var {} _)}))
+    (app {span: "surf:63..79"}
+      (var {span: "surf:63..70"} dropout)
+      (var {span: "surf:71..72"} x)
+      (var {span: "surf:74..78"} rate))))
+
+(defsig {dtype_bounds: {p: float}}
+  wrapper
+  (p)
+  (t-fn {}
+    (t-tensor {} (d-lit {} 8) (t-var {} p))
+    (t-tensor {} (d-lit {} 8) (t-var {} p))))
+
+(def {}
+  wrapper
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (let {span: "surf:137..190"}
+      (bind {}
+        rate
+        (cast {span: "surf:146..158"}
+          (lit {span: "surf:151..154", surf_literal_style: "unsuffixed", type: (t-var {} p)} 0.5)
+          (t-var {} p)))
+      (let {}
+        (bind {}
+          alias
+          (var {span: "surf:168..172"} rate))
+        (app {span: "surf:174..188"}
+          (var {span: "surf:174..178"} keep)
+          (var {span: "surf:179..180"} x)
+          (var {span: "surf:182..187"} alias))))))
+
+(defsig {}
+  sample
+  (t-fn {}
+    (t-tensor {} (d-lit {} 8) (t-prim {} DTYPE))
+    (t-tensor {} (d-lit {} 8) (t-prim {} DTYPE))))
+
+(def {}
+  sample
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:241..251"}
+      (var {span: "surf:241..248"} wrapper)
+      (var {span: "surf:249..250"} x))))

@@ -1,0 +1,10 @@
+(defsig {} dec (t-fn {} (t-prim {} i32) (t-var {} _)))
+
+(def {}
+  dec
+  (fn {}
+    (params {} (n {type: (t-var {} _)}))
+    (app {span: "surf:18..27"}
+      (var {span: "surf:18..21"} sub)
+      (var {span: "surf:22..23"} n)
+      (lit {span: "surf:25..26", type: (t-prim {} i32)} 1))))

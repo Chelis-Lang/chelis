@@ -1,0 +1,24 @@
+(def {}
+  t
+  (app {span: "surf:4..82"}
+    (var {span: "surf:4..6"} eq)
+    (app {span: "surf:7..43"}
+      (var {span: "surf:7..13"} expand)
+      (app {span: "surf:14..33"}
+        (var {span: "surf:14..23"} to_tensor)
+        (app {span: "surf:24..32"}
+          (var {} Cons)
+          (lit {span: "surf:25..31", surf_literal_style: "explicit", type: (t-prim {} f32)} 0.5)
+          (var {} Nil)))
+      (lit {span: "surf:35..36", type: (t-prim {} i32)} 0)
+      (lit {span: "surf:38..42", type: (t-prim {} i64)} 3))
+    (app {span: "surf:45..81"}
+      (var {span: "surf:45..51"} expand)
+      (app {span: "surf:52..71"}
+        (var {span: "surf:52..61"} to_tensor)
+        (app {span: "surf:62..70"}
+          (var {} Cons)
+          (lit {span: "surf:63..69", surf_literal_style: "explicit", type: (t-prim {} f32)} 0.5)
+          (var {} Nil)))
+      (lit {span: "surf:73..74", type: (t-prim {} i32)} 0)
+      (lit {span: "surf:76..80", type: (t-prim {} i64)} 3))))

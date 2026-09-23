@@ -1,0 +1,8 @@
+(defsig {}
+  f
+  (d p)
+  (t-fn {}
+    (t-tensor {} (d-var {} d) (t-var {} p))
+    (t-tensor {} (d-var {} d) (t-var {} p))))
+
+(def {} f (fn {} (params {} x) (var {span: "surf:53..54"} x)))

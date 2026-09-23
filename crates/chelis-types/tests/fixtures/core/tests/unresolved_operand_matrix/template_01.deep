@@ -1,0 +1,18 @@
+@@HELPER@@
+
+(def {}
+  f
+  (app {span: "surf:29..61"}
+    (var {span: "surf:29..30"} g)
+    (app {span: "surf:31..60"}
+      (var {span: "surf:31..40"} to_tensor)
+      (app {span: "surf:41..59"}
+        (var {} Cons)
+        (lit {span: "surf:42..46", surf_literal_style: "explicit", type: (t-prim {} i32)} 1)
+        (app {}
+          (var {} Cons)
+          (lit {span: "surf:48..52", surf_literal_style: "explicit", type: (t-prim {} i32)} 2)
+          (app {}
+            (var {} Cons)
+            (lit {span: "surf:54..58", surf_literal_style: "explicit", type: (t-prim {} i32)} 4)
+            (var {} Nil)))))))

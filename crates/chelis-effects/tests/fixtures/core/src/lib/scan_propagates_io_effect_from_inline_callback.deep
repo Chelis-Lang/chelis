@@ -1,0 +1,32 @@
+(defsig {} xs (t-adt {} List (t-prim {} i64)))
+
+(def {}
+  xs
+  (app {span: "surf:17..45"}
+    (var {} Cons)
+    (cast {span: "surf:18..30"}
+      (lit {span: "surf:23..24", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 1)
+      (t-prim {} i64))
+    (app {}
+      (var {} Cons)
+      (cast {span: "surf:32..44"}
+        (lit {span: "surf:37..38", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 2)
+        (t-prim {} i64))
+      (var {} Nil))))
+
+(def {}
+  totals
+  (app {span: "surf:55..122"}
+    (var {span: "surf:55..59"} scan)
+    (fn {span: "surf:60..103"}
+      (params {} (acc {type: (t-prim {} i64)}) (x {type: (t-prim {} i64)}))
+      (app {span: "surf:85..103"}
+        (var {span: "surf:85..90"} debug)
+        (app {span: "surf:91..102"}
+          (var {span: "surf:91..94"} add)
+          (var {span: "surf:95..98"} acc)
+          (var {span: "surf:100..101"} x))))
+    (cast {span: "surf:105..117"}
+      (lit {span: "surf:110..111", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 0)
+      (t-prim {} i64))
+    (var {span: "surf:119..121"} xs)))

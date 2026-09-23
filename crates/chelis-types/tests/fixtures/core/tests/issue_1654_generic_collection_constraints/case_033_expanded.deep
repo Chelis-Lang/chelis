@@ -1,0 +1,11 @@
+(def {} op (var {span: "surf:5..11"} append))
+
+(def {}
+  out
+  (app {span: "surf:18..35"}
+    (var {span: "surf:18..20"} op)
+    (app {span: "surf:21..27"}
+      (var {} Cons)
+      (lit {span: "surf:22..26", type: (t-prim {} i64)} 1)
+      (var {} Nil))
+    (lit {span: "surf:29..34", type: (t-prim {} string)} "bad")))

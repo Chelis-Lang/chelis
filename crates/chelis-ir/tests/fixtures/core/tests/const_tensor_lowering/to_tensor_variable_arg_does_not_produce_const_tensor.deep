@@ -1,0 +1,17 @@
+(defsig {}
+  make_tensor
+  (t-fn {}
+    (t-prim {} f32)
+    (t-prim {} f32)
+    (t-tensor {} (d-lit {} 2) (t-prim {} f32))))
+
+(def {}
+  make_tensor
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (y {type: (t-var {} _)}))
+    (app {span: "surf:55..72"}
+      (var {span: "surf:55..64"} to_tensor)
+      (app {span: "surf:65..71"}
+        (var {} Cons)
+        (var {span: "surf:66..67"} x)
+        (app {} (var {} Cons) (var {span: "surf:69..70"} y) (var {} Nil))))))

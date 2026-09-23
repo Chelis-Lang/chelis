@@ -1,0 +1,40 @@
+(defsig {}
+  want_2x2
+  (t-fn {}
+    (t-tensor {} (d-lit {} 2) (d-lit {} 2) (t-prim {} f32))
+    (t-tensor {} (t-prim {} f32))))
+
+(def {}
+  want_2x2
+  (fn {}
+    (params {} (a {type: (t-var {} _)}))
+    (app {span: "surf:52..66"}
+      (var {span: "surf:52..57"} trace)
+      (var {span: "surf:58..59"} a)
+      (lit {span: "surf:61..62", type: (t-prim {} i32)} 0)
+      (lit {span: "surf:64..65", type: (t-prim {} i32)} 1))))
+
+(defsig {}
+  bad_consumer
+  (m n)
+  (t-fn {}
+    (t-tensor {} (d-var {} m) (d-var {} n) (t-prim {} f32))
+    (t-tensor {} (t-prim {} f32))))
+
+(def {}
+  bad_consumer
+  (fn {}
+    (params {} (a {type: (t-var {} _)}))
+    (app {span: "surf:129..140"}
+      (var {span: "surf:129..137"} want_2x2)
+      (var {span: "surf:138..139"} a))))
+
+(defsig {} main (t-fn {} (t-prim {} f32)))
+
+(def {}
+  main
+  (fn {}
+    (params {})
+    (cast {span: "surf:161..175"}
+      (lit {span: "surf:166..169", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 0.0)
+      (t-prim {} f32))))

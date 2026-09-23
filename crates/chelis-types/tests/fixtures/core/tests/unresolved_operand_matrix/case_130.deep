@@ -1,0 +1,22 @@
+(defsig {dtype_bounds: {p: float}}
+  g
+  (p)
+  (t-fn {eff: (effects {} test)}
+    (t-ref {} (t-tensor {} (d-lit {} 3) (t-var {} p)))
+    (t-ref {} (t-tensor {} (d-lit {} 3) (t-var {} p)))
+    (t-var {} p)
+    (t-unit {})))
+
+(def {}
+  g
+  (fn {}
+    (params {}
+      (a {type: (t-var {} _)})
+      (b {type: (t-var {} _)})
+      (tol {type: (t-var {} _)}))
+    (app {span: "surf:81..121"}
+      (var {span: "surf:81..105"} test_assert_close_tensor)
+      (var {span: "surf:106..107"} a)
+      (var {span: "surf:109..110"} b)
+      (var {span: "surf:112..115"} tol)
+      (lit {span: "surf:117..120", type: (t-prim {} string)} "l"))))

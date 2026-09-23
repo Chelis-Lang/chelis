@@ -1,0 +1,41 @@
+(defsig {}
+  size
+  (k v)
+  (t-fn {} (t-adt {} Dict (t-var {} k) (t-var {} v)) (t-prim {} i64)))
+
+(def {}
+  size
+  (fn {}
+    (params {} (xs {type: (t-var {} _)}))
+    (app {span: "surf:40..47"}
+      (var {span: "surf:40..43"} len)
+      (var {span: "surf:44..46"} xs))))
+
+(defsig {} keys (t-adt {} List (t-prim {} string)))
+
+(def {}
+  keys
+  (app {span: "surf:69..74"}
+    (var {} Cons)
+    (lit {span: "surf:70..73", type: (t-prim {} string)} "a")
+    (var {} Nil)))
+
+(defsig {} values (t-adt {} List (t-prim {} i64)))
+
+(def {}
+  values
+  (app {span: "surf:95..101"}
+    (var {} Cons)
+    (lit {span: "surf:96..100", type: (t-prim {} i64)} 1)
+    (var {} Nil)))
+
+(def {}
+  out
+  (app {span: "surf:108..140"}
+    (var {span: "surf:108..112"} size)
+    (app {span: "surf:113..139"}
+      (var {span: "surf:113..120"} dict_of)
+      (app {span: "surf:121..138"}
+        (var {span: "surf:121..124"} zip)
+        (var {span: "surf:125..129"} keys)
+        (var {span: "surf:131..137"} values)))))

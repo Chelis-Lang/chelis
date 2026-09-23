@@ -1,0 +1,4 @@
+(app {span: "surf:16..32"}
+    (var {span: "surf:16..23"} softmax)
+    (var {span: "surf:24..25"} x)
+    (lit {span: "surf:27..31", surf_literal_style: "explicit", type: (t-prim {} i32)} 0))

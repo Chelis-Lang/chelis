@@ -1,0 +1,14 @@
+(defsig {}
+  forward
+  (t-fn {}
+    (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 2) (t-prim {} f32))))
+
+(def {}
+  forward
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:55..71"}
+      (var {span: "surf:55..65"} max_reduce)
+      (var {span: "surf:66..67"} x)
+      (lit {span: "surf:69..70", type: (t-prim {} i32)} 1))))

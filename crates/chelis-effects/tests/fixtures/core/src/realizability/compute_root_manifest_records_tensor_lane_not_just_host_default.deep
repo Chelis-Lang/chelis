@@ -1,0 +1,11 @@
+(def {}
+  x
+  (app {span: "surf:4..53"}
+    (var {span: "surf:4..10"} insert)
+    (app {span: "surf:11..43"}
+      (var {span: "surf:11..27"} scalar_to_tensor)
+      (cast {span: "surf:28..42"}
+        (lit {span: "surf:33..36", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 1.0)
+        (t-prim {} f32)))
+    (lit {span: "surf:45..46", type: (t-prim {} i32)} 0)
+    (lit {span: "surf:48..52", type: (t-prim {} i64)} 1)))

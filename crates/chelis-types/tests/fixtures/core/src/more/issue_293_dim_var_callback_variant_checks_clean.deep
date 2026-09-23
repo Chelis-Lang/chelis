@@ -1,0 +1,44 @@
+(module {surf_path: "Repro.DimCallback"}
+  repro.dimcallback
+  (defsig {}
+    apply_resid
+    (n m)
+    (t-fn {}
+      (t-tensor {} (d-var {} n) (t-prim {} f32))
+      (t-tensor {} (d-var {} m) (t-prim {} f32))
+      (t-fn {}
+        (t-tensor {} (d-var {} n) (t-prim {} f32))
+        (t-tensor {} (d-var {} m) (t-prim {} f32))
+        (t-tensor {} (d-var {} n) (t-prim {} f32)))
+      (t-tensor {} (d-var {} n) (t-prim {} f32))))
+  (def {}
+    apply_resid
+    (fn {}
+      (params {}
+        (x {type: (t-var {} _)})
+        (inner {type: (t-var {} _)})
+        (f {type: (t-var {} _)}))
+      (app {span: "surf:167..178"}
+        (var {span: "surf:167..168"} f)
+        (var {span: "surf:169..170"} x)
+        (var {span: "surf:172..177"} inner))))
+  (defsig {}
+    use_it
+    (t-fn {}
+      (t-tensor {} (d-lit {} 3) (t-prim {} f32))
+      (t-tensor {} (d-lit {} 3) (t-prim {} f32))
+      (t-tensor {} (d-lit {} 3) (t-prim {} f32))))
+  (def {}
+    use_it
+    (fn {}
+      (params {} (x {type: (t-var {} _)}) (w {type: (t-var {} _)}))
+      (app {span: "surf:250..291"}
+        (var {span: "surf:250..261"} apply_resid)
+        (var {span: "surf:262..263"} x)
+        (var {span: "surf:265..266"} w)
+        (fn {span: "surf:268..290"}
+          (params {} t q)
+          (app {span: "surf:281..290"}
+            (var {span: "surf:281..284"} add)
+            (var {span: "surf:285..286"} t)
+            (var {span: "surf:288..289"} q)))))))

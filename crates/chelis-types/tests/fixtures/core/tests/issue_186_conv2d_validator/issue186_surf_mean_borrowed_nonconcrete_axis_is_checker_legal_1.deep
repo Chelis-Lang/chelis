@@ -1,0 +1,15 @@
+(defsig {}
+  call_mean
+  (n)
+  (t-fn {}
+    (t-tensor {} (d-lit {} 32) (d-var {} n) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 32) (t-prim {} f32))))
+
+(def {}
+  call_mean
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:62..73"}
+      (var {span: "surf:62..66"} mean)
+      (borrow {span: "surf:67..69"} (var {span: "surf:68..69"} x))
+      (lit {span: "surf:71..72", type: (t-prim {} i32)} 1))))

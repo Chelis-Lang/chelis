@@ -1,0 +1,33 @@
+(defsig {}
+  forward_fixed
+  (d)
+  (t-fn {}
+    (t-tensor {} (d-var {} d) (t-prim {} f32))
+    (t-tensor {} (d-name {} fixed) (t-prim {} f32))
+    (t-tensor {} (d-var {} d) (t-prim {} f32))))
+
+(def {}
+  forward_fixed
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (gain {type: (t-var {} _)}))
+    (app {span: "surf:83..101"}
+      (var {span: "surf:83..93"} fixed_gain)
+      (var {span: "surf:94..95"} x)
+      (var {span: "surf:96..100"} gain))))
+
+(defsig {}
+  forward_other
+  (d)
+  (t-fn {}
+    (t-tensor {} (d-var {} d) (t-prim {} f32))
+    (t-tensor {} (d-name {} other) (t-prim {} f32))
+    (t-tensor {} (d-var {} d) (t-prim {} f32))))
+
+(def {}
+  forward_other
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (gain {type: (t-var {} _)}))
+    (app {span: "surf:185..203"}
+      (var {span: "surf:185..195"} other_gain)
+      (var {span: "surf:196..197"} x)
+      (var {span: "surf:198..202"} gain))))

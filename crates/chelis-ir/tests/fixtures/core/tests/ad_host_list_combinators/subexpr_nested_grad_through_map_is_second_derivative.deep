@@ -1,0 +1,72 @@
+(defsig {}
+  loss
+  (t-fn {} (t-tensor {} (d-lit {} 1) (t-prim {} f32)) (t-prim {} f32)))
+
+(def {}
+  loss
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (let {span: "surf:37..166"}
+      (bind {}
+        xs
+        (app {span: "surf:46..62"}
+          (var {span: "surf:46..53"} to_list)
+          (copy {span: "surf:54..61"} (var {span: "surf:59..60"} x))))
+      (let {}
+        (bind {}
+          ys
+          (app {span: "surf:70..111"}
+            (var {span: "surf:70..73"} map)
+            (fn {span: "surf:74..106"}
+              (params {} (v {type: (t-prim {} f32)}))
+              (app {span: "surf:89..106"}
+                (var {span: "surf:89..92"} mul)
+                (app {span: "surf:93..102"}
+                  (var {span: "surf:93..96"} mul)
+                  (var {span: "surf:97..98"} v)
+                  (var {span: "surf:100..101"} v))
+                (var {span: "surf:104..105"} v)))
+            (var {span: "surf:108..110"} xs)))
+        (app {span: "surf:114..164"}
+          (var {span: "surf:114..130"} tensor_to_scalar)
+          (app {span: "surf:131..163"}
+            (var {span: "surf:131..134"} sum)
+            (app {span: "surf:135..148"}
+              (var {span: "surf:135..144"} to_tensor)
+              (var {span: "surf:145..147"} ys))
+            (cast {span: "surf:150..162"}
+              (lit {span: "surf:155..156", surf_literal_style: "unsuffixed", type: (t-prim {} i32)} 0)
+              (t-prim {} i32))))))))
+
+(defsig {}
+  first_derivative_sum
+  (t-fn {} (t-tensor {} (d-lit {} 1) (t-prim {} f32)) (t-prim {} f32)))
+
+(def {}
+  first_derivative_sum
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:222..272"}
+      (var {span: "surf:222..238"} tensor_to_scalar)
+      (app {span: "surf:239..271"}
+        (var {span: "surf:239..242"} sum)
+        (app {span: "surf:243..256"}
+          (grad {span: "surf:243..253"} (var {span: "surf:248..252"} loss))
+          (var {span: "surf:254..255"} x))
+        (cast {span: "surf:258..270"}
+          (lit {span: "surf:263..264", surf_literal_style: "unsuffixed", type: (t-prim {} i32)} 0)
+          (t-prim {} i32))))))
+
+(def {}
+  out
+  (app {span: "surf:279..334"}
+    (grad {span: "surf:279..305"}
+      (var {span: "surf:284..304"} first_derivative_sum))
+    (app {span: "surf:306..333"}
+      (var {span: "surf:306..315"} to_tensor)
+      (app {span: "surf:316..332"}
+        (var {} Cons)
+        (cast {span: "surf:317..331"}
+          (lit {span: "surf:322..325", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 3.0)
+          (t-prim {} f32))
+        (var {} Nil)))))

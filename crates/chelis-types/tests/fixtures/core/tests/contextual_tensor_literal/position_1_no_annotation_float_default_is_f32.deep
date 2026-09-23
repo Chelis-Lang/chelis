@@ -1,0 +1,12 @@
+(def {}
+  xs
+  (app {span: "surf:5..20"}
+    (var {} Cons)
+    (lit {span: "surf:6..9", type: (t-prim {} f32)} 1.0)
+    (app {}
+      (var {} Cons)
+      (lit {span: "surf:11..14", type: (t-prim {} f32)} 2.0)
+      (app {}
+        (var {} Cons)
+        (lit {span: "surf:16..19", type: (t-prim {} f32)} 3.0)
+        (var {} Nil)))))

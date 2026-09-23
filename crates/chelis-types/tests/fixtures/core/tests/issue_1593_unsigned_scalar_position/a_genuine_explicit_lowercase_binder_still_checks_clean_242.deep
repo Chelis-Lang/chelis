@@ -1,0 +1,9 @@
+(module {surf_path: "P.M"}
+  p.m
+  (export {} f)
+  (defsig {} f (a) (t-fn {} (t-var {} a) (t-var {} a)))
+  (def {}
+    f
+    (fn {}
+      (params {} (x {type: (t-var {} _)}))
+      (var {span: "surf:44..45"} x))))

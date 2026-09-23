@@ -1,0 +1,20 @@
+(defsig {dtype_bounds: {p: numeric}}
+  less
+  (p)
+  (t-fn {} (t-var {} p) (t-var {} p) (t-prim {} bool)))
+
+(def {}
+  less
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (y {type: (t-var {} _)}))
+    (app {}
+      (var {} lt)
+      (var {} x)
+      (var {} y))))
+
+(def {}
+  out
+  (app {}
+    (var {} less)
+    (lit {surf_literal_style: "explicit", type: (t-prim {} i32)} 1)
+    (lit {surf_literal_style: "explicit", type: (t-prim {} i32)} 2)))

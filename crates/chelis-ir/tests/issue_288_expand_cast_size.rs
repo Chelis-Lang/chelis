@@ -24,14 +24,8 @@ use chelis_ir::lower::lower_program;
 use chelis_ir::verify;
 use chelis_types::check_ir_program;
 
-fn lower_surf(src: &str) -> Result<chelis_ir::dag::Dag, String> {
-    let decls = chelis_surf::parser::parse_str(src).map_err(|e| format!("parse: {e:?}"))?;
-    let exprs = chelis_macros::expand_program(
-        &chelis_surf::desugar::desugar_program(&decls),
-        &chelis_macros::ExpansionOptions::default(),
-    )
-    .map_err(|e| format!("expand: {e:?}"))?
-    .into_exprs();
+fn lower_deep(src: &str) -> Result<chelis_ir::dag::Dag, String> {
+    let exprs = chelis_deep::parser::parse_str(src).expect("Deep fixture");
     let checked = check_ir_program(&exprs).map_err(|r| {
         format!(
             "check: {:?}",
@@ -51,11 +45,10 @@ fn lower_surf(src: &str) -> Result<chelis_ir::dag::Dag, String> {
 /// rank-1 `tensor[2]` output — not the default size-1 `tensor[1]`.
 #[test]
 fn issue_288_expand_with_cast_size_lowers_to_requested_size() {
-    let src = r#"
-sig run: tensor[2, f32] -> tensor[2, f32]
-def run(x) = mul(x, insert(scalar_to_tensor(cast(2.5, f32)), cast(0, i32), cast(2, i64)))
-"#;
-    let dag = lower_surf(src).expect("expand-with-cast-size must lower");
+    let src = include_str!(
+        "fixtures/core/tests/issue_288_expand_cast_size/issue_288_expand_with_cast_size_lowers_to_requested_size_0.dp"
+    );
+    let dag = lower_deep(src).expect("expand-with-cast-size must lower");
     assert!(
         verify::verify(&dag).is_empty(),
         "lowered DAG must verify clean; got {:?}",
@@ -87,11 +80,10 @@ def run(x) = mul(x, insert(scalar_to_tensor(cast(2.5, f32)), cast(0, i32), cast(
 /// the literal path.
 #[test]
 fn issue_288_expand_with_plain_size_still_lowers() {
-    let src = r#"
-sig run: tensor[2, f32] -> tensor[2, f32]
-def run(x) = mul(x, insert(scalar_to_tensor(cast(2.5, f32)), 0, 2i64))
-"#;
-    let dag = lower_surf(src).expect("expand-with-plain-size must lower");
+    let src = include_str!(
+        "fixtures/core/tests/issue_288_expand_cast_size/issue_288_expand_with_plain_size_still_lowers_1.dp"
+    );
+    let dag = lower_deep(src).expect("expand-with-plain-size must lower");
     assert!(
         verify::verify(&dag).is_empty(),
         "lowered DAG must verify clean"
@@ -113,11 +105,10 @@ def run(x) = mul(x, insert(scalar_to_tensor(cast(2.5, f32)), 0, 2i64))
 /// `tensor[1]` and the DAG was malformed.
 #[test]
 fn issue_288_constant_broadcast_forward_lowers_clean() {
-    let src = r#"
-sig f: tensor[2, f32] -> f32
-def f(x) = tensor_to_scalar(sum(mul(x, insert(scalar_to_tensor(cast(2.5, f32)), cast(0, i32), cast(2, i64))), cast(0, i32)))
-"#;
-    let dag = lower_surf(src).expect("issue #288 forward must lower");
+    let src = include_str!(
+        "fixtures/core/tests/issue_288_expand_cast_size/issue_288_constant_broadcast_forward_lowers_clean_2.dp"
+    );
+    let dag = lower_deep(src).expect("issue #288 forward must lower");
     let errors = verify::verify(&dag);
     assert!(
         errors.is_empty(),
@@ -136,7 +127,7 @@ def f(x) = tensor_to_scalar(sum(mul(x, insert(scalar_to_tensor(cast(2.5, f32)), 
 // ---------------------------------------------------------------------------
 
 fn assert_form3_reject_before_lowering(src: &str, label: &str) {
-    let err = lower_surf(src)
+    let err = lower_deep(src)
         .err()
         .unwrap_or_else(|| panic!("{label}: sourceless inline expand size must reject at check"));
     assert!(
@@ -154,7 +145,9 @@ fn assert_form3_reject_before_lowering(src: &str, label: &str) {
 #[test]
 fn issue_530_tuple_get_size_rejected_before_lowering() {
     assert_form3_reject_before_lowering(
-        "def g[a, n](b: tensor[n, f32], t: (i64, i64)) -> tensor[a, n, f32] = insert(b, 0, t.0)\n",
+        include_str!(
+            "fixtures/core/tests/issue_288_expand_cast_size/issue_530_tuple_get_size_rejected_before_lowering_3.dp"
+        ),
         "tuple-get size",
     );
 }
@@ -162,7 +155,9 @@ fn issue_530_tuple_get_size_rejected_before_lowering() {
 #[test]
 fn issue_530_cast_wrapped_tuple_get_size_rejected_before_lowering() {
     assert_form3_reject_before_lowering(
-        "def g[a, n](b: tensor[n, f32], t: (i64, i64)) -> tensor[a, n, f32] = insert(b, 0, cast(t.0, i64))\n",
+        include_str!(
+            "fixtures/core/tests/issue_288_expand_cast_size/issue_530_cast_wrapped_tuple_get_size_rejected_before_lowering_4.dp"
+        ),
         "cast(tuple-get) size",
     );
 }
@@ -170,7 +165,9 @@ fn issue_530_cast_wrapped_tuple_get_size_rejected_before_lowering() {
 #[test]
 fn issue_530_arith_over_tuple_get_size_rejected_before_lowering() {
     assert_form3_reject_before_lowering(
-        "def g[a, n](b: tensor[n, f32], t: (i64, i64)) -> tensor[a, n, f32] = insert(b, 0, add(t.0, cast(0, i64)))\n",
+        include_str!(
+            "fixtures/core/tests/issue_288_expand_cast_size/issue_530_arith_over_tuple_get_size_rejected_before_lowering_5.dp"
+        ),
         "add(tuple-get, ...) size",
     );
 }
@@ -181,11 +178,10 @@ fn issue_530_arith_over_tuple_get_size_rejected_before_lowering() {
 /// over-rejected by the #530 gate.
 #[test]
 fn issue_530_shape_sourced_size_still_lowers_clean() {
-    let src = "def g[n, a](b: &tensor[n, f32], c: &tensor[a, f32]) -> tensor[a, n, f32] = insert(b, 0, shape(c, cast(0, i32)))\n\
-         xs = to_tensor([1.0, 2.0])\n\
-         cs = to_tensor([10.0, 20.0, 30.0])\n\
-         out = g(&xs, &cs)\n";
-    let dag = lower_surf(src).expect("a shape-sourced Form-3 expand size must still lower");
+    let src = include_str!(
+        "fixtures/core/tests/issue_288_expand_cast_size/issue_530_shape_sourced_size_still_lowers_clean_6.dp"
+    );
+    let dag = lower_deep(src).expect("a shape-sourced Form-3 expand size must still lower");
     let errors = verify::verify(&dag);
     assert!(
         errors.is_empty(),

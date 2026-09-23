@@ -515,16 +515,10 @@ fn check_effects_linearity_deep(deep_src: &str) -> chelis_types::CheckedProgram 
     chelis_types::check_linearity(&checked).expect("linearity")
 }
 
-fn lower_surf_program(src: &str) -> Result<Dag, chelis_ir::lower::LowerDiagnostic> {
-    let decls = chelis_surf::parser::parse_str(src).expect("surf parse");
-    let exprs = chelis_macros::expand_program(
-        &chelis_surf::desugar::desugar_program(&decls),
-        &chelis_macros::ExpansionOptions::default(),
-    )
-    .expect("expand")
-    .into_exprs();
+fn lower_deep_program(src: &str) -> Result<Dag, chelis_ir::lower::LowerDiagnostic> {
+    let exprs = chelis_deep::parser::parse_str(src).expect("Deep fixture");
     let checked = check_ir_program(&exprs)
-        .unwrap_or_else(|r| panic!("surf program must check clean: {:?}", r.errors));
+        .unwrap_or_else(|r| panic!("Deep program must check clean: {:?}", r.errors));
     let checked = chelis_effects::check_program(&checked).expect("effects");
     let checked = chelis_types::check_linearity(&checked).expect("linearity");
     chelis_ir::lower::try_lower_program(&checked)
@@ -615,19 +609,20 @@ fn issue524_constant_vmap_axis_still_lowers() {
 /// cleanly (the `None` branch, not the rejected non-constant branch).
 #[test]
 fn issue524_absent_vmap_axis_defaults_to_zero_and_lowers() {
-    let src = "def process(x: tensor[features, f32]) -> tensor[features, f32] = relu(x)\n\
-         def batch_process(xs: tensor[batch, features, f32]) -> tensor[batch, features, f32] = xs |> vmap(process)\n";
-    let dag = lower_surf_program(src).expect("an absent vmap axis must default to 0 and lower");
+    let src = include_str!(
+        "fixtures/core/tests/vmap/issue524_absent_vmap_axis_defaults_to_zero_and_lowers_0.dp"
+    );
+    let dag = lower_deep_program(src).expect("an absent vmap axis must default to 0 and lower");
     assert!(!dag.nodes().is_empty(), "lowered DAG must be non-empty");
 }
 
-/// CONTROL (explicit nonzero constant axis via Surf): the canonical named
-/// `axis=1` form lowers cleanly.
+/// CONTROL: the desugared explicit nonzero constant axis lowers cleanly.
 #[test]
-fn issue524_explicit_nonzero_constant_vmap_axis_via_surf_lowers() {
-    let src = "def process(x: tensor[features, f32]) -> tensor[features, f32] = relu(x)\n\
-         def batch_process(xs: tensor[features, batch, f32]) -> tensor[features, batch, f32] = xs |> vmap(process, axis=1)\n";
-    let dag = lower_surf_program(src).expect("an explicit constant vmap axis must lower");
+fn issue524_explicit_nonzero_constant_vmap_axis_lowers() {
+    let src = include_str!(
+        "fixtures/core/tests/vmap/issue524_explicit_nonzero_constant_vmap_axis_via_surf_lowers_1.dp"
+    );
+    let dag = lower_deep_program(src).expect("an explicit constant vmap axis must lower");
     assert!(!dag.nodes().is_empty(), "lowered DAG must be non-empty");
 }
 
@@ -758,10 +753,11 @@ fn the_vmap_node_map_names_every_input_nodes_batched_id() {
 /// `the_vmap_node_map_names_every_input_nodes_batched_id` above.
 #[test]
 fn vmap_grad_records_the_batched_forward_activation_as_a_shape_dep() {
-    let source = "def h(x: tensor[2, f32]) -> tensor[f32] = sum(mul(x, x), 0i32)\n\
-                  def main() = vmap(grad(h))(to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32]]))\n";
-    let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let source = include_str!(
+        "fixtures/core/tests/vmap/vmap_grad_records_the_batched_forward_activation_as_a_shape_dep_2.dp"
+    );
+
+    let exprs = chelis_deep::parser::parse_str(source).expect("Deep fixture");
     let checked = check_ir_program(&exprs).expect("check");
     let checked = chelis_effects::check_program(&checked).expect("effects");
     let checked = chelis_types::check_linearity(&checked).expect("linearity");

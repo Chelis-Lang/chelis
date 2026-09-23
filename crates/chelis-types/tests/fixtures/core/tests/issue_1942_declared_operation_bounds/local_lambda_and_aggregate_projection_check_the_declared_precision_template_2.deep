@@ -1,0 +1,28 @@
+(deftype {}
+  Box
+  ()
+  (variant {} Box (field {} t (t-tensor {} (d-lit {} 3) (t-prim {} __CORE_ARG_0__)))))
+
+(defsig {dtype_bounds: {p: float}}
+  g
+  (p)
+  (t-fn {} (t-tensor {} (d-lit {} 3) (t-var {} p)) (t-tensor {} (t-var {} p))))
+
+(def {}
+  g
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {}
+      (var {} mean)
+      (var {} x)
+      (lit {surf_literal_style: "explicit", type: (t-prim {} i32)} 0))))
+
+(defsig {} pick (t-fn {} (t-adt {} Box) (t-tensor {} (t-prim {} __CORE_ARG_0__))))
+
+(def {}
+  pick
+  (fn {}
+    (params {} (b {type: (t-var {} _)}))
+    (app {}
+      (var {} g)
+      (access {} (var {} b) t))))

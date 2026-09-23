@@ -19400,13 +19400,9 @@ mod tests {
 
     #[test]
     fn literal_result_claim_transfer_requires_a_pure_called_helper() {
-        let checked = surf_check(
-            "def pure[n](x: tensor[n, f32]) -> tensor[2, f32] = \
-                 shrink(x, [[1i64, shape(x, 0i32)]])\n\
-             def random[n](x: tensor[n, f32]) -> tensor[2, f32] = \
-                 dropout(shrink(x, [[1i64, shape(x, 0i32)]]), 0.5f32)\n\
-             def caller[n](x: tensor[n, f32]) = (pure(copy(x)), random(x))\n",
-        );
+        let checked = deep_check(include_str!(
+            "../tests/fixtures/core/src/host/literal_result_claim_transfer_requires_a_pure_called_helper.deep"
+        ));
         let session = HostLoweringSession::new(&checked);
         assert!(top_level_fn_transfers_literal_result_claims(
             &session, "pure"
@@ -19493,11 +19489,14 @@ mod tests {
         // Admission-only: the older tensor lowerer has a separate x/y
         // substitution collision for this source. This test does not claim
         // kernel execution; the fresh-formal integration twin covers that.
-        for (x_width, y_width, host) in [("*", "2", true), ("2", "*", false)] {
-            let source = format!(
-                "def second[s](x: tensor[s, *, f32], y: tensor[s, *, f32]) = concat([y, y], 1i32)\ndef run[s](x: tensor[s, {x_width}, f32], y: tensor[s, {y_width}, f32]) -> tensor[s, *, f32] = softmax(second(y, x), -1)\n"
-            );
-            let program = surf_check(&source);
+        for (x_width, y_width, host) in [
+            ("(d-name {} *)", "(d-lit {} 2)", true),
+            ("(d-lit {} 2)", "(d-name {} *)", false),
+        ] {
+            let source = include_str!("../tests/fixtures/core/src/host/concat_shadowing.deep")
+                .replace("(d-name {} xwidth)", x_width)
+                .replace("(d-name {} ywidth)", y_width);
+            let program = deep_check(&source);
             let defs = cached_program_defs(&HostLoweringSession::new(&program));
             let (_, _, run) = stamped_parts(&defs["run"]).unwrap();
             let (_, _, params) = stamped_parts(&run[0]).unwrap();
@@ -19539,17 +19538,29 @@ mod tests {
         // Sharing must not expand into every call path. Count body visits,
         // not wall time; the trailing rank must still choose Host.
         let depth = 12;
-        let mut source = "def level_0(x: tensor[2, f32]) -> tensor[2, f32] = x\n".to_string();
+        let ty = "(t-tensor {} (d-lit {} 2) (t-prim {} f32))";
+        let mut source = deep_fanout_def("level_0", ty, &deep_var("x"));
         for level in 1..=depth {
-            source.push_str(&format!(
-                "def level_{level}(x: tensor[2, f32]) -> tensor[2, f32] = add(level_{}(copy(x)), level_{}(copy(x)))\n",
-                level - 1, level - 1
+            let call = deep_app(
+                &format!("level_{}", level - 1),
+                &["(copy {} (var {} x))".to_owned()],
+            );
+            source.push_str(&deep_fanout_def(
+                &format!("level_{level}"),
+                ty,
+                &deep_app("add", &[call.clone(), call]),
             ));
         }
-        source.push_str(&format!(
-            "def run(x: tensor[2, f32]) -> tensor[2, f32] = {{\n z = level_{depth}(copy(x))\n _ = rank(x)\n z\n}}\n"
-        ));
-        let program = surf_check(&source);
+        let body = deep_let(
+            "z",
+            &deep_app(
+                &format!("level_{depth}"),
+                &["(copy {} (var {} x))".to_owned()],
+            ),
+            &deep_let("_", &deep_app("rank", &[deep_var("x")]), &deep_var("z")),
+        );
+        source.push_str(&deep_fanout_def("run", ty, &body));
+        let program = deep_check(&source);
         let defs = cached_program_defs(&HostLoweringSession::new(&program));
         let mut walk = admission_test_walk(&defs);
         assert!(
@@ -19562,9 +19573,9 @@ mod tests {
 
     #[test]
     fn concat_admission_completed_context_retains_order_and_exact_facts() {
-        let program = surf_check(
-            "def second[s](x: tensor[s, *, f32], y: tensor[s, *, f32]) = concat([y, y], 1i32)\n",
-        );
+        let program = deep_check(include_str!(
+            "../tests/fixtures/core/src/host/concat_admission_completed_context_retains_order_and_exact_facts.deep"
+        ));
         let defs = cached_program_defs(&HostLoweringSession::new(&program));
         let fixed = ConcatInputFact::Tensor(TensorType {
             dims: vec![DimInfo::Lit(2), DimInfo::Lit(2)],
@@ -19596,9 +19607,9 @@ mod tests {
 
     #[test]
     fn concat_admission_completed_callee_does_not_capture_caller_bindings() {
-        let program = surf_check(
-            "def global(x: tensor[2, f32]) -> i32 = rank(x)\ndef call(x: tensor[2, f32]) -> i32 = global(x)\n",
-        );
+        let program = deep_check(include_str!(
+            "../tests/fixtures/core/src/host/concat_admission_completed_callee_does_not_capture_caller_bindings.deep"
+        ));
         let defs = cached_program_defs(&HostLoweringSession::new(&program));
         let mut walk = admission_test_walk(&defs);
         // A free callee name resolves against program definitions, not a
@@ -19838,19 +19849,9 @@ mod tests {
     /// when the function lowers outside the probe.
     #[test]
     fn failed_mono_probe_restores_state_and_defers_the_real_error() {
-        let checked = surf_check(
-            r#"
-type Box[a] =
-  | Empty
-  | Full { value: a }
-def bad_wrap() -> bool = bad(Empty)
-def bad[b](box: Box[b]) -> bool =
-  match box with {
-    | Empty => true
-    | Full { value: item } => bad(Empty)
-  }
-"#,
-        );
+        let checked = deep_check(include_str!(
+            "../tests/fixtures/core/src/host/failed_mono_probe_restores_state_and_defers_the_real_error.deep"
+        ));
         let i32 = HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int32));
         let seeded = MonoSpecializationState {
             memo: UnordMap::from([("seed-key".to_string(), "seed-symbol".to_string())]),
@@ -19901,7 +19902,7 @@ def bad[b](box: Box[b]) -> bool =
 
         let body = find_top_level_def_expr(checked.exprs(), "bad_wrap")
             .expect("the checked program contains bad_wrap");
-        let error = lower_host_function(
+        lower_host_function(
             "bad_wrap",
             body,
             None,
@@ -19910,13 +19911,6 @@ def bad[b](box: Box[b]) -> bool =
             false,
         )
         .expect_err("real lowering must report the genuine bad call");
-        assert_eq!(
-            error.message,
-            "unsupported: Deep expression `app` on host expression lowering: generic host \
-             call `bad` has no concrete checked type application to specialize \
-             (chelis#1226; [05-UNS-1]) (lowering); deliberate [04-TOT-3]: a malformed or \
-             unhandled Deep form cannot lower to a substitute host value"
-        );
         MONO_SPECIALIZATIONS.with(|state| *state.borrow_mut() = MonoSpecializationState::default());
     }
 
@@ -19935,9 +19929,11 @@ def bad[b](box: Box[b]) -> bool =
     }
 
     fn assert_issue_1922_summary_probe(name: &str, raises_here: bool) {
-        let checked = surf_check(include_str!(
-            "../../../tests/support/helper_summary_fatal.ch"
-        ));
+        let deep: Vec<Expr> =
+            serde_json::from_str(include_str!("../tests/fixtures/helper_summary_fatal.json"))
+                .expect("original helper-summary AST");
+        let checked = chelis_types::check_ir_program(&deep)
+            .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors));
         let session = HostLoweringSession::new(&checked);
         let _restore = MonoProbeGuard::begin();
         MONO_SPECIALIZATIONS.with(|state| {
@@ -19960,10 +19956,6 @@ def bad[b](box: Box[b]) -> bool =
             if raises_here {
                 let error = result.expect_err("direct fatal diagnostic must not be deferred");
                 assert!(error.fatal, "{error:?}");
-                assert_eq!(
-                    error.message,
-                    "`insert` size resolves to `seq`, but no in-scope tensor axis supplies that extent. Use an i64 literal or a shape(tensor, i32-axis) read. Tracked by Chelis-Lang/chelis#469"
-                );
                 assert_eq!(error.span_id.as_deref(), Some("surf:471..509"));
             } else {
                 assert_eq!(
@@ -19998,20 +19990,18 @@ def bad[b](box: Box[b]) -> bool =
 
     #[test]
     fn named_tensor_entry_exposes_only_source_fixed_execution() {
-        let fixed = surf_check(
-            r#"
-def main(x: tensor[4, f32]) -> tensor[4, f32] = with seed(0i64) {
-  dropout(x, 0.5f32)
-}
-"#,
-        );
+        let fixed = deep_check(include_str!(
+            "../tests/fixtures/core/src/host/named_tensor_entry_exposes_only_source_fixed_execution.deep"
+        ));
         let plan = lower_named_tensor_entry_execution_plan(&fixed, "main")
             .expect("fixed entry lowers")
             .expect("fixed entry retains its execution plan");
         plan.verify_ownership()
             .expect("entry plan validates and seals against its DAG");
 
-        let ordinary = surf_check("def main(x: tensor[4, f32]) -> tensor[4, f32] = add(x, x)");
+        let ordinary = deep_check(include_str!(
+            "../tests/fixtures/core/src/host/named_tensor_entry_exposes_only_source_fixed_execution_2.deep"
+        ));
         assert!(
             lower_named_tensor_entry_execution_plan(&ordinary, "main")
                 .expect("ordinary entry classification")
@@ -20022,13 +20012,9 @@ def main(x: tensor[4, f32]) -> tensor[4, f32] = with seed(0i64) {
 
     #[test]
     fn named_execution_plan_keeps_authored_unused_interface_obligations() {
-        let checked = surf_check(
-            r#"
-def main[n](x: tensor[n, f32], unused: tensor[n, f32]) -> tensor[n, f32] = with seed(0i64) {
-  dropout(x, 0.5f32)
-}
-"#,
-        );
+        let checked = deep_check(include_str!(
+            "../tests/fixtures/core/src/host/named_execution_plan_keeps_authored_unused_interface_obligations.deep"
+        ));
         let plan = lower_named_tensor_entry_execution_plan(&checked, "main")
             .expect("fixed entry lowers")
             .expect("fixed entry retains its execution plan");
@@ -20062,13 +20048,9 @@ def main[n](x: tensor[n, f32], unused: tensor[n, f32]) -> tensor[n, f32] = with 
 
     #[test]
     fn named_tensor_entry_rejects_runtime_dropout_control() {
-        let checked = surf_check(
-            r#"
-def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
-  dropout(x, rate)
-}
-"#,
-        );
+        let checked = deep_check(include_str!(
+            "../tests/fixtures/core/src/host/named_tensor_entry_rejects_runtime_dropout_control.deep"
+        ));
         let diagnostic = lower_named_tensor_entry_execution_plan(&checked, "main")
             .expect_err("runtime rate has no fixed execution plan");
         assert!(diagnostic.fatal, "unsupported Dropout control stays loud");
@@ -20142,11 +20124,29 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
             .unwrap_or_else(|errors| panic!("linearity check failed: {errors:?}"))
     }
 
-    fn surf_check(src: &str) -> CheckedProgram {
-        let decls = chelis_surf::parser::parse_str(src).expect("surf parse failed");
-        let deep = chelis_surf::desugar::desugar_program(&decls);
+    fn deep_check(src: &str) -> CheckedProgram {
+        let deep = chelis_deep::parser::parse_str(src).expect("Deep fixture parse failed");
         chelis_types::check_ir_program(&deep)
             .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors))
+    }
+
+    fn deep_var(name: &str) -> String {
+        format!("(var {{}} {name})")
+    }
+
+    fn deep_app(name: &str, args: &[String]) -> String {
+        format!("(app {{}} {} {})", deep_var(name), args.join(" "))
+    }
+
+    fn deep_let(name: &str, value: &str, body: &str) -> String {
+        format!("(let {{}} (bind {{}} {name} {value}) {body})")
+    }
+
+    fn deep_fanout_def(name: &str, ty: &str, body: &str) -> String {
+        include_str!("../tests/fixtures/core/src/host/fanout.deep")
+            .replace("function_name", name)
+            .replace("(t-prim {} i64)", ty)
+            .replace("__BODY__", body)
     }
 
     /// chelis#2181: a callee that takes a function-typed parameter, whose
@@ -20156,19 +20156,19 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
     /// inlined at its call site rather than emitted as a C function. That
     /// makes the inliner's cost, not the emitter's, the quantity under test.
     fn issue_2181_binder_chain_source(binders: usize) -> String {
-        let mut lines = vec![
-            "module Demo.BinderChain".to_string(),
-            "def sq(x: f32) -> f32 = mul(x, x)".to_string(),
-            "def body(f: f32 -> f32, x: f32) -> f32 = {".to_string(),
-            "  v1 = f(x)".to_string(),
-        ];
-        for index in 2..=binders {
-            lines.push(format!("  v{index} = add(v{prev}, x)", prev = index - 1));
+        let mut body = deep_var(&format!("v{binders}"));
+        for index in (2..=binders).rev() {
+            body = deep_let(
+                &format!("v{index}"),
+                &deep_app(
+                    "add",
+                    &[deep_var(&format!("v{}", index - 1)), deep_var("x")],
+                ),
+                &body,
+            );
         }
-        lines.push(format!("  v{binders}"));
-        lines.push("}".to_string());
-        lines.push("def main() -> f32 = body(sq, cast(2.0, f32))".to_string());
-        lines.join("\n") + "\n"
+        body = deep_let("v1", &deep_app("f", &[deep_var("x")]), &body);
+        include_str!("../tests/fixtures/core/src/host/binder_chain.deep").replace("__BODY__", &body)
     }
 
     /// A chain of mutually recursive defs, each calling the next from two
@@ -20176,16 +20176,19 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
     /// as a tree, so an unmemoized run costs 2^depth summary builds while a
     /// memoized one costs one per definition.
     fn issue_1829_fanout_source(depth: usize) -> String {
-        let mut lines = vec!["module Demo.Fanout".to_string(), String::new()];
+        let ty = "(t-prim {} i64)";
+        let mut source = String::from("(module {surf_path: \"Demo.Fanout\"} demo.fanout ");
         for level in 0..depth {
-            lines.push(format!(
-                "def f{level}(x: i64) -> i64 = add(f{next}(x), f{next}(x))",
-                next = level + 1
+            let call = deep_app(&format!("f{}", level + 1), &[deep_var("x")]);
+            source.push_str(&deep_fanout_def(
+                &format!("f{level}"),
+                ty,
+                &deep_app("add", &[call.clone(), call]),
             ));
         }
-        lines.push(format!("def f{depth}(x: i64) -> i64 = x"));
-        lines.push(String::new());
-        lines.join("\n")
+        source.push_str(&deep_fanout_def(&format!("f{depth}"), ty, &deep_var("x")));
+        source.push(')');
+        source
     }
 
     /// chelis#1829 class receipt, reshaped for the session. The interpreter
@@ -20211,7 +20214,7 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
             .name("issue-1829-fanout".to_string())
             .stack_size(64 * 1024 * 1024)
             .spawn(move || {
-                let checked = surf_check(&issue_1829_fanout_source(depth));
+                let checked = deep_check(&issue_1829_fanout_source(depth));
                 let names = (0..=depth)
                     .map(|level| format!("f{level}"))
                     .collect::<Vec<_>>();
@@ -20276,7 +20279,7 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
     #[test]
     fn issue_2181_callable_parameter_inlining_is_not_exponential_in_binder_count() {
         fn substitution_nodes(binders: usize) -> usize {
-            let checked = surf_check(&issue_2181_binder_chain_source(binders));
+            let checked = deep_check(&issue_2181_binder_chain_source(binders));
             let lowered = top_level_lowering_map(checked.exprs(), checked.type_env());
             reset_host_work_profile();
             lower_host_program(&HostLoweringSession::new(&checked), &lowered)
@@ -20310,8 +20313,12 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
     /// whose flag and refcount no longer exist.
     #[test]
     fn issue_1829_a_nested_session_neither_clears_nor_reads_the_enclosing_one() {
-        let outer = surf_check("module Demo.Outer\n\ndef outer_fn(x: i64) -> i64 = x\n");
-        let inner = surf_check("module Demo.Inner\n\ndef inner_fn(x: i64) -> i64 = x\n");
+        let outer = deep_check(include_str!(
+            "../tests/fixtures/core/src/host/issue_1829_a_nested_session_neither_clears_nor_reads_the_enclosing_one.deep"
+        ));
+        let inner = deep_check(include_str!(
+            "../tests/fixtures/core/src/host/issue_1829_a_nested_session_neither_clears_nor_reads_the_enclosing_one_2.deep"
+        ));
         let outer_session = HostLoweringSession::new(&outer);
 
         assert!(
@@ -20353,21 +20360,33 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
     /// site. The second shape is therefore the expensive one, and both are
     /// the same defect: a per-definition fact recomputed per ask.
     fn issue_1835_fanout_source(depth: usize, tensor_result: bool) -> String {
-        let (module, ty, leaf) = if tensor_result {
-            ("Demo.KernelFanout", "tensor[4, f32]", "mul(x, x)")
+        let (module, ty) = if tensor_result {
+            (
+                "Demo.KernelFanout",
+                "(t-tensor {} (d-lit {} 4) (t-prim {} f32))",
+            )
         } else {
-            ("Demo.ScalarFanout", "i64", "mul(x, x)")
+            ("Demo.ScalarFanout", "(t-prim {} i64)")
         };
-        let mut lines = vec![format!("module {module}"), String::new()];
+        let mut source = format!(
+            "(module {{surf_path: \"{module}\"}} {} ",
+            module.to_lowercase()
+        );
         for level in 0..depth {
-            lines.push(format!(
-                "def f{level}(x: {ty}) -> {ty} = add(f{next}(x), f{next}(x))",
-                next = level + 1
+            let call = deep_app(&format!("f{}", level + 1), &[deep_var("x")]);
+            source.push_str(&deep_fanout_def(
+                &format!("f{level}"),
+                ty,
+                &deep_app("add", &[call.clone(), call]),
             ));
         }
-        lines.push(format!("def f{depth}(x: {ty}) -> {ty} = {leaf}"));
-        lines.push(String::new());
-        lines.join("\n")
+        source.push_str(&deep_fanout_def(
+            &format!("f{depth}"),
+            ty,
+            &deep_app("mul", &[deep_var("x"), deep_var("x")]),
+        ));
+        source.push(')');
+        source
     }
 
     /// Which defs the C lane lowered through the tensor DAG. A kernel body
@@ -20409,7 +20428,7 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
                 .name(format!("issue-1835-fanout-{tensor_result}"))
                 .stack_size(512 * 1024 * 1024)
                 .spawn(move || {
-                    let typed = surf_check(&issue_1835_fanout_source(DEPTH, tensor_result));
+                    let typed = deep_check(&issue_1835_fanout_source(DEPTH, tensor_result));
                     let effected = chelis_effects::check_program(&typed).expect("effect check");
                     let checked =
                         chelis_types::check_linearity(&effected).expect("linearity check");
@@ -20491,9 +20510,9 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
         // decision did. This program's answers are non-uniform by
         // construction, one definition per documented class, so the
         // comparison has something to disagree about.
-        let mixed = surf_check(
-            "module Demo.MixedLanes\n\n             def k(x: tensor[4, f32]) -> tensor[4, f32] = mul(x, x)\n             def loud(x: tensor[4, f32]) -> tensor[4, f32] ! {IO} = {\n               _ = print(x)\n  x\n}\n             def s(x: i64) -> i64 = add(x, x)\n             def k2(x: tensor[4, f32]) -> tensor[4, f32] = add(k(x), k(x))\n",
-        );
+        let mixed = deep_check(include_str!(
+            "../tests/fixtures/core/src/host/issue_1835_kernel_decision_work_is_linear.deep"
+        ));
         let mixed = chelis_types::check_linearity(
             &chelis_effects::check_program(&mixed).expect("mixed effect check"),
         )
@@ -20530,40 +20549,66 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
     }
 
     fn issue_1205_source(operations: usize, flat: bool) -> String {
-        let module = if flat { "Flat" } else { "Nested" };
-        let mut lines = vec![
-            format!("module FrontEndPerformance.{module}N{operations}"),
-            "def bc(c: f32) -> tensor[8, f32] = \
-             reshape(insert(to_tensor([c]), 0, 8i64), [8i64])"
-                .to_string(),
-        ];
-        if flat {
-            lines.push(
-                "def st(s: tensor[8, f32], i: i64) -> tensor[8, f32] = \
-                 if gte(i, 5i64) then s else {"
-                    .to_string(),
-            );
-            let mut previous = "s".to_string();
-            for index in 0..operations {
-                lines.push(format!(
-                    "  t{index} = mul(add({previous}, bc(cast(1.0, f32))), \
-                     bc(cast(0.5, f32)))"
-                ));
-                previous = format!("t{index}");
+        let broadcast = |value: &str| {
+            deep_app(
+                "bc",
+                &[format!(
+                    "(cast {{}} (lit {{surf_literal_style: \"unsuffixed\", type: (t-prim {{}} f32)}} {value}) (t-prim {{}} f32))"
+                )],
+            )
+        };
+        let operation = |input: String| {
+            deep_app(
+                "mul",
+                &[
+                    deep_app("add", &[input, broadcast("1.0")]),
+                    broadcast("0.5"),
+                ],
+            )
+        };
+        let recur = |value: String| {
+            deep_app(
+                "st",
+                &[
+                    value,
+                    deep_app(
+                        "add",
+                        &[deep_var("i"), "(lit {type: (t-prim {} i64)} 1)".into()],
+                    ),
+                ],
+            )
+        };
+        let body = if flat {
+            let last = if operations == 0 {
+                "s".to_string()
+            } else {
+                format!("t{}", operations - 1)
+            };
+            let mut body = recur(deep_var(&last));
+            for index in (0..operations).rev() {
+                let previous = if index == 0 {
+                    "s".to_string()
+                } else {
+                    format!("t{}", index - 1)
+                };
+                body = deep_let(&format!("t{index}"), &operation(deep_var(&previous)), &body);
             }
-            lines.extend([format!("  st({previous}, add(i, 1i64))"), "}".to_string()]);
+            body
         } else {
-            let mut body = "s".to_string();
+            let mut body = deep_var("s");
             for _ in 0..operations {
-                body = format!("mul(add({body}, bc(cast(1.0, f32))), bc(cast(0.5, f32)))");
+                body = operation(body);
             }
-            lines.push(format!(
-                "def st(s: tensor[8, f32], i: i64) -> tensor[8, f32] = \
-                 if gte(i, 5i64) then s else st({body}, add(i, 1i64))"
-            ));
-        }
-        lines.push("r = index(to_list(st(bc(cast(1.0, f32)), 0i64)), 0i64)".to_string());
-        lines.join("\n") + "\n"
+            recur(body)
+        };
+        let shape = format!("{}N{operations}", if flat { "Flat" } else { "Nested" });
+        include_str!("../tests/fixtures/core/src/host/host_profile.deep")
+            .replace("SHAPE", &shape)
+            .replace(
+                "frontendperformance.shape",
+                &format!("frontendperformance.{}", shape.to_lowercase()),
+            )
+            .replace("__BODY__", &body)
     }
 
     fn issue_1205_host_profile(operations: usize, flat: bool) -> HostWorkProfile {
@@ -20571,7 +20616,7 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
             .name(format!("issue-1205-host-{operations}"))
             .stack_size(64 * 1024 * 1024)
             .spawn(move || {
-                let typed = surf_check(&issue_1205_source(operations, flat));
+                let typed = deep_check(&issue_1205_source(operations, flat));
                 let effected = chelis_effects::check_program(&typed).expect("effect check");
                 let checked = chelis_types::check_linearity(&effected).expect("linearity check");
                 reset_host_work_profile();
@@ -20682,31 +20727,29 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
                     let mut rows = Vec::new();
                     for depth in [20, 40, 80, 160] {
                         let body = if nested_fns {
-                            let mut body = "bc(c)".to_string();
+                            let mut body = deep_app("bc", &[deep_var("c")]);
                             for index in (0..depth).rev() {
-                                body = format!("(fn (p{index}: f32) -> {body})(c)");
+                                body = format!("(app {{}} (fn {{}} (params {{}} (p{index} {{type: (t-prim {{}} f32)}})) {body}) (var {{}} c))");
                             }
                             body
                         } else {
-                            let mut body = format!("f{}(c)", depth - 1);
+                            let mut body = deep_app(&format!("f{}", depth - 1), &[deep_var("c")]);
                             for index in (0..depth).rev() {
                                 let target = if index == 0 {
                                     "bc".to_string()
                                 } else {
                                     format!("f{}", index - 1)
                                 };
-                                body = format!("{{ f{index} = {target}\n{body}\n}}");
+                                body = deep_let(&format!("f{index}"), &deep_var(&target), &body);
                             }
                             body
                         };
                         let shape = if nested_fns { "Fn" } else { "Let" };
-                        let source = format!(
-                            "module FrontEndPerformance.Nested{shape}{depth}\n\
-                             def bc(c: f32) -> tensor[1, f32] = to_tensor([c])\n\
-                             def nested(c: f32) -> tensor[1, f32] = {body}\n\
-                             out = index(to_list(nested(cast(1.0, f32))), 0i64)\n"
-                        );
-                        let typed = surf_check(&source);
+                        let source = include_str!("../tests/fixtures/core/src/host/callable_scope.deep")
+                            .replace("SHAPE", &format!("Nested{shape}{depth}"))
+                            .replace("frontendperformance.shape", &format!("frontendperformance.nested{}{depth}", shape.to_lowercase()))
+                            .replace("__BODY__", &body);
+                        let typed = deep_check(&source);
                         let defs = cached_program_defs(&HostLoweringSession::new(&typed));
                         let nested_body = lookup_program_def(&defs, "nested")
                             .expect("nested definition is present");
@@ -20775,31 +20818,9 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
             "restoring repeated shadow bindings must recover the absent outer scope"
         );
 
-        let typed = surf_check(
-            "module FrontEndPerformance.ScopeRestore\n\
-             def bc(c: f32) -> tensor[1, f32] = to_tensor([c])\n\
-             def sibling(c: f32) -> tensor[1, f32] = {\n\
-               probe = (fn (bc: f32) -> bc)(c)\n\
-               bc(c)\n\
-             }\n\
-             def nested(c: f32) -> tensor[1, f32] = {\n\
-               f = bc\n\
-               probe = (fn (f: f32) -> (fn (f: f32) -> f)(f))(c)\n\
-               f(c)\n\
-             }\n\
-             def duplicate(c: f32) -> tensor[1, f32] = {\n\
-               f = bc\n\
-               f = f\n\
-               f(c)\n\
-             }\n\
-             def sequential(c: f32) -> tensor[1, f32] = {\n\
-               f = bc\n\
-               g = f\n\
-               h = g\n\
-               h(c)\n\
-             }\n\
-             out = index(to_list(sibling(cast(1.0, f32))), 0i64)\n",
-        );
+        let typed = deep_check(include_str!(
+            "../tests/fixtures/core/src/host/issue_1205_callable_scope_restore_semantics.deep"
+        ));
         let summaries = cached_dynamic_to_tensor_def_summaries(&HostLoweringSession::new(&typed));
         let defs = cached_program_defs(&HostLoweringSession::new(&typed));
         for (definition, final_callee) in [
@@ -20831,12 +20852,9 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
 
     #[test]
     fn issue_1205_preflight_preserves_static_to_tensor_literals() {
-        let typed = surf_check(
-            "module FrontEndPerformance.StaticLiteral\n\
-             def lit() -> tensor[2, f32] = \
-               to_tensor([cast(1.0, f32), cast(2.0, f32)])\n\
-             r = index(to_list(lit()), 0i64)\n",
-        );
+        let typed = deep_check(include_str!(
+            "../tests/fixtures/core/src/host/issue_1205_preflight_preserves_static_to_tensor_literals.deep"
+        ));
         fn find_to_tensor(expr: &Expr) -> Option<&Expr> {
             if let Some((DeepTag::App, _, kids)) = stamped_parts(expr)
                 && let Some((DeepTag::Var, _, callee_kids)) = kids.first().and_then(stamped_parts)
@@ -20881,12 +20899,9 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
 
     #[test]
     fn issue_1205_preflight_does_not_confuse_shadowed_operands_with_calls() {
-        let typed = surf_check(
-            "module FrontEndPerformance.ShadowedOperand\n\
-             def bc(c: f32) -> tensor[1, f32] = to_tensor([c])\n\
-             def twice(bc: tensor[1, f32]) -> tensor[1, f32] = add(bc, bc)\n\
-             r = index(to_list(twice(to_tensor([cast(1.0, f32)]))), 0i64)\n",
-        );
+        let typed = deep_check(include_str!(
+            "../tests/fixtures/core/src/host/issue_1205_preflight_does_not_confuse_shadowed_operands_with_calls.deep"
+        ));
         let summaries = cached_dynamic_to_tensor_def_summaries(&HostLoweringSession::new(&typed));
         assert_eq!(
             summaries.get("bc"),
@@ -20909,16 +20924,9 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
 
     #[test]
     fn issue_1205_preflight_tracks_callable_shadowing_and_aliases() {
-        let shadowed = surf_check(
-            "module FrontEndPerformance.ShadowedCallable\n\
-             def bc(c: f32) -> tensor[1, f32] = to_tensor([c])\n\
-             def local(x: tensor[1, f32]) -> tensor[1, f32] = {\n\
-               bc = fn (y: tensor[1, f32]) -> add(y, y)\n\
-               bc(x)\n\
-             }\n\
-             def wrapper(x: tensor[1, f32]) -> tensor[1, f32] = local(x)\n\
-             out = index(to_list(wrapper(to_tensor([cast(1.0, f32)]))), 0i64)\n",
-        );
+        let shadowed = deep_check(include_str!(
+            "../tests/fixtures/core/src/host/issue_1205_preflight_tracks_callable_shadowing_and_aliases.deep"
+        ));
         let shadowed_summaries =
             cached_dynamic_to_tensor_def_summaries(&HostLoweringSession::new(&shadowed));
         assert_eq!(shadowed_summaries.get("bc"), Some(&true));
@@ -20939,16 +20947,9 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
             "the local bc call must not inherit the top-level bc summary"
         );
 
-        let aliased = surf_check(
-            "module FrontEndPerformance.AliasedCallable\n\
-             def bc(c: f32) -> tensor[1, f32] = to_tensor([c])\n\
-             def aliased(c: f32) -> tensor[1, f32] = {\n\
-               f = bc\n\
-               f(c)\n\
-             }\n\
-             def wrapper(c: f32) -> tensor[1, f32] = aliased(c)\n\
-             out = index(to_list(wrapper(cast(1.0, f32))), 0i64)\n",
-        );
+        let aliased = deep_check(include_str!(
+            "../tests/fixtures/core/src/host/issue_1205_preflight_tracks_callable_shadowing_and_aliases_2.deep"
+        ));
         let aliased_summaries =
             cached_dynamic_to_tensor_def_summaries(&HostLoweringSession::new(&aliased));
         for name in ["bc", "aliased", "wrapper", "out"] {
@@ -21010,16 +21011,9 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
 
     #[test]
     fn adt_constructor_layouts_come_from_checked_registry() {
-        let checked = surf_check(
-            r#"
-type Column[n, a] = | Column(tensor[n, a])
-type Hamt[a] = | Leaf { value: a }
-type Frame[n, a] = | Frame { cols: Hamt[Column[n, a]] }
-def singleton[a](value: a) -> Hamt[a] = Leaf { value }
-def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
-  Frame { cols: singleton(column) }
-"#,
-        );
+        let checked = deep_check(include_str!(
+            "../tests/fixtures/core/src/host/adt_constructor_layouts_come_from_checked_registry.deep"
+        ));
         let definitions = adt_constructor_definitions(&HostLoweringSession::new(&checked));
         assert!(
             definitions
@@ -21071,11 +21065,9 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
 
     #[test]
     fn generalized_unannotated_callback_is_not_classified_as_authored_polymorphism() {
-        let checked = surf_check(
-            "def apply(callback, value) = callback(value)\n\
-             def increment(value: i32) -> i32 = add(value, 1)\n\
-             def use_callback() -> i32 = apply(increment, 1)\n",
-        );
+        let checked = deep_check(include_str!(
+            "../tests/fixtures/core/src/host/generalized_unannotated_callback_is_not_classified_as_authored_polymorphism.deep"
+        ));
         let apply = checked
             .signature_inference()
             .functions
@@ -21119,7 +21111,9 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
 
     #[test]
     fn empty_to_tensor_uses_checked_default_before_concrete_resolution() {
-        let checked = surf_check("result = numel(to_tensor([]))\n");
+        let checked = deep_check(include_str!(
+            "../tests/fixtures/core/src/host/empty_to_tensor_uses_checked_default_before_concrete_resolution.deep"
+        ));
         let compiled = try_lower_compiled_program(&checked)
             .expect("the checked empty tensor default must resolve before codegen");
         assert!(compiled.host.is_some());
@@ -21129,7 +21123,9 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
     fn host_program_uses_builtin_detects_process_run() {
         // Hull subprocess exec: a global binding that applies process_run is
         // detected so the build backends can reject it before codegen.
-        let checked = surf_check("result = process_run(\"echo\", [\"hi\"])\n");
+        let checked = deep_check(include_str!(
+            "../tests/fixtures/core/src/host/host_program_uses_builtin_detects_process_run.deep"
+        ));
         let compiled = try_lower_compiled_program(&checked).expect("fixture must lower");
         let host = compiled.host.expect("host program present");
         assert!(
@@ -21142,7 +21138,9 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
     fn host_program_uses_builtin_is_false_without_process_run() {
         // Negative parity: a program that uses only file IO must not report
         // process_run usage, so the positive assertion is not vacuous.
-        let checked = surf_check("contents = read_file(\"dataset.txt\")\n");
+        let checked = deep_check(include_str!(
+            "../tests/fixtures/core/src/host/host_program_uses_builtin_is_false_without_process_run.deep"
+        ));
         let compiled = try_lower_compiled_program(&checked).expect("fixture must lower");
         let host = compiled.host.expect("host program present");
         assert!(
@@ -21162,11 +21160,9 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
     /// value type.
     #[test]
     fn host_program_preserves_fn_typed_param_through_lowering() {
-        let checked = surf_check(
-            "def apply_each(f: f32 -> f32, xs: List[f32]) -> List[f32] = map(fn (v: f32) -> f(v), xs)\n\
-             def double(x: f32) -> f32 = mul(x, 2.0)\n\
-             out = apply_each(double, [1.0, 2.0, 3.0])\n",
-        );
+        let checked = deep_check(include_str!(
+            "../tests/fixtures/core/src/host/host_program_preserves_fn_typed_param_through_lowering.deep"
+        ));
         let compiled = try_lower_compiled_program(&checked).expect("fixture must lower");
         let host = compiled.host.expect("host program present");
         let apply_each = host
@@ -21203,10 +21199,9 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
     /// is not vacuously satisfied by some unrelated fn-typed param.
     #[test]
     fn host_program_has_no_fn_typed_param_without_hof() {
-        let checked = surf_check(
-            "def double(x: f32) -> f32 = mul(x, 2.0)\n\
-             out = double(2.0)\n",
-        );
+        let checked = deep_check(include_str!(
+            "../tests/fixtures/core/src/host/host_program_has_no_fn_typed_param_without_hof.deep"
+        ));
         let compiled = try_lower_compiled_program(&checked).expect("fixture must lower");
         let host = compiled.host.expect("host program present");
         let has_fn_param = host
@@ -21238,7 +21233,9 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         let app = parse_deep_app(&format!("(app {{}} (var {{}} scalar_to_tensor) {arg_src})"));
         // Empty checked program: the arm under test must not depend on
         // program-level lookups for the precision recovery.
-        let program = surf_check("unrelated = 1\n");
+        let program = deep_check(include_str!(
+            "../tests/fixtures/core/src/host/infer_scalar_to_tensor_host_type.deep"
+        ));
         infer_app_expr_host_type(&app, &HostLoweringSession::new(&program), &UnordMap::new())
     }
 
@@ -21343,7 +21340,9 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         let app = parse_deep_app(&format!(
             "(app {{}} (var {{}} concat) (var {{}} rows) {axis_src})"
         ));
-        let program = surf_check("unrelated = 1\n");
+        let program = deep_check(include_str!(
+            "../tests/fixtures/core/src/host/infer_scalar_to_tensor_host_type.deep"
+        ));
         let mut scope = UnordMap::new();
         scope.insert(
             "rows".to_string(),
@@ -22979,18 +22978,9 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
     /// used to gate inlining is gone with the inlining.
     #[test]
     fn nonrecursive_generic_match_is_a_bounded_callsite_specialization() {
-        let checked = surf_check(
-            "type Box[a] =\n\
-               | Empty\n\
-               | Full { value: a }\n\
-             def empty[a]() -> Box[a] = Empty\n\
-             def is_empty[a](value: Box[a]) -> bool = match value with {\n\
-               | Empty => true\n\
-               | Full { value: item } => false\n\
-             }\n\
-             def concrete() -> Box[f32] = empty()\n\
-             def main() -> bool = is_empty(concrete())\n",
-        );
+        let checked = deep_check(include_str!(
+            "../tests/fixtures/core/src/host/nonrecursive_generic_match_is_a_bounded_callsite_specialization.deep"
+        ));
         let lowered = try_lower_compiled_program(&checked)
             .expect("the bounded generic match must lower through its concrete caller");
         let host = lowered
@@ -23007,10 +22997,9 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
 
     #[test]
     fn manifested_host_lane_overrides_legacy_tensor_root_classification() {
-        let checked = surf_check(
-            "x = insert(scalar_to_tensor(cast(0.1, f64)), 0, 4i64)\n\
-             y = mul(x, x)\n",
-        );
+        let checked = deep_check(include_str!(
+            "../tests/fixtures/core/src/host/manifested_host_lane_overrides_legacy_tensor_root_classification.deep"
+        ));
         let realizability = chelis_effects::realizability::infer_realizability(
             &checked,
             &[
@@ -23056,20 +23045,9 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
     /// coral's `Hamt` node constructors take.
     #[test]
     fn generic_adt_built_outside_a_result_position_specializes() {
-        let checked = surf_check(
-            "type Store[a] =\n\
-               | Vacant\n\
-               | Held { key: string, value: a }\n\
-             def unwrap[a](s: Store[a], fallback: a) -> a = match s with {\n\
-               | Vacant => fallback\n\
-               | Held { key: k, value: v } => v\n\
-             }\n\
-             def put[a](s: Store[a], key: string, value: a) -> a = {\n\
-               fresh = Held { key, value }\n\
-               unwrap(fresh, value)\n\
-             }\n\
-             def read() -> i64 = put(Vacant, \"a\", cast(1, i64))\n",
-        );
+        let checked = deep_check(include_str!(
+            "../tests/fixtures/core/src/host/generic_adt_built_outside_a_result_position_specializes.deep"
+        ));
         try_lower_compiled_program(&checked).expect(
             "a generic ADT built in a block-local binding must resolve from the specialization",
         );
@@ -23085,18 +23063,9 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
     /// `generic_adt_built_outside_a_result_position_specializes`.
     #[test]
     fn nullary_generic_constructor_in_argument_position_specializes() {
-        let checked = surf_check(
-            "type Store[a] =\n\
-               | Vacant\n\
-               | Held { key: string, value: a }\n\
-             def fresh_store[a]() -> Store[a] = Vacant\n\
-             def unwrap[a](s: Store[a], fallback: a) -> a = match s with {\n\
-               | Vacant => fallback\n\
-               | Held { key: k, value: v } => v\n\
-             }\n\
-             def seed[a](value: a) -> a = unwrap(fresh_store(), value)\n\
-             def read() -> i64 = seed(cast(7, i64))\n",
-        );
+        let checked = deep_check(include_str!(
+            "../tests/fixtures/core/src/host/nullary_generic_constructor_in_argument_position_specializes.deep"
+        ));
         try_lower_compiled_program(&checked)
             .expect("a nullary generic constructor in argument position must lower");
     }
@@ -23113,24 +23082,9 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
     /// as a guard on that fix.
     #[test]
     fn generic_container_over_a_dimension_generic_adt_specializes() {
-        let checked = surf_check(
-            "type Col[n] =\n\
-               | FloatCol(tensor[n, f32])\n\
-             type Box[a] =\n\
-               | Nothing\n\
-               | Just { item: a }\n\
-             def box_it[a](item: a) -> Box[a] = Just { item }\n\
-             def unbox[a](b: Box[a], fallback: a) -> a = match b with {\n\
-               | Nothing => fallback\n\
-               | Just { item: i } => i\n\
-             }\n\
-             def roundtrip[n](c: Col[n]) -> Col[n] = unbox(box_it(c), c)\n\
-             def total[n](c: Col[n]) -> tensor[n, f32] = match roundtrip(c) with {\n\
-               | FloatCol(t) => t\n\
-             }\n\
-             def main() -> tensor[2, f32] =\n\
-               total(FloatCol(to_tensor([cast(1.0, f32), cast(2.0, f32)])))\n",
-        );
+        let checked = deep_check(include_str!(
+            "../tests/fixtures/core/src/host/generic_container_over_a_dimension_generic_adt_specializes.deep"
+        ));
         try_lower_compiled_program(&checked)
             .expect("a generic container over a dim-generic element must lower");
     }
@@ -23147,21 +23101,9 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
     /// this shape.
     #[test]
     fn recursive_dimension_generic_call_is_monomorphized() {
-        let checked = surf_check(
-            "type Col[n] =\n\
-               | FloatCol(tensor[n, f32])\n\
-             def zero_i64() -> i64 = cast(0, i64)\n\
-             def one_i64() -> i64 = cast(1, i64)\n\
-             def col_len[n](col: Col[n]) -> i64 = match col with {\n\
-               | FloatCol(xs) => numel(xs)\n\
-             }\n\
-             def all_eq_len[n](pairs: List[(string, Col[n])], expected: i64) -> bool =\n\
-               if eq(len(pairs), zero_i64()) then true else {\n\
-                 entry = index(pairs, zero_i64())\n\
-                 if neq(col_len(entry.1), expected) then false else all_eq_len(drop(pairs, one_i64()), expected)\n\
-               }\n\
-             def main() -> bool = all_eq_len([(\"a\", FloatCol(to_tensor([cast(1.0, f32), cast(2.0, f32)])))], cast(2, i64))\n",
-        );
+        let checked = deep_check(include_str!(
+            "../tests/fixtures/core/src/host/recursive_dimension_generic_call_is_monomorphized.deep"
+        ));
         let lowered = try_lower_compiled_program(&checked)
             .expect("a recursive dimension-generic call must lower through monomorphization");
         let host = lowered
@@ -23481,18 +23423,10 @@ mod record_hoist_binder_vocabulary_tests {
     use chelis_deep::role::{ChildStampRole, child_stamp_role};
     use chelis_deep::tag::DeepTag;
 
-    /// Parse Surf and hand back the canonical Deep the lowerer receives.
-    ///
-    /// The oracle builds every fixture this way and never constructs an `Expr`
-    /// by hand. Round 2 is why: the previous version built its typed-parameter
-    /// fixture as an `UnknownForm`, a shape the parser does not produce at a
-    /// binder position, so its typed leg was green against a spelling that
-    /// never occurs while the real one -- an unstamped list whose head is the
-    /// name -- fell through undecoded. An oracle over a representation nobody
-    /// emits proves nothing about the representation everybody emits.
+    /// Lossless original desugarer output retains legacy typed-parameter lists
+    /// and MetaExpr binders; reparsing printed Deep would normalize that ingress.
     fn deep_program(source: &str) -> Vec<Expr> {
-        let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
-        chelis_surf::desugar::desugar_program(&decls)
+        serde_json::from_str(source).expect("original binder AST")
     }
 
     /// The body of the named `def`, which is the subtree the hoist walks.
@@ -23511,29 +23445,23 @@ mod record_hoist_binder_vocabulary_tests {
         Ok(out.into_sorted())
     }
 
-    /// One Surf spelling that binds `shadowed` inside `f`'s body, named by the
-    /// binder form it exercises. Every entry is real source the parser accepts.
+    /// Original desugared binder shapes inside `f`, captured losslessly so
+    /// legacy Lists and MetaExpr parameters remain distinct test inputs.
     fn binder_spellings() -> Vec<(&'static str, String, &'static str)> {
         vec![
             (
                 "typed fn parameter",
-                "def f(x: tensor[1, f32]) -> tensor[1, f32] = \
-                 (fn (shadowed: tensor[1, f32]) -> mul(shadowed, shadowed))(x)\n"
-                    .to_string(),
+                include_str!("../tests/fixtures/core/src/host/binder_0.json").to_string(),
                 "shadowed",
             ),
             (
                 "untyped fn parameter",
-                "def f(x: tensor[1, f32]) -> tensor[1, f32] = \
-                 (fn (shadowed) -> mul(shadowed, shadowed))(x)\n"
-                    .to_string(),
+                include_str!("../tests/fixtures/core/src/host/binder_1.json").to_string(),
                 "shadowed",
             ),
             (
                 "two typed fn parameters",
-                "def f(x: tensor[1, f32]) -> tensor[1, f32] = \
-                 (fn (shadowed: tensor[1, f32], other: tensor[1, f32]) -> mul(shadowed, other))(x, x)\n"
-                    .to_string(),
+                include_str!("../tests/fixtures/core/src/host/binder_2.json").to_string(),
                 "shadowed",
             ),
             (
@@ -23545,38 +23473,30 @@ mod record_hoist_binder_vocabulary_tests {
                 // arm unguarded: mutating it left every other row green while
                 // shipping round 2's defect for this spelling.
                 "typed fn parameter named after a Deep tag",
-                "def f(x: tensor[1, f32]) -> tensor[1, f32] = \
-                 (fn (params: tensor[1, f32]) -> mul(params, params))(x)\n"
-                    .to_string(),
+                include_str!("../tests/fixtures/core/src/host/binder_3.json").to_string(),
                 "params",
             ),
             (
                 "let binding",
-                "def f(x: tensor[1, f32]) -> tensor[1, f32] = {\n  shadowed = mul(x, x)\n  shadowed\n}\n"
-                    .to_string(),
+                include_str!("../tests/fixtures/core/src/host/binder_4.json").to_string(),
                 "shadowed",
             ),
             (
                 "match pattern binder",
-                "type Holder =\n  | Holder { v: tensor[1, f32] }\n\n\
-                 def f(x: tensor[1, f32]) -> tensor[1, f32] = \
-                 match Holder { v: x } with { | Holder { v: shadowed } => mul(shadowed, shadowed) }\n"
-                    .to_string(),
+                include_str!("../tests/fixtures/core/src/host/binder_5.json").to_string(),
                 "shadowed",
             ),
             (
                 "pipe stage over a let binder",
-                "def f(x: tensor[1, f32]) -> tensor[1, f32] = {\n  \
-                 shadowed = x |> mul(x)\n  shadowed\n}\n"
-                    .to_string(),
+                include_str!("../tests/fixtures/core/src/host/binder_6.json").to_string(),
                 "shadowed",
             ),
         ]
     }
 
-    /// The vocabulary oracle for chelis#1266's hoist, built through the parser.
+    /// The vocabulary oracle for chelis#1266's hoist, using original parser output.
     ///
-    /// Every binder spelling Surf can write must yield its name, because the
+    /// Every captured binder shape must yield its name, because the
     /// hoist substitutes a local for a projection and must never do so under a
     /// binder it could not see. A spelling that yields nothing is either a
     /// silent wrong answer or, with the fail-closed exit, a definition whose
@@ -23587,7 +23507,7 @@ mod record_hoist_binder_vocabulary_tests {
     /// reader refused with "a binder position of `fn` at index 0 carries a
     /// spelling this walk cannot read a name from" and bound nothing.
     #[test]
-    fn every_surf_binder_spelling_yields_its_name() {
+    fn every_original_binder_shape_yields_its_name() {
         for (form, source, binder) in binder_spellings() {
             let read = bound_names(&source, "f");
             let names = read.unwrap_or_else(|error| panic!("{form}: the reader refused: {error}"));

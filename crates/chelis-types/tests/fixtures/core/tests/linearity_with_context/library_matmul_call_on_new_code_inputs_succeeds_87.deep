@@ -1,0 +1,15 @@
+(defsig {}
+  lib_matmul
+  (t-fn {}
+    (t-ref {} (t-tensor {} (d-lit {} 4) (t-prim {} f32)))
+    (t-ref {} (t-tensor {} (d-lit {} 4) (t-prim {} f32)))
+    (t-tensor {} (d-lit {} 4) (t-prim {} f32))))
+
+(def {}
+  lib_matmul
+  (fn {}
+    (params {} (a {type: (t-var {} _)}) (b {type: (t-var {} _)}))
+    (app {span: "surf:78..87"}
+      (var {span: "surf:78..81"} add)
+      (var {span: "surf:82..83"} a)
+      (var {span: "surf:85..86"} b))))

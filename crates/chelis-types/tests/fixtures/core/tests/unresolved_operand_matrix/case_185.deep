@@ -1,0 +1,14 @@
+(defsig {}
+  f
+  (t-fn {} (t-adt {} List (t-prim {} i32)) (t-adt {} List (t-prim {} i32))))
+
+(def {}
+  f
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:35..61"}
+      (var {span: "surf:35..41"} append)
+      (app {span: "surf:42..54"}
+        (var {span: "surf:42..51"} to_tensor)
+        (var {span: "surf:52..53"} x))
+      (lit {span: "surf:56..60", surf_literal_style: "explicit", type: (t-prim {} i32)} 1))))

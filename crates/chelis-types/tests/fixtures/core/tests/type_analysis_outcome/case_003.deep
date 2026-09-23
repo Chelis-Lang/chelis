@@ -1,0 +1,10 @@
+(module {surf_path: "Rec"}
+  rec
+  (defsig {} forever (t-fn {} (t-prim {} i32) (t-prim {} i32)))
+  (def {}
+    forever
+    (fn {}
+      (params {} (n {type: (t-var {} _)}))
+      (app {span: "surf:40..50"}
+        (var {span: "surf:40..47"} forever)
+        (var {span: "surf:48..49"} n)))))

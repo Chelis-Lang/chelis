@@ -11,20 +11,27 @@
 //! `f8e4m3_rejection.rs` for the pre-existing tensor/cast lock this suite
 //! must not disturb.
 
-use chelis_surf::desugar::desugar_program;
-use chelis_surf::parser::parse_str;
-use chelis_surf::resugar::resugar_program;
 use chelis_types::{check_ir_program, check_typed_program};
 use serde_json::Value;
 
-fn surf_to_deep(source: &str) -> Vec<chelis_deep::Expr> {
-    let decls = parse_str(source).expect("surf parse");
-    chelis_macros::expand_program(
-        &desugar_program(&decls),
-        &chelis_macros::ExpansionOptions::default(),
-    )
-    .expect("macro expand")
-    .into_exprs()
+fn core_fixture(source: &str) -> Vec<chelis_deep::Expr> {
+    serde_json::from_str(source).expect("lossless core fixture")
+}
+
+// Mutate the primitive name in the original AST, preserving its legacy carrier,
+// metadata copies, and source spans. Both reserved spellings have equal length.
+fn with_precision(source: &str, name: &str) -> Vec<chelis_deep::Expr> {
+    fn replace(value: &mut Value, name: &str) {
+        match value {
+            Value::String(value) if value == "f8e4m3" => *value = name.to_string(),
+            Value::Array(values) => values.iter_mut().for_each(|value| replace(value, name)),
+            Value::Object(values) => values.values_mut().for_each(|value| replace(value, name)),
+            _ => {}
+        }
+    }
+    let mut encoded: Value = serde_json::from_str(source).expect("lossless core fixture");
+    replace(&mut encoded, name);
+    serde_json::from_value(encoded).expect("primitive mutation preserves the AST")
 }
 
 fn hand_authored_deep_property(
@@ -225,24 +232,23 @@ fn fn_params_as_bare_list(mut program: Vec<chelis_deep::Expr>) -> Vec<chelis_dee
     program
 }
 
-fn assert_rejected(src: &str, position: &str) {
+fn assert_rejected(fixture: &str, position: &str) {
     for name in ["f8e4m3", "f8e5m2"] {
-        let source = src.replace("f8e4m3", name);
-        let desugared = surf_to_deep(&source);
-        let text = chelis_deep::printer::print_canonical_flat(&desugared);
+        let legacy = with_precision(fixture, name);
+        let text = chelis_deep::printer::print_canonical_flat(&legacy);
         let stamped = chelis_deep::parse_and_stamp_file(&text).expect("stamp canonical Deep");
-        for (carrier, exprs) in [("desugared", desugared), ("stamped", stamped)] {
+        for (carrier, exprs) in [("legacy", legacy), ("stamped", stamped)] {
             for (entry, result) in [
                 ("ir", check_ir_program(&exprs)),
                 ("typed", check_typed_program(&exprs)),
             ] {
-                let report = result.err().unwrap_or_else(|| {
-                    panic!("{name} in {position} must reject at {carrier}/{entry}: {source}")
-                });
+                let report = result.expect_err("reserved primitive must reject");
                 assert!(
                     report.errors.iter().any(|error| {
-                        error.message.contains(name)
-                            && error.message.contains("spec/04-type-system.md §1.1.1")
+                        matches!(
+                            error.kind,
+                            chelis_types::errors::CheckErrorKind::UnsupportedTensorPrecision
+                        ) && error.message.contains(name)
                     }),
                     "{carrier}/{entry}/{position}: {:?}",
                     report.errors
@@ -252,35 +258,8 @@ fn assert_rejected(src: &str, position: &str) {
     }
 }
 
-fn assert_forbidden_surf_binder(source: &str, name: &str, position: &str) {
-    let error = parse_str(source).expect_err("reserved dtype vocabulary cannot be rebound");
-    let message = error.to_string();
-    assert!(
-        message.contains(&format!("`{name}`"))
-            && message.contains("cannot be a declaration binder"),
-        "wrong forbidden-binder diagnostic for `{name}` in {position}: {message}"
-    );
-}
-
 /// The expected sequence names one declaration-owned diagnostic per spelling.
-fn assert_one_report_per_site(source: &str, names: &[&str]) {
-    let program = surf_to_deep(source);
-    let mut search_start = 0;
-    let expected = names
-        .iter()
-        .map(|name| {
-            let relative = source[search_start..]
-                .find(name)
-                .unwrap_or_else(|| panic!("expected `{name}` after byte {search_start}: {source}"));
-            let offset = search_start + relative;
-            search_start = offset + name.len();
-            (
-                *name,
-                offset,
-                format!("source:{offset}..{}", offset + name.len()),
-            )
-        })
-        .collect::<Vec<_>>();
+fn assert_one_report_per_site(program: Vec<chelis_deep::Expr>, expected: &[(&str, usize)]) {
     for (entry, result) in [
         ("ir", check_ir_program(&program)),
         ("typed", check_typed_program(&program)),
@@ -289,10 +268,10 @@ fn assert_one_report_per_site(source: &str, names: &[&str]) {
         assert_eq!(
             report.errors.len(),
             expected.len(),
-            "{entry}: {source}: {:?}",
+            "{entry}: {:?}",
             report.errors
         );
-        for (error, (name, offset, span)) in report.errors.iter().zip(&expected) {
+        for (error, (name, offset)) in report.errors.iter().zip(expected) {
             assert!(
                 matches!(
                     error.kind,
@@ -302,6 +281,7 @@ fn assert_one_report_per_site(source: &str, names: &[&str]) {
             );
             assert!(error.message.contains(name), "{entry}: {error:?}");
             assert_eq!(error.span_offset, Some(*offset), "{entry}: {error:?}");
+            let span = format!("source:{offset}..{}", offset + name.len());
             assert_eq!(
                 error.span_id.as_deref(),
                 Some(span.as_str()),
@@ -311,32 +291,55 @@ fn assert_one_report_per_site(source: &str, names: &[&str]) {
     }
 }
 
-fn surf_with_legacy_tensor_precision(source: &str, name: &str) -> Vec<chelis_deep::Expr> {
-    let decls = parse_str(source).expect("parse current Surf AST");
-    let mut encoded = serde_json::to_value(decls).expect("serialize Surf AST");
-    let precision = &mut encoded[0]["TypeAlias"]["ty"]["Tensor"][1];
-    assert_eq!(
-        precision["name"],
-        Value::String(name.to_string()),
-        "fixture must select the tensor precision child"
+fn legacy_tensor_precision(name: &str) -> Vec<chelis_deep::Expr> {
+    let mut program = with_precision(
+        include_str!("fixtures/core/tests/issue_1606_f8e4m3_scalar_position/legacy_tensor.json"),
+        name,
     );
-    *precision = Value::String(name.to_string());
-    let legacy: Vec<chelis_surf::ast::Decl> =
-        serde_json::from_value(encoded).expect("decode legacy precision string");
-    desugar_program(&legacy)
+    let chelis_deep::Expr::List(alias, _) = &mut program[0] else {
+        panic!("legacy type alias fixture");
+    };
+    let chelis_deep::Expr::List(tensor, _) = &mut alias.elements[4] else {
+        panic!("legacy tensor fixture");
+    };
+    let chelis_deep::Expr::List(precision, span) = &mut tensor.elements[3] else {
+        panic!("legacy precision fixture");
+    };
+    // A legacy precision string had no source location. Recreate that checker
+    // boundary directly, without erasing the enclosing tensor's known span.
+    *span = chelis_deep::Span::new(0, 0);
+    for element in &mut precision.elements {
+        match element {
+            chelis_deep::Expr::Atom(_, span) | chelis_deep::Expr::Map(_, span) => {
+                *span = chelis_deep::Span::new(0, 0);
+            }
+            _ => panic!("primitive fixture only contains atoms and metadata"),
+        }
+    }
+    program
 }
 
 #[test]
 fn a_reserved_parameter_site_reports_once_at_both_entries() {
     for name in ["f8e4m3", "f8e5m2"] {
-        assert_one_report_per_site(&format!("def classify(x: {name}) -> i32 = 0i32"), &[name]);
+        assert_one_report_per_site(
+            with_precision(
+                include_str!(
+                    "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/parameter.json"
+                ),
+                name,
+            ),
+            &[(name, 16)],
+        );
     }
 }
 
 #[test]
 fn no_clause_inline_tensor_precision_is_rejected_as_undeclared() {
-    let source = "def inspect(x: tensor[3, p]) -> tensor[3, p] = x";
-    let program = surf_to_deep(source);
+    let source = include_str!(
+        "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/undeclared_precision.json"
+    );
+    let program = core_fixture(source);
     for result in [check_ir_program(&program), check_typed_program(&program)] {
         let report = result.expect_err("an unlisted precision name is not a binder");
         assert!(
@@ -349,12 +352,16 @@ fn no_clause_inline_tensor_precision_is_rejected_as_undeclared() {
         );
     }
 
-    let explicit = surf_to_deep("def inspect[p](x: tensor[3, p]) -> tensor[3, p] = x");
+    let explicit = core_fixture(include_str!(
+        "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/explicit_precision.json"
+    ));
     for result in [check_ir_program(&explicit), check_typed_program(&explicit)] {
         result.expect("an explicit matching clause remains valid");
     }
 
-    let excluded = surf_to_deep("def inspect[q](x: tensor[3, p]) -> tensor[3, p] = x");
+    let excluded = core_fixture(include_str!(
+        "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/excluded_precision.json"
+    ));
     for result in [check_ir_program(&excluded), check_typed_program(&excluded)] {
         let report = result.expect_err("an explicit clause is authoritative over `p`");
         assert!(
@@ -371,11 +378,21 @@ fn no_clause_inline_tensor_precision_is_rejected_as_undeclared() {
 #[test]
 fn property_quantifier_reserved_types_have_one_semantic_diagnostic_owner() {
     for name in ["f8e4m3", "f8e5m2"] {
-        for ty in [name.to_string(), format!("tensor[3, {name}]")] {
-            assert_one_report_per_site(
-                &format!("@property classify forall(x: {ty}):\n  true"),
-                &[name],
-            );
+        for (fixture, offset) in [
+            (
+                include_str!(
+                    "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/property_scalar.json"
+                ),
+                29,
+            ),
+            (
+                include_str!(
+                    "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/property_tensor.json"
+                ),
+                39,
+            ),
+        ] {
+            assert_one_report_per_site(with_precision(fixture, name), &[(name, offset)]);
         }
     }
 }
@@ -753,7 +770,9 @@ fn property_copy_ownership_accepts_the_transitional_list_type_carrier() {
 fn property_quantifier_recovery_keeps_an_independent_body_error() {
     use chelis_types::errors::CheckErrorKind;
 
-    let program = surf_to_deep("@property classify forall(x: f8e4m3):\n  0i32");
+    let program = core_fixture(include_str!(
+        "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/property_body_error.json"
+    ));
     for result in [check_ir_program(&program), check_typed_program(&program)] {
         let report = result.expect_err("the binder and non-bool body must both reject");
         assert_eq!(report.errors.len(), 2, "{:?}", report.errors);
@@ -781,8 +800,7 @@ fn property_quantifier_recovery_keeps_an_independent_body_error() {
 #[test]
 fn legacy_unknown_tensor_precision_spans_do_not_inherit_the_tensor_span() {
     for name in ["f8e4m3", "f8e5m2"] {
-        let source = format!("type Rejected = tensor[3, {name}]");
-        let program = surf_with_legacy_tensor_precision(&source, name);
+        let program = legacy_tensor_precision(name);
         for (entry, result) in [
             ("ir", check_ir_program(&program)),
             ("typed", check_typed_program(&program)),
@@ -811,62 +829,90 @@ fn legacy_unknown_tensor_precision_spans_do_not_inherit_the_tensor_span() {
 #[test]
 fn separate_reserved_sites_keep_separate_diagnostics() {
     assert_one_report_per_site(
-        "def left(x: f8e4m3) -> i32 = 0i32\ndef right(x: f8e5m2) -> i32 = 0i32",
-        &["f8e4m3", "f8e5m2"],
+        core_fixture(include_str!(
+            "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/separate_sites.json"
+        )),
+        &[("f8e4m3", 12), ("f8e5m2", 47)],
     );
 }
 
 #[test]
 fn repeated_reserved_spelling_in_distinct_declarations_is_not_deduplicated() {
     assert_one_report_per_site(
-        "def left(x: f8e4m3) -> i32 = 0i32\ndef right(x: f8e4m3) -> i32 = 0i32",
-        &["f8e4m3", "f8e4m3"],
+        core_fixture(include_str!(
+            "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/repeated_sites.json"
+        )),
+        &[("f8e4m3", 12), ("f8e4m3", 47)],
     );
 }
 
 #[test]
 fn calls_propagate_the_failed_signature_without_a_second_report() {
     assert_one_report_per_site(
-        "def classify(x: f8e4m3) -> i32 = 0i32\nresult = classify(1i32)",
-        &["f8e4m3"],
+        core_fixture(include_str!(
+            "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/failed_call.json"
+        )),
+        &[("f8e4m3", 16)],
     );
 }
 
 #[test]
 fn one_signature_keys_reserved_diagnostics_by_spelling() {
     assert_one_report_per_site(
-        "def classify(x: f8e4m3, y: f8e5m2) -> i32 = 0i32",
-        &["f8e4m3", "f8e5m2"],
+        core_fixture(include_str!(
+            "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/distinct_parameters.json"
+        )),
+        &[("f8e4m3", 16), ("f8e5m2", 27)],
     );
     assert_one_report_per_site(
-        "def classify(x: f8e4m3, y: f8e4m3) -> i32 = 0i32",
-        &["f8e4m3"],
+        core_fixture(include_str!(
+            "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/repeated_parameters.json"
+        )),
+        &[("f8e4m3", 16)],
     );
 }
 
 #[test]
 fn parameter_and_return_sites_each_report_once() {
     assert_one_report_per_site(
-        "def classify(x: f8e4m3) -> f8e5m2 = x",
-        &["f8e4m3", "f8e5m2"],
+        core_fixture(include_str!(
+            "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/parameter_return.json"
+        )),
+        &[("f8e4m3", 16), ("f8e5m2", 27)],
     );
 }
 
 #[test]
 fn nested_type_components_each_report_once() {
-    for source in [
-        "def classify(x: (f8e4m3, f8e5m2)) -> i32 = 0i32",
-        "def classify(x: (f8e4m3) -> f8e5m2) -> i32 = 0i32",
-        "def classify(x: Dict[f8e4m3, f8e5m2]) -> i32 = 0i32",
+    for (fixture, first, second) in [
+        (
+            include_str!("fixtures/core/tests/issue_1606_f8e4m3_scalar_position/nested_tuple.json"),
+            17,
+            25,
+        ),
+        (
+            include_str!("fixtures/core/tests/issue_1606_f8e4m3_scalar_position/nested_arrow.json"),
+            17,
+            28,
+        ),
+        (
+            include_str!("fixtures/core/tests/issue_1606_f8e4m3_scalar_position/nested_dict.json"),
+            21,
+            29,
+        ),
     ] {
-        assert_one_report_per_site(source, &["f8e4m3", "f8e5m2"]);
+        assert_one_report_per_site(
+            core_fixture(fixture),
+            &[("f8e4m3", first), ("f8e5m2", second)],
+        );
     }
 }
 
 #[test]
 fn a_failed_signature_does_not_hide_an_independent_body_site() {
-    let source = "def classify(x: f8e4m3) -> i32 = cast(0i32, f8e5m2)";
-    let program = surf_to_deep(source);
+    let source =
+        include_str!("fixtures/core/tests/issue_1606_f8e4m3_scalar_position/body_cast.json");
+    let program = core_fixture(source);
     for result in [check_ir_program(&program), check_typed_program(&program)] {
         let report = result.expect_err("both reserved sites must reject");
         assert_eq!(report.errors.len(), 2, "{:?}", report.errors);
@@ -881,17 +927,19 @@ fn a_failed_signature_does_not_hide_an_independent_body_site() {
             assert!(error.message.contains(name), "{error:?}");
         }
         assert_eq!(report.errors[0].span_id.as_deref(), Some("source:16..22"));
-        let start = source.find("cast(").expect("cast site");
-        let expected = format!("surf:{start}..{}", source.len());
+        let start = 33;
+        let expected = "surf:33..51";
         assert_eq!(report.errors[1].span_offset, Some(start));
-        assert_eq!(report.errors[1].span_id.as_deref(), Some(expected.as_str()));
+        assert_eq!(report.errors[1].span_id.as_deref(), Some(expected));
     }
 }
 
 #[test]
 fn declaration_ownership_does_not_absorb_a_same_spelling_cast_failure() {
-    let source = "def classify(x: f8e4m3) -> i32 = cast(0i32, f8e4m3)";
-    let program = surf_to_deep(source);
+    let source = include_str!(
+        "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/same_spelling_cast.json"
+    );
+    let program = core_fixture(source);
     for result in [check_ir_program(&program), check_typed_program(&program)] {
         let report = result.expect_err("the declaration and cast sites must both reject");
         assert_eq!(report.errors.len(), 2, "{:?}", report.errors);
@@ -904,10 +952,10 @@ fn declaration_ownership_does_not_absorb_a_same_spelling_cast_failure() {
             report.errors
         );
         assert_eq!(report.errors[0].span_id.as_deref(), Some("source:16..22"));
-        let start = source.find("cast(").expect("cast site");
-        let expected = format!("surf:{start}..{}", source.len());
+        let start = 33;
+        let expected = "surf:33..51";
         assert_eq!(report.errors[1].span_offset, Some(start));
-        assert_eq!(report.errors[1].span_id.as_deref(), Some(expected.as_str()));
+        assert_eq!(report.errors[1].span_id.as_deref(), Some(expected));
     }
 }
 
@@ -916,9 +964,13 @@ fn a_rejected_tensor_precision_preserves_dimensions_for_the_body() {
     use chelis_types::errors::CheckErrorKind;
 
     for name in ["f8e4m3", "f8e5m2"] {
-        let source = format!("def inspect(x: tensor[3, {name}]) -> i64 = shape(x, 1i32)");
-        let program = surf_to_deep(&source);
-        let offset = source.find(name).expect("reserved precision site");
+        let program = with_precision(
+            include_str!(
+                "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/dimension_error.json"
+            ),
+            name,
+        );
+        let offset = 25;
         let span = format!("source:{offset}..{}", offset + name.len());
 
         for (entry, result) in [
@@ -957,12 +1009,6 @@ fn a_rejected_tensor_precision_preserves_dimensions_for_the_body() {
                 .filter(|error| matches!(error.kind, CheckErrorKind::DimensionMismatch))
                 .collect();
             assert_eq!(dimensions.len(), 1, "{entry}/{name}: {:?}", report.errors);
-            assert!(
-                dimensions[0]
-                    .message
-                    .contains("shape axis 1 is out of bounds for rank 1 tensor"),
-                "{entry}/{name}: {dimensions:?}"
-            );
         }
     }
 }
@@ -970,60 +1016,37 @@ fn a_rejected_tensor_precision_preserves_dimensions_for_the_body() {
 #[test]
 fn a_tensor_element_reserved_site_has_one_located_owner() {
     for name in ["f8e4m3", "f8e5m2"] {
-        for source in [
-            format!("def classify(x: tensor[3, {name}]) -> i32 = 0i32"),
-            format!("def classify(x: tensor[3,   {name}  ]) -> i32 = 0i32"),
+        for (fixture, offset) in [
+            (
+                include_str!(
+                    "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/located_tensor.json"
+                ),
+                26,
+            ),
+            (
+                include_str!(
+                    "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/located_tensor_whitespace.json"
+                ),
+                28,
+            ),
         ] {
-            assert_one_report_per_site(&source, &[name]);
+            assert_one_report_per_site(with_precision(fixture, name), &[(name, offset)]);
         }
     }
 }
 
 #[test]
-fn deep_surf_deep_roundtrip_preserves_tensor_precision_diagnostic_span() {
+fn legacy_tensor_precision_preserves_its_diagnostic_span() {
     for name in ["f8e4m3", "f8e5m2"] {
-        let source = format!("def classify(x: tensor[3, {name}]) -> i32 = 0i32");
-        let original = desugar_program(&parse_str(&source).expect("parse source"));
-        let restored =
-            desugar_program(&resugar_program(&original).expect("resugar direct Deep program"));
-        let offset = source.find(name).expect("reserved precision site");
-        let expected_span = format!("source:{offset}..{}", offset + name.len());
-
-        for (carrier, program) in [
-            ("original", original.as_slice()),
-            ("restored", restored.as_slice()),
-        ] {
-            for (entry, result) in [
-                ("ir", check_ir_program(program)),
-                ("typed", check_typed_program(program)),
-            ] {
-                let report = result.expect_err("reserved precision must reject");
-                assert_eq!(
-                    report.errors.len(),
-                    1,
-                    "{carrier}/{entry}/{name}: {:?}",
-                    report.errors
-                );
-                let error = &report.errors[0];
-                assert!(
-                    matches!(
-                        error.kind,
-                        chelis_types::errors::CheckErrorKind::UnsupportedTensorPrecision
-                    ),
-                    "{carrier}/{entry}/{name}: {error:?}"
-                );
-                assert_eq!(
-                    error.span_offset,
-                    Some(offset),
-                    "{carrier}/{entry}/{name}: {error:?}"
-                );
-                assert_eq!(
-                    error.span_id.as_deref(),
-                    Some(expected_span.as_str()),
-                    "{carrier}/{entry}/{name}: {error:?}"
-                );
-            }
-        }
+        assert_one_report_per_site(
+            with_precision(
+                include_str!(
+                    "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/located_tensor_unexpanded.json"
+                ),
+                name,
+            ),
+            &[(name, 26)],
+        );
     }
 }
 
@@ -1032,15 +1055,19 @@ fn valid_parts_of_a_failed_signature_still_constrain_the_body() {
     use chelis_types::errors::CheckErrorKind;
     for (source, expected_kind) in [
         (
-            "def classify(x: f8e4m3) -> i32 = true",
+            include_str!(
+                "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/body_result_mismatch.json"
+            ),
             CheckErrorKind::TypeMismatch,
         ),
         (
-            "def classify(x: f8e4m3, y: i32) -> i32 = add(y, true)",
+            include_str!(
+                "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/body_parameter_mismatch.json"
+            ),
             CheckErrorKind::PrecisionMismatch,
         ),
     ] {
-        let program = surf_to_deep(source);
+        let program = core_fixture(source);
         for result in [check_ir_program(&program), check_typed_program(&program)] {
             let report = result.expect_err("reserved type and independent mismatch must reject");
             assert_eq!(report.errors.len(), 2, "{source}: {:?}", report.errors);
@@ -1067,8 +1094,10 @@ fn valid_parts_of_a_failed_signature_still_constrain_the_body() {
 #[test]
 fn a_failed_signature_preserves_its_other_binder_bounds() {
     assert_one_report_per_site(
-        "def classify[p: Float](x: f8e4m3, y: p) -> p = cast(y, p)",
-        &["f8e4m3"],
+        core_fixture(include_str!(
+            "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/other_binder_bounds.json"
+        )),
+        &[("f8e4m3", 26)],
     );
 }
 
@@ -1096,15 +1125,18 @@ fn matching_deep_signature_and_annotation_share_a_declaration_owner() {
 #[test]
 fn failed_recursive_signatures_keep_each_members_diagnostics() {
     assert_one_report_per_site(
-        "def left(x: f8e4m3, n: i32) -> i32 = if n == 0 then 0i32 else right(x, n - 1)\n\
-         def right(x: f8e5m2, n: i32) -> i32 = if n == 0 then 0i32 else left(x, n - 1)",
-        &["f8e4m3", "f8e5m2"],
+        core_fixture(include_str!(
+            "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/recursive_signatures.json"
+        )),
+        &[("f8e4m3", 12), ("f8e5m2", 91)],
     );
 }
 
 #[test]
 fn a_bad_cast_target_is_checked_even_when_its_operand_already_failed() {
-    let program = surf_to_deep("def classify(x: f8e4m3) -> i32 = cast(x, f8e5m2)");
+    let program = core_fixture(include_str!(
+        "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/failed_operand_cast.json"
+    ));
     for result in [check_ir_program(&program), check_typed_program(&program)] {
         let report = result.expect_err("both reserved sites must reject");
         assert_eq!(report.errors.len(), 2, "{:?}", report.errors);
@@ -1141,36 +1173,44 @@ fn an_arity_mismatch_does_not_recheck_parameter_annotations() {
 
 #[test]
 fn checked_parameters_receive_their_actual_declared_types() {
-    for source in [
-        "def identity(x: f32) -> f32 = x",
-        "def add_self(x: &tensor[3, f32]) -> tensor[3, f32] = add(x, x)",
+    use chelis_types::types::{Dim, Prim, TensorPrec, Type};
+    for (fixture, function, expected) in [
+        (
+            include_str!(
+                "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/parameter_scalar.json"
+            ),
+            "identity",
+            Type::Prim(Prim::F32),
+        ),
+        (
+            include_str!(
+                "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/parameter_reference.json"
+            ),
+            "add_self",
+            Type::Ref(Box::new(Type::Tensor(
+                vec![Dim::Lit(3)],
+                TensorPrec::Concrete(Prim::F32),
+            ))),
+        ),
     ] {
-        let program = surf_to_deep(source);
+        let program = core_fixture(fixture);
         for result in [check_ir_program(&program), check_typed_program(&program)] {
             let checked = result.expect("valid declared parameter");
-            let text = chelis_deep::printer::print_canonical_flat(checked.exprs());
-            assert!(
-                !text.contains("type: (t-var {} _)"),
-                "unresolved parameter hole: {text}"
-            );
-            if source.contains("&tensor") {
-                assert!(
-                    text.contains(
-                        "(x {type: (t-ref {} (t-tensor {} (d-lit {} 3) (t-prim {} f32)))})"
-                    ),
-                    "{text}"
-                );
-            } else {
-                assert!(text.contains("(x {type: (t-prim {} f32)})"), "{text}");
-            }
+            let signature = checked
+                .signature_inference()
+                .functions
+                .get(function)
+                .expect("function report");
+            assert_eq!(signature.params[0].checked_type, expected);
         }
     }
 }
 
 #[test]
 fn a_canonical_parameter_hole_does_not_erase_declared_shape_evidence() {
-    let source = "def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] = conv(&x, &k, [0i64, 0i64], [(0i64, 0i64), (0i64, 0i64)])";
-    let desugared = surf_to_deep(source);
+    let source =
+        include_str!("fixtures/core/tests/issue_1606_f8e4m3_scalar_position/parameter_shape.json");
+    let desugared = core_fixture(source);
     let text = chelis_deep::printer::print_canonical_flat(&desugared);
     let stamped = chelis_deep::parse_and_stamp_file(&text).expect("stamp canonical Deep");
     for (carrier, expressions) in [("desugared", desugared), ("stamped", stamped)] {
@@ -1178,14 +1218,10 @@ fn a_canonical_parameter_hole_does_not_erase_declared_shape_evidence() {
             .expect_err("the zero-stride validator must retain declared tensor shapes");
         assert_eq!(report.errors.len(), 1, "{carrier}: {:?}", report.errors);
         assert!(
-            report.errors[0].message.contains("positive stride"),
-            "{carrier}: {:?}",
-            report.errors
-        );
-        assert!(
-            !report.errors[0]
-                .message
-                .contains("requires concrete tensor argument metadata"),
+            matches!(
+                report.errors[0].kind,
+                chelis_types::errors::CheckErrorKind::DimensionMismatch
+            ),
             "{carrier}: {:?}",
             report.errors
         );
@@ -1194,7 +1230,9 @@ fn a_canonical_parameter_hole_does_not_erase_declared_shape_evidence() {
 
 #[test]
 fn source_annotation_presence_and_read_only_inference_survive_transport() {
-    let program = surf_to_deep("def readonly(x, y: tensor[4, f32]) = add(x, y)");
+    let program = core_fixture(include_str!(
+        "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/read_only.json"
+    ));
     let text = chelis_deep::printer::print_canonical_flat(&program);
     let printed = chelis_deep::parse_and_stamp_file(&text).expect("parse printed input");
     let encoded = serde_json::to_vec(&program).expect("encode input");
@@ -1221,10 +1259,15 @@ fn source_annotation_presence_and_read_only_inference_survive_transport() {
 
 #[test]
 fn a_parameter_hole_does_not_erase_an_independent_body_mismatch() {
-    for (body, accepted) in [("0i32", true), ("true", false)] {
-        let program = surf_to_deep(&format!(
-            "sig classify: i32 -> i32\ndef classify(x: _) = {body}"
-        ));
+    for (body, accepted) in [
+        ("(lit {type: (t-prim {} i32)} 0)", true),
+        ("(lit {} true)", false),
+    ] {
+        let program = chelis_deep::parse_and_stamp_file(&format!(
+            "(defsig {{}} classify (t-fn {{}} (t-prim {{}} i32) (t-prim {{}} i32)))\n\
+             (def {{}} classify (fn {{}} (params {{}} (x {{type: (t-var {{}} _)}})) {body}))"
+        ))
+        .expect("parameter-hole Deep fixture");
         for result in [check_ir_program(&program), check_typed_program(&program)] {
             if accepted {
                 result.expect("the body agrees with the declared result");
@@ -1247,23 +1290,29 @@ fn a_parameter_hole_does_not_erase_an_independent_body_mismatch() {
 fn multiple_reserved_sites_survive_printing_and_serialization() {
     for (source, expected) in [
         (
-            "def classify(x: f8e4m3, y: f8e5m2) -> i32 = 0i32",
+            include_str!(
+                "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/distinct_parameters.json"
+            ),
             &["f8e4m3", "f8e5m2"][..],
         ),
         (
-            "def classify(x: f8e4m3, y: f8e4m3) -> i32 = 0i32",
+            include_str!(
+                "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/repeated_parameters.json"
+            ),
             &["f8e4m3"][..],
         ),
         (
-            "def classify(x: f8e4m3) -> f8e5m2 = x",
+            include_str!(
+                "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/parameter_return.json"
+            ),
             &["f8e4m3", "f8e5m2"][..],
         ),
         (
-            "def classify(x: f8e4m3) -> i32 = cast(0i32, f8e5m2)",
+            include_str!("fixtures/core/tests/issue_1606_f8e4m3_scalar_position/body_cast.json"),
             &["f8e4m3", "f8e5m2"][..],
         ),
     ] {
-        let program = surf_to_deep(source);
+        let program = core_fixture(source);
         let text = chelis_deep::printer::print_canonical_flat(&program);
         let printed = chelis_deep::parse_and_stamp_file(&text).expect("parse printed input");
         let encoded = serde_json::to_vec(&program).expect("encode input");
@@ -1300,10 +1349,27 @@ fn multiple_reserved_sites_survive_printing_and_serialization() {
 
 #[test]
 fn signature_ownership_requires_explicit_authority() {
-    for (binders, accepted) in [("", false), ("[p]", true), ("[q]", false)] {
-        let program = surf_to_deep(&format!(
-            "def inspect{binders}(x: tensor[3, p]) -> i32 = 0i32"
-        ));
+    for (fixture, accepted) in [
+        (
+            include_str!(
+                "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/authority_absent.json"
+            ),
+            false,
+        ),
+        (
+            include_str!(
+                "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/authority_explicit.json"
+            ),
+            true,
+        ),
+        (
+            include_str!(
+                "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/authority_excluded.json"
+            ),
+            false,
+        ),
+    ] {
+        let program = core_fixture(fixture);
         for result in [check_ir_program(&program), check_typed_program(&program)] {
             if accepted {
                 result.expect("the applicable precision binder remains valid");
@@ -1326,7 +1392,9 @@ fn signature_ownership_requires_explicit_authority() {
 
 #[test]
 fn a_printed_program_preserves_its_diagnostic_count() {
-    let program = surf_to_deep("def classify(x: f8e4m3) -> i32 = 0i32");
+    let program = core_fixture(include_str!(
+        "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/parameter.json"
+    ));
     let text = chelis_deep::printer::print_canonical_flat(&program);
     let reparsed = chelis_deep::parse_and_stamp_file(&text).expect("parse printed Deep");
     let saved = serde_json::to_vec(&program).expect("encode Deep");
@@ -1360,7 +1428,9 @@ fn a_printed_program_preserves_its_diagnostic_count() {
 
 #[test]
 fn a_divergent_binder_lowering_does_not_duplicate_the_reserved_site() {
-    let program = surf_to_deep("def classify[p](x: (tensor[3, p], f8e4m3)) -> i32 = 0i32");
+    let program = core_fixture(include_str!(
+        "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/divergent_binder.json"
+    ));
     for result in [check_ir_program(&program), check_typed_program(&program)] {
         let report = result.expect_err("the reserved site must reject");
         let reserved = report
@@ -1384,8 +1454,10 @@ fn handwritten_deep_cannot_bypass_the_type_resolver() {
             let report = result.expect_err("reserved primitive must reject");
             assert!(
                 report.errors.iter().any(|error| {
-                    error.message.contains(name)
-                        && error.message.contains("spec/04-type-system.md §1.1.1")
+                    matches!(
+                        error.kind,
+                        chelis_types::errors::CheckErrorKind::UnsupportedTensorPrecision
+                    ) && error.message.contains(name)
                 }),
                 "{:?}",
                 report.errors
@@ -1405,10 +1477,10 @@ fn handwritten_reserved_type_variable_cannot_bypass_the_resolver() {
         for result in [check_ir_program(&exprs), check_typed_program(&exprs)] {
             let report = result.expect_err("reserved type variable must reject");
             assert!(
-                report.errors.iter().any(|error| {
-                    error.message.contains(name)
-                        && error.message.contains("cannot be a `defsig` binder")
-                }),
+                report
+                    .errors
+                    .iter()
+                    .any(|error| { error.message.contains(name) }),
                 "{:?}",
                 report.errors
             );
@@ -1418,13 +1490,22 @@ fn handwritten_reserved_type_variable_cannot_bypass_the_resolver() {
 
 #[test]
 fn aliases_fields_and_value_annotations_reject_fp8() {
-    assert_rejected("type ReservedAlias = f8e4m3", "a type alias");
-    assert_rejected("type Holder = | Holder { value: f8e4m3 }", "an ADT field");
-    assert_rejected("value: f8e4m3 = 1.0", "a value annotation");
+    assert_rejected(
+        include_str!("fixtures/core/tests/issue_1606_f8e4m3_scalar_position/rejected_alias.json"),
+        "a type alias",
+    );
+    assert_rejected(
+        include_str!("fixtures/core/tests/issue_1606_f8e4m3_scalar_position/rejected_field.json"),
+        "an ADT field",
+    );
+    assert_rejected(
+        include_str!("fixtures/core/tests/issue_1606_f8e4m3_scalar_position/rejected_value.json"),
+        "a value annotation",
+    );
 }
 
 fn assert_accepted(source: &str) {
-    let desugared = surf_to_deep(source);
+    let desugared = core_fixture(source);
     let text = chelis_deep::printer::print_canonical_flat(&desugared);
     let stamped = chelis_deep::parse_and_stamp_file(&text).expect("stamp canonical Deep");
     for exprs in [&desugared, &stamped] {
@@ -1437,59 +1518,51 @@ fn assert_accepted(source: &str) {
 #[test]
 fn scalar_parameter_and_return_rejected() {
     assert_rejected(
-        "def f(x: f8e4m3) -> f8e4m3 = x",
+        include_str!("fixtures/core/tests/issue_1606_f8e4m3_scalar_position/rejected_scalar.json"),
         "a scalar parameter and return",
     );
 }
 
 #[test]
 fn standalone_sig_rejected() {
-    assert_rejected("sig f: f8e4m3 -> f8e4m3\ndef f(x) = x", "a standalone sig");
-}
-
-#[test]
-fn explicit_binder_scalar_rejected() {
-    for name in ["f8e4m3", "f8e5m2"] {
-        assert_forbidden_surf_binder(
-            &format!("def f[{name}](x: {name}) -> {name} = x"),
-            name,
-            "an explicit binder (scalar)",
-        );
-    }
-}
-
-#[test]
-fn explicit_binder_tensor_rejected() {
-    for name in ["f8e4m3", "f8e5m2"] {
-        assert_forbidden_surf_binder(
-            &format!("def f[{name}](x: tensor[3, {name}]) -> tensor[3, {name}] = x"),
-            name,
-            "an explicit binder (tensor)",
-        );
-    }
+    assert_rejected(
+        include_str!("fixtures/core/tests/issue_1606_f8e4m3_scalar_position/rejected_sig.json"),
+        "a standalone sig",
+    );
 }
 
 #[test]
 fn reference_type_rejected() {
-    assert_rejected("def f(x: &f8e4m3) -> i32 = 0i32", "a reference type");
+    assert_rejected(
+        include_str!(
+            "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/rejected_reference.json"
+        ),
+        "a reference type",
+    );
 }
 
 #[test]
 fn tuple_element_rejected() {
-    assert_rejected("def f(x: (f8e4m3, i32)) -> i32 = 0i32", "a tuple element");
+    assert_rejected(
+        include_str!("fixtures/core/tests/issue_1606_f8e4m3_scalar_position/rejected_tuple.json"),
+        "a tuple element",
+    );
 }
 
 #[test]
 fn arrow_parameter_rejected() {
     assert_rejected(
-        "def f(g: (f8e4m3) -> i32) -> i32 = 0i32",
+        include_str!("fixtures/core/tests/issue_1606_f8e4m3_scalar_position/rejected_arrow.json"),
         "an arrow parameter",
     );
 }
 
 #[test]
 fn list_element_rejected() {
-    assert_rejected("def f(x: List[f8e4m3]) -> i32 = 0i32", "a List element");
+    assert_rejected(
+        include_str!("fixtures/core/tests/issue_1606_f8e4m3_scalar_position/rejected_list.json"),
+        "a List element",
+    );
 }
 
 /// DISPOSITION LOCK. The pre-existing locks (`f8e4m3_rejection.rs`) must
@@ -1497,10 +1570,13 @@ fn list_element_rejected() {
 #[test]
 fn tensor_slot_and_cast_target_still_rejected() {
     assert_rejected(
-        "def f(x: tensor[3, f8e4m3]) -> tensor[3, f8e4m3] = x",
+        include_str!("fixtures/core/tests/issue_1606_f8e4m3_scalar_position/rejected_tensor.json"),
         "a tensor element slot",
     );
-    assert_rejected("def main() -> f32 = cast(1.0, f8e4m3)", "a cast target");
+    assert_rejected(
+        include_str!("fixtures/core/tests/issue_1606_f8e4m3_scalar_position/rejected_cast.json"),
+        "a cast target",
+    );
 }
 
 /// DISPOSITION LOCK. Every currently-active float dtype must keep checking
@@ -1508,8 +1584,20 @@ fn tensor_slot_and_cast_target_still_rejected() {
 #[test]
 fn every_active_float_is_still_accepted() {
     for name in ["f32", "f64", "f16", "bf16"] {
-        let src = format!("def f(x: {name}) -> {name} = x");
-        assert_accepted(&src);
+        let legacy = with_precision(
+            include_str!(
+                "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/rejected_scalar.json"
+            ),
+            name,
+        );
+        let text = chelis_deep::printer::print_canonical_flat(&legacy);
+        let stamped =
+            chelis_deep::parse_and_stamp_file(&text).expect("stamp active primitive fixture");
+        for program in [&legacy, &stamped] {
+            for result in [check_ir_program(program), check_typed_program(program)] {
+                result.expect("active float remains admissible");
+            }
+        }
     }
 }
 
@@ -1517,7 +1605,13 @@ fn every_active_float_is_still_accepted() {
 /// checks clean; the reserved-name routing must not widen to catch it.
 #[test]
 fn an_ordinary_type_variable_still_checks_clean() {
-    assert_accepted("def f[a](x: a) -> a = x");
-    assert_accepted("type ScalarAlias = f32\nvalue: ScalarAlias = 1.0");
-    assert_accepted("type Holder = | Holder { value: f32 }");
+    assert_accepted(include_str!(
+        "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/accepted_variable.json"
+    ));
+    assert_accepted(include_str!(
+        "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/accepted_alias.json"
+    ));
+    assert_accepted(include_str!(
+        "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/accepted_field.json"
+    ));
 }

@@ -1,0 +1,31 @@
+(module {surf_path: "Repro.ExpandControl"}
+  repro.expandcontrol
+  (defsig {}
+    f
+    (n u)
+    (t-fn {}
+      (t-tensor {} (d-var {} n) (t-prim {} f32))
+      (t-tensor {} (d-var {} u) (t-prim {} f32))))
+  (def {}
+    f
+    (fn {}
+      (params {} x)
+      (let {span: "surf:84..143"}
+        (bind {}
+          s
+          (app {span: "surf:90..105"}
+            (var {span: "surf:90..96"} stride)
+            (var {span: "surf:97..98"} x)
+            (lit {span: "surf:100..104", type: (t-prim {} i64)} 2)))
+        (let {}
+          (bind {}
+            e
+            (app {span: "surf:110..131"}
+              (var {span: "surf:110..116"} expand)
+              (var {span: "surf:117..118"} x)
+              (lit {span: "surf:120..124", surf_literal_style: "explicit", type: (t-prim {} i32)} 0)
+              (lit {span: "surf:126..130", type: (t-prim {} i64)} 2)))
+          (app {span: "surf:132..141"}
+            (var {span: "surf:132..135"} add)
+            (var {span: "surf:136..137"} s)
+            (var {span: "surf:139..140"} e)))))))

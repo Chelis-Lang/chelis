@@ -1,0 +1,10 @@
+(defsig {} leak (t-fn {eff: (effects {} io)} (t-unit {})))
+
+(def {}
+  leak
+  (fn {}
+    (params {})
+    (app {span: "surf:29..55"}
+      (var {span: "surf:29..40"} test_assert)
+      (lit {span: "surf:41..45", type: (t-prim {} bool)} true)
+      (lit {span: "surf:47..54", type: (t-prim {} string)} "sneak"))))

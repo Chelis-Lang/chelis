@@ -1,0 +1,13 @@
+(def {}
+  pair
+  (fn {}
+    (params {})
+    (tuple {span: "surf:13..24"}
+      (var {span: "surf:14..17"} len)
+      (lit {span: "surf:19..23", surf_literal_style: "explicit", type: (t-prim {} i32)} 1))))
+
+(def {}
+  out
+  (tuple-get {span: "surf:31..39"}
+    (app {span: "surf:31..37"} (var {span: "surf:31..35"} pair))
+    (lit {type: (t-prim {} i32)} 1)))

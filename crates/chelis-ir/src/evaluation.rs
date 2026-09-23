@@ -2408,14 +2408,38 @@ mod tests {
         ] {
             // Only v is differentiated; weights is a captured tensor input.
             let source = format!(
-                "def sample(x: tensor[4, {prim}], weights: tensor[4, {prim}]) -> tensor[4, {prim}] = {{\n loss = fn (v: tensor[4, {prim}]) -> tensor_to_scalar(sum(mul(dropout(v, 0.5{prim}), weights), 0i32))\n grad(loss)(x)\n }}\n def next(x: tensor[4, {prim}]) -> tensor[4, {prim}] = dropout(x, 0.5{prim})",
+                r#"
+                (defsig {{}} sample
+                  (t-fn {{}}
+                    (t-tensor {{}} (d-lit {{}} 4) (t-prim {{}} {prim}))
+                    (t-tensor {{}} (d-lit {{}} 4) (t-prim {{}} {prim}))
+                    (t-tensor {{}} (d-lit {{}} 4) (t-prim {{}} {prim}))))
+                (def {{}} sample
+                  (fn {{}} (params {{}} (x {{type: (t-var {{}} _)}}) (weights {{type: (t-var {{}} _)}}))
+                    (let {{}}
+                      (bind {{}} loss
+                        (fn {{}} (params {{}} (v {{type: (t-tensor {{}} (d-lit {{}} 4) (t-prim {{}} {prim}))}}))
+                          (app {{}} (var {{}} tensor_to_scalar)
+                            (app {{}} (var {{}} sum)
+                              (app {{}} (var {{}} mul)
+                                (app {{}} (var {{}} dropout) (var {{}} v)
+                                  (lit {{surf_literal_style: "explicit", type: (t-prim {{}} {prim})}} 0.5))
+                                (var {{}} weights))
+                              (lit {{surf_literal_style: "explicit", type: (t-prim {{}} i32)}} 0)))))
+                      (app {{}} (grad {{}} (var {{}} loss)) (var {{}} x)))))
+                (defsig {{}} next
+                  (t-fn {{}}
+                    (t-tensor {{}} (d-lit {{}} 4) (t-prim {{}} {prim}))
+                    (t-tensor {{}} (d-lit {{}} 4) (t-prim {{}} {prim}))))
+                (def {{}} next
+                  (fn {{}} (params {{}} (x {{type: (t-var {{}} _)}}))
+                    (app {{}} (var {{}} dropout) (var {{}} x)
+                      (lit {{surf_literal_style: "explicit", type: (t-prim {{}} {prim})}} 0.5))))
+                "#,
                 prim = prim.name(),
             );
-            let declarations = chelis_surf::parser::parse_str(&source).unwrap();
-            let checked = chelis_types::check_ir_program(&chelis_surf::desugar::desugar_program(
-                &declarations,
-            ))
-            .unwrap();
+            let expressions = chelis_deep::parser::parse_str(&source).unwrap();
+            let checked = chelis_types::check_ir_program(&expressions).unwrap();
             let session = crate::host::HostLoweringSession::new(&checked);
             let plan = |name| {
                 crate::host::host_def_evaluation_plan(&session, name, &context())

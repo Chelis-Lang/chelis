@@ -3,15 +3,11 @@
 //! backend-only symbolic-metadata rejection and applies the surviving semantic
 //! checks at both public checker ingresses.
 
-use chelis_surf::desugar::desugar_program;
-use chelis_surf::parser::parse_str as parse_surf;
 use chelis_types::errors::CheckError;
 use chelis_types::{check_ir_program, check_typed_program};
 
 fn deep(source: &str) -> Vec<chelis_deep::Expr> {
-    desugar_program(&parse_surf(source).unwrap_or_else(|error| {
-        panic!("fixture must parse as Surf: {error:?}\n{source}");
-    }))
+    chelis_deep::parse_and_stamp_file(source).expect("Deep fixture")
 }
 
 fn messages(errors: &[CheckError]) -> Vec<String> {
@@ -47,9 +43,9 @@ fn assert_conv_still_validates(source: &str, needle: &str, label: &str) {
     );
 }
 
-const CONV2D_STRIDE_ZERO_DIRECT: &str = "module Repro.Conv2dStrideZeroDirect\n\
-     def f(x: tensor[2, 3, 8, 8, f32], k: tensor[4, 3, 3, 3, f32]) = \
-     conv(&x, &k, [0i64, 0i64], [(0i64, 0i64), (0i64, 0i64)])\n";
+const CONV2D_STRIDE_ZERO_DIRECT: &str = include_str!(
+    "fixtures/core/tests/issue_668_deleted_derivation_does_not_suppress_conv2d/CONV2D_STRIDE_ZERO_DIRECT_1.deep"
+);
 
 /// `stride = 0` is undefined: the output spatial-dim formula divides by it.
 /// Routing the input through each of the three operations whose derivation
@@ -62,28 +58,36 @@ const CONV2D_STRIDE_ZERO_DIRECT: &str = "module Repro.Conv2dStrideZeroDirect\n\
 fn an_invalid_stride_is_refused_through_each_deleted_derivation() {
     for (binding, input, label) in [
         (
-            "y = expand(x, 0i32, 2i64)",
-            "tensor[1, 3, 8, 8, f32]",
+            r#"(app {span: "surf:11..32"}
+      (var {span: "surf:11..17"} expand)
+      (var {span: "surf:18..19"} x)
+      (lit {span: "surf:21..25", surf_literal_style: "explicit", type: (t-prim {} i32)} 0)
+      (lit {span: "surf:27..31", type: (t-prim {} i64)} 2))"#,
+            "(t-tensor {} (d-lit {} 1) (d-lit {} 3) (d-lit {} 8) (d-lit {} 8) (t-prim {} f32))",
             "let-bound expand",
         ),
         (
-            "y = insert(x, 0i32, 2i64)",
-            "tensor[3, 8, 8, f32]",
+            r#"(app {span: "surf:11..32"}
+      (var {span: "surf:11..17"} insert)
+      (var {span: "surf:18..19"} x)
+      (lit {span: "surf:21..25", surf_literal_style: "explicit", type: (t-prim {} i32)} 0)
+      (lit {span: "surf:27..31", type: (t-prim {} i64)} 2))"#,
+            "(t-tensor {} (d-lit {} 3) (d-lit {} 8) (d-lit {} 8) (t-prim {} f32))",
             "let-bound insert",
         ),
         (
-            "y = stride(x, 1i64, 1i64, 1i64, 1i64)",
-            "tensor[2, 3, 8, 8, f32]",
+            r#"(app {span: "surf:11..44"}
+      (var {span: "surf:11..17"} stride)
+      (var {span: "surf:18..19"} x)
+      (lit {span: "surf:21..25", type: (t-prim {} i64)} 1)
+      (lit {span: "surf:27..31", type: (t-prim {} i64)} 1)
+      (lit {span: "surf:33..37", type: (t-prim {} i64)} 1)
+      (lit {span: "surf:39..43", type: (t-prim {} i64)} 1))"#,
+            "(t-tensor {} (d-lit {} 2) (d-lit {} 3) (d-lit {} 8) (d-lit {} 8) (t-prim {} f32))",
             "let-bound stride",
         ),
     ] {
-        let source = format!(
-            "module Repro.Conv2dStrideZero\n\
-             def f(x: {input}, k: tensor[4, 3, 3, 3, f32]) = {{\n\
-               {binding}\n\
-               conv(&y, &k, [0i64, 0i64], [(0i64, 0i64), (0i64, 0i64)])\n\
-             }}\n"
-        );
+        let source = include_str!("fixtures/core/tests/issue_668_deleted_derivation_does_not_suppress_conv2d/movement_template.deep").replace("@input@", input).replace("@binding@", binding);
         assert_conv_still_validates(&source, "requires a positive stride", label);
     }
 }
@@ -105,46 +109,27 @@ fn an_invalid_stride_without_a_let_binding_names_the_stride() {
 /// PP9 relocates symbolic-metadata capability refusal to chelis#730.
 #[test]
 fn a_symbolic_spatial_dimension_through_a_let_bound_expand_is_checker_legal() {
-    let diagnostics = ir_diagnostics(
-        "module Repro.Conv2dSymbolicSpatial\n\
-         def f[h](x: tensor[1, 3, h, 8, f32], k: tensor[4, 3, 3, 3, f32]) = {\n\
-           y = expand(x, 0i32, 2i64)\n\
-           conv(&y, &k, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])\n\
-         }\n",
-    );
+    let diagnostics = ir_diagnostics(include_str!(
+        "fixtures/core/tests/issue_668_deleted_derivation_does_not_suppress_conv2d/a_symbolic_spatial_dimension_through_a_let_bound_expand_is_checker_legal_1.deep"
+    ));
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
 }
 
 /// A well-typed `conv` behind a let-bound `expand`.
 #[test]
 fn a_well_typed_conv_through_a_let_bound_expand_is_accepted() {
-    let diagnostics = ir_diagnostics(
-        "module Repro.Conv2dWellTyped\n\
-         def f(\n\
-           x: tensor[1, 3, 8, 8, f32],\n\
-           k: tensor[4, 3, 3, 3, f32],\n\
-         ) -> tensor[2, 4, 6, 6, f32] = {\n\
-           y = expand(x, 0i32, 2i64)\n\
-           conv(&y, &k, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])\n\
-         }\n",
-    );
+    let diagnostics = ir_diagnostics(include_str!(
+        "fixtures/core/tests/issue_668_deleted_derivation_does_not_suppress_conv2d/a_well_typed_conv_through_a_let_bound_expand_is_accepted_1.deep"
+    ));
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
 }
 
 /// Symbolic conv metadata remains legal through a chain.
 #[test]
 fn a_symbolic_conv_chain_is_checker_legal() {
-    let chained = ir_diagnostics(
-        "module Repro.Conv2dCascade\n\
-         def f[h](\n\
-           x: tensor[2, 3, h, 8, f32],\n\
-           k1: tensor[4, 3, 3, 3, f32],\n\
-           k2: tensor[4, 4, 3, 3, f32],\n\
-         ) = {\n\
-           y = conv(&x, &k1, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])\n\
-           conv(&y, &k2, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])\n\
-         }\n",
-    );
+    let chained = ir_diagnostics(include_str!(
+        "fixtures/core/tests/issue_668_deleted_derivation_does_not_suppress_conv2d/a_symbolic_conv_chain_is_checker_legal_1.deep"
+    ));
     assert!(chained.is_empty(), "{chained:?}");
 }
 

@@ -1,0 +1,16 @@
+(def {}
+  invoke
+  (fn {}
+    (params {} f x)
+    (app {span: "surf:19..23"}
+      (var {span: "surf:19..20"} f)
+      (var {span: "surf:21..22"} x))))
+
+(def {}
+  size
+  (fn {}
+    (params {} x)
+    (app {span: "surf:38..52"}
+      (var {span: "surf:38..44"} invoke)
+      (var {span: "surf:45..48"} len)
+      (var {span: "surf:50..51"} x))))

@@ -1,0 +1,10 @@
+(defsig {dtype_bounds: {p: float}} f (p) (t-fn {} (t-var {} p) (t-var {} p)))
+
+(def {}
+  f
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:29..43"}
+      (var {span: "surf:29..32"} add)
+      (var {span: "surf:33..34"} x)
+      (lit {span: "surf:36..42", surf_literal_style: "explicit", type: (t-prim {} f32)} 1.0))))

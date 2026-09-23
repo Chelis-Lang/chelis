@@ -1,0 +1,16 @@
+(module {surf_path: "Cycle"}
+  cycle
+  (defsig {} a (t-prim {} i32))
+  (def {}
+    a
+    (app {span: "surf:22..31"}
+      (var {span: "surf:22..25"} add)
+      (var {span: "surf:26..27"} b)
+      (lit {span: "surf:29..30", type: (t-prim {} i32)} 1)))
+  (defsig {} b (t-prim {} i32))
+  (def {}
+    b
+    (app {span: "surf:41..50"}
+      (var {span: "surf:41..44"} add)
+      (var {span: "surf:45..46"} a)
+      (lit {span: "surf:48..49", type: (t-prim {} i32)} 1))))

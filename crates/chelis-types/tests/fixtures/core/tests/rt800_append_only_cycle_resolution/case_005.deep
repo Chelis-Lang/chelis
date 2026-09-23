@@ -1,0 +1,35 @@
+(defsig {} is_even (t-fn {} (t-prim {} i32) (t-var {} _)))
+
+(def {}
+  is_even
+  (fn {}
+    (params {} (n {type: (t-var {} _)}))
+    (if {span: "surf:25..66"}
+      (app {span: "surf:28..36"}
+        (var {span: "surf:28..30"} eq)
+        (var {span: "surf:31..32"} n)
+        (lit {span: "surf:34..35", type: (t-prim {} i32)} 0))
+      (lit {span: "surf:42..46", type: (t-prim {} bool)} true)
+      (app {span: "surf:52..66"}
+        (var {span: "surf:52..58"} is_odd)
+        (app {span: "surf:59..65"}
+          (var {span: "surf:59..62"} dec)
+          (var {span: "surf:63..64"} n))))))
+
+(defsig {} is_odd (t-fn {} (t-prim {} i32) (t-var {} _)))
+
+(def {}
+  is_odd
+  (fn {}
+    (params {} (n {type: (t-var {} _)}))
+    (if {span: "surf:90..133"}
+      (app {span: "surf:93..101"}
+        (var {span: "surf:93..95"} eq)
+        (var {span: "surf:96..97"} n)
+        (lit {span: "surf:99..100", type: (t-prim {} i32)} 0))
+      (lit {span: "surf:107..112", type: (t-prim {} bool)} false)
+      (app {span: "surf:118..133"}
+        (var {span: "surf:118..125"} is_even)
+        (app {span: "surf:126..132"}
+          (var {span: "surf:126..129"} dec)
+          (var {span: "surf:130..131"} n))))))

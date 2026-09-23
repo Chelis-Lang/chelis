@@ -1,0 +1,90 @@
+(def {}
+  base
+  (app {span: "surf:8..64"}
+    (var {span: "surf:8..21"} pad_sequences)
+    (app {span: "surf:22..58"}
+      (var {} Cons)
+      (app {span: "surf:23..33"}
+        (var {} Cons)
+        (lit {span: "surf:24..27", type: (t-prim {} f32)} 0.0)
+        (app {}
+          (var {} Cons)
+          (lit {span: "surf:29..32", type: (t-prim {} f32)} 0.0)
+          (var {} Nil)))
+      (app {}
+        (var {} Cons)
+        (app {span: "surf:35..45"}
+          (var {} Cons)
+          (lit {span: "surf:36..39", type: (t-prim {} f32)} 0.0)
+          (app {}
+            (var {} Cons)
+            (lit {span: "surf:41..44", type: (t-prim {} f32)} 0.0)
+            (var {} Nil)))
+        (app {}
+          (var {} Cons)
+          (app {span: "surf:47..57"}
+            (var {} Cons)
+            (lit {span: "surf:48..51", type: (t-prim {} f32)} 0.0)
+            (app {}
+              (var {} Cons)
+              (lit {span: "surf:53..56", type: (t-prim {} f32)} 0.0)
+              (var {} Nil)))
+          (var {} Nil))))
+    (lit {span: "surf:60..63", type: (t-prim {} f32)} 0.0)))
+
+(defsig {} ids (t-adt {} List (t-prim {} i64)))
+
+(def {}
+  ids
+  (app {span: "surf:82..110"}
+    (var {} Cons)
+    (cast {span: "surf:83..95"}
+      (lit {span: "surf:88..89", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 1)
+      (t-prim {} i64))
+    (app {}
+      (var {} Cons)
+      (cast {span: "surf:97..109"}
+        (lit {span: "surf:102..103", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 1)
+        (t-prim {} i64))
+      (var {} Nil))))
+
+(def {}
+  idx
+  (app {span: "surf:117..131"}
+    (var {span: "surf:117..126"} to_tensor)
+    (var {span: "surf:127..130"} ids)))
+
+(def {}
+  updates
+  (app {span: "surf:142..186"}
+    (var {span: "surf:142..155"} pad_sequences)
+    (app {span: "surf:156..180"}
+      (var {} Cons)
+      (app {span: "surf:157..167"}
+        (var {} Cons)
+        (lit {span: "surf:158..161", type: (t-prim {} f32)} 5.0)
+        (app {}
+          (var {} Cons)
+          (lit {span: "surf:163..166", type: (t-prim {} f32)} 5.0)
+          (var {} Nil)))
+      (app {}
+        (var {} Cons)
+        (app {span: "surf:169..179"}
+          (var {} Cons)
+          (lit {span: "surf:170..173", type: (t-prim {} f32)} 6.0)
+          (app {}
+            (var {} Cons)
+            (lit {span: "surf:175..178", type: (t-prim {} f32)} 6.0)
+            (var {} Nil)))
+        (var {} Nil)))
+    (lit {span: "surf:182..185", type: (t-prim {} f32)} 0.0)))
+
+(def {}
+  out
+  (app {span: "surf:193..234"}
+    (var {span: "surf:193..200"} scatter)
+    (var {span: "surf:201..205"} base)
+    (var {span: "surf:207..210"} idx)
+    (var {span: "surf:212..219"} updates)
+    (lit {span: "surf:221..222", type: (t-prim {} i32)} 0)
+    (lit {span: "surf:224..233", type: (t-prim {} string)} "replace")))

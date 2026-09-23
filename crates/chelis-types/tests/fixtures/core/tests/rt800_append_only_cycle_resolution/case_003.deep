@@ -1,0 +1,36 @@
+(module {surf_path: "Cycle"}
+  cycle
+  (defsig {} is_even (t-fn {} (t-prim {} i32) (t-var {} _)))
+  (def {}
+    is_even
+    (fn {}
+      (params {} (n {type: (t-var {} _)}))
+      (if {span: "surf:38..82"}
+        (app {span: "surf:41..49"}
+          (var {span: "surf:41..43"} eq)
+          (var {span: "surf:44..45"} n)
+          (lit {span: "surf:47..48", type: (t-prim {} i32)} 0))
+        (lit {span: "surf:55..59", type: (t-prim {} bool)} true)
+        (app {span: "surf:65..82"}
+          (var {span: "surf:65..71"} is_odd)
+          (app {span: "surf:72..81"}
+            (var {span: "surf:72..75"} sub)
+            (var {span: "surf:76..77"} n)
+            (lit {span: "surf:79..80", type: (t-prim {} i32)} 1))))))
+  (defsig {} is_odd (t-fn {} (t-prim {} i32) (t-var {} _)))
+  (def {}
+    is_odd
+    (fn {}
+      (params {} (n {type: (t-var {} _)}))
+      (if {span: "surf:106..152"}
+        (app {span: "surf:109..117"}
+          (var {span: "surf:109..111"} eq)
+          (var {span: "surf:112..113"} n)
+          (lit {span: "surf:115..116", type: (t-prim {} i32)} 0))
+        (lit {span: "surf:123..128", type: (t-prim {} bool)} false)
+        (app {span: "surf:134..152"}
+          (var {span: "surf:134..141"} is_even)
+          (app {span: "surf:142..151"}
+            (var {span: "surf:142..145"} sub)
+            (var {span: "surf:146..147"} n)
+            (lit {span: "surf:149..150", type: (t-prim {} i32)} 1)))))))

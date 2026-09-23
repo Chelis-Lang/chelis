@@ -1,0 +1,18 @@
+(module {surf_path: "Profile.Errors"}
+  profile.errors
+  (defsig {} first (t-fn {} (t-prim {} i32) (t-prim {} i32)))
+  (def {}
+    first
+    (fn {}
+      (params {} (x {type: (t-var {} _)}))
+      (app {span: "surf:49..65"}
+        (var {span: "surf:49..62"} missing_first)
+        (var {span: "surf:63..64"} x))))
+  (defsig {} second (t-fn {} (t-prim {} i32) (t-prim {} i32)))
+  (def {}
+    second
+    (fn {}
+      (params {} (x {type: (t-var {} _)}))
+      (app {span: "surf:94..111"}
+        (var {span: "surf:94..108"} missing_second)
+        (var {span: "surf:109..110"} x)))))

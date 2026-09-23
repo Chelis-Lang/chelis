@@ -1,0 +1,26 @@
+(module {surf_path: "Repro.RaggedConcat3Bad"}
+  repro.raggedconcat3bad
+  (defsig {}
+    cat
+    (t-fn {}
+      (t-tensor {} (d-lit {} 4) (d-lit {} 1) (t-prim {} f32))
+      (t-tensor {} (d-lit {} 4) (d-lit {} 2) (t-prim {} f32))
+      (t-tensor {} (d-lit {} 4) (d-lit {} 3) (t-prim {} f32))
+      (t-tensor {} (d-lit {} 4) (d-lit {} 7) (t-prim {} f32))))
+  (def {}
+    cat
+    (fn {}
+      (params {}
+        (a {type: (t-var {} _)})
+        (b {type: (t-var {} _)})
+        (c {type: (t-var {} _)}))
+      (app {span: "surf:130..150"}
+        (var {span: "surf:130..136"} concat)
+        (app {span: "surf:137..146"}
+          (var {} Cons)
+          (var {span: "surf:138..139"} a)
+          (app {}
+            (var {} Cons)
+            (var {span: "surf:141..142"} b)
+            (app {} (var {} Cons) (var {span: "surf:144..145"} c) (var {} Nil))))
+        (lit {span: "surf:148..149", type: (t-prim {} i32)} 1)))))

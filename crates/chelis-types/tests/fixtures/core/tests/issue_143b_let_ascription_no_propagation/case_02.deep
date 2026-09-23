@@ -1,0 +1,25 @@
+(defsig {}
+  pair_id
+  (n)
+  (t-fn {}
+    (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} f32)))
+    (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} f32)))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))))
+
+(def {} pair_id (fn {} (params {} x y) (var {span: "surf:90..91"} x)))
+
+(defsig {}
+  caller
+  (t-fn {}
+    (t-ref {} (t-tensor {} (d-lit {} 3) (t-prim {} f32)))
+    (t-ref {} (t-tensor {} (d-lit {} 5) (t-prim {} f32)))
+    (t-tensor {} (d-lit {} 3) (t-prim {} f32))))
+
+(def {}
+  caller
+  (fn {}
+    (params {} (a {type: (t-var {} _)}) (b {type: (t-var {} _)}))
+    (app {span: "surf:165..178"}
+      (var {span: "surf:165..172"} pair_id)
+      (var {span: "surf:173..174"} a)
+      (var {span: "surf:176..177"} b))))

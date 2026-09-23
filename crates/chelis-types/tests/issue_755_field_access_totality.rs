@@ -20,22 +20,15 @@
 //! spec/design/checker_totality.md §C3.
 
 use chelis_deep::Expr;
-use chelis_surf::desugar::desugar_program;
-use chelis_surf::parser::parse_str as parse_surf;
+
 use chelis_types::{InferResult, check_ir_program};
 
-fn surf_to_deep(source: &str) -> Vec<Expr> {
-    let decls = parse_surf(source).expect("surf parse");
-    chelis_macros::expand_program(
-        &desugar_program(&decls),
-        &chelis_macros::ExpansionOptions::default(),
-    )
-    .expect("macro expand")
-    .into_exprs()
+fn parse_core(source: &str) -> Vec<Expr> {
+    chelis_deep::parse_and_stamp_file(source).expect("valid core fixture")
 }
 
 fn reject_messages(source: &str, label: &str) -> Vec<String> {
-    let deep = surf_to_deep(source);
+    let deep = parse_core(source);
     let rep: InferResult = check_ir_program(&deep)
         .err()
         .unwrap_or_else(|| panic!("{label}: expected a check rejection, but it passed"));
@@ -47,7 +40,7 @@ fn reject_messages(source: &str, label: &str) -> Vec<String> {
 }
 
 fn accept(source: &str, label: &str) {
-    let deep = surf_to_deep(source);
+    let deep = parse_core(source);
     if let Err(rep) = check_ir_program(&deep) {
         let msgs: Vec<String> = rep.errors.iter().map(|e| e.message.clone()).collect();
         panic!("{label}: expected a clean check, got errors: {msgs:?}");
@@ -59,8 +52,9 @@ fn accept(source: &str, label: &str) {
 #[test]
 fn field_access_on_single_record_variant_is_accepted() {
     accept(
-        "type Point = | Point { x: f32, y: f32 }\n\
-         def get_x(p: Point) -> f32 = p.x\n",
+        include_str!(
+            "fixtures/core/tests/issue_755_field_access_totality/field_access_on_single_record_variant_is_accepted.0.deep"
+        ),
         "single-record field access",
     );
 }
@@ -71,8 +65,9 @@ fn field_access_on_single_record_variant_is_accepted() {
 fn field_access_on_multi_variant_adt_is_rejected() {
     // The exact chelis#755 repro: `.radius` on a two-variant `Shape`.
     let msgs = reject_messages(
-        "type Shape = | Circle(f32) | Square(f32)\n\
-         def f(s: Shape) -> f32 = s.radius\n",
+        include_str!(
+            "fixtures/core/tests/issue_755_field_access_totality/field_access_on_multi_variant_adt_is_rejected.0.deep"
+        ),
         "multi-variant field access",
     );
     assert!(
@@ -85,7 +80,12 @@ fn field_access_on_multi_variant_adt_is_rejected() {
 #[test]
 fn field_access_on_scalar_is_rejected() {
     // The second chelis#755 repro: `.field` on a scalar `f32`.
-    let msgs = reject_messages("def f(x: f32) -> f32 = x.field\n", "scalar field access");
+    let msgs = reject_messages(
+        include_str!(
+            "fixtures/core/tests/issue_755_field_access_totality/field_access_on_scalar_is_rejected.0.deep"
+        ),
+        "scalar field access",
+    );
     assert!(
         msgs.iter()
             .any(|m| m.contains("record value") && m.contains("755")),

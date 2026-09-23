@@ -1,0 +1,3 @@
+(module {surf_path: "Prior"}
+  prior
+  (def {} later (lit {span: "surf:23..30", type: (t-prim {} i32)} 1)))

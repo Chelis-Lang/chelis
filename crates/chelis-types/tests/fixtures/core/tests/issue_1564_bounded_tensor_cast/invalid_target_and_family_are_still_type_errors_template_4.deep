@@ -1,0 +1,13 @@
+(def {}
+  out
+  (cast {}
+    (app {}
+      (var {} to_tensor)
+      (app {}
+        (var {} Cons)
+        (lit {type: (t-prim {} i32)} 1)
+        (app {}
+          (var {} Cons)
+          (lit {type: (t-prim {} i32)} 2)
+          (var {} Nil))))
+    (t-prim {} float64)))

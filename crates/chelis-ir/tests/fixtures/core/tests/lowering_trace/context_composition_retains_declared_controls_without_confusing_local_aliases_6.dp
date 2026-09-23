@@ -1,0 +1,8 @@
+(def {}
+  sample
+  (handle-effect {effect: random, span: "surf:9..58"}
+    (lit {span: "surf:19..24", type: (t-prim {} i64)} 42)
+    (app {span: "surf:26..58"}
+      (var {span: "surf:28..35"} dropout)
+      (var {span: "surf:36..47"} empty_scope)
+      (lit {span: "surf:49..55", surf_literal_style: "explicit", type: (t-prim {} f32)} 0.0))))

@@ -1,0 +1,53 @@
+(defsig {}
+  loss
+  (t-fn {} (t-tensor {} (d-lit {} 3) (t-prim {} f32)) (t-prim {} f32)))
+
+(def {}
+  loss
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:39..144"}
+      (var {span: "surf:39..43"} fold)
+      (fn {span: "surf:44..109"}
+        (params {} (acc {type: (t-prim {} f32)}) (v {type: (t-prim {} f32)}))
+        (app {span: "surf:69..109"}
+          (var {span: "surf:69..72"} add)
+          (app {span: "surf:73..97"}
+            (var {span: "surf:73..76"} mul)
+            (var {span: "surf:77..80"} acc)
+            (cast {span: "surf:82..96"}
+              (lit {span: "surf:87..90", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 0.5)
+              (t-prim {} f32)))
+          (app {span: "surf:99..108"}
+            (var {span: "surf:99..102"} mul)
+            (var {span: "surf:103..104"} v)
+            (var {span: "surf:106..107"} v))))
+      (cast {span: "surf:111..125"}
+        (lit {span: "surf:116..119", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 1.0)
+        (t-prim {} f32))
+      (app {span: "surf:127..143"}
+        (var {span: "surf:127..134"} to_list)
+        (copy {span: "surf:135..142"} (var {span: "surf:140..141"} x))))))
+
+(def {}
+  out
+  (app {span: "surf:151..222"}
+    (grad {span: "surf:151..161"} (var {span: "surf:156..160"} loss))
+    (app {span: "surf:162..221"}
+      (var {span: "surf:162..171"} to_tensor)
+      (app {span: "surf:172..220"}
+        (var {} Cons)
+        (cast {span: "surf:173..187"}
+          (lit {span: "surf:178..181", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 1.0)
+          (t-prim {} f32))
+        (app {}
+          (var {} Cons)
+          (cast {span: "surf:189..203"}
+            (lit {span: "surf:194..197", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 2.0)
+            (t-prim {} f32))
+          (app {}
+            (var {} Cons)
+            (cast {span: "surf:205..219"}
+              (lit {span: "surf:210..213", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 3.0)
+              (t-prim {} f32))
+            (var {} Nil)))))))

@@ -1,0 +1,9 @@
+(defsig {} answer (t-fn {} (t-prim {} i32)))
+
+(def {}
+  answer
+  (fn {}
+    (params {})
+    (cast {span: "surf:22..35"}
+      (lit {span: "surf:27..29", surf_literal_style: "unsuffixed", type: (t-prim {} i32)} 42)
+      (t-prim {} i32))))

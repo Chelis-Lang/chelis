@@ -1,0 +1,161 @@
+(deftype {}
+  P
+  ()
+  (variant {} P (field {} v (t-tensor {} (d-lit {} 2) (t-prim {} f32)))))
+
+(deftype {}
+  G
+  ()
+  (variant {} G (field {} v (t-tensor {} (d-lit {} 2) (t-prim {} f32)))))
+
+(deftype {}
+  V
+  ()
+  (variant {} V (field {} v (t-tensor {} (d-lit {} 2) (t-prim {} f32)))))
+
+(defsig {}
+  e_loss
+  (t-fn {}
+    (t-adt {} P)
+    (t-tensor {} (d-lit {} 2) (t-prim {} f32))
+    (t-prim {} f32)))
+
+(def {}
+  e_loss
+  (fn {}
+    (params {} (p {type: (t-var {} _)}) (s {type: (t-var {} _)}))
+    (match {span: "surf:156..236"}
+      (var {span: "surf:162..163"} p)
+      (arm {}
+        (pat-record {} P (kv {} v (pat-var {} v)))
+        ()
+        (pipe {span: "surf:186..234"}
+          (app {span: "surf:186..214"}
+            (var {span: "surf:186..189"} sum)
+            (app {span: "surf:190..199"}
+              (var {span: "surf:190..193"} add)
+              (var {span: "surf:194..195"} v)
+              (var {span: "surf:197..198"} s))
+            (cast {span: "surf:201..213"}
+              (lit {span: "surf:206..207", surf_literal_style: "unsuffixed", type: (t-prim {} i32)} 0)
+              (t-prim {} i32)))
+          (var {span: "surf:218..234"} tensor_to_scalar))))))
+
+(defsig {} g_of (t-fn {} (t-adt {} P) (t-adt {} G)))
+
+(def {}
+  g_of
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (match {span: "surf:259..298"}
+      (var {span: "surf:265..266"} x)
+      (arm {}
+        (pat-record {} P (kv {} v (pat-var {} v)))
+        ()
+        (record {span: "surf:289..296"}
+          G
+          (kv {} v (var {span: "surf:293..294"} v)))))))
+
+(defsig {}
+  e_step
+  (t-fn {} (t-adt {} P) (t-adt {} G) (t-adt {} V) (t-prim {} f32)))
+
+(def {}
+  e_step
+  (fn {}
+    (params {}
+      ^{:type (t-var {} _)} params
+      (grads {type: (t-var {} _)})
+      (vel {type: (t-var {} _)}))
+    (match {span: "surf:348..532"}
+      (var {span: "surf:354..360"} params)
+      (arm {}
+        (pat-record {} P (kv {} v (pat-var {} pv)))
+        ()
+        (match {span: "surf:387..530"}
+          (var {span: "surf:393..398"} grads)
+          (arm {}
+            (pat-record {} G (kv {} v (pat-var {} gv)))
+            ()
+            (match {span: "surf:427..528"}
+              (var {span: "surf:433..436"} vel)
+              (arm {}
+                (pat-record {} V (kv {} v (pat-var {} vv)))
+                ()
+                (pipe {span: "surf:465..524"}
+                  (app {span: "surf:465..504"}
+                    (var {span: "surf:465..468"} sum)
+                    (app {span: "surf:469..489"}
+                      (var {span: "surf:469..472"} add)
+                      (app {span: "surf:473..484"}
+                        (var {span: "surf:473..476"} add)
+                        (var {span: "surf:477..479"} pv)
+                        (var {span: "surf:481..483"} gv))
+                      (var {span: "surf:486..488"} vv))
+                    (cast {span: "surf:491..503"}
+                      (lit {span: "surf:496..497", surf_literal_style: "unsuffixed", type: (t-prim {} i32)} 0)
+                      (t-prim {} i32)))
+                  (var {span: "surf:508..524"} tensor_to_scalar))))))))))
+
+(defsig {} driver (t-fn {} (t-prim {} f32)))
+
+(def {}
+  driver
+  (fn {}
+    (params {})
+    (let {span: "surf:555..726"}
+      (bind {}
+        p0
+        (record {span: "surf:564..616"}
+          P
+          (kv {}
+            v
+            (app {span: "surf:571..614"}
+              (var {span: "surf:571..580"} to_tensor)
+              (app {span: "surf:581..613"}
+                (var {} Cons)
+                (cast {span: "surf:582..596"}
+                  (lit {span: "surf:587..590", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 1.0)
+                  (t-prim {} f32))
+                (app {}
+                  (var {} Cons)
+                  (cast {span: "surf:598..612"}
+                    (lit {span: "surf:603..606", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 2.0)
+                    (t-prim {} f32))
+                  (var {} Nil)))))))
+      (let {}
+        (bind {}
+          s
+          (app {span: "surf:623..666"}
+            (var {span: "surf:623..632"} to_tensor)
+            (app {span: "surf:633..665"}
+              (var {} Cons)
+              (cast {span: "surf:634..648"}
+                (lit {span: "surf:639..642", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 0.5)
+                (t-prim {} f32))
+              (app {}
+                (var {} Cons)
+                (cast {span: "surf:650..664"}
+                  (lit {span: "surf:655..658", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 0.5)
+                  (t-prim {} f32))
+                (var {} Nil)))))
+        (let {}
+          (bind {}
+            gt
+            (app {span: "surf:674..693"}
+              (grad {span: "surf:674..686"}
+                (var {span: "surf:679..685"} e_loss))
+              (var {span: "surf:687..689"} p0)
+              (var {span: "surf:691..692"} s)))
+          (let {}
+            (bind {}
+              a
+              (tuple-get {span: "surf:703..707",
+                           surf_binding_type: "explicit",
+                           type: (t-adt {} P)
+                         }
+                (var {span: "surf:703..705"} gt)
+                (lit {type: (t-prim {} i32)} 0)))
+            (cast {span: "surf:710..724"}
+              (lit {span: "surf:715..718", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 0.0)
+              (t-prim {} f32))))))))

@@ -1,0 +1,34 @@
+(defsig {}
+  f
+  (a)
+  (t-fn {}
+    (t-tensor {} (d-var {} a) (t-prim {} f32))
+    (t-prim {} i32)
+    (t-tensor {} (d-var {} a) (t-prim {} f32))))
+
+(def {}
+  f
+  (fn {}
+    (params {}
+      (x {type: (t-tensor {} (d-var {} a) (t-prim {} f32))})
+      (k {type: (t-prim {} i32)}))
+    (let {span: "surf:85..157"}
+      (bind {}
+        a_dim
+        (pipe {span: "surf:97..111"}
+          (var {span: "surf:97..98"} k)
+          (fn {span: "surf:102..111", surf_pipe_stage: "call-first"}
+            (params {} __chelis_pipe)
+            (cast {span: "surf:102..111"}
+              (var {span: "surf:102..106"} __chelis_pipe)
+              (t-prim {} i64)))))
+      (app {span: "surf:114..155"}
+        (var {span: "surf:114..120"} expand)
+        (app {span: "surf:121..141"}
+          (var {span: "surf:121..130"} to_tensor)
+          (app {span: "surf:131..140"}
+            (var {} Cons)
+            (lit {span: "surf:132..139", surf_literal_style: "explicit", type: (t-prim {} f32)} 0.25)
+            (var {} Nil)))
+        (lit {span: "surf:143..147", surf_literal_style: "explicit", type: (t-prim {} i32)} 0)
+        (var {span: "surf:149..154"} a_dim)))))

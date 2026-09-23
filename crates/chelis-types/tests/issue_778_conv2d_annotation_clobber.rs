@@ -30,40 +30,29 @@ const CONV2D_SRC: &str = r#"
 "#;
 
 fn list_tag(expr: &Expr) -> Option<&str> {
-    let Expr::List(list, _) = expr else {
-        return None;
-    };
-    // Decode-once: the spelling comes from the decoded tag, never a raw
-    // element-0 string.
-    list.tag().map(|tag| tag.as_str())
+    expr.tag().map(|tag| tag.as_str())
 }
 
 fn node_type_meta(expr: &Expr) -> Option<&Expr> {
-    let Expr::List(list, _) = expr else {
-        return None;
-    };
-    let Some(Expr::Map(meta, _)) = list.elements.get(1) else {
+    let chelis_deep::ExprCarrier::DecodedNode(_, meta, _) = expr.carrier() else {
         return None;
     };
     meta.ty().map(|ty| ty.expression())
 }
 
 fn app_callee_name(expr: &Expr) -> Option<&str> {
-    if list_tag(expr) != Some("app") {
-        return None;
-    }
-    let Expr::List(list, _) = expr else {
-        return None;
-    };
-    let callee = list.elements.get(2)?;
-    if list_tag(callee) != Some("var") {
-        return None;
-    }
-    let Expr::List(var_list, _) = callee else {
+    let chelis_deep::ExprCarrier::DecodedNode(chelis_deep::DeepTag::App, _, children) =
+        expr.carrier()
+    else {
         return None;
     };
-    match var_list.elements.get(2) {
-        Some(Expr::Atom(Atom::Name(name), _)) => Some(name.as_str()),
+    let chelis_deep::ExprCarrier::DecodedNode(chelis_deep::DeepTag::Var, _, callee) =
+        children.first()?.carrier()
+    else {
+        return None;
+    };
+    match callee.first()? {
+        Expr::Atom(Atom::Name(name), _) => Some(name.as_str()),
         _ => None,
     }
 }
@@ -117,19 +106,17 @@ fn visit<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
 /// Count the dimension children of a `t-tensor` type node (everything after
 /// the tag+meta except the trailing `t-prim` precision node).
 fn tensor_type_dim_count(ty: &Expr) -> Option<usize> {
-    if list_tag(ty) != Some("t-tensor") {
-        return None;
-    }
-    let Expr::List(list, _) = ty else {
+    let chelis_deep::ExprCarrier::DecodedNode(chelis_deep::DeepTag::TTensor, _, children) =
+        ty.carrier()
+    else {
         return None;
     };
-    let dims = list
-        .elements
-        .iter()
-        .skip(2)
-        .filter(|child| list_tag(child) != Some("t-prim"))
-        .count();
-    Some(dims)
+    Some(
+        children
+            .iter()
+            .filter(|child| list_tag(child) != Some("t-prim"))
+            .count(),
+    )
 }
 
 #[test]

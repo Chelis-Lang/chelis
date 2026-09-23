@@ -1,0 +1,59 @@
+(defsig {}
+  loss
+  (t-fn {} (t-tensor {} (d-lit {} 3) (t-prim {} f32)) (t-prim {} f32)))
+
+(def {}
+  loss
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (let {span: "surf:37..158"}
+      (bind {}
+        xs
+        (app {span: "surf:46..62"}
+          (var {span: "surf:46..53"} to_list)
+          (copy {span: "surf:54..61"} (var {span: "surf:59..60"} x))))
+      (let {}
+        (bind {}
+          ys
+          (app {span: "surf:70..103"}
+            (var {span: "surf:70..73"} map)
+            (fn {span: "surf:74..98"}
+              (params {} (v {type: (t-prim {} f32)}))
+              (app {span: "surf:89..98"}
+                (var {span: "surf:89..92"} mul)
+                (var {span: "surf:93..94"} v)
+                (var {span: "surf:96..97"} v)))
+            (var {span: "surf:100..102"} xs)))
+        (app {span: "surf:106..156"}
+          (var {span: "surf:106..122"} tensor_to_scalar)
+          (app {span: "surf:123..155"}
+            (var {span: "surf:123..126"} sum)
+            (app {span: "surf:127..140"}
+              (var {span: "surf:127..136"} to_tensor)
+              (var {span: "surf:137..139"} ys))
+            (cast {span: "surf:142..154"}
+              (lit {span: "surf:147..148", surf_literal_style: "unsuffixed", type: (t-prim {} i32)} 0)
+              (t-prim {} i32))))))))
+
+(def {}
+  out
+  (app {span: "surf:165..236"}
+    (grad {span: "surf:165..175"} (var {span: "surf:170..174"} loss))
+    (app {span: "surf:176..235"}
+      (var {span: "surf:176..185"} to_tensor)
+      (app {span: "surf:186..234"}
+        (var {} Cons)
+        (cast {span: "surf:187..201"}
+          (lit {span: "surf:192..195", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 1.0)
+          (t-prim {} f32))
+        (app {}
+          (var {} Cons)
+          (cast {span: "surf:203..217"}
+            (lit {span: "surf:208..211", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 2.0)
+            (t-prim {} f32))
+          (app {}
+            (var {} Cons)
+            (cast {span: "surf:219..233"}
+              (lit {span: "surf:224..227", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 3.0)
+              (t-prim {} f32))
+            (var {} Nil)))))))

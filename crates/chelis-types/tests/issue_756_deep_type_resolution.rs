@@ -33,11 +33,9 @@ fn assert_accepts(source: &str, label: &str) {
     }
 }
 
-fn assert_surf_accepts(source: &str, label: &str) {
-    let declarations = chelis_surf::parser::parse_str(source)
-        .unwrap_or_else(|error| panic!("{label}: Surf fixture must parse: {error}"));
-    let exprs = chelis_surf::desugar::desugar_program(&declarations);
-    let fitness = chelis_types::check_program(&exprs);
+fn assert_core_accepts(source: &str, label: &str) {
+    let deep = chelis_deep::parse_and_stamp_file(source).expect("Deep fixture");
+    let fitness = chelis_types::check_program(&deep);
     assert!(
         fitness.errors.is_empty(),
         "{label}: fitness/check_program must be clean, got {:?}",
@@ -48,7 +46,7 @@ fn assert_surf_accepts(source: &str, label: &str) {
         "{label}: fitness/check_program scored {}, expected >= 0.9",
         fitness.score
     );
-    if let Err(result) = check_ir_program(&exprs) {
+    if let Err(result) = check_ir_program(&deep) {
         let messages: Vec<_> = result.errors.iter().map(|error| &error.message).collect();
         panic!("{label}: expected a clean check, got {messages:?}");
     }
@@ -149,9 +147,10 @@ fn explicit_kinded_typealias_body_rejects_inference_hole() {
 
 #[test]
 fn parameterized_typealias_type_and_dimension_binders_are_accepted() {
-    assert_surf_accepts(
-        "type Matrix[p, rows] = tensor[rows, p]\n\
-         def keep[p, rows](value: Matrix[p, rows]) -> Matrix[p, rows] = value",
+    assert_core_accepts(
+        include_str!(
+            "fixtures/core/tests/issue_756_deep_type_resolution/parameterized_typealias_type_and_dimension_binders_are_accepted_1.deep"
+        ),
         "parameterized typealias type/dimension binders",
     );
 }
@@ -172,9 +171,10 @@ fn documented_zero_parameter_symbolic_dimension_alias_is_accepted() {
     // Exact executable example shared by packages/chelis-std/SKILL.md and
     // docs/book/src/surf-reference.md. With no `[n]` parameter, `n` is a
     // concrete symbolic dimension (`d-name`), not an undeclared `d-var`.
-    assert_surf_accepts(
-        "type Weights = tensor[n, f32]\n\n\
-         def keep(w: Weights) -> Weights = w",
+    assert_core_accepts(
+        include_str!(
+            "fixtures/core/tests/issue_756_deep_type_resolution/documented_zero_parameter_symbolic_dimension_alias_is_accepted_1.deep"
+        ),
         "documented Weights alias",
     );
 }

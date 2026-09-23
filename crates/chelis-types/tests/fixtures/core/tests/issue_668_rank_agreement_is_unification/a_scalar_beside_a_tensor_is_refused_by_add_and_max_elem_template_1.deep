@@ -1,0 +1,21 @@
+(module {surf_path: "Repro.Scalar"}
+  repro.scalar
+  (def {}
+    f
+    (fn {}
+      (params {})
+      (app {}
+        (var {} __CORE_ARG_0__)
+        (app {}
+          (var {} to_tensor)
+          (app {}
+            (var {} Cons)
+            (lit {surf_literal_style: "explicit", type: (t-prim {} f32)} 1.0)
+            (app {}
+              (var {} Cons)
+              (lit {surf_literal_style: "explicit", type: (t-prim {} f32)} 2.0)
+              (app {}
+                (var {} Cons)
+                (lit {surf_literal_style: "explicit", type: (t-prim {} f32)} 3.0)
+                (var {} Nil)))))
+        (lit {surf_literal_style: "explicit", type: (t-prim {} f32)} 1.5)))))

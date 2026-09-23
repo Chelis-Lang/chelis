@@ -1,0 +1,17 @@
+(defsig {} f (t-fn {} (t-prim {} i32)))
+
+(def {}
+  f
+  (fn {}
+    (params {})
+    (let {span: "surf:17..66"}
+      (bind {}
+        g
+        (fn {span: "surf:25..57"}
+          (params {} t)
+          (app {span: "surf:35..57"}
+            (var {span: "surf:35..42"} permute)
+            (var {span: "surf:43..44"} t)
+            (lit {span: "surf:46..50", surf_literal_style: "explicit", type: (t-prim {} i32)} 1)
+            (lit {span: "surf:52..56", surf_literal_style: "explicit", type: (t-prim {} i32)} 0))))
+      (lit {span: "surf:60..64", surf_literal_style: "explicit", type: (t-prim {} i32)} 1))))

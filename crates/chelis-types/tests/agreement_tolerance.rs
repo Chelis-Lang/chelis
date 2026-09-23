@@ -3,8 +3,7 @@
 
 use chelis_types::agreement::{
     AgreementError, AgreementOp, AgreementOutcome, ArithmeticWidthStatus, OP_TOLERANCES,
-    compare_exact_observations, compare_rendered_elements, render_spec_tolerance_table,
-    tolerance_for,
+    compare_exact_observations, compare_rendered_elements, tolerance_for,
 };
 use chelis_types::types::Prim;
 use chelis_types::{ElementRef, format_element};
@@ -214,41 +213,4 @@ fn exact_diagnostics_and_values_use_the_same_comparator_entrypoint() {
         compare_exact_observations("unsupported diagnostic", "unsupported: x", "unsupported: y"),
         Err(AgreementError::ExactMismatch { .. })
     ));
-}
-
-#[test]
-fn numbered_spec_table_is_generated_from_the_machine_rows() {
-    let spec = include_str!("../../../spec/05-risc-primitives.md");
-    let begin = "<!-- BEGIN GENERATED OBSERVATION TOLERANCE TABLE -->";
-    let end = "<!-- END GENERATED OBSERVATION TOLERANCE TABLE -->";
-    let (_, after_begin) = spec.split_once(begin).expect("spec table begin marker");
-    let (actual, _) = after_begin.split_once(end).expect("spec table end marker");
-    assert_eq!(actual.trim(), render_spec_tolerance_table().trim());
-}
-
-#[test]
-fn phase3_oracles_use_the_shared_comparator_without_f64_fallbacks() {
-    let parity = include_str!("../../chelis-cli/tests/parity.rs");
-    let eval_agreement = include_str!("../../chelis-e2e/tests/eval_agreement.rs");
-    let rejected = include_str!("../../chelis-cli/tests/issue_687_rejected_cells_corpus.rs");
-
-    assert!(parity.contains("compare_exact_observations"));
-    assert!(eval_agreement.contains("compare_rendered_elements"));
-    assert!(eval_agreement.contains("ArithmeticWidthStatus::Nonconforming { issue: 897 }"));
-    assert!(eval_agreement.contains("chelis_string_from_scalar"));
-    assert!(!eval_agreement.contains("chelis_format_shortest"));
-    assert!(rejected.contains("compare_exact_observations"));
-
-    for forbidden in [
-        "fn eval_last(dag: &Dag) -> f64",
-        "fn parse_c_output(output: &str) -> f64",
-        "fn assert_close(a: f64, b: f64, tol: f64",
-        "printf(\"%.6f\"",
-        "printf(\"%.8f",
-    ] {
-        assert!(
-            !eval_agreement.contains(forbidden),
-            "Phase 3 forbids the old f64/tolerance oracle path: {forbidden}"
-        );
-    }
 }

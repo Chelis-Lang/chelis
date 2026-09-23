@@ -1,0 +1,34 @@
+(module {surf_path: "Repro.RankAgreement"}
+  repro.rankagreement
+  (defsig {}
+    f
+    (n u)
+    (t-fn {}
+      (t-tensor {} (d-var {} n) (t-prim {} f32))
+      (t-tensor {} (d-var {} u) (t-prim {} f32))))
+  (def {}
+    f
+    (fn {}
+      (params {} x)
+      (let {}
+        (bind {}
+          s
+          (app {}
+            (var {} stride)
+            (var {} x)
+            (lit {type: (t-prim {} i64)} 2)))
+        (let {}
+          (bind {}
+            e
+            (app {}
+              (var {} insert)
+              (var {} x)
+              (lit {surf_literal_style: "explicit", type: (t-prim {} i32)} 0)
+              (lit {type: (t-prim {} i64)} 2)))
+          (app {}
+            (var {} add)
+            (app {}
+              (var {} __CORE_ARG_0__)
+              (var {} s)
+              (var {} s))
+            (var {} e)))))))

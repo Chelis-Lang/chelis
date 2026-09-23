@@ -1,0 +1,9 @@
+(defsig {} caller (t-fn {} (t-prim {} i64) (t-prim {} i64)))
+
+(def {}
+  caller
+  (fn {}
+    (params {} (y {type: (t-var {} _)}))
+    (app {span: "surf:29..38"}
+      (var {span: "surf:29..35"} lib_id)
+      (var {span: "surf:36..37"} y))))

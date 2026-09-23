@@ -10,41 +10,48 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use chelis_deep::Expr;
 use chelis_deep::parser::parse_str as parse_deep_lenient;
-use chelis_surf::desugar::desugar_program;
-use chelis_surf::parser::parse_str as parse_surf;
+
 use chelis_types::errors::CheckErrorKind;
 use chelis_types::{BUILTIN_NAMES, check_ir_fitness};
 
-fn surf_to_deep(source: &str) -> Vec<Expr> {
-    let decls = parse_surf(source).expect("Surf fixture must parse");
-    chelis_macros::expand_program(
-        &desugar_program(&decls),
-        &chelis_macros::ExpansionOptions::default(),
-    )
-    .expect("Surf fixture must expand")
-    .into_exprs()
+fn core_program(source: &str) -> Vec<Expr> {
+    chelis_deep::parse_and_stamp_file(source).expect("Deep fixture")
 }
 
 fn conv_program(arity: usize) -> String {
     let args = [
-        "x",
-        "k",
-        "[1i64,1i64]",
-        "[(0i64,0i64),(0i64,0i64)]",
-        "0",
-        "0",
+        r#"(var {span: "surf:96..97"} x)"#,
+        r#"(var {span: "surf:99..100"} k)"#,
+        r#"(app {span: "surf:102..113"}
+        (var {} Cons)
+        (lit {span: "surf:103..107", type: (t-prim {} i64)} 1)
+        (app {}
+          (var {} Cons)
+          (lit {span: "surf:108..112", type: (t-prim {} i64)} 1)
+          (var {} Nil)))"#,
+        r#"(app {span: "surf:115..140"}
+        (var {} Cons)
+        (tuple {span: "surf:116..127"}
+          (lit {span: "surf:117..121", type: (t-prim {} i64)} 0)
+          (lit {span: "surf:122..126", type: (t-prim {} i64)} 0))
+        (app {}
+          (var {} Cons)
+          (tuple {span: "surf:128..139"}
+            (lit {span: "surf:129..133", type: (t-prim {} i64)} 0)
+            (lit {span: "surf:134..138", type: (t-prim {} i64)} 0))
+          (var {} Nil)))"#,
+        r#"(lit {span: "surf:142..143", type: (t-prim {} i32)} 0)"#,
+        r#"(lit {span: "surf:145..146", type: (t-prim {} i32)} 0)"#,
     ][..arity]
-        .join(", ");
-    format!(
-        "def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) \
-         -> tensor[1, 8, 6, 6, f32] = conv({args})\n"
-    )
+        .join(" ");
+    include_str!("fixtures/core/tests/issue_813_conv2d_arity/conv_arity_template.deep")
+        .replace("@args@", &args)
 }
 
 #[test]
 fn conv_arity_zero_through_six_is_total_and_exact() {
     for arity in 0..=6 {
-        let deep = surf_to_deep(&conv_program(arity));
+        let deep = core_program(&conv_program(arity));
         let outcome = catch_unwind(AssertUnwindSafe(|| check_ir_fitness(&deep)));
         let report = outcome.unwrap_or_else(|_| panic!("conv arity {arity} must not panic"));
 

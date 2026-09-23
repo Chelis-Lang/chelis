@@ -39,18 +39,14 @@ use chelis_ir::dag::{Dag, NodeId, RiscOp};
 use chelis_ir::eval::{TensorValue, eval_tensor_with};
 use chelis_ir::grad::grad_dag_checked;
 use chelis_ir::lower::try_lower_program;
-use chelis_surf::desugar::desugar_program;
-use chelis_surf::parser::parse_str as surf_parse;
+
 use chelis_types::types::Prim;
 use chelis_types::{check_linearity, check_typed_program};
 
-/// Full Surf-to-DAG pipeline: parse Surf → desugar to Deep → typecheck →
-/// effects → linearity → lower. Returns `Err(error_string)` for any stage
-/// that fails so the linearity-only fixtures can pin the exact failure
-/// mode.
-fn surf_to_dag(source: &str) -> Result<Dag, String> {
-    let decls = surf_parse(source).map_err(|e| format!("surf parse: {e:?}"))?;
-    let deep = desugar_program(&decls);
+/// Deep fixture → typecheck → effects → linearity → lower.
+/// Returns a stage-tagged error so linearity regressions remain observable.
+fn deep_to_dag(source: &str) -> Result<Dag, String> {
+    let deep = chelis_deep::parser::parse_str(source).map_err(|e| format!("Deep parse: {e:?}"))?;
     let checked = check_typed_program(&deep)
         .map_err(|errs| format!("typecheck failed: {:?}", errs.errors))?;
     let checked = chelis_effects::check_program(&checked)
@@ -111,16 +107,10 @@ fn call_rhs_fanout_control_lowers_without_explicit_copy() {
     // or `consume_var_expr` would surface here. NB: this matches the
     // plan's Item 1 fixture 3, which a prior dispatch confirmed already
     // passed.
-    let source = r#"
-module Repro.RealizeFanOut
-
-def fanout(w: tensor[3, f32]) -> tensor[3, f32] = {
-  a = realize(w)
-  b = realize(w)
-  add(a, b)
-}
-"#;
-    let dag = surf_to_dag(source).expect("control surface must lower cleanly");
+    let source = include_str!(
+        "fixtures/core/tests/cross_statement_fanout/call_rhs_fanout_control_lowers_without_explicit_copy_0.dp"
+    );
+    let dag = deep_to_dag(source).expect("control surface must lower cleanly");
     let root = find_def_root_by_name(&dag, "fanout");
     // Two consume sites on `w` (realize×2) → exactly one inserted Copy.
     assert_eq!(
@@ -155,15 +145,10 @@ fn var_rhs_let_alias_then_borrow_use_lowers_without_explicit_copy() {
     // inputs, so neither resolves to a consuming use at the DAG level
     // and `insert_copy_nodes_for_consuming_fanout` inserts zero Copy
     // nodes (both `x` and `alias` resolve to the same `Load(x)` NodeId).
-    let source = r#"
-module Repro.FanOut
-
-def fanout(x: tensor[3, f32]) -> tensor[3, f32] = {
-  alias = x
-  mul(x, alias)
-}
-"#;
-    let dag = surf_to_dag(source).expect("var-RHS let aliasing must lower cleanly after the fix");
+    let source = include_str!(
+        "fixtures/core/tests/cross_statement_fanout/var_rhs_let_alias_then_borrow_use_lowers_without_explicit_copy_1.dp"
+    );
+    let dag = deep_to_dag(source).expect("var-RHS let aliasing must lower cleanly after the fix");
     let root = find_def_root_by_name(&dag, "fanout");
     // `mul` is a borrow primitive (auto-borrows both args). Source has
     // no consuming fan-out → zero inserted Copy nodes. Per spec §"Copy
@@ -178,15 +163,10 @@ def fanout(x: tensor[3, f32]) -> tensor[3, f32] = {
     // produce the same gradient because the only difference is an inert
     // `Copy` node in the explicit variant, and `Copy`'s adjoint is the
     // identity.
-    let workaround = r#"
-module Repro.FanOutWorkaround
-
-def fanout(x: tensor[3, f32]) -> tensor[3, f32] = {
-  alias = copy(x)
-  mul(x, alias)
-}
-"#;
-    let workaround_dag = surf_to_dag(workaround)
+    let workaround = include_str!(
+        "fixtures/core/tests/cross_statement_fanout/var_rhs_let_alias_then_borrow_use_lowers_without_explicit_copy_2.dp"
+    );
+    let workaround_dag = deep_to_dag(workaround)
         .expect("explicit-copy workaround must lower cleanly today and after the fix");
     let workaround_root = find_def_root_by_name(&workaround_dag, "fanout");
 
@@ -274,31 +254,21 @@ fn top_level_no_module_var_rhs_aliased_fan_out_passes_linearity() {
     // because top-level statements do not surface as DAG roots in
     // the lowerer; the runtime evaluator handles them via its
     // statement-by-statement scope path, not via lowered DAG roots.
-    let source = r#"
-x = to_tensor([1.5, 2.7, -0.3])
-y = x
-a = mul(y, to_tensor([2.0, 2.0, 2.0]))
-b = mul(x, to_tensor([3.0, 3.0, 3.0]))
-"#;
-    // surf_to_dag runs parse -> desugar -> typecheck -> effects ->
-    // linearity -> lower. Linearity is the stage that fails today;
-    // surf_to_dag returns Ok iff every stage passes. The fix flips
-    // linearity from Err to Ok.
-    surf_to_dag(source)
+    let source = include_str!(
+        "fixtures/core/tests/cross_statement_fanout/top_level_no_module_var_rhs_aliased_fan_out_passes_linearity_3.dp"
+    );
+    // Every core stage must accept the no-module aliasing shape.
+    deep_to_dag(source)
         .expect("top-level no-module var-RHS aliasing must pass linearity after the V2-F4 fix");
 
     // Sibling shape from the report's "Fix sketch": 3-alias chain
     // `y = x; z = y; ...`. Each link of the chain must take the
     // binding-consume path so chained aliasing also feeds the PR #29
     // tolerance to downstream borrow reads.
-    let chained = r#"
-x = to_tensor([1.5, 2.7, -0.3])
-y = x
-z = y
-a = mul(z, to_tensor([2.0, 2.0, 2.0]))
-b = mul(x, to_tensor([3.0, 3.0, 3.0]))
-"#;
-    surf_to_dag(chained)
+    let chained = include_str!(
+        "fixtures/core/tests/cross_statement_fanout/top_level_no_module_var_rhs_aliased_fan_out_passes_linearity_4.dp"
+    );
+    deep_to_dag(chained)
         .expect("chained top-level var-RHS aliasing must pass linearity after the V2-F4 fix");
 }
 
@@ -312,17 +282,10 @@ fn fn_body_cross_statement_var_rhs_aliased_fan_out_lowers_without_explicit_copy(
     // consume site (PR #29), so the control already accepts. This
     // fixture pins behavior so a future regression in `check_let`'s
     // bind-loop, or the `read_or_error` tolerance, surfaces here.
-    let source = r#"
-module Repro.FanOutFnBody
-
-def fanout(x: tensor[3, f32]) -> tensor[3, f32] = {
-  y = x
-  a = mul(y, x)
-  b = mul(x, x)
-  add(a, b)
-}
-"#;
-    let dag = surf_to_dag(source)
+    let source = include_str!(
+        "fixtures/core/tests/cross_statement_fanout/fn_body_cross_statement_var_rhs_aliased_fan_out_lowers_without_explicit_copy_5.dp"
+    );
+    let dag = deep_to_dag(source)
         .expect("function-body var-RHS aliasing must lower cleanly after the V2-F4 fix");
     let root = find_def_root_by_name(&dag, "fanout");
     // mul/add borrow all args; no non-borrow consuming fan-out source
@@ -335,17 +298,10 @@ def fanout(x: tensor[3, f32]) -> tensor[3, f32] = {
 
     // AD parity vs the explicit-`copy(x)` rewrite. Copy's adjoint is
     // identity, so gradients must match within 1e-6.
-    let workaround = r#"
-module Repro.FanOutFnBodyWorkaround
-
-def fanout(x: tensor[3, f32]) -> tensor[3, f32] = {
-  y = copy(x)
-  a = mul(y, x)
-  b = mul(x, x)
-  add(a, b)
-}
-"#;
-    let workaround_dag = surf_to_dag(workaround)
+    let workaround = include_str!(
+        "fixtures/core/tests/cross_statement_fanout/fn_body_cross_statement_var_rhs_aliased_fan_out_lowers_without_explicit_copy_6.dp"
+    );
+    let workaround_dag = deep_to_dag(workaround)
         .expect("explicit-copy workaround must lower cleanly today and after the fix");
     let workaround_root = find_def_root_by_name(&workaround_dag, "fanout");
 

@@ -1,0 +1,30 @@
+(defsig {dtype_bounds: {p: float}}
+  only_floats
+  (p)
+  (t-fn {} (t-var {} p) (t-var {} p)))
+
+(def {} only_floats (fn {} (params {} x) (var {span: "surf:56..57"} x)))
+
+(defsig {}
+  apply_to
+  (q)
+  (t-fn {} (t-fn {} (t-var {} q) (t-var {} q)) (t-var {} q) (t-var {} q)))
+
+(def {}
+  apply_to
+  (fn {}
+    (params {} (f {type: (t-var {} _)}) (x {type: (t-var {} _)}))
+    (app {span: "surf:98..102"}
+      (var {span: "surf:98..99"} f)
+      (var {span: "surf:100..101"} x))))
+
+(defsig {} probe (t-fn {} (t-prim {} i32) (t-prim {} i32)))
+
+(def {}
+  probe
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:130..154"}
+      (var {span: "surf:130..138"} apply_to)
+      (var {span: "surf:139..150"} only_floats)
+      (var {span: "surf:152..153"} x))))

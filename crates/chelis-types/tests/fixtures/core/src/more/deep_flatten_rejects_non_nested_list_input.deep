@@ -1,0 +1,16 @@
+(defsig {} xs (t-adt {} List (t-prim {} i64)))
+
+(def {}
+  xs
+  (app {span: "surf:17..31"}
+    (var {} Cons)
+    (cast {span: "surf:18..30"}
+      (lit {span: "surf:23..24", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 1)
+      (t-prim {} i64))
+    (var {} Nil)))
+
+(def {}
+  bad
+  (app {span: "surf:38..49"}
+    (var {span: "surf:38..45"} flatten)
+    (var {span: "surf:46..48"} xs)))

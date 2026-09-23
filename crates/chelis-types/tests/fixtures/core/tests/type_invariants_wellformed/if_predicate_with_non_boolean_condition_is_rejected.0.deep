@@ -1,0 +1,16 @@
+(module {surf_path: "M"}
+  m
+  (deftype {invariant: (fn {}
+                          (params {} p)
+                          (if {span: "surf:31..62"}
+                            (access {span: "surf:34..41"}
+                              (var {span: "surf:34..35"} p)
+                              value)
+                            (lit {span: "surf:47..51", type: (t-prim {} bool)} true)
+                            (lit {span: "surf:57..62", type: (t-prim {} bool)} false))),
+             invariant_amenability: "linear",
+             opaque: true
+           }
+    T
+    ()
+    (variant {} T (field {} value (t-prim {} f32)))))

@@ -1,0 +1,24 @@
+(defsig {}
+  f
+  (t-fn {}
+    (t-tensor {} (d-lit {} 2) (d-lit {} 4) (t-prim {} f32))
+    (t-tuple {}
+      (t-tensor {} (d-lit {} 2) (d-lit {} 4) (t-prim {} f32))
+      (t-tensor {} (d-lit {} 2) (d-lit {} 4) (t-prim {} i64)))))
+
+(def {}
+  f
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (let {span: "surf:72..112"}
+      (bind {}
+        g
+        (fn {span: "surf:80..103"}
+          (params {} t)
+          (app {span: "surf:90..103"}
+            (var {span: "surf:90..94"} sort)
+            (var {span: "surf:95..96"} t)
+            (lit {span: "surf:98..102", surf_literal_style: "explicit", type: (t-prim {} i32)} 0))))
+      (app {span: "surf:106..110"}
+        (var {span: "surf:106..107"} g)
+        (var {span: "surf:108..109"} x)))))

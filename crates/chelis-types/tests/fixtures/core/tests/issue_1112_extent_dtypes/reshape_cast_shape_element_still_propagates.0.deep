@@ -1,0 +1,29 @@
+(defsig {}
+  flat_view
+  (t-fn {}
+    (t-ref {} (t-tensor {} (d-name {} batch) (d-lit {} 4) (t-prim {} f32)))
+    (t-tensor {} (d-name {} batch) (d-lit {} 4) (t-prim {} f32))))
+
+(def {}
+  flat_view
+  (fn {}
+    (params {} x)
+    (app {span: "surf:83..144"}
+      (var {span: "surf:83..90"} reshape)
+      (var {span: "surf:91..92"} x)
+      (app {span: "surf:94..143"}
+        (var {} Cons)
+        (cast {span: "surf:95..128"}
+          (app {span: "surf:100..122"}
+            (var {span: "surf:100..105"} shape)
+            (var {span: "surf:106..107"} x)
+            (cast {span: "surf:109..121"}
+              (lit {span: "surf:114..115", surf_literal_style: "unsuffixed", type: (t-prim {} i32)} 0)
+              (t-prim {} i32)))
+          (t-prim {} i64))
+        (app {}
+          (var {} Cons)
+          (cast {span: "surf:130..142"}
+            (lit {span: "surf:135..136", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 4)
+            (t-prim {} i64))
+          (var {} Nil))))))

@@ -1,0 +1,9 @@
+(defsig {} size (a) (t-fn {} (t-var {} a) (t-prim {} i64)))
+
+(def {}
+  size
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:27..33"}
+      (var {span: "surf:27..30"} len)
+      (var {span: "surf:31..32"} x))))

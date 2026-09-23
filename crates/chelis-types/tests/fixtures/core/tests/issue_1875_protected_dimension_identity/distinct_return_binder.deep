@@ -1,0 +1,16 @@
+(defsig {}
+  wrong
+  (n m)
+  (t-fn {}
+    (t-tensor {} (d-var {} n) (t-prim {} f32))
+    (t-tensor {} (d-name {} batch) (t-prim {} f32))
+    (t-tensor {} (d-var {} m) (t-prim {} f32))))
+
+(def {}
+  wrong
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (y {type: (t-var {} _)}))
+    (app {span: "surf:78..87"}
+      (var {span: "surf:78..81"} add)
+      (var {span: "surf:82..83"} x)
+      (var {span: "surf:85..86"} y))))

@@ -29,18 +29,11 @@
 
 use chelis_deep::Expr;
 use chelis_deep::parser::parse_str as parse_deep;
-use chelis_surf::desugar::desugar_program;
-use chelis_surf::parser::parse_str as parse_surf;
+
 use chelis_types::check_ir_program;
 
-fn surf_to_deep(source: &str) -> Vec<Expr> {
-    let decls = parse_surf(source).expect("surf parse");
-    chelis_macros::expand_program(
-        &desugar_program(&decls),
-        &chelis_macros::ExpansionOptions::default(),
-    )
-    .expect("macro expand")
-    .into_exprs()
+fn parse_core_fixture(source: &str) -> Vec<Expr> {
+    chelis_deep::parser::parse_str(source).expect("Deep fixture")
 }
 
 // ---------------------------------------------------------------------------
@@ -56,10 +49,10 @@ fn surf_to_deep(source: &str) -> Vec<Expr> {
 /// silently skipped.
 #[test]
 fn issue216_sum_cast_wrapped_oob_axis_is_error() {
-    let src = r#"
-def f(x: tensor[2, 4, f32]) -> tensor[2, f32] = sum(x, cast(99, i32))
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_216_cast_aware_extraction_sweep/issue216_sum_cast_wrapped_oob_axis_is_error_59.deep"
+    );
+    let deep = parse_core_fixture(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on cast-wrapped OOB sum axis");
     assert!(
@@ -80,10 +73,10 @@ def f(x: tensor[2, 4, f32]) -> tensor[2, f32] = sum(x, cast(99, i32))
 /// `sum`-specific.
 #[test]
 fn issue216_max_reduce_cast_wrapped_oob_axis_is_error() {
-    let src = r#"
-def f(x: tensor[2, 4, f32]) -> tensor[2, f32] = max_reduce(x, cast(7, i32))
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_216_cast_aware_extraction_sweep/issue216_max_reduce_cast_wrapped_oob_axis_is_error_83.deep"
+    );
+    let deep = parse_core_fixture(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on cast-wrapped OOB max_reduce axis");
     assert!(
@@ -105,10 +98,10 @@ def f(x: tensor[2, 4, f32]) -> tensor[2, f32] = max_reduce(x, cast(7, i32))
 /// dropped as "non-literal."
 #[test]
 fn issue216_sum_cast_wrapped_negative_axis_typechecks() {
-    let src = r#"
-def f(x: tensor[2, 4, f32]) -> tensor[2, f32] = sum(x, cast(-1, i32))
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_216_cast_aware_extraction_sweep/issue216_sum_cast_wrapped_negative_axis_typechecks_108.deep"
+    );
+    let deep = parse_core_fixture(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
         for err in &rep.errors {
@@ -131,10 +124,10 @@ def f(x: tensor[2, 4, f32]) -> tensor[2, f32] = sum(x, cast(-1, i32))
 /// with an out-of-bounds axis diagnostic.
 #[test]
 fn issue216_softmax_cast_wrapped_oob_axis_is_error() {
-    let src = r#"
-def f(x: tensor[2, 4, f32]) -> tensor[2, 4, f32] = softmax(x, cast(5, i32))
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_216_cast_aware_extraction_sweep/issue216_softmax_cast_wrapped_oob_axis_is_error_134.deep"
+    );
+    let deep = parse_core_fixture(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on cast-wrapped OOB softmax axis");
     assert!(
@@ -163,10 +156,10 @@ def f(x: tensor[2, 4, f32]) -> tensor[2, 4, f32] = softmax(x, cast(5, i32))
 /// the extractor, then `axis < 0` fires).
 #[test]
 fn issue216_shape_cast_wrapped_negative_axis_is_error() {
-    let src = r#"
-def f(x: tensor[2, 4, f32]) -> i32 = shape(x, cast(-1, i32))
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_216_cast_aware_extraction_sweep/issue216_shape_cast_wrapped_negative_axis_is_error_166.deep"
+    );
+    let deep = parse_core_fixture(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on cast-wrapped negative shape axis");
     assert!(
@@ -186,10 +179,10 @@ def f(x: tensor[2, 4, f32]) -> i32 = shape(x, cast(-1, i32))
 /// out-of-bounds axis diagnostic.
 #[test]
 fn issue216_shape_cast_wrapped_oob_axis_is_error() {
-    let src = r#"
-def f(x: tensor[2, 4, f32]) -> i32 = shape(x, cast(9, i32))
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_216_cast_aware_extraction_sweep/issue216_shape_cast_wrapped_oob_axis_is_error_189.deep"
+    );
+    let deep = parse_core_fixture(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on cast-wrapped OOB shape axis");
     assert!(
@@ -215,10 +208,10 @@ def f(x: tensor[2, 4, f32]) -> i32 = shape(x, cast(9, i32))
 /// `split axis ... out of bounds` diagnostic.
 #[test]
 fn issue216_split_cast_wrapped_oob_axis_is_error() {
-    let src = r#"
-def f(x: tensor[2, 4, f32]) -> List[tensor[2, 4, f32]] = split(x, cast(9, i32), [cast(2, i32), cast(2, i32)])
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_216_cast_aware_extraction_sweep/issue216_split_cast_wrapped_oob_axis_is_error_218.deep"
+    );
+    let deep = parse_core_fixture(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on cast-wrapped OOB split axis");
     assert!(
@@ -245,10 +238,10 @@ def f(x: tensor[2, 4, f32]) -> List[tensor[2, 4, f32]] = split(x, cast(9, i32), 
 /// rejected with an OOB axis diagnostic.
 #[test]
 fn issue216_gather_cast_wrapped_oob_axis_is_error() {
-    let src = r#"
-def f(table: tensor[10, 4, f32], ids: tensor[3, i64]) -> tensor[3, 4, f32] = gather(table, ids, cast(9, i32))
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_216_cast_aware_extraction_sweep/issue216_gather_cast_wrapped_oob_axis_is_error_248.deep"
+    );
+    let deep = parse_core_fixture(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on cast-wrapped OOB gather axis");
     assert!(
@@ -275,10 +268,10 @@ def f(table: tensor[10, 4, f32], ids: tensor[3, i64]) -> tensor[3, 4, f32] = gat
 /// matrix is rejected with an OOB axis diagnostic.
 #[test]
 fn issue216_trace_cast_wrapped_oob_axis_is_error() {
-    let src = r#"
-def f(m: tensor[4, 4, f32]) -> tensor[f32] = trace(m, cast(9, i32), cast(1, i32))
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_216_cast_aware_extraction_sweep/issue216_trace_cast_wrapped_oob_axis_is_error_278.deep"
+    );
+    let deep = parse_core_fixture(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on cast-wrapped OOB trace axis1");
     assert!(
@@ -299,10 +292,10 @@ def f(m: tensor[4, 4, f32]) -> tensor[f32] = trace(m, cast(9, i32), cast(1, i32)
 /// member calls, not just one).
 #[test]
 fn issue216_diagonal_cast_wrapped_oob_axis2_is_error() {
-    let src = r#"
-def f(m: tensor[4, 4, f32]) -> tensor[4, f32] = diagonal(m, cast(0, i32), cast(9, i32))
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_216_cast_aware_extraction_sweep/issue216_diagonal_cast_wrapped_oob_axis2_is_error_302.deep"
+    );
+    let deep = parse_core_fixture(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on cast-wrapped OOB diagonal axis2");
     assert!(
@@ -335,11 +328,10 @@ def f(m: tensor[4, 4, f32]) -> tensor[4, f32] = diagonal(m, cast(0, i32), cast(9
 /// `positive stride` check fires.
 #[test]
 fn issue216_conv_cast_wrapped_zero_stride_is_error() {
-    let src = r#"
-def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
-  conv(&x, &k, [cast(0i64, i64), cast(0i64, i64)], [(0i64, 0i64), (0i64, 0i64)])
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_216_cast_aware_extraction_sweep/issue216_conv_cast_wrapped_zero_stride_is_error_338.deep"
+    );
+    let deep = parse_core_fixture(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on cast-wrapped zero conv stride");
     // Lock the post-fix diagnostic: "requires a positive stride, got 0".
@@ -364,11 +356,10 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6,
 /// as the zero-stride case.
 #[test]
 fn issue216_conv_cast_wrapped_negative_padding_is_error() {
-    let src = r#"
-def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
-  conv(&x, &k, [1i64, 1i64], [(cast(-1i64, i64), cast(-1i64, i64)), (cast(-1i64, i64), cast(-1i64, i64))])
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_216_cast_aware_extraction_sweep/issue216_conv_cast_wrapped_negative_padding_is_error_367.deep"
+    );
+    let deep = parse_core_fixture(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on cast-wrapped negative conv padding");
     assert!(
@@ -390,11 +381,10 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6,
 /// a regression on well-formed cast-wrapped stride/padding.
 #[test]
 fn issue216_conv_cast_wrapped_wellformed_typechecks() {
-    let src = r#"
-def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
-  conv(&x, &k, [cast(1i64, i64), cast(1i64, i64)], [(cast(0i64, i64), cast(0i64, i64)), (cast(0i64, i64), cast(0i64, i64))])
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_216_cast_aware_extraction_sweep/issue216_conv_cast_wrapped_wellformed_typechecks_393.deep"
+    );
+    let deep = parse_core_fixture(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
         for err in &rep.errors {

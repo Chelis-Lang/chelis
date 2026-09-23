@@ -1,0 +1,49 @@
+(module {surf_path: "Repro.AuthoredRankName"}
+  repro.authoredrankname
+  (defsig {}
+    convolve
+    (t-fn {}
+      (t-tensor {}
+        (d-name {} __chelis_rank_only_axis_0)
+        (d-lit {} 3)
+        (d-lit {} 8)
+        (d-lit {} 8)
+        (t-prim {} f32))
+      (t-tensor {}
+        (d-lit {} 8)
+        (d-lit {} 3)
+        (d-lit {} 3)
+        (d-lit {} 3)
+        (t-prim {} f32))
+      (t-tensor {}
+        (d-name {} __chelis_rank_only_axis_0)
+        (d-lit {} 8)
+        (d-lit {} 6)
+        (d-lit {} 6)
+        (t-prim {} f32))))
+  (def {}
+    convolve
+    (fn {}
+      (params {} (x {type: (t-var {} _)}) (k {type: (t-var {} _)}))
+      (app {}
+        (var {} conv)
+        (borrow {} (var {} x))
+        (borrow {} (var {} k))
+        (app {}
+          (var {} Cons)
+          (lit {type: (t-prim {} i64)} 1)
+          (app {}
+            (var {} Cons)
+            (lit {type: (t-prim {} i64)} 1)
+            (var {} Nil)))
+        (app {}
+          (var {} Cons)
+          (tuple {}
+            (lit {type: (t-prim {} i64)} 0)
+            (lit {type: (t-prim {} i64)} 0))
+          (app {}
+            (var {} Cons)
+            (tuple {}
+              (lit {type: (t-prim {} i64)} 0)
+              (lit {type: (t-prim {} i64)} 0))
+            (var {} Nil)))))))

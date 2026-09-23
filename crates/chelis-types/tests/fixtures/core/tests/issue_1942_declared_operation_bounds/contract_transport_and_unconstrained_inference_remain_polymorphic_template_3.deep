@@ -1,0 +1,13 @@
+(def {} identity (fn {} (params {} x) (var {} x)))
+
+(def {}
+  a
+  (app {}
+    (var {} identity)
+    (lit {surf_literal_style: "explicit", type: (t-prim {} i32)} 1)))
+
+(def {}
+  b
+  (app {}
+    (var {} identity)
+    (lit {type: (t-prim {} bool)} true)))

@@ -1,0 +1,51 @@
+(defsig {}
+  f
+  (c a h w)
+  (t-fn {}
+    (t-ref {} (t-tensor {} (d-var {} c) (t-prim {} f32)))
+    (t-ref {}
+      (t-tensor {}
+        (d-var {} a)
+        (d-var {} c)
+        (d-var {} h)
+        (d-var {} w)
+        (t-prim {} f32)))
+    (t-tensor {} (d-var {} c) (d-var {} h) (d-var {} w) (t-prim {} f32))))
+
+(def {}
+  f
+  (fn {}
+    (params {} (g {type: (t-var {} _)}) (x {type: (t-var {} _)}))
+    (let {span: "surf:93..221"}
+      (bind {}
+        step1
+        (app {span: "surf:124..149",
+               surf_binding_type: "explicit",
+               type: (t-tensor {} (d-var {} c) (d-var {} h) (t-prim {} f32))
+             }
+          (var {span: "surf:124..130"} insert)
+          (var {span: "surf:131..132"} g)
+          (lit {span: "surf:134..135", type: (t-prim {} i32)} 1)
+          (app {span: "surf:137..148"}
+            (var {span: "surf:137..142"} shape)
+            (var {span: "surf:143..144"} x)
+            (lit {span: "surf:146..147", type: (t-prim {} i32)} 2))))
+      (let {}
+        (bind {}
+          step2
+          (app {span: "surf:182..211",
+                 surf_binding_type: "explicit",
+                 type: (t-tensor {}
+                         (d-var {} c)
+                         (d-var {} h)
+                         (d-var {} w)
+                         (t-prim {} f32))
+               }
+            (var {span: "surf:182..188"} insert)
+            (var {span: "surf:189..194"} step1)
+            (lit {span: "surf:196..197", type: (t-prim {} i32)} 2)
+            (app {span: "surf:199..210"}
+              (var {span: "surf:199..204"} shape)
+              (var {span: "surf:205..206"} x)
+              (lit {span: "surf:208..209", type: (t-prim {} i32)} 3))))
+        (var {span: "surf:214..219"} step2)))))

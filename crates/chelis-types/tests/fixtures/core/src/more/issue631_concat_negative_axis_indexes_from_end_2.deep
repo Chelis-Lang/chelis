@@ -1,0 +1,21 @@
+(module {surf_path: "Repro.ConcatNegAxisBad"}
+  repro.concatnegaxisbad
+  (defsig {}
+    cat_neg
+    (t-fn {}
+      (t-tensor {} (d-lit {} 1) (d-lit {} 2) (t-prim {} f32))
+      (t-tensor {} (d-lit {} 1) (d-lit {} 2) (t-prim {} f32))
+      (t-tensor {} (d-lit {} 1) (d-lit {} 5) (t-prim {} f32))))
+  (def {}
+    cat_neg
+    (fn {}
+      (params {} (a {type: (t-var {} _)}) (b {type: (t-var {} _)}))
+      (app {span: "surf:112..130"}
+        (var {span: "surf:112..118"} concat)
+        (app {span: "surf:119..125"}
+          (var {} Cons)
+          (var {span: "surf:120..121"} a)
+          (app {} (var {} Cons) (var {span: "surf:123..124"} b) (var {} Nil)))
+        (app {span: "surf:127..129"}
+          (var {} neg)
+          (lit {span: "surf:128..129", type: (t-prim {} i32)} 1))))))

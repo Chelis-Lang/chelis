@@ -1,0 +1,17 @@
+(defsig {} f (t-fn {} (t-adt {} List (t-prim {} i32)) (t-prim {} f32)))
+
+(def {}
+  f
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (let {span: "surf:29..68"}
+      (bind {}
+        g
+        (fn {span: "surf:37..59"}
+          (params {} t)
+          (cast {span: "surf:47..59"}
+            (var {span: "surf:52..53"} t)
+            (t-prim {} f32))))
+      (app {span: "surf:62..66"}
+        (var {span: "surf:62..63"} g)
+        (var {span: "surf:64..65"} x)))))

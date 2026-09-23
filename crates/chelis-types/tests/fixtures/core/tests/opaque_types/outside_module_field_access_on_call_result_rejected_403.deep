@@ -1,0 +1,14 @@
+(module {surf_path: "Agent.Strategy"}
+  agent.strategy
+  (defsig {} leak (t-fn {} (t-prim {} f32) (t-prim {} f32)))
+  (def {}
+    leak
+    (fn {}
+      (params {} (x {type: (t-var {} _)}))
+      (let {span: "surf:48..82"}
+        (bind {}
+          p
+          (app {span: "surf:56..70"}
+            (var {span: "surf:56..67"} probability)
+            (var {span: "surf:68..69"} x)))
+        (access {span: "surf:73..80"} (var {span: "surf:73..74"} p) value)))))

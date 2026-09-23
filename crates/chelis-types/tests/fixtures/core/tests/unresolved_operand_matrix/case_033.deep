@@ -1,0 +1,15 @@
+(defsig {}
+  f
+  (t-fn {}
+    (t-adt {} Dict (t-prim {} string) (t-prim {} i32))
+    (t-adt {} Dict (t-prim {} string) (t-prim {} f32))
+    (t-adt {} Dict (t-prim {} string) (t-prim {} i32))))
+
+(def {}
+  f
+  (fn {}
+    (params {} (d {type: (t-var {} _)}) (e {type: (t-var {} _)}))
+    (app {span: "surf:73..89"}
+      (var {span: "surf:73..83"} dict_merge)
+      (var {span: "surf:84..85"} d)
+      (var {span: "surf:87..88"} e))))

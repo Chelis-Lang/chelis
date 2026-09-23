@@ -1,0 +1,33 @@
+(module {surf_path: "Demo.BinderChain"}
+  demo.binderchain
+  (defsig {} sq (t-fn {} (t-prim {} f32) (t-prim {} f32)))
+  (def {}
+    sq
+    (fn {}
+      (params {} (x {type: (t-var {} _)}))
+      (app {span: "surf:48..56"}
+        (var {span: "surf:48..51"} mul)
+        (var {span: "surf:52..53"} x)
+        (var {span: "surf:54..55"} x))))
+  (defsig {}
+    body
+    (t-fn {}
+      (t-fn {} (t-prim {} f32) (t-prim {} f32))
+      (t-prim {} f32)
+      (t-prim {} f32)))
+  (def {}
+    body
+    (fn {}
+      (params {} (f {type: (t-var {} _)}) (x {type: (t-var {} _)}))
+      __BODY__))
+  (defsig {} main (t-fn {} (t-prim {} f32)))
+  (def {}
+    main
+    (fn {}
+      (params {})
+      (app {span: "surf:130..154"}
+        (var {span: "surf:130..134"} body)
+        (var {span: "surf:135..137"} sq)
+        (cast {span: "surf:139..153"}
+          (lit {span: "surf:144..147", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 2.0)
+          (t-prim {} f32))))))

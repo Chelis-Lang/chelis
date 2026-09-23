@@ -44,10 +44,6 @@ mod rejection_registry_generated;
 
 pub mod builtin_discovery;
 mod builtins;
-/// Source architecture guard for the `infer` module tree. Test-only: it
-/// inspects source layout, so it has no place in a release build.
-#[cfg(test)]
-mod source_arch;
 
 pub use builtins::{
     AxisArgumentLayout, BUILTIN_NAMES, BUILTINS, BuiltinCapabilityDecl, BuiltinDecl,

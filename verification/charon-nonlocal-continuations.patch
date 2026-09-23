@@ -1,0 +1,265 @@
+--- a/src/transform/control_flow/ullbc_to_llbc.rs
++++ b/src/transform/control_flow/ullbc_to_llbc.rs
+@@ -947,8 +947,13 @@
+             .iter_mut()
+             .rev()
+             .enumerate()
+-            .find(|(_, j)| j.target_block == target_block)
+-        {
++            .find(|(i, j)| {
++                // Only the innermost continuation is reached by falling through.
++                // An outer one may cross a loop or another branch continuation;
++                // use an enclosing break/continue target or duplicate its code.
++                j.target_block == target_block
++                    && (*i == 0 || !matches!(j.kind, SpecialJumpKind::NextBlock))
++            }) {
+             Some((i, jump_target)) => {
+                 let mk_block = |kind| tgt::Statement::new(span, kind).into_block();
+                 match jump_target.kind {
+--- a/tests/ui/nonlocal-loop-return.rs
++++ b/tests/ui/nonlocal-loop-return.rs
+@@ -0,0 +1,18 @@
++//@ no-default-options
++//@ charon-args=--preset=aeneas
++
++// The owned argument's shared cleanup is outside the loop. The early Err must
++// reach that cleanup and return, not fall through the loop or overwrite it with Ok.
++pub fn check(values: Vec<u32>, enabled: bool) -> Result<u32, u32> {
++    if !enabled {
++        return Err(9);
++    }
++    let mut index = 0;
++    while index < values.len() {
++        if values[index] == 0 {
++            return Err(0);
++        }
++        index += 1;
++    }
++    Ok(1)
++}
+--- a/tests/ui/nonlocal-loop-return.out
++++ b/tests/ui/nonlocal-loop-return.out
+@@ -0,0 +1,223 @@
++# Final LLBC before serialization:
++
++// Full name: core::option::Option
++#[lang_item("Option")]
++pub enum Option<T> {
++  None,
++  Some(T),
++}
++
++// Full name: core::result::Result
++#[lang_item("Result")]
++pub enum Result<T, E> {
++  Ok(T),
++  Err(E),
++}
++
++// Full name: core::slice::index::private_slice_index::Sealed
++pub trait Sealed<Self>
++
++// Full name: core::slice::index::private_slice_index::{impl Sealed for usize}
++impl Sealed for usize {    vtable: {impl Sealed for usize}::{vtable}
++}
++
++// Full name: core::slice::index::SliceIndex
++#[lang_item("SliceIndex")]
++pub trait SliceIndex<Self, T, Self_Output>
++{
++    parent_clause0 : [@TraitClause0]: Sealed<Self>
++    fn get<'_0_1> = core::slice::index::SliceIndex::get<'_0_1, Self, T, Self_Output>[Self]
++    fn get_mut<'_0_1> = core::slice::index::SliceIndex::get_mut<'_0_1, Self, T, Self_Output>[Self]
++    fn get_unchecked = core::slice::index::SliceIndex::get_unchecked<Self, T, Self_Output>[Self]
++    fn get_unchecked_mut = core::slice::index::SliceIndex::get_unchecked_mut<Self, T, Self_Output>[Self]
++    fn index<'_0_1> = core::slice::index::SliceIndex::index<'_0_1, Self, T, Self_Output>[Self]
++    fn index_mut<'_0_1> = core::slice::index::SliceIndex::index_mut<'_0_1, Self, T, Self_Output>[Self]
++    vtable: core::slice::index::SliceIndex::{vtable}<T, Self_Output>
++}
++
++pub fn core::slice::index::SliceIndex::get<'_0, Self, T, Clause0_Output>(_1: Self, _2: &'_0 T) -> Option<&'_0 Clause0_Output>
++where
++    [@TraitClause0]: SliceIndex<Self, T, Clause0_Output>,
++= <opaque>
++
++pub fn core::slice::index::SliceIndex::get_mut<'_0, Self, T, Clause0_Output>(_1: Self, _2: &'_0 mut T) -> Option<&'_0 mut Clause0_Output>
++where
++    [@TraitClause0]: SliceIndex<Self, T, Clause0_Output>,
++= <opaque>
++
++pub unsafe fn core::slice::index::SliceIndex::get_unchecked<Self, T, Clause0_Output>(_1: Self, _2: *const T) -> *const Clause0_Output
++where
++    [@TraitClause0]: SliceIndex<Self, T, Clause0_Output>,
++= <opaque>
++
++pub unsafe fn core::slice::index::SliceIndex::get_unchecked_mut<Self, T, Clause0_Output>(_1: Self, _2: *mut T) -> *mut Clause0_Output
++where
++    [@TraitClause0]: SliceIndex<Self, T, Clause0_Output>,
++= <opaque>
++
++pub fn core::slice::index::SliceIndex::index<'_0, Self, T, Clause0_Output>(_1: Self, _2: &'_0 T) -> &'_0 Clause0_Output
++where
++    [@TraitClause0]: SliceIndex<Self, T, Clause0_Output>,
++= <opaque>
++
++pub fn core::slice::index::SliceIndex::index_mut<'_0, Self, T, Clause0_Output>(_1: Self, _2: &'_0 mut T) -> &'_0 mut Clause0_Output
++where
++    [@TraitClause0]: SliceIndex<Self, T, Clause0_Output>,
++= <opaque>
++
++// Full name: core::slice::index::{impl SliceIndex<[T], T> for usize}::index_mut
++pub fn {impl SliceIndex<[T], T> for usize}::index_mut<'_0, T>(_1: usize, _2: &'_0 mut [T]) -> &'_0 mut T
++= <opaque>
++
++// Full name: core::slice::index::{impl SliceIndex<[T], T> for usize}::index
++pub fn {impl SliceIndex<[T], T> for usize}::index<'_0, T>(_1: usize, _2: &'_0 [T]) -> &'_0 T
++= <opaque>
++
++// Full name: core::slice::index::{impl SliceIndex<[T], T> for usize}::get_unchecked_mut
++pub unsafe fn {impl SliceIndex<[T], T> for usize}::get_unchecked_mut<T>(_1: usize, _2: *mut [T]) -> *mut T
++= <opaque>
++
++// Full name: core::slice::index::{impl SliceIndex<[T], T> for usize}::get_unchecked
++pub unsafe fn {impl SliceIndex<[T], T> for usize}::get_unchecked<T>(_1: usize, _2: *const [T]) -> *const T
++= <opaque>
++
++// Full name: core::slice::index::{impl SliceIndex<[T], T> for usize}::get_mut
++pub fn {impl SliceIndex<[T], T> for usize}::get_mut<'_0, T>(_1: usize, _2: &'_0 mut [T]) -> Option<&'_0 mut T>
++= <opaque>
++
++// Full name: core::slice::index::{impl SliceIndex<[T], T> for usize}::get
++pub fn {impl SliceIndex<[T], T> for usize}::get<'_0, T>(_1: usize, _2: &'_0 [T]) -> Option<&'_0 T>
++= <opaque>
++
++// Full name: core::slice::index::{impl SliceIndex<[T], T> for usize}
++impl<T> SliceIndex<[T], T> for usize {
++    parent_clause0 = {impl Sealed for usize}
++    fn get<'_0_1> = {impl SliceIndex<[T], T> for usize}::get<'_0_1, T>
++    fn get_mut<'_0_1> = {impl SliceIndex<[T], T> for usize}::get_mut<'_0_1, T>
++    fn get_unchecked = {impl SliceIndex<[T], T> for usize}::get_unchecked<T>
++    fn get_unchecked_mut = {impl SliceIndex<[T], T> for usize}::get_unchecked_mut<T>
++    fn index<'_0_1> = {impl SliceIndex<[T], T> for usize}::index<'_0_1, T>
++    fn index_mut<'_0_1> = {impl SliceIndex<[T], T> for usize}::index_mut<'_0_1, T>
++    vtable: {impl SliceIndex<[T], T> for usize}::{vtable}<T>
++}
++
++// Full name: alloc::alloc::Global
++#[lang_item("global_alloc_ty")]
++pub struct Global {}
++
++// Full name: alloc::vec::Vec
++#[lang_item("Vec")]
++pub opaque type Vec<T>
++
++// Full name: alloc::vec::{Vec<T>}::len
++pub fn len<'_0, T, A>(_1: &'_0 Vec<T>) -> usize
++= <opaque>
++
++// Full name: alloc::vec::{impl Index<I, Clause0_Output> for Vec<T>}::index
++pub fn {impl Index<I, Clause0_Output> for Vec<T>}::index<'_0, T, I, A, Clause0_Output>(_1: &'_0 Vec<T>, _2: I) -> &'_0 Clause0_Output
++where
++    [@TraitClause0]: SliceIndex<I, [T], Clause0_Output>,
++= <opaque>
++
++// Full name: UNIT_METADATA
++fn UNIT_METADATA()
++{
++    let _0: (); // return
++
++    _0 = ()
++    return
++}
++
++// Full name: UNIT_METADATA
++const UNIT_METADATA: () = UNIT_METADATA()
++
++// Full name: test_crate::check
++pub fn check(values_1: Vec<u32>, enabled_2: bool) -> Result<u32, u32>
++{
++    let _0: Result<u32, u32>; // return
++    let values_1: Vec<u32>; // arg #1
++    let enabled_2: bool; // arg #2
++    let _3: bool; // anonymous local
++    let index_4: usize; // local
++    let _5: bool; // anonymous local
++    let _6: usize; // anonymous local
++    let _7: usize; // anonymous local
++    let _8: &'1 Vec<u32>; // anonymous local
++    let _9: bool; // anonymous local
++    let _10: u32; // anonymous local
++    let _11: &'3 u32; // anonymous local
++    let _12: &'4 Vec<u32>; // anonymous local
++    let _13: usize; // anonymous local
++    let _14: usize; // anonymous local
++
++    storage_live(_14)
++    storage_live(_3)
++    _3 = copy enabled_2
++    if move _3 {
++        storage_dead(_3)
++        storage_live(index_4)
++        index_4 = const 0 : usize
++        loop {
++            storage_live(_5)
++            storage_live(_6)
++            _6 = copy index_4
++            storage_live(_7)
++            storage_live(_8)
++            _8 = &values_1
++            _7 = len<'6, u32, Global>(move _8)
++            storage_dead(_8)
++            _5 = move _6 < move _7
++            if move _5 {
++            } else {
++                break 0
++            }
++            storage_dead(_7)
++            storage_dead(_6)
++            storage_live(_9)
++            storage_live(_10)
++            storage_live(_11)
++            storage_live(_12)
++            _12 = &values_1
++            storage_live(_13)
++            _13 = copy index_4
++            _11 = {impl Index<I, Clause0_Output> for Vec<T>}::index<'8, u32, usize, Global, u32>[{impl SliceIndex<[T], T> for usize}<u32>](move _12, move _13)
++            _10 = copy (*_11)
++            storage_dead(_13)
++            storage_dead(_12)
++            _9 = move _10 == const 0 : u32
++            if move _9 {
++                storage_dead(_11)
++                storage_dead(_10)
++                _0 = Result::Err { 0: const 0 : u32 }
++                storage_dead(_9)
++                storage_dead(_5)
++                storage_dead(index_4)
++                conditional_drop[{impl#0}<u32, Global>] values_1
++                return
++            } else {
++                storage_dead(_11)
++                storage_dead(_10)
++                storage_dead(_9)
++                _14 = copy index_4 panic.+ const 1 : usize
++                index_4 = move _14
++                storage_dead(_5)
++                continue 0
++            }
++        }
++        storage_dead(_7)
++        storage_dead(_6)
++        storage_dead(_5)
++        _0 = Result::Ok { 0: const 1 : u32 }
++        storage_dead(index_4)
++        conditional_drop[{impl#0}<u32, Global>] values_1
++        return
++    } else {
++        _0 = Result::Err { 0: const 9 : u32 }
++        storage_dead(_3)
++    }
++    conditional_drop[{impl#0}<u32, Global>] values_1
++    return
++}
++
++
++

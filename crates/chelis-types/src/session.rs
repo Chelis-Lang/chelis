@@ -801,10 +801,9 @@ pub(crate) fn param_has_consuming_use(
 mod builtin_selection_tests {
     use super::*;
     use crate::builtin_discovery::BuiltinCaseSelection;
-    use chelis_surf::{desugar::desugar_program, parser::parse_str};
 
     fn selections(source: &str) -> Result<Vec<BuiltinCaseSelection>, InferResult> {
-        let deep = desugar_program(&parse_str(source).unwrap());
+        let deep = chelis_deep::parser::parse_str(source).expect("core discovery fixture");
         run_with_metadata(&deep, |sink| {
             Ok(crate::infer::builtin_selection_probe(&deep, sink))
         })
@@ -812,7 +811,10 @@ mod builtin_selection_tests {
 
     #[test]
     fn builtin_atom_discovery_inference_resolves_enclosing_operands_and_preserves_shadows() {
-        let selected = selections("result = map(fn(x) -> to_string(x), [1.0])").unwrap();
+        let selected = selections(include_str!(
+            "../tests/fixtures/core/src/session/map_to_string.deep"
+        ))
+        .unwrap();
         assert!(selected.contains(&BuiltinCaseSelection::Resolved(
             "Boundary:to_string:ToStringScalar".into()
         )));
@@ -821,24 +823,30 @@ mod builtin_selection_tests {
                 .iter()
                 .all(|s| matches!(s, BuiltinCaseSelection::Resolved(_)))
         );
-        for bound in ["Float", "Int", "Numeric"] {
-            let selected = selections(&format!(
-                "sig equal[p: {bound}]: p -> p -> bool\ndef equal(x,y) = eq(x,y)"
-            ))
+        for bound in ["float", "int", "numeric"] {
+            let selected = selections(
+                &include_str!("../tests/fixtures/core/src/session/equal_bound.deep")
+                    .replace("BOUND", bound),
+            )
             .unwrap();
             assert!(selected.contains(&BuiltinCaseSelection::Resolved("Numeric:eq:TableA".into())));
             assert!(!selected.contains(&BuiltinCaseSelection::Resolved(
                 "Container:eq:EqRecursive".into()
             )));
         }
-        let selected =
-            selections("def apply(to_string: (f32 -> f32), x: f32) -> f32 = to_string(x)").unwrap();
+        let selected = selections(include_str!(
+            "../tests/fixtures/core/src/session/shadow_to_string.deep"
+        ))
+        .unwrap();
         assert!(
             selected.is_empty(),
             "lexical shadow acquired builtin metadata: {selected:?}"
         );
         assert!(
-            selections("result = map(fn(x) -> len(x), [1.0])").is_err(),
+            selections(include_str!(
+                "../tests/fixtures/core/src/session/invalid_len.deep"
+            ))
+            .is_err(),
             "concrete invalid case must not skip deferred resolution"
         );
     }

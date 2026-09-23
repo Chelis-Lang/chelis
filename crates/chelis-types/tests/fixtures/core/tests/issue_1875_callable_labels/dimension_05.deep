@@ -1,0 +1,54 @@
+(defsig {}
+  apply_it
+  (d b)
+  (t-fn {}
+    (t-fn {}
+      (t-tensor {} (d-var {} d) (d-lit {} 2) (d-lit {} 2) (t-prim {} f32))
+      (t-var {} b))
+    (t-tensor {} (d-var {} d) (d-lit {} 2) (d-lit {} 2) (t-prim {} f32))
+    (t-var {} b)))
+
+(def {}
+  apply_it
+  (fn {}
+    (params {} (f {type: (t-var {} _)}) (t {type: (t-var {} _)}))
+    (app {span: "surf:74..78"}
+      (var {span: "surf:74..75"} f)
+      (var {span: "surf:76..77"} t))))
+
+(defsig {}
+  run
+  (d)
+  (t-fn {}
+    (t-tensor {} (d-var {} d) (d-lit {} 2) (d-lit {} 2) (t-prim {} f32))
+    (t-tensor {}
+      (d-name {} batch)
+      (d-name {} row)
+      (d-name {} col)
+      (t-prim {} f32))
+    (t-var {} _)))
+
+(def {}
+  run
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (g {type: (t-var {} _)}))
+    (app {span: "surf:144..214"}
+      (var {span: "surf:144..147"} sum)
+      (app {span: "surf:148..207"}
+        (var {span: "surf:148..156"} apply_it)
+        (fn {span: "surf:157..196"}
+          (params {} v)
+          (let {span: "surf:167..196"}
+            (bind {}
+              r
+              (app {span: "surf:173..191"}
+                (var {span: "surf:173..178"} trace)
+                (var {span: "surf:179..180"} v)
+                (lit {span: "surf:181..185", surf_literal_style: "explicit", type: (t-prim {} i32)} 1)
+                (lit {span: "surf:186..190", surf_literal_style: "explicit", type: (t-prim {} i32)} 2)))
+            (var {span: "surf:193..194"} r)))
+        (app {span: "surf:197..206"}
+          (var {span: "surf:197..201"} tag3)
+          (var {span: "surf:202..203"} x)
+          (var {span: "surf:204..205"} g)))
+      (var {span: "surf:208..213"} batch))))

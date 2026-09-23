@@ -1,0 +1,73 @@
+(def {}
+  use
+  (fn {}
+    (params {})
+    (let {span: "surf:12..201"}
+      (bind {}
+        f
+        (var {span: "surf:18..25"} aligned))
+      (let {}
+        (bind {}
+          g
+          (var {span: "surf:31..32"} f))
+        (let {}
+          (bind {}
+            a
+            (app {span: "surf:38..94"}
+              (var {span: "surf:38..39"} g)
+              (app {span: "surf:40..66"}
+                (var {span: "surf:40..49"} to_tensor)
+                (app {span: "surf:50..65"}
+                  (var {} Cons)
+                  (lit {span: "surf:51..57", surf_literal_style: "explicit", type: (t-prim {} f32)} 1.0)
+                  (app {}
+                    (var {} Cons)
+                    (lit {span: "surf:58..64", surf_literal_style: "explicit", type: (t-prim {} f32)} 2.0)
+                    (var {} Nil))))
+              (app {span: "surf:67..93"}
+                (var {span: "surf:67..76"} to_tensor)
+                (app {span: "surf:77..92"}
+                  (var {} Cons)
+                  (lit {span: "surf:78..84", surf_literal_style: "explicit", type: (t-prim {} f32)} 1.0)
+                  (app {}
+                    (var {} Cons)
+                    (lit {span: "surf:85..91", surf_literal_style: "explicit", type: (t-prim {} f32)} 2.0)
+                    (var {} Nil))))))
+          (let {}
+            (bind {}
+              b
+              (app {span: "surf:100..170"}
+                (var {span: "surf:100..101"} g)
+                (app {span: "surf:102..135"}
+                  (var {span: "surf:102..111"} to_tensor)
+                  (app {span: "surf:112..134"}
+                    (var {} Cons)
+                    (lit {span: "surf:113..119", surf_literal_style: "explicit", type: (t-prim {} f32)} 1.0)
+                    (app {}
+                      (var {} Cons)
+                      (lit {span: "surf:120..126", surf_literal_style: "explicit", type: (t-prim {} f32)} 2.0)
+                      (app {}
+                        (var {} Cons)
+                        (lit {span: "surf:127..133", surf_literal_style: "explicit", type: (t-prim {} f32)} 3.0)
+                        (var {} Nil)))))
+                (app {span: "surf:136..169"}
+                  (var {span: "surf:136..145"} to_tensor)
+                  (app {span: "surf:146..168"}
+                    (var {} Cons)
+                    (lit {span: "surf:147..153", surf_literal_style: "explicit", type: (t-prim {} f32)} 1.0)
+                    (app {}
+                      (var {} Cons)
+                      (lit {span: "surf:154..160", surf_literal_style: "explicit", type: (t-prim {} f32)} 2.0)
+                      (app {}
+                        (var {} Cons)
+                        (lit {span: "surf:161..167", surf_literal_style: "explicit", type: (t-prim {} f32)} 3.0)
+                        (var {} Nil)))))))
+            (tuple {span: "surf:172..199"}
+              (app {span: "surf:173..185"}
+                (var {span: "surf:173..176"} sum)
+                (var {span: "surf:177..178"} a)
+                (var {span: "surf:179..184"} fixed))
+              (app {span: "surf:186..198"}
+                (var {span: "surf:186..189"} sum)
+                (var {span: "surf:190..191"} b)
+                (var {span: "surf:192..197"} fixed)))))))))

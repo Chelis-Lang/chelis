@@ -1,0 +1,32 @@
+(defsig {}
+  probabilities
+  (s)
+  (t-fn {}
+    (t-tensor {} (d-var {} s) (d-lit {} 2) (t-prim {} f32))
+    (t-tensor {} (d-var {} s) (d-lit {} 2) (t-prim {} f32))
+    (t-tensor {} (d-var {} s) (d-lit {} 4) (t-prim {} f32))))
+
+(def {}
+  probabilities
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (y {type: (t-var {} _)}))
+    (let {span: "surf:88..146"}
+      (bind {}
+        a
+        (var {span: "surf:95..96"} x))
+      (let {}
+        (bind {}
+          rows
+          (app {span: "surf:105..111"}
+            (var {} Cons)
+            (var {span: "surf:106..107"} a)
+            (app {} (var {} Cons) (var {span: "surf:109..110"} y) (var {} Nil))))
+        (app {span: "surf:113..144"}
+          (var {span: "surf:113..120"} softmax)
+          (app {span: "surf:121..139"}
+            (var {span: "surf:121..127"} concat)
+            (var {span: "surf:128..132"} rows)
+            (lit {span: "surf:134..138", surf_literal_style: "explicit", type: (t-prim {} i32)} 1))
+          (app {span: "surf:141..143"}
+            (var {} neg)
+            (lit {span: "surf:142..143", type: (t-prim {} i32)} 1)))))))

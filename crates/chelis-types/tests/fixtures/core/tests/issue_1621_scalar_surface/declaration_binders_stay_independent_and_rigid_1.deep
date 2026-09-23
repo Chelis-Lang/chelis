@@ -1,0 +1,37 @@
+(defsig {dtype_bounds: {p: float}} f (p) (t-fn {} (t-var {} p) (t-var {} p)))
+
+(def {}
+  f
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:29..49"}
+      (var {span: "surf:29..32"} mul)
+      (var {span: "surf:33..34"} x)
+      (cast {span: "surf:36..48"}
+        (lit {span: "surf:41..44", surf_literal_style: "unsuffixed", type: (t-var {} p)} 0.1)
+        (t-var {} p)))))
+
+(defsig {dtype_bounds: {p: int}} g (p) (t-fn {} (t-var {} p) (t-var {} p)))
+
+(def {}
+  g
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:77..95"}
+      (var {span: "surf:77..80"} add)
+      (var {span: "surf:81..82"} x)
+      (cast {span: "surf:84..94"}
+        (lit {span: "surf:89..90", surf_literal_style: "unsuffixed", type: (t-var {} p)} 1)
+        (t-var {} p)))))
+
+(def {}
+  a
+  (app {span: "surf:100..109"}
+    (var {span: "surf:100..101"} f)
+    (lit {span: "surf:102..108", type: (t-prim {} f64)} 3.0)))
+
+(def {}
+  b
+  (app {span: "surf:114..136"}
+    (var {span: "surf:114..115"} g)
+    (lit {span: "surf:116..135", type: (t-prim {} i64)} 9007199254740993)))

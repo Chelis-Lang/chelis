@@ -1,0 +1,13 @@
+(module {surf_path: "Frag.Io"}
+  frag.io
+  (export {} entry)
+  (defsig {}
+    entry
+    (t-fn {eff: (effects {})} (t-prim {} string) (t-prim {} string)))
+  (def {}
+    entry
+    (fn {}
+      (params {} (path {type: (t-var {} _)}))
+      (app {span: "surf:72..87"}
+        (var {span: "surf:72..81"} read_file)
+        (var {span: "surf:82..86"} path)))))

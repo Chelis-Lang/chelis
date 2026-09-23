@@ -1,0 +1,71 @@
+(def {}
+  data
+  (app {span: "surf:8..55"}
+    (var {span: "surf:8..17"} to_tensor)
+    (app {span: "surf:18..54"}
+      (var {} Cons)
+      (app {span: "surf:19..35"}
+        (var {} Cons)
+        (lit {span: "surf:20..26", surf_literal_style: "explicit", type: (t-prim {} f32)} 0.0)
+        (app {}
+          (var {} Cons)
+          (lit {span: "surf:28..34", surf_literal_style: "explicit", type: (t-prim {} f32)} 0.0)
+          (var {} Nil)))
+      (app {}
+        (var {} Cons)
+        (app {span: "surf:37..53"}
+          (var {} Cons)
+          (lit {span: "surf:38..44", surf_literal_style: "explicit", type: (t-prim {} f32)} 0.0)
+          (app {}
+            (var {} Cons)
+            (lit {span: "surf:46..52", surf_literal_style: "explicit", type: (t-prim {} f32)} 0.0)
+            (var {} Nil)))
+        (var {} Nil)))))
+
+(def {}
+  indices
+  (app {span: "surf:66..93"}
+    (var {span: "surf:66..75"} to_tensor)
+    (app {span: "surf:76..92"}
+      (var {} Cons)
+      (app {span: "surf:77..83"}
+        (var {} Cons)
+        (lit {span: "surf:78..79", type: (t-prim {} i32)} 1)
+        (app {}
+          (var {} Cons)
+          (lit {span: "surf:81..82", type: (t-prim {} i32)} 0)
+          (var {} Nil)))
+      (app {}
+        (var {} Cons)
+        (app {span: "surf:85..91"}
+          (var {} Cons)
+          (lit {span: "surf:86..87", type: (t-prim {} i32)} 0)
+          (app {}
+            (var {} Cons)
+            (lit {span: "surf:89..90", type: (t-prim {} i32)} 1)
+            (var {} Nil)))
+        (var {} Nil)))))
+
+(def {}
+  updates
+  (app {span: "surf:104..151"}
+    (var {span: "surf:104..113"} to_tensor)
+    (app {span: "surf:114..150"}
+      (var {} Cons)
+      (app {span: "surf:115..131"}
+        (var {} Cons)
+        (lit {span: "surf:116..122", surf_literal_style: "explicit", type: (t-prim {} f32)} 5.0)
+        (app {}
+          (var {} Cons)
+          (lit {span: "surf:124..130", surf_literal_style: "explicit", type: (t-prim {} f32)} 6.0)
+          (var {} Nil)))
+      (app {}
+        (var {} Cons)
+        (app {span: "surf:133..149"}
+          (var {} Cons)
+          (lit {span: "surf:134..140", surf_literal_style: "explicit", type: (t-prim {} f32)} 7.0)
+          (app {}
+            (var {} Cons)
+            (lit {span: "surf:142..148", surf_literal_style: "explicit", type: (t-prim {} f32)} 8.0)
+            (var {} Nil)))
+        (var {} Nil)))))

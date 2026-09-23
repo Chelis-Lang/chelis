@@ -1,0 +1,13 @@
+(def {} identity (fn {} (params {} f) (var {span: "surf:18..19"} f)))
+
+(def {}
+  measure
+  (app {span: "surf:30..43"}
+    (var {span: "surf:30..38"} identity)
+    (var {span: "surf:39..42"} len)))
+
+(def {}
+  out
+  (app {span: "surf:50..63"}
+    (var {span: "surf:50..57"} measure)
+    (lit {span: "surf:58..62", type: (t-prim {} i64)} 1)))

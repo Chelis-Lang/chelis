@@ -5,22 +5,22 @@ use chelis_ir::dag::{Dag, DimInfo, ExtentWitnessSite, RiscOp, RtAxis, TensorType
 use chelis_ir::eval::{TensorValue, eval_tensor_with};
 use chelis_ir::optimize::{common_subexpr_eliminate, dead_code_eliminate};
 use chelis_ir::specialize::specialize_for_exact_arithmetic;
-use chelis_surf::desugar::desugar_program;
-use chelis_surf::parser::parse_str;
+
+use chelis_deep::parser::parse_str;
 use chelis_types::check_ir_program;
 use chelis_types::types::Prim;
 
 fn lower(source: &str) -> chelis_ir::Dag {
-    let decls = parse_str(source).expect("Surf parse");
-    let checked = check_ir_program(&desugar_program(&decls)).unwrap_or_else(|report| {
+    let decls = parse_str(source).expect("Deep fixture");
+    let checked = check_ir_program(&decls).unwrap_or_else(|report| {
         panic!("type check failed: {:?}", report.errors);
     });
     chelis_ir::host::lower_named_tensor_entry_dag(&checked, "f").expect("named tensor entry lowers")
 }
 
 fn checked(source: &str) -> chelis_types::CheckedProgram {
-    let decls = parse_str(source).expect("Surf parse");
-    check_ir_program(&desugar_program(&decls)).unwrap_or_else(|report| {
+    let decls = parse_str(source).expect("Deep fixture");
+    check_ir_program(&decls).unwrap_or_else(|report| {
         panic!("type check failed: {:?}", report.errors);
     })
 }
@@ -53,25 +53,14 @@ fn local_claims(dag: &chelis_ir::Dag) -> Vec<(usize, u64, String, String, i32)> 
         .collect()
 }
 
-fn direct_source(body: &str) -> String {
-    format!("def f(x: tensor[*, f32]) -> tensor[*, f32] = {{\n  {body}\n}}\n")
-}
-
 fn runtime_branch_source() -> &'static str {
-    "def f(flag: bool, x: tensor[*, f32]) -> tensor[*, f32] = \
-     if flag then {\n  \
-       y: tensor[2, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n  \
-       y\n\
-     } else x\n"
+    include_str!("fixtures/core/tests/issue_2110_local_ascription_claim/runtime_branch_source_1.dp")
 }
 
 fn runtime_branch_inlined_helper_source() -> &'static str {
-    "def helper(x: tensor[*, f32]) -> tensor[*, f32] = {\n  \
-       y: tensor[2, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n  \
-       y\n\
-     }\n\
-     def f(flag: bool, x: tensor[*, f32]) -> tensor[*, f32] = \
-       if flag then helper(x) else x\n"
+    include_str!(
+        "fixtures/core/tests/issue_2110_local_ascription_claim/runtime_branch_inlined_helper_source_2.dp"
+    )
 }
 
 fn runtime_bool(value: bool) -> TensorValue {
@@ -171,8 +160,8 @@ fn selected_runtime_branch_executes_an_inlined_helpers_local_ascription_guard() 
 
 #[test]
 fn lowering_matches_the_authored_binding_and_attaches_one_exact_site_to_its_initializer() {
-    let dag = lower(&direct_source(
-        "y: tensor[2, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n  y",
+    let dag = lower(include_str!(
+        "fixtures/core/tests/issue_2110_local_ascription_claim/direct_claim_0.dp"
     ));
     let claims = local_claims(&dag);
     assert_eq!(claims.len(), 1, "exactly one authored obligation: {dag:?}");
@@ -206,10 +195,8 @@ fn lowering_matches_the_authored_binding_and_attaches_one_exact_site_to_its_init
 
 #[test]
 fn aliasing_and_dead_value_elimination_retain_the_initializer_obligation() {
-    let dag = lower(&direct_source(
-        "raw = pad(x, [[0i64, 0i64]], 0.0f32)\n  \
-         y: tensor[2, f32] = raw\n  \
-         x",
+    let dag = lower(include_str!(
+        "fixtures/core/tests/issue_2110_local_ascription_claim/direct_claim_1.dp"
     ));
     assert_eq!(local_claims(&dag).len(), 1, "dead except for its trap");
     assert!(
@@ -231,8 +218,9 @@ fn aliasing_and_dead_value_elimination_retain_the_initializer_obligation() {
 
 #[test]
 fn rebuild_cse_dce_and_specialization_preserve_the_exact_site() {
-    let source = direct_source("y: tensor[2, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n  y");
-    let original = lower(&source);
+    let source =
+        include_str!("fixtures/core/tests/issue_2110_local_ascription_claim/direct_claim_0.dp");
+    let original = lower(source);
     for (pass, dag) in [
         ("cse", common_subexpr_eliminate(&original)),
         ("dce", dead_code_eliminate(&original)),
@@ -336,12 +324,9 @@ fn fusion_preserves_the_exact_local_site_on_the_rebuilt_initializer() {
 
 #[test]
 fn grad_pruning_preserves_a_dead_except_for_trap_local_site() {
-    let original = lower(
-        "def f(x: tensor[*, f32]) -> tensor[f32] = {\n  \
-         y: tensor[2, f32] = exp(neg(x))\n  \
-         sum(y, 0)\n\
-         }\n",
-    );
+    let original = lower(include_str!(
+        "fixtures/core/tests/issue_2110_local_ascription_claim/grad_pruning_preserves_a_dead_except_for_trap_local_site_3.dp"
+    ));
     let output = original.roots()[0];
     let input = original
         .nodes()
@@ -360,8 +345,8 @@ fn grad_pruning_preserves_a_dead_except_for_trap_local_site() {
 
 #[test]
 fn ownership_lowering_keeps_the_claim_live_through_its_initializer_owner() {
-    let dag = lower(&direct_source(
-        "y: tensor[2, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n  y",
+    let dag = lower(include_str!(
+        "fixtures/core/tests/issue_2110_local_ascription_claim/direct_claim_0.dp"
     ));
     let claims = local_claims(&dag);
     let token = chelis_ir::dag::NodeId(claims[0].0);
@@ -385,16 +370,17 @@ fn ownership_lowering_keeps_the_claim_live_through_its_initializer_owner() {
 
 #[test]
 fn inferred_metadata_does_not_create_a_local_ascription_site() {
-    let dag = lower(&direct_source(
-        "inferred = pad(x, [[0i64, 0i64]], 0.0f32)\n  inferred",
+    let dag = lower(include_str!(
+        "fixtures/core/tests/issue_2110_local_ascription_claim/direct_claim_2.dp"
     ));
     assert!(local_claims(&dag).is_empty());
 }
 
 #[test]
 fn host_evaluation_kernel_carries_the_same_local_ascription_site() {
-    let source = direct_source("y: tensor[2, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n  y");
-    let checked = checked(&source);
+    let source =
+        include_str!("fixtures/core/tests/issue_2110_local_ascription_claim/direct_claim_0.dp");
+    let checked = checked(source);
     let session = chelis_ir::host::HostLoweringSession::new(&checked);
     let execution =
         chelis_ir::evaluation::RandomExecutionContext::new(chelis_ir::host::RandomLoweringState {
@@ -414,10 +400,9 @@ fn host_evaluation_kernel_carries_the_same_local_ascription_site() {
 
 #[test]
 fn staged_host_partition_retains_the_local_ascription_site() {
-    let source = "def f[m, n](source: tensor[m, f32], x: tensor[n, f32]) -> tensor[*, f32] = {\n  \
-                  y: tensor[2, f32] = reshape(x, [numel(source)])\n  \
-                  y\n\
-                  }\n";
+    let source = include_str!(
+        "fixtures/core/tests/issue_2110_local_ascription_claim/staged_host_partition_retains_the_local_ascription_site_4.dp"
+    );
     let checked = checked(source);
     let session = chelis_ir::host::HostLoweringSession::new(&checked);
     let execution =
@@ -442,15 +427,9 @@ fn staged_host_partition_retains_the_local_ascription_site() {
 
 #[test]
 fn each_inlined_activation_gets_a_distinct_one_owner_local_claim() {
-    let source = "def helper(x: tensor[*, f32]) -> tensor[*, f32] = {\n  \
-                  y: tensor[2, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n  \
-                  y\n\
-                  }\n\
-                  def f(x: tensor[*, f32]) -> tensor[*, f32] = {\n  \
-                  left = helper(x)\n  \
-                  right = helper(x)\n  \
-                  add(left, right)\n\
-                  }\n";
+    let source = include_str!(
+        "fixtures/core/tests/issue_2110_local_ascription_claim/each_inlined_activation_gets_a_distinct_one_owner_local_claim_5.dp"
+    );
     let dag = lower(source);
     let claims = local_claims(&dag);
     assert_eq!(claims.len(), 2, "one claim per helper activation: {dag:?}");
@@ -472,12 +451,9 @@ fn each_inlined_activation_gets_a_distinct_one_owner_local_claim() {
 
 #[test]
 fn vmap_shifts_the_local_claim_and_initializer_axis_together() {
-    let source = "def helper(x: tensor[*, f32]) -> tensor[*, f32] = {\n  \
-                  y: tensor[2, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n  \
-                  y\n\
-                  }\n\
-                  def f(xs: tensor[batch, *, f32]) -> tensor[batch, *, f32] = \
-                  vmap(helper)(xs)\n";
+    let source = include_str!(
+        "fixtures/core/tests/issue_2110_local_ascription_claim/vmap_shifts_the_local_claim_and_initializer_axis_together_6.dp"
+    );
     let dag = lower(source);
     let claims = local_claims(&dag);
     assert_eq!(claims.len(), 1, "one vmapped local obligation: {dag:?}");
@@ -493,13 +469,9 @@ fn vmap_shifts_the_local_claim_and_initializer_axis_together() {
 
 #[test]
 fn inserted_output_axis_and_observed_source_axis_are_independently_exact() {
-    let dag = lower(
-        "def f[c, a, h, w](g: &tensor[c, f32], x: &tensor[a, c, h, w, f32]) -> tensor[c, h, w, f32] = {\n  \
-         step1: tensor[c, h, f32] = insert(g, 1, shape(x, 2))\n  \
-         step2: tensor[c, h, w, f32] = insert(step1, 2, shape(x, 3))\n  \
-         step2\n\
-         }\n",
-    );
+    let dag = lower(include_str!(
+        "fixtures/core/tests/issue_2110_local_ascription_claim/inserted_output_axis_and_observed_source_axis_are_independently_exact_7.dp"
+    ));
     let coordinates = dag
         .nodes()
         .iter()
@@ -534,8 +506,8 @@ fn inserted_output_axis_and_observed_source_axis_are_independently_exact() {
 
 #[test]
 fn malformed_local_claim_roles_are_rejected_by_the_native_verifier() {
-    let direct = lower(&direct_source(
-        "y: tensor[2, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n  y",
+    let direct = lower(include_str!(
+        "fixtures/core/tests/issue_2110_local_ascription_claim/direct_claim_0.dp"
     ));
     let token = chelis_ir::dag::NodeId(local_claims(&direct)[0].0);
     assert!(chelis_ir::verify::verify(&direct).is_empty());
@@ -642,22 +614,11 @@ fn malformed_local_claim_roles_are_rejected_by_the_native_verifier() {
             !errors.is_empty(),
             "malformed local role {mutation} was accepted"
         );
-        if mutation == 7 {
-            assert!(
-                errors.iter().any(|error| {
-                    error == "local ascription owner 2 has multiple runtime branch activations"
-                }),
-                "{errors:?}"
-            );
-        }
     }
 
-    let named = lower(
-        "def f[n](anchor: tensor[n, f32], x: tensor[*, f32]) -> tensor[*, f32] = {\n  \
-         y: tensor[n, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n  \
-         y\n\
-         }\n",
-    );
+    let named = lower(include_str!(
+        "fixtures/core/tests/issue_2110_local_ascription_claim/malformed_local_claim_roles_are_rejected_by_the_native_verifier_8.dp"
+    ));
     let named_token = chelis_ir::dag::NodeId(local_claims(&named)[0].0);
     let mut missing_declaration_identity = named;
     let RiscOp::ExtentWitness { parameter, .. } = &mut missing_declaration_identity

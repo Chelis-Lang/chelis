@@ -1,0 +1,47 @@
+(defsig {dtype_bounds: {p: float}}
+  convert
+  (p)
+  (t-fn {}
+    (t-tensor {} (d-lit {} 2) (t-prim {} i32))
+    (t-var {} p)
+    (t-tensor {} (d-lit {} 2) (t-var {} p))))
+
+(def {}
+  convert
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (witness {type: (t-var {} _)}))
+    (cast {} (var {} x) (t-var {} p))))
+
+(def {}
+  a
+  (app {}
+    (var {} convert)
+    (app {}
+      (var {} to_tensor)
+      (app {}
+        (var {} Cons)
+        (lit {type: (t-prim {} i32)} 1)
+        (app {}
+          (var {} Cons)
+          (lit {type: (t-prim {} i32)} 2)
+          (var {} Nil))))
+    (cast {}
+      (lit {literal_source: integer,surf_literal_style: "unsuffixed", type: (t-prim {} __CORE_ARG_0__)} 0)
+      (t-prim {} __CORE_ARG_0__))))
+
+(def {}
+  b
+  (app {}
+    (var {} convert)
+    (app {}
+      (var {} to_tensor)
+      (app {}
+        (var {} Cons)
+        (lit {type: (t-prim {} i32)} 3)
+        (app {}
+          (var {} Cons)
+          (lit {type: (t-prim {} i32)} 4)
+          (var {} Nil))))
+    (cast {}
+      (lit {literal_source: integer,surf_literal_style: "unsuffixed", type: (t-prim {} __CORE_ARG_1__)} 0)
+      (t-prim {} __CORE_ARG_1__))))

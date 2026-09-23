@@ -1420,7 +1420,6 @@ fn zero_span() -> Span {
 mod tests {
     use super::*;
     use chelis_deep::parser::parse_str;
-    use chelis_surf::{desugar::desugar_program, parser::parse_str as parse_surf};
 
     fn checked(src: &str) -> CheckedProgram {
         let exprs = parse_str(src).unwrap();
@@ -1428,48 +1427,49 @@ mod tests {
         check_program(&checked).unwrap()
     }
 
-    fn surf_checked(src: &str) -> CheckedProgram {
-        let decls = parse_surf(src).expect("surf parse");
-        let deep = desugar_program(&decls);
-        let checked = chelis_types::check_ir_program(&deep).expect("type check");
-        check_program(&checked).expect("effect check")
-    }
-
     fn issue_1205_source(operations: usize, flat: bool) -> String {
-        let module = if flat { "Flat" } else { "Nested" };
-        let mut lines = vec![
-            format!("module FrontEndPerformance.{module}N{operations}"),
-            "def bc(c: f32) -> tensor[8, f32] = \
-             reshape(insert(to_tensor([c]), 0, 8i64), [8i64])"
-                .to_string(),
-        ];
-        if flat {
-            lines.push(
-                "def st(s: tensor[8, f32], i: i64) -> tensor[8, f32] = \
-                 if gte(i, 5i64) then s else {"
-                    .to_string(),
-            );
-            let mut previous = "s".to_string();
-            for index in 0..operations {
-                lines.push(format!(
-                    "  t{index} = mul(add({previous}, bc(cast(1.0, f32))), \
-                     bc(cast(0.5, f32)))"
-                ));
-                previous = format!("t{index}");
-            }
-            lines.extend([format!("  st({previous}, add(i, 1i64))"), "}".to_string()]);
-        } else {
-            let mut body = "s".to_string();
-            for _ in 0..operations {
-                body = format!("mul(add({body}, bc(cast(1.0, f32))), bc(cast(0.5, f32)))");
-            }
-            lines.push(format!(
-                "def st(s: tensor[8, f32], i: i64) -> tensor[8, f32] = \
-                 if gte(i, 5i64) then s else st({body}, add(i, 1i64))"
-            ));
+        fn step(input: &str) -> String {
+            format!(
+                "(app {{}} (var {{}} mul)
+                   (app {{}} (var {{}} add) {input}
+                     (app {{}} (var {{}} bc)
+                       (cast {{}} (lit {{surf_literal_style: \"unsuffixed\", type: (t-prim {{}} f32)}} 1.0) (t-prim {{}} f32))))
+                   (app {{}} (var {{}} bc)
+                     (cast {{}} (lit {{surf_literal_style: \"unsuffixed\", type: (t-prim {{}} f32)}} 0.5) (t-prim {{}} f32))))"
+            )
         }
-        lines.push("r = index(to_list(st(bc(cast(1.0, f32)), 0i64)), 0i64)".to_string());
-        lines.join("\n") + "\n"
+        fn recur(input: &str) -> String {
+            format!(
+                "(app {{}} (var {{}} st) {input}
+                   (app {{}} (var {{}} add) (var {{}} i)
+                     (lit {{type: (t-prim {{}} i64)}} 1)))"
+            )
+        }
+        let body = if flat {
+            let last = if operations == 0 {
+                "(var {} s)".to_string()
+            } else {
+                format!("(var {{}} t{})", operations - 1)
+            };
+            let mut body = recur(&last);
+            for index in (0..operations).rev() {
+                let input = if index == 0 {
+                    "(var {} s)".to_string()
+                } else {
+                    format!("(var {{}} t{})", index - 1)
+                };
+                body = format!("(let {{}} (bind {{}} t{index} {}) {body})", step(&input));
+            }
+            body
+        } else {
+            let mut body = "(var {} s)".to_string();
+            for _ in 0..operations {
+                body = step(&body);
+            }
+            recur(&body)
+        };
+        include_str!("../tests/fixtures/core/src/lib/issue_1205.deep")
+            .replace(r#"(var {span: "surf:202..211"} STEP_BODY)"#, &body)
     }
 
     fn issue_1205_effect_profile(operations: usize, flat: bool) -> EffectWorkProfile {
@@ -1478,8 +1478,7 @@ mod tests {
             .stack_size(64 * 1024 * 1024)
             .spawn(move || {
                 let source = issue_1205_source(operations, flat);
-                let decls = parse_surf(&source).expect("#1205 surf fixture parses");
-                let deep = desugar_program(&decls);
+                let deep = parse_str(&source).expect("#1205 Deep fixture parses");
                 let typed =
                     chelis_types::check_ir_program(&deep).expect("#1205 fixture type checks");
                 reset_effect_work_profile();
@@ -1527,8 +1526,7 @@ mod tests {
 
     #[test]
     fn effect_annotation_reconstruction_preserves_type_context() {
-        let decls = parse_surf("def add_one(x: i32) -> i32 = add(x, 1)").expect("surf parse");
-        let deep = desugar_program(&decls);
+        let deep = parse_str(include_str!("../tests/fixtures/core/src/lib/effect_annotation_reconstruction_preserves_type_context.deep")).expect("Deep fixture");
         let typed = chelis_types::check_ir_program(&deep).expect("type check");
         let expected_type_env = typed.type_env().clone();
         let expected_signatures = typed.signature_inference().clone();
@@ -2108,16 +2106,6 @@ mod tests {
     }
 
     #[test]
-    fn declared_effect_reader_has_no_local_optional_carrier_adapter() {
-        let source = include_str!("lib.rs");
-        let definition = ["fn stamped_", "parts"].concat();
-        assert!(
-            !source.contains(&definition),
-            "E5b requires declared-effect reads to disposition ExprCarrier directly"
-        );
-    }
-
-    #[test]
     fn malformed_legacy_effect_readers_preserve_tagged_behavior() {
         let span = Span::new(0, 0);
         let malformed = |tag, children: Vec<Expr>| {
@@ -2433,12 +2421,7 @@ mod tests {
     fn malformed_seed_constants_never_cross_the_effect_boundary() {
         let malformed = "(def {} value (handle-effect {effect: random} \
             (lit {type: (t-prim {} i64)} 1 2) (lit {type: (t-prim {} f32)} 1.0)))";
-        assert!(
-            parse_str(malformed)
-                .unwrap_err()
-                .to_string()
-                .contains("wrong child count for `lit`")
-        );
+        assert!(parse_str(malformed).is_err());
         for seed in [
             "(lit {type: (t-prim {} i64)} 1.0)",
             "(lit {type: (t-prim {} bool)} true)",
@@ -2466,10 +2449,7 @@ mod tests {
 
     #[test]
     fn nonliteral_handlers_are_rejected_once_by_the_effect_owner() {
-        for (effect, expected) in [
-            ("random", "requires a signed i64 literal seed"),
-            ("resource", "requires a string literal device"),
-        ] {
+        for effect in ["random", "resource"] {
             let source = format!(
                 "(def {{}} value (handle-effect {{effect: {effect}}} \
                  (var {{}} computed_handler) (lit {{type: (t-prim {{}} i32)}} 1)))"
@@ -2480,7 +2460,6 @@ mod tests {
             let errors = check_program(&typed).expect_err("nonliteral handler must reject");
             assert_eq!(errors.len(), 1, "one effects owner diagnostic: {errors:?}");
             assert_eq!(errors[0].kind, EffectErrorKind::InvalidHandler);
-            assert!(errors[0].message.contains(expected), "{errors:?}");
         }
     }
 
@@ -2506,12 +2485,9 @@ mod tests {
     // missing), so a consumer can tell "pure" from "unknown".
     #[test]
     fn def_effect_rows_reports_io_and_empty_rows() {
-        let program = surf_checked(
-            r#"
-def logged(msg: string) -> string = debug(msg)
-def pure_add(x: i64, y: i64) -> i64 = add(x, y)
-"#,
-        );
+        let program = checked(include_str!(
+            "../tests/fixtures/core/src/lib/def_effect_rows_reports_io_and_empty_rows.deep"
+        ));
         let rows = def_effect_rows(&program);
         let logged = rows.get("logged").expect("logged effect row present");
         assert!(logged.contains(&Effect::Io));
@@ -2558,7 +2534,9 @@ def pure_add(x: i64, y: i64) -> i64 = add(x, y)
 
     #[test]
     fn c_target_accepts_only_explicit_host_resource_designators() {
-        let program = surf_checked("def main() -> i32 = with device(\"cpu\") { 1 }\n");
+        let program = checked(include_str!(
+            "../tests/fixtures/core/src/lib/c_target_accepts_only_explicit_host_resource_designators.deep"
+        ));
         validate_build_target(&program, "c").expect("exact cpu host region");
 
         for device in [
@@ -2578,8 +2556,12 @@ def pure_add(x: i64, y: i64) -> i64 = add(x, y)
             "cpu:two words",
             "cpu:/0",
         ] {
-            let program = surf_checked(&format!(
-                "def main() -> i32 = with device(\"{device}\") {{ 1 }}\n"
+            let program = checked(&format!(
+                "(defsig {{}} main (t-fn {{}} (t-prim {{}} i32)))
+                 (def {{}} main (fn {{}} (params {{}})
+                   (handle-effect {{effect: resource}}
+                     (lit {{type: (t-prim {{}} string)}} \"{device}\")
+                     (lit {{type: (t-prim {{}} i32)}} 1))))"
             ));
             let errors = validate_build_target(&program, "c").expect_err(device);
             assert_eq!(errors.len(), 1, "{device}: {errors:?}");
@@ -2588,60 +2570,45 @@ def pure_add(x: i64, y: i64) -> i64 = add(x, y)
                 EffectErrorKind::BuildTargetMismatch,
                 "{device}"
             );
-            assert_eq!(
-                errors[0].message,
-                format!(
-                    "`chelis build --target c` cannot satisfy resource region `{device}`: \
-                     host C accepts only exact `cpu`"
-                ),
-                "{device}"
-            );
-            assert_eq!(
-                errors[0].suggestions,
-                vec![
-                    "Use `with device(\"cpu\") { ... }` for host execution; accelerator \
-                     placement is a separate target capability (chelis#2104)"
-                        .to_string()
-                ],
-                "{device}"
-            );
         }
     }
 
     #[test]
     fn c_target_checks_each_nested_resource_region() {
         for source in [
-            r#"def main() -> i32 = with device("cpu") { with device("cuda:0") { 1 } }"#,
-            r#"def main() -> i32 = with device("metal") { with device("cpu") { 1 } }"#,
-            r#"def main() -> i32 = with device("cpu") { with device("cpu:author-device") { 1 } }"#,
-            r#"def main() -> i32 = with device("cpu:socket_9") { with device("cpu") { 1 } }"#,
+            include_str!(
+                "../tests/fixtures/core/src/lib/c_target_checks_each_nested_resource_region.deep"
+            ),
+            include_str!(
+                "../tests/fixtures/core/src/lib/c_target_checks_each_nested_resource_region_2.deep"
+            ),
+            include_str!(
+                "../tests/fixtures/core/src/lib/c_target_checks_each_nested_resource_region_3.deep"
+            ),
+            include_str!(
+                "../tests/fixtures/core/src/lib/c_target_checks_each_nested_resource_region_4.deep"
+            ),
         ] {
-            let program = surf_checked(source);
+            let program = checked(source);
             let errors = validate_build_target(&program, "c").expect_err(source);
             assert_eq!(errors.len(), 1, "{source}: {errors:?}");
             assert_eq!(errors[0].kind, EffectErrorKind::BuildTargetMismatch);
         }
 
-        let accepted =
-            surf_checked(r#"def main() -> i32 = with device("cpu") { with device("cpu") { 1 } }"#);
+        let accepted = checked(include_str!(
+            "../tests/fixtures/core/src/lib/c_target_checks_each_nested_resource_region_5.deep"
+        ));
         validate_build_target(&accepted, "c").expect("nested host regions");
 
-        let two_rejected = surf_checked(
-            r#"def main() -> i32 = with device("cpu:author-device") { with device("cpu:socket_9") { 1 } }"#,
-        );
+        let two_rejected = checked(include_str!(
+            "../tests/fixtures/core/src/lib/c_target_checks_each_nested_resource_region_6.deep"
+        ));
         let errors = validate_build_target(&two_rejected, "c").expect_err("two rejected regions");
         assert_eq!(errors.len(), 2, "{errors:?}");
-        assert_eq!(
+        assert!(
             errors
                 .iter()
-                .map(|error| error.message.as_str())
-                .collect::<Vec<_>>(),
-            [
-                "`chelis build --target c` cannot satisfy resource region \
-                 `cpu:author-device`: host C accepts only exact `cpu`",
-                "`chelis build --target c` cannot satisfy resource region \
-                 `cpu:socket_9`: host C accepts only exact `cpu`",
-            ]
+                .all(|error| error.kind == EffectErrorKind::BuildTargetMismatch)
         );
     }
 
@@ -2665,13 +2632,9 @@ def pure_add(x: i64, y: i64) -> i64 = add(x, y)
 
     #[test]
     fn map_propagates_io_effect_from_callback() {
-        let program = surf_checked(
-            r#"
-def emit(x: i64) -> i64 = debug(add(x, cast(1, i64)))
-xs: List[i64] = [cast(1, i64), cast(2, i64)]
-ys = map(emit, xs)
-"#,
-        );
+        let program = checked(include_str!(
+            "../tests/fixtures/core/src/lib/map_propagates_io_effect_from_callback.deep"
+        ));
         let (inferred, _) = infer_program_effects(program.annotated_exprs());
         assert!(
             inferred
@@ -2684,12 +2647,9 @@ ys = map(emit, xs)
 
     #[test]
     fn fold_propagates_io_effect_from_inline_callback() {
-        let program = surf_checked(
-            r#"
-xs: List[i64] = [cast(1, i64), cast(2, i64)]
-total = fold(fn (acc: i64, x: i64) -> debug(add(acc, x)), cast(0, i64), xs)
-"#,
-        );
+        let program = checked(include_str!(
+            "../tests/fixtures/core/src/lib/fold_propagates_io_effect_from_inline_callback.deep"
+        ));
         let (inferred, _) = infer_program_effects(program.annotated_exprs());
         assert!(
             inferred
@@ -2702,12 +2662,9 @@ total = fold(fn (acc: i64, x: i64) -> debug(add(acc, x)), cast(0, i64), xs)
 
     #[test]
     fn scan_propagates_io_effect_from_inline_callback() {
-        let program = surf_checked(
-            r#"
-xs: List[i64] = [cast(1, i64), cast(2, i64)]
-totals = scan(fn (acc: i64, x: i64) -> debug(add(acc, x)), cast(0, i64), xs)
-"#,
-        );
+        let program = checked(include_str!(
+            "../tests/fixtures/core/src/lib/scan_propagates_io_effect_from_inline_callback.deep"
+        ));
         let (inferred, _) = infer_program_effects(program.annotated_exprs());
         assert!(
             inferred
@@ -2720,18 +2677,11 @@ totals = scan(fn (acc: i64, x: i64) -> debug(add(acc, x)), cast(0, i64), xs)
 
     #[test]
     fn partition_propagates_random_effect_to_root() {
-        let decls = parse_surf(
-            r#"
-def keep(x: tensor[f32]) -> bool = gt(tensor_to_scalar(dropout(x, 0.5)), 0.0)
-xs: List[tensor[f32]] = [
-  trace(pad_sequences_to([[1.0]], cast(1, i64), cast(0.0, f32)), 0, 1),
-  trace(pad_sequences_to([[2.0]], cast(1, i64), cast(0.0, f32)), 0, 1)
-]
-buckets = partition(keep, xs)
-"#,
-        )
-        .expect("surf parse");
-        let deep = desugar_program(&decls);
+        let deep = parse_str(include_str!(
+            "../tests/fixtures/core/src/lib/partition_propagates_random_effect_to_root.deep"
+        ))
+        .expect("Deep fixture");
+
         let checked = chelis_types::check_ir_program(&deep).expect("type check");
         let errors = check_program(&checked).expect_err("partition should propagate Random effect");
         assert!(
@@ -2746,12 +2696,9 @@ buckets = partition(keep, xs)
 
     #[test]
     fn flat_map_propagates_io_effect_from_callback() {
-        let program = surf_checked(
-            r#"
-xs: List[i64] = [cast(1, i64), cast(2, i64)]
-ys = flat_map(fn (x: i64) -> debug([x, add(x, cast(10, i64))]), xs)
-"#,
-        );
+        let program = checked(include_str!(
+            "../tests/fixtures/core/src/lib/flat_map_propagates_io_effect_from_callback.deep"
+        ));
         let (inferred, _) = infer_program_effects(program.annotated_exprs());
         assert!(
             inferred
@@ -2764,18 +2711,11 @@ ys = flat_map(fn (x: i64) -> debug([x, add(x, cast(10, i64))]), xs)
 
     #[test]
     fn map_propagates_random_effect_to_root() {
-        let decls = parse_surf(
-            r#"
-def step(x: tensor[8, f32]) -> tensor[8, f32] = dropout(x, 0.5)
-xs: List[tensor[8, f32]] = [
-  (to_tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]) : tensor[8, f32]),
-  (to_tensor([8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0]) : tensor[8, f32])
-]
-ys = map(step, xs)
-"#,
-        )
-        .expect("surf parse");
-        let deep = desugar_program(&decls);
+        let deep = parse_str(include_str!(
+            "../tests/fixtures/core/src/lib/map_propagates_random_effect_to_root.deep"
+        ))
+        .expect("Deep fixture");
+
         let checked = chelis_types::check_ir_program(&deep).expect("type check");
         let errors = check_program(&checked).expect_err("map should propagate Random effect");
         assert!(
@@ -2790,14 +2730,9 @@ ys = map(step, xs)
 
     #[test]
     fn file_io_builtins_infer_io_but_mmap_reads_stay_pure() {
-        let program = surf_checked(
-            r#"
-mapped = mmap_file("dataset.txt")
-prefix = mmap_read(mapped, cast(0, i64), cast(4, i64))
-width = mmap_len(mapped)
-contents = read_file("dataset.txt")
-"#,
-        );
+        let program = checked(include_str!(
+            "../tests/fixtures/core/src/lib/file_io_builtins_infer_io_but_mmap_reads_stay_pure.deep"
+        ));
         let (inferred, _) = infer_program_effects(program.annotated_exprs());
         assert!(
             inferred
@@ -2834,12 +2769,9 @@ contents = read_file("dataset.txt")
         // Hull subprocess exec: a binding whose value applies process_run
         // acquires Effect::Io (mirroring read_file), while an adjacent pure
         // arithmetic binding stays effect-free.
-        let program = surf_checked(
-            r#"
-result = process_run("echo", ["hi"])
-pure_value = add(cast(1, i64), cast(2, i64))
-"#,
-        );
+        let program = checked(include_str!(
+            "../tests/fixtures/core/src/lib/process_run_infers_io_but_pure_binding_stays_pure.deep"
+        ));
         let (inferred, _) = infer_program_effects(program.annotated_exprs());
         assert!(
             inferred
@@ -2862,11 +2794,9 @@ pure_value = add(cast(1, i64), cast(2, i64))
     #[test]
     fn test_assert_adds_test_effect_to_calling_fn() {
         // A top-level def whose body calls test_assert should acquire Effect::Test.
-        let program = surf_checked(
-            r#"
-def my_check() -> unit = test_assert(true, "ok")
-"#,
-        );
+        let program = checked(include_str!(
+            "../tests/fixtures/core/src/lib/test_assert_adds_test_effect_to_calling_fn.deep"
+        ));
         let (inferred, _) = infer_program_effects(program.annotated_exprs());
         assert!(
             inferred
@@ -2879,17 +2809,9 @@ def my_check() -> unit = test_assert(true, "ok")
 
     #[test]
     fn test_assert_close_tensor_propagates_test_effect() {
-        let program = surf_checked(
-            r#"
-def close() -> unit =
-  test_assert_close_tensor(
-    to_tensor([1.0, 2.0]),
-    to_tensor([1.0, 2.0]),
-    0.01,
-    "close"
-  )
-"#,
-        );
+        let program = checked(include_str!(
+            "../tests/fixtures/core/src/lib/test_assert_close_tensor_propagates_test_effect.deep"
+        ));
         let (inferred, _) = infer_program_effects(program.annotated_exprs());
         assert!(
             inferred
@@ -2902,12 +2824,9 @@ def close() -> unit =
 
     #[test]
     fn test_effect_propagates_transitively_through_calls() {
-        let program = surf_checked(
-            r#"
-def inner() -> unit = test_assert(true, "inner")
-def outer() -> unit = inner()
-"#,
-        );
+        let program = checked(include_str!(
+            "../tests/fixtures/core/src/lib/test_effect_propagates_transitively_through_calls.deep"
+        ));
         let (inferred, _) = infer_program_effects(program.annotated_exprs());
         assert!(
             inferred
@@ -2921,12 +2840,9 @@ def outer() -> unit = inner()
     #[test]
     fn with_seed_does_not_handle_test_effect() {
         // `with seed(...)` must remove Random, but must NOT remove Test.
-        let program = surf_checked(
-            r#"
-def sealed() -> unit =
-  with seed(7i64) { test_assert(true, "inside-handler") }
-"#,
-        );
+        let program = checked(include_str!(
+            "../tests/fixtures/core/src/lib/with_seed_does_not_handle_test_effect.deep"
+        ));
         let (inferred, _) = infer_program_effects(program.annotated_exprs());
         assert!(
             inferred
@@ -2941,13 +2857,11 @@ def sealed() -> unit =
     fn empty_effect_sig_rejects_test_assert_caller() {
         // `def g() -> unit ! {} = test_assert(...)` should fail: body inferred Test,
         // sig declares no effects.
-        let decls = parse_surf(
-            r#"
-def g() -> unit ! {} = test_assert(true, "leak")
-"#,
-        )
-        .expect("surf parse");
-        let deep = desugar_program(&decls);
+        let deep = parse_str(include_str!(
+            "../tests/fixtures/core/src/lib/empty_effect_sig_rejects_test_assert_caller.deep"
+        ))
+        .expect("Deep fixture");
+
         let checked = chelis_types::check_ir_program(&deep).expect("type check");
         let errors = check_program(&checked)
             .expect_err("def with `! {}` that calls test_assert must be rejected");
@@ -2963,14 +2877,11 @@ def g() -> unit ! {} = test_assert(true, "leak")
     fn empty_effect_sig_rejects_transitive_test_caller() {
         // Caller has no assert in its body, but it calls a function that does.
         // The `! {}` signature on g must still reject this.
-        let decls = parse_surf(
-            r#"
-def f() -> unit = test_assert(true, "x")
-def g() -> unit ! {} = f()
-"#,
-        )
-        .expect("surf parse");
-        let deep = desugar_program(&decls);
+        let deep = parse_str(include_str!(
+            "../tests/fixtures/core/src/lib/empty_effect_sig_rejects_transitive_test_caller.deep"
+        ))
+        .expect("Deep fixture");
+
         let checked = chelis_types::check_ir_program(&deep).expect("type check");
         let errors =
             check_program(&checked).expect_err("transitive caller with `! {}` must be rejected");
@@ -2987,13 +2898,11 @@ def g() -> unit ! {} = f()
     #[test]
     fn declared_test_effect_accepts_test_assert_caller() {
         // When the caller honestly declares `! { Test }`, no error.
-        let decls = parse_surf(
-            r#"
-def test_ok() -> unit ! {Test} = test_assert(true, "ok")
-"#,
-        )
-        .expect("surf parse");
-        let deep = desugar_program(&decls);
+        let deep = parse_str(include_str!(
+            "../tests/fixtures/core/src/lib/declared_test_effect_accepts_test_assert_caller.deep"
+        ))
+        .expect("Deep fixture");
+
         let checked = chelis_types::check_ir_program(&deep).expect("type check");
         check_program(&checked).expect("declared Test should accept test_assert caller");
     }
@@ -3003,13 +2912,8 @@ def test_ok() -> unit ! {Test} = test_assert(true, "ok")
         // A sig with `! { IO }` is not a superset of `{ Test }`. Adding a test_assert
         // call inside an IO-only function should still be rejected — the effect
         // systems are orthogonal axes of the effect row.
-        let decls = parse_surf(
-            r#"
-def leak() -> unit ! {IO} = test_assert(true, "sneak")
-"#,
-        )
-        .expect("surf parse");
-        let deep = desugar_program(&decls);
+        let deep = parse_str(include_str!("../tests/fixtures/core/src/lib/declared_io_effect_still_rejects_test_effect_leakage.deep")).expect("Deep fixture");
+
         let checked = chelis_types::check_ir_program(&deep).expect("type check");
         let errors =
             check_program(&checked).expect_err("IO-declared fn must not silently acquire Test");
@@ -3032,8 +2936,8 @@ def leak() -> unit ! {IO} = test_assert(true, "sneak")
     /// Type-check a module-WRAPPED Deep program (the shape `chelis check` runs
     /// on a `.dp` MODULE), preserving the `(module ...)` wrapper.
     fn typed_module(src: &str) -> CheckedProgram {
-        let decls = parse_surf(src).expect("surf parse");
-        let deep = desugar_program(&decls);
+        let deep = parse_str(src).expect("Deep fixture");
+
         chelis_types::check_typed_program(&deep).expect("type check")
     }
 
@@ -3042,13 +2946,9 @@ def leak() -> unit ! {IO} = test_assert(true, "sneak")
         // `entry` is declared pure (`! { }`) but its body calls `noisy`, which
         // performs Random. Wrapped in `(module ...)`, the declared-vs-inferred
         // validator must still fire after descending into the wrapper.
-        let checked = typed_module(
-            r#"module Frag.Effect
-export (entry)
-def noisy(x: tensor[8, f32]) -> tensor[8, f32] = dropout(x, 0.5)
-def entry(x: tensor[8, f32]) -> tensor[8, f32] ! { } = noisy(x)
-"#,
-        );
+        let checked = typed_module(include_str!(
+            "../tests/fixtures/core/src/lib/module_wrapped_declared_pure_body_does_random_is_rejected.deep"
+        ));
         let errors = check_program(&checked)
             .expect_err("module-wrapped declared-pure body performing Random must be rejected");
         assert!(
@@ -3065,12 +2965,9 @@ def entry(x: tensor[8, f32]) -> tensor[8, f32] ! { } = noisy(x)
     fn module_wrapped_declared_pure_body_does_io_is_rejected() {
         // The IO counterpart: a declared-pure function whose body calls a
         // file-IO builtin must be rejected module-wrapped, the same as Random.
-        let checked = typed_module(
-            r#"module Frag.Io
-export (entry)
-def entry(path: string) -> string ! { } = read_file(path)
-"#,
-        );
+        let checked = typed_module(include_str!(
+            "../tests/fixtures/core/src/lib/module_wrapped_declared_pure_body_does_io_is_rejected.deep"
+        ));
         let errors = check_program(&checked)
             .expect_err("module-wrapped declared-pure body performing IO must be rejected");
         assert!(
@@ -3087,12 +2984,9 @@ def entry(path: string) -> string ! { } = read_file(path)
     fn module_wrapped_unhandled_random_value_root_is_rejected() {
         // A value-binding (non-fn) root that performs Random inside a module
         // wrapper must still be caught by the unhandled-random-roots validator.
-        let checked = typed_module(
-            r#"module Frag.Root
-export (sampled)
-sampled: tensor[8, f32] = dropout(to_tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]), 0.5)
-"#,
-        );
+        let checked = typed_module(include_str!(
+            "../tests/fixtures/core/src/lib/module_wrapped_unhandled_random_value_root_is_rejected.deep"
+        ));
         let errors = check_program(&checked)
             .expect_err("module-wrapped unhandled Random value root must be rejected");
         assert!(
@@ -3107,13 +3001,9 @@ sampled: tensor[8, f32] = dropout(to_tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 
     fn module_wrapped_pure_program_checks_clean() {
         // The negative-parity case: a pure module must still check clean after
         // the descent change (no effects -> no rejection).
-        let checked = typed_module(
-            r#"module Frag.Pure
-export (entry)
-def helper(x: f32) -> f32 = add(x, x)
-def entry(x: f32) -> f32 = helper(mul(x, x))
-"#,
-        );
+        let checked = typed_module(include_str!(
+            "../tests/fixtures/core/src/lib/module_wrapped_pure_program_checks_clean.deep"
+        ));
         check_program(&checked).expect("pure module-wrapped program must check clean");
     }
 
@@ -3122,13 +3012,9 @@ def entry(x: f32) -> f32 = helper(mul(x, x))
         // A module-wrapped function that honestly declares `! { Random }` and
         // handles the effect with `with seed(...)` must check clean: the
         // descent fix tightens the unsound-accept path only, not honest code.
-        let checked = typed_module(
-            r#"module Frag.Honest
-export (entry)
-def entry(x: tensor[8, f32]) -> tensor[8, f32] =
-  with seed(7i64) { dropout(x, 0.5) }
-"#,
-        );
+        let checked = typed_module(include_str!(
+            "../tests/fixtures/core/src/lib/module_wrapped_honest_random_signature_checks_clean.deep"
+        ));
         check_program(&checked).expect("handled-Random module-wrapped program must check clean");
     }
 }

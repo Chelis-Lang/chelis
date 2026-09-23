@@ -1,0 +1,72 @@
+(module {surf_path: "Stats.Prob"}
+  stats.prob
+  (export {} probability prob_value)
+  (deftype {opaque: true}
+    Probability
+    ()
+    (variant {} Probability (field {} value (t-prim {} f32))))
+  (deftype {}
+    WrapRec
+    ()
+    (variant {}
+      WrapRec
+      (field {} prob (t-adt {} Probability))
+      (field {} score (t-prim {} f32))))
+  (defsig {} probability (t-fn {} (t-prim {} f32) (t-adt {} Probability)))
+  (def {}
+    probability
+    (fn {}
+      (params {} (x {type: (t-var {} _)}))
+      (record {span: "surf:211..235"}
+        Probability
+        (kv {} value (var {span: "surf:232..233"} x)))))
+  (defsig {} prob_value (t-fn {} (t-adt {} Probability) (t-prim {} f32)))
+  (def {}
+    prob_value
+    (fn {}
+      (params {} (p {type: (t-var {} _)}))
+      (access {span: "surf:276..283"} (var {span: "surf:276..277"} p) value)))
+  (defsig {} internal_make (t-fn {} (t-prim {} f32) (t-adt {} Probability)))
+  (def {}
+    internal_make
+    (fn {}
+      (params {} (x {type: (t-var {} _)}))
+      (record {span: "surf:327..351"}
+        Probability
+        (kv {} value (var {span: "surf:348..349"} x)))))
+  (defsig {} internal_consume (t-fn {} (t-adt {} Probability) (t-prim {} f32)))
+  (def {}
+    internal_consume
+    (fn {}
+      (params {} (p {type: (t-var {} _)}))
+      (access {span: "surf:398..405"} (var {span: "surf:398..399"} p) value)))
+  (defsig {}
+    with_t
+    (t-fn {} (t-fn {} (t-adt {} Probability) (t-prim {} f32)) (t-prim {} f32)))
+  (def {}
+    with_t
+    (fn {}
+      (params {} (f {type: (t-var {} _)}))
+      (app {span: "surf:449..468"}
+        (var {span: "surf:449..450"} f)
+        (app {span: "surf:451..467"}
+          (var {span: "surf:451..462"} probability)
+          (lit {span: "surf:463..466", type: (t-prim {} f32)} 0.5)))))
+  (defsig {} helper (t-fn {} (t-adt {} WrapRec)))
+  (def {}
+    helper
+    (fn {}
+      (params {})
+      (record {span: "surf:495..541"}
+        WrapRec
+        (kv {}
+          prob
+          (app {span: "surf:511..527"}
+            (var {span: "surf:511..522"} probability)
+            (lit {span: "surf:523..526", type: (t-prim {} f32)} 0.5)))
+        (kv {} score (lit {span: "surf:536..539", type: (t-prim {} f32)} 1.0)))))
+  (def {}
+    half
+    (app {span: "surf:549..565"}
+      (var {span: "surf:549..560"} probability)
+      (lit {span: "surf:561..564", type: (t-prim {} f32)} 0.5))))

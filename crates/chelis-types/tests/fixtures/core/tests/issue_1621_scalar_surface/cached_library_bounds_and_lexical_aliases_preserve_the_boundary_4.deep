@@ -1,0 +1,19 @@
+(defsig {dtype_bounds: {p: float}}
+  f
+  (p)
+  (t-fn {} (t-tensor {} (d-lit {} 3) (t-var {} p)) (t-var {} p) (t-var {} p)))
+
+(def {}
+  f
+  (fn {}
+    (params {} (xs {type: (t-var {} _)}) (c {type: (t-var {} _)}))
+    (let {span: "surf:47..80"}
+      (bind {}
+        gt
+        (fn {span: "surf:54..67"}
+          (params {} a b)
+          (var {span: "surf:66..67"} b)))
+      (app {span: "surf:69..78"}
+        (var {span: "surf:69..71"} gt)
+        (var {span: "surf:72..74"} xs)
+        (var {span: "surf:76..77"} c)))))

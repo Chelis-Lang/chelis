@@ -1,0 +1,27 @@
+(defsig {}
+  constish
+  (t-fn {} (t-tensor {} (d-lit {} 3) (t-prim {} f32)) (t-prim {} f32)))
+
+(def {}
+  constish
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (cast {span: "surf:42..56"}
+      (lit {span: "surf:47..50", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 1.0)
+      (t-prim {} f32))))
+
+(defsig {}
+  g
+  (t-fn {}
+    (t-tensor {} (d-lit {} 3) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 3) (t-prim {} f32))))
+
+(def {}
+  g
+  (fn {}
+    (params {} (theta {type: (t-var {} _)}))
+    (app {span: "surf:106..138"}
+      (grad {span: "surf:106..131", wrt: (var {} theta)}
+        (var {span: "surf:111..119"} constish)
+        (lit {type: (t-prim {} i32)} 0))
+      (var {span: "surf:132..137"} theta))))

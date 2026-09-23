@@ -1,0 +1,8 @@
+(module {surf_path: "Demo.Inner"}
+  demo.inner
+  (defsig {} inner_fn (t-fn {} (t-prim {} i64) (t-prim {} i64)))
+  (def {}
+    inner_fn
+    (fn {}
+      (params {} (x {type: (t-var {} _)}))
+      (var {span: "surf:49..50"} x))))

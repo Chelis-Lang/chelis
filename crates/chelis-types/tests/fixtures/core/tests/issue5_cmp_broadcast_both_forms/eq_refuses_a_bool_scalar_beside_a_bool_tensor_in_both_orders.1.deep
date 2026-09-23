@@ -1,0 +1,16 @@
+(def {}
+  f
+  (fn {}
+    (params {})
+    (app {span: "surf:10..44"}
+      (var {span: "surf:10..12"} eq)
+      (lit {span: "surf:13..17", type: (t-prim {} bool)} true)
+      (app {span: "surf:19..43"}
+        (var {span: "surf:19..28"} to_tensor)
+        (app {span: "surf:29..42"}
+          (var {} Cons)
+          (lit {span: "surf:30..34", type: (t-prim {} bool)} true)
+          (app {}
+            (var {} Cons)
+            (lit {span: "surf:36..41", type: (t-prim {} bool)} false)
+            (var {} Nil)))))))

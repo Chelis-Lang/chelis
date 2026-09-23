@@ -1,0 +1,23 @@
+(module {surf_path: "Geo.Units"}
+  geo.units
+  (export {} meters)
+  (deftype {opaque: true} Meters () (variant {} Meters (t-prim {} f32)))
+  (defsig {} meters (t-fn {} (t-prim {} f32) (t-adt {} Meters)))
+  (def {}
+    meters
+    (fn {}
+      (params {} (x {type: (t-var {} _)}))
+      (app {span: "surf:102..111"}
+        (var {span: "surf:102..108"} Meters)
+        (var {span: "surf:109..110"} x))))
+  (defsig {} read_pos (t-fn {} (t-adt {} Meters) (t-prim {} f32)))
+  (def {}
+    read_pos
+    (fn {}
+      (params {} (m {type: (t-var {} _)}))
+      (match {span: "surf:145..180"}
+        (var {span: "surf:151..152"} m)
+        (arm {}
+          (pat-ctor {} Meters (pat-var {} v))
+          ()
+          (var {span: "surf:177..178"} v))))))

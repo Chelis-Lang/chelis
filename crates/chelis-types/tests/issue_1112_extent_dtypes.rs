@@ -14,14 +14,12 @@
 //! Both polarities throughout: every accepted `i64` form has the
 //! rejected `i32` counterpart beside it.
 
-use chelis_surf::desugar::desugar_program;
-use chelis_surf::parser::parse_str as parse_surf;
 use chelis_types::check_typed_program;
 use chelis_types::errors::CheckError;
 
-fn typecheck_surf(source: &str) -> Vec<CheckError> {
-    let decls = parse_surf(source).expect("surf parse should succeed");
-    let deep = desugar_program(&decls);
+fn typecheck_core(source: &str) -> Vec<CheckError> {
+    let deep: Vec<chelis_deep::Expr> =
+        chelis_deep::parse_and_stamp_file(source).expect("valid core fixture");
     match check_typed_program(&deep) {
         Ok(_) => Vec::new(),
         Err(prog_errors) => prog_errors.errors,
@@ -41,7 +39,7 @@ fn errors_summary(errors: &[CheckError]) -> String {
 }
 
 fn assert_clean(source: &str, what: &str) {
-    let errors = typecheck_surf(source);
+    let errors = typecheck_core(source);
     assert!(
         errors.is_empty(),
         "{what} must type-check clean; got:\n{}",
@@ -50,7 +48,7 @@ fn assert_clean(source: &str, what: &str) {
 }
 
 fn assert_rejected_with(source: &str, needle: &str, what: &str) {
-    let errors = typecheck_surf(source);
+    let errors = typecheck_core(source);
     assert!(
         !errors.is_empty(),
         "{what} must be rejected, but checked clean"
@@ -69,20 +67,16 @@ fn assert_rejected_with(source: &str, needle: &str, what: &str) {
 #[test]
 fn shape_read_types_int64() {
     assert_clean(
-        r#"
-def f(x: tensor[3, f32]) -> i64 = shape(x, 0)
-"#,
+        include_str!("fixtures/core/tests/issue_1112_extent_dtypes/shape_read_types_int64.0.deep"),
         "shape() read declared i64",
     );
 }
 
 #[test]
 fn shape_read_is_not_int32() {
-    let errors = typecheck_surf(
-        r#"
-def f(x: tensor[3, f32]) -> i32 = shape(x, 0)
-"#,
-    );
+    let errors = typecheck_core(include_str!(
+        "fixtures/core/tests/issue_1112_extent_dtypes/shape_read_is_not_int32.0.deep"
+    ));
     assert!(
         !errors.is_empty(),
         "shape() read declared i32 must be rejected under [05-DIM-2]"
@@ -92,15 +86,15 @@ def f(x: tensor[3, f32]) -> i32 = shape(x, 0)
 #[test]
 fn shape_axis_stays_int32_and_rejects_int64() {
     assert_clean(
-        r#"
-def f(x: tensor[3, f32]) -> i64 = shape(x, cast(0, i32))
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1112_extent_dtypes/shape_axis_stays_int32_and_rejects_int64.0.deep"
+        ),
         "shape() with cast(0, i32) axis",
     );
     assert_rejected_with(
-        r#"
-def g(x: tensor[3, f32]) -> i64 = shape(x, 0i64)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1112_extent_dtypes/shape_axis_stays_int32_and_rejects_int64.1.deep"
+        ),
         "i32 axis",
         "shape() with an i64 axis",
     );
@@ -113,9 +107,9 @@ def g(x: tensor[3, f32]) -> i64 = shape(x, 0i64)
 #[test]
 fn shrink_int64_bounds_typecheck() {
     assert_clean(
-        r#"
-def f(x: tensor[2, 4, f32]) -> tensor[1, 2, f32] = shrink(&x, [[0i64, 1i64], [1i64, 3i64]])
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1112_extent_dtypes/shrink_int64_bounds_typecheck.0.deep"
+        ),
         "shrink with i64 bounds pairs",
     );
 }
@@ -123,9 +117,9 @@ def f(x: tensor[2, 4, f32]) -> tensor[1, 2, f32] = shrink(&x, [[0i64, 1i64], [1i
 #[test]
 fn shrink_int32_bounds_rejected_naming_int64() {
     assert_rejected_with(
-        r#"
-def f(x: tensor[2, 4, f32]) -> tensor[1, 2, f32] = shrink(&x, [[0, 1], [1, 3]])
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1112_extent_dtypes/shrink_int32_bounds_rejected_naming_int64.0.deep"
+        ),
         "i64",
         "shrink with bare i32 bounds pairs",
     );
@@ -138,9 +132,9 @@ def f(x: tensor[2, 4, f32]) -> tensor[1, 2, f32] = shrink(&x, [[0, 1], [1, 3]])
 #[test]
 fn pad_int64_pairs_typecheck() {
     assert_clean(
-        r#"
-def f(x: tensor[2, f32]) -> tensor[4, f32] = pad(&x, [[1i64, 1i64]], 0.0)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1112_extent_dtypes/pad_int64_pairs_typecheck.0.deep"
+        ),
         "pad with i64 padding pairs",
     );
 }
@@ -148,9 +142,9 @@ def f(x: tensor[2, f32]) -> tensor[4, f32] = pad(&x, [[1i64, 1i64]], 0.0)
 #[test]
 fn pad_int32_pairs_rejected_naming_int64() {
     assert_rejected_with(
-        r#"
-def f(x: tensor[2, f32]) -> tensor[4, f32] = pad(&x, [[1, 1]], 0.0)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1112_extent_dtypes/pad_int32_pairs_rejected_naming_int64.0.deep"
+        ),
         "i64",
         "pad with bare i32 padding pairs",
     );
@@ -163,9 +157,9 @@ def f(x: tensor[2, f32]) -> tensor[4, f32] = pad(&x, [[1, 1]], 0.0)
 #[test]
 fn stride_int64_steps_typecheck() {
     assert_clean(
-        r#"
-def f(x: tensor[2, 4, f32]) -> tensor[2, 2, f32] = stride(&x, 1i64, 2i64)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1112_extent_dtypes/stride_int64_steps_typecheck.0.deep"
+        ),
         "stride with i64 steps",
     );
 }
@@ -173,9 +167,9 @@ def f(x: tensor[2, 4, f32]) -> tensor[2, 2, f32] = stride(&x, 1i64, 2i64)
 #[test]
 fn stride_int32_steps_rejected_naming_int64() {
     assert_rejected_with(
-        r#"
-def f(x: tensor[2, 4, f32]) -> tensor[2, 2, f32] = stride(&x, 1, 2)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1112_extent_dtypes/stride_int32_steps_rejected_naming_int64.0.deep"
+        ),
         "i64",
         "stride with bare i32 steps",
     );
@@ -188,9 +182,9 @@ def f(x: tensor[2, 4, f32]) -> tensor[2, 2, f32] = stride(&x, 1, 2)
 #[test]
 fn expand_int64_size_typechecks() {
     assert_clean(
-        r#"
-def f(b: tensor[1, 4, f32]) -> tensor[8, 4, f32] = expand(&b, 0, 8i64)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1112_extent_dtypes/expand_int64_size_typechecks.0.deep"
+        ),
         "expand with an i64 literal size",
     );
 }
@@ -198,9 +192,9 @@ def f(b: tensor[1, 4, f32]) -> tensor[8, 4, f32] = expand(&b, 0, 8i64)
 #[test]
 fn expand_int32_size_rejected_naming_int64() {
     assert_rejected_with(
-        r#"
-def f(b: tensor[1, 4, f32]) -> tensor[8, 4, f32] = expand(&b, 0, 8)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1112_extent_dtypes/expand_int32_size_rejected_naming_int64.0.deep"
+        ),
         "write Ni64",
         "expand with a bare i32 size",
     );
@@ -209,9 +203,9 @@ def f(b: tensor[1, 4, f32]) -> tensor[8, 4, f32] = expand(&b, 0, 8)
 #[test]
 fn expand_int64_axis_rejected() {
     assert_rejected_with(
-        r#"
-def f(b: tensor[1, 4, f32]) -> tensor[8, 4, f32] = expand(&b, 0i64, 8i64)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1112_extent_dtypes/expand_int64_axis_rejected.0.deep"
+        ),
         "i32",
         "expand with an i64 axis",
     );
@@ -223,9 +217,9 @@ def f(b: tensor[1, 4, f32]) -> tensor[8, 4, f32] = expand(&b, 0i64, 8i64)
 #[test]
 fn expand_shape_sourced_size_typechecks() {
     assert_clean(
-        r#"
-def f[n](x: tensor[n, 4, f32], b: tensor[1, 4, f32]) -> tensor[n, 4, f32] = expand(&b, 0, shape(x, 0))
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1112_extent_dtypes/expand_shape_sourced_size_typechecks.0.deep"
+        ),
         "expand with a shape()-sourced size",
     );
 }
@@ -237,10 +231,9 @@ def f[n](x: tensor[n, 4, f32], b: tensor[1, 4, f32]) -> tensor[n, 4, f32] = expa
 #[test]
 fn named_axis_expand_int64_size_typechecks() {
     assert_clean(
-        r#"
-sig add_axis[rest]: &tensor[..rest, f32] -> tensor[..rest, one, f32]
-def add_axis(x) = insert(x, one, 1i64)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1112_extent_dtypes/named_axis_expand_int64_size_typechecks.0.deep"
+        ),
         "named-axis expand with an i64 literal size",
     );
 }
@@ -248,10 +241,9 @@ def add_axis(x) = insert(x, one, 1i64)
 #[test]
 fn named_axis_expand_int32_size_rejected() {
     assert_rejected_with(
-        r#"
-sig add_axis[rest]: &tensor[..rest, f32] -> tensor[..rest, one, f32]
-def add_axis(x) = insert(x, one, 1)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1112_extent_dtypes/named_axis_expand_int32_size_rejected.0.deep"
+        ),
         "i64",
         "named-axis expand with a bare i32 size",
     );
@@ -270,10 +262,9 @@ def add_axis(x) = insert(x, one, 1)
 #[test]
 fn reshape_bare_shape_element_propagates_symbolic_dim() {
     assert_clean(
-        r#"
-sig flat_view: &tensor[batch, 4, f32] -> tensor[batch, 4, f32]
-def flat_view(x) = reshape(x, [shape(x, 0), 4i64])
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1112_extent_dtypes/reshape_bare_shape_element_propagates_symbolic_dim.0.deep"
+        ),
         "reshape with a bare shape() element and i64 literal",
     );
 }
@@ -283,10 +274,9 @@ def flat_view(x) = reshape(x, [shape(x, 0), 4i64])
 #[test]
 fn reshape_cast_shape_element_still_propagates() {
     assert_clean(
-        r#"
-sig flat_view: &tensor[batch, 4, f32] -> tensor[batch, 4, f32]
-def flat_view(x) = reshape(x, [cast(shape(x, cast(0, i32)), i64), cast(4, i64)])
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1112_extent_dtypes/reshape_cast_shape_element_still_propagates.0.deep"
+        ),
         "reshape with the cast-wrapped shape() element",
     );
 }
@@ -294,9 +284,9 @@ def flat_view(x) = reshape(x, [cast(shape(x, cast(0, i32)), i64), cast(4, i64)])
 #[test]
 fn reshape_suffixed_literal_list_typechecks() {
     assert_clean(
-        r#"
-def f(x: tensor[2, 2, f32]) -> tensor[4, f32] = reshape(&x, [4i64])
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1112_extent_dtypes/reshape_suffixed_literal_list_typechecks.0.deep"
+        ),
         "reshape with an i64-suffixed literal list",
     );
 }
@@ -304,9 +294,9 @@ def f(x: tensor[2, 2, f32]) -> tensor[4, f32] = reshape(&x, [4i64])
 #[test]
 fn reshape_unsuffixed_list_rejected_naming_the_fix() {
     assert_rejected_with(
-        r#"
-def f(x: tensor[2, 2, f32]) -> tensor[4, f32] = reshape(&x, [4])
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1112_extent_dtypes/reshape_unsuffixed_list_rejected_naming_the_fix.0.deep"
+        ),
         "i64",
         "reshape with an unsuffixed i32 shape list",
     );
@@ -321,15 +311,11 @@ def f(x: tensor[2, 2, f32]) -> tensor[4, f32] = reshape(&x, [4])
 #[test]
 fn permute_axes_stay_int32() {
     assert_clean(
-        r#"
-def f(x: tensor[2, 4, f32]) -> tensor[4, 2, f32] = permute(&x, 1, 0)
-"#,
+        include_str!("fixtures/core/tests/issue_1112_extent_dtypes/permute_axes_stay_int32.0.deep"),
         "permute with bare i32 axes",
     );
     assert_rejected_with(
-        r#"
-def g(x: tensor[2, 4, f32]) -> tensor[4, 2, f32] = permute(&x, 1i64, 0i64)
-"#,
+        include_str!("fixtures/core/tests/issue_1112_extent_dtypes/permute_axes_stay_int32.1.deep"),
         "i32 axis indices",
         "permute with i64 axes",
     );
@@ -340,15 +326,15 @@ def g(x: tensor[2, 4, f32]) -> tensor[4, 2, f32] = permute(&x, 1i64, 0i64)
 #[test]
 fn reduce_window_lists_are_int64() {
     assert_clean(
-        r#"
-def f(x: tensor[4, 4, f32]) -> tensor[2, 2, f32] = reduce_window_max(&x, [2i64, 2i64], [2i64, 2i64])
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1112_extent_dtypes/reduce_window_lists_are_int64.0.deep"
+        ),
         "reduce_window_max with i64 window/strides",
     );
     assert_rejected_with(
-        r#"
-def g(x: tensor[4, 4, f32]) -> tensor[2, 2, f32] = reduce_window_max(&x, [2, 2], [2, 2])
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1112_extent_dtypes/reduce_window_lists_are_int64.1.deep"
+        ),
         "List[i64]",
         "reduce_window_max with i32 window",
     );
@@ -362,9 +348,9 @@ def g(x: tensor[4, 4, f32]) -> tensor[2, 2, f32] = reduce_window_max(&x, [2, 2],
 #[test]
 fn reshape_mixed_suffix_list_rejected() {
     assert_rejected_with(
-        r#"
-def f(x: tensor[2, 2, f32]) -> tensor[4, f32] = reshape(&x, [2i64, 2i32])
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1112_extent_dtypes/reshape_mixed_suffix_list_rejected.0.deep"
+        ),
         "i32",
         "reshape with a mixed-suffix shape list",
     );

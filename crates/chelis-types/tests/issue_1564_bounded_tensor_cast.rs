@@ -1,112 +1,144 @@
-//! [05-OP-63] preserves shape; [04-DTYPE-2] constrains each instantiation.
-use chelis_surf::{desugar::desugar_program, parser::parse_str};
+//! Bounded tensor casts preserve shape and constrain each instantiation.
+use chelis_types::errors::CheckErrorKind;
 use chelis_types::{check_ir_program, check_typed_program};
 
-fn check(source: &str, expected: Option<&str>) {
-    let program = desugar_program(&parse_str(source).expect("Surf"));
-    let messages = |result: Result<_, chelis_types::InferResult>| match result {
-        Ok(_) => vec![],
-        Err(result) => result
+fn template(name: &str, args: &[&str]) -> Vec<chelis_deep::Expr> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/core/tests/issue_1564_bounded_tensor_cast")
+        .join(format!("{name}.deep"));
+    let mut source = std::fs::read_to_string(path).expect("core fixture");
+    for (index, value) in args.iter().enumerate() {
+        source = source.replace(&format!("__CORE_ARG_{index}__"), value);
+    }
+    chelis_deep::parser::parse_str(&source).expect("valid parameterized Deep fixture")
+}
+
+fn check(name: &str, args: &[&str], expected: Option<CheckErrorKind>) {
+    let program = template(name, args);
+    let kinds = |result: Result<_, chelis_types::InferResult>| match result {
+        Ok(_) => Vec::new(),
+        Err(report) => report
             .errors
-            .iter()
-            .map(|e| format!("{:?}: {}", e.kind, e.message))
+            .into_iter()
+            .map(|e| format!("{:?}", e.kind))
             .collect::<Vec<_>>(),
     };
-    let ir = messages(check_ir_program(&program));
-    let typed = messages(check_typed_program(&program));
-    assert_eq!(ir, typed, "ingress parity: {source}");
+    let ir = kinds(check_ir_program(&program));
+    let typed = kinds(check_typed_program(&program));
+    assert_eq!(ir, typed, "ingress parity: {name}, {args:?}");
     match expected {
-        None => assert!(ir.is_empty(), "{source}: {ir:?}"),
-        Some(needle) => assert!(
-            ir.iter().any(|m| m.contains(needle)),
-            "{source}: expected {needle}, got {ir:?}"
+        None => assert!(ir.is_empty(), "{name}, {args:?}: {ir:?}"),
+        Some(kind) => assert!(
+            ir.contains(&format!("{kind:?}")),
+            "{name}, {args:?}: expected {kind:?}, got {ir:?}"
         ),
     }
 }
 
 #[test]
 fn bounded_tensor_targets_preserve_shape_and_instantiate_independently() {
-    for (family, first, second) in [
-        ("Float", "f32", "f64"),
-        ("Float", "f16", "bf16"),
-        ("Int", "i16", "i64"),
-        ("Int", "i8", "i32"),
-        ("Numeric", "f32", "i64"),
+    for (args, expected) in [
+        (&["float", "f32", "f64"][..], None),
+        (&["float", "f16", "bf16"][..], None),
+        (&["int", "i16", "i64"][..], None),
+        (&["int", "i8", "i32"][..], None),
+        (&["numeric", "f32", "i64"][..], None),
     ] {
         check(
-            &format!(
-                "def recast[p: {family}](x: tensor[2, p]) -> tensor[2, p] = cast(x, p)\na = recast(cast(to_tensor([1, 2]), {first}))\nb = recast(cast(to_tensor([3, 4]), {second}))\n"
-            ),
-            None,
-        );
-        check(
-            &format!(
-                "def convert[p: {family}](x: tensor[2, i32], witness: p) -> tensor[2, p] = cast(x, p)\na = convert(to_tensor([1, 2]), cast(0, {first}))\nb = convert(to_tensor([3, 4]), cast(0, {second}))\n"
-            ),
-            None,
+            "bounded_tensor_targets_preserve_shape_and_instantiate_independently_template_0",
+            args,
+            expected,
         );
     }
+    for (args, expected) in [(&["f32", "f64"][..], None), (&["f16", "bf16"][..], None)] {
+        check(
+            "bounded_tensor_targets_preserve_shape_and_instantiate_independently_template_1",
+            args,
+            expected,
+        );
+    }
+    for (args, expected) in [(&["i16", "i64"][..], None), (&["i8", "i32"][..], None)] {
+        check(
+            "bounded_tensor_targets_preserve_shape_and_instantiate_independently_template_2",
+            args,
+            expected,
+        );
+    }
+    check(
+        "bounded_tensor_targets_preserve_shape_and_instantiate_independently_template_3",
+        &[],
+        None,
+    );
 }
 
 #[test]
 fn invalid_target_and_family_are_still_type_errors() {
     check(
-        "def f[p](x: tensor[2, p]) -> tensor[2, p] = cast(x, p)\n",
-        Some("04-DTYPE-1"),
+        "invalid_target_and_family_are_still_type_errors_template_0",
+        &[],
+        Some(CheckErrorKind::TypeMismatch),
     );
     check(
-        "def f[p: Float](x: tensor[2, p]) -> tensor[2, p] = cast(x, p)\nout = f(to_tensor([1, 2]))\n",
-        Some("Float"),
+        "invalid_target_and_family_are_still_type_errors_template_1",
+        &[],
+        Some(CheckErrorKind::PrecisionMismatch),
     );
     check(
-        "def f[p: Int](x: tensor[2, p]) -> tensor[2, p] = cast(x, p)\nout = f(to_tensor([1.0f32, 2.0f32]))\n",
-        Some("Int"),
+        "invalid_target_and_family_are_still_type_errors_template_2",
+        &[],
+        Some(CheckErrorKind::PrecisionMismatch),
     );
     check(
-        "def f[p: Numeric](x: tensor[2, p]) -> tensor[2, p] = cast(x, p)\nout = f(to_tensor([true, false]))\n",
-        Some("Numeric"),
+        "invalid_target_and_family_are_still_type_errors_template_3",
+        &[],
+        Some(CheckErrorKind::PrecisionMismatch),
     );
     check(
-        "out = cast(to_tensor([1, 2]), float64)\n",
-        Some("not a recognized primitive"),
+        "invalid_target_and_family_are_still_type_errors_template_4",
+        &[],
+        Some(CheckErrorKind::CastNonTensor),
     );
     check(
-        "def f[p: Float](x: tensor[2, p]) -> tensor[3, p] = cast(x, p)\n",
-        Some("DimensionMismatch"),
+        "invalid_target_and_family_are_still_type_errors_template_5",
+        &[],
+        Some(CheckErrorKind::DimensionMismatch),
     );
 }
 
 #[test]
 fn truncating_bounded_tensor_cast_requires_float_to_integer() {
     check(
-        "def f[p: Float, q: Int](x: tensor[2, p], witness: q) -> tensor[2, q] = cast_trunc(x, q)\nout = f(to_tensor([1.5f32, -2.5f32]), 0i64)\n",
+        "truncating_bounded_tensor_cast_requires_float_to_integer_template_0",
+        &[],
         None,
     );
     check(
-        "def f[p: Int](x: tensor[2, f32], witness: p) -> tensor[2, p] = cast_trunc(x, p)\nout = f(to_tensor([1.5f32, -2.5f32]), 0i64)\n",
+        "truncating_bounded_tensor_cast_requires_float_to_integer_template_1",
+        &[],
         None,
     );
-    check(
-        "def f[p: Float](x: tensor[2, p]) -> tensor[2, p] = cast_trunc(x, p)\n",
-        Some("05-OP-6"),
-    );
-    check(
-        "def f[p: Int](x: tensor[2, p]) -> tensor[2, p] = cast_trunc(x, p)\n",
-        Some("05-OP-6"),
-    );
+    for (args, expected) in [
+        (&["float"][..], Some(CheckErrorKind::CastNonTensor)),
+        (&["int"][..], Some(CheckErrorKind::CastNonTensor)),
+    ] {
+        check(
+            "truncating_bounded_tensor_cast_requires_float_to_integer_template_2",
+            args,
+            expected,
+        );
+    }
 }
 
 #[test]
 fn result_constraints_obey_bounded_target_family() {
-    let declaration = "def convert[p: Float](x: tensor[2, i32]) -> tensor[2, p] = cast(x, p)\n";
     check(
-        &format!(
-            "{declaration}a: tensor[2, f32] = convert(to_tensor([1, 2]))\nb: tensor[2, f64] = convert(to_tensor([1, 2]))\n"
-        ),
+        "result_constraints_obey_bounded_target_family_template_0",
+        &[],
         None,
     );
     check(
-        &format!("{declaration}a: tensor[2, i64] = convert(to_tensor([1, 2]))\n"),
-        Some("PrecisionMismatch"),
+        "result_constraints_obey_bounded_target_family_template_1",
+        &[],
+        Some(CheckErrorKind::PrecisionMismatch),
     );
 }

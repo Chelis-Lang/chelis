@@ -1,0 +1,24 @@
+(defsig {}
+  test_a
+  (t-fn {eff: (effects {} test)}
+    (t-tensor {} (d-lit {} 3) (t-prim {} f32))
+    (t-unit {})))
+
+(def {}
+  test_a
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (let {span: "surf:49..120"}
+      (bind {}
+        g
+        (fn {span: "surf:57..111"}
+          (params {} t)
+          (app {span: "surf:67..111"}
+            (var {span: "surf:67..91"} test_assert_close_tensor)
+            (var {span: "surf:92..93"} t)
+            (var {span: "surf:95..96"} t)
+            (lit {span: "surf:98..105", type: (t-prim {} f64)} 0.01)
+            (lit {span: "surf:107..110", type: (t-prim {} string)} "m"))))
+      (app {span: "surf:114..118"}
+        (var {span: "surf:114..115"} g)
+        (var {span: "surf:116..117"} x)))))

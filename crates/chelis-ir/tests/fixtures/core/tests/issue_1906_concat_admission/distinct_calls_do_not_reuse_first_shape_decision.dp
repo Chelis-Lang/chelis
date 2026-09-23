@@ -1,0 +1,61 @@
+(defsig {}
+  join_columns
+  (s)
+  (t-fn {}
+    (t-tensor {} (d-var {} s) (d-name {} *) (t-prim {} f32))
+    (t-tensor {} (d-var {} s) (d-name {} *) (t-prim {} f32))
+    (t-var {} _)))
+
+(def {}
+  join_columns
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (y {type: (t-var {} _)}))
+    (app {span: "surf:66..86"}
+      (var {span: "surf:66..72"} concat)
+      (app {span: "surf:73..79"}
+        (var {} Cons)
+        (var {span: "surf:74..75"} x)
+        (app {} (var {} Cons) (var {span: "surf:77..78"} y) (var {} Nil)))
+      (lit {span: "surf:81..85", surf_literal_style: "explicit", type: (t-prim {} i32)} 1))))
+
+(defsig {}
+  fixed
+  (s)
+  (t-fn {}
+    (t-tensor {} (d-var {} s) (d-lit {} 2) (t-prim {} f32))
+    (t-tensor {} (d-var {} s) (d-lit {} 4) (t-prim {} f32))))
+
+(def {}
+  fixed
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:145..176"}
+      (var {span: "surf:145..152"} softmax)
+      (app {span: "surf:153..171"}
+        (var {span: "surf:153..165"} join_columns)
+        (var {span: "surf:166..167"} x)
+        (var {span: "surf:169..170"} x))
+      (app {span: "surf:173..175"}
+        (var {} neg)
+        (lit {span: "surf:174..175", type: (t-prim {} i32)} 1)))))
+
+(defsig {}
+  dynamic
+  (s)
+  (t-fn {}
+    (t-tensor {} (d-var {} s) (d-name {} *) (t-prim {} f32))
+    (t-tensor {} (d-var {} s) (d-name {} *) (t-prim {} f32))))
+
+(def {}
+  dynamic
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:237..268"}
+      (var {span: "surf:237..244"} softmax)
+      (app {span: "surf:245..263"}
+        (var {span: "surf:245..257"} join_columns)
+        (var {span: "surf:258..259"} x)
+        (var {span: "surf:261..262"} x))
+      (app {span: "surf:265..267"}
+        (var {} neg)
+        (lit {span: "surf:266..267", type: (t-prim {} i32)} 1)))))

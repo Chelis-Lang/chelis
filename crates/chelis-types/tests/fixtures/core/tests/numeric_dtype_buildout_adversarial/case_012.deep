@@ -1,0 +1,8 @@
+(defsig {} out (t-prim {} f64))
+
+(def {}
+  out
+  (app {span: "surf:11..26"}
+    (var {} add)
+    (lit {span: "surf:11..17", surf_literal_style: "explicit", type: (t-prim {} f32)} 1.0)
+    (lit {span: "surf:20..26", type: (t-prim {} f64)} 1.0)))

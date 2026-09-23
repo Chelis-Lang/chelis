@@ -1,0 +1,20 @@
+(defsig {}
+  f
+  (n)
+  (t-fn {}
+    (t-tensor {} (d-var {} n) (d-lit {} 4) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 1) (d-lit {} 4) (t-prim {} f32))
+    (t-tensor {} (d-var {} n) (d-lit {} 4) (t-prim {} f32))))
+
+(def {}
+  f
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (b {type: (t-var {} _)}))
+    (app {span: "surf:77..103"}
+      (var {span: "surf:77..83"} expand)
+      (borrow {span: "surf:84..86"} (var {span: "surf:85..86"} b))
+      (lit {span: "surf:88..89", type: (t-prim {} i32)} 0)
+      (app {span: "surf:91..102"}
+        (var {span: "surf:91..96"} shape)
+        (var {span: "surf:97..98"} x)
+        (lit {span: "surf:100..101", type: (t-prim {} i32)} 0)))))

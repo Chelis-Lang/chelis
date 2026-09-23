@@ -1,0 +1,7 @@
+(defsig {} main (t-fn {} (t-prim {} i64)))
+
+(def {}
+  main
+  (fn {}
+    (params {})
+    (lit {span: "surf:20..25", type: (t-prim {} i64)} 42)))

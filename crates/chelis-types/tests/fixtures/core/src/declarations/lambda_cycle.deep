@@ -1,0 +1,27 @@
+(module {surf_path: "LambdaCycle"}
+  lambdacycle
+  (def {}
+    carried
+    (app {span: "surf:30..62"}
+      (var {span: "surf:30..33"} map)
+      (fn {span: "surf:34..53"}
+        (params {} (x {type: (t-prim {} i32)}))
+        (app {span: "surf:49..53"}
+          (var {span: "surf:49..50"} f)
+          (var {span: "surf:51..52"} x)))
+      (app {span: "surf:55..61"}
+        (var {} Cons)
+        (lit {span: "surf:56..57", type: (t-prim {} i32)} 1)
+        (app {}
+          (var {} Cons)
+          (lit {span: "surf:59..60", type: (t-prim {} i32)} 2)
+          (var {} Nil)))))
+  (defsig {} f (t-fn {} (t-prim {} i32) (t-prim {} i32)))
+  (def {}
+    f
+    (fn {}
+      (params {} (n {type: (t-var {} _)}))
+      (app {span: "surf:87..102"}
+        (var {span: "surf:87..90"} add)
+        (var {span: "surf:91..92"} n)
+        (var {span: "surf:94..101"} carried)))))

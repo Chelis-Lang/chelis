@@ -15,14 +15,16 @@
 //!
 //! Both polarities per op: the i32 axis stays accepted.
 
-use chelis_surf::desugar::desugar_program;
-use chelis_surf::parser::parse_str as parse_surf;
+use chelis_deep::parser::parse_str as parse_core;
 use chelis_types::errors::CheckError;
 use chelis_types::{AxisArgumentLayout, BUILTIN_NAMES, BUILTINS, check_typed_program};
 
-fn typecheck_surf(source: &str) -> Vec<CheckError> {
-    let decls = parse_surf(source).expect("surf parse should succeed");
-    let deep = desugar_program(&decls);
+fn typecheck_core(source: &str) -> Vec<CheckError> {
+    let deep = if source.trim_start().starts_with('[') {
+        serde_json::from_str(source).expect("lossless AST fixture")
+    } else {
+        parse_core(source).expect("Deep fixture parse should succeed")
+    };
     match check_typed_program(&deep) {
         Ok(_) => Vec::new(),
         Err(prog_errors) => prog_errors.errors,
@@ -42,7 +44,7 @@ fn errors_summary(errors: &[CheckError]) -> String {
 }
 
 fn assert_clean(source: &str, what: &str) {
-    let errors = typecheck_surf(source);
+    let errors = typecheck_core(source);
     assert!(
         errors.is_empty(),
         "{what} must type-check clean; got:\n{}",
@@ -51,7 +53,7 @@ fn assert_clean(source: &str, what: &str) {
 }
 
 fn assert_rejects_axis(source: &str, op: &str, axis_dtype: &str) {
-    let errors = typecheck_surf(source);
+    let errors = typecheck_core(source);
     assert!(
         !errors.is_empty(),
         "{op} with a {axis_dtype} axis must be rejected, but checked clean"
@@ -70,15 +72,15 @@ fn assert_rejects_int64_axis(source: &str, op: &str) {
 #[test]
 fn cumsum_int32_axis_accepted_int64_rejected() {
     assert_clean(
-        r#"
-def f(x: tensor[2, 4, f32]) -> tensor[2, 4, f32] = cumsum(&x, 1)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1113_axis_dtype_guard/cumsum_int32_axis_accepted_int64_rejected_73.deep"
+        ),
         "cumsum with a bare i32 axis",
     );
     assert_rejects_int64_axis(
-        r#"
-def g(x: tensor[2, 4, f32]) -> tensor[2, 4, f32] = cumsum(&x, 1i64)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1113_axis_dtype_guard/cumsum_int32_axis_accepted_int64_rejected_79.deep"
+        ),
         "cumsum",
     );
 }
@@ -86,15 +88,15 @@ def g(x: tensor[2, 4, f32]) -> tensor[2, 4, f32] = cumsum(&x, 1i64)
 #[test]
 fn softmax_int32_axis_accepted_int64_rejected() {
     assert_clean(
-        r#"
-def f(x: tensor[2, 4, f32]) -> tensor[2, 4, f32] = softmax(&x, 1)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1113_axis_dtype_guard/softmax_int32_axis_accepted_int64_rejected_89.deep"
+        ),
         "softmax with a bare i32 axis",
     );
     assert_rejects_int64_axis(
-        r#"
-def g(x: tensor[2, 4, f32]) -> tensor[2, 4, f32] = softmax(&x, 1i64)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1113_axis_dtype_guard/softmax_int32_axis_accepted_int64_rejected_95.deep"
+        ),
         "softmax",
     );
 }
@@ -102,15 +104,15 @@ def g(x: tensor[2, 4, f32]) -> tensor[2, 4, f32] = softmax(&x, 1i64)
 #[test]
 fn concat_int32_axis_accepted_int64_rejected() {
     assert_clean(
-        r#"
-def f(x: tensor[2, 4, f32], y: tensor[2, 4, f32]) -> tensor[4, 4, f32] = concat([x, y], 0)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1113_axis_dtype_guard/concat_int32_axis_accepted_int64_rejected_105.deep"
+        ),
         "concat with a bare i32 axis",
     );
     assert_rejects_int64_axis(
-        r#"
-def g(x: tensor[2, 4, f32], y: tensor[2, 4, f32]) -> tensor[4, 4, f32] = concat([x, y], 0i64)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1113_axis_dtype_guard/concat_int32_axis_accepted_int64_rejected_111.deep"
+        ),
         "concat",
     );
 }
@@ -118,10 +120,9 @@ def g(x: tensor[2, 4, f32], y: tensor[2, 4, f32]) -> tensor[4, 4, f32] = concat(
 #[test]
 fn concat_list_overload_does_not_apply_the_axis_contract() {
     assert_clean(
-        r#"
-xs = [1.0, 2.0]
-ys = concat(xs, [3.0, 4.0])
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1113_axis_dtype_guard/concat_list_overload_does_not_apply_the_axis_contract_121.deep"
+        ),
         "ordinary List concat has no axis slot",
     );
 }
@@ -129,15 +130,15 @@ ys = concat(xs, [3.0, 4.0])
 #[test]
 fn sort_int32_axis_accepted_int64_rejected() {
     assert_clean(
-        r#"
-def f(x: tensor[2, 4, f32]) -> (tensor[2, 4, f32], tensor[2, 4, i64]) = sort(&x, 1)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1113_axis_dtype_guard/sort_int32_axis_accepted_int64_rejected_132.deep"
+        ),
         "sort with a bare i32 axis",
     );
     assert_rejects_int64_axis(
-        r#"
-def g(x: tensor[2, 4, f32]) -> (tensor[2, 4, f32], tensor[2, 4, i64]) = sort(&x, 1i64)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1113_axis_dtype_guard/sort_int32_axis_accepted_int64_rejected_138.deep"
+        ),
         "sort",
     );
 }
@@ -148,9 +149,9 @@ def g(x: tensor[2, 4, f32]) -> (tensor[2, 4, f32], tensor[2, 4, i64]) = sort(&x,
 #[test]
 fn cumsum_cast_int64_axis_rejected() {
     assert_rejects_int64_axis(
-        r#"
-def f(x: tensor[2, 4, f32]) -> tensor[2, 4, f32] = cumsum(&x, cast(1, i64))
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1113_axis_dtype_guard/cumsum_cast_int64_axis_rejected_151.deep"
+        ),
         "cumsum",
     );
 }
@@ -159,11 +160,9 @@ def f(x: tensor[2, 4, f32]) -> tensor[2, 4, f32] = cumsum(&x, cast(1, i64))
 /// guard existed. Pinned here so the consistency claim has its anchor.
 #[test]
 fn sum_int64_axis_still_rejected() {
-    let errors = typecheck_surf(
-        r#"
-def f(x: tensor[2, 4, f32]) -> tensor[4, f32] = sum(&x, 0i64)
-"#,
-    );
+    let errors = typecheck_core(include_str!(
+        "fixtures/core/tests/issue_1113_axis_dtype_guard/sum_int64_axis_still_rejected_163.deep"
+    ));
     assert!(
         !errors.is_empty(),
         "sum with an i64 axis must stay rejected"
@@ -173,15 +172,15 @@ def f(x: tensor[2, 4, f32]) -> tensor[4, f32] = sum(&x, 0i64)
 #[test]
 fn count_int32_axis_accepted_int64_rejected() {
     assert_clean(
-        r#"
-def f(x: tensor[2, 4, bool]) -> tensor[2, i64] = count(&x, 1)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1113_axis_dtype_guard/count_int32_axis_accepted_int64_rejected_176.deep"
+        ),
         "count with a bare i32 axis",
     );
     assert_rejects_int64_axis(
-        r#"
-def g(x: tensor[2, 4, bool]) -> tensor[2, i64] = count(&x, 1i64)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1113_axis_dtype_guard/count_int32_axis_accepted_int64_rejected_182.deep"
+        ),
         "count",
     );
 }
@@ -193,15 +192,15 @@ def g(x: tensor[2, 4, bool]) -> tensor[2, i64] = count(&x, 1i64)
 #[test]
 fn gather_int32_axis_accepted_int64_rejected() {
     assert_clean(
-        r#"
-def f(x: tensor[4, 3, f32], i: tensor[2, i32]) -> tensor[2, 3, f32] = gather(&x, &i, 0)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1113_axis_dtype_guard/gather_int32_axis_accepted_int64_rejected_196.deep"
+        ),
         "gather with a bare i32 axis",
     );
     assert_rejects_int64_axis(
-        r#"
-def g(x: tensor[4, 3, f32], i: tensor[2, i32]) -> tensor[2, 3, f32] = gather(&x, &i, 0i64)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1113_axis_dtype_guard/gather_int32_axis_accepted_int64_rejected_202.deep"
+        ),
         "gather",
     );
 }
@@ -209,17 +208,15 @@ def g(x: tensor[4, 3, f32], i: tensor[2, i32]) -> tensor[2, 3, f32] = gather(&x,
 #[test]
 fn scatter_int32_axis_accepted_int64_rejected() {
     assert_clean(
-        r#"
-def f(b: tensor[4, 3, f32], i: tensor[2, i32], u: tensor[2, 3, f32]) -> tensor[4, 3, f32] =
-  scatter(b, i, u, 0, "add")
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1113_axis_dtype_guard/scatter_int32_axis_accepted_int64_rejected_212.json"
+        ),
         "scatter with a bare i32 axis",
     );
     assert_rejects_int64_axis(
-        r#"
-def g(b: tensor[4, 3, f32], i: tensor[2, i32], u: tensor[2, 3, f32]) -> tensor[4, 3, f32] =
-  scatter(b, i, u, 0i64, "add")
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1113_axis_dtype_guard/scatter_int32_axis_accepted_int64_rejected_219.json"
+        ),
         "scatter",
     );
 }
@@ -227,34 +224,52 @@ def g(b: tensor[4, 3, f32], i: tensor[2, i32], u: tensor[2, 3, f32]) -> tensor[4
 #[test]
 fn scatter_replace_int32_axis_accepted_int64_rejected() {
     assert_clean(
-        r#"
-def f(b: tensor[4, 3, f32], i: tensor[2, i32], u: tensor[2, 3, f32]) -> tensor[4, 3, f32] =
-  scatter_replace(b, i, u, 0)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1113_axis_dtype_guard/scatter_replace_int32_axis_accepted_int64_rejected_230.deep"
+        ),
         "scatter_replace with a bare i32 axis",
     );
     assert_rejects_int64_axis(
-        r#"
-def g(b: tensor[4, 3, f32], i: tensor[2, i32], u: tensor[2, 3, f32]) -> tensor[4, 3, f32] =
-  scatter_replace(b, i, u, 0i64)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1113_axis_dtype_guard/scatter_replace_int32_axis_accepted_int64_rejected_237.deep"
+        ),
         "scatter_replace",
     );
 }
 
 #[test]
 fn scatter_elements_int32_axis_accepted_int64_rejected() {
-    let setup = r#"
-data = to_tensor([[0.0f32, 0.0f32], [0.0f32, 0.0f32]])
-indices = to_tensor([[1, 0], [0, 1]])
-updates = to_tensor([[5.0f32, 6.0f32], [7.0f32, 8.0f32]])
-"#;
+    let setup = include_str!(
+        "fixtures/core/tests/issue_1113_axis_dtype_guard/scatter_elements_int32_axis_accepted_int64_rejected_247.deep"
+    );
     assert_clean(
-        &format!("{setup}\nout = scatter_elements(data, indices, updates, 0)"),
+        &format!(
+            r###"{setup}
+(def {{}}
+  out
+  (app {{span: "surf:6..49"}}
+    (var {{span: "surf:6..22"}} scatter_elements)
+    (var {{span: "surf:23..27"}} data)
+    (var {{span: "surf:29..36"}} indices)
+    (var {{span: "surf:38..45"}} updates)
+    (lit {{span: "surf:47..48", type: (t-prim {{}} i32)}} 0)))
+"###
+        ),
         "scatter_elements with a bare i32 axis",
     );
     assert_rejects_int64_axis(
-        &format!("{setup}\nout = scatter_elements(data, indices, updates, 0i64)"),
+        &format!(
+            r###"{setup}
+(def {{}}
+  out
+  (app {{span: "surf:6..52"}}
+    (var {{span: "surf:6..22"}} scatter_elements)
+    (var {{span: "surf:23..27"}} data)
+    (var {{span: "surf:29..36"}} indices)
+    (var {{span: "surf:38..45"}} updates)
+    (lit {{span: "surf:47..51", type: (t-prim {{}} i64)}} 0)))
+"###
+        ),
         "scatter_elements",
     );
 }
@@ -264,17 +279,15 @@ updates = to_tensor([[5.0f32, 6.0f32], [7.0f32, 8.0f32]])
 #[test]
 fn split_int32_axis_accepted_int64_rejected() {
     assert_clean(
-        r#"
-m = pad_sequences([[1.0, 2.0], [3.0, 4.0]], 0.0)
-pieces = split(m, 1, [cast(1, i64), cast(1, i64)])
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1113_axis_dtype_guard/split_int32_axis_accepted_int64_rejected_267.deep"
+        ),
         "split with a bare i32 axis",
     );
     assert_rejects_int64_axis(
-        r#"
-m = pad_sequences([[1.0, 2.0], [3.0, 4.0]], 0.0)
-pieces = split(m, 1i64, [cast(1, i64), cast(1, i64)])
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1113_axis_dtype_guard/split_int32_axis_accepted_int64_rejected_274.deep"
+        ),
         "split",
     );
 }
@@ -285,24 +298,21 @@ pieces = split(m, 1i64, [cast(1, i64), cast(1, i64)])
 #[test]
 fn trace_int32_axis_pair_accepted_int64_rejected() {
     assert_clean(
-        r#"
-m = pad_sequences([[1.0, 2.0], [3.0, 4.0]], 0.0)
-t = trace(m, 0, 1)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1113_axis_dtype_guard/trace_int32_axis_pair_accepted_int64_rejected_288.deep"
+        ),
         "trace with a bare i32 axis pair",
     );
     assert_rejects_int64_axis(
-        r#"
-m = pad_sequences([[1.0, 2.0], [3.0, 4.0]], 0.0)
-t = trace(m, 0i64, 1)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1113_axis_dtype_guard/trace_int32_axis_pair_accepted_int64_rejected_295.deep"
+        ),
         "trace",
     );
     assert_rejects_int64_axis(
-        r#"
-m = pad_sequences([[1.0, 2.0], [3.0, 4.0]], 0.0)
-t = trace(m, 0, 1i64)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1113_axis_dtype_guard/trace_int32_axis_pair_accepted_int64_rejected_302.deep"
+        ),
         "trace second axis",
     );
 }
@@ -310,17 +320,15 @@ t = trace(m, 0, 1i64)
 #[test]
 fn diagonal_int32_axis_pair_accepted_int64_rejected() {
     assert_clean(
-        r#"
-m = pad_sequences([[1.0, 2.0], [3.0, 4.0]], 0.0)
-d = diagonal(m, 0, 1)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1113_axis_dtype_guard/diagonal_int32_axis_pair_accepted_int64_rejected_313.deep"
+        ),
         "diagonal with a bare i32 axis pair",
     );
     assert_rejects_int64_axis(
-        r#"
-m = pad_sequences([[1.0, 2.0], [3.0, 4.0]], 0.0)
-d = diagonal(m, 0i64, 1)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1113_axis_dtype_guard/diagonal_int32_axis_pair_accepted_int64_rejected_320.deep"
+        ),
         "diagonal",
     );
 }
@@ -333,18 +341,16 @@ d = diagonal(m, 0i64, 1)
 #[test]
 fn diagonal_non_integer_axis_rejected_on_dtype() {
     assert_rejects_axis(
-        r#"
-m = pad_sequences([[1.0, 2.0], [3.0, 4.0]], 0.0)
-d = diagonal(m, 0.0, 1)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1113_axis_dtype_guard/diagonal_non_integer_axis_rejected_on_dtype_336.deep"
+        ),
         "diagonal",
         "f32",
     );
     assert_rejects_axis(
-        r#"
-m = pad_sequences([[1.0, 2.0], [3.0, 4.0]], 0.0)
-d = diagonal(m, "zero", 1)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1113_axis_dtype_guard/diagonal_non_integer_axis_rejected_on_dtype_344.deep"
+        ),
         "diagonal",
         "string",
     );

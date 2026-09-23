@@ -1,0 +1,11 @@
+(def {} op (var {span: "surf:5..10"} index))
+
+(def {}
+  out
+  (app {span: "surf:17..33"}
+    (var {span: "surf:17..19"} op)
+    (app {span: "surf:20..26"}
+      (var {} Cons)
+      (lit {span: "surf:21..25", type: (t-prim {} i64)} 1)
+      (var {} Nil))
+    (lit {span: "surf:28..32", surf_literal_style: "explicit", type: (t-prim {} i32)} 0)))

@@ -1,0 +1,29 @@
+(module {surf_path: "SeparateCycle"}
+  separatecycle
+  (def {}
+    root
+    (app {span: "surf:29..62"}
+      (var {span: "surf:29..32"} add)
+      (app {span: "surf:33..46"}
+        (var {span: "surf:33..43"} read_later)
+        (lit {span: "surf:44..45", type: (t-prim {} i32)} 0))
+      (app {span: "surf:48..61"} (var {span: "surf:48..59"} enter_cycle))))
+  (def {} later (lit {span: "surf:73..80", type: (t-prim {} i32)} 5))
+  (def {}
+    cycle_value
+    (app {span: "surf:97..110"} (var {span: "surf:97..108"} enter_cycle)))
+  (defsig {} read_later (t-fn {} (t-prim {} i32) (t-prim {} i32)))
+  (def {}
+    read_later
+    (fn {}
+      (params {} (n {type: (t-var {} _)}))
+      (app {span: "surf:144..157"}
+        (var {span: "surf:144..147"} add)
+        (var {span: "surf:148..149"} n)
+        (var {span: "surf:151..156"} later))))
+  (defsig {} enter_cycle (t-fn {} (t-prim {} i32)))
+  (def {}
+    enter_cycle
+    (fn {}
+      (params {})
+      (var {span: "surf:186..197"} cycle_value))))

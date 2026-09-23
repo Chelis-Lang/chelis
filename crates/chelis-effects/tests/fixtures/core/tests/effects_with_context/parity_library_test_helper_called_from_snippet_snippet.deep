@@ -1,0 +1,7 @@
+(defsig {} my_test (t-fn {} (t-unit {})))
+
+(def {}
+  my_test
+  (fn {}
+    (params {})
+    (app {span: "surf:25..36"} (var {span: "surf:25..34"} lib_check))))

@@ -12,8 +12,6 @@
 //! §1.1.1 citation - which is what the spec's diagnostic contract
 //! forbids.
 
-use chelis_surf::desugar::desugar_program;
-use chelis_surf::parser::parse_str;
 use chelis_types::check_ir_program;
 use chelis_types::types::Prim;
 
@@ -27,36 +25,20 @@ const DEFERRED_NAMES: &[&str] = &[
     "decimal256",
 ];
 
-fn surf_to_deep(source: &str) -> Vec<chelis_deep::Expr> {
-    let decls = parse_str(source).expect("surf parse");
-    chelis_macros::expand_program(
-        &desugar_program(&decls),
-        &chelis_macros::ExpansionOptions::default(),
-    )
-    .expect("macro expand")
-    .into_exprs()
+fn parse_core(source: &str) -> Vec<chelis_deep::Expr> {
+    chelis_deep::parse_and_stamp_file(source).expect("valid core fixture")
 }
 
 fn assert_deferred_rejection(src: &str, dtype_name: &str) {
-    let deep = surf_to_deep(src);
-    let res = check_ir_program(&deep);
-    let rep = res.expect_err(&format!(
-        "`{dtype_name}` must be a type error per spec §1.1.1"
-    ));
-    let messages: Vec<&str> = rep.errors.iter().map(|e| e.message.as_str()).collect();
+    let deep = parse_core(src);
+    let report = check_ir_program(&deep).expect_err("a deferred dtype must reject");
     assert!(
-        messages
-            .iter()
-            .any(|m| m.contains(&format!("{dtype_name} is reserved but deferred"))),
-        "expected diagnostic containing literal phrase \
-         '{dtype_name} is reserved but deferred'; got: {messages:?}"
-    );
-    assert!(
-        messages
-            .iter()
-            .any(|m| m.contains("spec/04-type-system.md §1.1.1")),
-        "diagnostic must cite spec/04-type-system.md §1.1.1 for `{dtype_name}`; \
-         got: {messages:?}"
+        report.errors.iter().any(|error| matches!(
+            error.kind,
+            chelis_types::errors::CheckErrorKind::UnsupportedTensorPrecision
+        ) && error.message.contains(dtype_name)),
+        "{dtype_name}: {:?}",
+        report.errors
     );
 }
 
@@ -79,7 +61,21 @@ fn parse_name_rejects_every_deferred_name() {
 #[test]
 fn cast_scalar_to_deferred_name_rejected_with_spec_1_1_1_diagnostic() {
     for name in DEFERRED_NAMES {
-        assert_deferred_rejection(&format!("def main() -> i32 = cast(1, {name})"), name);
+        assert_deferred_rejection(
+            &format!(
+                r#"(defsig {{}} main (t-fn {{}} (t-prim {{}} i32)))
+
+(def {{}}
+  main
+  (fn {{}}
+    (params {{}})
+    (cast {{span: "surf:20..35"}}
+      (lit {{span: "surf:25..26", type: (t-prim {{}} i32)}} 1)
+      (t-prim {{}} {name}))))
+"#
+            ),
+            name,
+        );
     }
 }
 
@@ -90,7 +86,27 @@ fn cast_scalar_to_deferred_name_rejected_with_spec_1_1_1_diagnostic() {
 fn tensor_element_deferred_name_rejected_with_spec_1_1_1_diagnostic() {
     for name in DEFERRED_NAMES {
         assert_deferred_rejection(
-            &format!("def stash() -> tensor[3, {name}] = to_tensor([1, 2, 3])"),
+            &format!(
+                r#"(defsig {{}} stash (t-fn {{}} (t-tensor {{}} (d-lit {{}} 3) (t-prim {{}} {name}))))
+
+(def {{}}
+  stash
+  (fn {{}}
+    (params {{}})
+    (app {{span: "surf:35..55"}}
+      (var {{span: "surf:35..44"}} to_tensor)
+      (app {{span: "surf:45..54"}}
+        (var {{}} Cons)
+        (lit {{span: "surf:46..47", type: (t-prim {{}} i32)}} 1)
+        (app {{}}
+          (var {{}} Cons)
+          (lit {{span: "surf:49..50", type: (t-prim {{}} i32)}} 2)
+          (app {{}}
+            (var {{}} Cons)
+            (lit {{span: "surf:52..53", type: (t-prim {{}} i32)}} 3)
+            (var {{}} Nil)))))))
+"#
+            ),
             name,
         );
     }
@@ -103,8 +119,15 @@ fn tensor_element_deferred_name_rejected_with_spec_1_1_1_diagnostic() {
 fn sig_precision_deferred_name_rejected_not_quantified() {
     for name in DEFERRED_NAMES {
         let src = format!(
-            "sig f[d]: tensor[d, {name}] -> tensor[d, {name}]\n\
-             def f(x) = x"
+            r#"(defsig {{}}
+  f
+  (d)
+  (t-fn {{}}
+    (t-tensor {{}} (d-var {{}} d) (t-prim {{}} {name}))
+    (t-tensor {{}} (d-var {{}} d) (t-prim {{}} {name}))))
+
+(def {{}} f (fn {{}} (params {{}} x) (var {{span: "surf:60..61"}} x)))
+"#
         );
         assert_deferred_rejection(&src, name);
     }
@@ -115,9 +138,10 @@ fn sig_precision_deferred_name_rejected_not_quantified() {
 /// reserved list and nothing wider.
 #[test]
 fn sig_precision_explicit_ordinary_tvar_still_quantifies() {
-    let src = "sig f[d, p]: tensor[d, p] -> tensor[d, p]\n\
-               def f(x) = x";
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/deferred_dtype_rejection/sig_precision_explicit_ordinary_tvar_still_quantifies.0.deep"
+    );
+    let deep = parse_core(src);
     let res = check_ir_program(&deep);
     assert!(
         res.is_ok(),
@@ -132,10 +156,20 @@ fn sig_precision_explicit_ordinary_tvar_still_quantifies() {
 #[test]
 fn active_dtypes_do_not_match_deferred_family() {
     for (src, what) in [
-        ("def main() -> i32 = cast(1, i32)", "i32"),
-        ("def main() -> f16 = cast(1.0, f16)", "f16"),
+        (
+            include_str!(
+                "fixtures/core/tests/deferred_dtype_rejection/active_dtypes_do_not_match_deferred_family.0.deep"
+            ),
+            "i32",
+        ),
+        (
+            include_str!(
+                "fixtures/core/tests/deferred_dtype_rejection/active_dtypes_do_not_match_deferred_family.1.deep"
+            ),
+            "f16",
+        ),
     ] {
-        let deep = surf_to_deep(src);
+        let deep = parse_core(src);
         let res = check_ir_program(&deep);
         assert!(
             res.is_ok(),

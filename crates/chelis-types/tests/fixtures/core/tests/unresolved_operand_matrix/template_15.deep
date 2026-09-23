@@ -1,0 +1,33 @@
+(defsig {dtype_bounds: {p: numeric}}
+  g
+  (p)
+  (t-fn {}
+    (t-tensor {} (d-lit {} 3) (t-var {} p))
+    (t-tensor {} (d-lit {} 3) (t-var {} p))))
+
+(def {}
+  g
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    @@body@@))
+
+(defsig {} f (t-fn {} (t-tensor {} (d-lit {} 3) (t-prim {} bool))))
+
+(def {}
+  f
+  (fn {}
+    (params {})
+    (app {span: "surf:95..128"}
+      (var {span: "surf:95..96"} g)
+      (app {span: "surf:97..127"}
+        (var {span: "surf:97..106"} to_tensor)
+        (app {span: "surf:107..126"}
+          (var {} Cons)
+          (lit {span: "surf:108..112", type: (t-prim {} bool)} true)
+          (app {}
+            (var {} Cons)
+            (lit {span: "surf:114..119", type: (t-prim {} bool)} false)
+            (app {}
+              (var {} Cons)
+              (lit {span: "surf:121..125", type: (t-prim {} bool)} true)
+              (var {} Nil))))))))

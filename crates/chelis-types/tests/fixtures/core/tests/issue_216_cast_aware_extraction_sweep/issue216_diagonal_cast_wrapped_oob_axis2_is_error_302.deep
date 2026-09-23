@@ -1,0 +1,19 @@
+(defsig {}
+  f
+  (t-fn {}
+    (t-tensor {} (d-lit {} 4) (d-lit {} 4) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 4) (t-prim {} f32))))
+
+(def {}
+  f
+  (fn {}
+    (params {} (m {type: (t-var {} _)}))
+    (app {span: "surf:49..88"}
+      (var {span: "surf:49..57"} diagonal)
+      (var {span: "surf:58..59"} m)
+      (cast {span: "surf:61..73"}
+        (lit {span: "surf:66..67", surf_literal_style: "unsuffixed", type: (t-prim {} i32)} 0)
+        (t-prim {} i32))
+      (cast {span: "surf:75..87"}
+        (lit {span: "surf:80..81", surf_literal_style: "unsuffixed", type: (t-prim {} i32)} 9)
+        (t-prim {} i32)))))

@@ -1,0 +1,74 @@
+(defsig {}
+  projection
+  (t-fn {}
+    (t-tensor {}
+      (d-name {} batch)
+      (d-name {} seq)
+      (d-name {} hidden)
+      (t-prim {} f32))
+    (t-tensor {} (d-name {} hidden) (d-name {} out_dim) (t-prim {} f32))
+    (t-tensor {} (d-name {} batch) (d-name {} seq) (t-prim {} i64))
+    (t-tensor {}
+      (d-name {} batch)
+      (d-name {} seq)
+      (d-name {} out_dim)
+      (t-prim {} bool))
+    (t-tensor {} (d-name {} vocab) (d-name {} out_dim) (t-prim {} f32))
+    (t-tensor {}
+      (d-name {} batch)
+      (d-name {} seq)
+      (d-name {} out_dim)
+      (t-prim {} f32))))
+
+(def {}
+  projection
+  (fn {}
+    (params {}
+      (x {type: (t-var {} _)})
+      (w {type: (t-var {} _)})
+      (token_ids {type: (t-var {} _)})
+      (mask {type: (t-var {} _)})
+      (table {type: (t-var {} _)}))
+    (let {span: "surf:248..475"}
+      (bind {}
+        logits
+        (app {span: "surf:261..288"}
+          (var {span: "surf:261..267"} einsum)
+          (lit {span: "surf:268..281", type: (t-prim {} string)} "bsh,ho->bso")
+          (var {span: "surf:283..284"} x)
+          (var {span: "surf:286..287"} w)))
+      (let {}
+        (bind {}
+          embed
+          (app {span: "surf:299..326"}
+            (var {span: "surf:299..305"} gather)
+            (var {span: "surf:306..311"} table)
+            (var {span: "surf:313..322"} token_ids)
+            (lit {span: "surf:324..325", type: (t-prim {} i32)} 0)))
+        (let {}
+          (bind {}
+            clipped
+            (app {span: "surf:339..410"}
+              (var {span: "surf:339..344"} clamp)
+              (app {span: "surf:345..363"}
+                (var {span: "surf:345..348"} add)
+                (var {span: "surf:349..355"} logits)
+                (var {span: "surf:357..362"} embed))
+              (app {span: "surf:365..386"}
+                (var {span: "surf:365..381"} scalar_to_tensor)
+                (lit {span: "surf:382..385", type: (t-prim {} f32)} 0.0))
+              (app {span: "surf:388..409"}
+                (var {span: "surf:388..404"} scalar_to_tensor)
+                (lit {span: "surf:405..408", type: (t-prim {} f32)} 6.0))))
+          (let {}
+            (bind {}
+              running
+              (app {span: "surf:423..441"}
+                (var {span: "surf:423..429"} cumsum)
+                (var {span: "surf:430..437"} clipped)
+                (lit {span: "surf:439..440", type: (t-prim {} i32)} 1)))
+            (app {span: "surf:444..473"}
+              (var {span: "surf:444..449"} where)
+              (var {span: "surf:450..454"} mask)
+              (var {span: "surf:456..463"} running)
+              (var {span: "surf:465..472"} clipped))))))))

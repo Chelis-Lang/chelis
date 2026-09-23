@@ -1,0 +1,70 @@
+(defsig {} keep (t-fn {} (t-tensor {} (t-prim {} f32)) (t-prim {} bool)))
+
+(def {}
+  keep
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:36..78"}
+      (var {span: "surf:36..38"} gt)
+      (app {span: "surf:39..72"}
+        (var {span: "surf:39..55"} tensor_to_scalar)
+        (app {span: "surf:56..71"}
+          (var {span: "surf:56..63"} dropout)
+          (var {span: "surf:64..65"} x)
+          (lit {span: "surf:67..70", type: (t-prim {} f32)} 0.5)))
+      (lit {span: "surf:74..77", type: (t-prim {} f32)} 0.0))))
+
+(defsig {} xs (t-adt {} List (t-tensor {} (t-prim {} f32))))
+
+(def {}
+  xs
+  (app {span: "surf:103..249"}
+    (var {} Cons)
+    (app {span: "surf:107..175"}
+      (var {span: "surf:107..112"} trace)
+      (app {span: "surf:113..168"}
+        (var {span: "surf:113..129"} pad_sequences_to)
+        (app {span: "surf:130..137"}
+          (var {} Cons)
+          (app {span: "surf:131..136"}
+            (var {} Cons)
+            (lit {span: "surf:132..135", type: (t-prim {} f32)} 1.0)
+            (var {} Nil))
+          (var {} Nil))
+        (cast {span: "surf:139..151"}
+          (lit {span: "surf:144..145", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 1)
+          (t-prim {} i64))
+        (cast {span: "surf:153..167"}
+          (lit {span: "surf:158..161", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 0.0)
+          (t-prim {} f32)))
+      (lit {span: "surf:170..171", type: (t-prim {} i32)} 0)
+      (lit {span: "surf:173..174", type: (t-prim {} i32)} 1))
+    (app {}
+      (var {} Cons)
+      (app {span: "surf:179..247"}
+        (var {span: "surf:179..184"} trace)
+        (app {span: "surf:185..240"}
+          (var {span: "surf:185..201"} pad_sequences_to)
+          (app {span: "surf:202..209"}
+            (var {} Cons)
+            (app {span: "surf:203..208"}
+              (var {} Cons)
+              (lit {span: "surf:204..207", type: (t-prim {} f32)} 2.0)
+              (var {} Nil))
+            (var {} Nil))
+          (cast {span: "surf:211..223"}
+            (lit {span: "surf:216..217", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 1)
+            (t-prim {} i64))
+          (cast {span: "surf:225..239"}
+            (lit {span: "surf:230..233", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 0.0)
+            (t-prim {} f32)))
+        (lit {span: "surf:242..243", type: (t-prim {} i32)} 0)
+        (lit {span: "surf:245..246", type: (t-prim {} i32)} 1))
+      (var {} Nil))))
+
+(def {}
+  buckets
+  (app {span: "surf:260..279"}
+    (var {span: "surf:260..269"} partition)
+    (var {span: "surf:270..274"} keep)
+    (var {span: "surf:276..278"} xs)))

@@ -1,0 +1,63 @@
+(defsig {}
+  demo_unify
+  (s d p)
+  (t-fn {}
+    (t-ref {} (t-tensor {} (d-var {} s) (d-var {} d) (t-var {} p)))
+    (t-ref {} (t-tensor {} (d-var {} s) (d-var {} d) (t-var {} p)))
+    (t-tensor {} (d-var {} s) (d-var {} d) (t-var {} p))))
+
+(def {} demo_unify (fn {} (params {} a b) (var {span: "surf:104..105"} a)))
+
+(defsig {}
+  test_mismatch
+  (s d)
+  (t-fn {} (t-tensor {} (d-var {} s) (d-var {} d) (t-prim {} f32))))
+
+(def {}
+  test_mismatch
+  (fn {}
+    (params {})
+    (let {span: "surf:155..317"}
+      (bind {}
+        q
+        (app {span: "surf:161..227"}
+          (var {span: "surf:161..177"} pad_sequences_to)
+          (app {span: "surf:178..196"}
+            (var {} Cons)
+            (app {span: "surf:179..195"}
+              (var {} Cons)
+              (cast {span: "surf:180..194"}
+                (lit {span: "surf:185..188", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 0.0)
+                (t-prim {} f32))
+              (var {} Nil))
+            (var {} Nil))
+          (cast {span: "surf:198..210"}
+            (lit {span: "surf:203..204", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 8)
+            (t-prim {} i64))
+          (cast {span: "surf:212..226"}
+            (lit {span: "surf:217..220", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 0.0)
+            (t-prim {} f32))))
+      (let {}
+        (bind {}
+          k
+          (app {span: "surf:232..298"}
+            (var {span: "surf:232..248"} pad_sequences_to)
+            (app {span: "surf:249..267"}
+              (var {} Cons)
+              (app {span: "surf:250..266"}
+                (var {} Cons)
+                (cast {span: "surf:251..265"}
+                  (lit {span: "surf:256..259", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 0.0)
+                  (t-prim {} f32))
+                (var {} Nil))
+              (var {} Nil))
+            (cast {span: "surf:269..281"}
+              (lit {span: "surf:274..275", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 5)
+              (t-prim {} i64))
+            (cast {span: "surf:283..297"}
+              (lit {span: "surf:288..291", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 0.0)
+              (t-prim {} f32))))
+        (app {span: "surf:299..315"}
+          (var {span: "surf:299..309"} demo_unify)
+          (var {span: "surf:310..311"} q)
+          (var {span: "surf:313..314"} k))))))

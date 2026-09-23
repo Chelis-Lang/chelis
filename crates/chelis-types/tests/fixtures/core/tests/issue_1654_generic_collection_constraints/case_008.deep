@@ -1,0 +1,8 @@
+(def {}
+  join
+  (fn {}
+    (params {} lhs rhs)
+    (app {span: "surf:21..37"}
+      (var {span: "surf:21..27"} concat)
+      (var {span: "surf:28..31"} lhs)
+      (var {span: "surf:33..36"} rhs))))

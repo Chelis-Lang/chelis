@@ -1,0 +1,13 @@
+(defsig {dtype_bounds: {p: @bound@}}
+  f
+  (p)
+  (t-fn {} (t-var {} p) (t-var {} p) (t-prim {} bool)))
+
+(def {}
+  f
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (y {type: (t-var {} _)}))
+    (app {span: "surf:38..60"}
+      (var {span: "surf:38..54"} @op@)
+      (var {span: "surf:55..56"} x)
+      (var {span: "surf:58..59"} y))))

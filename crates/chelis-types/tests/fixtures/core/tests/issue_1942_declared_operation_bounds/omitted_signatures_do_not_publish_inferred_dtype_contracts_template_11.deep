@@ -1,0 +1,8 @@
+(def {}
+  g
+  (fn {}
+    (params {} x)
+    (app {}
+      (var {} __CORE_ARG_0__)
+      (var {} x)
+      (var {} x))))

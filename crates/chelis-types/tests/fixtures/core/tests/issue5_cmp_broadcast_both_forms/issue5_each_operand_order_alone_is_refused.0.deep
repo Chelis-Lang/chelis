@@ -1,0 +1,21 @@
+(defsig {} below (t-fn {} (t-tensor {} (d-lit {} 3) (t-prim {} bool))))
+
+(def {}
+  below
+  (fn {}
+    (params {})
+    (app {span: "surf:33..68"}
+      (var {span: "surf:33..35"} gt)
+      (lit {span: "surf:36..39", type: (t-prim {} f32)} 1.5)
+      (app {span: "surf:41..67"}
+        (var {span: "surf:41..50"} to_tensor)
+        (app {span: "surf:51..66"}
+          (var {} Cons)
+          (lit {span: "surf:52..55", type: (t-prim {} f32)} 1.0)
+          (app {}
+            (var {} Cons)
+            (lit {span: "surf:57..60", type: (t-prim {} f32)} 2.0)
+            (app {}
+              (var {} Cons)
+              (lit {span: "surf:62..65", type: (t-prim {} f32)} 3.0)
+              (var {} Nil))))))))

@@ -1,0 +1,9 @@
+(module {surf_path: "PureDirect"}
+  puredirect
+  (def {}
+    root
+    (app {span: "surf:26..47"}
+      (var {span: "surf:26..29"} add)
+      (var {span: "surf:30..35"} later)
+      (lit {span: "surf:38..45", type: (t-prim {} i32)} 1)))
+  (def {} later (lit {span: "surf:58..65", type: (t-prim {} i32)} 5)))

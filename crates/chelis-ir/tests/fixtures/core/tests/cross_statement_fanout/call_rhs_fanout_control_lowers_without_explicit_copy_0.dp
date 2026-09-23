@@ -1,0 +1,23 @@
+(module {surf_path: "Repro.RealizeFanOut"}
+  repro.realizefanout
+  (defsig {}
+    fanout
+    (t-fn {}
+      (t-tensor {} (d-lit {} 3) (t-prim {} f32))
+      (t-tensor {} (d-lit {} 3) (t-prim {} f32))))
+  (def {}
+    fanout
+    (fn {}
+      (params {} (w {type: (t-var {} _)}))
+      (let {span: "surf:79..128"}
+        (bind {}
+          a
+          (realize {span: "surf:87..97"} (var {span: "surf:95..96"} w)))
+        (let {}
+          (bind {}
+            b
+            (realize {span: "surf:104..114"} (var {span: "surf:112..113"} w)))
+          (app {span: "surf:117..126"}
+            (var {span: "surf:117..120"} add)
+            (var {span: "surf:121..122"} a)
+            (var {span: "surf:124..125"} b)))))))

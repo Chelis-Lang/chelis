@@ -1,0 +1,40 @@
+(defsig {}
+  f
+  (t-fn {}
+    (t-tensor {} (d-lit {} 2) (d-lit {} 4) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 1) (d-lit {} 2) (t-prim {} f32))))
+
+(def {}
+  f
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (let {span: "surf:51..117"}
+      (bind {}
+        g
+        (fn {span: "surf:59..108"}
+          (params {} t)
+          (app {span: "surf:69..108"}
+            (var {span: "surf:69..75"} shrink)
+            (var {span: "surf:76..77"} t)
+            (app {span: "surf:79..107"}
+              (var {} Cons)
+              (app {span: "surf:80..92"}
+                (var {} Cons)
+                (lit {span: "surf:81..85", type: (t-prim {} i64)} 0)
+                (app {}
+                  (var {} Cons)
+                  (lit {span: "surf:87..91", type: (t-prim {} i64)} 1)
+                  (var {} Nil)))
+              (app {}
+                (var {} Cons)
+                (app {span: "surf:94..106"}
+                  (var {} Cons)
+                  (lit {span: "surf:95..99", type: (t-prim {} i64)} 1)
+                  (app {}
+                    (var {} Cons)
+                    (lit {span: "surf:101..105", type: (t-prim {} i64)} 3)
+                    (var {} Nil)))
+                (var {} Nil))))))
+      (app {span: "surf:111..115"}
+        (var {span: "surf:111..112"} g)
+        (var {span: "surf:113..114"} x)))))

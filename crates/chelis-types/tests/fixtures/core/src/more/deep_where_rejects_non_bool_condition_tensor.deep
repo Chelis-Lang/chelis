@@ -1,0 +1,20 @@
+(defsig {}
+  bad
+  (t-fn {}
+    (t-tensor {} (d-name {} batch) (d-name {} hidden) (t-prim {} f32))
+    (t-tensor {} (d-name {} batch) (d-name {} hidden) (t-prim {} f32))
+    (t-tensor {} (d-name {} batch) (d-name {} hidden) (t-prim {} f32))
+    (t-tensor {} (d-name {} batch) (d-name {} hidden) (t-prim {} f32))))
+
+(def {}
+  bad
+  (fn {}
+    (params {}
+      (cond {type: (t-var {} _)})
+      (x {type: (t-var {} _)})
+      (y {type: (t-var {} _)}))
+    (app {span: "surf:147..164"}
+      (var {span: "surf:147..152"} where)
+      (var {span: "surf:153..157"} cond)
+      (var {span: "surf:159..160"} x)
+      (var {span: "surf:162..163"} y))))

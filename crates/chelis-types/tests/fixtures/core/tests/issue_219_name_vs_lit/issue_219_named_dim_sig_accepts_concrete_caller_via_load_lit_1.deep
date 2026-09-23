@@ -1,0 +1,25 @@
+(defsig {}
+  f
+  (t-fn {}
+    (t-tensor {} (d-name {} batch) (d-name {} hidden) (t-prim {} f32))
+    (t-tensor {} (d-name {} batch) (d-name {} hidden) (t-prim {} f32))))
+
+(def {}
+  f
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (copy {span: "surf:70..77"} (var {span: "surf:75..76"} x))))
+
+(defsig {}
+  caller
+  (t-fn {}
+    (t-ref {} (t-tensor {} (d-lit {} 1) (d-lit {} 3) (t-prim {} f32)))
+    (t-tensor {} (d-lit {} 1) (d-lit {} 3) (t-prim {} f32))))
+
+(def {}
+  caller
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:135..145"}
+      (var {span: "surf:135..136"} f)
+      (copy {span: "surf:137..144"} (var {span: "surf:142..143"} x)))))

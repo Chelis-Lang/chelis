@@ -1,0 +1,29 @@
+(def {}
+  apply
+  (fn {}
+    (params {} callback value)
+    (app {span: "surf:29..44"}
+      (var {span: "surf:29..37"} callback)
+      (var {span: "surf:38..43"} value))))
+
+(defsig {} increment (t-fn {} (t-prim {} i32) (t-prim {} i32)))
+
+(def {}
+  increment
+  (fn {}
+    (params {} (value {type: (t-var {} _)}))
+    (app {span: "surf:80..93"}
+      (var {span: "surf:80..83"} add)
+      (var {span: "surf:84..89"} value)
+      (lit {span: "surf:91..92", type: (t-prim {} i32)} 1))))
+
+(defsig {} use_callback (t-fn {} (t-prim {} i32)))
+
+(def {}
+  use_callback
+  (fn {}
+    (params {})
+    (app {span: "surf:122..141"}
+      (var {span: "surf:122..127"} apply)
+      (var {span: "surf:128..137"} increment)
+      (lit {span: "surf:139..140", type: (t-prim {} i32)} 1))))

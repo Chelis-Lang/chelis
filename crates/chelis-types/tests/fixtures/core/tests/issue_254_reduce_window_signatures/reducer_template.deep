@@ -1,0 +1,37 @@
+(defsig {}
+  run
+  (t-fn {}
+    (t-tensor {}
+      (d-lit {} 1)
+      (d-lit {} 1)
+      (d-lit {} 3)
+      (d-lit {} 3)
+      (t-prim {} f32))
+    (t-tensor {}
+      (d-lit {} 1)
+      (d-lit {} 1)
+      (d-lit {} 2)
+      (d-lit {} 2)
+      (t-prim {} f32))))
+
+(def {}
+  run
+  (fn {}
+    (params {} x)
+    (app {span: "surf:74..120"}
+      (var {span: "surf:74..89"} fixture_reducer)
+      (var {span: "surf:90..91"} x)
+      (app {span: "surf:93..105"}
+        (var {} Cons)
+        (lit {span: "surf:94..98", type: (t-prim {} i64)} 2)
+        (app {}
+          (var {} Cons)
+          (lit {span: "surf:100..104", type: (t-prim {} i64)} 2)
+          (var {} Nil)))
+      (app {span: "surf:107..119"}
+        (var {} Cons)
+        (lit {span: "surf:108..112", type: (t-prim {} i64)} 1)
+        (app {}
+          (var {} Cons)
+          (lit {span: "surf:114..118", type: (t-prim {} i64)} 1)
+          (var {} Nil))))))

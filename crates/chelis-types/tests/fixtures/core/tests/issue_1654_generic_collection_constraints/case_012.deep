@@ -1,0 +1,17 @@
+(defsig {} size (a) (t-fn {} (t-adt {} List (t-var {} a)) (t-prim {} i64)))
+
+(def {}
+  size
+  (fn {}
+    (params {} (xs {type: (t-var {} _)}))
+    (app {span: "surf:34..41"}
+      (var {span: "surf:34..37"} len)
+      (var {span: "surf:38..40"} xs))))
+
+(def {} measure (var {span: "surf:52..56"} size))
+
+(def {}
+  out
+  (app {span: "surf:63..76"}
+    (var {span: "surf:63..70"} measure)
+    (lit {span: "surf:71..75", type: (t-prim {} i64)} 1)))

@@ -1,0 +1,23 @@
+(defsig {}
+  constant
+  (t-fn {} (t-tensor {} (d-lit {} 3) (t-prim {} f32)) (t-prim {} f32)))
+
+(def {}
+  constant
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (lit {span: "surf:42..48", surf_literal_style: "explicit", type: (t-prim {} f32)} 1.0)))
+
+(defsig {}
+  derivative
+  (t-fn {}
+    (t-tensor {} (d-lit {} 3) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 3) (t-prim {} f32))))
+
+(def {}
+  derivative
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:103..120"}
+      (grad {span: "surf:103..117"} (var {span: "surf:108..116"} constant))
+      (var {span: "surf:118..119"} x))))

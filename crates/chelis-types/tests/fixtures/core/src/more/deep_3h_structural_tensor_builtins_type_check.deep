@@ -1,0 +1,43 @@
+(defsig {}
+  pack_heads
+  (t-fn {}
+    (t-tensor {} (d-name {} batch) (d-name {} seq) (d-lit {} 2) (t-prim {} f32))
+    (t-tensor {} (d-name {} batch) (d-name {} seq) (d-lit {} 2) (t-prim {} f32))
+    (t-tensor {}
+      (d-name {} batch)
+      (d-name {} seq)
+      (d-name {} *)
+      (t-prim {} f32))))
+
+(def {}
+  pack_heads
+  (fn {}
+    (params {} (q {type: (t-var {} _)}) (k {type: (t-var {} _)}))
+    (let {span: "surf:116..204"}
+      (bind {}
+        packed
+        (app {span: "surf:129..146"}
+          (var {span: "surf:129..135"} concat)
+          (app {span: "surf:136..142"}
+            (var {} Cons)
+            (var {span: "surf:137..138"} q)
+            (app {} (var {} Cons) (var {span: "surf:140..141"} k) (var {} Nil)))
+          (lit {span: "surf:144..145", type: (t-prim {} i32)} 2)))
+      (let {}
+        (bind {}
+          pieces
+          (app {span: "surf:158..182"}
+            (var {span: "surf:158..163"} split)
+            (var {span: "surf:164..170"} packed)
+            (lit {span: "surf:172..173", type: (t-prim {} i32)} 2)
+            (app {span: "surf:175..181"}
+              (var {} Cons)
+              (lit {span: "surf:176..177", type: (t-prim {} i32)} 2)
+              (app {}
+                (var {} Cons)
+                (lit {span: "surf:179..180", type: (t-prim {} i32)} 2)
+                (var {} Nil)))))
+        (app {span: "surf:185..202"}
+          (var {span: "surf:185..191"} concat)
+          (var {span: "surf:192..198"} pieces)
+          (lit {span: "surf:200..201", type: (t-prim {} i32)} 2))))))

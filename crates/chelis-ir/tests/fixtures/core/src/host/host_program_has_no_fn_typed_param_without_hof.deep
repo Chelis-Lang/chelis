@@ -1,0 +1,16 @@
+(defsig {} double (t-fn {} (t-prim {} f32) (t-prim {} f32)))
+
+(def {}
+  double
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:28..39"}
+      (var {span: "surf:28..31"} mul)
+      (var {span: "surf:32..33"} x)
+      (lit {span: "surf:35..38", type: (t-prim {} f32)} 2.0))))
+
+(def {}
+  out
+  (app {span: "surf:46..57"}
+    (var {span: "surf:46..52"} double)
+    (lit {span: "surf:53..56", type: (t-prim {} f32)} 2.0)))

@@ -1,0 +1,9 @@
+(def {}
+  make
+  (fn {}
+    (params {})
+    (fn {}
+      (params {} (x {type: (t-prim {} f32)}))
+      (app {}
+        (var {} sin)
+        (var {} x)))))

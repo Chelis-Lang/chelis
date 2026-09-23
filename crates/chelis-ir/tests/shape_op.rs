@@ -10,10 +10,7 @@ use chelis_ir::grad::grad_dag_checked;
 use chelis_ir::verify;
 use chelis_types::types::Prim;
 
-// End-to-end lowering (`shape(x, axis)` value -> `RiscOp::Shape` -> eval / C
-// backend) is covered by the CLI integration suite in
-// `crates/chelis-cli/tests/issue_558_shape_value_read.rs`; this file covers
-// the value node's IR-level semantics directly.
+// Covers the shape value node's IR-level semantics directly.
 
 fn tensor_ty(dims: Vec<DimInfo>, precision: Prim) -> TensorType {
     TensorType { dims, precision }

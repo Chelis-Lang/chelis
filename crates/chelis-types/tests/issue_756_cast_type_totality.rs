@@ -25,8 +25,7 @@ mod support;
 use chelis_deep::Expr;
 use chelis_deep::parser::parse_str_strict as parse_deep;
 use chelis_deep::printer::print_canonical;
-use chelis_surf::desugar::desugar_program;
-use chelis_surf::parser::parse_str as parse_surf;
+
 use chelis_types::errors::CheckErrorKind;
 use chelis_types::{FitnessReport, InferResult, check_ir_fitness, check_ir_program};
 
@@ -34,18 +33,12 @@ const ACTIVE_CAST_TARGETS: [&str; 9] = [
     "f32", "f64", "bf16", "f16", "bool", "i8", "i16", "i32", "i64",
 ];
 
-fn surf_to_deep(source: &str) -> Vec<Expr> {
-    let decls = parse_surf(source).expect("surf parse");
-    chelis_macros::expand_program(
-        &desugar_program(&decls),
-        &chelis_macros::ExpansionOptions::default(),
-    )
-    .expect("macro expand")
-    .into_exprs()
+fn parse_core_fixture(source: &str) -> Vec<Expr> {
+    chelis_deep::parser::parse_str(source).expect("Deep fixture")
 }
 
 fn reject_messages(source: &str, label: &str) -> Vec<String> {
-    let deep = surf_to_deep(source);
+    let deep = parse_core_fixture(source);
     let rep: InferResult = check_ir_program(&deep)
         .err()
         .unwrap_or_else(|| panic!("{label}: expected a check rejection, but it passed"));
@@ -57,7 +50,7 @@ fn reject_messages(source: &str, label: &str) -> Vec<String> {
 }
 
 fn accept(source: &str, label: &str) {
-    let deep = surf_to_deep(source);
+    let deep = parse_core_fixture(source);
     if let Err(rep) = check_ir_program(&deep) {
         let msgs: Vec<String> = rep.errors.iter().map(|e| e.message.clone()).collect();
         panic!("{label}: expected a clean check, got errors: {msgs:?}");
@@ -88,7 +81,12 @@ fn assert_deep_accepts(source: &str, label: &str) {
 
 #[test]
 fn cast_to_recognized_primitive_is_accepted() {
-    accept("def f() -> f32 = cast(1.0, f32)\n", "cast to f32");
+    accept(
+        include_str!(
+            "fixtures/core/tests/issue_756_cast_type_totality/cast_to_recognized_primitive_is_accepted_91.deep"
+        ),
+        "cast to f32",
+    );
 }
 
 #[test]
@@ -116,7 +114,12 @@ fn every_active_canonical_t_prim_cast_target_is_accepted() {
 #[test]
 fn cast_to_unknown_type_name_is_rejected() {
     // The exact chelis#756 repro: `cast(1.0, madeup)`.
-    let msgs = reject_messages("def f() -> f32 = cast(1.0, madeup)\n", "cast to madeup");
+    let msgs = reject_messages(
+        include_str!(
+            "fixtures/core/tests/issue_756_cast_type_totality/cast_to_unknown_type_name_is_rejected_119.deep"
+        ),
+        "cast to madeup",
+    );
     assert!(
         msgs.iter().any(|m| m.contains("madeup")),
         "expected a diagnostic naming the unknown cast target `madeup`, got: {msgs:?}"

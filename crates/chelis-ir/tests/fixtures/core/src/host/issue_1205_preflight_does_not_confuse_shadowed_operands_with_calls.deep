@@ -1,0 +1,45 @@
+(module {surf_path: "FrontEndPerformance.ShadowedOperand"}
+  frontendperformance.shadowedoperand
+  (defsig {}
+    bc
+    (t-fn {} (t-prim {} f32) (t-tensor {} (d-lit {} 1) (t-prim {} f32))))
+  (def {}
+    bc
+    (fn {}
+      (params {} (c {type: (t-var {} _)}))
+      (app {span: "surf:78..92"}
+        (var {span: "surf:78..87"} to_tensor)
+        (app {span: "surf:88..91"}
+          (var {} Cons)
+          (var {span: "surf:89..90"} c)
+          (var {} Nil)))))
+  (defsig {}
+    twice
+    (t-fn {}
+      (t-tensor {} (d-lit {} 1) (t-prim {} f32))
+      (t-tensor {} (d-lit {} 1) (t-prim {} f32))))
+  (def {}
+    twice
+    (fn {}
+      (params {} (bc {type: (t-var {} _)}))
+      (app {span: "surf:143..154"}
+        (var {span: "surf:143..146"} add)
+        (var {span: "surf:147..149"} bc)
+        (var {span: "surf:151..153"} bc))))
+  (def {}
+    r
+    (app {span: "surf:159..215"}
+      (var {span: "surf:159..164"} index)
+      (app {span: "surf:165..208"}
+        (var {span: "surf:165..172"} to_list)
+        (app {span: "surf:173..207"}
+          (var {span: "surf:173..178"} twice)
+          (app {span: "surf:179..206"}
+            (var {span: "surf:179..188"} to_tensor)
+            (app {span: "surf:189..205"}
+              (var {} Cons)
+              (cast {span: "surf:190..204"}
+                (lit {span: "surf:195..198", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 1.0)
+                (t-prim {} f32))
+              (var {} Nil)))))
+      (lit {span: "surf:210..214", type: (t-prim {} i64)} 0))))

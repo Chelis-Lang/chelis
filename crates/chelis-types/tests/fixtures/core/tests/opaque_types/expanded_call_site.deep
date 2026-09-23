@@ -1,0 +1,31 @@
+(module {surf_path: "Stats.Prob"}
+  stats.prob
+  (export {} probability)
+  (deftype {opaque: true}
+    Probability
+    ()
+    (variant {} Probability (field {} value (t-prim {} f32))))
+  (defsig {} probability (t-fn {} (t-prim {} f32) (t-adt {} Probability)))
+  (def {}
+    probability
+    (fn {}
+      (params {} (x {type: (t-var {} _)}))
+      (record {span: "surf:136..160"}
+        Probability
+        (kv {} value (var {span: "surf:157..158"} x))))))
+
+(module {surf_path: "Agent.Mac"}
+  agent.mac
+  (defsig {} sneak (t-fn {} (t-prim {} f32) (t-var {} _)))
+  (def {}
+    sneak
+    (fn {}
+      (params {} (x {type: (t-var {} _)}))
+      (record {source: (forge_prob (var {span: "surf:95..96"} x)),
+                span: "surf:39..63"
+              }
+        Probability
+        (kv {source: (forge_prob (var {span: "surf:95..96"} x))}
+          value
+          (var {source: (forge_prob (var {span: "surf:95..96"} x)), span: "surf:95..96"} x))))))
+

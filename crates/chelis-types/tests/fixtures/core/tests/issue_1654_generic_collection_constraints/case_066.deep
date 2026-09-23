@@ -1,0 +1,14 @@
+(def {} exported (fn {} (params {}) (var {span: "surf:17..20"} len)))
+
+(def {}
+  measure
+  (app {span: "surf:31..41"} (var {span: "surf:31..39"} exported)))
+
+(def {}
+  out
+  (app {span: "surf:48..63"}
+    (var {span: "surf:48..55"} measure)
+    (app {span: "surf:56..62"}
+      (var {} Cons)
+      (lit {span: "surf:57..61", type: (t-prim {} i64)} 1)
+      (var {} Nil))))

@@ -1,0 +1,14 @@
+(typealias {} Matrix (p rows) (t-tensor {} (d-var {} rows) (t-var {} p)))
+
+(defsig {}
+  keep
+  (p rows)
+  (t-fn {}
+    (t-adt {} Matrix (t-var {} p) (t-var {} rows))
+    (t-adt {} Matrix (t-var {} p) (t-var {} rows))))
+
+(def {}
+  keep
+  (fn {}
+    (params {} (value {type: (t-var {} _)}))
+    (var {span: "surf:102..107"} value)))

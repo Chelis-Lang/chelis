@@ -1,0 +1,19 @@
+(module {surf_path: "Repro.FanOutWorkaround"}
+  repro.fanoutworkaround
+  (defsig {}
+    fanout
+    (t-fn {}
+      (t-tensor {} (d-lit {} 3) (t-prim {} f32))
+      (t-tensor {} (d-lit {} 3) (t-prim {} f32))))
+  (def {}
+    fanout
+    (fn {}
+      (params {} (x {type: (t-var {} _)}))
+      (let {span: "surf:82..119"}
+        (bind {}
+          alias
+          (copy {span: "surf:94..101"} (var {span: "surf:99..100"} x)))
+        (app {span: "surf:104..117"}
+          (var {span: "surf:104..107"} mul)
+          (var {span: "surf:108..109"} x)
+          (var {span: "surf:111..116"} alias))))))

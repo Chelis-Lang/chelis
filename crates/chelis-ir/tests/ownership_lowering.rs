@@ -1,6 +1,6 @@
 //! Verified ownership-lowering acceptance tests (chelis#1286).
 //!
-//! The fixtures and inline programs pass through Surf parsing, type/effect/
+//! The lossless desugared fixtures pass through type/effect/
 //! linearity checking, the real root manifest, and concrete host lowering
 //! before the ownership boundary. Positive and negative cases therefore do
 //! not self-certify against a synthetic ownership graph.
@@ -18,8 +18,6 @@ use chelis_ir::ownership::{
     lower_dag_ownership, lower_host_ownership, verify_ownership,
 };
 use chelis_ir::{ConcreteHostType, Dag, DimInfo, RiscOp, TensorType};
-use chelis_surf::desugar::desugar_program;
-use chelis_surf::parser::parse_str as surf_parse;
 use chelis_types::manifest::{ManifestedProgram, RootManifest};
 use chelis_types::types::{Prim, Target};
 use chelis_types::{CheckedProgram, check_linearity, check_typed_program};
@@ -35,7 +33,7 @@ const C_TENSOR_PRIMS: &[Prim] = &[
 
 const FIXTURE_DIR: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../chelis-cli/tests/fixtures/compiled_value_ownership/"
+    "/tests/fixtures/compiled_value_ownership/"
 );
 
 #[test]
@@ -96,13 +94,14 @@ struct Front {
 }
 
 fn fixture_source(name: &str) -> String {
-    let path = format!("{FIXTURE_DIR}{name}.ch");
+    let path = format!("{FIXTURE_DIR}{name}.json");
     std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("read {path}: {error}"))
 }
 
 fn front(source: &str) -> Front {
-    let declarations = surf_parse(source).unwrap_or_else(|error| panic!("parse: {error:?}"));
-    let deep = desugar_program(&declarations);
+    // Preserve legacy carriers and signature metadata that select the host lane.
+    let deep: Vec<chelis_deep::Expr> =
+        serde_json::from_str(source).expect("deserialize lossless Deep fixture");
     let checked = check_typed_program(&deep)
         .unwrap_or_else(|errors| panic!("type check: {:?}", errors.errors));
     let checked = chelis_effects::check_program(&checked)
@@ -257,7 +256,9 @@ fn aliased_roots_copy_the_earlier_sink_in_manifest_order() {
 
 #[test]
 fn non_root_heap_value_drops_at_its_verified_last_use() {
-    let mut front = front("kept = [1i64]\nout = len(kept)\n");
+    let mut front = front(include_str!(
+        "fixtures/core/tests/ownership_lowering/non_root_heap_value_drops_at_its_verified_last_use.json"
+    ));
     front
         .manifest
         .entries
@@ -298,7 +299,9 @@ fn recursive_tail_frame_drops_precede_the_direct_call() {
 
 #[test]
 fn nested_scope_escape_projects_the_same_owner_into_the_outer_payload_slot() {
-    let verified = verified_source("b = {\n  q = to_tensor([1.0f32, 2.0f32])\n  q\n}\n");
+    let verified = verified_source(include_str!(
+        "fixtures/core/tests/ownership_lowering/nested_scope_escape_projects_the_same_owner_into_the_outer_payload_slot.json"
+    ));
     let body = unit_text(&verified, "roots");
     assert_eq!(count(&body, "project borrow"), 1, "{body}");
     let (project, projected_owner_drop) = projected_owner_terminal(&body);
@@ -308,15 +311,17 @@ fn nested_scope_escape_projects_the_same_owner_into_the_outer_payload_slot() {
     );
 
     let flat = unit_text(
-        &verified_source("b = to_tensor([1.0f32, 2.0f32])\n"),
+        &verified_source(include_str!(
+            "fixtures/core/tests/ownership_lowering/nested_scope_escape_projects_the_same_owner_into_the_outer_payload_slot_2.json"
+        )),
         "roots",
     );
     assert_eq!(count(&flat, "project borrow"), 0, "{flat}");
 
     let doubly_nested = unit_text(
-        &verified_source(
-            "b = {\n  middle = {\n    q = to_tensor([1.0f32, 2.0f32])\n    q\n  }\n  middle\n}\n",
-        ),
+        &verified_source(include_str!(
+            "fixtures/core/tests/ownership_lowering/nested_scope_escape_projects_the_same_owner_into_the_outer_payload_slot_3.json"
+        )),
         "roots",
     );
     assert_eq!(
@@ -342,10 +347,9 @@ fn nested_scope_escape_projects_the_same_owner_into_the_outer_payload_slot() {
 
 #[test]
 fn source_copy_mints_a_fresh_owned_identity_for_named_fresh_and_tail_values() {
-    let named_program = verified_source(
-        "a = to_tensor([1.0f32, 2.0f32])\n\
-         b = copy(a)\n",
-    );
+    let named_program = verified_source(include_str!(
+        "fixtures/core/tests/ownership_lowering/source_copy_mints_a_fresh_owned_identity_for_named_fresh_and_tail_values.json"
+    ));
     let named = unit_text(&named_program, "roots");
     assert!(named.contains("= tensor:"), "{named}");
     assert!(
@@ -360,7 +364,9 @@ fn source_copy_mints_a_fresh_owned_identity_for_named_fresh_and_tail_values() {
     assert!(named.contains("root a move"), "{named}");
     assert!(named.contains("root b move"), "{named}");
 
-    let fresh_program = verified_source("b = copy(to_tensor([3.0f32, 4.0f32]))\n");
+    let fresh_program = verified_source(include_str!(
+        "fixtures/core/tests/ownership_lowering/source_copy_mints_a_fresh_owned_identity_for_named_fresh_and_tail_values_2.json"
+    ));
     let fresh = unit_text(&fresh_program, "roots");
     assert!(
         fresh.contains("= tensor:"),
@@ -373,11 +379,9 @@ fn source_copy_mints_a_fresh_owned_identity_for_named_fresh_and_tail_values() {
         "fresh source copy must be preserved in a verified nested DAG"
     );
 
-    let tail_program = verified_source(
-        "def duplicate(x: tensor[2, f32]) -> tensor[2, f32] = copy(x)\n\
-         source = to_tensor([5.0f32, 6.0f32])\n\
-         out = duplicate(source)\n",
-    );
+    let tail_program = verified_source(include_str!(
+        "fixtures/core/tests/ownership_lowering/source_copy_mints_a_fresh_owned_identity_for_named_fresh_and_tail_values_3.json"
+    ));
     let tail = unit_text(&tail_program, "duplicate");
     assert_eq!(
         count(&tail, "= copy clone %"),
@@ -404,9 +408,9 @@ fn source_copy_mints_a_fresh_owned_identity_for_named_fresh_and_tail_values() {
 /// `owner %1 in `g` b1 is not live`.
 #[test]
 fn scalar_reused_in_tail_call_slots_duplicates_and_verifies() {
-    let source = "def f3(a: f32, b: f32) -> f32 = add(a, b)\n\
-                  def g(x: f32) -> f32 = f3(x, x)\n\
-                  def main() -> f32 = g(cast(0.5, f32))\n";
+    let source = include_str!(
+        "fixtures/core/tests/ownership_lowering/scalar_reused_in_tail_call_slots_duplicates_and_verifies.json"
+    );
     // The core oracle: the whole program lowers AND verifies. Before the fix
     // the verifier rejected `g` because the first slot moved `x` and the second
     // read it dead.
@@ -433,9 +437,9 @@ fn scalar_reused_in_tail_call_slots_duplicates_and_verifies() {
 /// explicit copy the user did not write.
 #[test]
 fn heap_value_reused_in_tail_call_slots_is_still_rejected() {
-    let source = "def joins(a: string, b: string) -> string = string_concat(a, b)\n\
-                  def dupstr(s: string) -> string = joins(s, s)\n\
-                  def run_main() -> string = dupstr(\"hi\")\n";
+    let source = include_str!(
+        "fixtures/core/tests/ownership_lowering/heap_value_reused_in_tail_call_slots_is_still_rejected.json"
+    );
     let error = match lower_source(source) {
         Ok(lowered) => verify_ownership(lowered).expect_err("heap double-move must be rejected"),
         Err(error) => error,
@@ -449,10 +453,9 @@ fn heap_value_reused_in_tail_call_slots_is_still_rejected() {
 #[test]
 fn debug_observes_the_existing_owner_and_is_not_source_copy() {
     let roots = unit_text(
-        &verified_source(
-            "a = to_tensor([1.0f32, 2.0f32])\n\
-             b = debug(a)\n",
-        ),
+        &verified_source(include_str!(
+            "fixtures/core/tests/ownership_lowering/debug_observes_the_existing_owner_and_is_not_source_copy.json"
+        )),
         "roots",
     );
     assert!(roots.contains("builtin:debug(borrow"), "{roots}");
@@ -465,7 +468,9 @@ fn debug_observes_the_existing_owner_and_is_not_source_copy() {
 
 #[test]
 fn missing_manifest_binding_is_a_typed_lowering_error() {
-    let mut front = front("out = [1i64]\n");
+    let mut front = front(include_str!(
+        "fixtures/core/tests/ownership_lowering/missing_manifest_binding_is_a_typed_lowering_error.json"
+    ));
     let mut ghost = front.manifest.entries[0].clone();
     ghost.name = "ghost".to_string();
     ghost.def_name = "ghost".to_string();
@@ -515,11 +520,9 @@ fn artifact_entry_borrow_is_copied_before_an_owned_formal() {
 
 #[test]
 fn artifact_entry_borrow_crosses_a_borrowed_formal_without_a_copy() {
-    let verified = verified_source(
-        "def peek(x: &tensor[2, f32]) -> i64 = 1i64\n\
-         input = to_tensor([cast(1.0, f32), cast(2.0, f32)])\n\
-         out = peek(&input)\n",
-    );
+    let verified = verified_source(include_str!(
+        "fixtures/core/tests/ownership_lowering/artifact_entry_borrow_crosses_a_borrowed_formal_without_a_copy.json"
+    ));
     let peek = unit_text(&verified, "peek");
     assert!(peek.contains("b0 (EntryBorrow %0)"), "{peek}");
     assert!(peek.contains("jump b1 [borrow %0]"), "{peek}");
@@ -529,8 +532,9 @@ fn artifact_entry_borrow_crosses_a_borrowed_formal_without_a_copy() {
 
 #[test]
 fn capture_is_borrowed_and_an_owned_return_copies_it() {
-    let verified =
-        verified_source("global = \"abc\"\ndef read() -> string = global\nout = read()\n");
+    let verified = verified_source(include_str!(
+        "fixtures/core/tests/ownership_lowering/capture_is_borrowed_and_an_owned_return_copies_it.json"
+    ));
     let function = unit_text(&verified, "read");
     assert!(function.contains("EntryBorrow"), "{function}");
     assert!(function.contains("Borrowed"), "{function}");
@@ -597,16 +601,9 @@ fn option_some_moves_fresh_payloads_and_clones_named_payloads_before_the_move() 
     assert!(fresh.contains("builtin:Some(move"), "{fresh}");
 
     let named = unit_text(
-        &verified_source(
-            r#"
-def length_after_wrap() -> i64 = {
-  text = "abc"
-  wrapped: Option[string] = Some(text)
-  string_len(text)
-}
-length = length_after_wrap()
-"#,
-        ),
+        &verified_source(include_str!(
+            "fixtures/core/tests/ownership_lowering/option_some_moves_fresh_payloads_and_clones_named_payloads_before_the_move.json"
+        )),
         "length_after_wrap",
     );
     assert!(named.contains("= copy clone"), "{named}");
@@ -640,26 +637,38 @@ fn fold_accumulator_is_one_owned_block_parameter_on_both_paths() {
 
 #[test]
 fn all_previously_supported_host_combinators_reach_the_verified_boundary() {
-    let verified = verified_source("xs = [[1i64], [2i64]]\nys = map(fn (v: List[i64]) -> v, xs)\n");
+    let verified = verified_source(include_str!(
+        "fixtures/core/tests/ownership_lowering/all_previously_supported_host_combinators_reach_the_verified_boundary.json"
+    ));
     let roots = unit_text(&verified, "roots");
     assert!(roots.contains("empty_list"), "{roots}");
     assert!(roots.contains("list_push"), "{roots}");
     assert!(roots.contains("loop borrow"), "{roots}");
 
     for source in [
-        "xs = [1i64, 2i64]\nys = filter(fn (v: i64) -> gte(v, 2i64), xs)\n",
-        "xs = [1i64, 2i64]\nys = scan(fn (acc: i64, v: i64) -> add(acc, v), 0i64, xs)\n",
-        "xs = [1i64, 2i64]\nys = partition(fn (v: i64) -> gt(v, 1i64), xs)\n",
-        "xs = [1i64, 2i64]\nys = flat_map(fn (v: i64) -> [v, v], xs)\n",
-        "sampled = with seed(7i64) { 1i64 }\n",
+        include_str!(
+            "fixtures/core/tests/ownership_lowering/all_previously_supported_host_combinators_reach_the_verified_boundary_2.json"
+        ),
+        include_str!(
+            "fixtures/core/tests/ownership_lowering/all_previously_supported_host_combinators_reach_the_verified_boundary_3.json"
+        ),
+        include_str!(
+            "fixtures/core/tests/ownership_lowering/all_previously_supported_host_combinators_reach_the_verified_boundary_4.json"
+        ),
+        include_str!(
+            "fixtures/core/tests/ownership_lowering/all_previously_supported_host_combinators_reach_the_verified_boundary_5.json"
+        ),
+        include_str!(
+            "fixtures/core/tests/ownership_lowering/all_previously_supported_host_combinators_reach_the_verified_boundary_6.json"
+        ),
     ] {
         verify_ownership(lower_source(source).unwrap()).unwrap();
     }
 }
 
 fn assert_front_rejects(source: &str) {
-    let declarations = surf_parse(source).expect("negative twin still parses");
-    let deep = desugar_program(&declarations);
+    let deep: Vec<chelis_deep::Expr> =
+        serde_json::from_str(source).expect("negative twin still deserializes");
     assert!(
         check_typed_program(&deep).is_err(),
         "negative twin unexpectedly checked"
@@ -668,18 +677,28 @@ fn assert_front_rejects(source: &str) {
 
 #[test]
 fn supported_combinators_keep_their_preexisting_typed_failure_twins() {
-    assert_front_rejects("xs = [1i64]\nys = filter(fn (v: i64) -> missing(v), xs)\n");
-    assert_front_rejects(
-        "xs = [1i64]\nys = scan(fn (acc: i64, v: i64) -> missing(acc, v), 0i64, xs)\n",
-    );
-    assert_front_rejects("xs = [1i64]\nys = partition(fn (v: i64) -> missing(v), xs)\n");
-    assert_front_rejects("xs = [1i64]\nys = flat_map(fn (v: i64) -> missing(v), xs)\n");
-    assert_front_rejects("sampled = with seed(7i64) { missing }\n");
+    assert_front_rejects(include_str!(
+        "fixtures/core/tests/ownership_lowering/supported_combinators_keep_their_preexisting_typed_failure_twins.json"
+    ));
+    assert_front_rejects(include_str!(
+        "fixtures/core/tests/ownership_lowering/supported_combinators_keep_their_preexisting_typed_failure_twins_2.json"
+    ));
+    assert_front_rejects(include_str!(
+        "fixtures/core/tests/ownership_lowering/supported_combinators_keep_their_preexisting_typed_failure_twins_3.json"
+    ));
+    assert_front_rejects(include_str!(
+        "fixtures/core/tests/ownership_lowering/supported_combinators_keep_their_preexisting_typed_failure_twins_4.json"
+    ));
+    assert_front_rejects(include_str!(
+        "fixtures/core/tests/ownership_lowering/supported_combinators_keep_their_preexisting_typed_failure_twins_5.json"
+    ));
 }
 
 #[test]
 fn malformed_real_host_programs_fail_at_typed_boundaries() {
-    let front = front("def id(p: i64) -> i64 = p\nout = id(1i64)\n");
+    let front = front(include_str!(
+        "fixtures/core/tests/ownership_lowering/malformed_real_host_programs_fail_at_typed_boundaries.json"
+    ));
     let mut wrong_arity = front.host.clone();
     wrong_arity.globals[0].value = HostExpr::new(HostExprKind::Call {
         function: "id".to_string(),
@@ -708,17 +727,9 @@ fn malformed_real_host_programs_fail_at_typed_boundaries() {
 
 #[test]
 fn checked_scalar_call_slots_restore_the_exact_literal_type() {
-    let verified = verified_source(
-        "def keep_i32(x: i32) -> i32 = x\n\
-         def keep_i64(x: i64) -> i64 = x\n\
-         def keep_f32(x: f32) -> f32 = x\n\
-         def keep_f64(x: f64) -> f64 = x\n\
-         a = keep_i32(7)\n\
-         b = keep_i64(7i64)\n\
-         c = keep_f32(1.5)\n\
-         d = keep_f64(1.5f64)\n\
-         e = keep_f32(cast(42, f32))\n",
-    );
+    let verified = verified_source(include_str!(
+        "fixtures/core/tests/ownership_lowering/checked_scalar_call_slots_restore_the_exact_literal_type.json"
+    ));
     let roots = unit_text(&verified, "roots");
     for callee in ["keep_i32", "keep_i64", "keep_f32", "keep_f64"] {
         assert!(roots.contains(&format!("call:{callee}")), "{roots}");
@@ -727,13 +738,9 @@ fn checked_scalar_call_slots_restore_the_exact_literal_type() {
 
 #[test]
 fn checked_tensor_call_slots_preserve_dimension_instantiation_and_reject_forgery() {
-    let source = "sig guarded[n]: tensor[n, f32] -> tensor[n, f32]\n\
-                  def guarded(x) = {\n\
-                    n = cast(shape(x, cast(0, i32)), i64)\n\
-                    if gt(cast(1, i64), n) then fail(\"empty\") else x\n\
-                  }\n\
-                  def call(x: tensor[4, f32]) -> tensor[4, f32] = guarded(x)\n\
-                  out = call(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32)]))\n";
+    let source = include_str!(
+        "fixtures/core/tests/ownership_lowering/checked_tensor_call_slots_preserve_dimension_instantiation_and_reject_forgery.json"
+    );
     let front = front(source);
     let verified = verify_ownership(
         lower_host_ownership(&front.manifested, front.host.clone()).expect("valid instantiation"),
@@ -765,14 +772,9 @@ fn checked_tensor_call_slots_preserve_dimension_instantiation_and_reject_forgery
 
 #[test]
 fn checked_nominal_dimension_provenance_rejects_a_different_name() {
-    let mut front = front(
-        "def nominal(x: tensor[batch, f32]) -> tensor[batch, f32] = {\n\
-           size = cast(shape(x, cast(0, i32)), i64)\n\
-           if gt(cast(1, i64), size) then fail(\"empty\") else x\n\
-         }\n\
-         def caller(x: tensor[batch, f32]) -> tensor[batch, f32] = nominal(x)\n\
-         out = 0\n",
-    );
+    let mut front = front(include_str!(
+        "fixtures/core/tests/ownership_lowering/checked_nominal_dimension_provenance_rejects_a_different_name.json"
+    ));
     let caller = front
         .host
         .functions
@@ -799,15 +801,9 @@ fn checked_nominal_dimension_provenance_rejects_a_different_name() {
 
 #[test]
 fn checked_repeated_dimension_variable_rejects_inconsistent_actuals() {
-    let mut front = front(
-        "sig paired[n]: tensor[n, f32] -> tensor[n, f32] -> tensor[n, f32]\n\
-         def paired(x, y) = {\n\
-           size = cast(shape(y, cast(0, i32)), i64)\n\
-           if gt(cast(1, i64), size) then fail(\"empty\") else x\n\
-         }\n\
-         def caller(x: tensor[4, f32], y: tensor[4, f32]) -> tensor[4, f32] = paired(x, y)\n\
-         out = 0\n",
-    );
+    let mut front = front(include_str!(
+        "fixtures/core/tests/ownership_lowering/checked_repeated_dimension_variable_rejects_inconsistent_actuals.json"
+    ));
     let caller = front
         .host
         .functions
@@ -834,7 +830,9 @@ fn checked_repeated_dimension_variable_rejects_inconsistent_actuals() {
 
 #[test]
 fn forged_call_argument_types_cannot_retag_an_actual_expression() {
-    let front = front("def keep(x: i32) -> i32 = x\nout = keep(1)\n");
+    let front = front(include_str!(
+        "fixtures/core/tests/ownership_lowering/forged_call_argument_types_cannot_retag_an_actual_expression.json"
+    ));
 
     let mut forged_slot = front.host.clone();
     let HostExprKind::Call { arg_tys, .. } = &mut forged_slot
@@ -907,12 +905,16 @@ fn every_current_concrete_host_expr_kind_has_a_closed_disposition() {
 
 #[test]
 fn callable_manifest_root_consumes_the_materialized_observation_binding() {
-    let verified = verified_source("def answer() -> string = \"owned\"\n");
+    let verified = verified_source(include_str!(
+        "fixtures/core/tests/ownership_lowering/callable_manifest_root_consumes_the_materialized_observation_binding.json"
+    ));
     let roots = unit_text(&verified, "roots");
     assert!(roots.contains("call:answer"), "{roots}");
     assert!(roots.contains("root answer move"), "{roots}");
 
-    let front = front("def answer() -> string = \"owned\"\n");
+    let front = front(include_str!(
+        "fixtures/core/tests/ownership_lowering/callable_manifest_root_consumes_the_materialized_observation_binding.json"
+    ));
     let mut missing = front.host;
     missing.functions.clear();
     assert!(matches!(
@@ -923,13 +925,17 @@ fn callable_manifest_root_consumes_the_materialized_observation_binding() {
 
 #[test]
 fn authored_entries_are_borrow_adapters_but_internal_specializations_are_not() {
-    let authored = front("def id(x: string) -> string = x\nout = id(\"x\")\n");
+    let authored = front(include_str!(
+        "fixtures/core/tests/ownership_lowering/authored_entries_are_borrow_adapters_but_internal_specializations_are_not.json"
+    ));
     let authored_verified =
         verify_ownership(lower_host_ownership(&authored.manifested, authored.host).unwrap())
             .unwrap();
     assert!(unit_text(&authored_verified, "id").contains("EntryBorrow"));
 
-    let internal = front("def id(x: string) -> string = x\nout = id(\"x\")\n");
+    let internal = front(include_str!(
+        "fixtures/core/tests/ownership_lowering/authored_entries_are_borrow_adapters_but_internal_specializations_are_not.json"
+    ));
     let mut host = internal.host;
     host.functions[0].origin = HostFunctionOrigin::Monomorphized;
     let internal_verified =
@@ -939,12 +945,9 @@ fn authored_entries_are_borrow_adapters_but_internal_specializations_are_not() {
 
 #[test]
 fn internal_borrowed_formal_remains_live_through_both_branch_arms() {
-    let internal = front(
-        "def choose(x: &tensor[1, f32], flag: bool) -> tensor[1, f32] =\n\
-         if flag then x else x\n\
-         input = to_tensor([cast(1.0, f32)])\n\
-         out = choose(&input, true)\n",
-    );
+    let internal = front(include_str!(
+        "fixtures/core/tests/ownership_lowering/internal_borrowed_formal_remains_live_through_both_branch_arms.json"
+    ));
     let mut host = internal.host;
     let function = host
         .functions
@@ -1052,11 +1055,9 @@ fn standalone_and_nested_dags_cross_verified_payload_boundaries() {
     assert!(terminal.contains("store n3 move n1"), "{terminal}");
     assert!(terminal.contains("drop n4 move n2"), "{terminal}");
 
-    let host = verified_source(
-        "def peek(x: &tensor[2, f32]) -> i64 = 1i64\n\
-         input = to_tensor([cast(1.0, f32), cast(2.0, f32)])\n\
-         out = peek(&input)\n",
-    );
+    let host = verified_source(include_str!(
+        "fixtures/core/tests/ownership_lowering/artifact_entry_borrow_crosses_a_borrowed_formal_without_a_copy.json"
+    ));
     assert!(host.nested_dag_count() > 0);
     assert!(host.nested_dag_render(0).is_some());
 }
@@ -1320,9 +1321,9 @@ fn a_dag_copy_after_store_move_is_rejected() {
 
 #[test]
 fn signature_entry_requires_tensor_observations_and_preserves_borrows() {
-    let front = front(
-        "def guarded[n](x: tensor[n, f32]) -> tensor[n, f32] ! { IO } = { _ = print(\"entered\")\n x }\nout = guarded(to_tensor([1.0f32, 2.0f32]))\n",
-    );
+    let front = front(include_str!(
+        "fixtures/core/tests/ownership_lowering/signature_entry_requires_tensor_observations_and_preserves_borrows.json"
+    ));
     let mut host = front.host.clone();
     let function = host
         .functions

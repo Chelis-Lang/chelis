@@ -1,0 +1,60 @@
+(defsig {}
+  bad
+  (t-fn {}
+    (t-tuple {}
+      (t-tensor {} (d-lit {} 4) (t-prim {} f32))
+      (t-tensor {} (d-lit {} 4) (t-prim {} f32)))
+    (t-tensor {} (d-lit {} 4) (t-prim {} f32))))
+
+(def {}
+  bad
+  (fn {}
+    (params {} (pair {type: (t-var {} _)}))
+    (let {span: "surf:71..266"}
+      (bind {destructure: true}
+        __chelis_tmp0
+        (var {span: "surf:93..97"} pair))
+      (let {}
+        (bind {destructure: true}
+          __chelis_tmp2
+          (tuple-get {} (var {} __chelis_tmp0) (lit {type: (t-prim {} i32)} 0)))
+        (let {}
+          (bind {destructure: true}
+            left
+            (var {} __chelis_tmp2))
+          (let {}
+            (bind {destructure: true}
+              __chelis_tmp1
+              (tuple-get {}
+                (var {} __chelis_tmp0)
+                (lit {type: (t-prim {} i32)} 1)))
+            (let {}
+              (bind {destructure: true}
+                right
+                (var {} __chelis_tmp1))
+              (let {}
+                (bind {}
+                  alias
+                  (var {span: "surf:126..130", surf_binding_type: "explicit", type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} left))
+                (let {}
+                  (bind {}
+                    consumed_left
+                    (realize {span: "surf:167..181",
+                               surf_binding_type: "explicit",
+                               type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))
+                             }
+                      (var {span: "surf:175..180"} alias)))
+                  (let {}
+                    (bind {}
+                      consumed_right
+                      (realize {span: "surf:219..233",
+                                 surf_binding_type: "explicit",
+                                 type: (t-tensor {}
+                                         (d-lit {} 4)
+                                         (t-prim {} f32))
+                               }
+                        (var {span: "surf:227..232"} right)))
+                    (app {span: "surf:238..262"}
+                      (var {span: "surf:238..241"} add)
+                      (var {span: "surf:242..246"} left)
+                      (var {span: "surf:248..261"} consumed_left))))))))))))

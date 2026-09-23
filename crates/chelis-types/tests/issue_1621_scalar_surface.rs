@@ -15,13 +15,11 @@ const ARITHMETIC: [&str; 8] = [
 ];
 
 fn diagnostics(source: &str) -> Vec<CheckError> {
-    let surf = chelis_surf::parser::parse_str(source).expect("Surf parse");
-    let deep = chelis_macros::expand_program(
-        &chelis_surf::desugar::desugar_program(&surf),
-        &chelis_macros::ExpansionOptions::default(),
-    )
-    .expect("expand")
-    .into_exprs();
+    let deep = if source.trim_start().starts_with('[') {
+        serde_json::from_str(source).expect("lossless expanded AST fixture")
+    } else {
+        chelis_deep::parse_and_stamp_file(source).expect("Deep fixture")
+    };
     deep_diagnostics(&deep)
 }
 
@@ -99,24 +97,36 @@ fn every_bounded_comparison_rejects_mixed_surfaces_in_both_orders() {
     for bound in ["Float", "Int", "Numeric"] {
         for op in COMPARISONS {
             for (lhs, rhs) in [
-                ("xs", "cast(1, p)"),
-                ("cast(1, p)", "xs"),
-                ("xs", "c"),
-                ("c", "xs"),
+                (
+                    "(var {} xs)",
+                    "(cast {} (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 1) (t-var {} p))",
+                ),
+                (
+                    "(cast {} (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 1) (t-var {} p))",
+                    "(var {} xs)",
+                ),
+                ("(var {} xs)", "(var {} c)"),
+                ("(var {} c)", "(var {} xs)"),
             ] {
                 rejects(
-                    &format!(
-                        "def f[p: {bound}](xs: tensor[3, p], c: p) -> tensor[3, bool] = {op}({lhs}, {rhs})\n"
-                    ),
+                    &include_str!("fixtures/core/tests/issue_1621_scalar_surface/template_8.deep")
+                        .replace("@bound@", &bound.to_ascii_lowercase())
+                        .replace("@op@", op)
+                        .replace("@lhs@", lhs)
+                        .replace("@rhs@", rhs),
                     true,
                 );
             }
-            accepts(&format!(
-                "def f[p: {bound}](x: p, y: p) -> bool = {op}(x, y)\n"
-            ));
-            accepts(&format!(
-                "def f[p: {bound}](x: tensor[3, p], y: tensor[3, p]) -> tensor[3, bool] = {op}(x, y)\n"
-            ));
+            accepts(
+                &include_str!("fixtures/core/tests/issue_1621_scalar_surface/template_9.deep")
+                    .replace("@bound@", &bound.to_ascii_lowercase())
+                    .replace("@op@", op),
+            );
+            accepts(
+                &include_str!("fixtures/core/tests/issue_1621_scalar_surface/template_10.deep")
+                    .replace("@bound@", &bound.to_ascii_lowercase())
+                    .replace("@op@", op),
+            );
         }
     }
 }
@@ -130,38 +140,103 @@ fn arithmetic_has_the_same_surface_boundary() {
             "Float"
         };
         for (lhs, rhs) in [
-            ("xs", "cast(1, p)"),
-            ("cast(1, p)", "xs"),
-            ("xs", "c"),
-            ("c", "xs"),
+            (
+                "(var {} xs)",
+                "(cast {} (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 1) (t-var {} p))",
+            ),
+            (
+                "(cast {} (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 1) (t-var {} p))",
+                "(var {} xs)",
+            ),
+            ("(var {} xs)", "(var {} c)"),
+            ("(var {} c)", "(var {} xs)"),
         ] {
             rejects(
-                &format!(
-                    "def f[p: {bound}](xs: tensor[3, p], c: p) -> tensor[3, p] = {op}({lhs}, {rhs})\n"
-                ),
+                &include_str!("fixtures/core/tests/issue_1621_scalar_surface/template_19.deep")
+                    .replace("@bound@", &bound.to_ascii_lowercase())
+                    .replace("@op@", op)
+                    .replace("@lhs@", lhs)
+                    .replace("@rhs@", rhs),
                 false,
             );
         }
-        accepts(&format!(
-            "def f[p: {bound}](x: p, y: p) -> p = {op}(x, y)\n"
-        ));
-        accepts(&format!(
-            "def f[p: {bound}](x: tensor[3, p], y: tensor[3, p]) -> tensor[3, p] = {op}(x, y)\n"
-        ));
+        accepts(
+            &include_str!("fixtures/core/tests/issue_1621_scalar_surface/template_20.deep")
+                .replace("@bound@", &bound.to_ascii_lowercase())
+                .replace("@op@", op),
+        );
+        accepts(
+            &include_str!("fixtures/core/tests/issue_1621_scalar_surface/template_21.deep")
+                .replace("@bound@", &bound.to_ascii_lowercase())
+                .replace("@op@", op),
+        );
     }
 }
 
 #[test]
 fn nesting_and_aliases_do_not_erase_the_scalar_surface() {
     for body in [
-        "{ c = cast(0.1, p)\n gt(xs, c) }",
-        "{ c: p = cast(0.1, p)\n gt(xs, c) }",
-        "{ compare = fn(c: p) -> gt(xs, c)\n compare(cast(0.1, p)) }",
-        "where(gt(xs, cast(0.1, p)), xs, xs)",
-        "gt(xs, tensor_to_scalar(scalar_to_tensor(cast(0.1, p))))",
+        r#"(let {span: "surf:36..67"}
+      (bind {}
+        c
+        (cast {span: "surf:42..54"}
+          (lit {span: "surf:47..50", surf_literal_style: "unsuffixed", type: (t-var {} p)} 0.1)
+          (t-var {} p)))
+      (app {span: "surf:56..65"}
+        (var {span: "surf:56..58"} gt)
+        (var {span: "surf:59..61"} xs)
+        (var {span: "surf:63..64"} c)))"#,
+        r#"(let {span: "surf:36..70"}
+      (bind {}
+        c
+        (cast {span: "surf:45..57",
+                surf_binding_type: "explicit",
+                type: (t-var {} p)
+              }
+          (lit {span: "surf:50..53", surf_literal_style: "unsuffixed", type: (t-var {} p)} 0.1)
+          (t-var {} p)))
+      (app {span: "surf:59..68"}
+        (var {span: "surf:59..61"} gt)
+        (var {span: "surf:62..64"} xs)
+        (var {span: "surf:66..67"} c)))"#,
+        r#"(let {span: "surf:36..94"}
+      (bind {}
+        compare
+        (fn {span: "surf:48..69"}
+          (params {} (c {type: (t-var {} p)}))
+          (app {span: "surf:60..69"}
+            (var {span: "surf:60..62"} gt)
+            (var {span: "surf:63..65"} xs)
+            (var {span: "surf:67..68"} c))))
+      (app {span: "surf:71..92"}
+        (var {span: "surf:71..78"} compare)
+        (cast {span: "surf:79..91"}
+          (lit {span: "surf:84..87", surf_literal_style: "unsuffixed", type: (t-var {} p)} 0.1)
+          (t-var {} p))))"#,
+        r#"(app {span: "surf:36..71"}
+      (var {span: "surf:36..41"} where)
+      (app {span: "surf:42..62"}
+        (var {span: "surf:42..44"} gt)
+        (var {span: "surf:45..47"} xs)
+        (cast {span: "surf:49..61"}
+          (lit {span: "surf:54..57", surf_literal_style: "unsuffixed", type: (t-var {} p)} 0.1)
+          (t-var {} p)))
+      (var {span: "surf:64..66"} xs)
+      (var {span: "surf:68..70"} xs))"#,
+        r#"(app {span: "surf:36..92"}
+      (var {span: "surf:36..38"} gt)
+      (var {span: "surf:39..41"} xs)
+      (app {span: "surf:43..91"}
+        (var {span: "surf:43..59"} tensor_to_scalar)
+        (app {span: "surf:60..90"}
+          (var {span: "surf:60..76"} scalar_to_tensor)
+          (cast {span: "surf:77..89"}
+            (lit {span: "surf:82..85", surf_literal_style: "unsuffixed", type: (t-var {} p)} 0.1)
+            (t-var {} p)))))"#,
     ] {
         rejects(
-            &format!("def f[p: Float](xs: tensor[3, p]) = {body}\n"),
+            &include_str!("fixtures/core/tests/issue_1621_scalar_surface/template_27.deep")
+                .replace("@body@", body),
             true,
         );
     }
@@ -171,44 +246,58 @@ fn nesting_and_aliases_do_not_erase_the_scalar_surface() {
 fn explicit_shape_construction_preserves_generic_dtype() {
     for size in [0, 1, 3] {
         for op in ["gt", "mul"] {
-            for extent in [format!("{size}i64"), "shape(xs, 0i32)".into()] {
-                accepts(&format!(
-                    "def f[p: Float](xs: tensor[{size}, p]) = {op}(xs, insert(scalar_to_tensor(cast(0.1, p)), 0i32, {extent}))\n"
-                ));
+            for extent in [
+                format!("(lit {{type: (t-prim {{}} i64)}} {size})"),
+                "(app {} (var {} shape) (var {} xs) (lit {type: (t-prim {} i32)} 0))".into(),
+            ] {
+                accepts(
+                    &include_str!("fixtures/core/tests/issue_1621_scalar_surface/template_30.deep")
+                        .replace("@size@", &size.to_string())
+                        .replace("@op@", op)
+                        .replace("@extent@", &extent),
+                );
             }
         }
     }
-    accepts(
-        "def f[p: Float](xs: tensor[2, 3, p]) = gt(xs, insert(insert(scalar_to_tensor(cast(0.1, p)), 0i32, 3i64), 0i32, 2i64))\n",
+    accepts(include_str!(
+        "fixtures/core/tests/issue_1621_scalar_surface/explicit_shape_construction_preserves_generic_dtype_1.deep"
+    ));
+    accepts(include_str!(
+        "fixtures/core/tests/issue_1621_scalar_surface/explicit_shape_construction_preserves_generic_dtype_2.deep"
+    ));
+    accepts(include_str!(
+        "fixtures/core/tests/issue_1621_scalar_surface/explicit_shape_construction_preserves_generic_dtype_3.deep"
+    ));
+    rejects(
+        include_str!(
+            "fixtures/core/tests/issue_1621_scalar_surface/explicit_shape_construction_preserves_generic_dtype_4.deep"
+        ),
+        true,
     );
-    accepts("def f[p: Float](x: p) -> p = tensor_to_scalar(scalar_to_tensor(x))\n");
-    accepts("def f[p: Float](x: p) -> p = { y: p = x\n y }\n");
-    rejects("def f[p: Float](x: p) = gt(scalar_to_tensor(x), x)\n", true);
 }
 
 #[test]
 fn declaration_binders_stay_independent_and_rigid() {
-    accepts(
-        "def f[p: Float](x: p) -> p = mul(x, cast(0.1, p))\ndef g[p: Int](x: p) -> p = add(x, cast(1, p))\na = f(3.0f64)\nb = g(9007199254740993i64)\n",
-    );
-    assert!(!diagnostics("def f[p: Float](x: p) -> p = cast(1, p)\na = f(1i64)\n").is_empty());
-    assert!(!diagnostics("def f[p: Float](x: p) -> p = add(x, 1.0f32)\n").is_empty());
-    accepts("def identity[p](x: p) -> p = x\nx = identity(to_tensor([1.0f32]))\n");
+    accepts(include_str!(
+        "fixtures/core/tests/issue_1621_scalar_surface/declaration_binders_stay_independent_and_rigid_1.deep"
+    ));
+    assert!(!diagnostics(include_str!("fixtures/core/tests/issue_1621_scalar_surface/declaration_binders_stay_independent_and_rigid_2.deep")).is_empty());
+    assert!(!diagnostics(include_str!("fixtures/core/tests/issue_1621_scalar_surface/declaration_binders_stay_independent_and_rigid_3.deep")).is_empty());
+    accepts(include_str!(
+        "fixtures/core/tests/issue_1621_scalar_surface/declaration_binders_stay_independent_and_rigid_4.deep"
+    ));
 }
 
 #[test]
 fn cached_library_bounds_and_lexical_aliases_preserve_the_boundary() {
-    let library = chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str("def id[p: Float](x: p) -> p = x\n").unwrap(),
-    );
+    let library = chelis_deep::parse_and_stamp_file(include_str!("fixtures/core/tests/issue_1621_scalar_surface/cached_library_bounds_and_lexical_aliases_preserve_the_boundary_1.deep")).expect("Deep fixture");
     let context = chelis_types::build_type_env_from_library(&library).unwrap();
     let bytes = bincode::serialize(&context).unwrap();
     let context: chelis_types::TypeEnv = bincode::deserialize(&bytes).unwrap();
-    for (operand, mixed) in [("xs", true), ("c", false)] {
-        let source = format!("def f[p: Float](xs: tensor[3, p], c: p) = gt({operand}, id(c))\n");
-        let deep = chelis_surf::desugar::desugar_program(
-            &chelis_surf::parser::parse_str(&source).unwrap(),
-        );
+    for (operand, mixed) in [("(var {} xs)", true), ("(var {} c)", false)] {
+        let source = include_str!("fixtures/core/tests/issue_1621_scalar_surface/template_33.deep")
+            .replace("@operand@", operand);
+        let deep = chelis_deep::parse_and_stamp_file(&source).expect("Deep fixture");
         let errors = chelis_types::check_ir_with_context(&context, &deep)
             .err()
             .map_or(vec![], |r| r.errors);
@@ -219,11 +308,17 @@ fn cached_library_bounds_and_lexical_aliases_preserve_the_boundary() {
         }
     }
     rejects(
-        "def f[p: Float](xs: &tensor[3, p], c: &p) = gt(xs, c)\n",
+        include_str!(
+            "fixtures/core/tests/issue_1621_scalar_surface/cached_library_bounds_and_lexical_aliases_preserve_the_boundary_2.deep"
+        ),
         true,
     );
-    accepts("def f[p: Float](x: &p, y: &p) -> bool = gt(x, y)\n");
-    accepts("def f[p: Float](xs: tensor[3, p], c: p) -> p = { gt = fn(a, b) -> b\n gt(xs, c) }\n");
+    accepts(include_str!(
+        "fixtures/core/tests/issue_1621_scalar_surface/cached_library_bounds_and_lexical_aliases_preserve_the_boundary_3.deep"
+    ));
+    accepts(include_str!(
+        "fixtures/core/tests/issue_1621_scalar_surface/cached_library_bounds_and_lexical_aliases_preserve_the_boundary_4.deep"
+    ));
 }
 
 /// #1621 does not enable the previously rejected generic tensor annotation
@@ -231,18 +326,34 @@ fn cached_library_bounds_and_lexical_aliases_preserve_the_boundary() {
 #[test]
 fn nested_generic_tensor_annotations_keep_their_existing_rejection_boundary() {
     for source in [
-        "def f[p: Float](x: tensor[3, p]) -> tensor[3, p] = { y: tensor[p, p] = x\n y }\n",
-        "def f[p: Float](x: tensor[3, p]) -> tensor[3, p] = { y: tensor[..p, p] = x\n y }\n",
-        "def f[p: Float](x: tensor[3, p]) -> tensor[3, p] = { identity = fn(y: tensor[p, p]) -> y\n identity(x) }\n",
-        "def f[n,m,p:Float](x:tensor[n,p], y:tensor[m,p])->tensor[m,p] = { z:tensor[n,p]=y\n z }\n",
-        "def f[r,s,p:Float](x:tensor[..r,p], y:tensor[..s,p])->tensor[..s,p] = { z:tensor[..r,p]=y\n z }\n",
-        "def f[n,m,p:Float](x:tensor[n,p], y:tensor[m,p])->tensor[m,p] = (y: tensor[n,p])\n",
-        "def f[n,m,p:Float](x:tensor[n,p], y:tensor[m,p])->tensor[m,p] = { identity = fn(z:tensor[n,p]) -> z\n identity(y) }\n",
+        include_str!(
+            "fixtures/core/tests/issue_1621_scalar_surface/nested_generic_tensor_annotations_keep_their_existing_rejection_boundary_1.json"
+        ),
+        include_str!(
+            "fixtures/core/tests/issue_1621_scalar_surface/nested_generic_tensor_annotations_keep_their_existing_rejection_boundary_2.json"
+        ),
+        include_str!(
+            "fixtures/core/tests/issue_1621_scalar_surface/nested_generic_tensor_annotations_keep_their_existing_rejection_boundary_3.json"
+        ),
+        include_str!(
+            "fixtures/core/tests/issue_1621_scalar_surface/nested_generic_tensor_annotations_keep_their_existing_rejection_boundary_4.json"
+        ),
+        include_str!(
+            "fixtures/core/tests/issue_1621_scalar_surface/nested_generic_tensor_annotations_keep_their_existing_rejection_boundary_5.json"
+        ),
+        include_str!(
+            "fixtures/core/tests/issue_1621_scalar_surface/nested_generic_tensor_annotations_keep_their_existing_rejection_boundary_6.json"
+        ),
+        include_str!(
+            "fixtures/core/tests/issue_1621_scalar_surface/nested_generic_tensor_annotations_keep_their_existing_rejection_boundary_7.json"
+        ),
     ] {
         assert!(
             !diagnostics(source).is_empty(),
             "must not newly admit {source}"
         );
     }
-    accepts("def f[p: Float](x: p) -> p = { identity = fn(y: p) -> y\n identity(x) }\n");
+    accepts(include_str!(
+        "fixtures/core/tests/issue_1621_scalar_surface/nested_generic_tensor_annotations_keep_their_existing_rejection_boundary_8.json"
+    ));
 }

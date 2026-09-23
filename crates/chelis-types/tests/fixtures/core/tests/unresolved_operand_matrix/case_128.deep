@@ -1,0 +1,16 @@
+(defsig {dtype_bounds: {p: float}}
+  g
+  (p)
+  (t-fn {eff: (effects {} random)}
+    (t-tensor {} (d-lit {} 3) (t-var {} p))
+    (t-var {} p)
+    (t-tensor {} (d-lit {} 3) (t-var {} p))))
+
+(def {}
+  g
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (r {type: (t-var {} _)}))
+    (app {span: "surf:70..83"}
+      (var {span: "surf:70..77"} dropout)
+      (var {span: "surf:78..79"} x)
+      (var {span: "surf:81..82"} r))))

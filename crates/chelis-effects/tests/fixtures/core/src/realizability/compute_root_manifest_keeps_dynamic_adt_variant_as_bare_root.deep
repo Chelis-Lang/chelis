@@ -1,0 +1,30 @@
+(deftype {}
+  Choice
+  ()
+  (variant {} First (t-prim {} i32))
+  (variant {} Second (t-prim {} i32)))
+
+(defsig {} choose (t-fn {} (t-prim {} bool) (t-adt {} Choice)))
+
+(def {}
+  choose
+  (fn {}
+    (params {} (flag {type: (t-var {} _)}))
+    (if {span: "surf:76..134"}
+      (var {span: "surf:79..83"} flag)
+      (app {span: "surf:89..108"}
+        (var {span: "surf:89..94"} First)
+        (cast {span: "surf:95..107"}
+          (lit {span: "surf:100..101", surf_literal_style: "unsuffixed", type: (t-prim {} i32)} 1)
+          (t-prim {} i32)))
+      (app {span: "surf:114..134"}
+        (var {span: "surf:114..120"} Second)
+        (cast {span: "surf:121..133"}
+          (lit {span: "surf:126..127", surf_literal_style: "unsuffixed", type: (t-prim {} i32)} 2)
+          (t-prim {} i32))))))
+
+(def {}
+  result
+  (app {span: "surf:144..156"}
+    (var {span: "surf:144..150"} choose)
+    (lit {span: "surf:151..155", type: (t-prim {} bool)} true)))

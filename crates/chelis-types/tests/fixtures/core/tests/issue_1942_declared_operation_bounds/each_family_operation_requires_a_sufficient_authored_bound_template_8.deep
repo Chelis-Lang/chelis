@@ -1,0 +1,17 @@
+(defsig {}
+  g
+  (p)
+  (t-fn {}
+    (t-tensor {} (d-lit {} 3) (t-var {} p))
+    (t-tensor {} (d-lit {} 3) (t-var {} p))))
+
+(def {}
+  g
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {}
+      (var {} layer_norm)
+      (var {} x)
+      (var {} x)
+      (var {} x)
+      (lit {surf_literal_style: "explicit", type: (t-prim {} f32)} 0.01))))

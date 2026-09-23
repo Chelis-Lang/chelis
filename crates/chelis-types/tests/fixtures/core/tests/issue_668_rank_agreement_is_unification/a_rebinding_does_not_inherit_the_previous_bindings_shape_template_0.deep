@@ -1,0 +1,39 @@
+(module {surf_path: "Repro.Rebind"}
+  repro.rebind
+  (defsig {}
+    f
+    (n)
+    (t-fn {} (t-tensor {} (d-var {} n) (t-prim {} f32)) (t-var {} _)))
+  (def {}
+    f
+    (fn {}
+      (params {} (x {type: (t-var {} _)}))
+      (let {}
+        (bind {}
+          a
+          (app {}
+            (var {} stride)
+            (var {} x)
+            (lit {type: (t-prim {} i64)} 2)))
+        (let {}
+          (bind {}
+            a
+            (app {}
+              (var {} relu)
+              (app {}
+                (var {} insert)
+                (var {} x)
+                (lit {surf_literal_style: "explicit", type: (t-prim {} i32)} 0)
+                (lit {type: (t-prim {} i64)} 2))))
+          (let {}
+            (bind {}
+              b
+              (app {}
+                (var {} insert)
+                (var {} x)
+                (lit {surf_literal_style: "explicit", type: (t-prim {} i32)} 0)
+                (lit {type: (t-prim {} i64)} 2)))
+            (app {}
+              (var {} add)
+              (var {} a)
+              (var {} b))))))))

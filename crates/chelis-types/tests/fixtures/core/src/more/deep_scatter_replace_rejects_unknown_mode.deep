@@ -1,0 +1,22 @@
+(defsig {}
+  bad
+  (t-fn {}
+    (t-tensor {} (d-name {} seq) (d-name {} hidden) (t-prim {} f32))
+    (t-tensor {} (d-name {} seq) (t-prim {} i64))
+    (t-tensor {} (d-name {} seq) (d-name {} hidden) (t-prim {} f32))
+    (t-tensor {} (d-name {} seq) (d-name {} hidden) (t-prim {} f32))))
+
+(def {}
+  bad
+  (fn {}
+    (params {}
+      (base {type: (t-var {} _)})
+      (ids {type: (t-var {} _)})
+      (updates {type: (t-var {} _)}))
+    (app {span: "surf:139..177"}
+      (var {span: "surf:139..146"} scatter)
+      (var {span: "surf:147..151"} base)
+      (var {span: "surf:153..156"} ids)
+      (var {span: "surf:158..165"} updates)
+      (lit {span: "surf:167..168", type: (t-prim {} i32)} 0)
+      (lit {span: "surf:170..176", type: (t-prim {} string)} "last"))))

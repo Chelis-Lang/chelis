@@ -1,0 +1,23 @@
+(defsig {} pick (a) (t-fn {} (t-var {} a) (t-var {} a) (t-var {} a)))
+
+(def {}
+  pick
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (y {type: (t-var {} _)}))
+    (var {span: "surf:32..33"} x)))
+
+(defsig {}
+  probe
+  (t-fn {}
+    (t-adt {} List (t-prim {} i32))
+    (t-adt {} List (t-prim {} i32))
+    (t-adt {} List (t-prim {} i32))))
+
+(def {}
+  probe
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (y {type: (t-var {} _)}))
+    (app {span: "surf:87..97"}
+      (var {span: "surf:87..91"} pick)
+      (var {span: "surf:92..93"} x)
+      (var {span: "surf:95..96"} y))))

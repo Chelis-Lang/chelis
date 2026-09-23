@@ -1,0 +1,71 @@
+(defsig {}
+  fixed_gain
+  (d)
+  (t-fn {}
+    (t-tensor {} (d-var {} d) (t-prim {} f32))
+    (t-tensor {} (d-name {} fixed) (t-prim {} f32))
+    (t-tensor {} (d-var {} d) (t-prim {} f32))))
+
+(def {}
+  fixed_gain
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (gain {type: (t-var {} _)}))
+    (app {span: "surf:80..91"}
+      (var {span: "surf:80..83"} mul)
+      (var {span: "surf:84..88"} gain)
+      (var {span: "surf:89..90"} x))))
+
+(defsig {}
+  other_gain
+  (d)
+  (t-fn {}
+    (t-tensor {} (d-var {} d) (t-prim {} f32))
+    (t-tensor {} (d-name {} other) (t-prim {} f32))
+    (t-tensor {} (d-var {} d) (t-prim {} f32))))
+
+(def {}
+  other_gain
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (gain {type: (t-var {} _)}))
+    (app {span: "surf:172..183"}
+      (var {span: "surf:172..175"} mul)
+      (var {span: "surf:176..180"} gain)
+      (var {span: "surf:181..182"} x))))
+
+(defsig {}
+  capture_fixed
+  (d)
+  (t-fn {}
+    (t-tensor {} (d-var {} d) (t-prim {} f32))
+    (t-tensor {} (d-name {} fixed) (t-prim {} f32))
+    (t-var {} _)))
+
+(def {}
+  capture_fixed
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (gain {type: (t-var {} _)}))
+    (fn {span: "surf:250..277"}
+      (params {})
+      (app {span: "surf:259..277"}
+        (var {span: "surf:259..269"} fixed_gain)
+        (var {span: "surf:270..271"} x)
+        (var {span: "surf:272..276"} gain)))))
+
+(defsig {}
+  capture_other
+  (d)
+  (t-fn {}
+    (t-tensor {} (d-var {} d) (t-prim {} f32))
+    (t-tensor {} (d-name {} other) (t-prim {} f32))
+    (t-var {} _)))
+
+(def {}
+  capture_other
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (gain {type: (t-var {} _)}))
+    (fn {span: "surf:344..371"}
+      (params {})
+      (app {span: "surf:353..371"}
+        (var {span: "surf:353..363"} other_gain)
+        (var {span: "surf:364..365"} x)
+        (var {span: "surf:366..370"} gain)))))

@@ -20,8 +20,7 @@
 
 use chelis_deep::parser::parse_str;
 use chelis_deep::{Atom, Expr};
-use chelis_surf::desugar::desugar_program;
-use chelis_surf::parser::parse_str as parse_surf;
+
 use chelis_types::{InferResult, check_ir_program};
 
 // ── Part A helpers (Deep source, mirror issue_778 clobber test) ───────────
@@ -187,14 +186,8 @@ fn insert_error_operand_does_not_clobber_concrete_annotation() {
 
 // ── Part B helpers (Surf source) ─────────────────────────────────────────
 
-fn surf_to_deep(source: &str) -> Vec<Expr> {
-    let decls = parse_surf(source).expect("surf parse");
-    chelis_macros::expand_program(
-        &desugar_program(&decls),
-        &chelis_macros::ExpansionOptions::default(),
-    )
-    .expect("macro expand")
-    .into_exprs()
+fn parse_core_fixture(source: &str) -> Vec<Expr> {
+    serde_json::from_str(source).expect("lossless AST fixture")
 }
 
 fn messages(rep: &InferResult) -> Vec<String> {
@@ -203,7 +196,7 @@ fn messages(rep: &InferResult) -> Vec<String> {
 
 /// The program MUST be rejected; returns its diagnostic messages.
 fn reject_messages(source: &str, label: &str) -> Vec<String> {
-    let deep = surf_to_deep(source);
+    let deep = parse_core_fixture(source);
     let rep = check_ir_program(&deep).err().unwrap_or_else(|| {
         panic!("{label}: expected a check rejection, but it PASSED (silent accept)")
     });
@@ -232,7 +225,9 @@ fn assert_single_unbound(source: &str, missing: &str, label: &str) {
 #[test]
 fn matmul_unbound_operand_single_diagnostic_no_accept() {
     assert_single_unbound(
-        "def driver(b: tensor[3, 4, f32]) -> f32 = {\n  m = matmul(missing_a, b)\n  cast(0.0, f32)\n}\n",
+        include_str!(
+            "fixtures/core/tests/rt784_adversarial/matmul_unbound_operand_single_diagnostic_no_accept_235.json"
+        ),
         "missing_a",
         "matmul main-pass",
     );
@@ -244,7 +239,9 @@ fn conv_unbound_operand_rejected_no_accept_no_ice() {
     // language checker. The authored unbound operand remains one loud error;
     // the old capability diagnostic must not survive as a cascade.
     let msgs = reject_messages(
-        "def driver(k: tensor[1, 1, 1, 1, f32]) -> f32 = {\n  y = conv(missing_x, k, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])\n  cast(0.0, f32)\n}\n",
+        include_str!(
+            "fixtures/core/tests/rt784_adversarial/conv_unbound_operand_rejected_no_accept_no_ice_247.json"
+        ),
         "conv main-pass",
     );
     assert!(
@@ -269,7 +266,9 @@ fn conv_unbound_operand_rejected_no_accept_no_ice() {
 #[test]
 fn sum_unbound_operand_single_diagnostic_no_accept() {
     assert_single_unbound(
-        "def driver() -> f32 = {\n  s = sum(missing_x, 1)\n  cast(0.0, f32)\n}\n",
+        include_str!(
+            "fixtures/core/tests/rt784_adversarial/sum_unbound_operand_single_diagnostic_no_accept_272.json"
+        ),
         "missing_x",
         "sum main-pass",
     );
@@ -278,7 +277,9 @@ fn sum_unbound_operand_single_diagnostic_no_accept() {
 #[test]
 fn expand_unbound_operand_single_diagnostic_no_accept() {
     assert_single_unbound(
-        "def driver() -> f32 = {\n  e = insert(missing_x, 0, 4i64)\n  cast(0.0, f32)\n}\n",
+        include_str!(
+            "fixtures/core/tests/rt784_adversarial/expand_unbound_operand_single_diagnostic_no_accept_281.json"
+        ),
         "missing_x",
         "expand main-pass",
     );
@@ -293,7 +294,9 @@ fn expand_error_size_operand_single_diagnostic_no_accept() {
     // `Error`; the unbound-var diagnostic still fires. Exactly ONE diagnostic
     // — no silent accept, no ICE.
     assert_single_unbound(
-        "def driver(x: tensor[3, f32]) -> f32 = {\n  e = insert(x, 0, add(missing_v, cast(1, i64)))\n  cast(0.0, f32)\n}\n",
+        include_str!(
+            "fixtures/core/tests/rt784_adversarial/expand_error_size_operand_single_diagnostic_no_accept_296.json"
+        ),
         "missing_v",
         "expand error-size main-pass",
     );
@@ -302,7 +305,9 @@ fn expand_error_size_operand_single_diagnostic_no_accept() {
 #[test]
 fn layer_norm_unbound_operand_single_diagnostic_no_accept() {
     assert_single_unbound(
-        "def driver(g: tensor[4, f32], b: tensor[4, f32]) -> f32 = {\n  y = layer_norm(missing_x, g, b, 0.00001f32)\n  cast(0.0, f32)\n}\n",
+        include_str!(
+            "fixtures/core/tests/rt784_adversarial/layer_norm_unbound_operand_single_diagnostic_no_accept_305.json"
+        ),
         "missing_x",
         "layer_norm main-pass",
     );

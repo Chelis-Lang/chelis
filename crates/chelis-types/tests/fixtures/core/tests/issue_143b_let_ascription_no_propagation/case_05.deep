@@ -1,0 +1,16 @@
+(defsig {} caller (t-fn {} (t-prim {} f64)))
+
+(def {}
+  caller
+  (fn {}
+    (params {})
+    (let {span: "surf:25..64"}
+      (bind {}
+        x
+        (cast {span: "surf:40..54",
+                surf_binding_type: "explicit",
+                type: (t-prim {} f64)
+              }
+          (lit {span: "surf:45..48", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 1.0)
+          (t-prim {} f32)))
+      (var {span: "surf:59..60"} x))))

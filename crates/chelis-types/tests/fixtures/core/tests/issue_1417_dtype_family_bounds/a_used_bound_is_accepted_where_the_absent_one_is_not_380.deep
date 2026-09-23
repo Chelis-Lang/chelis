@@ -1,0 +1,3 @@
+(defsig {dtype_bounds: {p: float}} f (p) (t-fn {} (t-var {} p) (t-var {} p)))
+
+(def {} f (fn {} (params {} x) (var {span: "surf:35..36"} x)))

@@ -1,0 +1,18 @@
+(defsig {} inner (t-fn {} (t-unit {})))
+
+(def {}
+  inner
+  (fn {}
+    (params {})
+    (app {span: "surf:23..49"}
+      (var {span: "surf:23..34"} test_assert)
+      (lit {span: "surf:35..39", type: (t-prim {} bool)} true)
+      (lit {span: "surf:41..48", type: (t-prim {} string)} "inner"))))
+
+(defsig {} outer (t-fn {} (t-unit {})))
+
+(def {}
+  outer
+  (fn {}
+    (params {})
+    (app {span: "surf:72..79"} (var {span: "surf:72..77"} inner))))

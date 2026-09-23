@@ -1,0 +1,14 @@
+(def {}
+  invoke
+  (fn {}
+    (params {} f x)
+    (app {span: "surf:19..23"}
+      (var {span: "surf:19..20"} f)
+      (var {span: "surf:21..22"} x))))
+
+(def {}
+  out
+  (app {span: "surf:30..47"}
+    (var {span: "surf:30..36"} invoke)
+    (var {span: "surf:37..40"} len)
+    (lit {span: "surf:42..46", type: (t-prim {} i64)} 1)))

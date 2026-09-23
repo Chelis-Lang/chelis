@@ -1,0 +1,43 @@
+(module {surf_path: "Repro.Conv2dStrideZero"}
+  repro.conv2dstridezero
+  (defsig {}
+    f
+    (t-fn {}
+      @input@
+      (t-tensor {}
+        (d-lit {} 4)
+        (d-lit {} 3)
+        (d-lit {} 3)
+        (d-lit {} 3)
+        (t-prim {} f32))
+      (t-var {} _)))
+  (def {}
+    f
+    (fn {}
+      (params {} (x {type: (t-var {} _)}) (k {type: (t-var {} _)}))
+      (let {span: "surf:90..172"}
+        (bind {}
+          y
+          @binding@)
+        (app {span: "surf:114..170"}
+          (var {span: "surf:114..118"} conv)
+          (borrow {span: "surf:119..121"} (var {span: "surf:120..121"} y))
+          (borrow {span: "surf:123..125"} (var {span: "surf:124..125"} k))
+          (app {span: "surf:127..139"}
+            (var {} Cons)
+            (lit {span: "surf:128..132", type: (t-prim {} i64)} 0)
+            (app {}
+              (var {} Cons)
+              (lit {span: "surf:134..138", type: (t-prim {} i64)} 0)
+              (var {} Nil)))
+          (app {span: "surf:141..169"}
+            (var {} Cons)
+            (tuple {span: "surf:142..154"}
+              (lit {span: "surf:143..147", type: (t-prim {} i64)} 0)
+              (lit {span: "surf:149..153", type: (t-prim {} i64)} 0))
+            (app {}
+              (var {} Cons)
+              (tuple {span: "surf:156..168"}
+                (lit {span: "surf:157..161", type: (t-prim {} i64)} 0)
+                (lit {span: "surf:163..167", type: (t-prim {} i64)} 0))
+              (var {} Nil))))))))

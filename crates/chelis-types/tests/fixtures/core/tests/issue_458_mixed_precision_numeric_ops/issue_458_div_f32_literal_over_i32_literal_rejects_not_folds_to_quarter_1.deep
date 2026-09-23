@@ -1,0 +1,6 @@
+(def {}
+  out
+  (app {span: "surf:6..17"}
+    (var {span: "surf:6..9"} div)
+    (lit {span: "surf:10..13", type: (t-prim {} f32)} 1.0)
+    (lit {span: "surf:15..16", type: (t-prim {} i32)} 4)))

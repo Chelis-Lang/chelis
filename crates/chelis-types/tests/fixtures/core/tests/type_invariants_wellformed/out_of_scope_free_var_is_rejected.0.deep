@@ -1,0 +1,16 @@
+(module {surf_path: "M"}
+  m
+  (deftype {invariant: (fn {}
+                          (params {} p)
+                          (app {span: "surf:31..45"}
+                            (var {} gte)
+                            (access {span: "surf:31..38"}
+                              (var {span: "surf:31..32"} p)
+                              value)
+                            (var {span: "surf:42..45"} eps))),
+             invariant_amenability: "linear",
+             opaque: true
+           }
+    Probability
+    ()
+    (variant {} Probability (field {} value (t-prim {} f32)))))

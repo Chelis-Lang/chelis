@@ -1,0 +1,19 @@
+(module {surf_path: "Rec"}
+  rec
+  (defsig {} descend (t-fn {} (t-prim {} i32) (t-prim {} i32)))
+  (def {}
+    descend
+    (fn {}
+      (params {} (n {type: (t-var {} _)}))
+      (if {span: "surf:40..82"}
+        (app {span: "surf:43..51"}
+          (var {span: "surf:43..45"} eq)
+          (var {span: "surf:46..47"} n)
+          (lit {span: "surf:49..50", type: (t-prim {} i32)} 0))
+        (lit {span: "surf:57..58", type: (t-prim {} i32)} 0)
+        (app {span: "surf:64..82"}
+          (var {span: "surf:64..71"} descend)
+          (app {span: "surf:72..81"}
+            (var {span: "surf:72..75"} sub)
+            (var {span: "surf:76..77"} n)
+            (lit {span: "surf:79..80", type: (t-prim {} i32)} 1)))))))

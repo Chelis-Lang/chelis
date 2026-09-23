@@ -1,0 +1,22 @@
+(defsig {}
+  direct_dynamic
+  (t-fn {}
+    (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))
+    (t-prim {} i32)
+    (t-tensor {} (d-name {} *) (d-name {} *) (t-prim {} f32))))
+
+(def {}
+  direct_dynamic
+  (fn {}
+    (params {}
+      (a {type: (t-var {} _)})
+      (b {type: (t-var {} _)})
+      (axis {type: (t-var {} _)}))
+    (app {span: "surf:97..117"}
+      (var {span: "surf:97..103"} concat)
+      (app {span: "surf:104..110"}
+        (var {} Cons)
+        (var {span: "surf:105..106"} a)
+        (app {} (var {} Cons) (var {span: "surf:108..109"} b) (var {} Nil)))
+      (var {span: "surf:112..116"} axis))))

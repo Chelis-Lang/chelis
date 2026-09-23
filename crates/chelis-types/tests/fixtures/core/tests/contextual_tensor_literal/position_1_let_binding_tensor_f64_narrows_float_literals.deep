@@ -1,0 +1,16 @@
+(defsig {} xs (t-tensor {} (d-lit {} 3) (t-prim {} f64)))
+
+(def {}
+  xs
+  (app {}
+    (var {} to_tensor)
+    (app {}
+      (var {} Cons)
+      (lit {surf_literal_style: "unsuffixed", type: (t-prim {} f64)} 1.0)
+      (app {}
+        (var {} Cons)
+        (lit {surf_literal_style: "unsuffixed", type: (t-prim {} f64)} 2.0)
+        (app {}
+          (var {} Cons)
+          (lit {surf_literal_style: "unsuffixed", type: (t-prim {} f64)} 3.0)
+          (var {} Nil))))))

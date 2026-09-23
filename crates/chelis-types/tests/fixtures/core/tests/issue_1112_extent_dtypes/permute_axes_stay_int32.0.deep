@@ -1,0 +1,15 @@
+(defsig {}
+  f
+  (t-fn {}
+    (t-tensor {} (d-lit {} 2) (d-lit {} 4) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 4) (d-lit {} 2) (t-prim {} f32))))
+
+(def {}
+  f
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:52..69"}
+      (var {span: "surf:52..59"} permute)
+      (borrow {span: "surf:60..62"} (var {span: "surf:61..62"} x))
+      (lit {span: "surf:64..65", type: (t-prim {} i32)} 1)
+      (lit {span: "surf:67..68", type: (t-prim {} i32)} 0))))

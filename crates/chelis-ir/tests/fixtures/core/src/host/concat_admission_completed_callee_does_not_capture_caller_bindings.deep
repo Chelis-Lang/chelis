@@ -1,0 +1,23 @@
+(defsig {}
+  global
+  (t-fn {} (t-tensor {} (d-lit {} 2) (t-prim {} f32)) (t-prim {} i32)))
+
+(def {}
+  global
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:39..46"}
+      (var {span: "surf:39..43"} rank)
+      (var {span: "surf:44..45"} x))))
+
+(defsig {}
+  call
+  (t-fn {} (t-tensor {} (d-lit {} 2) (t-prim {} f32)) (t-prim {} i32)))
+
+(def {}
+  call
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:84..93"}
+      (var {span: "surf:84..90"} global)
+      (var {span: "surf:91..92"} x))))

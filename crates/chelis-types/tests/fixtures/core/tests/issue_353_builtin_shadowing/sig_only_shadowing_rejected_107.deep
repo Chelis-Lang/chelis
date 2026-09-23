@@ -1,0 +1,22 @@
+(module {surf_path: "SigOnly"}
+  sigonly
+  (defsig {}
+    sum
+    (t-fn {}
+      (t-ref {} (t-tensor {} (d-name {} batch) (t-prim {} f32)))
+      (t-tensor {} (d-name {} batch) (t-prim {} f32))))
+  (def {}
+    out
+    (app {span: "surf:72..100"}
+      (var {span: "surf:72..76"} relu)
+      (app {span: "surf:77..99"}
+        (var {span: "surf:77..86"} to_tensor)
+        (app {span: "surf:87..98"}
+          (var {} Cons)
+          (lit {span: "surf:88..91", type: (t-prim {} f32)} 1.0)
+          (app {}
+            (var {} Cons)
+            (app {span: "surf:93..97"}
+              (var {} neg)
+              (lit {span: "surf:94..97", type: (t-prim {} f32)} 2.0))
+            (var {} Nil)))))))

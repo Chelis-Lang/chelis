@@ -1,0 +1,35 @@
+(module {surf_path: "FrontEndPerformance.SHAPE"}
+  frontendperformance.shape
+  (defsig {}
+    bc
+    (t-fn {} (t-prim {} f32) (t-tensor {} (d-lit {} 1) (t-prim {} f32))))
+  (def {}
+    bc
+    (fn {}
+      (params {} (c {type: (t-var {} _)}))
+      (app {span: "surf:68..82"}
+        (var {span: "surf:68..77"} to_tensor)
+        (app {span: "surf:78..81"}
+          (var {} Cons)
+          (var {span: "surf:79..80"} c)
+          (var {} Nil)))))
+  (defsig {}
+    nested
+    (t-fn {} (t-prim {} f32) (t-tensor {} (d-lit {} 1) (t-prim {} f32))))
+  (def {}
+    nested
+    (fn {}
+      (params {} (c {type: (t-var {} _)}))
+      __BODY__))
+  (def {}
+    out
+    (app {span: "surf:140..184"}
+      (var {span: "surf:140..145"} index)
+      (app {span: "surf:146..177"}
+        (var {span: "surf:146..153"} to_list)
+        (app {span: "surf:154..176"}
+          (var {span: "surf:154..160"} nested)
+          (cast {span: "surf:161..175"}
+            (lit {span: "surf:166..169", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 1.0)
+            (t-prim {} f32))))
+      (lit {span: "surf:179..183", type: (t-prim {} i64)} 0))))

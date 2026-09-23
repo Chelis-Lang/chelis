@@ -1,0 +1,18 @@
+(def {}
+  f
+  (fn {}
+    (params {})
+    (app {span: "surf:10..40"}
+      (var {span: "surf:10..14"} conv)
+      (var {span: "surf:15..16"} x)
+      (var {span: "surf:17..18"} k)
+      (app {span: "surf:19..25"}
+        (var {} Cons)
+        (lit {span: "surf:20..24", type: (t-prim {} i64)} 1)
+        (var {} Nil))
+      (app {span: "surf:26..39"}
+        (var {} Cons)
+        (tuple {span: "surf:27..38"}
+          (lit {span: "surf:28..32", type: (t-prim {} i64)} 0)
+          (lit {span: "surf:33..37", type: (t-prim {} i64)} 0))
+        (var {} Nil)))))

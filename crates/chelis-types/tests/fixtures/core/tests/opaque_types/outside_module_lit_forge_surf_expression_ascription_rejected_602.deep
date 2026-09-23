@@ -1,0 +1,8 @@
+(module {surf_path: "Agent.Strategy"}
+  agent.strategy
+  (defsig {} forge (t-fn {} (t-prim {} f32) (t-adt {} Probability)))
+  (def {}
+    forge
+    (fn {}
+      (params {} (x {type: (t-var {} _)}))
+      (lit {span: "surf:57..74", type: (t-adt {} Probability)} 0.5))))

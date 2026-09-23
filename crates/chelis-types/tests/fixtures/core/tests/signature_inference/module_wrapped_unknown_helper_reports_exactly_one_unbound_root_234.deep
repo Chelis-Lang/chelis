@@ -1,0 +1,16 @@
+(module {surf_path: "Foo"}
+  foo
+  (defsig {}
+    caller
+    (t-fn {}
+      (t-var {} _)
+      (t-tensor {} (d-lit {} 4) (t-prim {} f32))
+      (t-var {} _)))
+  (def {}
+    caller
+    (fn {}
+      (params {} a (b {type: (t-var {} _)}))
+      (app {span: "surf:47..67"}
+        (var {span: "surf:47..61"} missing_helper)
+        (var {span: "surf:62..63"} a)
+        (var {span: "surf:65..66"} b)))))

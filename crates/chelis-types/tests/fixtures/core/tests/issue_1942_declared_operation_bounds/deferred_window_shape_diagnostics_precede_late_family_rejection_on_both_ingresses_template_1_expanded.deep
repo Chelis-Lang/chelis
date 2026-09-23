@@ -1,0 +1,29 @@
+(defsig {}
+  use
+  (t-fn {}
+    (t-tensor {} (d-lit {} 3) (t-prim {} bool))
+    (t-tensor {} (d-lit {} 2) (t-prim {} bool))))
+
+(def {}
+  use
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (let {}
+      (bind {}
+        windowed
+        (fn {}
+          (params {} value)
+          (app {}
+            (var {} reduce_window_sum)
+            (var {} value)
+            (app {}
+              (var {} Cons)
+              (lit {type: (t-prim {} i64)} 1)
+              (var {} Nil))
+            (app {}
+              (var {} Cons)
+              (lit {type: (t-prim {} i64)} 1)
+              (var {} Nil)))))
+      (app {}
+        (var {} windowed)
+        (var {} x)))))

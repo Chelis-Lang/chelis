@@ -1,0 +1,57 @@
+(deftype {}
+  Frame
+  (n)
+  (variant {} Frame (field {} col (t-tensor {} (d-var {} n) (t-prim {} f32)))))
+
+(defsig {}
+  get_col
+  (n)
+  (t-fn {}
+    (t-adt {} Frame (t-var {} n))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))))
+
+(def {}
+  get_col
+  (fn {}
+    (params {} (df {type: (t-var {} _)}))
+    (match {span: "surf:100..143"}
+      (var {span: "surf:106..108"} df)
+      (arm {}
+        (pat-record {} Frame (kv {} col (pat-var {} c)))
+        ()
+        (var {span: "surf:140..141"} c)))))
+
+(defsig {}
+  f
+  (n)
+  (t-fn {}
+    (t-adt {} Frame (t-var {} n))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))))
+
+(def {}
+  f
+  (fn {}
+    (params {} (df {type: (t-var {} _)}))
+    (let {span: "surf:187..273"}
+      (bind {}
+        c
+        (app {span: "surf:195..206"}
+          (var {span: "surf:195..202"} get_col)
+          (var {span: "surf:203..205"} df)))
+      (let {}
+        (bind {}
+          inner
+          (fn {span: "surf:217..241"}
+            (params {} (i {type: (t-prim {} i64)}))
+            (app {span: "surf:232..241"}
+              (var {span: "surf:232..235"} add)
+              (var {span: "surf:236..237"} c)
+              (var {span: "surf:239..240"} c))))
+        (app {span: "surf:244..271"}
+          (var {span: "surf:244..247"} add)
+          (var {span: "surf:248..249"} c)
+          (app {span: "surf:251..270"}
+            (var {span: "surf:251..256"} inner)
+            (cast {span: "surf:257..269"}
+              (lit {span: "surf:262..263", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 0)
+              (t-prim {} i64))))))))

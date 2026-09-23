@@ -1,0 +1,19 @@
+(defsig {} emit (t-fn {} (t-prim {} i64) (t-prim {} i64)))
+
+(def {}
+  emit
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:27..35"}
+      (var {span: "surf:27..32"} debug)
+      (var {span: "surf:33..34"} x))))
+
+(defsig {} caller (t-fn {} (t-prim {} i64) (t-prim {} i64)))
+
+(def {}
+  caller
+  (fn {}
+    (params {} (y {type: (t-var {} _)}))
+    (app {span: "surf:64..71"}
+      (var {span: "surf:64..68"} emit)
+      (var {span: "surf:69..70"} y))))

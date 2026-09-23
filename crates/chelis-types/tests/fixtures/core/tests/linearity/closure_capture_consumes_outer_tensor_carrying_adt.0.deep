@@ -1,0 +1,35 @@
+(deftype {}
+  Params
+  (n)
+  (variant {}
+    Params
+    (field {} weight (t-tensor {} (d-var {} n) (t-prim {} f32)))))
+
+(defsig {}
+  use_params
+  (n)
+  (t-fn {} (t-adt {} Params (t-var {} n)) (t-prim {} bool)))
+
+(def {}
+  use_params
+  (fn {}
+    (params {} p)
+    (lit {span: "surf:114..118", type: (t-prim {} bool)} true)))
+
+(defsig {} bad (n) (t-fn {} (t-adt {} Params (t-var {} n)) (t-prim {} bool)))
+
+(def {}
+  bad
+  (fn {}
+    (params {} (p {type: (t-var {} _)}))
+    (let {span: "surf:157..211"}
+      (bind {}
+        f
+        (fn {span: "surf:167..189"}
+          (params {})
+          (app {span: "surf:176..189"}
+            (var {span: "surf:176..186"} use_params)
+            (var {span: "surf:187..188"} p))))
+      (app {span: "surf:194..207"}
+        (var {span: "surf:194..204"} use_params)
+        (var {span: "surf:205..206"} p)))))

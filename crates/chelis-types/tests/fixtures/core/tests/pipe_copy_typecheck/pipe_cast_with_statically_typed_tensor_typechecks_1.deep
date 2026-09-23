@@ -1,0 +1,17 @@
+(defsig {}
+  f
+  (t-fn {}
+    (t-tensor {} (d-lit {} 3) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 3) (t-prim {} f32))))
+
+(def {}
+  f
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (pipe {span: "surf:45..59"}
+      (var {span: "surf:45..46"} x)
+      (fn {span: "surf:50..59", surf_pipe_stage: "call-first"}
+        (params {} __chelis_pipe)
+        (cast {span: "surf:50..59"}
+          (var {span: "surf:50..54"} __chelis_pipe)
+          (t-prim {} f32))))))

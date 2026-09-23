@@ -1,0 +1,43 @@
+(deftype {}
+  Box
+  ()
+  (variant {}
+    Box
+    (field {} x (t-tensor {} (d-lit {} 4) (d-lit {} 3) (t-prim {} f32)))
+    (field {} y (t-tensor {} (d-lit {} 4) (d-lit {} 3) (t-prim {} f32)))))
+
+(defsig {}
+  apply_b
+  (b)
+  (t-fn {} (t-fn {} (t-adt {} Box) (t-var {} b)) (t-adt {} Box) (t-var {} b)))
+
+(def {}
+  apply_b
+  (fn {}
+    (params {} (f {type: (t-var {} _)}) (r {type: (t-var {} _)}))
+    (app {span: "surf:111..115"}
+      (var {span: "surf:111..112"} f)
+      (var {span: "surf:113..114"} r))))
+
+(defsig {}
+  probe
+  (t-fn {}
+    (t-tensor {} (d-lit {} 4) (d-lit {} 3) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 4) (d-lit {} 3) (t-prim {} f32))))
+
+(def {}
+  probe
+  (fn {}
+    (params {} (t {type: (t-var {} _)}))
+    (app {span: "surf:171..223"}
+      (var {span: "surf:171..178"} apply_b)
+      (fn {span: "surf:179..202"}
+        (params {} q)
+        (app {span: "surf:189..202"}
+          (var {span: "surf:189..192"} add)
+          (access {span: "surf:193..196"} (var {span: "surf:193..194"} q) x)
+          (access {span: "surf:198..201"} (var {span: "surf:198..199"} q) y)))
+      (record {span: "surf:204..222"}
+        Box
+        (kv {} x (var {span: "surf:213..214"} t))
+        (kv {} y (var {span: "surf:219..220"} t))))))

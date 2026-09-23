@@ -159,11 +159,3 @@ fn reduce_sum_int8_operand_with_int64_accumulator_accepted() {
         other => panic!("expected RiscOp::Sum, got {other:?}"),
     }
 }
-
-// ---------------------------------------------------------------
-// F. Backend MatmulInfo accumulator-loss
-// ---------------------------------------------------------------
-
-// (Backend-side MatmulInfo accumulator-loss is exercised in
-// crates/chelis-backend-c/tests/rt1_adversarial.rs to avoid pulling
-// chelis-backend-c into chelis-ir's dev-dep graph.)

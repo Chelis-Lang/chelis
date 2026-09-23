@@ -1,1 +1,0 @@
-(def {} g (app {} (var {} exp) (lit {type: (t-prim {} string)} s)))

@@ -1,0 +1,52 @@
+{
+  "chelis": {
+    "repository": "https://github.com/Chelis-Lang/chelis",
+    "revision": "e0250b290b0fb297220378aeb7f1d0dce64aa5d7"
+  },
+  "aeneas": {
+    "repository": "https://github.com/AeneasVerif/aeneas",
+    "revision": "ee9bb3935375aacfa8ea3682fc21b051b79fc931",
+    "source": {
+      "package": "aeneas-source",
+      "patch_root": ".",
+      "patches": [
+        "verification/aeneas-stdlib-models.patch"
+      ],
+      "lean_subdirectory": "backends/lean"
+    },
+    "patch_root": "src",
+    "patches": [
+      "verification/aeneas-strict-warnings.patch",
+      "verification/aeneas-loop-continuations.patch",
+      "verification/aeneas-trait-models.patch",
+      "verification/aeneas-shared-borrows.patch",
+      "verification/aeneas-floating-scalars.patch"
+    ]
+  },
+  "charon": {
+    "repository": "https://github.com/AeneasVerif/charon",
+    "revision": "ed22146b1cd4d0b578006a58b3299d41ecbe0fd4",
+    "rust_toolchain": "nightly-2026-02-07",
+    "patches": [
+      "verification/charon-box-init.patch",
+      "verification/charon-closure-clauses.patch",
+      "verification/charon-nonlocal-continuations.patch",
+      "verification/charon-local-trait-bounds.patch",
+      "verification/charon-closure-regions.patch",
+      "verification/charon-hidden-traits.patch"
+    ],
+    "ml": {
+      "package": "charon-ml",
+      "patch_root": ".",
+      "patches": [
+        "verification/charon-ml-binders.patch"
+      ]
+    }
+  },
+  "lean": "leanprover/lean4:v4.29.0",
+  "lacadile": {
+    "repository": "https://github.com/Chelis-Lang/LaCaDiLE",
+    "revision": "11531c8b0e3e6fb6650ddbc404937e5c527b0785",
+    "subdirectory": "lean"
+  }
+}

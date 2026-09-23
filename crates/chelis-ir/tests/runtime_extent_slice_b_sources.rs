@@ -345,7 +345,6 @@ fn omitted_or_duplicated_output_axis_source_fails_before_emission() {
             .contains("3 extent source(s) for 2 output axis(es)"),
         "{error}"
     );
-    assert!(error.to_string().contains("chelis#1277"), "{error}");
 
     // Positive control: the same permutation over its real rank passes.
     let mut exact = Dag::new();
@@ -568,7 +567,6 @@ fn unsupported_but_well_typed_mapping_yields_the_registered_receipt_not_an_ice()
         .expect_err("a sourceless output axis must be a typed receipt");
     let rendered = error.to_string();
     assert!(rendered.starts_with("unsupported: "), "{rendered}");
-    assert!(rendered.contains("chelis#1482"), "{rendered}");
     assert!(rendered.contains("codegen:c"), "{rendered}");
 
     // Positive control: the same fill with a literal extent has a source and

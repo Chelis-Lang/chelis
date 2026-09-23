@@ -1,0 +1,20 @@
+(def {}
+  result
+  (app {span: "surf:10..37"}
+    (var {span: "surf:10..21"} process_run)
+    (lit {span: "surf:22..28", type: (t-prim {} string)} "echo")
+    (app {span: "surf:30..36"}
+      (var {} Cons)
+      (lit {span: "surf:31..35", type: (t-prim {} string)} "hi")
+      (var {} Nil))))
+
+(def {}
+  pure_value
+  (app {span: "surf:51..82"}
+    (var {span: "surf:51..54"} add)
+    (cast {span: "surf:55..67"}
+      (lit {span: "surf:60..61", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 1)
+      (t-prim {} i64))
+    (cast {span: "surf:69..81"}
+      (lit {span: "surf:74..75", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 2)
+      (t-prim {} i64))))

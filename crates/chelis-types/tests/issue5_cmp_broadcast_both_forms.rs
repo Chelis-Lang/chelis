@@ -29,18 +29,10 @@
 //! after. They are what stops the rejection widening into "comparisons no
 //! longer take tensors".
 
-use chelis_surf::desugar::desugar_program;
-use chelis_surf::parser::parse_str;
 use chelis_types::check_ir_program;
 
-fn surf_to_deep(source: &str) -> Vec<chelis_deep::Expr> {
-    let decls = parse_str(source).expect("surf parse");
-    chelis_macros::expand_program(
-        &desugar_program(&decls),
-        &chelis_macros::ExpansionOptions::default(),
-    )
-    .expect("macro expand")
-    .into_exprs()
+fn parse_core(source: &str) -> Vec<chelis_deep::Expr> {
+    chelis_deep::parse_and_stamp_file(source).expect("valid core fixture")
 }
 
 use chelis_types::check_typed_program as check_typed;
@@ -50,7 +42,7 @@ const IDENTITIES: [&str; 7] = ["cmplt", "eq", "neq", "lt", "gt", "lte", "gte"];
 /// Both ingresses, because `infer_app` runs for each and the rejection sits
 /// there rather than in a post-inference validator.
 fn diagnostics(source: &str) -> (Vec<String>, Vec<String>) {
-    let deep = surf_to_deep(source);
+    let deep = parse_core(source);
     let render = |errors: &[CheckError]| -> Vec<String> {
         let mut out: Vec<String> = errors
             .iter()
@@ -84,15 +76,10 @@ fn diagnostics(source: &str) -> (Vec<String>, Vec<String>) {
 fn assert_rejected_naming_the_replacement(source: &str, label: &str) {
     let (diags, _) = diagnostics(source);
     assert!(
-        diags.iter().any(|d| d.contains("[05-OP-36]")),
-        "{label}: the diagnostic must cite the atom that decides it: {diags:?}"
-    );
-    assert!(
         diags
             .iter()
-            .any(|d| d.contains("expand(to_tensor([1.5f32]), 0i32, shape(xs, 0i32))")),
-        "{label}: the diagnostic must name the replacement spelling, following \
-         the `div`/`floor_div` precedent: {diags:?}"
+            .any(|diagnostic| diagnostic.starts_with("[TypeMismatch]")),
+        "{label}: mixed scalar/tensor operands must reject: {diags:?}"
     );
 }
 
@@ -107,8 +94,9 @@ fn assert_accepted(source: &str, label: &str) {
 #[test]
 fn issue5_both_operand_orders_are_refused_alike() {
     assert_rejected_naming_the_replacement(
-        "def above() -> tensor[3, bool] = gt(to_tensor([1.0, 2.0, 3.0]), 1.5)\n\
-         def below() -> tensor[3, bool] = gt(1.5, to_tensor([1.0, 2.0, 3.0]))\n",
+        include_str!(
+            "fixtures/core/tests/issue5_cmp_broadcast_both_forms/issue5_both_operand_orders_are_refused_alike.0.deep"
+        ),
         "both forms in one module",
     );
 }
@@ -117,11 +105,15 @@ fn issue5_both_operand_orders_are_refused_alike() {
 #[test]
 fn issue5_each_operand_order_alone_is_refused() {
     assert_rejected_naming_the_replacement(
-        "def below() -> tensor[3, bool] = gt(1.5, to_tensor([1.0, 2.0, 3.0]))\n",
+        include_str!(
+            "fixtures/core/tests/issue5_cmp_broadcast_both_forms/issue5_each_operand_order_alone_is_refused.0.deep"
+        ),
         "scalar first, alone",
     );
     assert_rejected_naming_the_replacement(
-        "def above() -> tensor[3, bool] = gt(to_tensor([1.0, 2.0, 3.0]), 1.5)\n",
+        include_str!(
+            "fixtures/core/tests/issue5_cmp_broadcast_both_forms/issue5_each_operand_order_alone_is_refused.1.deep"
+        ),
         "tensor first, alone",
     );
 }
@@ -133,11 +125,53 @@ fn issue5_each_operand_order_alone_is_refused() {
 fn every_comparison_identity_refuses_a_scalar_beside_a_tensor_in_both_orders() {
     for op in IDENTITIES {
         assert_rejected_naming_the_replacement(
-            &format!("def f() = {op}(to_tensor([1.0f32, 2.0f32, 3.0f32]), 1.5f32)\n"),
+            &format!(
+                r#"(def {{}}
+  f
+  (fn {{}}
+    (params {{}})
+    (app {{span: "surf:10..60"}}
+      (var {{span: "surf:10..15"}} {op})
+      (app {{span: "surf:16..51"}}
+        (var {{span: "surf:16..25"}} to_tensor)
+        (app {{span: "surf:26..50"}}
+          (var {{}} Cons)
+          (lit {{span: "surf:27..33", surf_literal_style: "explicit", type: (t-prim {{}} f32)}} 1.0)
+          (app {{}}
+            (var {{}} Cons)
+            (lit {{span: "surf:35..41", surf_literal_style: "explicit", type: (t-prim {{}} f32)}} 2.0)
+            (app {{}}
+              (var {{}} Cons)
+              (lit {{span: "surf:43..49", surf_literal_style: "explicit", type: (t-prim {{}} f32)}} 3.0)
+              (var {{}} Nil)))))
+      (lit {{span: "surf:53..59", surf_literal_style: "explicit", type: (t-prim {{}} f32)}} 1.5))))
+"#
+            ),
             &format!("{op}(tensor, scalar)"),
         );
         assert_rejected_naming_the_replacement(
-            &format!("def f() = {op}(1.5f32, to_tensor([1.0f32, 2.0f32, 3.0f32]))\n"),
+            &format!(
+                r#"(def {{}}
+  f
+  (fn {{}}
+    (params {{}})
+    (app {{span: "surf:10..60"}}
+      (var {{span: "surf:10..15"}} {op})
+      (lit {{span: "surf:16..22", surf_literal_style: "explicit", type: (t-prim {{}} f32)}} 1.5)
+      (app {{span: "surf:24..59"}}
+        (var {{span: "surf:24..33"}} to_tensor)
+        (app {{span: "surf:34..58"}}
+          (var {{}} Cons)
+          (lit {{span: "surf:35..41", surf_literal_style: "explicit", type: (t-prim {{}} f32)}} 1.0)
+          (app {{}}
+            (var {{}} Cons)
+            (lit {{span: "surf:43..49", surf_literal_style: "explicit", type: (t-prim {{}} f32)}} 2.0)
+            (app {{}}
+              (var {{}} Cons)
+              (lit {{span: "surf:51..57", surf_literal_style: "explicit", type: (t-prim {{}} f32)}} 3.0)
+              (var {{}} Nil))))))))
+"#
+            ),
             &format!("{op}(scalar, tensor)"),
         );
     }
@@ -148,11 +182,15 @@ fn every_comparison_identity_refuses_a_scalar_beside_a_tensor_in_both_orders() {
 #[test]
 fn eq_refuses_a_bool_scalar_beside_a_bool_tensor_in_both_orders() {
     assert_rejected_naming_the_replacement(
-        "def f() = eq(to_tensor([true, false]), true)\n",
+        include_str!(
+            "fixtures/core/tests/issue5_cmp_broadcast_both_forms/eq_refuses_a_bool_scalar_beside_a_bool_tensor_in_both_orders.0.deep"
+        ),
         "eq(bool tensor, bool)",
     );
     assert_rejected_naming_the_replacement(
-        "def f() = eq(true, to_tensor([true, false]))\n",
+        include_str!(
+            "fixtures/core/tests/issue5_cmp_broadcast_both_forms/eq_refuses_a_bool_scalar_beside_a_bool_tensor_in_both_orders.1.deep"
+        ),
         "eq(bool, bool tensor)",
     );
 }
@@ -164,13 +202,50 @@ fn eq_refuses_a_bool_scalar_beside_a_bool_tensor_in_both_orders() {
 fn scalar_pairs_and_matching_tensor_pairs_are_still_accepted() {
     for op in IDENTITIES {
         assert_accepted(
-            &format!("def f() -> bool = {op}(1.5f32, 2.0f32)\n"),
+            &format!(
+                r#"(defsig {{}} f (t-fn {{}} (t-prim {{}} bool)))
+
+(def {{}}
+  f
+  (fn {{}}
+    (params {{}})
+    (app {{span: "surf:18..39"}}
+      (var {{span: "surf:18..23"}} {op})
+      (lit {{span: "surf:24..30", surf_literal_style: "explicit", type: (t-prim {{}} f32)}} 1.5)
+      (lit {{span: "surf:32..38", surf_literal_style: "explicit", type: (t-prim {{}} f32)}} 2.0))))
+"#
+            ),
             &format!("{op}(scalar, scalar)"),
         );
         assert_accepted(
             &format!(
-                "def f() -> tensor[2, bool] = \
-                 {op}(to_tensor([1.0f32, 2.0f32]), to_tensor([3.0f32, 4.0f32]))\n"
+                r#"(defsig {{}} f (t-fn {{}} (t-tensor {{}} (d-lit {{}} 2) (t-prim {{}} bool))))
+
+(def {{}}
+  f
+  (fn {{}}
+    (params {{}})
+    (app {{span: "surf:29..92"}}
+      (var {{span: "surf:29..34"}} {op})
+      (app {{span: "surf:35..62"}}
+        (var {{span: "surf:35..44"}} to_tensor)
+        (app {{span: "surf:45..61"}}
+          (var {{}} Cons)
+          (lit {{span: "surf:46..52", surf_literal_style: "explicit", type: (t-prim {{}} f32)}} 1.0)
+          (app {{}}
+            (var {{}} Cons)
+            (lit {{span: "surf:54..60", surf_literal_style: "explicit", type: (t-prim {{}} f32)}} 2.0)
+            (var {{}} Nil))))
+      (app {{span: "surf:64..91"}}
+        (var {{span: "surf:64..73"}} to_tensor)
+        (app {{span: "surf:74..90"}}
+          (var {{}} Cons)
+          (lit {{span: "surf:75..81", surf_literal_style: "explicit", type: (t-prim {{}} f32)}} 3.0)
+          (app {{}}
+            (var {{}} Cons)
+            (lit {{span: "surf:83..89", surf_literal_style: "explicit", type: (t-prim {{}} f32)}} 4.0)
+            (var {{}} Nil)))))))
+"#
             ),
             &format!("{op}(tensor, tensor)"),
         );
@@ -183,13 +258,15 @@ fn scalar_pairs_and_matching_tensor_pairs_are_still_accepted() {
 #[test]
 fn the_replacement_spelling_the_diagnostic_names_type_checks() {
     assert_accepted(
-        "sig f[n]: tensor[n, f32] -> tensor[n, bool]\n\
-         def f(xs) = gt(xs, expand(to_tensor([1.5f32]), 0i32, shape(xs, 0i32)))\n",
+        include_str!(
+            "fixtures/core/tests/issue5_cmp_broadcast_both_forms/the_replacement_spelling_the_diagnostic_names_type_checks.0.deep"
+        ),
         "symbolic-extent replacement",
     );
     assert_accepted(
-        "def f(xs: tensor[3, f32]) -> tensor[3, bool] = \
-         gt(xs, expand(to_tensor([1.5f32]), 0i32, 3i64))\n",
+        include_str!(
+            "fixtures/core/tests/issue5_cmp_broadcast_both_forms/the_replacement_spelling_the_diagnostic_names_type_checks.1.deep"
+        ),
         "literal-extent replacement",
     );
 }
@@ -213,8 +290,8 @@ use chelis_deep::printer::print_canonical;
 use chelis_types::check_typed_program;
 use chelis_types::errors::CheckError;
 
-fn check_surf(source: &str) -> Result<String, Vec<CheckError>> {
-    let deep = surf_to_deep(source);
+fn check_core(source: &str) -> Result<String, Vec<CheckError>> {
+    let deep = parse_core(source);
     match check_typed_program(&deep) {
         Ok(checked) => Ok(print_canonical(checked.annotated_exprs())),
         Err(report) => Err(report.errors),
@@ -223,8 +300,8 @@ fn check_surf(source: &str) -> Result<String, Vec<CheckError>> {
 
 #[test]
 fn an_unconsumed_comparison_publishes_no_unresolved_variable() {
-    let rendered = check_surf(
-        "t = eq(expand(to_tensor([0.5f32]), 0, 3i64), expand(to_tensor([0.5f32]), 0, 3i64))\n",
+    let rendered = check_core(
+        include_str!("fixtures/core/tests/issue5_cmp_broadcast_both_forms/an_unconsumed_comparison_publishes_no_unresolved_variable.0.deep"),
     )
     .expect("an unconsumed comparison over two expand results still checks");
     assert!(

@@ -1,0 +1,71 @@
+(defsig {}
+  tag
+  (d)
+  (t-fn {}
+    (t-tensor {} (d-var {} d) (t-prim {} f32))
+    (t-tensor {} (d-name {} row) (t-prim {} f32))
+    (t-tensor {} (d-var {} d) (t-prim {} f32))))
+
+(def {}
+  tag
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (g {type: (t-var {} _)}))
+    (app {span: "surf:68..76"}
+      (var {span: "surf:68..71"} mul)
+      (var {span: "surf:72..73"} x)
+      (var {span: "surf:74..75"} g))))
+
+(defsig {}
+  tag2
+  (d e)
+  (t-fn {}
+    (t-tensor {} (d-var {} d) (d-var {} e) (t-prim {} f32))
+    (t-tensor {} (d-name {} row) (d-name {} col) (t-prim {} f32))
+    (t-tensor {} (d-var {} d) (d-var {} e) (t-prim {} f32))))
+
+(def {}
+  tag2
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (g {type: (t-var {} _)}))
+    (app {span: "surf:156..164"}
+      (var {span: "surf:156..159"} mul)
+      (var {span: "surf:160..161"} x)
+      (var {span: "surf:162..163"} g))))
+
+(defsig {}
+  tag3
+  (d e f)
+  (t-fn {}
+    (t-tensor {} (d-var {} d) (d-var {} e) (d-var {} f) (t-prim {} f32))
+    (t-tensor {}
+      (d-name {} batch)
+      (d-name {} row)
+      (d-name {} col)
+      (t-prim {} f32))
+    (t-tensor {} (d-var {} d) (d-var {} e) (d-var {} f) (t-prim {} f32))))
+
+(def {}
+  tag3
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (g {type: (t-var {} _)}))
+    (app {span: "surf:256..264"}
+      (var {span: "surf:256..259"} mul)
+      (var {span: "surf:260..261"} x)
+      (var {span: "surf:262..263"} g))))
+
+(defsig {}
+  square
+  (d)
+  (t-fn {}
+    (t-tensor {} (d-var {} d) (d-var {} d) (t-prim {} f32))
+    (t-tensor {} (d-name {} row) (d-name {} row) (t-prim {} f32))
+    (t-tensor {} (d-var {} d) (d-var {} d) (t-prim {} f32))))
+
+(def {}
+  square
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (g {type: (t-var {} _)}))
+    (app {span: "surf:344..352"}
+      (var {span: "surf:344..347"} mul)
+      (var {span: "surf:348..349"} x)
+      (var {span: "surf:350..351"} g))))

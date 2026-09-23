@@ -1,0 +1,29 @@
+(defsig {}
+  same_rank
+  (rest)
+  (t-fn {}
+    (t-ref {} (t-tensor {} (d-rank {} rest) (t-prim {} f32)))
+    (t-ref {} (t-tensor {} (d-rank {} rest) (t-prim {} f32)))
+    (t-tensor {} (d-rank {} rest) (t-prim {} f32))))
+
+(def {}
+  same_rank
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (y {type: (t-var {} _)}))
+    (copy {span: "surf:95..102"} (var {span: "surf:100..101"} x))))
+
+(defsig {}
+  bridge
+  (t-fn {}
+    (t-tensor {} (d-name {} *) (d-name {} *) (t-prim {} f32))
+    (t-tensor {} (d-name {} *) (d-name {} *) (t-prim {} f32))
+    (t-tensor {} (d-name {} *) (d-name {} *) (t-prim {} f32))))
+
+(def {}
+  bridge
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (y {type: (t-var {} _)}))
+    (app {span: "surf:181..196"}
+      (var {span: "surf:181..190"} same_rank)
+      (var {span: "surf:191..192"} x)
+      (var {span: "surf:194..195"} y))))

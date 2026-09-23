@@ -1,7 +1,7 @@
 //! chelis#1854 acceptance at both checker ingresses.
 
 use chelis_deep::{Expr, parser::parse_str as parse_deep, printer::print_canonical_flat};
-use chelis_surf::{desugar::desugar_program, parser::parse_str as parse_surf};
+
 use chelis_types::{check_ir_program, check_typed_program};
 
 const UNKNOWN_DTYPES: [(&str, Option<&str>); 5] = [
@@ -13,8 +13,12 @@ const UNKNOWN_DTYPES: [(&str, Option<&str>); 5] = [
 ];
 const RESERVED_DTYPES: [&str; 2] = ["f8e4m3", "f8e5m2"];
 
-fn surf(source: &str) -> Vec<Expr> {
-    desugar_program(&parse_surf(source).expect("Surf fixture must parse"))
+fn parse_core_fixture(source: &str) -> Vec<Expr> {
+    if source.trim_start().starts_with('[') {
+        serde_json::from_str(source).expect("lossless AST fixture")
+    } else {
+        chelis_deep::parser::parse_str(source).expect("Deep fixture")
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -81,14 +85,32 @@ fn assert_both_ingresses_reject_once(program: &[Expr], name: &str, nearest: Opti
 fn unknown_surf_scalar_names_reject_once_at_both_checker_ingresses() {
     for (name, nearest) in UNKNOWN_DTYPES {
         assert_both_ingresses_reject_once(
-            &surf(&format!("def ident(x: {name}) -> {name} = x")),
+            &parse_core_fixture(&format!(
+                r###"(defsig {{}} ident (t-fn {{}} (t-prim {{}} {name}) (t-prim {{}} {name})))
+
+(def {{}}
+  ident
+  (fn {{}}
+    (params {{}} (x {{type: (t-var {{}} _)}}))
+    (var {{span: "surf:35..36"}} x)))
+"###
+            )),
             name,
             nearest,
         );
     }
     for name in RESERVED_DTYPES {
         assert_both_ingresses_reject_once(
-            &surf(&format!("def ident(x: {name}) -> {name} = x")),
+            &parse_core_fixture(&format!(
+                r###"(defsig {{}} ident (t-fn {{}} (t-prim {{}} {name}) (t-prim {{}} {name})))
+
+(def {{}}
+  ident
+  (fn {{}}
+    (params {{}} (x {{type: (t-var {{}} _)}}))
+    (var {{span: "surf:35..36"}} x)))
+"###
+            )),
             name,
             None,
         );
@@ -97,7 +119,9 @@ fn unknown_surf_scalar_names_reject_once_at_both_checker_ingresses() {
 
 #[test]
 fn distinct_unknown_surf_scalar_names_keep_distinct_diagnostics() {
-    let program = surf("def convert(x: float32) -> fp32 = x");
+    let program = parse_core_fixture(include_str!(
+        "fixtures/core/tests/issue_1854_explicit_type_binders/distinct_unknown_surf_scalar_names_keep_distinct_diagnostics_100.json"
+    ));
     let ir = diagnostics(check_ir_program(&program));
     let typed = diagnostics(check_typed_program(&program));
     assert_eq!(
@@ -170,16 +194,20 @@ fn assert_unknown_spelling_order_amid_other_errors(program: &[Expr], expected: &
 #[test]
 fn standalone_signature_and_matching_inline_annotation_share_one_unknown_owner() {
     for source in [
-        "sig ident: float32 -> float32\n\
-         def ident(x: float32) -> float32 = x",
-        "def ident(x: float32) -> float32 = x\n\
-         sig ident: float32 -> float32",
-        "sig ident[a]: float32 -> float32\n\
-         def ident(x: float32) -> float32 = x",
-        "def ident(x: float32) -> float32 = x\n\
-         sig ident[a]: float32 -> float32",
+        include_str!(
+            "fixtures/core/tests/issue_1854_explicit_type_binders/standalone_signature_and_matching_inline_annotation_share_one_unknown_owner_173.json"
+        ),
+        include_str!(
+            "fixtures/core/tests/issue_1854_explicit_type_binders/standalone_signature_and_matching_inline_annotation_share_one_unknown_owner_175.json"
+        ),
+        include_str!(
+            "fixtures/core/tests/issue_1854_explicit_type_binders/standalone_signature_and_matching_inline_annotation_share_one_unknown_owner_177.json"
+        ),
+        include_str!(
+            "fixtures/core/tests/issue_1854_explicit_type_binders/standalone_signature_and_matching_inline_annotation_share_one_unknown_owner_179.json"
+        ),
     ] {
-        assert_unknown_spelling_order(&surf(source), &["float32"]);
+        assert_unknown_spelling_order(&parse_core_fixture(source), &["float32"]);
     }
 
     for source in [
@@ -203,9 +231,15 @@ fn standalone_signature_and_matching_inline_annotation_share_one_unknown_owner()
 fn explicit_binders_share_reserved_primitive_diagnostics() {
     for name in RESERVED_DTYPES {
         assert_both_ingresses_reject_once(
-            &surf(&format!(
-                "sig ident[a]: {name} -> {name}\n\
-                 def ident(x: {name}) -> {name} = x"
+            &parse_core_fixture(&format!(
+                r###"(defsig {{}} ident (a) (t-fn {{}} (t-prim {{}} {name}) (t-prim {{}} {name})))
+
+(def {{}}
+  ident
+  (fn {{}}
+    (params {{}} (x {{type: (t-prim {{}} {name})}}))
+    (var {{span: "surf:68..69"}} x)))
+"###
             )),
             name,
             None,
@@ -216,37 +250,31 @@ fn explicit_binders_share_reserved_primitive_diagnostics() {
 #[test]
 fn unknown_primitive_owners_preserve_spelling_declaration_order_and_module_scope() {
     assert_unknown_spelling_order(
-        &surf(
-            "sig convert: float32 -> float32\n\
-             def convert(x: fp32) -> fp32 = x",
-        ),
+        &parse_core_fixture(include_str!(
+            "fixtures/core/tests/issue_1854_explicit_type_binders/unknown_primitive_owners_preserve_spelling_declaration_order_and_module_scope_220.json"
+        )),
         &["float32", "fp32"],
     );
     for (source, expected) in [
         (
-            "sig first: fp32 -> fp32\n\
-             def first(x: fp32) -> fp32 = x\n\
-             sig second: float32 -> float32\n\
-             def second(x: float32) -> float32 = x",
+            include_str!(
+                "fixtures/core/tests/issue_1854_explicit_type_binders/unknown_primitive_owners_preserve_spelling_declaration_order_and_module_scope_227.json"
+            ),
             ["fp32", "float32"],
         ),
         (
-            "sig second: float32 -> float32\n\
-             def second(x: float32) -> float32 = x\n\
-             sig first: fp32 -> fp32\n\
-             def first(x: fp32) -> fp32 = x",
+            include_str!(
+                "fixtures/core/tests/issue_1854_explicit_type_binders/unknown_primitive_owners_preserve_spelling_declaration_order_and_module_scope_234.json"
+            ),
             ["float32", "fp32"],
         ),
     ] {
-        assert_unknown_spelling_order(&surf(source), &expected);
+        assert_unknown_spelling_order(&parse_core_fixture(source), &expected);
     }
     assert_unknown_spelling_order(
-        &surf(
-            "sig first: float32 -> float32\n\
-             def first(x: float32) -> float32 = x\n\
-             sig second: float32 -> float32\n\
-             def second(x: float32) -> float32 = x",
-        ),
+        &parse_core_fixture(include_str!(
+            "fixtures/core/tests/issue_1854_explicit_type_binders/unknown_primitive_owners_preserve_spelling_declaration_order_and_module_scope_245.json"
+        )),
         &["float32", "float32"],
     );
 
@@ -275,8 +303,17 @@ fn unknown_surf_tensor_precision_names_reject_once_at_both_checker_ingresses() {
         .chain(RESERVED_DTYPES.map(|name| (name, None)))
     {
         assert_both_ingresses_reject_once(
-            &surf(&format!(
-                "sig ident: tensor[2, {name}] -> f32\ndef ident(x) = 0.0f32"
+            &parse_core_fixture(&format!(
+                r###"(defsig {{}}
+  ident
+  (t-fn {{}} (t-tensor {{}} (d-lit {{}} 2) (t-prim {{}} {name})) (t-prim {{}} f32)))
+
+(def {{}}
+  ident
+  (fn {{}}
+    (params {{}} x)
+    (lit {{span: "surf:52..58", surf_literal_style: "explicit", type: (t-prim {{}} f32)}} 0.0)))
+"###
             )),
             name,
             nearest,
@@ -288,17 +325,21 @@ fn unknown_surf_tensor_precision_names_reject_once_at_both_checker_ingresses() {
 fn undeclared_surf_dimension_and_rank_variables_reject_at_both_ingresses() {
     for (source, name, needle) in [
         (
-            "sig shaped: tensor[n, f32] -> f32\ndef shaped(x) = 0.0f32",
+            include_str!(
+                "fixtures/core/tests/issue_1854_explicit_type_binders/undeclared_surf_dimension_and_rank_variables_reject_at_both_ingresses_291.json"
+            ),
             "n",
             "undeclared dimension variable",
         ),
         (
-            "sig shaped: tensor[..r, f32] -> f32\ndef shaped(x) = 0.0f32",
+            include_str!(
+                "fixtures/core/tests/issue_1854_explicit_type_binders/undeclared_surf_dimension_and_rank_variables_reject_at_both_ingresses_296.json"
+            ),
             "r",
             "undeclared rank variable",
         ),
     ] {
-        let program = surf(source);
+        let program = parse_core_fixture(source);
         let ir = diagnostics(check_ir_program(&program));
         let typed = diagnostics(check_typed_program(&program));
         assert_eq!(typed, ir, "Surf ingress parity for undeclared `{name}`");
@@ -441,18 +482,35 @@ fn undeclared_dimension_owners_are_isolated_by_declaration_and_module() {
 #[test]
 fn explicit_surf_binders_and_active_primitives_check_clean() {
     for source in [
-        "def ident[a](x: a) -> a = x",
-        "sig ident[a]: a -> a\ndef ident(x) = x",
-        "def constant[a]() -> i32 = 1i32",
-        "sig constant[a]: i32 -> i32\ndef constant(x) = x",
-        "def ident[n, p](x: tensor[n, p]) -> tensor[n, p] = x",
-        "sig ident[n, p]: tensor[n, p] -> tensor[n, p]\ndef ident(x) = x",
-        "sig ident[n, p]: tensor[n, p] -> tensor[n, p]\n\
-         def ident(x: tensor[n, p]) -> tensor[n, p] = x",
-        "sig ident[r]: tensor[..r, f32] -> tensor[..r, f32]\ndef ident(x) = x",
-        "def ident(x: f32) -> f32 = x",
+        include_str!(
+            "fixtures/core/tests/issue_1854_explicit_type_binders/explicit_surf_binders_and_active_primitives_check_clean_444.json"
+        ),
+        include_str!(
+            "fixtures/core/tests/issue_1854_explicit_type_binders/explicit_surf_binders_and_active_primitives_check_clean_445.json"
+        ),
+        include_str!(
+            "fixtures/core/tests/issue_1854_explicit_type_binders/explicit_surf_binders_and_active_primitives_check_clean_446.json"
+        ),
+        include_str!(
+            "fixtures/core/tests/issue_1854_explicit_type_binders/explicit_surf_binders_and_active_primitives_check_clean_447.json"
+        ),
+        include_str!(
+            "fixtures/core/tests/issue_1854_explicit_type_binders/explicit_surf_binders_and_active_primitives_check_clean_448.json"
+        ),
+        include_str!(
+            "fixtures/core/tests/issue_1854_explicit_type_binders/explicit_surf_binders_and_active_primitives_check_clean_449.json"
+        ),
+        include_str!(
+            "fixtures/core/tests/issue_1854_explicit_type_binders/explicit_surf_binders_and_active_primitives_check_clean_450.json"
+        ),
+        include_str!(
+            "fixtures/core/tests/issue_1854_explicit_type_binders/explicit_surf_binders_and_active_primitives_check_clean_452.json"
+        ),
+        include_str!(
+            "fixtures/core/tests/issue_1854_explicit_type_binders/explicit_surf_binders_and_active_primitives_check_clean_453.json"
+        ),
     ] {
-        let program = surf(source);
+        let program = parse_core_fixture(source);
         check_ir_program(&program).unwrap_or_else(|report| {
             panic!("IR ingress must accept `{source}`: {:?}", report.errors)
         });
@@ -465,27 +523,40 @@ fn explicit_surf_binders_and_active_primitives_check_clean() {
 #[test]
 fn declaration_body_annotations_preserve_one_explicit_binder_scope() {
     for source in [
-        "def ident[p](x: p) -> p = { y: p = x\n y }",
-        "def ident[p](x: p) -> p = { apply = fn(y: p) -> y\n apply(x) }",
-        "def ident[p](x: p) -> p = (x: p)",
-        "def ident[p](xs: List[p]) -> List[p] = { ys: List[p] = xs\n ys }",
-        "sig ident[p]: p -> p\ndef ident(x) = { y: p = x\n y }",
-        "def ident[n, p](x: tensor[n, p]) -> tensor[n, p] = \
-         { y: tensor[n, p] = x\n y }",
-        "def ident[n, p](x: tensor[n, p]) -> tensor[n, p] = \
-         { apply = fn(y: tensor[n, p]) -> y\n apply(x) }",
-        "def ident[n, p](x: tensor[n, p]) -> tensor[n, p] = \
-         (x: tensor[n, p])",
-        "def f[n, p](a: tensor[n, p]) -> tensor[n, p] = \
-         { b: tensor[n, p] = a\n b }\n\
-         def main() -> tensor[2, f32] = f(to_tensor([1.0f32, 2.0f32]))",
+        include_str!(
+            "fixtures/core/tests/issue_1854_explicit_type_binders/declaration_body_annotations_preserve_one_explicit_binder_scope_468.json"
+        ),
+        include_str!(
+            "fixtures/core/tests/issue_1854_explicit_type_binders/declaration_body_annotations_preserve_one_explicit_binder_scope_469.json"
+        ),
+        include_str!(
+            "fixtures/core/tests/issue_1854_explicit_type_binders/declaration_body_annotations_preserve_one_explicit_binder_scope_470.json"
+        ),
+        include_str!(
+            "fixtures/core/tests/issue_1854_explicit_type_binders/declaration_body_annotations_preserve_one_explicit_binder_scope_471.json"
+        ),
+        include_str!(
+            "fixtures/core/tests/issue_1854_explicit_type_binders/declaration_body_annotations_preserve_one_explicit_binder_scope_472.json"
+        ),
+        include_str!(
+            "fixtures/core/tests/issue_1854_explicit_type_binders/declaration_body_annotations_preserve_one_explicit_binder_scope_473.json"
+        ),
+        include_str!(
+            "fixtures/core/tests/issue_1854_explicit_type_binders/declaration_body_annotations_preserve_one_explicit_binder_scope_475.json"
+        ),
+        include_str!(
+            "fixtures/core/tests/issue_1854_explicit_type_binders/declaration_body_annotations_preserve_one_explicit_binder_scope_477.json"
+        ),
+        include_str!(
+            "fixtures/core/tests/issue_1854_explicit_type_binders/declaration_body_annotations_preserve_one_explicit_binder_scope_479.json"
+        ),
     ] {
-        let surf_program = surf(source);
-        let canonical_source = print_canonical_flat(&surf_program);
+        let legacy_program = parse_core_fixture(source);
+        let canonical_source = print_canonical_flat(&legacy_program);
         let canonical_program =
             parse_deep(&canonical_source).expect("desugared body-binder Deep must parse");
         for (carrier, program) in [
-            ("Surf-desugared Deep", surf_program.as_slice()),
+            ("Surf-desugared Deep", legacy_program.as_slice()),
             ("canonical Deep", canonical_program.as_slice()),
         ] {
             check_ir_program(program).unwrap_or_else(|report| {
@@ -508,14 +579,16 @@ fn declaration_body_annotations_preserve_one_explicit_binder_scope() {
 
 #[test]
 fn expression_tensor_ascriptions_preserve_rigid_dimension_identity() {
-    let source = "def f[n,m,p:Float](x:tensor[n,p], y:tensor[m,p])->tensor[m,p] = (y: tensor[n,p])";
-    let surf_program = surf(source);
-    let canonical_source = print_canonical_flat(&surf_program);
+    let source = include_str!(
+        "fixtures/core/tests/issue_1854_explicit_type_binders/expression_tensor_ascriptions_preserve_rigid_dimension_identity_511.json"
+    );
+    let legacy_program = parse_core_fixture(source);
+    let canonical_source = print_canonical_flat(&legacy_program);
     let canonical_program =
         parse_deep(&canonical_source).expect("desugared expression ascription must parse");
 
     for (carrier, program) in [
-        ("Surf-desugared Deep", surf_program.as_slice()),
+        ("Surf-desugared Deep", legacy_program.as_slice()),
         ("canonical Deep", canonical_program.as_slice()),
     ] {
         let ir = diagnostics(check_ir_program(program));
@@ -536,14 +609,25 @@ fn expression_tensor_ascriptions_preserve_rigid_dimension_identity() {
 
 #[test]
 fn contextual_literal_copies_share_one_unknown_precision_owner() {
-    for (extent, values) in [("1", "[1.0]"), ("3", "[1.0, 2.0, 3.0]")] {
+    for extent in [1, 3] {
+        let mut values = "(var {} Nil)".to_string();
+        for value in (1..=extent).rev() {
+            values = format!(
+                "(app {{}} (var {{}} Cons) (lit {{surf_literal_style: \"unsuffixed\", type: (t-prim {{}} p)}} {value}.0) {values})"
+            );
+        }
         let source = format!(
-            "def main() -> tensor[{extent}, f32] = {{\n  \
-             xs: tensor[{extent}, p] = {values}\n  \
-             xs\n\
-             }}\n"
+            r#"
+(defsig {{}} main (t-fn {{}} (t-tensor {{}} (d-lit {{}} {extent}) (t-prim {{}} f32))))
+(def {{}} main (fn {{}} (params {{}})
+  (let {{span: "surf:31..76"}}
+    (bind {{}} xs
+      (app {{surf_binding_type: "explicit", type: (t-tensor {{}} (d-lit {{}} {extent}) (t-prim {{}} p))}}
+        (var {{}} to_tensor) {values}))
+    (var {{span: "surf:72..74"}} xs))))
+"#
         );
-        let program = surf(&source);
+        let program = parse_core_fixture(&source);
         let ir = diagnostics(check_ir_program(&program));
         let typed = diagnostics(check_typed_program(&program));
         assert_eq!(typed, ir, "checker ingress parity for `{source}`");
@@ -586,12 +670,20 @@ fn defsig_less_function_metadata_shares_the_declaration_owner() {
 #[test]
 fn body_only_surf_binders_check_at_both_ingresses() {
     for source in [
-        "def maker[p]() = fn (x: p) -> x",
-        "def maker[n]() = fn (x: tensor[n, f32]) -> x",
-        "def maker[r]() = fn (x: tensor[..r, f32]) -> x",
-        "def maker[p]() = fn (x: tensor[2, p]) -> x",
+        include_str!(
+            "fixtures/core/tests/issue_1854_explicit_type_binders/body_only_surf_binders_check_at_both_ingresses_589.json"
+        ),
+        include_str!(
+            "fixtures/core/tests/issue_1854_explicit_type_binders/body_only_surf_binders_check_at_both_ingresses_590.json"
+        ),
+        include_str!(
+            "fixtures/core/tests/issue_1854_explicit_type_binders/body_only_surf_binders_check_at_both_ingresses_591.json"
+        ),
+        include_str!(
+            "fixtures/core/tests/issue_1854_explicit_type_binders/body_only_surf_binders_check_at_both_ingresses_592.json"
+        ),
     ] {
-        let program = surf(source);
+        let program = parse_core_fixture(source);
         check_ir_program(&program).unwrap_or_else(|report| {
             panic!(
                 "normalized IR ingress must accept body-only binder in `{source}`: {:?}",
@@ -608,12 +700,12 @@ fn body_only_surf_binders_check_at_both_ingresses() {
 }
 
 fn assert_non_function_binder_narrowing_rejects(source: &str, declaration: &str, binders: &[&str]) {
-    let surf_program = surf(source);
-    let canonical_source = print_canonical_flat(&surf_program);
+    let legacy_program = parse_core_fixture(source);
+    let canonical_source = print_canonical_flat(&legacy_program);
     let canonical_program =
         parse_deep(&canonical_source).expect("desugared non-function Deep must parse");
     for (carrier, program) in [
-        ("Surf-desugared Deep", surf_program.as_slice()),
+        ("Surf-desugared Deep", legacy_program.as_slice()),
         ("canonical Deep", canonical_program.as_slice()),
     ] {
         let ir = diagnostics(check_ir_program(program));
@@ -644,29 +736,30 @@ fn assert_non_function_binder_narrowing_rejects(source: &str, declaration: &str,
 fn non_function_declaration_binders_reject_concrete_narrowing_at_both_ingresses() {
     for (source, declaration, binders) in [
         (
-            "sig type_value[p]: p\n\
-             type_value = 1.0f32",
+            include_str!(
+                "fixtures/core/tests/issue_1854_explicit_type_binders/non_function_declaration_binders_reject_concrete_narrowing_at_both_ingresses_647.json"
+            ),
             "type_value",
             &["p"][..],
         ),
         (
-            "sig dimension_value[n]: tensor[n, f32]\n\
-             dimension_value = to_tensor([1.0f32, 2.0f32])",
+            include_str!(
+                "fixtures/core/tests/issue_1854_explicit_type_binders/non_function_declaration_binders_reject_concrete_narrowing_at_both_ingresses_653.json"
+            ),
             "dimension_value",
             &["n"][..],
         ),
         (
-            "sig rank_value[r]: tensor[..r, f32]\n\
-             rank_value = to_tensor([1.0f32])",
+            include_str!(
+                "fixtures/core/tests/issue_1854_explicit_type_binders/non_function_declaration_binders_reject_concrete_narrowing_at_both_ingresses_659.json"
+            ),
             "rank_value",
             &["r"][..],
         ),
         (
-            "sig matrix_value[rows, cols]: tensor[rows, cols, f32]\n\
-             matrix_value = to_tensor([\n\
-               [1.0f32, 2.0f32],\n\
-               [3.0f32, 4.0f32]\n\
-             ])",
+            include_str!(
+                "fixtures/core/tests/issue_1854_explicit_type_binders/non_function_declaration_binders_reject_concrete_narrowing_at_both_ingresses_665.json"
+            ),
             "matrix_value",
             &["rows", "cols"][..],
         ),
@@ -677,12 +770,14 @@ fn non_function_declaration_binders_reject_concrete_narrowing_at_both_ingresses(
 
 #[test]
 fn unconstrained_polymorphic_non_function_value_remains_valid_at_both_ingresses() {
-    let surf_program = surf("sig empty[p]: List[p]\nempty = []");
-    let canonical_source = print_canonical_flat(&surf_program);
+    let legacy_program = parse_core_fixture(include_str!(
+        "fixtures/core/tests/issue_1854_explicit_type_binders/unconstrained_polymorphic_non_function_value_remains_valid_at_both_ingresses_680.json"
+    ));
+    let canonical_source = print_canonical_flat(&legacy_program);
     let canonical_program =
         parse_deep(&canonical_source).expect("desugared polymorphic value must parse");
     for (carrier, program) in [
-        ("Surf-desugared Deep", surf_program.as_slice()),
+        ("Surf-desugared Deep", legacy_program.as_slice()),
         ("canonical Deep", canonical_program.as_slice()),
     ] {
         check_ir_program(program).unwrap_or_else(|report| {
@@ -704,17 +799,17 @@ fn unconstrained_polymorphic_non_function_value_remains_valid_at_both_ingresses(
 
 #[test]
 fn body_only_type_binder_is_generalized_and_remains_rigid() {
-    let polymorphic = surf(
-        "def maker[p]() = fn (x: p) -> x\n\
-         int_result = (maker())(1i32)\n\
-         float_result = (maker())(1.0f32)",
-    );
+    let polymorphic = parse_core_fixture(include_str!(
+        "fixtures/core/tests/issue_1854_explicit_type_binders/body_only_type_binder_is_generalized_and_remains_rigid_708.json"
+    ));
     check_ir_program(&polymorphic)
         .expect("normalized IR ingress must generalize the body-only type binder");
     check_typed_program(&polymorphic)
         .expect("typed ingress must generalize the body-only type binder");
 
-    let narrowed = surf("def maker[p]() = fn (x: p) -> add(x, 1i32)");
+    let narrowed = parse_core_fixture(include_str!(
+        "fixtures/core/tests/issue_1854_explicit_type_binders/body_only_type_binder_is_generalized_and_remains_rigid_717.json"
+    ));
     let ir = diagnostics(check_ir_program(&narrowed));
     let typed = diagnostics(check_typed_program(&narrowed));
     assert_eq!(typed, ir, "body-only binder rigidity ingress parity");
@@ -733,13 +828,13 @@ fn assert_body_only_shape_binder_pin_rejects(
     binder: &str,
     role: &str,
 ) {
-    let surf_program = surf(source);
-    let canonical_source = print_canonical_flat(&surf_program);
+    let legacy_program = parse_core_fixture(source);
+    let canonical_source = print_canonical_flat(&legacy_program);
     let canonical_program =
         parse_deep(&canonical_source).expect("desugared canonical Deep must parse");
 
     for (carrier, program) in [
-        ("Surf-desugared Deep", surf_program.as_slice()),
+        ("Surf-desugared Deep", legacy_program.as_slice()),
         ("canonical Deep", canonical_program.as_slice()),
     ] {
         let ir = diagnostics(check_ir_program(program));
@@ -764,18 +859,16 @@ fn assert_body_only_shape_binder_pin_rejects(
 fn body_only_dimension_and_rank_binders_cannot_be_pinned_to_concrete_shapes() {
     for (source, binder, role) in [
         (
-            "def narrowed_dimension[n]() = {\n\
-               value: tensor[n, f32] = to_tensor([1.0f32, 2.0f32])\n\
-               value\n\
-             }",
+            include_str!(
+                "fixtures/core/tests/issue_1854_explicit_type_binders/body_only_dimension_and_rank_binders_cannot_be_pinned_to_concrete_shapes_767.json"
+            ),
             "n",
             "dimension",
         ),
         (
-            "def narrowed_rank[r]() = {\n\
-               value: tensor[..r, f32] = to_tensor([1.0f32, 2.0f32])\n\
-               value\n\
-             }",
+            include_str!(
+                "fixtures/core/tests/issue_1854_explicit_type_binders/body_only_dimension_and_rank_binders_cannot_be_pinned_to_concrete_shapes_775.json"
+            ),
             "r",
             "rank",
         ),
@@ -793,19 +886,17 @@ fn body_only_dimension_and_rank_binders_cannot_be_pinned_to_concrete_shapes() {
 fn recursive_body_only_dimension_and_rank_binders_remain_rigid() {
     for (source, declaration, binder, role) in [
         (
-            "def recursive_dimension[n](stop: bool) -> i32 = {\n\
-               value: tensor[n, f32] = to_tensor([1.0f32, 2.0f32])\n\
-               if stop then 0i32 else recursive_dimension(true)\n\
-             }",
+            include_str!(
+                "fixtures/core/tests/issue_1854_explicit_type_binders/recursive_body_only_dimension_and_rank_binders_remain_rigid_796.json"
+            ),
             "recursive_dimension",
             "n",
             "dimension",
         ),
         (
-            "def recursive_rank[r](stop: bool) -> i32 = {\n\
-               value: tensor[..r, f32] = to_tensor([1.0f32, 2.0f32])\n\
-               if stop then 0i32 else recursive_rank(true)\n\
-             }",
+            include_str!(
+                "fixtures/core/tests/issue_1854_explicit_type_binders/recursive_body_only_dimension_and_rank_binders_remain_rigid_805.json"
+            ),
             "recursive_rank",
             "r",
             "rank",
@@ -816,13 +907,13 @@ fn recursive_body_only_dimension_and_rank_binders_remain_rigid() {
 }
 
 fn assert_body_only_dimension_cannot_collapse_into_return_only(source: &str, declaration: &str) {
-    let surf_program = surf(source);
-    let canonical_source = print_canonical_flat(&surf_program);
+    let legacy_program = parse_core_fixture(source);
+    let canonical_source = print_canonical_flat(&legacy_program);
     let canonical_program =
         parse_deep(&canonical_source).expect("desugared canonical Deep must parse");
 
     for (carrier, program) in [
-        ("Surf-desugared Deep", surf_program.as_slice()),
+        ("Surf-desugared Deep", legacy_program.as_slice()),
         ("canonical Deep", canonical_program.as_slice()),
     ] {
         let ir = diagnostics(check_ir_program(program));
@@ -848,20 +939,15 @@ fn assert_body_only_dimension_cannot_collapse_into_return_only(source: &str, dec
 fn body_only_dimension_cannot_collapse_into_a_distinct_return_only_binder() {
     for (source, declaration) in [
         (
-            "def mixed_return_only[n, m](values: List[f32]) -> tensor[n, f32] = {\n\
-               result: tensor[m, f32] = to_tensor(values)\n\
-               result\n\
-             }",
+            include_str!(
+                "fixtures/core/tests/issue_1854_explicit_type_binders/body_only_dimension_cannot_collapse_into_a_distinct_return_only_binder_851.json"
+            ),
             "mixed_return_only",
         ),
         (
-            "def recursive_mixed_return_only[n, m](\n\
-               values: List[f32],\n\
-               stop: bool\n\
-             ) -> tensor[n, f32] = {\n\
-               result: tensor[m, f32] = to_tensor(values)\n\
-               if stop then result else recursive_mixed_return_only(values, true)\n\
-             }",
+            include_str!(
+                "fixtures/core/tests/issue_1854_explicit_type_binders/body_only_dimension_cannot_collapse_into_a_distinct_return_only_binder_858.json"
+            ),
             "recursive_mixed_return_only",
         ),
     ] {
@@ -871,18 +957,16 @@ fn body_only_dimension_cannot_collapse_into_a_distinct_return_only_binder() {
 
 #[test]
 fn distinct_return_only_dimensions_may_share_one_body_inferred_output() {
-    let source = "def shared_return_only[n, m](values: List[f32]) \
-                  -> (tensor[n, f32], tensor[m, f32]) = {\n\
-                    result = to_tensor(values)\n\
-                    (result, result)\n\
-                  }";
-    let surf_program = surf(source);
-    let canonical_source = print_canonical_flat(&surf_program);
+    let source = include_str!(
+        "fixtures/core/tests/issue_1854_explicit_type_binders/distinct_return_only_dimensions_may_share_one_body_inferred_output_874.json"
+    );
+    let legacy_program = parse_core_fixture(source);
+    let canonical_source = print_canonical_flat(&legacy_program);
     let canonical_program =
         parse_deep(&canonical_source).expect("desugared canonical Deep must parse");
 
     for (carrier, program) in [
-        ("Surf-desugared Deep", surf_program.as_slice()),
+        ("Surf-desugared Deep", legacy_program.as_slice()),
         ("canonical Deep", canonical_program.as_slice()),
     ] {
         check_ir_program(program).unwrap_or_else(|report| {
@@ -905,27 +989,35 @@ fn distinct_return_only_dimensions_may_share_one_body_inferred_output() {
 fn body_only_surf_annotations_cannot_introduce_undeclared_binders() {
     for (source, name, needle) in [
         (
-            "def maker() = fn (x: p) -> x",
+            include_str!(
+                "fixtures/core/tests/issue_1854_explicit_type_binders/body_only_surf_annotations_cannot_introduce_undeclared_binders_908.json"
+            ),
             "p",
             "unknown primitive type",
         ),
         (
-            "def maker() = fn (x: tensor[n, f32]) -> x",
+            include_str!(
+                "fixtures/core/tests/issue_1854_explicit_type_binders/body_only_surf_annotations_cannot_introduce_undeclared_binders_913.json"
+            ),
             "n",
             "undeclared dimension variable",
         ),
         (
-            "def maker() = fn (x: tensor[2, p]) -> x",
+            include_str!(
+                "fixtures/core/tests/issue_1854_explicit_type_binders/body_only_surf_annotations_cannot_introduce_undeclared_binders_918.json"
+            ),
             "p",
             "unknown primitive type",
         ),
         (
-            "def maker() = fn (x: tensor[..r, f32]) -> x",
+            include_str!(
+                "fixtures/core/tests/issue_1854_explicit_type_binders/body_only_surf_annotations_cannot_introduce_undeclared_binders_923.json"
+            ),
             "r",
             "undeclared rank variable",
         ),
     ] {
-        let program = surf(source);
+        let program = parse_core_fixture(source);
         let ir = diagnostics(check_ir_program(&program));
         let typed = diagnostics(check_typed_program(&program));
         assert_eq!(typed, ir, "undeclared Surf body-binder parity for `{name}`");
@@ -1330,10 +1422,10 @@ fn declared_but_unused_bounded_deep_binder_rejects_at_both_ingresses() {
 #[test]
 fn explicit_property_binders_check_at_both_ingresses() {
     for source in [
-        "@property accepts[p] forall(x: p): true",
-        "@property accepts[p: Float] forall(x: p): true",
+        include_str!("fixtures/core/tests/issue_1854_explicit_type_binders/shared_1333.json"),
+        include_str!("fixtures/core/tests/issue_1854_explicit_type_binders/shared_1334.json"),
     ] {
-        let program = surf(source);
+        let program = parse_core_fixture(source);
         check_ir_program(&program).expect("IR ingress must accept the property binder");
         check_typed_program(&program).expect("typed ingress must accept the property binder");
     }
@@ -1341,7 +1433,9 @@ fn explicit_property_binders_check_at_both_ingresses() {
 
 #[test]
 fn incomplete_property_binder_lists_reject_at_both_ingresses() {
-    let program = surf("@property accepts[p] forall(x: tensor[n, p]): true");
+    let program = parse_core_fixture(include_str!(
+        "fixtures/core/tests/issue_1854_explicit_type_binders/shared_1344.json"
+    ));
     let ir = diagnostics(check_ir_program(&program));
     let typed = diagnostics(check_typed_program(&program));
     assert_eq!(typed, ir, "incomplete property binders need ingress parity");
@@ -1355,7 +1449,9 @@ fn incomplete_property_binder_lists_reject_at_both_ingresses() {
 #[test]
 fn an_unlisted_property_scalar_name_remains_an_unknown_primitive() {
     assert_both_ingresses_reject_once(
-        &surf("@property accepts forall(x: float32): true"),
+        &parse_core_fixture(include_str!(
+            "fixtures/core/tests/issue_1854_explicit_type_binders/shared_1358.json"
+        )),
         "float32",
         Some("f32"),
     );

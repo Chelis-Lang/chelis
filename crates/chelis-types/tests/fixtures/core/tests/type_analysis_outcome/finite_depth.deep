@@ -1,0 +1,4 @@
+(module {surf_path: "Deep"}
+  deep
+  (defsig {} value (t-fn {} (t-prim {} i32)))
+  (def {} value (fn {} (params {}) @@body@@)))

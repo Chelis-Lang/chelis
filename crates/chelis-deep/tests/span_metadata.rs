@@ -53,8 +53,7 @@ fn collect_span_ids_one(expr: &Expr, acc: &mut Vec<String>) {
 
 // ── Black-Scholes fixture round-trip (S1 oracle) ─────────────────────
 
-const BLACK_SCHOLES_DP: &str =
-    include_str!("../../chelis-cli/tests/fixtures/octant/black_scholes/call_price.dp");
+const BLACK_SCHOLES_DP: &str = include_str!("fixtures/black_scholes_call_price.dp");
 
 #[test]
 fn roundtrip_span_metadata_black_scholes_fixture() {

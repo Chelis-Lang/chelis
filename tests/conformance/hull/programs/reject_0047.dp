@@ -1,3 +1,0 @@
-(deftype {} Maybe () (variant {} Just (t-prim {} i32)) (variant {} Nothing))
-
-(def {} n (var {} Nothing))

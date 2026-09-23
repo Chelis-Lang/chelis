@@ -1,0 +1,26 @@
+(defsig {}
+  filled
+  (n)
+  (t-fn {}
+    (t-tensor {} (d-var {} n) (t-prim {} f32))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))))
+
+(def {}
+  filled
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:56..111"}
+      (var {span: "surf:56..62"} expand)
+      (app {span: "surf:63..82"}
+        (var {span: "surf:63..72"} to_tensor)
+        (app {span: "surf:73..81"}
+          (var {} Cons)
+          (lit {span: "surf:74..80", surf_literal_style: "explicit", type: (t-prim {} f32)} 3.0)
+          (var {} Nil)))
+      (lit {span: "surf:84..85", type: (t-prim {} i32)} 0)
+      (cast {span: "surf:87..110"}
+        (app {span: "surf:92..104"}
+          (var {span: "surf:92..97"} shape)
+          (borrow {span: "surf:98..100"} (var {span: "surf:99..100"} x))
+          (lit {span: "surf:102..103", type: (t-prim {} i32)} 0))
+        (t-prim {} i64)))))

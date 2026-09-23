@@ -1,0 +1,13 @@
+(defsig {}
+  good
+  (t-fn {}
+    (t-tensor {} (d-lit {} 4) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 4) (t-prim {} f32))))
+
+(def {}
+  good
+  (fn {}
+    (params {} (my_x {type: (t-var {} _)}))
+    (app {span: "surf:51..63"}
+      (var {span: "surf:51..57"} lib_id)
+      (var {span: "surf:58..62"} my_x))))

@@ -1,0 +1,28 @@
+(module {surf_path: "FrontEndPerformance.StaticLiteral"}
+  frontendperformance.staticliteral
+  (defsig {} lit (t-fn {} (t-tensor {} (d-lit {} 2) (t-prim {} f32))))
+  (def {}
+    lit
+    (fn {}
+      (params {})
+      (app {span: "surf:71..114"}
+        (var {span: "surf:71..80"} to_tensor)
+        (app {span: "surf:81..113"}
+          (var {} Cons)
+          (cast {span: "surf:82..96"}
+            (lit {span: "surf:87..90", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 1.0)
+            (t-prim {} f32))
+          (app {}
+            (var {} Cons)
+            (cast {span: "surf:98..112"}
+              (lit {span: "surf:103..106", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 2.0)
+              (t-prim {} f32))
+            (var {} Nil))))))
+  (def {}
+    r
+    (app {span: "surf:119..146"}
+      (var {span: "surf:119..124"} index)
+      (app {span: "surf:125..139"}
+        (var {span: "surf:125..132"} to_list)
+        (app {span: "surf:133..138"} (var {span: "surf:133..136"} lit)))
+      (lit {span: "surf:141..145", type: (t-prim {} i64)} 0))))

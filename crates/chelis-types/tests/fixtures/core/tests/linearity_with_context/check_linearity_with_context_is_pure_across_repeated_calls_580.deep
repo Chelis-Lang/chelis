@@ -1,0 +1,1 @@
+(deftype {} Carrier (n) (variant {} Carrier (field {} tag (t-prim {} i32))))

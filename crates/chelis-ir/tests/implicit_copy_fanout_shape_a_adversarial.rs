@@ -11,13 +11,13 @@
 
 use chelis_ir::dag::Dag;
 use chelis_ir::lower::try_lower_program;
-use chelis_surf::desugar::desugar_program;
-use chelis_surf::parser::parse_str as surf_parse;
+
 use chelis_types::{check_linearity, check_typed_program};
 
-fn surf_to_dag(source: &str) -> Result<Dag, String> {
-    let decls = surf_parse(source).map_err(|e| format!("surf parse: {e:?}"))?;
-    let deep = desugar_program(&decls);
+/// Load the original unexpanded frontend AST, preserving legacy carriers and metadata.
+fn fixture_to_dag(source: &str) -> Result<Dag, String> {
+    let deep: Vec<chelis_deep::Expr> =
+        serde_json::from_str(source).map_err(|e| format!("fixture JSON: {e}"))?;
     let checked = check_typed_program(&deep)
         .map_err(|errs| format!("typecheck failed: {:?}", errs.errors))?;
     let checked = chelis_effects::check_program(&checked)
@@ -44,15 +44,10 @@ fn surf_to_dag(source: &str) -> Result<Dag, String> {
 /// in `implicit_copy_shape_a_broader_return.rs` pin the broader coverage.
 #[test]
 fn shape_a_let_tail_return_lowers_cleanly() {
-    let source = r#"
-module Repro.ShapeABroader
-
-def identity_via_let[a](x: &tensor[a, f32]) -> tensor[a, f32] = {
-  y: &tensor[a, f32] = x
-  y
-}
-"#;
-    let result = surf_to_dag(source);
+    let source = include_str!(
+        "fixtures/core/tests/implicit_copy_fanout_shape_a_adversarial/shape_a_let_tail_return_lowers_cleanly.json"
+    );
+    let result = fixture_to_dag(source);
     assert!(
         result.is_ok(),
         "Shape A broader-return fix should lower let-tail returns cleanly; got {:?}",
@@ -65,13 +60,10 @@ def identity_via_let[a](x: &tensor[a, f32]) -> tensor[a, f32] = {
 /// triple and accepts when both resolve to the same bare-var name.
 #[test]
 fn shape_a_if_tail_return_lowers_cleanly() {
-    let source = r#"
-module Repro.ShapeAIf
-
-def identity_via_if[a](x: &tensor[a, f32], flag: bool) -> tensor[a, f32] =
-  if flag then x else x
-"#;
-    let result = surf_to_dag(source);
+    let source = include_str!(
+        "fixtures/core/tests/implicit_copy_fanout_shape_a_adversarial/shape_a_if_tail_return_lowers_cleanly.json"
+    );
+    let result = fixture_to_dag(source);
     assert!(
         result.is_ok(),
         "Shape A broader-return fix should lower if-tail returns cleanly; got {:?}",
@@ -88,27 +80,10 @@ def identity_via_if[a](x: &tensor[a, f32], flag: bool) -> tensor[a, f32] =
 /// the `arg_is_borrowed` clause N times against the same arg names.
 #[test]
 fn shape_b_three_grad_fanout_lowers_cleanly() {
-    let source = r#"
-module Repro.ImplicitCopyShapeBThreeGrad
-
-def mse_loss(x: tensor[3, f32], y: tensor[3, f32], w: tensor[3, f32], b: tensor[3, f32]) -> tensor[f32] = {
-  prod = mul(w, b)
-  d = sub(prod, x)
-  e = sub(d, y)
-  sq = mul(e, e)
-  sum(sq, 0)
-}
-
-def sgd_step(x: tensor[3, f32], y: tensor[3, f32], w: tensor[3, f32], b: tensor[3, f32], c: tensor[3, f32]) -> tensor[3, f32] = {
-  dw = grad(mse_loss, wrt=w)(x, y, w, b)
-  db = grad(mse_loss, wrt=b)(x, y, w, b)
-  dc = grad(mse_loss, wrt=w)(x, y, w, b)
-  new_w = sub(w, dw)
-  new_b = sub(b, db)
-  add(new_w, new_b)
-}
-"#;
-    let result = surf_to_dag(source);
+    let source = include_str!(
+        "fixtures/core/tests/implicit_copy_fanout_shape_a_adversarial/shape_b_three_grad_fanout_lowers_cleanly.json"
+    );
+    let result = fixture_to_dag(source);
     assert!(
         result.is_ok(),
         "Shape B three-grad fan-out must lower cleanly; got {:?}",
@@ -121,55 +96,15 @@ def sgd_step(x: tensor[3, f32], y: tensor[3, f32], w: tensor[3, f32], b: tensor[
 /// covered by `arg_is_borrowed` but the mixed case is not pinned.
 #[test]
 fn shape_b_mixed_grad_vmap_fanout_lowers_cleanly() {
-    let source = r#"
-module Repro.ImplicitCopyShapeBMixed
-
-def my_loss(w: tensor[3, f32]) -> tensor[f32] = sum(w, 0)
-
-def step(w: tensor[3, f32], ws: tensor[2, 3, f32]) -> tensor[3, f32] = {
-  dw = grad(my_loss, wrt=w)(w)
-  rs = vmap(my_loss)(ws)
-  trailing = sub(w, dw)
-  trailing
-}
-"#;
-    let result = surf_to_dag(source);
+    let source = include_str!(
+        "fixtures/core/tests/implicit_copy_fanout_shape_a_adversarial/shape_b_mixed_grad_vmap_fanout_lowers_cleanly.json"
+    );
+    let result = fixture_to_dag(source);
     assert!(
         result.is_ok(),
         "Shape B mixed grad + vmap fan-out must lower cleanly; got {:?}",
         result
     );
-}
-
-/// Sibling: `jit(f)(args)` per the v3 diagnosis is NOT affected (jit
-/// follows f's param types). Pin the negative: an `jit(f)(args); sub(w, ...)`
-/// where `f`'s param is owned should still fail with UseAfterConsume
-/// at the linearity layer, NOT silently lower.
-///
-/// This pins the v3 fix scope; if jit started to be treated as
-/// observational, this test would catch the over-broad fix.
-#[test]
-fn shape_b_jit_call_with_owned_arg_then_borrow_still_rejects() {
-    let source = r#"
-module Repro.ImplicitCopyShapeBJit
-
-def my_op(w: tensor[3, f32]) -> tensor[3, f32] = add(w, w)
-
-def step(w: tensor[3, f32]) -> tensor[3, f32] = {
-  out = jit(my_op)(w)
-  trailing = sub(w, out)
-  trailing
-}
-"#;
-    let result = surf_to_dag(source);
-    // jit's call follows the underlying f's param types. If `my_op`
-    // takes owned `tensor[3, f32]`, jit-app consumes `w` structurally,
-    // and the trailing sub(w, ...) borrow-read should error. The
-    // implicit-copy inserter at the lower level inserts a fork for
-    // single-consumer + borrow-read, so this MAY lower cleanly via
-    // the v2 inserter. Pin whichever outcome the current implementation
-    // produces.
-    let _ = result;
 }
 
 /// Positive control: 3-grad fan-out without trailing borrow. The
@@ -178,19 +113,10 @@ def step(w: tensor[3, f32]) -> tensor[3, f32] = {
 /// after also works.
 #[test]
 fn shape_b_three_grad_no_trailing_borrow_lowers_cleanly() {
-    let source = r#"
-module Repro.ImplicitCopyShapeBNoBorrow
-
-def my_loss(w: tensor[3, f32]) -> tensor[f32] = sum(w, 0)
-
-def step(w: tensor[3, f32]) -> tensor[3, f32] = {
-  d1 = grad(my_loss, wrt=w)(w)
-  d2 = grad(my_loss, wrt=w)(w)
-  d3 = grad(my_loss, wrt=w)(w)
-  add(d1, add(d2, d3))
-}
-"#;
-    let result = surf_to_dag(source);
+    let source = include_str!(
+        "fixtures/core/tests/implicit_copy_fanout_shape_a_adversarial/shape_b_three_grad_no_trailing_borrow_lowers_cleanly.json"
+    );
+    let result = fixture_to_dag(source);
     assert!(
         result.is_ok(),
         "Shape B three-grad without trailing borrow must lower cleanly; got {:?}",

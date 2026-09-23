@@ -5,9 +5,6 @@
 mod support;
 
 use chelis_deep::parser::parse_str as parse_deep_lenient;
-use chelis_macros::{ExpansionOptions, expand_program};
-use chelis_surf::desugar::desugar_program;
-use chelis_surf::parser::parse_str as parse_surf;
 use chelis_types::check_ir_program;
 use chelis_types::errors::{CheckError, CheckErrorKind};
 
@@ -18,13 +15,10 @@ fn deep_errors(source: &str) -> Vec<CheckError> {
         .errors
 }
 
-fn surf_errors(source: &str) -> Vec<CheckError> {
-    let decls = parse_surf(source).expect("Surf fixture must parse");
-    let exprs = expand_program(&desugar_program(&decls), &ExpansionOptions::default())
-        .expect("Surf fixture must macro-expand")
-        .into_exprs();
+fn fixture_errors(source: &str) -> Vec<CheckError> {
+    let exprs: Vec<chelis_deep::Expr> = serde_json::from_str(source).expect("core AST fixture");
     check_ir_program(&exprs)
-        .expect_err("adversarial Surf fixture must be rejected")
+        .expect_err("adversarial core fixture must be rejected")
         .errors
 }
 
@@ -97,13 +91,10 @@ fn tuple_projection_of_failed_cast_keeps_one_root_without_a_cascade() {
 }
 
 #[test]
-fn surf_unknown_alias_target_has_a_complete_source_location() {
-    let errors = surf_errors(
-        r#"
-type Broken = Missing
-def keep(x: Broken) -> Broken = x
-"#,
-    );
+fn unknown_alias_target_has_a_complete_source_location() {
+    let errors = fixture_errors(include_str!(
+        "fixtures/core/tests/rt800_session_location_conformance/case_001.json"
+    ));
     assert_eq!(
         errors.len(),
         1,
@@ -113,6 +104,6 @@ def keep(x: Broken) -> Broken = x
     assert!(error.message.contains("Missing"), "{errors:?}");
     assert!(
         error.span_offset.is_some() && error.span_id.is_some(),
-        "Surf desugaring preserves both byte offset and synthesized span id: {error:?}"
+        "the retained core AST preserves both byte offset and synthesized span id: {error:?}"
     );
 }

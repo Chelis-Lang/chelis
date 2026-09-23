@@ -1,0 +1,6 @@
+(defsig {dtype_bounds: {n: float}}
+  f
+  (n)
+  (t-fn {}
+    (t-tensor {} (d-var {} n) (t-prim {} f32))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))))

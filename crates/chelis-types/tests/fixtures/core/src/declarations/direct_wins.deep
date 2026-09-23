@@ -1,0 +1,20 @@
+(module {surf_path: "DirectWins"}
+  directwins
+  (def {}
+    u
+    (app {span: "surf:23..39"}
+      (var {span: "surf:23..26"} add)
+      (var {span: "surf:27..29"} v1)
+      (app {span: "surf:31..38"}
+        (var {span: "surf:31..35"} ping)
+        (lit {span: "surf:36..37", type: (t-prim {} i32)} 1))))
+  (def {} v1 (lit {span: "surf:46..47", type: (t-prim {} i32)} 5))
+  (defsig {} ping (t-fn {} (t-prim {} i32) (t-prim {} i32)))
+  (def {}
+    ping
+    (fn {}
+      (params {} (n {type: (t-var {} _)}))
+      (app {span: "surf:75..85"}
+        (var {span: "surf:75..78"} add)
+        (var {span: "surf:79..80"} n)
+        (var {span: "surf:82..84"} v1)))))

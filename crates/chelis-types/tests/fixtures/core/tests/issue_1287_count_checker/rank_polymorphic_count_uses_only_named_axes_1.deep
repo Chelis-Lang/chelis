@@ -1,0 +1,20 @@
+(defsig {}
+  good
+  (pre post)
+  (t-fn {}
+    (t-ref {}
+      (t-tensor {}
+        (d-rank {} pre)
+        (d-name {} seq)
+        (d-rank {} post)
+        (t-prim {} bool)))
+    (t-tensor {} (d-rank {} pre) (d-rank {} post) (t-prim {} i64))))
+
+(def {}
+  good
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:91..105"}
+      (var {span: "surf:91..96"} count)
+      (borrow {span: "surf:97..99"} (var {span: "surf:98..99"} x))
+      (var {span: "surf:101..104"} seq))))

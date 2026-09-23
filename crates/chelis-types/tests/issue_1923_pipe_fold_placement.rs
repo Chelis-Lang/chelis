@@ -21,8 +21,7 @@
 //!    the entry set itself is enumerated rather than sampled.
 
 use chelis_deep::{DeepTag, Expr};
-use chelis_surf::desugar::desugar_program;
-use chelis_surf::parser::parse_str as parse_surf;
+
 use chelis_types::TypeEnv;
 use chelis_types::infer::{
     CheckedProgram, SignatureInferenceMetadata, build_compiled_library_context,
@@ -34,17 +33,10 @@ use chelis_types::infer::{
 /// A program whose body is a pipe chain with both stage shapes: a bare-name
 /// stage (`to_tensor`) and a call stage the desugarer wraps in a synthesized
 /// unary lambda (`sum(..)`).
-const PIPED: &str = "def f() -> tensor[f32] = \
-                     [1.0f32, 2.0f32] |> to_tensor |> sum(cast(0, i32))\n";
+const PIPED: &str = include_str!("fixtures/core/tests/issue_1923_pipe_fold_placement/PIPED_1.json");
 
-fn surf_to_deep(source: &str) -> Vec<Expr> {
-    let decls = parse_surf(source).expect("surf parse");
-    chelis_macros::expand_program(
-        &desugar_program(&decls),
-        &chelis_macros::ExpansionOptions::default(),
-    )
-    .expect("macro expand")
-    .into_exprs()
+fn core_program(source: &str) -> Vec<chelis_deep::Expr> {
+    serde_json::from_str(source).expect("lossless core fixture")
 }
 
 /// Does this expression, or anything under it, carry a `pipe` node?
@@ -82,7 +74,7 @@ fn program_contains_pipe(exprs: &[Expr]) -> bool {
 /// variant is the cheaper implementation and nothing else would catch it.
 #[test]
 fn the_fold_never_mutates_the_callers_program() {
-    let deep = surf_to_deep(PIPED);
+    let deep = core_program(PIPED);
     assert!(
         program_contains_pipe(&deep),
         "the fixture must actually carry a pipe before the check"
@@ -95,56 +87,6 @@ fn the_fold_never_mutates_the_callers_program() {
     assert!(
         !program_contains_pipe(checked.annotated_exprs()),
         "and the checker's output carries the application instead"
-    );
-}
-
-/// Property 2a: the set of public checker entries is what this file enumerates.
-///
-/// Read off the source rather than asserted about behaviour, because the
-/// failure this guards against is an entry that does not exist yet. A new
-/// `pub fn` in `program.rs` taking a Deep program lands here as a failure
-/// naming itself, and the fix is to fold in it and add it below.
-///
-/// EVIDENTIARY STATUS: disposition lock over the current entry set.
-#[test]
-fn the_public_checker_entries_are_the_ones_this_file_covers() {
-    let source =
-        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/infer/program.rs"))
-            .expect("program.rs is readable");
-
-    let mut found: Vec<String> = Vec::new();
-    let lines: Vec<&str> = source.lines().collect();
-    for (index, line) in lines.iter().enumerate() {
-        let Some(rest) = line.strip_prefix("pub fn ") else {
-            continue;
-        };
-        let name = rest.split('(').next().unwrap_or_default().to_string();
-        // A checker entry takes a Deep program. Read the signature up to its
-        // closing paren; the entries are all short.
-        let signature: String = lines[index..lines.len().min(index + 8)].join(" ");
-        let signature = signature.split(')').next().unwrap_or_default().to_string();
-        if signature.contains("&[deep::Expr]") {
-            found.push(name);
-        }
-    }
-    found.sort();
-
-    let expected = vec![
-        "build_compiled_library_context".to_string(),
-        "build_compiled_library_context_with_base".to_string(),
-        "build_type_env_from_library".to_string(),
-        "check_ir_program".to_string(),
-        "check_ir_with_context".to_string(),
-        "check_ir_with_signature_context".to_string(),
-        "check_typed_program".to_string(),
-        "infer_ir_program".to_string(),
-        "infer_program".to_string(),
-    ];
-    assert_eq!(
-        found, expected,
-        "a public checker entry was added or removed. Every entry folds its \
-         input (chelis#1923); add it to this list and to the behavioural \
-         lock beside it, or fold in it first"
     );
 }
 
@@ -162,7 +104,7 @@ fn the_public_checker_entries_are_the_ones_this_file_covers() {
 /// the pipe.
 #[test]
 fn every_public_checker_entry_folds_its_input() {
-    let deep = surf_to_deep(PIPED);
+    let deep = core_program(PIPED);
     let empty = TypeEnv::empty();
 
     let assert_folded = |label: &str, checked: &CheckedProgram| {

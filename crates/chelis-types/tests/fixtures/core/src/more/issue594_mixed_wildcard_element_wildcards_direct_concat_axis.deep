@@ -1,0 +1,23 @@
+(module {surf_path: "Repro.ConcatHeadBiasBinding"}
+  repro.concatheadbiasbinding
+  (defsig {}
+    cat_bias
+    (t-fn {}
+      (t-tensor {} (d-lit {} 2) (t-prim {} f32))
+      (t-tensor {} (d-name {} *) (t-prim {} f32))
+      (t-tensor {} (d-lit {} 5) (t-prim {} f32))))
+  (def {}
+    cat_bias
+    (fn {}
+      (params {} (a {type: (t-var {} _)}) (b {type: (t-var {} _)}))
+      (let {span: "surf:107..144"}
+        (bind {}
+          rows
+          (app {span: "surf:118..124"}
+            (var {} Cons)
+            (var {span: "surf:119..120"} a)
+            (app {} (var {} Cons) (var {span: "surf:122..123"} b) (var {} Nil))))
+        (app {span: "surf:127..142"}
+          (var {span: "surf:127..133"} concat)
+          (var {span: "surf:134..138"} rows)
+          (lit {span: "surf:140..141", type: (t-prim {} i32)} 0))))))

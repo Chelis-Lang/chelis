@@ -1,0 +1,37 @@
+(module {surf_path: "Stats.Simplex"}
+  stats.simplex
+  (def {} eps (lit {span: "surf:27..32", type: (t-prim {} f32)} 0.001))
+  (deftype {invariant: (fn {}
+                          (params {} p)
+                          (app {span: "surf:56..119"}
+                            (var {} and)
+                            (app {span: "surf:56..84"}
+                              (var {} gte)
+                              (app {span: "surf:56..70"}
+                                (var {span: "surf:56..59"} sum)
+                                (access {span: "surf:60..69"}
+                                  (var {span: "surf:60..61"} p)
+                                  weights))
+                              (app {span: "surf:75..84"}
+                                (var {} sub)
+                                (lit {span: "surf:75..78", type: (t-prim {} f32)} 1.0)
+                                (var {span: "surf:81..84"} eps)))
+                            (app {span: "surf:91..119"}
+                              (var {} lte)
+                              (app {span: "surf:91..105"}
+                                (var {span: "surf:91..94"} sum)
+                                (access {span: "surf:95..104"}
+                                  (var {span: "surf:95..96"} p)
+                                  weights))
+                              (app {span: "surf:110..119"}
+                                (var {} add)
+                                (lit {span: "surf:110..113", type: (t-prim {} f32)} 1.0)
+                                (var {span: "surf:116..119"} eps))))),
+             invariant_amenability: "linear",
+             opaque: true
+           }
+    Simplex
+    ()
+    (variant {}
+      Simplex
+      (field {} weights (t-tensor {} (d-lit {} 3) (t-prim {} f32))))))

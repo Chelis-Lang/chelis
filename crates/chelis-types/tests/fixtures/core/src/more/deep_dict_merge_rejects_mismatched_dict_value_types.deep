@@ -1,0 +1,34 @@
+(defsig {} lhs (t-adt {} Dict (t-prim {} string) (t-prim {} i64)))
+
+(def {}
+  lhs
+  (app {span: "surf:26..60"}
+    (var {span: "surf:26..33"} dict_of)
+    (app {span: "surf:34..59"}
+      (var {} Cons)
+      (tuple {span: "surf:35..58"}
+        (lit {span: "surf:36..43", type: (t-prim {} string)} "alpha")
+        (cast {span: "surf:45..57"}
+          (lit {span: "surf:50..51", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 1)
+          (t-prim {} i64)))
+      (var {} Nil))))
+
+(defsig {} rhs (t-adt {} Dict (t-prim {} string) (t-prim {} string)))
+
+(def {}
+  rhs
+  (app {span: "surf:89..115"}
+    (var {span: "surf:89..96"} dict_of)
+    (app {span: "surf:97..114"}
+      (var {} Cons)
+      (tuple {span: "surf:98..113"}
+        (lit {span: "surf:99..105", type: (t-prim {} string)} "beta")
+        (lit {span: "surf:107..112", type: (t-prim {} string)} "two"))
+      (var {} Nil))))
+
+(def {}
+  bad
+  (app {span: "surf:122..142"}
+    (var {span: "surf:122..132"} dict_merge)
+    (var {span: "surf:133..136"} lhs)
+    (var {span: "surf:138..141"} rhs)))

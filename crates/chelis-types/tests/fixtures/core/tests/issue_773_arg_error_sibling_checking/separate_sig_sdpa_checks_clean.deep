@@ -1,0 +1,45 @@
+(defsig {dtype_bounds: {p: float}}
+  sdpa
+  (s d p)
+  (t-fn {}
+    (t-tensor {} (d-var {} s) (d-var {} d) (t-var {} p))
+    (t-tensor {} (d-var {} s) (d-var {} d) (t-var {} p))
+    (t-tensor {} (d-var {} s) (d-var {} d) (t-var {} p))
+    (t-tensor {} (d-var {} s) (d-var {} s) (t-var {} p))
+    (t-tensor {} (d-var {} s) (d-var {} d) (t-var {} p))))
+
+(def {}
+  sdpa
+  (fn {}
+    (params {} q k v scale)
+    (let {span: "surf:145..262"}
+      (bind {}
+        kt
+        (app {span: "surf:154..170"}
+          (var {span: "surf:154..161"} permute)
+          (var {span: "surf:162..163"} k)
+          (lit {span: "surf:165..166", type: (t-prim {} i32)} 1)
+          (lit {span: "surf:168..169", type: (t-prim {} i32)} 0)))
+      (let {}
+        (bind {}
+          scores
+          (app {span: "surf:182..195"}
+            (var {span: "surf:182..188"} matmul)
+            (var {span: "surf:189..190"} q)
+            (var {span: "surf:192..194"} kt)))
+        (let {}
+          (bind {}
+            weights
+            (app {span: "surf:208..239"}
+              (var {span: "surf:208..215"} softmax)
+              (app {span: "surf:216..234"}
+                (var {span: "surf:216..219"} mul)
+                (var {span: "surf:220..226"} scores)
+                (var {span: "surf:228..233"} scale))
+              (app {span: "surf:236..238"}
+                (var {} neg)
+                (lit {span: "surf:237..238", type: (t-prim {} i32)} 1))))
+          (app {span: "surf:242..260"}
+            (var {span: "surf:242..248"} matmul)
+            (var {span: "surf:249..256"} weights)
+            (var {span: "surf:258..259"} v)))))))

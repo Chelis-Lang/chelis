@@ -1,75 +1,24 @@
-# Cargo target directories, at any depth. Deliberately unrooted: the rooted
-# `/target` this replaces matched only the workspace root, so a cargo run
-# invoked from a subdirectory wrote an unignored target tree. The agent
-# convention in AGENTS.md (`CARGO_TARGET_DIR=target/agents/<name>`) resolves
-# relative to the invocation cwd, which made that easy to hit, and PR #822 did:
-# 1,943 files and 518 MB of build artifacts under bindings/python/target/.
-# No path named `target` is tracked anywhere in the repo, so matching at any
-# depth costs nothing.
+# Rust and Lean build outputs.
 target/
-# Node dependency trees are generated artifacts. OpenSpec tooling is supplied
-# by CI and must not install packages into the repository checkout.
-node_modules/
-# Devenv generates local state from the tracked input files.
+.lake/
+
+# Task-owned extraction tools, models and temporary probes.
+/.work/
+
+# Local or inherited workstation state; never part of the core deliverable.
+/.venv
 /.devenv/
 /.devenv.flake.nix
 /.pre-commit-config.yaml
-# WI-13 Option B: the no-sudo local prefix where the dep-setup script builds
-# Sollya + fplll from source. A build artifact, never committed (the committed
-# proof bundle under crates/chelis-prove/data is the source of truth).
-/.local
+/.local/
+/.claude/
+/.pi/
+/.worktrees/
+/.ruff_cache/
+node_modules/
 .env
-.claude/scheduled_tasks.lock
+__pycache__/
+*.py[cod]
 *.swp
 *.swo
 .DS_Store
-data/
-*.c
-*.h
-!crates/
-!crates/**/*.c
-!crates/**/*.h
-!nix/**/*.c
-# WI-13 committed, certified erf envelope + its Sollya/Gappa proof bundle: all
-# source-of-truth data (the envelope is embedded via include_str!; the .gappa
-# proof + .sollya generator are the committed machine-checkable proof term), so
-# they must be tracked despite the broad `data/` ignore above (mirrors the
-# !crates/**/*.c re-inclusion idiom).
-!crates/chelis-prove/data/
-!crates/chelis-prove/data/*.json
-!crates/chelis-prove/data/**/*.json
-!crates/chelis-prove/data/**/*.gappa
-!crates/chelis-prove/data/**/*.sollya
-!crates/chelis-prove/data/**/*.sha256
-!crates/chelis-prove/data/**/*.md
-!grammars/**/*.c
-!grammars/**/*.h
-bindings/python/chelis/_native.abi3.so
-bindings/python/chelis/__pycache__/
-__pycache__/
-*.py[cod]
-docs/book/book/
-
-# chelis build artifacts left in crates/chelis-cli/ by integration tests
-crates/chelis-cli/libchelis_runtime.a
-crates/chelis-cli/chelis_runtime.h
-crates/chelis-cli/chelis_hip_runtime.h
-crates/chelis-cli/pad_hip.cpp
-crates/chelis-cli/pad_hip.h
-
-# Agent worktrees (ephemeral, per-session)
-.claude/worktrees/
-
-# Lean proof work-in-progress (tracked separately)
-proof/
-.venv
-HANDOVER.md
-libchelis_runtime.a
-bs_vec.c
-bs_vec.h
-const_vec.c
-const_vec.h
-chelis_runtime.h
-chelis_blas.h
-.pi/
-f32_print_912

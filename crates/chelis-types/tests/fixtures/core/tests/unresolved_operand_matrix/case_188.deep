@@ -1,0 +1,13 @@
+(defsig {}
+  f
+  (t-fn {}
+    (t-adt {} List (t-prim {} i32))
+    (t-adt {} List (t-tuple {} (t-prim {} i64) (t-prim {} i32)))))
+
+(def {}
+  f
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:42..54"}
+      (var {span: "surf:42..51"} enumerate)
+      (var {span: "surf:52..53"} x))))

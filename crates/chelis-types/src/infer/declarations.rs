@@ -2575,14 +2575,12 @@ pub(super) fn param_name_for_refs(param: &deep::Expr) -> Option<String> {
 mod top_level_reference_graph_tests {
     use super::*;
 
-    fn surf_program(source: &str) -> Vec<deep::Expr> {
-        let declarations = chelis_surf::parser::parse_str(source)
-            .unwrap_or_else(|error| panic!("graph fixture must parse: {error:?}\n{source}"));
-        chelis_surf::desugar::desugar_program(&declarations)
+    fn deep_program(source: &str) -> Vec<deep::Expr> {
+        chelis_deep::parser::parse_str(source).expect("graph core fixture must parse")
     }
 
     fn graph(source: &str) -> TopLevelReferenceGraph {
-        let exprs = surf_program(source);
+        let exprs = deep_program(source);
         let items = top_level_decl_items_with_modules(&exprs);
         TopLevelReferenceGraph::build(&items)
     }
@@ -2592,12 +2590,9 @@ mod top_level_reference_graph_tests {
     /// explains why individually legal references are jointly illegal.
     #[test]
     fn indirect_later_value_dependency_is_reported_once_per_pair() {
-        let graph = graph(
-            "module IndirectLater\n\n\
-             u = ping(1)\n\n\
-             v1 = 5\n\n\
-             def ping(n: i32) -> i32 = add(n, v1)\n",
-        );
+        let graph = graph(include_str!(
+            "../../tests/fixtures/core/src/declarations/indirect_later.deep"
+        ));
         let findings = graph
             .acyclic_later_eager_value_dependencies()
             .expect("uncancelled analysis completes");
@@ -2620,12 +2615,9 @@ mod top_level_reference_graph_tests {
     /// error even when an alternative indirect path reaches the same value.
     #[test]
     fn direct_forward_reference_with_an_indirect_alternative_is_reported_once() {
-        let exprs = surf_program(
-            "module DirectWins\n\n\
-             u = add(v1, ping(1))\n\n\
-             v1 = 5\n\n\
-             def ping(n: i32) -> i32 = add(n, v1)\n",
-        );
+        let exprs = deep_program(include_str!(
+            "../../tests/fixtures/core/src/declarations/direct_wins.deep"
+        ));
         let report = crate::check_ir_program(&exprs).expect_err("direct read must reject");
         let matching = report
             .errors
@@ -2647,11 +2639,9 @@ mod top_level_reference_graph_tests {
 
     #[test]
     fn pure_direct_forward_reference_remains_one_diagnostic() {
-        let exprs = surf_program(
-            "module PureDirect\n\n\
-             root = add(later, (1 : i32))\n\n\
-             later = (5 : i32)\n",
-        );
+        let exprs = deep_program(include_str!(
+            "../../tests/fixtures/core/src/declarations/pure_direct.deep"
+        ));
         let report = crate::check_ir_program(&exprs).expect_err("direct read must reject");
         let matching = report
             .errors
@@ -2672,15 +2662,14 @@ mod top_level_reference_graph_tests {
     /// The direct graph edge must not hide the distinct indirect dependency.
     #[test]
     fn prior_context_direct_binding_does_not_hide_current_unit_indirect_dependency() {
-        let library = surf_program("module Prior\n\nlater = (1 : i32)\n");
+        let library = deep_program(include_str!(
+            "../../tests/fixtures/core/src/declarations/prior.deep"
+        ));
         let context = crate::build_type_env_from_library(&library)
             .expect("the prior i32 binding builds a reusable context");
-        let current = surf_program(
-            "module Current\n\n\
-             root = add(later, read_current(0))\n\n\
-             later = (5 : i32)\n\n\
-             def read_current(n: i32) -> i32 = add(n, later)\n",
-        );
+        let current = deep_program(include_str!(
+            "../../tests/fixtures/core/src/declarations/current.deep"
+        ));
         let report = crate::check_ir_with_context(&context, &current)
             .expect_err("the indirect dependency on current-unit later must reject");
         let matching = report
@@ -2701,13 +2690,9 @@ mod top_level_reference_graph_tests {
     /// does not own or suppress this root's distinct indirect [04-INF-8] path.
     #[test]
     fn unrelated_direct_error_does_not_suppress_another_roots_indirect_dependency() {
-        let exprs = surf_program(
-            "module UnrelatedDirect\n\n\
-             unrelated = later\n\n\
-             root = read_current(0)\n\n\
-             later = (5 : i32)\n\n\
-             def read_current(n: i32) -> i32 = add(n, later)\n",
-        );
+        let exprs = deep_program(include_str!(
+            "../../tests/fixtures/core/src/declarations/unrelated_direct.deep"
+        ));
         let report = crate::check_ir_program(&exprs)
             .expect_err("both roots' distinct initialization errors must reject");
         let direct = report
@@ -2739,14 +2724,9 @@ mod top_level_reference_graph_tests {
     /// independent root-to-later [04-INF-8] violation.
     #[test]
     fn separate_reachable_cycle_preserves_root_later_diagnostic() {
-        let exprs = surf_program(
-            "module SeparateCycle\n\n\
-             root = add(read_later(0), enter_cycle())\n\n\
-             later = (5 : i32)\n\n\
-             cycle_value = enter_cycle()\n\n\
-             def read_later(n: i32) -> i32 = add(n, later)\n\n\
-             def enter_cycle() -> i32 = cycle_value\n",
-        );
+        let exprs = deep_program(include_str!(
+            "../../tests/fixtures/core/src/declarations/separate_cycle.deep"
+        ));
         let report = crate::check_ir_program(&exprs)
             .expect_err("both the eager cycle and indirect later dependency must reject");
         assert!(
@@ -2776,8 +2756,8 @@ mod top_level_reference_graph_tests {
     #[test]
     fn backward_and_independent_values_stay_out_of_the_later_set() {
         for source in [
-            "module Backward\n\nv1 = 5\n\nu = ping(1)\n\ndef ping(n: i32) -> i32 = add(n, v1)\n",
-            "module Independent\n\nu = ping(1)\n\nv1 = 5\n\ndef ping(n: i32) -> i32 = n\n",
+            include_str!("../../tests/fixtures/core/src/declarations/backward.deep"),
+            include_str!("../../tests/fixtures/core/src/declarations/independent.deep"),
         ] {
             let graph = graph(source);
             assert!(
@@ -2794,11 +2774,9 @@ mod top_level_reference_graph_tests {
     /// full SCC projection that Slice C consumes.
     #[test]
     fn eager_lambda_cycle_is_one_component() {
-        let graph = graph(
-            "module LambdaCycle\n\n\
-             carried = map(fn (x: i32) -> f(x), [1, 2])\n\n\
-             def f(n: i32) -> i32 = add(n, carried)\n",
-        );
+        let graph = graph(include_str!(
+            "../../tests/fixtures/core/src/declarations/lambda_cycle.deep"
+        ));
         let carried = graph.vertex_by_name["carried"];
         let f = graph.vertex_by_name["f"];
         let projection = graph.inference_components();
@@ -2827,11 +2805,10 @@ mod top_level_reference_graph_tests {
     /// error, not one per traversal path, and the message names both endpoints.
     #[test]
     fn checker_reports_one_root_later_diagnostic_for_the_indirect_shape() {
-        let source = "module IndirectLaterDiagnostic\n\n\
-                      u = ping(1)\n\n\
-                      v1 = 5\n\n\
-                      def ping(n: i32) -> i32 = add(n, v1)\n";
-        let exprs = surf_program(source);
+        let source = include_str!(
+            "../../tests/fixtures/core/src/declarations/indirect_later_diagnostic.deep"
+        );
+        let exprs = deep_program(source);
         let report = crate::check_ir_program(&exprs).expect_err("[04-INF-8] must reject");
         let matching = report
             .errors
@@ -2850,12 +2827,9 @@ mod top_level_reference_graph_tests {
 
     #[test]
     fn cancellation_during_later_reachability_emits_only_cancellation() {
-        let exprs = surf_program(
-            "module CancelLaterDependency\n\n\
-             root = read_current(0)\n\n\
-             later = (5 : i32)\n\n\
-             def read_current(n: i32) -> i32 = add(n, later)\n",
-        );
+        let exprs = deep_program(include_str!(
+            "../../tests/fixtures/core/src/declarations/cancel_later_dependency.deep"
+        ));
         let token = CancelToken::new();
         let _cancel_guard = crate::cancel::install_cancel_token(token.clone());
         let _reachability_hook = cancel_later_dependency_after_edges_for_test(1, token);
@@ -2874,13 +2848,9 @@ mod top_level_reference_graph_tests {
 
     #[test]
     fn cancellation_during_later_reachability_survives_prior_source_errors() {
-        let exprs = surf_program(
-            "module CancelAfterError\n\n\
-             broken = missing\n\n\
-             root = read_current(0)\n\n\
-             later = (5 : i32)\n\n\
-             def read_current(n: i32) -> i32 = add(n, later)\n",
-        );
+        let exprs = deep_program(include_str!(
+            "../../tests/fixtures/core/src/declarations/cancel_after_error.deep"
+        ));
         let token = CancelToken::new();
         let _cancel_guard = crate::cancel::install_cancel_token(token.clone());
         let _reachability_hook = cancel_later_dependency_after_edges_for_test(1, token);

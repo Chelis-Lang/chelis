@@ -1,0 +1,44 @@
+(deftype {}
+  Box
+  (a)
+  (variant {} Empty)
+  (variant {} Full (field {} value (t-var {} a))))
+
+(defsig {} empty (a) (t-fn {} (t-adt {} Box (t-var {} a))))
+
+(def {} empty (fn {} (params {}) (var {span: "surf:69..74"} Empty)))
+
+(defsig {} is_empty (a) (t-fn {} (t-adt {} Box (t-var {} a)) (t-prim {} bool)))
+
+(def {}
+  is_empty
+  (fn {}
+    (params {} (value {type: (t-var {} _)}))
+    (match {span: "surf:116..184"}
+      (var {span: "surf:122..127"} value)
+      (arm {}
+        (pat-ctor {} Empty)
+        ()
+        (lit {span: "surf:146..150", type: (t-prim {} bool)} true))
+      (arm {}
+        (pat-record {} Full (kv {} value (pat-var {} item)))
+        ()
+        (lit {span: "surf:177..182", type: (t-prim {} bool)} false)))))
+
+(defsig {} concrete (t-fn {} (t-adt {} Box (t-prim {} f32))))
+
+(def {}
+  concrete
+  (fn {}
+    (params {})
+    (app {span: "surf:214..221"} (var {span: "surf:214..219"} empty))))
+
+(defsig {} main (t-fn {} (t-prim {} bool)))
+
+(def {}
+  main
+  (fn {}
+    (params {})
+    (app {span: "surf:243..263"}
+      (var {span: "surf:243..251"} is_empty)
+      (app {span: "surf:252..262"} (var {span: "surf:252..260"} concrete)))))

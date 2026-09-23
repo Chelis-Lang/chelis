@@ -1,0 +1,20 @@
+(module {surf_path: "M"}
+  m
+  (deftype {invariant: (fn {}
+                          (params {} p)
+                          (app {span: "surf:31..52"}
+                            (var {} gte)
+                            (app {span: "surf:31..45"}
+                              (var {span: "surf:31..34"} sum)
+                              (access {span: "surf:35..44"}
+                                (var {span: "surf:35..36"} p)
+                                weights))
+                            (lit {span: "surf:49..52", type: (t-prim {} f32)} 0.0))),
+             invariant_amenability: "linear",
+             opaque: true
+           }
+    Vec
+    ()
+    (variant {}
+      Vec
+      (field {} weights (t-tensor {} (d-name {} n) (t-prim {} f32))))))

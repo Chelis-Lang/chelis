@@ -1,0 +1,20 @@
+(defsig {} logged (t-fn {} (t-prim {} string) (t-prim {} string)))
+
+(def {}
+  logged
+  (fn {}
+    (params {} (msg {type: (t-var {} _)}))
+    (app {span: "surf:37..47"}
+      (var {span: "surf:37..42"} debug)
+      (var {span: "surf:43..46"} msg))))
+
+(defsig {} pure_add (t-fn {} (t-prim {} i64) (t-prim {} i64) (t-prim {} i64)))
+
+(def {}
+  pure_add
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (y {type: (t-var {} _)}))
+    (app {span: "surf:86..95"}
+      (var {span: "surf:86..89"} add)
+      (var {span: "surf:90..91"} x)
+      (var {span: "surf:93..94"} y))))

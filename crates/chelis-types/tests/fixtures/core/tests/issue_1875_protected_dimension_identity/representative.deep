@@ -1,0 +1,95 @@
+(deftype {}
+  Affine
+  ()
+  (variant {}
+    Affine
+    (field {} gain (t-tensor {} (d-name {} fixed) (t-prim {} f32)))))
+
+(defsig {}
+  checked
+  (a d)
+  (t-fn {}
+    (t-tensor {} (d-var {} a) (d-var {} d) (t-prim {} f32))
+    (t-adt {} Affine)
+    (t-tensor {} (d-var {} a) (d-var {} d) (t-prim {} f32))))
+
+(def {}
+  checked
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (gain {type: (t-var {} _)}))
+    (app {span: "surf:129..176"}
+      (var {span: "surf:129..132"} mul)
+      (var {span: "surf:133..134"} x)
+      (app {span: "surf:136..175"}
+        (var {span: "surf:136..142"} insert)
+        (access {span: "surf:143..152"} (var {span: "surf:143..147"} gain) gain)
+        (lit {span: "surf:154..158", surf_literal_style: "explicit", type: (t-prim {} i32)} 0)
+        (app {span: "surf:160..174"}
+          (var {span: "surf:160..165"} shape)
+          (var {span: "surf:166..167"} x)
+          (lit {span: "surf:169..173", surf_literal_style: "explicit", type: (t-prim {} i32)} 0))))))
+
+(defsig {}
+  aligned
+  (d)
+  (t-fn {}
+    (t-tensor {} (d-var {} d) (t-prim {} f32))
+    (t-tensor {} (d-name {} fixed) (t-prim {} f32))
+    (t-tensor {} (d-var {} d) (t-prim {} f32))))
+
+(def {}
+  aligned
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (gain {type: (t-var {} _)}))
+    (app {span: "surf:257..269"}
+      (var {span: "surf:257..260"} mul)
+      (var {span: "surf:261..262"} x)
+      (var {span: "surf:264..268"} gain))))
+
+(defsig {}
+  reduce
+  (d)
+  (t-fn {}
+    (t-tensor {} (d-var {} d) (t-prim {} f32))
+    (t-tensor {} (d-name {} fixed) (t-prim {} f32))
+    (t-var {} _)))
+
+(def {}
+  reduce
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (gain {type: (t-var {} _)}))
+    (let {span: "surf:331..370"}
+      (bind {}
+        f
+        (var {span: "surf:337..344"} aligned))
+      (app {span: "surf:346..368"}
+        (var {span: "surf:346..349"} sum)
+        (app {span: "surf:350..360"}
+          (var {span: "surf:350..351"} f)
+          (var {span: "surf:352..353"} x)
+          (var {span: "surf:355..359"} gain))
+        (var {span: "surf:362..367"} fixed)))))
+
+(defsig {}
+  kept
+  (k)
+  (t-fn {}
+    (t-tensor {} (d-name {} *) (t-prim {} f32))
+    (t-tensor {} (d-var {} k) (t-prim {} f32))))
+
+(def {}
+  kept
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:422..457"}
+      (var {span: "surf:422..431"} to_tensor)
+      (app {span: "surf:432..456"}
+        (var {} Cons)
+        (lit {span: "surf:433..439", surf_literal_style: "explicit", type: (t-prim {} f32)} 1.0)
+        (app {}
+          (var {} Cons)
+          (lit {span: "surf:441..447", surf_literal_style: "explicit", type: (t-prim {} f32)} 2.0)
+          (app {}
+            (var {} Cons)
+            (lit {span: "surf:449..455", surf_literal_style: "explicit", type: (t-prim {} f32)} 3.0)
+            (var {} Nil)))))))

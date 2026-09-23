@@ -1,0 +1,121 @@
+(defsig {} main (t-fn {} (t-tensor {} (d-lit {} 3) (t-prim {} i64))))
+
+(def {}
+  main
+  (fn {}
+    (params {})
+    (let {span: "surf:32..268"}
+      (bind {}
+        x
+        (app {surf_binding_type: "explicit",
+               type: (t-tensor {}
+                       (d-lit {} 2)
+                       (d-lit {} 3)
+                       (d-lit {} 4)
+                       (t-prim {} bool))
+             }
+          (var {} to_tensor)
+          (app {}
+            (var {} Cons)
+            (app {}
+              (var {} Cons)
+              (app {}
+                (var {} Cons)
+                (lit {span: "surf:71..75", type: (t-prim {} bool)} true)
+                (app {}
+                  (var {} Cons)
+                  (lit {span: "surf:77..82", type: (t-prim {} bool)} false)
+                  (app {}
+                    (var {} Cons)
+                    (lit {span: "surf:84..88", type: (t-prim {} bool)} true)
+                    (app {}
+                      (var {} Cons)
+                      (lit {span: "surf:90..95", type: (t-prim {} bool)} false)
+                      (var {} Nil)))))
+              (app {}
+                (var {} Cons)
+                (app {}
+                  (var {} Cons)
+                  (lit {span: "surf:99..103", type: (t-prim {} bool)} true)
+                  (app {}
+                    (var {} Cons)
+                    (lit {span: "surf:105..110", type: (t-prim {} bool)} false)
+                    (app {}
+                      (var {} Cons)
+                      (lit {span: "surf:112..116", type: (t-prim {} bool)} true)
+                      (app {}
+                        (var {} Cons)
+                        (lit {span: "surf:118..123", type: (t-prim {} bool)} false)
+                        (var {} Nil)))))
+                (app {}
+                  (var {} Cons)
+                  (app {}
+                    (var {} Cons)
+                    (lit {span: "surf:127..131", type: (t-prim {} bool)} true)
+                    (app {}
+                      (var {} Cons)
+                      (lit {span: "surf:133..138", type: (t-prim {} bool)} false)
+                      (app {}
+                        (var {} Cons)
+                        (lit {span: "surf:140..144", type: (t-prim {} bool)} true)
+                        (app {}
+                          (var {} Cons)
+                          (lit {span: "surf:146..151", type: (t-prim {} bool)} false)
+                          (var {} Nil)))))
+                  (var {} Nil))))
+            (app {}
+              (var {} Cons)
+              (app {}
+                (var {} Cons)
+                (app {}
+                  (var {} Cons)
+                  (lit {span: "surf:161..165", type: (t-prim {} bool)} true)
+                  (app {}
+                    (var {} Cons)
+                    (lit {span: "surf:167..172", type: (t-prim {} bool)} false)
+                    (app {}
+                      (var {} Cons)
+                      (lit {span: "surf:174..178", type: (t-prim {} bool)} true)
+                      (app {}
+                        (var {} Cons)
+                        (lit {span: "surf:180..185", type: (t-prim {} bool)} false)
+                        (var {} Nil)))))
+                (app {}
+                  (var {} Cons)
+                  (app {}
+                    (var {} Cons)
+                    (lit {span: "surf:189..193", type: (t-prim {} bool)} true)
+                    (app {}
+                      (var {} Cons)
+                      (lit {span: "surf:195..200", type: (t-prim {} bool)} false)
+                      (app {}
+                        (var {} Cons)
+                        (lit {span: "surf:202..206", type: (t-prim {} bool)} true)
+                        (app {}
+                          (var {} Cons)
+                          (lit {span: "surf:208..213", type: (t-prim {} bool)} false)
+                          (var {} Nil)))))
+                  (app {}
+                    (var {} Cons)
+                    (app {}
+                      (var {} Cons)
+                      (lit {span: "surf:217..221", type: (t-prim {} bool)} true)
+                      (app {}
+                        (var {} Cons)
+                        (lit {span: "surf:223..228", type: (t-prim {} bool)} false)
+                        (app {}
+                          (var {} Cons)
+                          (lit {span: "surf:230..234", type: (t-prim {} bool)} true)
+                          (app {}
+                            (var {} Cons)
+                            (lit {span: "surf:236..241", type: (t-prim {} bool)} false)
+                            (var {} Nil)))))
+                    (var {} Nil))))
+              (var {} Nil)))))
+      (app {span: "surf:250..266"}
+        (var {span: "surf:250..255"} count)
+        (borrow {span: "surf:256..258"} (var {span: "surf:257..258"} x))
+        (lit {span: "surf:260..261", type: (t-prim {} i32)} 0)
+        (app {span: "surf:263..265"}
+          (var {} neg)
+          (lit {span: "surf:264..265", type: (t-prim {} i32)} 1))))))

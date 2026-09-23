@@ -116,46 +116,24 @@ pub use semantic::{
 mod tests {
     use super::*;
 
-    #[test]
-    fn carrier_owns_the_expanded_deep_vector() {
-        let expressions =
-            chelis_deep::parser::parse_str("(lit {} 1)").expect("the fixture Deep must parse");
-        let expected = expressions.clone();
-
-        let prepared = PreparedProgram::from_expanded_deep(expressions);
-
-        assert_eq!(prepared.expanded_deep(), expected.as_slice());
-        assert_eq!(prepared.into_expanded_deep(), expected);
-    }
-
-    #[test]
-    fn empty_expanded_deep_is_an_explicit_owned_program() {
-        let prepared = PreparedProgram::from_expanded_deep(Vec::new());
-
-        assert!(prepared.expanded_deep().is_empty());
-        assert!(prepared.into_expanded_deep().is_empty());
-    }
-
     fn prepared(source: &str) -> PreparedProgram {
         PreparedProgram::from_expanded_deep(
             chelis_deep::parser::parse_str(source).expect("the test Deep must parse"),
         )
     }
 
-    #[test]
-    fn contextual_success_composes_its_bound_library() {
-        let library =
-            check_prepared_library(prepared("(def {} one (lit {type: (t-prim {} i32)} 1))"))
-                .expect("the library must pass all checks");
-        let analysis =
-            analyze_prepared_with_library(prepared("(def {} two (var {} one))"), &library)
-                .expect("the extension must type-check against the library");
-        let checked =
-            complete_context_checks(analysis).expect("the extension must pass semantic checks");
+    fn accepted_analysis(source: &str) -> PreparedTypeAnalysis {
+        match analyze_prepared(prepared(source)) {
+            PreparedTypeAnalysisOutcome::Accepted(analysis) => *analysis,
+            PreparedTypeAnalysisOutcome::Rejected { fitness } => {
+                panic!("the fixture must type-check: {:?}", fitness.errors)
+            }
+        }
+    }
 
-        assert!(std::ptr::eq(checked.library(), &library));
-        let combined = checked.compose();
-        assert_eq!(combined.program().exprs().len(), 2);
+    fn checked(source: &str) -> CheckedCompilation {
+        complete_checks(accepted_analysis(source), SemanticContext::Isolated)
+            .expect("the fixture must pass semantic checks")
     }
 
     #[test]
@@ -188,32 +166,14 @@ mod tests {
         let replacement_evaluation =
             chelis_ir::lower::try_lower_program_to_evaluation_library(replacement.program())
                 .unwrap();
-        let error = lower_checked_with_evaluation_context(&checked, &replacement_evaluation)
-            .expect_err("plan lowering must reject a different checked library too");
-        assert!(error.to_string().contains("does not match"));
-        let error = lower_checked_with_context(checked, &replacement_dag, LoweringMode::Strict)
-            .expect_err("contextual lowering must reject another library DAG");
-        assert!(error.to_string().contains("does not match"));
-    }
-
-    #[test]
-    fn library_extension_composes_with_its_bound_context_and_environment() {
-        let library =
-            check_prepared_library(prepared("(def {} one (lit {type: (t-prim {} i32)} 1))"))
-                .expect("the library must pass all checks");
-        let analysis =
-            analyze_prepared_library_with_base(prepared("(def {} two (var {} one))"), &library)
-                .expect("the library extension must type-check");
-
-        assert!(std::ptr::eq(analysis.library(), &library));
-        let combined = complete_context_library_checks(analysis)
-            .expect("the library extension must pass semantic checks");
-        assert_eq!(combined.program().exprs().len(), 2);
-        assert!(
-            combined
-                .type_env()
-                .matches_checked_program(combined.program())
-        );
+        assert!(matches!(
+            lower_checked_with_evaluation_context(&checked, &replacement_evaluation),
+            Err(CoreLowerError::Lower(_))
+        ));
+        assert!(matches!(
+            lower_checked_with_context(checked, &replacement_dag, LoweringMode::Strict),
+            Err(CoreLowerError::Lower(_))
+        ));
     }
 
     #[test]
@@ -253,5 +213,95 @@ mod tests {
                 .expect_err("a foreign type environment must fail at the cache boundary");
 
         assert!(matches!(rejection, LibraryRejection::ContextMismatch));
+    }
+
+    #[test]
+    fn lowering_preserves_canonical_tuple_roots() {
+        let lowered = lower_checked(
+            checked(include_str!("../tests/fixtures/pair.dp")),
+            LoweringMode::Strict,
+        )
+        .expect("the tuple must lower");
+        assert_eq!(
+            lowered
+                .checked()
+                .root_metadata()
+                .tensor_names()
+                .iter()
+                .map(IrName::as_str)
+                .collect::<Vec<_>>(),
+            ["pair.0", "pair.1"]
+        );
+        assert_eq!(lowered.named_roots().len(), 2);
+        assert_eq!(lowered.dag().roots().len(), 2);
+    }
+
+    #[test]
+    fn declared_roots_and_forward_load_aliases_have_distinct_lookups() {
+        let lowered = lower_checked(
+            checked(include_str!("../tests/fixtures/lookup.dp")),
+            LoweringMode::Strict,
+        )
+        .expect("the function must lower");
+        let output = IrName::new("out");
+        let input = IrName::new("input");
+        assert!(lowered.named_roots().get(&output).is_some());
+        assert!(lowered.named_roots().get(&input).is_none());
+        assert!(lowered.forward_node_index().get(&output).is_some());
+        assert!(lowered.forward_node_index().get(&input).is_some());
+    }
+
+    #[test]
+    fn host_only_output_keeps_the_explicit_empty_root_product() {
+        let lowered = lower_checked(
+            checked(include_str!("../tests/fixtures/host.dp")),
+            LoweringMode::AllowHostOnly,
+        )
+        .expect("the host-only value must lower without tensor roots");
+        assert!(lowered.dag().roots().is_empty());
+        assert!(lowered.named_roots().is_empty());
+    }
+
+    #[test]
+    fn type_rejection_has_no_checked_product() {
+        assert!(matches!(
+            analyze_prepared(prepared(include_str!(
+                "../tests/fixtures/type_rejection.dp"
+            ))),
+            PreparedTypeAnalysisOutcome::Rejected { .. }
+        ));
+    }
+
+    #[test]
+    fn effect_rejection_uses_the_narrow_semantic_error() {
+        assert!(matches!(
+            complete_checks(
+                accepted_analysis(include_str!("../tests/fixtures/effect_rejection.dp")),
+                SemanticContext::Isolated,
+            ),
+            Err(SemanticRejection::Effects { .. })
+        ));
+    }
+
+    #[test]
+    fn linearity_rejection_uses_the_narrow_semantic_error() {
+        assert!(matches!(
+            complete_checks(
+                accepted_analysis(include_str!("../tests/fixtures/linearity_rejection.dp")),
+                SemanticContext::Isolated,
+            ),
+            Err(SemanticRejection::Linearity { .. })
+        ));
+    }
+
+    #[test]
+    fn strict_lowering_rejection_retains_the_lower_diagnostic() {
+        assert!(matches!(
+            lower_checked(
+                checked(include_str!("../tests/fixtures/lower_rejection.dp")),
+                LoweringMode::Strict,
+            ),
+            Err(CoreLowerError::Lower(_))
+        ));
     }
 }

@@ -1,0 +1,4 @@
+(defsig {dtype_bounds: {q: float}}
+  f
+  (q)
+  (t-fn {} (t-prim {} i32) (t-prim {} i32)))

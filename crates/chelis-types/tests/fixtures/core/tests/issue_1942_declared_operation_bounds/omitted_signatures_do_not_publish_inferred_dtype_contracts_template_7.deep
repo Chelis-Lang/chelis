@@ -1,0 +1,9 @@
+(def {}
+  g
+  (fn {}
+    (params {})
+    (app {}
+      (var {} sin)
+      (app {}
+        (var {} to_tensor)
+        (var {} Nil)))))

@@ -1,12 +1,8 @@
 //! Wave 4 / W4-A — M5(c) IR-level structured-rejection oracle.
 //!
-//! Complements the CLI-level oracle in
-//! `crates/chelis-cli/tests/cross_library_semantic_gap_diagnostics.rs`
-//! by driving the structured sparse-helper recognizer
-//! (`try_summarize_sparse_helper_for_test`) on **synthetic helper
-//! DAGs** that the Surf surface cannot construct today. Together the
-//! two files lock every W3-B-enumerated rejection category as a
-//! structured `SummaryRejection`.
+//! Drives the structured sparse-helper recognizer
+//! (`try_summarize_sparse_helper_for_test`) on synthetic helper DAGs,
+//! locking rejection categories as structured `SummaryRejection` values.
 //!
 //! ## Categories covered here
 //!
@@ -14,13 +10,6 @@
 //! 5. `IndicesDTypeMismatch` — synthetic helper with f32 indices.
 //! 6. `PayloadDTypeMismatch` — synthetic helper with f64 updates on an
 //!    f32 target/output.
-//!
-//! ## Categories covered at the CLI level
-//!
-//!   2. `MultipleReturnPaths`
-//!   3. `NonLoadOperand`
-//!   4. `PostProcessingAfterSparseOp`
-//!   7. `WildcardDim`
 //!
 //! ## Pattern-match contract
 //!

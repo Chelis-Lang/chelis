@@ -1,0 +1,16 @@
+(defsig {dtype_bounds: {p: @bound@}}
+  f
+  (p)
+  (t-fn {}
+    (t-tensor {} (d-lit {} 3) (t-var {} p))
+    (t-tensor {} (d-lit {} 3) (t-var {} p))
+    (t-tensor {} (d-lit {} 3) (t-var {} p))))
+
+(def {}
+  f
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (y {type: (t-var {} _)}))
+    (app {span: "surf:68..90"}
+      (var {span: "surf:68..84"} @op@)
+      (var {span: "surf:85..86"} x)
+      (var {span: "surf:88..89"} y))))

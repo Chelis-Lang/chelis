@@ -1,0 +1,4 @@
+(app {span: "surf:10..31"}
+    (var {} Cons)
+    @A@
+    (app {} (var {} Cons) @B@ (var {} Nil)))

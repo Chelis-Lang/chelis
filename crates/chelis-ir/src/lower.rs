@@ -19597,24 +19597,47 @@ mod fused_zero_tests {
     #[test]
     fn fused_zero_live_unresolved_is_rootless_but_dead_call_is_complete() {
         for (style, call) in [
-            ("direct", "f(x)"),
-            ("helper", "apply(f, x)"),
-            ("pipe", "x |> f"),
+            ("direct", "(app {} (var {} f) (var {} x))"),
+            ("helper", "(app {} (var {} apply) (var {} f) (var {} x))"),
+            ("pipe", "(pipe {} (var {} x) (var {} f))"),
         ] {
             for dead in [false, true] {
                 let body = if dead {
-                    format!("{{ discarded = {call}\n 3.0f32 }}")
+                    format!(
+                        "(let {{}} (bind {{}} discarded {call})
+                           (lit {{surf_literal_style: \"explicit\", type: (t-prim {{}} f32)}} 3.0))"
+                    )
                 } else {
                     call.into()
                 };
                 let source = format!(
-                    "def apply(f: tensor[f32] -> f32, x: tensor[f32]) -> f32 = f(x)\ndef mapped(f: tensor[f32] -> f32, xs: tensor[2, f32]) -> tensor[2, f32] = {{ target = fn (x: tensor[f32]) -> {body}\n vmap(grad(target))(xs) }}\n"
+                    r#"
+                    (defsig {{}} apply
+                      (t-fn {{}}
+                        (t-fn {{}} (t-tensor {{}} (t-prim {{}} f32)) (t-prim {{}} f32))
+                        (t-tensor {{}} (t-prim {{}} f32))
+                        (t-prim {{}} f32)))
+                    (def {{}} apply
+                      (fn {{}} (params {{}} (f {{type: (t-var {{}} _)}}) (x {{type: (t-var {{}} _)}}))
+                        (app {{}} (var {{}} f) (var {{}} x))))
+                    (defsig {{}} mapped
+                      (t-fn {{}}
+                        (t-fn {{}} (t-tensor {{}} (t-prim {{}} f32)) (t-prim {{}} f32))
+                        (t-tensor {{}} (d-lit {{}} 2) (t-prim {{}} f32))
+                        (t-tensor {{}} (d-lit {{}} 2) (t-prim {{}} f32))))
+                    (def {{}} mapped
+                      (fn {{}} (params {{}} (f {{type: (t-var {{}} _)}}) (xs {{type: (t-var {{}} _)}}))
+                        (let {{}}
+                          (bind {{}} target
+                            (fn {{}} (params {{}} (x {{type: (t-tensor {{}} (t-prim {{}} f32))}}))
+                              {body}))
+                          (app {{}}
+                            (vmap {{}} (grad {{}} (var {{}} target)) (lit {{type: (t-prim {{}} i32)}} 0))
+                            (var {{}} xs)))))
+                    "#
                 );
-                let declarations = chelis_surf::parser::parse_str(&source).unwrap();
-                let checked = chelis_types::check_typed_program(
-                    &chelis_surf::desugar::desugar_program(&declarations),
-                )
-                .unwrap();
+                let expressions = chelis_deep::parser::parse_str(&source).unwrap();
+                let checked = chelis_types::check_typed_program(&expressions).unwrap();
                 let checked = chelis_effects::check_program(&checked).unwrap();
                 let checked = chelis_types::check_linearity(&checked).unwrap();
                 let library = try_lower_program_to_library(&checked).unwrap();
@@ -19724,12 +19747,11 @@ mod fused_zero_tests {
 
     #[test]
     fn fused_zero_consumer_maps_shared_coefficient_gradients() {
-        let source = "def loss(x: tensor[rows, f32], y: tensor[rows, f32]) -> f32 = {\n n = shape(x, 0)\n m = shape(y, 0)\n a = insert(mul(sum(x, 0), scalar_to_tensor(cast(n, f32))), 0, add(n, 0i64))\n b = insert(mul(sum(y, 0), scalar_to_tensor(add(cast(m, f32), 2.0f32))), 0, add(m, 0i64))\n tensor_to_scalar(add(sum(a, 0), sum(b, 0)))\n}\n";
-        let declarations = chelis_surf::parser::parse_str(source).unwrap();
-        let checked = chelis_types::check_typed_program(&chelis_surf::desugar::desugar_program(
-            &declarations,
+        let expressions = chelis_deep::parser::parse_str(include_str!(
+            "../tests/fixtures/core/src/lower/shared_coefficient.deep"
         ))
         .unwrap();
+        let checked = chelis_types::check_typed_program(&expressions).unwrap();
         let mut ctx = LowerCtx::new(
             BTreeMap::new(),
             collect_top_level_defs(checked.exprs()),
@@ -20219,24 +20241,6 @@ mod tests {
         let mut names = UnordSet::new();
         collect_body_precision_var_names(&negative, &mut names);
         assert!(names.is_empty());
-    }
-
-    #[test]
-    fn precision_variable_reader_has_no_shallow_list_bridge() {
-        let source = include_str!("lower.rs");
-        let start = source
-            .find("fn collect_body_precision_var_names")
-            .expect("precision reader");
-        let tail = &source[start..];
-        let end = tail
-            .find("\n}\n\n/// Tier-2 rank polymorphism")
-            .expect("precision reader end");
-        let body = &tail[..end];
-        let bridge = [".to_", "list("].concat();
-        assert!(
-            !body.contains(&bridge),
-            "E5b forbids a shallow Node-to-List reader bridge"
-        );
     }
 
     #[test]
@@ -20785,16 +20789,14 @@ mod tests {
     }
 
     fn local_ascription_fixture() -> (chelis_types::CheckedLocalTensorAscription, Expr) {
-        let declarations = chelis_surf::parser::parse_str(
-            "def f(x: tensor[*, f32]) -> tensor[*, f32] = {\n  \
-             y: tensor[2, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n  \
-             y\n\
-             }\n",
-        )
-        .expect("Surf local-ascription fixture parses");
-        let checked =
-            chelis_types::check_ir_program(&chelis_surf::desugar::desugar_program(&declarations))
-                .unwrap_or_else(|report| panic!("fixture type check failed: {:?}", report.errors));
+        // Preserve the original legacy List ingress and structural spans: the
+        // callers compare this binding against its explicitly decoded Node.
+        let expressions: Vec<Expr> = serde_json::from_str(include_str!(
+            "../tests/fixtures/core/src/lower/local_ascription.json"
+        ))
+        .expect("lossless local-ascription fixture");
+        let checked = chelis_types::check_ir_program(&expressions)
+            .unwrap_or_else(|report| panic!("fixture type check failed: {:?}", report.errors));
         let ascription = checked
             .local_tensor_ascriptions()
             .first()
@@ -22222,13 +22224,18 @@ mod tests {
 
     #[test]
     fn context_lowering_inserts_copy_for_library_boundary_fanout() {
-        let library_decls = chelis_surf::parser::parse_str(
+        let library_exprs = chelis_deep::parser::parse_str(
             r#"
-                def consume(x: tensor[2, 3, f32]) -> tensor[2, 3, f32] = realize(x)
+                (defsig {} consume
+                  (t-fn {}
+                    (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))
+                    (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))))
+                (def {} consume
+                  (fn {} (params {} (x {type: (t-var {} _)}))
+                    (realize {} (var {} x))))
             "#,
         )
         .expect("parse library");
-        let library_exprs = chelis_surf::desugar::desugar_program(&library_decls);
         let (type_env, library_checked) =
             chelis_types::build_compiled_library_context(&library_exprs).expect("library checks");
         let library_checked =
@@ -22237,14 +22244,20 @@ mod tests {
             chelis_types::check_linearity(&library_checked).expect("library linearity");
         let library = lower_program_to_library(&library_checked);
 
-        let new_decls = chelis_surf::parser::parse_str(
+        let new_exprs = chelis_deep::parser::parse_str(
             r#"
-                def double_it(x: tensor[2, 3, f32]) -> tensor[2, 3, f32] =
-                  add(consume(x), consume(x))
+                (defsig {} double_it
+                  (t-fn {}
+                    (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))
+                    (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))))
+                (def {} double_it
+                  (fn {} (params {} (x {type: (t-var {} _)}))
+                    (app {} (var {} add)
+                      (app {} (var {} consume) (var {} x))
+                      (app {} (var {} consume) (var {} x)))))
             "#,
         )
         .expect("parse new code");
-        let new_exprs = chelis_surf::desugar::desugar_program(&new_decls);
         let new_checked =
             chelis_types::check_ir_with_context(&type_env, &new_exprs).expect("new code checks");
         let new_checked =

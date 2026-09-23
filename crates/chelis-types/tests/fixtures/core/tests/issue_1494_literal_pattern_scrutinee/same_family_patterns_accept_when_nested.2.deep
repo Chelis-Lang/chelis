@@ -1,0 +1,18 @@
+(deftype {} Tag () (variant {} Tag (t-prim {} i32)))
+
+(defsig {} read (t-fn {} (t-adt {} Tag) (t-prim {} f32)))
+
+(def {}
+  read
+  (fn {}
+    (params {} (t {type: (t-var {} _)}))
+    (match {span: "surf:51..98"}
+      (var {span: "surf:57..58"} t)
+      (arm {}
+        (pat-ctor {} Tag (pat-lit {} 1))
+        ()
+        (lit {span: "surf:80..83", type: (t-prim {} f32)} 1.5))
+      (arm {}
+        (pat-wild {})
+        ()
+        (lit {span: "surf:93..96", type: (t-prim {} f32)} 2.5)))))

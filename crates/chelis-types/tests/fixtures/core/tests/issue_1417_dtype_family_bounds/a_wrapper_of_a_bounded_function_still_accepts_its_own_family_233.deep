@@ -1,0 +1,26 @@
+(defsig {dtype_bounds: {p: int}}
+  only_ints
+  (p)
+  (t-fn {} (t-var {} p) (t-var {} p)))
+
+(def {} only_ints (fn {} (params {} x) (var {span: "surf:50..51"} x)))
+
+(defsig {dtype_bounds: {q: int}} wrap (q) (t-fn {} (t-var {} q) (t-var {} q)))
+
+(def {}
+  wrap
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:82..94"}
+      (var {span: "surf:82..91"} only_ints)
+      (var {span: "surf:92..93"} x))))
+
+(defsig {} probe (t-fn {} (t-prim {} i16) (t-prim {} i16)))
+
+(def {}
+  probe
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:122..129"}
+      (var {span: "surf:122..126"} wrap)
+      (var {span: "surf:127..128"} x))))

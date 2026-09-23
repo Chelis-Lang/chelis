@@ -1,0 +1,14 @@
+(def {}
+  out
+  (pipe {}
+    (lit {surf_literal_style: "explicit", type: (t-prim {} f32)} 2.0)
+    (var {} recip)
+    (fn {}
+      (params {} v)
+      (pipe {}
+        (cast {}
+          (app {}
+            (var {} floor)
+            (var {} v))
+          (t-prim {} __CORE_ARG_0__))
+        (var {} recip)))))

@@ -11,9 +11,5 @@ chelis-deep.workspace = true
 chelis-types.workspace = true
 chelis-vocab.workspace = true
 
-[dev-dependencies]
-chelis-macros.workspace = true
-chelis-surf.workspace = true
-
 [lints]
 workspace = true

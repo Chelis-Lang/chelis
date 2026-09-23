@@ -1,0 +1,3 @@
+(module {surf_path: "Agent.Strategy"}
+  agent.strategy
+  (def {} grab (var {span: "surf:29..34"} Ready)))

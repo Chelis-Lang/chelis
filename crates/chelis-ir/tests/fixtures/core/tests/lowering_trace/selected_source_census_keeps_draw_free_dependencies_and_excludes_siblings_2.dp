@@ -1,0 +1,24 @@
+(defsig {} x (t-tensor {} (d-lit {} 32) (t-prim {} f32)))
+
+(def {} x (var {span: "surf:22..23"} x))
+
+(def {}
+  empty_scope
+  (handle-effect {effect: random, span: "surf:38..59"}
+    (lit {span: "surf:48..52", type: (t-prim {} i64)} 7)
+    (var {span: "surf:54..59"} x)))
+
+(def {}
+  unrelated
+  (handle-effect {effect: random, span: "surf:72..94"}
+    (lit {span: "surf:82..87", type: (t-prim {} i64)} 99)
+    (var {span: "surf:89..94"} x)))
+
+(def {}
+  sample
+  (handle-effect {effect: random, span: "surf:104..153"}
+    (lit {span: "surf:114..119", type: (t-prim {} i64)} 42)
+    (app {span: "surf:121..153"}
+      (var {span: "surf:123..130"} dropout)
+      (var {span: "surf:131..142"} empty_scope)
+      (lit {span: "surf:144..150", surf_literal_style: "explicit", type: (t-prim {} f32)} 0.0))))

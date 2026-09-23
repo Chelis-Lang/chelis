@@ -11,10 +11,12 @@ use chelis_unord::UnordMap;
 
 // #1764: admission and lowering must specialize the same typed rate, before AD.
 fn typed_rate_plan(source: &str) -> Result<EvaluationPlan, String> {
-    let declarations = chelis_surf::parser::parse_str(source).unwrap();
-    let checked =
-        chelis_types::check_ir_program(&chelis_surf::desugar::desugar_program(&declarations))
-            .unwrap();
+    let expressions = chelis_deep::parser::parse_and_stamp(source).unwrap();
+    typed_rate_plan_from_ir(&expressions)
+}
+
+fn typed_rate_plan_from_ir(expressions: &[chelis_deep::Expr]) -> Result<EvaluationPlan, String> {
+    let checked = chelis_types::check_ir_program(expressions).unwrap();
     let context = RandomExecutionContext::new(RandomLoweringState {
         seed: Some(42),
         counter: 0,
@@ -37,8 +39,15 @@ fn typed_rate_plan(source: &str) -> Result<EvaluationPlan, String> {
 
 #[test]
 fn typed_static_rate_checks_only_actual_transitive_captures() {
+    // Preserve the original static-capture carriers and metadata without
+    // normalizing the legacy AST through the canonical Deep printer.
+    let fixture_plan = |source: &str| {
+        let expressions: Vec<chelis_deep::Expr> =
+            serde_json::from_str(source).expect("original static-capture AST");
+        typed_rate_plan_from_ir(&expressions)
+    };
     let reference =
-        typed_rate_plan("def sample(x: tensor[8, f32]) -> tensor[8, f32] = dropout(x, 0.5f32)")
+        fixture_plan(include_str!("fixtures/core/tests/dropout_fixed_stream_ir/typed_static_rate_checks_only_actual_transitive_captures.json"))
             .unwrap();
     let execute = |plan: &EvaluationPlan| {
         let mut context = RandomExecutionContext::new(RandomLoweringState {
@@ -54,22 +63,20 @@ fn typed_static_rate_checks_only_actual_transitive_captures() {
             context.state().counter,
         )
     };
-    for body in [
-        "unrelated = 0.5f32\n f = fn (v: tensor[8, f32]) -> dropout(v, 0.5f32)\n unrelated = 0.25f32\n f(x)",
-        "rate = 0.5f32\n inner = fn (v: tensor[8, f32]) -> dropout(v, rate)\n alias = inner\n outer = fn (v: tensor[8, f32]) -> alias(v)\n unrelated = 0.25f32\n outer(x)",
-        "rate = 0.25f32\n f = fn (v: tensor[8, f32]) -> { rate = 0.5f32\n alias = rate\n dropout(v, alias) }\n rate = 0.75f32\n f(x)",
+    for source in [
+        include_str!("fixtures/core/tests/dropout_fixed_stream_ir/rate_group_0_case_0.json"),
+        include_str!("fixtures/core/tests/dropout_fixed_stream_ir/rate_group_0_case_1.json"),
+        include_str!("fixtures/core/tests/dropout_fixed_stream_ir/rate_group_0_case_2.json"),
     ] {
-        let source = format!("def sample(x: tensor[8, f32]) -> tensor[8, f32] = {{ {body}\n }}");
-        let plan = typed_rate_plan(&source).unwrap_or_else(|error| panic!("{source}\n{error}"));
+        let plan = fixture_plan(source).unwrap_or_else(|error| panic!("{source}\n{error}"));
         assert_eq!(execute(&plan), execute(&reference), "{source}");
     }
-    for body in [
-        "rate = 0.5f32\n inner = fn (v: tensor[8, f32]) -> dropout(v, rate)\n alias = inner\n outer = fn (v: tensor[8, f32]) -> alias(v)\n rate = 0.25f32\n outer(x)",
-        "rate = 0.5f32\n loss = fn (v: tensor[8, f32]) -> tensor_to_scalar(sum(dropout(v, rate), 0i32))\n outer = fn (v: tensor[8, f32]) -> grad(loss)(v)\n rate = 0.25f32\n outer(x)",
-        "neg = fn (v: f32) -> 0.25f32\n f = fn (v: tensor[8, f32]) -> dropout(v, neg(-0.5f32))\n f(x)",
+    for source in [
+        include_str!("fixtures/core/tests/dropout_fixed_stream_ir/rate_group_1_case_0.json"),
+        include_str!("fixtures/core/tests/dropout_fixed_stream_ir/rate_group_1_case_1.json"),
+        include_str!("fixtures/core/tests/dropout_fixed_stream_ir/rate_group_1_case_2.json"),
     ] {
-        let source = format!("def sample(x: tensor[8, f32]) -> tensor[8, f32] = {{ {body}\n }}");
-        assert!(typed_rate_plan(&source).is_err(), "{source}");
+        assert!(fixture_plan(source).is_err(), "{source}");
     }
 }
 
@@ -81,24 +88,12 @@ fn typed_static_rate_specializes_helpers_and_gradient_captures() {
         ("f32", Prim::F32),
         ("f64", Prim::F64),
     ] {
-        for body in [
-            "keep(x, cast(0.5, p))",
-            "{ rate = cast(0.5, p)\n alias = rate\n keep(x, alias) }",
-            "{ rate = cast(0.5, DTYPE)\n loss = fn (v: tensor[8, DTYPE]) -> tensor_to_scalar(sum(keep(v, rate), 0i32))\n grad(loss)(x) }",
+        for template in [
+            include_str!("fixtures/core/tests/dropout_fixed_stream_ir/rate_group_2_case_0.deep"),
+            include_str!("fixtures/core/tests/dropout_fixed_stream_ir/rate_group_2_case_1.deep"),
+            include_str!("fixtures/core/tests/dropout_fixed_stream_ir/rate_group_2_case_2.deep"),
         ] {
-            let (wrapper, entry) = if body.contains("DTYPE") {
-                (String::new(), body.replace("DTYPE", dtype))
-            } else {
-                (
-                    format!("def wrapper[p: Float](x: tensor[8, p]) -> tensor[8, p] = {body}"),
-                    "wrapper(x)".to_owned(),
-                )
-            };
-            let source = format!(
-                "def keep[p: Float](x: tensor[8, p], rate: p) -> tensor[8, p] = dropout(x, rate)\n\
-                 {wrapper}\n\
-                 def sample(x: tensor[8, {dtype}]) -> tensor[8, {dtype}] = {entry}"
-            );
+            let source = template.replace("DTYPE", dtype);
             let plan = typed_rate_plan(&source).unwrap_or_else(|error| panic!("{source}\n{error}"));
             let input = chelis_types::finalize_tensor(
                 "test",
@@ -136,10 +131,9 @@ fn typed_static_rate_specializes_helpers_and_gradient_captures() {
 
 #[test]
 fn typed_static_rate_preserves_source_width_and_distinct_call_bindings() {
-    let source = "def keep[p: Float](x: tensor[8, p], rate: p) -> tensor[8, p] = dropout(x, rate)\n\
-                  def sample(x: tensor[8, f64]) -> tensor[8, f64] = {\n\
-                    first = keep(x, cast(0.1f32, f64))\n\
-                    second = keep(x, 0.1f64)\n add(first, second)\n }";
+    let source = include_str!(
+        "fixtures/core/tests/dropout_fixed_stream_ir/typed_static_rate_preserves_source_width_and_distinct_call_bindings.deep"
+    );
     let plan = typed_rate_plan(source).unwrap();
     let rates = plan
         .dag_for_inspection()
@@ -158,12 +152,10 @@ fn typed_static_rate_preserves_source_width_and_distinct_call_bindings() {
 
 #[test]
 fn typed_static_rate_does_not_duplicate_arguments() {
-    let (body, expected) = ("keep(dropout(x, 0.5f32), 0.25f32)", vec![0.5, 0.25]);
-    let source = format!(
-        "def keep[p: Float](x: tensor[8, p], rate: p) -> tensor[8, p] = dropout(x, rate)\n\
-            def sample(x: tensor[8, f32]) -> tensor[8, f32] = {body}"
-    );
-    let plan = typed_rate_plan(&source).unwrap();
+    let expected = vec![0.5, 0.25];
+    let source =
+        include_str!("fixtures/core/tests/dropout_fixed_stream_ir/distinct_argument_calls.deep");
+    let plan = typed_rate_plan(source).unwrap();
     let rates = plan
         .dag_for_inspection()
         .nodes()
@@ -190,16 +182,15 @@ fn typed_static_rate_does_not_duplicate_arguments() {
 
 #[test]
 fn typed_static_rate_rejects_runtime_formals_and_shadowed_aliases() {
-    for body in [
-        "dropout(x, rate)",
-        "{ alias = 0.5f32\n alias = rate\n dropout(x, alias) }",
-        "{ alias = 0.5f32\n f = fn (alias: f32) -> dropout(x, alias)\n f(rate) }",
-        "{ neg = fn (unused: f32) -> rate\n dropout(x, neg(0.5f32)) }",
-        "{ alias = 0.5f32\n f = fn (v: tensor[8, f32]) -> dropout(v, alias)\n alias = 0.25f32\n f(x) }",
-        "{ alias = 0.5f32\n loss = fn (v: tensor[8, f32]) -> tensor_to_scalar(sum(dropout(v, alias), 0i32))\n alias = 0.25f32\n grad(loss)(x) }",
+    for source in [
+        include_str!("fixtures/core/tests/dropout_fixed_stream_ir/rate_group_3_case_0.deep"),
+        include_str!("fixtures/core/tests/dropout_fixed_stream_ir/rate_group_3_case_1.deep"),
+        include_str!("fixtures/core/tests/dropout_fixed_stream_ir/rate_group_3_case_2.deep"),
+        include_str!("fixtures/core/tests/dropout_fixed_stream_ir/rate_group_3_case_3.deep"),
+        include_str!("fixtures/core/tests/dropout_fixed_stream_ir/rate_group_3_case_4.deep"),
+        include_str!("fixtures/core/tests/dropout_fixed_stream_ir/rate_group_3_case_5.deep"),
     ] {
-        let source = format!("def sample(x: tensor[8, f32], rate: f32) -> tensor[8, f32] = {body}");
-        let error = typed_rate_plan(&source).unwrap_err();
+        let error = typed_rate_plan(source).unwrap_err();
         assert!(
             error.contains("RuntimeRate")
                 || error.contains("statically-resolvable")
@@ -274,11 +265,11 @@ fn splitmix64(mut value: u64) -> u64 {
 #[test]
 fn staged_claim_failure_commits_the_preceding_draw_and_reuse_keeps_live_ordinals() {
     use chelis_ir::host::staged::HostStage;
-    let source = "def sample[m, n](source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = {\n dead = dropout(source, 0.0f32)\n dropout(reshape(x, [numel(dead), 2i64]), 0.5f32)\n}";
-    let declarations = chelis_surf::parser::parse_str(source).unwrap();
-    let checked =
-        chelis_types::check_ir_program(&chelis_surf::desugar::desugar_program(&declarations))
-            .unwrap();
+    let source = include_str!(
+        "fixtures/core/tests/dropout_fixed_stream_ir/staged_claim_failure_commits_the_preceding_draw_and_reuse_keeps_live_ordinals.deep"
+    );
+    let expressions = chelis_deep::parser::parse_and_stamp(source).unwrap();
+    let checked = chelis_types::check_ir_program(&expressions).unwrap();
     let mut context = RandomExecutionContext::new(RandomLoweringState {
         seed: Some(42),
         counter: 5,
@@ -599,8 +590,7 @@ fn valid_uniform_like_occupies_one_shared_ordinal_between_dropout_calls() {
 
 #[test]
 fn local_movement_failure_occurs_after_the_earlier_entered_draw() {
-    let declarations = chelis_surf::parser::parse_str("def sample[n](x: tensor[n, f32]) -> tensor[3, f32] = {\n dead = dropout(x, 0.0f32)\n shrink(x, [[0i64, 3i64]])\n}\n").unwrap();
-    let expressions = chelis_surf::desugar::desugar_program(&declarations);
+    let expressions = chelis_deep::parser::parse_and_stamp(include_str!("fixtures/core/tests/dropout_fixed_stream_ir/local_movement_failure_occurs_after_the_earlier_entered_draw.deep")).unwrap();
     let checked = chelis_types::check_ir_program(&expressions).unwrap();
     let mut context = RandomExecutionContext::new(RandomLoweringState {
         seed: Some(42),
@@ -630,9 +620,10 @@ fn local_movement_failure_occurs_after_the_earlier_entered_draw() {
 
 #[test]
 fn explicit_drop_in_gradient_retains_draws_and_verified_terminal_ownership() {
-    let source = "def loss(x: tensor[32, f32]) -> tensor[f32] = {\n dead = dropout(x, 0.0f32)\n _ = drop(dead)\n sum(dropout(x, 0.5f32), 0)\n}\ndef sample(x: tensor[32, f32]) -> tensor[32, f32] = grad(loss)(x)\n";
-    let declarations = chelis_surf::parser::parse_str(source).unwrap();
-    let expressions = chelis_surf::desugar::desugar_program(&declarations);
+    let source = include_str!(
+        "fixtures/core/tests/dropout_fixed_stream_ir/explicit_drop_in_gradient_retains_draws_and_verified_terminal_ownership.deep"
+    );
+    let expressions = chelis_deep::parser::parse_and_stamp(source).unwrap();
     let checked = chelis_types::check_ir_program(&expressions).unwrap();
     let mut context = RandomExecutionContext::new(RandomLoweringState {
         seed: Some(42),

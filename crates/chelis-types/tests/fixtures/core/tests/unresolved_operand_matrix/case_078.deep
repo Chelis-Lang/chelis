@@ -1,0 +1,14 @@
+(defsig {}
+  f
+  (t-fn {}
+    (t-tensor {} (d-lit {} 3) (t-prim {} i32))
+    (t-tensor {} (t-prim {} i32))))
+
+(def {}
+  f
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:42..55"}
+      (var {span: "surf:42..46"} mean)
+      (var {span: "surf:47..48"} x)
+      (lit {span: "surf:50..54", surf_literal_style: "explicit", type: (t-prim {} i32)} 0))))

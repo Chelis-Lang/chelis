@@ -1,0 +1,44 @@
+(defsig {}
+  loss
+  (t-fn {}
+    (t-tensor {} (d-lit {} 32) (t-prim {} f32))
+    (t-tensor {} (t-prim {} f32))))
+
+(def {}
+  loss
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (let {span: "surf:46..120"}
+      (bind {}
+        dead
+        (app {span: "surf:56..74"}
+          (var {span: "surf:56..63"} dropout)
+          (var {span: "surf:64..65"} x)
+          (lit {span: "surf:67..73", surf_literal_style: "explicit", type: (t-prim {} f32)} 0.0)))
+      (let {}
+        (bind {destructure: true}
+          __chelis_tmp0
+          (app {span: "surf:80..90"}
+            (var {span: "surf:80..84"} drop)
+            (var {span: "surf:85..89"} dead)))
+        (app {span: "surf:92..118"}
+          (var {span: "surf:92..95"} sum)
+          (app {span: "surf:96..114"}
+            (var {span: "surf:96..103"} dropout)
+            (var {span: "surf:104..105"} x)
+            (lit {span: "surf:107..113", surf_literal_style: "explicit", type: (t-prim {} f32)} 0.5))
+          (lit {span: "surf:116..117", type: (t-prim {} i32)} 0))))))
+
+(defsig {}
+  sample
+  (t-fn {}
+    (t-tensor {} (d-lit {} 32) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 32) (t-prim {} f32))))
+
+(def {}
+  sample
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:173..186"}
+      (grad {span: "surf:173..183"} (var {span: "surf:178..182"} loss))
+      (var {span: "surf:184..185"} x))))

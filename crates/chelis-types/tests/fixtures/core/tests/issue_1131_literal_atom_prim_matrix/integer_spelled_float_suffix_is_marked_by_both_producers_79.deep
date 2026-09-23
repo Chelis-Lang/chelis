@@ -1,0 +1,25 @@
+(defsig {} scalar (t-fn {} (t-prim {} f32)))
+
+(def {}
+  scalar
+  (fn {}
+    (params {})
+    (cast {span: "surf:22..34"}
+      (lit {literal_source: integer, span: "surf:27..28", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 7)
+      (t-prim {} f32))))
+
+(defsig {} vector (t-fn {} (t-tensor {} (d-lit {} 2) (t-prim {} f32))))
+
+(def {}
+  vector
+  (fn {}
+    (params {})
+    (app {}
+      (var {} to_tensor)
+      (app {}
+        (var {} Cons)
+        (lit {literal_source: integer, surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 1)
+        (app {}
+          (var {} Cons)
+          (lit {literal_source: integer, surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 2)
+          (var {} Nil))))))

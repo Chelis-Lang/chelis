@@ -1,0 +1,23 @@
+(defsig {}
+  f
+  (t-fn {}
+    (t-adt {} List (t-prim {} i32))
+    (t-prim {} i32)
+    (t-adt {} List (t-tuple {} (t-prim {} i32) (t-prim {} i32)))))
+
+(def {}
+  f
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (y {type: (t-var {} _)}))
+    (let {span: "surf:50..86"}
+      (bind {}
+        g
+        (fn {span: "surf:58..77"}
+          (params {} t)
+          (app {span: "surf:68..77"}
+            (var {span: "surf:68..71"} zip)
+            (var {span: "surf:72..73"} x)
+            (var {span: "surf:75..76"} t))))
+      (app {span: "surf:80..84"}
+        (var {span: "surf:80..81"} g)
+        (var {span: "surf:82..83"} y)))))

@@ -1,0 +1,26 @@
+(defsig {}
+  predict
+  (t-fn {}
+    (t-tensor {} (d-name {} batch) (d-lit {} 64) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 64) (d-lit {} 1) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 1) (t-prim {} f32))
+    (t-tensor {} (d-name {} batch) (d-lit {} 1) (t-prim {} f32))))
+
+(def {}
+  predict
+  (fn {}
+    (params {}
+      (x {type: (t-var {} _)})
+      (w {type: (t-var {} _)})
+      (b {type: (t-var {} _)}))
+    (app {span: "surf:119..157"}
+      (var {span: "surf:119..122"} add)
+      (app {span: "surf:123..135"}
+        (var {span: "surf:123..129"} matmul)
+        (var {span: "surf:130..131"} x)
+        (var {span: "surf:133..134"} w))
+      (app {span: "surf:137..156"}
+        (var {span: "surf:137..143"} insert)
+        (var {span: "surf:144..145"} b)
+        (lit {span: "surf:147..148", type: (t-prim {} i32)} 0)
+        (var {span: "surf:150..155"} batch)))))

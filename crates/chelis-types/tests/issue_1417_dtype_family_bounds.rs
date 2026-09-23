@@ -5,8 +5,7 @@
 //! bound is checked through aliases, wrappers, higher-order values, and
 //! recursion rather than at a named callee.
 
-use chelis_surf::desugar::desugar_program;
-use chelis_surf::parser::parse_str as parse_surf;
+use chelis_deep::parser::parse_str as parse_core;
 use chelis_types::check_typed_program;
 use chelis_types::errors::{CheckError, CheckErrorKind};
 
@@ -15,8 +14,12 @@ const INTS: &[&str] = &["i8", "i16", "i32", "i64"];
 const NON_NUMERIC: &[&str] = &["bool"];
 
 fn diagnostics(source: &str) -> Vec<CheckError> {
-    let decls = parse_surf(source).expect("Surf fixture must parse");
-    match check_typed_program(&desugar_program(&decls)) {
+    let decls = if source.trim_start().starts_with('[') {
+        serde_json::from_str(source).expect("lossless AST fixture")
+    } else {
+        parse_core(source).expect("Deep fixture must parse")
+    };
+    match check_typed_program(&decls) {
         Ok(_) => Vec::new(),
         Err(report) => report.errors,
     }
@@ -56,21 +59,58 @@ fn assert_family_rejection(source: &str, context: &str, family: &str, dtype: &st
 
 fn arange_shaped(dtype: &str) -> String {
     format!(
-        r#"
-sig arange_like[p: Int]: p -> p -> p
-def arange_like(start, stop) = start
-def probe(a: {dtype}, b: {dtype}) -> {dtype} = arange_like(a, b)
-"#
+        r###"(defsig {{dtype_bounds: {{p: int}}}}
+  arange_like
+  (p)
+  (t-fn {{}} (t-var {{}} p) (t-var {{}} p) (t-var {{}} p)))
+
+(def {{}}
+  arange_like
+  (fn {{}}
+    (params {{}} start stop)
+    (var {{span: "surf:69..74"}} start)))
+
+(defsig {{}} probe (t-fn {{}} (t-prim {{}} {dtype}) (t-prim {{}} {dtype}) (t-prim {{}} {dtype})))
+
+(def {{}}
+  probe
+  (fn {{}}
+    (params {{}} (a {{type: (t-var {{}} _)}}) (b {{type: (t-var {{}} _)}}))
+    (app {{span: "surf:110..127"}}
+      (var {{span: "surf:110..121"}} arange_like)
+      (var {{span: "surf:122..123"}} a)
+      (var {{span: "surf:125..126"}} b))))
+"###
     )
 }
 
 fn linspace_shaped(dtype: &str) -> String {
     format!(
-        r#"
-sig linspace_like[p: Float]: p -> p -> i64 -> p
-def linspace_like(start, stop, count) = start
-def probe(a: {dtype}, b: {dtype}) -> {dtype} = linspace_like(a, b, cast(3, i64))
-"#
+        r###"(defsig {{dtype_bounds: {{p: float}}}}
+  linspace_like
+  (p)
+  (t-fn {{}} (t-var {{}} p) (t-var {{}} p) (t-prim {{}} i64) (t-var {{}} p)))
+
+(def {{}}
+  linspace_like
+  (fn {{}}
+    (params {{}} start stop count)
+    (var {{span: "surf:89..94"}} start)))
+
+(defsig {{}} probe (t-fn {{}} (t-prim {{}} {dtype}) (t-prim {{}} {dtype}) (t-prim {{}} {dtype})))
+
+(def {{}}
+  probe
+  (fn {{}}
+    (params {{}} (a {{type: (t-var {{}} _)}}) (b {{type: (t-var {{}} _)}}))
+    (app {{span: "surf:130..163"}}
+      (var {{span: "surf:130..143"}} linspace_like)
+      (var {{span: "surf:144..145"}} a)
+      (var {{span: "surf:147..148"}} b)
+      (cast {{span: "surf:150..162"}}
+        (lit {{span: "surf:155..156", surf_literal_style: "unsuffixed", type: (t-prim {{}} i64)}} 3)
+        (t-prim {{}} i64)))))
+"###
     )
 }
 
@@ -135,11 +175,24 @@ fn no_family_admits_bool() {
         );
         assert_family_rejection(
             &format!(
-                r#"
-sig total[p: Numeric]: p -> p -> p
-def total(a, b) = a
-def probe(x: {dtype}, y: {dtype}) -> {dtype} = total(x, y)
-"#
+                r###"(defsig {{dtype_bounds: {{p: numeric}}}}
+  total
+  (p)
+  (t-fn {{}} (t-var {{}} p) (t-var {{}} p) (t-var {{}} p)))
+
+(def {{}} total (fn {{}} (params {{}} a b) (var {{span: "surf:54..55"}} a)))
+
+(defsig {{}} probe (t-fn {{}} (t-prim {{}} {dtype}) (t-prim {{}} {dtype}) (t-prim {{}} {dtype})))
+
+(def {{}}
+  probe
+  (fn {{}}
+    (params {{}} (x {{type: (t-var {{}} _)}}) (y {{type: (t-var {{}} _)}}))
+    (app {{span: "surf:91..102"}}
+      (var {{span: "surf:91..96"}} total)
+      (var {{span: "surf:97..98"}} x)
+      (var {{span: "surf:100..101"}} y))))
+"###
             ),
             "a `Numeric` bound at bool",
             "Numeric",
@@ -153,11 +206,24 @@ fn a_numeric_bound_admits_both_numeric_families() {
     for dtype in FLOATS.iter().chain(INTS) {
         assert_accepted(
             &format!(
-                r#"
-sig total[p: Numeric]: p -> p -> p
-def total(a, b) = a
-def probe(x: {dtype}, y: {dtype}) -> {dtype} = total(x, y)
-"#
+                r###"(defsig {{dtype_bounds: {{p: numeric}}}}
+  total
+  (p)
+  (t-fn {{}} (t-var {{}} p) (t-var {{}} p) (t-var {{}} p)))
+
+(def {{}} total (fn {{}} (params {{}} a b) (var {{span: "surf:54..55"}} a)))
+
+(defsig {{}} probe (t-fn {{}} (t-prim {{}} {dtype}) (t-prim {{}} {dtype}) (t-prim {{}} {dtype})))
+
+(def {{}}
+  probe
+  (fn {{}}
+    (params {{}} (x {{type: (t-var {{}} _)}}) (y {{type: (t-var {{}} _)}}))
+    (app {{span: "surf:91..102"}}
+      (var {{span: "surf:91..96"}} total)
+      (var {{span: "surf:97..98"}} x)
+      (var {{span: "surf:100..101"}} y))))
+"###
             ),
             &format!("a `Numeric`-bounded signature at {dtype}"),
         );
@@ -169,12 +235,9 @@ def probe(x: {dtype}, y: {dtype}) -> {dtype} = total(x, y)
 #[test]
 fn a_bound_survives_a_top_level_alias() {
     assert_family_rejection(
-        r#"
-sig only_ints[p: Int]: p -> p
-def only_ints(x) = x
-alias = only_ints
-def probe(x: f32) -> f32 = alias(x)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1417_dtype_family_bounds/a_bound_survives_a_top_level_alias_172.deep"
+        ),
         "an alias of an `Int`-bounded function",
         "Int",
         "f32",
@@ -184,12 +247,9 @@ def probe(x: f32) -> f32 = alias(x)
 #[test]
 fn a_bound_survives_a_generic_wrapper() {
     assert_family_rejection(
-        r#"
-sig only_ints[p: Int]: p -> p
-def only_ints(x) = x
-def wrap[q: Int](x: q) -> q = only_ints(x)
-def probe(x: f64) -> f64 = wrap(x)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1417_dtype_family_bounds/a_bound_survives_a_generic_wrapper_187.deep"
+        ),
         "a generic wrapper over an `Int`-bounded function",
         "Int",
         "f64",
@@ -199,12 +259,9 @@ def probe(x: f64) -> f64 = wrap(x)
 #[test]
 fn a_bound_survives_a_higher_order_call() {
     assert_family_rejection(
-        r#"
-sig only_floats[p: Float]: p -> p
-def only_floats(x) = x
-def apply_to[q](f: q -> q, x: q) -> q = f(x)
-def probe(x: i32) -> i32 = apply_to(only_floats, x)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1417_dtype_family_bounds/a_bound_survives_a_higher_order_call_202.deep"
+        ),
         "an `Float`-bounded function passed as a value",
         "Float",
         "i32",
@@ -214,11 +271,9 @@ def probe(x: i32) -> i32 = apply_to(only_floats, x)
 #[test]
 fn a_bound_survives_a_recursive_helper() {
     assert_family_rejection(
-        r#"
-sig countdown[p: Int]: p -> p -> p
-def countdown(current, stop) = if gte(current, stop) then current else countdown(current, stop)
-def probe(x: bf16) -> bf16 = countdown(x, x)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1417_dtype_family_bounds/a_bound_survives_a_recursive_helper_217.deep"
+        ),
         "a recursive `Int`-bounded helper",
         "Int",
         "bf16",
@@ -230,12 +285,9 @@ fn a_wrapper_of_a_bounded_function_still_accepts_its_own_family() {
     // The negative tests above must fail for the bound, not because the
     // wrapper shapes are themselves broken.
     assert_accepted(
-        r#"
-sig only_ints[p: Int]: p -> p
-def only_ints(x) = x
-def wrap[q: Int](x: q) -> q = only_ints(x)
-def probe(x: i16) -> i16 = wrap(x)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1417_dtype_family_bounds/a_wrapper_of_a_bounded_function_still_accepts_its_own_family_233.deep"
+        ),
         "a generic wrapper at an admitted dtype",
     );
 }
@@ -245,13 +297,9 @@ def probe(x: i16) -> i16 = wrap(x)
 #[test]
 fn a_numeric_binder_narrows_to_float_through_a_float_bounded_callee() {
     assert_family_rejection(
-        r#"
-sig only_floats[p: Float]: p -> p
-def only_floats(x) = x
-sig any_numeric[q: Numeric]: q -> q
-def any_numeric(x) = only_floats(x)
-def probe(x: i32) -> i32 = any_numeric(x)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1417_dtype_family_bounds/a_numeric_binder_narrows_to_float_through_a_float_bounded_callee_248.deep"
+        ),
         "a `Numeric` binder identified with a `Float` one",
         "Float",
         "i32",
@@ -262,13 +310,9 @@ def probe(x: i32) -> i32 = any_numeric(x)
 fn a_narrowed_numeric_binder_still_accepts_its_intersection() {
     // Intersection is valid for inference variables, not a license to narrow
     // an authored Numeric contract. The declaration fails even with an f32 call.
-    let source = r#"
-sig only_floats[p: Float]: p -> p
-def only_floats(x) = x
-sig any_numeric[q: Numeric]: q -> q
-def any_numeric(x) = only_floats(x)
-def probe(x: f32) -> f32 = any_numeric(x)
-"#;
+    let source = include_str!(
+        "fixtures/core/tests/issue_1417_dtype_family_bounds/a_narrowed_numeric_binder_still_accepts_its_intersection_265.json"
+    );
     let errors = diagnostics(source);
     assert!(
         errors.iter().any(
@@ -281,22 +325,18 @@ def probe(x: f32) -> f32 = any_numeric(x)
         rendered(&errors)
     );
     assert_accepted(
-        &source.replace("q: Numeric", "q: Float"),
+        include_str!(
+            "fixtures/core/tests/issue_1417_dtype_family_bounds/a_narrowed_numeric_binder_still_accepts_its_intersection_float.json"
+        ),
         "the explicitly sufficient contract admits f32",
     );
 }
 
 #[test]
 fn float_and_int_bounds_cannot_name_the_same_variable() {
-    let errors = diagnostics(
-        r#"
-sig only_floats[p: Float]: p -> p
-def only_floats(x) = x
-sig only_ints[q: Int]: q -> q
-def only_ints(x) = x
-def probe[r](x: r) -> r = only_ints(only_floats(x))
-"#,
-    );
+    let errors = diagnostics(include_str!(
+        "fixtures/core/tests/issue_1417_dtype_family_bounds/float_and_int_bounds_cannot_name_the_same_variable_292.deep"
+    ));
     assert!(
         errors.iter().any(
             |error| matches!(error.kind, CheckErrorKind::PrecisionMismatch)
@@ -313,11 +353,9 @@ def probe[r](x: r) -> r = only_ints(only_floats(x))
 #[test]
 fn a_bound_reaches_a_tensor_precision_slot() {
     assert_family_rejection(
-        r#"
-sig scale[n, p: Float]: tensor[n, p] -> tensor[n, p]
-def scale(x) = x
-def probe(x: tensor[4, i32]) -> tensor[4, i32] = scale(x)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1417_dtype_family_bounds/a_bound_reaches_a_tensor_precision_slot_316.deep"
+        ),
         "a `Float` bound occupying a tensor precision slot",
         "Float",
         "i32",
@@ -327,11 +365,9 @@ def probe(x: tensor[4, i32]) -> tensor[4, i32] = scale(x)
 #[test]
 fn a_precision_slot_bound_accepts_its_own_family() {
     assert_accepted(
-        r#"
-sig scale[n, p: Float]: tensor[n, p] -> tensor[n, p]
-def scale(x) = x
-def probe(x: tensor[4, f32]) -> tensor[4, f32] = scale(x)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1417_dtype_family_bounds/a_precision_slot_bound_accepts_its_own_family_330.deep"
+        ),
         "a `Float` precision-slot bound at f32",
     );
 }
@@ -340,7 +376,9 @@ def probe(x: tensor[4, f32]) -> tensor[4, f32] = scale(x)
 
 #[test]
 fn a_bounded_binder_cannot_name_a_dimension() {
-    let errors = diagnostics("sig f[n: Float]: tensor[n, f32] -> tensor[n, f32]");
+    let errors = diagnostics(include_str!(
+        "fixtures/core/tests/issue_1417_dtype_family_bounds/a_bounded_binder_cannot_name_a_dimension_343.deep"
+    ));
     assert!(
         errors
             .iter()
@@ -352,7 +390,9 @@ fn a_bounded_binder_cannot_name_a_dimension() {
 
 #[test]
 fn a_bounded_binder_cannot_name_a_rank_spread() {
-    let errors = diagnostics("sig f[r: Float]: tensor[..r, f32] -> tensor[..r, f32]");
+    let errors = diagnostics(include_str!(
+        "fixtures/core/tests/issue_1417_dtype_family_bounds/a_bounded_binder_cannot_name_a_rank_spread_355.deep"
+    ));
     assert!(
         errors
             .iter()
@@ -364,7 +404,9 @@ fn a_bounded_binder_cannot_name_a_rank_spread() {
 
 #[test]
 fn a_bound_must_name_a_binder_the_signature_uses() {
-    let errors = diagnostics("sig f[q: Float]: i32 -> i32");
+    let errors = diagnostics(include_str!(
+        "fixtures/core/tests/issue_1417_dtype_family_bounds/a_bound_must_name_a_binder_the_signature_uses_367.deep"
+    ));
     assert!(
         errors
             .iter()
@@ -377,25 +419,10 @@ fn a_bound_must_name_a_binder_the_signature_uses() {
 #[test]
 fn a_used_bound_is_accepted_where_the_absent_one_is_not() {
     assert_accepted(
-        "sig f[p: Float]: p -> p\ndef f(x) = x",
+        include_str!(
+            "fixtures/core/tests/issue_1417_dtype_family_bounds/a_used_bound_is_accepted_where_the_absent_one_is_not_380.deep"
+        ),
         "a bound naming a binder the signature uses",
-    );
-}
-
-#[test]
-fn a_def_may_not_bound_a_binder_its_sig_owns() {
-    let error = parse_surf(
-        r#"
-sig f[p: Float]: p -> p
-def f[p: Float](x: p) -> p = x
-"#,
-    )
-    .expect_err("duplicate bound ownership must reject before desugaring");
-    assert!(
-        error
-            .to_string()
-            .contains("a declaration's `defsig` owns its binder list"),
-        "a bound belongs to one binder list; got: {error}"
     );
 }
 
@@ -404,10 +431,9 @@ fn a_def_without_a_sig_carries_its_own_bound() {
     // The negative control for the previous test: the restriction is about
     // two binder lists, not about bounds on a `def`.
     assert_family_rejection(
-        r#"
-def only_ints[p: Int](x: p) -> p = x
-def probe(x: f32) -> f32 = only_ints(x)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1417_dtype_family_bounds/a_def_without_a_sig_carries_its_own_bound_407.deep"
+        ),
         "a `def`-declared `Int` bound",
         "Int",
         "f32",
@@ -417,10 +443,9 @@ def probe(x: f32) -> f32 = only_ints(x)
 #[test]
 fn a_def_declared_bound_accepts_its_own_family() {
     assert_accepted(
-        r#"
-def only_ints[p: Int](x: p) -> p = x
-def probe(x: i64) -> i64 = only_ints(x)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1417_dtype_family_bounds/a_def_declared_bound_accepts_its_own_family_420.deep"
+        ),
         "a `def`-declared `Int` bound at i64",
     );
 }
@@ -430,10 +455,9 @@ fn an_unbounded_binder_still_admits_a_non_dtype_type() {
     // [04-DTYPE-2] leaves an unbounded binder a general type variable; this
     // is what a narrowing implementation would silently break.
     assert_accepted(
-        r#"
-def pick[a](x: a, y: a) -> a = x
-def probe(x: List[i32], y: List[i32]) -> List[i32] = pick(x, y)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1417_dtype_family_bounds/an_unbounded_binder_still_admits_a_non_dtype_type_433.deep"
+        ),
         "an unbounded binder at a non-dtype type",
     );
 }

@@ -1,0 +1,11 @@
+(defsig {}
+  annotated
+  (t-fn {} (t-tensor {} (d-lit {} 4) (t-prim {} f32)) (t-var {} _)))
+
+(def {}
+  annotated
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:36..43"}
+      (var {span: "surf:36..40"} relu)
+      (var {span: "surf:41..42"} x))))

@@ -1,0 +1,29 @@
+(defsig {}
+  recur
+  (t-fn {}
+    (t-var {} _)
+    (t-tensor {} (d-lit {} 4) (t-prim {} f32))
+    (t-prim {} i32)
+    (t-var {} _)))
+
+(def {}
+  recur
+  (fn {}
+    (params {} x (y {type: (t-var {} _)}) (n {type: (t-var {} _)}))
+    (if {span: "surf:45..99"}
+      (app {span: "surf:48..56"}
+        (var {span: "surf:48..50"} eq)
+        (var {span: "surf:51..52"} n)
+        (lit {span: "surf:54..55", type: (t-prim {} i32)} 0))
+      (app {span: "surf:62..71"}
+        (var {span: "surf:62..65"} add)
+        (var {span: "surf:66..67"} x)
+        (var {span: "surf:69..70"} y))
+      (app {span: "surf:77..99"}
+        (var {span: "surf:77..82"} recur)
+        (var {span: "surf:83..84"} x)
+        (var {span: "surf:86..87"} y)
+        (app {span: "surf:89..98"}
+          (var {span: "surf:89..92"} sub)
+          (var {span: "surf:93..94"} n)
+          (lit {span: "surf:96..97", type: (t-prim {} i32)} 1))))))

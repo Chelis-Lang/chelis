@@ -1,0 +1,56 @@
+(defsig {}
+  g
+  (n a)
+  (t-fn {}
+    (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} f32)))
+    (t-ref {} (t-tensor {} (d-var {} a) (t-prim {} f32)))
+    (t-tensor {} (d-var {} a) (d-var {} n) (t-prim {} f32))))
+
+(def {}
+  g
+  (fn {}
+    (params {} (b {type: (t-var {} _)}) (c {type: (t-var {} _)}))
+    (app {span: "surf:75..111"}
+      (var {span: "surf:75..81"} insert)
+      (var {span: "surf:82..83"} b)
+      (lit {span: "surf:85..86", type: (t-prim {} i32)} 0)
+      (app {span: "surf:88..110"}
+        (var {span: "surf:88..93"} shape)
+        (var {span: "surf:94..95"} c)
+        (cast {span: "surf:97..109"}
+          (lit {span: "surf:102..103", surf_literal_style: "unsuffixed", type: (t-prim {} i32)} 0)
+          (t-prim {} i32))))))
+
+(def {}
+  xs
+  (app {span: "surf:117..138"}
+    (var {span: "surf:117..126"} to_tensor)
+    (app {span: "surf:127..137"}
+      (var {} Cons)
+      (lit {span: "surf:128..131", type: (t-prim {} f32)} 1.0)
+      (app {}
+        (var {} Cons)
+        (lit {span: "surf:133..136", type: (t-prim {} f32)} 2.0)
+        (var {} Nil)))))
+
+(def {}
+  cs
+  (app {span: "surf:144..173"}
+    (var {span: "surf:144..153"} to_tensor)
+    (app {span: "surf:154..172"}
+      (var {} Cons)
+      (lit {span: "surf:155..159", type: (t-prim {} f32)} 10.0)
+      (app {}
+        (var {} Cons)
+        (lit {span: "surf:161..165", type: (t-prim {} f32)} 20.0)
+        (app {}
+          (var {} Cons)
+          (lit {span: "surf:167..171", type: (t-prim {} f32)} 30.0)
+          (var {} Nil))))))
+
+(def {}
+  out
+  (app {span: "surf:180..191"}
+    (var {span: "surf:180..181"} g)
+    (borrow {span: "surf:182..185"} (var {span: "surf:183..185"} xs))
+    (borrow {span: "surf:187..190"} (var {span: "surf:188..190"} cs))))

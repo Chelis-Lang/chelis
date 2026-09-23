@@ -1,0 +1,13 @@
+(module {surf_path: "Agent.Strategy"}
+  agent.strategy
+  (defsig {} peek (t-fn {} (t-adt {} Meters) (t-prim {} f32)))
+  (def {}
+    peek
+    (fn {}
+      (params {} (m {type: (t-var {} _)}))
+      (match {span: "surf:51..86"}
+        (var {span: "surf:57..58"} m)
+        (arm {}
+          (pat-ctor {} Meters (pat-var {} v))
+          ()
+          (var {span: "surf:83..84"} v))))))

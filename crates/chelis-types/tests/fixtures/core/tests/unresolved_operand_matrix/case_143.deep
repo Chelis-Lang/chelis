@@ -1,0 +1,42 @@
+(defsig {}
+  apply_t
+  (b)
+  (t-fn {}
+    (t-fn {}
+      (t-tensor {} (d-lit {} 4) (d-lit {} 3) (t-prim {} f32))
+      (t-var {} b))
+    (t-tensor {} (d-lit {} 4) (d-lit {} 3) (t-prim {} f32))
+    (t-var {} b)))
+
+(def {}
+  apply_t
+  (fn {}
+    (params {} (f {type: (t-var {} _)}) (x {type: (t-var {} _)}))
+    (app {span: "surf:73..77"}
+      (var {span: "surf:73..74"} f)
+      (var {span: "surf:75..76"} x))))
+
+(defsig {}
+  probe
+  (t-fn {}
+    (t-tensor {} (d-lit {} 4) (d-lit {} 3) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 3) (t-prim {} f32))))
+
+(def {}
+  probe
+  (fn {}
+    (params {} (t {type: (t-var {} _)}))
+    (app {span: "surf:130..190"}
+      (var {span: "surf:130..137"} apply_t)
+      (fn {span: "surf:138..186"}
+        (params {} q)
+        (match {span: "surf:148..186"}
+          (var {span: "surf:154..155"} q)
+          (arm {}
+            (pat-tuple {} (pat-var {} a) (pat-var {} k))
+            ()
+            (app {span: "surf:175..184"}
+              (var {span: "surf:175..178"} sum)
+              (var {span: "surf:179..180"} a)
+              (lit {span: "surf:182..183", type: (t-prim {} i32)} 0)))))
+      (var {span: "surf:188..189"} t))))

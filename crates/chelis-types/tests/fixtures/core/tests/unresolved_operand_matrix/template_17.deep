@@ -1,0 +1,27 @@
+@@helper@@
+
+(defsig {}
+  apply_it
+  (t-fn {}
+    (t-fn {}
+      (t-tensor {} (d-lit {} 3) (t-prim {} @@dtype@@))
+      (t-tensor {} (t-prim {} @@dtype@@)))
+    (t-tensor {} (d-lit {} 3) (t-prim {} @@dtype@@))
+    (t-tensor {} (t-prim {} @@dtype@@))))
+
+(def {}
+  apply_it
+  (fn {}
+    (params {} (fn_arg {type: (t-var {} _)}) (y {type: (t-var {} _)}))
+    (app {span: "surf:113..122"}
+      (var {span: "surf:113..119"} fn_arg)
+      (var {span: "surf:120..121"} y))))
+
+(def {}
+  f
+  (app {span: "surf:127..165"}
+    (var {span: "surf:127..135"} apply_it)
+    (var {span: "surf:136..137"} g)
+    (app {span: "surf:139..164"}
+      (var {span: "surf:139..148"} to_tensor)
+      @@values@@)))

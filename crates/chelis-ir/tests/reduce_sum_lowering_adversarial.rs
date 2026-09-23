@@ -12,17 +12,10 @@
 //! crates/chelis-types/tests/numeric_dtype_buildout_adversarial.rs.
 
 use chelis_ir::lower::lower_program;
-use chelis_ir::verify;
 use chelis_types::check_ir_program;
 
-fn lower_surf(src: &str) -> Result<chelis_ir::dag::Dag, String> {
-    let decls = chelis_surf::parser::parse_str(src).map_err(|e| format!("parse: {e:?}"))?;
-    let exprs = chelis_macros::expand_program(
-        &chelis_surf::desugar::desugar_program(&decls),
-        &chelis_macros::ExpansionOptions::default(),
-    )
-    .map_err(|e| format!("expand: {e:?}"))?
-    .into_exprs();
+fn lower_deep(src: &str) -> Result<chelis_ir::dag::Dag, String> {
+    let exprs = chelis_deep::parser::parse_str(src).expect("parse Deep fixture");
     let checked = check_ir_program(&exprs).map_err(|r| {
         format!(
             "check: {:?}",
@@ -32,9 +25,8 @@ fn lower_surf(src: &str) -> Result<chelis_ir::dag::Dag, String> {
                 .collect::<Vec<_>>()
         )
     })?;
-    let checked = chelis_effects::check_program(&checked).map_err(|e| format!("effects: {e:?}"))?;
-    let checked =
-        chelis_types::check_linearity(&checked).map_err(|e| format!("linearity: {e:?}"))?;
+    let checked = chelis_effects::check_program(&checked).expect("fixture effects");
+    let checked = chelis_types::check_linearity(&checked).expect("fixture linearity");
     Ok(lower_program(&checked))
 }
 
@@ -48,72 +40,17 @@ fn lower_surf(src: &str) -> Result<chelis_ir::dag::Dag, String> {
 fn end_to_end_sum_int8_lowering_produces_verify_failure() {
     // The user-visible source is innocuous: sum a tensor of i8
     // suffixed literals.
-    let src = r#"
-        xs: tensor[3, i8] = [1i8, 2i8, 3i8]
-        out: tensor[i8] = sum(&xs, 0)
-    "#;
-    let result = lower_surf(src);
-    match result {
-        Ok(dag) => {
-            let errs = verify::verify(&dag);
-            assert!(
-                !errs.is_empty(),
-                "expected EITHER a type-check error or an IR-verify error from \
-                 sum(i8); got neither (silent-data-loss class)"
-            );
-            assert!(
-                errs.iter().any(|e| e.contains("§5.7.1")),
-                "verify error must cite §5.7.1; got: {errs:?}"
-            );
-            // Symptom: the type checker accepted sum(i8) -> i8, then
-            // lowering propagated accumulator=i8, then verify caught
-            // the spec violation. The user-facing diagnostic should be
-            // a type error per §5.7.1, not an IR-verify message.
-            panic!(
-                "spec divergence symptom: program lowers but IR verify \
-                 rejects. The type checker should have rejected this OR \
-                 should have widened the result to i32. errs={errs:?}"
-            );
-        }
-        Err(msg) => {
-            // The program failed earlier in the pipeline. Whether the
-            // failure is a type-check error or an effects/linearity
-            // error depends on the implementation; spec says it must
-            // be a type error.
-            assert!(
-                msg.contains("§5.7.1") || msg.contains("i32") || msg.contains("accumulator"),
-                "rejection must cite §5.7.1 or mention i32 widening; got: {msg}"
-            );
-        }
-    }
+    let src = include_str!(
+        "fixtures/core/tests/reduce_sum_lowering_adversarial/end_to_end_sum_int8_lowering_produces_verify_failure.deep"
+    );
+    lower_deep(src).expect_err("sum(i8) bound to i8 must be rejected before IR lowering");
 }
 
-/// Same shape for i16: sum(i16) must error with a §5.7.1 widening
-/// hint, not an internal-IR diagnostic.
+/// The i16 result binding must likewise be rejected before IR lowering.
 #[test]
 fn end_to_end_sum_int16_lowering_produces_verify_failure() {
-    let src = r#"
-        xs: tensor[3, i16] = [1i16, 2i16, 3i16]
-        out: tensor[i16] = sum(&xs, 0)
-    "#;
-    let result = lower_surf(src);
-    match result {
-        Ok(dag) => {
-            let errs = verify::verify(&dag);
-            assert!(
-                !errs.is_empty(),
-                "expected an error from sum(i16) -> i16 binding"
-            );
-            panic!(
-                "spec divergence symptom: i16 sum lowers but IR verify \
-                 rejects. errs={errs:?}"
-            );
-        }
-        Err(msg) => {
-            assert!(
-                msg.contains("§5.7.1") || msg.contains("i32") || msg.contains("accumulator"),
-                "rejection must cite §5.7.1 or mention i32 widening; got: {msg}"
-            );
-        }
-    }
+    let src = include_str!(
+        "fixtures/core/tests/reduce_sum_lowering_adversarial/end_to_end_sum_int16_lowering_produces_verify_failure.deep"
+    );
+    lower_deep(src).expect_err("sum(i16) bound to i16 must be rejected before IR lowering");
 }

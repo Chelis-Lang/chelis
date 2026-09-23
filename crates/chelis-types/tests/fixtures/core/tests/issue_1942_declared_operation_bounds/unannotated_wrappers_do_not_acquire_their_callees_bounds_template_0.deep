@@ -1,0 +1,19 @@
+(defsig {dtype_bounds: {p: float}} g (p) (t-fn {} (t-var {} p) (t-var {} p)))
+
+(def {}
+  g
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {}
+      (var {} sin)
+      (var {} x))))
+
+(defsig {dtype_bounds: {q: float}} wrap (q) (t-fn {} (t-var {} q) (t-var {} q)))
+
+(def {}
+  wrap
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {}
+      (var {} g)
+      (var {} x))))

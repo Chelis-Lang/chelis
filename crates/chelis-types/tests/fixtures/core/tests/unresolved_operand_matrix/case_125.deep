@@ -1,0 +1,12 @@
+(defsig {}
+  id_dt
+  (p)
+  (t-fn {}
+    (t-tensor {} (d-lit {} 3) (t-var {} p))
+    (t-tensor {} (d-lit {} 3) (t-var {} p))))
+
+(def {}
+  id_dt
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (var {span: "surf:48..49"} x)))

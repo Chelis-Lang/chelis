@@ -1,0 +1,30 @@
+(defsig {}
+  bad
+  (t-fn {}
+    (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 2) (d-lit {} 99) (t-prim {} f32))))
+
+(def {}
+  bad
+  (fn {}
+    (params {} (a {type: (t-var {} _)}) (b {type: (t-var {} _)}))
+    (let {span: "surf:76..187"}
+      (bind {}
+        op
+        (var {span: "surf:136..142", surf_binding_type: "explicit", type: (t-fn {} (t-adt {} List (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))) (t-prim {} i32) (t-tensor {} (d-lit {} 2) (d-name {} *) (t-prim {} f32)))} concat))
+      (let {}
+        (bind {}
+          nested
+          (tuple-get {span: "surf:152..164"}
+            (tuple {span: "surf:152..162"}
+              (var {span: "surf:153..155"} op)
+              (lit {span: "surf:157..161", surf_literal_style: "explicit", type: (t-prim {} i32)} 1))
+            (lit {type: (t-prim {} i32)} 0)))
+        (app {span: "surf:165..185"}
+          (var {span: "surf:165..171"} nested)
+          (app {span: "surf:172..178"}
+            (var {} Cons)
+            (var {span: "surf:173..174"} a)
+            (app {} (var {} Cons) (var {span: "surf:176..177"} b) (var {} Nil)))
+          (lit {span: "surf:180..184", surf_literal_style: "explicit", type: (t-prim {} i32)} 1))))))

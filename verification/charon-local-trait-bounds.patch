@@ -1,0 +1,466 @@
+--- a/rustc_trait_elaboration/src/elaboration.rs
++++ b/rustc_trait_elaboration/src/elaboration.rs
+@@ -156,9 +156,26 @@
+         for mut candidate in candidates {
+             // Normalize and erase all lifetimes.
+             candidate.pred = normalize_bound_val(tcx, self.typing_env, candidate.pred);
+-            if let Entry::Vacant(entry) = self.candidates.entry(candidate.pred) {
+-                entry.insert(candidate.clone());
+-                new_candidates.push(candidate);
++            let priority = |candidate: &Candidate<'tcx>| {
++                (
++                    candidate.path.len(),
++                    matches!(candidate.origin.id, ItemPredicateId::TraitSelf),
++                )
++            };
++            match self.candidates.entry(candidate.pred) {
++                Entry::Vacant(entry) => {
++                    entry.insert(candidate.clone());
++                    new_candidates.push(candidate);
++                }
++                Entry::Occupied(mut entry) if priority(&candidate) < priority(entry.get()) => {
++                    // In particular, prefer an explicit method bound over `Self: Trait`.
++                    // Its associated-type equalities must stay on the method's dictionary:
++                    // substituting the implicit Self clause with an impl would otherwise
++                    // turn them into equalities on that impl instead.
++                    entry.insert(candidate.clone());
++                    new_candidates.push(candidate);
++                }
++                Entry::Occupied(_) => {}
+             }
+         }
+         if !new_candidates.is_empty() {
+@@ -299,17 +316,35 @@
+         };
+ 
+         let impl_source = shallow_resolve_trait_ref(tcx, self.typing_env.param_env, erased_tref);
++        let param_candidate = match &impl_source {
++            Ok(ImplSource::Param(_)) => self.resolve_local(erased_tref.upcast(self.tcx), warn)?,
++            _ => None,
++        };
+         let atom = match impl_source {
+             Ok(ImplSource::UserDefined(ImplSourceUserDefinedData {
+                 impl_def_id,
+                 args: generics,
+                 ..
+-            })) => ImplExprAtom::Concrete {
+-                def_id: impl_def_id,
+-                generics,
+-            },
+-            Ok(ImplSource::Param(_)) => {
+-                match self.resolve_local(erased_tref.upcast(self.tcx), warn)? {
++            })) => {
++                // A local dictionary can carry a stronger associated-type equality than
++                // this concrete impl. Prefer it without overriding rustc's builtin
++                // implementations, which also normalize function and closure types.
++                match self.candidates.get(&erased_tref) {
++                    Some(candidate) => candidate
++                        .clone()
++                        .into_impl_expr(tcx, self.implicit_self_clause),
++                    None => ImplExprAtom::Concrete {
++                        def_id: impl_def_id,
++                        generics,
++                    },
++                }
++            }
++            // Preserve explicit runtime dictionaries. Only a missing const
++            // Destruct clause falls through to the virtual runtime model.
++            Ok(ImplSource::Param(_))
++                if trait_def_id != destruct_trait || param_candidate.is_some() =>
++            {
++                match param_candidate {
+                     Some(candidate) => candidate.into_impl_expr(tcx, self.implicit_self_clause),
+                     None => {
+                         let msg = format!(
+@@ -320,7 +355,7 @@
+                 }
+             }
+             Ok(ImplSource::Builtin(BuiltinImplSource::Object { .. }, _)) => ImplExprAtom::Dyn,
+-            Ok(ImplSource::Builtin(_, _)) => {
++            Ok(ImplSource::Builtin(_, _)) | Ok(ImplSource::Param(_)) => {
+                 // Resolve the predicates implied by the trait.
+                 // If we wanted to not skip this binder, we'd have to instantiate the bound
+                 // regions, solve, then wrap the result in a binder. And track higher-kinded
+--- a/src/transform/normalize/expand_associated_types.rs
++++ b/src/transform/normalize/expand_associated_types.rs
+@@ -67,9 +67,9 @@
+ //! Limitations:
+ //! - we don't track bound lifetimes in quantified clauses properly (<https://github.com/AeneasVerif/charon/issues/534>).
+ //! - type aliases don't have the correct clauses in scope (<https://github.com/AeneasVerif/charon/issues/531>).
+-//! - we don't take into account unicity of trait implementations. This means we won't detect type
+-//!   equalities due to the same trait predicate appearing twice, or a trait predicate coinciding
+-//!   with an existing trait impl. See the `dictionary_passing_style_woes.rs` test file.
++//! - we only use unicity of trait implementations for identical predicates in the same binder.
++//!   We don't detect equalities between different parent-clause paths or between a local predicate
++//!   and an existing trait impl. See the `dictionary_passing_style_woes.rs` test file.
+ use derive_generic_visitor::*;
+ use itertools::Itertools;
+ use std::collections::{HashMap, HashSet};
+@@ -360,6 +360,11 @@
+     pub struct TypeConstraintSet {
+         /// For each base clause, a sub-trie of type constraints.
+         clauses: HashMap<BaseClause, TypeConstraintSetInner>,
++        /// Equivalent local dictionaries in this binder, mapped to their first occurrence.
++        /// Keep the actual constraints on their original paths: in particular, a method's
++        /// explicit dictionary must not become its implicit Self dictionary when defaults
++        /// are instantiated with a concrete impl.
++        clause_aliases: HashMap<BaseClause, BaseClause>,
+     }
+ 
+     /// A set of `TraitTypeConstraint`s that apply to a trait.
+@@ -373,11 +378,21 @@
+     }
+ 
+     impl TypeConstraintSet {
+-        pub fn from_constraints(
+-            constraints: &IndexVec<TraitTypeConstraintId, RegionBinder<TraitTypeConstraint>>,
+-        ) -> Self {
++        pub fn from_params(params: &GenericParams) -> Self {
+             let mut this = TypeConstraintSet::default();
+-            for (i, c) in constraints.iter_enumerated() {
++            let mut representatives = HashMap::new();
++            for clause in &params.trait_clauses {
++                let base = TraitRefPath::local_clause(clause.clause_id).base;
++                // Compare the complete quantified predicate, including all type, const,
++                // region and dictionary arguments. Both predicates belong to `params`,
++                // so their de Bruijn indices refer to the same enclosing binders.
++                // In method bodies this includes the implicit Self dictionary (clause 0).
++                let representative = *representatives.entry(&clause.trait_).or_insert(base);
++                if representative != base {
++                    this.clause_aliases.insert(base, representative);
++                }
++            }
++            for (i, c) in params.trait_type_constraints.iter_enumerated() {
+                 this.insert_type_constraint(i, c);
+             }
+             this
+@@ -420,6 +435,18 @@
+             self.insert_inner(&path, Some(cid), ty);
+         }
+ 
++        fn representative(&self, base: BaseClause) -> BaseClause {
++            self.clause_aliases.get(&base).copied().unwrap_or(base)
++        }
++
++        /// Coherence identifies projections on identical dictionaries, but not the
++        /// dictionaries themselves. Keep their paths intact for later substitutions.
++        pub fn equivalent_paths(&self, lhs: &AssocTypePath, rhs: &AssocTypePath) -> bool {
++            self.representative(lhs.tref.base) == self.representative(rhs.tref.base)
++                && lhs.tref.parent_path == rhs.tref.parent_path
++                && lhs.type_name == rhs.type_name
++        }
++
+         /// Find the entry at that path from the trie, if it exists. Also returns the type
+         /// constraint that gave us that type.
+         pub fn find_ty_and_used_constraint(
+@@ -431,13 +458,25 @@
+                 // the item.
+                 assert!(var.bound_at_depth(DeBruijnId::zero()).is_some());
+             }
+-            let mut trie = self.clauses.get(&path.tref.base)?;
+-            for id in &path.tref.parent_path {
+-                trie = trie.parent_clauses.get(*id)?;
+-            }
+-            trie.assoc_tys
+-                .get(&path.type_name)
+-                .map(|(id, ty)| (*id, ty))
++            let find_on = |base| {
++                let mut trie = self.clauses.get(&base)?;
++                for id in &path.tref.parent_path {
++                    trie = trie.parent_clauses.get(*id)?;
++                }
++                trie.assoc_tys
++                    .get(&path.type_name)
++                    .map(|(id, ty)| (*id, ty))
++            };
++            // Prefer the constraint on the requested dictionary. If it has none, use
++            // one on an equivalent predicate without moving or discarding the original.
++            let representative = self.representative(path.tref.base);
++            find_on(path.tref.base)
++                .or_else(|| find_on(representative))
++                .or_else(|| {
++                    self.clause_aliases.iter().find_map(|(&alias, &target)| {
++                        (target == representative).then(|| find_on(alias)).flatten()
++                    })
++                })
+         }
+         /// Find the entry at that path from the trie, if it exists.
+         pub fn find(&self, path: &AssocTypePath) -> Option<&Ty> {
+@@ -569,7 +608,11 @@
+                 self.remove_constraints.insert(cstr_id);
+             }
+             // The path is already in the set, no need to replace it.
+-        } else {
++        } else if !self
++            .required_extra_paths
++            .iter()
++            .any(|other| self.type_constraints.equivalent_paths(&path, other))
++        {
+             // We don't have a value for this associated type; we add a new type parameter
+             // to supply it.
+             self.required_extra_paths.push(path);
+@@ -669,8 +712,7 @@
+ 
+     /// Compute the initial constraint set for this item.
+     fn compute_constraint_set(&mut self, params: &GenericParams) -> TypeConstraintSet {
+-        let mut type_constraints =
+-            TypeConstraintSet::from_constraints(&params.trait_type_constraints);
++        let mut type_constraints = TypeConstraintSet::from_params(params);
+         // Clauses may provide more type constraints.
+         for clause in &params.trait_clauses {
+             let tref = clause.identity_tref();
+@@ -1055,8 +1097,7 @@
+     }
+ 
+     fn compute_constraints_for_binder<T>(&self, binder: &Binder<T>) -> TypeConstraintSet {
+-        let mut type_constraints =
+-            TypeConstraintSet::from_constraints(&binder.params.trait_type_constraints);
++        let mut type_constraints = TypeConstraintSet::from_params(&binder.params);
+         // Clauses may provide more type constraints.
+         for clause in &binder.params.trait_clauses {
+             let tref = clause.identity_tref();
+--- a/src/transform/mod.rs
++++ b/src/transform/mod.rs
+@@ -95,9 +95,6 @@
+     NonBody(&simplify_output::lift_associated_item_clauses::Transform),
+     // Hide the `A` type parameter on standard library containers (`Box`, `Vec`, etc).
+     NonBody(&simplify_output::hide_allocator_param::Transform),
+-    // # Micro-pass: remove the explicit `Self: Trait` clause of methods/assoc const declaration
+-    // items if they're not used. This simplifies the graph of dependencies between definitions.
+-    NonBody(&simplify_output::remove_unused_self_clause::Transform),
+     // Transform Drops into Calls to drop_in_place.
+     UnstructuredBody(&normalize::desugar_drops::Transform),
+     // # Micro-pass: whenever we reference a trait method on a known type, refer to the method
+@@ -110,6 +107,11 @@
+     // Change trait associated types to be type parameters instead. See the module for details.
+     // This also normalizes any use of an associated type that we can resolve.
+     NonBody(&normalize::expand_associated_types::Transform),
++    // Associated-type expansion still needs the implicit Self dictionary, including for
++    // `ItemSource::TraitDecl`, and can introduce new uses of it. Only remove it afterwards.
++    // # Micro-pass: remove the explicit `Self: Trait` clause of methods/assoc const declaration
++    // items if they're not used. This simplifies the graph of dependencies between definitions.
++    NonBody(&simplify_output::remove_unused_self_clause::Transform),
+     // `--remove-adt-clauses`: Remove all trait clauses from type declarations.
+     NonBody(&simplify_output::remove_adt_clauses::Transform),
+ ];
+--- a/tests/ui/iterator.out
++++ b/tests/ui/iterator.out
+@@ -639,9 +639,9 @@
+     fn min_by_key<B, F, [@TraitClause0_1]: Sized<B>, [@TraitClause1_1]: Sized<F>, [@TraitClause2_1]: Ord<B>, [@TraitClause3_1]: Sized<Self>, [@TraitClause4_1]: for<'_0_2> FnMut<F, (&'_0_2 Self::Item,)>, for<'_0_2> @TraitClause4_1::parent_clause1::Output = B> = core::iter::traits::iterator::Iterator::min_by_key<Self, B, F>[Self, @TraitClause0_1, @TraitClause1_1, @TraitClause2_1, @TraitClause3_1, @TraitClause4_1]
+     fn min_by<F, [@TraitClause0_1]: Sized<F>, [@TraitClause1_1]: Sized<Self>, [@TraitClause2_1]: for<'_0_2, '_1_2> FnMut<F, (&'_0_2 Self::Item, &'_1_2 Self::Item)>, for<'_0_2, '_1_2> @TraitClause2_1::parent_clause1::Output = Ordering> = core::iter::traits::iterator::Iterator::min_by<Self, F>[Self, @TraitClause0_1, @TraitClause1_1, @TraitClause2_1]
+     fn rev<[@TraitClause0_1]: Sized<Self>, [@TraitClause1_1]: DoubleEndedIterator<Self>> = core::iter::traits::iterator::Iterator::rev<Self>[Self, @TraitClause0_1, @TraitClause1_1]
+-    fn unzip<A, B, FromA, FromB, [@TraitClause0_1]: Sized<A>, [@TraitClause1_1]: Sized<B>, [@TraitClause2_1]: Sized<FromA>, [@TraitClause3_1]: Sized<FromB>, [@TraitClause4_1]: Default<FromA>, [@TraitClause5_1]: Extend<FromA, A>, [@TraitClause6_1]: Default<FromB>, [@TraitClause7_1]: Extend<FromB, B>, [@TraitClause8_1]: Sized<Self>, [@TraitClause9_1]: Iterator<Self>, Self::Item = (A, B)> = core::iter::traits::iterator::Iterator::unzip<Self, A, B, FromA, FromB>[Self, @TraitClause0_1, @TraitClause1_1, @TraitClause2_1, @TraitClause3_1, @TraitClause4_1, @TraitClause5_1, @TraitClause6_1, @TraitClause7_1, @TraitClause8_1, @TraitClause9_1]
+-    fn copied<'a, T, [@TraitClause0_1]: Sized<T>, [@TraitClause1_1]: Copy<T>, [@TraitClause2_1]: Sized<Self>, [@TraitClause3_1]: Iterator<Self>, T : 'a, Self::Item = &'a T> = core::iter::traits::iterator::Iterator::copied<'a, Self, T>[Self, @TraitClause0_1, @TraitClause1_1, @TraitClause2_1, @TraitClause3_1]
+-    fn cloned<'a, T, [@TraitClause0_1]: Sized<T>, [@TraitClause1_1]: Clone<T>, [@TraitClause2_1]: Sized<Self>, [@TraitClause3_1]: Iterator<Self>, T : 'a, Self::Item = &'a T> = core::iter::traits::iterator::Iterator::cloned<'a, Self, T>[Self, @TraitClause0_1, @TraitClause1_1, @TraitClause2_1, @TraitClause3_1]
++    fn unzip<A, B, FromA, FromB, [@TraitClause0_1]: Sized<A>, [@TraitClause1_1]: Sized<B>, [@TraitClause2_1]: Sized<FromA>, [@TraitClause3_1]: Sized<FromB>, [@TraitClause4_1]: Default<FromA>, [@TraitClause5_1]: Extend<FromA, A>, [@TraitClause6_1]: Default<FromB>, [@TraitClause7_1]: Extend<FromB, B>, [@TraitClause8_1]: Sized<Self>, [@TraitClause9_1]: Iterator<Self>, @TraitClause9_1::Item = (A, B)> = core::iter::traits::iterator::Iterator::unzip<Self, A, B, FromA, FromB>[Self, @TraitClause0_1, @TraitClause1_1, @TraitClause2_1, @TraitClause3_1, @TraitClause4_1, @TraitClause5_1, @TraitClause6_1, @TraitClause7_1, @TraitClause8_1, @TraitClause9_1]
++    fn copied<'a, T, [@TraitClause0_1]: Sized<T>, [@TraitClause1_1]: Copy<T>, [@TraitClause2_1]: Sized<Self>, [@TraitClause3_1]: Iterator<Self>, T : 'a, @TraitClause3_1::Item = &'a T> = core::iter::traits::iterator::Iterator::copied<'a, Self, T>[Self, @TraitClause0_1, @TraitClause1_1, @TraitClause2_1, @TraitClause3_1]
++    fn cloned<'a, T, [@TraitClause0_1]: Sized<T>, [@TraitClause1_1]: Clone<T>, [@TraitClause2_1]: Sized<Self>, [@TraitClause3_1]: Iterator<Self>, T : 'a, @TraitClause3_1::Item = &'a T> = core::iter::traits::iterator::Iterator::cloned<'a, Self, T>[Self, @TraitClause0_1, @TraitClause1_1, @TraitClause2_1, @TraitClause3_1]
+     fn cycle<[@TraitClause0_1]: Sized<Self>, [@TraitClause1_1]: Clone<Self>> = core::iter::traits::iterator::Iterator::cycle<Self>[Self, @TraitClause0_1, @TraitClause1_1]
+     fn array_chunks<const N : usize, [@TraitClause0_1]: Sized<Self>> = core::iter::traits::iterator::Iterator::array_chunks<Self, N>[Self, @TraitClause0_1]
+     fn sum<S, [@TraitClause0_1]: Sized<S>, [@TraitClause1_1]: Sized<Self>, [@TraitClause2_1]: Sum<S, Self::Item>> = core::iter::traits::iterator::Iterator::sum<Self, S>[Self, @TraitClause0_1, @TraitClause1_1, @TraitClause2_1]
+@@ -914,7 +914,7 @@
+     [@TraitClause3]: Sized<IntoIter<T, N>[@TraitClause0]>,
+     [@TraitClause4]: Iterator<IntoIter<T, N>[@TraitClause0]>,
+     T : 'a,
+-    {impl Iterator for IntoIter<T, N>[@TraitClause0]}<T, N>[@TraitClause0]::Item = &'a T,
++    @TraitClause4::Item = &'a T,
+ = <opaque>
+ 
+ // Full name: core::array::iter::{impl Iterator for IntoIter<T, N>[@TraitClause0]}::copied
+@@ -927,7 +927,7 @@
+     [@TraitClause3]: Sized<IntoIter<T, N>[@TraitClause0]>,
+     [@TraitClause4]: Iterator<IntoIter<T, N>[@TraitClause0]>,
+     T : 'a,
+-    {impl Iterator for IntoIter<T, N>[@TraitClause0]}<T, N>[@TraitClause0]::Item = &'a T,
++    @TraitClause4::Item = &'a T,
+ = <opaque>
+ 
+ // Full name: core::array::iter::{impl Iterator for IntoIter<T, N>[@TraitClause0]}::unzip
+@@ -944,7 +944,7 @@
+     [@TraitClause8]: Extend<FromB, B>,
+     [@TraitClause9]: Sized<IntoIter<T, N>[@TraitClause0]>,
+     [@TraitClause10]: Iterator<IntoIter<T, N>[@TraitClause0]>,
+-    {impl Iterator for IntoIter<T, N>[@TraitClause0]}<T, N>[@TraitClause0]::Item = (A, B),
++    @TraitClause10::Item = (A, B),
+ = <opaque>
+ 
+ // Full name: core::array::iter::{impl Iterator for IntoIter<T, N>[@TraitClause0]}::rev
+@@ -1487,9 +1487,9 @@
+     fn min_by_key<B, F, [@TraitClause0_1]: Sized<B>, [@TraitClause1_1]: Sized<F>, [@TraitClause2_1]: Ord<B>, [@TraitClause3_1]: Sized<IntoIter<T, N>[@TraitClause0]>, [@TraitClause4_1]: for<'_0_2> FnMut<F, (&'_0_2 T,)>, for<'_0_2> @TraitClause4_1::parent_clause1::Output = B> = {impl Iterator for IntoIter<T, N>[@TraitClause0]}::min_by_key<T, B, F, N>[@TraitClause0, @TraitClause0_1, @TraitClause1_1, @TraitClause2_1, @TraitClause3_1, @TraitClause4_1]
+     fn min_by<F, [@TraitClause0_1]: Sized<F>, [@TraitClause1_1]: Sized<IntoIter<T, N>[@TraitClause0]>, [@TraitClause2_1]: for<'_0_2, '_1_2> FnMut<F, (&'_0_2 T, &'_1_2 T)>, for<'_0_2, '_1_2> @TraitClause2_1::parent_clause1::Output = Ordering> = {impl Iterator for IntoIter<T, N>[@TraitClause0]}::min_by<T, F, N>[@TraitClause0, @TraitClause0_1, @TraitClause1_1, @TraitClause2_1]
+     fn rev<[@TraitClause0_1]: Sized<IntoIter<T, N>[@TraitClause0]>, [@TraitClause1_1]: DoubleEndedIterator<IntoIter<T, N>[@TraitClause0]>> = {impl Iterator for IntoIter<T, N>[@TraitClause0]}::rev<T, N>[@TraitClause0, @TraitClause0_1, @TraitClause1_1]
+-    fn unzip<A, B, FromA, FromB, [@TraitClause0_1]: Sized<A>, [@TraitClause1_1]: Sized<B>, [@TraitClause2_1]: Sized<FromA>, [@TraitClause3_1]: Sized<FromB>, [@TraitClause4_1]: Default<FromA>, [@TraitClause5_1]: Extend<FromA, A>, [@TraitClause6_1]: Default<FromB>, [@TraitClause7_1]: Extend<FromB, B>, [@TraitClause8_1]: Sized<IntoIter<T, N>[@TraitClause0]>, [@TraitClause9_1]: Iterator<IntoIter<T, N>[@TraitClause0]>, {impl Iterator for IntoIter<T, N>[@TraitClause0]}<T, N>[@TraitClause0]::Item = (A, B)> = {impl Iterator for IntoIter<T, N>[@TraitClause0]}::unzip<T, A, B, FromA, FromB, N>[@TraitClause0, @TraitClause0_1, @TraitClause1_1, @TraitClause2_1, @TraitClause3_1, @TraitClause4_1, @TraitClause5_1, @TraitClause6_1, @TraitClause7_1, @TraitClause8_1, @TraitClause9_1]
+-    fn copied<'a, T, [@TraitClause0_1]: Sized<T>, [@TraitClause1_1]: Copy<T>, [@TraitClause2_1]: Sized<IntoIter<T, N>[@TraitClause0]>, [@TraitClause3_1]: Iterator<IntoIter<T, N>[@TraitClause0]>, T : 'a, {impl Iterator for IntoIter<T, N>[@TraitClause0]}<T, N>[@TraitClause0]::Item = &'a T> = {impl Iterator for IntoIter<T, N>[@TraitClause0]}::copied<'a, T, T, N>[@TraitClause0, @TraitClause0_1, @TraitClause1_1, @TraitClause2_1, @TraitClause3_1]
+-    fn cloned<'a, T, [@TraitClause0_1]: Sized<T>, [@TraitClause1_1]: Clone<T>, [@TraitClause2_1]: Sized<IntoIter<T, N>[@TraitClause0]>, [@TraitClause3_1]: Iterator<IntoIter<T, N>[@TraitClause0]>, T : 'a, {impl Iterator for IntoIter<T, N>[@TraitClause0]}<T, N>[@TraitClause0]::Item = &'a T> = {impl Iterator for IntoIter<T, N>[@TraitClause0]}::cloned<'a, T, T, N>[@TraitClause0, @TraitClause0_1, @TraitClause1_1, @TraitClause2_1, @TraitClause3_1]
++    fn unzip<A, B, FromA, FromB, [@TraitClause0_1]: Sized<A>, [@TraitClause1_1]: Sized<B>, [@TraitClause2_1]: Sized<FromA>, [@TraitClause3_1]: Sized<FromB>, [@TraitClause4_1]: Default<FromA>, [@TraitClause5_1]: Extend<FromA, A>, [@TraitClause6_1]: Default<FromB>, [@TraitClause7_1]: Extend<FromB, B>, [@TraitClause8_1]: Sized<IntoIter<T, N>[@TraitClause0]>, [@TraitClause9_1]: Iterator<IntoIter<T, N>[@TraitClause0]>, @TraitClause9_1::Item = (A, B)> = {impl Iterator for IntoIter<T, N>[@TraitClause0]}::unzip<T, A, B, FromA, FromB, N>[@TraitClause0, @TraitClause0_1, @TraitClause1_1, @TraitClause2_1, @TraitClause3_1, @TraitClause4_1, @TraitClause5_1, @TraitClause6_1, @TraitClause7_1, @TraitClause8_1, @TraitClause9_1]
++    fn copied<'a, T, [@TraitClause0_1]: Sized<T>, [@TraitClause1_1]: Copy<T>, [@TraitClause2_1]: Sized<IntoIter<T, N>[@TraitClause0]>, [@TraitClause3_1]: Iterator<IntoIter<T, N>[@TraitClause0]>, T : 'a, @TraitClause3_1::Item = &'a T> = {impl Iterator for IntoIter<T, N>[@TraitClause0]}::copied<'a, T, T, N>[@TraitClause0, @TraitClause0_1, @TraitClause1_1, @TraitClause2_1, @TraitClause3_1]
++    fn cloned<'a, T, [@TraitClause0_1]: Sized<T>, [@TraitClause1_1]: Clone<T>, [@TraitClause2_1]: Sized<IntoIter<T, N>[@TraitClause0]>, [@TraitClause3_1]: Iterator<IntoIter<T, N>[@TraitClause0]>, T : 'a, @TraitClause3_1::Item = &'a T> = {impl Iterator for IntoIter<T, N>[@TraitClause0]}::cloned<'a, T, T, N>[@TraitClause0, @TraitClause0_1, @TraitClause1_1, @TraitClause2_1, @TraitClause3_1]
+     fn cycle<[@TraitClause0_1]: Sized<IntoIter<T, N>[@TraitClause0]>, [@TraitClause1_1]: Clone<IntoIter<T, N>[@TraitClause0]>> = {impl Iterator for IntoIter<T, N>[@TraitClause0]}::cycle<T, N>[@TraitClause0, @TraitClause0_1, @TraitClause1_1]
+     fn array_chunks<const N : usize, [@TraitClause0_1]: Sized<IntoIter<T, N>[@TraitClause0]>> = {impl Iterator for IntoIter<T, N>[@TraitClause0]}::array_chunks<T, N, N>[@TraitClause0, @TraitClause0_1]
+     fn sum<S, [@TraitClause0_1]: Sized<S>, [@TraitClause1_1]: Sized<IntoIter<T, N>[@TraitClause0]>, [@TraitClause2_1]: Sum<S, T>> = {impl Iterator for IntoIter<T, N>[@TraitClause0]}::sum<T, S, N>[@TraitClause0, @TraitClause0_1, @TraitClause1_1, @TraitClause2_1]
+@@ -2273,7 +2273,7 @@
+     [@TraitClause8]: Extend<FromB, B>,
+     [@TraitClause9]: Sized<Self>,
+     [@TraitClause10]: Iterator<Self>,
+-    @TraitClause0::Item = (A, B),
++    @TraitClause10::Item = (A, B),
+ = <opaque>
+ 
+ #[lang_item("iter_copied")]
+@@ -2285,7 +2285,7 @@
+     [@TraitClause3]: Sized<Self>,
+     [@TraitClause4]: Iterator<Self>,
+     T : 'a,
+-    @TraitClause0::Item = &'a T,
++    @TraitClause4::Item = &'a T,
+ = <opaque>
+ 
+ #[lang_item("iter_cloned")]
+@@ -2297,7 +2297,7 @@
+     [@TraitClause3]: Sized<Self>,
+     [@TraitClause4]: Iterator<Self>,
+     T : 'a,
+-    @TraitClause0::Item = &'a T,
++    @TraitClause4::Item = &'a T,
+ = <opaque>
+ 
+ pub fn core::iter::traits::iterator::Iterator::cycle<Self>(_1: Self) -> Cycle<Self>[@TraitClause1]
+@@ -2840,7 +2840,7 @@
+     [@TraitClause3]: Sized<Iter<'a, T>[@TraitClause0]>,
+     [@TraitClause4]: Iterator<Iter<'a, T>[@TraitClause0]>,
+     T : 'a,
+-    {impl Iterator for Iter<'a, T>[@TraitClause0]}<'a, T>[@TraitClause0]::Item = &'a T,
++    @TraitClause4::Item = &'a T,
+ = <opaque>
+ 
+ // Full name: core::slice::iter::{impl Iterator for Iter<'a, T>[@TraitClause0]}::copied
+@@ -2853,7 +2853,7 @@
+     [@TraitClause3]: Sized<Iter<'a, T>[@TraitClause0]>,
+     [@TraitClause4]: Iterator<Iter<'a, T>[@TraitClause0]>,
+     T : 'a,
+-    {impl Iterator for Iter<'a, T>[@TraitClause0]}<'a, T>[@TraitClause0]::Item = &'a T,
++    @TraitClause4::Item = &'a T,
+ = <opaque>
+ 
+ // Full name: core::slice::iter::{impl Iterator for Iter<'a, T>[@TraitClause0]}::unzip
+@@ -2870,7 +2870,7 @@
+     [@TraitClause8]: Extend<FromB, B>,
+     [@TraitClause9]: Sized<Iter<'a, T>[@TraitClause0]>,
+     [@TraitClause10]: Iterator<Iter<'a, T>[@TraitClause0]>,
+-    {impl Iterator for Iter<'a, T>[@TraitClause0]}<'a, T>[@TraitClause0]::Item = (A, B),
++    @TraitClause10::Item = (A, B),
+ = <opaque>
+ 
+ // Full name: core::slice::iter::{impl Iterator for Iter<'a, T>[@TraitClause0]}::rev
+@@ -3341,9 +3341,9 @@
+     fn min_by_key<B, F, [@TraitClause0_1]: Sized<B>, [@TraitClause1_1]: Sized<F>, [@TraitClause2_1]: Ord<B>, [@TraitClause3_1]: Sized<Iter<'a, T>[@TraitClause0]>, [@TraitClause4_1]: for<'_0_2> FnMut<F, (&'_0_2 &'a T,)>, for<'_0_2> @TraitClause4_1::parent_clause1::Output = B> = {impl Iterator for Iter<'a, T>[@TraitClause0]}::min_by_key<'a, T, B, F>[@TraitClause0, @TraitClause0_1, @TraitClause1_1, @TraitClause2_1, @TraitClause3_1, @TraitClause4_1]
+     fn min_by<F, [@TraitClause0_1]: Sized<F>, [@TraitClause1_1]: Sized<Iter<'a, T>[@TraitClause0]>, [@TraitClause2_1]: for<'_0_2, '_1_2> FnMut<F, (&'_0_2 &'a T, &'_1_2 &'a T)>, for<'_0_2, '_1_2> @TraitClause2_1::parent_clause1::Output = Ordering> = {impl Iterator for Iter<'a, T>[@TraitClause0]}::min_by<'a, T, F>[@TraitClause0, @TraitClause0_1, @TraitClause1_1, @TraitClause2_1]
+     fn rev<[@TraitClause0_1]: Sized<Iter<'a, T>[@TraitClause0]>, [@TraitClause1_1]: DoubleEndedIterator<Iter<'a, T>[@TraitClause0]>> = {impl Iterator for Iter<'a, T>[@TraitClause0]}::rev<'a, T>[@TraitClause0, @TraitClause0_1, @TraitClause1_1]
+-    fn unzip<A, B, FromA, FromB, [@TraitClause0_1]: Sized<A>, [@TraitClause1_1]: Sized<B>, [@TraitClause2_1]: Sized<FromA>, [@TraitClause3_1]: Sized<FromB>, [@TraitClause4_1]: Default<FromA>, [@TraitClause5_1]: Extend<FromA, A>, [@TraitClause6_1]: Default<FromB>, [@TraitClause7_1]: Extend<FromB, B>, [@TraitClause8_1]: Sized<Iter<'a, T>[@TraitClause0]>, [@TraitClause9_1]: Iterator<Iter<'a, T>[@TraitClause0]>, {impl Iterator for Iter<'a, T>[@TraitClause0]}<'a, T>[@TraitClause0]::Item = (A, B)> = {impl Iterator for Iter<'a, T>[@TraitClause0]}::unzip<'a, T, A, B, FromA, FromB>[@TraitClause0, @TraitClause0_1, @TraitClause1_1, @TraitClause2_1, @TraitClause3_1, @TraitClause4_1, @TraitClause5_1, @TraitClause6_1, @TraitClause7_1, @TraitClause8_1, @TraitClause9_1]
+-    fn copied<'a, T, [@TraitClause0_1]: Sized<T>, [@TraitClause1_1]: Copy<T>, [@TraitClause2_1]: Sized<Iter<'a, T>[@TraitClause0]>, [@TraitClause3_1]: Iterator<Iter<'a, T>[@TraitClause0]>, T : 'a, {impl Iterator for Iter<'a, T>[@TraitClause0]}<'a, T>[@TraitClause0]::Item = &'a T> = {impl Iterator for Iter<'a, T>[@TraitClause0]}::copied<'a, 'a, T, T>[@TraitClause0, @TraitClause0_1, @TraitClause1_1, @TraitClause2_1, @TraitClause3_1]
+-    fn cloned<'a, T, [@TraitClause0_1]: Sized<T>, [@TraitClause1_1]: Clone<T>, [@TraitClause2_1]: Sized<Iter<'a, T>[@TraitClause0]>, [@TraitClause3_1]: Iterator<Iter<'a, T>[@TraitClause0]>, T : 'a, {impl Iterator for Iter<'a, T>[@TraitClause0]}<'a, T>[@TraitClause0]::Item = &'a T> = {impl Iterator for Iter<'a, T>[@TraitClause0]}::cloned<'a, 'a, T, T>[@TraitClause0, @TraitClause0_1, @TraitClause1_1, @TraitClause2_1, @TraitClause3_1]
++    fn unzip<A, B, FromA, FromB, [@TraitClause0_1]: Sized<A>, [@TraitClause1_1]: Sized<B>, [@TraitClause2_1]: Sized<FromA>, [@TraitClause3_1]: Sized<FromB>, [@TraitClause4_1]: Default<FromA>, [@TraitClause5_1]: Extend<FromA, A>, [@TraitClause6_1]: Default<FromB>, [@TraitClause7_1]: Extend<FromB, B>, [@TraitClause8_1]: Sized<Iter<'a, T>[@TraitClause0]>, [@TraitClause9_1]: Iterator<Iter<'a, T>[@TraitClause0]>, @TraitClause9_1::Item = (A, B)> = {impl Iterator for Iter<'a, T>[@TraitClause0]}::unzip<'a, T, A, B, FromA, FromB>[@TraitClause0, @TraitClause0_1, @TraitClause1_1, @TraitClause2_1, @TraitClause3_1, @TraitClause4_1, @TraitClause5_1, @TraitClause6_1, @TraitClause7_1, @TraitClause8_1, @TraitClause9_1]
++    fn copied<'a, T, [@TraitClause0_1]: Sized<T>, [@TraitClause1_1]: Copy<T>, [@TraitClause2_1]: Sized<Iter<'a, T>[@TraitClause0]>, [@TraitClause3_1]: Iterator<Iter<'a, T>[@TraitClause0]>, T : 'a, @TraitClause3_1::Item = &'a T> = {impl Iterator for Iter<'a, T>[@TraitClause0]}::copied<'a, 'a, T, T>[@TraitClause0, @TraitClause0_1, @TraitClause1_1, @TraitClause2_1, @TraitClause3_1]
++    fn cloned<'a, T, [@TraitClause0_1]: Sized<T>, [@TraitClause1_1]: Clone<T>, [@TraitClause2_1]: Sized<Iter<'a, T>[@TraitClause0]>, [@TraitClause3_1]: Iterator<Iter<'a, T>[@TraitClause0]>, T : 'a, @TraitClause3_1::Item = &'a T> = {impl Iterator for Iter<'a, T>[@TraitClause0]}::cloned<'a, 'a, T, T>[@TraitClause0, @TraitClause0_1, @TraitClause1_1, @TraitClause2_1, @TraitClause3_1]
+     fn cycle<[@TraitClause0_1]: Sized<Iter<'a, T>[@TraitClause0]>, [@TraitClause1_1]: Clone<Iter<'a, T>[@TraitClause0]>> = {impl Iterator for Iter<'a, T>[@TraitClause0]}::cycle<'a, T>[@TraitClause0, @TraitClause0_1, @TraitClause1_1]
+     fn array_chunks<const N : usize, [@TraitClause0_1]: Sized<Iter<'a, T>[@TraitClause0]>> = {impl Iterator for Iter<'a, T>[@TraitClause0]}::array_chunks<'a, T, N>[@TraitClause0, @TraitClause0_1]
+     fn sum<S, [@TraitClause0_1]: Sized<S>, [@TraitClause1_1]: Sized<Iter<'a, T>[@TraitClause0]>, [@TraitClause2_1]: Sum<S, &'a T>> = {impl Iterator for Iter<'a, T>[@TraitClause0]}::sum<'a, T, S>[@TraitClause0, @TraitClause0_1, @TraitClause1_1, @TraitClause2_1]
+@@ -3599,7 +3599,7 @@
+     [@TraitClause3]: Sized<Chunks<'a, T>[@TraitClause0]>,
+     [@TraitClause4]: Iterator<Chunks<'a, T>[@TraitClause0]>,
+     T : 'a,
+-    {impl Iterator for Chunks<'a, T>[@TraitClause0]}<'a, T>[@TraitClause0]::Item = &'a T,
++    @TraitClause4::Item = &'a T,
+ = <opaque>
+ 
+ // Full name: core::slice::iter::{impl Iterator for Chunks<'a, T>[@TraitClause0]}::copied
+@@ -3612,7 +3612,7 @@
+     [@TraitClause3]: Sized<Chunks<'a, T>[@TraitClause0]>,
+     [@TraitClause4]: Iterator<Chunks<'a, T>[@TraitClause0]>,
+     T : 'a,
+-    {impl Iterator for Chunks<'a, T>[@TraitClause0]}<'a, T>[@TraitClause0]::Item = &'a T,
++    @TraitClause4::Item = &'a T,
+ = <opaque>
+ 
+ // Full name: core::slice::iter::{impl Iterator for Chunks<'a, T>[@TraitClause0]}::unzip
+@@ -3629,7 +3629,7 @@
+     [@TraitClause8]: Extend<FromB, B>,
+     [@TraitClause9]: Sized<Chunks<'a, T>[@TraitClause0]>,
+     [@TraitClause10]: Iterator<Chunks<'a, T>[@TraitClause0]>,
+-    {impl Iterator for Chunks<'a, T>[@TraitClause0]}<'a, T>[@TraitClause0]::Item = (A, B),
++    @TraitClause10::Item = (A, B),
+ = <opaque>
+ 
+ // Full name: core::slice::iter::{impl Iterator for Chunks<'a, T>[@TraitClause0]}::rev
+@@ -4197,9 +4197,9 @@
+     fn min_by_key<B, F, [@TraitClause0_1]: Sized<B>, [@TraitClause1_1]: Sized<F>, [@TraitClause2_1]: Ord<B>, [@TraitClause3_1]: Sized<Chunks<'a, T>[@TraitClause0]>, [@TraitClause4_1]: for<'_0_2> FnMut<F, (&'_0_2 &'a [T],)>, for<'_0_2> @TraitClause4_1::parent_clause1::Output = B> = {impl Iterator for Chunks<'a, T>[@TraitClause0]}::min_by_key<'a, T, B, F>[@TraitClause0, @TraitClause0_1, @TraitClause1_1, @TraitClause2_1, @TraitClause3_1, @TraitClause4_1]
+     fn min_by<F, [@TraitClause0_1]: Sized<F>, [@TraitClause1_1]: Sized<Chunks<'a, T>[@TraitClause0]>, [@TraitClause2_1]: for<'_0_2, '_1_2> FnMut<F, (&'_0_2 &'a [T], &'_1_2 &'a [T])>, for<'_0_2, '_1_2> @TraitClause2_1::parent_clause1::Output = Ordering> = {impl Iterator for Chunks<'a, T>[@TraitClause0]}::min_by<'a, T, F>[@TraitClause0, @TraitClause0_1, @TraitClause1_1, @TraitClause2_1]
+     fn rev<[@TraitClause0_1]: Sized<Chunks<'a, T>[@TraitClause0]>, [@TraitClause1_1]: DoubleEndedIterator<Chunks<'a, T>[@TraitClause0]>> = {impl Iterator for Chunks<'a, T>[@TraitClause0]}::rev<'a, T>[@TraitClause0, @TraitClause0_1, @TraitClause1_1]
+-    fn unzip<A, B, FromA, FromB, [@TraitClause0_1]: Sized<A>, [@TraitClause1_1]: Sized<B>, [@TraitClause2_1]: Sized<FromA>, [@TraitClause3_1]: Sized<FromB>, [@TraitClause4_1]: Default<FromA>, [@TraitClause5_1]: Extend<FromA, A>, [@TraitClause6_1]: Default<FromB>, [@TraitClause7_1]: Extend<FromB, B>, [@TraitClause8_1]: Sized<Chunks<'a, T>[@TraitClause0]>, [@TraitClause9_1]: Iterator<Chunks<'a, T>[@TraitClause0]>, {impl Iterator for Chunks<'a, T>[@TraitClause0]}<'a, T>[@TraitClause0]::Item = (A, B)> = {impl Iterator for Chunks<'a, T>[@TraitClause0]}::unzip<'a, T, A, B, FromA, FromB>[@TraitClause0, @TraitClause0_1, @TraitClause1_1, @TraitClause2_1, @TraitClause3_1, @TraitClause4_1, @TraitClause5_1, @TraitClause6_1, @TraitClause7_1, @TraitClause8_1, @TraitClause9_1]
+-    fn copied<'a, T, [@TraitClause0_1]: Sized<T>, [@TraitClause1_1]: Copy<T>, [@TraitClause2_1]: Sized<Chunks<'a, T>[@TraitClause0]>, [@TraitClause3_1]: Iterator<Chunks<'a, T>[@TraitClause0]>, T : 'a, {impl Iterator for Chunks<'a, T>[@TraitClause0]}<'a, T>[@TraitClause0]::Item = &'a T> = {impl Iterator for Chunks<'a, T>[@TraitClause0]}::copied<'a, 'a, T, T>[@TraitClause0, @TraitClause0_1, @TraitClause1_1, @TraitClause2_1, @TraitClause3_1]
+-    fn cloned<'a, T, [@TraitClause0_1]: Sized<T>, [@TraitClause1_1]: Clone<T>, [@TraitClause2_1]: Sized<Chunks<'a, T>[@TraitClause0]>, [@TraitClause3_1]: Iterator<Chunks<'a, T>[@TraitClause0]>, T : 'a, {impl Iterator for Chunks<'a, T>[@TraitClause0]}<'a, T>[@TraitClause0]::Item = &'a T> = {impl Iterator for Chunks<'a, T>[@TraitClause0]}::cloned<'a, 'a, T, T>[@TraitClause0, @TraitClause0_1, @TraitClause1_1, @TraitClause2_1, @TraitClause3_1]
++    fn unzip<A, B, FromA, FromB, [@TraitClause0_1]: Sized<A>, [@TraitClause1_1]: Sized<B>, [@TraitClause2_1]: Sized<FromA>, [@TraitClause3_1]: Sized<FromB>, [@TraitClause4_1]: Default<FromA>, [@TraitClause5_1]: Extend<FromA, A>, [@TraitClause6_1]: Default<FromB>, [@TraitClause7_1]: Extend<FromB, B>, [@TraitClause8_1]: Sized<Chunks<'a, T>[@TraitClause0]>, [@TraitClause9_1]: Iterator<Chunks<'a, T>[@TraitClause0]>, @TraitClause9_1::Item = (A, B)> = {impl Iterator for Chunks<'a, T>[@TraitClause0]}::unzip<'a, T, A, B, FromA, FromB>[@TraitClause0, @TraitClause0_1, @TraitClause1_1, @TraitClause2_1, @TraitClause3_1, @TraitClause4_1, @TraitClause5_1, @TraitClause6_1, @TraitClause7_1, @TraitClause8_1, @TraitClause9_1]
++    fn copied<'a, T, [@TraitClause0_1]: Sized<T>, [@TraitClause1_1]: Copy<T>, [@TraitClause2_1]: Sized<Chunks<'a, T>[@TraitClause0]>, [@TraitClause3_1]: Iterator<Chunks<'a, T>[@TraitClause0]>, T : 'a, @TraitClause3_1::Item = &'a T> = {impl Iterator for Chunks<'a, T>[@TraitClause0]}::copied<'a, 'a, T, T>[@TraitClause0, @TraitClause0_1, @TraitClause1_1, @TraitClause2_1, @TraitClause3_1]
++    fn cloned<'a, T, [@TraitClause0_1]: Sized<T>, [@TraitClause1_1]: Clone<T>, [@TraitClause2_1]: Sized<Chunks<'a, T>[@TraitClause0]>, [@TraitClause3_1]: Iterator<Chunks<'a, T>[@TraitClause0]>, T : 'a, @TraitClause3_1::Item = &'a T> = {impl Iterator for Chunks<'a, T>[@TraitClause0]}::cloned<'a, 'a, T, T>[@TraitClause0, @TraitClause0_1, @TraitClause1_1, @TraitClause2_1, @TraitClause3_1]
+     fn cycle<[@TraitClause0_1]: Sized<Chunks<'a, T>[@TraitClause0]>, [@TraitClause1_1]: Clone<Chunks<'a, T>[@TraitClause0]>> = {impl Iterator for Chunks<'a, T>[@TraitClause0]}::cycle<'a, T>[@TraitClause0, @TraitClause0_1, @TraitClause1_1]
+     fn array_chunks<const N : usize, [@TraitClause0_1]: Sized<Chunks<'a, T>[@TraitClause0]>> = {impl Iterator for Chunks<'a, T>[@TraitClause0]}::array_chunks<'a, T, N>[@TraitClause0, @TraitClause0_1]
+     fn sum<S, [@TraitClause0_1]: Sized<S>, [@TraitClause1_1]: Sized<Chunks<'a, T>[@TraitClause0]>, [@TraitClause2_1]: Sum<S, &'a [T]>> = {impl Iterator for Chunks<'a, T>[@TraitClause0]}::sum<'a, T, S>[@TraitClause0, @TraitClause0_1, @TraitClause1_1, @TraitClause2_1]
+@@ -4455,7 +4455,7 @@
+     [@TraitClause3]: Sized<ChunksExact<'a, T>[@TraitClause0]>,
+     [@TraitClause4]: Iterator<ChunksExact<'a, T>[@TraitClause0]>,
+     T : 'a,
+-    {impl Iterator for ChunksExact<'a, T>[@TraitClause0]}<'a, T>[@TraitClause0]::Item = &'a T,
++    @TraitClause4::Item = &'a T,
+ = <opaque>
+ 
+ // Full name: core::slice::iter::{impl Iterator for ChunksExact<'a, T>[@TraitClause0]}::copied
+@@ -4468,7 +4468,7 @@
+     [@TraitClause3]: Sized<ChunksExact<'a, T>[@TraitClause0]>,
+     [@TraitClause4]: Iterator<ChunksExact<'a, T>[@TraitClause0]>,
+     T : 'a,
+-    {impl Iterator for ChunksExact<'a, T>[@TraitClause0]}<'a, T>[@TraitClause0]::Item = &'a T,
++    @TraitClause4::Item = &'a T,
+ = <opaque>
+ 
+ // Full name: core::slice::iter::{impl Iterator for ChunksExact<'a, T>[@TraitClause0]}::unzip
+@@ -4485,7 +4485,7 @@
+     [@TraitClause8]: Extend<FromB, B>,
+     [@TraitClause9]: Sized<ChunksExact<'a, T>[@TraitClause0]>,
+     [@TraitClause10]: Iterator<ChunksExact<'a, T>[@TraitClause0]>,
+-    {impl Iterator for ChunksExact<'a, T>[@TraitClause0]}<'a, T>[@TraitClause0]::Item = (A, B),
++    @TraitClause10::Item = (A, B),
+ = <opaque>
+ 
+ // Full name: core::slice::iter::{impl Iterator for ChunksExact<'a, T>[@TraitClause0]}::rev
+@@ -5053,9 +5053,9 @@
+     fn min_by_key<B, F, [@TraitClause0_1]: Sized<B>, [@TraitClause1_1]: Sized<F>, [@TraitClause2_1]: Ord<B>, [@TraitClause3_1]: Sized<ChunksExact<'a, T>[@TraitClause0]>, [@TraitClause4_1]: for<'_0_2> FnMut<F, (&'_0_2 &'a [T],)>, for<'_0_2> @TraitClause4_1::parent_clause1::Output = B> = {impl Iterator for ChunksExact<'a, T>[@TraitClause0]}::min_by_key<'a, T, B, F>[@TraitClause0, @TraitClause0_1, @TraitClause1_1, @TraitClause2_1, @TraitClause3_1, @TraitClause4_1]
+     fn min_by<F, [@TraitClause0_1]: Sized<F>, [@TraitClause1_1]: Sized<ChunksExact<'a, T>[@TraitClause0]>, [@TraitClause2_1]: for<'_0_2, '_1_2> FnMut<F, (&'_0_2 &'a [T], &'_1_2 &'a [T])>, for<'_0_2, '_1_2> @TraitClause2_1::parent_clause1::Output = Ordering> = {impl Iterator for ChunksExact<'a, T>[@TraitClause0]}::min_by<'a, T, F>[@TraitClause0, @TraitClause0_1, @TraitClause1_1, @TraitClause2_1]
+     fn rev<[@TraitClause0_1]: Sized<ChunksExact<'a, T>[@TraitClause0]>, [@TraitClause1_1]: DoubleEndedIterator<ChunksExact<'a, T>[@TraitClause0]>> = {impl Iterator for ChunksExact<'a, T>[@TraitClause0]}::rev<'a, T>[@TraitClause0, @TraitClause0_1, @TraitClause1_1]
+-    fn unzip<A, B, FromA, FromB, [@TraitClause0_1]: Sized<A>, [@TraitClause1_1]: Sized<B>, [@TraitClause2_1]: Sized<FromA>, [@TraitClause3_1]: Sized<FromB>, [@TraitClause4_1]: Default<FromA>, [@TraitClause5_1]: Extend<FromA, A>, [@TraitClause6_1]: Default<FromB>, [@TraitClause7_1]: Extend<FromB, B>, [@TraitClause8_1]: Sized<ChunksExact<'a, T>[@TraitClause0]>, [@TraitClause9_1]: Iterator<ChunksExact<'a, T>[@TraitClause0]>, {impl Iterator for ChunksExact<'a, T>[@TraitClause0]}<'a, T>[@TraitClause0]::Item = (A, B)> = {impl Iterator for ChunksExact<'a, T>[@TraitClause0]}::unzip<'a, T, A, B, FromA, FromB>[@TraitClause0, @TraitClause0_1, @TraitClause1_1, @TraitClause2_1, @TraitClause3_1, @TraitClause4_1, @TraitClause5_1, @TraitClause6_1, @TraitClause7_1, @TraitClause8_1, @TraitClause9_1]
+-    fn copied<'a, T, [@TraitClause0_1]: Sized<T>, [@TraitClause1_1]: Copy<T>, [@TraitClause2_1]: Sized<ChunksExact<'a, T>[@TraitClause0]>, [@TraitClause3_1]: Iterator<ChunksExact<'a, T>[@TraitClause0]>, T : 'a, {impl Iterator for ChunksExact<'a, T>[@TraitClause0]}<'a, T>[@TraitClause0]::Item = &'a T> = {impl Iterator for ChunksExact<'a, T>[@TraitClause0]}::copied<'a, 'a, T, T>[@TraitClause0, @TraitClause0_1, @TraitClause1_1, @TraitClause2_1, @TraitClause3_1]
+-    fn cloned<'a, T, [@TraitClause0_1]: Sized<T>, [@TraitClause1_1]: Clone<T>, [@TraitClause2_1]: Sized<ChunksExact<'a, T>[@TraitClause0]>, [@TraitClause3_1]: Iterator<ChunksExact<'a, T>[@TraitClause0]>, T : 'a, {impl Iterator for ChunksExact<'a, T>[@TraitClause0]}<'a, T>[@TraitClause0]::Item = &'a T> = {impl Iterator for ChunksExact<'a, T>[@TraitClause0]}::cloned<'a, 'a, T, T>[@TraitClause0, @TraitClause0_1, @TraitClause1_1, @TraitClause2_1, @TraitClause3_1]
++    fn unzip<A, B, FromA, FromB, [@TraitClause0_1]: Sized<A>, [@TraitClause1_1]: Sized<B>, [@TraitClause2_1]: Sized<FromA>, [@TraitClause3_1]: Sized<FromB>, [@TraitClause4_1]: Default<FromA>, [@TraitClause5_1]: Extend<FromA, A>, [@TraitClause6_1]: Default<FromB>, [@TraitClause7_1]: Extend<FromB, B>, [@TraitClause8_1]: Sized<ChunksExact<'a, T>[@TraitClause0]>, [@TraitClause9_1]: Iterator<ChunksExact<'a, T>[@TraitClause0]>, @TraitClause9_1::Item = (A, B)> = {impl Iterator for ChunksExact<'a, T>[@TraitClause0]}::unzip<'a, T, A, B, FromA, FromB>[@TraitClause0, @TraitClause0_1, @TraitClause1_1, @TraitClause2_1, @TraitClause3_1, @TraitClause4_1, @TraitClause5_1, @TraitClause6_1, @TraitClause7_1, @TraitClause8_1, @TraitClause9_1]
++    fn copied<'a, T, [@TraitClause0_1]: Sized<T>, [@TraitClause1_1]: Copy<T>, [@TraitClause2_1]: Sized<ChunksExact<'a, T>[@TraitClause0]>, [@TraitClause3_1]: Iterator<ChunksExact<'a, T>[@TraitClause0]>, T : 'a, @TraitClause3_1::Item = &'a T> = {impl Iterator for ChunksExact<'a, T>[@TraitClause0]}::copied<'a, 'a, T, T>[@TraitClause0, @TraitClause0_1, @TraitClause1_1, @TraitClause2_1, @TraitClause3_1]
++    fn cloned<'a, T, [@TraitClause0_1]: Sized<T>, [@TraitClause1_1]: Clone<T>, [@TraitClause2_1]: Sized<ChunksExact<'a, T>[@TraitClause0]>, [@TraitClause3_1]: Iterator<ChunksExact<'a, T>[@TraitClause0]>, T : 'a, @TraitClause3_1::Item = &'a T> = {impl Iterator for ChunksExact<'a, T>[@TraitClause0]}::cloned<'a, 'a, T, T>[@TraitClause0, @TraitClause0_1, @TraitClause1_1, @TraitClause2_1, @TraitClause3_1]
+     fn cycle<[@TraitClause0_1]: Sized<ChunksExact<'a, T>[@TraitClause0]>, [@TraitClause1_1]: Clone<ChunksExact<'a, T>[@TraitClause0]>> = {impl Iterator for ChunksExact<'a, T>[@TraitClause0]}::cycle<'a, T>[@TraitClause0, @TraitClause0_1, @TraitClause1_1]
+     fn array_chunks<const N : usize, [@TraitClause0_1]: Sized<ChunksExact<'a, T>[@TraitClause0]>> = {impl Iterator for ChunksExact<'a, T>[@TraitClause0]}::array_chunks<'a, T, N>[@TraitClause0, @TraitClause0_1]
+     fn sum<S, [@TraitClause0_1]: Sized<S>, [@TraitClause1_1]: Sized<ChunksExact<'a, T>[@TraitClause0]>, [@TraitClause2_1]: Sum<S, &'a [T]>> = {impl Iterator for ChunksExact<'a, T>[@TraitClause0]}::sum<'a, T, S>[@TraitClause0, @TraitClause0_1, @TraitClause1_1, @TraitClause2_1]
+--- a/tests/ui/simple/explicit_destruct_bound.rs
++++ /dev/null
+@@ -1,6 +0,0 @@
+-//@ known-failure
+-//@ charon-args=--hide-marker-traits
+-#![feature(const_destruct)]
+-
+-use std::marker::Destruct;
+-fn drop<T: Destruct>(_: T) {}
+--- a/tests/ui/simple/explicit_destruct_bound.out
++++ /dev/null
+@@ -1,7 +0,0 @@
+-error: Error during trait resolution: Could not find a clause for `Binder { value: <T as std::marker::Destruct>, bound_vars: [] }` in the item parameters
+- --> tests/ui/simple/explicit_destruct_bound.rs:6:29
+-  |
+-6 | fn drop<T: Destruct>(_: T) {}
+-  |                             ^
+-
+-ERROR Charon failed to translate this code (1 errors)

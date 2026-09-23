@@ -1,0 +1,31 @@
+(defsig {}
+  sample
+  (n)
+  (t-fn {}
+    (t-tensor {} (d-var {} n) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 3) (t-prim {} f32))))
+
+(def {}
+  sample
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (let {span: "surf:53..110"}
+      (bind {}
+        dead
+        (app {span: "surf:63..81"}
+          (var {span: "surf:63..70"} dropout)
+          (var {span: "surf:71..72"} x)
+          (lit {span: "surf:74..80", surf_literal_style: "explicit", type: (t-prim {} f32)} 0.0)))
+      (app {span: "surf:83..108"}
+        (var {span: "surf:83..89"} shrink)
+        (var {span: "surf:90..91"} x)
+        (app {span: "surf:93..107"}
+          (var {} Cons)
+          (app {span: "surf:94..106"}
+            (var {} Cons)
+            (lit {span: "surf:95..99", type: (t-prim {} i64)} 0)
+            (app {}
+              (var {} Cons)
+              (lit {span: "surf:101..105", type: (t-prim {} i64)} 3)
+              (var {} Nil)))
+          (var {} Nil))))))

@@ -1,0 +1,32 @@
+(def {}
+  m
+  (app {span: "surf:5..49"}
+    (var {span: "surf:5..18"} pad_sequences)
+    (app {span: "surf:19..43"}
+      (var {} Cons)
+      (app {span: "surf:20..30"}
+        (var {} Cons)
+        (lit {span: "surf:21..24", type: (t-prim {} f32)} 1.0)
+        (app {}
+          (var {} Cons)
+          (lit {span: "surf:26..29", type: (t-prim {} f32)} 2.0)
+          (var {} Nil)))
+      (app {}
+        (var {} Cons)
+        (app {span: "surf:32..42"}
+          (var {} Cons)
+          (lit {span: "surf:33..36", type: (t-prim {} f32)} 3.0)
+          (app {}
+            (var {} Cons)
+            (lit {span: "surf:38..41", type: (t-prim {} f32)} 4.0)
+            (var {} Nil)))
+        (var {} Nil)))
+    (lit {span: "surf:45..48", type: (t-prim {} f32)} 0.0)))
+
+(def {}
+  d
+  (app {span: "surf:54..76"}
+    (var {span: "surf:54..62"} diagonal)
+    (var {span: "surf:63..64"} m)
+    (lit {span: "surf:66..72", type: (t-prim {} string)} "zero")
+    (lit {span: "surf:74..75", type: (t-prim {} i32)} 1)))

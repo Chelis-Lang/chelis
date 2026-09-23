@@ -1,0 +1,41 @@
+(deftype {}
+  Box
+  ()
+  (variant {}
+    Box
+    (field {} x (t-tensor {} (d-lit {} 4) (d-lit {} 3) (t-prim {} f32)))))
+
+(defsig {}
+  apply_b
+  (b)
+  (t-fn {} (t-fn {} (t-adt {} Box) (t-var {} b)) (t-adt {} Box) (t-var {} b)))
+
+(def {}
+  apply_b
+  (fn {}
+    (params {} (f {type: (t-var {} _)}) (r {type: (t-var {} _)}))
+    (app {span: "surf:89..93"}
+      (var {span: "surf:89..90"} f)
+      (var {span: "surf:91..92"} r))))
+
+(defsig {}
+  probe
+  (t-fn {}
+    (t-tensor {} (d-lit {} 4) (d-lit {} 3) (t-prim {} f32))
+    @@declared@@))
+
+(def {}
+  probe
+  (fn {}
+    (params {} (t {type: (t-var {} _)}))
+    (app {span: "surf:147..191"}
+      (var {span: "surf:147..154"} apply_b)
+      (fn {span: "surf:155..176"}
+        (params {} q)
+        (app {span: "surf:165..176"}
+          (var {span: "surf:165..168"} sum)
+          (access {span: "surf:169..172"} (var {span: "surf:169..170"} q) x)
+          (lit {span: "surf:174..175", type: (t-prim {} i32)} 0)))
+      (record {span: "surf:178..190"}
+        Box
+        (kv {} x (var {span: "surf:187..188"} t))))))

@@ -1,0 +1,7 @@
+(defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32)))
+
+(def {}
+  f
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (access {span: "surf:23..30"} (var {span: "surf:23..24"} x) field)))

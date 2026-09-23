@@ -30,23 +30,9 @@
 //!      closes. A regression that re-introduced silent skip would
 //!      cause that test to fail with an explicit precision named.
 //!
-//! ## Surf-reachable vs DAG-only paths
-//!
-//! Surf accepts `matmul(a, b)` for any precision as long as `lhs_prec
-//! == rhs_prec` (see
-//! `crates/chelis-types/src/infer.rs::check_matmul_signature`). Some
-//! exotic precisions (`f8e4m3`, `bf16`) may not lower cleanly through
-//! every IR pass; this file's IR-level tests drive the recognizer
-//! directly via the public test entry point
-//! `try_summarize_blas_helper_for_test`, bypassing pipeline
-//! preconditions that might block exotic precisions.
-//!
-//! A separate Surf-end-to-end cross-product test lives in
-//! `crates/chelis-cli/tests/red_team_w7_blas_precision_cross_product.rs`
-//! and exercises F64 through the full pipeline (the W6 file's
-//! `surface_f64_matmul_helper_emits_blas_output_precision_mismatch_rejection`
-//! covers F64 specifically; this red-team file extends it to a
-//! matrix of Surf-reachable precisions).
+//! The IR-level tests drive the recognizer directly through
+//! `try_summarize_blas_helper_for_test`, covering exotic precisions
+//! independently of whole-program lowering preconditions.
 
 use chelis_ir::dag::{Dag, RiscOp};
 use chelis_ir::host::{

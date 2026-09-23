@@ -1,0 +1,9 @@
+(def {} measure (var {span: "surf:10..13"} len))
+
+(def {}
+  size
+  (fn {}
+    (params {} x)
+    (app {span: "surf:28..38"}
+      (var {span: "surf:28..35"} measure)
+      (var {span: "surf:36..37"} x))))

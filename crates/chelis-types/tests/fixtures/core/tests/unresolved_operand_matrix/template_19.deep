@@ -1,0 +1,24 @@
+@@helper@@
+
+(defsig {}
+  id2
+  (q)
+  (t-fn {}
+    (t-tensor {} (d-lit {} 3) (t-var {} q))
+    (t-tensor {} (d-lit {} 3) (t-var {} q))))
+
+(def {}
+  id2
+  (fn {}
+    (params {} (y {type: (t-var {} _)}))
+    (var {span: "surf:71..72"} y)))
+
+(def {}
+  f
+  (app {span: "surf:77..110"}
+    (var {span: "surf:77..78"} g)
+    (app {span: "surf:79..109"}
+      (var {span: "surf:79..82"} id2)
+      (app {span: "surf:83..108"}
+        (var {span: "surf:83..92"} to_tensor)
+        @@values@@))))

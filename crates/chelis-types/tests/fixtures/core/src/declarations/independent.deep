@@ -1,0 +1,14 @@
+(module {surf_path: "Independent"}
+  independent
+  (def {}
+    u
+    (app {span: "surf:24..31"}
+      (var {span: "surf:24..28"} ping)
+      (lit {span: "surf:29..30", type: (t-prim {} i32)} 1)))
+  (def {} v1 (lit {span: "surf:38..39", type: (t-prim {} i32)} 5))
+  (defsig {} ping (t-fn {} (t-prim {} i32) (t-prim {} i32)))
+  (def {}
+    ping
+    (fn {}
+      (params {} (n {type: (t-var {} _)}))
+      (var {span: "surf:67..68"} n))))

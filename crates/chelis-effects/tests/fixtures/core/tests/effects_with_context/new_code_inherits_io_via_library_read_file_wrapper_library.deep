@@ -1,0 +1,9 @@
+(defsig {} lib_load (t-fn {} (t-prim {} string) (t-prim {} string)))
+
+(def {}
+  lib_load
+  (fn {}
+    (params {} (path {type: (t-var {} _)}))
+    (app {span: "surf:40..55"}
+      (var {span: "surf:40..49"} read_file)
+      (var {span: "surf:50..54"} path))))

@@ -10,15 +10,9 @@ use chelis_ir::eval::{TensorValue, eval_tensor_with};
 type NamedAxis = (String, usize);
 type CallerNamedClaim = (String, NamedAxis, NamedAxis);
 
-fn checked_surf(source: &str) -> chelis_types::CheckedProgram {
+fn checked_deep(source: &str) -> chelis_types::CheckedProgram {
     let _linked = chelis_types::install_linked_program_guard();
-    let declarations = chelis_surf::parser::parse_str(source).expect("Surf parse");
-    let expanded = chelis_macros::expand_program(
-        &chelis_surf::desugar::desugar_program(&declarations),
-        &chelis_macros::ExpansionOptions::default(),
-    )
-    .expect("macro expansion")
-    .into_exprs();
+    let expanded = chelis_deep::parser::parse_and_stamp(source).expect("Deep fixture");
     let checked = chelis_types::check_ir_program(&expanded).unwrap_or_else(|report| {
         panic!(
             "type check failed: {:?}",
@@ -34,12 +28,12 @@ fn checked_surf(source: &str) -> chelis_types::CheckedProgram {
 }
 
 fn named_entry(source: &str, name: &str) -> chelis_ir::Dag {
-    chelis_ir::host::lower_named_tensor_entry_dag(&checked_surf(source), name)
+    chelis_ir::host::lower_named_tensor_entry_dag(&checked_deep(source), name)
         .expect("named tensor entry lowers")
 }
 
 fn compiled_dags(source: &str) -> Vec<chelis_ir::Dag> {
-    let compiled = chelis_ir::host::try_lower_compiled_program(&checked_surf(source))
+    let compiled = chelis_ir::host::try_lower_compiled_program(&checked_deep(source))
         .expect("compiled host program lowers");
     let mut dags = compiled.dag.into_iter().collect::<Vec<_>>();
     if let Some(host) = compiled.host {
@@ -111,9 +105,9 @@ fn caller_named_claims(dag: &chelis_ir::Dag) -> Vec<CallerNamedClaim> {
 #[test]
 fn caller_result_label_does_not_merge_an_unrelated_helper_parameter_binder() {
     let dag = named_entry(
-        "def keep[d](x: tensor[d, f32], gain: tensor[fixed, f32]) -> tensor[d, f32] = copy(x)\n\
-         def bridge(x: tensor[fixed, f32]) -> tensor[fixed, f32] = \
-           keep(x, to_tensor([1.0f32, 2.0f32, 3.0f32]))\n",
+        include_str!(
+            "fixtures/core/tests/issue_1889_result_label_regressions/caller_result_label_does_not_merge_an_unrelated_helper_parameter_binder.deep"
+        ),
         "bridge",
     );
 
@@ -149,7 +143,9 @@ fn caller_result_label_does_not_merge_an_unrelated_helper_parameter_binder() {
 #[test]
 fn authored_repeated_binder_still_enforces_one_runtime_witness() {
     let dag = named_entry(
-        "def same[d](x: tensor[d, f32], y: tensor[d, f32]) -> tensor[d, f32] = copy(x)\n",
+        include_str!(
+            "fixtures/core/tests/issue_1889_result_label_regressions/authored_repeated_binder_still_enforces_one_runtime_witness.deep"
+        ),
         "same",
     );
 
@@ -188,9 +184,9 @@ fn authored_repeated_binder_still_enforces_one_runtime_witness() {
 #[test]
 fn authored_repeated_rank_spread_enforces_each_positional_runtime_witness() {
     let dag = named_entry(
-        "def same_rank[rest](x: &tensor[..rest, f32], y: &tensor[..rest, f32]) -> tensor[..rest, f32] = copy(x)\n\
-         def bridge(x: tensor[*, *, f32], y: tensor[*, *, f32]) -> tensor[*, *, f32] = \
-           same_rank(x, y)\n",
+        include_str!(
+            "fixtures/core/tests/issue_1889_result_label_regressions/authored_repeated_rank_spread_enforces_each_positional_runtime_witness.deep"
+        ),
         "bridge",
     );
 
@@ -220,9 +216,9 @@ fn authored_repeated_rank_spread_enforces_each_positional_runtime_witness() {
 #[test]
 fn rank_polymorphic_result_label_does_not_merge_distinct_argument_axes() {
     let dag = named_entry(
-        "def add_axis[rest](x: &tensor[..rest, f32]) -> tensor[..rest, one, f32] = \
-           insert(x, one, 1i64)\n\
-         def a2(x: &tensor[batch, seq, f32]) -> tensor[batch, seq, one, f32] = add_axis(x)\n",
+        include_str!(
+            "fixtures/core/tests/issue_1889_result_label_regressions/rank_polymorphic_result_label_does_not_merge_distinct_argument_axes.deep"
+        ),
         "a2",
     );
 
@@ -257,12 +253,9 @@ fn rank_polymorphic_result_label_does_not_merge_distinct_argument_axes() {
 
 #[test]
 fn merged_root_does_not_join_a_checked_label_to_the_helpers_sibling_binder() {
-    let dags = compiled_dags(
-        "def pkg__mylib__Mylib__Axes__keep_rank[rest](x: tensor[..rest, f32], gain: tensor[fixed, f32]) -> tensor[..rest, f32] = copy(x)\n\
-         def bridge(x: tensor[fixed, f32]) -> tensor[fixed, f32] = \
-           pkg__mylib__Mylib__Axes__keep_rank(x, to_tensor([1.0f32, 2.0f32, 3.0f32]))\n\
-         out = bridge(to_tensor([4.0f32, 5.0f32]))\n",
-    );
+    let dags = compiled_dags(include_str!(
+        "fixtures/core/tests/issue_1889_result_label_regressions/merged_root_does_not_join_a_checked_label_to_the_helpers_sibling_binder.deep"
+    ));
     for dag in &dags {
         let claims = caller_named_claims(dag);
         assert!(
@@ -309,20 +302,9 @@ fn merged_root_does_not_join_a_checked_label_to_the_helpers_sibling_binder() {
 
 #[test]
 fn merged_rank_polymorphic_root_keeps_batch_and_seq_in_distinct_classes() {
-    let dags = compiled_dags(
-        "def add_axis[rest](x: &tensor[..rest, f32]) -> tensor[..rest, one, f32] = \
-           insert(x, one, 1i64)\n\
-         def widen[pre, post, c](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, c, seq, ..post, f32] = \
-           insert(x, c, 3i64, seq)\n\
-         def a1(x: &tensor[seq, f32]) -> tensor[seq, one, f32] = add_axis(x)\n\
-         def a2(x: &tensor[batch, seq, f32]) -> tensor[batch, seq, one, f32] = add_axis(x)\n\
-         def w_lead[c](x: &tensor[seq, hidden, f32]) -> tensor[c, seq, hidden, f32] = widen(x)\n\
-         def w_mid[c](x: &tensor[batch, seq, f32]) -> tensor[batch, c, seq, f32] = widen(x)\n\
-         out1 = a1(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n\
-         out2 = a2(to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]))\n\
-         outl = w_lead(to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32]]))\n\
-         outm = w_mid(to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]))\n",
-    );
+    let dags = compiled_dags(include_str!(
+        "fixtures/core/tests/issue_1889_result_label_regressions/merged_rank_polymorphic_root_keeps_batch_and_seq_in_distinct_classes.deep"
+    ));
     for dag in &dags {
         let claims = caller_named_claims(dag);
         assert!(

@@ -1,0 +1,82 @@
+(defsig {}
+  f
+  (t-fn {}
+    (t-tensor {}
+      (d-lit {} 1)
+      (d-lit {} 3)
+      (d-lit {} 8)
+      (d-lit {} 8)
+      (t-prim {} f32))
+    (t-tensor {}
+      (d-lit {} 8)
+      (d-lit {} 3)
+      (d-lit {} 3)
+      (d-lit {} 3)
+      (t-prim {} f32))
+    (t-tensor {}
+      (d-lit {} 16)
+      (d-lit {} 8)
+      (d-lit {} 9)
+      (d-lit {} 9)
+      (t-prim {} f32))
+    (t-tensor {}
+      (d-lit {} 1)
+      (d-lit {} 16)
+      (d-lit {} 1)
+      (d-lit {} 1)
+      (t-prim {} f32))))
+
+(def {}
+  f
+  (fn {}
+    (params {}
+      (x {type: (t-var {} _)})
+      (k1 {type: (t-var {} _)})
+      (k2 {type: (t-var {} _)}))
+    (let {span: "surf:124..251"}
+      (bind {}
+        y
+        (app {span: "surf:132..189"}
+          (var {span: "surf:132..136"} conv)
+          (borrow {span: "surf:137..139"} (var {span: "surf:138..139"} x))
+          (borrow {span: "surf:141..144"} (var {span: "surf:142..144"} k1))
+          (app {span: "surf:146..158"}
+            (var {} Cons)
+            (lit {span: "surf:147..151", type: (t-prim {} i64)} 1)
+            (app {}
+              (var {} Cons)
+              (lit {span: "surf:153..157", type: (t-prim {} i64)} 1)
+              (var {} Nil)))
+          (app {span: "surf:160..188"}
+            (var {} Cons)
+            (tuple {span: "surf:161..173"}
+              (lit {span: "surf:162..166", type: (t-prim {} i64)} 0)
+              (lit {span: "surf:168..172", type: (t-prim {} i64)} 0))
+            (app {}
+              (var {} Cons)
+              (tuple {span: "surf:175..187"}
+                (lit {span: "surf:176..180", type: (t-prim {} i64)} 0)
+                (lit {span: "surf:182..186", type: (t-prim {} i64)} 0))
+              (var {} Nil)))))
+      (app {span: "surf:192..249"}
+        (var {span: "surf:192..196"} conv)
+        (borrow {span: "surf:197..199"} (var {span: "surf:198..199"} y))
+        (borrow {span: "surf:201..204"} (var {span: "surf:202..204"} k2))
+        (app {span: "surf:206..218"}
+          (var {} Cons)
+          (lit {span: "surf:207..211", type: (t-prim {} i64)} 1)
+          (app {}
+            (var {} Cons)
+            (lit {span: "surf:213..217", type: (t-prim {} i64)} 1)
+            (var {} Nil)))
+        (app {span: "surf:220..248"}
+          (var {} Cons)
+          (tuple {span: "surf:221..233"}
+            (lit {span: "surf:222..226", type: (t-prim {} i64)} 0)
+            (lit {span: "surf:228..232", type: (t-prim {} i64)} 0))
+          (app {}
+            (var {} Cons)
+            (tuple {span: "surf:235..247"}
+              (lit {span: "surf:236..240", type: (t-prim {} i64)} 0)
+              (lit {span: "surf:242..246", type: (t-prim {} i64)} 0))
+            (var {} Nil)))))))

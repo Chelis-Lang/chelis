@@ -1,0 +1,23 @@
+(defsig {}
+  f
+  (t-fn {}
+    (t-adt {} Dict (t-prim {} string) (t-prim {} i32))
+    (t-prim {} i32)
+    (t-prim {} i32)))
+
+(def {}
+  f
+  (fn {}
+    (params {} (d {type: (t-var {} _)}) (k {type: (t-var {} _)}))
+    (let {span: "surf:45..86"}
+      (bind {}
+        g
+        (fn {span: "surf:53..77"}
+          (params {} t)
+          (app {span: "surf:63..77"}
+            (var {span: "surf:63..71"} dict_get)
+            (var {span: "surf:72..73"} d)
+            (var {span: "surf:75..76"} t))))
+      (app {span: "surf:80..84"}
+        (var {span: "surf:80..81"} g)
+        (var {span: "surf:82..83"} k)))))

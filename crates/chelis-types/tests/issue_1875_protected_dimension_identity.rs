@@ -3,14 +3,89 @@
 //! Named-query controls preserve the existing source contract; they do not
 //! authorize associating arbitrary same-spelled named values globally.
 
-use chelis_surf::{desugar::desugar_program, parser::parse_str};
+use chelis_deep::parser::parse_str;
 use chelis_types::{
     CheckedProgram, InferResult, TypeEnv, build_compiled_library_context, check_ir_program,
     check_ir_with_context, errors::CheckErrorKind,
 };
 
 fn parse(source: &str) -> Vec<chelis_deep::Expr> {
-    desugar_program(&parse_str(source).expect("fixture parses"))
+    parse_str(source).expect("Deep fixture parses")
+}
+
+const D: &str = "(d-var {} d)";
+const SEVENTEEN: &str = "(d-lit {} 17)";
+const FIXED: &str = "(t-tensor {} (d-name {} fixed) (t-prim {} f32))";
+const AFFINE: &str = "(deftype {} Affine () (variant {} Affine (field {} gain (t-tensor {} (d-name {} fixed) (t-prim {} f32)))))";
+
+fn tensor(dimensions: &str) -> String {
+    format!("(t-tensor {{}} {dimensions} (t-prim {{}} f32))")
+}
+
+// Canonical defsig binders and erased parameter annotations match representative.deep.
+fn function(
+    name: &str,
+    binders: &str,
+    input: &str,
+    gain: &str,
+    result: &str,
+    body: &str,
+) -> String {
+    format!(
+        "(defsig {{}} {name} ({binders}) (t-fn {{}} {input} {gain} {result}))
+         (def {{}} {name} (fn {{}} (params {{}} (x {{type: (t-var {{}} _)}}) (gain {{type: (t-var {{}} _)}})) {body}))"
+    )
+}
+
+fn multiply(gain: &str, reversed: bool) -> String {
+    if reversed {
+        format!("(app {{}} (var {{}} mul) {gain} (var {{}} x))")
+    } else {
+        format!("(app {{}} (var {{}} mul) (var {{}} x) {gain})")
+    }
+}
+
+fn insertion_control(result: &str, reversed: bool) -> String {
+    let gain = "(app {} (var {} insert) (access {} (var {} gain) gain)
+        (lit {type: (t-prim {} i32)} 0)
+        (app {} (var {} shape) (var {} x) (lit {type: (t-prim {} i32)} 0)))";
+    let function = function(
+        "checked",
+        "a d",
+        &tensor("(d-var {} a) (d-var {} d)"),
+        "(t-adt {} Affine)",
+        &tensor(&format!("(d-var {{}} a) {result}")),
+        &multiply(gain, reversed),
+    );
+    format!("{AFFINE}\n{function}")
+}
+
+fn consumer(alias: bool, reduce: bool) -> String {
+    let callee = if alias { "f" } else { "aligned" };
+    let call = format!("(app {{}} (var {{}} {callee}) (var {{}} x) (var {{}} gain))");
+    let body = if reduce {
+        format!("(app {{}} (var {{}} sum) {call} (var {{}} fixed))")
+    } else {
+        call
+    };
+    let body = if alias {
+        format!("(let {{}} (bind {{}} f (var {{}} aligned)) {body})")
+    } else {
+        body
+    };
+    let result = if reduce {
+        "(t-var {} _)".to_owned()
+    } else {
+        tensor(SEVENTEEN)
+    };
+    function(
+        if reduce { "reduce" } else { "wrong" },
+        "d",
+        &tensor(D),
+        FIXED,
+        &result,
+        &body,
+    )
 }
 
 fn verdict_error(
@@ -62,25 +137,22 @@ fn check(library: &str, consumer: &str, route: Route) -> Result<CheckedProgram, 
 }
 
 fn direct_control(result: &str, reversed: bool, adt: bool) -> String {
-    let prefix = if adt {
-        "type Affine = | Affine { gain: tensor[fixed, f32] }\n"
+    let prefix = if adt { AFFINE } else { "" };
+    let parameter = if adt { "(t-adt {} Affine)" } else { FIXED };
+    let gain = if adt {
+        "(access {} (var {} gain) gain)"
     } else {
-        ""
+        "(var {} gain)"
     };
-    let parameter = if adt {
-        "gain: Affine"
-    } else {
-        "gain: tensor[fixed, f32]"
-    };
-    let gain = if adt { "gain.gain" } else { "gain" };
-    let body = if reversed {
-        format!("mul({gain}, x)")
-    } else {
-        format!("mul(x, {gain})")
-    };
-    format!(
-        "{prefix}def checked[d](x: tensor[d, f32], {parameter}) -> tensor[{result}, f32] = {body}"
-    )
+    let function = function(
+        "checked",
+        "d",
+        &tensor(D),
+        parameter,
+        &tensor(result),
+        &multiply(gain, reversed),
+    );
+    format!("{prefix}\n{function}")
 }
 
 #[test]
@@ -88,7 +160,7 @@ fn direct_and_adt_bad_results_reject_both_orders() {
     let mut failures = Vec::new();
     for adt in [false, true] {
         for reversed in [false, true] {
-            let source = direct_control("17", reversed, adt);
+            let source = direct_control(SEVENTEEN, reversed, adt);
             failures.extend(verdict_error(
                 check_ir_program(&parse(&source)),
                 false,
@@ -101,9 +173,16 @@ fn direct_and_adt_bad_results_reject_both_orders() {
 
 #[test]
 fn direct_and_adt_matching_results_accept_both_orders() {
+    assert_verdict(
+        check_ir_program(&parse(include_str!(
+            "fixtures/core/tests/issue_1875_protected_dimension_identity/representative.deep"
+        ))),
+        true,
+        "representative Deep program",
+    );
     for adt in [false, true] {
         for reversed in [false, true] {
-            let source = direct_control("d", reversed, adt);
+            let source = direct_control(D, reversed, adt);
             assert_verdict(check_ir_program(&parse(&source)), true, &source);
         }
     }
@@ -113,14 +192,7 @@ fn direct_and_adt_matching_results_accept_both_orders() {
 fn insertion_bad_results_reject_both_orders() {
     let mut failures = Vec::new();
     for reversed in [false, true] {
-        let body = if reversed {
-            "mul(insert(gain.gain, 0i32, shape(x, 0i32)), x)"
-        } else {
-            "mul(x, insert(gain.gain, 0i32, shape(x, 0i32)))"
-        };
-        let source = format!(
-            "type Affine = | Affine {{ gain: tensor[fixed, f32] }}\ndef checked[a, d](x: tensor[a, d, f32], gain: Affine) -> tensor[a, 17, f32] = {body}"
-        );
+        let source = insertion_control(SEVENTEEN, reversed);
         failures.extend(verdict_error(
             check_ir_program(&parse(&source)),
             false,
@@ -133,26 +205,19 @@ fn insertion_bad_results_reject_both_orders() {
 #[test]
 fn insertion_matching_results_accept_both_orders() {
     for reversed in [false, true] {
-        let body = if reversed {
-            "mul(insert(gain.gain, 0i32, shape(x, 0i32)), x)"
-        } else {
-            "mul(x, insert(gain.gain, 0i32, shape(x, 0i32)))"
-        };
-        let source = format!(
-            "type Affine = | Affine {{ gain: tensor[fixed, f32] }}\ndef checked[a, d](x: tensor[a, d, f32], gain: Affine) -> tensor[a, d, f32] = {body}"
-        );
+        let source = insertion_control(D, reversed);
         assert_verdict(check_ir_program(&parse(&source)), true, &source);
     }
 }
 
 fn helper(reversed: bool) -> String {
-    let body = if reversed {
-        "mul(gain, x)"
-    } else {
-        "mul(x, gain)"
-    };
-    format!(
-        "def aligned[d](x: tensor[d, f32], gain: tensor[fixed, f32]) -> tensor[d, f32] = {body}"
+    function(
+        "aligned",
+        "d",
+        &tensor(D),
+        FIXED,
+        &tensor(D),
+        &multiply("(var {} gain)", reversed),
     )
 }
 
@@ -162,16 +227,8 @@ fn helper_bad_results_reject_all_routes_and_aliases() {
     for route in [Route::Whole, Route::Live, Route::Decoded] {
         for reversed in [false, true] {
             for alias in [false, true] {
-                let call = if alias {
-                    "{ f = aligned\n f(x, gain) }"
-                } else {
-                    "aligned(x, gain)"
-                };
-                let consumer = format!(
-                    "def wrong[d](x: tensor[d, f32], gain: tensor[fixed, f32]) -> tensor[17, f32] = {call}"
-                );
                 failures.extend(verdict_error(
-                    check(&helper(reversed), &consumer, route),
+                    check(&helper(reversed), &consumer(alias, false), route),
                     false,
                     &format!("{route:?}, reversed={reversed}, alias={alias}"),
                 ));
@@ -186,15 +243,8 @@ fn helper_named_queries_accept_all_routes_and_aliases() {
     for route in [Route::Whole, Route::Live, Route::Decoded] {
         for reversed in [false, true] {
             for alias in [false, true] {
-                let call = if alias {
-                    "{ f = aligned\n sum(f(x, gain), fixed) }"
-                } else {
-                    "sum(aligned(x, gain), fixed)"
-                };
-                let consumer =
-                    format!("def reduce[d](x: tensor[d, f32], gain: tensor[fixed, f32]) = {call}");
                 assert_verdict(
-                    check(&helper(reversed), &consumer, route),
+                    check(&helper(reversed), &consumer(alias, true), route),
                     true,
                     &format!("{route:?}, reversed={reversed}, alias={alias}"),
                 );
@@ -205,13 +255,18 @@ fn helper_named_queries_accept_all_routes_and_aliases() {
 
 #[test]
 fn unrelated_named_argument_does_not_name_returned_axis() {
-    let library =
-        "def aligned[d](x: tensor[d, f32], gain: tensor[fixed, f32]) -> tensor[d, f32] = copy(x)";
-    let consumer =
-        "def reduce[d](x: tensor[d, f32], gain: tensor[fixed, f32]) = sum(aligned(x, gain), fixed)";
+    let library = function(
+        "aligned",
+        "d",
+        &tensor(D),
+        FIXED,
+        &tensor(D),
+        "(copy {} (var {} x))",
+    );
+    let consumer = consumer(false, true);
     for route in [Route::Whole, Route::Live, Route::Decoded] {
         assert_verdict(
-            check(library, consumer, route),
+            check(&library, &consumer, route),
             false,
             &format!("{route:?}"),
         );
@@ -222,31 +277,45 @@ fn unrelated_named_argument_does_not_name_returned_axis() {
 fn return_only_and_distinctness_boundaries() {
     for (source, accepts) in [
         (
-            "def kept[k](x: tensor[2, f32]) -> tensor[k, f32] = to_tensor([1.0f32, 2.0f32, 3.0f32])",
+            include_str!(
+                "fixtures/core/tests/issue_1875_protected_dimension_identity/return_only_distinct.deep"
+            ),
             true,
         ),
         (
-            "def wrong[k](x: tensor[2, f32]) -> tensor[k, f32] = to_tensor([1.0f32, 2.0f32])",
+            include_str!(
+                "fixtures/core/tests/issue_1875_protected_dimension_identity/return_only_same.deep"
+            ),
             false,
         ),
         (
-            "def kept[m](x: tensor[batch, f32]) -> tensor[m, f32] = copy(x)",
+            include_str!(
+                "fixtures/core/tests/issue_1875_protected_dimension_identity/return_only_named.deep"
+            ),
             true,
         ),
         (
-            "def kept[k](x: tensor[*, f32]) -> tensor[k, f32] = copy(x)",
+            include_str!(
+                "fixtures/core/tests/issue_1875_protected_dimension_identity/return_only_wildcard.deep"
+            ),
             true,
         ),
         (
-            "def wrong[n, m](x: tensor[n, f32], y: tensor[batch, f32]) -> tensor[m, f32] = add(x, y)",
+            include_str!(
+                "fixtures/core/tests/issue_1875_protected_dimension_identity/distinct_return_binder.deep"
+            ),
             false,
         ),
         (
-            "def wrong[a, b](x: tensor[a, f32], y: tensor[b, f32]) -> tensor[a, f32] = mul(x, y)",
+            include_str!(
+                "fixtures/core/tests/issue_1875_protected_dimension_identity/distinct_parameter_binders.deep"
+            ),
             false,
         ),
         (
-            "def wrong(x: tensor[fixed, f32], y: tensor[other, f32]) = mul(x, y)",
+            include_str!(
+                "fixtures/core/tests/issue_1875_protected_dimension_identity/distinct_named_dimensions.deep"
+            ),
             false,
         ),
     ] {

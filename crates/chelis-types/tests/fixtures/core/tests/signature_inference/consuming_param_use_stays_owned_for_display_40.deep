@@ -1,0 +1,19 @@
+(defsig {}
+  consume
+  (t-fn {} (t-var {} _) (t-tensor {} (d-lit {} 4) (t-prim {} f32)) (t-var {} _)))
+
+(def {}
+  consume
+  (fn {}
+    (params {} x (y {type: (t-var {} _)}))
+    (let {span: "surf:37..85"}
+      (bind {}
+        z
+        (app {span: "surf:61..70",
+               surf_binding_type: "explicit",
+               type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))
+             }
+          (var {span: "surf:61..64"} add)
+          (var {span: "surf:65..66"} x)
+          (var {span: "surf:68..69"} y)))
+      (realize {span: "surf:73..83"} (var {span: "surf:81..82"} x)))))

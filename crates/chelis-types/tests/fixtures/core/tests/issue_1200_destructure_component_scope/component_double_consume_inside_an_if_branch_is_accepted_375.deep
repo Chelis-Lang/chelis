@@ -1,0 +1,44 @@
+(defsig {}
+  f
+  (t-fn {}
+    (t-prim {} bool)
+    (t-tuple {}
+      (t-tensor {} (d-lit {} 4) (t-prim {} f32))
+      (t-tensor {} (d-lit {} 4) (t-prim {} f32)))
+    (t-tensor {} (d-lit {} 4) (t-prim {} f32))))
+
+(def {}
+  f
+  (fn {}
+    (params {} (c {type: (t-var {} _)}) (p {type: (t-var {} _)}))
+    (let {span: "surf:73..136"}
+      (bind {destructure: true}
+        __chelis_tmp0
+        (var {span: "surf:86..87"} p))
+      (let {}
+        (bind {destructure: true}
+          __chelis_tmp2
+          (tuple-get {} (var {} __chelis_tmp0) (lit {type: (t-prim {} i32)} 0)))
+        (let {}
+          (bind {destructure: true}
+            a
+            (var {} __chelis_tmp2))
+          (let {}
+            (bind {destructure: true}
+              __chelis_tmp1
+              (tuple-get {}
+                (var {} __chelis_tmp0)
+                (lit {type: (t-prim {} i32)} 1)))
+            (let {}
+              (bind {destructure: true}
+                b
+                (var {} __chelis_tmp1))
+              (if {span: "surf:90..134"}
+                (var {span: "surf:93..94"} c)
+                (app {span: "surf:100..127"}
+                  (var {span: "surf:100..103"} add)
+                  (realize {span: "surf:104..114"}
+                    (var {span: "surf:112..113"} a))
+                  (realize {span: "surf:116..126"}
+                    (var {span: "surf:124..125"} a)))
+                (var {span: "surf:133..134"} b)))))))))

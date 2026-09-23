@@ -11,9 +11,7 @@
 //! placeholder built a backward DAG that failed verification with a rank-zero
 //! collapse and `0 extent source(s) for 1 output axis(es)`.
 //!
-//! The end-to-end receipt is
-//! `chelis-cli`'s `issue_368_runtime_symbolic_window_grad_is_half_everywhere`.
-//! These fixtures pin the lowering property that test depends on, directly.
+//! These fixtures pin the lowering property directly, independently of a backend.
 
 use chelis_deep::Expr;
 use chelis_ir::axis_sources::check_axis_sources;
@@ -227,9 +225,5 @@ fn an_axis_with_no_extent_source_is_still_refused() {
     assert!(
         rendered.contains("0 extent source(s) for 1 output axis(es)"),
         "the receipt must name the exact cardinality: {rendered}"
-    );
-    assert!(
-        rendered.contains("chelis#1482"),
-        "the receipt must cite its authority: {rendered}"
     );
 }

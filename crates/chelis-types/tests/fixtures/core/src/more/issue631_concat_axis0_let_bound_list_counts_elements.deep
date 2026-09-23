@@ -1,0 +1,23 @@
+(module {surf_path: "Repro.ConcatCountLet"}
+  repro.concatcountlet
+  (defsig {}
+    stack_rows
+    (t-fn {}
+      (t-tensor {} (d-lit {} 1) (d-lit {} 2) (t-prim {} f32))
+      (t-tensor {} (d-lit {} 1) (d-lit {} 2) (t-prim {} f32))
+      (t-tensor {} (d-lit {} 2) (d-lit {} 2) (t-prim {} f32))))
+  (def {}
+    stack_rows
+    (fn {}
+      (params {} (a {type: (t-var {} _)}) (b {type: (t-var {} _)}))
+      (let {span: "surf:111..148"}
+        (bind {}
+          rows
+          (app {span: "surf:122..128"}
+            (var {} Cons)
+            (var {span: "surf:123..124"} a)
+            (app {} (var {} Cons) (var {span: "surf:126..127"} b) (var {} Nil))))
+        (app {span: "surf:131..146"}
+          (var {span: "surf:131..137"} concat)
+          (var {span: "surf:138..142"} rows)
+          (lit {span: "surf:144..145", type: (t-prim {} i32)} 0))))))

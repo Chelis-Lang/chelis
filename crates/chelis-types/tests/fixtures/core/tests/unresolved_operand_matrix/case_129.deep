@@ -1,0 +1,40 @@
+(defsig {dtype_bounds: {p: float}}
+  g
+  (p)
+  (t-fn {eff: (effects {} random)}
+    (t-tensor {} (d-lit {} 3) (t-var {} p))
+    (t-var {} p)
+    (t-tensor {} (d-lit {} 3) (t-var {} p))))
+
+(def {}
+  g
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (r {type: (t-var {} _)}))
+    (app {span: "surf:70..83"}
+      (var {span: "surf:70..77"} dropout)
+      (var {span: "surf:78..79"} x)
+      (var {span: "surf:81..82"} r))))
+
+(defsig {}
+  f
+  (t-fn {eff: (effects {} random)} (t-tensor {} (d-lit {} 3) (t-prim {} i32))))
+
+(def {}
+  f
+  (fn {}
+    (params {})
+    (app {span: "surf:125..163"}
+      (var {span: "surf:125..126"} g)
+      (app {span: "surf:127..156"}
+        (var {span: "surf:127..136"} to_tensor)
+        (app {span: "surf:137..155"}
+          (var {} Cons)
+          (lit {span: "surf:138..142", surf_literal_style: "explicit", type: (t-prim {} i32)} 1)
+          (app {}
+            (var {} Cons)
+            (lit {span: "surf:144..148", surf_literal_style: "explicit", type: (t-prim {} i32)} 2)
+            (app {}
+              (var {} Cons)
+              (lit {span: "surf:150..154", surf_literal_style: "explicit", type: (t-prim {} i32)} 4)
+              (var {} Nil)))))
+      (lit {span: "surf:158..162", surf_literal_style: "explicit", type: (t-prim {} i32)} 1))))

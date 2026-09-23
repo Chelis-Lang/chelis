@@ -1,0 +1,70 @@
+(defsig {}
+  f
+  (t-fn {}
+    (t-tuple {}
+      (t-tensor {} (d-lit {} 4) (t-prim {} f32))
+      (t-tensor {} (d-lit {} 4) (t-prim {} f32)))
+    (t-tensor {} (d-lit {} 4) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 4) (t-prim {} f32))))
+
+(def {}
+  f
+  (fn {}
+    (params {} (p {type: (t-var {} _)}) (w {type: (t-var {} _)}))
+    (let {span: "surf:83..237"}
+      (bind {destructure: true}
+        __chelis_tmp0
+        (var {span: "surf:96..97"} p))
+      (let {}
+        (bind {destructure: true}
+          __chelis_tmp2
+          (tuple-get {} (var {} __chelis_tmp0) (lit {type: (t-prim {} i32)} 0)))
+        (let {}
+          (bind {destructure: true}
+            a
+            (var {} __chelis_tmp2))
+          (let {}
+            (bind {destructure: true}
+              __chelis_tmp1
+              (tuple-get {}
+                (var {} __chelis_tmp0)
+                (lit {type: (t-prim {} i32)} 1)))
+            (let {}
+              (bind {destructure: true}
+                b
+                (var {} __chelis_tmp1))
+              (let {}
+                (bind {}
+                  y
+                  (var {span: "surf:120..121", surf_binding_type: "explicit", type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} a))
+                (let {}
+                  (bind {}
+                    a
+                    (var {span: "surf:144..145", surf_binding_type: "explicit", type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} w))
+                  (let {}
+                    (bind {}
+                      r1
+                      (realize {span: "surf:169..179",
+                                 surf_binding_type: "explicit",
+                                 type: (t-tensor {}
+                                         (d-lit {} 4)
+                                         (t-prim {} f32))
+                               }
+                        (var {span: "surf:177..178"} y)))
+                    (let {}
+                      (bind {}
+                        r2
+                        (realize {span: "surf:203..213",
+                                   surf_binding_type: "explicit",
+                                   type: (t-tensor {}
+                                           (d-lit {} 4)
+                                           (t-prim {} f32))
+                                 }
+                          (var {span: "surf:211..212"} y)))
+                      (app {span: "surf:216..235"}
+                        (var {span: "surf:216..219"} add)
+                        (app {span: "surf:220..231"}
+                          (var {span: "surf:220..223"} add)
+                          (var {span: "surf:224..226"} r1)
+                          (var {span: "surf:228..230"} r2))
+                        (var {span: "surf:233..234"} a)))))))))))))

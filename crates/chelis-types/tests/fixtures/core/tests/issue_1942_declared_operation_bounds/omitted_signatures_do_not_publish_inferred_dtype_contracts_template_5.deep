@@ -1,0 +1,15 @@
+(deftype {} Box (a) (variant {} Box (field {} value (t-var {} a))))
+
+(def {}
+  source
+  (fn {}
+    (params {})
+    (record {}
+      Box
+      (kv {} value (var {} sin)))))
+
+(def {}
+  make
+  (fn {}
+    (params {})
+    (app {} (var {} source))))

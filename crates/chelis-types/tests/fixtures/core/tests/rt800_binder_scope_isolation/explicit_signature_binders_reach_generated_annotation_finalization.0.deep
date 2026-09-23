@@ -1,0 +1,41 @@
+(defsig {}
+  row_argmax
+  (piece classes p)
+  (t-fn {}
+    (t-ref {} (t-tensor {} (d-var {} piece) (d-var {} classes) (t-var {} p)))
+    (t-prim {} i64)))
+
+(def {}
+  row_argmax
+  (fn {}
+    (params {}
+      (row
+        {type: (t-ref {}
+                  (t-tensor {} (d-var {} piece) (d-var {} classes) (t-var {} p)))
+        }))
+    (let {span: "surf:127..178"}
+      (bind {}
+        pair
+        (app {span: "surf:138..161"}
+          (var {span: "surf:138..142"} sort)
+          (var {span: "surf:143..146"} row)
+          (cast {span: "surf:148..160"}
+            (lit {span: "surf:153..154", surf_literal_style: "unsuffixed", type: (t-prim {} i32)} 1)
+            (t-prim {} i32))))
+      (cast {span: "surf:164..176"}
+        (lit {span: "surf:169..170", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 0)
+        (t-prim {} i64)))))
+
+(defsig {}
+  call
+  (t-fn {}
+    (t-ref {} (t-tensor {} (d-lit {} 1) (d-lit {} 3) (t-prim {} f32)))
+    (t-prim {} i64)))
+
+(def {}
+  call
+  (fn {}
+    (params {} (xs {type: (t-var {} _)}))
+    (app {span: "surf:221..235"}
+      (var {span: "surf:221..231"} row_argmax)
+      (var {span: "surf:232..234"} xs))))

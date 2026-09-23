@@ -1,0 +1,9 @@
+(defsig {} f (t-fn {} (t-prim {} f32)))
+
+(def {}
+  f
+  (fn {}
+    (params {})
+    (cast {span: "surf:17..31"}
+      (lit {span: "surf:22..25", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 1.0)
+      (t-prim {} f32))))

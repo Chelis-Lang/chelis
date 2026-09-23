@@ -1,0 +1,85 @@
+(def {}
+  first
+  (fn {}
+    (params {} n)
+    (if {span: "surf:15..58"}
+      (app {span: "surf:18..27"}
+        (var {} eq)
+        (var {span: "surf:18..19"} n)
+        (lit {span: "surf:23..27", surf_literal_style: "explicit", type: (t-prim {} i32)} 0))
+      (var {span: "surf:33..36"} len)
+      (app {span: "surf:42..58"}
+        (var {span: "surf:42..48"} fourth)
+        (app {span: "surf:49..57"}
+          (var {} sub)
+          (var {span: "surf:49..50"} n)
+          (lit {span: "surf:53..57", surf_literal_style: "explicit", type: (t-prim {} i32)} 1))))))
+
+(def {}
+  second
+  (fn {}
+    (params {} n)
+    (if {span: "surf:75..125"}
+      (app {span: "surf:78..87"}
+        (var {} eq)
+        (var {span: "surf:78..79"} n)
+        (lit {span: "surf:83..87", surf_literal_style: "explicit", type: (t-prim {} i32)} 0))
+      (app {span: "surf:93..104"}
+        (var {span: "surf:93..98"} first)
+        (lit {span: "surf:99..103", surf_literal_style: "explicit", type: (t-prim {} i32)} 0))
+      (app {span: "surf:110..125"}
+        (var {span: "surf:110..115"} first)
+        (app {span: "surf:116..124"}
+          (var {} sub)
+          (var {span: "surf:116..117"} n)
+          (lit {span: "surf:120..124", surf_literal_style: "explicit", type: (t-prim {} i32)} 1))))))
+
+(def {}
+  third
+  (fn {}
+    (params {} n)
+    (if {span: "surf:141..193"}
+      (app {span: "surf:144..153"}
+        (var {} eq)
+        (var {span: "surf:144..145"} n)
+        (lit {span: "surf:149..153", surf_literal_style: "explicit", type: (t-prim {} i32)} 0))
+      (app {span: "surf:159..171"}
+        (var {span: "surf:159..165"} second)
+        (lit {span: "surf:166..170", surf_literal_style: "explicit", type: (t-prim {} i32)} 0))
+      (app {span: "surf:177..193"}
+        (var {span: "surf:177..183"} second)
+        (app {span: "surf:184..192"}
+          (var {} sub)
+          (var {span: "surf:184..185"} n)
+          (lit {span: "surf:188..192", surf_literal_style: "explicit", type: (t-prim {} i32)} 1))))))
+
+(def {}
+  fourth
+  (fn {}
+    (params {} n)
+    (if {span: "surf:210..260"}
+      (app {span: "surf:213..222"}
+        (var {} eq)
+        (var {span: "surf:213..214"} n)
+        (lit {span: "surf:218..222", surf_literal_style: "explicit", type: (t-prim {} i32)} 0))
+      (app {span: "surf:228..239"}
+        (var {span: "surf:228..233"} third)
+        (lit {span: "surf:234..238", surf_literal_style: "explicit", type: (t-prim {} i32)} 0))
+      (app {span: "surf:245..260"}
+        (var {span: "surf:245..250"} third)
+        (app {span: "surf:251..259"}
+          (var {} sub)
+          (var {span: "surf:251..252"} n)
+          (lit {span: "surf:255..259", surf_literal_style: "explicit", type: (t-prim {} i32)} 1))))))
+
+(def {}
+  measure
+  (app {span: "surf:271..283"}
+    (var {span: "surf:271..277"} fourth)
+    (lit {span: "surf:278..282", surf_literal_style: "explicit", type: (t-prim {} i32)} 1)))
+
+(def {}
+  out
+  (app {span: "surf:290..303"}
+    (var {span: "surf:290..297"} measure)
+    (lit {span: "surf:298..302", type: (t-prim {} i64)} 1)))

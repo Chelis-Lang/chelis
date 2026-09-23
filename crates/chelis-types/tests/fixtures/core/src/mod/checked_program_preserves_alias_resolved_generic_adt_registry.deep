@@ -1,0 +1,14 @@
+(typealias {} Payload (a) (t-var {} a))
+
+(deftype {} Boxed (a) (variant {} Boxed (t-adt {} Payload (t-var {} a))))
+
+(defsig {}
+  identity
+  (a)
+  (t-fn {} (t-adt {} Boxed (t-var {} a)) (t-adt {} Boxed (t-var {} a))))
+
+(def {}
+  identity
+  (fn {}
+    (params {} (value {type: (t-var {} _)}))
+    (var {span: "surf:104..109"} value)))

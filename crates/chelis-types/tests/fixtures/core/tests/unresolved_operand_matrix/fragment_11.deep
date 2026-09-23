@@ -1,0 +1,10 @@
+(app {span: "surf:16..40"}
+    (var {} Cons)
+    (lit {span: "surf:17..23", surf_literal_style: "explicit", type: (t-prim {} f32)} 1.0)
+    (app {}
+      (var {} Cons)
+      (lit {span: "surf:25..31", surf_literal_style: "explicit", type: (t-prim {} f32)} 4.0)
+      (app {}
+        (var {} Cons)
+        (lit {span: "surf:33..39", surf_literal_style: "explicit", type: (t-prim {} f32)} 9.0)
+        (var {} Nil))))

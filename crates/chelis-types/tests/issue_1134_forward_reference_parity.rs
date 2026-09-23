@@ -2,7 +2,7 @@
 //! stamped typed and serialized-IR checker ingresses.
 
 use chelis_deep::{parse_and_stamp, parse_and_stamp_file};
-use chelis_surf::{desugar::desugar_program, parser::parse_str as parse_surf};
+
 use chelis_types::{
     TypeEnv, build_type_env_from_library, check_ir_program, check_ir_with_context,
     check_typed_program,
@@ -21,9 +21,8 @@ fn deep_file_program(source: &str) -> Vec<chelis_deep::Expr> {
     parse_and_stamp_file(source).expect("Deep file fixture must parse and stamp")
 }
 
-fn surf_program(source: &str) -> Vec<chelis_deep::Expr> {
-    let declarations = parse_surf(source).expect("Surf fixture must parse");
-    desugar_program(&declarations)
+fn legacy_program(source: &str) -> Vec<chelis_deep::Expr> {
+    serde_json::from_str(source).expect("lossless legacy fixture")
 }
 
 fn diagnostics(program: &[chelis_deep::Expr]) -> (Diagnostics, Diagnostics) {
@@ -91,32 +90,33 @@ fn backward_value_reference_remains_legal_at_both_ingresses() {
 
 #[test]
 fn module_wrapped_forward_generic_helper_has_the_same_verdict() {
-    let program = surf_program(
-        r#"
-module ForwardParity
-def use_int(x: i32) -> i32 = identity(x)
-def use_float(x: f32) -> f32 = identity(x)
-def identity(x) = x
-"#,
-    );
+    let program = legacy_program(include_str!(
+        "fixtures/core/tests/issue_1134_forward_reference_parity/module_wrapped_forward_generic_helper_has_the_same_verdict_1.json"
+    ));
     assert_accepts_at_both_ingresses(&program, "module generic forward helper");
 }
 
 #[test]
 fn ascribed_external_input_self_reference_is_legal_at_both_ingresses() {
-    let program = surf_program("x = (x : tensor[4, f32])\n");
+    let program = legacy_program(include_str!(
+        "fixtures/core/tests/issue_1134_forward_reference_parity/ascribed_external_input_self_reference_is_legal_at_both_ingresses_1.json"
+    ));
     assert_accepts_at_both_ingresses(&program, "external input self-reference");
 }
 
 #[test]
 fn declaration_typed_self_reference_is_an_external_input_at_both_ingresses() {
-    let program = surf_program("x: tensor[4, f32] = x\n");
+    let program = legacy_program(include_str!(
+        "fixtures/core/tests/issue_1134_forward_reference_parity/declaration_typed_self_reference_is_an_external_input_at_both_ingresses_1.json"
+    ));
     assert_accepts_at_both_ingresses(&program, "declaration-typed external input");
 }
 
 #[test]
 fn bare_self_reference_is_not_an_external_input_at_either_ingress() {
-    let program = surf_program("x = x\n");
+    let program = legacy_program(include_str!(
+        "fixtures/core/tests/issue_1134_forward_reference_parity/bare_self_reference_is_not_an_external_input_at_either_ingress_1.json"
+    ));
     assert_rejects_identically(&program, "CycleDetected", "bare self-reference");
 }
 
@@ -133,10 +133,20 @@ fn type_stamped_deep_self_reference_is_an_explicit_external_input() {
 #[test]
 fn a_malformed_external_input_type_reports_identically_at_both_ingresses() {
     for (label, source) in [
-        ("ascribed", "x = (x : Unknown)\n"),
-        ("declaration-typed", "x: Unknown = x\n"),
+        (
+            "ascribed",
+            include_str!(
+                "fixtures/core/tests/issue_1134_forward_reference_parity/a_malformed_external_input_type_reports_identically_at_both_ingresses_1.json"
+            ),
+        ),
+        (
+            "declaration-typed",
+            include_str!(
+                "fixtures/core/tests/issue_1134_forward_reference_parity/a_malformed_external_input_type_reports_identically_at_both_ingresses_2.json"
+            ),
+        ),
     ] {
-        let program = surf_program(source);
+        let program = legacy_program(source);
         let (ir, typed) = diagnostics(&program);
         assert_eq!(ir, typed, "{label}: ingress diagnostics diverged");
         assert!(!ir.is_empty(), "{label}: an unknown type must be rejected");
@@ -157,36 +167,30 @@ fn higher_order_lambda_cycles_reject_identically_at_both_ingresses() {
     for (label, source) in [
         (
             "annotated helper-returned lambda",
-            "module ReturnedLambdaAnnotated\n\n\
-             def anchor() -> i32 = 1\n\n\
-             result: i32 = (make_reader())(1)\n\n\
-             def make_reader() = fn (x: i32) -> read_result(x)\n\n\
-             def read_result(n: i32) -> i32 = add(n, result)\n",
+            include_str!(
+                "fixtures/core/tests/issue_1134_forward_reference_parity/higher_order_lambda_cycles_reject_identically_at_both_ingresses_1.json"
+            ),
         ),
         (
             "unannotated helper-returned lambda",
-            "module ReturnedLambdaInferred\n\n\
-             def anchor() -> i32 = 1\n\n\
-             result = (make_reader())(1)\n\n\
-             def make_reader() = fn (x: i32) -> read_result(x)\n\n\
-             def read_result(n: i32) -> i32 = add(n, result)\n",
+            include_str!(
+                "fixtures/core/tests/issue_1134_forward_reference_parity/higher_order_lambda_cycles_reject_identically_at_both_ingresses_2.json"
+            ),
         ),
         (
             "annotated stored closure applied by later value",
-            "module StoredLambdaAnnotated\n\n\
-             stored = fn (x: i32) -> read_result(x)\n\n\
-             result: i32 = stored(1)\n\n\
-             def read_result(n: i32) -> i32 = add(n, result)\n",
+            include_str!(
+                "fixtures/core/tests/issue_1134_forward_reference_parity/higher_order_lambda_cycles_reject_identically_at_both_ingresses_3.json"
+            ),
         ),
         (
             "unannotated stored closure applied by later value",
-            "module StoredLambdaInferred\n\n\
-             stored = fn (x: i32) -> read_result(x)\n\n\
-             result = stored(1)\n\n\
-             def read_result(n: i32) -> i32 = add(n, result)\n",
+            include_str!(
+                "fixtures/core/tests/issue_1134_forward_reference_parity/higher_order_lambda_cycles_reject_identically_at_both_ingresses_4.json"
+            ),
         ),
     ] {
-        assert_only_cycle_at_both_ingresses(&surf_program(source), label);
+        assert_only_cycle_at_both_ingresses(&legacy_program(source), label);
     }
 }
 
@@ -198,19 +202,18 @@ fn stored_top_level_lambdas_and_earlier_reads_remain_legal() {
     for (label, source) in [
         (
             "stored top-level lambda",
-            "module StoredLambdaOnly\n\n\
-             stored = fn (x: i32) -> read_value(x)\n\n\
-             def read_value(n: i32) -> i32 = add(n, 1)\n",
+            include_str!(
+                "fixtures/core/tests/issue_1134_forward_reference_parity/stored_top_level_lambdas_and_earlier_reads_remain_legal_1.json"
+            ),
         ),
         (
             "lambda reaches earlier eager value",
-            "module StoredLambdaEarlier\n\n\
-             earlier: i32 = 5\n\n\
-             stored = fn (x: i32) -> read_earlier(x)\n\n\
-             def read_earlier(n: i32) -> i32 = add(n, earlier)\n",
+            include_str!(
+                "fixtures/core/tests/issue_1134_forward_reference_parity/stored_top_level_lambdas_and_earlier_reads_remain_legal_2.json"
+            ),
         ),
     ] {
-        assert_accepts_at_both_ingresses(&surf_program(source), label);
+        assert_accepts_at_both_ingresses(&legacy_program(source), label);
     }
 }
 
@@ -227,30 +230,24 @@ fn a_value_naming_a_function_that_reads_it_back_is_a_recorded_stall() {
     for (label, source) in [
         (
             "signed reader",
-            "module MirrorEscape\n\n\
-             def anchor() -> i32 = 1\n\n\
-             carried = wrap(f)\n\n\
-             def wrap(g) = g\n\n\
-             def f(n: i32) -> i32 = if (n <= 0) then 0 else carried((n - 1))\n",
+            include_str!(
+                "fixtures/core/tests/issue_1134_forward_reference_parity/a_value_naming_a_function_that_reads_it_back_is_a_recorded_stall_1.json"
+            ),
         ),
         (
             "lambda naming a signed reader",
-            "module PickEscape\n\n\
-             def anchor() -> i32 = 1\n\n\
-             carried = pick(fn (x: i32) -> f(x))\n\n\
-             def pick(g) = 5\n\n\
-             def f(n: i32) -> i32 = add(n, carried)\n",
+            include_str!(
+                "fixtures/core/tests/issue_1134_forward_reference_parity/a_value_naming_a_function_that_reads_it_back_is_a_recorded_stall_2.json"
+            ),
         ),
         (
             "defsig-less reader",
-            "module WrapEscape\n\n\
-             def anchor() -> i32 = 1\n\n\
-             carried = wrap(g)\n\n\
-             def wrap(h) = h\n\n\
-             def g(n) = if (n <= 0) then 0 else carried((n - 1))\n",
+            include_str!(
+                "fixtures/core/tests/issue_1134_forward_reference_parity/a_value_naming_a_function_that_reads_it_back_is_a_recorded_stall_3.json"
+            ),
         ),
     ] {
-        let program = surf_program(source);
+        let program = legacy_program(source);
         let (ir, typed) = diagnostics(&program);
         assert_eq!(ir, typed, "{label}: ingress diagnostics diverged");
         assert!(
@@ -289,15 +286,22 @@ fn a_value_naming_a_function_that_reads_it_back_is_a_recorded_stall() {
 /// Assemble one unit from ordered declarations, with or without the module
 /// wrapper that gives the planner a region.
 fn layout_source(module: Option<&str>, declarations: &[&str]) -> String {
-    let mut source = String::new();
+    use chelis_deep::{Atom, DeepTag, Expr, List, Metadata, Span};
+    let mut program: Vec<Expr> = declarations
+        .iter()
+        .flat_map(|source| legacy_program(source))
+        .collect();
     if let Some(name) = module {
-        source.push_str(&format!("module {name}\n\n"));
+        let span = Span { offset: 0, len: 0 };
+        let mut elements = vec![
+            Expr::Atom(Atom::Tag(DeepTag::Module), span),
+            Expr::Map(Metadata::default(), span),
+            Expr::Atom(Atom::Name(name.into()), span),
+        ];
+        elements.append(&mut program);
+        program.push(Expr::List(List { elements }, span));
     }
-    for declaration in declarations {
-        source.push_str(declaration);
-        source.push_str("\n\n");
-    }
-    source
+    serde_json::to_string(&program).expect("serializable legacy declarations")
 }
 
 /// A partial or generic header must not be instantiated before its body
@@ -319,14 +323,26 @@ fn layout_source(module: Option<&str>, declarations: &[&str]) -> String {
 /// rejected at the reader rather than at the declaration.
 #[test]
 fn a_partial_or_generic_header_is_not_instantiated_before_its_body_narrows_it() {
-    let partial_reader = "r: f32 = f(2)";
-    let partial_fn = "def f(n: i32) = add(v, n)";
-    let generic_reader = "r: f32 = f(1.5)";
+    let partial_reader = include_str!(
+        "fixtures/core/tests/issue_1134_forward_reference_parity/a_partial_or_generic_header_is_not_instantiated_before_its_body_narrows_it_1.json"
+    );
+    let partial_fn = include_str!(
+        "fixtures/core/tests/issue_1134_forward_reference_parity/a_partial_or_generic_header_is_not_instantiated_before_its_body_narrows_it_2.json"
+    );
+    let generic_reader = include_str!(
+        "fixtures/core/tests/issue_1134_forward_reference_parity/a_partial_or_generic_header_is_not_instantiated_before_its_body_narrows_it_3.json"
+    );
     // [04-INF-6]: the body pins the authored `a` to `i32`, so `f` itself is
     // the rejection and the reader never gets to matter.
-    let generic_fn = "def f[a](x: a) -> a = add(x, v)";
-    let anchor = "def anchor() -> i32 = 1";
-    let carried = "v: i32 = 1";
+    let generic_fn = include_str!(
+        "fixtures/core/tests/issue_1134_forward_reference_parity/a_partial_or_generic_header_is_not_instantiated_before_its_body_narrows_it_4.json"
+    );
+    let anchor = include_str!(
+        "fixtures/core/tests/issue_1134_forward_reference_parity/a_partial_or_generic_header_is_not_instantiated_before_its_body_narrows_it_5.json"
+    );
+    let carried = include_str!(
+        "fixtures/core/tests/issue_1134_forward_reference_parity/a_partial_or_generic_header_is_not_instantiated_before_its_body_narrows_it_6.json"
+    );
 
     for (program, reader, function) in [
         ("PartialHeader", partial_reader, partial_fn),
@@ -340,7 +356,7 @@ fn a_partial_or_generic_header_is_not_instantiated_before_its_body_narrows_it() 
         ] {
             let source = layout_source(Some(program), &declarations);
             assert_rejects_identically(
-                &surf_program(&source),
+                &legacy_program(&source),
                 "TypeMismatch",
                 &format!("{program} {layout}\n{source}"),
             );
@@ -348,7 +364,7 @@ fn a_partial_or_generic_header_is_not_instantiated_before_its_body_narrows_it() 
         // A bare unit has no planner region at all.
         let source = layout_source(None, &[reader, carried, function]);
         assert_rejects_identically(
-            &surf_program(&source),
+            &legacy_program(&source),
             "TypeMismatch",
             &format!("{program} bare unit\n{source}"),
         );
@@ -373,27 +389,30 @@ fn a_body_that_narrows_an_authored_type_binder_rejects_at_the_declaration() {
     for (label, source) in [
         (
             "explicit binder pinned to i32",
-            "module ExplicitRigid\n\n\
-             def f[a](x: a) -> a = add(x, 1)\n",
+            include_str!(
+                "fixtures/core/tests/issue_1134_forward_reference_parity/a_body_that_narrows_an_authored_type_binder_rejects_at_the_declaration_1.json"
+            ),
         ),
         (
             "standalone sig binder pinned to i32",
-            "module StandaloneSigRigid\n\n\
-             sig f[a]: a -> a\n\
-             def f(x) = add(x, 1)\n",
+            include_str!(
+                "fixtures/core/tests/issue_1134_forward_reference_parity/a_body_that_narrows_an_authored_type_binder_rejects_at_the_declaration_2.json"
+            ),
         ),
         (
             "two binders collapsed onto each other",
-            "module CollapsedBinders\n\n\
-             def g[a, b](x: a, y: b) -> a = y\n",
+            include_str!(
+                "fixtures/core/tests/issue_1134_forward_reference_parity/a_body_that_narrows_an_authored_type_binder_rejects_at_the_declaration_3.json"
+            ),
         ),
         (
             "bounded binder pinned by an unsuffixed literal",
-            "module BoundedRigid\n\n\
-             def scale[p: Float](x: p) -> p = mul(x, 0.0)\n",
+            include_str!(
+                "fixtures/core/tests/issue_1134_forward_reference_parity/a_body_that_narrows_an_authored_type_binder_rejects_at_the_declaration_4.json"
+            ),
         ),
     ] {
-        assert_rejects_identically(&surf_program(source), "TypeMismatch", label);
+        assert_rejects_identically(&legacy_program(source), "TypeMismatch", label);
     }
 }
 
@@ -413,26 +432,30 @@ fn a_body_that_keeps_its_authored_type_binders_polymorphic_stays_accepted() {
     for (label, source) in [
         (
             "identity with an explicit result",
-            "module PolyIdentity\n\n\
-             def id[a](x: a) -> a = x\n",
+            include_str!(
+                "fixtures/core/tests/issue_1134_forward_reference_parity/a_body_that_keeps_its_authored_type_binders_polymorphic_stays_accepted_1.json"
+            ),
         ),
         (
             "identity whose result slot is a hole",
-            "module PolyHoleResult\n\n\
-             def k[a](x: a) = x\n",
+            include_str!(
+                "fixtures/core/tests/issue_1134_forward_reference_parity/a_body_that_keeps_its_authored_type_binders_polymorphic_stays_accepted_2.json"
+            ),
         ),
         (
             "bounded binder written with the cast override",
-            "module PolyBounded\n\n\
-             def scale[p: Float](x: p) -> p = mul(x, cast(0.0, p))\n",
+            include_str!(
+                "fixtures/core/tests/issue_1134_forward_reference_parity/a_body_that_keeps_its_authored_type_binders_polymorphic_stays_accepted_3.json"
+            ),
         ),
         (
             "two binders kept distinct",
-            "module DistinctBinders\n\n\
-             def pick[a, b](x: a, y: b) -> a = x\n",
+            include_str!(
+                "fixtures/core/tests/issue_1134_forward_reference_parity/a_body_that_keeps_its_authored_type_binders_polymorphic_stays_accepted_4.json"
+            ),
         ),
     ] {
-        assert_accepts_at_both_ingresses(&surf_program(source), label);
+        assert_accepts_at_both_ingresses(&legacy_program(source), label);
     }
 }
 
@@ -441,35 +464,27 @@ fn a_later_external_input_is_not_visible_to_an_earlier_declaration() {
     for (label, source) in [
         (
             "later ascribed external input",
-            r#"
-module ExternalScope
-def capture() -> i32 = x
-x = (x : i32)
-"#,
+            include_str!(
+                "fixtures/core/tests/issue_1134_forward_reference_parity/a_later_external_input_is_not_visible_to_an_earlier_declaration_1.json"
+            ),
         ),
         (
             "later declaration-typed external input",
-            r#"
-module DeclaredExternalScope
-def capture() -> i32 = x
-x: i32 = x
-"#,
+            include_str!(
+                "fixtures/core/tests/issue_1134_forward_reference_parity/a_later_external_input_is_not_visible_to_an_earlier_declaration_2.json"
+            ),
         ),
     ] {
-        let program = surf_program(source);
+        let program = legacy_program(source);
         assert_rejects_identically(&program, "UnboundVariable", label);
     }
 }
 
 #[test]
 fn a_declaration_typed_value_is_not_visible_before_its_source_position() {
-    let program = surf_program(
-        r#"
-module DeclaredValueScope
-def capture() -> i32 = value
-value: i32 = 7
-"#,
-    );
+    let program = legacy_program(include_str!(
+        "fixtures/core/tests/issue_1134_forward_reference_parity/a_declaration_typed_value_is_not_visible_before_its_source_position_1.json"
+    ));
     assert_rejects_identically(&program, "UnboundVariable", "later declared value");
 }
 
@@ -500,18 +515,14 @@ fn a_separated_defsig_preserves_a_prior_context_binding_until_its_def() {
 #[test]
 fn context_check_cannot_prebind_a_later_external_input_globally() {
     for source in [
-        r#"
-module ExternalContext
-def capture() -> i32 = x
-x = (x : i32)
-"#,
-        r#"
-module DeclaredExternalContext
-def capture() -> i32 = x
-x: i32 = x
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1134_forward_reference_parity/context_check_cannot_prebind_a_later_external_input_globally_1.json"
+        ),
+        include_str!(
+            "fixtures/core/tests/issue_1134_forward_reference_parity/context_check_cannot_prebind_a_later_external_input_globally_2.json"
+        ),
     ] {
-        let program = surf_program(source);
+        let program = legacy_program(source);
         let result = check_ir_with_context(&TypeEnv::empty(), &program)
             .expect_err("later external input must remain unavailable in context checks");
         assert!(
@@ -526,17 +537,9 @@ x: i32 = x
 
 #[test]
 fn sequential_let_shadow_does_not_create_a_top_level_dependency() {
-    let program = surf_program(
-        r#"
-module ShadowParity
-def helper() = {
-  result = 1
-  copied = result
-  copied
-}
-result = helper()
-"#,
-    );
+    let program = legacy_program(include_str!(
+        "fixtures/core/tests/issue_1134_forward_reference_parity/sequential_let_shadow_does_not_create_a_top_level_dependency_1.json"
+    ));
     assert_accepts_at_both_ingresses(&program, "sequential let shadow");
 }
 
@@ -641,7 +644,7 @@ enum ReaderKind {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum SurfSpelling {
+enum LegacySpelling {
     Unannotated,
     DeclarationTyped,
 }
@@ -680,32 +683,24 @@ fn layout_accepts(layout: &[Item]) -> bool {
     position(Item::Value) < position(Item::Reader)
 }
 
-fn surf_source(
+fn legacy_source(
     layout: &[Item],
     reader: ReaderKind,
-    spelling: SurfSpelling,
+    spelling: LegacySpelling,
     wrapped: bool,
 ) -> String {
-    let mut source = String::new();
-    if wrapped {
-        source.push_str("module OrderingMatrix\n\n");
-    }
-    for item in layout {
-        let declaration = match item {
-            Item::Anchor => "def anchor() -> i32 = 1".to_string(),
-            Item::Value => match spelling {
-                SurfSpelling::Unannotated => "carried = 7".to_string(),
-                SurfSpelling::DeclarationTyped => "carried: i32 = 7".to_string(),
-            },
-            Item::Reader => match reader {
-                ReaderKind::Function => "def reader() -> i32 = carried".to_string(),
-                ReaderKind::Value => "echoed = carried".to_string(),
-            },
-        };
-        source.push_str(&declaration);
-        source.push_str("\n\n");
-    }
-    source
+    let declarations: Vec<&str> = layout.iter().map(|item| match item {
+        Item::Anchor => include_str!("fixtures/core/tests/issue_1134_forward_reference_parity/fragment_anchor.json"),
+        Item::Value => match spelling {
+            LegacySpelling::Unannotated => include_str!("fixtures/core/tests/issue_1134_forward_reference_parity/fragment_carried.json"),
+            LegacySpelling::DeclarationTyped => include_str!("fixtures/core/tests/issue_1134_forward_reference_parity/fragment_typed_carried.json"),
+        },
+        Item::Reader => match reader {
+            ReaderKind::Function => include_str!("fixtures/core/tests/issue_1134_forward_reference_parity/fragment_reader.json"),
+            ReaderKind::Value => include_str!("fixtures/core/tests/issue_1134_forward_reference_parity/fragment_echoed.json"),
+        },
+    }).collect();
+    layout_source(wrapped.then_some("OrderingMatrix"), &declarations)
 }
 
 fn deep_source(
@@ -784,20 +779,23 @@ fn report(failures: Vec<String>, rows: usize) {
 }
 
 #[test]
-fn surf_ordering_matrix_matches_04_inf_4_at_both_ingresses() {
+fn legacy_ordering_matrix_matches_04_inf_4_at_both_ingresses() {
     let mut failures = Vec::new();
     let mut rows = 0;
     for layout in layouts() {
         for reader in [ReaderKind::Function, ReaderKind::Value] {
-            for spelling in [SurfSpelling::Unannotated, SurfSpelling::DeclarationTyped] {
+            for spelling in [
+                LegacySpelling::Unannotated,
+                LegacySpelling::DeclarationTyped,
+            ] {
                 for wrapped in [true, false] {
                     rows += 1;
-                    let source = surf_source(&layout, reader, spelling, wrapped);
+                    let source = legacy_source(&layout, reader, spelling, wrapped);
                     let label = format!(
                         "surf layout={layout:?} reader={reader:?} spelling={spelling:?} \
                          wrapped={wrapped}\n{source}"
                     );
-                    let program = surf_program(&source);
+                    let program = legacy_program(&source);
                     let accepts = layout_accepts(&layout);
                     if let Some(failure) = ordering_row_failure(&program, accepts, &label) {
                         failures.push(failure);
@@ -892,34 +890,23 @@ fn recursive_layout_accepts(layout: &[RecursiveItem]) -> bool {
     position(RecursiveItem::Value) < position(RecursiveItem::Pong)
 }
 
-fn recursive_surf_source(
+fn recursive_legacy_source(
     layout: &[RecursiveItem],
     spelling: RecursiveValueSpelling,
     wrapped: bool,
 ) -> String {
-    let mut source = String::new();
-    if wrapped {
-        source.push_str("module RecursiveOrderingMatrix\n\n");
-    }
-    // `seed` leads in both spellings so the layouts stay comparable.
-    source.push_str("def seed() -> i32 = 3\n\n");
-    for item in layout {
-        let declaration = match item {
-            RecursiveItem::Ping => {
-                "def ping(n: i32) -> i32 = if (n <= 0) then 0 else pong((n - 1))".to_string()
-            }
-            RecursiveItem::Pong => {
-                "def pong(n: i32) -> i32 = if (n <= 0) then carried else ping((n - 1))".to_string()
-            }
-            RecursiveItem::Value => match spelling {
-                RecursiveValueSpelling::Stamped => "carried = 7".to_string(),
-                RecursiveValueSpelling::Computed => "carried = seed()".to_string(),
-            },
-        };
-        source.push_str(&declaration);
-        source.push_str("\n\n");
-    }
-    source
+    let mut declarations = vec![include_str!(
+        "fixtures/core/tests/issue_1134_forward_reference_parity/fragment_seed.json"
+    )];
+    declarations.extend(layout.iter().map(|item| match item {
+        RecursiveItem::Ping => include_str!("fixtures/core/tests/issue_1134_forward_reference_parity/fragment_ping.json"),
+        RecursiveItem::Pong => include_str!("fixtures/core/tests/issue_1134_forward_reference_parity/fragment_pong.json"),
+        RecursiveItem::Value => match spelling {
+            RecursiveValueSpelling::Stamped => include_str!("fixtures/core/tests/issue_1134_forward_reference_parity/fragment_carried.json"),
+            RecursiveValueSpelling::Computed => include_str!("fixtures/core/tests/issue_1134_forward_reference_parity/fragment_computed_carried.json"),
+        },
+    }));
+    layout_source(wrapped.then_some("RecursiveOrderingMatrix"), &declarations)
 }
 
 #[test]
@@ -933,11 +920,11 @@ fn recursive_component_ordering_matrix_matches_04_inf_4_at_both_ingresses() {
         ] {
             for wrapped in [true, false] {
                 rows += 1;
-                let source = recursive_surf_source(&layout, spelling, wrapped);
+                let source = recursive_legacy_source(&layout, spelling, wrapped);
                 let label = format!(
                     "recursive layout={layout:?} spelling={spelling:?} wrapped={wrapped}\n{source}"
                 );
-                let program = surf_program(&source);
+                let program = legacy_program(&source);
                 let accepts = recursive_layout_accepts(&layout);
                 if let Some(failure) = ordering_row_failure(&program, accepts, &label) {
                     failures.push(failure);
@@ -1012,20 +999,21 @@ fn fn_dep_layout_accepts(layout: &[FnDepItem], wrapped: bool) -> bool {
 }
 
 fn fn_dep_source(layout: &[FnDepItem], wrapped: bool) -> String {
-    let mut source = String::new();
-    if wrapped {
-        source.push_str("module FnDepMatrix\n\n");
-    }
-    for item in layout {
-        let declaration = match item {
-            FnDepItem::Helper => "def helper(x) = x",
-            FnDepItem::Caller => "def caller(n) = helper(n)",
-            FnDepItem::Consumer => "consumer = caller(1)",
-        };
-        source.push_str(declaration);
-        source.push_str("\n\n");
-    }
-    source
+    let declarations: Vec<&str> = layout
+        .iter()
+        .map(|item| match item {
+            FnDepItem::Helper => include_str!(
+                "fixtures/core/tests/issue_1134_forward_reference_parity/fragment_helper.json"
+            ),
+            FnDepItem::Caller => include_str!(
+                "fixtures/core/tests/issue_1134_forward_reference_parity/fragment_caller.json"
+            ),
+            FnDepItem::Consumer => include_str!(
+                "fixtures/core/tests/issue_1134_forward_reference_parity/fragment_consumer.json"
+            ),
+        })
+        .collect();
+    layout_source(wrapped.then_some("FnDepMatrix"), &declarations)
 }
 
 #[test]
@@ -1037,7 +1025,7 @@ fn function_visibility_matrix_is_unchanged_by_eager_value_scope() {
             rows += 1;
             let source = fn_dep_source(&layout, wrapped);
             let label = format!("fn-dep layout={layout:?} wrapped={wrapped}\n{source}");
-            let program = surf_program(&source);
+            let program = legacy_program(&source);
             if let Some(failure) =
                 ordering_row_failure(&program, fn_dep_layout_accepts(&layout, wrapped), &label)
             {
@@ -1056,12 +1044,9 @@ fn function_visibility_matrix_is_unchanged_by_eager_value_scope() {
 /// indirect residue and is owned there, not here.
 #[test]
 fn an_initialization_cycle_leaves_the_schedule_total_at_both_ingresses() {
-    let program = surf_program(
-        "module InitializationCycle\n\n\
-         def ping(n: i32) -> i32 = if (n <= 0) then 0 else pong((n - 1))\n\n\
-         carried = ping(1)\n\n\
-         def pong(n: i32) -> i32 = if (n <= 0) then carried else ping((n - 1))\n",
-    );
+    let program = legacy_program(include_str!(
+        "fixtures/core/tests/issue_1134_forward_reference_parity/an_initialization_cycle_leaves_the_schedule_total_at_both_ingresses_1.json"
+    ));
     // The cycle detector owns the verdict; this test owns the property that the
     // scheduler reaches it at all, identically at both ingresses.
     assert_rejects_identically(&program, "CycleDetected", "initialization cycle");

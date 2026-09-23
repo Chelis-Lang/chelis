@@ -3,7 +3,7 @@
 //!
 //! # Diagnosis
 //!
-//! `chelis_surf::desugar::desugar_let_bindings` routes every `let` whose
+//! The original desugaring routes every `let` whose
 //! pattern is not a bare `Var` — including a bare `_` discard — through
 //! `bind_destructure_value`, which stamps `destructure: true` on the
 //! synthesized bind. Before this fix `Checker::check_let` turned that
@@ -41,21 +41,20 @@
 //! mechanism is `spec/design/implicit_linearity.md` §"Destructured
 //! components".
 
-use chelis_surf::desugar::desugar_program;
-use chelis_surf::parser::parse_str;
+use chelis_deep::parser::parse_str;
 use chelis_types::errors::CheckErrorKind;
 use chelis_types::{check_linearity, check_typed_program};
 
 fn linearity_errors(source: &str) -> Vec<chelis_types::errors::CheckError> {
-    let decls = parse_str(source).expect("surf parse should succeed");
-    let deep = desugar_program(&decls);
+    let decls = parse_str(source).expect("Deep fixture parse should succeed");
+    let deep = decls;
     let checked = check_typed_program(&deep).expect("type check should succeed");
     check_linearity(&checked).expect_err("linearity check must error")
 }
 
 fn assert_linearity_clean(source: &str) {
-    let decls = parse_str(source).expect("surf parse should succeed");
-    let deep = desugar_program(&decls);
+    let decls = parse_str(source).expect("Deep fixture parse should succeed");
+    let deep = decls;
     let checked = check_typed_program(&deep).expect("type check should succeed");
     if let Err(errors) = check_linearity(&checked) {
         panic!("linearity check should not error; got {errors:?}");
@@ -73,14 +72,9 @@ fn assert_linearity_clean(source: &str) {
 /// discard.
 #[test]
 fn wildcard_discard_does_not_poison_its_own_source() {
-    assert_linearity_clean(
-        r#"
-def f(v: tensor[4, f32]) -> tensor[4, f32] = {
-  _ = realize(v)
-  realize(v)
-}
-"#,
-    );
+    assert_linearity_clean(include_str!(
+        "fixtures/core/tests/issue_1200_destructure_component_scope/wildcard_discard_does_not_poison_its_own_source_77.deep"
+    ));
 }
 
 /// Control: the same double consume without the discard was always
@@ -88,14 +82,9 @@ def f(v: tensor[4, f32]) -> tensor[4, f32] = {
 /// verdict, not a newly-invented leniency.
 #[test]
 fn double_consume_without_discard_is_the_same_verdict() {
-    assert_linearity_clean(
-        r#"
-def f(v: tensor[4, f32]) -> tensor[4, f32] = {
-  r: tensor[4, f32] = realize(v)
-  realize(v)
-}
-"#,
-    );
+    assert_linearity_clean(include_str!(
+        "fixtures/core/tests/issue_1200_destructure_component_scope/double_consume_without_discard_is_the_same_verdict_92.deep"
+    ));
 }
 
 // ============================================================
@@ -108,16 +97,9 @@ def f(v: tensor[4, f32]) -> tensor[4, f32] = {
 /// `realize(p)` a hard error.
 #[test]
 fn discard_does_not_poison_an_unrelated_binding() {
-    assert_linearity_clean(
-        r#"
-def f(p: tensor[4, f32], q: tensor[4, f32]) -> tensor[4, f32] = {
-  r1: tensor[4, f32] = realize(p)
-  _ = realize(q)
-  r2: tensor[4, f32] = realize(p)
-  add(r1, r2)
-}
-"#,
-    );
+    assert_linearity_clean(include_str!(
+        "fixtures/core/tests/issue_1200_destructure_component_scope/discard_does_not_poison_an_unrelated_binding_112.deep"
+    ));
 }
 
 /// Coral's actual shape: a run of leading discards followed by ordinary
@@ -125,17 +107,9 @@ def f(p: tensor[4, f32], q: tensor[4, f32]) -> tensor[4, f32] = {
 /// scope.
 #[test]
 fn a_run_of_discards_does_not_poison_the_rest_of_the_block() {
-    assert_linearity_clean(
-        r#"
-def f(p: tensor[4, f32], q: tensor[4, f32], s: tensor[4, f32]) -> tensor[4, f32] = {
-  _ = realize(q)
-  _ = realize(s)
-  r1: tensor[4, f32] = realize(p)
-  r2: tensor[4, f32] = realize(p)
-  add(r1, r2)
-}
-"#,
-    );
+    assert_linearity_clean(include_str!(
+        "fixtures/core/tests/issue_1200_destructure_component_scope/a_run_of_discards_does_not_poison_the_rest_of_the_block_129.deep"
+    ));
 }
 
 // ============================================================
@@ -148,15 +122,9 @@ def f(p: tensor[4, f32], q: tensor[4, f32], s: tensor[4, f32]) -> tensor[4, f32]
 /// block-scoped gate was the cause.
 #[test]
 fn named_tuple_destructure_does_not_poison_its_source() {
-    assert_linearity_clean(
-        r#"
-def f(v: tensor[4, f32], w: tensor[4, f32]) -> tensor[4, f32] = {
-  (a, b) = (realize(v), realize(w))
-  r: tensor[4, f32] = realize(v)
-  add(add(a, b), r)
-}
-"#,
-    );
+    assert_linearity_clean(include_str!(
+        "fixtures/core/tests/issue_1200_destructure_component_scope/named_tuple_destructure_does_not_poison_its_source_152.deep"
+    ));
 }
 
 // ============================================================
@@ -169,15 +137,9 @@ def f(v: tensor[4, f32], w: tensor[4, f32]) -> tensor[4, f32] = {
 /// aliased borrow.
 #[test]
 fn component_reuse_without_copy_still_errors() {
-    let errors = linearity_errors(
-        r#"
-def f(p: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] = {
-  (a, b) = p
-  r1: tensor[4, f32] = realize(a)
-  realize(a)
-}
-"#,
-    );
+    let errors = linearity_errors(include_str!(
+        "fixtures/core/tests/issue_1200_destructure_component_scope/component_reuse_without_copy_still_errors_173.deep"
+    ));
     assert!(
         errors.iter().any(|e| {
             matches!(e.kind, CheckErrorKind::UseAfterConsume)
@@ -191,15 +153,9 @@ def f(p: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] = {
 /// The escape hatch the diagnostic names still works.
 #[test]
 fn component_reuse_with_copy_compiles() {
-    assert_linearity_clean(
-        r#"
-def f(p: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] = {
-  (a, b) = p
-  r1: tensor[4, f32] = realize(copy(a))
-  realize(a)
-}
-"#,
-    );
+    assert_linearity_clean(include_str!(
+        "fixtures/core/tests/issue_1200_destructure_component_scope/component_reuse_with_copy_compiles_195.deep"
+    ));
 }
 
 // ============================================================
@@ -211,30 +167,18 @@ def f(p: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] = {
 /// The destructure's SOURCE is not one of them.
 #[test]
 fn tuple_wildcard_does_not_poison_its_source() {
-    assert_linearity_clean(
-        r#"
-def f(v: tensor[4, f32], w: tensor[4, f32]) -> tensor[4, f32] = {
-  (a, _) = (realize(v), realize(w))
-  r: tensor[4, f32] = realize(v)
-  add(a, r)
-}
-"#,
-    );
+    assert_linearity_clean(include_str!(
+        "fixtures/core/tests/issue_1200_destructure_component_scope/tuple_wildcard_does_not_poison_its_source_215.deep"
+    ));
 }
 
 /// Same pattern, but now the named component `a` is consumed twice: still
 /// an error.
 #[test]
 fn tuple_wildcard_component_reuse_still_errors() {
-    let errors = linearity_errors(
-        r#"
-def f(p: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] = {
-  (a, _) = p
-  r1: tensor[4, f32] = realize(a)
-  realize(a)
-}
-"#,
-    );
+    let errors = linearity_errors(include_str!(
+        "fixtures/core/tests/issue_1200_destructure_component_scope/tuple_wildcard_component_reuse_still_errors_230.deep"
+    ));
     assert!(
         errors.iter().any(|e| {
             matches!(e.kind, CheckErrorKind::UseAfterConsume)
@@ -254,17 +198,9 @@ def f(p: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] = {
 /// binding is an ordinary one and gets ordinary implicit-Copy treatment.
 #[test]
 fn ordinary_rebinding_of_a_component_name_drops_the_mark() {
-    assert_linearity_clean(
-        r#"
-def f(p: (tensor[4, f32], tensor[4, f32]), w: tensor[4, f32]) -> tensor[4, f32] = {
-  (a, b) = p
-  a: tensor[4, f32] = realize(w)
-  r1: tensor[4, f32] = realize(a)
-  r2: tensor[4, f32] = realize(a)
-  add(r1, r2)
-}
-"#,
-    );
+    assert_linearity_clean(include_str!(
+        "fixtures/core/tests/issue_1200_destructure_component_scope/ordinary_rebinding_of_a_component_name_drops_the_mark_258.deep"
+    ));
 }
 
 /// The converse direction: a name bound ordinarily first and re-bound as
@@ -272,16 +208,9 @@ def f(p: (tensor[4, f32], tensor[4, f32]), w: tensor[4, f32]) -> tensor[4, f32] 
 /// component's double consume errors.
 #[test]
 fn destructure_rebinding_of_an_ordinary_name_takes_the_mark() {
-    let errors = linearity_errors(
-        r#"
-def f(p: (tensor[4, f32], tensor[4, f32]), w: tensor[4, f32]) -> tensor[4, f32] = {
-  a: tensor[4, f32] = realize(w)
-  (a, b) = p
-  r1: tensor[4, f32] = realize(a)
-  realize(a)
-}
-"#,
-    );
+    let errors = linearity_errors(include_str!(
+        "fixtures/core/tests/issue_1200_destructure_component_scope/destructure_rebinding_of_an_ordinary_name_takes_the_mark_276.deep"
+    ));
     assert!(
         errors.iter().any(|e| {
             matches!(e.kind, CheckErrorKind::UseAfterConsume)
@@ -305,16 +234,9 @@ def f(p: (tensor[4, f32], tensor[4, f32]), w: tensor[4, f32]) -> tensor[4, f32] 
 /// terminal instead would leak `__chelis_tmpN`.
 #[test]
 fn component_consumed_through_an_alias_still_errors() {
-    let errors = linearity_errors(
-        r#"
-def f(p: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] = {
-  (a, b) = p
-  y: tensor[4, f32] = a
-  r1: tensor[4, f32] = realize(y)
-  realize(y)
-}
-"#,
-    );
+    let errors = linearity_errors(include_str!(
+        "fixtures/core/tests/issue_1200_destructure_component_scope/component_consumed_through_an_alias_still_errors_309.deep"
+    ));
     assert!(
         errors
             .iter()
@@ -350,20 +272,9 @@ def f(p: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] = {
 /// agree with the closure-body verdict. 0.18.3 accepted this too.
 #[test]
 fn component_double_consume_inside_a_match_arm_is_accepted() {
-    assert_linearity_clean(
-        r#"
-type Flag =
-  | On
-  | Off
-def f(c: Flag, p: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] = {
-  (a, b) = p
-  match c with {
-    | On => add(realize(a), realize(a))
-    | Off => b
-  }
-}
-"#,
-    );
+    assert_linearity_clean(include_str!(
+        "fixtures/core/tests/issue_1200_destructure_component_scope/component_double_consume_inside_a_match_arm_is_accepted_354.deep"
+    ));
 }
 
 /// Same for an `if` branch. `check_if` clones without re-declaring for
@@ -371,14 +282,9 @@ def f(c: Flag, p: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] = {
 /// have replaced the old match-vs-closure split with an if-vs-match one.
 #[test]
 fn component_double_consume_inside_an_if_branch_is_accepted() {
-    assert_linearity_clean(
-        r#"
-def f(c: bool, p: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] = {
-  (a, b) = p
-  if c then add(realize(a), realize(a)) else b
-}
-"#,
-    );
+    assert_linearity_clean(include_str!(
+        "fixtures/core/tests/issue_1200_destructure_component_scope/component_double_consume_inside_an_if_branch_is_accepted_375.deep"
+    ));
 }
 
 /// NEGATIVE SIDE: only marks INHERITED from outside the branch are
@@ -388,20 +294,9 @@ def f(c: bool, p: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] = {
 /// inside a `match`.
 #[test]
 fn destructure_authored_inside_a_match_arm_still_errors() {
-    let errors = linearity_errors(
-        r#"
-type Flag =
-  | On
-  | Off
-def f(c: Flag, t: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] = match c with {
-  | On => {
-    (a, b) = t
-    add(realize(a), realize(a))
-  }
-  | Off => to_tensor([0.0, 0.0, 0.0, 0.0])
-}
-"#,
-    );
+    let errors = linearity_errors(include_str!(
+        "fixtures/core/tests/issue_1200_destructure_component_scope/destructure_authored_inside_a_match_arm_still_errors_392.deep"
+    ));
     assert!(
         errors.iter().any(|e| {
             matches!(e.kind, CheckErrorKind::UseAfterConsume)
@@ -426,15 +321,9 @@ def f(c: Flag, t: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] = match c 
 /// positive F2 exists to protect.
 #[test]
 fn component_consumed_in_then_branch_then_after_join_errors() {
-    let errors = linearity_errors(
-        r#"
-def f(c: bool, p: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] = {
-  (a, b) = p
-  r: tensor[4, f32] = if c then realize(a) else b
-  add(r, realize(a))
-}
-"#,
-    );
+    let errors = linearity_errors(include_str!(
+        "fixtures/core/tests/issue_1200_destructure_component_scope/component_consumed_in_then_branch_then_after_join_errors_430.deep"
+    ));
     assert!(
         errors.iter().any(|e| {
             matches!(e.kind, CheckErrorKind::UseAfterConsume) && e.message.contains("variable `a`")
@@ -447,15 +336,9 @@ def f(c: bool, p: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] = {
 /// order-sensitive.
 #[test]
 fn component_consumed_in_else_branch_then_after_join_errors() {
-    let errors = linearity_errors(
-        r#"
-def f(c: bool, p: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] = {
-  (a, b) = p
-  r: tensor[4, f32] = if c then b else realize(a)
-  add(r, realize(a))
-}
-"#,
-    );
+    let errors = linearity_errors(include_str!(
+        "fixtures/core/tests/issue_1200_destructure_component_scope/component_consumed_in_else_branch_then_after_join_errors_451.deep"
+    ));
     assert!(
         errors.iter().any(|e| {
             matches!(e.kind, CheckErrorKind::UseAfterConsume) && e.message.contains("variable `a`")
@@ -467,21 +350,9 @@ def f(c: bool, p: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] = {
 /// Same through a match arm.
 #[test]
 fn component_consumed_in_match_arm_then_after_join_errors() {
-    let errors = linearity_errors(
-        r#"
-type Flag =
-  | On
-  | Off
-def f(c: Flag, p: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] = {
-  (a, b) = p
-  r: tensor[4, f32] = match c with {
-    | On => realize(a)
-    | Off => b
-  }
-  add(r, realize(a))
-}
-"#,
-    );
+    let errors = linearity_errors(include_str!(
+        "fixtures/core/tests/issue_1200_destructure_component_scope/component_consumed_in_match_arm_then_after_join_errors_471.deep"
+    ));
     assert!(
         errors.iter().any(|e| {
             matches!(e.kind, CheckErrorKind::UseAfterConsume) && e.message.contains("variable `a`")
@@ -496,14 +367,9 @@ def f(c: Flag, p: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] = {
 /// reporting single consumes.
 #[test]
 fn component_consumed_only_inside_a_branch_stays_clean() {
-    assert_linearity_clean(
-        r#"
-def f(c: bool, p: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] = {
-  (a, b) = p
-  if c then realize(a) else b
-}
-"#,
-    );
+    assert_linearity_clean(include_str!(
+        "fixtures/core/tests/issue_1200_destructure_component_scope/component_consumed_only_inside_a_branch_stays_clean_500.deep"
+    ));
 }
 
 // ------------------------------------------------------------
@@ -516,16 +382,9 @@ def f(c: bool, p: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] = {
 /// 0.18.3 accepted.
 #[test]
 fn two_alias_binds_of_one_component_are_accepted() {
-    assert_linearity_clean(
-        r#"
-def f(p: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] = {
-  (a, b) = p
-  y: tensor[4, f32] = a
-  z: tensor[4, f32] = a
-  add(y, z)
-}
-"#,
-    );
+    assert_linearity_clean(include_str!(
+        "fixtures/core/tests/issue_1200_destructure_component_scope/two_alias_binds_of_one_component_are_accepted_520.deep"
+    ));
 }
 
 // ------------------------------------------------------------
@@ -548,15 +407,9 @@ def f(p: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] = {
 /// uniqueness of carrier names; it proves carrier *forwarding*.
 #[test]
 fn component_captured_then_reused_outside_the_closure_errors() {
-    let errors = linearity_errors(
-        r#"
-def f(p: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] = {
-  (a, b) = p
-  g = fn () -> realize(a)
-  add(g(), realize(a))
-}
-"#,
-    );
+    let errors = linearity_errors(include_str!(
+        "fixtures/core/tests/issue_1200_destructure_component_scope/component_captured_then_reused_outside_the_closure_errors_552.deep"
+    ));
     assert!(
         errors.iter().any(|e| {
             matches!(e.kind, CheckErrorKind::UseAfterConsume) && e.message.contains("variable `a`")
@@ -570,14 +423,9 @@ def f(p: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] = {
 /// the component fix aligned the two rather than inventing a new rule.
 #[test]
 fn capture_then_reuse_of_an_ordinary_binding_still_errors() {
-    let errors = linearity_errors(
-        r#"
-def f(x: tensor[4, f32]) -> tensor[4, f32] = {
-  g = fn () -> realize(x)
-  add(g(), realize(x))
-}
-"#,
-    );
+    let errors = linearity_errors(include_str!(
+        "fixtures/core/tests/issue_1200_destructure_component_scope/capture_then_reuse_of_an_ordinary_binding_still_errors_574.deep"
+    ));
     assert!(
         errors.iter().any(|e| {
             matches!(e.kind, CheckErrorKind::UseAfterConsume)
@@ -601,16 +449,9 @@ def f(x: tensor[4, f32]) -> tensor[4, f32] = {
 /// to undo — and the component misroute does not need it.
 #[test]
 fn two_closures_capturing_one_value_through_an_alias_still_compile() {
-    assert_linearity_clean(
-        r#"
-def f(x: tensor[4, f32]) -> tensor[4, f32] = {
-  y: tensor[4, f32] = x
-  g = fn () -> realize(y)
-  h = fn () -> realize(x)
-  add(g(), h())
-}
-"#,
-    );
+    assert_linearity_clean(include_str!(
+        "fixtures/core/tests/issue_1200_destructure_component_scope/two_closures_capturing_one_value_through_an_alias_still_compile_605.deep"
+    ));
 }
 
 /// chelis#1211 item 2, the later-consume half: an ordinary alias stays
@@ -625,18 +466,9 @@ def f(x: tensor[4, f32]) -> tensor[4, f32] = {
 /// declaration regions" and rides [04-LIN-2]'s identity ruling.
 #[test]
 fn ordinary_alias_still_consumable_after_a_branch_closure_consumes_its_source() {
-    assert_linearity_clean(
-        r#"
-def f(c: bool, x: tensor[4, f32], t: tensor[4, f32]) -> tensor[4, f32] = {
-  y: tensor[4, f32] = x
-  r: tensor[4, f32] = if c then {
-    g = fn () -> realize(x)
-    g()
-  } else t
-  add(r, realize(y))
-}
-"#,
-    );
+    assert_linearity_clean(include_str!(
+        "fixtures/core/tests/issue_1200_destructure_component_scope/ordinary_alias_still_consumable_after_a_branch_closure_consumes_its_source_629.deep"
+    ));
 }
 
 /// A synthesized temp is never named to the user. `a`'s carrier is
@@ -645,15 +477,9 @@ def f(c: bool, x: tensor[4, f32], t: tensor[4, f32]) -> tensor[4, f32] = {
 /// that the user cannot act on.
 #[test]
 fn diagnostics_never_name_a_synthesized_temp() {
-    let errors = linearity_errors(
-        r#"
-def f(p: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] = {
-  (a, b) = p
-  g = fn () -> realize(a)
-  add(g(), realize(a))
-}
-"#,
-    );
+    let errors = linearity_errors(include_str!(
+        "fixtures/core/tests/issue_1200_destructure_component_scope/diagnostics_never_name_a_synthesized_temp_649.deep"
+    ));
     assert!(
         !errors.is_empty(),
         "fixture must produce a diagnostic to inspect"
@@ -699,18 +525,9 @@ def f(p: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] = {
 /// blamed.
 #[test]
 fn pass_b_alias_survives_shadowing_of_its_source() {
-    let errors = linearity_errors(
-        r#"
-def f(p: (tensor[4, f32], tensor[4, f32]), w: tensor[4, f32]) -> tensor[4, f32] = {
-  (a, b) = p
-  y: tensor[4, f32] = a
-  a: tensor[4, f32] = w
-  r1: tensor[4, f32] = realize(y)
-  r2: tensor[4, f32] = realize(y)
-  add(add(r1, r2), a)
-}
-"#,
-    );
+    let errors = linearity_errors(include_str!(
+        "fixtures/core/tests/issue_1200_destructure_component_scope/pass_b_alias_survives_shadowing_of_its_source_703.deep"
+    ));
     assert!(
         errors.iter().any(|e| {
             matches!(e.kind, CheckErrorKind::UseAfterConsume) && e.message.contains("variable `y`")
@@ -732,18 +549,9 @@ def f(p: (tensor[4, f32], tensor[4, f32]), w: tensor[4, f32]) -> tensor[4, f32] 
 /// only because the alias crossed a generation.
 #[test]
 fn pass_b_alias_is_not_captured_by_a_later_destructure_of_its_source_name() {
-    assert_linearity_clean(
-        r#"
-def f(t: (tensor[4, f32], tensor[4, f32]), s: tensor[4, f32]) -> tensor[4, f32] = {
-  x: tensor[4, f32] = s
-  y: tensor[4, f32] = x
-  (x, c) = t
-  r1: tensor[4, f32] = realize(y)
-  r2: tensor[4, f32] = realize(y)
-  add(add(r1, r2), x)
-}
-"#,
-    );
+    assert_linearity_clean(include_str!(
+        "fixtures/core/tests/issue_1200_destructure_component_scope/pass_b_alias_is_not_captured_by_a_later_destructure_of_its_source_name_736.deep"
+    ));
 }
 
 /// The one verdict change generation identity brings beyond the two
@@ -756,17 +564,9 @@ def f(t: (tensor[4, f32], tensor[4, f32]), s: tensor[4, f32]) -> tensor[4, f32] 
 /// fan-out silently fell through to implicit copy.
 #[test]
 fn component_self_rebind_alias_double_consume_errors() {
-    let errors = linearity_errors(
-        r#"
-def f(p: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] = {
-  (a, b) = p
-  a: tensor[4, f32] = a
-  r1: tensor[4, f32] = realize(a)
-  r2: tensor[4, f32] = realize(a)
-  add(r1, r2)
-}
-"#,
-    );
+    let errors = linearity_errors(include_str!(
+        "fixtures/core/tests/issue_1200_destructure_component_scope/component_self_rebind_alias_double_consume_errors_760.deep"
+    ));
     assert!(
         errors.iter().any(|e| {
             matches!(e.kind, CheckErrorKind::UseAfterConsume)
@@ -784,17 +584,9 @@ def f(p: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] = {
 /// for this shape.
 #[test]
 fn ordinary_self_rebind_double_consume_stays_clean() {
-    assert_linearity_clean(
-        r#"
-def f(s: tensor[4, f32]) -> tensor[4, f32] = {
-  x: tensor[4, f32] = s
-  x: tensor[4, f32] = x
-  r1: tensor[4, f32] = realize(x)
-  r2: tensor[4, f32] = realize(x)
-  add(r1, r2)
-}
-"#,
-    );
+    assert_linearity_clean(include_str!(
+        "fixtures/core/tests/issue_1200_destructure_component_scope/ordinary_self_rebind_double_consume_stays_clean_788.deep"
+    ));
 }
 
 // ------------------------------------------------------------
@@ -819,20 +611,9 @@ def f(s: tensor[4, f32]) -> tensor[4, f32] = {
 /// disappear. Both spellings must now report it.
 #[test]
 fn authored_destructure_temp_name_does_not_hide_an_outer_double_consume() {
-    let errors = linearity_errors(
-        r#"
-def two(t: tensor[4, f32]) -> (tensor[4, f32], tensor[4, f32]) = (t, t)
-def f(x: tensor[4, f32], w: tensor[4, f32]) -> tensor[4, f32] = {
-  __chelis_tmp0 = x
-  y = __chelis_tmp0
-  r: tensor[4, f32] = {
-    (a, b) = two(w)
-    add(realize(y), add(a, b))
-  }
-  add(r, add(y, y))
-}
-"#,
-    );
+    let errors = linearity_errors(include_str!(
+        "fixtures/core/tests/issue_1200_destructure_component_scope/authored_destructure_temp_name_does_not_hide_an_outer_double_consume_823.deep"
+    ));
     assert!(
         errors.iter().any(|error| error.message.contains("`y`")),
         "the authored/synthesized collision must not hide `y`'s \

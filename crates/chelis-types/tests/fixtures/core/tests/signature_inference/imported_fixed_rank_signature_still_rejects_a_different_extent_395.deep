@@ -1,0 +1,16 @@
+(defsig {}
+  fixed
+  (t-fn {} (t-tensor {} (d-lit {} 3) (t-prim {} f32)) (t-prim {} f32)))
+
+(def {}
+  fixed
+  (fn {}
+    (params {} (xs {type: (t-var {} _)}))
+    (app {span: "surf:42..74"}
+      (var {span: "surf:42..47"} index)
+      (app {span: "surf:48..59"}
+        (var {span: "surf:48..55"} to_list)
+        (var {span: "surf:56..58"} xs))
+      (cast {span: "surf:61..73"}
+        (lit {span: "surf:66..67", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 0)
+        (t-prim {} i64)))))

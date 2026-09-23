@@ -1,0 +1,3 @@
+(defsig {} broken (t-fn {} (t-prim {} i32)))
+
+(def {} broken (fn {} (params {}) (var {span: "surf:22..29"} missing)))

@@ -1,0 +1,18 @@
+(module {surf_path: "Agent.Exh"}
+  agent.exh
+  (deftype {}
+    Pair
+    ()
+    (variant {} MkPair (field {} a (t-prim {} f32)))
+    (variant {} Empty))
+  (defsig {} partial (t-fn {} (t-adt {} Pair) (t-prim {} f32)))
+  (def {}
+    partial
+    (fn {}
+      (params {} (p {type: (t-var {} _)}))
+      (match {span: "surf:91..132"}
+        (var {span: "surf:97..98"} p)
+        (arm {}
+          (pat-record {} MkPair (kv {} a (pat-var {} v)))
+          ()
+          (var {span: "surf:129..130"} v))))))

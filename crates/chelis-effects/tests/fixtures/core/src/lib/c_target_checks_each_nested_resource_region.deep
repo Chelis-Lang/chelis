@@ -1,0 +1,11 @@
+(defsig {} main (t-fn {} (t-prim {} i32)))
+
+(def {}
+  main
+  (fn {}
+    (params {})
+    (handle-effect {effect: resource, span: "surf:20..70"}
+      (lit {span: "surf:32..37", type: (t-prim {} string)} "cpu")
+      (handle-effect {effect: resource, span: "surf:39..70"}
+        (lit {span: "surf:53..61", type: (t-prim {} string)} "cuda:0")
+        (lit {span: "surf:63..68", type: (t-prim {} i32)} 1)))))

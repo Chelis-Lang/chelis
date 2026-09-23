@@ -4,18 +4,11 @@
 //! PR must hold. Run against the PR-head branch.
 
 use chelis_deep::{Atom, Expr};
-use chelis_surf::desugar::desugar_program;
-use chelis_surf::parser::parse_str as parse_surf;
+
 use chelis_types::{InferResult, check_ir_program};
 
-fn surf_to_deep_macro(source: &str) -> Vec<Expr> {
-    let decls = parse_surf(source).expect("surf parse");
-    chelis_macros::expand_program(
-        &desugar_program(&decls),
-        &chelis_macros::ExpansionOptions::default(),
-    )
-    .expect("macro expand")
-    .into_exprs()
+fn parse_core(source: &str) -> Vec<Expr> {
+    serde_json::from_str(source).expect("lossless core fixture")
 }
 
 fn messages(rep: &InferResult) -> Vec<String> {
@@ -23,7 +16,7 @@ fn messages(rep: &InferResult) -> Vec<String> {
 }
 
 fn reject_messages(source: &str, label: &str) -> Vec<String> {
-    let deep = surf_to_deep_macro(source);
+    let deep = parse_core(source);
     let rep = check_ir_program(&deep)
         .err()
         .unwrap_or_else(|| panic!("{label}: expected a check rejection, but it passed"));
@@ -33,40 +26,29 @@ fn reject_messages(source: &str, label: &str) -> Vec<String> {
 // ─── structural Deep-AST helpers (mirrors issue_319 detector) ─────────────
 
 fn list_tag(expr: &Expr) -> Option<&str> {
-    let Expr::List(list, _) = expr else {
-        return None;
-    };
-    // Decode-once: the spelling comes from the decoded tag, never a raw
-    // element-0 string.
-    list.tag().map(|tag| tag.as_str())
+    expr.tag().map(|tag| tag.as_str())
 }
 
 fn node_type_meta(expr: &Expr) -> Option<&Expr> {
-    let Expr::List(list, _) = expr else {
-        return None;
-    };
-    let Some(Expr::Map(meta, _)) = list.elements.get(1) else {
+    let chelis_deep::ExprCarrier::DecodedNode(_, meta, _) = expr.carrier() else {
         return None;
     };
     meta.ty().map(|ty| ty.expression())
 }
 
 fn app_callee_name(expr: &Expr) -> Option<&str> {
-    if list_tag(expr) != Some("app") {
-        return None;
-    }
-    let Expr::List(list, _) = expr else {
-        return None;
-    };
-    let callee = list.elements.get(2)?;
-    if list_tag(callee) != Some("var") {
-        return None;
-    }
-    let Expr::List(var_list, _) = callee else {
+    let chelis_deep::ExprCarrier::DecodedNode(chelis_deep::DeepTag::App, _, children) =
+        expr.carrier()
+    else {
         return None;
     };
-    match var_list.elements.get(2) {
-        Some(Expr::Atom(Atom::Name(name), _)) => Some(name.as_str()),
+    let chelis_deep::ExprCarrier::DecodedNode(chelis_deep::DeepTag::Var, _, callee) =
+        children.first()?.carrier()
+    else {
+        return None;
+    };
+    match callee.first()? {
+        Expr::Atom(Atom::Name(name), _) => Some(name.as_str()),
         _ => None,
     }
 }
@@ -118,18 +100,16 @@ fn visit<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
 }
 
 fn is_named_def(expr: &Expr, def_name: &str) -> bool {
-    if list_tag(expr) != Some("def") {
-        return false;
-    }
-    let Expr::List(list, _) = expr else {
+    let chelis_deep::ExprCarrier::DecodedNode(chelis_deep::DeepTag::Def, _, children) =
+        expr.carrier()
+    else {
         return false;
     };
-    matches!(list.elements.get(2), Some(Expr::Atom(Atom::Name(name), _)) if name == def_name)
+    matches!(children.first(), Some(Expr::Atom(Atom::Name(name), _)) if name == def_name)
 }
 
 fn checked_def(src: &str, def_name: &str) -> Expr {
-    let decls = parse_surf(src).expect("surf parse");
-    let deep = desugar_program(&decls);
+    let deep: Vec<chelis_deep::Expr> = serde_json::from_str(src).expect("lossless core fixture");
     let checked = check_ir_program(&deep).expect("check");
     checked
         .exprs()
@@ -165,32 +145,16 @@ fn app_type_tags(def: &Expr, callee_name: &str) -> Vec<String> {
     tags
 }
 
-// ─── (3a) THREE Error args + one wrong sibling: no flood ──────────────────
-
-const PRELUDE4: &str = "\
-type P =
-  | P { v: tensor[2, f32] }
-type V =
-  | V { v: tensor[2, f32] }
-def take_four(a: P, b: P, c: P, d: V) -> f32 = cast(0.0, f32)
-";
-
 #[test]
 fn three_error_args_plus_one_wrong_sibling_no_flood() {
     // slots a,b,c get three DISTINCT unbound names (each an Error arg); slot
     // d gets a `P` where a `V` is required (a genuine sibling mismatch). The
     // de-poison must (1) still surface the mismatch, and (2) report the
     // wrong sibling EXACTLY ONCE — no flood off the three Error siblings.
-    let src = format!(
-        "{PRELUDE4}\
-def driver() -> f32 = {{
-  pp = P {{ v: to_tensor([cast(1.0, f32), cast(1.0, f32)]) }}
-  sink = take_four(miss_a, miss_b, miss_c, pp)
-  cast(0.0, f32)
-}}
-"
+    let src = include_str!(
+        "fixtures/core/tests/rt773_adversarial/three_error_args_plus_one_wrong_sibling_no_flood.0.json"
     );
-    let msgs = reject_messages(&src, "3a: three errors + wrong sibling");
+    let msgs = reject_messages(src, "3a: three errors + wrong sibling");
     let unbound: Vec<_> = msgs
         .iter()
         .filter(|m| m.contains("unbound variable"))
@@ -218,23 +182,15 @@ def driver() -> f32 = {{
 
 // ─── (3b) fresh separate-sig def, shape-computed builtins, no bare tvar ───
 
-const FRESH_SEPARATE_SIG: &str = "\
-sig ffn[n, d, h, p: Float]: tensor[n, d, p] -> tensor[d, h, p] -> tensor[h, d, p] -> tensor[n, d, p] -> tensor[n, d, p]
-def ffn(x, w1, w2, r) = {
-  hidden = matmul(x, w1)
-  proj = matmul(hidden, w2)
-  rt = permute(r, 1, 0)
-  back = permute(rt, 1, 0)
-  mul(proj, back)
-}
-";
+const FRESH_SEPARATE_SIG: &str =
+    include_str!("fixtures/core/tests/rt773_adversarial/FRESH_SEPARATE_SIG.0.json");
 
 #[test]
 fn fresh_separate_sig_two_builtins_checks_clean() {
     // 4 params sharing precision var `p` and dim vars n/d/h; let-bound
     // intermediates; three distinct builtins (matmul, permute, mul). Must
     // check clean — the var-ID-collision fix must not spuriously error.
-    let deep = desugar_program(&parse_surf(FRESH_SEPARATE_SIG).expect("surf parse"));
+    let deep: Vec<Expr> = serde_json::from_str(FRESH_SEPARATE_SIG).expect("lossless core fixture");
     let rep = check_ir_program(&deep);
     assert!(
         rep.is_ok(),
@@ -274,8 +230,9 @@ fn expand_error_inline_size_still_fires_form3_gate_once() {
     // Form-3 gate: the #469 sourceless-size reject must fire EXACTLY ONCE
     // (not skipped, not doubled), and never an ICE.
     let msgs = reject_messages(
-        "def g[a, n](b: tensor[n, f32], t: (i64, i64)) -> tensor[a, n, f32] = \
-         insert(b, 0, add(t.1, cast(1, i64)))\n",
+        include_str!(
+            "fixtures/core/tests/rt773_adversarial/expand_error_inline_size_still_fires_form3_gate_once.0.json"
+        ),
         "3c: expand Error size",
     );
     let form3: Vec<_> = msgs
@@ -305,17 +262,9 @@ fn three_deep_call_chain_single_diagnostic() {
     // level returns its resolved type; no re-poison, no flood through
     // returns. Exactly ONE diagnostic (the unbound var) end-to-end.
     let msgs = reject_messages(
-        "\
-type P =
-  | P { v: tensor[2, f32] }
-def wrap1(x: P) -> P = x
-def wrap2(x: P) -> P = wrap1(x)
-def wrap3(x: P) -> P = wrap2(x)
-def driver() -> f32 = {
-  sink = wrap3(missing_p)
-  cast(0.0, f32)
-}
-",
+        include_str!(
+            "fixtures/core/tests/rt773_adversarial/three_deep_call_chain_single_diagnostic.0.json"
+        ),
         "3d: 3-deep chain",
     );
     assert_eq!(

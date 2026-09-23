@@ -1,0 +1,10 @@
+(module {surf_path: "Agent.Mac"}
+  agent.mac
+  (defsig {} sneak (t-fn {} (t-prim {} f32) (t-adt {} Probability)))
+  (def {}
+    sneak
+    (fn {}
+      (params {} (x {type: (t-var {} _)}))
+      (app {span: "surf:52..65"}
+        (var {span: "surf:52..62"} forge_prob)
+        (var {span: "surf:63..64"} x)))))

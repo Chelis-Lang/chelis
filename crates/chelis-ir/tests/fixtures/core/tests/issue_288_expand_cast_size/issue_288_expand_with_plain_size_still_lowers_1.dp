@@ -1,0 +1,22 @@
+(defsig {}
+  run
+  (t-fn {}
+    (t-tensor {} (d-lit {} 2) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 2) (t-prim {} f32))))
+
+(def {}
+  run
+  (fn {}
+    (params {} x)
+    (app {span: "surf:56..113"}
+      (var {span: "surf:56..59"} mul)
+      (var {span: "surf:60..61"} x)
+      (app {span: "surf:63..112"}
+        (var {span: "surf:63..69"} insert)
+        (app {span: "surf:70..102"}
+          (var {span: "surf:70..86"} scalar_to_tensor)
+          (cast {span: "surf:87..101"}
+            (lit {span: "surf:92..95", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 2.5)
+            (t-prim {} f32)))
+        (lit {span: "surf:104..105", type: (t-prim {} i32)} 0)
+        (lit {span: "surf:107..111", type: (t-prim {} i64)} 2)))))

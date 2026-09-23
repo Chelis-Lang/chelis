@@ -1,0 +1,13 @@
+(def {}
+  result
+  (app {span: "surf:9..36"}
+    (var {span: "surf:9..12"} map)
+    (fn {span: "surf:13..28"}
+      (params {} x)
+      (app {span: "surf:22..28"}
+        (var {span: "surf:22..25"} len)
+        (var {span: "surf:26..27"} x)))
+    (app {span: "surf:30..35"}
+      (var {} Cons)
+      (lit {span: "surf:31..34", type: (t-prim {} f32)} 1.0)
+      (var {} Nil))))

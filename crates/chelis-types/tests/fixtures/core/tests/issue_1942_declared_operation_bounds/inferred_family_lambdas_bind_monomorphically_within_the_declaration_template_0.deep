@@ -1,0 +1,17 @@
+(defsig {} use (t-fn {} (t-prim {} __CORE_ARG_0__)))
+
+(def {}
+  use
+  (fn {}
+    (params {})
+    (let {}
+      (bind {}
+        h
+        (fn {}
+          (params {} x)
+          (app {}
+            (var {} sin)
+            (var {} x))))
+      (app {}
+        (var {} h)
+        (lit {surf_literal_style: "explicit", type: (t-prim {} __CORE_ARG_0__)} __CORE_ARG_1__)))))

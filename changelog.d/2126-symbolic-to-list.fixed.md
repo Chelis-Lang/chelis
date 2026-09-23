@@ -1,1 +1,0 @@
-Generic rank-one tensor helpers now preserve `to_list`'s known `List[p]` result when the tensor dtype `p` is still polymorphic, so a following `index` no longer fails as an unresolved collection obligation. See [#2126](https://github.com/Chelis-Lang/chelis/issues/2126).

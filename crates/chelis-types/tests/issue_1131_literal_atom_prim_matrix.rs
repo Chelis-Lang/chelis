@@ -75,12 +75,11 @@ fn integer_spelled_float_suffix_is_marked_by_both_producers() {
         "Deep's typed-token producer emitted a contradictory atom: {deep_errors:#?}"
     );
 
-    let declarations = chelis_surf::parser::parse_str(
-        "def scalar() -> f32 = cast(7, f32)\n\
-         def vector() -> tensor[2, f32] = [1, 2]",
+    let declarations = chelis_deep::parser::parse_str(
+        include_str!("fixtures/core/tests/issue_1131_literal_atom_prim_matrix/integer_spelled_float_suffix_is_marked_by_both_producers_79.deep"),
     )
     .expect("Surf producer fixture must parse");
-    let program = chelis_surf::desugar::desugar_program(&declarations);
+    let program = declarations;
     let errors = match check_typed_program(&program) {
         Ok(_) => Vec::new(),
         Err(result) => result.errors,

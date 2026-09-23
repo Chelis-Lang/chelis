@@ -1,0 +1,17 @@
+(module {surf_path: "CancelLaterDependency"}
+  cancellaterdependency
+  (def {}
+    root
+    (app {span: "surf:37..52"}
+      (var {span: "surf:37..49"} read_current)
+      (lit {span: "surf:50..51", type: (t-prim {} i32)} 0)))
+  (def {} later (lit {span: "surf:63..70", type: (t-prim {} i32)} 5))
+  (defsig {} read_current (t-fn {} (t-prim {} i32) (t-prim {} i32)))
+  (def {}
+    read_current
+    (fn {}
+      (params {} (n {type: (t-var {} _)}))
+      (app {span: "surf:107..120"}
+        (var {span: "surf:107..110"} add)
+        (var {span: "surf:111..112"} n)
+        (var {span: "surf:114..119"} later)))))

@@ -1,0 +1,39 @@
+(deftype {}
+  Curve
+  (n)
+  (variant {} Curve (field {} xs (t-tensor {} (d-var {} n) (t-prim {} f32)))))
+
+(defsig {}
+  make
+  (n)
+  (t-fn {}
+    (t-tensor {} (d-var {} n) (t-prim {} f32))
+    (t-adt {} Curve (t-var {} n))))
+
+(def {}
+  make
+  (fn {}
+    (params {} (xs {type: (t-var {} _)}))
+    (record {span: "surf:98..110"}
+      Curve
+      (kv {} xs (var {span: "surf:106..108"} xs)))))
+
+(defsig {} value (n) (t-fn {} (t-adt {} Curve (t-var {} n)) (t-prim {} f32)))
+
+(def {}
+  value
+  (fn {}
+    (params {} (curve {type: (t-var {} _)}))
+    (match {span: "surf:152..241"}
+      (var {span: "surf:158..163"} curve)
+      (arm {}
+        (pat-record {} Curve (kv {} xs (pat-var {} values)))
+        ()
+        (app {span: "surf:201..237"}
+          (var {span: "surf:201..206"} index)
+          (app {span: "surf:207..222"}
+            (var {span: "surf:207..214"} to_list)
+            (var {span: "surf:215..221"} values))
+          (cast {span: "surf:224..236"}
+            (lit {span: "surf:229..230", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 0)
+            (t-prim {} i64)))))))

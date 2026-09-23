@@ -1,0 +1,46 @@
+(defsig {}
+  apply_each
+  (t-fn {}
+    (t-fn {} (t-prim {} f32) (t-prim {} f32))
+    (t-adt {} List (t-prim {} f32))
+    (t-adt {} List (t-prim {} f32))))
+
+(def {}
+  apply_each
+  (fn {}
+    (params {} (f {type: (t-var {} _)}) (xs {type: (t-var {} _)}))
+    (app {span: "surf:60..88"}
+      (var {span: "surf:60..63"} map)
+      (fn {span: "surf:64..83"}
+        (params {} (v {type: (t-prim {} f32)}))
+        (app {span: "surf:79..83"}
+          (var {span: "surf:79..80"} f)
+          (var {span: "surf:81..82"} v)))
+      (var {span: "surf:85..87"} xs))))
+
+(defsig {} double (t-fn {} (t-prim {} f32) (t-prim {} f32)))
+
+(def {}
+  double
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:117..128"}
+      (var {span: "surf:117..120"} mul)
+      (var {span: "surf:121..122"} x)
+      (lit {span: "surf:124..127", type: (t-prim {} f32)} 2.0))))
+
+(def {}
+  out
+  (app {span: "surf:135..170"}
+    (var {span: "surf:135..145"} apply_each)
+    (var {span: "surf:146..152"} double)
+    (app {span: "surf:154..169"}
+      (var {} Cons)
+      (lit {span: "surf:155..158", type: (t-prim {} f32)} 1.0)
+      (app {}
+        (var {} Cons)
+        (lit {span: "surf:160..163", type: (t-prim {} f32)} 2.0)
+        (app {}
+          (var {} Cons)
+          (lit {span: "surf:165..168", type: (t-prim {} f32)} 3.0)
+          (var {} Nil))))))

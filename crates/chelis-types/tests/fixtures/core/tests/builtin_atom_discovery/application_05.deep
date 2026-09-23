@@ -1,0 +1,14 @@
+(defsig {}
+  apply
+  (t-fn {}
+    (t-fn {} (t-prim {} f32) (t-prim {} f32))
+    (t-prim {} f32)
+    (t-prim {} f32)))
+
+(def {}
+  apply
+  (fn {}
+    (params {} (to_string {type: (t-var {} _)}) (x {type: (t-var {} _)}))
+    (app {span: "surf:52..64"}
+      (var {span: "surf:52..61"} to_string)
+      (var {span: "surf:62..63"} x))))

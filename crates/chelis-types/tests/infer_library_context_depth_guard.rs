@@ -15,13 +15,12 @@
 //! assert they reject with the located stack-budget diagnostic.
 //!
 //! They mirror `infer_recursion_depth_guard.rs`: the deep `app` tree is built
-//! directly in Deep (bypassing the Surf parser/desugarer) so the recursion
+//! directly in Deep (without parsing source) so the recursion
 //! depth is exactly the chain length, and the entries run on an
 //! explicitly-sized worker thread so the guard fires deterministically
 //! regardless of the harness default stack size.
 //!
-//! See docs/investigations/wi1_infer_recursion_depth.md and the
-//! `STACK_RED_ZONE_BYTES` doc-comment in crates/chelis-types/src/infer.rs.
+//! See the `STACK_RED_ZONE_BYTES` doc-comment in crates/chelis-types/src/infer.rs.
 
 use chelis_deep::ast::{Atom, Expr, List, Metadata};
 use chelis_deep::span::Span;

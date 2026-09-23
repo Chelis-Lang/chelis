@@ -1,0 +1,21 @@
+(defsig {} wrong (t-fn {} (t-prim {} f32)))
+
+(def {}
+  wrong
+  (fn {}
+    (params {})
+    (app {span: "surf:24..74"}
+      (var {span: "surf:24..29"} fixed)
+      (app {span: "surf:30..73"}
+        (var {span: "surf:30..39"} to_tensor)
+        (app {span: "surf:40..72"}
+          (var {} Cons)
+          (cast {span: "surf:41..55"}
+            (lit {span: "surf:46..49", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 1.0)
+            (t-prim {} f32))
+          (app {}
+            (var {} Cons)
+            (cast {span: "surf:57..71"}
+              (lit {span: "surf:62..65", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 2.0)
+              (t-prim {} f32))
+            (var {} Nil)))))))

@@ -1,0 +1,17 @@
+(module {surf_path: "Repro.ReduceA"}
+  repro.reducea
+  (defsig {}
+    f
+    (n)
+    (t-fn {} (t-tensor {} (d-var {} n) (t-prim {} f32)) (t-var {} _)))
+  (def {}
+    f
+    (fn {}
+      (params {} (x {type: (t-var {} _)}))
+      (app {}
+        (var {} add)
+        (app {}
+          (var {} sum)
+          (var {} x)
+          (lit {surf_literal_style: "explicit", type: (t-prim {} i32)} 0))
+        (var {} x)))))

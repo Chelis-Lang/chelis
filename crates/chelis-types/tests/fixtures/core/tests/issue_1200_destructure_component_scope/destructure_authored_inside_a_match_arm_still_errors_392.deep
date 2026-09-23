@@ -1,0 +1,68 @@
+(deftype {} Flag () (variant {} On) (variant {} Off))
+
+(defsig {}
+  f
+  (t-fn {}
+    (t-adt {} Flag)
+    (t-tuple {}
+      (t-tensor {} (d-lit {} 4) (t-prim {} f32))
+      (t-tensor {} (d-lit {} 4) (t-prim {} f32)))
+    (t-tensor {} (d-lit {} 4) (t-prim {} f32))))
+
+(def {}
+  f
+  (fn {}
+    (params {} (c {type: (t-var {} _)}) (t {type: (t-var {} _)}))
+    (match {span: "surf:100..222"}
+      (var {span: "surf:106..107"} c)
+      (arm {}
+        (pat-ctor {} On)
+        ()
+        (let {span: "surf:125..177"}
+          (bind {destructure: true}
+            __chelis_tmp0
+            (var {span: "surf:140..141"} t))
+          (let {}
+            (bind {destructure: true}
+              __chelis_tmp2
+              (tuple-get {}
+                (var {} __chelis_tmp0)
+                (lit {type: (t-prim {} i32)} 0)))
+            (let {}
+              (bind {destructure: true}
+                a
+                (var {} __chelis_tmp2))
+              (let {}
+                (bind {destructure: true}
+                  __chelis_tmp1
+                  (tuple-get {}
+                    (var {} __chelis_tmp0)
+                    (lit {type: (t-prim {} i32)} 1)))
+                (let {}
+                  (bind {destructure: true}
+                    b
+                    (var {} __chelis_tmp1))
+                  (app {span: "surf:146..173"}
+                    (var {span: "surf:146..149"} add)
+                    (realize {span: "surf:150..160"}
+                      (var {span: "surf:158..159"} a))
+                    (realize {span: "surf:162..172"}
+                      (var {span: "surf:170..171"} a)))))))))
+      (arm {}
+        (pat-ctor {} Off)
+        ()
+        (app {span: "surf:189..220"}
+          (var {span: "surf:189..198"} to_tensor)
+          (app {span: "surf:199..219"}
+            (var {} Cons)
+            (lit {span: "surf:200..203", type: (t-prim {} f32)} 0.0)
+            (app {}
+              (var {} Cons)
+              (lit {span: "surf:205..208", type: (t-prim {} f32)} 0.0)
+              (app {}
+                (var {} Cons)
+                (lit {span: "surf:210..213", type: (t-prim {} f32)} 0.0)
+                (app {}
+                  (var {} Cons)
+                  (lit {span: "surf:215..218", type: (t-prim {} f32)} 0.0)
+                  (var {} Nil))))))))))

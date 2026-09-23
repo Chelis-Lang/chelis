@@ -1,0 +1,75 @@
+(defsig {}
+  pure
+  (n)
+  (t-fn {}
+    (t-tensor {} (d-var {} n) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 2) (t-prim {} f32))))
+
+(def {}
+  pure
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:51..86"}
+      (var {span: "surf:51..57"} shrink)
+      (var {span: "surf:58..59"} x)
+      (app {span: "surf:61..85"}
+        (var {} Cons)
+        (app {span: "surf:62..84"}
+          (var {} Cons)
+          (lit {span: "surf:63..67", type: (t-prim {} i64)} 1)
+          (app {}
+            (var {} Cons)
+            (app {span: "surf:69..83"}
+              (var {span: "surf:69..74"} shape)
+              (var {span: "surf:75..76"} x)
+              (lit {span: "surf:78..82", surf_literal_style: "explicit", type: (t-prim {} i32)} 0))
+            (var {} Nil)))
+        (var {} Nil)))))
+
+(defsig {}
+  random
+  (n)
+  (t-fn {}
+    (t-tensor {} (d-var {} n) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 2) (t-prim {} f32))))
+
+(def {}
+  random
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:140..192"}
+      (var {span: "surf:140..147"} dropout)
+      (app {span: "surf:148..183"}
+        (var {span: "surf:148..154"} shrink)
+        (var {span: "surf:155..156"} x)
+        (app {span: "surf:158..182"}
+          (var {} Cons)
+          (app {span: "surf:159..181"}
+            (var {} Cons)
+            (lit {span: "surf:160..164", type: (t-prim {} i64)} 1)
+            (app {}
+              (var {} Cons)
+              (app {span: "surf:166..180"}
+                (var {span: "surf:166..171"} shape)
+                (var {span: "surf:172..173"} x)
+                (lit {span: "surf:175..179", surf_literal_style: "explicit", type: (t-prim {} i32)} 0))
+              (var {} Nil)))
+          (var {} Nil)))
+      (lit {span: "surf:185..191", surf_literal_style: "explicit", type: (t-prim {} f32)} 0.5))))
+
+(defsig {}
+  caller
+  (n)
+  (t-fn {} (t-tensor {} (d-var {} n) (t-prim {} f32)) (t-var {} _)))
+
+(def {}
+  caller
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (tuple {span: "surf:228..254"}
+      (app {span: "surf:229..242"}
+        (var {span: "surf:229..233"} pure)
+        (copy {span: "surf:234..241"} (var {span: "surf:239..240"} x)))
+      (app {span: "surf:244..253"}
+        (var {span: "surf:244..250"} random)
+        (var {span: "surf:251..252"} x)))))

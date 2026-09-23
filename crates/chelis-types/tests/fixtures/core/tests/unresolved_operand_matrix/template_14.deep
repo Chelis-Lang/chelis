@@ -1,0 +1,25 @@
+@@HELPER@@
+
+(def {}
+  t
+  (app {span: "surf:29..53"}
+    (var {span: "surf:29..38"} to_tensor)
+    @@first@@))
+
+(def {} u (var {span: "surf:58..59"} t))
+
+(def {}
+  pick
+  (fn {}
+    (params {})
+    (let {span: "surf:73..114"}
+      (bind {}
+        t
+        (app {span: "surf:80..105"}
+          (var {span: "surf:80..89"} to_tensor)
+          @@second@@))
+      (app {span: "surf:107..111"}
+        (var {span: "surf:107..108"} g)
+        (var {span: "surf:109..110"} u)))))
+
+(def {} f (app {span: "surf:119..125"} (var {span: "surf:119..123"} pick)))

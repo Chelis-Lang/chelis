@@ -1,0 +1,17 @@
+(defsig {} less (p) (t-fn {} (t-var {} p) (t-var {} p) (t-prim {} bool)))
+
+(def {}
+  less
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (y {type: (t-var {} _)}))
+    (app {}
+      (var {} lt)
+      (var {} x)
+      (var {} y))))
+
+(def {}
+  out
+  (app {}
+    (var {} less)
+    (lit {type: (t-prim {} bool)} true)
+    (lit {type: (t-prim {} bool)} false)))

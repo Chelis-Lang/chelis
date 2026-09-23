@@ -1,0 +1,18 @@
+(deftype {}
+  BatchNormParams
+  (n)
+  (variant {}
+    BatchNormParams
+    (field {} gamma (t-tensor {} (d-var {} n) (t-prim {} f32)))
+    (field {} beta (t-tensor {} (d-var {} n) (t-prim {} f32)))))
+
+(defsig {}
+  lib_borrow_params
+  (n)
+  (t-fn {} (t-ref {} (t-adt {} BatchNormParams (t-var {} n))) (t-prim {} bool)))
+
+(def {}
+  lib_borrow_params
+  (fn {}
+    (params {} p)
+    (lit {span: "surf:177..181", type: (t-prim {} bool)} true)))

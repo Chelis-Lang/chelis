@@ -1,0 +1,75 @@
+(defsig {} a (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} i8)))
+
+(def {}
+  a
+  (app {}
+    (var {} to_tensor)
+    (app {}
+      (var {} Cons)
+      (app {}
+        (var {} Cons)
+        (lit {span: "surf:33..36", type: (t-prim {} i8)} 1)
+        (app {}
+          (var {} Cons)
+          (lit {span: "surf:38..41", type: (t-prim {} i8)} 2)
+          (app {}
+            (var {} Cons)
+            (lit {span: "surf:43..46", type: (t-prim {} i8)} 3)
+            (var {} Nil))))
+      (app {}
+        (var {} Cons)
+        (app {}
+          (var {} Cons)
+          (lit {span: "surf:50..53", type: (t-prim {} i8)} 4)
+          (app {}
+            (var {} Cons)
+            (lit {span: "surf:55..58", type: (t-prim {} i8)} 5)
+            (app {}
+              (var {} Cons)
+              (lit {span: "surf:60..63", type: (t-prim {} i8)} 6)
+              (var {} Nil))))
+        (var {} Nil)))))
+
+(defsig {} b (t-tensor {} (d-lit {} 3) (d-lit {} 2) (t-prim {} i8)))
+
+(def {}
+  b
+  (app {}
+    (var {} to_tensor)
+    (app {}
+      (var {} Cons)
+      (app {}
+        (var {} Cons)
+        (lit {span: "surf:98..101", type: (t-prim {} i8)} 1)
+        (app {}
+          (var {} Cons)
+          (lit {span: "surf:103..106", type: (t-prim {} i8)} 2)
+          (var {} Nil)))
+      (app {}
+        (var {} Cons)
+        (app {}
+          (var {} Cons)
+          (lit {span: "surf:110..113", type: (t-prim {} i8)} 3)
+          (app {}
+            (var {} Cons)
+            (lit {span: "surf:115..118", type: (t-prim {} i8)} 4)
+            (var {} Nil)))
+        (app {}
+          (var {} Cons)
+          (app {}
+            (var {} Cons)
+            (lit {span: "surf:122..125", type: (t-prim {} i8)} 5)
+            (app {}
+              (var {} Cons)
+              (lit {span: "surf:127..130", type: (t-prim {} i8)} 6)
+              (var {} Nil)))
+          (var {} Nil))))))
+
+(defsig {} out (t-tensor {} (d-lit {} 2) (d-lit {} 2) (t-prim {} i8)))
+
+(def {}
+  out
+  (app {span: "surf:165..179"}
+    (var {span: "surf:165..171"} matmul)
+    (borrow {span: "surf:172..174"} (var {span: "surf:173..174"} a))
+    (borrow {span: "surf:176..178"} (var {span: "surf:177..178"} b))))

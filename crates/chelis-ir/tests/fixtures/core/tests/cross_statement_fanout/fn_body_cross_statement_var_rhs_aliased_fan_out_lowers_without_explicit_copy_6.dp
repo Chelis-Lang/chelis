@@ -1,0 +1,33 @@
+(module {surf_path: "Repro.FanOutFnBodyWorkaround"}
+  repro.fanoutfnbodyworkaround
+  (defsig {}
+    fanout
+    (t-fn {}
+      (t-tensor {} (d-lit {} 3) (t-prim {} f32))
+      (t-tensor {} (d-lit {} 3) (t-prim {} f32))))
+  (def {}
+    fanout
+    (fn {}
+      (params {} (x {type: (t-var {} _)}))
+      (let {span: "surf:88..149"}
+        (bind {}
+          y
+          (copy {span: "surf:96..103"} (var {span: "surf:101..102"} x)))
+        (let {}
+          (bind {}
+            a
+            (app {span: "surf:110..119"}
+              (var {span: "surf:110..113"} mul)
+              (var {span: "surf:114..115"} y)
+              (var {span: "surf:117..118"} x)))
+          (let {}
+            (bind {}
+              b
+              (app {span: "surf:126..135"}
+                (var {span: "surf:126..129"} mul)
+                (var {span: "surf:130..131"} x)
+                (var {span: "surf:133..134"} x)))
+            (app {span: "surf:138..147"}
+              (var {span: "surf:138..141"} add)
+              (var {span: "surf:142..143"} a)
+              (var {span: "surf:145..146"} b))))))))

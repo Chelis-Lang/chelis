@@ -1,1 +1,0 @@
-../../agent-skills/cli-surface/SKILL.md

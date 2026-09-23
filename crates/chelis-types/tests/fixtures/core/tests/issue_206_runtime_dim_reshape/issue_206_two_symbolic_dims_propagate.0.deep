@@ -1,0 +1,35 @@
+(defsig {}
+  flatten_two
+  (n m)
+  (t-fn {}
+    (t-ref {} (t-tensor {} (d-var {} n) (d-var {} m) (t-prim {} f32)))
+    (t-tensor {} (d-var {} n) (d-var {} m) (t-prim {} f32))))
+
+(def {}
+  flatten_two
+  (fn {}
+    (params {} x)
+    (app {span: "surf:85..167"}
+      (var {span: "surf:85..92"} reshape)
+      (var {span: "surf:93..94"} x)
+      (app {span: "surf:96..166"}
+        (var {} Cons)
+        (cast {span: "surf:97..130"}
+          (app {span: "surf:102..124"}
+            (var {span: "surf:102..107"} shape)
+            (var {span: "surf:108..109"} x)
+            (cast {span: "surf:111..123"}
+              (lit {span: "surf:116..117", surf_literal_style: "unsuffixed", type: (t-prim {} i32)} 0)
+              (t-prim {} i32)))
+          (t-prim {} i64))
+        (app {}
+          (var {} Cons)
+          (cast {span: "surf:132..165"}
+            (app {span: "surf:137..159"}
+              (var {span: "surf:137..142"} shape)
+              (var {span: "surf:143..144"} x)
+              (cast {span: "surf:146..158"}
+                (lit {span: "surf:151..152", surf_literal_style: "unsuffixed", type: (t-prim {} i32)} 1)
+                (t-prim {} i32)))
+            (t-prim {} i64))
+          (var {} Nil))))))

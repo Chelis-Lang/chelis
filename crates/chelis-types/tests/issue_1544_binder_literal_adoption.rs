@@ -1,7 +1,7 @@
 //! P10b binder-literal adoption at both checker ingresses (#1544/#1553).
 
 use chelis_deep::{Expr, parse_and_stamp_file};
-use chelis_surf::{desugar::desugar_program, parser::parse_str};
+
 use chelis_types::{check_ir_program, check_typed_program};
 
 fn deep(source: &str) -> Vec<Expr> {
@@ -35,12 +35,8 @@ fn assert_both(program: &[Expr], expected: Option<&str>, label: &str) {
     }
 }
 
-fn assert_surf(source: &str, expected: Option<&str>) {
-    assert_both(
-        &desugar_program(&parse_str(source).expect("Surf")),
-        expected,
-        source,
-    );
+fn assert_fixture(source: &str, expected: Option<&str>) {
+    assert_both(&deep(source), expected, source);
 }
 
 fn assert_deep(source: &str, expected: &str, label: &str) {
@@ -62,36 +58,76 @@ const FORGED_LOCAL_NEG: &str = "(defsig {dtype_bounds: {p: float}} scale (p) (t-
 #[test]
 fn bounded_binder_casts_accept_matching_literals() {
     for (family, literal) in [
-        ("Float", "0.1"),
-        ("Int", "1"),
-        ("Float", "1"),
-        ("Numeric", "0.1"),
-        ("Numeric", "1"),
-        ("Float", "-0.1"),
-        ("Float", "-0.1f64"),
+        (
+            "Float",
+            r#"(lit {span: "surf:34..37", surf_literal_style: "unsuffixed", type: (t-var {} p)} 0.1)"#,
+        ),
+        (
+            "Int",
+            r#"(lit {span: "surf:34..35", surf_literal_style: "unsuffixed", type: (t-var {} p)} 1)"#,
+        ),
+        (
+            "Float",
+            r#"(lit {span: "surf:34..35", surf_literal_style: "unsuffixed", type: (t-var {} p)} 1)"#,
+        ),
+        (
+            "Numeric",
+            r#"(lit {span: "surf:34..37", surf_literal_style: "unsuffixed", type: (t-var {} p)} 0.1)"#,
+        ),
+        (
+            "Numeric",
+            r#"(lit {span: "surf:34..35", surf_literal_style: "unsuffixed", type: (t-var {} p)} 1)"#,
+        ),
+        (
+            "Float",
+            r#"(lit {span: "surf:34..38", surf_literal_style: "unsuffixed", type: (t-var {} p)} -0.1)"#,
+        ),
+        (
+            "Float",
+            r#"(app {span: "surf:34..41"}
+        (var {} neg)
+        (lit {span: "surf:35..41", type: (t-prim {} f64)} 0.1))"#,
+        ),
     ] {
-        let source = format!("def f[p: {family}](x: p) -> p = cast({literal}, p)\n");
-        assert_surf(&source, None);
+        let source = adoption_program(Some(family), literal);
+        assert_fixture(&source, None);
     }
-    assert_surf("sig f[p: Float]: p -> p\ndef f(x) = cast(0.1, p)\n", None);
+    assert_fixture(
+        include_str!(
+            "fixtures/core/tests/issue_1544_binder_literal_adoption/bounded_binder_casts_accept_matching_literals_1.deep"
+        ),
+        None,
+    );
 }
 
 #[test]
 fn unbounded_binders_reject_every_literal_polarity_and_kind() {
-    for literal in ["0.1", "-0.1", "0.1f64", "-0.1f64", "true", "\"text\"", "()"] {
-        let source = format!("def f[p](x: p) -> p = cast({literal}, p)\n");
-        assert_surf(&source, Some("[04-DTYPE-1]"));
+    for literal in [
+        r#"(lit {span: "surf:27..30", type: (t-prim {} f32)} 0.1)"#,
+        r#"(lit {span: "surf:27..31", type: (t-prim {} f32)} -0.1)"#,
+        r#"(lit {span: "surf:27..33", type: (t-prim {} f64)} 0.1)"#,
+        r#"(lit {span: "surf:27..34", type: (t-prim {} f64)} -0.1)"#,
+        r#"(lit {span: "surf:27..31", type: (t-prim {} bool)} true)"#,
+        r#"(lit {span: "surf:27..33", type: (t-prim {} string)} "text")"#,
+        r#"(lit {span: "surf:27..29", type: (t-unit {})} ())"#,
+    ] {
+        let source = adoption_program(None, literal);
+        assert_fixture(&source, Some("[04-DTYPE-1]"));
     }
-    assert_surf(
-        "sig f[p]: p -> p\ndef f(x) = cast(0.1, p)\n",
+    assert_fixture(
+        include_str!(
+            "fixtures/core/tests/issue_1544_binder_literal_adoption/unbounded_binders_reject_every_literal_polarity_and_kind_1.deep"
+        ),
         Some("[04-DTYPE-1]"),
     );
 }
 
 #[test]
 fn only_the_exact_adopting_relation_can_stamp_a_binder_literal() {
-    assert_surf(
-        "def f[p: Float](x: p) -> p = (0.1 : p)\n",
+    assert_fixture(
+        include_str!(
+            "fixtures/core/tests/issue_1544_binder_literal_adoption/only_the_exact_adopting_relation_can_stamp_a_binder_literal_1.deep"
+        ),
         Some("[04-INF-6]"),
     );
     let malformed = binder_program("float", "surf_literal_style: 1, ", "0.1");
@@ -145,14 +181,32 @@ fn adopted_integer_literals_fit_every_family_member() {
             ("128", Some("§5.6")),
             ("-129", Some("§5.6")),
         ] {
-            assert_surf(
-                &format!("def f[p: {family}](x: p) -> p = cast({literal}, p)\n"),
+            assert_fixture(
+                &adoption_program(
+                    Some(family),
+                    &format!(
+                        "(lit {{surf_literal_style: \"unsuffixed\", type: (t-var {{}} p)}} {literal})"
+                    ),
+                ),
                 expected,
             );
         }
     }
-    assert_surf(
-        "def f[p: Float](x: p) -> p = cast(10000000000.0, p)\n",
+    assert_fixture(
+        include_str!(
+            "fixtures/core/tests/issue_1544_binder_literal_adoption/adopted_integer_literals_fit_every_family_member_1.deep"
+        ),
         None,
     );
+}
+
+fn adoption_program(bound: Option<&str>, literal: &str) -> String {
+    let metadata = bound
+        .map(|bound| format!("dtype_bounds: {{p: {}}}", bound.to_ascii_lowercase()))
+        .unwrap_or_default();
+    format!(
+        "(defsig {{{metadata}}} f (p) (t-fn {{}} (t-var {{}} p) (t-var {{}} p)))\n\
+         (def {{}} f (fn {{}} (params {{}} (x {{type: (t-var {{}} _)}}))\n\
+           (cast {{}} {literal} (t-var {{}} p))))"
+    )
 }

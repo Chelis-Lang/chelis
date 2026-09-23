@@ -1,0 +1,22 @@
+(defsig {dtype_bounds: {p: float}}
+  scale
+  (n p)
+  (t-fn {}
+    (t-tensor {} (d-var {} n) (t-var {} p))
+    (t-tensor {} (d-var {} n) (t-var {} p))))
+
+(def {} scale (fn {} (params {} x) (var {span: "surf:69..70"} x)))
+
+(defsig {}
+  probe
+  (t-fn {}
+    (t-tensor {} (d-lit {} 4) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 4) (t-prim {} f32))))
+
+(def {}
+  probe
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:120..128"}
+      (var {span: "surf:120..125"} scale)
+      (var {span: "surf:126..127"} x))))

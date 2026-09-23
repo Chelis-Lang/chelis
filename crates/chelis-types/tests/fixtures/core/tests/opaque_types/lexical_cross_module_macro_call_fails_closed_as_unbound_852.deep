@@ -1,0 +1,15 @@
+(module {surf_path: "Stats.Prob"}
+  stats.prob
+  (export {} probability)
+  (deftype {opaque: true}
+    Probability
+    ()
+    (variant {} Probability (field {} value (t-prim {} f32))))
+  (defsig {} probability (t-fn {} (t-prim {} f32) (t-adt {} Probability)))
+  (def {}
+    probability
+    (fn {}
+      (params {} (x {type: (t-var {} _)}))
+      (record {span: "surf:138..162"}
+        Probability
+        (kv {} value (var {span: "surf:159..160"} x))))))

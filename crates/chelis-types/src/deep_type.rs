@@ -1140,13 +1140,9 @@ pub(crate) fn retired_integer_diagnostic(
         CheckErrorKind::UnsupportedTensorPrecision,
         format!(
             "cannot use retired spelling `{name}` as a {surface} dtype; the canonical \
-             spelling is `{canonical}`; run `chelis migrate surf --from 0.18 <path>` \
-             for `.ch` or `chelis migrate deep --from 0.18 <path>` for `.dp`"
+             spelling is `{canonical}`"
         ),
-        vec![format!(
-            "the versioned migration rewrites `{name}` to `{canonical}` without \
-             admitting the retired spelling at normal compiler ingress"
-        )],
+        vec![format!("replace `{name}` with `{canonical}`")],
     ))
 }
 

@@ -1,0 +1,16 @@
+(defsig {} xs (t-tensor {} (d-lit {} 3) (t-prim {} i8)))
+
+(def {}
+  xs
+  (app {}
+    (var {} to_tensor)
+    (app {}
+      (var {} Cons)
+      (lit {surf_literal_style: "unsuffixed", type: (t-prim {} i8)} -128)
+      (app {}
+        (var {} Cons)
+        (lit {surf_literal_style: "unsuffixed", type: (t-prim {} i8)} -127)
+        (app {}
+          (var {} Cons)
+          (lit {surf_literal_style: "unsuffixed", type: (t-prim {} i8)} -126)
+          (var {} Nil))))))

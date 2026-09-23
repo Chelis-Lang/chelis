@@ -1,0 +1,28 @@
+(deftype {}
+  Box
+  ()
+  (variant {} Box (field {} t (t-tensor {} (d-lit {} 3) (t-prim {} @@dtype@@)))))
+
+@@helper@@
+
+(defsig {} pick (t-fn {} (t-adt {} Box) (t-tensor {} (t-prim {} @@dtype@@))))
+
+(def {}
+  pick
+  (fn {}
+    (params {} (b {type: (t-var {} _)}))
+    (app {span: "surf:99..105"}
+      (var {span: "surf:99..100"} g)
+      (access {span: "surf:101..104"} (var {span: "surf:101..102"} b) t))))
+
+(def {}
+  f
+  (app {span: "surf:110..152"}
+    (var {span: "surf:110..114"} pick)
+    (record {span: "surf:115..151"}
+      Box
+      (kv {}
+        t
+        (app {span: "surf:124..149"}
+          (var {span: "surf:124..133"} to_tensor)
+          @@values@@)))))

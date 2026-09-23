@@ -115,21 +115,16 @@ fn check(src: &str) -> InferResult {
     infer_program(&exprs)
 }
 
-fn checked_surf(src: &str) -> CheckedProgram {
-    let decls = chelis_surf::parser::parse_str(src).expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+fn checked_deep(src: &str) -> CheckedProgram {
+    let exprs = chelis_deep::parser::parse_str(src).expect("Deep fixture parses");
     check_ir_program(&exprs).expect("IR check")
 }
 
 #[test]
 fn checked_program_preserves_alias_resolved_generic_adt_registry() {
-    let checked = checked_surf(
-        r#"
-type Payload[a] = a
-type Boxed[a] = | Boxed(Payload[a])
-def identity[a](value: Boxed[a]) -> Boxed[a] = value
-"#,
-    );
+    let checked = checked_deep(include_str!(
+        "../../../tests/fixtures/core/src/mod/checked_program_preserves_alias_resolved_generic_adt_registry.deep"
+    ));
     let assert_checker_metadata = |stage: &str, program: &CheckedProgram| {
         assert!(
             program.adt_registry().lookup("Boxed").is_some(),
@@ -201,12 +196,9 @@ def identity[a](value: Boxed[a]) -> Boxed[a] = value
         "independent checked programs must not compose"
     );
 
-    let dimensional = checked_surf(
-        r#"
-type Column[n, a] = | Column(tensor[n, a])
-def identity[n, a](column: Column[n, a]) -> Column[n, a] = column
-"#,
-    );
+    let dimensional = checked_deep(include_str!(
+        "../../../tests/fixtures/core/src/mod/checked_program_preserves_alias_resolved_generic_adt_registry_2.deep"
+    ));
     let column = dimensional
         .adt_registry()
         .lookup("Column")
@@ -247,13 +239,9 @@ def identity[n, a](column: Column[n, a]) -> Column[n, a] = column
 
 #[test]
 fn generalized_unannotated_function_is_not_an_authored_signature() {
-    let checked = checked_surf(
-        r#"
-def identity(x) = x
-def use_int() = identity(1)
-def use_bool() = identity(true)
-"#,
-    );
+    let checked = checked_deep(include_str!(
+        "../../../tests/fixtures/core/src/mod/generalized_unannotated_function_is_not_an_authored_signature.deep"
+    ));
     let identity = checked
         .signature_inference()
         .functions
@@ -271,15 +259,6 @@ def use_bool() = identity(true)
         matches!(identity.checked_signature, Type::Fn(_, _)),
         "the function is still generalized and callable"
     );
-}
-
-/// Run the full Surf → desugar → infer pipeline and return the raw
-/// `InferResult` (errors included) so a test can assert clean or assert
-/// a specific failure mode end-to-end.
-fn infer_surf(src: &str) -> InferResult {
-    let decls = chelis_surf::parser::parse_str(src).expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
-    infer_program(&exprs)
 }
 
 fn missing_shape_sensitive_app(expr: &deep::Expr) -> Option<String> {
@@ -1060,13 +1039,14 @@ fn cast_prim_to_f64_is_allowed() {
 }
 
 #[test]
-fn surf_source_accepts_f64_tensor_ascription() {
+fn deep_source_accepts_f64_tensor_ascription() {
     // v0.2.3: exercise the full surf → desugar → check pipeline to confirm
     // the user-facing syntax `(expr : tensor[4, f64])` is accepted.
-    let decls =
-        chelis_surf::parser::parse_str("y = (to_tensor([1.0, 2.0, 3.0, 4.0]) : tensor[4, f64])")
-            .expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let exprs = chelis_deep::parser::parse_str(include_str!(
+        "../../../tests/fixtures/core/src/mod/deep_source_accepts_f64_tensor_ascription.deep"
+    ))
+    .expect("Deep fixture parses");
+
     let result = infer_program(&exprs);
     assert!(
         !result
@@ -1079,11 +1059,13 @@ fn surf_source_accepts_f64_tensor_ascription() {
 }
 
 #[test]
-fn surf_source_accepts_cast_to_f64_tensor() {
+fn deep_source_accepts_cast_to_f64_tensor() {
     // v0.2.3: exercise the full pipeline for `cast(tensor, f64)`.
-    let decls =
-        chelis_surf::parser::parse_str("y = cast(to_tensor([1.5]), f64)").expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let exprs = chelis_deep::parser::parse_str(include_str!(
+        "../../../tests/fixtures/core/src/mod/deep_source_accepts_cast_to_f64_tensor.deep"
+    ))
+    .expect("Deep fixture parses");
+
     let result = infer_program(&exprs);
     assert!(
         !result
@@ -1765,20 +1747,16 @@ fn typealias_resolves_in_literal_metadata() {
 // `type Type = ... | TArrow(Type, Type, EffectRow) | ...`; constructing
 // `TArrow(a, b, [])` must not report `EffectRow vs List`.
 
-/// Surf source -> desugar -> IR check. Returns the collected check
-/// errors (empty on success). Parse failures panic — the source is
-/// the test's own fixture, not user input under test.
-fn surf_check_errors(src: &str) -> Vec<CheckError> {
-    let decls = chelis_surf::parser::parse_str(src).expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+fn deep_check_errors(src: &str) -> Vec<CheckError> {
+    let exprs = chelis_deep::parser::parse_str(src).expect("Deep fixture parses");
     match check_ir_program(&exprs) {
         Ok(_) => Vec::new(),
         Err(result) => result.errors,
     }
 }
 
-fn assert_surf_ok(src: &str) {
-    let errors = surf_check_errors(src);
+fn assert_deep_ok(src: &str) {
+    let errors = deep_check_errors(src);
     assert!(errors.is_empty(), "expected no errors, got: {errors:?}");
 }
 
@@ -1788,18 +1766,9 @@ fn alias_typed_ctor_field_constructs_with_list_value() {
     // (forward reference). Constructing TArrow(a, b, e) where the third
     // field is the alias must type-check: the field expands to
     // List[Effect] and unifies with the EffectRow-typed argument.
-    assert_surf_ok(
-        "module M\n\
-         export (mk)\n\
-         type Effect =\n\
-           | Pure\n\
-           | Impure\n\
-         type Ty =\n\
-           | TBase\n\
-           | TArrow(Ty, Ty, EffectRow)\n\
-         type EffectRow = List[Effect]\n\
-         def mk(a: Ty, b: Ty, e: EffectRow) -> Ty = TArrow(a, b, e)\n",
-    );
+    assert_deep_ok(include_str!(
+        "../../../tests/fixtures/core/src/mod/alias_typed_ctor_field_constructs_with_list_value.deep"
+    ));
 }
 
 #[test]
@@ -1807,71 +1776,35 @@ fn alias_typed_ctor_field_constructs_with_empty_list_literal() {
     // Constructing TArrow(a, b, []) where the third field is the alias
     // must type-check: [] is List[Effect], the field expands to
     // List[Effect].
-    assert_surf_ok(
-        "module M\n\
-         export (mk)\n\
-         type Effect =\n\
-           | Pure\n\
-           | Impure\n\
-         type Ty =\n\
-           | TBase\n\
-           | TArrow(Ty, Ty, EffectRow)\n\
-         type EffectRow = List[Effect]\n\
-         def mk(a: Ty, b: Ty) -> Ty = TArrow(a, b, [])\n",
-    );
+    assert_deep_ok(include_str!(
+        "../../../tests/fixtures/core/src/mod/alias_typed_ctor_field_constructs_with_empty_list_literal.deep"
+    ));
 }
 
 #[test]
 fn def_returning_option_tuple_with_alias_field_type_checks() {
     // The spec §3 pattern `Some((Ctor(...), []))` returning
     // Option[(Ty, EffectRow)].
-    assert_surf_ok(
-        "module M\n\
-         export (mk)\n\
-         type Effect =\n\
-           | Pure\n\
-           | Impure\n\
-         type Ty =\n\
-           | TBase\n\
-           | TArrow(Ty, Ty, EffectRow)\n\
-         type EffectRow = List[Effect]\n\
-         def mk(a: Ty, b: Ty) -> Option[(Ty, EffectRow)] = Some((TArrow(a, b, []), []))\n",
-    );
+    assert_deep_ok(include_str!(
+        "../../../tests/fixtures/core/src/mod/def_returning_option_tuple_with_alias_field_type_checks.deep"
+    ));
 }
 
 #[test]
 fn two_level_alias_in_ctor_field_resolves() {
     // Alias of an alias: Effects = EffectRow = List[Effect].
-    assert_surf_ok(
-        "module M\n\
-         export (mk)\n\
-         type Effect =\n\
-           | Pure\n\
-           | Impure\n\
-         type Ty =\n\
-           | TBase\n\
-           | TArrow(Ty, Ty, Effects)\n\
-         type EffectRow = List[Effect]\n\
-         type Effects = EffectRow\n\
-         def mk(a: Ty, b: Ty) -> Ty = TArrow(a, b, [])\n",
-    );
+    assert_deep_ok(include_str!(
+        "../../../tests/fixtures/core/src/mod/two_level_alias_in_ctor_field_resolves.deep"
+    ));
 }
 
 #[test]
 fn ctx_list_of_tuple_alias_used_in_value_position() {
     // Ctx = List[(String, Ty)] -- a tuple-bearing alias used as a
     // constructor field; constructing with an empty list must work.
-    assert_surf_ok(
-        "module M\n\
-         export (mk)\n\
-         type Ty =\n\
-           | TBase\n\
-           | TArrow(Ty, Ty)\n\
-         type Ctx = List[(String, Ty)]\n\
-         type Judgement =\n\
-           | Judge(Ctx, Ty)\n\
-         def mk(t: Ty) -> Judgement = Judge([], t)\n",
-    );
+    assert_deep_ok(include_str!(
+        "../../../tests/fixtures/core/src/mod/ctx_list_of_tuple_alias_used_in_value_position.deep"
+    ));
 }
 
 #[test]
@@ -1879,18 +1812,9 @@ fn genuine_mismatch_against_expanded_alias_still_rejected() {
     // NEGATIVE PARITY: passing an Int where the expanded alias is
     // List[Effect] must STILL be a TypeMismatch. Alias transparency
     // must not weaken genuine error detection.
-    let errors = surf_check_errors(
-        "module M\n\
-         export (mk)\n\
-         type Effect =\n\
-           | Pure\n\
-           | Impure\n\
-         type Ty =\n\
-           | TBase\n\
-           | TArrow(Ty, Ty, EffectRow)\n\
-         type EffectRow = List[Effect]\n\
-         def mk(a: Ty, b: Ty) -> Ty = TArrow(a, b, 5)\n",
-    );
+    let errors = deep_check_errors(include_str!(
+        "../../../tests/fixtures/core/src/mod/genuine_mismatch_against_expanded_alias_still_rejected.deep"
+    ));
     assert!(
         errors
             .iter()
@@ -1903,18 +1827,9 @@ fn genuine_mismatch_against_expanded_alias_still_rejected() {
 fn alias_field_rejects_wrong_list_element_type() {
     // NEGATIVE PARITY: List[Ty] where the field expands to
     // List[Effect] must still mismatch on the element type.
-    let errors = surf_check_errors(
-        "module M\n\
-         export (mk)\n\
-         type Effect =\n\
-           | Pure\n\
-           | Impure\n\
-         type Ty =\n\
-           | TBase\n\
-           | TArrow(Ty, Ty, EffectRow)\n\
-         type EffectRow = List[Effect]\n\
-         def mk(a: Ty, b: Ty, ts: List[Ty]) -> Ty = TArrow(a, b, ts)\n",
-    );
+    let errors = deep_check_errors(include_str!(
+        "../../../tests/fixtures/core/src/mod/alias_field_rejects_wrong_list_element_type.deep"
+    ));
     assert!(
         errors
             .iter()

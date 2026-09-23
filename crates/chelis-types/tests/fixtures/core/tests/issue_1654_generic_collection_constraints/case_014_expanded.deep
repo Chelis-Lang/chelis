@@ -1,0 +1,17 @@
+(defsig {} use (t-fn {} (t-prim {} i64) (t-prim {} i64)))
+
+(def {}
+  use
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (let {span: "surf:25..74"}
+      (bind {}
+        measure
+        (fn {span: "surf:37..61"}
+          (params {} value)
+          (app {span: "surf:51..61"}
+            (var {span: "surf:51..54"} len)
+            (var {span: "surf:55..60"} value))))
+      (app {span: "surf:62..72"}
+        (var {span: "surf:62..69"} measure)
+        (var {span: "surf:70..71"} x)))))

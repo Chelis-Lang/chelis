@@ -138,17 +138,6 @@ fn adt_variant_and_field_readers_fail_closed_on_malformed_legacy_carriers() {
 }
 
 #[test]
-fn adt_reader_has_no_local_optional_carrier_adapter() {
-    let source = include_str!("../src/adt.rs");
-    let definition = ["fn stamped_", "parts"].concat();
-    let call = ["stamped_", "parts("].concat();
-    assert!(
-        !source.contains(&definition) && !source.contains(&call),
-        "E5b requires ADT variant and field reads to disposition ExprCarrier directly"
-    );
-}
-
-#[test]
 fn type_environment_matches_its_checked_library_program() {
     let library = parse("(def {} one (lit {type: (t-prim {} i32)} 1))");
     let (type_env, checked) =

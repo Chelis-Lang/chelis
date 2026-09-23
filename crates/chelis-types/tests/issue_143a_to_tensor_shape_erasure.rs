@@ -39,14 +39,11 @@
 //! Tracking: chelis#158 (sub-issue (A) of chelis#143)
 //! Diagnosis: docs/investigations/issue_143a_to_tensor_shape_erasure_diagnosis.md
 
-use chelis_surf::desugar::desugar_program;
-use chelis_surf::parser::parse_str;
 use chelis_types::check_typed_program;
 use chelis_types::errors::{CheckError, CheckErrorKind};
 
-fn typecheck_surf(source: &str) -> Vec<CheckError> {
-    let decls = parse_str(source).expect("surf parse should succeed");
-    let deep = desugar_program(&decls);
+fn typecheck_core(source: &str) -> Vec<CheckError> {
+    let deep = chelis_deep::parse_and_stamp_file(source).expect("Deep fixture");
     match check_typed_program(&deep) {
         Ok(_) => Vec::new(),
         Err(prog_errors) => prog_errors.errors,
@@ -83,18 +80,9 @@ fn to_tensor_mismatched_list_lengths_should_trip_dim_mismatch() {
     // dim info; the sig var `n` stays free; no DimensionMismatch is
     // reported (the failure surfaces only at runtime, as documented in
     // chelis#143).
-    let errors = typecheck_surf(
-        r#"
-sig pair_id[n]: &tensor[n, f32] -> &tensor[n, f32] -> tensor[n, f32]
-def pair_id(x, y) = x
-def caller() -> tensor[3, f32] =
-  {
-    a = to_tensor([1.0, 2.0, 3.0])
-    b = to_tensor([1.0, 2.0, 3.0, 4.0, 5.0])
-    pair_id(&a, &b)
-  }
-"#,
-    );
+    let errors = typecheck_core(include_str!(
+        "fixtures/core/tests/issue_143a_to_tensor_shape_erasure/to_tensor_mismatched_list_lengths_should_trip_dim_mismatch_1.deep"
+    ));
     assert!(
         has_dimension_mismatch(&errors),
         "expected DimensionMismatch (sig `n` should bind to 3 from `a`, then \
@@ -109,14 +97,9 @@ fn parameter_ascription_with_shared_sig_dim_does_trip_dim_mismatch() {
     // (via direct parameter ascription, not `to_tensor`), the sig's
     // shared dim var unification works correctly. This isolates the
     // bug above to tensor-builder shape erasure, not unify_dim.
-    let errors = typecheck_surf(
-        r#"
-sig pair_id[n]: &tensor[n, f32] -> &tensor[n, f32] -> tensor[n, f32]
-def pair_id(x, y) = x
-def caller(a: &tensor[3, f32], b: &tensor[5, f32]) -> tensor[3, f32] =
-  pair_id(a, b)
-"#,
-    );
+    let errors = typecheck_core(include_str!(
+        "fixtures/core/tests/issue_143a_to_tensor_shape_erasure/parameter_ascription_with_shared_sig_dim_does_trip_dim_mismatch_1.deep"
+    ));
     assert!(
         has_dimension_mismatch(&errors),
         "expected DimensionMismatch (sig `n` binds to 3 from `a`, conflicts with 5 from `b`), \
@@ -130,18 +113,9 @@ fn matched_to_tensor_lengths_does_not_trip_dim_mismatch_today() {
     // Sanity: with matched list lengths, today's buggy behavior still
     // does not produce a spurious DimensionMismatch. (This will remain
     // true post-fix; it's an invariant lock against over-corrections.)
-    let errors = typecheck_surf(
-        r#"
-sig pair_id[n]: &tensor[n, f32] -> &tensor[n, f32] -> tensor[n, f32]
-def pair_id(x, y) = x
-def caller() -> tensor[3, f32] =
-  {
-    a = to_tensor([1.0, 2.0, 3.0])
-    b = to_tensor([1.0, 2.0, 3.0])
-    pair_id(&a, &b)
-  }
-"#,
-    );
+    let errors = typecheck_core(include_str!(
+        "fixtures/core/tests/issue_143a_to_tensor_shape_erasure/matched_to_tensor_lengths_does_not_trip_dim_mismatch_today_1.deep"
+    ));
     assert!(
         !has_dimension_mismatch(&errors),
         "matched dims must not produce DimensionMismatch, got errors:\n{}",

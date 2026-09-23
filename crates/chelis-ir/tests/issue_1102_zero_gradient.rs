@@ -8,14 +8,12 @@
 
 use chelis_ir::dag::DimInfo;
 use chelis_ir::lower::{LoweredLibrary, try_lower_program_to_library};
-use chelis_surf::desugar::desugar_program;
-use chelis_surf::parser::parse_str as surf_parse;
 use chelis_types::check_typed_program;
 use chelis_types::types::Prim;
 
-fn surf_to_library(source: &str) -> Result<LoweredLibrary, String> {
-    let decls = surf_parse(source).map_err(|error| format!("surf parse: {error:?}"))?;
-    let deep = desugar_program(&decls);
+fn deep_to_library(source: &str) -> Result<LoweredLibrary, String> {
+    let deep =
+        chelis_deep::parser::parse_str(source).map_err(|error| format!("Deep parse: {error:?}"))?;
     let checked = check_typed_program(&deep)
         .map_err(|errors| format!("typecheck failed: {:?}", errors.errors))?;
     let checked = chelis_effects::check_program(&checked)
@@ -27,12 +25,7 @@ fn surf_to_library(source: &str) -> Result<LoweredLibrary, String> {
 
 #[test]
 fn proven_shaped_zero_gradient_retains_a_typed_root() {
-    let library = surf_to_library(
-        r#"
-def constish(x: tensor[3, f32]) -> f32 = cast(1.0, f32)
-def g(theta: tensor[3, f32]) -> tensor[3, f32] = grad(constish, wrt=theta)(theta)
-"#,
-    )
+    let library = deep_to_library(include_str!("fixtures/core/tests/issue_1102_zero_gradient/proven_shaped_zero_gradient_retains_a_typed_root.deep"),)
     .expect("a proven zero gradient must lower");
 
     assert!(
@@ -58,12 +51,7 @@ def g(theta: tensor[3, f32]) -> tensor[3, f32] = grad(constish, wrt=theta)(theta
 
 #[test]
 fn proven_rank_zero_gradient_retains_an_f32_root() {
-    let library = surf_to_library(
-        r#"
-def const_rank_zero(x: tensor[f32]) -> f32 = cast(1.0, f32)
-def rank_zero_grad(x: tensor[f32]) -> tensor[f32] = grad(const_rank_zero, wrt=x)(x)
-"#,
-    )
+    let library = deep_to_library(include_str!("fixtures/core/tests/issue_1102_zero_gradient/proven_rank_zero_gradient_retains_an_f32_root.deep"),)
     .expect("a proven rank-zero gradient must lower");
 
     assert!(!library.rootless_defs().contains("rank_zero_grad"));
@@ -76,20 +64,7 @@ def rank_zero_grad(x: tensor[f32]) -> tensor[f32] = grad(const_rank_zero, wrt=x)
 
 #[test]
 fn unresolved_callable_gradient_remains_rootless_until_specialized() {
-    let library = surf_to_library(
-        r#"
-def sumsq(theta: tensor[3, f32]) -> f32 =
-  tensor_to_scalar(sum(mul(theta, theta), 0))
-
-def grad_sumsq(
-  model: tensor[3, f32] -> f32,
-  theta: tensor[3, f32]
-) -> tensor[3, f32] = {
-  target = fn (theta_local: tensor[3, f32]) -> model(theta_local)
-  grad(target, wrt=theta_local)(theta)
-}
-"#,
-    )
+    let library = deep_to_library(include_str!("fixtures/core/tests/issue_1102_zero_gradient/unresolved_callable_gradient_remains_rootless_until_specialized.deep"),)
     .expect("the standalone higher-order definition must remain representable");
 
     assert!(
@@ -104,22 +79,7 @@ def grad_sumsq(
 
 #[test]
 fn unresolved_callable_forwarded_through_helpers_remains_rootless() {
-    let library = surf_to_library(
-        r#"
-def apply(model: tensor[3, f32] -> f32, x: tensor[3, f32]) -> f32 = model(x)
-def apply_pipe(model: tensor[3, f32] -> f32, x: tensor[3, f32]) -> f32 = x |> model
-
-def indirect(model: tensor[3, f32] -> f32, x: tensor[3, f32]) -> tensor[3, f32] = {
-  target = fn (v: tensor[3, f32]) -> apply(model, v)
-  grad(target, wrt=v)(x)
-}
-
-def indirect_pipe(model: tensor[3, f32] -> f32, x: tensor[3, f32]) -> tensor[3, f32] = {
-  target = fn (v: tensor[3, f32]) -> apply_pipe(model, v)
-  grad(target, wrt=v)(x)
-}
-"#,
-    )
+    let library = deep_to_library(include_str!("fixtures/core/tests/issue_1102_zero_gradient/unresolved_callable_forwarded_through_helpers_remains_rootless.deep"),)
     .expect("forwarding an unresolved callable must remain representable");
 
     for name in ["indirect", "indirect_pipe"] {
@@ -136,37 +96,7 @@ def indirect_pipe(model: tensor[3, f32] -> f32, x: tensor[3, f32]) -> tensor[3, 
 
 #[test]
 fn unresolved_callable_only_blocks_a_gradient_when_its_result_reaches_the_output() {
-    let library = surf_to_library(
-        r#"
-def sumsq(x: tensor[3, f32]) -> f32 =
-  tensor_to_scalar(sum(mul(x, x), 0))
-
-def dead_callable(
-  model: tensor[3, f32] -> f32,
-  x: tensor[3, f32]
-) -> tensor[3, f32] = {
-  target = fn (v: tensor[3, f32]) -> {
-    dead = model(v)
-    cast(1.0, f32)
-  }
-  grad(target, wrt=v)(x)
-}
-
-def live_callable(
-  model: tensor[3, f32] -> f32,
-  x: tensor[3, f32]
-) -> tensor[3, f32] = {
-  target = fn (v: tensor[3, f32]) -> model(v)
-  grad(target, wrt=v)(x)
-}
-
-def dead_specialized(x: tensor[3, f32]) -> tensor[3, f32] =
-  dead_callable(sumsq, x)
-
-def live_specialized(x: tensor[3, f32]) -> tensor[3, f32] =
-  live_callable(sumsq, x)
-"#,
-    )
+    let library = deep_to_library(include_str!("fixtures/core/tests/issue_1102_zero_gradient/unresolved_callable_only_blocks_a_gradient_when_its_result_reaches_the_output.deep"),)
     .expect("dead and live callable controls must remain representable");
 
     assert!(

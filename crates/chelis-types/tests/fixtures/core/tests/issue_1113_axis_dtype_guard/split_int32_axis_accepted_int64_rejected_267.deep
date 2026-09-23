@@ -1,0 +1,42 @@
+(def {}
+  m
+  (app {span: "surf:5..49"}
+    (var {span: "surf:5..18"} pad_sequences)
+    (app {span: "surf:19..43"}
+      (var {} Cons)
+      (app {span: "surf:20..30"}
+        (var {} Cons)
+        (lit {span: "surf:21..24", type: (t-prim {} f32)} 1.0)
+        (app {}
+          (var {} Cons)
+          (lit {span: "surf:26..29", type: (t-prim {} f32)} 2.0)
+          (var {} Nil)))
+      (app {}
+        (var {} Cons)
+        (app {span: "surf:32..42"}
+          (var {} Cons)
+          (lit {span: "surf:33..36", type: (t-prim {} f32)} 3.0)
+          (app {}
+            (var {} Cons)
+            (lit {span: "surf:38..41", type: (t-prim {} f32)} 4.0)
+            (var {} Nil)))
+        (var {} Nil)))
+    (lit {span: "surf:45..48", type: (t-prim {} f32)} 0.0)))
+
+(def {}
+  pieces
+  (app {span: "surf:59..100"}
+    (var {span: "surf:59..64"} split)
+    (var {span: "surf:65..66"} m)
+    (lit {span: "surf:68..69", type: (t-prim {} i32)} 1)
+    (app {span: "surf:71..99"}
+      (var {} Cons)
+      (cast {span: "surf:72..84"}
+        (lit {span: "surf:77..78", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 1)
+        (t-prim {} i64))
+      (app {}
+        (var {} Cons)
+        (cast {span: "surf:86..98"}
+          (lit {span: "surf:91..92", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 1)
+          (t-prim {} i64))
+        (var {} Nil)))))

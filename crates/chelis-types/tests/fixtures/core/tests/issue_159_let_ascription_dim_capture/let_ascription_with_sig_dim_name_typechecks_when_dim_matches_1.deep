@@ -1,0 +1,26 @@
+(defsig {}
+  pair_id
+  (n)
+  (t-fn {}
+    (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} f32)))
+    (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} f32)))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))))
+
+(def {}
+  pair_id
+  (fn {}
+    (params {}
+      (a {type: (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} f32)))})
+      (b {type: (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} f32)))}))
+    (let {span: "surf:144..221"}
+      (bind {}
+        x
+        (var {span: "surf:171..172", surf_binding_type: "explicit", type: (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} f32)))} a))
+      (let {}
+        (bind {}
+          y
+          (var {span: "surf:198..199", surf_binding_type: "explicit", type: (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} f32)))} b))
+        (app {span: "surf:204..217"}
+          (var {span: "surf:204..211"} pair_id)
+          (var {span: "surf:212..213"} x)
+          (var {span: "surf:215..216"} y))))))

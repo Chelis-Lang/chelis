@@ -1,0 +1,19 @@
+(module {surf_path: "M"}
+  m
+  (deftype {} Inner () (variant {} Inner (field {} value (t-prim {} f32))))
+  (deftype {invariant: (fn {}
+                          (params {} p)
+                          (app {span: "surf:67..87"}
+                            (var {} gte)
+                            (access {span: "surf:67..80"}
+                              (access {span: "surf:67..74"}
+                                (var {span: "surf:67..68"} p)
+                                inner)
+                              value)
+                            (lit {span: "surf:84..87", type: (t-prim {} f32)} 0.0))),
+             invariant_amenability: "linear",
+             opaque: true
+           }
+    Boxed
+    ()
+    (variant {} Boxed (field {} inner (t-adt {} Inner)))))

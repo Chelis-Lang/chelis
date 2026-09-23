@@ -1,0 +1,10 @@
+(defsig {} g (p) (t-fn {} (t-var {} p) (t-var {} p)))
+
+(def {}
+  g
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {}
+      (var {} __CORE_ARG_0__)
+      (var {} x)
+      (var {} x))))

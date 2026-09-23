@@ -1,0 +1,9 @@
+(defsig {dtype_bounds: {p: __CORE_ARG_0__}} g (p) (t-fn {} (t-var {} p) (t-var {} p)))
+
+(def {}
+  g
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {}
+      (var {} sin)
+      (var {} x))))

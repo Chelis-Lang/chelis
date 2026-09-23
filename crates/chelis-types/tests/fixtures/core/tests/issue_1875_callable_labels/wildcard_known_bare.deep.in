@@ -1,0 +1,9 @@
+(defsig {}
+  use
+  (t-fn {} (t-tensor {} (d-name {} *) (t-prim {} f32)) (t-var {} _)))
+
+(def {}
+  use
+  (fn {}
+    (params {} (w {type: (t-var {} _)}))
+    @BODY@))

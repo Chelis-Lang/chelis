@@ -1,0 +1,46 @@
+(deftype {}
+  Mixed
+  ()
+  (variant {}
+    Mixed
+    (field {} t (t-tensor {} (d-lit {} 2) (t-prim {} f32)))
+    (field {} n (t-prim {} i32))))
+
+(defsig {} loss (t-fn {} (t-adt {} Mixed) (t-prim {} f32)))
+
+(def {}
+  loss
+  (fn {}
+    (params {} (p {type: (t-var {} _)}))
+    (match {span: "surf:80..149"}
+      (var {span: "surf:86..87"} p)
+      (arm {}
+        (pat-record {} Mixed (kv {} t (pat-var {} t)) (kv {} n (pat-wild {})))
+        ()
+        (app {span: "surf:120..147"}
+          (var {span: "surf:120..136"} tensor_to_scalar)
+          (app {span: "surf:137..146"}
+            (var {span: "surf:137..140"} sum)
+            (var {span: "surf:141..142"} t)
+            (lit {span: "surf:144..145", type: (t-prim {} i32)} 0)))))))
+
+(defsig {}
+  derivative
+  (t-fn {}
+    (t-tensor {} (d-lit {} 2) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 2) (t-prim {} f32))))
+
+(def {}
+  derivative
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (let {span: "surf:204..252"}
+      (bind {}
+        g
+        (app {span: "surf:212..244"}
+          (grad {span: "surf:212..222"} (var {span: "surf:217..221"} loss))
+          (record {span: "surf:223..243"}
+            Mixed
+            (kv {} t (var {span: "surf:234..235"} x))
+            (kv {} n (lit {span: "surf:240..241", type: (t-prim {} i32)} 3)))))
+      (access {span: "surf:247..250"} (var {span: "surf:247..248"} g) t))))

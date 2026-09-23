@@ -1,0 +1,80 @@
+(defsig {} keys (t-adt {} List (t-prim {} string)))
+
+(def {}
+  keys
+  (app {span: "surf:22..39"}
+    (var {} Cons)
+    (lit {span: "surf:23..30", type: (t-prim {} string)} "alpha")
+    (app {}
+      (var {} Cons)
+      (lit {span: "surf:32..38", type: (t-prim {} string)} "beta")
+      (var {} Nil))))
+
+(defsig {} ids (t-adt {} List (t-prim {} i64)))
+
+(def {}
+  ids
+  (app {span: "surf:57..85"}
+    (var {} Cons)
+    (cast {span: "surf:58..70"}
+      (lit {span: "surf:63..64", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 1)
+      (t-prim {} i64))
+    (app {}
+      (var {} Cons)
+      (cast {span: "surf:72..84"}
+        (lit {span: "surf:77..78", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 2)
+        (t-prim {} i64))
+      (var {} Nil))))
+
+(def {}
+  pairs
+  (app {span: "surf:94..108"}
+    (var {span: "surf:94..97"} zip)
+    (var {span: "surf:98..102"} keys)
+    (var {span: "surf:104..107"} ids)))
+
+(def {}
+  indexed
+  (app {span: "surf:119..134"}
+    (var {span: "surf:119..128"} enumerate)
+    (var {span: "surf:129..133"} keys)))
+
+(defsig {} vocab (t-adt {} Dict (t-prim {} string) (t-prim {} i64)))
+
+(def {}
+  vocab
+  (app {span: "surf:162..176"}
+    (var {span: "surf:162..169"} dict_of)
+    (var {span: "surf:170..175"} pairs)))
+
+(def {}
+  found
+  (app {span: "surf:185..214"}
+    (var {span: "surf:185..198"} dict_contains)
+    (var {span: "surf:199..204"} vocab)
+    (lit {span: "surf:206..213", type: (t-prim {} string)} "alpha")))
+
+(def {}
+  id
+  (app {span: "surf:220..243"}
+    (var {span: "surf:220..228"} dict_get)
+    (var {span: "surf:229..234"} vocab)
+    (lit {span: "surf:236..242", type: (t-prim {} string)} "beta")))
+
+(def {}
+  only_keys
+  (app {span: "surf:256..272"}
+    (var {span: "surf:256..265"} dict_keys)
+    (var {span: "surf:266..271"} vocab)))
+
+(def {}
+  only_values
+  (app {span: "surf:287..305"}
+    (var {span: "surf:287..298"} dict_values)
+    (var {span: "surf:299..304"} vocab)))
+
+(def {}
+  roundtrip
+  (app {span: "surf:318..337"}
+    (var {span: "surf:318..330"} dict_entries)
+    (var {span: "surf:331..336"} vocab)))

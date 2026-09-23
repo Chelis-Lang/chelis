@@ -1,0 +1,4 @@
+(deftype {opaque: true}
+  Probability
+  ()
+  (variant {} Probability (field {} value (t-prim {} f32))))

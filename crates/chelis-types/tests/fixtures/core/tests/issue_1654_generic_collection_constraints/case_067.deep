@@ -1,0 +1,16 @@
+(def {} exported (fn {} (params {}) (var {span: "surf:17..23"} concat)))
+
+(def {} join (app {span: "surf:31..41"} (var {span: "surf:31..39"} exported)))
+
+(def {}
+  out
+  (app {span: "surf:48..68"}
+    (var {span: "surf:48..52"} join)
+    (app {span: "surf:53..59"}
+      (var {} Cons)
+      (lit {span: "surf:54..58", type: (t-prim {} i64)} 1)
+      (var {} Nil))
+    (app {span: "surf:61..67"}
+      (var {} Cons)
+      (lit {span: "surf:62..66", type: (t-prim {} i64)} 2)
+      (var {} Nil))))

@@ -34,7 +34,7 @@ enum Kind {
 /// What header the generator says a declaration publishes, which is what
 /// decides whether a reader needs a precedence edge to it (chelis#1486).
 ///
-/// Declared, not measured, so a desugarer change that stopped synthesizing a
+/// Declared, not measured, so a fixture change that stopped including a
 /// `defsig` would show up as a disagreement rather than silently changing the
 /// model the invariants are checked against; `reference` asserts each value
 /// against the real flattened `defsig` items.
@@ -138,11 +138,14 @@ impl Program {
     fn source(&self) -> String {
         let mut source = String::new();
         if self.wrapped {
-            source.push_str("module ScheduleOracle\n\n");
+            source.push_str("(module {surf_path: \"ScheduleOracle\"} scheduleoracle\n");
         }
         for declaration in &self.declarations {
             source.push_str(&declaration.source);
             source.push_str("\n\n");
+        }
+        if self.wrapped {
+            source.push(')');
         }
         source
     }
@@ -163,7 +166,7 @@ struct Measured {
     module_fn_indices: BTreeSet<usize>,
     /// The header each name actually publishes, read off the real flattened
     /// `defsig` items. Compared against the generator's declared `Header` so a
-    /// mis-annotated call site or a desugarer change is a loud disagreement.
+    /// mis-annotated call site or a fixture change is a loud disagreement.
     headers: BTreeMap<&'static str, Header>,
 }
 
@@ -199,9 +202,9 @@ fn deep_type_has_hole(root: &chelis_deep::Expr) -> bool {
 
 fn measure(program: &Program) -> Measured {
     let source = program.source();
-    let declarations = chelis_surf::parser::parse_str(&source)
-        .unwrap_or_else(|error| panic!("generated Surf must parse: {error:?}\n{source}"));
-    let exprs = chelis_surf::desugar::desugar_program(&declarations);
+    let exprs = chelis_deep::parser::parse_str(&source)
+        .unwrap_or_else(|error| panic!("generated Deep must parse: {error:?}\n{source}"));
+
     let items = top_level_decl_items_with_modules(&exprs);
     let flat = items
         .iter()
@@ -707,19 +710,62 @@ fn round_eight_layouts() -> Vec<Vec<Declaration>> {
     let mut layouts = Vec::new();
     for annotated in [false, true] {
         let carried = if annotated {
-            signed_value("carried", "carried: i32 = tailfn(1)", &["tailfn"])
+            signed_value(
+                "carried",
+                r#"(defsig {} carried (t-prim {} i32))
+
+(def {}
+  carried
+  (app {span: "surf:15..24"}
+    (var {span: "surf:15..21"} tailfn)
+    (lit {span: "surf:22..23", type: (t-prim {} i32)} 1)))"#,
+                &["tailfn"],
+            )
         } else {
-            value("carried", "carried = tailfn(1)", &["tailfn"])
+            value(
+                "carried",
+                r#"(def {}
+  carried
+  (app {span: "surf:10..19"}
+    (var {span: "surf:10..16"} tailfn)
+    (lit {span: "surf:17..18", type: (t-prim {} i32)} 1)))"#,
+                &["tailfn"],
+            )
         };
         let alphabet = vec![
-            function("caller", "def caller(n) = helper(n)", &["helper"]),
-            function("helper", "def helper(x) = carried", &["carried"]),
-            function("tailfn", "def tailfn(n) = n", &[]),
+            function(
+                "caller",
+                r#"(def {}
+  caller
+  (fn {}
+    (params {} n)
+    (app {span: "surf:16..25"}
+      (var {span: "surf:16..22"} helper)
+      (var {span: "surf:23..24"} n))))"#,
+                &["helper"],
+            ),
+            function(
+                "helper",
+                r#"(def {} helper (fn {} (params {} x) (var {span: "surf:16..23"} carried)))"#,
+                &["carried"],
+            ),
+            function(
+                "tailfn",
+                r#"(def {} tailfn (fn {} (params {} n) (var {span: "surf:16..17"} n)))"#,
+                &[],
+            ),
             carried,
         ];
         for mut layout in permutations(&alphabet) {
             layouts.push(layout.clone());
-            layout.insert(0, function("anchor", "def anchor(x) = x", &[]));
+            layout.insert(
+                0,
+                function(
+                    "anchor",
+                    r#"(def {} anchor (fn {} (params {} x) (var {span: "surf:16..17"} x)))"#,
+                    &[],
+                ),
+            );
             layouts.push(layout);
         }
     }
@@ -739,16 +785,46 @@ fn matrix_layouts() -> Vec<Vec<Declaration>> {
     let mut layouts = Vec::new();
     for annotated in [false, true] {
         let carried = if annotated {
-            signed_value("carried", "carried: i32 = 7", &[])
+            signed_value(
+                "carried",
+                r#"(defsig {} carried (t-prim {} i32))
+
+(def {} carried (lit {span: "surf:15..16", type: (t-prim {} i32)} 7))"#,
+                &[],
+            )
         } else {
-            value("carried", "carried = 7", &[])
+            value(
+                "carried",
+                r#"(def {} carried (lit {span: "surf:10..11", type: (t-prim {} i32)} 7))"#,
+                &[],
+            )
         };
         for reader in [
-            signed_function("reader", "def reader() -> i32 = carried", &["carried"]),
-            value("echoed", "echoed = carried", &["carried"]),
+            signed_function(
+                "reader",
+                r#"(defsig {} reader (t-fn {} (t-prim {} i32)))
+
+(def {} reader (fn {} (params {}) (var {span: "surf:22..29"} carried)))"#,
+                &["carried"],
+            ),
+            value(
+                "echoed",
+                r#"(def {} echoed (var {span: "surf:9..16"} carried))"#,
+                &["carried"],
+            ),
         ] {
             let alphabet = vec![
-                signed_function("anchor", "def anchor() -> i32 = 1", &[]),
+                signed_function(
+                    "anchor",
+                    r#"(defsig {} anchor (t-fn {} (t-prim {} i32)))
+
+(def {}
+  anchor
+  (fn {}
+    (params {})
+    (lit {span: "surf:22..23", type: (t-prim {} i32)} 1)))"#,
+                    &[],
+                ),
                 carried.clone(),
                 reader.clone(),
             ];
@@ -774,27 +850,82 @@ fn recursive_layouts() -> Vec<Vec<Declaration>> {
     let mut layouts = Vec::new();
     for computed in [false, true] {
         let carried = if computed {
-            value("carried", "carried = seed()", &["seed"])
+            value(
+                "carried",
+                r#"(def {} carried (app {span: "surf:10..16"} (var {span: "surf:10..14"} seed)))"#,
+                &["seed"],
+            )
         } else {
-            value("carried", "carried = 7", &[])
+            value(
+                "carried",
+                r#"(def {} carried (lit {span: "surf:10..11", type: (t-prim {} i32)} 7))"#,
+                &[],
+            )
         };
         let alphabet = vec![
             signed_member(
                 "ping",
-                "def ping(n: i32) -> i32 = if (n <= 0) then 0 else pong((n - 1))",
+                r#"(defsig {} ping (t-fn {} (t-prim {} i32) (t-prim {} i32)))
+
+(def {}
+  ping
+  (fn {}
+    (params {} (n {type: (t-var {} _)}))
+    (if {span: "surf:26..63"}
+      (app {span: "surf:30..36"}
+        (var {} lte)
+        (var {span: "surf:30..31"} n)
+        (lit {span: "surf:35..36", type: (t-prim {} i32)} 0))
+      (lit {span: "surf:43..44", type: (t-prim {} i32)} 0)
+      (app {span: "surf:50..63"}
+        (var {span: "surf:50..54"} pong)
+        (app {span: "surf:56..61"}
+          (var {} sub)
+          (var {span: "surf:56..57"} n)
+          (lit {span: "surf:60..61", type: (t-prim {} i32)} 1))))))"#,
                 &["pong"],
                 "pair",
             ),
             signed_member(
                 "pong",
-                "def pong(n: i32) -> i32 = if (n <= 0) then carried else ping((n - 1))",
+                r#"(defsig {} pong (t-fn {} (t-prim {} i32) (t-prim {} i32)))
+
+(def {}
+  pong
+  (fn {}
+    (params {} (n {type: (t-var {} _)}))
+    (if {span: "surf:26..69"}
+      (app {span: "surf:30..36"}
+        (var {} lte)
+        (var {span: "surf:30..31"} n)
+        (lit {span: "surf:35..36", type: (t-prim {} i32)} 0))
+      (var {span: "surf:43..50"} carried)
+      (app {span: "surf:56..69"}
+        (var {span: "surf:56..60"} ping)
+        (app {span: "surf:62..67"}
+          (var {} sub)
+          (var {span: "surf:62..63"} n)
+          (lit {span: "surf:66..67", type: (t-prim {} i32)} 1))))))"#,
                 &["ping", "carried"],
                 "pair",
             ),
             carried,
         ];
         for mut layout in permutations(&alphabet) {
-            layout.insert(0, signed_function("seed", "def seed() -> i32 = 3", &[]));
+            layout.insert(
+                0,
+                signed_function(
+                    "seed",
+                    r#"(defsig {} seed (t-fn {} (t-prim {} i32)))
+
+(def {}
+  seed
+  (fn {}
+    (params {})
+    (lit {span: "surf:20..21", type: (t-prim {} i32)} 3)))"#,
+                    &[],
+                ),
+            );
             layouts.push(layout);
         }
     }
@@ -813,9 +944,31 @@ fn recursive_component_layouts_satisfy_the_schedule_invariants() {
 /// of the value once the hoist is no longer blunt.
 fn function_visibility_layouts() -> Vec<Vec<Declaration>> {
     permutations(&[
-        function("helper", "def helper(x) = x", &[]),
-        function("caller", "def caller(n) = helper(n)", &["helper"]),
-        value("consumer", "consumer = caller(1)", &["caller"]),
+        function(
+            "helper",
+            r#"(def {} helper (fn {} (params {} x) (var {span: "surf:16..17"} x)))"#,
+            &[],
+        ),
+        function(
+            "caller",
+            r#"(def {}
+  caller
+  (fn {}
+    (params {} n)
+    (app {span: "surf:16..25"}
+      (var {span: "surf:16..22"} helper)
+      (var {span: "surf:23..24"} n))))"#,
+            &["helper"],
+        ),
+        value(
+            "consumer",
+            r#"(def {}
+  consumer
+  (app {span: "surf:11..20"}
+    (var {span: "surf:11..17"} caller)
+    (lit {span: "surf:18..19", type: (t-prim {} i32)} 1)))"#,
+            &["caller"],
+        ),
     ])
 }
 
@@ -865,12 +1018,38 @@ fn round_five_hoisted_reader_follows_the_value_it_reads() {
     let program = named(
         true,
         vec![
-            signed_function("seed", "def seed() -> i32 = 3", &[]),
-            signed_function("anchor", "def anchor() -> i32 = 1", &[]),
-            value("carried", "carried = seed()", &["seed"]),
+            signed_function(
+                "seed",
+                r#"(defsig {} seed (t-fn {} (t-prim {} i32)))
+
+(def {}
+  seed
+  (fn {}
+    (params {})
+    (lit {span: "surf:20..21", type: (t-prim {} i32)} 3)))"#,
+                &[],
+            ),
+            signed_function(
+                "anchor",
+                r#"(defsig {} anchor (t-fn {} (t-prim {} i32)))
+
+(def {}
+  anchor
+  (fn {}
+    (params {})
+    (lit {span: "surf:22..23", type: (t-prim {} i32)} 1)))"#,
+                &[],
+            ),
+            value(
+                "carried",
+                r#"(def {} carried (app {span: "surf:10..16"} (var {span: "surf:10..14"} seed)))"#,
+                &["seed"],
+            ),
             signed_function(
                 "later_reader",
-                "def later_reader() -> i32 = carried",
+                r#"(defsig {} later_reader (t-fn {} (t-prim {} i32)))
+
+(def {} later_reader (fn {} (params {}) (var {span: "surf:28..35"} carried)))"#,
                 &["carried"],
             ),
         ],
@@ -887,23 +1066,75 @@ fn round_six_recursive_component_follows_the_value_a_member_reads() {
     // the component is emitted at `ping`, which precedes the value on `main`.
     for wrapped in [true, false] {
         for carried in [
-            value("carried", "carried = 7", &[]),
-            value("carried", "carried = seed()", &["seed"]),
+            value(
+                "carried",
+                r#"(def {} carried (lit {span: "surf:10..11", type: (t-prim {} i32)} 7))"#,
+                &[],
+            ),
+            value(
+                "carried",
+                r#"(def {} carried (app {span: "surf:10..16"} (var {span: "surf:10..14"} seed)))"#,
+                &["seed"],
+            ),
         ] {
             let program = named(
                 wrapped,
                 vec![
-                    signed_function("seed", "def seed() -> i32 = 3", &[]),
+                    signed_function(
+                        "seed",
+                        r#"(defsig {} seed (t-fn {} (t-prim {} i32)))
+
+(def {}
+  seed
+  (fn {}
+    (params {})
+    (lit {span: "surf:20..21", type: (t-prim {} i32)} 3)))"#,
+                        &[],
+                    ),
                     signed_member(
                         "ping",
-                        "def ping(n: i32) -> i32 = if (n <= 0) then 0 else pong((n - 1))",
+                        r#"(defsig {} ping (t-fn {} (t-prim {} i32) (t-prim {} i32)))
+
+(def {}
+  ping
+  (fn {}
+    (params {} (n {type: (t-var {} _)}))
+    (if {span: "surf:26..63"}
+      (app {span: "surf:30..36"}
+        (var {} lte)
+        (var {span: "surf:30..31"} n)
+        (lit {span: "surf:35..36", type: (t-prim {} i32)} 0))
+      (lit {span: "surf:43..44", type: (t-prim {} i32)} 0)
+      (app {span: "surf:50..63"}
+        (var {span: "surf:50..54"} pong)
+        (app {span: "surf:56..61"}
+          (var {} sub)
+          (var {span: "surf:56..57"} n)
+          (lit {span: "surf:60..61", type: (t-prim {} i32)} 1))))))"#,
                         &["pong"],
                         "pair",
                     ),
                     carried,
                     signed_member(
                         "pong",
-                        "def pong(n: i32) -> i32 = if (n <= 0) then carried else ping((n - 1))",
+                        r#"(defsig {} pong (t-fn {} (t-prim {} i32) (t-prim {} i32)))
+
+(def {}
+  pong
+  (fn {}
+    (params {} (n {type: (t-var {} _)}))
+    (if {span: "surf:26..69"}
+      (app {span: "surf:30..36"}
+        (var {} lte)
+        (var {span: "surf:30..31"} n)
+        (lit {span: "surf:35..36", type: (t-prim {} i32)} 0))
+      (var {span: "surf:43..50"} carried)
+      (app {span: "surf:56..69"}
+        (var {span: "surf:56..60"} ping)
+        (app {span: "surf:62..67"}
+          (var {} sub)
+          (var {span: "surf:62..63"} n)
+          (lit {span: "surf:66..67", type: (t-prim {} i32)} 1))))))"#,
                         &["ping", "carried"],
                         "pair",
                     ),
@@ -924,9 +1155,31 @@ fn round_seven_value_reading_a_caller_waits_for_the_defsig_less_chain() {
     let program = named(
         true,
         vec![
-            function("caller", "def caller(n) = helper(n)", &["helper"]),
-            value("consumer", "consumer = caller(1)", &["caller"]),
-            function("helper", "def helper(x) = x", &[]),
+            function(
+                "caller",
+                r#"(def {}
+  caller
+  (fn {}
+    (params {} n)
+    (app {span: "surf:16..25"}
+      (var {span: "surf:16..22"} helper)
+      (var {span: "surf:23..24"} n))))"#,
+                &["helper"],
+            ),
+            value(
+                "consumer",
+                r#"(def {}
+  consumer
+  (app {span: "surf:11..20"}
+    (var {span: "surf:11..17"} caller)
+    (lit {span: "surf:18..19", type: (t-prim {} i32)} 1)))"#,
+                &["caller"],
+            ),
+            function(
+                "helper",
+                r#"(def {} helper (fn {} (params {} x) (var {span: "surf:16..17"} x)))"#,
+                &[],
+            ),
         ],
     );
     assert!(violations(&program).is_empty());
@@ -943,10 +1196,38 @@ fn round_eight_stall_free_program_keeps_planner_order() {
     let program = named(
         true,
         vec![
-            function("caller", "def caller(n) = helper(n)", &["helper"]),
-            signed_value("carried", "carried: i32 = tailfn(1)", &["tailfn"]),
-            function("helper", "def helper(x) = carried", &["carried"]),
-            function("tailfn", "def tailfn(n) = n", &[]),
+            function(
+                "caller",
+                r#"(def {}
+  caller
+  (fn {}
+    (params {} n)
+    (app {span: "surf:16..25"}
+      (var {span: "surf:16..22"} helper)
+      (var {span: "surf:23..24"} n))))"#,
+                &["helper"],
+            ),
+            signed_value(
+                "carried",
+                r#"(defsig {} carried (t-prim {} i32))
+
+(def {}
+  carried
+  (app {span: "surf:15..24"}
+    (var {span: "surf:15..21"} tailfn)
+    (lit {span: "surf:22..23", type: (t-prim {} i32)} 1)))"#,
+                &["tailfn"],
+            ),
+            function(
+                "helper",
+                r#"(def {} helper (fn {} (params {} x) (var {span: "surf:16..23"} carried)))"#,
+                &["carried"],
+            ),
+            function(
+                "tailfn",
+                r#"(def {} tailfn (fn {} (params {} n) (var {span: "surf:16..17"} n)))"#,
+                &[],
+            ),
         ],
     );
     let measured = measure(&program);
@@ -969,10 +1250,30 @@ fn a_value_reading_a_later_function_does_not_stall() {
     let program = named(
         true,
         vec![
-            function("anchor", "def anchor(x) = x", &[]),
-            value("carried", "carried = tail(1)", &["tail"]),
-            function("head", "def head(n) = carried", &["carried"]),
-            function("tail", "def tail(n) = n", &[]),
+            function(
+                "anchor",
+                r#"(def {} anchor (fn {} (params {} x) (var {span: "surf:16..17"} x)))"#,
+                &[],
+            ),
+            value(
+                "carried",
+                r#"(def {}
+  carried
+  (app {span: "surf:10..17"}
+    (var {span: "surf:10..14"} tail)
+    (lit {span: "surf:15..16", type: (t-prim {} i32)} 1)))"#,
+                &["tail"],
+            ),
+            function(
+                "head",
+                r#"(def {} head (fn {} (params {} n) (var {span: "surf:14..21"} carried)))"#,
+                &["carried"],
+            ),
+            function(
+                "tail",
+                r#"(def {} tail (fn {} (params {} n) (var {span: "surf:14..15"} n)))"#,
+                &[],
+            ),
         ],
     );
     let measured = measure(&program);
@@ -994,10 +1295,32 @@ fn a_textual_chain_would_close_a_cycle_this_graph_does_not_have() {
     let program = named(
         true,
         vec![
-            signed_function("anchor", "def anchor() -> i32 = 1", &[]),
-            value("first", "first = reads()", &["reads"]),
-            value("second", "second = 7", &[]),
-            function("reads", "def reads() = second", &["second"]),
+            signed_function(
+                "anchor",
+                r#"(defsig {} anchor (t-fn {} (t-prim {} i32)))
+
+(def {}
+  anchor
+  (fn {}
+    (params {})
+    (lit {span: "surf:22..23", type: (t-prim {} i32)} 1)))"#,
+                &[],
+            ),
+            value(
+                "first",
+                r#"(def {} first (app {span: "surf:8..15"} (var {span: "surf:8..13"} reads)))"#,
+                &["reads"],
+            ),
+            value(
+                "second",
+                r#"(def {} second (lit {span: "surf:9..10", type: (t-prim {} i32)} 7))"#,
+                &[],
+            ),
+            function(
+                "reads",
+                r#"(def {} reads (fn {} (params {}) (var {span: "surf:14..20"} second)))"#,
+                &["second"],
+            ),
         ],
     );
     let measured = measure(&program);
@@ -1027,9 +1350,37 @@ fn a_below_floor_reader_of_a_hole_signature_function_follows_it() {
     let holed_wrapped = named(
         true,
         vec![
-            value("r", "r = f(2)", &["f"]),
-            signed_function("anchor", "def anchor() -> i32 = 1", &[]),
-            holed_function("f", "def f(n: i32) = n", &[]),
+            value(
+                "r",
+                r#"(def {}
+  r
+  (app {span: "surf:4..8"}
+    (var {span: "surf:4..5"} f)
+    (lit {span: "surf:6..7", type: (t-prim {} i32)} 2)))"#,
+                &["f"],
+            ),
+            signed_function(
+                "anchor",
+                r#"(defsig {} anchor (t-fn {} (t-prim {} i32)))
+
+(def {}
+  anchor
+  (fn {}
+    (params {})
+    (lit {span: "surf:22..23", type: (t-prim {} i32)} 1)))"#,
+                &[],
+            ),
+            holed_function(
+                "f",
+                r#"(defsig {} f (t-fn {} (t-prim {} i32) (t-var {} _)))
+
+(def {}
+  f
+  (fn {}
+    (params {} (n {type: (t-var {} _)}))
+    (var {span: "surf:16..17"} n)))"#,
+                &[],
+            ),
         ],
     );
     assert!(
@@ -1045,8 +1396,26 @@ fn a_below_floor_reader_of_a_hole_signature_function_follows_it() {
     let holed_bare = named(
         false,
         vec![
-            value("r", "r = f(2)", &["f"]),
-            holed_function("f", "def f(n: i32) = n", &[]),
+            value(
+                "r",
+                r#"(def {}
+  r
+  (app {span: "surf:4..8"}
+    (var {span: "surf:4..5"} f)
+    (lit {span: "surf:6..7", type: (t-prim {} i32)} 2)))"#,
+                &["f"],
+            ),
+            holed_function(
+                "f",
+                r#"(defsig {} f (t-fn {} (t-prim {} i32) (t-var {} _)))
+
+(def {}
+  f
+  (fn {}
+    (params {} (n {type: (t-var {} _)}))
+    (var {span: "surf:16..17"} n)))"#,
+                &[],
+            ),
         ],
     );
     assert!(
@@ -1063,9 +1432,37 @@ fn a_below_floor_reader_of_a_hole_signature_function_follows_it() {
     let complete = named(
         true,
         vec![
-            value("r", "r = g(2)", &["g"]),
-            signed_function("anchor", "def anchor() -> i32 = 1", &[]),
-            signed_function("g", "def g(n: i32) -> i32 = n", &[]),
+            value(
+                "r",
+                r#"(def {}
+  r
+  (app {span: "surf:4..8"}
+    (var {span: "surf:4..5"} g)
+    (lit {span: "surf:6..7", type: (t-prim {} i32)} 2)))"#,
+                &["g"],
+            ),
+            signed_function(
+                "anchor",
+                r#"(defsig {} anchor (t-fn {} (t-prim {} i32)))
+
+(def {}
+  anchor
+  (fn {}
+    (params {})
+    (lit {span: "surf:22..23", type: (t-prim {} i32)} 1)))"#,
+                &[],
+            ),
+            signed_function(
+                "g",
+                r#"(defsig {} g (t-fn {} (t-prim {} i32) (t-prim {} i32)))
+
+(def {}
+  g
+  (fn {}
+    (params {} (n {type: (t-var {} _)}))
+    (var {span: "surf:23..24"} n)))"#,
+                &[],
+            ),
         ],
     );
     assert!(violations(&complete).is_empty(), "{}", complete.source());
@@ -1081,11 +1478,40 @@ fn a_value_naming_a_function_that_reads_it_back_is_a_recorded_stall() {
     for (label, carried, helper, reader) in [
         (
             "signed reader",
-            value("carried", "carried = wrap(f)", &["wrap", "f"]),
-            function("wrap", "def wrap(g) = g", &[]),
+            value(
+                "carried",
+                r#"(def {}
+  carried
+  (app {span: "surf:10..17"}
+    (var {span: "surf:10..14"} wrap)
+    (var {span: "surf:15..16"} f)))"#,
+                &["wrap", "f"],
+            ),
+            function(
+                "wrap",
+                r#"(def {} wrap (fn {} (params {} g) (var {span: "surf:14..15"} g)))"#,
+                &[],
+            ),
             signed_function(
                 "f",
-                "def f(n: i32) -> i32 = if (n <= 0) then 0 else carried((n - 1))",
+                r#"(defsig {} f (t-fn {} (t-prim {} i32) (t-prim {} i32)))
+
+(def {}
+  f
+  (fn {}
+    (params {} (n {type: (t-var {} _)}))
+    (if {span: "surf:23..63"}
+      (app {span: "surf:27..33"}
+        (var {} lte)
+        (var {span: "surf:27..28"} n)
+        (lit {span: "surf:32..33", type: (t-prim {} i32)} 0))
+      (lit {span: "surf:40..41", type: (t-prim {} i32)} 0)
+      (app {span: "surf:47..63"}
+        (var {span: "surf:47..54"} carried)
+        (app {span: "surf:56..61"}
+          (var {} sub)
+          (var {span: "surf:56..57"} n)
+          (lit {span: "surf:60..61", type: (t-prim {} i32)} 1))))))"#,
                 &["carried"],
             ),
         ),
@@ -1093,19 +1519,75 @@ fn a_value_naming_a_function_that_reads_it_back_is_a_recorded_stall() {
             "lambda naming a signed reader",
             value(
                 "carried",
-                "carried = pick(fn (x: i32) -> f(x))",
+                r#"(def {}
+  carried
+  (app {span: "surf:10..35"}
+    (var {span: "surf:10..14"} pick)
+    (fn {span: "surf:15..34"}
+      (params {} (x {type: (t-prim {} i32)}))
+      (app {span: "surf:30..34"}
+        (var {span: "surf:30..31"} f)
+        (var {span: "surf:32..33"} x)))))"#,
                 &["pick", "f"],
             ),
-            function("pick", "def pick(g) = 5", &[]),
-            signed_function("f", "def f(n: i32) -> i32 = add(n, carried)", &["carried"]),
+            function(
+                "pick",
+                r#"(def {}
+  pick
+  (fn {}
+    (params {} g)
+    (lit {span: "surf:14..15", type: (t-prim {} i32)} 5)))"#,
+                &[],
+            ),
+            signed_function(
+                "f",
+                r#"(defsig {} f (t-fn {} (t-prim {} i32) (t-prim {} i32)))
+
+(def {}
+  f
+  (fn {}
+    (params {} (n {type: (t-var {} _)}))
+    (app {span: "surf:23..38"}
+      (var {span: "surf:23..26"} add)
+      (var {span: "surf:27..28"} n)
+      (var {span: "surf:30..37"} carried))))"#,
+                &["carried"],
+            ),
         ),
         (
             "defsig-less reader",
-            value("carried", "carried = wrap(g)", &["wrap", "g"]),
-            function("wrap", "def wrap(h) = h", &[]),
+            value(
+                "carried",
+                r#"(def {}
+  carried
+  (app {span: "surf:10..17"}
+    (var {span: "surf:10..14"} wrap)
+    (var {span: "surf:15..16"} g)))"#,
+                &["wrap", "g"],
+            ),
+            function(
+                "wrap",
+                r#"(def {} wrap (fn {} (params {} h) (var {span: "surf:14..15"} h)))"#,
+                &[],
+            ),
             function(
                 "g",
-                "def g(n) = if (n <= 0) then 0 else carried((n - 1))",
+                r#"(def {}
+  g
+  (fn {}
+    (params {} n)
+    (if {span: "surf:11..51"}
+      (app {span: "surf:15..21"}
+        (var {} lte)
+        (var {span: "surf:15..16"} n)
+        (lit {span: "surf:20..21", type: (t-prim {} i32)} 0))
+      (lit {span: "surf:28..29", type: (t-prim {} i32)} 0)
+      (app {span: "surf:35..51"}
+        (var {span: "surf:35..42"} carried)
+        (app {span: "surf:44..49"}
+          (var {} sub)
+          (var {span: "surf:44..45"} n)
+          (lit {span: "surf:48..49", type: (t-prim {} i32)} 1))))))"#,
                 &["carried"],
             ),
         ),
@@ -1113,7 +1595,17 @@ fn a_value_naming_a_function_that_reads_it_back_is_a_recorded_stall() {
         let program = named(
             true,
             vec![
-                signed_function("anchor", "def anchor() -> i32 = 1", &[]),
+                signed_function(
+                    "anchor",
+                    r#"(defsig {} anchor (t-fn {} (t-prim {} i32)))
+
+(def {}
+  anchor
+  (fn {}
+    (params {})
+    (lit {span: "surf:22..23", type: (t-prim {} i32)} 1)))"#,
+                    &[],
+                ),
                 carried,
                 helper,
                 reader,
@@ -1164,9 +1656,33 @@ fn a_genuine_binding_cycle_stays_total_as_one_component() {
     let three = named(
         true,
         vec![
-            function("caller", "def caller(n) = helper(n)", &["helper"]),
-            signed_value("carried", "carried: i32 = caller(1)", &["caller"]),
-            function("helper", "def helper(x) = carried", &["carried"]),
+            function(
+                "caller",
+                r#"(def {}
+  caller
+  (fn {}
+    (params {} n)
+    (app {span: "surf:16..25"}
+      (var {span: "surf:16..22"} helper)
+      (var {span: "surf:23..24"} n))))"#,
+                &["helper"],
+            ),
+            signed_value(
+                "carried",
+                r#"(defsig {} carried (t-prim {} i32))
+
+(def {}
+  carried
+  (app {span: "surf:15..24"}
+    (var {span: "surf:15..21"} caller)
+    (lit {span: "surf:22..23", type: (t-prim {} i32)} 1)))"#,
+                &["caller"],
+            ),
+            function(
+                "helper",
+                r#"(def {} helper (fn {} (params {} x) (var {span: "surf:16..23"} carried)))"#,
+                &["carried"],
+            ),
         ],
     );
     let measured = measure(&three);
@@ -1203,14 +1719,56 @@ fn a_genuine_binding_cycle_stays_total_as_one_component() {
         vec![
             signed_member(
                 "ping",
-                "def ping(n: i32) -> i32 = if (n <= 0) then 0 else pong((n - 1))",
+                r#"(defsig {} ping (t-fn {} (t-prim {} i32) (t-prim {} i32)))
+
+(def {}
+  ping
+  (fn {}
+    (params {} (n {type: (t-var {} _)}))
+    (if {span: "surf:26..63"}
+      (app {span: "surf:30..36"}
+        (var {} lte)
+        (var {span: "surf:30..31"} n)
+        (lit {span: "surf:35..36", type: (t-prim {} i32)} 0))
+      (lit {span: "surf:43..44", type: (t-prim {} i32)} 0)
+      (app {span: "surf:50..63"}
+        (var {span: "surf:50..54"} pong)
+        (app {span: "surf:56..61"}
+          (var {} sub)
+          (var {span: "surf:56..57"} n)
+          (lit {span: "surf:60..61", type: (t-prim {} i32)} 1))))))"#,
                 &["pong"],
                 "pair",
             ),
-            value("carried", "carried = ping(1)", &["ping"]),
+            value(
+                "carried",
+                r#"(def {}
+  carried
+  (app {span: "surf:10..17"}
+    (var {span: "surf:10..14"} ping)
+    (lit {span: "surf:15..16", type: (t-prim {} i32)} 1)))"#,
+                &["ping"],
+            ),
             signed_member(
                 "pong",
-                "def pong(n: i32) -> i32 = if (n <= 0) then carried else ping((n - 1))",
+                r#"(defsig {} pong (t-fn {} (t-prim {} i32) (t-prim {} i32)))
+
+(def {}
+  pong
+  (fn {}
+    (params {} (n {type: (t-var {} _)}))
+    (if {span: "surf:26..69"}
+      (app {span: "surf:30..36"}
+        (var {} lte)
+        (var {span: "surf:30..31"} n)
+        (lit {span: "surf:35..36", type: (t-prim {} i32)} 0))
+      (var {span: "surf:43..50"} carried)
+      (app {span: "surf:56..69"}
+        (var {span: "surf:56..60"} ping)
+        (app {span: "surf:62..67"}
+          (var {} sub)
+          (var {span: "surf:62..63"} n)
+          (lit {span: "surf:66..67", type: (t-prim {} i32)} 1))))))"#,
                 &["ping", "carried"],
                 "pair",
             ),
@@ -1278,12 +1836,21 @@ fn a_mixed_bare_and_module_component_follows_the_value_a_member_reads() {
 /// ordinary [04-INF-4] diagnostic after it has been produced.
 #[test]
 fn cycle_precedence_value_is_available_before_the_cyclic_component() {
-    let source = "module CyclePrecedence\n\n\
-                  root = add(read_root(), later)\n\n\
-                  later = 5i32\n\n\
-                  def read_root() -> i32 = root\n";
-    let declarations = chelis_surf::parser::parse_str(source).expect("fixture parses");
-    let exprs = chelis_surf::desugar::desugar_program(&declarations);
+    let source = r#"(module {surf_path: "CyclePrecedence"}
+  cycleprecedence
+  (def {}
+    root
+    (app {span: "surf:31..54"}
+      (var {span: "surf:31..34"} add)
+      (app {span: "surf:35..46"} (var {span: "surf:35..44"} read_root))
+      (var {span: "surf:48..53"} later)))
+  (def {}
+    later
+    (lit {span: "surf:64..68", surf_literal_style: "explicit", type: (t-prim {} i32)} 5))
+  (defsig {} read_root (t-fn {} (t-prim {} i32)))
+  (def {} read_root (fn {} (params {}) (var {span: "surf:95..99"} root))))"#;
+    let exprs = chelis_deep::parser::parse_str(source).expect("fixture parses");
+
     let items = top_level_decl_items_with_modules(&exprs);
     let plan = FunctionInferencePlan::build(&items);
     let schedule = primary_inference_schedule(&plan, &items);

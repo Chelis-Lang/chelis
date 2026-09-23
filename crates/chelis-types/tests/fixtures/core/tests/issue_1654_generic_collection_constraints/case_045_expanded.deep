@@ -1,0 +1,25 @@
+(def {} return_concat (fn {} (params {}) (var {span: "surf:22..28"} concat)))
+
+(defsig {}
+  bad
+  (t-fn {}
+    (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 2) (d-lit {} 4) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 2) (d-lit {} 99) (t-prim {} f32))))
+
+(def {}
+  bad
+  (fn {}
+    (params {} (a {type: (t-var {} _)}) (b {type: (t-var {} _)}))
+    (let {span: "surf:105..146"}
+      (bind {}
+        op
+        (app {span: "surf:112..127"}
+          (var {span: "surf:112..125"} return_concat)))
+      (app {span: "surf:128..144"}
+        (var {span: "surf:128..130"} op)
+        (app {span: "surf:131..137"}
+          (var {} Cons)
+          (var {span: "surf:132..133"} a)
+          (app {} (var {} Cons) (var {span: "surf:135..136"} b) (var {} Nil)))
+        (lit {span: "surf:139..143", surf_literal_style: "explicit", type: (t-prim {} i32)} 1)))))

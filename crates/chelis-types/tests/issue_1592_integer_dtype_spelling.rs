@@ -1,7 +1,6 @@
 //! chelis#1592 checker ingress parity for canonical and retired signed integer
 //! primitive spellings.
 
-use chelis_surf::parser::parse_str;
 use chelis_types::check_ir_program;
 use chelis_types::types::{Prim, Type};
 
@@ -49,38 +48,15 @@ fn language_and_interchange_integer_names_are_distinct() {
 }
 
 #[test]
-fn retired_surf_names_reject_at_parser_ingress_with_the_versioned_migration_command() {
-    for retired in ["int8", "int16", "int32", "int64"] {
-        let source = format!("module P.M\nexport (f)\ndef f(x: {retired}) -> {retired} = x\n");
-        let message = parse_str(&source)
-            .expect_err("canonical Surf parser rejects retired dtype")
-            .to_string();
-        assert!(
-            message.contains(retired) && message.contains("chelis migrate surf --from 0.18"),
-            "`{retired}` must reject with actionable migration advice: {message}"
-        );
-    }
-}
-
-#[test]
 fn retired_deep_primitive_and_type_variable_names_both_reject() {
-    for (tag, command) in [
-        ("t-prim", "chelis migrate deep --from 0.18"),
-        ("t-var", "chelis migrate deep --from 0.18"),
-    ] {
+    for tag in ["t-prim", "t-var"] {
         let source = format!(
             "(module {{surf_path: \"P.M\"}}\n  p.m\n  (export {{}} f)\n  \
              (defsig {{}} f (t-fn {{}} ({tag} {{}} int64) ({tag} {{}} int64)))\n  \
              (def {{}} f (fn {{}} (params {{}} (x {{type: ({tag} {{}} int64)}})) \
              (var {{}} x))))\n"
         );
-        let error =
-            chelis_deep::parser::parse_and_stamp_file(&source).expect_err("Deep ingress rejects");
-        let message = error.to_string();
-        assert!(
-            message.contains("int64") && message.contains(command),
-            "retired `{tag}` spelling must reject with Deep migration advice: {message}"
-        );
+        chelis_deep::parser::parse_and_stamp_file(&source).expect_err("Deep ingress rejects");
     }
 }
 

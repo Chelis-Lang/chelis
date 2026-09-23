@@ -1,0 +1,16 @@
+(defsig {}
+  main
+  (t-fn {}
+    (t-tensor {} (d-lit {} 4) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 4) (t-prim {} f32))))
+
+(def {}
+  main
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (handle-effect {effect: random, span: "surf:49..89"}
+      (lit {span: "surf:59..63", type: (t-prim {} i64)} 0)
+      (app {span: "surf:65..89"}
+        (var {span: "surf:69..76"} dropout)
+        (var {span: "surf:77..78"} x)
+        (lit {span: "surf:80..86", surf_literal_style: "explicit", type: (t-prim {} f32)} 0.5)))))

@@ -1,0 +1,217 @@
+(defsig {}
+  add_axis
+  (rest)
+  (t-fn {}
+    (t-ref {} (t-tensor {} (d-rank {} rest) (t-prim {} f32)))
+    (t-tensor {} (d-rank {} rest) (d-name {} one) (t-prim {} f32))))
+
+(def {}
+  add_axis
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:74..94"}
+      (var {span: "surf:74..80"} insert)
+      (var {span: "surf:81..82"} x)
+      (var {span: "surf:84..87"} one)
+      (lit {span: "surf:89..93", type: (t-prim {} i64)} 1))))
+
+(defsig {}
+  widen
+  (pre post c)
+  (t-fn {}
+    (t-ref {}
+      (t-tensor {}
+        (d-rank {} pre)
+        (d-name {} seq)
+        (d-rank {} post)
+        (t-prim {} f32)))
+    (t-tensor {}
+      (d-rank {} pre)
+      (d-var {} c)
+      (d-name {} seq)
+      (d-rank {} post)
+      (t-prim {} f32))))
+
+(def {}
+  widen
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:196..219"}
+      (var {span: "surf:196..202"} insert)
+      (var {span: "surf:203..204"} x)
+      (var {span: "surf:206..207"} c)
+      (lit {span: "surf:209..213", type: (t-prim {} i64)} 3)
+      (var {span: "surf:215..218"} seq))))
+
+(defsig {}
+  a1
+  (t-fn {}
+    (t-ref {} (t-tensor {} (d-name {} seq) (t-prim {} f32)))
+    (t-tensor {} (d-name {} seq) (d-name {} one) (t-prim {} f32))))
+
+(def {}
+  a1
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:276..287"}
+      (var {span: "surf:276..284"} add_axis)
+      (var {span: "surf:285..286"} x))))
+
+(defsig {}
+  a2
+  (t-fn {}
+    (t-ref {} (t-tensor {} (d-name {} batch) (d-name {} seq) (t-prim {} f32)))
+    (t-tensor {}
+      (d-name {} batch)
+      (d-name {} seq)
+      (d-name {} one)
+      (t-prim {} f32))))
+
+(def {}
+  a2
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:358..369"}
+      (var {span: "surf:358..366"} add_axis)
+      (var {span: "surf:367..368"} x))))
+
+(defsig {}
+  w_lead
+  (c)
+  (t-fn {}
+    (t-ref {} (t-tensor {} (d-name {} seq) (d-name {} hidden) (t-prim {} f32)))
+    (t-tensor {}
+      (d-var {} c)
+      (d-name {} seq)
+      (d-name {} hidden)
+      (t-prim {} f32))))
+
+(def {}
+  w_lead
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:447..455"}
+      (var {span: "surf:447..452"} widen)
+      (var {span: "surf:453..454"} x))))
+
+(defsig {}
+  w_mid
+  (c)
+  (t-fn {}
+    (t-ref {} (t-tensor {} (d-name {} batch) (d-name {} seq) (t-prim {} f32)))
+    (t-tensor {} (d-name {} batch) (d-var {} c) (d-name {} seq) (t-prim {} f32))))
+
+(def {}
+  w_mid
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:530..538"}
+      (var {span: "surf:530..535"} widen)
+      (var {span: "surf:536..537"} x))))
+
+(def {}
+  out1
+  (app {span: "surf:546..585"}
+    (var {span: "surf:546..548"} a1)
+    (app {span: "surf:549..584"}
+      (var {span: "surf:549..558"} to_tensor)
+      (app {span: "surf:559..583"}
+        (var {} Cons)
+        (lit {span: "surf:560..566", surf_literal_style: "explicit", type: (t-prim {} f32)} 1.0)
+        (app {}
+          (var {} Cons)
+          (lit {span: "surf:568..574", surf_literal_style: "explicit", type: (t-prim {} f32)} 2.0)
+          (app {}
+            (var {} Cons)
+            (lit {span: "surf:576..582", surf_literal_style: "explicit", type: (t-prim {} f32)} 3.0)
+            (var {} Nil)))))))
+
+(def {}
+  out2
+  (app {span: "surf:593..660"}
+    (var {span: "surf:593..595"} a2)
+    (app {span: "surf:596..659"}
+      (var {span: "surf:596..605"} to_tensor)
+      (app {span: "surf:606..658"}
+        (var {} Cons)
+        (app {span: "surf:607..631"}
+          (var {} Cons)
+          (lit {span: "surf:608..614", surf_literal_style: "explicit", type: (t-prim {} f32)} 1.0)
+          (app {}
+            (var {} Cons)
+            (lit {span: "surf:616..622", surf_literal_style: "explicit", type: (t-prim {} f32)} 2.0)
+            (app {}
+              (var {} Cons)
+              (lit {span: "surf:624..630", surf_literal_style: "explicit", type: (t-prim {} f32)} 3.0)
+              (var {} Nil))))
+        (app {}
+          (var {} Cons)
+          (app {span: "surf:633..657"}
+            (var {} Cons)
+            (lit {span: "surf:634..640", surf_literal_style: "explicit", type: (t-prim {} f32)} 4.0)
+            (app {}
+              (var {} Cons)
+              (lit {span: "surf:642..648", surf_literal_style: "explicit", type: (t-prim {} f32)} 5.0)
+              (app {}
+                (var {} Cons)
+                (lit {span: "surf:650..656", surf_literal_style: "explicit", type: (t-prim {} f32)} 6.0)
+                (var {} Nil))))
+          (var {} Nil))))))
+
+(def {}
+  outl
+  (app {span: "surf:668..723"}
+    (var {span: "surf:668..674"} w_lead)
+    (app {span: "surf:675..722"}
+      (var {span: "surf:675..684"} to_tensor)
+      (app {span: "surf:685..721"}
+        (var {} Cons)
+        (app {span: "surf:686..702"}
+          (var {} Cons)
+          (lit {span: "surf:687..693", surf_literal_style: "explicit", type: (t-prim {} f32)} 1.0)
+          (app {}
+            (var {} Cons)
+            (lit {span: "surf:695..701", surf_literal_style: "explicit", type: (t-prim {} f32)} 2.0)
+            (var {} Nil)))
+        (app {}
+          (var {} Cons)
+          (app {span: "surf:704..720"}
+            (var {} Cons)
+            (lit {span: "surf:705..711", surf_literal_style: "explicit", type: (t-prim {} f32)} 3.0)
+            (app {}
+              (var {} Cons)
+              (lit {span: "surf:713..719", surf_literal_style: "explicit", type: (t-prim {} f32)} 4.0)
+              (var {} Nil)))
+          (var {} Nil))))))
+
+(def {}
+  outm
+  (app {span: "surf:731..801"}
+    (var {span: "surf:731..736"} w_mid)
+    (app {span: "surf:737..800"}
+      (var {span: "surf:737..746"} to_tensor)
+      (app {span: "surf:747..799"}
+        (var {} Cons)
+        (app {span: "surf:748..772"}
+          (var {} Cons)
+          (lit {span: "surf:749..755", surf_literal_style: "explicit", type: (t-prim {} f32)} 1.0)
+          (app {}
+            (var {} Cons)
+            (lit {span: "surf:757..763", surf_literal_style: "explicit", type: (t-prim {} f32)} 2.0)
+            (app {}
+              (var {} Cons)
+              (lit {span: "surf:765..771", surf_literal_style: "explicit", type: (t-prim {} f32)} 3.0)
+              (var {} Nil))))
+        (app {}
+          (var {} Cons)
+          (app {span: "surf:774..798"}
+            (var {} Cons)
+            (lit {span: "surf:775..781", surf_literal_style: "explicit", type: (t-prim {} f32)} 4.0)
+            (app {}
+              (var {} Cons)
+              (lit {span: "surf:783..789", surf_literal_style: "explicit", type: (t-prim {} f32)} 5.0)
+              (app {}
+                (var {} Cons)
+                (lit {span: "surf:791..797", surf_literal_style: "explicit", type: (t-prim {} f32)} 6.0)
+                (var {} Nil))))
+          (var {} Nil))))))

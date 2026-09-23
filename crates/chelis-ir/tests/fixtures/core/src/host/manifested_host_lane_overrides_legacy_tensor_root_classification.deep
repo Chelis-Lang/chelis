@@ -1,0 +1,18 @@
+(def {}
+  x
+  (app {span: "surf:4..53"}
+    (var {span: "surf:4..10"} insert)
+    (app {span: "surf:11..43"}
+      (var {span: "surf:11..27"} scalar_to_tensor)
+      (cast {span: "surf:28..42"}
+        (lit {span: "surf:33..36", surf_literal_style: "unsuffixed", type: (t-prim {} f64)} 0.1)
+        (t-prim {} f64)))
+    (lit {span: "surf:45..46", type: (t-prim {} i32)} 0)
+    (lit {span: "surf:48..52", type: (t-prim {} i64)} 4)))
+
+(def {}
+  y
+  (app {span: "surf:58..67"}
+    (var {span: "surf:58..61"} mul)
+    (var {span: "surf:62..63"} x)
+    (var {span: "surf:65..66"} x)))

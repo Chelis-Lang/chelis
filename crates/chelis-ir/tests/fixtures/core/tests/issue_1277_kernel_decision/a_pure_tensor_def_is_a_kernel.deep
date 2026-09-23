@@ -1,0 +1,15 @@
+(defsig {}
+  f
+  (n)
+  (t-fn {}
+    (t-tensor {} (d-var {} n) (t-prim {} f32))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))))
+
+(def {}
+  f
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:48..57"}
+      (var {span: "surf:48..51"} mul)
+      (var {span: "surf:52..53"} x)
+      (var {span: "surf:55..56"} x))))

@@ -1,0 +1,10 @@
+(defsig {} loud (t-fn {eff: (effects {} test)} (t-unit {})))
+
+(def {}
+  loud
+  (fn {}
+    (params {})
+    (app {span: "surf:31..56"}
+      (var {span: "surf:31..42"} test_assert)
+      (lit {span: "surf:43..47", type: (t-prim {} bool)} true)
+      (lit {span: "surf:49..55", type: (t-prim {} string)} "loud"))))

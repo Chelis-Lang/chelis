@@ -1,0 +1,16 @@
+(def {}
+  xs
+  (cast {span: "surf:5..24"}
+    (app {}
+      (var {} to_tensor)
+      (app {}
+        (var {} Cons)
+        (lit {surf_literal_style: "unsuffixed", type: (t-prim {} i8)} 1)
+        (app {}
+          (var {} Cons)
+          (lit {surf_literal_style: "unsuffixed", type: (t-prim {} i8)} 2)
+          (app {}
+            (var {} Cons)
+            (lit {surf_literal_style: "unsuffixed", type: (t-prim {} i8)} 3)
+            (var {} Nil)))))
+    (t-prim {} i8)))

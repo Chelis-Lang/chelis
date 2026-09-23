@@ -1,0 +1,82 @@
+(defsig {}
+  loss
+  (t-fn {} (t-tensor {} (d-lit {} 3) (t-prim {} f32)) (t-prim {} f32)))
+
+(def {}
+  loss
+  (fn {}
+    (params {} (row {type: (t-var {} _)}))
+    (let {span: "surf:39..162"}
+      (bind {}
+        xs
+        (app {span: "surf:48..66"}
+          (var {span: "surf:48..55"} to_list)
+          (copy {span: "surf:56..65"} (var {span: "surf:61..64"} row))))
+      (let {}
+        (bind {}
+          ys
+          (app {span: "surf:74..107"}
+            (var {span: "surf:74..77"} map)
+            (fn {span: "surf:78..102"}
+              (params {} (v {type: (t-prim {} f32)}))
+              (app {span: "surf:93..102"}
+                (var {span: "surf:93..96"} mul)
+                (var {span: "surf:97..98"} v)
+                (var {span: "surf:100..101"} v)))
+            (var {span: "surf:104..106"} xs)))
+        (app {span: "surf:110..160"}
+          (var {span: "surf:110..126"} tensor_to_scalar)
+          (app {span: "surf:127..159"}
+            (var {span: "surf:127..130"} sum)
+            (app {span: "surf:131..144"}
+              (var {span: "surf:131..140"} to_tensor)
+              (var {span: "surf:141..143"} ys))
+            (cast {span: "surf:146..158"}
+              (lit {span: "surf:151..152", surf_literal_style: "unsuffixed", type: (t-prim {} i32)} 0)
+              (t-prim {} i32))))))))
+
+(def {}
+  out
+  (app {span: "surf:169..298"}
+    (vmap {span: "surf:169..185"}
+      (grad {span: "surf:174..184"} (var {span: "surf:179..183"} loss))
+      (lit {type: (t-prim {} i32)} 0))
+    (app {span: "surf:186..297"}
+      (var {span: "surf:186..195"} to_tensor)
+      (app {span: "surf:196..296"}
+        (var {} Cons)
+        (app {span: "surf:197..245"}
+          (var {} Cons)
+          (cast {span: "surf:198..212"}
+            (lit {span: "surf:203..206", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 1.0)
+            (t-prim {} f32))
+          (app {}
+            (var {} Cons)
+            (cast {span: "surf:214..228"}
+              (lit {span: "surf:219..222", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 2.0)
+              (t-prim {} f32))
+            (app {}
+              (var {} Cons)
+              (cast {span: "surf:230..244"}
+                (lit {span: "surf:235..238", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 3.0)
+                (t-prim {} f32))
+              (var {} Nil))))
+        (app {}
+          (var {} Cons)
+          (app {span: "surf:247..295"}
+            (var {} Cons)
+            (cast {span: "surf:248..262"}
+              (lit {span: "surf:253..256", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 4.0)
+              (t-prim {} f32))
+            (app {}
+              (var {} Cons)
+              (cast {span: "surf:264..278"}
+                (lit {span: "surf:269..272", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 5.0)
+                (t-prim {} f32))
+              (app {}
+                (var {} Cons)
+                (cast {span: "surf:280..294"}
+                  (lit {span: "surf:285..288", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 6.0)
+                  (t-prim {} f32))
+                (var {} Nil))))
+          (var {} Nil))))))

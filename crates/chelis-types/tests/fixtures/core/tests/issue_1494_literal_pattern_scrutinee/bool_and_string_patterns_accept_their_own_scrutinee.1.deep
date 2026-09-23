@@ -1,0 +1,24 @@
+(defsig {} g (t-fn {} (t-prim {} string) (t-prim {} string)))
+
+(def {}
+  g
+  (fn {}
+    (params {} (s {type: (t-var {} _)}))
+    (var {span: "surf:29..30"} s)))
+
+(defsig {} r (t-prim {} i32))
+
+(def {}
+  r
+  (match {span: "surf:41..88"}
+    (app {span: "surf:47..53"}
+      (var {span: "surf:47..48"} g)
+      (lit {span: "surf:49..52", type: (t-prim {} string)} "a"))
+    (arm {}
+      (pat-lit {} "a")
+      ()
+      (lit {span: "surf:72..74", type: (t-prim {} i32)} 10))
+    (arm {}
+      (pat-wild {})
+      ()
+      (lit {span: "surf:84..86", type: (t-prim {} i32)} 20))))

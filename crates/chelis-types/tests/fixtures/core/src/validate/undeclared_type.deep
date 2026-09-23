@@ -1,0 +1,17 @@
+(def {}
+  out
+  (app {span: "surf:6..49"}
+    (vmap {span: "surf:6..26"}
+      (fn {span: "surf:11..25"}
+        (params {} (v {type: (t-prim {} a)}))
+        (var {span: "surf:24..25"} v))
+      (lit {type: (t-prim {} i32)} 0))
+    (app {span: "surf:27..48"}
+      (var {span: "surf:27..36"} to_tensor)
+      (app {span: "surf:37..47"}
+        (var {} Cons)
+        (app {span: "surf:38..46"}
+          (var {} Cons)
+          (lit {span: "surf:39..45", surf_literal_style: "explicit", type: (t-prim {} f32)} 1.0)
+          (var {} Nil))
+        (var {} Nil)))))

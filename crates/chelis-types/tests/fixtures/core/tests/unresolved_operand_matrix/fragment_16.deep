@@ -1,0 +1,12 @@
+(let {span: "surf:16..62"}
+    (bind {}
+      h
+      (fn {span: "surf:23..51"}
+        (params {} (y {type: (t-prim {} i32)}))
+        (app {span: "surf:38..51"}
+          (var {span: "surf:38..42"} mean)
+          (var {span: "surf:43..44"} x)
+          (lit {span: "surf:46..50", surf_literal_style: "explicit", type: (t-prim {} i32)} 0))))
+    (app {span: "surf:53..60"}
+      (var {span: "surf:53..54"} h)
+      (lit {span: "surf:55..59", surf_literal_style: "explicit", type: (t-prim {} i32)} 1)))

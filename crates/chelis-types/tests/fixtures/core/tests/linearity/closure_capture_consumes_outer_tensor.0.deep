@@ -1,0 +1,17 @@
+(defsig {}
+  bad
+  (t-fn {}
+    (t-tensor {} (d-lit {} 4) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 4) (t-prim {} f32))))
+
+(def {}
+  bad
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (let {span: "surf:50..89"}
+      (bind {}
+        f
+        (fn {span: "surf:60..70"}
+          (params {})
+          (var {span: "surf:69..70"} x)))
+      (realize {span: "surf:75..85"} (var {span: "surf:83..84"} x)))))

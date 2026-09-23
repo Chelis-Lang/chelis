@@ -1,0 +1,19 @@
+(defsig {} use (t-fn {} (t-prim {} f64)))
+
+(def {}
+  use
+  (fn {}
+    (params {})
+    (let {}
+      (bind {}
+        op
+        (var {} sin))
+      (let {}
+        (bind {destructure: true}
+          __chelis_tmp0
+          (app {}
+            (var {} op)
+            (lit {surf_literal_style: "explicit", type: (t-prim {} f32)} 1.0)))
+        (app {}
+          (var {} op)
+          (lit {type: (t-prim {} f64)} 1.0))))))

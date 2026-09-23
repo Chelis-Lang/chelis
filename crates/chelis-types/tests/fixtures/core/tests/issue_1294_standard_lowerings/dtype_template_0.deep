@@ -1,0 +1,23 @@
+(defsig {}
+  f
+  (t-fn {}
+    (t-tensor {} (d-lit {} 2) (d-lit {} 2) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 2) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 2) (t-prim {} f32))
+    (t-prim {} f32)
+    (t-tensor {} (d-lit {} 2) (d-lit {} 2) (t-prim {} f32))))
+
+(def {}
+  f
+  (fn {}
+    (params {}
+      (x {type: (t-var {} _)})
+      (g {type: (t-var {} _)})
+      (b {type: (t-var {} _)})
+      (e {type: (t-var {} _)}))
+    (app {span: "surf:91..110"}
+      (var {span: "surf:91..101"} layer_norm)
+      (var {span: "surf:102..103"} x)
+      (var {span: "surf:104..105"} g)
+      (var {span: "surf:106..107"} b)
+      (var {span: "surf:108..109"} e))))

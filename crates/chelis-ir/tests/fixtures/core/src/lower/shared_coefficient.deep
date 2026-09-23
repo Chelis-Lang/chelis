@@ -1,0 +1,82 @@
+(defsig {}
+  loss
+  (t-fn {}
+    (t-tensor {} (d-name {} rows) (t-prim {} f32))
+    (t-tensor {} (d-name {} rows) (t-prim {} f32))
+    (t-prim {} f32)))
+
+(def {}
+  loss
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (y {type: (t-var {} _)}))
+    (let {span: "surf:62..311"}
+      (bind {}
+        n
+        (app {span: "surf:69..80"}
+          (var {span: "surf:69..74"} shape)
+          (var {span: "surf:75..76"} x)
+          (lit {span: "surf:78..79", type: (t-prim {} i32)} 0)))
+      (let {}
+        (bind {}
+          m
+          (app {span: "surf:86..97"}
+            (var {span: "surf:86..91"} shape)
+            (var {span: "surf:92..93"} y)
+            (lit {span: "surf:95..96", type: (t-prim {} i32)} 0)))
+        (let {}
+          (bind {}
+            a
+            (app {span: "surf:103..174"}
+              (var {span: "surf:103..109"} insert)
+              (app {span: "surf:110..156"}
+                (var {span: "surf:110..113"} mul)
+                (app {span: "surf:114..123"}
+                  (var {span: "surf:114..117"} sum)
+                  (var {span: "surf:118..119"} x)
+                  (lit {span: "surf:121..122", type: (t-prim {} i32)} 0))
+                (app {span: "surf:125..155"}
+                  (var {span: "surf:125..141"} scalar_to_tensor)
+                  (cast {span: "surf:142..154"}
+                    (var {span: "surf:147..148"} n)
+                    (t-prim {} f32))))
+              (lit {span: "surf:158..159", type: (t-prim {} i32)} 0)
+              (app {span: "surf:161..173"}
+                (var {span: "surf:161..164"} add)
+                (var {span: "surf:165..166"} n)
+                (lit {span: "surf:168..172", type: (t-prim {} i64)} 0))))
+          (let {}
+            (bind {}
+              b
+              (app {span: "surf:180..264"}
+                (var {span: "surf:180..186"} insert)
+                (app {span: "surf:187..246"}
+                  (var {span: "surf:187..190"} mul)
+                  (app {span: "surf:191..200"}
+                    (var {span: "surf:191..194"} sum)
+                    (var {span: "surf:195..196"} y)
+                    (lit {span: "surf:198..199", type: (t-prim {} i32)} 0))
+                  (app {span: "surf:202..245"}
+                    (var {span: "surf:202..218"} scalar_to_tensor)
+                    (app {span: "surf:219..244"}
+                      (var {span: "surf:219..222"} add)
+                      (cast {span: "surf:223..235"}
+                        (var {span: "surf:228..229"} m)
+                        (t-prim {} f32))
+                      (lit {span: "surf:237..243", surf_literal_style: "explicit", type: (t-prim {} f32)} 2.0))))
+                (lit {span: "surf:248..249", type: (t-prim {} i32)} 0)
+                (app {span: "surf:251..263"}
+                  (var {span: "surf:251..254"} add)
+                  (var {span: "surf:255..256"} m)
+                  (lit {span: "surf:258..262", type: (t-prim {} i64)} 0))))
+            (app {span: "surf:266..309"}
+              (var {span: "surf:266..282"} tensor_to_scalar)
+              (app {span: "surf:283..308"}
+                (var {span: "surf:283..286"} add)
+                (app {span: "surf:287..296"}
+                  (var {span: "surf:287..290"} sum)
+                  (var {span: "surf:291..292"} a)
+                  (lit {span: "surf:294..295", type: (t-prim {} i32)} 0))
+                (app {span: "surf:298..307"}
+                  (var {span: "surf:298..301"} sum)
+                  (var {span: "surf:302..303"} b)
+                  (lit {span: "surf:305..306", type: (t-prim {} i32)} 0))))))))))

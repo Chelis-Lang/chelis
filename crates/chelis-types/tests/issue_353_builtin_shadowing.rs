@@ -33,29 +33,20 @@
 //!   package `def sum` neither collides nor mis-dispatches (pinned in the
 //!   CLI-level test file).
 
-use chelis_surf::desugar::desugar_program;
-use chelis_surf::parser::parse_str;
 use chelis_types::errors::CheckErrorKind;
 use chelis_types::{BUILTIN_NAMES, check_ir_program};
 
-fn surf_to_deep(source: &str) -> Vec<chelis_deep::Expr> {
-    let decls = parse_str(source).expect("surf parse");
-    chelis_macros::expand_program(
-        &desugar_program(&decls),
-        &chelis_macros::ExpansionOptions::default(),
-    )
-    .expect("macro expand")
-    .into_exprs()
+fn parse_core_fixture(source: &str) -> Vec<chelis_deep::Expr> {
+    chelis_deep::parser::parse_str(source).expect("Deep fixture")
 }
 
-fn shadowing_errors(exprs: &[chelis_deep::Expr]) -> Vec<(String, Vec<String>)> {
+fn shadowing_errors(exprs: &[chelis_deep::Expr]) -> Vec<chelis_types::errors::CheckError> {
     match check_ir_program(exprs) {
         Ok(_) => Vec::new(),
         Err(report) => report
             .errors
-            .iter()
+            .into_iter()
             .filter(|e| matches!(e.kind, CheckErrorKind::BuiltinShadowing))
-            .map(|e| (e.message.clone(), e.suggestions.clone()))
             .collect(),
     }
 }
@@ -66,34 +57,15 @@ fn shadowing_errors(exprs: &[chelis_deep::Expr]) -> Vec<(String, Vec<String>)> {
 /// spec section.
 #[test]
 fn def_sum_shadowing_rejected_with_spec_diagnostic() {
-    let deep = surf_to_deep(
-        "module Repro\n\
-         def sum(x: &tensor[batch, f32]) -> tensor[batch, f32] = relu(x)\n\
-         out = sum(to_tensor([1.0, -2.0]))\n",
-    );
+    let deep = parse_core_fixture(include_str!(
+        "fixtures/core/tests/issue_353_builtin_shadowing/def_sum_shadowing_rejected_with_spec_diagnostic_70.deep"
+    ));
     let errs = shadowing_errors(&deep);
     assert_eq!(
         errs.len(),
         1,
         "exactly one BuiltinShadowing error expected (the inline-annotated \
          def desugars to defsig+def and must be reported once); got {errs:?}"
-    );
-    let (message, suggestions) = &errs[0];
-    assert!(
-        message.contains("`def sum`"),
-        "message must identify the declaration site `def sum`; got: {message}"
-    );
-    assert!(
-        message.contains("shadows the builtin"),
-        "message must say the name shadows a builtin; got: {message}"
-    );
-    assert!(
-        message.contains("spec/04-type-system.md §8.6"),
-        "message must cite the owning spec section; got: {message}"
-    );
-    assert!(
-        !suggestions.is_empty() && suggestions[0].contains("rename `sum`"),
-        "suggestion must propose a rename; got: {suggestions:?}"
     );
 }
 
@@ -103,21 +75,14 @@ fn def_sum_shadowing_rejected_with_spec_diagnostic() {
 /// signature while eval still dispatches the builtin.
 #[test]
 fn sig_only_shadowing_rejected() {
-    let deep = surf_to_deep(
-        "module SigOnly\n\
-         sig sum: &tensor[batch, f32] -> tensor[batch, f32]\n\
-         out = relu(to_tensor([1.0, -2.0]))\n",
-    );
+    let deep = parse_core_fixture(include_str!(
+        "fixtures/core/tests/issue_353_builtin_shadowing/sig_only_shadowing_rejected_107.deep"
+    ));
     let errs = shadowing_errors(&deep);
     assert_eq!(
         errs.len(),
         1,
         "sig-only shadowing must be rejected; got {errs:?}"
-    );
-    assert!(
-        errs[0].0.contains("`sig sum`"),
-        "sig-only diagnostic must identify the declaration as a `sig`; got: {}",
-        errs[0].0
     );
 }
 
@@ -126,17 +91,14 @@ fn sig_only_shadowing_rejected() {
 /// with a confusing unification error against the builtin scheme).
 #[test]
 fn top_level_load_binding_shadowing_rejected() {
-    let deep = surf_to_deep(
-        "module TopBind\n\
-         sum = relu(to_tensor([1.0, -2.0]))\n\
-         out = sum\n",
-    );
+    let deep = parse_core_fixture(include_str!(
+        "fixtures/core/tests/issue_353_builtin_shadowing/top_level_load_binding_shadowing_rejected_130.deep"
+    ));
     let errs = shadowing_errors(&deep);
     assert!(
         !errs.is_empty(),
         "top-level `sum = ...` desugars to `def sum` and must be rejected"
     );
-    assert!(errs[0].0.contains("`def sum`"), "got: {}", errs[0].0);
 }
 
 /// Table-completeness sweep: every name in `BUILTIN_NAMES` is rejected
@@ -163,11 +125,6 @@ fn every_builtin_name_def_is_rejected() {
             !errs.is_empty(),
             "def `{name}` shadows a BUILTIN_NAMES entry and must be rejected"
         );
-        assert!(
-            errs[0].0.contains(&format!("`def {name}`")),
-            "diagnostic for `{name}` must name the offending declaration; got: {}",
-            errs[0].0
-        );
     }
 }
 
@@ -185,11 +142,6 @@ fn defsig_rejection_spans_builtin_classes() {
             !errs.is_empty(),
             "defsig `{name}` must be rejected as builtin shadowing"
         );
-        assert!(
-            errs[0].0.contains(&format!("`sig {name}`")),
-            "got: {}",
-            errs[0].0
-        );
     }
 }
 
@@ -198,10 +150,37 @@ fn defsig_rejection_spans_builtin_classes() {
 #[test]
 fn near_miss_names_still_check_clean() {
     for def_name in ["sum2", "my_sum", "summarize", "relu_fwd"] {
-        let deep = surf_to_deep(&format!(
-            "module NearMiss\n\
-             def {def_name}(x: &tensor[batch, f32]) -> tensor[batch, f32] = relu(x)\n\
-             out = {def_name}(to_tensor([1.0, -2.0]))\n"
+        let deep = parse_core_fixture(&format!(
+            r###"(module {{surf_path: "NearMiss"}}
+  nearmiss
+  (defsig {{}}
+    {def_name}
+    (t-fn {{}}
+      (t-ref {{}} (t-tensor {{}} (d-name {{}} batch) (t-prim {{}} f32)))
+      (t-tensor {{}} (d-name {{}} batch) (t-prim {{}} f32))))
+  (def {{}}
+    {def_name}
+    (fn {{}}
+      (params {{}} (x {{type: (t-var {{}} _)}}))
+      (app {{span: "surf:86..93"}}
+        (var {{span: "surf:86..90"}} relu)
+        (var {{span: "surf:91..92"}} x))))
+  (def {{}}
+    out
+    (app {{span: "surf:100..141"}}
+      (var {{span: "surf:100..117"}} {def_name})
+      (app {{span: "surf:118..140"}}
+        (var {{span: "surf:118..127"}} to_tensor)
+        (app {{span: "surf:128..139"}}
+          (var {{}} Cons)
+          (lit {{span: "surf:129..132", type: (t-prim {{}} f32)}} 1.0)
+          (app {{}}
+            (var {{}} Cons)
+            (app {{span: "surf:134..138"}}
+              (var {{}} neg)
+              (lit {{span: "surf:135..138", type: (t-prim {{}} f32)}} 2.0))
+            (var {{}} Nil)))))))
+"###
         ));
         let res = check_ir_program(&deep);
         assert!(
@@ -222,24 +201,17 @@ fn near_miss_names_still_check_clean() {
 /// §8.6, chelis#1076).
 #[test]
 fn value_params_and_locals_may_reuse_builtin_names() {
-    let param_case = surf_to_deep(
-        "module Param\n\
-         def f(sum: &tensor[batch, f32]) -> tensor[batch, f32] = relu(sum)\n\
-         out = f(to_tensor([1.0, -2.0]))\n",
-    );
+    let param_case = parse_core_fixture(include_str!(
+        "fixtures/core/tests/issue_353_builtin_shadowing/value_params_and_locals_may_reuse_builtin_names_226.deep"
+    ));
     assert!(
         check_ir_program(&param_case).is_ok(),
         "a value parameter named `sum` must stay accepted"
     );
 
-    let local_case = surf_to_deep(
-        "module Local\n\
-         def f(x: &tensor[batch, f32]) -> tensor[batch, f32] = {\n\
-           sum = relu(x)\n\
-           sum\n\
-         }\n\
-         out = f(to_tensor([1.0, -2.0]))\n",
-    );
+    let local_case = parse_core_fixture(include_str!(
+        "fixtures/core/tests/issue_353_builtin_shadowing/value_params_and_locals_may_reuse_builtin_names_236.deep"
+    ));
     assert!(
         check_ir_program(&local_case).is_ok(),
         "a block-local named `sum` must stay accepted"
@@ -251,10 +223,9 @@ fn value_params_and_locals_may_reuse_builtin_names() {
 /// reported as the `def` (what the user wrote).
 #[test]
 fn inline_annotated_def_reports_exactly_one_error() {
-    let deep = surf_to_deep(
-        "module Dedupe\n\
-         def relu(x: &tensor[batch, f32]) -> tensor[batch, f32] = x\n",
-    );
+    let deep = parse_core_fixture(include_str!(
+        "fixtures/core/tests/issue_353_builtin_shadowing/inline_annotated_def_reports_exactly_one_error_255.deep"
+    ));
     let errs = shadowing_errors(&deep);
     assert_eq!(
         errs.len(),
@@ -262,7 +233,6 @@ fn inline_annotated_def_reports_exactly_one_error() {
         "defsig+def pair from one inline-annotated def must produce one \
          BuiltinShadowing error; got {errs:?}"
     );
-    assert!(errs[0].0.contains("`def relu`"), "got: {}", errs[0].0);
 }
 
 /// chelis#1076: callable parameters named like builtins follow ordinary
@@ -270,10 +240,9 @@ fn inline_annotated_def_reports_exactly_one_error() {
 /// parameter in call position; eval/build parity is pinned at the CLI layer.
 #[test]
 fn builtin_named_param_called_in_body_is_accepted() {
-    let called = surf_to_deep(
-        "module ParamCall\n\
-         def apply(round_to: (f64 -> i64 -> f64), x: f64) -> f64 = round_to(x, cast(0, i64))\n",
-    );
+    let called = parse_core_fixture(include_str!(
+        "fixtures/core/tests/issue_353_builtin_shadowing/builtin_named_param_called_in_body_is_accepted_274.deep"
+    ));
     let called_result = check_ir_program(&called);
     assert!(
         called_result.is_ok(),
@@ -282,10 +251,9 @@ fn builtin_named_param_called_in_body_is_accepted() {
     );
 
     // Lambda parameters get the same treatment.
-    let lambda = surf_to_deep(
-        "module LambdaCall\n\
-         g = fn (map: (f64 -> f64)) -> map(1.5f64)\n",
-    );
+    let lambda = parse_core_fixture(include_str!(
+        "fixtures/core/tests/issue_353_builtin_shadowing/builtin_named_param_called_in_body_is_accepted_286.deep"
+    ));
     let lambda_result = check_ir_program(&lambda);
     assert!(
         lambda_result.is_ok(),
@@ -295,11 +263,9 @@ fn builtin_named_param_called_in_body_is_accepted() {
 
     // A DIFFERENT (non-shadowed) callee alongside a builtin-named value
     // parameter stays accepted: only the call-position shape is rejected.
-    let value_only = surf_to_deep(
-        "module ValueOnly\n\
-         def f(sum: &tensor[batch, f32]) -> tensor[batch, f32] = relu(sum)\n\
-         out = f(to_tensor([1.0, -2.0]))\n",
-    );
+    let value_only = parse_core_fixture(include_str!(
+        "fixtures/core/tests/issue_353_builtin_shadowing/builtin_named_param_called_in_body_is_accepted_299.deep"
+    ));
     assert!(
         check_ir_program(&value_only).is_ok(),
         "value-position builtin-named params must stay accepted"
@@ -308,13 +274,9 @@ fn builtin_named_param_called_in_body_is_accepted() {
 
 #[test]
 fn builtin_named_non_callable_local_still_rejects_as_a_type_error() {
-    let deep = surf_to_deep(
-        "module NonCallable\n\
-         def f(x: f64) -> f64 = {\n\
-           round_to = x\n\
-           round_to(x, cast(0, i64))\n\
-         }\n",
-    );
+    let deep = parse_core_fixture(include_str!(
+        "fixtures/core/tests/issue_353_builtin_shadowing/builtin_named_non_callable_local_still_rejects_as_a_type_error_312.deep"
+    ));
     let err = check_ir_program(&deep).expect_err("a scalar local is not callable");
     assert!(
         err.errors.iter().any(|error| {

@@ -1,0 +1,16 @@
+(defsig {}
+  add_axis
+  (rest)
+  (t-fn {}
+    (t-ref {} (t-tensor {} (d-rank {} rest) (t-prim {} f32)))
+    (t-tensor {} (d-rank {} rest) (d-name {} one) (t-prim {} f32))))
+
+(def {}
+  add_axis
+  (fn {}
+    (params {} x)
+    (app {span: "surf:88..105"}
+      (var {span: "surf:88..94"} insert)
+      (var {span: "surf:95..96"} x)
+      (var {span: "surf:98..101"} one)
+      (lit {span: "surf:103..104", type: (t-prim {} i32)} 1))))

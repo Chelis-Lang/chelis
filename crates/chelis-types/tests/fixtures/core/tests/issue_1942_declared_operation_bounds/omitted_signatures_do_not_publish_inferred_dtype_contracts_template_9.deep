@@ -1,0 +1,7 @@
+(def {}
+  g
+  (fn {}
+    (params {} x)
+    (app {}
+      (var {} sin)
+      (var {} x))))

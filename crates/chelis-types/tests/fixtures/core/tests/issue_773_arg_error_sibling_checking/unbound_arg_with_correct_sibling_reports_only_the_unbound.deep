@@ -1,0 +1,56 @@
+(deftype {}
+  P
+  ()
+  (variant {} P (field {} v (t-tensor {} (d-lit {} 2) (t-prim {} f32)))))
+
+(deftype {}
+  V
+  ()
+  (variant {} V (field {} v (t-tensor {} (d-lit {} 2) (t-prim {} f32)))))
+
+(defsig {} take_two (t-fn {} (t-adt {} P) (t-adt {} V) (t-prim {} f32)))
+
+(def {}
+  take_two
+  (fn {}
+    (params {} (a {type: (t-var {} _)}) (b {type: (t-var {} _)}))
+    (cast {span: "surf:108..122"}
+      (lit {span: "surf:113..116", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 0.0)
+      (t-prim {} f32))))
+
+(defsig {} driver (t-fn {} (t-prim {} f32)))
+
+(def {}
+  driver
+  (fn {}
+    (params {})
+    (let {span: "surf:145..258"}
+      (bind {}
+        vv
+        (record {span: "surf:154..206"}
+          V
+          (kv {}
+            v
+            (app {span: "surf:161..204"}
+              (var {span: "surf:161..170"} to_tensor)
+              (app {span: "surf:171..203"}
+                (var {} Cons)
+                (cast {span: "surf:172..186"}
+                  (lit {span: "surf:177..180", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 1.0)
+                  (t-prim {} f32))
+                (app {}
+                  (var {} Cons)
+                  (cast {span: "surf:188..202"}
+                    (lit {span: "surf:193..196", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 1.0)
+                    (t-prim {} f32))
+                  (var {} Nil)))))))
+      (let {}
+        (bind {}
+          sink
+          (app {span: "surf:216..239"}
+            (var {span: "surf:216..224"} take_two)
+            (var {span: "surf:225..234"} missing_p)
+            (var {span: "surf:236..238"} vv)))
+        (cast {span: "surf:242..256"}
+          (lit {span: "surf:247..250", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 0.0)
+          (t-prim {} f32))))))

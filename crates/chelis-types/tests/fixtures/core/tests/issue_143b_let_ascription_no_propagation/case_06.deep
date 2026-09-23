@@ -1,0 +1,27 @@
+(defsig {} caller (t-fn {} (t-tensor {} (d-lit {} 3) (t-prim {} f32))))
+
+(def {}
+  caller
+  (fn {}
+    (params {})
+    (let {span: "surf:36..111"}
+      (bind {}
+        x
+        (cast {span: "surf:62..76",
+                surf_binding_type: "explicit",
+                type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))
+              }
+          (lit {span: "surf:67..70", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 1.0)
+          (t-prim {} f32)))
+      (app {span: "surf:81..107"}
+        (var {span: "surf:81..90"} to_tensor)
+        (app {span: "surf:91..106"}
+          (var {} Cons)
+          (lit {span: "surf:92..95", type: (t-prim {} f32)} 1.0)
+          (app {}
+            (var {} Cons)
+            (lit {span: "surf:97..100", type: (t-prim {} f32)} 2.0)
+            (app {}
+              (var {} Cons)
+              (lit {span: "surf:102..105", type: (t-prim {} f32)} 3.0)
+              (var {} Nil))))))))

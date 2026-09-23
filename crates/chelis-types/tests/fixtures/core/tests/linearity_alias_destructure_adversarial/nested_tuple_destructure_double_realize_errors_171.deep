@@ -1,0 +1,72 @@
+(defsig {}
+  f
+  (t-fn {}
+    (t-tuple {}
+      (t-tuple {}
+        (t-tensor {} (d-lit {} 4) (t-prim {} f32))
+        (t-tensor {} (d-lit {} 4) (t-prim {} f32)))
+      (t-tensor {} (d-lit {} 4) (t-prim {} f32)))
+    (t-tensor {} (d-lit {} 4) (t-prim {} f32))))
+
+(def {}
+  f
+  (fn {}
+    (params {} (p {type: (t-var {} _)}))
+    (let {span: "surf:84..178"}
+      (bind {destructure: true}
+        __chelis_tmp3
+        (var {span: "surf:103..104"} p))
+      (let {}
+        (bind {destructure: true}
+          __chelis_tmp5
+          (tuple-get {} (var {} __chelis_tmp3) (lit {type: (t-prim {} i32)} 0)))
+        (let {}
+          (bind {destructure: true}
+            inner
+            (var {} __chelis_tmp5))
+          (let {}
+            (bind {destructure: true}
+              __chelis_tmp4
+              (tuple-get {}
+                (var {} __chelis_tmp3)
+                (lit {type: (t-prim {} i32)} 1)))
+            (let {}
+              (bind {destructure: true}
+                c
+                (var {} __chelis_tmp4))
+              (let {}
+                (bind {destructure: true}
+                  __chelis_tmp0
+                  (var {span: "surf:118..123"} inner))
+                (let {}
+                  (bind {destructure: true}
+                    __chelis_tmp2
+                    (tuple-get {}
+                      (var {} __chelis_tmp0)
+                      (lit {type: (t-prim {} i32)} 0)))
+                  (let {}
+                    (bind {destructure: true}
+                      a
+                      (var {} __chelis_tmp2))
+                    (let {}
+                      (bind {destructure: true}
+                        __chelis_tmp1
+                        (tuple-get {}
+                          (var {} __chelis_tmp0)
+                          (lit {type: (t-prim {} i32)} 1)))
+                      (let {}
+                        (bind {destructure: true}
+                          b
+                          (var {} __chelis_tmp1))
+                        (let {}
+                          (bind {}
+                            r1
+                            (realize {span: "surf:149..159",
+                                       surf_binding_type: "explicit",
+                                       type: (t-tensor {}
+                                               (d-lit {} 4)
+                                               (t-prim {} f32))
+                                     }
+                              (var {span: "surf:157..158"} a)))
+                          (realize {span: "surf:164..174"}
+                            (var {span: "surf:172..173"} a)))))))))))))))

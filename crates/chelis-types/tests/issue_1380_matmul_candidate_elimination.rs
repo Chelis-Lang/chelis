@@ -23,14 +23,13 @@
 //! leaves it untouched.
 
 use chelis_deep::printer::print_canonical;
-use chelis_surf::desugar::desugar_program;
-use chelis_surf::parser::parse_str as parse_surf;
+
 use chelis_types::check_typed_program;
 use chelis_types::errors::CheckError;
 
 fn check(source: &str) -> Result<String, Vec<CheckError>> {
-    let decls = parse_surf(source).expect("surf parse should succeed");
-    let deep = desugar_program(&decls);
+    let deep: Vec<chelis_deep::Expr> =
+        chelis_deep::parse_and_stamp_file(source).expect("valid core fixture");
     match check_typed_program(&deep) {
         Ok(checked) => Ok(print_canonical(checked.annotated_exprs())),
         Err(report) => Err(report.errors),
@@ -48,8 +47,7 @@ fn summary(errors: &[CheckError]) -> String {
 #[test]
 fn matmul_rejects_an_operand_no_candidate_form_satisfies() {
     let errors = check(
-        "def f(s: f32, xb: tensor[3, 4, f32]) = \
-         matmul(insert(scalar_to_tensor(s), 0, 3i64), xb)\n",
+        include_str!("fixtures/core/tests/issue_1380_matmul_candidate_elimination/matmul_rejects_an_operand_no_candidate_form_satisfies.0.deep"),
     )
     .expect_err("`insert` raises the rank-0 input to rank 1, which matmul rejects");
     assert!(
@@ -67,6 +65,6 @@ fn matmul_rejects_an_operand_no_candidate_form_satisfies() {
 /// as the control that `matmul` supports batching at all.
 #[test]
 fn batched_matmul_without_a_deferred_operand_is_supported() {
-    check("def f(xa: tensor[5, 3, 4, f32], xb: tensor[5, 4, 7, f32]) = matmul(xa, xb)\n")
+    check(include_str!("fixtures/core/tests/issue_1380_matmul_candidate_elimination/batched_matmul_without_a_deferred_operand_is_supported.0.deep"))
         .expect("batched matmul is supported");
 }

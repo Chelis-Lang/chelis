@@ -28,16 +28,14 @@
 //! confirmed zero in-tree warnings, so the channel removal is total
 //! and violations on destructured components surface as errors.
 
-use chelis_surf::desugar::desugar_program;
-use chelis_surf::parser::parse_str;
 use chelis_types::errors::CheckErrorKind;
 use chelis_types::{check_linearity, check_typed_program};
 
 /// Run linearity and return the surfaced errors. Fixtures that
 /// expect a hard error call this.
 fn linearity_errors(source: &str) -> Vec<chelis_types::errors::CheckError> {
-    let decls = parse_str(source).expect("surf parse should succeed");
-    let deep = desugar_program(&decls);
+    let deep: Vec<chelis_deep::Expr> =
+        chelis_deep::parse_and_stamp_file(source).expect("valid core fixture");
     let checked = check_typed_program(&deep).expect("type check should succeed");
     check_linearity(&checked).expect_err("linearity check must error")
 }
@@ -45,8 +43,8 @@ fn linearity_errors(source: &str) -> Vec<chelis_types::errors::CheckError> {
 /// Run linearity and assert no errors. Used by positive controls
 /// that must stay clean.
 fn assert_linearity_clean(source: &str) {
-    let decls = parse_str(source).expect("surf parse should succeed");
-    let deep = desugar_program(&decls);
+    let deep: Vec<chelis_deep::Expr> =
+        chelis_deep::parse_and_stamp_file(source).expect("valid core fixture");
     let checked = check_typed_program(&deep).expect("type check should succeed");
     check_linearity(&checked).expect("linearity check should not error");
 }
@@ -60,15 +58,9 @@ fn assert_linearity_clean(source: &str) {
 /// discrimination mechanism (typed field, not string prefix).
 #[test]
 fn aliasing_consume_control_passes() {
-    assert_linearity_clean(
-        r#"
-def f(w: tensor[4, f32]) -> tensor[4, f32] =
-  {
-    y: tensor[4, f32] = w
-    realize(y)
-  }
-"#,
-    );
+    assert_linearity_clean(include_str!(
+        "fixtures/core/tests/linearity_typed_consumekind/aliasing_consume_control_passes.0.deep"
+    ));
 }
 
 /// Fixture 2: structural-consume control. `a = realize(w)` is a
@@ -81,15 +73,9 @@ def f(w: tensor[4, f32]) -> tensor[4, f32] =
 /// `detects_use_after_consume` fixture in `linearity.rs:22-39`.
 #[test]
 fn structural_consume_control_errors() {
-    let errors = linearity_errors(
-        r#"
-def f(w: tensor[4, f32]) -> tensor[4, f32] =
-  {
-    y: tensor[4, f32] = realize(w)
-    add(w, y)
-  }
-"#,
-    );
+    let errors = linearity_errors(include_str!(
+        "fixtures/core/tests/linearity_typed_consumekind/structural_consume_control_errors.0.deep"
+    ));
     assert!(
         errors.iter().any(|e| {
             matches!(e.kind, CheckErrorKind::UseAfterConsume)
@@ -109,16 +95,9 @@ def f(w: tensor[4, f32]) -> tensor[4, f32] =
 /// clean up.
 #[test]
 fn tuple_destructure_double_realize_errors() {
-    let errors = linearity_errors(
-        r#"
-def f(pair: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] =
-  {
-    (a, b) = pair
-    r1: tensor[4, f32] = realize(a)
-    realize(a)
-  }
-"#,
-    );
+    let errors = linearity_errors(include_str!(
+        "fixtures/core/tests/linearity_typed_consumekind/tuple_destructure_double_realize_errors.0.deep"
+    ));
     assert!(
         errors.iter().any(|e| {
             matches!(e.kind, CheckErrorKind::UseAfterConsume)
@@ -135,15 +114,9 @@ def f(pair: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] =
 /// Must pass with no errors.
 #[test]
 fn tuple_destructure_single_consume_each_passes() {
-    assert_linearity_clean(
-        r#"
-def f(pair: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] =
-  {
-    (a, b) = pair
-    add(realize(a), realize(b))
-  }
-"#,
-    );
+    assert_linearity_clean(include_str!(
+        "fixtures/core/tests/linearity_typed_consumekind/tuple_destructure_single_consume_each_passes.0.deep"
+    ));
 }
 
 /// A destructuring marker governs the bindings it introduces, not the
@@ -152,14 +125,7 @@ def f(pair: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] =
 /// the normal implicit-copy behavior for that parameter.
 #[test]
 fn destructuring_scope_starts_after_the_root_binding_value() {
-    assert_linearity_clean(
-        r#"
-def f(x: tensor[4, f32]) -> unit =
-  {
-    y: tensor[4, f32] = realize(x)
-    _ = drop(x)
-    ()
-  }
-"#,
-    );
+    assert_linearity_clean(include_str!(
+        "fixtures/core/tests/linearity_typed_consumekind/destructuring_scope_starts_after_the_root_binding_value.0.deep"
+    ));
 }

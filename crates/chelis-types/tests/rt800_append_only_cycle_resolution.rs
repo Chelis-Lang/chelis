@@ -1,62 +1,45 @@
-use chelis_surf::{desugar::desugar_program, parser::parse_str};
+use chelis_deep::parser::parse_str;
 use chelis_types::{TypeEnv, build_type_env_from_library, check_ir_program, check_ir_with_context};
 
-fn surf(source: &str) -> Vec<chelis_deep::Expr> {
-    desugar_program(&parse_str(source).expect("Surf fixture parses"))
+fn core_fixture(source: &str) -> Vec<chelis_deep::Expr> {
+    parse_str(source).expect("Deep fixture parses")
 }
 
 fn assert_checks(source: &str) {
-    let result = check_ir_program(&surf(source));
+    let result = check_ir_program(&core_fixture(source));
     assert!(result.is_ok(), "known recursion must check: {result:?}");
 }
 
 #[test]
 fn self_recursive_function_is_prebound_without_diagnostic_erasure() {
-    assert_checks(
-        r#"
-def countdown(n: i32) =
-  if eq(n, 0) then 0 else countdown(sub(n, 1))
-"#,
-    );
+    assert_checks(include_str!(
+        "fixtures/core/tests/rt800_append_only_cycle_resolution/case_001.deep"
+    ));
 }
 
 #[test]
 fn mutually_recursive_functions_are_prebound_without_diagnostic_erasure() {
-    assert_checks(
-        r#"
-def is_even(n: i32) =
-  if eq(n, 0) then true else is_odd(sub(n, 1))
-def is_odd(n: i32) =
-  if eq(n, 0) then false else is_even(sub(n, 1))
-"#,
-    );
+    assert_checks(include_str!(
+        "fixtures/core/tests/rt800_append_only_cycle_resolution/case_002.deep"
+    ));
 }
 
 #[test]
 fn module_mutual_cycle_uses_the_canonical_dependency_schedule() {
-    assert_checks(
-        r#"
-module Cycle
-def is_even(n: i32) =
-  if eq(n, 0) then true else is_odd(sub(n, 1))
-def is_odd(n: i32) =
-  if eq(n, 0) then false else is_even(sub(n, 1))
-"#,
-    );
+    assert_checks(include_str!(
+        "fixtures/core/tests/rt800_append_only_cycle_resolution/case_003.deep"
+    ));
 }
 
 #[test]
 fn context_check_prebinds_new_cycle_and_keeps_library_names_visible() {
-    let library = surf("def dec(n: i32) = sub(n, 1)");
+    let library = core_fixture(include_str!(
+        "fixtures/core/tests/rt800_append_only_cycle_resolution/case_004.deep"
+    ));
     let context = build_type_env_from_library(&library).expect("library checks");
-    let new_code = surf(
-        r#"
-def is_even(n: i32) =
-  if eq(n, 0) then true else is_odd(dec(n))
-def is_odd(n: i32) =
-  if eq(n, 0) then false else is_even(dec(n))
-"#,
-    );
+    let new_code = core_fixture(include_str!(
+        "fixtures/core/tests/rt800_append_only_cycle_resolution/case_005.deep"
+    ));
     let result = check_ir_with_context(&context, &new_code);
     assert!(result.is_ok(), "context recursion must check: {result:?}");
 }
@@ -65,7 +48,9 @@ def is_odd(n: i32) =
 fn genuinely_unknown_callable_still_reports_exactly_once() {
     let result = check_ir_with_context(
         &TypeEnv::empty(),
-        &surf("def caller(n: i32) -> i32 = missing(n)"),
+        &core_fixture(include_str!(
+            "fixtures/core/tests/rt800_append_only_cycle_resolution/case_006.deep"
+        )),
     )
     .expect_err("unknown call must reject");
     let unbound = result
@@ -88,13 +73,9 @@ fn genuinely_unknown_callable_still_reports_exactly_once() {
 
 #[test]
 fn acyclic_generic_helper_remains_generalized_for_downstream_calls() {
-    assert_checks(
-        r#"
-def identity(x) = x
-def use_int() = identity(1)
-def use_bool() = identity(true)
-"#,
-    );
+    assert_checks(include_str!(
+        "fixtures/core/tests/rt800_append_only_cycle_resolution/case_007.deep"
+    ));
 }
 
 #[test]

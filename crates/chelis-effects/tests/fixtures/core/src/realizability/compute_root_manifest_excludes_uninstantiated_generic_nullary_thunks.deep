@@ -1,0 +1,9 @@
+(deftype {}
+  Box
+  (a)
+  (variant {} Empty)
+  (variant {} Full (field {} value (t-var {} a))))
+
+(defsig {} empty (a) (t-fn {} (t-adt {} Box (t-var {} a))))
+
+(def {} empty (fn {} (params {}) (var {span: "surf:73..78"} Empty)))

@@ -1,0 +1,53 @@
+(module {surf_path: "Repro.Conv2dSymbolicSpatial"}
+  repro.conv2dsymbolicspatial
+  (defsig {}
+    f
+    (h)
+    (t-fn {}
+      (t-tensor {}
+        (d-lit {} 1)
+        (d-lit {} 3)
+        (d-var {} h)
+        (d-lit {} 8)
+        (t-prim {} f32))
+      (t-tensor {}
+        (d-lit {} 4)
+        (d-lit {} 3)
+        (d-lit {} 3)
+        (d-lit {} 3)
+        (t-prim {} f32))
+      (t-var {} _)))
+  (def {}
+    f
+    (fn {}
+      (params {} (x {type: (t-var {} _)}) (k {type: (t-var {} _)}))
+      (let {span: "surf:102..188"}
+        (bind {}
+          y
+          (app {span: "surf:108..129"}
+            (var {span: "surf:108..114"} expand)
+            (var {span: "surf:115..116"} x)
+            (lit {span: "surf:118..122", surf_literal_style: "explicit", type: (t-prim {} i32)} 0)
+            (lit {span: "surf:124..128", type: (t-prim {} i64)} 2)))
+        (app {span: "surf:130..186"}
+          (var {span: "surf:130..134"} conv)
+          (borrow {span: "surf:135..137"} (var {span: "surf:136..137"} y))
+          (borrow {span: "surf:139..141"} (var {span: "surf:140..141"} k))
+          (app {span: "surf:143..155"}
+            (var {} Cons)
+            (lit {span: "surf:144..148", type: (t-prim {} i64)} 1)
+            (app {}
+              (var {} Cons)
+              (lit {span: "surf:150..154", type: (t-prim {} i64)} 1)
+              (var {} Nil)))
+          (app {span: "surf:157..185"}
+            (var {} Cons)
+            (tuple {span: "surf:158..170"}
+              (lit {span: "surf:159..163", type: (t-prim {} i64)} 0)
+              (lit {span: "surf:165..169", type: (t-prim {} i64)} 0))
+            (app {}
+              (var {} Cons)
+              (tuple {span: "surf:172..184"}
+                (lit {span: "surf:173..177", type: (t-prim {} i64)} 0)
+                (lit {span: "surf:179..183", type: (t-prim {} i64)} 0))
+              (var {} Nil))))))))

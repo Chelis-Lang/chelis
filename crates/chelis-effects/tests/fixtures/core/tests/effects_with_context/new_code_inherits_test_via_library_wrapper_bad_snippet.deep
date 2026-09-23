@@ -1,0 +1,12 @@
+(defsig {} my_check (t-fn {eff: (effects {})} (t-prim {} i64) (t-unit {})))
+
+(def {}
+  my_check
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:37..67"}
+      (var {span: "surf:37..50"} lib_assert_eq)
+      (var {span: "surf:51..52"} x)
+      (cast {span: "surf:54..66"}
+        (lit {span: "surf:59..60", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 1)
+        (t-prim {} i64)))))

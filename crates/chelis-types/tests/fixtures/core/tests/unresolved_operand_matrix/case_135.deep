@@ -1,0 +1,14 @@
+(defsig {} f (t-fn {} (t-tensor {} (d-lit {} 3) (t-prim {} bool))))
+
+(def {}
+  f
+  (fn {}
+    (params {})
+    (app {span: "surf:29..62"}
+      (var {span: "surf:29..32"} add)
+      (app {span: "surf:33..46"}
+        (var {span: "surf:33..42"} to_tensor)
+        (var {span: "surf:43..45"} Nil))
+      (app {span: "surf:48..61"}
+        (var {span: "surf:48..57"} to_tensor)
+        (var {span: "surf:58..60"} Nil)))))

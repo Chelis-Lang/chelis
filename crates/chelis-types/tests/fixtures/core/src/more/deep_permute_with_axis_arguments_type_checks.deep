@@ -1,0 +1,15 @@
+(defsig {}
+  transpose
+  (t-fn {}
+    (t-tensor {} (d-name {} seq) (d-name {} hidden) (t-prim {} f32))
+    (t-tensor {} (d-name {} hidden) (d-name {} seq) (t-prim {} f32))))
+
+(def {}
+  transpose
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:76..92"}
+      (var {span: "surf:76..83"} permute)
+      (var {span: "surf:84..85"} x)
+      (lit {span: "surf:87..88", type: (t-prim {} i32)} 1)
+      (lit {span: "surf:90..91", type: (t-prim {} i32)} 0))))

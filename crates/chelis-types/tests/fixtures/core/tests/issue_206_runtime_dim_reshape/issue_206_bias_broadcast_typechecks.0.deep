@@ -1,0 +1,24 @@
+(module {surf_path: "Probe.Runtime"}
+  probe.runtime
+  (export {} bias_broadcast)
+  (defsig {}
+    bias_broadcast
+    (n)
+    (t-fn {}
+      (t-ref {} (t-tensor {} (d-var {} n) (d-lit {} 4) (t-prim {} f32)))
+      (t-ref {} (t-tensor {} (d-lit {} 4) (t-prim {} f32)))
+      (t-tensor {} (d-var {} n) (d-lit {} 4) (t-prim {} f32))))
+  (def {}
+    bias_broadcast
+    (fn {}
+      (params {} x b)
+      (app {span: "surf:156..192"}
+        (var {span: "surf:156..162"} insert)
+        (var {span: "surf:163..164"} b)
+        (lit {span: "surf:166..167", type: (t-prim {} i32)} 0)
+        (app {span: "surf:169..191"}
+          (var {span: "surf:169..174"} shape)
+          (var {span: "surf:175..176"} x)
+          (cast {span: "surf:178..190"}
+            (lit {span: "surf:183..184", surf_literal_style: "unsuffixed", type: (t-prim {} i32)} 0)
+            (t-prim {} i32)))))))

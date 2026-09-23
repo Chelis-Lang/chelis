@@ -1,0 +1,7 @@
+(defsig {} leak (t-fn {eff: (effects {})} (t-unit {})))
+
+(def {}
+  leak
+  (fn {}
+    (params {})
+    (app {span: "surf:27..38"} (var {span: "surf:27..36"} lib_check))))

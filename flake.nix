@@ -1,13 +1,8 @@
 {
-  description = "Chelis compiler, runtime, and toolchain installer packages";
-
-  nixConfig.allow-import-from-derivation = true;
+  description = "Chelis semantic core and pinned Aeneas verification tools";
 
   inputs = {
-    crate2nix = {
-      url = "github:nix-community/crate2nix/0.15.0";
-      flake = false;
-    };
+    aeneas.url = "github:AeneasVerif/aeneas/ee9bb3935375aacfa8ea3682fc21b051b79fc931";
     nixpkgs.url = "github:NixOS/nixpkgs/f205b5574fd0cb7da5b702a2da51507b7f4fdd1b";
     rust-overlay = {
       url = "github:oxalica/rust-overlay/89abdfd661ea493cde2f73d7b1332cb34150aa43";
@@ -16,16 +11,14 @@
   };
 
   outputs =
-    {
-      self,
-      crate2nix,
-      nixpkgs,
-      rust-overlay,
-    }:
+    { aeneas, nixpkgs, rust-overlay, ... }:
     let
-      lib = nixpkgs.lib;
-      contracts = import ./nix/contracts.nix;
-      forAllSystems = lib.genAttrs contracts.supportedSystems;
+      forAllSystems = nixpkgs.lib.genAttrs [
+        "aarch64-darwin"
+        "x86_64-darwin"
+        "aarch64-linux"
+        "x86_64-linux"
+      ];
       perSystem = forAllSystems (
         system:
         let
@@ -33,62 +26,65 @@
             inherit system;
             overlays = [ rust-overlay.overlays.default ];
           };
-          cvc5 = import ./nix/cvc5.nix {
-            inherit pkgs lib;
-            root = self;
+          upstream = aeneas.packages.${system};
+          modelRust = aeneas.inputs.charon.packages.${system}.rustToolchain;
+          patchedAeneasSource = pkgs.applyPatches {
+            name = "aeneas-source";
+            src = aeneas;
+            patches = [ ./verification/aeneas-stdlib-models.patch ];
           };
-          built = import ./nix/packages.nix {
-            inherit
-              crate2nix
-              cvc5
-              lib
-              pkgs
-              ;
-            root = self;
-          };
-          packages = rec {
-            inherit (built) chelis chelisup;
-            chelis-runtime = built.runtime;
-            default = chelis;
-          };
-          apps = rec {
-            chelis = {
-              type = "app";
-              program = "${packages.chelis}/bin/chelis";
-            };
-            chelisup = {
-              type = "app";
-              program = "${packages.chelisup}/bin/chelisup";
-            };
-            default = chelis;
-          };
-          checks = import ./nix/checks.nix {
-            inherit
-              apps
-              built
-              contracts
-              cvc5
-              lib
-              packages
-              pkgs
-              ;
-            root = self;
+          tools = rec {
+            charon = upstream.charon.overrideAttrs (old: {
+              patches = (old.patches or [ ]) ++ [
+                ./verification/charon-box-init.patch
+                ./verification/charon-closure-clauses.patch
+                ./verification/charon-nonlocal-continuations.patch
+                ./verification/charon-local-trait-bounds.patch
+                ./verification/charon-closure-regions.patch
+                ./verification/charon-hidden-traits.patch
+              ];
+            });
+            charon-ml = upstream.charon-ml.overrideAttrs (old: {
+              patches = (old.patches or [ ]) ++ [
+                ./verification/charon-ml-binders.patch
+              ];
+            });
+            aeneas = (upstream.aeneas.override { inherit charon charon-ml; }).overrideAttrs (old: {
+              src = "${patchedAeneasSource}/src";
+              patches = (old.patches or [ ]) ++ [
+                ./verification/aeneas-strict-warnings.patch
+                ./verification/aeneas-loop-continuations.patch
+                ./verification/aeneas-trait-models.patch
+                ./verification/aeneas-shared-borrows.patch
+                ./verification/aeneas-floating-scalars.patch
+              ];
+            });
+            rust = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+            model-rustc = pkgs.writeShellScriptBin "model-rustc" ''
+              exec ${modelRust}/bin/rustc "$@"
+            '';
           };
         in
         {
-          inherit apps checks packages;
-          # CI caches this pinned toolchain closure between runs; exposing it
-          # here keeps the locked package contract unchanged.
-          legacy = {
-            cvc5-dir = cvc5.dir;
+          packages = tools // {
+            default = tools.aeneas;
+            aeneas-source = patchedAeneasSource;
+          };
+          devShells.default = pkgs.mkShell {
+            packages = [
+              tools.aeneas
+              tools.charon
+              tools.rust
+              tools.model-rustc
+              pkgs.elan
+              pkgs.python311
+            ];
           };
         }
       );
     in
     {
-      packages = lib.mapAttrs (_system: outputs: outputs.packages) perSystem;
-      apps = lib.mapAttrs (_system: outputs: outputs.apps) perSystem;
-      checks = lib.mapAttrs (_system: outputs: outputs.checks) perSystem;
-      legacyPackages = lib.mapAttrs (_system: outputs: outputs.legacy) perSystem;
+      packages = nixpkgs.lib.mapAttrs (_: value: value.packages) perSystem;
+      devShells = nixpkgs.lib.mapAttrs (_: value: value.devShells) perSystem;
     };
 }

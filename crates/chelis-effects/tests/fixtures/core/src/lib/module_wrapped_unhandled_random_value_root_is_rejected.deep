@@ -1,0 +1,36 @@
+(module {surf_path: "Frag.Root"}
+  frag.root
+  (export {} sampled)
+  (defsig {} sampled (t-tensor {} (d-lit {} 8) (t-prim {} f32)))
+  (def {}
+    sampled
+    (app {span: "surf:60..125"}
+      (var {span: "surf:60..67"} dropout)
+      (app {span: "surf:68..119"}
+        (var {span: "surf:68..77"} to_tensor)
+        (app {span: "surf:78..118"}
+          (var {} Cons)
+          (lit {span: "surf:79..82", type: (t-prim {} f32)} 1.0)
+          (app {}
+            (var {} Cons)
+            (lit {span: "surf:84..87", type: (t-prim {} f32)} 2.0)
+            (app {}
+              (var {} Cons)
+              (lit {span: "surf:89..92", type: (t-prim {} f32)} 3.0)
+              (app {}
+                (var {} Cons)
+                (lit {span: "surf:94..97", type: (t-prim {} f32)} 4.0)
+                (app {}
+                  (var {} Cons)
+                  (lit {span: "surf:99..102", type: (t-prim {} f32)} 5.0)
+                  (app {}
+                    (var {} Cons)
+                    (lit {span: "surf:104..107", type: (t-prim {} f32)} 6.0)
+                    (app {}
+                      (var {} Cons)
+                      (lit {span: "surf:109..112", type: (t-prim {} f32)} 7.0)
+                      (app {}
+                        (var {} Cons)
+                        (lit {span: "surf:114..117", type: (t-prim {} f32)} 8.0)
+                        (var {} Nil))))))))))
+      (lit {span: "surf:121..124", type: (t-prim {} f32)} 0.5))))

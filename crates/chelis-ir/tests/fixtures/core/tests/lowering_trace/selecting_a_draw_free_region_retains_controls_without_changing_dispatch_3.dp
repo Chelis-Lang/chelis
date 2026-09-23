@@ -1,0 +1,17 @@
+(defsig {} x (t-tensor {} (d-lit {} 2) (t-prim {} f32)))
+
+(def {} x (var {span: "surf:21..22"} x))
+
+(def {}
+  selected
+  (handle-effect {effect: random, span: "surf:34..75"}
+    (lit {span: "surf:44..48", type: (t-prim {} i64)} 7)
+    (handle-effect {effect: random, span: "surf:50..75"}
+      (lit {span: "surf:62..66", type: (t-prim {} i64)} 7)
+      (var {span: "surf:68..73"} x))))
+
+(def {}
+  unrelated
+  (handle-effect {effect: random, span: "surf:88..110"}
+    (lit {span: "surf:98..103", type: (t-prim {} i64)} 99)
+    (var {span: "surf:105..110"} x)))

@@ -1,0 +1,10 @@
+(def {}
+  lam
+  (fn {}
+    (params {})
+    (fn {span: "surf:12..37"}
+      (params {} v)
+      (app {span: "surf:22..37"}
+        (var {span: "surf:22..25"} sum)
+        (copy {span: "surf:26..33"} (var {span: "surf:31..32"} v))
+        (lit {span: "surf:35..36", type: (t-prim {} i32)} 0)))))

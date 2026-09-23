@@ -1,0 +1,39 @@
+(defsig {}
+  keep
+  (d)
+  (t-fn {}
+    (t-tensor {} (d-var {} d) (t-prim {} f32))
+    (t-tensor {} (d-name {} fixed) (t-prim {} f32))
+    (t-tensor {} (d-var {} d) (t-prim {} f32))))
+
+(def {}
+  keep
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (gain {type: (t-var {} _)}))
+    (copy {span: "surf:77..84"} (var {span: "surf:82..83"} x))))
+
+(defsig {}
+  bridge
+  (t-fn {}
+    (t-tensor {} (d-name {} fixed) (t-prim {} f32))
+    (t-tensor {} (d-name {} fixed) (t-prim {} f32))))
+
+(def {}
+  bridge
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:143..187"}
+      (var {span: "surf:143..147"} keep)
+      (var {span: "surf:148..149"} x)
+      (app {span: "surf:151..186"}
+        (var {span: "surf:151..160"} to_tensor)
+        (app {span: "surf:161..185"}
+          (var {} Cons)
+          (lit {span: "surf:162..168", surf_literal_style: "explicit", type: (t-prim {} f32)} 1.0)
+          (app {}
+            (var {} Cons)
+            (lit {span: "surf:170..176", surf_literal_style: "explicit", type: (t-prim {} f32)} 2.0)
+            (app {}
+              (var {} Cons)
+              (lit {span: "surf:178..184", surf_literal_style: "explicit", type: (t-prim {} f32)} 3.0)
+              (var {} Nil))))))))

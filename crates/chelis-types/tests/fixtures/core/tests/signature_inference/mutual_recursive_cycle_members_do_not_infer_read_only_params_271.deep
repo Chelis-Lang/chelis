@@ -1,0 +1,59 @@
+(defsig {}
+  ping
+  (t-fn {}
+    (t-var {} _)
+    (t-tensor {} (d-lit {} 4) (t-prim {} f32))
+    (t-prim {} i32)
+    (t-var {} _)))
+
+(def {}
+  ping
+  (fn {}
+    (params {} x (y {type: (t-var {} _)}) (n {type: (t-var {} _)}))
+    (if {span: "surf:44..97"}
+      (app {span: "surf:47..55"}
+        (var {span: "surf:47..49"} eq)
+        (var {span: "surf:50..51"} n)
+        (lit {span: "surf:53..54", type: (t-prim {} i32)} 0))
+      (app {span: "surf:61..70"}
+        (var {span: "surf:61..64"} add)
+        (var {span: "surf:65..66"} x)
+        (var {span: "surf:68..69"} y))
+      (app {span: "surf:76..97"}
+        (var {span: "surf:76..80"} pong)
+        (var {span: "surf:81..82"} x)
+        (var {span: "surf:84..85"} y)
+        (app {span: "surf:87..96"}
+          (var {span: "surf:87..90"} sub)
+          (var {span: "surf:91..92"} n)
+          (lit {span: "surf:94..95", type: (t-prim {} i32)} 1))))))
+
+(defsig {}
+  pong
+  (t-fn {}
+    (t-var {} _)
+    (t-tensor {} (d-lit {} 4) (t-prim {} f32))
+    (t-prim {} i32)
+    (t-var {} _)))
+
+(def {}
+  pong
+  (fn {}
+    (params {} x (y {type: (t-var {} _)}) (n {type: (t-var {} _)}))
+    (if {span: "surf:142..195"}
+      (app {span: "surf:145..153"}
+        (var {span: "surf:145..147"} eq)
+        (var {span: "surf:148..149"} n)
+        (lit {span: "surf:151..152", type: (t-prim {} i32)} 0))
+      (app {span: "surf:159..168"}
+        (var {span: "surf:159..162"} add)
+        (var {span: "surf:163..164"} x)
+        (var {span: "surf:166..167"} y))
+      (app {span: "surf:174..195"}
+        (var {span: "surf:174..178"} ping)
+        (var {span: "surf:179..180"} x)
+        (var {span: "surf:182..183"} y)
+        (app {span: "surf:185..194"}
+          (var {span: "surf:185..188"} sub)
+          (var {span: "surf:189..190"} n)
+          (lit {span: "surf:192..193", type: (t-prim {} i32)} 1))))))

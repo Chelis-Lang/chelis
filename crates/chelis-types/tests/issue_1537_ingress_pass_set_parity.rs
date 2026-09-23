@@ -12,7 +12,7 @@ use chelis_deep::{
     Atom, DeepTag, Expr, List, Metadata, Span, parse_and_stamp_file,
     parser::parse_str as parse_deep, printer,
 };
-use chelis_surf::{desugar::desugar_program, parser::parse_str as parse_surf};
+
 use chelis_types::errors::CheckError;
 use chelis_types::{
     check_ir_fitness, check_ir_program, check_program, check_typed_program, infer_ir_program,
@@ -21,7 +21,7 @@ use chelis_types::{
 
 #[derive(Clone, Copy)]
 enum Source {
-    Surf(&'static str),
+    Legacy(&'static str),
     Deep(&'static str),
     LegacyMalformedDef,
 }
@@ -41,10 +41,8 @@ struct Row {
 
 fn unstamped(source: Source) -> Vec<Expr> {
     match source {
-        Source::Surf(source) => {
-            let declarations = parse_surf(source)
-                .unwrap_or_else(|error| panic!("Surf fixture must parse:\n{source}\n{error}"));
-            desugar_program(&declarations)
+        Source::Legacy(source) => {
+            serde_json::from_str(source).expect("lossless legacy AST fixture")
         }
         Source::Deep(source) => parse_deep(source)
             .unwrap_or_else(|error| panic!("Deep fixture must parse:\n{source}\n{error}")),
@@ -162,7 +160,7 @@ fn assert_row(row: Row) {
                 "unexpected stamped-admission error: {error}"
             );
         }
-        Source::Surf(_) | Source::Deep(_) => {
+        Source::Legacy(_) | Source::Deep(_) => {
             let stamped = stamped(&plain);
             let stamped_diagnostics = assert_entry_parity(row, "stamped", &stamped);
             assert_eq!(
@@ -191,28 +189,30 @@ fn assert_row(row: Row) {
 const ROWS: &[Row] = &[
     Row {
         name: "direct recursion is a language-level function",
-        source: Source::Surf("def recurse(x: i32) -> i32 = recurse(x)\n"),
+        source: Source::Legacy(include_str!(
+            "fixtures/core/tests/issue_1537_ingress_pass_set_parity/shared_194.json"
+        )),
         expected: Expected::Accept,
     },
     Row {
         name: "mutual recursion is a language-level function group",
-        source: Source::Surf(
-            "def left(x: i32) -> i32 = right(x)\n\
-             def right(x: i32) -> i32 = left(x)\n",
-        ),
+        source: Source::Legacy(include_str!(
+            "fixtures/core/tests/issue_1537_ingress_pass_set_parity/shared_200.json"
+        )),
         expected: Expected::Accept,
     },
     Row {
         name: "recursive function with an authored binder",
-        source: Source::Surf("def recurse[a](x: a) -> a = recurse(x)\n"),
+        source: Source::Legacy(include_str!(
+            "fixtures/core/tests/issue_1537_ingress_pass_set_parity/shared_207.json"
+        )),
         expected: Expected::Accept,
     },
     Row {
         name: "module-wrapped recursion",
-        source: Source::Surf(
-            "module Recursive\n\
-             def recurse(x: i32) -> i32 = recurse(x)\n",
-        ),
+        source: Source::Legacy(include_str!(
+            "fixtures/core/tests/issue_1537_ingress_pass_set_parity/shared_213.json"
+        )),
         expected: Expected::Accept,
     },
     Row {
@@ -226,76 +226,65 @@ const ROWS: &[Row] = &[
     },
     Row {
         name: "conv rejects a statically nonpositive stride",
-        source: Source::Surf(
-            "def f(x: tensor[1, 1, 4, f32], k: tensor[1, 1, 2, f32]) = \
-             conv(x, k, [0i64], [(0i64, 0i64)])\n",
-        ),
+        source: Source::Legacy(include_str!(
+            "fixtures/core/tests/issue_1537_ingress_pass_set_parity/shared_230.json"
+        )),
         expected: Expected::Reject("positive stride"),
     },
     Row {
         name: "conv rejects statically negative padding",
-        source: Source::Surf(
-            "def f(x: tensor[1, 1, 4, f32], k: tensor[1, 1, 2, f32]) = \
-             conv(x, k, [1i64], [(-1i64, 0i64)])\n",
-        ),
+        source: Source::Legacy(include_str!(
+            "fixtures/core/tests/issue_1537_ingress_pass_set_parity/shared_238.json"
+        )),
         expected: Expected::Reject("non-negative padding"),
     },
     Row {
         name: "conv static range checks survive an untracked let shape",
-        source: Source::Surf(
-            "def f(x: tensor[1, 1, 4, f32], k: tensor[1, 1, 2, f32]) = {\n\
-             \x20 y = expand(x, 0i32, 2i64)\n\
-             \x20 conv(y, k, [0i64], [(0i64, 0i64)])\n\
-             }\n",
-        ),
+        source: Source::Legacy(include_str!(
+            "fixtures/core/tests/issue_1537_ingress_pass_set_parity/shared_246.json"
+        )),
         expected: Expected::Reject("positive stride"),
     },
     Row {
         name: "conv admits a runtime stride",
-        source: Source::Surf(
-            "def f(x: tensor[1, 1, 4, f32], k: tensor[1, 1, 2, f32], \
-             strides: List[i64]) = conv(x, k, strides, [(0i64, 0i64)])\n",
-        ),
+        source: Source::Legacy(include_str!(
+            "fixtures/core/tests/issue_1537_ingress_pass_set_parity/shared_256.json"
+        )),
         expected: Expected::Accept,
     },
     Row {
         name: "conv admits runtime padding",
-        source: Source::Surf(
-            "def f(x: tensor[1, 1, 4, f32], k: tensor[1, 1, 2, f32], \
-             padding: List[(i64, i64)]) = conv(x, k, [1i64], padding)\n",
-        ),
+        source: Source::Legacy(include_str!(
+            "fixtures/core/tests/issue_1537_ingress_pass_set_parity/shared_264.json"
+        )),
         expected: Expected::Accept,
     },
     Row {
         name: "vmap rejects an element-derived movement extent",
-        source: Source::Surf(
-            "def g[n, m](x: tensor[n, f32]) -> tensor[m, f32] = {\n\
-             \x20 end = cast(tensor_to_scalar(sum(x, 0i32)), i64)\n\
-             \x20 shrink(x, [[0i64, end]])\n\
-             }\n\
-             out = vmap(g)(to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32]]))\n",
-        ),
+        source: Source::Legacy(include_str!(
+            "fixtures/core/tests/issue_1537_ingress_pass_set_parity/shared_272.json"
+        )),
         expected: Expected::Reject("batch_varying_extent"),
     },
     Row {
         name: "mean admits a symbolic selected extent",
-        source: Source::Surf(
-            "def f[n](x: tensor[32, n, f32]) -> tensor[32, f32] = mean(x, 1i32)\n",
-        ),
+        source: Source::Legacy(include_str!(
+            "fixtures/core/tests/issue_1537_ingress_pass_set_parity/shared_283.json"
+        )),
         expected: Expected::Accept,
     },
     Row {
         name: "layer_norm admits a symbolic hidden extent",
-        source: Source::Surf(
-            "def f(x: tensor[batch, hidden, f32], gamma: tensor[hidden, f32], \
-             beta: tensor[hidden, f32]) -> tensor[batch, hidden, f32] = \
-             layer_norm(x, gamma, beta, 0.00001f32)\n",
-        ),
+        source: Source::Legacy(include_str!(
+            "fixtures/core/tests/issue_1537_ingress_pass_set_parity/shared_290.json"
+        )),
         expected: Expected::Accept,
     },
     Row {
         name: "elementwise rank mismatch remains a type error",
-        source: Source::Surf("def f(a: tensor[2, 3, f32], b: tensor[3, f32]) = add(a, b)\n"),
+        source: Source::Legacy(include_str!(
+            "fixtures/core/tests/issue_1537_ingress_pass_set_parity/shared_298.json"
+        )),
         expected: Expected::Reject("rank mismatch"),
     },
     Row {
@@ -305,7 +294,9 @@ const ROWS: &[Row] = &[
     },
     Row {
         name: "top-level eager binding cycle",
-        source: Source::Surf("a = b\nb = a\n"),
+        source: Source::Legacy(include_str!(
+            "fixtures/core/tests/issue_1537_ingress_pass_set_parity/shared_308.json"
+        )),
         expected: Expected::Reject("CycleDetected"),
     },
     Row {
@@ -315,7 +306,9 @@ const ROWS: &[Row] = &[
     },
     Row {
         name: "literal reduction axis bounds remain checked",
-        source: Source::Surf("def f(x: tensor[2, f32]) -> f32 = mean(x, 4i32)\n"),
+        source: Source::Legacy(include_str!(
+            "fixtures/core/tests/issue_1537_ingress_pass_set_parity/shared_318.json"
+        )),
         expected: Expected::Reject("out of bounds"),
     },
     Row {
@@ -328,25 +321,30 @@ const ROWS: &[Row] = &[
     },
     Row {
         name: "ascribed self-reference remains an external input",
-        source: Source::Surf("x = (x : tensor[4, f32])\n"),
+        source: Source::Legacy(include_str!(
+            "fixtures/core/tests/issue_1537_ingress_pass_set_parity/shared_331.json"
+        )),
         expected: Expected::Accept,
     },
     Row {
         name: "literal conv metadata remains accepted",
-        source: Source::Surf(
-            "def f(x: tensor[1, 1, 4, f32], k: tensor[1, 1, 2, f32]) \
-             -> tensor[1, 1, 3, f32] = conv(x, k, [1i64], [(0i64, 0i64)])\n",
-        ),
+        source: Source::Legacy(include_str!(
+            "fixtures/core/tests/issue_1537_ingress_pass_set_parity/shared_337.json"
+        )),
         expected: Expected::Accept,
     },
     Row {
         name: "ordinary scalar control",
-        source: Source::Surf("answer: i32 = add(40, 2)\n"),
+        source: Source::Legacy(include_str!(
+            "fixtures/core/tests/issue_1537_ingress_pass_set_parity/shared_344.json"
+        )),
         expected: Expected::Accept,
     },
     Row {
         name: "ordinary tensor control",
-        source: Source::Surf("def f[n](x: tensor[n, f32]) -> tensor[n, f32] = relu(x)\n"),
+        source: Source::Legacy(include_str!(
+            "fixtures/core/tests/issue_1537_ingress_pass_set_parity/shared_349.json"
+        )),
         expected: Expected::Accept,
     },
 ];

@@ -37,18 +37,11 @@
 //!   - spec/04-type-system.md §5.7.1 (reduction result precision).
 
 use chelis_deep::Expr;
-use chelis_surf::desugar::desugar_program;
-use chelis_surf::parser::parse_str as parse_surf;
+use chelis_deep::parser::parse_str;
 use chelis_types::{InferResult, check_ir_program};
 
-fn surf_to_deep(source: &str) -> Vec<Expr> {
-    let decls = parse_surf(source).expect("surf parse");
-    chelis_macros::expand_program(
-        &desugar_program(&decls),
-        &chelis_macros::ExpansionOptions::default(),
-    )
-    .expect("macro expand")
-    .into_exprs()
+fn core_fixture(source: &str) -> Vec<Expr> {
+    parse_str(source).expect("core fixture")
 }
 
 fn messages(rep: &InferResult) -> Vec<String> {
@@ -67,14 +60,10 @@ fn messages(rep: &InferResult) -> Vec<String> {
 /// borrow diagnostic must NOT appear.
 #[test]
 fn issue259_mean_nonliteral_axis_reports_axis_cause_not_borrow() {
-    let src = r#"
-def consumer[n](x: &tensor[n, f32]) -> tensor[n, f32] = copy(x)
-def go[m, n](x: tensor[m, n, f32], ax: i32) -> tensor[n, f32] = {
-  y = mean(&x, ax)
-  consumer(&y)
-}
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_259_nonliteral_axis_diagnostic/issue259_mean_nonliteral_axis_reports_axis_cause_not_borrow.deep"
+    );
+    let deep = core_fixture(src);
     let rep =
         check_ir_program(&deep).expect_err("non-literal reduction axis must be rejected at infer");
     let msgs = messages(&rep);
@@ -118,10 +107,11 @@ fn issue259_reduction_family_nonliteral_axis_all_report_axis_cause() {
         "argmax_reduce",
         "argmin_reduce",
     ] {
-        let src = format!(
-            "def go[m, n](x: tensor[m, n, f32], ax: i32) -> tensor[n, f32] = {name}(&x, ax)\n"
-        );
-        let deep = surf_to_deep(&src);
+        let source = include_str!(
+            "fixtures/core/tests/issue_259_nonliteral_axis_diagnostic/reduction_family.deep"
+        )
+        .replace(" sum)", &format!(" {name})"));
+        let deep = core_fixture(&source);
         let rep = check_ir_program(&deep)
             .err()
             .unwrap_or_else(|| panic!("{name} non-literal axis must be rejected"));
@@ -147,14 +137,10 @@ fn issue259_reduction_family_nonliteral_axis_all_report_axis_cause() {
 /// `tensor_expand_to_out` and shares the same unconstrained-`out` shape.
 #[test]
 fn issue259_expand_nonliteral_axis_reports_axis_cause_not_borrow() {
-    let src = r#"
-def consumer[m, n](x: &tensor[m, n, f32]) -> tensor[m, n, f32] = copy(x)
-def go[n](x: tensor[n, f32], ax: i32) -> tensor[4, n, f32] = {
-  y = insert(&x, ax, 4i64)
-  consumer(&y)
-}
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_259_nonliteral_axis_diagnostic/issue259_expand_nonliteral_axis_reports_axis_cause_not_borrow.deep"
+    );
+    let deep = core_fixture(src);
     let rep =
         check_ir_program(&deep).expect_err("non-literal expand axis must be rejected at infer");
     let msgs = messages(&rep);
@@ -186,14 +172,10 @@ def go[n](x: tensor[n, f32], ax: i32) -> tensor[4, n, f32] = {
 /// literal-axis path.
 #[test]
 fn issue259_mean_literal_axis_still_typechecks() {
-    let src = r#"
-def consumer[m](x: &tensor[m, f32]) -> tensor[m, f32] = copy(x)
-def go[m](x: tensor[m, 4, f32]) -> tensor[m, f32] = {
-  y = mean(&x, 1)
-  consumer(&y)
-}
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_259_nonliteral_axis_diagnostic/issue259_mean_literal_axis_still_typechecks.deep"
+    );
+    let deep = core_fixture(src);
     if let Err(rep) = check_ir_program(&deep) {
         panic!(
             "literal-axis reduction must still type-check, got {:?}",
@@ -208,14 +190,10 @@ def go[m](x: tensor[m, 4, f32]) -> tensor[m, f32] = {
 /// cast-wrapped literal that #216 deliberately admits.
 #[test]
 fn issue259_mean_cast_wrapped_literal_axis_still_typechecks() {
-    let src = r#"
-def consumer[m](x: &tensor[m, f32]) -> tensor[m, f32] = copy(x)
-def go[m](x: tensor[m, 4, f32]) -> tensor[m, f32] = {
-  y = mean(&x, cast(1, i32))
-  consumer(&y)
-}
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_259_nonliteral_axis_diagnostic/issue259_mean_cast_wrapped_literal_axis_still_typechecks.deep"
+    );
+    let deep = core_fixture(src);
     if let Err(rep) = check_ir_program(&deep) {
         panic!(
             "cast-wrapped literal-axis reduction must still type-check, got {:?}",
@@ -230,10 +208,10 @@ def go[m](x: tensor[m, 4, f32]) -> tensor[m, f32] = {
 /// fix touches only the axis arm, not the size arm.
 #[test]
 fn issue259_expand_literal_axis_symbolic_size_still_typechecks() {
-    let src = r#"
-def go[n](x: tensor[n, f32]) -> tensor[4, n, f32] = insert(&x, 0, 4i64)
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_259_nonliteral_axis_diagnostic/issue259_expand_literal_axis_symbolic_size_still_typechecks.deep"
+    );
+    let deep = core_fixture(src);
     if let Err(rep) = check_ir_program(&deep) {
         panic!(
             "literal-axis expand must still type-check, got {:?}",
@@ -253,10 +231,10 @@ def go[n](x: tensor[n, f32]) -> tensor[4, n, f32] = insert(&x, 0, 4i64)
 /// different error than an unresolvable axis.
 #[test]
 fn issue259_oob_literal_axis_still_reports_out_of_bounds() {
-    let src = r#"
-def go[m, n](x: tensor[m, n, f32]) -> tensor[m, f32] = mean(&x, 9)
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_259_nonliteral_axis_diagnostic/issue259_oob_literal_axis_still_reports_out_of_bounds.deep"
+    );
+    let deep = core_fixture(src);
     let rep = check_ir_program(&deep).expect_err("out-of-bounds literal axis must be rejected");
     let msgs = messages(&rep);
     assert!(
@@ -276,11 +254,10 @@ def go[m, n](x: tensor[m, n, f32]) -> tensor[m, f32] = mean(&x, 9)
 /// diagnostic; the #259 fix must not suppress it.
 #[test]
 fn issue259_non_tensor_borrow_still_rejected() {
-    let src = r#"
-def consumer[n](x: &tensor[n, f32]) -> tensor[n, f32] = copy(x)
-def go(v: i32) -> tensor[1, f32] = consumer(&v)
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_259_nonliteral_axis_diagnostic/issue259_non_tensor_borrow_still_rejected.deep"
+    );
+    let deep = core_fixture(src);
     let rep = check_ir_program(&deep).expect_err("borrow of i32 against &tensor must be rejected");
     assert!(
         !rep.errors.is_empty(),

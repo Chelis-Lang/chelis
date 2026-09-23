@@ -1,0 +1,47 @@
+(def {}
+  left
+  (fn {}
+    (params {} n)
+    (if {span: "surf:14..56"}
+      (app {span: "surf:17..26"}
+        (var {} eq)
+        (var {span: "surf:17..18"} n)
+        (lit {span: "surf:22..26", surf_literal_style: "explicit", type: (t-prim {} i32)} 0))
+      (var {span: "surf:32..35"} len)
+      (app {span: "surf:41..56"}
+        (var {span: "surf:41..46"} right)
+        (app {span: "surf:47..55"}
+          (var {} sub)
+          (var {span: "surf:47..48"} n)
+          (lit {span: "surf:51..55", surf_literal_style: "explicit", type: (t-prim {} i32)} 1))))))
+
+(def {}
+  right
+  (fn {}
+    (params {} n)
+    (if {span: "surf:72..120"}
+      (app {span: "surf:75..84"}
+        (var {} eq)
+        (var {span: "surf:75..76"} n)
+        (lit {span: "surf:80..84", surf_literal_style: "explicit", type: (t-prim {} i32)} 0))
+      (app {span: "surf:90..100"}
+        (var {span: "surf:90..94"} left)
+        (lit {span: "surf:95..99", surf_literal_style: "explicit", type: (t-prim {} i32)} 0))
+      (app {span: "surf:106..120"}
+        (var {span: "surf:106..110"} left)
+        (app {span: "surf:111..119"}
+          (var {} sub)
+          (var {span: "surf:111..112"} n)
+          (lit {span: "surf:115..119", surf_literal_style: "explicit", type: (t-prim {} i32)} 1))))))
+
+(def {}
+  measure
+  (app {span: "surf:131..142"}
+    (var {span: "surf:131..136"} right)
+    (lit {span: "surf:137..141", surf_literal_style: "explicit", type: (t-prim {} i32)} 1)))
+
+(def {}
+  out
+  (app {span: "surf:149..162"}
+    (var {span: "surf:149..156"} measure)
+    (lit {span: "surf:157..161", type: (t-prim {} i64)} 1)))

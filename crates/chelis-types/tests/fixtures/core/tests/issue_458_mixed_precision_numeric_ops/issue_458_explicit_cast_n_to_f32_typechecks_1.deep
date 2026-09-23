@@ -1,0 +1,10 @@
+(defsig {} recip_n (t-fn {} (t-prim {} i32) (t-prim {} f32)))
+
+(def {}
+  recip_n
+  (fn {}
+    (params {} (n {type: (t-var {} _)}))
+    (app {span: "surf:29..51"}
+      (var {span: "surf:29..32"} div)
+      (lit {span: "surf:33..36", type: (t-prim {} f32)} 1.0)
+      (cast {span: "surf:38..50"} (var {span: "surf:43..44"} n) (t-prim {} f32)))))

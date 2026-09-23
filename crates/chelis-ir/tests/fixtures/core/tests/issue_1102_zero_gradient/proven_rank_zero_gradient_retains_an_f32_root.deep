@@ -1,0 +1,25 @@
+(defsig {}
+  const_rank_zero
+  (t-fn {} (t-tensor {} (t-prim {} f32)) (t-prim {} f32)))
+
+(def {}
+  const_rank_zero
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (cast {span: "surf:46..60"}
+      (lit {span: "surf:51..54", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 1.0)
+      (t-prim {} f32))))
+
+(defsig {}
+  rank_zero_grad
+  (t-fn {} (t-tensor {} (t-prim {} f32)) (t-tensor {} (t-prim {} f32))))
+
+(def {}
+  rank_zero_grad
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:113..144"}
+      (grad {span: "surf:113..141", wrt: (var {} x)}
+        (var {span: "surf:118..133"} const_rank_zero)
+        (lit {type: (t-prim {} i32)} 0))
+      (var {span: "surf:142..143"} x))))

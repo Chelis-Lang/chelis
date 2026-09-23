@@ -1,0 +1,17 @@
+(deftype {}
+  Column
+  (n a)
+  (variant {} Column (t-tensor {} (d-var {} n) (t-var {} a))))
+
+(defsig {}
+  identity
+  (n a)
+  (t-fn {}
+    (t-adt {} Column (t-var {} n) (t-var {} a))
+    (t-adt {} Column (t-var {} n) (t-var {} a))))
+
+(def {}
+  identity
+  (fn {}
+    (params {} (column {type: (t-var {} _)}))
+    (var {span: "surf:103..109"} column)))

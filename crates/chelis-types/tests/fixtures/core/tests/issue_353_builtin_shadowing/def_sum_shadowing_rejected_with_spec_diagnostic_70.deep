@@ -1,0 +1,29 @@
+(module {surf_path: "Repro"}
+  repro
+  (defsig {}
+    sum
+    (t-fn {}
+      (t-ref {} (t-tensor {} (d-name {} batch) (t-prim {} f32)))
+      (t-tensor {} (d-name {} batch) (t-prim {} f32))))
+  (def {}
+    sum
+    (fn {}
+      (params {} (x {type: (t-var {} _)}))
+      (app {span: "surf:69..76"}
+        (var {span: "surf:69..73"} relu)
+        (var {span: "surf:74..75"} x))))
+  (def {}
+    out
+    (app {span: "surf:83..110"}
+      (var {span: "surf:83..86"} sum)
+      (app {span: "surf:87..109"}
+        (var {span: "surf:87..96"} to_tensor)
+        (app {span: "surf:97..108"}
+          (var {} Cons)
+          (lit {span: "surf:98..101", type: (t-prim {} f32)} 1.0)
+          (app {}
+            (var {} Cons)
+            (app {span: "surf:103..107"}
+              (var {} neg)
+              (lit {span: "surf:104..107", type: (t-prim {} f32)} 2.0))
+            (var {} Nil)))))))

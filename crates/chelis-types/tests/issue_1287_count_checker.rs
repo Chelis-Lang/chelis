@@ -4,14 +4,12 @@
 //! bool tensors, one or more compile-time i32 axes, and returns an i64
 //! tensor with every selected axis removed.
 
-use chelis_surf::desugar::desugar_program;
-use chelis_surf::parser::parse_str as parse_surf;
 use chelis_types::check_typed_program;
 use chelis_types::errors::CheckError;
 
 fn errors(source: &str) -> Vec<CheckError> {
-    let decls = parse_surf(source).expect("Surf fixture parses");
-    match check_typed_program(&desugar_program(&decls)) {
+    let deep = chelis_deep::parse_and_stamp_file(source).expect("Deep fixture");
+    match check_typed_program(&deep) {
         Ok(_) => Vec::new(),
         Err(report) => report.errors,
     }
@@ -36,34 +34,38 @@ fn assert_rejects(source: &str, needle: &str) {
 
 #[test]
 fn concrete_positional_axes_are_variadic_and_order_independent() {
-    assert_clean(
-        r#"
-def f(x: tensor[2, 3, 4, bool]) -> tensor[3, i64] = count(&x, 0, -1)
-def g(x: tensor[2, 3, 4, bool]) -> tensor[3, i64] = count(&x, 2, 0)
-"#,
-    );
+    assert_clean(include_str!(
+        "fixtures/core/tests/issue_1287_count_checker/concrete_positional_axes_are_variadic_and_order_independent_1.deep"
+    ));
 }
 
 #[test]
 fn bool_tensor_is_required_not_numeric_tensor_or_bool_scalar() {
-    assert_clean("def good(x: tensor[4, bool]) -> tensor[i64] = count(&x, 0)");
+    assert_clean(include_str!(
+        "fixtures/core/tests/issue_1287_count_checker/bool_tensor_is_required_not_numeric_tensor_or_bool_scalar_1.deep"
+    ));
     assert_rejects(
-        "def bad(x: tensor[4, i64]) -> tensor[i64] = count(&x, 0)",
+        include_str!(
+            "fixtures/core/tests/issue_1287_count_checker/bool_tensor_is_required_not_numeric_tensor_or_bool_scalar_2.deep"
+        ),
         "bool tensor",
     );
     assert_rejects(
-        "def bad(x: bool) -> tensor[i64] = count(x, 0)",
+        include_str!(
+            "fixtures/core/tests/issue_1287_count_checker/bool_tensor_is_required_not_numeric_tensor_or_bool_scalar_3.deep"
+        ),
         "tensor input",
     );
     assert_rejects(
-        "def bad[p](x: tensor[4, p]) -> tensor[i64] = count(&x, 0)",
+        include_str!(
+            "fixtures/core/tests/issue_1287_count_checker/bool_tensor_is_required_not_numeric_tensor_or_bool_scalar_4.deep"
+        ),
         "exactly a bool tensor",
     );
     assert_rejects(
-        r#"
-def count_any[p](x: tensor[4, p]) -> tensor[i64] = count(&x, 0)
-def bad(x: tensor[4, i64]) -> tensor[i64] = count_any(x)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1287_count_checker/bool_tensor_is_required_not_numeric_tensor_or_bool_scalar_5.deep"
+        ),
         "exactly a bool tensor",
     );
 }
@@ -71,95 +73,108 @@ def bad(x: tensor[4, i64]) -> tensor[i64] = count_any(x)
 #[test]
 fn axes_are_required_unique_static_int32_and_in_range() {
     assert_rejects(
-        "def bad(x: tensor[2, 3, bool]) -> tensor[2, 3, i64] = count(&x)",
+        include_str!(
+            "fixtures/core/tests/issue_1287_count_checker/axes_are_required_unique_static_int32_and_in_range_1.deep"
+        ),
         "expected 2 args, got 1",
     );
     assert_rejects(
-        "def bad(x: tensor[2, 3, bool]) -> tensor[i64] = count(&x, 0, 0)",
+        include_str!(
+            "fixtures/core/tests/issue_1287_count_checker/axes_are_required_unique_static_int32_and_in_range_2.deep"
+        ),
         "duplicate",
     );
     assert_rejects(
-        "def bad(x: tensor[2, 3, bool]) -> tensor[2, i64] = count(&x, 1i64)",
+        include_str!(
+            "fixtures/core/tests/issue_1287_count_checker/axes_are_required_unique_static_int32_and_in_range_3.deep"
+        ),
         "i32 axis",
     );
     assert_rejects(
-        "def bad(x: tensor[2, 3, bool], axis: i32) -> tensor[2, i64] = count(&x, axis)",
+        include_str!(
+            "fixtures/core/tests/issue_1287_count_checker/axes_are_required_unique_static_int32_and_in_range_4.deep"
+        ),
         "compile-time constant",
     );
     assert_rejects(
-        "def bad(x: tensor[2, 3, bool]) -> tensor[2, i64] = count(&x, 2)",
+        include_str!(
+            "fixtures/core/tests/issue_1287_count_checker/axes_are_required_unique_static_int32_and_in_range_5.deep"
+        ),
         "out of bounds",
     );
 }
 
 #[test]
 fn variadic_axes_enforce_int32_in_every_position() {
-    assert_clean(
-        r#"
-def first_cast(x: tensor[2, 3, bool]) -> tensor[i64] = count(&x, cast(0, i32), 1)
-def later_cast(x: tensor[2, 3, bool]) -> tensor[i64] = count(&x, 0, cast(1, i32))
-"#,
-    );
+    assert_clean(include_str!(
+        "fixtures/core/tests/issue_1287_count_checker/variadic_axes_enforce_int32_in_every_position_1.deep"
+    ));
 
     assert_rejects(
-        "def bad(x: tensor[2, 3, bool]) -> tensor[i64] = count(&x, 0i64, 1)",
+        include_str!(
+            "fixtures/core/tests/issue_1287_count_checker/variadic_axes_enforce_int32_in_every_position_2.deep"
+        ),
         "i32 axis",
     );
     assert_rejects(
-        "def bad(x: tensor[2, 3, bool]) -> tensor[i64] = count(&x, 0, 1i64)",
+        include_str!(
+            "fixtures/core/tests/issue_1287_count_checker/variadic_axes_enforce_int32_in_every_position_3.deep"
+        ),
         "i32 axis",
     );
     assert_rejects(
-        "def bad(x: tensor[2, 3, bool]) -> tensor[i64] = count(&x, cast(0, i64), 1)",
+        include_str!(
+            "fixtures/core/tests/issue_1287_count_checker/variadic_axes_enforce_int32_in_every_position_4.deep"
+        ),
         "i32 axis",
     );
     assert_rejects(
-        "def bad(x: tensor[2, 3, bool]) -> tensor[i64] = count(&x, 0, cast(1, i64))",
+        include_str!(
+            "fixtures/core/tests/issue_1287_count_checker/variadic_axes_enforce_int32_in_every_position_5.deep"
+        ),
         "i32 axis",
     );
 }
 
 #[test]
 fn rank_polymorphic_count_uses_only_named_axes() {
-    assert_clean(
-        r#"
-def good[pre, post](x: &tensor[..pre, seq, ..post, bool]) -> tensor[..pre, ..post, i64] = count(&x, seq)
-"#,
-    );
+    assert_clean(include_str!(
+        "fixtures/core/tests/issue_1287_count_checker/rank_polymorphic_count_uses_only_named_axes_1.deep"
+    ));
     assert_rejects(
-        r#"
-def bad[pre, post](x: &tensor[..pre, seq, ..post, bool]) -> tensor[..pre, ..post, i64] = count(&x, 0)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1287_count_checker/rank_polymorphic_count_uses_only_named_axes_2.deep"
+        ),
         "rank-spread",
     );
     assert_rejects(
-        r#"
-def bad[pre, post](x: &tensor[..pre, seq, ..post, bool]) -> tensor[..pre, ..post, i64] = count(&x, seq, seq)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1287_count_checker/rank_polymorphic_count_uses_only_named_axes_3.deep"
+        ),
         "duplicate",
     );
     assert_rejects(
-        r#"
-def bad[pre, post](x: &tensor[..pre, seq, ..post, bool]) -> tensor[..pre, ..post, i64] = count(&x, missing)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1287_count_checker/rank_polymorphic_count_uses_only_named_axes_4.deep"
+        ),
         "no named `missing` axis",
     );
     assert_rejects(
-        r#"
-def bad[pre, post](x: &tensor[..pre, seq, seq, ..post, bool]) -> tensor[..pre, ..post, i64] = count(&x, seq)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1287_count_checker/rank_polymorphic_count_uses_only_named_axes_5.deep"
+        ),
         "ambiguous",
     );
     assert_rejects(
-        r#"
-def bad[pre, post](x: &tensor[..pre, seq, ..post, bool]) -> tensor[..pre, ..post, i64] = count(&x, seq, 0)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1287_count_checker/rank_polymorphic_count_uses_only_named_axes_6.deep"
+        ),
         "positional and named axes cannot be mixed",
     );
     assert_rejects(
-        r#"
-def bad(x: &tensor[row, col, bool]) -> tensor[row, i64] = count(&x, col)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_1287_count_checker/rank_polymorphic_count_uses_only_named_axes_7.deep"
+        ),
         "concrete-rank operand requires",
     );
 }

@@ -1,0 +1,25 @@
+(defsig {} value (t-adt {} List (t-prim {} i32)))
+
+(def {}
+  value
+  (app {span: "surf:19..33"}
+    (var {} Cons)
+    (cast {span: "surf:20..32"}
+      (lit {span: "surf:25..26", surf_literal_style: "unsuffixed", type: (t-prim {} i32)} 1)
+      (t-prim {} i32))
+    (var {} Nil)))
+
+(defsig {}
+  square
+  (t-fn {}
+    (t-tensor {} (d-lit {} 2) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 2) (t-prim {} f32))))
+
+(def {}
+  square
+  (fn {}
+    (params {} (value {type: (t-var {} _)}))
+    (app {span: "surf:88..105"}
+      (var {span: "surf:88..91"} mul)
+      (var {span: "surf:92..97"} value)
+      (var {span: "surf:99..104"} value))))

@@ -1,0 +1,24 @@
+(defsig {}
+  run
+  (d)
+  (t-fn {}
+    (t-tensor {} (d-var {} d) (t-prim {} f32))
+    (t-tensor {} (d-name {} row) (t-prim {} f32))
+    (t-tensor {} (d-name {} row) (t-prim {} bool))
+    (t-tensor {} (d-var {} d) (t-prim {} f32))))
+
+(def {}
+  run
+  (fn {}
+    (params {}
+      (x {type: (t-var {} _)})
+      (g {type: (t-var {} _)})
+      (c {type: (t-var {} _)}))
+    (app {span: "surf:89..108"}
+      (var {span: "surf:89..94"} where)
+      (var {span: "surf:95..96"} c)
+      (app {span: "surf:97..105"}
+        (var {span: "surf:97..100"} tag)
+        (var {span: "surf:101..102"} x)
+        (var {span: "surf:103..104"} g))
+      (var {span: "surf:106..107"} g))))

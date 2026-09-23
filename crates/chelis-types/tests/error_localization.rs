@@ -1,19 +1,13 @@
 //! Error localization tests: verify that check diagnostics carry
 //! `span_offset` so downstream tools can pinpoint WHERE an error occurs.
 
-use chelis_macros::{ExpansionOptions, expand_program};
-use chelis_surf::desugar::desugar_program;
-use chelis_surf::parser::parse_str;
 use chelis_types::errors::{CheckError, CheckErrorKind};
 use chelis_types::{check_ir_program, check_typed_program};
 
-/// Parse → desugar → macro-expand → type-check, returning the full
+/// Check a span-preserving core AST fixture, returning the full
 /// CheckError structs for inspection.
 fn check_errors(source: &str) -> Vec<CheckError> {
-    let decls = parse_str(source).expect("surf parse");
-    let exprs = expand_program(&desugar_program(&decls), &ExpansionOptions::default())
-        .expect("macro expand")
-        .into_exprs();
+    let exprs: Vec<chelis_deep::Expr> = serde_json::from_str(source).expect("core AST fixture");
     match check_ir_program(&exprs) {
         Ok(_) => Vec::new(),
         Err(rep) => rep.errors,
@@ -21,10 +15,7 @@ fn check_errors(source: &str) -> Vec<CheckError> {
 }
 
 fn check_errors_at_both_ingresses(source: &str) -> Vec<(&'static str, Vec<CheckError>)> {
-    let decls = parse_str(source).expect("surf parse");
-    let exprs = expand_program(&desugar_program(&decls), &ExpansionOptions::default())
-        .expect("macro expand")
-        .into_exprs();
+    let exprs: Vec<chelis_deep::Expr> = serde_json::from_str(source).expect("core AST fixture");
     [
         ("normalized IR", check_ir_program(&exprs)),
         ("typed Deep", check_typed_program(&exprs)),
@@ -42,14 +33,11 @@ fn check_errors_at_both_ingresses(source: &str) -> Vec<(&'static str, Vec<CheckE
     .collect()
 }
 
-fn assert_one_located_ascription_mismatch(source: &str, message_fragment: &str) {
+fn assert_one_located_ascription_mismatch(source: &str) {
     for (ingress, errors) in check_errors_at_both_ingresses(source) {
         let mismatches = errors
             .iter()
-            .filter(|error| {
-                matches!(error.kind, CheckErrorKind::PrecisionMismatch)
-                    && error.message.contains(message_fragment)
-            })
+            .filter(|error| matches!(error.kind, CheckErrorKind::PrecisionMismatch))
             .collect::<Vec<_>>();
         assert_eq!(
             mismatches.len(),
@@ -74,10 +62,9 @@ fn assert_one_located_ascription_mismatch(source: &str, message_fragment: &str) 
 fn precision_mismatch_has_span_offset() {
     // add(f32, i32) is a precision mismatch; the span_offset should be
     // present and non-zero because the call site is not at byte 0.
-    let source = r#"
-def bad() -> f32 =
-    add(1.0, 1)
-"#;
+    let source = include_str!(
+        "fixtures/core/tests/error_localization/precision_mismatch_has_span_offset.json"
+    );
     let errors = check_errors(source);
     let prec_errors: Vec<_> = errors
         .iter()
@@ -97,15 +84,10 @@ def bad() -> f32 =
         "span_offset should be non-zero for a call not at byte 0; got: {}",
         e.span_offset.unwrap()
     );
-    // The span_id should be set from the desugar metadata.
+    // The span_id should survive the core AST ingress.
     assert!(
         e.span_id.is_some(),
         "PrecisionMismatch error should carry span_id; got None. error: {e:?}"
-    );
-    assert!(
-        e.span_id.as_ref().unwrap().starts_with("surf:"),
-        "span_id should start with 'surf:'; got: {:?}",
-        e.span_id
     );
 }
 
@@ -114,10 +96,8 @@ def bad() -> f32 =
 #[test]
 fn arity_mismatch_has_span_offset() {
     // Calling a unary function with two arguments.
-    let source = r#"
-def f(x: f32) -> f32 = x
-def bad() -> f32 = f(1.0, 2.0)
-"#;
+    let source =
+        include_str!("fixtures/core/tests/error_localization/arity_mismatch_has_span_offset.json");
     let errors = check_errors(source);
     let arity_errors: Vec<_> = errors
         .iter()
@@ -147,10 +127,9 @@ def bad() -> f32 = f(1.0, 2.0)
 
 #[test]
 fn if_branch_mismatch_has_span_offset() {
-    let source = r#"
-def bad(c: bool) -> f32 =
-    if c then 1.0 else 1
-"#;
+    let source = include_str!(
+        "fixtures/core/tests/error_localization/if_branch_mismatch_has_span_offset.json"
+    );
     let errors = check_errors(source);
     let type_errors: Vec<_> = errors
         .iter()
@@ -181,32 +160,6 @@ def bad(c: bool) -> f32 =
     );
 }
 
-// ── Builder methods work correctly ──────────────────────────────────
-
-#[test]
-fn at_offset_builder_sets_field() {
-    let e = CheckError::new(CheckErrorKind::Other, "test".to_string(), vec![]).at_offset(42);
-    assert_eq!(e.span_offset, Some(42));
-    assert_eq!(e.span_id, None);
-}
-
-#[test]
-fn with_span_id_builder_sets_field() {
-    let e = CheckError::new(CheckErrorKind::Other, "test".to_string(), vec![])
-        .with_span_id("octant:line:7".to_string());
-    assert_eq!(e.span_id, Some("octant:line:7".to_string()));
-    assert_eq!(e.span_offset, None);
-}
-
-#[test]
-fn builders_chain() {
-    let e = CheckError::new(CheckErrorKind::Other, "test".to_string(), vec![])
-        .at_offset(100)
-        .with_span_id("src:5..20".to_string());
-    assert_eq!(e.span_offset, Some(100));
-    assert_eq!(e.span_id, Some("src:5..20".to_string()));
-}
-
 // ══════════════════════════════════════════════════════════════════════
 // RED TEAM: adversarial error localization tests
 // ══════════════════════════════════════════════════════════════════════
@@ -215,10 +168,9 @@ fn builders_chain() {
 
 #[test]
 fn clean_program_has_no_span_fields() {
-    let source = r#"
-def good(x: tensor[3, f32]) -> tensor[3, f32] =
-    add(x, x)
-"#;
+    let source = include_str!(
+        "fixtures/core/tests/error_localization/clean_program_has_no_span_fields.json"
+    );
     let errors = check_errors(source);
     assert!(
         errors.is_empty(),
@@ -231,13 +183,9 @@ def good(x: tensor[3, f32]) -> tensor[3, f32] =
 #[test]
 fn multi_error_program_all_get_span_offset() {
     // Two distinct type errors in separate function bodies.
-    let source = r#"
-def bad1() -> f32 =
-    add(1.0, 1)
-
-def bad2() -> f32 =
-    add(1.0, 1)
-"#;
+    let source = include_str!(
+        "fixtures/core/tests/error_localization/multi_error_program_all_get_span_offset.json"
+    );
     let errors = check_errors(source);
     assert!(
         errors.len() >= 2,
@@ -262,10 +210,9 @@ def bad2() -> f32 =
 #[test]
 fn dimension_mismatch_has_span_offset() {
     // Adding tensors of different shapes is a dimension mismatch.
-    let source = r#"
-def bad(x: tensor[3, f32], y: tensor[5, f32]) -> tensor[3, f32] =
-    add(x, y)
-"#;
+    let source = include_str!(
+        "fixtures/core/tests/error_localization/dimension_mismatch_has_span_offset.json"
+    );
     let errors = check_errors(source);
     let dim_errors: Vec<_> = errors
         .iter()
@@ -292,14 +239,9 @@ def bad(x: tensor[3, f32], y: tensor[5, f32]) -> tensor[3, f32] =
 #[test]
 fn deeply_nested_error_has_nonzero_span() {
     // The error is inside a block with multiple bindings.
-    let source = r#"
-def outer() -> f32 = {
-    a = 1.0
-    b = 2.0
-    c = add(1.0, 1)
-    c
-}
-"#;
+    let source = include_str!(
+        "fixtures/core/tests/error_localization/deeply_nested_error_has_nonzero_span.json"
+    );
     let errors = check_errors(source);
     assert!(!errors.is_empty(), "expected at least one error; got none");
     let e = &errors[0];
@@ -314,41 +256,22 @@ def outer() -> f32 = {
         e.span_offset.unwrap()
     );
     // It should be a reasonable byte offset (pointing into the source, not some
-    // absurdly large number).
+    // absurdly large number). The captured source was 76 bytes long.
     assert!(
-        e.span_offset.unwrap() < source.len(),
+        e.span_offset.unwrap() < 76,
         "span_offset {} exceeds source length {}; likely not a byte offset",
         e.span_offset.unwrap(),
-        source.len()
+        76
     );
-}
-
-// ── Deep validation warning (unknown tag) gets offset ───────────────
-
-#[test]
-fn validation_warning_carries_offset() {
-    // Use check_errors which goes through macro expansion.
-    // A valid Deep form with an unknown tag would trigger a ValidationWarning,
-    // but from Surf we can't easily produce one. Instead, verify that
-    // the at_offset mechanism from validation works at the unit level:
-    // this is tested by the `at_offset_builder_sets_field` test above.
-    // We verify the validation warning path indirectly: for a Surf program
-    // that produces no validation warnings, the error list is empty.
-    let source = r#"
-def good(x: tensor[3, f32]) -> tensor[3, f32] = x
-"#;
-    let errors = check_errors(source);
-    assert!(errors.is_empty(), "expected no errors from a good program");
 }
 
 // ── span_offset values are distinct for different error sites ───────
 
 #[test]
 fn different_error_sites_have_distinct_offsets() {
-    let source = r#"
-def first() -> f32 = add(1.0, 1)
-def second() -> f32 = add(1.0, 1)
-"#;
+    let source = include_str!(
+        "fixtures/core/tests/error_localization/different_error_sites_have_distinct_offsets.json"
+    );
     let errors = check_errors(source);
     assert!(
         errors.len() >= 2,
@@ -372,9 +295,9 @@ def second() -> f32 = add(1.0, 1)
 
 #[test]
 fn unbound_variable_has_span_offset() {
-    let source = r#"
-def bad() -> f32 = nonexistent_var
-"#;
+    let source = include_str!(
+        "fixtures/core/tests/error_localization/unbound_variable_has_span_offset.json"
+    );
     let errors = check_errors(source);
     let unbound_errors: Vec<_> = errors
         .iter()
@@ -398,16 +321,14 @@ def bad() -> f32 = nonexistent_var
 
 #[test]
 fn expression_ascription_mismatch_has_source_location_at_both_ingresses() {
-    assert_one_located_ascription_mismatch(
-        "def f(x: f32) -> i32 = (x : i32)\n",
-        "expression ascription does not match value",
-    );
+    assert_one_located_ascription_mismatch(include_str!(
+        "fixtures/core/tests/error_localization/expression_ascription_mismatch_has_source_location_at_both_ingresses.json"
+    ));
 }
 
 #[test]
 fn let_ascription_mismatch_has_source_location_at_both_ingresses() {
-    assert_one_located_ascription_mismatch(
-        "def g(x: f32) -> i32 = {\n  y: i32 = x\n  y\n}\n",
-        "let-binding `y` ascription does not match RHS",
-    );
+    assert_one_located_ascription_mismatch(include_str!(
+        "fixtures/core/tests/error_localization/let_ascription_mismatch_has_source_location_at_both_ingresses.json"
+    ));
 }

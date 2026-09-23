@@ -1,0 +1,17 @@
+(def {} identity (fn {} (params {} x) (var {span: "surf:19..20"} x)))
+
+(def {}
+  use_int
+  (fn {}
+    (params {})
+    (app {span: "surf:37..48"}
+      (var {span: "surf:37..45"} identity)
+      (lit {span: "surf:46..47", type: (t-prim {} i32)} 1))))
+
+(def {}
+  use_bool
+  (fn {}
+    (params {})
+    (app {span: "surf:66..80"}
+      (var {span: "surf:66..74"} identity)
+      (lit {span: "surf:75..79", type: (t-prim {} bool)} true))))

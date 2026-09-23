@@ -21,14 +21,17 @@
 //! times on chelis#1489's conversions). A cell that only checked "rejected"
 //! would pass on a rejection from an entirely different rule.
 
-use chelis_surf::desugar::desugar_program;
-use chelis_surf::parser::parse_str as parse_surf;
+use chelis_deep::parser::parse_str;
 use chelis_types::check_typed_program;
 use chelis_types::errors::CheckError;
 
 fn check(source: &str) -> Result<(), Vec<CheckError>> {
-    let decls = parse_surf(source).expect("surf parse should succeed");
-    match check_typed_program(&desugar_program(&decls)) {
+    let exprs = if source.trim_start().starts_with('[') {
+        serde_json::from_str(source).expect("lossless AST fixture")
+    } else {
+        parse_str(source).expect("Deep fixture must parse")
+    };
+    match check_typed_program(&exprs) {
         Ok(_) => Ok(()),
         Err(report) => Err(report.errors),
     }
@@ -42,48 +45,31 @@ fn summary(errors: &[CheckError]) -> String {
         .join("\n")
 }
 
-/// The same call with its operand supplied directly.
-fn resolved(decl: &str, call: &str, result: &str) -> String {
-    format!("def f({decl}) -> {result} = {}\n", call.replace('$', "x"))
-}
-
-/// The same call with its operand an unannotated lambda parameter, bound only
-/// by the application on the line below it. The route runs while the operand
-/// is still `Type::Var`.
-fn unresolved(decl: &str, call: &str, result: &str) -> String {
-    format!(
-        "def f({decl}) -> {result} = {{\n  g = fn (t) -> {}\n  g(x)\n}}\n",
-        call.replace('$', "t")
-    )
-}
-
-/// One route's four cells. `valid_result` is the type the route's rule
-/// actually produces; `invalid_call` is a call the rule rejects, and
-/// `diagnostic` is the substring its own rejection prints.
+/// One route's four parser-produced core programs: resolved and late-bound
+/// operands, each with a valid and invalid call. `diagnostic` identifies the
+/// route's own rejection.
 struct Row {
     route: &'static str,
-    decl: &'static str,
-    valid_call: &'static str,
-    valid_result: &'static str,
-    invalid_call: &'static str,
-    invalid_result: &'static str,
+    resolved_valid: &'static str,
+    resolved_invalid: &'static str,
+    late_valid: &'static str,
+    late_invalid: &'static str,
     diagnostic: &'static str,
 }
 
 fn run(row: &Row) {
     let Row {
         route,
-        decl,
-        valid_call,
-        valid_result,
-        invalid_call,
-        invalid_result,
+        resolved_valid,
+        resolved_invalid,
+        late_valid,
+        late_invalid,
         diagnostic,
     } = row;
 
     // Cell 1 (resolved, valid): DISPOSITION LOCK. Green before the repair;
     // it is here so a repair that rejects correct programs is caught.
-    check(&resolved(decl, valid_call, valid_result)).unwrap_or_else(|e| {
+    check(resolved_valid).unwrap_or_else(|e| {
         panic!(
             "{route}: a valid resolved call must check:\n{}",
             summary(&e)
@@ -93,7 +79,7 @@ fn run(row: &Row) {
     // Cell 2 (resolved, invalid): DISPOSITION LOCK. This is the rule that was
     // always right and simply never ran; the cell pins its exact wording so
     // cell 4 has something to be equal to.
-    let eager = check(&resolved(decl, invalid_call, invalid_result)).expect_err(&format!(
+    let eager = check(resolved_invalid).expect_err(&format!(
         "{route}: an invalid resolved call must be rejected"
     ));
     assert!(
@@ -106,7 +92,7 @@ fn run(row: &Row) {
     // DISPOSITION LOCK elsewhere. Before the repair the five window routes
     // published the OPERAND's type here, so a correct declared result was
     // rejected with a signature mismatch.
-    check(&unresolved(decl, valid_call, valid_result)).unwrap_or_else(|e| {
+    check(late_valid).unwrap_or_else(|e| {
         panic!(
             "{route}: a valid call over an unresolved operand must check:\n{}",
             summary(&e)
@@ -116,7 +102,7 @@ fn run(row: &Row) {
     // Cell 4 (unresolved, invalid): REGRESSION TEST. This is chelis#1512.
     // Before the repair every route below accepted this program at score 1
     // with an empty error list.
-    let deferred = check(&unresolved(decl, invalid_call, invalid_result)).expect_err(&format!(
+    let deferred = check(late_invalid).expect_err(&format!(
         "{route}: an invalid call over an unresolved operand must be rejected"
     ));
     assert!(
@@ -135,38 +121,58 @@ fn app_shape_window_family_validates_a_late_bound_operand() {
     for row in [
         Row {
             route: "permute",
-            decl: "x: tensor[3, 2, f32]",
-            valid_call: "permute($, 1i32, 0i32)",
-            valid_result: "tensor[2, 3, f32]",
-            invalid_call: "permute($, 1i32, 0i32, 2i32)",
-            invalid_result: "tensor[2, 3, f32]",
+            resolved_valid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_155.deep"
+            ),
+            resolved_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_156.deep"
+            ),
+            late_valid: include_str!("fixtures/core/tests/unresolved_operand_matrix/case_053.deep"),
+            late_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_157.deep"
+            ),
             diagnostic: "permute expects 2 axis indices for rank 2 tensor, got 3",
         },
         Row {
             route: "shrink",
-            decl: "x: tensor[2, 4, f32]",
-            valid_call: "shrink($, [[0i64, 1i64], [1i64, 3i64]])",
-            valid_result: "tensor[1, 2, f32]",
-            invalid_call: "shrink($, [[0i64, 1i64]])",
-            invalid_result: "tensor[1, 4, f32]",
+            resolved_valid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_158.deep"
+            ),
+            resolved_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_159.deep"
+            ),
+            late_valid: include_str!("fixtures/core/tests/unresolved_operand_matrix/case_160.deep"),
+            late_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_161.deep"
+            ),
             diagnostic: "shrink expects 2 bounds pairs for rank 2 tensor, got 1",
         },
         Row {
             route: "stride",
-            decl: "x: tensor[2, 4, f32]",
-            valid_call: "stride($, 1i64, 2i64)",
-            valid_result: "tensor[2, 2, f32]",
-            invalid_call: "stride($, 1i64)",
-            invalid_result: "tensor[2, 4, f32]",
+            resolved_valid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_162.deep"
+            ),
+            resolved_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_163.deep"
+            ),
+            late_valid: include_str!("fixtures/core/tests/unresolved_operand_matrix/case_056.deep"),
+            late_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_164.deep"
+            ),
             diagnostic: "stride expects 2 strides for rank 2 tensor, got 1",
         },
         Row {
             route: "pad",
-            decl: "x: tensor[2, 4, f32]",
-            valid_call: "pad($, [[0i64, 1i64], [0i64, 1i64]], 0.0f32)",
-            valid_result: "tensor[3, 5, f32]",
-            invalid_call: "pad($, [[0i64, 1i64]], 0.0f32)",
-            invalid_result: "tensor[3, 4, f32]",
+            resolved_valid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_165.deep"
+            ),
+            resolved_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_166.deep"
+            ),
+            late_valid: include_str!("fixtures/core/tests/unresolved_operand_matrix/case_167.deep"),
+            late_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_168.deep"
+            ),
             diagnostic: "pad expects 2 padding pairs for rank 2 tensor, got 1",
         },
     ] {
@@ -180,29 +186,44 @@ fn app_post_tensor_routes_validate_a_late_bound_operand() {
     for row in [
         Row {
             route: "tensor_to_scalar",
-            decl: "x: tensor[3, f32]",
-            valid_call: "tensor_to_scalar(sum($, 0i32))",
-            valid_result: "f32",
-            invalid_call: "tensor_to_scalar($)",
-            invalid_result: "f32",
+            resolved_valid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_169.deep"
+            ),
+            resolved_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_170.deep"
+            ),
+            late_valid: include_str!("fixtures/core/tests/unresolved_operand_matrix/case_171.deep"),
+            late_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_172.deep"
+            ),
             diagnostic: "tensor_to_scalar expects a rank-0 tensor",
         },
         Row {
             route: "cumsum",
-            decl: "x: tensor[2, 4, f32]",
-            valid_call: "cumsum($, 0i32)",
-            valid_result: "tensor[2, 4, f32]",
-            invalid_call: "cumsum($, 7i32)",
-            invalid_result: "tensor[2, 4, f32]",
+            resolved_valid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_173.deep"
+            ),
+            resolved_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_174.deep"
+            ),
+            late_valid: include_str!("fixtures/core/tests/unresolved_operand_matrix/case_175.deep"),
+            late_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_176.deep"
+            ),
             diagnostic: "cumsum axis 7 out of bounds for rank 2",
         },
         Row {
             route: "sort",
-            decl: "x: tensor[2, 4, f32]",
-            valid_call: "sort($, 0i32)",
-            valid_result: "(tensor[2, 4, f32], tensor[2, 4, i64])",
-            invalid_call: "sort($, 7i32)",
-            invalid_result: "(tensor[2, 4, f32], tensor[2, 4, i64])",
+            resolved_valid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_177.deep"
+            ),
+            resolved_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_178.deep"
+            ),
+            late_valid: include_str!("fixtures/core/tests/unresolved_operand_matrix/case_179.deep"),
+            late_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_180.deep"
+            ),
             diagnostic: "sort axis 7 out of bounds for rank 2",
         },
     ] {
@@ -218,65 +239,100 @@ fn app_post_collection_and_host_routes_validate_a_late_bound_operand() {
     for row in [
         Row {
             route: "len",
-            decl: "x: List[i32]",
-            valid_call: "len($)",
-            valid_result: "i64",
-            invalid_call: "len(to_tensor($))",
-            invalid_result: "i64",
+            resolved_valid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_181.deep"
+            ),
+            resolved_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_182.deep"
+            ),
+            late_valid: include_str!("fixtures/core/tests/unresolved_operand_matrix/case_061.deep"),
+            late_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_183.deep"
+            ),
             diagnostic: "len expects List or Dict input",
         },
         Row {
             route: "append",
-            decl: "x: List[i32]",
-            valid_call: "append($, 1i32)",
-            valid_result: "List[i32]",
-            invalid_call: "append(to_tensor($), 1i32)",
-            invalid_result: "List[i32]",
+            resolved_valid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_184.deep"
+            ),
+            resolved_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_185.deep"
+            ),
+            late_valid: include_str!("fixtures/core/tests/unresolved_operand_matrix/case_186.deep"),
+            late_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_187.deep"
+            ),
             diagnostic: "append expects List input",
         },
         Row {
             route: "enumerate",
-            decl: "x: List[i32]",
-            valid_call: "enumerate($)",
-            valid_result: "List[(i64, i32)]",
-            invalid_call: "enumerate(to_tensor($))",
-            invalid_result: "List[(i64, i32)]",
+            resolved_valid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_188.deep"
+            ),
+            resolved_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_189.deep"
+            ),
+            late_valid: include_str!("fixtures/core/tests/unresolved_operand_matrix/case_190.deep"),
+            late_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_191.deep"
+            ),
             diagnostic: "enumerate expects List input",
         },
         Row {
             route: "rank",
-            decl: "x: tensor[3, f32]",
-            valid_call: "rank($)",
-            valid_result: "i32",
-            invalid_call: "rank(to_list($))",
-            invalid_result: "i32",
+            resolved_valid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_192.deep"
+            ),
+            resolved_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_193.deep"
+            ),
+            late_valid: include_str!("fixtures/core/tests/unresolved_operand_matrix/case_194.deep"),
+            late_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_195.deep"
+            ),
             diagnostic: "rank expects tensor input",
         },
         Row {
             route: "numel",
-            decl: "x: tensor[3, f32]",
-            valid_call: "numel($)",
-            valid_result: "i64",
-            invalid_call: "numel(to_list($))",
-            invalid_result: "i64",
+            resolved_valid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_196.deep"
+            ),
+            resolved_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_197.deep"
+            ),
+            late_valid: include_str!("fixtures/core/tests/unresolved_operand_matrix/case_198.deep"),
+            late_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_199.deep"
+            ),
             diagnostic: "numel expects tensor input",
         },
         Row {
             route: "shape",
-            decl: "x: tensor[3, f32]",
-            valid_call: "shape($, 0i32)",
-            valid_result: "i64",
-            invalid_call: "shape(to_list($), 0i32)",
-            invalid_result: "i64",
+            resolved_valid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_200.deep"
+            ),
+            resolved_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_201.deep"
+            ),
+            late_valid: include_str!("fixtures/core/tests/unresolved_operand_matrix/case_202.deep"),
+            late_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_203.deep"
+            ),
             diagnostic: "shape expects tensor input",
         },
         Row {
             route: "string_len",
-            decl: "x: string",
-            valid_call: "string_len($)",
-            valid_result: "i64",
-            invalid_call: "string_len(to_int($))",
-            invalid_result: "i64",
+            resolved_valid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_204.deep"
+            ),
+            resolved_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_205.deep"
+            ),
+            late_valid: include_str!("fixtures/core/tests/unresolved_operand_matrix/case_206.deep"),
+            late_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_207.deep"
+            ),
             diagnostic: "string_len expects string input",
         },
     ] {
@@ -293,13 +349,16 @@ fn an_error_operand_still_suppresses_the_routes_own_diagnostic() {
     for (route, program) in [
         (
             "permute",
-            "def f(x: tensor[3, f32]) -> tensor[3, f32] = permute(nope(x), 1i32, 0i32)\n",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_001.deep"),
         ),
         (
             "cumsum",
-            "def f(x: tensor[3, f32]) -> tensor[3, f32] = cumsum(nope(x), 7i32)\n",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_002.deep"),
         ),
-        ("len", "def f(x: List[i32]) -> i64 = len(nope(x))\n"),
+        (
+            "len",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_003.deep"),
+        ),
     ] {
         let errors = check(program).expect_err("the unbound callee is an error");
         assert!(
@@ -336,11 +395,11 @@ fn an_operand_that_never_binds_is_rejected_at_the_declaration_boundary() {
     for (route, program) in [
         (
             "permute",
-            "def f() -> i32 = {\n  g = fn (t) -> permute(t, 1i32, 0i32)\n  1i32\n}\n",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_004.deep"),
         ),
         (
             "reshape",
-            "def f() -> i32 = {\n  g = fn (t) -> reshape(t, [6i64])\n  1i32\n}\n",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_005.deep"),
         ),
     ] {
         let errors = check(program).expect_err("a never-bound operand is not a typed program");
@@ -363,15 +422,15 @@ fn a_declared_result_the_route_cannot_produce_is_rejected() {
     for (route, program) in [
         (
             "permute",
-            "def f(x: tensor[3, 2, f32]) -> tensor[99, f32] = {\n  g = fn (t) -> permute(t, 1i32, 0i32)\n  g(x)\n}\n",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_006.deep"),
         ),
         (
             "cumsum",
-            "def f(x: tensor[3, 2, f32]) -> tensor[99, f32] = {\n  g = fn (t) -> cumsum(t, 0i32)\n  g(x)\n}\n",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_007.deep"),
         ),
         (
             "pad",
-            "def f(x: tensor[2, 4, f32]) -> tensor[99, f32] = {\n  g = fn (t) -> pad(t, [[0i64, 1i64], [0i64, 1i64]], 0.0f32)\n  g(x)\n}\n",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_008.deep"),
         ),
     ] {
         check(program).expect_err(&format!(
@@ -396,56 +455,86 @@ fn app_tensor_ledger_family_validates_a_late_bound_operand() {
     for row in [
         Row {
             route: "matmul",
-            decl: "x: tensor[3, 2, f32], y: tensor[2, 4, f32], z: tensor[5, 4, f32]",
-            valid_call: "matmul($, y)",
-            valid_result: "tensor[3, 4, f32]",
-            invalid_call: "matmul($, z)",
-            invalid_result: "tensor[3, 4, f32]",
+            resolved_valid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_208.deep"
+            ),
+            resolved_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_209.deep"
+            ),
+            late_valid: include_str!("fixtures/core/tests/unresolved_operand_matrix/case_210.deep"),
+            late_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_211.deep"
+            ),
             diagnostic: "dimension mismatch: Lit(2) vs Lit(5)",
         },
         Row {
             route: "sum",
-            decl: "x: tensor[3, 2, f32]",
-            valid_call: "sum($, 0i32)",
-            valid_result: "tensor[2, f32]",
-            invalid_call: "sum($, 7i32)",
-            invalid_result: "tensor[2, f32]",
+            resolved_valid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_212.deep"
+            ),
+            resolved_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_213.deep"
+            ),
+            late_valid: include_str!("fixtures/core/tests/unresolved_operand_matrix/case_214.deep"),
+            late_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_215.deep"
+            ),
             diagnostic: "sum axis 7 is out of bounds for rank 2 tensor",
         },
         Row {
             route: "expand",
-            decl: "x: tensor[1, 3, f32]",
-            valid_call: "expand($, 0i32, 4i64)",
-            valid_result: "tensor[4, 3, f32]",
-            invalid_call: "expand($, 9i32, 4i64)",
-            invalid_result: "tensor[4, 3, f32]",
+            resolved_valid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_216.deep"
+            ),
+            resolved_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_217.deep"
+            ),
+            late_valid: include_str!("fixtures/core/tests/unresolved_operand_matrix/case_218.deep"),
+            late_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_219.deep"
+            ),
             diagnostic: "expand axis 9 is out of bounds for rank 2 tensor",
         },
         Row {
             route: "layer_norm",
-            decl: "x: tensor[3, 2, f32], w: tensor[2, f32], v: tensor[5, f32]",
-            valid_call: "layer_norm($, w, w, 0.001f32)",
-            valid_result: "tensor[3, 2, f32]",
-            invalid_call: "layer_norm($, v, v, 0.001f32)",
-            invalid_result: "tensor[3, 2, f32]",
+            resolved_valid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_220.deep"
+            ),
+            resolved_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_221.deep"
+            ),
+            late_valid: include_str!("fixtures/core/tests/unresolved_operand_matrix/case_222.deep"),
+            late_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_223.deep"
+            ),
             diagnostic: "dimension mismatch: Lit(2) vs Lit(5)",
         },
         Row {
             route: "scatter_elements",
-            decl: "x: tensor[3, f32], i: tensor[3, i64], u: tensor[3, f32], bad: tensor[2, f32]",
-            valid_call: "scatter_elements($, i, u, 0i32)",
-            valid_result: "tensor[3, f32]",
-            invalid_call: "scatter_elements($, i, bad, 0i32)",
-            invalid_result: "tensor[3, f32]",
+            resolved_valid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_224.deep"
+            ),
+            resolved_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_225.deep"
+            ),
+            late_valid: include_str!("fixtures/core/tests/unresolved_operand_matrix/case_226.deep"),
+            late_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_227.deep"
+            ),
             diagnostic: "scatter_elements updates shape must equal indices shape",
         },
         Row {
             route: "conv",
-            decl: "x: tensor[1, 2, 4, 4, f32], w: tensor[3, 2, 3, 3, f32], bad: tensor[3, 5, 3, 3, f32]",
-            valid_call: "conv($, w, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])",
-            valid_result: "tensor[1, 3, 2, 2, f32]",
-            invalid_call: "conv($, bad, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])",
-            invalid_result: "tensor[1, 3, 2, 2, f32]",
+            resolved_valid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_228.deep"
+            ),
+            resolved_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_229.deep"
+            ),
+            late_valid: include_str!("fixtures/core/tests/unresolved_operand_matrix/case_230.deep"),
+            late_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_231.deep"
+            ),
             diagnostic: "Lit(2) vs Lit(5)",
         },
     ] {
@@ -464,11 +553,12 @@ fn app_tensor_ledger_family_validates_a_late_bound_operand() {
 fn reshape_validates_a_late_bound_operand() {
     run(&Row {
         route: "reshape",
-        decl: "x: tensor[3, 2, f32]",
-        valid_call: "reshape($, [6i64])",
-        valid_result: "tensor[6, f32]",
-        invalid_call: "reshape($, [7i64])",
-        invalid_result: "tensor[7, f32]",
+        resolved_valid: include_str!("fixtures/core/tests/unresolved_operand_matrix/case_232.deep"),
+        resolved_invalid: include_str!(
+            "fixtures/core/tests/unresolved_operand_matrix/case_233.deep"
+        ),
+        late_valid: include_str!("fixtures/core/tests/unresolved_operand_matrix/case_234.deep"),
+        late_invalid: include_str!("fixtures/core/tests/unresolved_operand_matrix/case_235.deep"),
         diagnostic: "reshape target has 7 elements but input tensor has 6",
     });
 }
@@ -487,37 +577,37 @@ fn a_route_whose_arm_admits_a_variable_is_still_rejected_by_a_later_rule() {
     for (route, program, diagnostic) in [
         (
             "and",
-            "def f(x: tensor[3, f32], y: tensor[3, f32]) -> tensor[3, bool] = {\n  g = fn (t) -> and(t, y)\n  g(x)\n}\n",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_009.deep"),
             "and does not accept argument type tensor[3, f32] in this context",
         ),
         (
             "string_contains",
-            "def f(x: i32) -> bool = {\n  g = fn (t) -> string_contains(t, \"a\")\n  g(x)\n}\n",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_010.deep"),
             "precision mismatch: expected string, got i32",
         ),
         (
             "dict_get",
-            "def f(d: Dict[string, i32], k: i32) -> i32 = {\n  g = fn (t) -> dict_get(d, t)\n  g(k)\n}\n",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_011.deep"),
             "precision mismatch: expected string, got i32",
         ),
         (
             "dict_insert",
-            "def f(d: Dict[string, i32], k: i32) -> Dict[string, i32] = {\n  g = fn (t) -> dict_insert(d, t, 1i32)\n  g(k)\n}\n",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_012.deep"),
             "precision mismatch: expected string, got i32",
         ),
         (
             "expand",
-            "def f(x: tensor[1, f32], a: i32) -> tensor[4, f32] = {\n  g = fn (v) -> expand(x, 0i32, v)\n  g(a)\n}\n",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_013.deep"),
             "but no tensor in scope carries it",
         ),
         (
             "cast",
-            "def f(x: List[i32]) -> f32 = {\n  g = fn (t) -> cast(t, f32)\n  g(x)\n}\n",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_014.deep"),
             "cast requires tensor or prim type",
         ),
         (
             "sum",
-            "def f(x: tensor[3, 2, f32], a: i64) -> tensor[2, f32] = {\n  g = fn (v) -> sum(x, v)\n  g(a)\n}\n",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_015.deep"),
             "is neither a compile-time constant nor a named axis of the operand",
         ),
     ] {
@@ -542,11 +632,7 @@ fn a_route_whose_arm_admits_a_variable_is_still_rejected_by_a_later_rule() {
 /// unresolved.
 #[test]
 fn a_chain_of_suspended_calls_settles_in_one_declaration() {
-    let chained = "def f(x: tensor[3, 2, f32]) -> tensor[3, 2, f32] = {\n  \
-                   g = fn (t) -> permute(t, 1i32, 0i32)\n  \
-                   h = fn (u) -> permute(u, 1i32, 0i32)\n  \
-                   a = h(x)\n  \
-                   g(a)\n}\n";
+    let chained = include_str!("fixtures/core/tests/unresolved_operand_matrix/case_016.deep");
     check(chained).unwrap_or_else(|e| {
         panic!(
             "a chain of suspended routes must settle, not report an unresolved obligation:\n{}",
@@ -557,11 +643,7 @@ fn a_chain_of_suspended_calls_settles_in_one_declaration() {
     // NEGATIVE TWIN: the chain settling is not the same as the chain being
     // unchecked. Both `permute` rules still run, so the wrong declared result
     // is still rejected.
-    let wrong = "def f(x: tensor[3, 2, f32]) -> tensor[2, 3, f32] = {\n  \
-                 g = fn (t) -> permute(t, 1i32, 0i32)\n  \
-                 h = fn (u) -> permute(u, 1i32, 0i32)\n  \
-                 a = h(x)\n  \
-                 g(a)\n}\n";
+    let wrong = include_str!("fixtures/core/tests/unresolved_operand_matrix/case_017.deep");
     check(wrong).expect_err("two transpositions return the original shape");
 }
 
@@ -572,7 +654,7 @@ fn a_chain_of_suspended_calls_settles_in_one_declaration() {
 /// REGRESSION TEST for the count, DISPOSITION LOCK for the wording.
 #[test]
 fn a_never_bound_operand_is_reported_exactly_once() {
-    let never = "def f() -> i32 = {\n  g = fn (t) -> permute(t, 1i32, 0i32)\n  1i32\n}\n";
+    let never = include_str!("fixtures/core/tests/unresolved_operand_matrix/case_004.deep");
     let errors = check(never).expect_err("a never-bound operand is not a typed program");
     assert_eq!(
         errors.len(),
@@ -590,9 +672,8 @@ fn a_never_bound_operand_is_reported_exactly_once() {
 }
 
 /// A route whose unresolved operand is not the FIRST one, or whose valid and
-/// invalid twins need different declarations, cannot use [`Row`]: that helper
-/// substitutes one binding into both calls. These carry their three programs
-/// written out instead.
+/// invalid twins need different declarations, uses three independent fixtures
+/// rather than [`Row`]'s four-cell comparison.
 struct Cell {
     route: &'static str,
     /// Resolved control: the rule that was always right, and its exact wording.
@@ -684,23 +765,35 @@ fn a_late_bound_secondary_operand_is_validated_too() {
     for cell in [
         Cell {
             route: "where",
-            resolved_invalid: "def f(c: tensor[3, bool], a: tensor[3, f32], b: tensor[2, f32]) -> tensor[3, f32] = where(c, a, b)\n",
-            late_invalid: "def f(c: tensor[3, bool], a: tensor[3, f32], b: tensor[2, f32]) -> tensor[3, f32] = {\n  g = fn (t) -> where(c, t, b)\n  g(a)\n}\n",
-            late_valid: "def f(c: tensor[3, bool], a: tensor[3, f32], b: tensor[3, f32]) -> tensor[3, f32] = {\n  g = fn (t) -> where(c, t, b)\n  g(a)\n}\n",
+            resolved_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_018.deep"
+            ),
+            late_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_019.deep"
+            ),
+            late_valid: include_str!("fixtures/core/tests/unresolved_operand_matrix/case_020.deep"),
             diagnostic: "where expects cond/both branches to have matching tensor shapes and branch precision",
         },
         Cell {
             route: "clamp",
-            resolved_invalid: "def f(x: tensor[3, f32], lo: tensor[2, f32], hi: tensor[3, f32]) -> tensor[3, f32] = clamp(x, lo, hi)\n",
-            late_invalid: "def f(x: tensor[3, f32], lo: tensor[2, f32], hi: tensor[3, f32]) -> tensor[3, f32] = {\n  g = fn (t) -> clamp(t, lo, hi)\n  g(x)\n}\n",
-            late_valid: "def f(x: tensor[3, f32], lo: tensor[3, f32], hi: tensor[3, f32]) -> tensor[3, f32] = {\n  g = fn (t) -> clamp(t, lo, hi)\n  g(x)\n}\n",
+            resolved_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_021.deep"
+            ),
+            late_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_022.deep"
+            ),
+            late_valid: include_str!("fixtures/core/tests/unresolved_operand_matrix/case_023.deep"),
             diagnostic: "clamp expects tensor input plus scalar-tensor or matching-shape tensor bounds of the same precision",
         },
         Cell {
             route: "index",
-            resolved_invalid: "def f(xs: List[i32], k: f32) -> i32 = index(xs, k)\n",
-            late_invalid: "def f(xs: List[i32], k: f32) -> i32 = {\n  g = fn (n) -> index(xs, n)\n  g(k)\n}\n",
-            late_valid: "def f(xs: List[i32], k: i64) -> i32 = {\n  g = fn (n) -> index(xs, n)\n  g(k)\n}\n",
+            resolved_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_024.deep"
+            ),
+            late_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_025.deep"
+            ),
+            late_valid: include_str!("fixtures/core/tests/unresolved_operand_matrix/case_026.deep"),
             diagnostic: "index expects i64 index, got f32",
         },
         Cell {
@@ -709,44 +802,68 @@ fn a_late_bound_secondary_operand_is_validated_too() {
             // rewrites the SIBLING tensor-concat branch of this same match and
             // leaves this arm alone.
             route: "concat",
-            resolved_invalid: "def f(x: List[i32], y: List[f32]) -> List[i32] = concat(x, y)\n",
-            late_invalid: "def f(x: List[i32], y: List[f32]) -> List[i32] = {\n  g = fn (t) -> concat(x, t)\n  g(y)\n}\n",
-            late_valid: "def f(x: List[i32], y: List[i32]) -> List[i32] = {\n  g = fn (t) -> concat(x, t)\n  g(y)\n}\n",
+            resolved_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_027.deep"
+            ),
+            late_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_028.deep"
+            ),
+            late_valid: include_str!("fixtures/core/tests/unresolved_operand_matrix/case_029.deep"),
             diagnostic: "precision mismatch: expected i32, got f32",
         },
         Cell {
             route: "zip",
-            resolved_invalid: "def f(x: List[i32], y: i32) -> List[(i32, i32)] = zip(x, y)\n",
-            late_invalid: "def f(x: List[i32], y: i32) -> List[(i32, i32)] = {\n  g = fn (t) -> zip(x, t)\n  g(y)\n}\n",
-            late_valid: "def f(x: List[i32], y: List[i32]) -> List[(i32, i32)] = {\n  g = fn (t) -> zip(x, t)\n  g(y)\n}\n",
+            resolved_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_030.deep"
+            ),
+            late_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_031.deep"
+            ),
+            late_valid: include_str!("fixtures/core/tests/unresolved_operand_matrix/case_032.deep"),
             diagnostic: "zip expects List inputs, got List i32 and i32",
         },
         Cell {
             route: "dict_merge",
-            resolved_invalid: "def f(d: Dict[string, i32], e: Dict[string, f32]) -> Dict[string, i32] = dict_merge(d, e)\n",
-            late_invalid: "def f(d: Dict[string, i32], e: Dict[string, f32]) -> Dict[string, i32] = {\n  g = fn (t) -> dict_merge(d, t)\n  g(e)\n}\n",
-            late_valid: "def f(d: Dict[string, i32], e: Dict[string, i32]) -> Dict[string, i32] = {\n  g = fn (t) -> dict_merge(d, t)\n  g(e)\n}\n",
+            resolved_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_033.deep"
+            ),
+            late_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_034.deep"
+            ),
+            late_valid: include_str!("fixtures/core/tests/unresolved_operand_matrix/case_035.deep"),
             diagnostic: "precision mismatch: expected i32, got f32",
         },
         Cell {
             route: "split sizes",
-            resolved_invalid: "def f(x: tensor[4, f32], s: List[f32]) -> List[tensor[2, f32]] = split(x, 0i32, s)\n",
-            late_invalid: "def f(x: tensor[4, f32], s: List[f32]) -> List[tensor[2, f32]] = {\n  g = fn (t) -> split(x, 0i32, t)\n  g(s)\n}\n",
-            late_valid: "def f(x: tensor[4, f32], s: List[i64]) -> List[tensor[2, f32]] = {\n  g = fn (t) -> split(x, 0i32, t)\n  g(s)\n}\n",
+            resolved_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_036.deep"
+            ),
+            late_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_037.deep"
+            ),
+            late_valid: include_str!("fixtures/core/tests/unresolved_operand_matrix/case_038.deep"),
             diagnostic: "split expects List[int] sizes",
         },
         Cell {
             route: "split input",
-            resolved_invalid: "def f(x: List[i32], s: List[i64]) -> List[tensor[2, f32]] = split(x, 0i32, s)\n",
-            late_invalid: "def f(x: List[i32], s: List[i64]) -> List[tensor[2, f32]] = {\n  g = fn (t) -> split(t, 0i32, s)\n  g(x)\n}\n",
-            late_valid: "def f(x: tensor[4, f32], s: List[i64]) -> List[tensor[2, f32]] = {\n  g = fn (t) -> split(t, 0i32, s)\n  g(x)\n}\n",
+            resolved_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_039.deep"
+            ),
+            late_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_040.deep"
+            ),
+            late_valid: include_str!("fixtures/core/tests/unresolved_operand_matrix/case_041.deep"),
             diagnostic: "split expects tensor input and List[int] sizes",
         },
         Cell {
             route: "take",
-            resolved_invalid: "def f(x: List[i32], k: f32) -> List[i32] = take(x, k)\n",
-            late_invalid: "def f(x: List[i32], k: f32) -> List[i32] = {\n  g = fn (n) -> take(x, n)\n  g(k)\n}\n",
-            late_valid: "def f(x: List[i32], k: i64) -> List[i32] = {\n  g = fn (n) -> take(x, n)\n  g(k)\n}\n",
+            resolved_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_042.deep"
+            ),
+            late_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_043.deep"
+            ),
+            late_valid: include_str!("fixtures/core/tests/unresolved_operand_matrix/case_044.deep"),
             diagnostic: "take expects integer count, got f32",
         },
         Cell {
@@ -754,16 +871,24 @@ fn a_late_bound_secondary_operand_is_validated_too() {
             // diagnostic interpolates the callee name and a shared arm that
             // named one of them would pass with the other silently wrong.
             route: "drop",
-            resolved_invalid: "def f(x: List[i32], k: f32) -> List[i32] = drop(x, k)\n",
-            late_invalid: "def f(x: List[i32], k: f32) -> List[i32] = {\n  g = fn (n) -> drop(x, n)\n  g(k)\n}\n",
-            late_valid: "def f(x: List[i32], k: i64) -> List[i32] = {\n  g = fn (n) -> drop(x, n)\n  g(k)\n}\n",
+            resolved_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_045.deep"
+            ),
+            late_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_046.deep"
+            ),
+            late_valid: include_str!("fixtures/core/tests/unresolved_operand_matrix/case_047.deep"),
             diagnostic: "drop expects integer count, got f32",
         },
         Cell {
             route: "chunk",
-            resolved_invalid: "def f(x: List[i32], k: f32) -> List[List[i32]] = chunk(x, k)\n",
-            late_invalid: "def f(x: List[i32], k: f32) -> List[List[i32]] = {\n  g = fn (n) -> chunk(x, n)\n  g(k)\n}\n",
-            late_valid: "def f(x: List[i32], k: i64) -> List[List[i32]] = {\n  g = fn (n) -> chunk(x, n)\n  g(k)\n}\n",
+            resolved_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_048.deep"
+            ),
+            late_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_049.deep"
+            ),
+            late_valid: include_str!("fixtures/core/tests/unresolved_operand_matrix/case_050.deep"),
             diagnostic: "chunk expects integer size, got f32",
         },
         Cell {
@@ -771,16 +896,24 @@ fn a_late_bound_secondary_operand_is_validated_too() {
             // axis or step that bound late slipped past the route's own guard
             // while the tensor was already settled.
             route: "permute axis",
-            resolved_invalid: "def f(x: tensor[3, 2, f32], a: i64) -> tensor[2, 3, f32] = permute(x, a, 0i32)\n",
-            late_invalid: "def f(x: tensor[3, 2, f32], a: i64) -> tensor[2, 3, f32] = {\n  g = fn (v) -> permute(x, v, 0i32)\n  g(a)\n}\n",
-            late_valid: "def f(x: tensor[3, 2, f32]) -> tensor[2, 3, f32] = {\n  g = fn (t) -> permute(t, 1i32, 0i32)\n  g(x)\n}\n",
+            resolved_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_051.deep"
+            ),
+            late_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_052.deep"
+            ),
+            late_valid: include_str!("fixtures/core/tests/unresolved_operand_matrix/case_053.deep"),
             diagnostic: "permute expects i32 axis indices, got i64",
         },
         Cell {
             route: "stride step",
-            resolved_invalid: "def f(x: tensor[2, 4, f32], a: i32) -> tensor[2, 2, f32] = stride(x, a, 2i64)\n",
-            late_invalid: "def f(x: tensor[2, 4, f32], a: i32) -> tensor[2, 2, f32] = {\n  g = fn (v) -> stride(x, v, 2i64)\n  g(a)\n}\n",
-            late_valid: "def f(x: tensor[2, 4, f32]) -> tensor[2, 2, f32] = {\n  g = fn (t) -> stride(t, 1i64, 2i64)\n  g(x)\n}\n",
+            resolved_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_054.deep"
+            ),
+            late_invalid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_055.deep"
+            ),
+            late_valid: include_str!("fixtures/core/tests/unresolved_operand_matrix/case_056.deep"),
             diagnostic: "stride expects i64 strides (write 2i64), got i32",
         },
     ] {
@@ -798,11 +931,11 @@ fn never_bound_collection_contracts_reject_while_other_routes_keep_their_disposi
     for (route, program) in [
         (
             "len",
-            "def f() -> i32 = {\n  g = fn (t) -> len(t)\n  1i32\n}\n",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_057.deep"),
         ),
         (
             "index",
-            "def f(xs: List[i32]) -> i32 = {\n  g = fn (n) -> index(xs, n)\n  1i32\n}\n",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_058.deep"),
         ),
     ] {
         let errors =
@@ -821,10 +954,9 @@ fn never_bound_collection_contracts_reject_while_other_routes_keep_their_disposi
         );
     }
 
-    check(
-        "def f(c: tensor[3, bool], b: tensor[3, f32]) -> i32 = {\n  \
-         g = fn (t) -> where(c, t, b)\n  1i32\n}\n",
-    )
+    check(include_str!(
+        "fixtures/core/tests/unresolved_operand_matrix/case_059.deep"
+    ))
     .unwrap_or_else(|e| {
         panic!(
             "where: the unchanged non-collection route must remain accepted:\n{}",
@@ -833,7 +965,10 @@ fn never_bound_collection_contracts_reject_while_other_routes_keep_their_disposi
     });
 
     // The standard library's own shape, reduced to one declaration.
-    check("def f() -> Dict[string, i32] = dict_of([])\n").unwrap_or_else(|e| {
+    check(include_str!(
+        "fixtures/core/tests/unresolved_operand_matrix/case_060.deep"
+    ))
+    .unwrap_or_else(|e| {
         panic!(
             "dict_of: the declared result decides an empty literal's element type, and the \
              operand never binds:\n{}",
@@ -842,14 +977,18 @@ fn never_bound_collection_contracts_reject_while_other_routes_keep_their_disposi
     });
 
     // Applied once, validly: still accepted, and the route ran.
-    check("def f(x: List[i32]) -> i64 = {\n  g = fn (t) -> len(t)\n  g(x)\n}\n")
-        .unwrap_or_else(|e| panic!("len: a valid binding must check:\n{}", summary(&e)));
+    check(include_str!(
+        "fixtures/core/tests/unresolved_operand_matrix/case_061.deep"
+    ))
+    .unwrap_or_else(|e| panic!("len: a valid binding must check:\n{}", summary(&e)));
 
     // Applied once, invalidly: rejected with the ROUTE's own text. Accepting
     // the never-bound case is not the same as not checking; this is the cell
     // that separates the two.
-    let errors = check("def f(x: tensor[3, f32]) -> i64 = {\n  g = fn (t) -> len(t)\n  g(x)\n}\n")
-        .expect_err("len over a tensor must be rejected once the operand binds");
+    let errors = check(include_str!(
+        "fixtures/core/tests/unresolved_operand_matrix/case_062.deep"
+    ))
+    .expect_err("len over a tensor must be rejected once the operand binds");
     assert!(
         errors
             .iter()
@@ -873,12 +1012,12 @@ fn a_call_that_suspends_and_then_rejects_eagerly_reports_once() {
     for (route, program, diagnostic) in [
         (
             "string_slice",
-            "def f(x: string) -> string = {\n  g = fn (t) -> string_slice(t, 0i64, 1.5f32)\n  g(x)\n}\n",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_063.deep"),
             "string_slice expects integer index arguments",
         ),
         (
             "string_concat",
-            "def f(x: string) -> string = {\n  g = fn (t) -> string_concat(t, 5i64)\n  g(x)\n}\n",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_064.deep"),
             "string_concat expects string arguments",
         ),
     ] {
@@ -899,9 +1038,9 @@ fn a_call_that_suspends_and_then_rejects_eagerly_reports_once() {
     // NEGATIVE TWIN. Cancelling a failed call's suspension must not cancel the
     // validation of a call that did NOT fail eagerly: the same route, invalid
     // only in the operand that binds late, still rejects.
-    let errors = check(
-        "def f(x: i32) -> string = {\n  g = fn (t) -> string_slice(t, 0i64, 1i64)\n  g(x)\n}\n",
-    )
+    let errors = check(include_str!(
+        "fixtures/core/tests/unresolved_operand_matrix/case_065.deep"
+    ))
     .expect_err("string_slice over a late-bound non-string must be rejected");
     assert!(
         !errors.is_empty(),
@@ -990,12 +1129,20 @@ fn dtype_admissibility_validates_a_late_bound_operand() {
         DtypeCell {
             cell: Cell {
                 route: "sqrt",
-                resolved_invalid: "def f(x: i32) -> i32 = sqrt(x)\n",
-                late_invalid: "def f(x: i32) -> i32 = {\n  g = fn (t) -> sqrt(t)\n  g(x)\n}\n",
-                late_valid: "def f(x: f32) -> f32 = {\n  g = fn (t) -> sqrt(t)\n  g(x)\n}\n",
+                resolved_invalid: include_str!(
+                    "fixtures/core/tests/unresolved_operand_matrix/case_066.deep"
+                ),
+                late_invalid: include_str!(
+                    "fixtures/core/tests/unresolved_operand_matrix/case_067.deep"
+                ),
+                late_valid: include_str!(
+                    "fixtures/core/tests/unresolved_operand_matrix/case_068.deep"
+                ),
                 diagnostic: "sqrt does not accept argument type i32 in this context",
             },
-            resolved_valid: "def f(x: f32) -> f32 = sqrt(x)\n",
+            resolved_valid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_069.deep"
+            ),
         },
         // The logical operations are bool-only, and the arithmetic ones are
         // exactly not-bool ([04-NUM-4]). Both directions, so a repair cannot
@@ -1003,44 +1150,76 @@ fn dtype_admissibility_validates_a_late_bound_operand() {
         DtypeCell {
             cell: Cell {
                 route: "and",
-                resolved_invalid: "def f(x: i32) -> i32 = and(x, x)\n",
-                late_invalid: "def f(x: i32) -> i32 = {\n  g = fn (t) -> and(t, t)\n  g(x)\n}\n",
-                late_valid: "def f(x: bool) -> bool = {\n  g = fn (t) -> and(t, t)\n  g(x)\n}\n",
+                resolved_invalid: include_str!(
+                    "fixtures/core/tests/unresolved_operand_matrix/case_070.deep"
+                ),
+                late_invalid: include_str!(
+                    "fixtures/core/tests/unresolved_operand_matrix/case_071.deep"
+                ),
+                late_valid: include_str!(
+                    "fixtures/core/tests/unresolved_operand_matrix/case_072.deep"
+                ),
                 diagnostic: "and does not accept argument type i32 in this context",
             },
-            resolved_valid: "def f(x: bool) -> bool = and(x, x)\n",
+            resolved_valid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_073.deep"
+            ),
         },
         DtypeCell {
             cell: Cell {
                 route: "add",
-                resolved_invalid: "def f(x: bool) -> bool = add(x, x)\n",
-                late_invalid: "def f(x: bool) -> bool = {\n  g = fn (t) -> add(t, t)\n  g(x)\n}\n",
-                late_valid: "def f(x: i32) -> i32 = {\n  g = fn (t) -> add(t, t)\n  g(x)\n}\n",
+                resolved_invalid: include_str!(
+                    "fixtures/core/tests/unresolved_operand_matrix/case_074.deep"
+                ),
+                late_invalid: include_str!(
+                    "fixtures/core/tests/unresolved_operand_matrix/case_075.deep"
+                ),
+                late_valid: include_str!(
+                    "fixtures/core/tests/unresolved_operand_matrix/case_076.deep"
+                ),
                 diagnostic: "add on bool operands is not admitted",
             },
-            resolved_valid: "def f(x: i32) -> i32 = add(x, x)\n",
+            resolved_valid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_077.deep"
+            ),
         },
         // The reduction family's own dtype rule, reached from the first-argument
         // arm of `validate_numeric_and_reduction_arguments`.
         DtypeCell {
             cell: Cell {
                 route: "mean",
-                resolved_invalid: "def f(x: tensor[3, i32]) -> tensor[i32] = mean(x, 0i32)\n",
-                late_invalid: "def f(x: tensor[3, i32]) -> tensor[i32] = {\n  g = fn (t) -> mean(t, 0i32)\n  g(x)\n}\n",
-                late_valid: "def f(x: tensor[3, f32]) -> tensor[f32] = {\n  g = fn (t) -> mean(t, 0i32)\n  g(x)\n}\n",
+                resolved_invalid: include_str!(
+                    "fixtures/core/tests/unresolved_operand_matrix/case_078.deep"
+                ),
+                late_invalid: include_str!(
+                    "fixtures/core/tests/unresolved_operand_matrix/case_079.deep"
+                ),
+                late_valid: include_str!(
+                    "fixtures/core/tests/unresolved_operand_matrix/case_080.deep"
+                ),
                 diagnostic: "mean on operand precision `i32` is not admitted",
             },
-            resolved_valid: "def f(x: tensor[3, f32]) -> tensor[f32] = mean(x, 0i32)\n",
+            resolved_valid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_081.deep"
+            ),
         },
         DtypeCell {
             cell: Cell {
                 route: "softmax",
-                resolved_invalid: "def f(x: tensor[3, i32]) -> tensor[3, i32] = softmax(x, 0i32)\n",
-                late_invalid: "def f(x: tensor[3, i32]) -> tensor[3, i32] = {\n  g = fn (t) -> softmax(t, 0i32)\n  g(x)\n}\n",
-                late_valid: "def f(x: tensor[3, f32]) -> tensor[3, f32] = {\n  g = fn (t) -> softmax(t, 0i32)\n  g(x)\n}\n",
+                resolved_invalid: include_str!(
+                    "fixtures/core/tests/unresolved_operand_matrix/case_082.deep"
+                ),
+                late_invalid: include_str!(
+                    "fixtures/core/tests/unresolved_operand_matrix/case_083.deep"
+                ),
+                late_valid: include_str!(
+                    "fixtures/core/tests/unresolved_operand_matrix/case_084.deep"
+                ),
                 diagnostic: "softmax on operand precision `i32` is not admitted",
             },
-            resolved_valid: "def f(x: tensor[3, f32]) -> tensor[3, f32] = softmax(x, 0i32)\n",
+            resolved_valid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_085.deep"
+            ),
         },
         // `reject_inadmissible_operand_dtypes`. `uniform_like`'s template
         // parameter is a bare type variable in the builtin scheme, so a
@@ -1049,22 +1228,38 @@ fn dtype_admissibility_validates_a_late_bound_operand() {
         DtypeCell {
             cell: Cell {
                 route: "uniform_like (non-float template)",
-                resolved_invalid: "def f(x: tensor[3, i32]) -> tensor[3, i32] ! {Random} = uniform_like(x, 0.0f32, 1.0f32)\n",
-                late_invalid: "def f(x: tensor[3, i32]) -> tensor[3, i32] ! {Random} = {\n  g = fn (t) -> uniform_like(t, 0.0f32, 1.0f32)\n  g(x)\n}\n",
-                late_valid: "def f(x: tensor[3, f32]) -> tensor[3, f32] ! {Random} = {\n  g = fn (t) -> uniform_like(t, 0.0f32, 1.0f32)\n  g(x)\n}\n",
+                resolved_invalid: include_str!(
+                    "fixtures/core/tests/unresolved_operand_matrix/case_086.deep"
+                ),
+                late_invalid: include_str!(
+                    "fixtures/core/tests/unresolved_operand_matrix/case_087.deep"
+                ),
+                late_valid: include_str!(
+                    "fixtures/core/tests/unresolved_operand_matrix/case_088.deep"
+                ),
                 diagnostic: "uniform_like expects a float tensor template",
             },
-            resolved_valid: "def f(x: tensor[3, f32]) -> tensor[3, f32] ! {Random} = uniform_like(x, 0.0f32, 1.0f32)\n",
+            resolved_valid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_089.deep"
+            ),
         },
         DtypeCell {
             cell: Cell {
                 route: "uniform_like (non-tensor template)",
-                resolved_invalid: "def f(x: i32) -> i32 ! {Random} = uniform_like(x, 0.0f32, 1.0f32)\n",
-                late_invalid: "def f(x: i32) -> i32 ! {Random} = {\n  g = fn (t) -> uniform_like(t, 0.0f32, 1.0f32)\n  g(x)\n}\n",
-                late_valid: "def f(x: tensor[3, f32]) -> tensor[3, f32] ! {Random} = {\n  g = fn (t) -> uniform_like(t, 0.0f32, 1.0f32)\n  g(x)\n}\n",
+                resolved_invalid: include_str!(
+                    "fixtures/core/tests/unresolved_operand_matrix/case_090.deep"
+                ),
+                late_invalid: include_str!(
+                    "fixtures/core/tests/unresolved_operand_matrix/case_091.deep"
+                ),
+                late_valid: include_str!(
+                    "fixtures/core/tests/unresolved_operand_matrix/case_088.deep"
+                ),
                 diagnostic: "uniform_like expects tensor template input",
             },
-            resolved_valid: "def f(x: tensor[3, f32]) -> tensor[3, f32] ! {Random} = uniform_like(x, 0.0f32, 1.0f32)\n",
+            resolved_valid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_089.deep"
+            ),
         },
         // `integer_binop_result_type`: the binary operators decide the call's
         // RESULT type, not only its admissibility, and their operands are three
@@ -1072,44 +1267,76 @@ fn dtype_admissibility_validates_a_late_bound_operand() {
         DtypeCell {
             cell: Cell {
                 route: "mod",
-                resolved_invalid: "def f(x: i64) -> i64 = mod(x, 3i32)\n",
-                late_invalid: "def f(x: i64) -> i64 = {\n  g = fn (t) -> mod(t, 3i32)\n  g(x)\n}\n",
-                late_valid: "def f(x: i32) -> i32 = {\n  g = fn (t) -> mod(t, 3i32)\n  g(x)\n}\n",
+                resolved_invalid: include_str!(
+                    "fixtures/core/tests/unresolved_operand_matrix/case_092.deep"
+                ),
+                late_invalid: include_str!(
+                    "fixtures/core/tests/unresolved_operand_matrix/case_093.deep"
+                ),
+                late_valid: include_str!(
+                    "fixtures/core/tests/unresolved_operand_matrix/case_094.deep"
+                ),
                 diagnostic: "mod requires matching integer arguments, got i64 and i32",
             },
-            resolved_valid: "def f(x: i32) -> i32 = mod(x, 3i32)\n",
+            resolved_valid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_095.deep"
+            ),
         },
         DtypeCell {
             cell: Cell {
                 route: "bitand",
-                resolved_invalid: "def f(x: i64) -> i64 = bitand(x, 3i32)\n",
-                late_invalid: "def f(x: i64) -> i64 = {\n  g = fn (t) -> bitand(t, 3i32)\n  g(x)\n}\n",
-                late_valid: "def f(x: i32) -> i32 = {\n  g = fn (t) -> bitand(t, 3i32)\n  g(x)\n}\n",
+                resolved_invalid: include_str!(
+                    "fixtures/core/tests/unresolved_operand_matrix/case_096.deep"
+                ),
+                late_invalid: include_str!(
+                    "fixtures/core/tests/unresolved_operand_matrix/case_097.deep"
+                ),
+                late_valid: include_str!(
+                    "fixtures/core/tests/unresolved_operand_matrix/case_098.deep"
+                ),
                 diagnostic: "bitand requires matching integer arguments, got i64 and i32",
             },
-            resolved_valid: "def f(x: i32) -> i32 = bitand(x, 3i32)\n",
+            resolved_valid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_099.deep"
+            ),
         },
         // The shift operators, whose admissibility was two boolean
         // disjunctions rather than match arms until this repair.
         DtypeCell {
             cell: Cell {
                 route: "shl",
-                resolved_invalid: "def f(x: f32) -> f32 = shl(x, 1i32)\n",
-                late_invalid: "def f(x: f32) -> f32 = {\n  g = fn (t) -> shl(t, 1i32)\n  g(x)\n}\n",
-                late_valid: "def f(x: i32) -> i32 = {\n  g = fn (t) -> shl(t, 1i32)\n  g(x)\n}\n",
+                resolved_invalid: include_str!(
+                    "fixtures/core/tests/unresolved_operand_matrix/case_100.deep"
+                ),
+                late_invalid: include_str!(
+                    "fixtures/core/tests/unresolved_operand_matrix/case_101.deep"
+                ),
+                late_valid: include_str!(
+                    "fixtures/core/tests/unresolved_operand_matrix/case_102.deep"
+                ),
                 diagnostic: "shl requires integer lhs and shift amount, got f32 and i32",
             },
-            resolved_valid: "def f(x: i32) -> i32 = shl(x, 1i32)\n",
+            resolved_valid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_103.deep"
+            ),
         },
         DtypeCell {
             cell: Cell {
                 route: "shr",
-                resolved_invalid: "def f(x: f32) -> f32 = shr(x, 1i32)\n",
-                late_invalid: "def f(x: f32) -> f32 = {\n  g = fn (t) -> shr(t, 1i32)\n  g(x)\n}\n",
-                late_valid: "def f(x: i32) -> i32 = {\n  g = fn (t) -> shr(t, 1i32)\n  g(x)\n}\n",
+                resolved_invalid: include_str!(
+                    "fixtures/core/tests/unresolved_operand_matrix/case_104.deep"
+                ),
+                late_invalid: include_str!(
+                    "fixtures/core/tests/unresolved_operand_matrix/case_105.deep"
+                ),
+                late_valid: include_str!(
+                    "fixtures/core/tests/unresolved_operand_matrix/case_106.deep"
+                ),
                 diagnostic: "shr requires integer lhs and shift amount, got f32 and i32",
             },
-            resolved_valid: "def f(x: i32) -> i32 = shr(x, 1i32)\n",
+            resolved_valid: include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_107.deep"
+            ),
         },
     ] {
         run_dtype_cell(&row);
@@ -1123,27 +1350,36 @@ fn dtype_admissibility_validates_a_late_bound_operand() {
 /// mechanism retain their previous disposition; do not reject all unused lambdas.
 #[test]
 fn never_bound_dtype_operands_do_not_publish_new_family_requirements() {
-    for (route, program) in [
+    for (route, program, concrete_program) in [
         (
             "sqrt",
-            "def f() -> i32 = {\n  g = fn (t) -> sqrt(t)\n  1i32\n}\n",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_108.json"),
+            Some(include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_108_concrete.json"
+            )),
         ),
         (
             "mod",
-            "def f() -> i32 = {\n  g = fn (t) -> mod(t, 3i32)\n  1i32\n}\n",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_109.json"),
+            Some(include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_109_concrete.json"
+            )),
         ),
         (
             "shl",
-            "def f() -> i32 = {\n  g = fn (t) -> shl(t, 1i32)\n  1i32\n}\n",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_110.json"),
+            Some(include_str!(
+                "fixtures/core/tests/unresolved_operand_matrix/case_110_concrete.json"
+            )),
         ),
         (
             "uniform_like",
-            "def f() -> i32 = {\n  g = fn (t) -> uniform_like(t, 0.0f32, 1.0f32)\n  1i32\n}\n",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_111.json"),
+            None,
         ),
     ] {
-        if matches!(route, "sqrt" | "mod" | "shl") {
+        if let Some(concrete_program) = concrete_program {
             let family = if route == "sqrt" { "Float" } else { "Int" };
-            let parameter = if route == "sqrt" { "f32" } else { "i32" };
             let errors = check(program).expect_err("a new family requirement cannot escape");
             assert!(
                 errors.iter().any(|error| {
@@ -1155,8 +1391,7 @@ fn never_bound_dtype_operands_do_not_publish_new_family_requirements() {
                 "{}",
                 summary(&errors)
             );
-            check(&program.replace("fn (t)", &format!("fn (t: {parameter})")))
-                .expect("the explicit concrete contract admits the operation");
+            check(concrete_program).expect("the explicit concrete contract admits the operation");
             continue;
         }
         check(program).unwrap_or_else(|e| {
@@ -1179,12 +1414,21 @@ fn never_bound_dtype_operands_do_not_publish_new_family_requirements() {
 #[test]
 fn an_error_operand_suppresses_the_dtype_routes_own_diagnostic() {
     for (route, program) in [
-        ("sqrt", "def f(x: f32) -> f32 = sqrt(nope(x))\n"),
-        ("mod", "def f(x: i32) -> i32 = mod(nope(x), 3i32)\n"),
-        ("shl", "def f(x: i32) -> i32 = shl(nope(x), 1i32)\n"),
+        (
+            "sqrt",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_112.deep"),
+        ),
+        (
+            "mod",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_113.deep"),
+        ),
+        (
+            "shl",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_114.deep"),
+        ),
         (
             "add",
-            "def f(x: i32) -> i32 = {\n  g = fn (t) -> add(t, nope(x))\n  g(x)\n}\n",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_115.deep"),
         ),
     ] {
         let errors = check(program).expect_err("the unbound callee is an error");
@@ -1216,7 +1460,7 @@ fn an_error_operand_suppresses_the_dtype_routes_own_diagnostic() {
 /// the string routes.
 #[test]
 fn a_dtype_call_that_suspends_and_then_rejects_eagerly_reports_once() {
-    let program = "def f(x: i32) -> i32 = {\n  g = fn (t) -> mod(t, 3.0f32)\n  g(x)\n}\n";
+    let program = include_str!("fixtures/core/tests/unresolved_operand_matrix/case_116.deep");
     let errors = check(program).expect_err("mod over a float shift amount must be rejected");
     let hits = errors
         .iter()
@@ -1236,8 +1480,10 @@ fn a_dtype_call_that_suspends_and_then_rejects_eagerly_reports_once() {
     // NEGATIVE TWIN. Cancelling a failed call's suspension must not cancel a
     // call that did not fail eagerly: the same operator, invalid only in the
     // operand that binds late, still rejects.
-    let errors = check("def f(x: i64) -> i64 = {\n  g = fn (t) -> mod(t, 3i32)\n  g(x)\n}\n")
-        .expect_err("mod over a late-bound i64 must be rejected");
+    let errors = check(include_str!(
+        "fixtures/core/tests/unresolved_operand_matrix/case_093.deep"
+    ))
+    .expect_err("mod over a late-bound i64 must be rejected");
     assert!(
         errors.iter().any(|e| e
             .message
@@ -1265,32 +1511,32 @@ fn dtype_routes_caught_before_the_validator_keep_their_verdict() {
     for (route, program, diagnostic) in [
         (
             "trunc_div",
-            "def f(x: f32) -> f32 = {\n  g = fn (t) -> trunc_div(t, 2.0f32)\n  g(x)\n}\n",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_117.deep"),
             "trunc_div on float operand precision `f32` is not admitted",
         ),
         (
             "div",
-            "def f(x: i32) -> i32 = {\n  g = fn (t) -> div(t, 2i32)\n  g(x)\n}\n",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_118.deep"),
             "div on integer operand precision `i32` is not admitted",
         ),
         (
             "sum (non-tensor operand)",
-            "def f(x: i32) -> i32 = {\n  g = fn (t) -> sum(t, 0i32)\n  g(x)\n}\n",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_119.deep"),
             "sum expects tensor input, got i32",
         ),
         (
             "dropout",
-            "def f(x: tensor[3, i32]) -> tensor[3, i32] ! {Random} = {\n  g = fn (t) -> dropout(t, 0.5f32)\n  g(x)\n}\n",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_120.deep"),
             "tensor precision mismatch: f32 vs i32",
         ),
         (
             "test_assert_close_tensor",
-            "def test_a(x: tensor[3, f32]) -> unit ! {Test} = {\n  g = fn (t) -> test_assert_close_tensor(t, t, 0.01f64, \"m\")\n  g(x)\n}\n",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_121.deep"),
             "tensor precision mismatch: f64 vs f32",
         ),
         (
             "sum (late-bound axis)",
-            "def f(x: f32) -> tensor[f32] = {\n  g = fn (a) -> sum(to_tensor([1.0f32, 2.0f32, 3.0f32]), a)\n  g(x)\n}\n",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_122.deep"),
             "is neither a compile-time constant nor a named axis",
         ),
     ] {
@@ -1310,31 +1556,30 @@ fn dtype_routes_caught_before_the_validator_keep_their_verdict() {
 /// Historical test identities remain stable for the class oracle.
 #[test]
 fn a_late_bound_tensor_precision_is_rejected_at_the_instantiation() {
-    const HELPER: &str = "def g[p: Float](x: tensor[3, p]) -> tensor[p] = mean(x, 0i32)\n";
+    const HELPER: &str =
+        include_str!("fixtures/core/tests/unresolved_operand_matrix/case_123.deep");
     const INT_TEXT: &str = "type variable bounded by dtype family `Float` (the active float dtypes) cannot be instantiated at `i32`";
 
     for (label, program) in [
         (
             "a to_tensor literal argument",
-            format!("{HELPER}f = g(to_tensor([1i32, 2i32, 4i32]))\n"),
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/template_01.deep")
+                .replace("@@HELPER@@", HELPER),
         ),
         (
             "a nested call's declared result",
-            format!(
-                "{HELPER}def h() -> tensor[3, i32] = to_tensor([1i32, 2i32, 4i32])\n\
-                 f = g(h())\n"
-            ),
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/template_02.deep")
+                .replace("@@HELPER@@", HELPER),
         ),
         (
             "a top-level value binding",
-            format!("{HELPER}t = to_tensor([1i32, 2i32, 4i32])\nf = g(t)\n"),
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/template_03.deep")
+                .replace("@@HELPER@@", HELPER),
         ),
         (
             "a tuple element of a declared parameter",
-            format!(
-                "{HELPER}def pick(pair: (tensor[3, i32], i32)) -> tensor[i32] = g(pair.0)\n\
-                 f = pick((to_tensor([1i32, 2i32, 4i32]), 7i32))\n"
-            ),
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/template_04.deep")
+                .replace("@@HELPER@@", HELPER),
         ),
     ] {
         let Err(errors) = check(&program) else {
@@ -1352,14 +1597,15 @@ fn a_late_bound_tensor_precision_is_rejected_at_the_instantiation() {
     // design proposed and this repair declined; `separate_sig_sdpa_checks_clean`
     // in `issue_773_arg_error_sibling_checking` is the program that settles it.
     check(HELPER).expect("a sufficiently bounded precision binder remains polymorphic");
-    check(&format!(
-        "{HELPER}f = g(to_tensor([1.0f32, 2.0f32, 4.0f32]))\n"
-    ))
+    check(
+        &include_str!("fixtures/core/tests/unresolved_operand_matrix/template_05.deep")
+            .replace("@@HELPER@@", HELPER),
+    )
     .expect("an f32 instantiation of the same helper is well typed");
-    check(&format!(
-        "{HELPER}def pick(pair: (tensor[3, f32], i32)) -> tensor[f32] = g(pair.0)\n\
-         f = pick((to_tensor([1.0f32, 2.0f32, 4.0f32]), 7i32))\n"
-    ))
+    check(
+        &include_str!("fixtures/core/tests/unresolved_operand_matrix/template_06.deep")
+            .replace("@@HELPER@@", HELPER),
+    )
     .expect("the same tuple projection at f32 is admitted");
 }
 
@@ -1369,12 +1615,13 @@ fn a_late_bound_tensor_precision_is_rejected_at_the_instantiation() {
 /// No precision replay ledger or named-callee body lookup is involved.
 #[test]
 fn a_precision_that_binds_one_application_later_is_decided_on_binding() {
-    const HELPER: &str = "def id_dt[p](x: tensor[3, p]) -> tensor[3, p] = x\n";
+    const HELPER: &str =
+        include_str!("fixtures/core/tests/unresolved_operand_matrix/case_125.deep");
 
-    let errors = check(&format!(
-        "{HELPER}def f() -> tensor[i32] = \
-         (fn (v) -> mean(id_dt(v), 0i32))(to_tensor([1i32, 2i32, 4i32]))\n"
-    ))
+    let errors = check(
+        &include_str!("fixtures/core/tests/unresolved_operand_matrix/template_07.deep")
+            .replace("@@HELPER@@", HELPER),
+    )
     .expect_err("a precision that binds to i32 one application later must be rejected");
     assert!(
         errors.iter().any(|e| e.message.contains(
@@ -1384,10 +1631,10 @@ fn a_precision_that_binds_one_application_later_is_decided_on_binding() {
         summary(&errors)
     );
 
-    check(&format!(
-        "{HELPER}def f() -> tensor[f32] = \
-         (fn (v) -> mean(id_dt(v), 0i32))(to_tensor([1.0f32, 2.0f32, 4.0f32]))\n"
-    ))
+    check(
+        &include_str!("fixtures/core/tests/unresolved_operand_matrix/template_08.deep")
+            .replace("@@HELPER@@", HELPER),
+    )
     .expect("a precision that binds to f32 one application later must be accepted");
 }
 
@@ -1410,16 +1657,19 @@ fn a_precision_that_binds_one_application_later_is_decided_on_binding() {
 /// DISPOSITION LOCK for the `Float` row, measured accepted there and here.
 #[test]
 fn a_bounded_precision_binder_is_decided_by_its_family_at_once() {
-    check("def g[p: Float](x: tensor[3, p]) -> tensor[p] = mean(x, 0i32)\n")
-        .expect("a `Float`-bounded binder is admitted by a float-only route");
+    check(include_str!(
+        "fixtures/core/tests/unresolved_operand_matrix/case_123.deep"
+    ))
+    .expect("a `Float`-bounded binder is admitted by a float-only route");
 
     for (bound, gloss) in [
         ("Int", "the active signed integer dtypes"),
         ("Numeric", "the active numeric dtypes"),
     ] {
-        let errors = check(&format!(
-            "def g[p: {bound}](x: tensor[3, p]) -> tensor[p] = mean(x, 0i32)\n"
-        ))
+        let errors = check(
+            &include_str!("fixtures/core/tests/unresolved_operand_matrix/template_09.deep")
+                .replace("@@bound@@", &bound.to_ascii_lowercase()),
+        )
         .expect_err("a bound admitting an inadmissible dtype must be rejected");
         assert!(
             errors.iter().any(|e| e.message.contains(&format!(
@@ -1440,10 +1690,9 @@ fn a_bounded_precision_binder_is_decided_by_its_family_at_once() {
         );
     }
 
-    let errors = check(
-        "def g[p: Numeric](x: tensor[3, p]) -> tensor[p] = mean(x, 0i32)\n\
-         f = g(to_tensor([1i32, 2i32, 4i32]))\n",
-    )
+    let errors = check(include_str!(
+        "fixtures/core/tests/unresolved_operand_matrix/case_126.deep"
+    ))
     .expect_err("a bounded binder badly instantiated must still be rejected");
     assert_eq!(
         errors
@@ -1462,21 +1711,47 @@ fn a_bounded_precision_binder_is_decided_by_its_family_at_once() {
 #[test]
 fn every_family_policy_route_rejects_an_inadmissible_instantiation() {
     for (body, elements, family, dtype) in [
-        ("sqrt(x)", "1i32, 4i32, 9i32", "Float", "i32"),
-        ("div(x, x)", "1i32, 4i32, 9i32", "Float", "i32"),
-        ("trunc_div(x, x)", "1.0f32, 4.0f32, 9.0f32", "Int", "f32"),
-        ("softmax(x, 0i32)", "1i32, 2i32, 4i32", "Float", "i32"),
+        (
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/fragment_01.deep"),
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/fragment_10.deep"),
+            "Float",
+            "i32",
+        ),
+        (
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/fragment_02.deep"),
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/fragment_10.deep"),
+            "Float",
+            "i32",
+        ),
+        (
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/fragment_03.deep"),
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/fragment_11.deep"),
+            "Int",
+            "f32",
+        ),
+        (
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/fragment_04.deep"),
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/fragment_12.deep"),
+            "Float",
+            "i32",
+        ),
     ] {
-        let program = format!(
-            "def g[p: {family}](x: tensor[3, p]) -> tensor[3, p] = {body}\nf = g(to_tensor([{elements}]))\n"
-        );
+        let program =
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/template_10.deep")
+                .replace("@@family@@", &family.to_ascii_lowercase())
+                .replace("@@body@@", body)
+                .replace("@@elements@@", elements);
         let errors = check(&program).expect_err("inadmissible instantiation");
         assert_family_error(&errors, family, dtype);
     }
-    check("def g[p: Numeric](x: tensor[3, p]) -> tensor[3, p] = add(x, x)\nf = g(to_tensor([1i32, 2i32, 4i32]))\n")
-        .expect("Numeric admits integer arithmetic");
-    check("def f(x: tensor[3, f32]) -> tensor[f32] = mean(x, 0i32)\n")
-        .expect("a concrete float operand is still accepted");
+    check(include_str!(
+        "fixtures/core/tests/unresolved_operand_matrix/case_127.deep"
+    ))
+    .expect("Numeric admits integer arithmetic");
+    check(include_str!(
+        "fixtures/core/tests/unresolved_operand_matrix/case_081.deep"
+    ))
+    .expect("a concrete float operand is still accepted");
 }
 
 /// chelis#1805, the arms it measured SAFE rather than repairing: a float-only
@@ -1498,13 +1773,14 @@ fn a_signature_bounded_callee_is_caught_at_the_call_site() {
     const FAMILY: &str = "type variable bounded by dtype family `Float` (the active float dtypes) \
          cannot be instantiated at `i32`";
 
-    check("def g[p: Float](x: tensor[3, p], r: p) -> tensor[3, p] ! { Random } = dropout(x, r)\n")
-        .expect("the signature's own bound makes the declaration well typed");
+    check(include_str!(
+        "fixtures/core/tests/unresolved_operand_matrix/case_128.deep"
+    ))
+    .expect("the signature's own bound makes the declaration well typed");
 
-    let errors = check(
-        "def g[p: Float](x: tensor[3, p], r: p) -> tensor[3, p] ! { Random } = dropout(x, r)\n\
-         def f() -> tensor[3, i32] ! { Random } = g(to_tensor([1i32, 2i32, 4i32]), 1i32)\n",
-    )
+    let errors = check(include_str!(
+        "fixtures/core/tests/unresolved_operand_matrix/case_129.deep"
+    ))
     .expect_err("the integer instantiation must be rejected");
     assert!(
         errors.iter().any(|e| e.message.contains(FAMILY)),
@@ -1512,18 +1788,14 @@ fn a_signature_bounded_callee_is_caught_at_the_call_site() {
         summary(&errors)
     );
 
-    check(
-        "def g[p: Float](a: &tensor[3, p], b: &tensor[3, p], tol: p) -> unit ! { Test } = \
-         test_assert_close_tensor(a, b, tol, \"l\")\n",
-    )
+    check(include_str!(
+        "fixtures/core/tests/unresolved_operand_matrix/case_130.deep"
+    ))
     .expect("the signature's own bound makes the declaration well typed");
 
-    let errors = check(
-        "def g[p: Float](a: &tensor[3, p], b: &tensor[3, p], tol: p) -> unit ! { Test } = \
-         test_assert_close_tensor(a, b, tol, \"l\")\n\
-         def test_call() -> unit ! { Test } = \
-         g(&to_tensor([1i32, 2i32, 4i32]), &to_tensor([1i32, 2i32, 4i32]), 1i32)\n",
-    )
+    let errors = check(include_str!(
+        "fixtures/core/tests/unresolved_operand_matrix/case_131.deep"
+    ))
     .expect_err("the integer instantiation must be rejected");
     assert!(
         errors.iter().any(|e| e.message.contains(FAMILY)),
@@ -1547,22 +1819,19 @@ fn a_signature_bounded_callee_is_caught_at_the_call_site() {
 /// compiled C lane printing `f = 2` for a true 2.3333333.
 #[test]
 fn a_local_binding_shadowing_a_top_level_one_is_read_from_the_local() {
-    const HELPER: &str = "def g[p: Float](x: tensor[3, p]) -> tensor[p] = mean(x, 0i32)\n";
+    const HELPER: &str =
+        include_str!("fixtures/core/tests/unresolved_operand_matrix/case_123.deep");
 
-    check(&format!(
-        "{HELPER}t = to_tensor([1i32, 2i32, 4i32])\n\
-         def pick() -> tensor[f32] = {{\n  \
-         t = to_tensor([1.0f32, 2.0f32, 4.0f32])\n  g(t)\n}}\n\
-         f = pick()\n"
-    ))
+    check(
+        &include_str!("fixtures/core/tests/unresolved_operand_matrix/template_11.deep")
+            .replace("@@HELPER@@", HELPER),
+    )
     .expect("the local f32 binding is what `g` receives, so the program is well typed");
 
-    let errors = check(&format!(
-        "{HELPER}t = to_tensor([1.0f32, 2.0f32, 4.0f32])\n\
-         def pick() -> tensor[i32] = {{\n  \
-         t = to_tensor([1i32, 2i32, 4i32])\n  g(t)\n}}\n\
-         f = pick()\n"
-    ))
+    let errors = check(
+        &include_str!("fixtures/core/tests/unresolved_operand_matrix/template_12.deep")
+            .replace("@@HELPER@@", HELPER),
+    )
     .expect_err("the local i32 binding is what `g` receives, so the program is rejected");
     assert!(
         errors.iter().any(|e| e.message.contains(
@@ -1577,20 +1846,29 @@ fn a_local_binding_shadowing_a_top_level_one_is_read_from_the_local() {
 /// The two dtype orders catch false acceptance as well as false rejection.
 #[test]
 fn argument_precision_respects_sequential_and_top_level_binding_scopes() {
-    const HELPER: &str = "def g[p: Float](x: tensor[3, p]) -> tensor[p] = mean(x, 0i32)\n";
+    const HELPER: &str =
+        include_str!("fixtures/core/tests/unresolved_operand_matrix/case_123.deep");
     for (first, second, rejects) in [
-        ("[1.0f32, 2.0f32, 4.0f32]", "[1i32, 2i32, 4i32]", false),
-        ("[1i32, 2i32, 4i32]", "[1.0f32, 2.0f32, 4.0f32]", true),
+        (
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/fragment_13.deep"),
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/fragment_12.deep"),
+            false,
+        ),
+        (
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/fragment_12.deep"),
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/fragment_13.deep"),
+            true,
+        ),
     ] {
         for program in [
-            format!(
-                "{HELPER}t = to_tensor({first})\n\
-                 def pick() = {{\n u = t\n t = to_tensor({second})\n g(u)\n }}\nf = pick()\n"
-            ),
-            format!(
-                "{HELPER}t = to_tensor({first})\nu = t\n\
-                 def pick() = {{\n t = to_tensor({second})\n g(u)\n }}\nf = pick()\n"
-            ),
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/template_13.deep")
+                .replace("@@HELPER@@", HELPER)
+                .replace("@@first@@", first)
+                .replace("@@second@@", second),
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/template_14.deep")
+                .replace("@@HELPER@@", HELPER)
+                .replace("@@first@@", first)
+                .replace("@@second@@", second),
         ] {
             let result = check(&program);
             if rejects {
@@ -1615,24 +1893,38 @@ fn argument_precision_respects_sequential_and_top_level_binding_scopes() {
 #[test]
 fn bool_arithmetic_through_an_unbounded_binder_is_rejected_at_the_instantiation() {
     for (op, body) in [
-        ("add", "add(x, x)"),
-        ("sub", "sub(x, x)"),
-        ("mul", "mul(x, x)"),
-        ("neg", "neg(x)"),
-        ("floor_div", "floor_div(x, x)"),
+        (
+            "add",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/fragment_05.deep"),
+        ),
+        (
+            "sub",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/fragment_06.deep"),
+        ),
+        (
+            "mul",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/fragment_07.deep"),
+        ),
+        (
+            "neg",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/fragment_08.deep"),
+        ),
+        (
+            "floor_div",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/fragment_09.deep"),
+        ),
     ] {
-        let program = format!(
-            "def g[p: Numeric](x: tensor[3, p]) -> tensor[3, p] = {body}\n\
-             def f() -> tensor[3, bool] = g(to_tensor([true, false, true]))\n"
-        );
+        let program =
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/template_15.deep")
+                .replace("@@body@@", body);
         let Err(errors) = check(&program) else {
             panic!("`{op}` on a bool instantiation must be rejected");
         };
         assert_family_error(&errors, "Numeric", "bool");
-        check(&format!(
-            "def g[p: Numeric](x: tensor[3, p]) -> tensor[3, p] = {body}\n\
-             def f() -> tensor[3, i32] = g(to_tensor([1i32, 2i32, 4i32]))\n"
-        ))
+        check(
+            &include_str!("fixtures/core/tests/unresolved_operand_matrix/template_16.deep")
+                .replace("@@body@@", body),
+        )
         .expect("the same arithmetic at i32 is admitted");
     }
 }
@@ -1647,26 +1939,35 @@ fn the_spellings_the_argument_reader_does_not_resolve_remain_unreached() {
     // Historical identity retained for the class oracle. Every former residual
     // is now a rejection, paired with the same bounded program at f32.
     for (dtype, values, accepts) in [
-        ("i32", "[1i32, 2i32, 4i32]", false),
-        ("f32", "[1.0f32, 2.0f32, 4.0f32]", true),
+        (
+            "i32",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/fragment_12.deep"),
+            false,
+        ),
+        (
+            "f32",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/fragment_13.deep"),
+            true,
+        ),
     ] {
-        let helper = "def g[p: Float](x: tensor[3, p]) -> tensor[p] = mean(x, 0i32)\n";
+        let helper = include_str!("fixtures/core/tests/unresolved_operand_matrix/case_123.deep");
         for program in [
-            format!(
-                "{helper}def apply_it(fn_arg: tensor[3, {dtype}] -> tensor[{dtype}], y: tensor[3, {dtype}]) -> tensor[{dtype}] = fn_arg(y)\nf = apply_it(g, to_tensor({values}))\n"
-            ),
-            format!(
-                "{helper}def mid[p: Float](x: tensor[3, p]) -> tensor[p] = g(x)\nf = mid(to_tensor({values}))\n"
-            ),
-            format!(
-                "{helper}def id2[q](y: tensor[3, q]) -> tensor[3, q] = y\nf = g(id2(to_tensor({values})))\n"
-            ),
-            format!(
-                "def g[p: Float](x: tensor[3, p]) -> tensor[p] = {{\n h = fn (t) -> mean(t, 0i32)\n h(x)\n}}\nf = g(to_tensor({values}))\n"
-            ),
-            format!(
-                "type Box =\n | Box {{ t: tensor[3, {dtype}] }}\n{helper}def pick(b: Box) -> tensor[{dtype}] = g(b.t)\nf = pick(Box {{ t: to_tensor({values}) }})\n"
-            ),
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/template_17.deep")
+                .replace("@@helper@@", helper)
+                .replace("@@dtype@@", dtype)
+                .replace("@@values@@", values),
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/template_18.deep")
+                .replace("@@helper@@", helper)
+                .replace("@@values@@", values),
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/template_19.deep")
+                .replace("@@helper@@", helper)
+                .replace("@@values@@", values),
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/template_20.deep")
+                .replace("@@values@@", values),
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/template_21.deep")
+                .replace("@@dtype@@", dtype)
+                .replace("@@helper@@", helper)
+                .replace("@@values@@", values),
         ] {
             let result = check(&program);
             if accepts {
@@ -1687,17 +1988,17 @@ fn an_empty_literal_the_declared_result_determines_is_now_validated() {
     for (route, program, _diagnostic) in [
         (
             "softmax",
-            "def f() -> tensor[3, i32] = softmax(to_tensor([]), 0i32)\n",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_133.deep"),
             "softmax on operand precision `i32` is not admitted",
         ),
         (
             "sqrt",
-            "def f() -> tensor[3, i32] = sqrt(to_tensor([]))\n",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_134.deep"),
             "sqrt on operand precision `i32` is not admitted",
         ),
         (
             "add",
-            "def f() -> tensor[3, bool] = add(to_tensor([]), to_tensor([]))\n",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_135.deep"),
             "add on bool operands is not admitted",
         ),
     ] {
@@ -1717,9 +2018,12 @@ fn an_empty_literal_the_declared_result_determines_is_now_validated() {
     for (route, program) in [
         (
             "softmax",
-            "def f() -> tensor[3, f32] = softmax(to_tensor([]), 0i32)\n",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_136.deep"),
         ),
-        ("sqrt", "def f() -> tensor[3, f32] = sqrt(to_tensor([]))\n"),
+        (
+            "sqrt",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_137.deep"),
+        ),
     ] {
         check(program).unwrap_or_else(|e| {
             panic!(
@@ -1741,8 +2045,10 @@ fn an_empty_literal_the_declared_result_determines_is_now_validated() {
     // [05-OP-57]` at eval: the acceptance this replaces was a check-clean
     // program that does not run, which is the defect class this ledger exists
     // to close rather than a capability being removed.
-    let errors = check("def f() -> tensor[f32] = mean(to_tensor([]), 0i32)\n")
-        .expect_err("a reducing route over an unresolved literal must be rejected");
+    let errors = check(include_str!(
+        "fixtures/core/tests/unresolved_operand_matrix/case_138.deep"
+    ))
+    .expect_err("a reducing route over an unresolved literal must be rejected");
     assert!(
         errors.iter().any(|e| e
             .message
@@ -1807,27 +2113,27 @@ fn expect_exact_error(program: &str, expected: &str) {
 #[test]
 fn a_match_destructured_sum_operand_is_tied_to_the_bound_scrutinee() {
     let program = |declared: &str| {
-        format!(
-            "def apply_p[b](f: ((tensor[4, 3, f32], i32)) -> b, r: (tensor[4, 3, f32], i32)) -> b = f(r)\n\
-             def probe(t: tensor[4, 3, f32]) -> {declared} = apply_p(fn (q) -> match q with {{ | (a, k) => sum(a, 0) }}, (t, 1i32))\n"
-        )
+        include_str!("fixtures/core/tests/unresolved_operand_matrix/template_22.deep")
+            .replace("@@declared@@", declared)
     };
 
     expect_exact_error(
-        &program("tensor[100, f32]"),
+        &program("(t-tensor {} (d-lit {} 100) (t-prim {} f32))"),
         &signature_mismatch("tensor[4, 3, f32]", "tensor[3, f32]", "tensor[100, f32]"),
     );
 
     // NEGATIVE TWIN: the shape the route actually produces still checks, so
     // the repair rejects a wrong claim rather than the destructuring form.
-    check(&program("tensor[3, f32]"))
+    check(&program("(t-tensor {} (d-lit {} 3) (t-prim {} f32))"))
         .unwrap_or_else(|e| panic!("the true result shape must still check:\n{}", summary(&e)));
 
     // The operand that NEVER binds is the acceptance boundary, not a pass:
     // the lambda is never applied, so no application supplies `q`'s
     // constructor. Measured accepting at score 1 on `6abca2406`.
-    let errors = check("def lam() = fn (q) -> match q with { | (a, k) => sum(a, 0) }\n")
-        .expect_err("a never-applied shape-computed route must be rejected");
+    let errors = check(include_str!(
+        "fixtures/core/tests/unresolved_operand_matrix/case_140.deep"
+    ))
+    .expect_err("a never-applied shape-computed route must be rejected");
     assert!(
         errors.iter().any(|e| e
             .message
@@ -1848,14 +2154,12 @@ fn a_match_destructured_sum_operand_is_tied_to_the_bound_scrutinee() {
 #[test]
 fn a_match_destructured_matmul_operand_is_tied_to_the_bound_scrutinee() {
     let program = |declared: &str| {
-        format!(
-            "def apply_p[b](f: ((tensor[4, 3, f32], i32)) -> b, r: (tensor[4, 3, f32], i32)) -> b = f(r)\n\
-             def probe(t: tensor[4, 3, f32], w: tensor[3, 5, f32]) -> {declared} = apply_p(fn (q) -> match q with {{ | (a, k) => matmul(a, w) }}, (t, 1i32))\n"
-        )
+        include_str!("fixtures/core/tests/unresolved_operand_matrix/template_23.deep")
+            .replace("@@declared@@", declared)
     };
 
     expect_exact_error(
-        &program("tensor[100, 5, f32]"),
+        &program("(t-tensor {} (d-lit {} 100) (d-lit {} 5) (t-prim {} f32))"),
         &signature_mismatch(
             "tensor[4, 3, f32], tensor[3, 5, f32]",
             "tensor[4, 5, f32]",
@@ -1864,7 +2168,10 @@ fn a_match_destructured_matmul_operand_is_tied_to_the_bound_scrutinee() {
     );
 
     // NEGATIVE TWIN.
-    check(&program("tensor[4, 5, f32]")).unwrap_or_else(|e| {
+    check(&program(
+        "(t-tensor {} (d-lit {} 4) (d-lit {} 5) (t-prim {} f32))",
+    ))
+    .unwrap_or_else(|e| {
         panic!(
             "matmul's true result shape must still check:\n{}",
             summary(&e)
@@ -1891,20 +2198,17 @@ fn a_match_destructured_matmul_operand_is_tied_to_the_bound_scrutinee() {
 #[test]
 fn a_record_field_sum_operand_is_tied_to_the_bound_target() {
     let program = |declared: &str| {
-        format!(
-            "type Box =\n  | Box {{ x: tensor[4, 3, f32] }}\n\
-             def apply_b[b](f: (Box) -> b, r: Box) -> b = f(r)\n\
-             def probe(t: tensor[4, 3, f32]) -> {declared} = apply_b(fn (q) -> sum(q.x, 0), Box {{ x: t }})\n"
-        )
+        include_str!("fixtures/core/tests/unresolved_operand_matrix/template_24.deep")
+            .replace("@@declared@@", declared)
     };
 
     expect_exact_error(
-        &program("tensor[100, f32]"),
+        &program("(t-tensor {} (d-lit {} 100) (t-prim {} f32))"),
         &signature_mismatch("tensor[4, 3, f32]", "tensor[3, f32]", "tensor[100, f32]"),
     );
 
     // NEGATIVE TWIN.
-    check(&program("tensor[3, f32]")).unwrap_or_else(|e| {
+    check(&program("(t-tensor {} (d-lit {} 3) (t-prim {} f32))")).unwrap_or_else(|e| {
         panic!(
             "the true result shape over a record field must still check:\n{}",
             summary(&e)
@@ -1926,19 +2230,17 @@ fn a_record_field_sum_operand_is_tied_to_the_bound_target() {
 #[test]
 fn a_gated_copy_result_ties_its_sum_consumer_to_the_bound_operand() {
     let program = |declared: &str| {
-        format!(
-            "def apply_n[b, n](f: tensor[n, 3, f32] -> b, x: tensor[n, 3, f32]) -> b = f(x)\n\
-             def probe(t: tensor[4, 3, f32]) -> {declared} = apply_n(fn (v) -> sum(copy(v), 0), t)\n"
-        )
+        include_str!("fixtures/core/tests/unresolved_operand_matrix/template_25.deep")
+            .replace("@@declared@@", declared)
     };
 
     expect_exact_error(
-        &program("tensor[100, f32]"),
+        &program("(t-tensor {} (d-lit {} 100) (t-prim {} f32))"),
         &signature_mismatch("tensor[4, 3, f32]", "tensor[3, f32]", "tensor[100, f32]"),
     );
 
     // NEGATIVE TWIN.
-    check(&program("tensor[3, f32]")).unwrap_or_else(|e| {
+    check(&program("(t-tensor {} (d-lit {} 3) (t-prim {} f32))")).unwrap_or_else(|e| {
         panic!(
             "the true result shape behind a copy gate must still check:\n{}",
             summary(&e)
@@ -1948,8 +2250,10 @@ fn a_gated_copy_result_ties_its_sum_consumer_to_the_bound_operand() {
     // The unapplied form keeps `copy`'s own rejection AND gains the boundary
     // obligation: the gate never discharges, so its consumer never settles.
     // Measured on `6abca2406` reporting only the `copy` diagnostic.
-    let errors = check("def lam() = fn (v) -> sum(copy(v), 0)\n")
-        .expect_err("a never-applied gated route must be rejected");
+    let errors = check(include_str!(
+        "fixtures/core/tests/unresolved_operand_matrix/case_141.deep"
+    ))
+    .expect_err("a never-applied gated route must be rejected");
     assert!(
         errors
             .iter()
@@ -1989,30 +2293,25 @@ fn an_ill_typed_destructure_or_field_read_on_a_late_bound_operand_is_now_reporte
     for (case, program, kind, diagnostic) in [
         (
             "pattern arity disagrees with the scrutinee",
-            "def apply_p[b](f: ((tensor[4, 3, f32], i32)) -> b, r: (tensor[4, 3, f32], i32)) -> b = f(r)\n\
-             def probe(t: tensor[4, 3, f32]) -> tensor[3, f32] = apply_p(fn (q) -> match q with { | (a, k, z) => sum(a, 0) }, (t, 1i32))\n",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_142.deep"),
             "ArityMismatch",
             "tuple length mismatch: 2 vs 3",
         ),
         (
             "tuple pattern on a scrutinee that binds to a tensor",
-            "def apply_t[b](f: (tensor[4, 3, f32]) -> b, x: tensor[4, 3, f32]) -> b = f(x)\n\
-             def probe(t: tensor[4, 3, f32]) -> tensor[3, f32] = apply_t(fn (q) -> match q with { | (a, k) => sum(a, 0) }, t)\n",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_143.deep"),
             "TypeMismatch",
             "type mismatch: tensor[4, 3, f32] vs (",
         ),
         (
             "field read on a target that binds to a tensor",
-            "def apply_t[b](f: (tensor[4, 3, f32]) -> b, x: tensor[4, 3, f32]) -> b = f(x)\n\
-             def probe(t: tensor[4, 3, f32]) -> tensor[3, f32] = apply_t(fn (q) -> sum(q.x, 0), t)\n",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_145.deep"),
             "TypeMismatch",
             "field access `.x` expects a record value, got a value of type `tensor[4, 3, f32]` (chelis#755)",
         ),
         (
             "unknown field on a target that binds to a record",
-            "type Box =\n  | Box { x: tensor[4, 3, f32] }\n\
-             def apply_b[b](f: (Box) -> b, r: Box) -> b = f(r)\n\
-             def probe(t: tensor[4, 3, f32]) -> tensor[3, f32] = apply_b(fn (q) -> sum(q.zzz, 0), Box { x: t })\n",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_146.deep"),
             "TypeMismatch",
             "unknown record field 'zzz' on Box",
         ),
@@ -2040,20 +2339,15 @@ fn an_ill_typed_destructure_or_field_read_on_a_late_bound_operand_is_now_reporte
     for (case, program) in [
         (
             "field read on a target that binds to a tensor",
-            "def apply_t[b](f: (tensor[4, 3, f32]) -> b, x: tensor[4, 3, f32]) -> b = f(x)\n\
-             def probe(t: tensor[4, 3, f32]) -> tensor[3, f32] = apply_t(fn (q) -> sum(q.x, 0), t)\n",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_145.deep"),
         ),
         (
             "unknown field on a target that binds to a record",
-            "type Box =\n  | Box { x: tensor[4, 3, f32] }\n\
-             def apply_b[b](f: (Box) -> b, r: Box) -> b = f(r)\n\
-             def probe(t: tensor[4, 3, f32]) -> tensor[3, f32] = apply_b(fn (q) -> sum(q.zzz, 0), Box { x: t })\n",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_146.deep"),
         ),
         (
             "multi-variant target",
-            "type Shape =\n  | Circle { r: tensor[4, 3, f32] }\n  | Square { s: tensor[4, 3, f32] }\n\
-             def apply_s[b](f: (Shape) -> b, r: Shape) -> b = f(r)\n\
-             def probe(t: tensor[4, 3, f32]) -> tensor[3, f32] = apply_s(fn (q) -> sum(q.r, 0), Circle { r: t })\n",
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_147.deep"),
         ),
     ] {
         let errors = check(program).expect_err(&format!("{case}: must be rejected"));
@@ -2075,11 +2369,9 @@ fn an_ill_typed_destructure_or_field_read_on_a_late_bound_operand_is_now_reporte
     // CONTROL. Two field reads on one unresolved target both resolve, so the
     // ties report nothing when they agree. DISPOSITION LOCK: accepted on
     // `6abca2406` and here.
-    check(
-        "type Box =\n  | Box { x: tensor[4, 3, f32], y: tensor[4, 3, f32] }\n\
-         def apply_b[b](f: (Box) -> b, r: Box) -> b = f(r)\n\
-         def probe(t: tensor[4, 3, f32]) -> tensor[4, 3, f32] = apply_b(fn (q) -> add(q.x, q.y), Box { x: t, y: t })\n",
-    )
+    check(include_str!(
+        "fixtures/core/tests/unresolved_operand_matrix/case_148.deep"
+    ))
     .unwrap_or_else(|e| {
         panic!(
             "two field reads on one late-bound target must still check:\n{}",
@@ -2114,15 +2406,13 @@ fn an_ill_typed_destructure_or_field_read_on_a_late_bound_operand_is_now_reporte
 #[test]
 fn a_gather_gate_result_ties_its_sum_consumer_to_the_bound_operand() {
     let program = |declared: &str| {
-        format!(
-            "def apply_v[b](f: tensor[4, 3, f32] -> b, x: tensor[4, 3, f32]) -> b = f(x)\n\
-             def probe(t: tensor[4, 3, f32], i: tensor[2, i32]) -> {declared} = apply_v(fn (v) -> sum(gather(v, i, 0i32), 0), t)\n"
-        )
+        include_str!("fixtures/core/tests/unresolved_operand_matrix/template_26.deep")
+            .replace("@@declared@@", declared)
     };
 
     // Measured score 1, `errors []` on `e0a482248`.
     expect_exact_error(
-        &program("tensor[99, f32]"),
+        &program("(t-tensor {} (d-lit {} 99) (t-prim {} f32))"),
         &signature_mismatch(
             "tensor[4, 3, f32], tensor[2, i32]",
             "tensor[3, f32]",
@@ -2131,7 +2421,7 @@ fn a_gather_gate_result_ties_its_sum_consumer_to_the_bound_operand() {
     );
 
     // NEGATIVE TWIN.
-    check(&program("tensor[3, f32]")).unwrap_or_else(|e| {
+    check(&program("(t-tensor {} (d-lit {} 3) (t-prim {} f32))")).unwrap_or_else(|e| {
         panic!(
             "gather's true result shape behind its gate must still check:\n{}",
             summary(&e)
@@ -2148,20 +2438,18 @@ fn a_gather_gate_result_ties_its_sum_consumer_to_the_bound_operand() {
 #[test]
 fn a_trace_gate_result_ties_its_sum_consumer_to_the_bound_operand() {
     let program = |declared: &str| {
-        format!(
-            "def apply_w[b](f: tensor[4, 4, 3, f32] -> b, x: tensor[4, 4, 3, f32]) -> b = f(x)\n\
-             def probe(t: tensor[4, 4, 3, f32]) -> {declared} = apply_w(fn (v) -> sum(trace(v, 0i32, 1i32), 0), t)\n"
-        )
+        include_str!("fixtures/core/tests/unresolved_operand_matrix/template_27.deep")
+            .replace("@@declared@@", declared)
     };
 
     // Measured score 1, `errors []` on `e0a482248`.
     expect_exact_error(
-        &program("tensor[99, f32]"),
+        &program("(t-tensor {} (d-lit {} 99) (t-prim {} f32))"),
         &signature_mismatch("tensor[4, 4, 3, f32]", "tensor[, f32]", "tensor[99, f32]"),
     );
 
     // NEGATIVE TWIN, at the rank-zero declaration.
-    check(&program("tensor[f32]")).unwrap_or_else(|e| {
+    check(&program("(t-tensor {} (t-prim {} f32))")).unwrap_or_else(|e| {
         panic!(
             "trace's true rank-zero result behind its gate must still check:\n{}",
             summary(&e)
@@ -2174,15 +2462,13 @@ fn a_trace_gate_result_ties_its_sum_consumer_to_the_bound_operand() {
 #[test]
 fn a_scatter_replace_gate_result_ties_its_sum_consumer_to_the_bound_operand() {
     let program = |declared: &str| {
-        format!(
-            "def apply_v[b](f: tensor[4, 3, f32] -> b, x: tensor[4, 3, f32]) -> b = f(x)\n\
-             def probe(t: tensor[4, 3, f32], i: tensor[2, i32], u: tensor[2, 3, f32]) -> {declared} = apply_v(fn (v) -> sum(scatter_replace(v, i, u, 0i32), 0), t)\n"
-        )
+        include_str!("fixtures/core/tests/unresolved_operand_matrix/template_28.deep")
+            .replace("@@declared@@", declared)
     };
 
     // Measured score 1, `errors []` on `e0a482248`.
     expect_exact_error(
-        &program("tensor[99, f32]"),
+        &program("(t-tensor {} (d-lit {} 99) (t-prim {} f32))"),
         &signature_mismatch(
             "tensor[4, 3, f32], tensor[2, i32], tensor[2, 3, f32]",
             "tensor[3, f32]",
@@ -2191,7 +2477,7 @@ fn a_scatter_replace_gate_result_ties_its_sum_consumer_to_the_bound_operand() {
     );
 
     // NEGATIVE TWIN.
-    check(&program("tensor[3, f32]")).unwrap_or_else(|e| {
+    check(&program("(t-tensor {} (d-lit {} 3) (t-prim {} f32))")).unwrap_or_else(|e| {
         panic!(
             "scatter_replace's true result shape behind its gate must still check:\n{}",
             summary(&e)
@@ -2207,51 +2493,27 @@ fn restricted_body_precision_follows_lexical_bindings() {
     for (case, program) in [
         (
             "body_local_shadow",
-            r#"def g[p](x: tensor[3, p]) -> tensor[f32] = {
- x = to_tensor([1.0f32, 2.0f32, 3.0f32])
- mean(x, 0i32)
-}
-f = g(to_tensor([1i32, 2i32, 4i32]))
-"#,
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_149.deep"),
         ),
         (
             "body_lambda_shadow",
-            r#"def g[p](x: tensor[3, p]) -> tensor[f32] = {
- h = fn (x: tensor[3, f32]) -> mean(x, 0i32)
- h(to_tensor([1.0f32, 2.0f32, 3.0f32]))
-}
-f = g(to_tensor([1i32, 2i32, 4i32]))
-"#,
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_150.deep"),
         ),
         (
             "body_callee_shadow",
-            r#"def g[p](x: tensor[3, p]) -> tensor[3, p] = {
- mean = fn (t) -> t
- mean(x)
-}
-f = g(to_tensor([1i32, 2i32, 4i32]))
-"#,
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_151.deep"),
         ),
         (
             "body_match_shadow",
-            r#"def g[p](x: tensor[3,p]) -> tensor[f32] = match (to_tensor([1.0f32, 2.0f32, 3.0f32]),7i32) with { | (x,k) => mean(x,0i32) }
-f=g(to_tensor([1i32, 2i32, 4i32]))
-"#,
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_152.deep"),
         ),
         (
             "body_renamed_local",
-            r#"def g[p](x: tensor[3,p]) -> tensor[f32] = {
- y=to_tensor([1.0f32, 2.0f32, 3.0f32])
- mean(y,0i32)
-}
-f=g(to_tensor([1i32, 2i32, 4i32]))
-"#,
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_153.deep"),
         ),
         (
             "body_match_renamed",
-            r#"def g[p](x: tensor[3,p]) -> tensor[f32] = match (to_tensor([1.0f32, 2.0f32, 3.0f32]),7i32) with { | (y,k) => mean(y,0i32) }
-f=g(to_tensor([1i32, 2i32, 4i32]))
-"#,
+            include_str!("fixtures/core/tests/unresolved_operand_matrix/case_154.deep"),
         ),
     ] {
         check(program).unwrap_or_else(|errors| panic!("{case}: {}", summary(&errors)));
@@ -2259,17 +2521,26 @@ f=g(to_tensor([1i32, 2i32, 4i32]))
     // A captured parameter and its sequential alias retain the substituted
     // dtype, even after another binding reuses its name.
     for body in [
-        "mean(x, 0i32)",
-        "{\n y = x\n x = to_tensor([1.0f32, 2.0f32, 3.0f32])\n mean(y, 0i32)\n}",
-        "{\n h = fn (y: i32) -> mean(x, 0i32)\n h(1i32)\n}",
+        include_str!("fixtures/core/tests/unresolved_operand_matrix/fragment_14.deep"),
+        include_str!("fixtures/core/tests/unresolved_operand_matrix/fragment_15.deep"),
+        include_str!("fixtures/core/tests/unresolved_operand_matrix/fragment_16.deep"),
     ] {
         for (dtype, values, rejects) in [
-            ("i32", "[1i32, 2i32, 4i32]", true),
-            ("f32", "[1.0f32, 2.0f32, 4.0f32]", false),
+            (
+                "i32",
+                include_str!("fixtures/core/tests/unresolved_operand_matrix/fragment_12.deep"),
+                true,
+            ),
+            (
+                "f32",
+                include_str!("fixtures/core/tests/unresolved_operand_matrix/fragment_13.deep"),
+                false,
+            ),
         ] {
-            let program = format!(
-                "def g[p: Float](x: tensor[3, p]) -> tensor[p] = {body}\nf = g(to_tensor({values}))\n"
-            );
+            let program =
+                include_str!("fixtures/core/tests/unresolved_operand_matrix/template_29.deep")
+                    .replace("@@body@@", body)
+                    .replace("@@values@@", values);
             let result = check(&program);
             if rejects {
                 let errors = result.expect_err("the captured parameter still carries i32");
@@ -2304,23 +2575,34 @@ fn every_family_route_checks_concrete_helper_instantiations() {
         "trunc_div",
     ] {
         let body = match op {
-            "mean" | "softmax" => format!("{op}(x, 0i32)"),
-            "div" | "trunc_div" => format!("{op}(x, x)"),
-            _ => format!("{op}(x)"),
+            "mean" | "softmax" => format!(
+                "(app {{}} (var {{}} {op}) (var {{}} x) (lit {{type: (t-prim {{}} i32)}} 0))"
+            ),
+            "div" | "trunc_div" => format!("(app {{}} (var {{}} {op}) (var {{}} x) (var {{}} x))"),
+            _ => format!("(app {{}} (var {{}} {op}) (var {{}} x))"),
         };
         let result_type = if op == "mean" {
-            "tensor[p]"
+            "(t-tensor {} (t-var {} p))"
         } else {
-            "tensor[3, p]"
+            "(t-tensor {} (d-lit {} 3) (t-var {} p))"
         };
         let family = if op == "trunc_div" { "Int" } else { "Float" };
         for (values, float) in [
-            ("[1i32, 2i32, 4i32]", false),
-            ("[1.0f32, 2.0f32, 4.0f32]", true),
+            (
+                include_str!("fixtures/core/tests/unresolved_operand_matrix/fragment_12.deep"),
+                false,
+            ),
+            (
+                include_str!("fixtures/core/tests/unresolved_operand_matrix/fragment_13.deep"),
+                true,
+            ),
         ] {
-            let program = format!(
-                "def g[p: {family}](x: tensor[3, p]) -> {result_type} = {body}\nf = g(to_tensor({values}))\n"
-            );
+            let program =
+                include_str!("fixtures/core/tests/unresolved_operand_matrix/template_30.deep")
+                    .replace("@@family@@", &family.to_ascii_lowercase())
+                    .replace("@@result_type@@", result_type)
+                    .replace("@@body@@", &body)
+                    .replace("@@values@@", values);
             let result = check(&program);
             if float == (op == "trunc_div") {
                 let errors =

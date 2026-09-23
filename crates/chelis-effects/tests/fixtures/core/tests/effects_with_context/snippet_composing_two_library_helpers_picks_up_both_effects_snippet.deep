@@ -1,0 +1,16 @@
+(defsig {} my_op (t-fn {eff: (effects {} io test)} (t-prim {} i64) (t-unit {})))
+
+(def {}
+  my_op
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (let {span: "surf:42..83"}
+      (bind {}
+        _y
+        (app {span: "surf:51..62"}
+          (var {span: "surf:51..59"} lib_emit)
+          (var {span: "surf:60..61"} x)))
+      (app {span: "surf:65..81"}
+        (var {span: "surf:65..75"} lib_assert)
+        (var {span: "surf:76..77"} x)
+        (var {span: "surf:79..80"} x)))))

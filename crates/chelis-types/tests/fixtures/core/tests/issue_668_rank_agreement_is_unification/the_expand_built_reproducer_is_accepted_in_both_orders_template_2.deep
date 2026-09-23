@@ -1,0 +1,37 @@
+(module {surf_path: "Repro.ExpandControl"}
+  repro.expandcontrol
+  (defsig {}
+    f
+    (n u)
+    (t-fn {}
+      (t-tensor {} (d-var {} n) (t-prim {} f32))
+      (t-tensor {} (d-var {} u) (t-prim {} f32))))
+  (def {}
+    f
+    (fn {}
+      (params {} x)
+      (let {}
+        (bind {}
+          s
+          (app {}
+            (var {} stride)
+            (var {} x)
+            (lit {type: (t-prim {} i64)} 2)))
+        (let {}
+          (bind {}
+            e
+            (app {}
+              (var {} expand)
+              (var {} x)
+              (lit {surf_literal_style: "explicit", type: (t-prim {} i32)} 0)
+              (lit {type: (t-prim {} i64)} 2)))
+          (let {}
+            (bind {}
+              ignored
+              (app {}
+                (var {} eq)
+                (var {} e)
+                (app {}
+                  (var {} neg)
+                  (var {} s))))
+            (var {} s)))))))

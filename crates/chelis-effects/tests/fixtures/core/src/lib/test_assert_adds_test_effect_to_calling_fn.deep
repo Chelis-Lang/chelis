@@ -1,0 +1,10 @@
+(defsig {} my_check (t-fn {} (t-unit {})))
+
+(def {}
+  my_check
+  (fn {}
+    (params {})
+    (app {span: "surf:26..49"}
+      (var {span: "surf:26..37"} test_assert)
+      (lit {span: "surf:38..42", type: (t-prim {} bool)} true)
+      (lit {span: "surf:44..48", type: (t-prim {} string)} "ok"))))

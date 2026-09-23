@@ -1,0 +1,15 @@
+(defsig {}
+  f
+  (t-fn {}
+    (t-adt {} List (t-prim {} i32))
+    (t-prim {} f32)
+    (t-adt {} List (t-prim {} i32))))
+
+(def {}
+  f
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (k {type: (t-var {} _)}))
+    (app {span: "surf:43..53"}
+      (var {span: "surf:43..47"} take)
+      (var {span: "surf:48..49"} x)
+      (var {span: "surf:51..52"} k))))

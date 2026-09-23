@@ -291,13 +291,11 @@ fn fix7b_suggestions_for_unbound() {
 }
 
 #[test]
-fn ir_literal_dimension_mismatch_surfaces_error() {
-    let decls = chelis_surf::parser::parse_str(
-        "def want_2x2(a: tensor[2, 2, f32]) -> tensor[f32] = trace(a, 0, 1)\n\
-         def main(a: tensor[3, 3, f32]) -> tensor[f32] = want_2x2(a)\n",
-    )
-    .expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+fn ir_literal_dimension_mismatch_deepaces_error() {
+    let exprs = chelis_deep::parser::parse_str(include_str!(
+        "../../../tests/fixtures/core/src/more/ir_literal_dimension_mismatch_deepaces_error.deep"
+    ))
+    .expect("Deep fixture parses");
 
     let result = infer_ir_program(&exprs);
     assert!(
@@ -320,13 +318,10 @@ fn ir_literal_dimension_mismatch_surfaces_error() {
 
 #[test]
 fn ir_rejects_polymorphic_dims_pinned_by_body() {
-    let decls = chelis_surf::parser::parse_str(
-        "def want_2x2(a: tensor[2, 2, f32]) -> tensor[f32] = trace(a, 0, 1)\n\
-         def bad_consumer[m, n](a: tensor[m, n, f32]) -> tensor[f32] = want_2x2(a)\n\
-         def main() -> f32 = cast(0.0, f32)\n",
-    )
-    .expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let exprs = chelis_deep::parser::parse_str(include_str!(
+        "../../../tests/fixtures/core/src/more/ir_rejects_polymorphic_dims_pinned_by_body.deep"
+    ))
+    .expect("Deep fixture parses");
 
     let result = infer_ir_program(&exprs);
     assert!(
@@ -349,12 +344,10 @@ fn ir_rejects_polymorphic_dims_pinned_by_body() {
 
 #[test]
 fn ir_preserves_unresolved_name_errors() {
-    let decls = chelis_surf::parser::parse_str(
-        "def probe(x: f32) -> f32 = sub(x, frobnicate(x))\n\
-         def main() -> f32 = probe(cast(1.0, f32))\n",
-    )
-    .expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let exprs = chelis_deep::parser::parse_str(include_str!(
+        "../../../tests/fixtures/core/src/more/ir_preserves_unresolved_name_errors.deep"
+    ))
+    .expect("Deep fixture parses");
 
     let result = infer_ir_program(&exprs);
     assert!(
@@ -385,19 +378,10 @@ fn ir_preserves_unresolved_name_errors() {
 // resolve against the same key without any terminal-match fuzziness.
 #[test]
 fn ir_resolves_consistently_mangled_constructor_names() {
-    let decls = chelis_surf::parser::parse_str(
-        "type Pkg__chelis__std__Std__Nn__Generate__KVCache[a] = \
-            | Pkg__chelis__std__Std__Nn__Generate__KVCache(List[a])\n\
-         def keep_cache[p](cache: \
-             Option[Pkg__chelis__std__Std__Nn__Generate__KVCache[p]]) -> \
-             Pkg__chelis__std__Std__Nn__Generate__KVCache[p] =\n\
-           match cache with {\n\
-             | Some(value) => value\n\
-             | None => Pkg__chelis__std__Std__Nn__Generate__KVCache([])\n\
-           }\n",
+    let exprs = chelis_deep::parser::parse_str(
+        include_str!("../../../tests/fixtures/core/src/more/ir_resolves_consistently_mangled_constructor_names.deep"),
     )
-    .expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    .expect("Deep fixture parses");
 
     let result = infer_ir_program(&exprs);
     assert!(
@@ -418,14 +402,10 @@ fn ir_resolves_consistently_mangled_constructor_names() {
 // `ir_resolves_unique_terminal_constructor_names` test accepted.
 #[test]
 fn ir_rejects_out_of_scope_terminal_constructor_name() {
-    let decls = chelis_surf::parser::parse_str(
-        "type Pkg__chelis__std__Std__Nn__Generate__KVCache[a] = \
-            | Pkg__chelis__std__Std__Nn__Generate__KVCache(List[a])\n\
-         def make_cache[p]() -> \
-             Pkg__chelis__std__Std__Nn__Generate__KVCache[p] = KVCache([])\n",
+    let exprs = chelis_deep::parser::parse_str(
+        include_str!("../../../tests/fixtures/core/src/more/ir_rejects_out_of_scope_terminal_constructor_name.deep"),
     )
-    .expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    .expect("Deep fixture parses");
 
     let result = infer_ir_program(&exprs);
     assert!(
@@ -572,11 +552,18 @@ fn checked_program_annotates_fn_bodies() {
     )
     .unwrap();
     let checked = check_ir_program(&exprs).expect("checked program");
-    let text = chelis_deep::printer::print_canonical(checked.annotated_exprs());
-    assert!(
-        text.contains("(fn {type: (t-fn {} (t-prim {} f32) (t-prim {} f32))}"),
-        "expected typed fn metadata, got:\n{text}"
-    );
+    let (_, _, declaration) = stamped_parts(&checked.annotated_exprs()[0]).unwrap();
+    let (tag, metadata, _) = stamped_parts(&declaration[1]).unwrap();
+    assert_eq!(tag, DeepTag::Fn);
+    let (tag, _, slots) =
+        stamped_parts(metadata.ty().expect("inferred fn type").expression()).unwrap();
+    assert_eq!(tag, DeepTag::TFn);
+    assert_eq!(slots.len(), 2);
+    for slot in slots {
+        let (tag, _, children) = stamped_parts(slot).unwrap();
+        assert_eq!(tag, DeepTag::TPrim);
+        assert_eq!(children.first().and_then(symbol_name), Some("f32"));
+    }
 }
 
 #[test]
@@ -588,11 +575,19 @@ fn checked_program_annotates_apps_and_updates_type_env() {
     )
     .unwrap();
     let checked = check_ir_program(&exprs).expect("checked program");
-    let text = chelis_deep::printer::print_canonical(checked.annotated_exprs());
-    assert!(
-        text.contains("(app {type: (t-tensor {} (d-name {} batch) (t-prim {} f32))}"),
-        "expected typed app metadata, got:\n{text}"
-    );
+    let (_, _, declaration) = stamped_parts(&checked.annotated_exprs()[2]).unwrap();
+    let (tag, metadata, _) = stamped_parts(&declaration[1]).unwrap();
+    assert_eq!(tag, DeepTag::App);
+    let (tag, _, slots) =
+        stamped_parts(metadata.ty().expect("inferred app type").expression()).unwrap();
+    assert_eq!(tag, DeepTag::TTensor);
+    assert_eq!(slots.len(), 2);
+    let (dimension_tag, _, dimension) = stamped_parts(&slots[0]).unwrap();
+    assert_eq!(dimension_tag, DeepTag::DName);
+    assert_eq!(dimension.first().and_then(symbol_name), Some("batch"));
+    let (precision_tag, _, precision) = stamped_parts(&slots[1]).unwrap();
+    assert_eq!(precision_tag, DeepTag::TPrim);
+    assert_eq!(precision.first().and_then(symbol_name), Some("f32"));
     assert!(checked.type_env().contains_key("c"));
 }
 
@@ -610,17 +605,10 @@ fn ir_accepts_symbolic_normalized_axis_for_layer_norm() {
 }
 
 #[test]
-fn checked_program_annotates_symbolic_expand_apps_from_surf() {
-    let checked = checked_surf(
-        r#"
-def predict(
-  x: tensor[batch, 64, f32],
-  w: tensor[64, 1, f32],
-  b: tensor[1, f32]
-) -> tensor[batch, 1, f32] =
-  add(matmul(x, w), insert(b, 0, batch))
-"#,
-    );
+fn checked_program_annotates_symbolic_expand_apps_from_deep() {
+    let checked = checked_deep(include_str!(
+        "../../../tests/fixtures/core/src/more/checked_program_annotates_symbolic_expand_apps_from_deep.deep"
+    ));
     let missing = checked
         .annotated_exprs()
         .iter()
@@ -633,13 +621,10 @@ def predict(
 }
 
 #[test]
-fn surf_permute_with_axis_arguments_type_checks() {
-    let checked = checked_surf(
-        r#"
-def transpose(x: tensor[seq, hidden, f32]) -> tensor[hidden, seq, f32] =
-  permute(x, 1, 0)
-"#,
-    );
+fn deep_permute_with_axis_arguments_type_checks() {
+    let checked = checked_deep(include_str!(
+        "../../../tests/fixtures/core/src/more/deep_permute_with_axis_arguments_type_checks.deep"
+    ));
     let missing = checked
         .annotated_exprs()
         .iter()
@@ -652,44 +637,26 @@ def transpose(x: tensor[seq, hidden, f32]) -> tensor[hidden, seq, f32] =
 }
 
 #[test]
-fn surf_list_builtins_type_check() {
-    let checked = checked_surf(
-        r#"
-xs: List[f32] = [1.0, 2.0]
-ys = append(xs, 3.0)
-total = tensor_to_scalar(sum(to_tensor(ys), 0))
-roundtrip = to_list(to_tensor(ys))
-"#,
-    );
+fn deep_list_builtins_type_check() {
+    let checked = checked_deep(include_str!(
+        "../../../tests/fixtures/core/src/more/deep_list_builtins_type_check.deep"
+    ));
     assert!(checked.annotated_exprs().len() >= 4);
 }
 
 #[test]
-fn surf_pad_sequences_type_checks() {
-    let checked = checked_surf(
-        r#"
-tokens: List[List[i64]] = [[cast(1, i64), cast(2, i64)], [cast(3, i64)]]
-padded = pad_sequences(tokens, cast(0, i64))
-"#,
-    );
+fn deep_pad_sequences_type_checks() {
+    let checked = checked_deep(include_str!(
+        "../../../tests/fixtures/core/src/more/deep_pad_sequences_type_checks.deep"
+    ));
     assert!(checked.annotated_exprs().len() >= 2);
 }
 
 #[test]
-fn surf_3g_io_and_exact_padding_builtins_type_check() {
-    let checked = checked_surf(
-        r#"
-contents = read_file("dataset.txt")
-lines = read_lines("dataset.txt")
-bytes = read_bytes("dataset.txt")
-exists = file_exists("dataset.txt")
-names = list_dir(".")
-mapped = mmap_file("dataset.txt")
-mapped_len = mmap_len(mapped)
-prefix = mmap_read(mapped, cast(0, i64), cast(4, i64))
-padded = pad_sequences_to([[cast(1, i64)], [cast(2, i64), cast(3, i64)]], cast(4, i64), cast(0, i64))
-"#,
-    );
+fn deep_3g_io_and_exact_padding_builtins_type_check() {
+    let checked = checked_deep(include_str!(
+        "../../../tests/fixtures/core/src/more/deep_3g_io_and_exact_padding_builtins_type_check.deep"
+    ));
     assert!(checked.annotated_exprs().len() >= 9);
 }
 
@@ -701,12 +668,11 @@ padded = pad_sequences_to([[cast(1, i64)], [cast(2, i64), cast(3, i64)]], cast(4
 
 #[test]
 fn pad_sequences_to_literal_width_matches_declared_shape() {
-    let decls = chelis_surf::parser::parse_str(
-        "def f() -> tensor[1, 4, f32] = \
-         pad_sequences_to([[cast(10.0, f32)]], cast(4, i64), cast(0.0, f32))\n",
+    let exprs = chelis_deep::parser::parse_str(
+        include_str!("../../../tests/fixtures/core/src/more/pad_sequences_to_literal_width_matches_declared_shape.deep"),
     )
-    .expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    .expect("Deep fixture parses");
+
     let result = infer_ir_program(&exprs);
     assert!(
         result.errors.is_empty(),
@@ -717,12 +683,11 @@ fn pad_sequences_to_literal_width_matches_declared_shape() {
 
 #[test]
 fn pad_sequences_to_wrong_literal_width_is_rejected() {
-    let decls = chelis_surf::parser::parse_str(
-        "def f() -> tensor[1, 5, f32] = \
-         pad_sequences_to([[cast(10.0, f32)]], cast(4, i64), cast(0.0, f32))\n",
+    let exprs = chelis_deep::parser::parse_str(
+        include_str!("../../../tests/fixtures/core/src/more/pad_sequences_to_wrong_literal_width_is_rejected.deep"),
     )
-    .expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    .expect("Deep fixture parses");
+
     let result = infer_ir_program(&exprs);
     assert!(
         !result.errors.is_empty(),
@@ -735,17 +700,11 @@ fn pad_sequences_to_mismatched_width_through_shared_sig_dim_is_rejected() {
     // The two `pad_sequences_to` results flow into a function whose
     // sig declares the same dim variable `d` on both parameters.
     // Different literal widths (8 vs 5) must collide on `d`.
-    let decls = chelis_surf::parser::parse_str(
-        "sig demo_unify[s, d, p]: &tensor[s, d, p] -> &tensor[s, d, p] -> tensor[s, d, p]\n\
-         def demo_unify(a, b) = a\n\
-         def test_mismatch[s, d]() -> tensor[s, d, f32] = {\n\
-           q = pad_sequences_to([[cast(0.0, f32)]], cast(8, i64), cast(0.0, f32))\n\
-           k = pad_sequences_to([[cast(0.0, f32)]], cast(5, i64), cast(0.0, f32))\n\
-           demo_unify(q, k)\n\
-         }\n",
+    let exprs = chelis_deep::parser::parse_str(
+        include_str!("../../../tests/fixtures/core/src/more/pad_sequences_to_mismatched_width_through_shared_sig_dim_is_rejected.deep"),
     )
-    .expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    .expect("Deep fixture parses");
+
     let result = infer_ir_program(&exprs);
     assert!(
         result
@@ -758,60 +717,26 @@ fn pad_sequences_to_mismatched_width_through_shared_sig_dim_is_rejected() {
 }
 
 #[test]
-fn surf_dict_and_iteration_builtins_type_check() {
-    let checked = checked_surf(
-        r#"
-keys: List[string] = ["alpha", "beta"]
-ids: List[i64] = [cast(1, i64), cast(2, i64)]
-pairs = zip(keys, ids)
-indexed = enumerate(keys)
-vocab: Dict[string, i64] = dict_of(pairs)
-found = dict_contains(vocab, "alpha")
-id = dict_get(vocab, "beta")
-only_keys = dict_keys(vocab)
-only_values = dict_values(vocab)
-roundtrip = dict_entries(vocab)
-"#,
-    );
+fn deep_dict_and_iteration_builtins_type_check() {
+    let checked = checked_deep(include_str!(
+        "../../../tests/fixtures/core/src/more/deep_dict_and_iteration_builtins_type_check.deep"
+    ));
     assert!(checked.annotated_exprs().len() >= 9);
 }
 
 #[test]
-fn surf_3h_tensor_numeric_builtins_type_check() {
-    let checked = checked_surf(
-        r#"
-def projection(
-  x: tensor[batch, seq, hidden, f32],
-  w: tensor[hidden, out_dim, f32],
-  token_ids: tensor[batch, seq, i64],
-  mask: tensor[batch, seq, out_dim, bool],
-  table: tensor[vocab, out_dim, f32]
-) -> tensor[batch, seq, out_dim, f32] = {
-  logits = einsum("bsh,ho->bso", x, w)
-  embed = gather(table, token_ids, 0)
-  clipped = clamp(add(logits, embed), scalar_to_tensor(0.0), scalar_to_tensor(6.0))
-  running = cumsum(clipped, 1)
-  where(mask, running, clipped)
-}
-"#,
-    );
+fn deep_3h_tensor_numeric_builtins_type_check() {
+    let checked = checked_deep(include_str!(
+        "../../../tests/fixtures/core/src/more/deep_3h_tensor_numeric_builtins_type_check.deep"
+    ));
     assert!(!checked.annotated_exprs().is_empty());
 }
 
 #[test]
-fn surf_3h_structural_tensor_builtins_type_check() {
-    let checked = checked_surf(
-        r#"
-def pack_heads(
-  q: tensor[batch, seq, 2, f32],
-  k: tensor[batch, seq, 2, f32]
-) -> tensor[batch, seq, *, f32] = {
-  packed = concat([q, k], 2)
-  pieces = split(packed, 2, [2, 2])
-  concat(pieces, 2)
-}
-"#,
-    );
+fn deep_3h_structural_tensor_builtins_type_check() {
+    let checked = checked_deep(include_str!(
+        "../../../tests/fixtures/core/src/more/deep_3h_structural_tensor_builtins_type_check.deep"
+    ));
     assert!(!checked.annotated_exprs().is_empty());
 }
 
@@ -824,13 +749,9 @@ def pack_heads(
 /// concrete return annotation was rejected.
 #[test]
 fn issue631_concat_axis0_literal_list_counts_elements() {
-    let result = infer_surf(
-        r#"
-module Repro.ConcatCount
-def stack_rows(a: tensor[1, 2, f32], b: tensor[1, 2, f32]) -> tensor[2, 2, f32] =
-  concat([a, b], 0)
-"#,
-    );
+    let result = check(include_str!(
+        "../../../tests/fixtures/core/src/more/issue631_concat_axis0_literal_list_counts_elements.deep"
+    ));
     assert!(
         result.errors.is_empty(),
         "axis-0 concat of two [1, 2] rows must type [2, 2], got: {:?}",
@@ -843,15 +764,9 @@ def stack_rows(a: tensor[1, 2, f32], b: tensor[1, 2, f32]) -> tensor[2, 2, f32] 
 /// length to the concat (Env::list_literal_len).
 #[test]
 fn issue631_concat_axis0_let_bound_list_counts_elements() {
-    let result = infer_surf(
-        r#"
-module Repro.ConcatCountLet
-def stack_rows(a: tensor[1, 2, f32], b: tensor[1, 2, f32]) -> tensor[2, 2, f32] = {
-  rows = [a, b]
-  concat(rows, 0)
-}
-"#,
-    );
+    let result = check(include_str!(
+        "../../../tests/fixtures/core/src/more/issue631_concat_axis0_let_bound_list_counts_elements.deep"
+    ));
     assert!(
         result.errors.is_empty(),
         "let-bound list concat must count elements through the binding, got: {:?}",
@@ -863,13 +778,9 @@ def stack_rows(a: tensor[1, 2, f32], b: tensor[1, 2, f32]) -> tensor[2, 2, f32] 
 /// computed `Lit(2)` is a real claim, not a permissive wildcard.
 #[test]
 fn issue631_concat_wrong_sum_annotation_rejected() {
-    let result = infer_surf(
-        r#"
-module Repro.ConcatWrongSum
-def stack_rows(a: tensor[1, 2, f32], b: tensor[1, 2, f32]) -> tensor[3, 2, f32] =
-  concat([a, b], 0)
-"#,
-    );
+    let result = check(include_str!(
+        "../../../tests/fixtures/core/src/more/issue631_concat_wrong_sum_annotation_rejected.deep"
+    ));
     assert!(
         !result.errors.is_empty(),
         "an axis-0 concat of two [1, 2] rows must not satisfy [3, 2]"
@@ -881,13 +792,9 @@ def stack_rows(a: tensor[1, 2, f32], b: tensor[1, 2, f32]) -> tensor[3, 2, f32] 
 /// unconditionally (the chelis#594 symptom).
 #[test]
 fn issue631_concat_mid_axis_preserves_last_axis() {
-    let accepted = infer_surf(
-        r#"
-module Repro.ConcatMidAxis
-def stack_mid(a: tensor[2, 1, 5, f32], b: tensor[2, 1, 5, f32]) -> tensor[2, 2, 5, f32] =
-  concat([a, b], 1)
-"#,
-    );
+    let accepted = check(include_str!(
+        "../../../tests/fixtures/core/src/more/issue631_concat_mid_axis_preserves_last_axis.deep"
+    ));
     assert!(
         accepted.errors.is_empty(),
         "axis-1 concat must type [2, 2, 5], got: {:?}",
@@ -895,13 +802,9 @@ def stack_mid(a: tensor[2, 1, 5, f32], b: tensor[2, 1, 5, f32]) -> tensor[2, 2, 
     );
     // The last axis is the element's `5`, not a wildcard: a wrong
     // trailing extent no longer slips through.
-    let rejected = infer_surf(
-        r#"
-module Repro.ConcatMidAxisBad
-def stack_mid(a: tensor[2, 1, 5, f32], b: tensor[2, 1, 5, f32]) -> tensor[2, 2, 6, f32] =
-  concat([a, b], 1)
-"#,
-    );
+    let rejected = check(include_str!(
+        "../../../tests/fixtures/core/src/more/issue631_concat_mid_axis_preserves_last_axis_2.deep"
+    ));
     assert!(
         !rejected.errors.is_empty(),
         "the non-concat trailing axis must stay 5; [2, 2, 6] must be rejected"
@@ -913,25 +816,17 @@ def stack_mid(a: tensor[2, 1, 5, f32], b: tensor[2, 1, 5, f32]) -> tensor[2, 2, 
 /// element extent (pre-chelis#631 it was the wildcarded one).
 #[test]
 fn issue631_concat_param_list_wildcards_concat_axis_only() {
-    let accepted = infer_surf(
-        r#"
-module Repro.ConcatParamList
-def cat_all(xs: List[tensor[2, 3, f32]]) -> tensor[*, 3, f32] =
-  concat(xs, 0)
-"#,
-    );
+    let accepted = check(include_str!(
+        "../../../tests/fixtures/core/src/more/issue631_concat_param_list_wildcards_concat_axis_only.deep"
+    ));
     assert!(
         accepted.errors.is_empty(),
         "param-list concat must type [*, 3], got: {:?}",
         accepted.errors
     );
-    let rejected = infer_surf(
-        r#"
-module Repro.ConcatParamListBad
-def cat_all(xs: List[tensor[2, 3, f32]]) -> tensor[*, 4, f32] =
-  concat(xs, 0)
-"#,
-    );
+    let rejected = check(include_str!(
+        "../../../tests/fixtures/core/src/more/issue631_concat_param_list_wildcards_concat_axis_only_2.deep"
+    ));
     assert!(
         !rejected.errors.is_empty(),
         "the non-concat trailing axis must stay 3; [*, 4] must be rejected"
@@ -945,13 +840,9 @@ def cat_all(xs: List[tensor[2, 3, f32]]) -> tensor[*, 4, f32] =
 /// `2` was pinned and `[4, 3]` was rejected).
 #[test]
 fn issue631_concat_dynamic_axis_wildcards_all_axes() {
-    let result = infer_surf(
-        r#"
-module Repro.ConcatDynAxis
-def cat_dyn(a: tensor[2, 3, f32], b: tensor[2, 3, f32], ax: i32) -> tensor[4, 3, f32] =
-  concat([a, b], ax)
-"#,
-    );
+    let result = check(include_str!(
+        "../../../tests/fixtures/core/src/more/issue631_concat_dynamic_axis_wildcards_all_axes.deep"
+    ));
     assert!(
         result.errors.is_empty(),
         "runtime-axis concat must not pin any per-axis extent, got: {:?}",
@@ -962,13 +853,9 @@ def cat_dyn(a: tensor[2, 3, f32], b: tensor[2, 3, f32], ax: i32) -> tensor[4, 3,
 /// An out-of-bounds literal concat axis is a check-time error.
 #[test]
 fn issue631_concat_axis_out_of_bounds_rejected() {
-    let result = infer_surf(
-        r#"
-module Repro.ConcatOob
-def cat_oob(a: tensor[2, f32], b: tensor[2, f32]) -> tensor[*, f32] =
-  concat([a, b], 5)
-"#,
-    );
+    let result = check(include_str!(
+        "../../../tests/fixtures/core/src/more/issue631_concat_axis_out_of_bounds_rejected.deep"
+    ));
     assert!(
         result
             .errors
@@ -983,25 +870,17 @@ def cat_oob(a: tensor[2, f32], b: tensor[2, f32]) -> tensor[*, f32] =
 /// matching every other axis-taking builtin.
 #[test]
 fn issue631_concat_negative_axis_indexes_from_end() {
-    let accepted = infer_surf(
-        r#"
-module Repro.ConcatNegAxis
-def cat_neg(a: tensor[1, 2, f32], b: tensor[1, 2, f32]) -> tensor[1, 4, f32] =
-  concat([a, b], -1)
-"#,
-    );
+    let accepted = check(include_str!(
+        "../../../tests/fixtures/core/src/more/issue631_concat_negative_axis_indexes_from_end.deep"
+    ));
     assert!(
         accepted.errors.is_empty(),
         "axis -1 concat of two [1, 2] rows must type [1, 4], got: {:?}",
         accepted.errors
     );
-    let rejected = infer_surf(
-        r#"
-module Repro.ConcatNegAxisBad
-def cat_neg(a: tensor[1, 2, f32], b: tensor[1, 2, f32]) -> tensor[1, 5, f32] =
-  concat([a, b], -1)
-"#,
-    );
+    let rejected = check(include_str!(
+        "../../../tests/fixtures/core/src/more/issue631_concat_negative_axis_indexes_from_end_2.deep"
+    ));
     assert!(
         !rejected.errors.is_empty(),
         "axis -1 concat sum is 4; [1, 5] must be rejected"
@@ -1019,11 +898,26 @@ def cat_neg(a: tensor[1, 2, f32], b: tensor[1, 2, f32]) -> tensor[1, 5, f32] =
 #[test]
 fn issue594_mixed_wildcard_element_wildcards_direct_concat_axis() {
     for claim in ["4", "5"] {
-        let result = infer_surf(&format!(
-            r#"
-module Repro.ConcatHeadBias
-def cat_bias(a: tensor[2, f32], b: tensor[*, f32]) -> tensor[{claim}, f32] =
-  concat([a, b], 0)
+        let result = check(&format!(
+            r#"(module {{surf_path: "Repro.ConcatHeadBias"}}
+  repro.concatheadbias
+  (defsig {{}}
+    cat_bias
+    (t-fn {{}}
+      (t-tensor {{}} (d-lit {{}} 2) (t-prim {{}} f32))
+      (t-tensor {{}} (d-name {{}} *) (t-prim {{}} f32))
+      (t-tensor {{}} (d-lit {{}} {claim}) (t-prim {{}} f32))))
+  (def {{}}
+    cat_bias
+    (fn {{}}
+      (params {{}} (a {{type: (t-var {{}} _)}}) (b {{type: (t-var {{}} _)}}))
+      (app {{span: "surf:107..124"}}
+        (var {{span: "surf:107..113"}} concat)
+        (app {{span: "surf:114..120"}}
+          (var {{}} Cons)
+          (var {{span: "surf:115..116"}} a)
+          (app {{}} (var {{}} Cons) (var {{span: "surf:118..119"}} b) (var {{}} Nil)))
+        (lit {{span: "surf:122..123", type: (t-prim {{}} i32)}} 0)))))
 "#
         ));
         assert!(
@@ -1034,15 +928,9 @@ def cat_bias(a: tensor[2, f32], b: tensor[*, f32]) -> tensor[{claim}, f32] =
     }
     // Binding path: the join is head-biased to the element `[2]` and
     // the length is 2, so the concat axis is `Lit(4)` — `[5]` rejects.
-    let rejected = infer_surf(
-        r#"
-module Repro.ConcatHeadBiasBinding
-def cat_bias(a: tensor[2, f32], b: tensor[*, f32]) -> tensor[5, f32] = {
-  rows = [a, b]
-  concat(rows, 0)
-}
-"#,
-    );
+    let rejected = check(include_str!(
+        "../../../tests/fixtures/core/src/more/issue594_mixed_wildcard_element_wildcards_direct_concat_axis.deep"
+    ));
     assert!(
         !rejected.errors.is_empty(),
         "the binding path keeps the head-biased join times count (Lit(4)); [5] must be rejected"
@@ -1057,25 +945,17 @@ def cat_bias(a: tensor[2, f32], b: tensor[*, f32]) -> tensor[5, f32] = {
 /// the sum was unrecoverable and the axis stayed a wildcard.
 #[test]
 fn issue594_ragged_direct_literal_concat_sums_extents() {
-    let accepted = infer_surf(
-        r#"
-module Repro.RaggedConcat
-def cat(a: tensor[2, f32], b: tensor[3, f32]) -> tensor[5, f32] =
-  concat([a, b], 0)
-"#,
-    );
+    let accepted = check(include_str!(
+        "../../../tests/fixtures/core/src/more/issue594_ragged_direct_literal_concat_sums_extents.deep"
+    ));
     assert!(
         accepted.errors.is_empty(),
         "ragged [2] + [3] must type [5], got: {:?}",
         accepted.errors
     );
-    let rejected = infer_surf(
-        r#"
-module Repro.RaggedConcatBad
-def cat(a: tensor[2, f32], b: tensor[3, f32]) -> tensor[6, f32] =
-  concat([a, b], 0)
-"#,
-    );
+    let rejected = check(include_str!(
+        "../../../tests/fixtures/core/src/more/issue594_ragged_direct_literal_concat_sums_extents_2.deep"
+    ));
     assert!(
         !rejected.errors.is_empty(),
         "ragged sum is 5; [6] must be rejected"
@@ -1087,25 +967,17 @@ def cat(a: tensor[2, f32], b: tensor[3, f32]) -> tensor[6, f32] =
 /// the non-concat axis preserved.
 #[test]
 fn issue594_ragged_three_element_mid_axis_concat_sums_extents() {
-    let accepted = infer_surf(
-        r#"
-module Repro.RaggedConcat3
-def cat(a: tensor[4, 1, f32], b: tensor[4, 2, f32], c: tensor[4, 3, f32]) -> tensor[4, 6, f32] =
-  concat([a, b, c], 1)
-"#,
-    );
+    let accepted = check(include_str!(
+        "../../../tests/fixtures/core/src/more/issue594_ragged_three_element_mid_axis_concat_sums_extents.deep"
+    ));
     assert!(
         accepted.errors.is_empty(),
         "ragged axis-1 sum must type [4, 6], got: {:?}",
         accepted.errors
     );
-    let rejected = infer_surf(
-        r#"
-module Repro.RaggedConcat3Bad
-def cat(a: tensor[4, 1, f32], b: tensor[4, 2, f32], c: tensor[4, 3, f32]) -> tensor[4, 7, f32] =
-  concat([a, b, c], 1)
-"#,
-    );
+    let rejected = check(include_str!(
+        "../../../tests/fixtures/core/src/more/issue594_ragged_three_element_mid_axis_concat_sums_extents_2.deep"
+    ));
     assert!(
         !rejected.errors.is_empty(),
         "ragged axis-1 sum is 6; [4, 7] must be rejected"
@@ -1120,15 +992,9 @@ def cat(a: tensor[4, 1, f32], b: tensor[4, 2, f32], c: tensor[4, 3, f32]) -> ten
 /// Deliberate boundary, pinned so a future extension is conscious.
 #[test]
 fn issue594_ragged_let_bound_list_stays_wildcard() {
-    let result = infer_surf(
-        r#"
-module Repro.RaggedConcatLet
-def cat(a: tensor[2, f32], b: tensor[3, f32]) -> tensor[9, f32] = {
-  rows = [a, b]
-  concat(rows, 0)
-}
-"#,
-    );
+    let result = check(include_str!(
+        "../../../tests/fixtures/core/src/more/issue594_ragged_let_bound_list_stays_wildcard.deep"
+    ));
     assert!(
         result.errors.is_empty(),
         "a let-bound ragged list wildcards the concat axis (permissive), got: {:?}",
@@ -1143,16 +1009,9 @@ def cat(a: tensor[2, f32], b: tensor[3, f32]) -> tensor[9, f32] = {
 /// binding honestly wildcards the concat axis.
 #[test]
 fn issue631_concat_rebound_list_clears_stale_length() {
-    let result = infer_surf(
-        r#"
-module Repro.ConcatRebind
-def cat_rebind(a: tensor[1, 2, f32], b: tensor[1, 2, f32], xs: List[tensor[1, 2, f32]]) -> tensor[7, 2, f32] = {
-  rows = [a, b]
-  rows = xs
-  concat(rows, 0)
-}
-"#,
-    );
+    let result = check(include_str!(
+        "../../../tests/fixtures/core/src/more/issue631_concat_rebound_list_clears_stale_length.deep"
+    ));
     assert!(
         result.errors.is_empty(),
         "a re-bound list name must clear its stale literal length, got: {:?}",
@@ -1165,14 +1024,9 @@ def cat_rebind(a: tensor[1, 2, f32], b: tensor[1, 2, f32], xs: List[tensor[1, 2,
 /// inherit the outer literal length through the env clone.
 #[test]
 fn issue631_concat_param_shadow_clears_outer_length() {
-    let result = infer_surf(
-        r#"
-module Repro.ConcatShadow
-rows = [to_tensor([cast(1.0, f32), cast(2.0, f32)])]
-def cat_shadow(rows: List[tensor[2, f32]]) -> tensor[9, f32] =
-  concat(rows, 0)
-"#,
-    );
+    let result = check(include_str!(
+        "../../../tests/fixtures/core/src/more/issue631_concat_param_shadow_clears_outer_length.deep"
+    ));
     assert!(
         result.errors.is_empty(),
         "a shadowing List param must clear the outer literal length, got: {:?}",
@@ -1181,36 +1035,21 @@ def cat_shadow(rows: List[tensor[2, f32]]) -> tensor[9, f32] =
 }
 
 #[test]
-fn surf_3h_sort_and_trace_type_check() {
-    let checked = checked_surf(
-        r#"
-def summarize(x: tensor[batch, hidden, hidden, f32]) -> (tensor[batch, hidden, f32], tensor[batch, hidden, i64], tensor[batch, f32]) = {
-  diag = diagonal(x, 1, 2)
-  sorted = sort(diag, 1)
-  values = sorted.0
-  indices = sorted.1
-  total = trace(x, 1, 2)
-  (values, indices, total)
-}
-"#,
-    );
+fn deep_3h_sort_and_trace_type_check() {
+    let checked = checked_deep(include_str!(
+        "../../../tests/fixtures/core/src/more/deep_3h_sort_and_trace_type_check.deep"
+    ));
     assert!(!checked.annotated_exprs().is_empty());
 }
 
 #[test]
-fn surf_einsum_rejects_ellipsis_in_3h() {
-    let result = check_ir_program(&chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str(
-            r#"
-def bad(
-  x: tensor[batch, seq, hidden, f32],
-  w: tensor[hidden, out_dim, f32]
-) -> tensor[batch, seq, out_dim, f32] =
-  einsum("...h,ho->...o", x, w)
-"#,
-        )
-        .expect("surf parse"),
-    ));
+fn deep_einsum_rejects_ellipsis_in_3h() {
+    let result = check_ir_program(
+        &chelis_deep::parser::parse_str(include_str!(
+            "../../../tests/fixtures/core/src/more/deep_einsum_rejects_ellipsis_in_3h.deep"
+        ))
+        .expect("Deep fixture parses"),
+    );
     let err = result.expect_err("ellipsis should be rejected in 3h einsum");
     assert!(
         err.errors.iter().any(|error| {
@@ -1223,20 +1062,11 @@ def bad(
 }
 
 #[test]
-fn surf_where_rejects_non_bool_condition_tensor() {
-    let result = check_ir_program(&chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str(
-            r#"
-def bad(
-  cond: tensor[batch, hidden, f32],
-  x: tensor[batch, hidden, f32],
-  y: tensor[batch, hidden, f32]
-) -> tensor[batch, hidden, f32] =
-  where(cond, x, y)
-"#,
+fn deep_where_rejects_non_bool_condition_tensor() {
+    let result = check_ir_program(&chelis_deep::parser::parse_str(
+            include_str!("../../../tests/fixtures/core/src/more/deep_where_rejects_non_bool_condition_tensor.deep"),
         )
-        .expect("surf parse"),
-    ));
+        .expect("Deep fixture parses"));
     let err = result.expect_err("where should reject non-bool condition tensors");
     assert!(
         err.errors
@@ -1248,20 +1078,13 @@ def bad(
 }
 
 #[test]
-fn surf_scatter_replace_rejects_unknown_mode() {
-    let result = check_ir_program(&chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str(
-            r#"
-def bad(
-  base: tensor[seq, hidden, f32],
-  ids: tensor[seq, i64],
-  updates: tensor[seq, hidden, f32]
-) -> tensor[seq, hidden, f32] =
-  scatter(base, ids, updates, 0, "last")
-"#,
-        )
-        .expect("surf parse"),
-    ));
+fn deep_scatter_replace_rejects_unknown_mode() {
+    let result = check_ir_program(
+        &chelis_deep::parser::parse_str(include_str!(
+            "../../../tests/fixtures/core/src/more/deep_scatter_replace_rejects_unknown_mode.deep"
+        ))
+        .expect("Deep fixture parses"),
+    );
     let err = result.expect_err("scatter should reject unsupported mode");
     assert!(
         err.errors.iter().any(|error| {
@@ -1275,17 +1098,13 @@ def bad(
 }
 
 #[test]
-fn surf_einsum_rejects_static_extent_mismatch() {
-    let result = check_ir_program(&chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str(
-            r#"
-a = pad_sequences([[1.0, 2.0], [3.0, 4.0]], 0.0)
-b = pad_sequences([[5.0, 6.0], [7.0, 8.0], [9.0, 10.0]], 0.0)
-out = einsum("ij,jk->ik", a, b)
-"#,
-        )
-        .expect("surf parse"),
-    ));
+fn deep_einsum_rejects_static_extent_mismatch() {
+    let result = check_ir_program(
+        &chelis_deep::parser::parse_str(include_str!(
+            "../../../tests/fixtures/core/src/more/deep_einsum_rejects_static_extent_mismatch.deep"
+        ))
+        .expect("Deep fixture parses"),
+    );
     let err = result.expect_err("static einsum extent mismatch should be rejected");
     assert!(
         err.errors.iter().any(|error| {
@@ -1297,47 +1116,30 @@ out = einsum("ij,jk->ik", a, b)
 }
 
 #[test]
-fn surf_scatter_replace_accepts_static_duplicate_indices() {
-    let result = check_ir_program(&chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str(
-            r#"
-base = pad_sequences([[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]], 0.0)
-ids: List[i64] = [cast(1, i64), cast(1, i64)]
-idx = to_tensor(ids)
-updates = pad_sequences([[5.0, 5.0], [6.0, 6.0]], 0.0)
-out = scatter(base, idx, updates, 0, "replace")
-"#,
+fn deep_scatter_replace_accepts_static_duplicate_indices() {
+    let result = check_ir_program(&chelis_deep::parser::parse_str(
+            include_str!("../../../tests/fixtures/core/src/more/deep_scatter_replace_accepts_static_duplicate_indices.deep"),
         )
-        .expect("surf parse"),
-    ));
+        .expect("Deep fixture parses"));
     result.expect("static scatter duplicate indices follow deterministic last-write-wins");
 }
 
 #[test]
-fn surf_map_filter_fold_type_check() {
-    let checked = checked_surf(
-        r#"
-def inc(x: i64) -> i64 = add(x, cast(1, i64))
-xs: List[i64] = [cast(1, i64), cast(2, i64), cast(3, i64)]
-mapped = map(inc, xs)
-filtered = filter(fn (x: i64) -> eq(mod(x, cast(2, i64)), cast(0, i64)), mapped)
-total = fold(fn (acc: i64, x: i64) -> add(acc, x), cast(0, i64), filtered)
-"#,
-    );
+fn deep_map_filter_fold_type_check() {
+    let checked = checked_deep(include_str!(
+        "../../../tests/fixtures/core/src/more/deep_map_filter_fold_type_check.deep"
+    ));
     assert!(checked.annotated_exprs().len() >= 5);
 }
 
 #[test]
-fn surf_append_rejects_wrong_element_type() {
-    let result = check_ir_program(&chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str(
-            r#"
-xs: List[i64] = [cast(1, i64)]
-bad = append(xs, "oops")
-"#,
-        )
-        .expect("surf parse"),
-    ));
+fn deep_append_rejects_wrong_element_type() {
+    let result = check_ir_program(
+        &chelis_deep::parser::parse_str(include_str!(
+            "../../../tests/fixtures/core/src/more/deep_append_rejects_wrong_element_type.deep"
+        ))
+        .expect("Deep fixture parses"),
+    );
     let err = result.expect_err("append should reject mismatched element type");
     assert!(
         err.errors
@@ -1349,16 +1151,13 @@ bad = append(xs, "oops")
 }
 
 #[test]
-fn surf_filter_rejects_non_bool_callback() {
-    let result = check_ir_program(&chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str(
-            r#"
-xs: List[i64] = [cast(1, i64)]
-bad = filter(fn (x: i64) -> add(x, cast(1, i64)), xs)
-"#,
-        )
-        .expect("surf parse"),
-    ));
+fn deep_filter_rejects_non_bool_callback() {
+    let result = check_ir_program(
+        &chelis_deep::parser::parse_str(include_str!(
+            "../../../tests/fixtures/core/src/more/deep_filter_rejects_non_bool_callback.deep"
+        ))
+        .expect("Deep fixture parses"),
+    );
     let err = result.expect_err("filter should reject non-bool callback");
     assert!(
         err.errors
@@ -1372,16 +1171,13 @@ bad = filter(fn (x: i64) -> add(x, cast(1, i64)), xs)
 }
 
 #[test]
-fn surf_dict_entries_rejects_non_dict_input() {
-    let result = check_ir_program(&chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str(
-            r#"
-xs: List[i64] = [cast(1, i64)]
-bad = dict_entries(xs)
-"#,
-        )
-        .expect("surf parse"),
-    ));
+fn deep_dict_entries_rejects_non_dict_input() {
+    let result = check_ir_program(
+        &chelis_deep::parser::parse_str(include_str!(
+            "../../../tests/fixtures/core/src/more/deep_dict_entries_rejects_non_dict_input.deep"
+        ))
+        .expect("Deep fixture parses"),
+    );
     let err = result.expect_err("dict_entries should reject non-dict input");
     assert!(
         err.errors
@@ -1393,15 +1189,13 @@ bad = dict_entries(xs)
 }
 
 #[test]
-fn surf_to_list_rejects_rank2_tensor() {
-    let result = check_ir_program(&chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str(
-            r#"
-def bad(x: tensor[2, 2, f32]) -> List[f32] = to_list(x)
-"#,
-        )
-        .expect("surf parse"),
-    ));
+fn deep_to_list_rejects_rank2_tensor() {
+    let result = check_ir_program(
+        &chelis_deep::parser::parse_str(include_str!(
+            "../../../tests/fixtures/core/src/more/deep_to_list_rejects_rank2_tensor.deep"
+        ))
+        .expect("Deep fixture parses"),
+    );
     let err = result.expect_err("to_list should reject rank-2 tensor input");
     assert!(
         err.errors.iter().any(|error| {
@@ -1413,16 +1207,13 @@ def bad(x: tensor[2, 2, f32]) -> List[f32] = to_list(x)
 }
 
 #[test]
-fn surf_fold_rejects_accumulator_mismatch() {
-    let result = check_ir_program(&chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str(
-            r#"
-xs: List[i64] = [cast(1, i64)]
-bad = fold(fn (acc: string, x: i64) -> string_concat(acc, to_string(x)), cast(0, i64), xs)
-"#,
-        )
-        .expect("surf parse"),
-    ));
+fn deep_fold_rejects_accumulator_mismatch() {
+    let result = check_ir_program(
+        &chelis_deep::parser::parse_str(include_str!(
+            "../../../tests/fixtures/core/src/more/deep_fold_rejects_accumulator_mismatch.deep"
+        ))
+        .expect("Deep fixture parses"),
+    );
     let err = result.expect_err("fold should reject mismatched accumulator type");
     assert!(
         err.errors.iter().any(|error| error.message.contains("fold")
@@ -1434,31 +1225,16 @@ bad = fold(fn (acc: string, x: i64) -> string_concat(acc, to_string(x)), cast(0,
     );
 }
 
-fn surf_tuple_fold_tensor_slot_program() -> Vec<deep::Expr> {
-    chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str(
-            r#"
-def f[n](xs: tensor[n, f32]) -> (tensor[n, f32], i64) = {
-  idxs = range(cast(0, i64), numel(copy(xs)))
-  state0 = (to_tensor(map(fn (x: f32) -> cast(0.0, f32), to_list(copy(xs)))), cast(0, i64))
-  step = fn (state, i) -> {
-acc = state.0
-total = state.1
-(acc, add(total, i))
-  }
-  fold(step, state0, idxs)
-}
-
-out = f(to_tensor([1.0, 2.0, 3.0]))
-"#,
-        )
-        .expect("surf parse"),
-    )
+fn deep_tuple_fold_tensor_slot_program() -> Vec<deep::Expr> {
+    chelis_deep::parser::parse_str(include_str!(
+        "../../../tests/fixtures/core/src/more/deep_tuple_fold_tensor_slot_program.deep"
+    ))
+    .expect("Deep fixture parses")
 }
 
 #[test]
-fn surf_polymorphic_tuple_fold_with_tensor_slot_infers_ir() {
-    let result = infer_ir_program(&surf_tuple_fold_tensor_slot_program());
+fn deep_polymorphic_tuple_fold_with_tensor_slot_infers_ir() {
+    let result = infer_ir_program(&deep_tuple_fold_tensor_slot_program());
     assert!(
         result.errors.is_empty(),
         "ir inference should succeed without overflowing: {:?}",
@@ -1467,52 +1243,36 @@ fn surf_polymorphic_tuple_fold_with_tensor_slot_infers_ir() {
 }
 
 #[test]
-fn surf_polymorphic_tuple_fold_with_tensor_slot_annotates_ir() {
-    let program = surf_tuple_fold_tensor_slot_program();
+fn deep_polymorphic_tuple_fold_with_tensor_slot_annotates_ir() {
+    let program = deep_tuple_fold_tensor_slot_program();
     check_typed_program(&program).expect("annotation should succeed without overflowing");
 }
 
 #[test]
-fn surf_polymorphic_tuple_fold_with_tensor_slot_type_checks() {
-    let result = check_ir_program(&surf_tuple_fold_tensor_slot_program());
+fn deep_polymorphic_tuple_fold_with_tensor_slot_type_checks() {
+    let result = check_ir_program(&deep_tuple_fold_tensor_slot_program());
     result.expect("polymorphic tuple fold should type check without overflowing");
 }
 
 #[test]
-fn surf_collection_helper_builtins_type_check() {
-    let result = check_ir_program(&chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str(
-            r#"
-xs: List[i64] = [cast(1, i64), cast(2, i64), cast(3, i64)]
-prefix = take(xs, cast(2, i64))
-suffix = drop(xs, cast(1, i64))
-groups = chunk(xs, cast(2, i64))
-scanned = scan(fn (acc: i64, x: i64) -> add(acc, x), cast(0, i64), xs)
-buckets = partition(fn (x: i64) -> gt(x, cast(1, i64)), xs)
-exploded = flat_map(fn (x: i64) -> [x, add(x, cast(10, i64))], xs)
-flattened = flatten([[cast(1, i64)], [cast(2, i64), cast(3, i64)]])
-base: Dict[string, i64] = dict_of([("alpha", cast(1, i64))])
-extended = dict_insert(base, "beta", cast(2, i64))
-merged = dict_merge(extended, dict_of([("beta", cast(20, i64)), ("gamma", cast(3, i64))]))
-trimmed = dict_remove(merged, "gamma")
-"#,
-        )
-        .expect("surf parse"),
-    ));
+fn deep_collection_helper_builtins_type_check() {
+    let result = check_ir_program(
+        &chelis_deep::parser::parse_str(include_str!(
+            "../../../tests/fixtures/core/src/more/deep_collection_helper_builtins_type_check.deep"
+        ))
+        .expect("Deep fixture parses"),
+    );
     result.expect("collection helper builtins should type check");
 }
 
 #[test]
-fn surf_take_rejects_non_integer_count() {
-    let result = check_ir_program(&chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str(
-            r#"
-xs: List[i64] = [cast(1, i64), cast(2, i64)]
-bad = take(xs, "two")
-"#,
-        )
-        .expect("surf parse"),
-    ));
+fn deep_take_rejects_non_integer_count() {
+    let result = check_ir_program(
+        &chelis_deep::parser::parse_str(include_str!(
+            "../../../tests/fixtures/core/src/more/deep_take_rejects_non_integer_count.deep"
+        ))
+        .expect("Deep fixture parses"),
+    );
     let err = result.expect_err("take should reject non-integer count");
     assert!(
         err.errors
@@ -1524,16 +1284,11 @@ bad = take(xs, "two")
 }
 
 #[test]
-fn surf_dict_insert_rejects_value_type_mismatch() {
-    let result = check_ir_program(&chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str(
-            r#"
-base: Dict[string, i64] = dict_of([("alpha", cast(1, i64))])
-bad = dict_insert(base, "beta", "two")
-"#,
+fn deep_dict_insert_rejects_value_type_mismatch() {
+    let result = check_ir_program(&chelis_deep::parser::parse_str(
+            include_str!("../../../tests/fixtures/core/src/more/deep_dict_insert_rejects_value_type_mismatch.deep"),
         )
-        .expect("surf parse"),
-    ));
+        .expect("Deep fixture parses"));
     let err = result.expect_err("dict_insert should reject mismatched value type");
     assert!(
         err.errors
@@ -1547,17 +1302,11 @@ bad = dict_insert(base, "beta", "two")
 }
 
 #[test]
-fn surf_dict_merge_rejects_mismatched_dict_value_types() {
-    let result = check_ir_program(&chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str(
-            r#"
-lhs: Dict[string, i64] = dict_of([("alpha", cast(1, i64))])
-rhs: Dict[string, string] = dict_of([("beta", "two")])
-bad = dict_merge(lhs, rhs)
-"#,
+fn deep_dict_merge_rejects_mismatched_dict_value_types() {
+    let result = check_ir_program(&chelis_deep::parser::parse_str(
+            include_str!("../../../tests/fixtures/core/src/more/deep_dict_merge_rejects_mismatched_dict_value_types.deep"),
         )
-        .expect("surf parse"),
-    ));
+        .expect("Deep fixture parses"));
     let err = result.expect_err("dict_merge should reject mismatched dict value types");
     assert!(
         err.errors
@@ -1572,16 +1321,13 @@ bad = dict_merge(lhs, rhs)
 }
 
 #[test]
-fn surf_scan_rejects_accumulator_mismatch() {
-    let result = check_ir_program(&chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str(
-            r#"
-xs: List[i64] = [cast(1, i64)]
-bad = scan(fn (acc: string, x: i64) -> string_concat(acc, to_string(x)), cast(0, i64), xs)
-"#,
-        )
-        .expect("surf parse"),
-    ));
+fn deep_scan_rejects_accumulator_mismatch() {
+    let result = check_ir_program(
+        &chelis_deep::parser::parse_str(include_str!(
+            "../../../tests/fixtures/core/src/more/deep_scan_rejects_accumulator_mismatch.deep"
+        ))
+        .expect("Deep fixture parses"),
+    );
     let err = result.expect_err("scan should reject mismatched accumulator type");
     assert!(
         err.errors.iter().any(|error| error.message.contains("scan")
@@ -1594,16 +1340,13 @@ bad = scan(fn (acc: string, x: i64) -> string_concat(acc, to_string(x)), cast(0,
 }
 
 #[test]
-fn surf_partition_rejects_non_bool_callback() {
-    let result = check_ir_program(&chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str(
-            r#"
-xs: List[i64] = [cast(1, i64)]
-bad = partition(fn (x: i64) -> add(x, cast(1, i64)), xs)
-"#,
-        )
-        .expect("surf parse"),
-    ));
+fn deep_partition_rejects_non_bool_callback() {
+    let result = check_ir_program(
+        &chelis_deep::parser::parse_str(include_str!(
+            "../../../tests/fixtures/core/src/more/deep_partition_rejects_non_bool_callback.deep"
+        ))
+        .expect("Deep fixture parses"),
+    );
     let err = result.expect_err("partition should reject non-bool callback");
     assert!(
         err.errors
@@ -1617,16 +1360,13 @@ bad = partition(fn (x: i64) -> add(x, cast(1, i64)), xs)
 }
 
 #[test]
-fn surf_flat_map_rejects_non_list_callback() {
-    let result = check_ir_program(&chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str(
-            r#"
-xs: List[i64] = [cast(1, i64)]
-bad = flat_map(fn (x: i64) -> add(x, cast(1, i64)), xs)
-"#,
-        )
-        .expect("surf parse"),
-    ));
+fn deep_flat_map_rejects_non_list_callback() {
+    let result = check_ir_program(
+        &chelis_deep::parser::parse_str(include_str!(
+            "../../../tests/fixtures/core/src/more/deep_flat_map_rejects_non_list_callback.deep"
+        ))
+        .expect("Deep fixture parses"),
+    );
     let err = result.expect_err("flat_map should reject non-list callback");
     assert!(
         err.errors
@@ -1638,16 +1378,13 @@ bad = flat_map(fn (x: i64) -> add(x, cast(1, i64)), xs)
 }
 
 #[test]
-fn surf_flatten_rejects_non_nested_list_input() {
-    let result = check_ir_program(&chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str(
-            r#"
-xs: List[i64] = [cast(1, i64)]
-bad = flatten(xs)
-"#,
-        )
-        .expect("surf parse"),
-    ));
+fn deep_flatten_rejects_non_nested_list_input() {
+    let result = check_ir_program(
+        &chelis_deep::parser::parse_str(include_str!(
+            "../../../tests/fixtures/core/src/more/deep_flatten_rejects_non_nested_list_input.deep"
+        ))
+        .expect("Deep fixture parses"),
+    );
     let err = result.expect_err("flatten should reject non-nested list input");
     assert!(
         err.errors
@@ -1659,16 +1396,11 @@ bad = flatten(xs)
 }
 
 #[test]
-fn surf_dict_remove_rejects_mismatched_key_type() {
-    let result = check_ir_program(&chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str(
-            r#"
-base: Dict[string, i64] = dict_of([("alpha", cast(1, i64))])
-bad = dict_remove(base, cast(7, i64))
-"#,
+fn deep_dict_remove_rejects_mismatched_key_type() {
+    let result = check_ir_program(&chelis_deep::parser::parse_str(
+            include_str!("../../../tests/fixtures/core/src/more/deep_dict_remove_rejects_mismatched_key_type.deep"),
         )
-        .expect("surf parse"),
-    ));
+        .expect("Deep fixture parses"));
     let err = result.expect_err("dict_remove should reject mismatched key type");
     assert!(
         err.errors.iter().any(|error| {
@@ -1681,16 +1413,13 @@ bad = dict_remove(base, cast(7, i64))
 }
 
 #[test]
-fn surf_chunk_rejects_non_integer_size() {
-    let result = check_ir_program(&chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str(
-            r#"
-xs: List[i64] = [cast(1, i64)]
-bad = chunk(xs, "two")
-"#,
-        )
-        .expect("surf parse"),
-    ));
+fn deep_chunk_rejects_non_integer_size() {
+    let result = check_ir_program(
+        &chelis_deep::parser::parse_str(include_str!(
+            "../../../tests/fixtures/core/src/more/deep_chunk_rejects_non_integer_size.deep"
+        ))
+        .expect("Deep fixture parses"),
+    );
     let err = result.expect_err("chunk should reject non-integer size");
     assert!(
         err.errors
@@ -1705,9 +1434,8 @@ bad = chunk(xs, "two")
 // Top-level binding cycle detection
 // ------------------------------------------------------------------
 
-fn ir_errors_from_surf(src: &str) -> Vec<CheckError> {
-    let decls = chelis_surf::parser::parse_str(src).expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+fn ir_errors_from_deep(src: &str) -> Vec<CheckError> {
+    let exprs = chelis_deep::parser::parse_str(src).expect("Deep fixture parses");
     infer_ir_program(&exprs).errors
 }
 
@@ -1715,7 +1443,9 @@ fn ir_errors_from_surf(src: &str) -> Vec<CheckError> {
 fn nautilus_self_reference_is_allowed() {
     // The single-hop identity `x = (x : tensor[...])` is a pinned Nautilus
     // external-input pattern and must NOT be flagged as a binding cycle.
-    let errors = ir_errors_from_surf("x = (x : tensor[4, f32])\n");
+    let errors = ir_errors_from_deep(include_str!(
+        "../../../tests/fixtures/core/src/more/nautilus_self_reference_is_allowed.deep"
+    ));
     assert!(
         !errors
             .iter()
@@ -1726,21 +1456,15 @@ fn nautilus_self_reference_is_allowed() {
 
 #[test]
 fn two_hop_binding_cycle_is_detected() {
-    let errors = ir_errors_from_surf(
-        "a = (b : tensor[4, f32])\n\
-         b = (a : tensor[4, f32])\n",
-    );
+    let errors = ir_errors_from_deep(include_str!(
+        "../../../tests/fixtures/core/src/more/two_hop_binding_cycle_is_detected.deep"
+    ));
     let cycle_err = errors
         .iter()
         .find(|e| matches!(e.kind, CheckErrorKind::CycleDetected))
         .unwrap_or_else(|| {
             panic!("expected a CycleDetected error for a two-hop cycle; got {errors:?}")
         });
-    assert!(
-        cycle_err.message.contains("binding cycle"),
-        "message should mention 'binding cycle'; got {:?}",
-        cycle_err.message
-    );
     assert!(
         cycle_err.message.contains("a -> b -> a"),
         "expected 'a -> b -> a' in message; got {:?}",
@@ -1750,11 +1474,9 @@ fn two_hop_binding_cycle_is_detected() {
 
 #[test]
 fn three_hop_binding_cycle_is_detected() {
-    let errors = ir_errors_from_surf(
-        "a = (b : tensor[4, f32])\n\
-         b = (c : tensor[4, f32])\n\
-         c = (a : tensor[4, f32])\n",
-    );
+    let errors = ir_errors_from_deep(include_str!(
+        "../../../tests/fixtures/core/src/more/three_hop_binding_cycle_is_detected.deep"
+    ));
     let cycle_err = errors
         .iter()
         .find(|e| matches!(e.kind, CheckErrorKind::CycleDetected))
@@ -1771,10 +1493,9 @@ fn three_hop_binding_cycle_is_detected() {
 #[test]
 fn unrelated_defs_do_not_trigger_cycle_false_positive() {
     // Sanity: multiple Nautilus self-references together should still pass.
-    let errors = ir_errors_from_surf(
-        "x = (x : tensor[4, f32])\n\
-         y = (y : tensor[4, f32])\n",
-    );
+    let errors = ir_errors_from_deep(include_str!(
+        "../../../tests/fixtures/core/src/more/unrelated_defs_do_not_trigger_cycle_false_positive.deep"
+    ));
     assert!(
         !errors
             .iter()
@@ -1796,15 +1517,9 @@ fn unrelated_defs_do_not_trigger_cycle_false_positive() {
 #[test]
 fn issue_293_general_tvar_through_arrow_param_checks_clean() {
     // Positive: the reproducer must check clean — no TypeMismatch.
-    let result = infer_surf(
-        r#"
-module Repro.GenericCallback
-def apply_resid[n, P](x: tensor[n, f32], inner_p: P, f: tensor[n, f32] -> P -> tensor[n, f32]) -> tensor[n, f32] =
-  add(x, f(x, inner_p))
-def use_it(x: tensor[3, f32], w: tensor[3, f32]) -> tensor[3, f32] =
-  apply_resid(x, w, fn (t, q) -> mul(t, q))
-"#,
-    );
+    let result = check(include_str!(
+        "../../../tests/fixtures/core/src/more/issue_293_general_tvar_through_arrow_param_checks_clean.deep"
+    ));
     assert!(
         result.errors.is_empty(),
         "expected the general-tvar-through-arrow reproducer to check clean, got: {:?}",
@@ -1816,13 +1531,9 @@ def use_it(x: tensor[3, f32], w: tensor[3, f32]) -> tensor[3, f32] =
 fn issue_293_apply_resid_checks_clean_in_isolation() {
     // Control: the generic def alone already checked clean before the
     // fix; it must keep checking clean.
-    let result = infer_surf(
-        r#"
-module Repro.GenericCallback
-def apply_resid[n, P](x: tensor[n, f32], inner_p: P, f: tensor[n, f32] -> P -> tensor[n, f32]) -> tensor[n, f32] =
-  add(x, f(x, inner_p))
-"#,
-    );
+    let result = check(include_str!(
+        "../../../tests/fixtures/core/src/more/issue_293_apply_resid_checks_clean_in_isolation.deep"
+    ));
     assert!(
         result.errors.is_empty(),
         "apply_resid must check clean in isolation, got: {:?}",
@@ -1835,15 +1546,9 @@ fn issue_293_dim_var_callback_variant_checks_clean() {
     // Control (dim-var path): the same shape where the threaded
     // parameter is a *dim* var `m` rather than a general type var
     // already worked and must keep working.
-    let result = infer_surf(
-        r#"
-module Repro.DimCallback
-def apply_resid[n, m](x: tensor[n, f32], inner: tensor[m, f32], f: tensor[n, f32] -> tensor[m, f32] -> tensor[n, f32]) -> tensor[n, f32] =
-  f(x, inner)
-def use_it(x: tensor[3, f32], w: tensor[3, f32]) -> tensor[3, f32] =
-  apply_resid(x, w, fn (t, q) -> add(t, q))
-"#,
-    );
+    let result = check(include_str!(
+        "../../../tests/fixtures/core/src/more/issue_293_dim_var_callback_variant_checks_clean.deep"
+    ));
     assert!(
         result.errors.is_empty(),
         "the dim-var callback control must check clean, got: {:?}",
@@ -1855,15 +1560,9 @@ def use_it(x: tensor[3, f32], w: tensor[3, f32]) -> tensor[3, f32] =
 fn issue_293_monomorphic_callback_variant_checks_clean() {
     // Control (monomorphic path): a fully concrete callback already
     // worked and must keep working.
-    let result = infer_surf(
-        r#"
-module Repro.MonoCallback
-def apply_resid[n](x: tensor[n, f32], inner: tensor[n, f32], f: tensor[n, f32] -> tensor[n, f32] -> tensor[n, f32]) -> tensor[n, f32] =
-  add(x, f(x, inner))
-def use_it(x: tensor[3, f32], w: tensor[3, f32]) -> tensor[3, f32] =
-  apply_resid(x, w, fn (t, q) -> mul(t, q))
-"#,
-    );
+    let result = check(include_str!(
+        "../../../tests/fixtures/core/src/more/issue_293_monomorphic_callback_variant_checks_clean.deep"
+    ));
     assert!(
         result.errors.is_empty(),
         "the monomorphic callback control must check clean, got: {:?}",
@@ -1879,15 +1578,9 @@ fn issue_293_incompatible_callback_still_rejected() {
     // `inner_p` argument supplied at the call site is a scalar `i32`,
     // which is bound to the same `P`. `P` cannot be both a tensor and a
     // scalar i32, so this must still produce a clear mismatch.
-    let result = infer_surf(
-        r#"
-module Repro.BadCallback
-def apply_resid[n, P](x: tensor[n, f32], inner_p: P, f: tensor[n, f32] -> P -> tensor[n, f32]) -> tensor[n, f32] =
-  add(x, f(x, inner_p))
-def use_it(x: tensor[3, f32]) -> tensor[3, f32] =
-  apply_resid(x, 1, fn (t, q) -> mul(t, q))
-"#,
-    );
+    let result = check(include_str!(
+        "../../../tests/fixtures/core/src/more/issue_293_incompatible_callback_still_rejected.deep"
+    ));
     assert!(
         result.errors.iter().any(|e| matches!(
             e.kind,
@@ -2065,15 +1758,9 @@ fn narrow_substitutes_literal_for_wildcard_unconditionally() {
 /// narrowed published scheme, so the lock inspects the caller.)
 #[test]
 fn const_col_chain_propagates_declared_dim_to_callers() {
-    let checked = checked_surf(
-        r#"
-def const_col[n](spots: tensor[n, f32], v: f64) -> tensor[n, 1, f64] = {
-  nn = cast(shape(copy(spots), cast(0, i32)), i64)
-  reshape(to_tensor(map(fn (i: i64) -> v, range(cast(0, i64), nn))), [nn, cast(1, i64)])
-}
-def caller[n](spots: tensor[n, f32]) -> tensor[n, 1, f64] = const_col(spots, cast(1.0, f64))
-"#,
-    );
+    let checked = checked_deep(include_str!(
+        "../../../tests/fixtures/core/src/more/const_col_chain_propagates_declared_dim_to_callers.deep"
+    ));
     let caller_ty = checked
         .type_env()
         .get("caller")

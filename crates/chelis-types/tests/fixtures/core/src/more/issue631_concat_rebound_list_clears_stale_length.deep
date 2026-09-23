@@ -1,0 +1,31 @@
+(module {surf_path: "Repro.ConcatRebind"}
+  repro.concatrebind
+  (defsig {}
+    cat_rebind
+    (t-fn {}
+      (t-tensor {} (d-lit {} 1) (d-lit {} 2) (t-prim {} f32))
+      (t-tensor {} (d-lit {} 1) (d-lit {} 2) (t-prim {} f32))
+      (t-adt {} List (t-tensor {} (d-lit {} 1) (d-lit {} 2) (t-prim {} f32)))
+      (t-tensor {} (d-lit {} 7) (d-lit {} 2) (t-prim {} f32))))
+  (def {}
+    cat_rebind
+    (fn {}
+      (params {}
+        (a {type: (t-var {} _)})
+        (b {type: (t-var {} _)})
+        (xs {type: (t-var {} _)}))
+      (let {span: "surf:138..187"}
+        (bind {}
+          rows
+          (app {span: "surf:149..155"}
+            (var {} Cons)
+            (var {span: "surf:150..151"} a)
+            (app {} (var {} Cons) (var {span: "surf:153..154"} b) (var {} Nil))))
+        (let {}
+          (bind {}
+            rows
+            (var {span: "surf:165..167"} xs))
+          (app {span: "surf:170..185"}
+            (var {span: "surf:170..176"} concat)
+            (var {span: "surf:177..181"} rows)
+            (lit {span: "surf:183..184", type: (t-prim {} i32)} 0)))))))

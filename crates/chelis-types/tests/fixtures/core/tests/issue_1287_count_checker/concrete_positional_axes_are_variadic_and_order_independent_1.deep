@@ -1,0 +1,33 @@
+(defsig {}
+  f
+  (t-fn {}
+    (t-tensor {} (d-lit {} 2) (d-lit {} 3) (d-lit {} 4) (t-prim {} bool))
+    (t-tensor {} (d-lit {} 3) (t-prim {} i64))))
+
+(def {}
+  f
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:53..69"}
+      (var {span: "surf:53..58"} count)
+      (borrow {span: "surf:59..61"} (var {span: "surf:60..61"} x))
+      (lit {span: "surf:63..64", type: (t-prim {} i32)} 0)
+      (app {span: "surf:66..68"}
+        (var {} neg)
+        (lit {span: "surf:67..68", type: (t-prim {} i32)} 1)))))
+
+(defsig {}
+  g
+  (t-fn {}
+    (t-tensor {} (d-lit {} 2) (d-lit {} 3) (d-lit {} 4) (t-prim {} bool))
+    (t-tensor {} (d-lit {} 3) (t-prim {} i64))))
+
+(def {}
+  g
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:122..137"}
+      (var {span: "surf:122..127"} count)
+      (borrow {span: "surf:128..130"} (var {span: "surf:129..130"} x))
+      (lit {span: "surf:132..133", type: (t-prim {} i32)} 2)
+      (lit {span: "surf:135..136", type: (t-prim {} i32)} 0))))

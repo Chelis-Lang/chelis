@@ -1,0 +1,10 @@
+(module {surf_path: "Agent.Strategy"}
+  agent.strategy
+  (defsig {} bad (t-fn {} (t-prim {} f32) (t-adt {} Meters)))
+  (def {}
+    bad
+    (fn {}
+      (params {} (x {type: (t-var {} _)}))
+      (app {span: "surf:50..59"}
+        (var {span: "surf:50..56"} Meters)
+        (var {span: "surf:57..58"} x)))))

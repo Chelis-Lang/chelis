@@ -1,0 +1,9 @@
+(defsig {} main (t-fn {} (t-prim {} i64)))
+
+(def {}
+  main
+  (fn {}
+    (params {})
+    (cast {span: "surf:20..41"}
+      (lit {span: "surf:25..35", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 2147483648)
+      (t-prim {} i64))))

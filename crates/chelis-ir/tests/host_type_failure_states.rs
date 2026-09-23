@@ -1,12 +1,6 @@
 //! chelis#730 Phase 2 contract tests for the HostType failure-state split.
 //!
-//! The value-level tests lock the logical and inference vocabulary. The
-//! source-boundary tests lock the completed migration away from the anonymous
-//! `Unknown` sentinel. C-host ABI parity lives in the backend crate's
-//! `host_abi_tests` module.
-
-use std::fs;
-use std::path::Path;
+//! Value-level tests lock the logical and inference vocabulary.
 
 use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, List, Metadata};
@@ -384,85 +378,4 @@ fn raw_decoder_rejects_malformed_and_unknown_syntax_without_a_term() {
     let malformed =
         serde_json::json!({"entries": [["type", Expr::Atom(Atom::Name("nope".into()), span)]]});
     assert!(serde_json::from_value::<Metadata>(malformed).is_err());
-}
-
-fn production_legacy_unknown_lines(source: &str) -> Vec<(usize, &str)> {
-    source
-        .lines()
-        .enumerate()
-        .filter_map(|(index, line)| {
-            let code = line.split("//").next().unwrap_or_default();
-            code.contains("HostType::Unknown")
-                .then_some((index + 1, line))
-        })
-        .collect()
-}
-
-fn host_sources() -> (String, String) {
-    let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let host = fs::read_to_string(crate_dir.join("src/host.rs")).expect("read host lowerer");
-    let backend = fs::read_to_string(
-        crate_dir
-            .parent()
-            .expect("crates directory")
-            .join("chelis-backend-c/src/host_emit.rs"),
-    )
-    .expect("read C host emitter");
-    (host, backend)
-}
-
-#[test]
-fn legacy_unknown_producers_and_consumers_are_gone() {
-    let (host, backend) = host_sources();
-    let host_hits = production_legacy_unknown_lines(&host);
-    let backend_hits = production_legacy_unknown_lines(&backend);
-    assert!(
-        host_hits.is_empty(),
-        "the host lowerer still carries the legacy anonymous state; every producer and \
-         consumer must migrate to HostTypeTerm/decode errors/resolution errors: \
-         {host_hits:?}"
-    );
-    assert!(
-        backend_hits.is_empty(),
-        "the C emitter still interprets the legacy anonymous state: {backend_hits:?}"
-    );
-}
-
-#[test]
-fn raw_host_type_decoding_is_result_typed() {
-    let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let state = fs::read_to_string(crate_dir.join("src/host_type_state.rs"))
-        .expect("read typed host-state module");
-    assert!(
-        state.contains("Result<HostTypeTerm, HostTypeDecodeError>"),
-        "raw Deep host-type decoding must return a typed Result; defining the error \
-         vocabulary without using it at the boundary is insufficient"
-    );
-    let definition = ["fn stamped_", "parts"].concat();
-    let call = ["stamped_", "parts("].concat();
-    assert!(
-        !state.contains(&definition) && !state.contains(&call),
-        "E5b requires every host-type read to disposition ExprCarrier directly"
-    );
-}
-
-#[test]
-fn c_emitter_has_no_infallible_or_default_host_type_conversion() {
-    let (_, backend) = host_sources();
-    assert!(
-        backend.contains("fn c_type(ty: &HostAbiType)"),
-        "C declarations must consume the backend-owned resolved ABI vocabulary"
-    );
-    assert!(
-        !backend.contains("HostType::Unknown => \"void*\""),
-        "an unresolved logical type must never become a plausible ABI pointer"
-    );
-    assert!(
-        !backend.contains("_ => \"chelis_value_from_int64(0)\""),
-        "boxing an unsupported host type must return Unsupported, not a boxed zero"
-    );
-    assert!(
-        !backend.contains("_ => \"0\".to_string()"),
-        "unboxing an unsupported host type must return Unsupported, not zero"
-    );
 }

@@ -15,13 +15,10 @@
 //! `spec/design/implicit_linearity.md` §3 (explicit `copy` lowers to
 //! `RiscOp::Copy` and is well-typed on any tensor input).
 
-use chelis_surf::desugar::desugar_program;
-use chelis_surf::parser::parse_str;
 use chelis_types::check_typed_program;
 
-fn typecheck_surf(source: &str) -> Result<(), Vec<chelis_types::errors::CheckError>> {
-    let decls = parse_str(source).expect("surf parse should succeed");
-    let deep = desugar_program(&decls);
+fn typecheck_core(source: &str) -> Result<(), Vec<chelis_types::errors::CheckError>> {
+    let deep = chelis_deep::parse_and_stamp_file(source).expect("Deep fixture");
     check_typed_program(&deep)
         .map(|_| ())
         .map_err(|result| result.errors)
@@ -35,7 +32,9 @@ fn typecheck_surf(source: &str) -> Result<(), Vec<chelis_types::errors::CheckErr
 /// the upstream pipe value's type.
 #[test]
 fn pipe_realize_with_statically_typed_tensor_typechecks() {
-    let result = typecheck_surf("def f(x: tensor[3, f32]) -> tensor[3, f32] = x |> realize");
+    let result = typecheck_core(include_str!(
+        "fixtures/core/tests/pipe_copy_typecheck/pipe_realize_with_statically_typed_tensor_typechecks_1.deep"
+    ));
     assert!(
         result.is_ok(),
         "x |> realize on tensor[3, f32] should type-check; errors={:?}",
@@ -53,7 +52,9 @@ fn pipe_realize_with_statically_typed_tensor_typechecks() {
 /// resolves its inner type the parameter is already a `Tensor`.
 #[test]
 fn pipe_copy_with_statically_typed_tensor_typechecks() {
-    let result = typecheck_surf("def f(x: tensor[3, f32]) -> tensor[3, f32] = x |> copy");
+    let result = typecheck_core(include_str!(
+        "fixtures/core/tests/pipe_copy_typecheck/pipe_copy_with_statically_typed_tensor_typechecks_1.deep"
+    ));
     assert!(
         result.is_ok(),
         "x |> copy on tensor[3, f32] should type-check; errors={:?}",
@@ -69,7 +70,9 @@ fn pipe_copy_with_statically_typed_tensor_typechecks() {
 /// ignored until the fix lands so a single fixture pins both.
 #[test]
 fn pipe_cast_with_statically_typed_tensor_typechecks() {
-    let result = typecheck_surf("def f(x: tensor[3, f32]) -> tensor[3, f32] = x |> cast(f32)");
+    let result = typecheck_core(include_str!(
+        "fixtures/core/tests/pipe_copy_typecheck/pipe_cast_with_statically_typed_tensor_typechecks_1.deep"
+    ));
     assert!(
         result.is_ok(),
         "x |> cast(f32) on tensor[3, f32] should type-check; errors={:?}",

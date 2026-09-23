@@ -2185,10 +2185,15 @@ fn shape_source_for_axis(dag: &Dag, id: NodeId, axis: usize) -> Option<(String, 
         | RiscOp::MaxElem
         | RiscOp::MinElem
         | RiscOp::ExtremaAdjoint { .. }
-        | RiscOp::ReluAdjoint => node
-            .inputs
-            .iter()
-            .find_map(|input| shape_source_for_axis(dag, *input, axis)),
+        | RiscOp::ReluAdjoint
+        | RiscOp::FusedElem { .. } => {
+            for input in &node.inputs {
+                if let Some(source) = shape_source_for_axis(dag, *input, axis) {
+                    return Some(source);
+                }
+            }
+            None
+        }
         RiscOp::Neg
         | RiscOp::Exp
         | RiscOp::Log
@@ -2307,10 +2312,6 @@ fn shape_source_for_axis(dag: &Dag, id: NodeId, axis: usize) -> Option<(String, 
             }
             _ => None,
         },
-        RiscOp::FusedElem { .. } => node
-            .inputs
-            .iter()
-            .find_map(|input| shape_source_for_axis(dag, *input, axis)),
         _ => None,
     }
 }
@@ -2669,6 +2670,44 @@ mod tests {
         assert_eq!(dag.len(), 3);
         let node = dag.get(c).unwrap();
         assert_eq!(node.inputs, vec![NodeId(0), NodeId(1)]);
+    }
+
+    #[test]
+    fn shape_sources_skip_unsourced_inputs_and_keep_first_match() {
+        let ty = TensorType {
+            dims: vec![DimInfo::Lit(2)],
+            precision: Prim::F32,
+        };
+        let mut dag = Dag::new();
+        let constant = dag.add_node(
+            RiscOp::synth_const_tensor(Prim::F32, vec![0.0, 0.0]),
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+        let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], ty.clone(), None);
+        let indirect = dag.add_node(RiscOp::Add, vec![constant, x], ty.clone(), None);
+        let binary = dag.add_node(RiscOp::Add, vec![indirect, y], ty.clone(), None);
+        let fused = dag.add_node(
+            RiscOp::FusedElem {
+                ops: vec![FusedStep {
+                    op: FusedStepOp::Add,
+                    input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
+                }],
+            },
+            vec![y, indirect],
+            ty.clone(),
+            None,
+        );
+        let unsourced = dag.add_node(RiscOp::Add, vec![constant, constant], ty, None);
+
+        assert_eq!(
+            shape_source_for_axis(&dag, binary, 0),
+            Some(("x".into(), 0))
+        );
+        assert_eq!(shape_source_for_axis(&dag, fused, 0), Some(("y".into(), 0)));
+        assert_eq!(shape_source_for_axis(&dag, unsourced, 0), None);
     }
 
     #[test]

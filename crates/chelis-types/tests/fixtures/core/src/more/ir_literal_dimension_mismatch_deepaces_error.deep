@@ -1,0 +1,29 @@
+(defsig {}
+  want_2x2
+  (t-fn {}
+    (t-tensor {} (d-lit {} 2) (d-lit {} 2) (t-prim {} f32))
+    (t-tensor {} (t-prim {} f32))))
+
+(def {}
+  want_2x2
+  (fn {}
+    (params {} (a {type: (t-var {} _)}))
+    (app {span: "surf:52..66"}
+      (var {span: "surf:52..57"} trace)
+      (var {span: "surf:58..59"} a)
+      (lit {span: "surf:61..62", type: (t-prim {} i32)} 0)
+      (lit {span: "surf:64..65", type: (t-prim {} i32)} 1))))
+
+(defsig {}
+  main
+  (t-fn {}
+    (t-tensor {} (d-lit {} 3) (d-lit {} 3) (t-prim {} f32))
+    (t-tensor {} (t-prim {} f32))))
+
+(def {}
+  main
+  (fn {}
+    (params {} (a {type: (t-var {} _)}))
+    (app {span: "surf:115..126"}
+      (var {span: "surf:115..123"} want_2x2)
+      (var {span: "surf:124..125"} a))))

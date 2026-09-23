@@ -1,0 +1,10 @@
+(module {surf_path: "Agent.Strategy"}
+  agent.strategy
+  (defsig {} sneak (t-fn {} (t-prim {} f32) (t-adt {} Probability)))
+  (def {}
+    sneak
+    (fn {}
+      (params {} (x {type: (t-var {} _)}))
+      (app {span: "surf:57..73"}
+        (var {span: "surf:57..70"} internal_make)
+        (var {span: "surf:71..72"} x)))))

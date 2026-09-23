@@ -1,0 +1,41 @@
+(defsig {}
+  ok
+  (t-fn {}
+    (t-tensor {} (d-lit {} 4) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 4) (t-prim {} f32))))
+
+(def {}
+  ok
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (let {span: "surf:49..156"}
+      (bind {}
+        xs
+        (app {span: "surf:71..81",
+               surf_binding_type: "explicit",
+               type: (t-adt {} List (t-prim {} f32))
+             }
+          (var {span: "surf:71..78"} to_list)
+          (var {span: "surf:79..80"} x)))
+      (let {}
+        (bind {destructure: true}
+          __chelis_tmp1
+          (app {span: "surf:90..98"}
+            (var {span: "surf:90..94"} drop)
+            (var {span: "surf:95..97"} xs)))
+        (let {}
+          (bind {}
+            y
+            (app {span: "surf:123..130",
+                   surf_binding_type: "explicit",
+                   type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))
+                 }
+              (var {span: "surf:123..127"} relu)
+              (var {span: "surf:128..129"} x)))
+          (let {}
+            (bind {destructure: true}
+              __chelis_tmp0
+              (app {span: "surf:139..146"}
+                (var {span: "surf:139..143"} drop)
+                (var {span: "surf:144..145"} x)))
+            (var {span: "surf:151..152"} y)))))))

@@ -1,0 +1,18 @@
+(deftype {} Cell () (variant {} Cell (field {} index (t-prim {} i32))))
+
+(defsig {} read (t-fn {} (t-adt {} Cell) (t-prim {} f32)))
+
+(def {}
+  read
+  (fn {}
+    (params {} (c {type: (t-var {} _)}))
+    (match {span: "surf:64..122"}
+      (var {span: "surf:70..71"} c)
+      (arm {}
+        (pat-record {} Cell (kv {} index (pat-lit {} 1)))
+        ()
+        (lit {span: "surf:104..107", type: (t-prim {} f32)} 1.5))
+      (arm {}
+        (pat-wild {})
+        ()
+        (lit {span: "surf:117..120", type: (t-prim {} f32)} 2.5)))))

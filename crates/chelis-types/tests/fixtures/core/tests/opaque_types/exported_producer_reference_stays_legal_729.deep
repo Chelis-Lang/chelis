@@ -1,0 +1,12 @@
+(module {surf_path: "Agent.Strategy"}
+  agent.strategy
+  (defsig {} fine (t-fn {} (t-prim {} f32) (t-prim {} f32)))
+  (def {}
+    fine
+    (fn {}
+      (params {} (x {type: (t-var {} _)}))
+      (app {span: "surf:48..74"}
+        (var {span: "surf:48..58"} prob_value)
+        (app {span: "surf:59..73"}
+          (var {span: "surf:59..70"} probability)
+          (var {span: "surf:71..72"} x))))))

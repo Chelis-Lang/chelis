@@ -1,4 +1,5 @@
 use super::*;
+use chelis_deep::annotations::{LiteralStyle, MetadataValue, Spanned, TypeSyntax};
 
 #[derive(Clone, Copy)]
 enum GraphShape {
@@ -9,45 +10,84 @@ enum GraphShape {
     Cycles(usize),
 }
 
-fn call(name: usize, argument: &str) -> String {
-    format!("f{name}({argument})")
+fn with_metadata(mut expr: deep::Expr, value: MetadataValue) -> deep::Expr {
+    let deep::Expr::List(list, _) = &mut expr else {
+        unreachable!("generated forms use the original List carrier");
+    };
+    let deep::Expr::Map(metadata, _) = &mut list.elements[1] else {
+        unreachable!("generated forms have a metadata map");
+    };
+    metadata.insert(value).expect("valid generated metadata");
+    expr
 }
 
-fn function_body(index: usize, definitions: usize, shape: GraphShape) -> String {
+fn var(name: &str) -> deep::Expr {
+    node_expr(DeepTag::Var, vec![symbol_expr(name)])
+}
+
+fn call(name: usize, argument: deep::Expr) -> deep::Expr {
+    node_expr(DeepTag::App, vec![var(&format!("f{name}")), argument])
+}
+
+fn i32_type() -> deep::Expr {
+    node_expr(DeepTag::TPrim, vec![symbol_expr("i32")])
+}
+
+fn i32_literal(value: i64) -> deep::Expr {
+    let literal = node_expr(
+        DeepTag::Lit,
+        vec![deep::Expr::Atom(deep::Atom::Int(value), zero_span())],
+    );
+    let literal = with_metadata(
+        literal,
+        MetadataValue::Type(TypeSyntax::try_new(i32_type()).expect("valid i32 type")),
+    );
+    with_metadata(
+        literal,
+        MetadataValue::SurfLiteralStyle(Spanned::new(LiteralStyle::Explicit, zero_span())),
+    )
+}
+
+fn function_body(index: usize, definitions: usize, shape: GraphShape) -> deep::Expr {
     match shape {
-        GraphShape::Isolated => "x".to_string(),
+        GraphShape::Isolated => var("x"),
         GraphShape::Chain => {
             if index + 1 < definitions {
-                call(index + 1, "x")
+                call(index + 1, var("x"))
             } else {
-                "x".to_string()
+                var("x")
             }
         }
         GraphShape::FanOut if index == 0 => {
-            let mut lines = vec!["{".to_string()];
-            for target in 1..definitions {
-                lines.push(format!("  y{target} = {}", call(target, "x")));
-            }
-            lines.push(if definitions > 1 {
-                format!("  y{}", definitions - 1)
+            let mut body = if definitions > 1 {
+                var(&format!("y{}", definitions - 1))
             } else {
-                "  x".to_string()
-            });
-            lines.push("}".to_string());
-            lines.join("\n")
+                var("x")
+            };
+            // Surf lowered the flat binding block to nested legacy Lets. Build
+            // that same tree bottom-up, without recursively parsing/stamping it.
+            for target in (1..definitions).rev() {
+                let binding = node_expr(
+                    DeepTag::Bind,
+                    vec![symbol_expr(&format!("y{target}")), call(target, var("x"))],
+                );
+                body = node_expr(DeepTag::Let, vec![binding, body]);
+            }
+            body
         }
-        GraphShape::FanOut => "x".to_string(),
+        GraphShape::FanOut => var("x"),
         GraphShape::BoundedDag => {
             let targets = [index + 1, index + 2]
                 .into_iter()
                 .filter(|target| *target < definitions)
                 .collect::<Vec<_>>();
             match targets.as_slice() {
-                [] => "x".to_string(),
-                [only] => call(*only, "x"),
-                [first, second] => {
-                    format!("add({}, {})", call(*first, "x"), call(*second, "x"))
-                }
+                [] => var("x"),
+                [only] => call(*only, var("x")),
+                [first, second] => node_expr(
+                    DeepTag::App,
+                    vec![var("add"), call(*first, var("x")), call(*second, var("x"))],
+                ),
                 _ => unreachable!(),
             }
         }
@@ -56,24 +96,67 @@ fn function_body(index: usize, definitions: usize, shape: GraphShape) -> String 
             let group_size = definitions / groups;
             let group_start = (index / group_size) * group_size;
             let target = group_start + ((index - group_start + 1) % group_size);
-            format!(
-                "if eq(x, 0i32) then x else {}",
-                call(target, "sub(x, 1i32)")
+            node_expr(
+                DeepTag::If,
+                vec![
+                    node_expr(DeepTag::App, vec![var("eq"), var("x"), i32_literal(0)]),
+                    var("x"),
+                    call(
+                        target,
+                        node_expr(DeepTag::App, vec![var("sub"), var("x"), i32_literal(1)]),
+                    ),
+                ],
             )
         }
     }
 }
 
 fn generated_program(definitions: usize, shape: GraphShape) -> Vec<deep::Expr> {
-    let mut source = String::from("module Profile.Issue1316\n");
+    // Match unexpanded Surf desugaring's List carrier, including the anonymous
+    // parameter type supplied by the separate signature. Source-only spans are
+    // synthetic here; this workload measures graph planning, not diagnostics.
+    let mut declarations = vec![symbol_expr("profile.issue1316")];
     for index in 0..definitions {
-        source.push_str(&format!(
-            "def f{index}(x: i32) -> i32 = {}\n",
-            function_body(index, definitions, shape)
+        declarations.push(node_expr(
+            DeepTag::Defsig,
+            vec![
+                symbol_expr(&format!("f{index}")),
+                node_expr(DeepTag::TFn, vec![i32_type(), i32_type()]),
+            ],
+        ));
+        let parameter_type = node_expr(DeepTag::TVar, vec![symbol_expr("_")]);
+        let parameter = deep::Expr::List(
+            deep::List {
+                elements: vec![
+                    symbol_expr("x"),
+                    deep::Expr::Map(
+                        deep::Metadata::from(MetadataValue::Type(
+                            TypeSyntax::try_new(parameter_type).expect("valid parameter type"),
+                        )),
+                        zero_span(),
+                    ),
+                ],
+            },
+            zero_span(),
+        );
+        declarations.push(node_expr(
+            DeepTag::Def,
+            vec![
+                symbol_expr(&format!("f{index}")),
+                node_expr(
+                    DeepTag::Fn,
+                    vec![
+                        node_expr(DeepTag::Params, vec![parameter]),
+                        function_body(index, definitions, shape),
+                    ],
+                ),
+            ],
         ));
     }
-    let declarations = chelis_surf::parser::parse_str(&source).expect("generated Surf parses");
-    chelis_surf::desugar::desugar_program(&declarations)
+    vec![with_metadata(
+        node_expr(DeepTag::Module, declarations),
+        MetadataValue::SurfPath(Spanned::new("Profile.Issue1316".into(), zero_span())),
+    )]
 }
 
 fn plan_for(program: &[deep::Expr]) -> FunctionInferencePlan {
@@ -332,13 +415,11 @@ fn issue_1316_malformed_group_rejects_in_both_drivers() {
 
 #[test]
 fn issue_1316_unknown_call_diagnostic_order_is_stable_across_drivers() {
-    let declarations = chelis_surf::parser::parse_str(
-        "module Profile.Errors\n\
-         def first(x: i32) -> i32 = missing_first(x)\n\
-         def second(x: i32) -> i32 = missing_second(x)\n",
+    let program = chelis_deep::parser::parse_str(
+        include_str!("../../../tests/fixtures/core/src/issue_1316/issue_1316_unknown_call_diagnostic_order_is_stable_across_drivers.deep"),
     )
     .expect("fixture parses");
-    let program = chelis_surf::desugar::desugar_program(&declarations);
+
     let messages = |result: Result<CheckedProgram, InferResult>| {
         result
             .expect_err("unknown calls must reject")

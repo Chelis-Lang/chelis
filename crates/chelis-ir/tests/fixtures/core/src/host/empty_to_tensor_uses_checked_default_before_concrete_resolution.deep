@@ -1,0 +1,7 @@
+(def {}
+  result
+  (app {span: "surf:9..29"}
+    (var {span: "surf:9..14"} numel)
+    (app {span: "surf:15..28"}
+      (var {span: "surf:15..24"} to_tensor)
+      (var {span: "surf:25..27"} Nil))))

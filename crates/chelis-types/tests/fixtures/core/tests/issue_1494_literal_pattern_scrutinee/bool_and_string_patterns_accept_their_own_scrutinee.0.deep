@@ -1,0 +1,24 @@
+(defsig {} g (t-fn {} (t-prim {} bool) (t-prim {} bool)))
+
+(def {}
+  g
+  (fn {}
+    (params {} (b {type: (t-var {} _)}))
+    (var {span: "surf:25..26"} b)))
+
+(defsig {} r (t-prim {} i32))
+
+(def {}
+  r
+  (match {span: "surf:37..90"}
+    (app {span: "surf:43..50"}
+      (var {span: "surf:43..44"} g)
+      (lit {span: "surf:45..49", type: (t-prim {} bool)} true))
+    (arm {}
+      (pat-lit {} true)
+      ()
+      (lit {span: "surf:70..72", type: (t-prim {} i32)} 10))
+    (arm {}
+      (pat-lit {} false)
+      ()
+      (lit {span: "surf:86..88", type: (t-prim {} i32)} 20))))

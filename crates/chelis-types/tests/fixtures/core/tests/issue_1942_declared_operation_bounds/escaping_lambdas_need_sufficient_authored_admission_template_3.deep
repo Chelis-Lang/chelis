@@ -1,0 +1,13 @@
+(def {}
+  make
+  (fn {}
+    (params {})
+    (let {}
+      (bind {}
+        h
+        (fn {}
+          (params {} x)
+          (app {}
+            (var {} sin)
+            (var {} x))))
+      (var {} h))))

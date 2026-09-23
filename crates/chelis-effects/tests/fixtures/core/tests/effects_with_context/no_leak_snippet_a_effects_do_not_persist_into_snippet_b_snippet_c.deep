@@ -1,0 +1,11 @@
+(defsig {} stamp (t-fn {eff: (effects {})} (t-prim {} i64)))
+
+(def {}
+  stamp
+  (fn {}
+    (params {})
+    (app {span: "surf:27..47"}
+      (var {span: "surf:27..33"} lib_id)
+      (cast {span: "surf:34..46"}
+        (lit {span: "surf:39..40", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 1)
+        (t-prim {} i64)))))

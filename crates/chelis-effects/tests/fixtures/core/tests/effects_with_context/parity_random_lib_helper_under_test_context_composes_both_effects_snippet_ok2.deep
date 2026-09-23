@@ -1,0 +1,20 @@
+(defsig {}
+  use_drop
+  (t-fn {eff: (effects {} random test)}
+    (t-tensor {} (d-lit {} 8) (t-prim {} f32))
+    (t-unit {})))
+
+(def {}
+  use_drop
+  (fn {}
+    (params {} (t {type: (t-var {} _)}))
+    (let {span: "surf:60..115"}
+      (bind {}
+        y
+        (app {span: "surf:68..79"}
+          (var {span: "surf:68..76"} lib_drop)
+          (var {span: "surf:77..78"} t)))
+      (app {span: "surf:82..113"}
+        (var {span: "surf:82..93"} test_assert)
+        (lit {span: "surf:94..98", type: (t-prim {} bool)} true)
+        (lit {span: "surf:100..112", type: (t-prim {} string)} "after-drop")))))

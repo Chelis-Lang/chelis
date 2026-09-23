@@ -24,9 +24,8 @@ fn parse(source: &str) -> Vec<chelis_deep::Expr> {
     chelis_deep::parser::parse_str(source).expect("Deep binder fixture must parse")
 }
 
-fn surf(source: &str) -> Vec<chelis_deep::Expr> {
-    let parsed = chelis_surf::parser::parse_str(source).expect("Surf binder fixture must parse");
-    chelis_surf::desugar::desugar_program(&parsed)
+fn parse_fixture(source: &str) -> Vec<chelis_deep::Expr> {
+    chelis_deep::parse_and_stamp_file(source).expect("valid core fixture")
 }
 
 fn assert_legal() {
@@ -109,16 +108,9 @@ fn malformed_parameter_type_is_rejected_once_at_annotation_admission() {
 
 #[test]
 fn explicit_signature_binders_reach_generated_annotation_finalization() {
-    let exprs = surf(
-        r#"
-sig row_argmax[piece, classes, p]: &tensor[piece, classes, p] -> i64
-def row_argmax(row: &tensor[piece, classes, p]) -> i64 = {
-  pair = sort(row, cast(1, i32))
-  cast(0, i64)
-}
-def call(xs: &tensor[1, 3, f32]) -> i64 = row_argmax(xs)
-"#,
-    );
+    let exprs = parse_fixture(include_str!(
+        "fixtures/core/tests/rt800_binder_scope_isolation/explicit_signature_binders_reach_generated_annotation_finalization.0.deep"
+    ));
     check_ir_program(&exprs).unwrap_or_else(|result| {
         panic!(
             "the declaration-owned `piece`/`classes`/`p` scope must survive finalization: {:?}",

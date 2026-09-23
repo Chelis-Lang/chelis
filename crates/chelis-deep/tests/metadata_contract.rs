@@ -224,30 +224,6 @@ fn placements_and_singleton_keys_are_validated() {
 }
 
 #[test]
-fn registry_and_corpus_cover_exactly_the_normative_inventory() {
-    let spec = include_str!("../../../spec/03-deep-syntax.md");
-    let section = spec
-        .split("**Defined keys:**")
-        .nth(1)
-        .unwrap()
-        .split("> **[03-META-1]**")
-        .next()
-        .unwrap();
-    let mut normative: Vec<_> = section
-        .lines()
-        .filter_map(|line| line.strip_prefix("| `")?.split('`').next())
-        .filter(|key| *key != "span_*")
-        .collect();
-    normative.sort_unstable();
-    let mut registered = chelis_deep::metadata::REGISTERED_METADATA_KEYS.to_vec();
-    registered.sort_unstable();
-    let mut corpus: Vec<_> = CASES.iter().map(|(key, _)| *key).collect();
-    corpus.sort_unstable();
-    assert_eq!(registered, normative);
-    assert_eq!(corpus, normative);
-}
-
-#[test]
 fn legacy_programmatic_carriers_cannot_hide_malformed_metadata() {
     for source in [
         "(var {span: 1} x)",

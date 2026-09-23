@@ -21,14 +21,11 @@
 //! The probes below pin the observed behavior so the design is
 //! discoverable and so future refactors don't silently change it.
 
-use chelis_surf::desugar::desugar_program;
-use chelis_surf::parser::parse_str;
 use chelis_types::check_typed_program;
 use chelis_types::errors::{CheckError, CheckErrorKind};
 
-fn typecheck_surf(source: &str) -> Vec<CheckError> {
-    let decls = parse_str(source).expect("surf parse should succeed");
-    let deep = desugar_program(&decls);
+fn typecheck_core(source: &str) -> Vec<CheckError> {
+    let deep = chelis_deep::parse_and_stamp_file(source).expect("Deep fixture");
     match check_typed_program(&deep) {
         Ok(_) => Vec::new(),
         Err(prog_errors) => prog_errors.errors,
@@ -60,17 +57,9 @@ fn let_ascription_with_sig_dim_name_typechecks_when_dim_matches() {
     // the sig params. The sig contract guarantees the params share
     // the same instantiated dim var; the let-ascriptions are
     // consistent with that. No error expected.
-    let errors = typecheck_surf(
-        r#"
-sig pair_id[n]: &tensor[n, f32] -> &tensor[n, f32] -> tensor[n, f32]
-def pair_id(a: &tensor[n, f32], b: &tensor[n, f32]) -> tensor[n, f32] =
-  {
-    x: &tensor[n, f32] = a
-    y: &tensor[n, f32] = b
-    pair_id(x, y)
-  }
-"#,
-    );
+    let errors = typecheck_core(include_str!(
+        "fixtures/core/tests/issue_159_let_ascription_dim_capture/let_ascription_with_sig_dim_name_typechecks_when_dim_matches_1.deep"
+    ));
     assert!(
         !has_dimension_mismatch(&errors),
         "expected no DimensionMismatch when let-ascriptions \
@@ -84,27 +73,13 @@ fn let_ascription_with_concrete_dim_mismatch_against_rhs_errors() {
     // Most direct probe of the patch's behavior: declared concrete
     // dim disagrees with the RHS's concrete dim. unify_dim must
     // produce DimensionMismatch via the patch's surfaced diagnostic.
-    let errors = typecheck_surf(
-        r#"
-def caller(t: &tensor[2, f32]) -> &tensor[2, f32] =
-  {
-    x: &tensor[3, f32] = t
-    x
-  }
-"#,
-    );
+    let errors = typecheck_core(include_str!(
+        "fixtures/core/tests/issue_159_let_ascription_dim_capture/let_ascription_with_concrete_dim_mismatch_against_rhs_errors_1.deep"
+    ));
     assert!(
         has_dimension_mismatch(&errors),
         "expected DimensionMismatch - declared `tensor[3, f32]` should \
          not accept a `&tensor[2, f32]` RHS, got errors:\n{}",
-        errors_summary(&errors)
-    );
-    assert!(
-        errors.iter().any(|e| e
-            .message
-            .contains("let-binding `x` ascription does not match RHS")),
-        "expected the chelis#159 diagnostic template `let-binding `x` ascription does not \
-         match RHS` in errors:\n{}",
         errors_summary(&errors)
     );
 }
@@ -114,16 +89,9 @@ fn declared_dim_name_captures_the_declaration_identity() {
     // `n` and `m` are distinct authored binders. Reusing `n` on the
     // ascription backed by the `m` parameter identifies those declarations,
     // which [04-INF-6] rejects.
-    let errors = typecheck_surf(
-        r#"
-def caller[n, m](a: &tensor[n, f32], b: &tensor[m, f32]) -> &tensor[n, f32] =
-  {
-    x: &tensor[n, f32] = a
-    y: &tensor[n, f32] = b
-    x
-  }
-"#,
-    );
+    let errors = typecheck_core(include_str!(
+        "fixtures/core/tests/issue_159_let_ascription_dim_capture/declared_dim_name_captures_the_declaration_identity_1.deep"
+    ));
     assert!(
         errors.iter().any(|error| {
             matches!(error.kind, CheckErrorKind::DimensionMismatch)

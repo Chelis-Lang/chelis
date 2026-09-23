@@ -1,0 +1,32 @@
+(defsig {}
+  f
+  (t-fn {}
+    (t-tensor {} (t-prim {} f32))
+    (t-tensor {} (t-prim {} f32))
+    (t-tensor {} (d-name {} rows) (t-prim {} f32))
+    (t-tensor {} (d-name {} cols) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 4) (d-lit {} 3) (t-prim {} f32))))
+
+(def {}
+  f
+  (fn {}
+    (params {}
+      (b {type: (t-var {} _)})
+      (unused {type: (t-var {} _)})
+      (z {type: (t-var {} _)})
+      (a {type: (t-var {} _)}))
+    (app {span: "surf:110..171"}
+      (var {span: "surf:110..116"} insert)
+      (app {span: "surf:117..148"}
+        (var {span: "surf:117..123"} insert)
+        (var {span: "surf:124..125"} b)
+        (lit {span: "surf:127..131", surf_literal_style: "explicit", type: (t-prim {} i32)} 0)
+        (app {span: "surf:133..147"}
+          (var {span: "surf:133..138"} shape)
+          (var {span: "surf:139..140"} a)
+          (lit {span: "surf:142..146", surf_literal_style: "explicit", type: (t-prim {} i32)} 0)))
+      (lit {span: "surf:150..154", surf_literal_style: "explicit", type: (t-prim {} i32)} 0)
+      (app {span: "surf:156..170"}
+        (var {span: "surf:156..161"} shape)
+        (var {span: "surf:162..163"} z)
+        (lit {span: "surf:165..169", surf_literal_style: "explicit", type: (t-prim {} i32)} 0)))))

@@ -1,0 +1,18 @@
+(defsig {dtype_bounds: {p: int}}
+  size
+  (p)
+  (t-fn {} (t-var {} p) (t-prim {} i64)))
+
+(def {}
+  size
+  (fn {}
+    (params {} x)
+    (app {span: "surf:41..47"}
+      (var {span: "surf:41..44"} len)
+      (var {span: "surf:45..46"} x))))
+
+(def {}
+  result
+  (app {span: "surf:57..67"}
+    (var {span: "surf:57..61"} size)
+    (lit {span: "surf:62..66", type: (t-prim {} i64)} 1)))

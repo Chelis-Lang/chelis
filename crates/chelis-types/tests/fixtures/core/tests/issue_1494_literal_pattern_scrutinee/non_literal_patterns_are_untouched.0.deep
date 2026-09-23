@@ -1,0 +1,31 @@
+(deftype {}
+  Shape
+  ()
+  (variant {} Circle (t-prim {} f32))
+  (variant {} Rect (t-prim {} f32) (t-prim {} f32)))
+
+(defsig {} area (t-fn {} (t-adt {} Shape) (t-prim {} f32)))
+
+(def {}
+  area
+  (fn {}
+    (params {} (s {type: (t-var {} _)}))
+    (match {span: "surf:77..159"}
+      (var {span: "surf:83..84"} s)
+      (arm {}
+        (pat-ctor {} Circle (pat-var {} r))
+        ()
+        (app {span: "surf:109..129"}
+          (var {span: "surf:109..112"} mul)
+          (lit {span: "surf:113..117", type: (t-prim {} f32)} 3.14)
+          (app {span: "surf:119..128"}
+            (var {span: "surf:119..122"} mul)
+            (var {span: "surf:123..124"} r)
+            (var {span: "surf:126..127"} r))))
+      (arm {}
+        (pat-ctor {} Rect (pat-var {} w) (pat-var {} h))
+        ()
+        (app {span: "surf:148..157"}
+          (var {span: "surf:148..151"} mul)
+          (var {span: "surf:152..153"} w)
+          (var {span: "surf:155..156"} h))))))

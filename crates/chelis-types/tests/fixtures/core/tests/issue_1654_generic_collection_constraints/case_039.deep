@@ -1,0 +1,16 @@
+(def {} op (var {span: "surf:5..11"} concat))
+
+(def {}
+  out
+  (app {span: "surf:18..49"}
+    (var {span: "surf:18..20"} op)
+    (app {span: "surf:21..42"}
+      (var {} Cons)
+      (app {span: "surf:22..41"}
+        (var {span: "surf:22..31"} to_tensor)
+        (app {span: "surf:32..40"}
+          (var {} Cons)
+          (lit {span: "surf:33..39", surf_literal_style: "explicit", type: (t-prim {} f32)} 1.0)
+          (var {} Nil)))
+      (var {} Nil))
+    (lit {span: "surf:44..48", surf_literal_style: "explicit", type: (t-prim {} i32)} 0)))

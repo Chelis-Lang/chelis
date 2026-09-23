@@ -1,0 +1,34 @@
+(defsig {dtype_bounds: {p: float}}
+  keep
+  (p)
+  (t-fn {}
+    (t-tensor {} (d-lit {} 8) (t-var {} p))
+    (t-var {} p)
+    (t-tensor {} (d-lit {} 8) (t-var {} p))))
+
+(def {}
+  keep
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (rate {type: (t-var {} _)}))
+    (app {span: "surf:63..79"}
+      (var {span: "surf:63..70"} dropout)
+      (var {span: "surf:71..72"} x)
+      (var {span: "surf:74..78"} rate))))
+
+(defsig {}
+  sample
+  (t-fn {}
+    (t-tensor {} (d-lit {} 8) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 8) (t-prim {} f32))))
+
+(def {}
+  sample
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:130..163"}
+      (var {span: "surf:130..134"} keep)
+      (app {span: "surf:135..153"}
+        (var {span: "surf:135..142"} dropout)
+        (var {span: "surf:143..144"} x)
+        (lit {span: "surf:146..152", surf_literal_style: "explicit", type: (t-prim {} f32)} 0.5))
+      (lit {span: "surf:155..162", surf_literal_style: "explicit", type: (t-prim {} f32)} 0.25))))

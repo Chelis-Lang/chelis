@@ -1,0 +1,43 @@
+(defsig {}
+  caller
+  (t-fn {}
+    (t-tensor {} (d-lit {} 4) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 4) (t-prim {} f32))
+    (t-prim {} i32)))
+
+(def {}
+  caller
+  (fn {}
+    (params {} (actual {type: (t-var {} _)}) (expected {type: (t-var {} _)}))
+    (let {span: "surf:73..228"}
+      (bind {}
+        _shape
+        (app {span: "surf:93..118",
+               surf_binding_type: "explicit",
+               type: (t-prim {} i32)
+             }
+          (var {span: "surf:93..109"} assert_shape_lib)
+          (borrow {span: "surf:110..117"} (var {span: "surf:111..117"} actual))))
+      (let {}
+        (bind {}
+          close
+          (app {span: "surf:136..170",
+                 surf_binding_type: "explicit",
+                 type: (t-prim {} i32)
+               }
+            (var {span: "surf:136..152"} assert_close_lib)
+            (var {span: "surf:153..159"} actual)
+            (var {span: "surf:161..169"} expected)))
+        (let {}
+          (bind {destructure: true}
+            __chelis_tmp1
+            (app {span: "surf:179..191"}
+              (var {span: "surf:179..183"} drop)
+              (var {span: "surf:184..190"} actual)))
+          (let {}
+            (bind {destructure: true}
+              __chelis_tmp0
+              (app {span: "surf:200..214"}
+                (var {span: "surf:200..204"} drop)
+                (var {span: "surf:205..213"} expected)))
+            (var {span: "surf:219..224"} close)))))))

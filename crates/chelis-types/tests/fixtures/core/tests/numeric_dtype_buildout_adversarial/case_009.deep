@@ -1,0 +1,25 @@
+(defsig {} xs (t-tensor {} (d-lit {} 3) (t-prim {} i8)))
+
+(def {}
+  xs
+  (app {}
+    (var {} to_tensor)
+    (app {}
+      (var {} Cons)
+      (lit {span: "surf:21..24", type: (t-prim {} i8)} 1)
+      (app {}
+        (var {} Cons)
+        (lit {span: "surf:26..29", type: (t-prim {} i8)} 2)
+        (app {}
+          (var {} Cons)
+          (lit {span: "surf:31..34", type: (t-prim {} i8)} 3)
+          (var {} Nil))))))
+
+(defsig {} out (t-tensor {} (t-prim {} i8)))
+
+(def {}
+  out
+  (app {span: "surf:54..65"}
+    (var {span: "surf:54..57"} sum)
+    (borrow {span: "surf:58..61"} (var {span: "surf:59..61"} xs))
+    (lit {span: "surf:63..64", type: (t-prim {} i32)} 0)))

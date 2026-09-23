@@ -1,0 +1,32 @@
+(deftype {}
+  Pkg__chelis__std__Std__Nn__Generate__KVCache
+  (a)
+  (variant {}
+    Pkg__chelis__std__Std__Nn__Generate__KVCache
+    (t-adt {} List (t-var {} a))))
+
+(defsig {}
+  keep_cache
+  (p)
+  (t-fn {}
+    (t-adt {}
+      Option
+      (t-adt {} Pkg__chelis__std__Std__Nn__Generate__KVCache (t-var {} p)))
+    (t-adt {} Pkg__chelis__std__Std__Nn__Generate__KVCache (t-var {} p))))
+
+(def {}
+  keep_cache
+  (fn {}
+    (params {} (cache {type: (t-var {} _)}))
+    (match {span: "surf:246..348"}
+      (var {span: "surf:252..257"} cache)
+      (arm {}
+        (pat-ctor {} Some (pat-var {} value))
+        ()
+        (var {span: "surf:282..287"} value))
+      (arm {}
+        (pat-ctor {} None)
+        ()
+        (app {span: "surf:298..346"}
+          (var {span: "surf:298..342"} Pkg__chelis__std__Std__Nn__Generate__KVCache)
+          (var {span: "surf:343..345"} Nil))))))

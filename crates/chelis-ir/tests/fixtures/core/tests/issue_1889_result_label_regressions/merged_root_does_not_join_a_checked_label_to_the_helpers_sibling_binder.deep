@@ -1,0 +1,53 @@
+(defsig {}
+  pkg__mylib__Mylib__Axes__keep_rank
+  (rest)
+  (t-fn {}
+    (t-tensor {} (d-rank {} rest) (t-prim {} f32))
+    (t-tensor {} (d-name {} fixed) (t-prim {} f32))
+    (t-tensor {} (d-rank {} rest) (t-prim {} f32))))
+
+(def {}
+  pkg__mylib__Mylib__Axes__keep_rank
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (gain {type: (t-var {} _)}))
+    (copy {span: "surf:120..127"} (var {span: "surf:125..126"} x))))
+
+(defsig {}
+  bridge
+  (t-fn {}
+    (t-tensor {} (d-name {} fixed) (t-prim {} f32))
+    (t-tensor {} (d-name {} fixed) (t-prim {} f32))))
+
+(def {}
+  bridge
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:186..260"}
+      (var {span: "surf:186..220"} pkg__mylib__Mylib__Axes__keep_rank)
+      (var {span: "surf:221..222"} x)
+      (app {span: "surf:224..259"}
+        (var {span: "surf:224..233"} to_tensor)
+        (app {span: "surf:234..258"}
+          (var {} Cons)
+          (lit {span: "surf:235..241", surf_literal_style: "explicit", type: (t-prim {} f32)} 1.0)
+          (app {}
+            (var {} Cons)
+            (lit {span: "surf:243..249", surf_literal_style: "explicit", type: (t-prim {} f32)} 2.0)
+            (app {}
+              (var {} Cons)
+              (lit {span: "surf:251..257", surf_literal_style: "explicit", type: (t-prim {} f32)} 3.0)
+              (var {} Nil))))))))
+
+(def {}
+  out
+  (app {span: "surf:267..302"}
+    (var {span: "surf:267..273"} bridge)
+    (app {span: "surf:274..301"}
+      (var {span: "surf:274..283"} to_tensor)
+      (app {span: "surf:284..300"}
+        (var {} Cons)
+        (lit {span: "surf:285..291", surf_literal_style: "explicit", type: (t-prim {} f32)} 4.0)
+        (app {}
+          (var {} Cons)
+          (lit {span: "surf:293..299", surf_literal_style: "explicit", type: (t-prim {} f32)} 5.0)
+          (var {} Nil))))))

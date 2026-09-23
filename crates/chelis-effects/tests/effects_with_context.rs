@@ -11,21 +11,19 @@
 
 use chelis_deep::ast::Expr;
 use chelis_effects::{EffectError, EffectErrorKind, check_effects_with_context, check_program};
-use chelis_surf::{desugar::desugar_program, parser::parse_str as parse_surf};
 use chelis_types::{
     CheckedProgram, TypeEnv, build_type_env_from_library, check_ir_program, check_ir_with_context,
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
-fn parse_then_desugar(src: &str) -> Vec<Expr> {
-    let decls = parse_surf(src).expect("surf parse");
-    desugar_program(&decls)
+fn parse_deep(src: &str) -> Vec<Expr> {
+    chelis_deep::parser::parse_str(src).expect("Deep fixture")
 }
 
-/// Build (library_typeenv, library_checked_with_effects) from library Surf source.
+/// Build (library_typeenv, library_checked_with_effects) from library Deep.
 fn build_library_pair(library_src: &str) -> (TypeEnv, CheckedProgram) {
-    let lib_deep = parse_then_desugar(library_src);
+    let lib_deep = parse_deep(library_src);
     let typeenv = build_type_env_from_library(&lib_deep).expect("library type-checks");
     // Run the FULL effects pipeline on the library — same way Phase D's
     // contract requires (the library's effect rows are already validated).
@@ -37,7 +35,7 @@ fn build_library_pair(library_src: &str) -> (TypeEnv, CheckedProgram) {
 /// Build a `CheckedProgram` for new-code only via Phase C's `with_context`,
 /// then return it. New-code's `annotated_exprs()` carry only new defs.
 fn build_new_code_checked(typeenv: &TypeEnv, new_src: &str) -> CheckedProgram {
-    let new_deep = parse_then_desugar(new_src);
+    let new_deep = parse_deep(new_src);
     check_ir_with_context(typeenv, &new_deep).expect("new code type-checks")
 }
 
@@ -46,12 +44,12 @@ fn build_new_code_checked(typeenv: &TypeEnv, new_src: &str) -> CheckedProgram {
 /// Parity 1: pure library, pure snippet. Both pass cleanly.
 #[test]
 fn parity_pure_library_pure_snippet() {
-    let library = r#"
-def lib_id(x: i64) -> i64 = x
-"#;
-    let snippet = r#"
-def caller(y: i64) -> i64 = lib_id(y)
-"#;
+    let library = include_str!(
+        "fixtures/core/tests/effects_with_context/parity_pure_library_pure_snippet_library.deep"
+    );
+    let snippet = include_str!(
+        "fixtures/core/tests/effects_with_context/parity_pure_library_pure_snippet_snippet.deep"
+    );
 
     let (typeenv, lib_checked) = build_library_pair(library);
     let new_checked = build_new_code_checked(&typeenv, snippet);
@@ -59,7 +57,7 @@ def caller(y: i64) -> i64 = lib_id(y)
         .expect("pure library, pure snippet must pass");
 
     // Monolithic equivalent:
-    let combined = parse_then_desugar(&format!("{library}\n{snippet}"));
+    let combined = parse_deep(&format!("{library}\n{snippet}"));
     let combined_checked = check_ir_program(&combined).unwrap();
     check_program(&combined_checked).expect("monolithic must also pass");
 }
@@ -69,12 +67,12 @@ def caller(y: i64) -> i64 = lib_id(y)
 /// `! {}`, so inferred Io is fine).
 #[test]
 fn parity_library_io_helper_called_from_snippet() {
-    let library = r#"
-def emit(x: i64) -> i64 = debug(x)
-"#;
-    let snippet = r#"
-def caller(y: i64) -> i64 = emit(y)
-"#;
+    let library = include_str!(
+        "fixtures/core/tests/effects_with_context/parity_library_io_helper_called_from_snippet_library.deep"
+    );
+    let snippet = include_str!(
+        "fixtures/core/tests/effects_with_context/parity_library_io_helper_called_from_snippet_snippet.deep"
+    );
 
     let (typeenv, lib_checked) = build_library_pair(library);
     let new_checked = build_new_code_checked(&typeenv, snippet);
@@ -101,7 +99,7 @@ def caller(y: i64) -> i64 = emit(y)
     );
 
     // Monolithic parity:
-    let combined = parse_then_desugar(&format!("{library}\n{snippet}"));
+    let combined = parse_deep(&format!("{library}\n{snippet}"));
     let combined_checked = check_ir_program(&combined).unwrap();
     check_program(&combined_checked).expect("monolithic must also pass");
 }
@@ -110,12 +108,12 @@ def caller(y: i64) -> i64 = emit(y)
 /// accept (snippet does not declare `! {}`).
 #[test]
 fn parity_library_test_helper_called_from_snippet() {
-    let library = r#"
-def lib_check() -> unit = test_assert(true, "lib")
-"#;
-    let snippet = r#"
-def my_test() -> unit = lib_check()
-"#;
+    let library = include_str!(
+        "fixtures/core/tests/effects_with_context/parity_library_test_helper_called_from_snippet_library.deep"
+    );
+    let snippet = include_str!(
+        "fixtures/core/tests/effects_with_context/parity_library_test_helper_called_from_snippet_snippet.deep"
+    );
 
     let (typeenv, lib_checked) = build_library_pair(library);
     let new_checked = build_new_code_checked(&typeenv, snippet);
@@ -128,7 +126,7 @@ def my_test() -> unit = lib_check()
         "expected test effect inherited from library wrapper, got:\n{snippet_text}"
     );
 
-    let combined = parse_then_desugar(&format!("{library}\n{snippet}"));
+    let combined = parse_deep(&format!("{library}\n{snippet}"));
     let combined_checked = check_ir_program(&combined).unwrap();
     check_program(&combined_checked).expect("monolithic must also pass");
 }
@@ -137,12 +135,12 @@ def my_test() -> unit = lib_check()
 /// must be rejected by both paths with the same error kind.
 #[test]
 fn parity_declared_empty_eff_snippet_rejects_test_effect_from_library() {
-    let library = r#"
-def lib_check() -> unit = test_assert(true, "lib")
-"#;
-    let snippet = r#"
-def leak() -> unit ! {} = lib_check()
-"#;
+    let library = include_str!(
+        "fixtures/core/tests/effects_with_context/parity_library_test_helper_called_from_snippet_library.deep"
+    );
+    let snippet = include_str!(
+        "fixtures/core/tests/effects_with_context/parity_declared_empty_eff_snippet_rejects_test_effect_from_library_snippet.deep"
+    );
 
     let (typeenv, lib_checked) = build_library_pair(library);
     let new_checked = build_new_code_checked(&typeenv, snippet);
@@ -156,7 +154,7 @@ def leak() -> unit ! {} = lib_check()
     );
 
     // Monolithic parity:
-    let combined = parse_then_desugar(&format!("{library}\n{snippet}"));
+    let combined = parse_deep(&format!("{library}\n{snippet}"));
     let combined_checked = check_ir_program(&combined).unwrap();
     let mono_errors = check_program(&combined_checked)
         .expect_err("monolithic must also reject !{} that calls Test helper");
@@ -179,30 +177,15 @@ def leak() -> unit ! {} = lib_check()
 /// declared `! {Test}` rejects with UnhandledEffect mentioning Random.
 #[test]
 fn parity_random_lib_helper_under_test_context_composes_both_effects() {
-    let library = r#"
-def lib_drop(x: tensor[8, f32]) -> tensor[8, f32] = dropout(x, 0.5)
-"#;
-    let snippet_ok = r#"
-def use_drop(t: tensor[8, f32]) -> unit ! {Random, Test} =
-  test_assert(true, "before-drop")
-"#;
-    // Note: Surf doesn't easily let me thread `lib_drop` into the body and
-    // discard, so the snippet uses test_assert + a separate stmt is awkward.
-    // Use a let-binding form instead.
-    let snippet_ok2 = r#"
-def use_drop(t: tensor[8, f32]) -> unit ! {Random, Test} = {
-  y = lib_drop(t)
-  test_assert(true, "after-drop")
-}
-"#;
-    let snippet_bad = r#"
-def use_drop(t: tensor[8, f32]) -> unit ! {Test} = {
-  y = lib_drop(t)
-  test_assert(true, "after-drop")
-}
-"#;
-
-    let _ = snippet_ok; // silence dead
+    let library = include_str!(
+        "fixtures/core/tests/effects_with_context/parity_random_lib_helper_under_test_context_composes_both_effects_library.deep"
+    );
+    let snippet_ok2 = include_str!(
+        "fixtures/core/tests/effects_with_context/parity_random_lib_helper_under_test_context_composes_both_effects_snippet_ok2.deep"
+    );
+    let snippet_bad = include_str!(
+        "fixtures/core/tests/effects_with_context/parity_random_lib_helper_under_test_context_composes_both_effects_snippet_bad.deep"
+    );
 
     // Positive: declared {Random, Test} accepts.
     let (typeenv, lib_checked) = build_library_pair(library);
@@ -222,7 +205,7 @@ def use_drop(t: tensor[8, f32]) -> unit ! {Test} = {
     );
 
     // Monolithic parity (negative case): same rejection.
-    let combined = parse_then_desugar(&format!("{library}\n{snippet_bad}"));
+    let combined = parse_deep(&format!("{library}\n{snippet_bad}"));
     let combined_checked = check_ir_program(&combined).unwrap();
     let mono_errors = check_program(&combined_checked).expect_err("monolithic must also reject");
     assert!(
@@ -239,12 +222,12 @@ def use_drop(t: tensor[8, f32]) -> unit ! {Test} = {
 /// wrapped in a library def) inherits Io.
 #[test]
 fn new_code_inherits_io_via_library_read_file_wrapper() {
-    let library = r#"
-def lib_load(path: string) -> string = read_file(path)
-"#;
-    let snippet = r#"
-def my_loader(p: string) -> string = lib_load(p)
-"#;
+    let library = include_str!(
+        "fixtures/core/tests/effects_with_context/new_code_inherits_io_via_library_read_file_wrapper_library.deep"
+    );
+    let snippet = include_str!(
+        "fixtures/core/tests/effects_with_context/new_code_inherits_io_via_library_read_file_wrapper_snippet.deep"
+    );
 
     let (typeenv, lib_checked) = build_library_pair(library);
     let new_checked = build_new_code_checked(&typeenv, snippet);
@@ -258,9 +241,9 @@ def my_loader(p: string) -> string = lib_load(p)
     );
 
     // Negative parity: declaring `! {}` must reject.
-    let bad_snippet = r#"
-def my_loader(p: string) -> string ! {} = lib_load(p)
-"#;
+    let bad_snippet = include_str!(
+        "fixtures/core/tests/effects_with_context/new_code_inherits_io_via_library_read_file_wrapper_bad_snippet.deep"
+    );
     let new_bad = build_new_code_checked(&typeenv, bad_snippet);
     let errors = check_effects_with_context(&lib_checked, &new_bad)
         .expect_err("declared !{} but inherits Io from lib_load must reject");
@@ -275,12 +258,12 @@ def my_loader(p: string) -> string ! {} = lib_load(p)
 /// New-code function that calls a Test-effecting library wrapper inherits Test.
 #[test]
 fn new_code_inherits_test_via_library_wrapper() {
-    let library = r#"
-def lib_assert_eq(a: i64, b: i64) -> unit = test_assert_eq(a, b, "lib_assert_eq")
-"#;
-    let snippet = r#"
-def my_check(x: i64) -> unit = lib_assert_eq(x, cast(1, i64))
-"#;
+    let library = include_str!(
+        "fixtures/core/tests/effects_with_context/new_code_inherits_test_via_library_wrapper_library.deep"
+    );
+    let snippet = include_str!(
+        "fixtures/core/tests/effects_with_context/new_code_inherits_test_via_library_wrapper_snippet.deep"
+    );
 
     let (typeenv, lib_checked) = build_library_pair(library);
     let new_checked = build_new_code_checked(&typeenv, snippet);
@@ -294,9 +277,9 @@ def my_check(x: i64) -> unit = lib_assert_eq(x, cast(1, i64))
     );
 
     // Negative parity: declaring `! {}` must reject.
-    let bad_snippet = r#"
-def my_check(x: i64) -> unit ! {} = lib_assert_eq(x, cast(1, i64))
-"#;
+    let bad_snippet = include_str!(
+        "fixtures/core/tests/effects_with_context/new_code_inherits_test_via_library_wrapper_bad_snippet.deep"
+    );
     let new_bad = build_new_code_checked(&typeenv, bad_snippet);
     let errors = check_effects_with_context(&lib_checked, &new_bad)
         .expect_err("declared !{} but inherits Test from lib_assert_eq must reject");
@@ -321,16 +304,15 @@ def my_check(x: i64) -> unit ! {} = lib_assert_eq(x, cast(1, i64))
 /// with NO effect, regardless of what snippet A's defs declared.
 #[test]
 fn no_leak_snippet_a_effects_do_not_persist_into_snippet_b() {
-    let library = r#"
-def lib_id(x: i64) -> i64 = x
-"#;
-    let snippet_a = r#"
-def stamp() -> unit ! {Test} = test_assert(true, "snippet-a")
-def call_a(y: i64) -> i64 = lib_id(y)
-"#;
-    let snippet_b = r#"
-def call_b(z: i64) -> i64 = lib_id(z)
-"#;
+    let library = include_str!(
+        "fixtures/core/tests/effects_with_context/parity_pure_library_pure_snippet_library.deep"
+    );
+    let snippet_a = include_str!(
+        "fixtures/core/tests/effects_with_context/no_leak_snippet_a_effects_do_not_persist_into_snippet_b_snippet_a.deep"
+    );
+    let snippet_b = include_str!(
+        "fixtures/core/tests/effects_with_context/no_leak_snippet_a_effects_do_not_persist_into_snippet_b_snippet_b.deep"
+    );
 
     let (typeenv, lib_checked) = build_library_pair(library);
 
@@ -356,10 +338,7 @@ def call_b(z: i64) -> i64 = lib_id(z)
     let b_with_effects =
         check_effects_with_context(&lib_checked, &b_checked).expect("snippet B passes");
     let b_text = chelis_deep::printer::print_canonical(b_with_effects.annotated_exprs());
-    // call_b's body is just `lib_id(z)`; lib_id is effect-free, so the
-    // annotated output should NOT carry an `effects` block on call_b.
-    // (The Surf desugar may emit `(effects)` empty though, so check
-    // `effects test|effects io|effects random` substrings instead.)
+    // call_b's body is just `lib_id(z)`; lib_id is effect-free.
     assert!(
         !b_text.contains("test"),
         "snippet B's call_b must NOT inherit any test effect, got:\n{b_text}"
@@ -381,9 +360,9 @@ def call_b(z: i64) -> i64 = lib_id(z)
     // validly-typed `i64` body instead -- the effect-leak isolation it
     // exercises is unchanged (a pure new-code `stamp` declared `! {}` must be
     // accepted against the unmutated library).
-    let snippet_c = r#"
-def stamp() -> i64 ! {} = lib_id(cast(1, i64))
-"#;
+    let snippet_c = include_str!(
+        "fixtures/core/tests/effects_with_context/no_leak_snippet_a_effects_do_not_persist_into_snippet_b_snippet_c.deep"
+    );
     let c_checked = build_new_code_checked(&typeenv, snippet_c);
     check_effects_with_context(&lib_checked, &c_checked).expect(
         "snippet C declares pure stamp; library_program must NOT have been mutated by snippet A",
@@ -395,17 +374,17 @@ def stamp() -> i64 ! {} = lib_id(cast(1, i64))
 /// previously-passed snippet that defined an effect-rich def.
 #[test]
 fn no_leak_repeated_calls_against_same_library_are_independent() {
-    let library = r#"
-def lib_id(x: i64) -> i64 = x
-"#;
+    let library = include_str!(
+        "fixtures/core/tests/effects_with_context/parity_pure_library_pure_snippet_library.deep"
+    );
     let (typeenv, lib_checked) = build_library_pair(library);
 
-    let effectful_snippet = r#"
-def loud() -> unit ! {Test} = test_assert(true, "loud")
-"#;
-    let pure_snippet = r#"
-def quiet(z: i64) -> i64 = lib_id(z)
-"#;
+    let effectful_snippet = include_str!(
+        "fixtures/core/tests/effects_with_context/no_leak_repeated_calls_against_same_library_are_independent_effectful_snippet.deep"
+    );
+    let pure_snippet = include_str!(
+        "fixtures/core/tests/effects_with_context/no_leak_repeated_calls_against_same_library_are_independent_pure_snippet.deep"
+    );
 
     // Call 1: effectful_snippet. Must accept (declared {Test} matches inferred {Test}).
     let eff_checked = build_new_code_checked(&typeenv, effectful_snippet);
@@ -433,12 +412,12 @@ def quiet(z: i64) -> i64 = lib_id(z)
 /// point at new-code's `leak` def.
 #[test]
 fn error_messages_reference_new_code_names_not_library() {
-    let library = r#"
-def lib_check() -> unit = test_assert(true, "lib")
-"#;
-    let snippet = r#"
-def leak() -> unit ! {} = lib_check()
-"#;
+    let library = include_str!(
+        "fixtures/core/tests/effects_with_context/parity_library_test_helper_called_from_snippet_library.deep"
+    );
+    let snippet = include_str!(
+        "fixtures/core/tests/effects_with_context/parity_declared_empty_eff_snippet_rejects_test_effect_from_library_snippet.deep"
+    );
 
     let (typeenv, lib_checked) = build_library_pair(library);
     let new_checked = build_new_code_checked(&typeenv, snippet);
@@ -468,12 +447,9 @@ def leak() -> unit ! {} = lib_check()
 /// thing on a monolithic input. Phase D must not regress the legacy path.
 #[test]
 fn legacy_check_program_still_works() {
-    let combined = parse_then_desugar(
-        r#"
-def emit(x: i64) -> i64 = debug(x)
-def caller(y: i64) -> i64 = emit(y)
-"#,
-    );
+    let combined = parse_deep(include_str!(
+        "fixtures/core/tests/effects_with_context/legacy_check_program_still_works.deep"
+    ));
     let checked = check_ir_program(&combined).expect("IR check");
     let with_effects = check_program(&checked).expect("legacy check_program clean");
     let text = chelis_deep::printer::print_canonical(with_effects.annotated_exprs());
@@ -487,16 +463,12 @@ def caller(y: i64) -> i64 = emit(y)
 
 #[test]
 fn snippet_composing_two_library_helpers_picks_up_both_effects() {
-    let library = r#"
-def lib_emit(x: i64) -> i64 = debug(x)
-def lib_assert(a: i64, b: i64) -> unit = test_assert_eq(a, b, "lib_assert")
-"#;
-    let snippet = r#"
-def my_op(x: i64) -> unit ! {IO, Test} = {
-  _y = lib_emit(x)
-  lib_assert(x, x)
-}
-"#;
+    let library = include_str!(
+        "fixtures/core/tests/effects_with_context/snippet_composing_two_library_helpers_picks_up_both_effects_library.deep"
+    );
+    let snippet = include_str!(
+        "fixtures/core/tests/effects_with_context/snippet_composing_two_library_helpers_picks_up_both_effects_snippet.deep"
+    );
 
     let (typeenv, lib_checked) = build_library_pair(library);
     let new_checked = build_new_code_checked(&typeenv, snippet);

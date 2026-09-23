@@ -1,0 +1,19 @@
+(module {surf_path: "Repro.ConcatWrongSum"}
+  repro.concatwrongsum
+  (defsig {}
+    stack_rows
+    (t-fn {}
+      (t-tensor {} (d-lit {} 1) (d-lit {} 2) (t-prim {} f32))
+      (t-tensor {} (d-lit {} 1) (d-lit {} 2) (t-prim {} f32))
+      (t-tensor {} (d-lit {} 3) (d-lit {} 2) (t-prim {} f32))))
+  (def {}
+    stack_rows
+    (fn {}
+      (params {} (a {type: (t-var {} _)}) (b {type: (t-var {} _)}))
+      (app {span: "surf:113..130"}
+        (var {span: "surf:113..119"} concat)
+        (app {span: "surf:120..126"}
+          (var {} Cons)
+          (var {span: "surf:121..122"} a)
+          (app {} (var {} Cons) (var {span: "surf:124..125"} b) (var {} Nil)))
+        (lit {span: "surf:128..129", type: (t-prim {} i32)} 0)))))

@@ -1,0 +1,19 @@
+(module {surf_path: "Repro.ConcatMidAxisBad"}
+  repro.concatmidaxisbad
+  (defsig {}
+    stack_mid
+    (t-fn {}
+      (t-tensor {} (d-lit {} 2) (d-lit {} 1) (d-lit {} 5) (t-prim {} f32))
+      (t-tensor {} (d-lit {} 2) (d-lit {} 1) (d-lit {} 5) (t-prim {} f32))
+      (t-tensor {} (d-lit {} 2) (d-lit {} 2) (d-lit {} 6) (t-prim {} f32))))
+  (def {}
+    stack_mid
+    (fn {}
+      (params {} (a {type: (t-var {} _)}) (b {type: (t-var {} _)}))
+      (app {span: "surf:123..140"}
+        (var {span: "surf:123..129"} concat)
+        (app {span: "surf:130..136"}
+          (var {} Cons)
+          (var {span: "surf:131..132"} a)
+          (app {} (var {} Cons) (var {span: "surf:134..135"} b) (var {} Nil)))
+        (lit {span: "surf:138..139", type: (t-prim {} i32)} 1)))))

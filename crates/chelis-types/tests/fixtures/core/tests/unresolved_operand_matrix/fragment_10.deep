@@ -1,0 +1,10 @@
+(app {span: "surf:16..34"}
+    (var {} Cons)
+    (lit {span: "surf:17..21", surf_literal_style: "explicit", type: (t-prim {} i32)} 1)
+    (app {}
+      (var {} Cons)
+      (lit {span: "surf:23..27", surf_literal_style: "explicit", type: (t-prim {} i32)} 4)
+      (app {}
+        (var {} Cons)
+        (lit {span: "surf:29..33", surf_literal_style: "explicit", type: (t-prim {} i32)} 9)
+        (var {} Nil))))

@@ -1,0 +1,15 @@
+(module {surf_path: "Agent.Exh"}
+  agent.exh
+  (defsig {} consume (t-fn {} (t-adt {} Probability) (t-prim {} f32)))
+  (def {}
+    consume
+    (fn {}
+      (params {} (p {type: (t-var {} _)}))
+      (match {span: "surf:54..93"}
+        (var {span: "surf:60..61"} p)
+        (arm {}
+          (pat-var {} x)
+          ()
+          (app {span: "surf:78..91"}
+            (var {span: "surf:78..88"} prob_value)
+            (var {span: "surf:89..90"} x)))))))

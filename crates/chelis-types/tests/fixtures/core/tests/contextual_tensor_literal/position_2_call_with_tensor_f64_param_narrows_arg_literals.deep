@@ -1,0 +1,28 @@
+(defsig {}
+  f
+  (t-fn {}
+    (t-tensor {} (d-lit {} 3) (t-prim {} f64))
+    (t-tensor {} (d-lit {} 3) (t-prim {} f64))))
+
+(def {}
+  f
+  (fn {}
+    (params {} (xs {type: (t-var {} _)}))
+    (var {span: "surf:46..48"} xs)))
+
+(def {}
+  ys
+  (app {span: "surf:54..72"}
+    (var {span: "surf:54..55"} f)
+    (app {}
+      (var {} to_tensor)
+      (app {}
+        (var {} Cons)
+        (lit {surf_literal_style: "unsuffixed", type: (t-prim {} f64)} 1.0)
+        (app {}
+          (var {} Cons)
+          (lit {surf_literal_style: "unsuffixed", type: (t-prim {} f64)} 2.0)
+          (app {}
+            (var {} Cons)
+            (lit {surf_literal_style: "unsuffixed", type: (t-prim {} f64)} 3.0)
+            (var {} Nil)))))))

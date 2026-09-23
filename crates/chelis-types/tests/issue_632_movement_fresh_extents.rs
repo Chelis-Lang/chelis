@@ -18,22 +18,15 @@
 
 use chelis_deep::ast::{Atom, List};
 use chelis_deep::{Expr, printer::print_canonical};
-use chelis_surf::desugar::desugar_program;
-use chelis_surf::parser::parse_str as parse_surf;
+
 use chelis_types::check_ir_program;
 
-fn surf_to_deep(source: &str) -> Vec<Expr> {
-    let decls = parse_surf(source).expect("surf parse");
-    chelis_macros::expand_program(
-        &desugar_program(&decls),
-        &chelis_macros::ExpansionOptions::default(),
-    )
-    .expect("macro expand")
-    .into_exprs()
+fn parse_core_fixture(source: &str) -> Vec<Expr> {
+    serde_json::from_str(source).expect("lossless AST fixture")
 }
 
 fn expect_clean(src: &str, what: &str) -> Vec<Expr> {
-    let deep = surf_to_deep(src);
+    let deep = parse_core_fixture(src);
     match check_ir_program(&deep) {
         Ok(checked) => checked.annotated_exprs().to_vec(),
         Err(rep) => {
@@ -99,9 +92,9 @@ fn stamped_app_type(exprs: &[Expr], builtin: &str) -> Option<String> {
 #[test]
 fn issue632_stride_nonidentity_step_mints_fresh_extent() {
     let annotated = expect_clean(
-        r#"
-def f(x: tensor[batch, 4, f32]) -> tensor[*, 2, f32] = stride(&x, 2i64, 2i64)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_632_movement_fresh_extents/issue632_stride_nonidentity_step_mints_fresh_extent_102.json"
+        ),
         "non-identity stride on a symbolic axis",
     );
     let ty = stamped_app_type(&annotated, "stride").expect("stride app has a stamped type");
@@ -120,9 +113,9 @@ def f(x: tensor[batch, 4, f32]) -> tensor[*, 2, f32] = stride(&x, 2i64, 2i64)
 #[test]
 fn issue632_pad_nonzero_padding_mints_fresh_extent() {
     let annotated = expect_clean(
-        r#"
-def p(x: tensor[batch, f32]) -> tensor[*, f32] = pad(&x, [[1i64, 0i64]], 0.0)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_632_movement_fresh_extents/issue632_pad_nonzero_padding_mints_fresh_extent_123.json"
+        ),
         "non-zero pad on a symbolic axis",
     );
     let ty = stamped_app_type(&annotated, "pad").expect("pad app has a stamped type");
@@ -144,11 +137,9 @@ def p(x: tensor[batch, f32]) -> tensor[*, f32] = pad(&x, [[1i64, 0i64]], 0.0)
 #[test]
 fn issue632_sig_symbol_stride_no_false_rigidity_rejection() {
     expect_clean(
-        r#"
-module Repro.SigStride
-sig f[n, u]: tensor[n, f32] -> tensor[u, f32]
-def f(x) = stride(x, cast(2, i64))
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_632_movement_fresh_extents/issue632_sig_symbol_stride_no_false_rigidity_rejection_147.json"
+        ),
         "sig-symbol direct-return stride",
     );
 }
@@ -164,9 +155,9 @@ def f(x) = stride(x, cast(2, i64))
 #[test]
 fn issue632_stride_identity_step_keeps_symbolic_dim() {
     let annotated = expect_clean(
-        r#"
-def f(x: tensor[batch, 4, f32]) -> tensor[batch, 2, f32] = stride(&x, 1i64, 2i64)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_632_movement_fresh_extents/issue632_stride_identity_step_keeps_symbolic_dim_167.json"
+        ),
         "identity stride on a symbolic axis",
     );
     let ty = stamped_app_type(&annotated, "stride").expect("stride app has a stamped type");
@@ -180,9 +171,9 @@ def f(x: tensor[batch, 4, f32]) -> tensor[batch, 2, f32] = stride(&x, 1i64, 2i64
 #[test]
 fn issue632_pad_zero_padding_keeps_symbolic_dim() {
     let annotated = expect_clean(
-        r#"
-def p(x: tensor[batch, f32]) -> tensor[batch, f32] = pad(&x, [[0i64, 0i64]], 0.0)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_632_movement_fresh_extents/issue632_pad_zero_padding_keeps_symbolic_dim_183.json"
+        ),
         "zero pad on a symbolic axis",
     );
     let ty = stamped_app_type(&annotated, "pad").expect("pad app has a stamped type");
@@ -202,10 +193,9 @@ def p(x: tensor[batch, f32]) -> tensor[batch, f32] = pad(&x, [[0i64, 0i64]], 0.0
 #[test]
 fn issue632_literal_axes_keep_exact_arithmetic() {
     expect_clean(
-        r#"
-def f(x: tensor[2, 4, f32]) -> tensor[2, 2, f32] = stride(&x, 1i64, 2i64)
-def p(x: tensor[2, 4, f32]) -> tensor[3, 5, f32] = pad(&x, [[0i64, 1i64], [0i64, 1i64]], 0.0)
-"#,
+        include_str!(
+            "fixtures/core/tests/issue_632_movement_fresh_extents/issue632_literal_axes_keep_exact_arithmetic_205.json"
+        ),
         "literal stride/pad arithmetic",
     );
 }

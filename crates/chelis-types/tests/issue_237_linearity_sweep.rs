@@ -42,14 +42,13 @@
 //!    surfaced to the orchestrator as a downstream-source fix on
 //!    coral, not a chelis fix.
 
-use chelis_surf::desugar::desugar_program;
-use chelis_surf::parser::parse_str;
+use chelis_deep::parser::parse_str;
 use chelis_types::errors::CheckErrorKind;
 use chelis_types::{check_linearity, check_typed_program};
 
-fn check_surf(source: &str) -> Result<(), Vec<chelis_types::errors::CheckError>> {
-    let decls = parse_str(source).expect("surf parse should succeed");
-    let deep = desugar_program(&decls);
+fn check_core(source: &str) -> Result<(), Vec<chelis_types::errors::CheckError>> {
+    let decls = parse_str(source).expect("Deep fixture parse should succeed");
+    let deep = decls;
     let checked = check_typed_program(&deep).expect("type check should succeed");
     check_linearity(&checked).map(|_| ())
 }
@@ -65,19 +64,8 @@ fn closure_that_only_borrow_reads_capture_does_not_consume_outer_var() {
     // (`add` borrows both args). The closure must not structurally
     // consume `c`, so the later `add(c, inner(...))` still sees `c`
     // as live.
-    check_surf(
-        r#"
-type Frame[n] =
-  | Frame { col: tensor[n, f32] }
-def get_col[n](df: Frame[n]) -> tensor[n, f32] = match df with {
-  | Frame { col: c } => c
-}
-def f[n](df: Frame[n]) -> tensor[n, f32] = {
-  c = get_col(df)
-  inner = fn (i: i64) -> add(c, c)
-  add(c, inner(cast(0, i64)))
-}
-"#,
+    check_core(
+        include_str!("fixtures/core/tests/issue_237_linearity_sweep/closure_that_only_borrow_reads_capture_does_not_consume_outer_var_69.deep"),
     )
     .expect(
         "issue #237: a closure that only borrow-reads its capture must not \
@@ -91,13 +79,8 @@ fn closure_that_only_reads_capture_via_outer_let_binding_is_a_borrow_capture() {
     // and a direct tensor parameter. Locks the simpler shape so a
     // regression in the destructure path does not mask a regression
     // in the bare-binding path.
-    check_surf(
-        r#"
-def f(x: tensor[4, f32]) -> tensor[4, f32] = {
-  g = fn (i: i64) -> add(x, x)
-  add(x, g(cast(0, i64)))
-}
-"#,
+    check_core(
+        include_str!("fixtures/core/tests/issue_237_linearity_sweep/closure_that_only_reads_capture_via_outer_let_binding_is_a_borrow_capture_95.deep"),
     )
     .expect(
         "issue #237: bare-binding closure capture that only borrow-reads must \
@@ -110,16 +93,8 @@ fn closure_chain_with_only_borrow_reads_does_not_consume_outer() {
     // Multiple sibling closures each borrow-read the same outer var;
     // none consumes it. The final `add(x, ...)` outside both closures
     // must still see `x` as live.
-    check_surf(
-        r#"
-def f(x: tensor[4, f32], y: tensor[4, f32]) -> tensor[4, f32] = {
-  g = fn (v: tensor[4, f32]) -> add(x, v)
-  h = fn (v: tensor[4, f32]) -> mul(x, v)
-  a = g(y)
-  b = h(y)
-  add(x, add(a, b))
-}
-"#,
+    check_core(
+        include_str!("fixtures/core/tests/issue_237_linearity_sweep/closure_chain_with_only_borrow_reads_does_not_consume_outer_114.deep"),
     )
     .expect(
         "issue #237: multiple closures each borrow-reading the same outer var \
@@ -133,14 +108,8 @@ fn closure_that_actually_consumes_capture_still_trips_use_after_consume() {
     // (via `realize`, a structural consume), the later use of `x`
     // outside the closure must still trip `UseAfterConsume`. The fix
     // must not over-permit.
-    let errors = check_surf(
-        r#"
-def f(x: tensor[4, f32], y: tensor[4, f32]) -> tensor[4, f32] = {
-  g = fn (other: tensor[4, f32]) -> realize(x)
-  z = g(y)
-  add(x, z)
-}
-"#,
+    let errors = check_core(
+        include_str!("fixtures/core/tests/issue_237_linearity_sweep/closure_that_actually_consumes_capture_still_trips_use_after_consume_137.deep"),
     )
     .expect_err(
         "issue #237 fix must preserve detection: a closure that structurally \
@@ -161,14 +130,8 @@ fn closure_that_consumes_via_returning_capture_still_trips_use_after_consume() {
     // structural consume (returning an owned tensor moves it out of
     // the closure scope). The outer scope must still see `x` as
     // consumed.
-    let errors = check_surf(
-        r#"
-def f(x: tensor[4, f32]) -> tensor[4, f32] = {
-  g = fn (i: i64) -> x
-  z = g(cast(0, i64))
-  add(x, z)
-}
-"#,
+    let errors = check_core(
+        include_str!("fixtures/core/tests/issue_237_linearity_sweep/closure_that_consumes_via_returning_capture_still_trips_use_after_consume_165.deep"),
     )
     .expect_err(
         "issue #237 fix must preserve detection: returning a captured tensor \
@@ -189,15 +152,8 @@ fn closure_that_consumes_via_app_arg_still_trips_use_after_consume() {
     // the capture. Later use outside must still be flagged.
     // (Fixture renamed from `take` for chelis#353: `take` is a builtin
     // name and bare shadowing defs are now rejected at declaration time.)
-    let errors = check_surf(
-        r#"
-def grab(t: tensor[4, f32]) -> tensor[4, f32] = t
-def f(x: tensor[4, f32]) -> tensor[4, f32] = {
-  g = fn (i: i64) -> grab(x)
-  z = g(cast(0, i64))
-  add(x, z)
-}
-"#,
+    let errors = check_core(
+        include_str!("fixtures/core/tests/issue_237_linearity_sweep/closure_that_consumes_via_app_arg_still_trips_use_after_consume_193.deep"),
     )
     .expect_err(
         "issue #237 fix must preserve detection: a closure that passes its \
@@ -226,14 +182,8 @@ fn auto_borrow_inference_through_pipe_stage_with_explicit_args() {
     // `pipe_consumes_param` returns `true` for `t`, so the inferencer
     // marks `reader.t` as owned, the call `reader(x, k)` consumes
     // `x`, and the later `add(x, y)` trips `UseAfterConsume`.
-    check_surf(
-        r#"
-def reader(t, k: tensor[4, f32]) = t |> add(k)
-def caller(x: tensor[4, f32], k: tensor[4, f32]) -> tensor[4, f32] = {
-  y = reader(x, k)
-  add(x, y)
-}
-"#,
+    check_core(
+        include_str!("fixtures/core/tests/issue_237_linearity_sweep/auto_borrow_inference_through_pipe_stage_with_explicit_args_230.deep"),
     )
     .expect(
         "issue #229: pipe_consumes_param must peer through the synthesized \
@@ -247,14 +197,8 @@ fn auto_borrow_inference_through_pipe_stage_chain_with_explicit_args() {
     // Composed pipe chain `t |> add(k) |> add(k)` — each stage is a
     // synthesized lambda. The inferencer must see both stages as
     // borrow-reads and conclude `reader.t` is read-only.
-    check_surf(
-        r#"
-def reader(t, k: tensor[4, f32]) = t |> add(k) |> add(k)
-def caller(x: tensor[4, f32], k: tensor[4, f32]) -> tensor[4, f32] = {
-  y = reader(x, k)
-  add(x, y)
-}
-"#,
+    check_core(
+        include_str!("fixtures/core/tests/issue_237_linearity_sweep/auto_borrow_inference_through_pipe_stage_chain_with_explicit_args_251.deep"),
     )
     .expect(
         "issue #229: composed pipe-stage chains with explicit args must be \
@@ -269,15 +213,8 @@ fn auto_borrow_pipe_stage_consuming_user_fn_keeps_param_owned() {
     // pipe_consumes_param must report `t` as consumed. The inferencer
     // then keeps `reader.t` owned, and `reader(x, k)` legitimately
     // consumes `x`. A later `add(x, y)` IS a use-after-consume.
-    let errors = check_surf(
-        r#"
-def consume_two(t: tensor[4, f32], k: tensor[4, f32]) -> tensor[4, f32] = t
-def reader(t, k: tensor[4, f32]) = t |> consume_two(k)
-def caller(x: tensor[4, f32], k: tensor[4, f32]) -> tensor[4, f32] = {
-  y = reader(x, k)
-  add(x, y)
-}
-"#,
+    let errors = check_core(
+        include_str!("fixtures/core/tests/issue_237_linearity_sweep/auto_borrow_pipe_stage_consuming_user_fn_keeps_param_owned_273.deep"),
     )
     .expect_err(
         "issue #229 fix must preserve detection: a pipe stage wrapping a \

@@ -1,0 +1,9 @@
+(module {surf_path: "LambdaCall"}
+  lambdacall
+  (def {}
+    g
+    (fn {span: "surf:22..59"}
+      (params {} (map {type: (t-fn {} (t-prim {} f64) (t-prim {} f64))}))
+      (app {span: "surf:48..59"}
+        (var {span: "surf:48..51"} map)
+        (lit {span: "surf:52..58", type: (t-prim {} f64)} 1.5)))))

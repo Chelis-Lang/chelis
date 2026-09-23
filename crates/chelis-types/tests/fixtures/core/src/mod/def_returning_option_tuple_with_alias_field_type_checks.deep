@@ -1,0 +1,29 @@
+(module {surf_path: "M"}
+  m
+  (export {} mk)
+  (deftype {} Effect () (variant {} Pure) (variant {} Impure))
+  (deftype {}
+    Ty
+    ()
+    (variant {} TBase)
+    (variant {} TArrow (t-adt {} Ty) (t-adt {} Ty) (t-adt {} EffectRow)))
+  (typealias {} EffectRow () (t-adt {} List (t-adt {} Effect)))
+  (defsig {}
+    mk
+    (t-fn {}
+      (t-adt {} Ty)
+      (t-adt {} Ty)
+      (t-adt {} Option (t-tuple {} (t-adt {} Ty) (t-adt {} EffectRow)))))
+  (def {}
+    mk
+    (fn {}
+      (params {} (a {type: (t-var {} _)}) (b {type: (t-var {} _)}))
+      (app {span: "surf:177..205"}
+        (var {span: "surf:177..181"} Some)
+        (tuple {span: "surf:182..204"}
+          (app {span: "surf:183..199"}
+            (var {span: "surf:183..189"} TArrow)
+            (var {span: "surf:190..191"} a)
+            (var {span: "surf:193..194"} b)
+            (var {span: "surf:196..198"} Nil))
+          (var {span: "surf:201..203"} Nil))))))

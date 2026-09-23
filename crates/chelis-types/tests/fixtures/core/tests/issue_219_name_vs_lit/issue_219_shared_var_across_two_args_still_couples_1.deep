@@ -1,0 +1,29 @@
+(defsig {}
+  f
+  (n p)
+  (t-fn {}
+    (t-ref {} (t-tensor {} (d-var {} n) (t-var {} p)))
+    (t-ref {} (t-tensor {} (d-var {} n) (t-var {} p)))
+    (t-tensor {} (d-var {} n) (t-var {} p))))
+
+(def {}
+  f
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (y {type: (t-var {} _)}))
+    (copy {span: "surf:67..74"} (var {span: "surf:72..73"} y))))
+
+(defsig {}
+  caller
+  (t-fn {}
+    (t-ref {} (t-tensor {} (d-lit {} 2) (t-prim {} f32)))
+    (t-ref {} (t-tensor {} (d-lit {} 3) (t-prim {} f32)))
+    (t-tensor {} (d-lit {} 2) (t-prim {} f32))))
+
+(def {}
+  caller
+  (fn {}
+    (params {} (a {type: (t-var {} _)}) (b {type: (t-var {} _)}))
+    (app {span: "surf:146..165"}
+      (var {span: "surf:146..147"} f)
+      (copy {span: "surf:148..155"} (var {span: "surf:153..154"} a))
+      (copy {span: "surf:157..164"} (var {span: "surf:162..163"} b)))))

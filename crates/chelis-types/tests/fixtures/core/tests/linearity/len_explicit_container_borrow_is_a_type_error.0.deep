@@ -1,0 +1,21 @@
+(defsig {}
+  bad
+  (k)
+  (t-fn {}
+    (t-adt {} List (t-tensor {} (d-var {} k) (t-prim {} f32)))
+    (t-prim {} i64)))
+
+(def {}
+  bad
+  (fn {}
+    (params {} ^{:type (t-var {} _)} params)
+    (let {span: "surf:53..90"}
+      (bind {}
+        n
+        (app {span: "surf:68..80",
+               surf_binding_type: "explicit",
+               type: (t-prim {} i64)
+             }
+          (var {span: "surf:68..71"} len)
+          (borrow {span: "surf:72..79"} (var {span: "surf:73..79"} params))))
+      (var {span: "surf:85..86"} n))))

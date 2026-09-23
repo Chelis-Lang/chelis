@@ -1,0 +1,16 @@
+(defsig {}
+  f
+  (t-fn {}
+    (t-tensor {} (d-lit {} 3) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 3) (t-prim {} f32))))
+
+(def {}
+  f
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:45..66"}
+      (var {span: "surf:45..51"} cumsum)
+      (app {span: "surf:52..59"}
+        (var {span: "surf:52..56"} nope)
+        (var {span: "surf:57..58"} x))
+      (lit {span: "surf:61..65", surf_literal_style: "explicit", type: (t-prim {} i32)} 7))))

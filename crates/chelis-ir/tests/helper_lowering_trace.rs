@@ -11,7 +11,6 @@ use chelis_ir::host::{
     try_lower_manifested_execution_program, try_lower_manifested_execution_program_with_trace,
 };
 use chelis_ir::lowering_trace::Value;
-use chelis_surf::{desugar::desugar_program, parser::parse_str};
 use chelis_types::manifest::ManifestedProgram;
 use chelis_types::types::{Prim, Target};
 use chelis_types::{CheckedProgram, check_linearity, check_typed_program};
@@ -26,7 +25,9 @@ const C_TENSOR_PRIMS: &[Prim] = &[
 ];
 
 fn manifested(source: &str) -> ManifestedProgram {
-    let deep = desugar_program(&parse_str(source).expect("parse fixture"));
+    // Preserve legacy carriers and signature metadata that select the host lane.
+    let deep: Vec<chelis_deep::Expr> =
+        serde_json::from_str(source).expect("deserialize lossless Deep fixture");
     let checked: CheckedProgram = check_typed_program(&deep).expect("check fixture types");
     let checked = chelis_effects::check_program(&checked).expect("check fixture effects");
     let checked = check_linearity(&checked).expect("check fixture linearity");
@@ -44,15 +45,9 @@ fn same_dag(left: &chelis_ir::Dag, right: &chelis_ir::Dag) {
 
 #[test]
 fn traced_helper_is_the_ordinary_retained_helper_and_projects_with_its_function() {
-    let program = manifested(
-        r#"
-def twice[p: Float](x: tensor[3, p]) -> tensor[3, p] = add(x, x)
-def selected(x: tensor[3, f32], flag: bool) -> (tensor[3, f32], bool) =
-  (twice(x), flag)
-def discarded(x: tensor[3, f16], flag: bool) -> (tensor[3, f16], bool) =
-  (twice(x), flag)
-"#,
-    );
+    let program = manifested(include_str!(
+        "fixtures/core/tests/helper_lowering_trace/traced_helper_is_the_ordinary_retained_helper_and_projects_with_its_function.json"
+    ));
     let (_, ordinary) = try_lower_manifested_execution_program(&program).unwrap();
     let (_, traced) = try_lower_manifested_execution_program_with_trace(&program).unwrap();
     let ordinary = ordinary.expect("ordinary host plan");
@@ -124,14 +119,9 @@ def discarded(x: tensor[3, f16], flag: bool) -> (tensor[3, f16], bool) =
 
 #[test]
 fn helper_trace_retains_actual_ad_and_ordered_duplicate_root_packing() {
-    let program = manifested(
-        r#"
-def loss(x: tensor[3, f32], y: tensor[3, f32]) -> f32 =
-  tensor_to_scalar(sum(x, 0))
-def derivative(x: tensor[3, f32], y: tensor[3, f32])
-  -> (tensor[3, f32], tensor[3, f32]) = grad(loss)(x, y)
-"#,
-    );
+    let program = manifested(include_str!(
+        "fixtures/core/tests/helper_lowering_trace/helper_trace_retains_actual_ad_and_ordered_duplicate_root_packing.json"
+    ));
     let (_, plan) = try_lower_manifested_execution_program_with_trace(&program).unwrap();
     let plan = plan.expect("host execution plan");
     let function = plan
@@ -193,15 +183,9 @@ def derivative(x: tensor[3, f32], y: tensor[3, f32])
 
 #[test]
 fn named_axis_helper_records_the_retained_dimension_rebinding_output() {
-    let program = manifested(
-        r#"
-def named_twice[n](x: tensor[n, f32]) -> tensor[n, f32] = add(x, x)
-def selected(
-  x: tensor[3, f32],
-  flag: bool
-) -> (tensor[3, f32], bool) = (named_twice(x), flag)
-"#,
-    );
+    let program = manifested(include_str!(
+        "fixtures/core/tests/helper_lowering_trace/named_axis_helper_records_the_retained_dimension_rebinding_output.json"
+    ));
     let (_, plan) = try_lower_manifested_execution_program_with_trace(&program).unwrap();
     let plan = plan.expect("host execution plan");
     let function = plan
@@ -224,15 +208,9 @@ def selected(
 
 #[test]
 fn fixed_control_helper_trace_captures_actual_pre_and_post_ad_execution() {
-    let program = manifested(
-        r#"
-def loss(x: tensor[32, f32]) -> f32 = with seed(42i64) {
-  draw_free = with seed(7i64) { x }
-  tensor_to_scalar(sum(dropout(draw_free, 0.5f32), 0))
-}
-def derivative(x: tensor[32, f32]) -> tensor[32, f32] = grad(loss)(x)
-"#,
-    );
+    let program = manifested(include_str!(
+        "fixtures/core/tests/helper_lowering_trace/fixed_control_helper_trace_captures_actual_pre_and_post_ad_execution.json"
+    ));
     let (_, plan) = try_lower_manifested_execution_program_with_trace(&program).unwrap();
     let plan = plan.expect("host execution plan");
     let trace = plan
@@ -298,14 +276,9 @@ def derivative(x: tensor[32, f32]) -> tensor[32, f32] = grad(loss)(x)
 fn resource_requirement_survives_actual_ad_splice() {
     use chelis_ir::lowering_trace::{FullSourceKind, FullStep};
 
-    let program = manifested(
-        r#"
-def loss(x: tensor[4, f32]) -> f32 = with device("cpu:author-device") {
-  with seed(42i64) { tensor_to_scalar(sum(dropout(x, 0.5f32), 0)) }
-}
-def derivative(x: tensor[4, f32]) -> tensor[4, f32] = grad(loss)(x)
-"#,
-    );
+    let program = manifested(include_str!(
+        "fixtures/core/tests/helper_lowering_trace/resource_requirement_survives_actual_ad_splice.json"
+    ));
     let (_, plan) = try_lower_manifested_execution_program_with_trace(&program).unwrap();
     let plan = plan.expect("C execution host plan");
     let trace = plan
@@ -404,22 +377,16 @@ def derivative(x: tensor[4, f32]) -> tensor[4, f32] = grad(loss)(x)
 
 #[test]
 fn failed_helper_attempt_returns_no_trace_and_cannot_pollute_the_next_compilation() {
-    let rejected = manifested(
-        r#"
-def loss(x: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(floor(x), 0))
-def derivative(x: tensor[3, f32]) -> tensor[3, f32] = grad(loss)(x)
-"#,
-    );
+    let rejected = manifested(include_str!(
+        "fixtures/core/tests/helper_lowering_trace/failed_helper_attempt_returns_no_trace_and_cannot_pollute_the_next_compilation.json"
+    ));
     let error = try_lower_manifested_execution_program_with_trace(&rejected)
         .expect_err("the actual AD pass rejects floor");
     assert!(error.to_string().contains("floor"));
 
-    let accepted = manifested(
-        r#"
-def loss(x: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(mul(x, x), 0))
-def derivative(x: tensor[3, f32]) -> tensor[3, f32] = grad(loss)(x)
-"#,
-    );
+    let accepted = manifested(include_str!(
+        "fixtures/core/tests/helper_lowering_trace/failed_helper_attempt_returns_no_trace_and_cannot_pollute_the_next_compilation_2.json"
+    ));
     let (_, plan) = try_lower_manifested_execution_program_with_trace(&accepted).unwrap();
     let plan = plan.expect("successful host plan");
     let trace = plan

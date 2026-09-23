@@ -1,1 +1,0 @@
-../../agent-skills/redteam-exec/SKILL.md

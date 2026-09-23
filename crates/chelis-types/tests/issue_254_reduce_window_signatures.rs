@@ -17,14 +17,8 @@
 
 use chelis_types::check_ir_program;
 
-fn check_surf(source: &str) -> Result<Vec<String>, Vec<String>> {
-    let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
-    let exprs = chelis_macros::expand_program(
-        &chelis_surf::desugar::desugar_program(&decls),
-        &chelis_macros::ExpansionOptions::default(),
-    )
-    .expect("macro expand")
-    .into_exprs();
+fn check_core(source: &str) -> Result<Vec<String>, Vec<String>> {
+    let exprs = chelis_deep::parse_and_stamp_file(source).expect("Deep fixture");
     match check_ir_program(&exprs) {
         Ok(_) => Ok(Vec::new()),
         Err(r) => Err(r.errors.iter().map(|e| e.message.clone()).collect()),
@@ -37,28 +31,28 @@ fn check_reducer(
     window: &[usize],
     strides: &[usize],
 ) -> Result<Vec<String>, Vec<String>> {
-    let shape_str = input_shape
+    let shape = input_shape
         .iter()
-        .map(|d| d.to_string())
+        .map(|dim| format!("(d-lit {{}} {dim})"))
         .collect::<Vec<_>>()
-        .join(", ");
-    let window_str = window
-        .iter()
-        .map(|w| format!("{w}i64"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let strides_str = strides
-        .iter()
-        .map(|s| format!("{s}i64"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let src = format!(
-        r#"
-sig run: tensor[{shape_str}, f32] -> tensor[{shape_str}, f32]
-def run(x) = {reducer_name}(x, [{window_str}], [{strides_str}])
-"#
+        .join(" ");
+    let list = |items: &[usize]| {
+        items
+            .iter()
+            .rev()
+            .fold("(var {} Nil)".to_string(), |tail, item| {
+                format!(
+                    "(app {{}} (var {{}} Cons) (lit {{type: (t-prim {{}} i64)}} {item}) {tail})"
+                )
+            })
+    };
+    let window = list(window);
+    let strides = list(strides);
+    let source = format!(
+        "(defsig {{}} run (t-fn {{}} (t-tensor {{}} {shape} (t-prim {{}} f32)) (t-tensor {{}} {shape} (t-prim {{}} f32))))\n\
+         (def {{}} run (fn {{}} (params {{}} x) (app {{}} (var {{}} {reducer_name}) (var {{}} x) {window} {strides})))"
     );
-    check_surf(&src)
+    check_core(&source)
 }
 
 // -------- Positive coverage --------
@@ -67,22 +61,20 @@ def run(x) = {reducer_name}(x, [{window_str}], [{strides_str}])
 /// [2, 2] + strides [1, 1] produces a rank-4 [2, 3, 7, 7] output.
 #[test]
 fn issue254_reduce_window_max_acceptance_shape_typechecks() {
-    let src = r#"
-sig run: tensor[2, 3, 8, 8, f32] -> tensor[2, 3, 7, 7, f32]
-def run(x) = reduce_window_max(x, [2i64, 2i64], [1i64, 1i64])
-"#;
-    check_surf(src).expect("acceptance shape must typecheck");
+    let src = include_str!(
+        "fixtures/core/tests/issue_254_reduce_window_signatures/issue254_reduce_window_max_acceptance_shape_typechecks_1.deep"
+    );
+    check_core(src).expect("acceptance shape must typecheck");
 }
 
 /// Non-overlapping pool2d (stride == window) on the same canonical
 /// rank-4 input: [2, 3, 8, 8] + [2, 2] + [2, 2] → [2, 3, 4, 4].
 #[test]
 fn issue254_reduce_window_max_nonoverlapping_pool2d_typechecks() {
-    let src = r#"
-sig run: tensor[2, 3, 8, 8, f32] -> tensor[2, 3, 4, 4, f32]
-def run(x) = reduce_window_max(x, [2i64, 2i64], [2i64, 2i64])
-"#;
-    check_surf(src).expect("non-overlapping pool2d must typecheck");
+    let src = include_str!(
+        "fixtures/core/tests/issue_254_reduce_window_signatures/issue254_reduce_window_max_nonoverlapping_pool2d_typechecks_1.deep"
+    );
+    check_core(src).expect("non-overlapping pool2d must typecheck");
 }
 
 /// All four reducers share the shape contract.
@@ -94,13 +86,11 @@ fn issue254_all_four_reducers_typecheck_with_same_shape_contract() {
         "reduce_window_sum",
         "reduce_window_mean",
     ] {
-        let src = format!(
-            r#"
-sig run: tensor[1, 1, 3, 3, f32] -> tensor[1, 1, 2, 2, f32]
-def run(x) = {name}(x, [2i64, 2i64], [1i64, 1i64])
-"#
-        );
-        check_surf(&src).unwrap_or_else(|errors| panic!("{name} must typecheck, got {errors:?}"));
+        let src = include_str!(
+            "fixtures/core/tests/issue_254_reduce_window_signatures/reducer_template.deep"
+        )
+        .replace("fixture_reducer", name);
+        check_core(&src).unwrap_or_else(|errors| panic!("{name} must typecheck, got {errors:?}"));
     }
 }
 
@@ -166,11 +156,10 @@ fn issue254_reduce_window_rejects_window_strides_length_mismatch_at_check() {
 fn issue254_reduce_window_rejects_wrong_declared_output_shape_at_check() {
     // Real output is [1,1,7,7] (input 8 - window 2 + 1 = 7); declared
     // is [1,1,8,8]. Type checker must reject.
-    let src = r#"
-sig run: tensor[1, 1, 8, 8, f32] -> tensor[1, 1, 8, 8, f32]
-def run(x) = reduce_window_max(x, [2i64, 2i64], [1i64, 1i64])
-"#;
-    let errors = check_surf(src).expect_err("wrong declared output shape must NOT typecheck");
+    let src = include_str!(
+        "fixtures/core/tests/issue_254_reduce_window_signatures/issue254_reduce_window_rejects_wrong_declared_output_shape_at_check_1.deep"
+    );
+    let errors = check_core(src).expect_err("wrong declared output shape must NOT typecheck");
     assert!(
         !errors.is_empty(),
         "expected a shape-mismatch diagnostic, got an empty error list"

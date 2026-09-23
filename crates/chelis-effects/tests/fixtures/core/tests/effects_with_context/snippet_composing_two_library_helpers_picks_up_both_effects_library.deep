@@ -1,0 +1,21 @@
+(defsig {} lib_emit (t-fn {} (t-prim {} i64) (t-prim {} i64)))
+
+(def {}
+  lib_emit
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:31..39"}
+      (var {span: "surf:31..36"} debug)
+      (var {span: "surf:37..38"} x))))
+
+(defsig {} lib_assert (t-fn {} (t-prim {} i64) (t-prim {} i64) (t-unit {})))
+
+(def {}
+  lib_assert
+  (fn {}
+    (params {} (a {type: (t-var {} _)}) (b {type: (t-var {} _)}))
+    (app {span: "surf:81..115"}
+      (var {span: "surf:81..95"} test_assert_eq)
+      (var {span: "surf:96..97"} a)
+      (var {span: "surf:99..100"} b)
+      (lit {span: "surf:102..114", type: (t-prim {} string)} "lib_assert"))))

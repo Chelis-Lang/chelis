@@ -1,0 +1,21 @@
+(module {surf_path: "Stats.Prob"}
+  stats.prob
+  (export {} probability prob_value)
+  (deftype {opaque: true}
+    Probability
+    ()
+    (variant {} Probability (field {} value (t-prim {} f32))))
+  (defsig {} probability (t-fn {} (t-prim {} f32) (t-adt {} Probability)))
+  (def {}
+    probability
+    (fn {}
+      (params {} (x {type: (t-var {} _)}))
+      (record {span: "surf:150..174"}
+        Probability
+        (kv {} value (var {span: "surf:171..172"} x)))))
+  (defsig {} prob_value (t-fn {} (t-adt {} Probability) (t-prim {} f32)))
+  (def {}
+    prob_value
+    (fn {}
+      (params {} (p {type: (t-var {} _)}))
+      (access {span: "surf:215..222"} (var {span: "surf:215..216"} p) value))))

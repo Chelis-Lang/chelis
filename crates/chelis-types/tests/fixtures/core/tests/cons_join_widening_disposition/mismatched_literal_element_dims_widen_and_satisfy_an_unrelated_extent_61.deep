@@ -1,0 +1,29 @@
+(defsig {}
+  sink
+  (t-fn {}
+    (t-adt {} List (t-tensor {} (d-lit {} 9) (t-prim {} f32)))
+    (t-prim {} i32)))
+
+(def {}
+  sink
+  (fn {}
+    (params {} (xs {type: (t-var {} _)}))
+    (lit {span: "surf:44..45", type: (t-prim {} i32)} 0)))
+
+(defsig {}
+  f
+  (t-fn {}
+    (t-tensor {} (d-lit {} 2) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 3) (t-prim {} f32))
+    (t-prim {} i32)))
+
+(def {}
+  f
+  (fn {}
+    (params {} (a {type: (t-var {} _)}) (b {type: (t-var {} _)}))
+    (app {span: "surf:99..111"}
+      (var {span: "surf:99..103"} sink)
+      (app {span: "surf:104..110"}
+        (var {} Cons)
+        (var {span: "surf:105..106"} a)
+        (app {} (var {} Cons) (var {span: "surf:108..109"} b) (var {} Nil))))))

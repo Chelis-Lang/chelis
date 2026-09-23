@@ -1,0 +1,62 @@
+(defsig {}
+  pair_id
+  (n)
+  (t-fn {}
+    (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} f32)))
+    (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} f32)))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))))
+
+(def {} pair_id (fn {} (params {} x y) (var {span: "surf:90..91"} x)))
+
+(defsig {} caller (t-fn {} (t-tensor {} (d-lit {} 3) (t-prim {} f32))))
+
+(def {}
+  caller
+  (fn {}
+    (params {})
+    (let {span: "surf:127..264"}
+      (bind {}
+        a
+        (app {span: "surf:153..179",
+               surf_binding_type: "explicit",
+               type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))
+             }
+          (var {span: "surf:153..162"} to_tensor)
+          (app {span: "surf:163..178"}
+            (var {} Cons)
+            (lit {span: "surf:164..167", type: (t-prim {} f32)} 1.0)
+            (app {}
+              (var {} Cons)
+              (lit {span: "surf:169..172", type: (t-prim {} f32)} 2.0)
+              (app {}
+                (var {} Cons)
+                (lit {span: "surf:174..177", type: (t-prim {} f32)} 3.0)
+                (var {} Nil))))))
+      (let {}
+        (bind {}
+          b
+          (app {span: "surf:204..240",
+                 surf_binding_type: "explicit",
+                 type: (t-tensor {} (d-lit {} 5) (t-prim {} f32))
+               }
+            (var {span: "surf:204..213"} to_tensor)
+            (app {span: "surf:214..239"}
+              (var {} Cons)
+              (lit {span: "surf:215..218", type: (t-prim {} f32)} 1.0)
+              (app {}
+                (var {} Cons)
+                (lit {span: "surf:220..223", type: (t-prim {} f32)} 2.0)
+                (app {}
+                  (var {} Cons)
+                  (lit {span: "surf:225..228", type: (t-prim {} f32)} 3.0)
+                  (app {}
+                    (var {} Cons)
+                    (lit {span: "surf:230..233", type: (t-prim {} f32)} 4.0)
+                    (app {}
+                      (var {} Cons)
+                      (lit {span: "surf:235..238", type: (t-prim {} f32)} 5.0)
+                      (var {} Nil))))))))
+        (app {span: "surf:245..260"}
+          (var {span: "surf:245..252"} pair_id)
+          (borrow {span: "surf:253..255"} (var {span: "surf:254..255"} a))
+          (borrow {span: "surf:257..259"} (var {span: "surf:258..259"} b)))))))

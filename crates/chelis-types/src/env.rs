@@ -1062,6 +1062,12 @@ impl Env {
     /// against. It is compiled only into tests and the temporary parity-oracle
     /// feature.
     ///
+    /// The environment includes the active declaration's annotation binders,
+    /// not just value bindings. A body-only binder need not occur in any value
+    /// scheme, but nested lets must still share its declaration-owned identity.
+    /// Sweep its substituted contents as monomorphic roots, including variables
+    /// reached through a type binding or an expanded rank.
+    ///
     /// It is a reference for *which variables the environment leaves free*, not
     /// for which of those may be quantified. Two exclusions are therefore
     /// mirrored here deliberately rather than inherited: a recursive group's
@@ -1078,9 +1084,34 @@ impl Env {
         owned_contracts: Option<&[crate::unify::CollectionContractId]>,
     ) -> (Scheme, Vec<crate::unify::CollectionContractId>) {
         let ty = subst.apply(ty);
-        let env_tvars = self.free_tvars(subst);
-        let env_dvars = self.free_dvars(subst);
-        let env_rvars = self.free_rvars(subst);
+        let mut env_tvars = self.free_tvars(subst);
+        let mut env_dvars = self.free_dvars(subst);
+        let mut env_rvars = self.free_rvars(subst);
+        if let Some(binders) = self.type_resolution_binders() {
+            for (_, var) in binders.type_vars.to_sorted() {
+                let ty = subst.apply(&Type::Var(*var));
+                env_tvars.extend(free_tvars(&ty));
+                env_dvars.extend(free_dvars(&ty));
+                env_rvars.extend(free_rvars(&ty));
+            }
+            let dimensions = binders
+                .dim_vars
+                .to_sorted()
+                .into_iter()
+                .map(|(_, var)| Dim::Var(*var))
+                .chain(
+                    binders
+                        .rank_vars
+                        .to_sorted()
+                        .into_iter()
+                        .map(|(_, var)| Dim::Rank(*var)),
+                );
+            for dim in dimensions {
+                let ty = subst.apply(&Type::Tensor(vec![dim], TensorPrec::Concrete(Prim::F32)));
+                env_dvars.extend(free_dvars(&ty));
+                env_rvars.extend(free_rvars(&ty));
+            }
+        }
         // chelis#1489: the same exclusion as `generalize_by_levels`, so the
         // parity assertion in `generalize` keeps comparing like with like.
         let (pending_t, pending_d, pending_r) = subst.pending_gate_result_vars();
@@ -1446,6 +1477,69 @@ fn collect_rvars(ty: &Type, vars: &mut Vec<RankVar>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "generalize-sweep-oracle")]
+    #[test]
+    fn nested_generalization_preserves_substituted_declaration_binders() {
+        let env = Env::new();
+        let mut body_env = env.clone();
+        let mut subst = Subst::new();
+        let mut vg = VarGen::default();
+        let declaration_level = subst.enter_level(&vg);
+        let outer_type = vg.fresh_tvar();
+        let outer_dim = vg.fresh_dvar();
+        let outer_rank = vg.fresh_rvar();
+        body_env.set_type_resolution_scope(
+            Some(&DeclarationBinderIdentities {
+                type_vars: UnordMap::from([("a".to_string(), outer_type)]),
+                dim_vars: UnordMap::from([("n".to_string(), outer_dim)]),
+                rank_vars: UnordMap::from([("r".to_string(), outer_rank)]),
+            }),
+            None,
+        );
+
+        let rhs_level = subst.enter_level(&vg);
+        let precision = vg.fresh_tvar();
+        let type_dim = vg.fresh_dvar();
+        let type_rank = vg.fresh_rvar();
+        let dim_alias = vg.fresh_dvar();
+        let rank_dim = vg.fresh_dvar();
+        let local = vg.fresh_tvar();
+        let captured_type = Type::Tensor(
+            vec![Dim::Var(type_dim), Dim::Rank(type_rank)],
+            TensorPrec::Var(precision),
+        );
+        crate::unify::unify(&Type::Var(outer_type), &captured_type, &mut subst).unwrap();
+        crate::unify::unify_dim(&Dim::Var(outer_dim), &Dim::Var(dim_alias), &mut subst).unwrap();
+        crate::unify::unify(
+            &Type::Tensor(vec![Dim::Rank(outer_rank)], TensorPrec::Concrete(Prim::F32)),
+            &Type::Tensor(vec![Dim::Var(rank_dim)], TensorPrec::Concrete(Prim::F32)),
+            &mut subst,
+        )
+        .unwrap();
+        let rhs = Type::Tuple(vec![
+            captured_type,
+            Type::Tensor(
+                vec![Dim::Var(dim_alias), Dim::Var(rank_dim)],
+                TensorPrec::Concrete(Prim::F32),
+            ),
+            Type::Var(local),
+        ]);
+        subst.leave_level(rhs_level, &vg);
+
+        // Neither a signature nor a parameter binding carries these roots.
+        // Only the RHS-local variable is fresh at each use of the nested let.
+        let nested = body_env.generalize(&rhs, &subst);
+        assert_eq!(nested.tvars, vec![local]);
+        assert!(nested.dvars.is_empty());
+        assert!(nested.rvars.is_empty());
+
+        // The declaration's lexical roots must not pin its published scheme.
+        subst.leave_level(declaration_level, &vg);
+        let published = env.generalize(&rhs, &subst);
+        assert_eq!(published.tvars, vec![precision, local]);
+        assert_eq!(published.dvars, vec![type_dim, dim_alias, rank_dim]);
+        assert_eq!(published.rvars, vec![type_rank]);
+    }
 
     /// A scheme exercising every quantifier kind, with a restriction on one
     /// type variable and none on the other, so a route that drops

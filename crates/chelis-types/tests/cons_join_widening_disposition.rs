@@ -28,14 +28,13 @@
 //! Every row here passes on the base commit as well, because S2b changes
 //! nothing about `Cons`.
 
-use chelis_surf::desugar::desugar_program;
-use chelis_surf::parser::parse_str as parse_surf;
+use chelis_deep::parser::parse_str as parse_core;
 use chelis_types::check_typed_program;
 use chelis_types::errors::CheckError;
 
 fn check(source: &str) -> Result<(), Vec<CheckError>> {
-    let decls = parse_surf(source).expect("surf parse should succeed");
-    let deep = desugar_program(&decls);
+    let decls = parse_core(source).expect("Deep fixture parse should succeed");
+    let deep = decls;
     match check_typed_program(&deep) {
         Ok(_) => Ok(()),
         Err(report) => Err(report.errors),
@@ -57,10 +56,9 @@ fn summary(errors: &[CheckError]) -> String {
 /// reach: both elements are fully resolved function parameters.
 #[test]
 fn mismatched_literal_element_dims_widen_and_satisfy_an_unrelated_extent() {
-    let accepted = check(
-        "def sink(xs: List[tensor[9, f32]]) -> i32 = 0\n\
-         def f(a: tensor[2, f32], b: tensor[3, f32]) -> i32 = sink([a, b])\n",
-    );
+    let accepted = check(include_str!(
+        "fixtures/core/tests/cons_join_widening_disposition/mismatched_literal_element_dims_widen_and_satisfy_an_unrelated_extent_61.deep"
+    ));
     assert!(
         accepted.is_ok(),
         "chelis#218's join widens `2` against `3` to a wildcard, and the \
@@ -75,12 +73,9 @@ fn mismatched_literal_element_dims_widen_and_satisfy_an_unrelated_extent() {
 /// acceptance in the join rather than in the parameter's type.
 #[test]
 fn a_mismatched_literal_element_list_is_accepted_on_its_own() {
-    let accepted = check(
-        "def f(a: tensor[2, f32], b: tensor[3, f32]) -> i32 = {\n  \
-         xs = [a, b]\n  \
-         0\n\
-         }\n",
-    );
+    let accepted = check(include_str!(
+        "fixtures/core/tests/cons_join_widening_disposition/a_mismatched_literal_element_list_is_accepted_on_its_own_79.deep"
+    ));
     assert!(
         accepted.is_ok(),
         "the join accepts the list itself: {}",
@@ -94,8 +89,7 @@ fn a_mismatched_literal_element_list_is_accepted_on_its_own() {
 #[test]
 fn a_mismatched_element_rank_is_still_rejected() {
     let errors = check(
-        "def sink(xs: List[tensor[9, f32]]) -> i32 = 0\n\
-         def f(a: tensor[2, f32], b: tensor[3, 4, f32]) -> i32 = sink([a, b])\n",
+        include_str!("fixtures/core/tests/cons_join_widening_disposition/a_mismatched_element_rank_is_still_rejected_97.deep"),
     )
     .expect_err("rank-uniform elements are required");
     assert!(

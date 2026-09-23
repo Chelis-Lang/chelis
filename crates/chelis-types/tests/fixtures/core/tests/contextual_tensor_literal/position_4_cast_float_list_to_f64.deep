@@ -1,0 +1,16 @@
+(def {}
+  xs
+  (cast {span: "surf:5..31"}
+    (app {}
+      (var {} to_tensor)
+      (app {}
+        (var {} Cons)
+        (lit {surf_literal_style: "unsuffixed", type: (t-prim {} f64)} 1.0)
+        (app {}
+          (var {} Cons)
+          (lit {surf_literal_style: "unsuffixed", type: (t-prim {} f64)} 2.0)
+          (app {}
+            (var {} Cons)
+            (lit {surf_literal_style: "unsuffixed", type: (t-prim {} f64)} 3.0)
+            (var {} Nil)))))
+    (t-prim {} f64)))

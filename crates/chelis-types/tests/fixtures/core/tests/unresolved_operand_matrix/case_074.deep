@@ -1,0 +1,10 @@
+(defsig {} f (t-fn {} (t-prim {} bool) (t-prim {} bool)))
+
+(def {}
+  f
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:25..34"}
+      (var {span: "surf:25..28"} add)
+      (var {span: "surf:29..30"} x)
+      (var {span: "surf:32..33"} x))))

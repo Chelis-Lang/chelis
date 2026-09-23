@@ -1,0 +1,17 @@
+(defsig {dtype_bounds: {p: float}} source (p) (t-fn {} (t-var {} p)))
+
+(def {}
+  source
+  (fn {}
+    (params {})
+    (cast {}
+      (lit {surf_literal_style: "explicit", type: (t-prim {} f32)} 0.0)
+      (t-var {} p))))
+
+(defsig {} make (t-fn {} (t-prim {} f32)))
+
+(def {}
+  make
+  (fn {}
+    (params {})
+    (app {} (var {} source))))

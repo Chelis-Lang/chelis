@@ -1,0 +1,19 @@
+(module {surf_path: "M"}
+  m
+  (deftype {invariant: (fn {}
+                          (params {} p)
+                          (app {span: "surf:31..42"}
+                            (var {} gte)
+                            (access {span: "surf:31..35"}
+                              (var {span: "surf:31..32"} p)
+                              ok)
+                            (lit {span: "surf:39..42", type: (t-prim {} f32)} 0.0))),
+             invariant_amenability: "linear",
+             opaque: true
+           }
+    T
+    ()
+    (variant {}
+      T
+      (field {} ok (t-prim {} f32))
+      (field {} bad (t-tensor {} (d-lit {} 4) (t-prim {} i32))))))

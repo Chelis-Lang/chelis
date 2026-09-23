@@ -14,13 +14,11 @@
 //! minted outside one, which is exactly "the original site, carried through".
 
 use super::*;
-use chelis_surf::desugar::desugar_program;
-use chelis_surf::parser::parse_str as parse_surf;
 
 fn check_and_take_keys(source: &str) -> Vec<(usize, bool)> {
     let _ = take_post_app_key_log();
-    let decls = parse_surf(source).expect("surf parse should succeed");
-    let _ = crate::check_typed_program(&desugar_program(&decls));
+    let exprs: Vec<deep::Expr> = serde_json::from_str(source).expect("lossless AST fixture");
+    let _ = crate::check_typed_program(&exprs);
     take_post_app_key_log()
 }
 
@@ -34,9 +32,9 @@ fn check_and_take_keys(source: &str) -> Vec<(usize, bool)> {
 /// no eager mint, and the `is_carried` assertion below fails.
 #[test]
 fn a_route_that_re_registers_during_a_replay_keeps_the_original_key() {
-    let keys = check_and_take_keys(
-        "def f(x: tensor[4, f32]) -> List[tensor[4, f32]] = split(x, 0i32, [])\n",
-    );
+    let keys = check_and_take_keys(include_str!(
+        "../../../tests/fixtures/core/src/post_app_ledger_key/a_route_that_re_registers_during_a_replay_keeps_the_original_key.json"
+    ));
     let replayed: Vec<usize> = keys
         .iter()
         .filter(|(_, during_replay)| *during_replay)
@@ -66,12 +64,9 @@ fn a_route_that_re_registers_during_a_replay_keeps_the_original_key() {
 /// is deduplicated into the other.
 #[test]
 fn two_distinct_eager_calls_keep_distinct_keys() {
-    let keys = check_and_take_keys(
-        "def f(a: List[i32], b: List[i32]) -> i64 = {\n  \
-         g = fn (t) -> len(t)\n  \
-         h = fn (u) -> len(u)\n  \
-         add(g(a), h(b))\n}\n",
-    );
+    let keys = check_and_take_keys(include_str!(
+        "../../../tests/fixtures/core/src/post_app_ledger_key/two_distinct_eager_calls_keep_distinct_keys.json"
+    ));
     let eager: Vec<usize> = keys
         .iter()
         .filter(|(_, during_replay)| !*during_replay)

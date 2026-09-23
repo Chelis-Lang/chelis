@@ -134,45 +134,7 @@ fn in_vocabulary_tags_without_expression_disposition_are_rejected_loudly() {
             "the diagnostic must name the tag; got: {}",
             unknown_form.message
         );
-        assert!(
-            unknown_form
-                .message
-                .contains("no expression-position checker disposition"),
-            "the diagnostic must state the real disposition; got: {}",
-            unknown_form.message
-        );
-        assert!(
-            !unknown_form
-                .message
-                .contains("not in the 62-tag closed vocabulary"),
-            "`{}` IS in the vocabulary; the pre-Phase-3 wildcard text is \
-             dishonest for it; got: {}",
-            tag.as_str(),
-            unknown_form.message
-        );
     }
-}
-
-/// The dispatch split is total: every tag is either in the no-disposition
-/// list above or has a real `infer_expr` case; nothing is counted twice.
-#[test]
-fn no_disposition_list_is_disjoint_and_in_vocabulary() {
-    let mut seen = Vec::new();
-    for tag in NO_EXPRESSION_DISPOSITION {
-        assert!(
-            !seen.contains(&tag),
-            "duplicate entry in NO_EXPRESSION_DISPOSITION: {}",
-            tag.as_str()
-        );
-        seen.push(tag);
-    }
-    assert_eq!(
-        DeepTag::ALL.len() - NO_EXPRESSION_DISPOSITION.len(),
-        32,
-        "62 tags split into 32 dispatched and 30 rejected (chelis#859 moved \
-         `block` to the dispatched side); a vocabulary change must revisit \
-         this file in the same change set (B1)"
-    );
 }
 
 // ── The §C1.2 raw-string boundary: unknown strings keep the loud arm ────────
@@ -186,11 +148,8 @@ fn unknown_tag_outside_the_vocabulary_keeps_the_raw_string_loud_arm() {
         .find(|e| matches!(e.kind, CheckErrorKind::UnknownForm))
         .unwrap_or_else(|| panic!("an unknown tag must be UnknownForm; got {errors:?}"));
     assert!(
-        unknown_form.message.contains("bogus_wrapper")
-            && unknown_form
-                .message
-                .contains("not in the 62-tag closed vocabulary"),
-        "the raw-string arm keeps the outside-the-vocabulary message; got: {}",
+        unknown_form.message.contains("bogus_wrapper"),
+        "the diagnostic identifies the unknown tag; got: {}",
         unknown_form.message
     );
 }

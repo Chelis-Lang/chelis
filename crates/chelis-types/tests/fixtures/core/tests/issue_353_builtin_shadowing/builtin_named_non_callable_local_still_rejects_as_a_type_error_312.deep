@@ -1,0 +1,17 @@
+(module {surf_path: "NonCallable"}
+  noncallable
+  (defsig {} f (t-fn {} (t-prim {} f64) (t-prim {} f64)))
+  (def {}
+    f
+    (fn {}
+      (params {} (x {type: (t-var {} _)}))
+      (let {span: "surf:42..84"}
+        (bind {}
+          round_to
+          (var {span: "surf:55..56"} x))
+        (app {span: "surf:57..82"}
+          (var {span: "surf:57..65"} round_to)
+          (var {span: "surf:66..67"} x)
+          (cast {span: "surf:69..81"}
+            (lit {span: "surf:74..75", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 0)
+            (t-prim {} i64)))))))

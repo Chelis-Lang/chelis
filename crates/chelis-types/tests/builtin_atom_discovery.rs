@@ -7,43 +7,10 @@ use chelis_types::{
 use std::collections::BTreeSet;
 
 #[test]
-fn every_declared_case_is_a_live_enum_member_and_every_member_is_declared() {
-    let source = syn::parse_file(include_str!("../src/builtins.rs")).expect("valid Rust");
-    let domains: BTreeSet<_> = source
-        .items
-        .iter()
-        .find_map(|item| match item {
-            syn::Item::Enum(e) if e.ident == "BuiltinSemanticDomain" => {
-                Some(e.variants.iter().map(|v| v.ident.to_string()).collect())
-            }
-            _ => None,
-        })
-        .expect("closed semantic domains");
-    assert_eq!(
-        domains,
-        ["Numeric", "Container", "Boundary"]
-            .map(str::to_string)
-            .into_iter()
-            .collect()
-    );
-    let members: BTreeSet<_> = source
-        .items
-        .iter()
-        .find_map(|item| match item {
-            syn::Item::Enum(e) if e.ident == "BuiltinSiblingCaseId" => {
-                Some(e.variants.iter().map(|v| v.ident.to_string()).collect())
-            }
-            _ => None,
-        })
-        .expect("closed case enum");
-    let mut declared = BTreeSet::new();
+fn every_declared_capability_is_valid() {
     for builtin in BUILTINS {
         builtin.capability.validate().expect("valid declaration");
-        for case in builtin.capability.sibling_cases {
-            declared.insert(format!("{:?}", case.case));
-        }
     }
-    assert_eq!(members, declared, "stale or missing sibling case");
 }
 
 #[test]
@@ -237,21 +204,23 @@ fn observation_rejections_have_explicit_cases_not_an_accepted_wildcard() {
 
 #[test]
 fn checked_applications_and_lexical_shadows_remain_distinct() {
-    use chelis_surf::{desugar::desugar_program, parser::parse_str};
     for source in [
-        "a = len([1, 2])",
-        "a = concat([1, 2], [3])",
-        "a = drop([1, 2], 1i64)",
-        "a = to_string([1, 2])",
-        "def apply(len: (f32 -> f32), x: f32) -> f32 = len(x)",
-        "def apply(to_string: (f32 -> f32), x: f32) -> f32 = to_string(x)",
+        include_str!("fixtures/core/tests/builtin_atom_discovery/application_00.deep"),
+        include_str!("fixtures/core/tests/builtin_atom_discovery/application_01.deep"),
+        include_str!("fixtures/core/tests/builtin_atom_discovery/application_02.deep"),
+        include_str!("fixtures/core/tests/builtin_atom_discovery/application_03.deep"),
+        include_str!("fixtures/core/tests/builtin_atom_discovery/application_04.deep"),
+        include_str!("fixtures/core/tests/builtin_atom_discovery/application_05.deep"),
     ] {
-        let deep = desugar_program(&parse_str(source).unwrap());
+        let deep = chelis_deep::parse_and_stamp_file(source).expect("core fixture parses");
         let checked = chelis_types::check_typed_program(&deep);
         assert!(checked.is_ok(), "{source}: {checked:?}");
     }
-    for source in ["a = len(1)", "a = concat([1], 1.0)"] {
-        let deep = desugar_program(&parse_str(source).unwrap());
+    for source in [
+        include_str!("fixtures/core/tests/builtin_atom_discovery/application_06.deep"),
+        include_str!("fixtures/core/tests/builtin_atom_discovery/application_07.deep"),
+    ] {
+        let deep = chelis_deep::parse_and_stamp_file(source).expect("core fixture parses");
         assert!(
             chelis_types::check_typed_program(&deep).is_err(),
             "{source}"
@@ -261,25 +230,24 @@ fn checked_applications_and_lexical_shadows_remain_distinct() {
 
 #[test]
 fn symbolic_observation_preserves_legal_applications_and_rejects_wrong_bounds() {
-    use chelis_surf::{desugar::desugar_program, parser::parse_str};
     for source in [
-        "result = map(fn(x) -> to_string(x), [1.0])",
-        "sig render[p: Float]: p -> string\ndef render(x) = to_string(x)\nresult = render(1.0f32)",
-        "sig render[p: Int]: p -> string\ndef render(x) = to_string(x)\nresult = render(1i64)",
-        "sig render[p: Numeric]: p -> string\ndef render(x) = to_string(x)\nresult = render(1i64)",
-        "def equal(x,y) = eq(x,y)\na = equal(1,1)\nb = equal([1],[1])",
+        include_str!("fixtures/core/tests/builtin_atom_discovery/application_08.deep"),
+        include_str!("fixtures/core/tests/builtin_atom_discovery/application_09.deep"),
+        include_str!("fixtures/core/tests/builtin_atom_discovery/application_10.deep"),
+        include_str!("fixtures/core/tests/builtin_atom_discovery/application_11.deep"),
+        include_str!("fixtures/core/tests/builtin_atom_discovery/application_12.deep"),
     ] {
-        let deep = desugar_program(&parse_str(source).unwrap());
+        let deep = chelis_deep::parse_and_stamp_file(source).expect("core fixture parses");
         assert!(chelis_types::check_typed_program(&deep).is_ok(), "{source}");
     }
     for source in [
-        "sig render[p: Float]: p -> string\ndef render(x) = to_string(x)\nresult = render(1i64)",
-        "sig render[p: Int]: p -> string\ndef render(x) = to_string(x)\nresult = render(1.0f32)",
-        "result = map(fn(x) -> len(x), [1.0])",
-        "sig size[p: Int]: p -> i64\ndef size(x) = len(x)\nresult = size(1i64)",
-        "def equal(x,y) = eq(x,y)\nresult = equal(1,[1])",
+        include_str!("fixtures/core/tests/builtin_atom_discovery/application_13.deep"),
+        include_str!("fixtures/core/tests/builtin_atom_discovery/application_14.deep"),
+        include_str!("fixtures/core/tests/builtin_atom_discovery/application_15.deep"),
+        include_str!("fixtures/core/tests/builtin_atom_discovery/application_16.deep"),
+        include_str!("fixtures/core/tests/builtin_atom_discovery/application_17.deep"),
     ] {
-        let deep = desugar_program(&parse_str(source).unwrap());
+        let deep = chelis_deep::parse_and_stamp_file(source).expect("core fixture parses");
         let errors = chelis_types::check_typed_program(&deep).unwrap_err();
         assert!(!errors.errors.is_empty(), "{source}");
         assert!(

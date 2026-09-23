@@ -133,11 +133,6 @@ pub(super) fn tensor_dims_from_type_expr(expr: &deep::Expr) -> Option<Vec<DeepDi
 }
 
 /// Record what the validator can prove about one `let` binding's shape.
-///
-/// Splitting this out of the `Let` arm keeps shape-fact bookkeeping in the
-/// module that owns `ShapeTypeEnv`, and keeps `validate.rs` inside the
-/// `source_arch` line budget that told us to divide by responsibility rather
-/// than trim.
 pub(super) fn record_let_binding_shape_fact(
     name: &str,
     value_expr: &deep::Expr,

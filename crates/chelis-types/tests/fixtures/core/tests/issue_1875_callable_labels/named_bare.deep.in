@@ -1,0 +1,18 @@
+(defsig {}
+  use
+  (t-fn {}
+    (t-tensor {} (d-name {} fixed) (t-prim {} f32))
+    (t-tensor {} (d-name {} fixture_label) (t-prim {} f32))
+    (t-tensor {} (d-name {} fixed) (t-prim {} f32))
+    (t-tensor {} (d-name {} fixture_label) (t-prim {} f32))
+    (t-var {} _)))
+
+(def {}
+  use
+  (fn {}
+    (params {}
+      (x {type: (t-var {} _)})
+      (y {type: (t-var {} _)})
+      (gx {type: (t-var {} _)})
+      (gy {type: (t-var {} _)}))
+    @BODY@))

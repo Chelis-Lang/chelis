@@ -14,14 +14,12 @@
 //! same-rank broadcasts under the single meaning.
 
 use chelis_deep::parse_and_stamp_file;
-use chelis_surf::desugar::desugar_program;
-use chelis_surf::parser::parse_str as parse_surf;
+
 use chelis_types::errors::{CheckError, CheckErrorKind};
 use chelis_types::{check_ir_program, check_typed_program};
 
 fn typecheck(source: &str) -> Vec<CheckError> {
-    let decls = parse_surf(source).expect("surf parse should succeed");
-    let deep = desugar_program(&decls);
+    let deep: Vec<chelis_deep::Expr> = serde_json::from_str(source).expect("lossless core fixture");
     match check_typed_program(&deep) {
         Ok(_) => Vec::new(),
         Err(errors) => errors.errors,
@@ -52,9 +50,7 @@ fn summary(errors: &[CheckError]) -> String {
 
 #[test]
 fn otherwise_unconsumed_expand_materializes_its_context_free_default() {
-    let decls =
-        parse_surf("t = expand(to_tensor([0.5f32]), 0, 8i64)").expect("surf parse should succeed");
-    let deep = desugar_program(&decls);
+    let deep: Vec<chelis_deep::Expr> = serde_json::from_str(include_str!("fixtures/core/tests/issue_942_inferred_tensor_cast/otherwise_unconsumed_expand_materializes_its_context_free_default_1.json")).expect("lossless legacy fixture");
     let checked = check_typed_program(&deep).expect("bare expand binding should typecheck");
     let rendered = chelis_deep::printer::print_canonical(checked.annotated_exprs());
     assert!(
@@ -69,7 +65,9 @@ fn otherwise_unconsumed_expand_materializes_its_context_free_default() {
 
 #[test]
 fn otherwise_unconsumed_expand_rejects_axis_beyond_trailing_position() {
-    let errors = typecheck("t = expand(to_tensor([0.5f32]), 2, 8i64)");
+    let errors = typecheck(include_str!(
+        "fixtures/core/tests/issue_942_inferred_tensor_cast/otherwise_unconsumed_expand_rejects_axis_beyond_trailing_position_1.json"
+    ));
     assert!(
         errors.iter().any(|error| {
             matches!(error.kind, CheckErrorKind::DimensionMismatch)
@@ -84,12 +82,9 @@ fn otherwise_unconsumed_expand_rejects_axis_beyond_trailing_position() {
 
 #[test]
 fn cast_accepts_unannotated_positional_expand_result() {
-    let errors = typecheck(
-        r#"
-t = expand(to_tensor([0.5f32]), 0, 8i64)
-c = cast(t, f64)
-"#,
-    );
+    let errors = typecheck(include_str!(
+        "fixtures/core/tests/issue_942_inferred_tensor_cast/cast_accepts_unannotated_positional_expand_result_1.json"
+    ));
     assert!(
         errors.is_empty(),
         "expand must expose its inferred tensor result to cast:\n{}",
@@ -99,13 +94,9 @@ c = cast(t, f64)
 
 #[test]
 fn context_free_positional_expand_retains_same_rank_replacement() {
-    let errors = typecheck(
-        r#"
-def require_rank_one(x: tensor[8, f32]) -> tensor[8, f32] = x
-t = expand(to_tensor([0.5f32]), 0, 8i64)
-y = require_rank_one(t)
-"#,
-    );
+    let errors = typecheck(include_str!(
+        "fixtures/core/tests/issue_942_inferred_tensor_cast/context_free_positional_expand_retains_same_rank_replacement_1.json"
+    ));
     assert!(
         errors.is_empty(),
         "context-free positional expand must replace the selected axis:\n{}",
@@ -118,17 +109,19 @@ fn reshape_shape_read_selects_replacement_before_axis_validation_on_every_ingres
     for (borrow, source) in [
         (
             "unborrowed",
-            "expanded = expand(to_tensor([0.0f32]), 0, 6i64)\n\
-             result = reshape(expanded, [shape(expanded, 1), 6i64])",
+            include_str!(
+                "fixtures/core/tests/issue_942_inferred_tensor_cast/reshape_shape_read_selects_replacement_before_axis_validation_on_every_ingress_1.json"
+            ),
         ),
         (
             "borrowed",
-            "expanded = expand(to_tensor([0.0f32]), 0, 6i64)\n\
-             result = reshape(expanded, [shape(&expanded, 1), 6i64])",
+            include_str!(
+                "fixtures/core/tests/issue_942_inferred_tensor_cast/reshape_shape_read_selects_replacement_before_axis_validation_on_every_ingress_2.json"
+            ),
         ),
     ] {
-        let decls = parse_surf(source).expect("surf parse should succeed");
-        let lists = desugar_program(&decls);
+        let lists: Vec<chelis_deep::Expr> =
+            serde_json::from_str(source).expect("lossless legacy fixture");
         let canonical = chelis_deep::printer::print_canonical(&lists);
         let nodes = parse_and_stamp_file(&canonical).expect("canonical Deep should stamp");
 
@@ -157,19 +150,9 @@ fn reshape_shape_read_selects_replacement_before_axis_validation_on_every_ingres
 
 #[test]
 fn expand_replacement_and_reshape_output_agree() {
-    let errors = typecheck(
-        r#"
-def require_replaced(x: tensor[3, 2, 1, f32]) -> tensor[3, 2, 1, f32] = x
-def require_replaced_reshape(x: tensor[2, 1, 3, f32]) -> tensor[2, 1, 3, f32] = x
-def f(bias: tensor[1, 2, 1, f32]) -> tensor[2, 1, 3, f32] = {
-  expanded = expand(bias, 0, 3i64)
-  reshaped = reshape(expanded, [shape(expanded, 1), shape(expanded, 2), 3i64])
-  replaced = require_replaced(expanded)
-  selected = require_replaced_reshape(reshaped)
-  selected
-}
-"#,
-    );
+    let errors = typecheck(include_str!(
+        "fixtures/core/tests/issue_942_inferred_tensor_cast/expand_replacement_and_reshape_output_agree_1.json"
+    ));
     assert!(
         errors.is_empty(),
         "expand replacement must agree with the immediately published reshape output:\n{}",
@@ -179,19 +162,9 @@ def f(bias: tensor[1, 2, 1, f32]) -> tensor[2, 1, 3, f32] = {
 
 #[test]
 fn reshape_output_rejects_a_contradictory_consumer() {
-    let errors = typecheck(
-        r#"
-def require_replaced(x: tensor[3, 2, 1, f32]) -> tensor[3, 2, 1, f32] = x
-def require_inserted_reshape(x: tensor[1, 2, 3, f32]) -> tensor[1, 2, 3, f32] = x
-def f(bias: tensor[1, 2, 1, f32]) -> tensor[1, 2, 3, f32] = {
-  expanded = expand(bias, 0, 3i64)
-  reshaped = reshape(expanded, [shape(expanded, 1), shape(expanded, 2), 3i64])
-  replaced = require_replaced(expanded)
-  selected = require_inserted_reshape(reshaped)
-  selected
-}
-"#,
-    );
+    let errors = typecheck(include_str!(
+        "fixtures/core/tests/issue_942_inferred_tensor_cast/reshape_output_rejects_a_contradictory_consumer_1.json"
+    ));
     assert!(
         errors
             .iter()
@@ -203,15 +176,9 @@ def f(bias: tensor[1, 2, 1, f32]) -> tensor[1, 2, 3, f32] = {
 
 #[test]
 fn chained_reshape_consumes_the_published_first_shape() {
-    let errors = typecheck(
-        r#"
-def f(bias: tensor[1, 2, 1, f32]) -> tensor[6, f32] = {
-  expanded = expand(bias, 0, 3i64)
-  first = reshape(expanded, [shape(expanded, 1), shape(expanded, 2), 3i64])
-  reshape(first, [6i64])
-}
-"#,
-    );
+    let errors = typecheck(include_str!(
+        "fixtures/core/tests/issue_942_inferred_tensor_cast/chained_reshape_consumes_the_published_first_shape_1.json"
+    ));
     assert!(
         errors.is_empty(),
         "a second reshape must consume the first reshape's published shape:\n{}",
@@ -221,15 +188,9 @@ def f(bias: tensor[1, 2, 1, f32]) -> tensor[6, f32] = {
 
 #[test]
 fn chained_reshape_rejects_incompatible_static_numel() {
-    let errors = typecheck(
-        r#"
-def f(bias: tensor[1, 2, 1, f32]) = {
-  expanded = expand(bias, 0, 3i64)
-  first = reshape(expanded, [shape(expanded, 1), shape(expanded, 2), 3i64])
-  reshape(first, [5i64])
-}
-"#,
-    );
+    let errors = typecheck(include_str!(
+        "fixtures/core/tests/issue_942_inferred_tensor_cast/chained_reshape_rejects_incompatible_static_numel_1.json"
+    ));
     assert!(
         errors
             .iter()
@@ -241,11 +202,9 @@ def f(bias: tensor[1, 2, 1, f32]) = {
 
 #[test]
 fn reshape_rejects_negative_static_extents_even_when_signed_product_matches() {
-    let errors = typecheck(
-        r#"
-def f(x: tensor[6, f32]) = reshape(x, [-2i64, -3i64])
-"#,
-    );
+    let errors = typecheck(include_str!(
+        "fixtures/core/tests/issue_942_inferred_tensor_cast/reshape_rejects_negative_static_extents_even_when_signed_product_matches_1.json"
+    ));
     assert!(
         errors.iter().any(|error| {
             matches!(error.kind, CheckErrorKind::DimensionMismatch)
@@ -258,12 +217,9 @@ def f(x: tensor[6, f32]) = reshape(x, [-2i64, -3i64])
 
 #[test]
 fn reshape_rejects_extreme_negative_extent_even_when_zero_masks_product() {
-    let errors = typecheck(
-        r#"
-def f(x: tensor[0, f32]) =
-  reshape(x, [-9223372036854775808i64, 0i64])
-"#,
-    );
+    let errors = typecheck(include_str!(
+        "fixtures/core/tests/issue_942_inferred_tensor_cast/reshape_rejects_extreme_negative_extent_even_when_zero_masks_product_1.json"
+    ));
     assert!(
         errors.iter().any(|error| {
             matches!(error.kind, CheckErrorKind::DimensionMismatch)
@@ -276,11 +232,9 @@ def f(x: tensor[0, f32]) =
 
 #[test]
 fn scalar_reshape_rejects_negative_static_extent() {
-    let errors = typecheck(
-        r#"
-def f(x: f32) = reshape(x, [-1i64])
-"#,
-    );
+    let errors = typecheck(include_str!(
+        "fixtures/core/tests/issue_942_inferred_tensor_cast/scalar_reshape_rejects_negative_static_extent_1.json"
+    ));
     assert!(
         errors.iter().any(|error| {
             matches!(error.kind, CheckErrorKind::DimensionMismatch)
@@ -293,14 +247,9 @@ def f(x: f32) = reshape(x, [-1i64])
 
 #[test]
 fn deferred_expand_reshape_rejects_negative_static_extents() {
-    let errors = typecheck(
-        r#"
-def f(bias: tensor[1, 2, 1, f32]) = {
-  expanded = expand(bias, 0, 3i64)
-  reshape(expanded, [-2i64, -3i64])
-}
-"#,
-    );
+    let errors = typecheck(include_str!(
+        "fixtures/core/tests/issue_942_inferred_tensor_cast/deferred_expand_reshape_rejects_negative_static_extents_1.json"
+    ));
     assert!(
         errors.iter().any(|error| {
             matches!(error.kind, CheckErrorKind::DimensionMismatch)
@@ -313,15 +262,9 @@ def f(bias: tensor[1, 2, 1, f32]) = {
 
 #[test]
 fn chained_deferred_reshape_rejects_negative_static_extents() {
-    let errors = typecheck(
-        r#"
-def f(bias: tensor[1, 2, 1, f32]) = {
-  expanded = expand(bias, 0, 3i64)
-  first = reshape(expanded, [shape(expanded, 1), shape(expanded, 2), 3i64])
-  reshape(first, [-2i64, -3i64])
-}
-"#,
-    );
+    let errors = typecheck(include_str!(
+        "fixtures/core/tests/issue_942_inferred_tensor_cast/chained_deferred_reshape_rejects_negative_static_extents_1.json"
+    ));
     assert!(
         errors.iter().any(|error| {
             matches!(error.kind, CheckErrorKind::DimensionMismatch)
@@ -334,12 +277,9 @@ def f(bias: tensor[1, 2, 1, f32]) = {
 
 #[test]
 fn reshape_accepts_equal_static_products_beyond_i64() {
-    let errors = typecheck(
-        r#"
-def f(x: tensor[9223372036854775807, 2, f32]) -> tensor[9223372036854775807, 2, f32] =
-  reshape(x, [9223372036854775807i64, 2i64])
-"#,
-    );
+    let errors = typecheck(include_str!(
+        "fixtures/core/tests/issue_942_inferred_tensor_cast/reshape_accepts_equal_static_products_beyond_i64_1.json"
+    ));
     assert!(
         errors.is_empty(),
         "equal static products must compare exactly even when they exceed i64:\n{}",
@@ -349,12 +289,9 @@ def f(x: tensor[9223372036854775807, 2, f32]) -> tensor[9223372036854775807, 2, 
 
 #[test]
 fn reshape_rejects_unequal_static_products_beyond_i64() {
-    let errors = typecheck(
-        r#"
-def f(x: tensor[9223372036854775807, 2, f32]) -> tensor[9223372036854775807, f32] =
-  reshape(x, [9223372036854775807i64])
-"#,
-    );
+    let errors = typecheck(include_str!(
+        "fixtures/core/tests/issue_942_inferred_tensor_cast/reshape_rejects_unequal_static_products_beyond_i64_1.json"
+    ));
     assert!(
         errors
             .iter()
@@ -366,11 +303,9 @@ def f(x: tensor[9223372036854775807, 2, f32]) -> tensor[9223372036854775807, f32
 
 #[test]
 fn declared_same_rank_result_selects_expand_replacement() {
-    let errors = typecheck(
-        r#"
-def replace_axis(x: tensor[1, f32]) -> tensor[8, f32] = expand(&x, 0, 8i64)
-"#,
-    );
+    let errors = typecheck(include_str!(
+        "fixtures/core/tests/issue_942_inferred_tensor_cast/declared_same_rank_result_selects_expand_replacement_1.json"
+    ));
     assert!(
         errors.is_empty(),
         "a declared same-rank result must select positional replacement:\n{}",
@@ -380,11 +315,9 @@ def replace_axis(x: tensor[1, f32]) -> tensor[8, f32] = expand(&x, 0, 8i64)
 
 #[test]
 fn declared_rank_increasing_result_takes_insert() {
-    let errors = typecheck(
-        r#"
-def insert_axis(x: tensor[1, f32]) -> tensor[8, 1, f32] = insert(&x, 0, 8i64)
-"#,
-    );
+    let errors = typecheck(include_str!(
+        "fixtures/core/tests/issue_942_inferred_tensor_cast/declared_rank_increasing_result_takes_insert_1.json"
+    ));
     assert!(
         errors.is_empty(),
         "a declared rank-plus-one result is `insert`'s shape:\n{}",
@@ -394,13 +327,9 @@ def insert_axis(x: tensor[1, f32]) -> tensor[8, 1, f32] = insert(&x, 0, 8i64)
 
 #[test]
 fn cast_accepts_uniform_like_result_inferred_from_template() {
-    let errors = typecheck(
-        r#"
-t = expand(to_tensor([0.0f32]), 0, 8i64)
-u = with seed(1i64) { uniform_like(t, 0.0, 1.0) }
-c = cast(u, f64)
-"#,
-    );
+    let errors = typecheck(include_str!(
+        "fixtures/core/tests/issue_942_inferred_tensor_cast/cast_accepts_uniform_like_result_inferred_from_template_1.json"
+    ));
     assert!(
         errors.is_empty(),
         "uniform_like must preserve the template tensor type for cast:\n{}",
@@ -410,7 +339,9 @@ c = cast(u, f64)
 
 #[test]
 fn cast_rejects_genuinely_unresolved_operand() {
-    let errors = typecheck("def f(x) = cast(x, f64)");
+    let errors = typecheck(include_str!(
+        "fixtures/core/tests/issue_942_inferred_tensor_cast/cast_rejects_genuinely_unresolved_operand_1.json"
+    ));
     assert!(
         errors.iter().any(|error| {
             matches!(error.kind, CheckErrorKind::CastNonTensor)
@@ -423,12 +354,9 @@ fn cast_rejects_genuinely_unresolved_operand() {
 
 #[test]
 fn cast_rejects_concrete_function_operand() {
-    let errors = typecheck(
-        r#"
-def identity(x) = x
-c = cast(identity, f64)
-"#,
-    );
+    let errors = typecheck(include_str!(
+        "fixtures/core/tests/issue_942_inferred_tensor_cast/cast_rejects_concrete_function_operand_1.json"
+    ));
     assert!(
         errors.iter().any(|error| {
             matches!(error.kind, CheckErrorKind::CastNonTensor)

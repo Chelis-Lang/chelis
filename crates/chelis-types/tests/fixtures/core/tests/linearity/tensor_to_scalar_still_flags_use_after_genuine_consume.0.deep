@@ -1,0 +1,26 @@
+(defsig {}
+  bad
+  (t-fn {} (t-tensor {} (t-prim {} f32)) (t-tensor {} (t-prim {} f32))))
+
+(def {}
+  bad
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (let {span: "surf:44..120"}
+      (bind {}
+        y
+        (realize {span: "surf:67..77",
+                   surf_binding_type: "explicit",
+                   type: (t-tensor {} (t-prim {} f32))
+                 }
+          (var {span: "surf:75..76"} x)))
+      (let {}
+        (bind {}
+          v
+          (app {span: "surf:91..110",
+                 surf_binding_type: "explicit",
+                 type: (t-prim {} f32)
+               }
+            (var {span: "surf:91..107"} tensor_to_scalar)
+            (var {span: "surf:108..109"} x)))
+        (var {span: "surf:115..116"} y)))))

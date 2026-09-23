@@ -1,0 +1,13 @@
+(defsig {}
+  lib_relu
+  (t-fn {}
+    (t-ref {} (t-tensor {} (d-lit {} 4) (t-prim {} f32)))
+    (t-tensor {} (d-lit {} 4) (t-prim {} f32))))
+
+(def {}
+  lib_relu
+  (fn {}
+    (params {} (t {type: (t-var {} _)}))
+    (app {span: "surf:53..60"}
+      (var {span: "surf:53..57"} relu)
+      (var {span: "surf:58..59"} t))))

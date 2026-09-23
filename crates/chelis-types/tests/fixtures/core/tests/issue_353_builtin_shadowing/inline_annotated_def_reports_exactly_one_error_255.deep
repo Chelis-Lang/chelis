@@ -1,0 +1,12 @@
+(module {surf_path: "Dedupe"}
+  dedupe
+  (defsig {}
+    relu
+    (t-fn {}
+      (t-ref {} (t-tensor {} (d-name {} batch) (t-prim {} f32)))
+      (t-tensor {} (d-name {} batch) (t-prim {} f32))))
+  (def {}
+    relu
+    (fn {}
+      (params {} (x {type: (t-var {} _)}))
+      (var {span: "surf:71..72"} x))))

@@ -1,0 +1,18 @@
+(defsig {}
+  g
+  (t-fn {}
+    (t-tensor {} (d-lit {} 3) (t-prim {} __CORE_ARG_0__))
+    (t-tensor {} (t-prim {} __CORE_ARG_0__))))
+
+(def {}
+  g
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (let {}
+      (bind {}
+        op
+        (var {} mean))
+      (app {}
+        (var {} op)
+        (var {} x)
+        (lit {surf_literal_style: "explicit", type: (t-prim {} i32)} 0)))))

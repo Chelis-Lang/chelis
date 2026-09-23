@@ -1,0 +1,30 @@
+(defsig {}
+  loss
+  (t-fn {} (t-tensor {} (d-lit {} 3) (t-prim {} f32)) (t-prim {} f32)))
+
+(def {}
+  loss
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:38..72"}
+      (var {span: "surf:38..54"} tensor_to_scalar)
+      (app {span: "surf:55..71"}
+        (var {span: "surf:55..58"} sum)
+        (app {span: "surf:59..67"}
+          (var {span: "surf:59..64"} floor)
+          (var {span: "surf:65..66"} x))
+        (lit {span: "surf:69..70", type: (t-prim {} i32)} 0)))))
+
+(defsig {}
+  derivative
+  (t-fn {}
+    (t-tensor {} (d-lit {} 3) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 3) (t-prim {} f32))))
+
+(def {}
+  derivative
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:127..140"}
+      (grad {span: "surf:127..137"} (var {span: "surf:132..136"} loss))
+      (var {span: "surf:138..139"} x))))

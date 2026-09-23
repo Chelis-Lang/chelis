@@ -1,23 +1,20 @@
-use chelis_surf::desugar::desugar_program;
-use chelis_surf::parser::parse_str;
+use chelis_deep::parser::parse_str;
 use chelis_types::{
     CheckedProgram, build_compiled_library_context, check_ir_with_signature_context,
     check_typed_program,
 };
 
-fn checked_surf(source: &str) -> CheckedProgram {
-    let decls = parse_str(source).expect("surf parse");
-    let deep = desugar_program(&decls);
+fn checked_core(source: &str) -> CheckedProgram {
+    let decls = parse_str(source).expect("Deep fixture parse");
+    let deep = decls;
     check_typed_program(&deep).expect("type check")
 }
 
 #[test]
 fn unannotated_read_only_tensor_param_gets_display_ref() {
-    let checked = checked_surf(
-        r#"
-def readonly(x, y: tensor[4, f32]) = add(x, y)
-"#,
-    );
+    let checked = checked_core(include_str!(
+        "fixtures/core/tests/signature_inference/unannotated_read_only_tensor_param_gets_display_ref_17.deep"
+    ));
 
     let func = checked
         .signature_inference()
@@ -36,14 +33,9 @@ def readonly(x, y: tensor[4, f32]) = add(x, y)
 
 #[test]
 fn consuming_param_use_stays_owned_for_display() {
-    let checked = checked_surf(
-        r#"
-def consume(x, y: tensor[4, f32]) = {
-  z: tensor[4, f32] = add(x, y)
-  realize(x)
-}
-"#,
-    );
+    let checked = checked_core(include_str!(
+        "fixtures/core/tests/signature_inference/consuming_param_use_stays_owned_for_display_40.deep"
+    ));
 
     let func = checked
         .signature_inference()
@@ -60,11 +52,9 @@ def consume(x, y: tensor[4, f32]) = {
 
 #[test]
 fn written_param_annotation_is_authoritative() {
-    let checked = checked_surf(
-        r#"
-def annotated(x: tensor[4, f32]) = relu(x)
-"#,
-    );
+    let checked = checked_core(include_str!(
+        "fixtures/core/tests/signature_inference/written_param_annotation_is_authoritative_64.deep"
+    ));
 
     let func = checked
         .signature_inference()
@@ -81,15 +71,9 @@ def annotated(x: tensor[4, f32]) = relu(x)
 
 #[test]
 fn earlier_inferred_signature_makes_later_call_read_only() {
-    let checked = checked_surf(
-        r#"
-def helper(x, y: tensor[4, f32]) = add(x, y)
-def caller(a, b: tensor[4, f32]) = {
-  z: tensor[4, f32] = helper(a, b)
-  add(a, z)
-}
-"#,
-    );
+    let checked = checked_core(include_str!(
+        "fixtures/core/tests/signature_inference/earlier_inferred_signature_makes_later_call_read_only_85.deep"
+    ));
 
     let helper = checked
         .signature_inference()
@@ -126,15 +110,9 @@ def caller(a, b: tensor[4, f32]) = {
 /// and read-only in the other three layouts of the same program.
 #[test]
 fn a_forward_reference_to_a_hole_signature_helper_reads_its_body_signature() {
-    let checked = checked_surf(
-        r#"
-def caller(a, b: tensor[4, f32]) = {
-  z = helper(a, b)
-  add(a, z)
-}
-def helper(x, y: tensor[4, f32]) = add(x, y)
-"#,
-    );
+    let checked = checked_core(include_str!(
+        "fixtures/core/tests/signature_inference/a_forward_reference_to_a_hole_signature_helper_reads_its_body_signature_130.deep"
+    ));
 
     let helper = checked
         .signature_inference()
@@ -176,16 +154,9 @@ fn module_wrapped_helper_signature_visible_to_caller_annotation() {
     // wherever the reference sits, and the schedule's hole edge is
     // bounded by no region, so the bare sibling above now agrees with
     // this one (chelis#1486).
-    let checked = checked_surf(
-        r#"
-module Foo
-def caller(a, b: tensor[4, f32]) = {
-  z = helper(a, b)
-  add(a, z)
-}
-def helper(x, y: tensor[4, f32]) = add(x, y)
-"#,
-    );
+    let checked = checked_core(include_str!(
+        "fixtures/core/tests/signature_inference/module_wrapped_helper_signature_visible_to_caller_annotation_180.deep"
+    ));
 
     let helper = checked
         .signature_inference()
@@ -207,16 +178,9 @@ def helper(x, y: tensor[4, f32]) = add(x, y)
 
 #[test]
 fn module_wrapped_backward_helper_keeps_the_same_primary_signature() {
-    let checked = checked_surf(
-        r#"
-module Foo
-def helper(x, y: tensor[4, f32]) = add(x, y)
-def caller(a, b: tensor[4, f32]) = {
-  z = helper(a, b)
-  add(a, z)
-}
-"#,
-    );
+    let checked = checked_core(include_str!(
+        "fixtures/core/tests/signature_inference/module_wrapped_backward_helper_keeps_the_same_primary_signature_211.deep"
+    ));
     let caller = checked
         .signature_inference()
         .functions
@@ -231,13 +195,10 @@ def caller(a, b: tensor[4, f32]) = {
 #[test]
 fn module_wrapped_unknown_helper_reports_exactly_one_unbound_root() {
     let decls = parse_str(
-        r#"
-module Foo
-def caller(a, b: tensor[4, f32]) = missing_helper(a, b)
-"#,
+        include_str!("fixtures/core/tests/signature_inference/module_wrapped_unknown_helper_reports_exactly_one_unbound_root_234.deep"),
     )
-    .expect("surf parse");
-    let deep = desugar_program(&decls);
+    .expect("Deep fixture parse");
+    let deep = decls;
     let result = check_typed_program(&deep).expect_err("unknown helper must reject");
     assert_eq!(result.errors.len(), 1, "unknown helper owns one diagnostic");
     assert!(matches!(
@@ -248,12 +209,9 @@ def caller(a, b: tensor[4, f32]) = missing_helper(a, b)
 
 #[test]
 fn recursive_cycle_member_does_not_infer_read_only_param() {
-    let checked = checked_surf(
-        r#"
-def recur(x, y: tensor[4, f32], n: i32) =
-  if eq(n, 0) then add(x, y) else recur(x, y, sub(n, 1))
-"#,
-    );
+    let checked = checked_core(include_str!(
+        "fixtures/core/tests/signature_inference/recursive_cycle_member_does_not_infer_read_only_param_252.deep"
+    ));
 
     let recur = checked
         .signature_inference()
@@ -267,15 +225,9 @@ def recur(x, y: tensor[4, f32], n: i32) =
 
 #[test]
 fn mutual_recursive_cycle_members_do_not_infer_read_only_params() {
-    let checked = checked_surf(
-        r#"
-def ping(x, y: tensor[4, f32], n: i32) =
-  if eq(n, 0) then add(x, y) else pong(x, y, sub(n, 1))
-
-def pong(x, y: tensor[4, f32], n: i32) =
-  if eq(n, 0) then add(x, y) else ping(x, y, sub(n, 1))
-"#,
-    );
+    let checked = checked_core(include_str!(
+        "fixtures/core/tests/signature_inference/mutual_recursive_cycle_members_do_not_infer_read_only_params_271.deep"
+    ));
 
     let ping = checked
         .signature_inference()
@@ -296,25 +248,18 @@ def pong(x, y: tensor[4, f32], n: i32) =
 #[test]
 fn context_signature_metadata_makes_imported_call_read_only() {
     let library_decls = parse_str(
-        r#"
-def helper(x, y: tensor[4, f32]) = add(x, y)
-"#,
+        include_str!("fixtures/core/tests/signature_inference/context_signature_metadata_makes_imported_call_read_only_299.deep"),
     )
-    .expect("library surf parse");
-    let library_deep = desugar_program(&library_decls);
+    .expect("library Deep fixture parse");
+    let library_deep = library_decls;
     let (type_env, library_checked) =
         build_compiled_library_context(&library_deep).expect("library context");
 
     let app_decls = parse_str(
-        r#"
-def caller(a, b: tensor[4, f32]) = {
-  z: tensor[4, f32] = helper(a, b)
-  add(a, z)
-}
-"#,
+        include_str!("fixtures/core/tests/signature_inference/context_signature_metadata_makes_imported_call_read_only_309.deep"),
     )
-    .expect("app surf parse");
-    let app_deep = desugar_program(&app_decls);
+    .expect("application Deep fixture parse");
+    let app_deep = app_decls;
     let checked = check_ir_with_signature_context(
         &type_env,
         library_checked.signature_inference(),
@@ -337,41 +282,41 @@ fn imported_rank_generic_adt_signatures_instantiate_independently() {
     // in the environment. The exported scheme then omitted that dimension
     // quantifier, so the first imported call concretized every later call.
     let library_decls = parse_str(
-        r#"
-type Curve[n] =
-  | Curve { xs: tensor[n, f32] }
-def make[n](xs: tensor[n, f32]) -> Curve[n] =
-  Curve { xs }
-def value[n](curve: Curve[n]) -> f32 =
-  match curve with {
-    | Curve { xs: values } => index(to_list(values), cast(0, i64))
-  }
-"#,
+        include_str!("fixtures/core/tests/signature_inference/imported_rank_generic_adt_signatures_instantiate_independently_340.deep"),
     )
-    .expect("library surf parse");
-    let library_deep = desugar_program(&library_decls);
+    .expect("library Deep fixture parse");
+    let library_deep = library_decls;
     let (type_env, library_checked) =
         build_compiled_library_context(&library_deep).expect("library context");
 
     for (first_extent, second_extent) in [(3, 2), (2, 3)] {
         let vector = |extent| {
-            (0..extent)
-                .map(|index| format!("cast({index}.0, f32)"))
-                .collect::<Vec<_>>()
-                .join(", ")
+            let mut values = "(var {} Nil)".to_string();
+            for index in (0..extent).rev() {
+                values = format!(
+                    "(app {{}} (var {{}} Cons) (cast {{}} (lit {{surf_literal_style: \"unsuffixed\", type: (t-prim {{}} f32)}} {index}.0) (t-prim {{}} f32)) {values})"
+                );
+            }
+            values
         };
         let app_source = format!(
             r#"
-def first() -> f32 =
-  value(make(to_tensor([{first_values}])))
-def second() -> f32 =
-  value(make(to_tensor([{second_values}])))
+(defsig {{}} first (t-fn {{}} (t-prim {{}} f32)))
+(def {{}} first (fn {{}} (params {{}})
+  (app {{}} (var {{}} value)
+    (app {{}} (var {{}} make)
+      (app {{}} (var {{}} to_tensor) {first_values})))))
+(defsig {{}} second (t-fn {{}} (t-prim {{}} f32)))
+(def {{}} second (fn {{}} (params {{}})
+  (app {{}} (var {{}} value)
+    (app {{}} (var {{}} make)
+      (app {{}} (var {{}} to_tensor) {second_values})))))
 "#,
             first_values = vector(first_extent),
             second_values = vector(second_extent),
         );
-        let app_decls = parse_str(&app_source).expect("app surf parse");
-        let app_deep = desugar_program(&app_decls);
+        let app_decls = parse_str(&app_source).expect("application Deep fixture parse");
+        let app_deep = app_decls;
         check_ir_with_signature_context(
             &type_env,
             library_checked.signature_inference(),
@@ -392,23 +337,17 @@ fn imported_fixed_rank_signature_still_rejects_a_different_extent() {
     // Negative parity for chelis#968: independent generic instantiation must
     // not weaken a genuinely fixed rank/extent contract.
     let library_decls = parse_str(
-        r#"
-def fixed(xs: tensor[3, f32]) -> f32 =
-  index(to_list(xs), cast(0, i64))
-"#,
+        include_str!("fixtures/core/tests/signature_inference/imported_fixed_rank_signature_still_rejects_a_different_extent_395.deep"),
     )
-    .expect("library surf parse");
-    let library_deep = desugar_program(&library_decls);
+    .expect("library Deep fixture parse");
+    let library_deep = library_decls;
     let (type_env, library_checked) =
         build_compiled_library_context(&library_deep).expect("library context");
     let app_decls = parse_str(
-        r#"
-def wrong() -> f32 =
-  fixed(to_tensor([cast(1.0, f32), cast(2.0, f32)]))
-"#,
+        include_str!("fixtures/core/tests/signature_inference/imported_fixed_rank_signature_still_rejects_a_different_extent_405.deep"),
     )
-    .expect("app surf parse");
-    let app_deep = desugar_program(&app_decls);
+    .expect("application Deep fixture parse");
+    let app_deep = app_decls;
     let err = check_ir_with_signature_context(
         &type_env,
         library_checked.signature_inference(),

@@ -1,0 +1,46 @@
+(defsig {}
+  f
+  (t-fn {} (t-tensor {} (d-lit {} 3) (t-prim {} f32)) (t-prim {} f32)))
+
+(def {}
+  f
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (let {span: "surf:35..113"}
+      (bind {}
+        c
+        (app {span: "surf:45..71"}
+          (var {span: "surf:45..54"} to_tensor)
+          (app {span: "surf:55..70"}
+            (var {} Cons)
+            (lit {span: "surf:56..59", type: (t-prim {} f32)} 1.0)
+            (app {}
+              (var {} Cons)
+              (lit {span: "surf:61..64", type: (t-prim {} f32)} 2.0)
+              (app {}
+                (var {} Cons)
+                (lit {span: "surf:66..69", type: (t-prim {} f32)} 3.0)
+                (var {} Nil))))))
+      (app {span: "surf:76..111"}
+        (var {span: "surf:76..92"} tensor_to_scalar)
+        (app {span: "surf:93..110"}
+          (var {span: "surf:93..96"} sum)
+          (app {span: "surf:97..106"}
+            (var {span: "surf:97..100"} mul)
+            (var {span: "surf:101..102"} x)
+            (var {span: "surf:104..105"} c))
+          (lit {span: "surf:108..109", type: (t-prim {} i32)} 0))))))
+
+(defsig {}
+  main
+  (t-fn {}
+    (t-tensor {} (d-lit {} 3) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 3) (t-prim {} f32))))
+
+(def {}
+  main
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:166..176"}
+      (grad {span: "surf:166..173"} (var {span: "surf:171..172"} f))
+      (var {span: "surf:174..175"} x))))

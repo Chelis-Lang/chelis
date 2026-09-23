@@ -1,0 +1,38 @@
+(defsig {}
+  loss
+  (t-fn {}
+    (t-tensor {} (d-lit {} 3) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 3) (t-prim {} f32))
+    (t-prim {} f32)))
+
+(def {}
+  loss
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (y {type: (t-var {} _)}))
+    (app {span: "surf:57..92"}
+      (var {span: "surf:57..73"} tensor_to_scalar)
+      (app {span: "surf:74..91"}
+        (var {span: "surf:74..77"} sum)
+        (app {span: "surf:78..87"}
+          (var {span: "surf:78..81"} mul)
+          (var {span: "surf:82..83"} x)
+          (var {span: "surf:85..86"} y))
+        (lit {span: "surf:89..90", type: (t-prim {} i32)} 0)))))
+
+(defsig {}
+  derivative
+  (t-fn {}
+    (t-tensor {} (d-lit {} 3) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 3) (t-prim {} f32))
+    (t-tuple {}
+      (t-tensor {} (d-lit {} 3) (t-prim {} f32))
+      (t-tensor {} (d-lit {} 3) (t-prim {} f32)))))
+
+(def {}
+  derivative
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (y {type: (t-var {} _)}))
+    (app {span: "surf:184..200"}
+      (grad {span: "surf:184..194"} (var {span: "surf:189..193"} loss))
+      (var {span: "surf:195..196"} x)
+      (var {span: "surf:198..199"} y))))

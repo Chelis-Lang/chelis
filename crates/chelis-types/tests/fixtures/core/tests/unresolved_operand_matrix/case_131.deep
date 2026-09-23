@@ -1,0 +1,58 @@
+(defsig {dtype_bounds: {p: float}}
+  g
+  (p)
+  (t-fn {eff: (effects {} test)}
+    (t-ref {} (t-tensor {} (d-lit {} 3) (t-var {} p)))
+    (t-ref {} (t-tensor {} (d-lit {} 3) (t-var {} p)))
+    (t-var {} p)
+    (t-unit {})))
+
+(def {}
+  g
+  (fn {}
+    (params {}
+      (a {type: (t-var {} _)})
+      (b {type: (t-var {} _)})
+      (tol {type: (t-var {} _)}))
+    (app {span: "surf:81..121"}
+      (var {span: "surf:81..105"} test_assert_close_tensor)
+      (var {span: "surf:106..107"} a)
+      (var {span: "surf:109..110"} b)
+      (var {span: "surf:112..115"} tol)
+      (lit {span: "surf:117..120", type: (t-prim {} string)} "l"))))
+
+(defsig {} test_call (t-fn {eff: (effects {} test)} (t-unit {})))
+
+(def {}
+  test_call
+  (fn {}
+    (params {})
+    (app {span: "surf:159..230"}
+      (var {span: "surf:159..160"} g)
+      (borrow {span: "surf:161..191"}
+        (app {span: "surf:162..191"}
+          (var {span: "surf:162..171"} to_tensor)
+          (app {span: "surf:172..190"}
+            (var {} Cons)
+            (lit {span: "surf:173..177", surf_literal_style: "explicit", type: (t-prim {} i32)} 1)
+            (app {}
+              (var {} Cons)
+              (lit {span: "surf:179..183", surf_literal_style: "explicit", type: (t-prim {} i32)} 2)
+              (app {}
+                (var {} Cons)
+                (lit {span: "surf:185..189", surf_literal_style: "explicit", type: (t-prim {} i32)} 4)
+                (var {} Nil))))))
+      (borrow {span: "surf:193..223"}
+        (app {span: "surf:194..223"}
+          (var {span: "surf:194..203"} to_tensor)
+          (app {span: "surf:204..222"}
+            (var {} Cons)
+            (lit {span: "surf:205..209", surf_literal_style: "explicit", type: (t-prim {} i32)} 1)
+            (app {}
+              (var {} Cons)
+              (lit {span: "surf:211..215", surf_literal_style: "explicit", type: (t-prim {} i32)} 2)
+              (app {}
+                (var {} Cons)
+                (lit {span: "surf:217..221", surf_literal_style: "explicit", type: (t-prim {} i32)} 4)
+                (var {} Nil))))))
+      (lit {span: "surf:225..229", surf_literal_style: "explicit", type: (t-prim {} i32)} 1))))

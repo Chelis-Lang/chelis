@@ -1,0 +1,56 @@
+(defsig {}
+  summarize
+  (t-fn {}
+    (t-tensor {}
+      (d-name {} batch)
+      (d-name {} hidden)
+      (d-name {} hidden)
+      (t-prim {} f32))
+    (t-tuple {}
+      (t-tensor {} (d-name {} batch) (d-name {} hidden) (t-prim {} f32))
+      (t-tensor {} (d-name {} batch) (d-name {} hidden) (t-prim {} i64))
+      (t-tensor {} (d-name {} batch) (t-prim {} f32)))))
+
+(def {}
+  summarize
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (let {span: "surf:136..284"}
+      (bind {}
+        diag
+        (app {span: "surf:147..164"}
+          (var {span: "surf:147..155"} diagonal)
+          (var {span: "surf:156..157"} x)
+          (lit {span: "surf:159..160", type: (t-prim {} i32)} 1)
+          (lit {span: "surf:162..163", type: (t-prim {} i32)} 2)))
+      (let {}
+        (bind {}
+          sorted
+          (app {span: "surf:176..189"}
+            (var {span: "surf:176..180"} sort)
+            (var {span: "surf:181..185"} diag)
+            (lit {span: "surf:187..188", type: (t-prim {} i32)} 1)))
+        (let {}
+          (bind {}
+            values
+            (tuple-get {span: "surf:201..209"}
+              (var {span: "surf:201..207"} sorted)
+              (lit {type: (t-prim {} i32)} 0)))
+          (let {}
+            (bind {}
+              indices
+              (tuple-get {span: "surf:222..230"}
+                (var {span: "surf:222..228"} sorted)
+                (lit {type: (t-prim {} i32)} 1)))
+            (let {}
+              (bind {}
+                total
+                (app {span: "surf:241..255"}
+                  (var {span: "surf:241..246"} trace)
+                  (var {span: "surf:247..248"} x)
+                  (lit {span: "surf:250..251", type: (t-prim {} i32)} 1)
+                  (lit {span: "surf:253..254", type: (t-prim {} i32)} 2)))
+              (tuple {span: "surf:258..282"}
+                (var {span: "surf:259..265"} values)
+                (var {span: "surf:267..274"} indices)
+                (var {span: "surf:276..281"} total)))))))))

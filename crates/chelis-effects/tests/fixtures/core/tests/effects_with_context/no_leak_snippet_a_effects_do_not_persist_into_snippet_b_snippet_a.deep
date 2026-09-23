@@ -1,0 +1,20 @@
+(defsig {} stamp (t-fn {eff: (effects {} test)} (t-unit {})))
+
+(def {}
+  stamp
+  (fn {}
+    (params {})
+    (app {span: "surf:32..62"}
+      (var {span: "surf:32..43"} test_assert)
+      (lit {span: "surf:44..48", type: (t-prim {} bool)} true)
+      (lit {span: "surf:50..61", type: (t-prim {} string)} "snippet-a"))))
+
+(defsig {} call_a (t-fn {} (t-prim {} i64) (t-prim {} i64)))
+
+(def {}
+  call_a
+  (fn {}
+    (params {} (y {type: (t-var {} _)}))
+    (app {span: "surf:91..100"}
+      (var {span: "surf:91..97"} lib_id)
+      (var {span: "surf:98..99"} y))))

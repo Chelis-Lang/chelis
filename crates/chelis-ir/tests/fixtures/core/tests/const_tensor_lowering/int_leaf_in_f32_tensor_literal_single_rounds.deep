@@ -1,0 +1,15 @@
+(defsig {} main (t-fn {} (t-tensor {} (d-lit {} 2) (t-prim {} f32))))
+
+(def {}
+  main
+  (fn {}
+    (params {})
+    (app {}
+      (var {} to_tensor)
+      (app {}
+        (var {} Cons)
+        (lit {literal_source: integer, surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 18014399583223809)
+        (app {}
+          (var {} Cons)
+          (lit {literal_source: integer, surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 3)
+          (var {} Nil))))))

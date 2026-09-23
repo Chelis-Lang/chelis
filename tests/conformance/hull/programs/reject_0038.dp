@@ -1,6 +1,0 @@
-(def {}
-  g
-  (app {}
-    (var {} div)
-    (lit {type: (t-prim {} i32)} 1)
-    (lit {type: (t-prim {} string)} z)))

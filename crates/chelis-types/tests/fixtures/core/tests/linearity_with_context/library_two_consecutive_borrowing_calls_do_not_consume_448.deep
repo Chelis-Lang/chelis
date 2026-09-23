@@ -1,0 +1,44 @@
+(defsig {}
+  caller
+  (t-fn {}
+    (t-tensor {} (d-lit {} 4) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 4) (t-prim {} f32))))
+
+(def {}
+  caller
+  (fn {}
+    (params {} (actual {type: (t-var {} _)}))
+    (let {span: "surf:58..183"}
+      (bind {}
+        _x
+        (app {span: "surf:74..87",
+               surf_binding_type: "explicit",
+               type: (t-prim {} i32)
+             }
+          (var {span: "surf:74..79"} lib_a)
+          (var {span: "surf:80..86"} actual)))
+      (let {}
+        (bind {}
+          _y
+          (app {span: "surf:102..115",
+                 surf_binding_type: "explicit",
+                 type: (t-prim {} i32)
+               }
+            (var {span: "surf:102..107"} lib_b)
+            (var {span: "surf:108..114"} actual)))
+        (let {}
+          (bind {}
+            y
+            (app {span: "surf:140..152",
+                   surf_binding_type: "explicit",
+                   type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))
+                 }
+              (var {span: "surf:140..144"} relu)
+              (var {span: "surf:145..151"} actual)))
+          (let {}
+            (bind {destructure: true}
+              __chelis_tmp0
+              (app {span: "surf:161..173"}
+                (var {span: "surf:161..165"} drop)
+                (var {span: "surf:166..172"} actual)))
+            (var {span: "surf:178..179"} y)))))))

@@ -1,0 +1,15 @@
+(module {surf_path: "Repro.ConcatParamListBad"}
+  repro.concatparamlistbad
+  (defsig {}
+    cat_all
+    (t-fn {}
+      (t-adt {} List (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32)))
+      (t-tensor {} (d-name {} *) (d-lit {} 4) (t-prim {} f32))))
+  (def {}
+    cat_all
+    (fn {}
+      (params {} (xs {type: (t-var {} _)}))
+      (app {span: "surf:99..112"}
+        (var {span: "surf:99..105"} concat)
+        (var {span: "surf:106..108"} xs)
+        (lit {span: "surf:110..111", type: (t-prim {} i32)} 0)))))

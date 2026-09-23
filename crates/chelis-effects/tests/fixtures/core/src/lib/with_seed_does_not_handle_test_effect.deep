@@ -1,0 +1,12 @@
+(defsig {} sealed (t-fn {} (t-unit {})))
+
+(def {}
+  sealed
+  (fn {}
+    (params {})
+    (handle-effect {effect: random, span: "surf:26..81"}
+      (lit {span: "surf:36..40", type: (t-prim {} i64)} 7)
+      (app {span: "surf:42..81"}
+        (var {span: "surf:44..55"} test_assert)
+        (lit {span: "surf:56..60", type: (t-prim {} bool)} true)
+        (lit {span: "surf:62..78", type: (t-prim {} string)} "inside-handler")))))

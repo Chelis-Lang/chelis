@@ -1,0 +1,15 @@
+(let {span: "surf:10..84"}
+    (bind {}
+      a
+      (app {span: "surf:16..35"}
+        (var {span: "surf:16..29"} capture_fixed)
+        (var {span: "surf:30..31"} x)
+        (var {span: "surf:32..34"} gx)))
+    (let {}
+      (bind {}
+        b
+        (app {span: "surf:41..68"}
+          (var {span: "surf:41..62"} capture_fixture_label)
+          (var {span: "surf:63..64"} y)
+          (var {span: "surf:65..67"} gy)))
+      @BODY@))

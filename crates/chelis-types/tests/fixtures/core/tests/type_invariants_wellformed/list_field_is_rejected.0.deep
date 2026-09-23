@@ -1,0 +1,19 @@
+(module {surf_path: "M"}
+  m
+  (deftype {invariant: (fn {}
+                          (params {} p)
+                          (app {span: "surf:31..45"}
+                            (var {} gte)
+                            (access {span: "surf:31..38"}
+                              (var {span: "surf:31..32"} p)
+                              count)
+                            (lit {span: "surf:42..45", type: (t-prim {} f32)} 0.0))),
+             invariant_amenability: "linear",
+             opaque: true
+           }
+    Bag
+    ()
+    (variant {}
+      Bag
+      (field {} items (t-adt {} List (t-prim {} f32)))
+      (field {} count (t-prim {} f32)))))

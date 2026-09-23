@@ -1,0 +1,18 @@
+(defsig {dtype_bounds: {p: int}}
+  render
+  (p)
+  (t-fn {} (t-var {} p) (t-prim {} string)))
+
+(def {}
+  render
+  (fn {}
+    (params {} x)
+    (app {span: "surf:48..60"}
+      (var {span: "surf:48..57"} to_string)
+      (var {span: "surf:58..59"} x))))
+
+(def {}
+  result
+  (app {span: "surf:70..84"}
+    (var {span: "surf:70..76"} render)
+    (lit {span: "surf:77..83", surf_literal_style: "explicit", type: (t-prim {} f32)} 1.0)))

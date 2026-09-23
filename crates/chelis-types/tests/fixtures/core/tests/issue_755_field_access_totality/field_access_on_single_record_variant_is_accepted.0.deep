@@ -1,0 +1,12 @@
+(deftype {}
+  Point
+  ()
+  (variant {} Point (field {} x (t-prim {} f32)) (field {} y (t-prim {} f32))))
+
+(defsig {} get_x (t-fn {} (t-adt {} Point) (t-prim {} f32)))
+
+(def {}
+  get_x
+  (fn {}
+    (params {} (p {type: (t-var {} _)}))
+    (access {span: "surf:69..72"} (var {span: "surf:69..70"} p) x)))

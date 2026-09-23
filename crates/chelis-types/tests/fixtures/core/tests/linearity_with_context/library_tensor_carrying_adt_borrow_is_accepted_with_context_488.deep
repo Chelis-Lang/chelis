@@ -1,0 +1,12 @@
+(defsig {}
+  use_params
+  (n)
+  (t-fn {} (t-adt {} BatchNormParams (t-var {} n)) (t-prim {} bool)))
+
+(def {}
+  use_params
+  (fn {}
+    (params {} (p {type: (t-var {} _)}))
+    (app {span: "surf:52..73"}
+      (var {span: "surf:52..69"} lib_borrow_params)
+      (borrow {span: "surf:70..72"} (var {span: "surf:71..72"} p)))))

@@ -1,0 +1,9 @@
+(def {}
+  result
+  (app {span: "surf:9..36"}
+    (var {span: "surf:9..20"} process_run)
+    (lit {span: "surf:21..27", type: (t-prim {} string)} "echo")
+    (app {span: "surf:29..35"}
+      (var {} Cons)
+      (lit {span: "surf:30..34", type: (t-prim {} string)} "hi")
+      (var {} Nil))))

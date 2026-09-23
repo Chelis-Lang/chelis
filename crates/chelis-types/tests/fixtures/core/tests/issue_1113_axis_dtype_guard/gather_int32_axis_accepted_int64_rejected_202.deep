@@ -1,0 +1,16 @@
+(defsig {}
+  g
+  (t-fn {}
+    (t-tensor {} (d-lit {} 4) (d-lit {} 3) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 2) (t-prim {} i32))
+    (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))))
+
+(def {}
+  g
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (i {type: (t-var {} _)}))
+    (app {span: "surf:71..91"}
+      (var {span: "surf:71..77"} gather)
+      (borrow {span: "surf:78..80"} (var {span: "surf:79..80"} x))
+      (borrow {span: "surf:82..84"} (var {span: "surf:83..84"} i))
+      (lit {span: "surf:86..90", type: (t-prim {} i64)} 0))))

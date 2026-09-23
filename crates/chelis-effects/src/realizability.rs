@@ -1283,14 +1283,8 @@ mod tests {
     use chelis_deep::ast::Metadata;
     use chelis_types::types::Prim;
 
-    fn check_program_from_source(source: &str) -> CheckedProgram {
-        let decls = chelis_surf::parser::parse_str(source).expect("parse");
-        let deep = chelis_macros::expand_program(
-            &chelis_surf::desugar::desugar_program(&decls),
-            &chelis_macros::ExpansionOptions::default(),
-        )
-        .expect("desugar")
-        .into_exprs();
+    fn check_program_from_deep(source: &str) -> CheckedProgram {
+        let deep = chelis_deep::parser::parse_str(source).expect("Deep fixture");
         let checked = chelis_types::check_ir_program(&deep).expect("typecheck");
         crate::check_program(&checked).expect("effects")
     }
@@ -1315,16 +1309,18 @@ mod tests {
 
     #[test]
     fn host_only_builtin_routes_host() {
-        let checked =
-            check_program_from_source("a: List[i32] = [cast(1, i32)]\nresult = concat(a, a)\n");
+        let checked = check_program_from_deep(include_str!(
+            "../tests/fixtures/core/src/realizability/host_only_builtin_routes_host.deep"
+        ));
         let result = infer_realizability(&checked, C_PRIMS);
         assert_eq!(result.lane_by_def.get("result"), Some(&Lane::Host));
     }
 
     #[test]
     fn pure_tensor_def_routes_tensor() {
-        let checked =
-            check_program_from_source("x = add(to_tensor([1.0, 2.0]), to_tensor([3.0, 4.0]))\n");
+        let checked = check_program_from_deep(include_str!(
+            "../tests/fixtures/core/src/realizability/pure_tensor_def_routes_tensor.deep"
+        ));
         let result = infer_realizability(&checked, C_PRIMS);
         // to_tensor is HostOnly, so this routes Host
         assert_eq!(result.lane_by_def.get("x"), Some(&Lane::Host));
@@ -1332,25 +1328,27 @@ mod tests {
 
     #[test]
     fn f64_def_routes_host_for_c_target() {
-        let checked =
-            check_program_from_source("def f(a: tensor[4, f64]) -> tensor[4, f64] = mul(a, a)\n");
+        let checked = check_program_from_deep(include_str!(
+            "../tests/fixtures/core/src/realizability/f64_def_routes_host_for_c_target.deep"
+        ));
         let result = infer_realizability(&checked, C_PRIMS);
         assert_eq!(result.lane_by_def.get("f"), Some(&Lane::Host));
     }
 
     #[test]
     fn f64_def_routes_tensor_for_eval_target() {
-        let checked =
-            check_program_from_source("def f(a: tensor[4, f64]) -> tensor[4, f64] = mul(a, a)\n");
+        let checked = check_program_from_deep(include_str!(
+            "../tests/fixtures/core/src/realizability/f64_def_routes_host_for_c_target.deep"
+        ));
         let result = infer_realizability(&checked, EVAL_PRIMS);
         assert_eq!(result.lane_by_def.get("f"), Some(&Lane::Tensor));
     }
 
     #[test]
     fn transitive_host_propagates() {
-        let checked = check_program_from_source(
-            "a: List[i32] = [cast(1, i32)]\nb = concat(a, a)\nc = len(b)\n",
-        );
+        let checked = check_program_from_deep(include_str!(
+            "../tests/fixtures/core/src/realizability/transitive_host_propagates.deep"
+        ));
         let result = infer_realizability(&checked, C_PRIMS);
         // concat is HostOnly → b is Host
         assert_eq!(result.lane_by_def.get("b"), Some(&Lane::Host));
@@ -1360,11 +1358,9 @@ mod tests {
 
     #[test]
     fn top_level_host_value_dependency_propagates_without_touching_a_sibling() {
-        let checked = check_program_from_source(
-            "source = to_tensor([1.0, 2.0])\n\
-             dependent = mul(source, source)\n\
-             def sibling(value: tensor[2, f32]) -> tensor[2, f32] = mul(value, value)\n",
-        );
+        let checked = check_program_from_deep(include_str!(
+            "../tests/fixtures/core/src/realizability/top_level_host_value_dependency_propagates_without_touching_a_sibling.deep"
+        ));
         let result = infer_realizability(&checked, C_PRIMS);
         assert_eq!(result.lane_by_def.get("source"), Some(&Lane::Host));
         assert_eq!(result.lane_by_def.get("dependent"), Some(&Lane::Host));
@@ -1373,10 +1369,9 @@ mod tests {
 
     #[test]
     fn host_root_inherits_only_the_referenced_top_level_runtime_input() {
-        let checked = check_program_from_source(
-            "input: tensor[2, f64] = input\nother: tensor[2, f64] = other\n\
-             values = to_list(input)\n",
-        );
+        let checked = check_program_from_deep(include_str!(
+            "../tests/fixtures/core/src/realizability/host_root_inherits_only_the_referenced_top_level_runtime_input.deep"
+        ));
         let input_def = checked
             .annotated_exprs()
             .iter()
@@ -1428,10 +1423,9 @@ mod tests {
 
     #[test]
     fn function_parameter_names_do_not_become_manifest_runtime_inputs() {
-        let checked = check_program_from_source(
-            "value: List[i32] = [cast(1, i32)]\n\
-             def square(value: tensor[2, f32]) -> tensor[2, f32] = mul(value, value)\n",
-        );
+        let checked = check_program_from_deep(include_str!(
+            "../tests/fixtures/core/src/realizability/function_parameter_names_do_not_become_manifest_runtime_inputs.deep"
+        ));
         let square_body = checked
             .annotated_exprs()
             .iter()
@@ -1486,11 +1480,9 @@ mod tests {
 
     #[test]
     fn recursive_function_name_does_not_become_a_runtime_input() {
-        let checked = check_program_from_source(
-            "def recur[n](x: tensor[n, f32], i: i64) -> tensor[n, f32] =\n\
-               if lte(i, cast(0, i64)) then x else recur(x, sub(i, cast(1, i64)))\n\
-             out = recur(to_tensor([1.0, 2.0]), cast(2, i64))\n",
-        );
+        let checked = check_program_from_deep(include_str!(
+            "../tests/fixtures/core/src/realizability/recursive_function_name_does_not_become_a_runtime_input.deep"
+        ));
         let result = infer_realizability(&checked, C_PRIMS);
         assert_eq!(
             result.required_inputs_by_def.get("recur"),
@@ -1506,7 +1498,9 @@ mod tests {
 
     #[test]
     fn module_wrapped_defs_receive_realizability_entries() {
-        let checked = check_program_from_source("module Demo.Root\nvalue = cast(7, i64)\n");
+        let checked = check_program_from_deep(include_str!(
+            "../tests/fixtures/core/src/realizability/module_wrapped_defs_receive_realizability_entries.deep"
+        ));
         let result = infer_realizability(&checked, C_PRIMS);
         assert!(
             result.lane_by_def.contains_key("value"),
@@ -1520,7 +1514,9 @@ mod tests {
 
     #[test]
     fn nullary_observation_thunk_routes_to_the_host_value_path() {
-        let checked = check_program_from_source("def answer() -> i64 = cast(42, i64)\n");
+        let checked = check_program_from_deep(include_str!(
+            "../tests/fixtures/core/src/realizability/nullary_observation_thunk_routes_to_the_host_value_path.deep"
+        ));
         let result = infer_realizability(&checked, EVAL_PRIMS);
         assert_eq!(result.lane_by_def.get("answer"), Some(&Lane::Host));
         assert!(
@@ -1585,7 +1581,9 @@ mod tests {
 
     #[test]
     fn scalar_result_function_and_its_value_caller_route_host() {
-        let checked = check_program_from_source("def f(x: f32) -> f32 = atan(x)\nout = f(3.5)\n");
+        let checked = check_program_from_deep(include_str!(
+            "../tests/fixtures/core/src/realizability/scalar_result_function_and_its_value_caller_route_host.deep"
+        ));
         let result = infer_realizability(&checked, C_PRIMS);
         assert_eq!(result.lane_by_def.get("f"), Some(&Lane::Host));
         assert_eq!(result.lane_by_def.get("out"), Some(&Lane::Host));
@@ -1603,8 +1601,9 @@ mod tests {
     // serve. An f32 elementwise def is C-capable and non-HostOnly.
     #[test]
     fn f32_tensor_def_routes_tensor_for_c_target() {
-        let checked =
-            check_program_from_source("def f(a: tensor[4, f32]) -> tensor[4, f32] = mul(a, a)\n");
+        let checked = check_program_from_deep(include_str!(
+            "../tests/fixtures/core/src/realizability/f32_tensor_def_routes_tensor_for_c_target.deep"
+        ));
         let result = infer_realizability(&checked, C_PRIMS);
         assert_eq!(result.lane_by_def.get("f"), Some(&Lane::Tensor));
     }
@@ -1613,8 +1612,9 @@ mod tests {
     // value root must appear in the manifest with its lane recorded.
     #[test]
     fn compute_root_manifest_lists_value_roots_with_lanes() {
-        let checked =
-            check_program_from_source("a: List[i32] = [cast(1, i32)]\nresult = concat(a, a)\n");
+        let checked = check_program_from_deep(include_str!(
+            "../tests/fixtures/core/src/realizability/host_only_builtin_routes_host.deep"
+        ));
         let realizability = infer_realizability(&checked, C_PRIMS);
         let manifest = compute_root_manifest(&checked, &realizability);
         let names: Vec<&str> = manifest.entries.iter().map(|e| e.name.as_str()).collect();
@@ -1687,8 +1687,9 @@ mod tests {
     // something an individual runtime may rediscover after lowering.
     #[test]
     fn compute_root_manifest_expands_nested_tuple_roots_depth_first() {
-        let checked =
-            check_program_from_source("result = (cast(1, i32), (cast(2, i32), cast(3, i32)))\n");
+        let checked = check_program_from_deep(include_str!(
+            "../tests/fixtures/core/src/realizability/compute_root_manifest_expands_nested_tuple_roots_depth_first.deep"
+        ));
         let realizability = infer_realizability(&checked, C_PRIMS);
         let manifest = compute_root_manifest(&checked, &realizability);
         assert_eq!(
@@ -1705,10 +1706,9 @@ mod tests {
     // the same declared field labels as lowering and runtime lookup.
     #[test]
     fn compute_root_manifest_expands_static_record_adt_roots() {
-        let checked = check_program_from_source(
-            "type Pair = | Pair { left: i32, right: i32 }\n\
-             result = Pair { left: cast(1, i32), right: cast(2, i32) }\n",
-        );
+        let checked = check_program_from_deep(include_str!(
+            "../tests/fixtures/core/src/realizability/compute_root_manifest_expands_static_record_adt_roots.deep"
+        ));
         let realizability = infer_realizability(&checked, C_PRIMS);
         let manifest = compute_root_manifest(&checked, &realizability);
         assert_eq!(
@@ -1723,10 +1723,9 @@ mod tests {
 
     #[test]
     fn compute_root_manifest_expands_static_positional_adt_roots() {
-        let checked = check_program_from_source(
-            "type Pair = | Pair(i32, i32)\n\
-             result = Pair(cast(1, i32), cast(2, i32))\n",
-        );
+        let checked = check_program_from_deep(include_str!(
+            "../tests/fixtures/core/src/realizability/compute_root_manifest_expands_static_positional_adt_roots.deep"
+        ));
         let realizability = infer_realizability(&checked, C_PRIMS);
         let manifest = compute_root_manifest(&checked, &realizability);
         assert_eq!(
@@ -1741,12 +1740,9 @@ mod tests {
 
     #[test]
     fn compute_root_manifest_keeps_dynamic_adt_variant_as_bare_root() {
-        let checked = check_program_from_source(
-            "type Choice = | First(i32) | Second(i32)\n\
-             def choose(flag: bool) -> Choice = \
-               if flag then First(cast(1, i32)) else Second(cast(2, i32))\n\
-             result = choose(true)\n",
-        );
+        let checked = check_program_from_deep(include_str!(
+            "../tests/fixtures/core/src/realizability/compute_root_manifest_keeps_dynamic_adt_variant_as_bare_root.deep"
+        ));
         let realizability = infer_realizability(&checked, C_PRIMS);
         let manifest = compute_root_manifest(&checked, &realizability);
         assert_eq!(
@@ -1761,8 +1757,9 @@ mod tests {
 
     #[test]
     fn compute_root_manifest_keeps_builtin_recursive_list_as_bare_root() {
-        let checked =
-            check_program_from_source("result: List[i32] = [cast(1, i32), cast(2, i32)]\n");
+        let checked = check_program_from_deep(include_str!(
+            "../tests/fixtures/core/src/realizability/compute_root_manifest_keeps_builtin_recursive_list_as_bare_root.deep"
+        ));
         let realizability = infer_realizability(&checked, C_PRIMS);
         let manifest = compute_root_manifest(&checked, &realizability);
         assert_eq!(
@@ -1779,9 +1776,9 @@ mod tests {
 
     #[test]
     fn compute_root_manifest_excludes_effectful_nullary_thunks() {
-        let checked = check_program_from_source(
-            "def logged() -> string = debug(\"must-not-run-for-observation\")\n",
-        );
+        let checked = check_program_from_deep(include_str!(
+            "../tests/fixtures/core/src/realizability/compute_root_manifest_excludes_effectful_nullary_thunks.deep"
+        ));
         let realizability = infer_realizability(&checked, EVAL_PRIMS);
         let manifest = compute_root_manifest(&checked, &realizability);
         assert!(
@@ -1792,7 +1789,9 @@ mod tests {
 
     #[test]
     fn compute_root_manifest_keeps_pure_nullary_thunks() {
-        let checked = check_program_from_source("def answer() -> i32 = cast(42, i32)\n");
+        let checked = check_program_from_deep(include_str!(
+            "../tests/fixtures/core/src/realizability/compute_root_manifest_keeps_pure_nullary_thunks.deep"
+        ));
         let realizability = infer_realizability(&checked, EVAL_PRIMS);
         let manifest = compute_root_manifest(&checked, &realizability);
         assert_eq!(
@@ -1807,11 +1806,9 @@ mod tests {
 
     #[test]
     fn compute_root_manifest_expands_pure_nullary_tuple_and_record_roots() {
-        let checked = check_program_from_source(
-            "type Pair = | Pair { left: i32, right: i32 }\n\
-             def tupled() -> (i32, i32) = (cast(1, i32), cast(2, i32))\n\
-             def answer() -> Pair = Pair { left: cast(3, i32), right: cast(4, i32) }\n",
-        );
+        let checked = check_program_from_deep(include_str!(
+            "../tests/fixtures/core/src/realizability/compute_root_manifest_expands_pure_nullary_tuple_and_record_roots.deep"
+        ));
         let realizability = infer_realizability(&checked, C_PRIMS);
         let manifest = compute_root_manifest(&checked, &realizability);
         assert_eq!(
@@ -1826,10 +1823,9 @@ mod tests {
 
     #[test]
     fn compute_root_manifest_excludes_uninstantiated_generic_nullary_thunks() {
-        let checked = check_program_from_source(
-            "type Box[a] =\n  | Empty\n  | Full { value: a }\n\
-             def empty[a]() -> Box[a] = Empty\n",
-        );
+        let checked = check_program_from_deep(include_str!(
+            "../tests/fixtures/core/src/realizability/compute_root_manifest_excludes_uninstantiated_generic_nullary_thunks.deep"
+        ));
         let realizability = infer_realizability(&checked, EVAL_PRIMS);
         let manifest = compute_root_manifest(&checked, &realizability);
         assert!(
@@ -1846,10 +1842,9 @@ mod tests {
     /// makes this assertion fail with an empty manifest.
     #[test]
     fn compute_root_manifest_keeps_a_runtime_extent_nullary_root() {
-        let checked = check_program_from_source(
-            "def g[n, m](x: tensor[n, f32]) -> tensor[m, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\
-             def main() = g(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n",
-        );
+        let checked = check_program_from_deep(include_str!(
+            "../tests/fixtures/core/src/realizability/compute_root_manifest_keeps_a_runtime_extent_nullary_root.deep"
+        ));
         let realizability = infer_realizability(&checked, C_PRIMS);
         let manifest = compute_root_manifest(&checked, &realizability);
         assert!(
@@ -1921,10 +1916,9 @@ mod tests {
 
     #[test]
     fn compute_root_manifest_keeps_dynamic_shape_value_roots() {
-        let checked = check_program_from_source(
-            "rows: List[List[i64]] = [[cast(1, i64)], [cast(2, i64)]]\n\
-             padded = pad_sequences(rows, cast(0, i64))\n",
-        );
+        let checked = check_program_from_deep(include_str!(
+            "../tests/fixtures/core/src/realizability/compute_root_manifest_keeps_dynamic_shape_value_roots.deep"
+        ));
         let realizability = infer_realizability(&checked, C_PRIMS);
         let manifest = compute_root_manifest(&checked, &realizability);
         assert!(
@@ -2440,8 +2434,9 @@ mod tests {
     // where the lane lookup is broken and every entry collapses to the default.
     #[test]
     fn compute_root_manifest_records_tensor_lane_not_just_host_default() {
-        let checked =
-            check_program_from_source("x = insert(scalar_to_tensor(cast(1.0, f32)), 0, 1i64)\n");
+        let checked = check_program_from_deep(include_str!(
+            "../tests/fixtures/core/src/realizability/compute_root_manifest_records_tensor_lane_not_just_host_default.deep"
+        ));
         let realizability = infer_realizability(&checked, C_PRIMS);
         let manifest = compute_root_manifest(&checked, &realizability);
         let x = manifest

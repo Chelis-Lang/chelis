@@ -1,0 +1,37 @@
+(defsig {}
+  step
+  (k)
+  (t-fn {}
+    (t-adt {} List (t-tensor {} (d-var {} k) (t-prim {} f32)))
+    (t-adt {} List (t-tensor {} (d-var {} k) (t-prim {} f32)))))
+
+(def {}
+  step
+  (fn {}
+    (params {} ^{:type (t-var {} _)} params)
+    (let {span: "surf:71..180"}
+      (bind {}
+        n
+        (app {span: "surf:86..97",
+               surf_binding_type: "explicit",
+               type: (t-prim {} i64)
+             }
+          (var {span: "surf:86..89"} len)
+          (var {span: "surf:90..96"} params)))
+      (let {}
+        (bind {}
+          first
+          (app {span: "surf:126..145",
+                 surf_binding_type: "explicit",
+                 type: (t-tensor {} (d-var {} k) (t-prim {} f32))
+               }
+            (var {span: "surf:126..131"} index)
+            (var {span: "surf:132..138"} params)
+            (lit {span: "surf:140..144", type: (t-prim {} i64)} 0)))
+        (let {}
+          (bind {destructure: true}
+            __chelis_tmp0
+            (app {span: "surf:154..165"}
+              (var {span: "surf:154..158"} drop)
+              (var {span: "surf:159..164"} first)))
+          (var {span: "surf:170..176"} params))))))

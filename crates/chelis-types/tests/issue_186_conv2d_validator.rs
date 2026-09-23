@@ -19,20 +19,12 @@
 //!     `(app {} (var conv) x k stride padding)` the window correctly
 //!     lands on `(var x)` and `(var k)`.
 
-use chelis_deep::Expr;
 use chelis_deep::parser::parse_str as parse_deep;
-use chelis_surf::desugar::desugar_program;
-use chelis_surf::parser::parse_str as parse_surf;
+
 use chelis_types::check_ir_program;
 
-fn surf_to_deep(source: &str) -> Vec<Expr> {
-    let decls = parse_surf(source).expect("surf parse");
-    chelis_macros::expand_program(
-        &desugar_program(&decls),
-        &chelis_macros::ExpansionOptions::default(),
-    )
-    .expect("macro expand")
-    .into_exprs()
+fn core_program(source: &str) -> Vec<chelis_deep::Expr> {
+    chelis_deep::parse_and_stamp_file(source).expect("Deep fixture")
 }
 
 /// EXPECT: A Surf-source conv call with fully-concrete input tensor +
@@ -44,11 +36,10 @@ fn surf_to_deep(source: &str) -> Vec<Expr> {
 /// because the app's `:type` metadata was unpopulated at validator time.
 #[test]
 fn issue186_surf_conv_concrete_shapes_typechecks() {
-    let src = r#"
-def call_conv(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
-  conv(x, k, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_186_conv2d_validator/issue186_surf_conv_concrete_shapes_typechecks_1.deep"
+    );
+    let deep = core_program(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
         for err in &rep.errors {
@@ -71,11 +62,10 @@ def call_conv(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[
 /// the concrete-tensor-arg-metadata error.
 #[test]
 fn issue186_surf_conv_borrowed_args_typechecks() {
-    let src = r#"
-def call_conv(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
-  conv(&x, &k, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_186_conv2d_validator/issue186_surf_conv_borrowed_args_typechecks_1.deep"
+    );
+    let deep = core_program(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
         for err in &rep.errors {
@@ -116,32 +106,30 @@ fn issue186_deep_conv_concrete_tensors_typechecks() {
 /// Backends that cannot lower it refuse it under chelis#730 instead.
 #[test]
 fn issue186_surf_conv_nonconcrete_input_dim_is_checker_legal() {
-    let src = r#"
-def call_conv[h](x: tensor[1, 3, h, 8, f32], k: tensor[8, 3, 3, 3, f32]) =
-  conv(x, k, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_186_conv2d_validator/issue186_surf_conv_nonconcrete_input_dim_is_checker_legal_1.deep"
+    );
+    let deep = core_program(src);
     check_ir_program(&deep).expect("symbolic conv metadata is not a type error");
 }
 
 /// PP9: a symbolic selected extent is not a `mean` type error.
 #[test]
 fn issue186_surf_mean_borrowed_nonconcrete_axis_is_checker_legal() {
-    let src = r#"
-def call_mean[n](x: tensor[32, n, f32]) -> tensor[32, f32] = mean(&x, 1)
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_186_conv2d_validator/issue186_surf_mean_borrowed_nonconcrete_axis_is_checker_legal_1.deep"
+    );
+    let deep = core_program(src);
     check_ir_program(&deep).expect("symbolic mean extent is not a type error");
 }
 
 /// PP9: a symbolic normalized extent is not a `layer_norm` type error.
 #[test]
 fn issue186_surf_layer_norm_borrowed_nonconcrete_axis_is_checker_legal() {
-    let src = r#"
-def call_ln[n](x: tensor[32, n, f32], g: tensor[n, f32], b: tensor[n, f32]) -> tensor[32, n, f32] =
-  layer_norm(&x, &g, &b, 0.00001f32)
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_186_conv2d_validator/issue186_surf_layer_norm_borrowed_nonconcrete_axis_is_checker_legal_1.deep"
+    );
+    let deep = core_program(src);
     check_ir_program(&deep).expect("symbolic layer_norm extent is not a type error");
 }
 
@@ -155,11 +143,10 @@ def call_ln[n](x: tensor[32, n, f32], g: tensor[n, f32], b: tensor[n, f32]) -> t
 /// `positive stride` diagnostic.
 #[test]
 fn red_team_205_f1_zero_stride_rejected() {
-    let src = r#"
-def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
-  conv(&x, &k, [0i64, 0i64], [(0i64, 0i64), (0i64, 0i64)])
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_f1_zero_stride_rejected_1.deep"
+    );
+    let deep = core_program(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for stride == 0");
     assert!(
@@ -176,11 +163,10 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6,
 /// sign check on the extracted value is required.
 #[test]
 fn red_team_205_f2_negative_stride_rejected() {
-    let src = r#"
-def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
-  conv(&x, &k, [-1i64, -1i64], [(0i64, 0i64), (0i64, 0i64)])
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_f2_negative_stride_rejected_1.deep"
+    );
+    let deep = core_program(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for negative stride");
     assert!(
@@ -197,11 +183,10 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6,
 /// zero in the output formula.
 #[test]
 fn red_team_205_f3_negative_padding_rejected() {
-    let src = r#"
-def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
-  conv(&x, &k, [1i64, 1i64], [(-100i64, -100i64), (-100i64, -100i64)])
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_f3_negative_padding_rejected_1.deep"
+    );
+    let deep = core_program(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for negative padding");
     assert!(
@@ -218,11 +203,10 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6,
 /// the canonical happy path.
 #[test]
 fn red_team_205_f1_f2_stride_one_padding_zero_accepted() {
-    let src = r#"
-def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
-  conv(&x, &k, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_f1_f2_stride_one_padding_zero_accepted_1.deep"
+    );
+    let deep = core_program(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
         for err in &rep.errors {
@@ -242,11 +226,10 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6,
 /// the validator and only failed during back-end lowering.
 #[test]
 fn red_team_205_f4_oversize_kernel_rejected() {
-    let src = r#"
-def f(x: tensor[1, 3, 2, 2, f32], k: tensor[8, 3, 5, 5, f32]) -> tensor[1, 8, 1, 1, f32] =
-  conv(&x, &k, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_f4_oversize_kernel_rejected_1.deep"
+    );
+    let deep = core_program(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for oversize kernel");
     assert!(
@@ -265,11 +248,10 @@ def f(x: tensor[1, 3, 2, 2, f32], k: tensor[8, 3, 5, 5, f32]) -> tensor[1, 8, 1,
 /// well as negative.
 #[test]
 fn red_team_205_f4_zero_output_rejected() {
-    let src = r#"
-def f(x: tensor[1, 3, 4, 8, f32], k: tensor[8, 3, 5, 3, f32]) -> tensor[1, 8, 1, 6, f32] =
-  conv(&x, &k, [2i64, 2i64], [(0i64, 0i64), (0i64, 0i64)])
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_f4_zero_output_rejected_1.deep"
+    );
+    let deep = core_program(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for zero-extent output");
     assert!(
@@ -286,11 +268,10 @@ def f(x: tensor[1, 3, 4, 8, f32], k: tensor[8, 3, 5, 3, f32]) -> tensor[1, 8, 1,
 /// the error fires before the back-end lowering pass.
 #[test]
 fn red_team_205_f4_rank3_input_rejected() {
-    let src = r#"
-def f(x: tensor[3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
-  conv(&x, &k, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_f4_rank3_input_rejected_1.deep"
+    );
+    let deep = core_program(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for rank-3 input");
     assert!(
@@ -306,11 +287,10 @@ def f(x: tensor[3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6,
 /// `floor((8 + 0 - 3) / 1) + 1 = 6` shape continues to be accepted.
 #[test]
 fn red_team_205_f4_canonical_output_accepted() {
-    let src = r#"
-def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
-  conv(&x, &k, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_f4_canonical_output_accepted_1.deep"
+    );
+    let deep = core_program(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
         for err in &rep.errors {
@@ -330,13 +310,10 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6,
 /// resolve to a concrete tensor type.
 #[test]
 fn red_team_205_f5_chained_conv_via_let_typechecks() {
-    let src = r#"
-def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32]) -> tensor[1, 16, 4, 4, f32] = {
-  y = conv(&x, &k1, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
-  conv(&y, &k2, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
-}
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_f5_chained_conv_via_let_typechecks_1.deep"
+    );
+    let deep = core_program(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
         for err in &rep.errors {
@@ -357,13 +334,10 @@ def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8,
 /// F4 formula evaluates against them.
 #[test]
 fn red_team_205_f5_chained_conv_second_call_ill_formed_rejected() {
-    let src = r#"
-def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 9, 9, f32]) -> tensor[1, 16, 1, 1, f32] = {
-  y = conv(&x, &k1, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
-  conv(&y, &k2, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
-}
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_f5_chained_conv_second_call_ill_formed_rejected_1.deep"
+    );
+    let deep = core_program(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for ill-formed second conv");
     assert!(
@@ -382,11 +356,10 @@ def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8,
 #[test]
 fn red_team_205_f6_validator_error_uses_dimension_mismatch_kind() {
     use chelis_types::errors::CheckErrorKind;
-    let src = r#"
-def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
-  conv(&x, &k, [0i64, 0i64], [(0i64, 0i64), (0i64, 0i64)])
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_f6_validator_error_uses_dimension_mismatch_kind_1.deep"
+    );
+    let deep = core_program(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for stride 0");
     let err = rep
@@ -406,32 +379,6 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6,
     );
 }
 
-/// EXPECT (RT-205 F6): validator errors include the call site's
-/// source span identifier as a suffix `(at surf:offset..end)` so
-/// JSON consumers can locate the offending expression. The exact
-/// offsets vary with surrounding whitespace; this test pins only the
-/// presence of the `(at surf:` prefix and the `..` separator.
-#[test]
-fn red_team_205_f6_validator_error_has_span_suffix() {
-    let src = r#"
-def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
-  conv(&x, &k, [0i64, 0i64], [(0i64, 0i64), (0i64, 0i64)])
-"#;
-    let deep = surf_to_deep(src);
-    let res = check_ir_program(&deep);
-    let rep = res.expect_err("expected check failure for stride 0");
-    let err = rep
-        .errors
-        .iter()
-        .find(|e| e.message.contains("positive stride"))
-        .expect("positive-stride error must be present");
-    assert!(
-        err.message.contains("(at surf:") && err.message.contains(".."),
-        "expected span suffix `(at surf:OFFSET..END)`, got message {:?}",
-        err.message
-    );
-}
-
 /// EXPECT (RT-205 F8): a Surf conv that declares a WRONG output
 /// shape is rejected. Before the fix the HM signature pass
 /// generated fresh dim-vars for output H/W and unified them with
@@ -442,11 +389,10 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6,
 /// body-vs-declared-sig check (TypeMismatch) catches the mismatch.
 #[test]
 fn red_team_205_f8_wrong_declared_output_dims_rejected() {
-    let src = r#"
-def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 100, 100, f32] =
-  conv(&x, &k, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_f8_wrong_declared_output_dims_rejected_1.deep"
+    );
+    let deep = core_program(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for wrong declared output dims");
     // Pin the EXACT computed-vs-declared shape so a future regression
@@ -465,11 +411,10 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 10
 /// the call still type-checks cleanly.
 #[test]
 fn red_team_205_f8_correct_declared_output_accepted() {
-    let src = r#"
-def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
-  conv(&x, &k, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_f8_correct_declared_output_accepted_1.deep"
+    );
+    let deep = core_program(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
         for err in &rep.errors {
@@ -488,11 +433,10 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6,
 /// `tensor[1, 8, 4, 4]` must be rejected.
 #[test]
 fn red_team_205_f8_off_by_one_output_rejected() {
-    let src = r#"
-def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 4, 4, f32] =
-  conv(&x, &k, [2i64, 2i64], [(0i64, 0i64), (0i64, 0i64)])
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_f8_off_by_one_output_rejected_1.deep"
+    );
+    let deep = core_program(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for off-by-one declared output");
     // Computed output is 3x3; declared is 4x4. Pin both values in
@@ -585,11 +529,10 @@ fn red_team_205_round2_f1_input_plus_padding_overflow_does_not_panic() {
 /// regress the happy path.
 #[test]
 fn red_team_205_round2_f1_canonical_shape_still_accepted() {
-    let src = r#"
-def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
-  conv(&x, &k, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_round2_f1_canonical_shape_still_accepted_1.deep"
+    );
+    let deep = core_program(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
         for err in &rep.errors {
@@ -609,13 +552,10 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6,
 /// unary point-wise ops so the wrapper does not break the chain.
 #[test]
 fn red_team_205_round2_f2_relu_wrapped_chained_conv_typechecks() {
-    let src = r#"
-def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32]) -> tensor[1, 16, 4, 4, f32] = {
-  y = relu(conv(&x, &k1, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)]))
-  conv(&y, &k2, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
-}
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_round2_f2_relu_wrapped_chained_conv_typechecks_1.deep"
+    );
+    let deep = core_program(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
         for err in &rep.errors {
@@ -631,13 +571,10 @@ def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8,
 /// EXPECT (RT-205 round-2 F2): tanh wrapper is also shape-preserving.
 #[test]
 fn red_team_205_round2_f2_tanh_wrapped_chained_conv_typechecks() {
-    let src = r#"
-def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32]) -> tensor[1, 16, 4, 4, f32] = {
-  y = tanh(conv(&x, &k1, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)]))
-  conv(&y, &k2, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
-}
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_round2_f2_tanh_wrapped_chained_conv_typechecks_1.deep"
+    );
+    let deep = core_program(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
         for err in &rep.errors {
@@ -656,13 +593,10 @@ def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8,
 /// `y` to the conv output shape via the binary derivation.
 #[test]
 fn red_team_205_round2_f2_add_wrapped_chained_conv_typechecks() {
-    let src = r#"
-def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32], b: tensor[1, 8, 6, 6, f32]) -> tensor[1, 16, 4, 4, f32] = {
-  y = add(conv(&x, &k1, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)]), &b)
-  conv(&y, &k2, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
-}
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_round2_f2_add_wrapped_chained_conv_typechecks_1.deep"
+    );
+    let deep = core_program(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
         for err in &rep.errors {
@@ -686,13 +620,10 @@ def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8,
 /// The ordinary type mismatch still rejects this rank-changing wrapper.
 #[test]
 fn red_team_205_round2_f2_sum_wrapped_chained_conv_still_rejected() {
-    let src = r#"
-def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32]) -> tensor[1, 16, 4, 4, f32] = {
-  y = sum(conv(&x, &k1, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)]), 1)
-  conv(&y, &k2, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
-}
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_round2_f2_sum_wrapped_chained_conv_still_rejected_1.deep"
+    );
+    let deep = core_program(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for sum-wrapped chain");
     assert!(
@@ -709,27 +640,20 @@ def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8,
 /// PP9: symbolic metadata remains legal through a chained convolution.
 #[test]
 fn red_team_205_round2_f3_symbolic_chain_is_checker_legal() {
-    let src = r#"
-def f[h](x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32]) -> tensor[1, 16, 4, 4, f32] = {
-  y = conv(&x, &k1, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
-  conv(&y, &k2, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
-}
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_round2_f3_symbolic_chain_is_checker_legal_1.deep"
+    );
+    let deep = core_program(src);
     check_ir_program(&deep).expect("symbolic conv metadata is not a type error");
 }
 
 /// PP9: independent symbolic conv calls are both checker-legal.
 #[test]
 fn red_team_205_round2_f3_independent_symbolic_calls_are_checker_legal() {
-    let src = r#"
-def f[h](x1: tensor[1, 3, h, 16, f32], x2: tensor[1, 3, h, 16, f32], k: tensor[8, 3, 3, 3, f32]) -> (tensor[1, 8, 6, 6, f32], tensor[1, 8, 6, 6, f32]) = {
-  y1 = conv(&x1, &k, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
-  y2 = conv(&x2, &k, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
-  (y1, y2)
-}
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_round2_f3_independent_symbolic_calls_are_checker_legal_1.deep"
+    );
+    let deep = core_program(src);
     check_ir_program(&deep).expect("symbolic conv metadata is not a type error");
 }
 
@@ -741,11 +665,10 @@ def f[h](x1: tensor[1, 3, h, 16, f32], x2: tensor[1, 3, h, 16, f32], k: tensor[8
 /// the HM-side has already emitted the equivalent.
 #[test]
 fn red_team_205_round2_f4_rank5_input_single_diagnostic() {
-    let src = r#"
-def f(x: tensor[1, 3, 8, 8, 2, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
-  conv(&x, &k, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_round2_f4_rank5_input_single_diagnostic_1.deep"
+    );
+    let deep = core_program(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for rank-5 input");
     let rank4_errors: Vec<_> = rep
@@ -766,11 +689,10 @@ def f(x: tensor[1, 3, 8, 8, 2, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8,
 /// should reach the user.
 #[test]
 fn red_team_205_round2_f4_rank5_kernel_single_diagnostic() {
-    let src = r#"
-def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, 2, f32]) -> tensor[1, 8, 6, 6, f32] =
-  conv(&x, &k, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_round2_f4_rank5_kernel_single_diagnostic_1.deep"
+    );
+    let deep = core_program(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for rank-5 kernel");
     let rank4_errors: Vec<_> = rep
@@ -792,13 +714,10 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, 2, f32]) -> tensor[1, 8,
 /// wrapper.
 #[test]
 fn red_team_205_round3_f_a_symbolic_conv_through_relu_is_checker_legal() {
-    let src = r#"
-def f[h](x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32]) -> tensor[1, 16, 4, 4, f32] = {
-  y = relu(conv(&x, &k1, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)]))
-  conv(&y, &k2, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
-}
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_round3_f_a_symbolic_conv_through_relu_is_checker_legal_1.deep"
+    );
+    let deep = core_program(src);
     check_ir_program(&deep).expect("symbolic conv metadata is not a type error");
 }
 
@@ -806,13 +725,10 @@ def f[h](x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16
 /// shape-preserving wrapper.
 #[test]
 fn red_team_205_round3_f_a_symbolic_conv_through_add_is_checker_legal() {
-    let src = r#"
-def f[h](x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32], b: tensor[1, 8, 6, 6, f32]) -> tensor[1, 16, 4, 4, f32] = {
-  y = add(conv(&x, &k1, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)]), &b)
-  conv(&y, &k2, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
-}
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_round3_f_a_symbolic_conv_through_add_is_checker_legal_1.deep"
+    );
+    let deep = core_program(src);
     check_ir_program(&deep).expect("symbolic conv metadata is not a type error");
 }
 
@@ -828,13 +744,10 @@ fn red_team_205_round3_f_a_independent_second_failure_not_suppressed() {
     // (tensor[8, 3, 3, f32]) instead of rank 4, so HM + validator
     // both surface the kernel rank-4 error. There's no f64 cascade
     // here, so we just count any errors with "rank-4 kernel" wording.
-    let src = r#"
-def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, f32]) -> tensor[1, 16, 4, 4, f32] = {
-  y = relu(conv(&x, &k1, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)]))
-  conv(&y, &k2, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
-}
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_round3_f_a_independent_second_failure_not_suppressed_1.deep"
+    );
+    let deep = core_program(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure on second conv kernel rank");
     assert!(
@@ -853,13 +766,10 @@ def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8,
 /// silently broken.
 #[test]
 fn red_team_205_round3_f_b_max_elem_passthrough() {
-    let src = r#"
-def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32], b: tensor[1, 8, 6, 6, f32]) -> tensor[1, 16, 4, 4, f32] = {
-  y = max_elem(conv(&x, &k1, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)]), &b)
-  conv(&y, &k2, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
-}
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_round3_f_b_max_elem_passthrough_1.deep"
+    );
+    let deep = core_program(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
         for err in &rep.errors {
@@ -876,13 +786,10 @@ def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8,
 /// per spec/05 §3.4, not `minimum`. Same shape as the max_elem fix.
 #[test]
 fn red_team_205_round3_f_b_min_elem_passthrough() {
-    let src = r#"
-def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32], b: tensor[1, 8, 6, 6, f32]) -> tensor[1, 16, 4, 4, f32] = {
-  y = min_elem(conv(&x, &k1, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)]), &b)
-  conv(&y, &k2, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
-}
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_round3_f_b_min_elem_passthrough_1.deep"
+    );
+    let deep = core_program(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
         for err in &rep.errors {
@@ -909,15 +816,10 @@ fn red_team_205_round3_f_b_unary_passthrough_audit() {
         "sin", "cos", "tan", "atan", "floor", "ceil",
     ];
     for op in &unary_ops {
-        let src = format!(
-            r#"
-def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32]) -> tensor[1, 16, 4, 4, f32] = {{
-  y = {op}(conv(&x, &k1, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)]))
-  conv(&y, &k2, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
-}}
-"#
-        );
-        let deep = surf_to_deep(&src);
+        let src =
+            include_str!("fixtures/core/tests/issue_186_conv2d_validator/operator_template_0.deep")
+                .replace("__fixture_op", op);
+        let deep = core_program(&src);
         let res = check_ir_program(&deep);
         if let Err(rep) = res {
             for err in &rep.errors {
@@ -946,15 +848,10 @@ fn red_team_205_round3_f_b_binary_passthrough_audit_arith() {
     // second conv to exercise the downstream registration.
     let arith_ops = ["add", "sub", "mul", "div", "max_elem", "min_elem"];
     for op in &arith_ops {
-        let src = format!(
-            r#"
-def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32], b: tensor[1, 8, 6, 6, f32]) -> tensor[1, 16, 4, 4, f32] = {{
-  y = {op}(conv(&x, &k1, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)]), &b)
-  conv(&y, &k2, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
-}}
-"#
-        );
-        let deep = surf_to_deep(&src);
+        let src =
+            include_str!("fixtures/core/tests/issue_186_conv2d_validator/operator_template_1.deep")
+                .replace("__fixture_op", op);
+        let deep = core_program(&src);
         let res = check_ir_program(&deep);
         if let Err(rep) = res {
             for err in &rep.errors {
@@ -982,15 +879,10 @@ fn red_team_205_round3_f_b_binary_compare_does_not_restore_metadata_rejection() 
         // Symbolic conv metadata is checker-legal. Comparison inference may
         // still reject its own operands, but it must not recreate the retired
         // backend capability diagnostic.
-        let src = format!(
-            r#"
-def f[h](x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32], b: tensor[1, 8, 6, 6, f32]) -> tensor[1, 16, 4, 4, f32] = {{
-  y = {op}(conv(&x, &k1, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)]), &b)
-  conv(&y, &k2, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
-}}
-"#
-        );
-        let deep = surf_to_deep(&src);
+        let src =
+            include_str!("fixtures/core/tests/issue_186_conv2d_validator/operator_template_2.deep")
+                .replace("__fixture_op", op);
+        let deep = core_program(&src);
         let messages = match check_ir_program(&deep) {
             Ok(_) => Vec::new(),
             Err(report) => report
@@ -1013,11 +905,10 @@ def f[h](x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16
 /// tensor metadata; backend implementation remains a separate capability.
 #[test]
 fn red_team_205_round3_f_c_symbolic_batch_single_call() {
-    let src = r#"
-def f(x: tensor[batch, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[batch, 8, 6, 6, f32] =
-  conv(&x, &k, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_round3_f_c_symbolic_batch_single_call_1.deep"
+    );
+    let deep = core_program(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
         for err in &rep.errors {
@@ -1037,13 +928,10 @@ def f(x: tensor[batch, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[batc
 /// signature is `tensor[batch, 16, 4, 4, f32]`.
 #[test]
 fn red_team_205_round3_f_c_symbolic_batch_chained() {
-    let src = r#"
-def f(x: tensor[batch, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32]) -> tensor[batch, 16, 4, 4, f32] = {
-  y = conv(&x, &k1, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
-  conv(&y, &k2, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
-}
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_round3_f_c_symbolic_batch_chained_1.deep"
+    );
+    let deep = core_program(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
         for err in &rep.errors {
@@ -1059,11 +947,10 @@ def f(x: tensor[batch, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16
 /// PP9: a symbolic spatial extent is legal at the checker boundary.
 #[test]
 fn red_team_205_round3_f_c_nonconcrete_spatial_is_checker_legal() {
-    let src = r#"
-def f[h](x: tensor[1, 3, h, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
-  conv(&x, &k, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_round3_f_c_nonconcrete_spatial_is_checker_legal_1.deep"
+    );
+    let deep = core_program(src);
     check_ir_program(&deep).expect("symbolic spatial metadata is not a type error");
 }
 
@@ -1071,11 +958,10 @@ def f[h](x: tensor[1, 3, h, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8,
 /// constraint is preserved.
 #[test]
 fn red_team_205_round3_f_c_nonconcrete_in_channels_is_checker_legal() {
-    let src = r#"
-def f(x: tensor[1, in_c, 8, 8, f32], k: tensor[8, in_c, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
-  conv(&x, &k, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_round3_f_c_nonconcrete_in_channels_is_checker_legal_1.deep"
+    );
+    let deep = core_program(src);
     check_ir_program(&deep).expect("symbolic channel metadata is not a type error");
 }
 
@@ -1090,13 +976,10 @@ def f(x: tensor[1, in_c, 8, 8, f32], k: tensor[8, in_c, 3, 3, f32]) -> tensor[1,
 fn red_team_205_round3_f_c_batch_dim_mismatch_detected() {
     // Declared return uses `b2`, but the body's chain carries
     // `batch` through, so HM should refuse the def.
-    let src = r#"
-def f(x: tensor[batch, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32]) -> tensor[b2, 16, 4, 4, f32] = {
-  y = conv(&x, &k1, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
-  conv(&y, &k2, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
-}
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_round3_f_c_batch_dim_mismatch_detected_1.deep"
+    );
+    let deep = core_program(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected rejection on batch dim mismatch");
     assert!(

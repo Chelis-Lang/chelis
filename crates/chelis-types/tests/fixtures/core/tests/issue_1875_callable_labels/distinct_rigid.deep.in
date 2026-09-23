@@ -1,0 +1,17 @@
+(defsig {}
+  use
+  (d e)
+  (t-fn {}
+    (t-tensor {} (d-var {} d) (t-prim {} f32))
+    (t-tensor {} (d-var {} e) (t-prim {} f32))
+    (t-tensor {} (d-name {} fixed) (t-prim {} f32))
+    (t-adt {} List (t-tensor {} (d-var {} d) (t-prim {} f32)))))
+
+(def {}
+  use
+  (fn {}
+    (params {}
+      (x {type: (t-var {} _)})
+      (y {type: (t-var {} _)})
+      (gain {type: (t-var {} _)}))
+    @BODY@))

@@ -1,0 +1,18 @@
+(defsig {}
+  broken
+  (t-fn {}
+    (t-tensor {} (d-lit {} 4) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 4) (t-prim {} f32))))
+
+(def {}
+  broken
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (let {span: "surf:50..82"}
+      (bind {}
+        y
+        (realize {span: "surf:58..68"} (var {span: "surf:66..67"} x)))
+      (app {span: "surf:71..80"}
+        (var {span: "surf:71..74"} add)
+        (var {span: "surf:75..76"} x)
+        (var {span: "surf:78..79"} y)))))

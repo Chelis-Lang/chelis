@@ -1,0 +1,32 @@
+(module {surf_path: "Probe.Runtime"}
+  probe.runtime
+  (export {} flatten_batch)
+  (defsig {}
+    flatten_batch
+    (n)
+    (t-fn {}
+      (t-ref {} (t-tensor {} (d-var {} n) (d-lit {} 4) (t-prim {} f32)))
+      (t-tensor {} (d-var {} n) (d-lit {} 4) (t-prim {} f32))))
+  (def {}
+    flatten_batch
+    (fn {}
+      (params {} x)
+      (app {span: "surf:131..192"}
+        (var {span: "surf:131..138"} reshape)
+        (var {span: "surf:139..140"} x)
+        (app {span: "surf:142..191"}
+          (var {} Cons)
+          (cast {span: "surf:143..176"}
+            (app {span: "surf:148..170"}
+              (var {span: "surf:148..153"} shape)
+              (var {span: "surf:154..155"} x)
+              (cast {span: "surf:157..169"}
+                (lit {span: "surf:162..163", surf_literal_style: "unsuffixed", type: (t-prim {} i32)} 0)
+                (t-prim {} i32)))
+            (t-prim {} i64))
+          (app {}
+            (var {} Cons)
+            (cast {span: "surf:178..190"}
+              (lit {span: "surf:183..184", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 4)
+              (t-prim {} i64))
+            (var {} Nil)))))))

@@ -1,0 +1,14 @@
+(defsig {}
+  noisy
+  (t-fn {eff: (effects {})}
+    (t-tensor {} (d-lit {} 4) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 4) (t-prim {} f32))))
+
+(def {}
+  noisy
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:55..70"}
+      (var {span: "surf:55..62"} dropout)
+      (var {span: "surf:63..64"} x)
+      (lit {span: "surf:66..69", type: (t-prim {} f32)} 0.5))))

@@ -1,0 +1,39 @@
+(defsig {}
+  reader
+  (t-fn {} (t-var {} _) (t-tensor {} (d-lit {} 4) (t-prim {} f32)) (t-var {} _)))
+
+(def {}
+  reader
+  (fn {}
+    (params {} t (k {type: (t-var {} _)}))
+    (pipe {span: "surf:36..47"}
+      (var {span: "surf:36..37"} t)
+      (fn {span: "surf:41..47", surf_pipe_stage: "call-first"}
+        (params {} __chelis_pipe)
+        (app {span: "surf:41..47"}
+          (var {span: "surf:41..44"} add)
+          (var {span: "surf:41..47"} __chelis_pipe)
+          (var {span: "surf:45..46"} k))))))
+
+(defsig {}
+  caller
+  (t-fn {}
+    (t-tensor {} (d-lit {} 4) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 4) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 4) (t-prim {} f32))))
+
+(def {}
+  caller
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (k {type: (t-var {} _)}))
+    (let {span: "surf:117..151"}
+      (bind {}
+        y
+        (app {span: "surf:125..137"}
+          (var {span: "surf:125..131"} reader)
+          (var {span: "surf:132..133"} x)
+          (var {span: "surf:135..136"} k)))
+      (app {span: "surf:140..149"}
+        (var {span: "surf:140..143"} add)
+        (var {span: "surf:144..145"} x)
+        (var {span: "surf:147..148"} y)))))

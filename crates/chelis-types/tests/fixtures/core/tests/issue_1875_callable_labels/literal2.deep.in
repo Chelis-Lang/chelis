@@ -1,0 +1,9 @@
+(app {span: "surf:10..36"}
+    (var {span: "surf:10..19"} to_tensor)
+    (app {span: "surf:20..35"}
+      (var {} Cons)
+      (lit {span: "surf:21..27", surf_literal_style: "explicit", type: (t-prim {} f32)} 1.0)
+      (app {}
+        (var {} Cons)
+        (lit {span: "surf:28..34", surf_literal_style: "explicit", type: (t-prim {} f32)} 2.0)
+        (var {} Nil))))

@@ -1,0 +1,28 @@
+(defsig {}
+  assert_shape_lib
+  (t-fn {}
+    (t-ref {} (t-tensor {} (d-lit {} 4) (t-prim {} f32)))
+    (t-prim {} i32)))
+
+(def {}
+  assert_shape_lib
+  (fn {}
+    (params {} (t {type: (t-var {} _)}))
+    (app {span: "surf:51..58"}
+      (var {span: "surf:51..55"} rank)
+      (var {span: "surf:56..57"} t))))
+
+(defsig {}
+  assert_close_lib
+  (t-fn {}
+    (t-ref {} (t-tensor {} (d-lit {} 4) (t-prim {} f32)))
+    (t-ref {} (t-tensor {} (d-lit {} 4) (t-prim {} f32)))
+    (t-prim {} i32)))
+
+(def {}
+  assert_close_lib
+  (fn {}
+    (params {} (a {type: (t-var {} _)}) (b {type: (t-var {} _)}))
+    (app {span: "surf:129..136"}
+      (var {span: "surf:129..133"} rank)
+      (var {span: "surf:134..135"} a))))

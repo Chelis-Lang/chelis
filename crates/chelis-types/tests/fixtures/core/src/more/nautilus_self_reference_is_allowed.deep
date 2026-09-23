@@ -1,0 +1,3 @@
+(def {}
+  x
+  (var {span: "surf:5..23", type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} x))

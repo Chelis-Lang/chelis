@@ -1,0 +1,11 @@
+(defsig {}
+  f
+  (t-fn {}
+    (t-ref {} (t-tensor {} (d-lit {} 2) (t-prim {} f32)))
+    (t-tensor {} (d-lit {} 3) (t-prim {} f32))))
+
+(def {}
+  f
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (copy {span: "surf:47..54"} (var {span: "surf:52..53"} x))))

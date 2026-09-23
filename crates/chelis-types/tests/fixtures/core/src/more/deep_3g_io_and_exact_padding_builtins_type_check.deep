@@ -1,0 +1,86 @@
+(def {}
+  contents
+  (app {span: "surf:12..36"}
+    (var {span: "surf:12..21"} read_file)
+    (lit {span: "surf:22..35", type: (t-prim {} string)} "dataset.txt")))
+
+(def {}
+  lines
+  (app {span: "surf:45..70"}
+    (var {span: "surf:45..55"} read_lines)
+    (lit {span: "surf:56..69", type: (t-prim {} string)} "dataset.txt")))
+
+(def {}
+  bytes
+  (app {span: "surf:79..104"}
+    (var {span: "surf:79..89"} read_bytes)
+    (lit {span: "surf:90..103", type: (t-prim {} string)} "dataset.txt")))
+
+(def {}
+  exists
+  (app {span: "surf:114..140"}
+    (var {span: "surf:114..125"} file_exists)
+    (lit {span: "surf:126..139", type: (t-prim {} string)} "dataset.txt")))
+
+(def {}
+  names
+  (app {span: "surf:149..162"}
+    (var {span: "surf:149..157"} list_dir)
+    (lit {span: "surf:158..161", type: (t-prim {} string)} ".")))
+
+(def {}
+  mapped
+  (app {span: "surf:172..196"}
+    (var {span: "surf:172..181"} mmap_file)
+    (lit {span: "surf:182..195", type: (t-prim {} string)} "dataset.txt")))
+
+(def {}
+  mapped_len
+  (app {span: "surf:210..226"}
+    (var {span: "surf:210..218"} mmap_len)
+    (var {span: "surf:219..225"} mapped)))
+
+(def {}
+  prefix
+  (app {span: "surf:236..281"}
+    (var {span: "surf:236..245"} mmap_read)
+    (var {span: "surf:246..252"} mapped)
+    (cast {span: "surf:254..266"}
+      (lit {span: "surf:259..260", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 0)
+      (t-prim {} i64))
+    (cast {span: "surf:268..280"}
+      (lit {span: "surf:273..274", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 4)
+      (t-prim {} i64))))
+
+(def {}
+  padded
+  (app {span: "surf:291..383"}
+    (var {span: "surf:291..307"} pad_sequences_to)
+    (app {span: "surf:308..354"}
+      (var {} Cons)
+      (app {span: "surf:309..323"}
+        (var {} Cons)
+        (cast {span: "surf:310..322"}
+          (lit {span: "surf:315..316", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 1)
+          (t-prim {} i64))
+        (var {} Nil))
+      (app {}
+        (var {} Cons)
+        (app {span: "surf:325..353"}
+          (var {} Cons)
+          (cast {span: "surf:326..338"}
+            (lit {span: "surf:331..332", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 2)
+            (t-prim {} i64))
+          (app {}
+            (var {} Cons)
+            (cast {span: "surf:340..352"}
+              (lit {span: "surf:345..346", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 3)
+              (t-prim {} i64))
+            (var {} Nil)))
+        (var {} Nil)))
+    (cast {span: "surf:356..368"}
+      (lit {span: "surf:361..362", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 4)
+      (t-prim {} i64))
+    (cast {span: "surf:370..382"}
+      (lit {span: "surf:375..376", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 0)
+      (t-prim {} i64))))

@@ -16,14 +16,8 @@
 
 use chelis_ir::host::{HostLoweringSession, host_def_kernel};
 
-fn checked_surf(src: &str) -> chelis_types::CheckedProgram {
-    let decls = chelis_surf::parser::parse_str(src).expect("surf parse");
-    let exprs = chelis_macros::expand_program(
-        &chelis_surf::desugar::desugar_program(&decls),
-        &chelis_macros::ExpansionOptions::default(),
-    )
-    .expect("macro expansion")
-    .into_exprs();
+fn checked_deep(src: &str) -> chelis_types::CheckedProgram {
+    let exprs = chelis_deep::parser::parse_str(src).expect("parse Deep fixture");
     let checked = chelis_types::check_ir_program(&exprs).unwrap_or_else(|report| {
         panic!(
             "type check failed: {:?}",
@@ -39,7 +33,7 @@ fn checked_surf(src: &str) -> chelis_types::CheckedProgram {
 }
 
 fn decision(src: &str, name: &str) -> Result<bool, String> {
-    let program = checked_surf(src);
+    let program = checked_deep(src);
     host_def_kernel(&HostLoweringSession::new(&program), name, None)
         .map(|kernel| kernel.is_some())
         .map_err(|diagnostic| diagnostic.to_string())
@@ -47,13 +41,17 @@ fn decision(src: &str, name: &str) -> Result<bool, String> {
 
 #[test]
 fn a_pure_tensor_def_is_a_kernel() {
-    let src = "def f[n](x: tensor[n, f32]) -> tensor[n, f32] = mul(x, x)\n";
+    let src = include_str!(
+        "fixtures/core/tests/issue_1277_kernel_decision/a_pure_tensor_def_is_a_kernel.deep"
+    );
     assert_eq!(decision(src, "f"), Ok(true));
 }
 
 #[test]
 fn an_io_effect_row_is_host() {
-    let src = "def f[n](x: tensor[n, f32]) -> tensor[n, f32] = {\n  _ = print(x)\n  x\n}\n";
+    let src = include_str!(
+        "fixtures/core/tests/issue_1277_kernel_decision/an_io_effect_row_is_host.deep"
+    );
     assert_eq!(decision(src, "f"), Ok(false));
 }
 
@@ -63,9 +61,9 @@ fn an_io_effect_row_is_host() {
 /// reaches the walker.
 #[test]
 fn a_match_on_a_runtime_scrutinee_is_host_before_lowering() {
-    let src = "type Flag =\n  | On\n  | Off\n\
-               def run(c: Flag, x: tensor[2, f32]) -> tensor[2, f32] = {\n  \
-               y = add(x, x)\n  match c with {\n    | On => y\n    | Off => x\n  }\n}\n";
+    let src = include_str!(
+        "fixtures/core/tests/issue_1277_kernel_decision/a_match_on_a_runtime_scrutinee_is_host_before_lowering.deep"
+    );
     assert_eq!(decision(src, "run"), Ok(false));
 }
 
@@ -74,9 +72,9 @@ fn a_match_on_a_runtime_scrutinee_is_host_before_lowering() {
 /// lowering does select.
 #[test]
 fn a_match_on_a_constructor_literal_stays_a_kernel() {
-    let src = "type Flag =\n  | On\n  | Off\n\
-               def run(x: tensor[2, f32]) -> tensor[2, f32] = {\n  \
-               y = add(x, x)\n  match On with {\n    | On => y\n    | Off => x\n  }\n}\n";
+    let src = include_str!(
+        "fixtures/core/tests/issue_1277_kernel_decision/a_match_on_a_constructor_literal_stays_a_kernel.deep"
+    );
     assert_eq!(decision(src, "run"), Ok(true));
 }
 
@@ -84,8 +82,9 @@ fn a_match_on_a_constructor_literal_stays_a_kernel() {
 /// lists only; a runtime list keeps the def in host code on both lanes.
 #[test]
 fn a_runtime_window_list_is_host_before_lowering() {
-    let src = "def f(x: tensor[6, f32], w: i64, s: i64) -> tensor[5, f32] = \
-               reduce_window_max(x, [w], [s])\n";
+    let src = include_str!(
+        "fixtures/core/tests/issue_1277_kernel_decision/a_runtime_window_list_is_host_before_lowering.deep"
+    );
     assert_eq!(decision(src, "f"), Ok(false));
 }
 
@@ -93,7 +92,9 @@ fn a_runtime_window_list_is_host_before_lowering() {
 /// host code on both lanes.
 #[test]
 fn a_runtime_pad_fill_is_host_before_lowering() {
-    let src = "def f(x: tensor[4, f32], r: f32) -> tensor[6, f32] = pad(&x, [[1i64, 1i64]], r)\n";
+    let src = include_str!(
+        "fixtures/core/tests/issue_1277_kernel_decision/a_runtime_pad_fill_is_host_before_lowering.deep"
+    );
     assert_eq!(decision(src, "f"), Ok(false));
 }
 
@@ -101,8 +102,9 @@ fn a_runtime_pad_fill_is_host_before_lowering() {
 /// issue_1222 shape the corpus found).
 #[test]
 fn a_host_only_builtin_inside_the_body_is_host_before_lowering() {
-    let src = "def f(x: tensor[2, f32]) -> tensor[2, f32] = {\n  \
-               z = [7i64]\n  m = len(z)\n  if (m > 0i64) then x else x\n}\n";
+    let src = include_str!(
+        "fixtures/core/tests/issue_1277_kernel_decision/a_host_only_builtin_inside_the_body_is_host_before_lowering.deep"
+    );
     assert_eq!(decision(src, "f"), Ok(false));
 }
 
@@ -112,9 +114,9 @@ fn a_host_only_builtin_inside_the_body_is_host_before_lowering() {
 #[test]
 fn tensor_helper_retains_declaring_parameter_order() {
     use chelis_ir::host::{RandomLoweringState, lower_named_tensor_entry_dag};
-    let program = checked_surf(
-        "def f(b: tensor[f32], unused: tensor[f32], z: tensor[rows, f32], a: tensor[cols, f32]) -> tensor[4, 3, f32] = insert(insert(b, 0i32, shape(a, 0i32)), 0i32, shape(z, 0i32))\n",
-    );
+    let program = checked_deep(include_str!(
+        "fixtures/core/tests/issue_1277_kernel_decision/tensor_helper_retains_declaring_parameter_order.deep"
+    ));
     for random in [
         None,
         Some(RandomLoweringState {

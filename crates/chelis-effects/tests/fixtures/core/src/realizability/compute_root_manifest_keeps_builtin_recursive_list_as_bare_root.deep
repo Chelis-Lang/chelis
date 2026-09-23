@@ -1,0 +1,15 @@
+(defsig {} result (t-adt {} List (t-prim {} i32)))
+
+(def {}
+  result
+  (app {span: "surf:20..48"}
+    (var {} Cons)
+    (cast {span: "surf:21..33"}
+      (lit {span: "surf:26..27", surf_literal_style: "unsuffixed", type: (t-prim {} i32)} 1)
+      (t-prim {} i32))
+    (app {}
+      (var {} Cons)
+      (cast {span: "surf:35..47"}
+        (lit {span: "surf:40..41", surf_literal_style: "unsuffixed", type: (t-prim {} i32)} 2)
+        (t-prim {} i32))
+      (var {} Nil))))

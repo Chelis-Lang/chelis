@@ -1,0 +1,37 @@
+(defsig {}
+  run
+  (t-fn {}
+    (t-tensor {}
+      (d-lit {} 1)
+      (d-lit {} 1)
+      (d-lit {} 8)
+      (d-lit {} 8)
+      (t-prim {} f32))
+    (t-tensor {}
+      (d-lit {} 1)
+      (d-lit {} 1)
+      (d-lit {} 8)
+      (d-lit {} 8)
+      (t-prim {} f32))))
+
+(def {}
+  run
+  (fn {}
+    (params {} x)
+    (app {span: "surf:74..122"}
+      (var {span: "surf:74..91"} reduce_window_max)
+      (var {span: "surf:92..93"} x)
+      (app {span: "surf:95..107"}
+        (var {} Cons)
+        (lit {span: "surf:96..100", type: (t-prim {} i64)} 2)
+        (app {}
+          (var {} Cons)
+          (lit {span: "surf:102..106", type: (t-prim {} i64)} 2)
+          (var {} Nil)))
+      (app {span: "surf:109..121"}
+        (var {} Cons)
+        (lit {span: "surf:110..114", type: (t-prim {} i64)} 1)
+        (app {}
+          (var {} Cons)
+          (lit {span: "surf:116..120", type: (t-prim {} i64)} 1)
+          (var {} Nil))))))

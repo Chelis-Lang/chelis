@@ -1,0 +1,11 @@
+(defsig {dtype_bounds: {p: float}} f (p) (t-fn {} (t-var {} p) (t-var {} p)))
+
+(def {}
+  f
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:29..66"}
+      (var {span: "surf:29..45"} tensor_to_scalar)
+      (app {span: "surf:46..65"}
+        (var {span: "surf:46..62"} scalar_to_tensor)
+        (var {span: "surf:63..64"} x)))))

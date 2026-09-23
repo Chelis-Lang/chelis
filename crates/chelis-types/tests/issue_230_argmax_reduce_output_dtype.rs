@@ -31,18 +31,11 @@
 //! Surf-level declarations) bind against.
 
 use chelis_deep::Expr;
-use chelis_surf::desugar::desugar_program;
-use chelis_surf::parser::parse_str as parse_surf;
+
 use chelis_types::check_ir_program;
 
-fn surf_to_deep(source: &str) -> Vec<Expr> {
-    let decls = parse_surf(source).expect("surf parse");
-    chelis_macros::expand_program(
-        &desugar_program(&decls),
-        &chelis_macros::ExpansionOptions::default(),
-    )
-    .expect("macro expand")
-    .into_exprs()
+fn parse_core(source: &str) -> Vec<Expr> {
+    chelis_deep::parse_and_stamp_file(source).expect("valid core fixture")
 }
 
 // ---------------------------------------------------------------------
@@ -53,10 +46,10 @@ fn surf_to_deep(source: &str) -> Vec<Expr> {
 /// This is the hydronnx PR #2 reproducer (issue #230).
 #[test]
 fn issue230_argmax_reduce_f32_input_yields_int64() {
-    let src = r#"
-def forward(x: tensor[2, 3, f32]) -> tensor[2, i64] = argmax_reduce(x, 1)
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_230_argmax_reduce_output_dtype/issue230_argmax_reduce_f32_input_yields_int64.0.deep"
+    );
+    let deep = parse_core(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
         for err in &rep.errors {
@@ -74,10 +67,10 @@ def forward(x: tensor[2, 3, f32]) -> tensor[2, i64] = argmax_reduce(x, 1)
 /// dtype.
 #[test]
 fn issue230_argmax_reduce_int32_input_yields_int64() {
-    let src = r#"
-def forward(x: tensor[2, 3, i32]) -> tensor[2, i64] = argmax_reduce(x, 1)
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_230_argmax_reduce_output_dtype/issue230_argmax_reduce_int32_input_yields_int64.0.deep"
+    );
+    let deep = parse_core(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
         for err in &rep.errors {
@@ -93,10 +86,10 @@ def forward(x: tensor[2, 3, i32]) -> tensor[2, i64] = argmax_reduce(x, 1)
 /// EXPECT: `argmin_reduce` on an `f32` tensor produces `tensor[..., i64]`.
 #[test]
 fn issue230_argmin_reduce_f32_input_yields_int64() {
-    let src = r#"
-def forward(x: tensor[2, 3, f32]) -> tensor[2, i64] = argmin_reduce(x, 1)
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_230_argmax_reduce_output_dtype/issue230_argmin_reduce_f32_input_yields_int64.0.deep"
+    );
+    let deep = parse_core(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
         for err in &rep.errors {
@@ -114,10 +107,10 @@ def forward(x: tensor[2, 3, f32]) -> tensor[2, i64] = argmin_reduce(x, 1)
 /// (input dtype happens to match the canonical output dtype).
 #[test]
 fn issue230_argmin_reduce_int64_input_yields_int64() {
-    let src = r#"
-def forward(x: tensor[2, 3, i64]) -> tensor[2, i64] = argmin_reduce(x, 1)
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_230_argmax_reduce_output_dtype/issue230_argmin_reduce_int64_input_yields_int64.0.deep"
+    );
+    let deep = parse_core(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
         for err in &rep.errors {
@@ -144,10 +137,10 @@ def forward(x: tensor[2, 3, i64]) -> tensor[2, i64] = argmin_reduce(x, 1)
 /// fails.
 #[test]
 fn issue230_argmax_reduce_wrong_output_dtype_f32_rejected() {
-    let src = r#"
-def forward(x: tensor[2, 3, f32]) -> tensor[2, f32] = argmax_reduce(x, 1)
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_230_argmax_reduce_output_dtype/issue230_argmax_reduce_wrong_output_dtype_f32_rejected.0.deep"
+    );
+    let deep = parse_core(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for argmax_reduce -> f32");
     assert!(
@@ -170,10 +163,10 @@ def forward(x: tensor[2, 3, f32]) -> tensor[2, f32] = argmax_reduce(x, 1)
 /// integer type, the output is still i64, not the input's i32.
 #[test]
 fn issue230_argmin_reduce_wrong_output_dtype_int32_rejected() {
-    let src = r#"
-def forward(x: tensor[2, 3, i32]) -> tensor[2, i32] = argmin_reduce(x, 1)
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_230_argmax_reduce_output_dtype/issue230_argmin_reduce_wrong_output_dtype_int32_rejected.0.deep"
+    );
+    let deep = parse_core(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for argmin_reduce -> i32");
     assert!(
@@ -201,10 +194,10 @@ def forward(x: tensor[2, 3, i32]) -> tensor[2, i32] = argmin_reduce(x, 1)
 /// `tensor[2, f32]` — input dtype preserved.
 #[test]
 fn issue230_sibling_sweep_max_reduce_preserves_input_dtype() {
-    let src = r#"
-def forward(x: tensor[2, 3, f32]) -> tensor[2, f32] = max_reduce(x, 1)
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_230_argmax_reduce_output_dtype/issue230_sibling_sweep_max_reduce_preserves_input_dtype.0.deep"
+    );
+    let deep = parse_core(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
         for err in &rep.errors {
@@ -221,10 +214,10 @@ def forward(x: tensor[2, 3, f32]) -> tensor[2, f32] = max_reduce(x, 1)
 /// `tensor[2, f32]` — input dtype preserved.
 #[test]
 fn issue230_sibling_sweep_min_reduce_preserves_input_dtype() {
-    let src = r#"
-def forward(x: tensor[2, 3, f32]) -> tensor[2, f32] = min_reduce(x, 1)
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_230_argmax_reduce_output_dtype/issue230_sibling_sweep_min_reduce_preserves_input_dtype.0.deep"
+    );
+    let deep = parse_core(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
         for err in &rep.errors {
@@ -241,10 +234,10 @@ def forward(x: tensor[2, 3, f32]) -> tensor[2, f32] = min_reduce(x, 1)
 /// `tensor[2, f32]` — input dtype preserved.
 #[test]
 fn issue230_sibling_sweep_prod_reduce_preserves_input_dtype() {
-    let src = r#"
-def forward(x: tensor[2, 3, f32]) -> tensor[2, f32] = prod_reduce(x, 1)
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_230_argmax_reduce_output_dtype/issue230_sibling_sweep_prod_reduce_preserves_input_dtype.0.deep"
+    );
+    let deep = parse_core(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
         for err in &rep.errors {
@@ -261,10 +254,10 @@ def forward(x: tensor[2, 3, f32]) -> tensor[2, f32] = prod_reduce(x, 1)
 /// `tensor[2, f32]` — input dtype preserved.
 #[test]
 fn issue230_sibling_sweep_mean_preserves_input_dtype() {
-    let src = r#"
-def forward(x: tensor[2, 3, f32]) -> tensor[2, f32] = mean(x, 1)
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_230_argmax_reduce_output_dtype/issue230_sibling_sweep_mean_preserves_input_dtype.0.deep"
+    );
+    let deep = parse_core(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
         for err in &rep.errors {
@@ -282,10 +275,10 @@ def forward(x: tensor[2, 3, f32]) -> tensor[2, f32] = mean(x, 1)
 /// only applies to narrow integer inputs).
 #[test]
 fn issue230_sibling_sweep_sum_f32_preserves_input_dtype() {
-    let src = r#"
-def forward(x: tensor[2, 3, f32]) -> tensor[2, f32] = sum(x, 1)
-"#;
-    let deep = surf_to_deep(src);
+    let src = include_str!(
+        "fixtures/core/tests/issue_230_argmax_reduce_output_dtype/issue230_sibling_sweep_sum_f32_preserves_input_dtype.0.deep"
+    );
+    let deep = parse_core(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
         for err in &rep.errors {

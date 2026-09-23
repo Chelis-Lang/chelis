@@ -3,13 +3,7 @@
 use chelis_ir::host::{HostLoweringSession, host_def_kernel};
 
 fn checked(src: &str) -> chelis_types::CheckedProgram {
-    let parsed = chelis_surf::parser::parse_str(src).expect("parse");
-    let expanded = chelis_macros::expand_program(
-        &chelis_surf::desugar::desugar_program(&parsed),
-        &chelis_macros::ExpansionOptions::default(),
-    )
-    .expect("expand")
-    .into_exprs();
+    let expanded = chelis_deep::parser::parse_str(src).expect("Deep fixture");
     let typed = chelis_types::check_ir_program(&expanded).expect("type check");
     let effected = chelis_effects::check_program(&typed).expect("effect check");
     chelis_types::check_linearity(&effected).expect("linearity")
@@ -23,14 +17,11 @@ fn decision(source: &str, name: &str, kernel: bool) {
     assert_eq!(result, Ok(kernel), "{source}");
 }
 
-const JOIN: &str =
-    "def join_columns[s](x: tensor[s, *, f32], y: tensor[s, *, f32]) = concat([x, y], 1i32)\n";
-
 #[test]
 fn annotated_dynamic_helper_is_host_before_lowering() {
     decision(
-        &format!(
-            "{JOIN}def probabilities[s](x: tensor[s, *, f32], y: tensor[s, *, f32]) -> tensor[s, *, f32] = softmax(join_columns(x, y), -1)\n"
+        include_str!(
+            "fixtures/core/tests/issue_1906_concat_admission/annotated_dynamic_helper_is_host_before_lowering.dp"
         ),
         "probabilities",
         false,
@@ -40,7 +31,9 @@ fn annotated_dynamic_helper_is_host_before_lowering() {
 #[test]
 fn annotated_dynamic_direct_is_host_before_lowering() {
     decision(
-        "def probabilities[s](x: tensor[s, *, f32], y: tensor[s, *, f32]) -> tensor[s, *, f32] = softmax(concat([x, y], 1i32), -1)\n",
+        include_str!(
+            "fixtures/core/tests/issue_1906_concat_admission/annotated_dynamic_direct_is_host_before_lowering_2.dp"
+        ),
         "probabilities",
         false,
     );
@@ -49,7 +42,9 @@ fn annotated_dynamic_direct_is_host_before_lowering() {
 #[test]
 fn static_direct_concat_remains_kernel() {
     decision(
-        "def probabilities[s](x: tensor[s, 2, f32], y: tensor[s, 2, f32]) -> tensor[s, 4, f32] = softmax(concat([x, y], 1i32), -1)\n",
+        include_str!(
+            "fixtures/core/tests/issue_1906_concat_admission/static_direct_concat_remains_kernel_3.dp"
+        ),
         "probabilities",
         true,
     );
@@ -58,8 +53,8 @@ fn static_direct_concat_remains_kernel() {
 #[test]
 fn static_actuals_through_wildcard_helper_remain_kernel() {
     decision(
-        &format!(
-            "{JOIN}def probabilities[s](x: tensor[s, 2, f32], y: tensor[s, 2, f32]) -> tensor[s, 4, f32] = softmax(join_columns(x, y), -1)\n"
+        include_str!(
+            "fixtures/core/tests/issue_1906_concat_admission/static_actuals_through_wildcard_helper_remain_kernel.dp"
         ),
         "probabilities",
         true,
@@ -69,7 +64,9 @@ fn static_actuals_through_wildcard_helper_remain_kernel() {
 #[test]
 fn static_lexical_alias_and_list_remain_kernel() {
     decision(
-        "def probabilities[s](x: tensor[s, 2, f32], y: tensor[s, 2, f32]) -> tensor[s, 4, f32] = {\n a = x\n rows = [a, y]\n softmax(concat(rows, 1i32), -1)\n}\n",
+        include_str!(
+            "fixtures/core/tests/issue_1906_concat_admission/static_lexical_alias_and_list_remain_kernel_5.dp"
+        ),
         "probabilities",
         true,
     );
@@ -78,7 +75,9 @@ fn static_lexical_alias_and_list_remain_kernel() {
 #[test]
 fn dynamic_lexical_alias_is_host() {
     decision(
-        "def probabilities[s](x: tensor[s, *, f32], y: tensor[s, *, f32]) -> tensor[s, *, f32] = {\n a = x\n rows = [a, y]\n softmax(concat(rows, 1i32), -1)\n}\n",
+        include_str!(
+            "fixtures/core/tests/issue_1906_concat_admission/dynamic_lexical_alias_is_host_6.dp"
+        ),
         "probabilities",
         false,
     );
@@ -86,20 +85,20 @@ fn dynamic_lexical_alias_is_host() {
 
 #[test]
 fn distinct_calls_do_not_reuse_first_shape_decision() {
-    let source = format!(
-        "{JOIN}def fixed[s](x: tensor[s, 2, f32]) -> tensor[s, 4, f32] = softmax(join_columns(x, x), -1)\ndef dynamic[s](x: tensor[s, *, f32]) -> tensor[s, *, f32] = softmax(join_columns(x, x), -1)\n"
+    let source = include_str!(
+        "fixtures/core/tests/issue_1906_concat_admission/distinct_calls_do_not_reuse_first_shape_decision.dp"
     );
-    decision(&source, "fixed", true);
-    decision(&source, "dynamic", false);
-    decision(&source, "fixed", true);
-    decision(&source, "dynamic", false);
+    decision(source, "fixed", true);
+    decision(source, "dynamic", false);
+    decision(source, "fixed", true);
+    decision(source, "dynamic", false);
 }
 
 #[test]
 fn same_activation_static_then_dynamic_is_host() {
     decision(
-        &format!(
-            "{JOIN}def run[s](x: tensor[s, 2, f32], y: tensor[s, *, f32]) -> tensor[s, *, f32] = {{\n a = join_columns(x, x)\n _ = a\n softmax(join_columns(y, y), -1)\n}}\n"
+        include_str!(
+            "fixtures/core/tests/issue_1906_concat_admission/same_activation_static_then_dynamic_is_host.dp"
         ),
         "run",
         false,
@@ -109,8 +108,8 @@ fn same_activation_static_then_dynamic_is_host() {
 #[test]
 fn same_activation_dynamic_then_static_is_host() {
     decision(
-        &format!(
-            "{JOIN}def run[s](x: tensor[s, *, f32], y: tensor[s, 2, f32]) -> tensor[s, *, f32] = {{\n a = join_columns(x, x)\n _ = a\n softmax(join_columns(y, y), -1)\n}}\n"
+        include_str!(
+            "fixtures/core/tests/issue_1906_concat_admission/same_activation_dynamic_then_static_is_host.dp"
         ),
         "run",
         false,
@@ -120,7 +119,9 @@ fn same_activation_dynamic_then_static_is_host() {
 #[test]
 fn literal_shadow_does_not_inherit_runtime_input_fact() {
     decision(
-        "def run(x: tensor[2, *, f32]) -> tensor[2, 4, f32] = {\n x = to_tensor([[1.0, 2.0], [3.0, 4.0]])\n softmax(concat([x, x], 1i32), -1)\n}\n",
+        include_str!(
+            "fixtures/core/tests/issue_1906_concat_admission/literal_shadow_does_not_inherit_runtime_input_fact_10.dp"
+        ),
         "run",
         true,
     );
@@ -128,12 +129,40 @@ fn literal_shadow_does_not_inherit_runtime_input_fact() {
 
 #[test]
 fn swapped_actuals_with_fresh_formals_preserve_static_kernel() {
-    let helper =
-        "def second[s](a: tensor[s, *, f32], b: tensor[s, *, f32]) = concat([b, b], 1i32)\n";
-    for (first_width, second_width, kernel) in [("*", "2", false), ("2", "*", true)] {
+    let helper = include_str!(
+        "fixtures/core/tests/issue_1906_concat_admission/swapped_actuals_with_fresh_formals_preserve_static_kernel_11.dp"
+    );
+    for (first_width, second_width, kernel) in [
+        ("(d-name {} *)", "(d-lit {} 2)", false),
+        ("(d-lit {} 2)", "(d-name {} *)", true),
+    ] {
         decision(
             &format!(
-                "{helper}def run[s](x: tensor[s, {first_width}, f32], y: tensor[s, {second_width}, f32]) -> tensor[s, *, f32] = softmax(second(y, x), -1)\n"
+                "{helper}{}",
+                format_args!(
+                    r#"(defsig {{}}
+              run
+              (s)
+              (t-fn {{}}
+                (t-tensor {{}} (d-var {{}} s) {first_width} (t-prim {{}} f32))
+                (t-tensor {{}} (d-var {{}} s) {second_width} (t-prim {{}} f32))
+                (t-tensor {{}} (d-var {{}} s) (d-name {{}} *) (t-prim {{}} f32))))
+            
+            (def {{}}
+              run
+              (fn {{}}
+                (params {{}} (x {{type: (t-var {{}} _)}}) (y {{type: (t-var {{}} _)}}))
+                (app {{span: "surf:97..122"}}
+                  (var {{span: "surf:97..104"}} softmax)
+                  (app {{span: "surf:105..117"}}
+                    (var {{span: "surf:105..111"}} second)
+                    (var {{span: "surf:112..113"}} y)
+                    (var {{span: "surf:115..116"}} x))
+                  (app {{span: "surf:119..121"}}
+                    (var {{}} neg)
+                    (lit {{span: "surf:120..121", type: (t-prim {{}} i32)}} 1)))))
+            "#
+                )
             ),
             "run",
             kernel,
@@ -143,9 +172,9 @@ fn swapped_actuals_with_fresh_formals_preserve_static_kernel() {
 
 #[test]
 fn computed_dynamic_extent_is_not_claimed_as_supported_host_partition() {
-    let program = checked(
-        "def run[s](x: tensor[s, *, f32]) -> tensor[s, *, f32] = {\n z = mul(x, x)\n softmax(concat([z, z], 1i32), -1)\n}\n",
-    );
+    let program = checked(include_str!(
+        "fixtures/core/tests/issue_1906_concat_admission/computed_dynamic_extent_is_not_claimed_as_supported_host_partition_13.dp"
+    ));
     let error = host_def_kernel(&HostLoweringSession::new(&program), "run", None)
         .expect_err("computed concat stays outside this admission class");
     assert!(

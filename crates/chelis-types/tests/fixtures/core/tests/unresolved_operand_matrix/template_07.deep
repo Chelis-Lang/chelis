@@ -1,0 +1,29 @@
+@@HELPER@@
+
+(defsig {} f (t-fn {} (t-tensor {} (t-prim {} i32))))
+
+(def {}
+  f
+  (fn {}
+    (params {})
+    (app {span: "surf:51..113"}
+      (fn {span: "surf:51..81"}
+        (params {} v)
+        (app {span: "surf:61..81"}
+          (var {span: "surf:61..65"} mean)
+          (app {span: "surf:66..74"}
+            (var {span: "surf:66..71"} id_dt)
+            (var {span: "surf:72..73"} v))
+          (lit {span: "surf:76..80", surf_literal_style: "explicit", type: (t-prim {} i32)} 0)))
+      (app {span: "surf:83..112"}
+        (var {span: "surf:83..92"} to_tensor)
+        (app {span: "surf:93..111"}
+          (var {} Cons)
+          (lit {span: "surf:94..98", surf_literal_style: "explicit", type: (t-prim {} i32)} 1)
+          (app {}
+            (var {} Cons)
+            (lit {span: "surf:100..104", surf_literal_style: "explicit", type: (t-prim {} i32)} 2)
+            (app {}
+              (var {} Cons)
+              (lit {span: "surf:106..110", surf_literal_style: "explicit", type: (t-prim {} i32)} 4)
+              (var {} Nil))))))))

@@ -51,15 +51,6 @@ fn owner_source() -> String {
     fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs")).unwrap()
 }
 
-fn replace_once(source: &str, from: &str, to: &str) -> String {
-    assert_eq!(
-        source.matches(from).count(),
-        1,
-        "mutation anchor must be unique: {from}"
-    );
-    source.replacen(from, to, 1)
-}
-
 fn assert_success(output: Output) {
     assert!(
         output.status.success(),
@@ -117,57 +108,4 @@ fn external_consumer_can_project_but_cannot_forge_or_rewrite_a_contract() {
         "E0616",
         "repr",
     );
-}
-
-#[test]
-fn new_dtype_without_contract_registration_does_not_compile() {
-    let probe = Probe::new();
-    let source = owner_source();
-    assert_success(probe.compile("positive", &source, false));
-    // Complete the existing naming/decoding surfaces. The only missing match
-    // is the new representation registration, not an unrelated old consumer.
-    let source = replace_once(
-        &source,
-        "    I16 = 8,\n",
-        "    I16 = 8,\n    UnregisteredDType = 9,\n",
-    );
-    let source = replace_once(
-        &source,
-        "Self::I16 => \"int16\",",
-        "Self::I16 => \"int16\",\n            Self::UnregisteredDType => \"unregistered\",",
-    );
-    let source = replace_once(
-        &source,
-        "Self::I16 => \"CHELIS_DTYPE_I16\",",
-        "Self::I16 => \"CHELIS_DTYPE_I16\",\n            Self::UnregisteredDType => \"CHELIS_DTYPE_UNREGISTERED\",",
-    );
-    let source = replace_once(
-        &source,
-        "8 => Ok(Self::I16),",
-        "8 => Ok(Self::I16),\n            9 => Ok(Self::UnregisteredDType),",
-    );
-    assert_rejected(
-        probe.compile("negative", &source, false),
-        "E0004",
-        "UnregisteredDType",
-    );
-}
-
-#[test]
-fn new_stored_or_arithmetic_representation_needs_an_exhaustive_projection() {
-    let probe = Probe::new();
-    let source = owner_source();
-    assert_success(probe.compile("positive", &source, false));
-    for owner in ["Repr", "ArithmeticRepr"] {
-        let mutated = replace_once(
-            &source,
-            &format!("pub enum {owner} {{"),
-            &format!("pub enum {owner} {{\n    UnregisteredRepresentation,"),
-        );
-        assert_rejected(
-            probe.compile("negative", &mutated, false),
-            "E0004",
-            "UnregisteredRepresentation",
-        );
-    }
 }

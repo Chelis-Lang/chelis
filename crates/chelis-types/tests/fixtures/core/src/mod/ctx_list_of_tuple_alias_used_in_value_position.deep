@@ -1,0 +1,22 @@
+(module {surf_path: "M"}
+  m
+  (export {} mk)
+  (deftype {}
+    Ty
+    ()
+    (variant {} TBase)
+    (variant {} TArrow (t-adt {} Ty) (t-adt {} Ty)))
+  (typealias {}
+    Ctx
+    ()
+    (t-adt {} List (t-tuple {} (t-adt {} String) (t-adt {} Ty))))
+  (deftype {} Judgement () (variant {} Judge (t-adt {} Ctx) (t-adt {} Ty)))
+  (defsig {} mk (t-fn {} (t-adt {} Ty) (t-adt {} Judgement)))
+  (def {}
+    mk
+    (fn {}
+      (params {} (t {type: (t-var {} _)}))
+      (app {span: "surf:149..161"}
+        (var {span: "surf:149..154"} Judge)
+        (var {span: "surf:155..157"} Nil)
+        (var {span: "surf:159..160"} t)))))

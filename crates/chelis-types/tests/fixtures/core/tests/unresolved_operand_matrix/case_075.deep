@@ -1,0 +1,18 @@
+(defsig {} f (t-fn {} (t-prim {} bool) (t-prim {} bool)))
+
+(def {}
+  f
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (let {span: "surf:25..61"}
+      (bind {}
+        g
+        (fn {span: "surf:33..52"}
+          (params {} t)
+          (app {span: "surf:43..52"}
+            (var {span: "surf:43..46"} add)
+            (var {span: "surf:47..48"} t)
+            (var {span: "surf:50..51"} t))))
+      (app {span: "surf:55..59"}
+        (var {span: "surf:55..56"} g)
+        (var {span: "surf:57..58"} x)))))

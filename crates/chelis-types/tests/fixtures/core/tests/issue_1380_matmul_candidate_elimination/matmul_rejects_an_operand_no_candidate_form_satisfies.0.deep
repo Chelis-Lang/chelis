@@ -1,0 +1,21 @@
+(defsig {}
+  f
+  (t-fn {}
+    (t-prim {} f32)
+    (t-tensor {} (d-lit {} 3) (d-lit {} 4) (t-prim {} f32))
+    (t-var {} _)))
+
+(def {}
+  f
+  (fn {}
+    (params {} (s {type: (t-var {} _)}) (xb {type: (t-var {} _)}))
+    (app {span: "surf:39..87"}
+      (var {span: "surf:39..45"} matmul)
+      (app {span: "surf:46..82"}
+        (var {span: "surf:46..52"} insert)
+        (app {span: "surf:53..72"}
+          (var {span: "surf:53..69"} scalar_to_tensor)
+          (var {span: "surf:70..71"} s))
+        (lit {span: "surf:74..75", type: (t-prim {} i32)} 0)
+        (lit {span: "surf:77..81", type: (t-prim {} i64)} 3))
+      (var {span: "surf:84..86"} xb))))

@@ -1,0 +1,23 @@
+(module {surf_path: "Frag.Pure"}
+  frag.pure
+  (export {} entry)
+  (defsig {} helper (t-fn {} (t-prim {} f32) (t-prim {} f32)))
+  (def {}
+    helper
+    (fn {}
+      (params {} (x {type: (t-var {} _)}))
+      (app {span: "surf:60..69"}
+        (var {span: "surf:60..63"} add)
+        (var {span: "surf:64..65"} x)
+        (var {span: "surf:67..68"} x))))
+  (defsig {} entry (t-fn {} (t-prim {} f32) (t-prim {} f32)))
+  (def {}
+    entry
+    (fn {}
+      (params {} (x {type: (t-var {} _)}))
+      (app {span: "surf:97..114"}
+        (var {span: "surf:97..103"} helper)
+        (app {span: "surf:104..113"}
+          (var {span: "surf:104..107"} mul)
+          (var {span: "surf:108..109"} x)
+          (var {span: "surf:111..112"} x))))))

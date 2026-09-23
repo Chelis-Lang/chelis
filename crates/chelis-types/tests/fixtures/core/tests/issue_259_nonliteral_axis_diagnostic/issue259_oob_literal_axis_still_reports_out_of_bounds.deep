@@ -1,0 +1,15 @@
+(defsig {}
+  go
+  (m n)
+  (t-fn {}
+    (t-tensor {} (d-var {} m) (d-var {} n) (t-prim {} f32))
+    (t-tensor {} (d-var {} m) (t-prim {} f32))))
+
+(def {}
+  go
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:56..67"}
+      (var {span: "surf:56..60"} mean)
+      (borrow {span: "surf:61..63"} (var {span: "surf:62..63"} x))
+      (lit {span: "surf:65..66", type: (t-prim {} i32)} 9))))

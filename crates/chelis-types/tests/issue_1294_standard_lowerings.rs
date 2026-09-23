@@ -5,18 +5,12 @@
 //! unit axis, while `insert` is the rank-raising operation. That contract is
 //! behavioral; it does not depend on a hand-maintained inventory of source
 //! spellings.
-use chelis_surf::{desugar::desugar_program, parser::parse_str};
+
 use chelis_types::check_ir_program;
 
 fn check(source: &str) -> Result<(), String> {
-    let parsed = parse_str(source).expect("valid Surf fixture");
-    let expanded = chelis_macros::expand_program(
-        &desugar_program(&parsed),
-        &chelis_macros::ExpansionOptions::default(),
-    )
-    .expect("valid macro expansion")
-    .into_exprs();
-    check_ir_program(&expanded)
+    let program = chelis_deep::parse_and_stamp_file(source).expect("Deep fixture");
+    check_ir_program(&program)
         .map(|_| ())
         .map_err(|e| format!("{e:?}"))
 }
@@ -24,9 +18,9 @@ fn check(source: &str) -> Result<(), String> {
 #[test]
 fn layer_norm_accepts_explicit_epsilon_at_each_float_width() {
     for dtype in ["f16", "bf16", "f32", "f64"] {
-        let source = format!(
-            "def f(x: tensor[2,2,{dtype}], g: tensor[2,{dtype}], b: tensor[2,{dtype}], e: {dtype}) -> tensor[2,2,{dtype}] = layer_norm(x,g,b,e)\n"
-        );
+        let source =
+            include_str!("fixtures/core/tests/issue_1294_standard_lowerings/dtype_template_0.deep")
+                .replace("f32", dtype);
         check(&source).unwrap_or_else(|e| panic!("{source}: {e}"));
     }
 }
@@ -34,22 +28,22 @@ fn layer_norm_accepts_explicit_epsilon_at_each_float_width() {
 #[test]
 fn layer_norm_rejects_missing_or_mistyped_epsilon_and_invalid_operands() {
     for args in [
-        "x,g,b",
-        "x,g,b,1i64",
-        "x,g,b,1.0f64",
-        "x,g,b,true",
-        "x,g,b,g",
-        "x,g,b,1.0f32,1.0f32",
+        "(var {} x) (var {} g) (var {} b)",
+        "(var {} x) (var {} g) (var {} b) (lit {type: (t-prim {} i64)} 1)",
+        "(var {} x) (var {} g) (var {} b) (lit {type: (t-prim {} f64)} 1.0)",
+        "(var {} x) (var {} g) (var {} b) (lit {type: (t-prim {} bool)} true)",
+        "(var {} x) (var {} g) (var {} b) (var {} g)",
+        "(var {} x) (var {} g) (var {} b) (lit {type: (t-prim {} f32)} 1.0) (lit {type: (t-prim {} f32)} 1.0)",
     ] {
-        let source = format!(
-            "def f(x: tensor[2,2,f32], g: tensor[2,f32], b: tensor[2,f32]) = layer_norm({args})\n"
-        );
+        let source =
+            include_str!("fixtures/core/tests/issue_1294_standard_lowerings/layer_norm_args.deep")
+                .replace("@args@", args);
         assert!(check(&source).is_err(), "accepted {source}");
     }
     for dtype in ["i8", "i16", "i32", "i64", "bool"] {
-        let source = format!(
-            "def f(x: tensor[2,2,{dtype}], g: tensor[2,{dtype}], b: tensor[2,{dtype}], e: {dtype}) = layer_norm(x,g,b,e)\n"
-        );
+        let source =
+            include_str!("fixtures/core/tests/issue_1294_standard_lowerings/dtype_template_8.deep")
+                .replace("f32", dtype);
         assert!(check(&source).is_err(), "accepted {source}");
     }
 }
@@ -57,13 +51,11 @@ fn layer_norm_rejects_missing_or_mistyped_epsilon_and_invalid_operands() {
 #[test]
 fn standard_axis_recipes_use_insert_for_rank_raising() {
     check(
-        "def f(x: tensor[2,3,f32]) -> tensor[2,3,f32] = \
-         insert(max_reduce(x,1i32),1i32,shape(x,1i32))\n",
+        include_str!("fixtures/core/tests/issue_1294_standard_lowerings/standard_axis_recipes_use_insert_for_rank_raising_1.deep"),
     )
     .unwrap();
     check(
-        "def f(x: tensor[1,2,3,f32]) -> tensor[4,1,2,3,f32] = \
-         insert(x,0i32,4i64)\n",
+        include_str!("fixtures/core/tests/issue_1294_standard_lowerings/standard_axis_recipes_use_insert_for_rank_raising_2.deep"),
     )
     .unwrap();
 }
@@ -71,16 +63,16 @@ fn standard_axis_recipes_use_insert_for_rank_raising() {
 #[test]
 fn expand_accepts_same_rank_unit_axis_recipe() {
     check(
-        "def f(x: tensor[1,2,3,f32]) -> tensor[4,2,3,f32] = \
-         expand(x,0i32,4i64)\n",
+        include_str!("fixtures/core/tests/issue_1294_standard_lowerings/expand_accepts_same_rank_unit_axis_recipe_1.deep"),
     )
     .unwrap();
 }
 
 #[test]
 fn expand_rejects_rank_raising_recipe() {
-    let rank_raising = "def f(x: tensor[1,2,3,f32]) -> tensor[4,1,2,3,f32] = \
-         expand(x,0i32,4i64)\n";
+    let rank_raising = include_str!(
+        "fixtures/core/tests/issue_1294_standard_lowerings/expand_rejects_rank_raising_recipe_1.deep"
+    );
     let error = check(rank_raising).expect_err("expand must not add an axis");
     assert!(
         error.contains("expand output rank 4 must equal input rank 3")
@@ -91,7 +83,9 @@ fn expand_rejects_rank_raising_recipe() {
 
 #[test]
 fn expand_rejects_nonunit_axis_recipe() {
-    let nonunit = "def f(x: tensor[2,3,f32]) -> tensor[2,4,f32] = expand(x,1i32,4i64)\n";
+    let nonunit = include_str!(
+        "fixtures/core/tests/issue_1294_standard_lowerings/expand_rejects_nonunit_axis_recipe_1.deep"
+    );
     let error = check(nonunit).expect_err("expand must not replace a non-unit axis");
     assert!(
         error.contains("requires the operand's extent at axis 1 to be 1, got 3"),
@@ -101,7 +95,9 @@ fn expand_rejects_nonunit_axis_recipe() {
 
 #[test]
 fn expand_rejects_retired_shape_taking_recipe() {
-    let obsolete_shape_form = "def f(x: tensor[2,3,f32]) = expand(x,[2i64,3i64,4i64])\n";
+    let obsolete_shape_form = include_str!(
+        "fixtures/core/tests/issue_1294_standard_lowerings/expand_rejects_retired_shape_taking_recipe_1.deep"
+    );
     let error = check(obsolete_shape_form).expect_err("retired expand form must be rejected");
     assert!(
         error.contains("kind: ArityMismatch")
@@ -115,24 +111,45 @@ fn expand_rejects_retired_shape_taking_recipe() {
 
 #[test]
 fn attention_recipe_checks_explicit_batch_mask_and_permutation_axes() {
-    let source = r#"def attention(q: tensor[1,2,2,1,f32], k: tensor[1,2,3,1,f32], v: tensor[1,2,3,2,f32], mask: tensor[1,2,2,3,bool], scale: f32) -> tensor[1,2,2,2,f32] = matmul(softmax(where(mask,mul(matmul(q,permute(k,0,1,3,2)),insert(insert(insert(insert(scalar_to_tensor(scale),0,1i64),1,2i64),2,2i64),3,3i64)),insert(insert(insert(insert(scalar_to_tensor(div(-1.0f32,0.0f32)),0,1i64),1,2i64),2,2i64),3,3i64)),3),v)
-"#;
-    check(source).unwrap();
+    check(include_str!("fixtures/core/tests/issue_1294_standard_lowerings/attention_recipe_checks_explicit_batch_mask_and_permutation_axes_1.deep")).unwrap();
     assert!(
-        check(&source.replace("mask: tensor[1,2,2,3,bool]", "mask: tensor[1,1,2,3,bool]")).is_err()
+        check(include_str!(
+            "fixtures/core/tests/issue_1294_standard_lowerings/attention_invalid_0.deep"
+        ))
+        .is_err()
     );
-    assert!(check(&source.replace("permute(k,0,1,3,2)", "permute(k,[0,1,3,2])")).is_err());
-    assert!(check(&source.replace("permute(k,0,1,3,2)", "permute(k,(0,1,3,2))")).is_err());
+    assert!(
+        check(include_str!(
+            "fixtures/core/tests/issue_1294_standard_lowerings/attention_invalid_1.deep"
+        ))
+        .is_err()
+    );
+    assert!(
+        check(include_str!(
+            "fixtures/core/tests/issue_1294_standard_lowerings/attention_invalid_2.deep"
+        ))
+        .is_err()
+    );
 }
 
 #[test]
 fn hosted_matmul_rejects_rank_dtype_and_batch_mismatches() {
     for source in [
-        "def f(a: tensor[2,f32], b: tensor[2,1,f32]) = matmul(a,b)\n",
-        "def f(a: tensor[1,2,f32], b: tensor[2,1,f64]) = matmul(a,b)\n",
-        "def f(a: tensor[1,2,i32], b: tensor[2,1,i32]) = matmul(a,b)\n",
-        "def f(a: tensor[2,1,2,f32], b: tensor[3,2,1,f32]) = matmul(a,b)\n",
-        "def f(a: tensor[1,2,f32], b: tensor[3,1,f32]) = matmul(a,b)\n",
+        include_str!(
+            "fixtures/core/tests/issue_1294_standard_lowerings/hosted_matmul_rejects_rank_dtype_and_batch_mismatches_1.deep"
+        ),
+        include_str!(
+            "fixtures/core/tests/issue_1294_standard_lowerings/hosted_matmul_rejects_rank_dtype_and_batch_mismatches_2.deep"
+        ),
+        include_str!(
+            "fixtures/core/tests/issue_1294_standard_lowerings/hosted_matmul_rejects_rank_dtype_and_batch_mismatches_3.deep"
+        ),
+        include_str!(
+            "fixtures/core/tests/issue_1294_standard_lowerings/hosted_matmul_rejects_rank_dtype_and_batch_mismatches_4.deep"
+        ),
+        include_str!(
+            "fixtures/core/tests/issue_1294_standard_lowerings/hosted_matmul_rejects_rank_dtype_and_batch_mismatches_5.deep"
+        ),
     ] {
         assert!(check(source).is_err(), "{source}");
     }

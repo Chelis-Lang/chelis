@@ -1,0 +1,23 @@
+(defsig {} base (t-adt {} Dict (t-prim {} string) (t-prim {} i64)))
+
+(def {}
+  base
+  (app {span: "surf:27..61"}
+    (var {span: "surf:27..34"} dict_of)
+    (app {span: "surf:35..60"}
+      (var {} Cons)
+      (tuple {span: "surf:36..59"}
+        (lit {span: "surf:37..44", type: (t-prim {} string)} "alpha")
+        (cast {span: "surf:46..58"}
+          (lit {span: "surf:51..52", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 1)
+          (t-prim {} i64)))
+      (var {} Nil))))
+
+(def {}
+  bad
+  (app {span: "surf:68..99"}
+    (var {span: "surf:68..79"} dict_remove)
+    (var {span: "surf:80..84"} base)
+    (cast {span: "surf:86..98"}
+      (lit {span: "surf:91..92", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 7)
+      (t-prim {} i64))))

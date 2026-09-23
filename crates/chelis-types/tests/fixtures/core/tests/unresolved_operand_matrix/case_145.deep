@@ -1,0 +1,37 @@
+(defsig {}
+  apply_t
+  (b)
+  (t-fn {}
+    (t-fn {}
+      (t-tensor {} (d-lit {} 4) (d-lit {} 3) (t-prim {} f32))
+      (t-var {} b))
+    (t-tensor {} (d-lit {} 4) (d-lit {} 3) (t-prim {} f32))
+    (t-var {} b)))
+
+(def {}
+  apply_t
+  (fn {}
+    (params {} (f {type: (t-var {} _)}) (x {type: (t-var {} _)}))
+    (app {span: "surf:73..77"}
+      (var {span: "surf:73..74"} f)
+      (var {span: "surf:75..76"} x))))
+
+(defsig {}
+  probe
+  (t-fn {}
+    (t-tensor {} (d-lit {} 4) (d-lit {} 3) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 3) (t-prim {} f32))))
+
+(def {}
+  probe
+  (fn {}
+    (params {} (t {type: (t-var {} _)}))
+    (app {span: "surf:130..163"}
+      (var {span: "surf:130..137"} apply_t)
+      (fn {span: "surf:138..159"}
+        (params {} q)
+        (app {span: "surf:148..159"}
+          (var {span: "surf:148..151"} sum)
+          (access {span: "surf:152..155"} (var {span: "surf:152..153"} q) x)
+          (lit {span: "surf:157..158", type: (t-prim {} i32)} 0)))
+      (var {span: "surf:161..162"} t))))

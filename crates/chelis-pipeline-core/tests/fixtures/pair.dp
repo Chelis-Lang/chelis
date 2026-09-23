@@ -1,0 +1,16 @@
+(defsig {}
+  pair
+  (n)
+  (t-fn {}
+    (t-tensor {} (d-var {} n) (t-prim {} f32))
+    (t-tuple {}
+      (t-tensor {} (d-var {} n) (t-prim {} f32))
+      (t-tensor {} (d-var {} n) (t-prim {} f32)))))
+
+(def {}
+  pair
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (tuple {span: "surf:69..81"}
+      (copy {span: "surf:70..77"} (var {span: "surf:75..76"} x))
+      (var {span: "surf:79..80"} x))))

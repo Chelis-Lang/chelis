@@ -1,0 +1,103 @@
+(defsig {}
+  sumsq
+  (t-fn {} (t-tensor {} (d-lit {} 3) (t-prim {} f32)) (t-prim {} f32)))
+
+(def {}
+  sumsq
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:41..76"}
+      (var {span: "surf:41..57"} tensor_to_scalar)
+      (app {span: "surf:58..75"}
+        (var {span: "surf:58..61"} sum)
+        (app {span: "surf:62..71"}
+          (var {span: "surf:62..65"} mul)
+          (var {span: "surf:66..67"} x)
+          (var {span: "surf:69..70"} x))
+        (lit {span: "surf:73..74", type: (t-prim {} i32)} 0)))))
+
+(defsig {}
+  dead_callable
+  (t-fn {}
+    (t-fn {} (t-tensor {} (d-lit {} 3) (t-prim {} f32)) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 3) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 3) (t-prim {} f32))))
+
+(def {}
+  dead_callable
+  (fn {}
+    (params {} (model {type: (t-var {} _)}) (x {type: (t-var {} _)}))
+    (let {span: "surf:171..281"}
+      (bind {}
+        target
+        (fn {span: "surf:184..254"}
+          (params {} (v {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}))
+          (let {span: "surf:210..254"}
+            (bind {}
+              dead
+              (app {span: "surf:223..231"}
+                (var {span: "surf:223..228"} model)
+                (var {span: "surf:229..230"} v)))
+            (cast {span: "surf:236..250"}
+              (lit {span: "surf:241..244", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 1.0)
+              (t-prim {} f32)))))
+      (app {span: "surf:257..279"}
+        (grad {span: "surf:257..276", wrt: (var {} v)}
+          (var {span: "surf:262..268"} target)
+          (lit {type: (t-prim {} i32)} 0))
+        (var {span: "surf:277..278"} x)))))
+
+(defsig {}
+  live_callable
+  (t-fn {}
+    (t-fn {} (t-tensor {} (d-lit {} 3) (t-prim {} f32)) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 3) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 3) (t-prim {} f32))))
+
+(def {}
+  live_callable
+  (fn {}
+    (params {} (model {type: (t-var {} _)}) (x {type: (t-var {} _)}))
+    (let {span: "surf:376..450"}
+      (bind {}
+        target
+        (fn {span: "surf:389..423"}
+          (params {} (v {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}))
+          (app {span: "surf:415..423"}
+            (var {span: "surf:415..420"} model)
+            (var {span: "surf:421..422"} v))))
+      (app {span: "surf:426..448"}
+        (grad {span: "surf:426..445", wrt: (var {} v)}
+          (var {span: "surf:431..437"} target)
+          (lit {type: (t-prim {} i32)} 0))
+        (var {span: "surf:446..447"} x)))))
+
+(defsig {}
+  dead_specialized
+  (t-fn {}
+    (t-tensor {} (d-lit {} 3) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 3) (t-prim {} f32))))
+
+(def {}
+  dead_specialized
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:514..537"}
+      (var {span: "surf:514..527"} dead_callable)
+      (var {span: "surf:528..533"} sumsq)
+      (var {span: "surf:535..536"} x))))
+
+(defsig {}
+  live_specialized
+  (t-fn {}
+    (t-tensor {} (d-lit {} 3) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 3) (t-prim {} f32))))
+
+(def {}
+  live_specialized
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:601..624"}
+      (var {span: "surf:601..614"} live_callable)
+      (var {span: "surf:615..620"} sumsq)
+      (var {span: "surf:622..623"} x))))

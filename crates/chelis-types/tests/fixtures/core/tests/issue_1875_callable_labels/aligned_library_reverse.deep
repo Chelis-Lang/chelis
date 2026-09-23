@@ -1,0 +1,16 @@
+(defsig {}
+  aligned
+  (d)
+  (t-fn {}
+    (t-tensor {} (d-var {} d) (t-prim {} f32))
+    (t-tensor {} (d-name {} fixed) (t-prim {} f32))
+    (t-tensor {} (d-var {} d) (t-prim {} f32))))
+
+(def {}
+  aligned
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (gain {type: (t-var {} _)}))
+    (app {span: "surf:77..88"}
+      (var {span: "surf:77..80"} mul)
+      (var {span: "surf:81..85"} gain)
+      (var {span: "surf:86..87"} x))))

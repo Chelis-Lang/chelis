@@ -1,0 +1,42 @@
+(defsig {}
+  invoke
+  (t-fn {}
+    (t-prim {} i32)
+    (t-fn {} (t-adt {} List (t-prim {} i64)) (t-prim {} i64))
+    (t-adt {} List (t-prim {} i64))
+    (t-prim {} i64)))
+
+(def {}
+  invoke
+  (fn {}
+    (params {}
+      (n {type: (t-var {} _)})
+      (f {type: (t-var {} _)})
+      (xs {type: (t-var {} _)}))
+    (if {span: "surf:64..116"}
+      (app {span: "surf:67..76"}
+        (var {} eq)
+        (var {span: "surf:67..68"} n)
+        (lit {span: "surf:72..76", surf_literal_style: "explicit", type: (t-prim {} i32)} 0))
+      (app {span: "surf:82..87"}
+        (var {span: "surf:82..83"} f)
+        (var {span: "surf:84..86"} xs))
+      (app {span: "surf:93..116"}
+        (var {span: "surf:93..99"} invoke)
+        (app {span: "surf:100..108"}
+          (var {} sub)
+          (var {span: "surf:100..101"} n)
+          (lit {span: "surf:104..108", surf_literal_style: "explicit", type: (t-prim {} i32)} 1))
+        (var {span: "surf:110..111"} f)
+        (var {span: "surf:113..115"} xs)))))
+
+(def {}
+  out
+  (app {span: "surf:123..148"}
+    (var {span: "surf:123..129"} invoke)
+    (lit {span: "surf:130..134", surf_literal_style: "explicit", type: (t-prim {} i32)} 1)
+    (var {span: "surf:136..139"} len)
+    (app {span: "surf:141..147"}
+      (var {} Cons)
+      (lit {span: "surf:142..146", type: (t-prim {} i64)} 1)
+      (var {} Nil))))

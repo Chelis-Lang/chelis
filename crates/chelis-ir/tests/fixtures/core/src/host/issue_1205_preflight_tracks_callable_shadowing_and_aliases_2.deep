@@ -1,0 +1,51 @@
+(module {surf_path: "FrontEndPerformance.AliasedCallable"}
+  frontendperformance.aliasedcallable
+  (defsig {}
+    bc
+    (t-fn {} (t-prim {} f32) (t-tensor {} (d-lit {} 1) (t-prim {} f32))))
+  (def {}
+    bc
+    (fn {}
+      (params {} (c {type: (t-var {} _)}))
+      (app {span: "surf:78..92"}
+        (var {span: "surf:78..87"} to_tensor)
+        (app {span: "surf:88..91"}
+          (var {} Cons)
+          (var {span: "surf:89..90"} c)
+          (var {} Nil)))))
+  (defsig {}
+    aliased
+    (t-fn {} (t-prim {} f32) (t-tensor {} (d-lit {} 1) (t-prim {} f32))))
+  (def {}
+    aliased
+    (fn {}
+      (params {} (c {type: (t-var {} _)}))
+      (let {span: "surf:133..148"}
+        (bind {}
+          f
+          (var {span: "surf:139..141"} bc))
+        (app {span: "surf:142..146"}
+          (var {span: "surf:142..143"} f)
+          (var {span: "surf:144..145"} c)))))
+  (defsig {}
+    wrapper
+    (t-fn {} (t-prim {} f32) (t-tensor {} (d-lit {} 1) (t-prim {} f32))))
+  (def {}
+    wrapper
+    (fn {}
+      (params {} (c {type: (t-var {} _)}))
+      (app {span: "surf:189..199"}
+        (var {span: "surf:189..196"} aliased)
+        (var {span: "surf:197..198"} c))))
+  (def {}
+    out
+    (app {span: "surf:206..251"}
+      (var {span: "surf:206..211"} index)
+      (app {span: "surf:212..244"}
+        (var {span: "surf:212..219"} to_list)
+        (app {span: "surf:220..243"}
+          (var {span: "surf:220..227"} wrapper)
+          (cast {span: "surf:228..242"}
+            (lit {span: "surf:233..236", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 1.0)
+            (t-prim {} f32))))
+      (lit {span: "surf:246..250", type: (t-prim {} i64)} 0))))

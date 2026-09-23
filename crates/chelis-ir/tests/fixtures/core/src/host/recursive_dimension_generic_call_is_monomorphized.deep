@@ -1,0 +1,117 @@
+(deftype {}
+  Col
+  (n)
+  (variant {} FloatCol (t-tensor {} (d-var {} n) (t-prim {} f32))))
+
+(defsig {} zero_i64 (t-fn {} (t-prim {} i64)))
+
+(def {}
+  zero_i64
+  (fn {}
+    (params {})
+    (cast {span: "surf:65..77"}
+      (lit {span: "surf:70..71", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 0)
+      (t-prim {} i64))))
+
+(defsig {} one_i64 (t-fn {} (t-prim {} i64)))
+
+(def {}
+  one_i64
+  (fn {}
+    (params {})
+    (cast {span: "surf:101..113"}
+      (lit {span: "surf:106..107", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 1)
+      (t-prim {} i64))))
+
+(defsig {} col_len (n) (t-fn {} (t-adt {} Col (t-var {} n)) (t-prim {} i64)))
+
+(def {}
+  col_len
+  (fn {}
+    (params {} (col {type: (t-var {} _)}))
+    (match {span: "surf:151..197"}
+      (var {span: "surf:157..160"} col)
+      (arm {}
+        (pat-ctor {} FloatCol (pat-var {} xs))
+        ()
+        (app {span: "surf:186..195"}
+          (var {span: "surf:186..191"} numel)
+          (var {span: "surf:192..194"} xs))))))
+
+(defsig {}
+  all_eq_len
+  (n)
+  (t-fn {}
+    (t-adt {} List (t-tuple {} (t-prim {} string) (t-adt {} Col (t-var {} n))))
+    (t-prim {} i64)
+    (t-prim {} bool)))
+
+(def {}
+  all_eq_len
+  (fn {}
+    (params {} (pairs {type: (t-var {} _)}) (expected {type: (t-var {} _)}))
+    (if {span: "surf:272..449"}
+      (app {span: "surf:275..301"}
+        (var {span: "surf:275..277"} eq)
+        (app {span: "surf:278..288"}
+          (var {span: "surf:278..281"} len)
+          (var {span: "surf:282..287"} pairs))
+        (app {span: "surf:290..300"} (var {span: "surf:290..298"} zero_i64)))
+      (lit {span: "surf:307..311", type: (t-prim {} bool)} true)
+      (let {span: "surf:317..449"}
+        (bind {}
+          entry
+          (app {span: "surf:327..351"}
+            (var {span: "surf:327..332"} index)
+            (var {span: "surf:333..338"} pairs)
+            (app {span: "surf:340..350"} (var {span: "surf:340..348"} zero_i64))))
+        (if {span: "surf:352..447"}
+          (app {span: "surf:355..386"}
+            (var {span: "surf:355..358"} neq)
+            (app {span: "surf:359..375"}
+              (var {span: "surf:359..366"} col_len)
+              (tuple-get {span: "surf:367..374"}
+                (var {span: "surf:367..372"} entry)
+                (lit {type: (t-prim {} i32)} 1)))
+            (var {span: "surf:377..385"} expected))
+          (lit {span: "surf:392..397", type: (t-prim {} bool)} false)
+          (app {span: "surf:403..447"}
+            (var {span: "surf:403..413"} all_eq_len)
+            (app {span: "surf:414..436"}
+              (var {span: "surf:414..418"} drop)
+              (var {span: "surf:419..424"} pairs)
+              (app {span: "surf:426..435"}
+                (var {span: "surf:426..433"} one_i64)))
+            (var {span: "surf:438..446"} expected)))))))
+
+(defsig {} main (t-fn {} (t-prim {} bool)))
+
+(def {}
+  main
+  (fn {}
+    (params {})
+    (app {span: "surf:471..559"}
+      (var {span: "surf:471..481"} all_eq_len)
+      (app {span: "surf:482..544"}
+        (var {} Cons)
+        (tuple {span: "surf:483..543"}
+          (lit {span: "surf:484..487", type: (t-prim {} string)} "a")
+          (app {span: "surf:489..542"}
+            (var {span: "surf:489..497"} FloatCol)
+            (app {span: "surf:498..541"}
+              (var {span: "surf:498..507"} to_tensor)
+              (app {span: "surf:508..540"}
+                (var {} Cons)
+                (cast {span: "surf:509..523"}
+                  (lit {span: "surf:514..517", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 1.0)
+                  (t-prim {} f32))
+                (app {}
+                  (var {} Cons)
+                  (cast {span: "surf:525..539"}
+                    (lit {span: "surf:530..533", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 2.0)
+                    (t-prim {} f32))
+                  (var {} Nil))))))
+        (var {} Nil))
+      (cast {span: "surf:546..558"}
+        (lit {span: "surf:551..552", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 2)
+        (t-prim {} i64)))))

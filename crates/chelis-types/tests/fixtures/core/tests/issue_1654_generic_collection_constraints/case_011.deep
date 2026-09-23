@@ -1,0 +1,80 @@
+(defsig {}
+  at
+  (a)
+  (t-fn {} (t-adt {} List (t-var {} a)) (t-prim {} i64) (t-var {} a)))
+
+(def {}
+  at
+  (fn {}
+    (params {} (xs {type: (t-var {} _)}) (i {type: (t-var {} _)}))
+    (app {span: "surf:38..50"}
+      (var {span: "surf:38..43"} index)
+      (var {span: "surf:44..46"} xs)
+      (var {span: "surf:48..49"} i))))
+
+(defsig {}
+  push
+  (a)
+  (t-fn {}
+    (t-adt {} List (t-var {} a))
+    (t-var {} a)
+    (t-adt {} List (t-var {} a))))
+
+(def {}
+  push
+  (fn {}
+    (params {} (xs {type: (t-var {} _)}) (x {type: (t-var {} _)}))
+    (app {span: "surf:95..108"}
+      (var {span: "surf:95..101"} append)
+      (var {span: "surf:102..104"} xs)
+      (var {span: "surf:106..107"} x))))
+
+(defsig {}
+  join
+  (a)
+  (t-fn {}
+    (t-adt {} List (t-var {} a))
+    (t-adt {} List (t-var {} a))
+    (t-adt {} List (t-var {} a))))
+
+(def {}
+  join
+  (fn {}
+    (params {} (lhs {type: (t-var {} _)}) (rhs {type: (t-var {} _)}))
+    (app {span: "surf:162..178"}
+      (var {span: "surf:162..168"} concat)
+      (var {span: "surf:169..172"} lhs)
+      (var {span: "surf:174..177"} rhs))))
+
+(def {}
+  first
+  (app {span: "surf:187..203"}
+    (var {span: "surf:187..189"} at)
+    (app {span: "surf:190..196"}
+      (var {} Cons)
+      (lit {span: "surf:191..195", type: (t-prim {} i64)} 1)
+      (var {} Nil))
+    (lit {span: "surf:198..202", type: (t-prim {} i64)} 0)))
+
+(def {}
+  more
+  (app {span: "surf:211..229"}
+    (var {span: "surf:211..215"} push)
+    (app {span: "surf:216..222"}
+      (var {} Cons)
+      (lit {span: "surf:217..221", type: (t-prim {} i64)} 1)
+      (var {} Nil))
+    (lit {span: "surf:224..228", type: (t-prim {} i64)} 2)))
+
+(def {}
+  all
+  (app {span: "surf:236..256"}
+    (var {span: "surf:236..240"} join)
+    (app {span: "surf:241..247"}
+      (var {} Cons)
+      (lit {span: "surf:242..246", type: (t-prim {} i64)} 1)
+      (var {} Nil))
+    (app {span: "surf:249..255"}
+      (var {} Cons)
+      (lit {span: "surf:250..254", type: (t-prim {} i64)} 2)
+      (var {} Nil))))

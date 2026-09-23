@@ -1,0 +1,34 @@
+(deftype {}
+  Box
+  (a)
+  (variant {} Empty)
+  (variant {} Full (field {} value (t-var {} a))))
+
+(defsig {} bad_wrap (t-fn {} (t-prim {} bool)))
+
+(def {}
+  bad_wrap
+  (fn {}
+    (params {})
+    (app {span: "surf:72..82"}
+      (var {span: "surf:72..75"} bad)
+      (var {span: "surf:76..81"} Empty))))
+
+(defsig {} bad (b) (t-fn {} (t-adt {} Box (t-var {} b)) (t-prim {} bool)))
+
+(def {}
+  bad
+  (fn {}
+    (params {} (box {type: (t-var {} _)}))
+    (match {span: "surf:119..200"}
+      (var {span: "surf:125..128"} box)
+      (arm {}
+        (pat-ctor {} Empty)
+        ()
+        (lit {span: "surf:151..155", type: (t-prim {} bool)} true))
+      (arm {}
+        (pat-record {} Full (kv {} value (pat-var {} item)))
+        ()
+        (app {span: "surf:186..196"}
+          (var {span: "surf:186..189"} bad)
+          (var {span: "surf:190..195"} Empty))))))

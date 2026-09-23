@@ -1,0 +1,24 @@
+(defsig {}
+  consumer
+  (n)
+  (t-fn {}
+    (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} f32)))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))))
+
+(def {}
+  consumer
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (copy {span: "surf:57..64"} (var {span: "surf:62..63"} x))))
+
+(defsig {}
+  go
+  (t-fn {} (t-prim {} i32) (t-tensor {} (d-lit {} 1) (t-prim {} f32))))
+
+(def {}
+  go
+  (fn {}
+    (params {} (v {type: (t-var {} _)}))
+    (app {span: "surf:100..112"}
+      (var {span: "surf:100..108"} consumer)
+      (borrow {span: "surf:109..111"} (var {span: "surf:110..111"} v)))))

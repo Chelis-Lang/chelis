@@ -1,0 +1,23 @@
+(defsig {}
+  sample
+  (t-fn {}
+    (t-tensor {} (d-lit {} 8) (t-prim {} f32))
+    (t-prim {} f32)
+    (t-tensor {} (d-lit {} 8) (t-prim {} f32))))
+
+(def {}
+  sample
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (rate {type: (t-var {} _)}))
+    (let {span: "surf:61..120"}
+      (bind {}
+        neg
+        (fn {span: "surf:69..93"}
+          (params {} (unused {type: (t-prim {} f32)}))
+          (var {span: "surf:89..93"} rate)))
+      (app {span: "surf:95..118"}
+        (var {span: "surf:95..102"} dropout)
+        (var {span: "surf:103..104"} x)
+        (app {span: "surf:106..117"}
+          (var {span: "surf:106..109"} neg)
+          (lit {span: "surf:110..116", surf_literal_style: "explicit", type: (t-prim {} f32)} 0.5))))))

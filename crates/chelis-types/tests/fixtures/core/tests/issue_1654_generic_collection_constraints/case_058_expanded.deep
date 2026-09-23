@@ -1,0 +1,26 @@
+(defsig {}
+  dynamic
+  (t-fn {}
+    (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))
+    (t-prim {} i32)
+    (t-tensor {} (d-name {} *) (d-name {} *) (t-prim {} f32))))
+
+(def {}
+  dynamic
+  (fn {}
+    (params {}
+      (a {type: (t-var {} _)})
+      (b {type: (t-var {} _)})
+      (axis {type: (t-var {} _)}))
+    (let {span: "surf:90..175"}
+      (bind {}
+        op
+        (var {span: "surf:150..156", surf_binding_type: "explicit", type: (t-fn {} (t-adt {} List (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))) (t-prim {} i32) (t-tensor {} (d-name {} *) (d-name {} *) (t-prim {} f32)))} concat))
+      (app {span: "surf:157..173"}
+        (var {span: "surf:157..159"} op)
+        (app {span: "surf:160..166"}
+          (var {} Cons)
+          (var {span: "surf:161..162"} a)
+          (app {} (var {} Cons) (var {span: "surf:164..165"} b) (var {} Nil)))
+        (var {span: "surf:168..172"} axis)))))

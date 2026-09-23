@@ -1,0 +1,97 @@
+(deftype {}
+  Col
+  (n)
+  (variant {} FloatCol (t-tensor {} (d-var {} n) (t-prim {} f32))))
+
+(deftype {}
+  Box
+  (a)
+  (variant {} Nothing)
+  (variant {} Just (field {} item (t-var {} a))))
+
+(defsig {} box_it (a) (t-fn {} (t-var {} a) (t-adt {} Box (t-var {} a))))
+
+(def {}
+  box_it
+  (fn {}
+    (params {} (item {type: (t-var {} _)}))
+    (record {span: "surf:119..132"}
+      Just
+      (kv {} item (var {span: "surf:126..130"} item)))))
+
+(defsig {}
+  unbox
+  (a)
+  (t-fn {} (t-adt {} Box (t-var {} a)) (t-var {} a) (t-var {} a)))
+
+(def {}
+  unbox
+  (fn {}
+    (params {} (b {type: (t-var {} _)}) (fallback {type: (t-var {} _)}))
+    (match {span: "surf:177..239"}
+      (var {span: "surf:183..184"} b)
+      (arm {} (pat-ctor {} Nothing) () (var {span: "surf:205..213"} fallback))
+      (arm {}
+        (pat-record {} Just (kv {} item (pat-var {} i)))
+        ()
+        (var {span: "surf:236..237"} i)))))
+
+(defsig {}
+  roundtrip
+  (n)
+  (t-fn {} (t-adt {} Col (t-var {} n)) (t-adt {} Col (t-var {} n))))
+
+(def {}
+  roundtrip
+  (fn {}
+    (params {} (c {type: (t-var {} _)}))
+    (app {span: "surf:280..299"}
+      (var {span: "surf:280..285"} unbox)
+      (app {span: "surf:286..295"}
+        (var {span: "surf:286..292"} box_it)
+        (var {span: "surf:293..294"} c))
+      (var {span: "surf:297..298"} c))))
+
+(defsig {}
+  total
+  (n)
+  (t-fn {}
+    (t-adt {} Col (t-var {} n))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))))
+
+(def {}
+  total
+  (fn {}
+    (params {} (c {type: (t-var {} _)}))
+    (match {span: "surf:344..390"}
+      (app {span: "surf:350..362"}
+        (var {span: "surf:350..359"} roundtrip)
+        (var {span: "surf:360..361"} c))
+      (arm {}
+        (pat-ctor {} FloatCol (pat-var {} t))
+        ()
+        (var {span: "surf:387..388"} t)))))
+
+(defsig {} main (t-fn {} (t-tensor {} (d-lit {} 2) (t-prim {} f32))))
+
+(def {}
+  main
+  (fn {}
+    (params {})
+    (app {span: "surf:422..482"}
+      (var {span: "surf:422..427"} total)
+      (app {span: "surf:428..481"}
+        (var {span: "surf:428..436"} FloatCol)
+        (app {span: "surf:437..480"}
+          (var {span: "surf:437..446"} to_tensor)
+          (app {span: "surf:447..479"}
+            (var {} Cons)
+            (cast {span: "surf:448..462"}
+              (lit {span: "surf:453..456", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 1.0)
+              (t-prim {} f32))
+            (app {}
+              (var {} Cons)
+              (cast {span: "surf:464..478"}
+                (lit {span: "surf:469..472", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 2.0)
+                (t-prim {} f32))
+              (var {} Nil))))))))

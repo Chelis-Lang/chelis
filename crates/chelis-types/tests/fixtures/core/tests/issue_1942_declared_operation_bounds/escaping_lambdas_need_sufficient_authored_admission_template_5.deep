@@ -1,0 +1,11 @@
+(def {}
+  make
+  (fn {}
+    (params {})
+    (tuple {}
+      (fn {}
+        (params {} x)
+        (app {}
+          (var {} sin)
+          (var {} x)))
+      (lit {surf_literal_style: "explicit", type: (t-prim {} i32)} 1))))

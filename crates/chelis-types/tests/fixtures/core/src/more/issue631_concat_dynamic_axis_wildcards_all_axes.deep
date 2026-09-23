@@ -1,0 +1,23 @@
+(module {surf_path: "Repro.ConcatDynAxis"}
+  repro.concatdynaxis
+  (defsig {}
+    cat_dyn
+    (t-fn {}
+      (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))
+      (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))
+      (t-prim {} i32)
+      (t-tensor {} (d-lit {} 4) (d-lit {} 3) (t-prim {} f32))))
+  (def {}
+    cat_dyn
+    (fn {}
+      (params {}
+        (a {type: (t-var {} _)})
+        (b {type: (t-var {} _)})
+        (ax {type: (t-var {} _)}))
+      (app {span: "surf:118..136"}
+        (var {span: "surf:118..124"} concat)
+        (app {span: "surf:125..131"}
+          (var {} Cons)
+          (var {span: "surf:126..127"} a)
+          (app {} (var {} Cons) (var {span: "surf:129..130"} b) (var {} Nil)))
+        (var {span: "surf:133..135"} ax)))))

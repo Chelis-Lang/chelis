@@ -1,0 +1,17 @@
+(defsig {}
+  run
+  (a b)
+  (t-fn {}
+    (t-ref {} (t-tensor {} (d-var {} a) (d-var {} b) (t-prim {} f32)))
+    (t-tensor {} (d-var {} a) (d-var {} b) (t-prim {} f32))))
+
+(def {}
+  run
+  (fn {}
+    (params {} logits)
+    (app {span: "surf:74..93"}
+      (var {span: "surf:74..81"} softmax)
+      (var {span: "surf:82..88"} logits)
+      (app {span: "surf:90..92"}
+        (var {} neg)
+        (lit {span: "surf:91..92", type: (t-prim {} i32)} 1)))))

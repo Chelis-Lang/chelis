@@ -1,0 +1,9 @@
+(defsig {} g (t-fn {} (t-prim {} f32) (t-prim {} f32)))
+
+(def {}
+  g
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {}
+      (var {} sin)
+      (var {} x))))

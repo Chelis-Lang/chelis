@@ -1,0 +1,46 @@
+(defsig {}
+  g
+  (n m)
+  (t-fn {}
+    (t-tensor {} (d-var {} n) (t-prim {} f32))
+    (t-tensor {} (d-var {} m) (t-prim {} f32))))
+
+(def {}
+  g
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:51..86"}
+      (var {span: "surf:51..57"} shrink)
+      (var {span: "surf:58..59"} x)
+      (app {span: "surf:61..85"}
+        (var {} Cons)
+        (app {span: "surf:62..84"}
+          (var {} Cons)
+          (lit {span: "surf:63..67", type: (t-prim {} i64)} 1)
+          (app {}
+            (var {} Cons)
+            (app {span: "surf:69..83"}
+              (var {span: "surf:69..74"} shape)
+              (var {span: "surf:75..76"} x)
+              (lit {span: "surf:78..82", surf_literal_style: "explicit", type: (t-prim {} i32)} 0))
+            (var {} Nil)))
+        (var {} Nil)))))
+
+(def {}
+  main
+  (fn {}
+    (params {})
+    (app {span: "surf:100..138"}
+      (var {span: "surf:100..101"} g)
+      (app {span: "surf:102..137"}
+        (var {span: "surf:102..111"} to_tensor)
+        (app {span: "surf:112..136"}
+          (var {} Cons)
+          (lit {span: "surf:113..119", surf_literal_style: "explicit", type: (t-prim {} f32)} 1.0)
+          (app {}
+            (var {} Cons)
+            (lit {span: "surf:121..127", surf_literal_style: "explicit", type: (t-prim {} f32)} 2.0)
+            (app {}
+              (var {} Cons)
+              (lit {span: "surf:129..135", surf_literal_style: "explicit", type: (t-prim {} f32)} 3.0)
+              (var {} Nil))))))))

@@ -1,0 +1,22 @@
+(defsig {} choose (t-fn {} (t-prim {} bool) (t-var {} _)))
+
+(def {}
+  choose
+  (fn {}
+    (params {} (flag {type: (t-var {} _)}))
+    (if {span: "surf:25..50"}
+      (var {span: "surf:28..32"} flag)
+      (var {span: "surf:38..41"} len)
+      (var {span: "surf:47..50"} len))))
+
+(def {}
+  measure
+  (app {span: "surf:61..73"}
+    (var {span: "surf:61..67"} choose)
+    (lit {span: "surf:68..72", type: (t-prim {} bool)} true)))
+
+(def {}
+  out
+  (app {span: "surf:80..93"}
+    (var {span: "surf:80..87"} measure)
+    (lit {span: "surf:88..92", type: (t-prim {} i64)} 1)))

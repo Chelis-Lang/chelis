@@ -1,0 +1,16 @@
+(def {}
+  size
+  (fn {}
+    (params {} x)
+    (app {span: "surf:14..20"}
+      (var {span: "surf:14..17"} len)
+      (var {span: "surf:18..19"} x))))
+
+(def {}
+  out
+  (app {span: "surf:27..39"}
+    (var {span: "surf:27..31"} size)
+    (app {span: "surf:32..38"}
+      (var {} Cons)
+      (lit {span: "surf:33..37", surf_literal_style: "explicit", type: (t-prim {} i32)} 1)
+      (var {} Nil))))

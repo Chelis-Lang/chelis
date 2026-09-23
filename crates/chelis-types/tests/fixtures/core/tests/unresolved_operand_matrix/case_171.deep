@@ -1,0 +1,22 @@
+(defsig {}
+  f
+  (t-fn {} (t-tensor {} (d-lit {} 3) (t-prim {} f32)) (t-prim {} f32)))
+
+(def {}
+  f
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (let {span: "surf:34..91"}
+      (bind {}
+        g
+        (fn {span: "surf:42..82"}
+          (params {} t)
+          (app {span: "surf:52..82"}
+            (var {span: "surf:52..68"} tensor_to_scalar)
+            (app {span: "surf:69..81"}
+              (var {span: "surf:69..72"} sum)
+              (var {span: "surf:73..74"} t)
+              (lit {span: "surf:76..80", surf_literal_style: "explicit", type: (t-prim {} i32)} 0)))))
+      (app {span: "surf:85..89"}
+        (var {span: "surf:85..86"} g)
+        (var {span: "surf:87..88"} x)))))

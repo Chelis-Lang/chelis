@@ -1,0 +1,111 @@
+(module {surf_path: "FrontEndPerformance.ScopeRestore"}
+  frontendperformance.scoperestore
+  (defsig {}
+    bc
+    (t-fn {} (t-prim {} f32) (t-tensor {} (d-lit {} 1) (t-prim {} f32))))
+  (def {}
+    bc
+    (fn {}
+      (params {} (c {type: (t-var {} _)}))
+      (app {span: "surf:75..89"}
+        (var {span: "surf:75..84"} to_tensor)
+        (app {span: "surf:85..88"}
+          (var {} Cons)
+          (var {span: "surf:86..87"} c)
+          (var {} Nil)))))
+  (defsig {}
+    sibling
+    (t-fn {} (t-prim {} f32) (t-tensor {} (d-lit {} 1) (t-prim {} f32))))
+  (def {}
+    sibling
+    (fn {}
+      (params {} (c {type: (t-var {} _)}))
+      (let {span: "surf:130..171"}
+        (bind {}
+          probe
+          (app {span: "surf:141..163"}
+            (fn {span: "surf:141..159"}
+              (params {} (bc {type: (t-prim {} f32)}))
+              (var {span: "surf:157..159"} bc))
+            (var {span: "surf:161..162"} c)))
+        (app {span: "surf:164..169"}
+          (var {span: "surf:164..166"} bc)
+          (var {span: "surf:167..168"} c)))))
+  (defsig {}
+    nested
+    (t-fn {} (t-prim {} f32) (t-tensor {} (d-lit {} 1) (t-prim {} f32))))
+  (def {}
+    nested
+    (fn {}
+      (params {} (c {type: (t-var {} _)}))
+      (let {span: "surf:211..276"}
+        (bind {}
+          f
+          (var {span: "surf:217..219"} bc))
+        (let {}
+          (bind {}
+            probe
+            (app {span: "surf:229..269"}
+              (fn {span: "surf:229..265"}
+                (params {} (f {type: (t-prim {} f32)}))
+                (app {span: "surf:245..265"}
+                  (fn {span: "surf:245..261"}
+                    (params {} (f {type: (t-prim {} f32)}))
+                    (var {span: "surf:260..261"} f))
+                  (var {span: "surf:263..264"} f)))
+              (var {span: "surf:267..268"} c)))
+          (app {span: "surf:270..274"}
+            (var {span: "surf:270..271"} f)
+            (var {span: "surf:272..273"} c))))))
+  (defsig {}
+    duplicate
+    (t-fn {} (t-prim {} f32) (t-tensor {} (d-lit {} 1) (t-prim {} f32))))
+  (def {}
+    duplicate
+    (fn {}
+      (params {} (c {type: (t-var {} _)}))
+      (let {span: "surf:319..340"}
+        (bind {}
+          f
+          (var {span: "surf:325..327"} bc))
+        (let {}
+          (bind {}
+            f
+            (var {span: "surf:332..333"} f))
+          (app {span: "surf:334..338"}
+            (var {span: "surf:334..335"} f)
+            (var {span: "surf:336..337"} c))))))
+  (defsig {}
+    sequential
+    (t-fn {} (t-prim {} f32) (t-tensor {} (d-lit {} 1) (t-prim {} f32))))
+  (def {}
+    sequential
+    (fn {}
+      (params {} (c {type: (t-var {} _)}))
+      (let {span: "surf:384..411"}
+        (bind {}
+          f
+          (var {span: "surf:390..392"} bc))
+        (let {}
+          (bind {}
+            g
+            (var {span: "surf:397..398"} f))
+          (let {}
+            (bind {}
+              h
+              (var {span: "surf:403..404"} g))
+            (app {span: "surf:405..409"}
+              (var {span: "surf:405..406"} h)
+              (var {span: "surf:407..408"} c)))))))
+  (def {}
+    out
+    (app {span: "surf:418..463"}
+      (var {span: "surf:418..423"} index)
+      (app {span: "surf:424..456"}
+        (var {span: "surf:424..431"} to_list)
+        (app {span: "surf:432..455"}
+          (var {span: "surf:432..439"} sibling)
+          (cast {span: "surf:440..454"}
+            (lit {span: "surf:445..448", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 1.0)
+            (t-prim {} f32))))
+      (lit {span: "surf:458..462", type: (t-prim {} i64)} 0))))

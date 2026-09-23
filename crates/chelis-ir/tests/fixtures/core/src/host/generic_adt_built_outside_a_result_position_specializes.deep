@@ -1,0 +1,70 @@
+(deftype {}
+  Store
+  (a)
+  (variant {} Vacant)
+  (variant {}
+    Held
+    (field {} key (t-prim {} string))
+    (field {} value (t-var {} a))))
+
+(defsig {}
+  unwrap
+  (a)
+  (t-fn {} (t-adt {} Store (t-var {} a)) (t-var {} a) (t-var {} a)))
+
+(def {}
+  unwrap
+  (fn {}
+    (params {} (s {type: (t-var {} _)}) (fallback {type: (t-var {} _)}))
+    (match {span: "surf:105..175"}
+      (var {span: "surf:111..112"} s)
+      (arm {} (pat-ctor {} Vacant) () (var {span: "surf:132..140"} fallback))
+      (arm {}
+        (pat-record {}
+          Held
+          (kv {} key (pat-var {} k))
+          (kv {} value (pat-var {} v)))
+        ()
+        (var {span: "surf:172..173"} v)))))
+
+(defsig {}
+  put
+  (a)
+  (t-fn {}
+    (t-adt {} Store (t-var {} a))
+    (t-prim {} string)
+    (t-var {} a)
+    (t-var {} a)))
+
+(def {}
+  put
+  (fn {}
+    (params {}
+      (s {type: (t-var {} _)})
+      (key {type: (t-var {} _)})
+      (value {type: (t-var {} _)}))
+    (let {span: "surf:230..282"}
+      (bind {}
+        fresh
+        (record {span: "surf:240..259"}
+          Held
+          (kv {} key (var {span: "surf:247..250"} key))
+          (kv {} value (var {span: "surf:252..257"} value))))
+      (app {span: "surf:260..280"}
+        (var {span: "surf:260..266"} unwrap)
+        (var {span: "surf:267..272"} fresh)
+        (var {span: "surf:274..279"} value)))))
+
+(defsig {} read (t-fn {} (t-prim {} i64)))
+
+(def {}
+  read
+  (fn {}
+    (params {})
+    (app {span: "surf:303..333"}
+      (var {span: "surf:303..306"} put)
+      (var {span: "surf:307..313"} Vacant)
+      (lit {span: "surf:315..318", type: (t-prim {} string)} "a")
+      (cast {span: "surf:320..332"}
+        (lit {span: "surf:325..326", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 1)
+        (t-prim {} i64)))))

@@ -1,0 +1,18 @@
+(defsig {} identity (p) (t-fn {} (t-var {} p) (t-var {} p)))
+
+(def {}
+  identity
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (var {span: "surf:29..30"} x)))
+
+(def {}
+  x
+  (app {span: "surf:35..64"}
+    (var {span: "surf:35..43"} identity)
+    (app {span: "surf:44..63"}
+      (var {span: "surf:44..53"} to_tensor)
+      (app {span: "surf:54..62"}
+        (var {} Cons)
+        (lit {span: "surf:55..61", surf_literal_style: "explicit", type: (t-prim {} f32)} 1.0)
+        (var {} Nil)))))

@@ -1,0 +1,29 @@
+(def {}
+  mapped
+  (app {span: "surf:10..34"}
+    (var {span: "surf:10..19"} mmap_file)
+    (lit {span: "surf:20..33", type: (t-prim {} string)} "dataset.txt")))
+
+(def {}
+  prefix
+  (app {span: "surf:44..89"}
+    (var {span: "surf:44..53"} mmap_read)
+    (var {span: "surf:54..60"} mapped)
+    (cast {span: "surf:62..74"}
+      (lit {span: "surf:67..68", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 0)
+      (t-prim {} i64))
+    (cast {span: "surf:76..88"}
+      (lit {span: "surf:81..82", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 4)
+      (t-prim {} i64))))
+
+(def {}
+  width
+  (app {span: "surf:98..114"}
+    (var {span: "surf:98..106"} mmap_len)
+    (var {span: "surf:107..113"} mapped)))
+
+(def {}
+  contents
+  (app {span: "surf:126..150"}
+    (var {span: "surf:126..135"} read_file)
+    (lit {span: "surf:136..149", type: (t-prim {} string)} "dataset.txt")))

@@ -1,0 +1,22 @@
+(module {surf_path: "Agent.Nest"}
+  agent.nest
+  (deftype {}
+    Holder
+    ()
+    (variant {}
+      Holder
+      (field {} p (t-adt {} Probability))
+      (field {} tag (t-prim {} f32))))
+  (defsig {} sneak (t-fn {} (t-prim {} f32) (t-adt {} Holder)))
+  (def {}
+    sneak
+    (fn {}
+      (params {} (x {type: (t-var {} _)}))
+      (record {span: "surf:102..150"}
+        Holder
+        (kv {}
+          p
+          (record {span: "surf:114..138"}
+            Probability
+            (kv {} value (var {span: "surf:135..136"} x))))
+        (kv {} tag (lit {span: "surf:145..148", type: (t-prim {} f32)} 1.0))))))

@@ -1,4 +1,0 @@
-# This archive commits its .ch probe sources. The parent
-# docs/investigations/probes/.gitignore ignores *.ch / *.dp (battery-run
-# scratch); re-include the ones that belong to this fixed archive.
-!*.ch

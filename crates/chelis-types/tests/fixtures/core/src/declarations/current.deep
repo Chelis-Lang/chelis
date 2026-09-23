@@ -1,0 +1,20 @@
+(module {surf_path: "Current"}
+  current
+  (def {}
+    root
+    (app {span: "surf:23..50"}
+      (var {span: "surf:23..26"} add)
+      (var {span: "surf:27..32"} later)
+      (app {span: "surf:34..49"}
+        (var {span: "surf:34..46"} read_current)
+        (lit {span: "surf:47..48", type: (t-prim {} i32)} 0))))
+  (def {} later (lit {span: "surf:61..68", type: (t-prim {} i32)} 5))
+  (defsig {} read_current (t-fn {} (t-prim {} i32) (t-prim {} i32)))
+  (def {}
+    read_current
+    (fn {}
+      (params {} (n {type: (t-var {} _)}))
+      (app {span: "surf:105..118"}
+        (var {span: "surf:105..108"} add)
+        (var {span: "surf:109..110"} n)
+        (var {span: "surf:112..117"} later)))))

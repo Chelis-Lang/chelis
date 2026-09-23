@@ -1,0 +1,24 @@
+(defsig {}
+  bad
+  (t-fn {}
+    (t-tensor {}
+      (d-name {} batch)
+      (d-name {} seq)
+      (d-name {} hidden)
+      (t-prim {} f32))
+    (t-tensor {} (d-name {} hidden) (d-name {} out_dim) (t-prim {} f32))
+    (t-tensor {}
+      (d-name {} batch)
+      (d-name {} seq)
+      (d-name {} out_dim)
+      (t-prim {} f32))))
+
+(def {}
+  bad
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (w {type: (t-var {} _)}))
+    (app {span: "surf:124..153"}
+      (var {span: "surf:124..130"} einsum)
+      (lit {span: "surf:131..146", type: (t-prim {} string)} "...h,ho->...o")
+      (var {span: "surf:148..149"} x)
+      (var {span: "surf:151..152"} w))))

@@ -1,0 +1,22 @@
+(module {surf_path: "Repro.Where"}
+  repro.where
+  (defsig {}
+    f
+    (n a b)
+    (t-fn {}
+      (t-tensor {} (d-var {} n) (t-prim {} bool))
+      (t-tensor {} (d-var {} n) (t-prim {} f32))
+      (t-tensor {} (d-var {} a) (d-var {} b) (t-prim {} f32))
+      (t-var {} _)))
+  (def {}
+    f
+    (fn {}
+      (params {}
+        (c {type: (t-var {} _)})
+        (x {type: (t-var {} _)})
+        (y {type: (t-var {} _)}))
+      (app {}
+        (var {} where)
+        (var {} c)
+        (var {} x)
+        (var {} y)))))

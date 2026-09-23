@@ -1,0 +1,24 @@
+(deftype {} Flag () (variant {} On) (variant {} Off))
+
+(defsig {}
+  run
+  (t-fn {}
+    (t-adt {} Flag)
+    (t-tensor {} (d-lit {} 2) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 2) (t-prim {} f32))))
+
+(def {}
+  run
+  (fn {}
+    (params {} (c {type: (t-var {} _)}) (x {type: (t-var {} _)}))
+    (let {span: "surf:83..152"}
+      (bind {}
+        y
+        (app {span: "surf:91..100"}
+          (var {span: "surf:91..94"} add)
+          (var {span: "surf:95..96"} x)
+          (var {span: "surf:98..99"} x)))
+      (match {span: "surf:103..150"}
+        (var {span: "surf:109..110"} c)
+        (arm {} (pat-ctor {} On) () (var {span: "surf:130..131"} y))
+        (arm {} (pat-ctor {} Off) () (var {span: "surf:145..146"} x))))))

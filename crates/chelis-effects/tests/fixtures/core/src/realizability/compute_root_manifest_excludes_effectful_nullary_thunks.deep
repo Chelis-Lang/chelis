@@ -1,0 +1,9 @@
+(defsig {} logged (t-fn {} (t-prim {} string)))
+
+(def {}
+  logged
+  (fn {}
+    (params {})
+    (app {span: "surf:25..62"}
+      (var {span: "surf:25..30"} debug)
+      (lit {span: "surf:31..61", type: (t-prim {} string)} "must-not-run-for-observation"))))

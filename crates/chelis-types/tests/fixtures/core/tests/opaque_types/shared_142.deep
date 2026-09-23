@@ -1,0 +1,10 @@
+(module {surf_path: "Flag.State"}
+  flag.state
+  (export {} initial)
+  (deftype {opaque: true}
+    Flag
+    ()
+    (variant {} Ready)
+    (variant {} Blocked (field {} reason (t-prim {} f32))))
+  (defsig {} initial (t-fn {} (t-adt {} Flag)))
+  (def {} initial (fn {} (params {}) (var {span: "surf:117..122"} Ready))))

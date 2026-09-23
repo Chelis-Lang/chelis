@@ -1,0 +1,33 @@
+(def {}
+  source
+  (app {span: "surf:9..30"}
+    (var {span: "surf:9..18"} to_tensor)
+    (app {span: "surf:19..29"}
+      (var {} Cons)
+      (lit {span: "surf:20..23", type: (t-prim {} f32)} 1.0)
+      (app {}
+        (var {} Cons)
+        (lit {span: "surf:25..28", type: (t-prim {} f32)} 2.0)
+        (var {} Nil)))))
+
+(def {}
+  dependent
+  (app {span: "surf:43..62"}
+    (var {span: "surf:43..46"} mul)
+    (var {span: "surf:47..53"} source)
+    (var {span: "surf:55..61"} source)))
+
+(defsig {}
+  sibling
+  (t-fn {}
+    (t-tensor {} (d-lit {} 2) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 2) (t-prim {} f32))))
+
+(def {}
+  sibling
+  (fn {}
+    (params {} (value {type: (t-var {} _)}))
+    (app {span: "surf:118..135"}
+      (var {span: "surf:118..121"} mul)
+      (var {span: "surf:122..127"} value)
+      (var {span: "surf:129..134"} value))))

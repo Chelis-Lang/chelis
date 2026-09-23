@@ -1,18 +1,16 @@
-use chelis_surf::desugar::desugar_program;
-use chelis_surf::parser::parse_str;
 use chelis_types::errors::CheckErrorKind;
 use chelis_types::{check_linearity, check_typed_program};
 
-fn check_surf(source: &str) -> Result<(), Vec<chelis_types::errors::CheckError>> {
-    let decls = parse_str(source).expect("surf parse should succeed");
-    let deep = desugar_program(&decls);
+fn check_core(source: &str) -> Result<(), Vec<chelis_types::errors::CheckError>> {
+    let deep: Vec<chelis_deep::Expr> =
+        chelis_deep::parse_and_stamp_file(source).expect("valid core fixture");
     let checked = check_typed_program(&deep).expect("type check should succeed");
     check_linearity(&checked).map(|_| ())
 }
 
-fn typecheck_surf(source: &str) -> Result<(), Vec<chelis_types::errors::CheckError>> {
-    let decls = parse_str(source).expect("surf parse should succeed");
-    let deep = desugar_program(&decls);
+fn typecheck_core(source: &str) -> Result<(), Vec<chelis_types::errors::CheckError>> {
+    let deep: Vec<chelis_deep::Expr> =
+        chelis_deep::parse_and_stamp_file(source).expect("valid core fixture");
     check_typed_program(&deep)
         .map(|_| ())
         .map_err(|result| result.errors)
@@ -20,15 +18,9 @@ fn typecheck_surf(source: &str) -> Result<(), Vec<chelis_types::errors::CheckErr
 
 #[test]
 fn detects_use_after_consume() {
-    let errors = check_surf(
-        r#"
-def bad(x: tensor[4, f32]) -> tensor[4, f32] =
-  {
-    y: tensor[4, f32] = realize(x)
-    add(x, y)
-  }
-"#,
-    )
+    let errors = check_core(include_str!(
+        "fixtures/core/tests/linearity/detects_use_after_consume.0.deep"
+    ))
     .expect_err("linearity should reject reusing a consumed tensor");
 
     assert!(errors.iter().any(|error| {
@@ -40,52 +32,25 @@ def bad(x: tensor[4, f32]) -> tensor[4, f32] =
 
 #[test]
 fn copy_allows_reuse() {
-    check_surf(
-        r#"
-def ok(x: tensor[4, f32]) -> tensor[4, f32] =
-  {
-    y: tensor[4, f32] = relu(copy(x))
-    out: tensor[4, f32] = add(x, y)
-    _ = drop(x)
-    _ = drop(y)
-    out
-  }
-"#,
-    )
+    check_core(include_str!(
+        "fixtures/core/tests/linearity/copy_allows_reuse.0.deep"
+    ))
     .expect("copy should preserve a later consuming use");
 }
 
 #[test]
 fn auto_borrowed_read_only_primitives_allow_fanout() {
-    check_surf(
-        r#"
-def ok(x: tensor[4, f32]) -> tensor[4, f32] =
-  {
-    y: tensor[4, f32] = relu(x)
-    z: tensor[4, f32] = sigmoid(x)
-    out: tensor[4, f32] = add(y, z)
-    _ = drop(x)
-    _ = drop(y)
-    _ = drop(z)
-    out
-  }
-"#,
-    )
+    check_core(include_str!(
+        "fixtures/core/tests/linearity/auto_borrowed_read_only_primitives_allow_fanout.0.deep"
+    ))
     .expect("read-only tensor primitives should borrow their tensor inputs");
 }
 
 #[test]
 fn pipe_auto_borrows_read_only_stage_input() {
-    check_surf(
-        r#"
-def ok(x: tensor[4, f32]) -> tensor[4, f32] =
-  {
-    y: tensor[4, f32] = x |> relu |> sigmoid
-    _ = drop(x)
-    y
-  }
-"#,
-    )
+    check_core(include_str!(
+        "fixtures/core/tests/linearity/pipe_auto_borrows_read_only_stage_input.0.deep"
+    ))
     .expect("pipe stages should use the same call-site auto-borrow rule");
 }
 
@@ -93,13 +58,9 @@ def ok(x: tensor[4, f32]) -> tensor[4, f32] =
 fn explicit_borrow_does_not_satisfy_owned_parameter() {
     // Fixture renamed from `take` for chelis#353: `take` is a builtin
     // name and bare shadowing defs are now rejected at declaration time.
-    let errors = typecheck_surf(
-        r#"
-def grab(x: tensor[4, f32]) -> tensor[4, f32] = x
-
-def bad(x: tensor[4, f32]) -> tensor[4, f32] = grab(&x)
-"#,
-    )
+    let errors = typecheck_core(include_str!(
+        "fixtures/core/tests/linearity/explicit_borrow_does_not_satisfy_owned_parameter.0.deep"
+    ))
     .expect_err("borrow-to-owned must require an explicit copy");
 
     assert!(
@@ -111,41 +72,25 @@ def bad(x: tensor[4, f32]) -> tensor[4, f32] = grab(&x)
 
 #[test]
 fn copy_accepts_explicit_borrow_and_returns_owned_tensor() {
-    check_surf(
-        r#"
-def ok(x: tensor[4, f32]) -> tensor[4, f32] =
-  {
-    y: tensor[4, f32] = copy(&x)
-    _ = drop(x)
-    y
-  }
-"#,
-    )
+    check_core(include_str!(
+        "fixtures/core/tests/linearity/copy_accepts_explicit_borrow_and_returns_owned_tensor.0.deep"
+    ))
     .expect("copy(&x) should fork ownership from a borrowed tensor");
 }
 
 #[test]
 fn borrowed_but_never_consumed_is_auto_dropped() {
-    check_surf(
-        r#"
-def ok() -> tensor[4, f32] =
-  {
-    x: tensor[4, f32] = to_tensor([1.0, 2.0, 3.0, 4.0])
-    y: tensor[4, f32] = relu(x)
-    y
-  }
-"#,
-    )
+    check_core(include_str!(
+        "fixtures/core/tests/linearity/borrowed_but_never_consumed_is_auto_dropped.0.deep"
+    ))
     .expect("implicit drop handles borrowed local owners at scope end");
 }
 
 #[test]
 fn borrow_cannot_escape_as_function_result() {
-    let errors = check_surf(
-        r#"
-def bad(x: tensor[4, f32]) -> &tensor[4, f32] = &x
-"#,
-    )
+    let errors = check_core(include_str!(
+        "fixtures/core/tests/linearity/borrow_cannot_escape_as_function_result.0.deep"
+    ))
     .expect_err("borrows cannot be returned from functions");
 
     assert!(
@@ -157,15 +102,9 @@ def bad(x: tensor[4, f32]) -> &tensor[4, f32] = &x
 
 #[test]
 fn closure_capture_consumes_outer_tensor() {
-    let errors = check_surf(
-        r#"
-def bad(x: tensor[4, f32]) -> tensor[4, f32] =
-  {
-    f = fn () -> x
-    realize(x)
-  }
-"#,
-    )
+    let errors = check_core(include_str!(
+        "fixtures/core/tests/linearity/closure_capture_consumes_outer_tensor.0.deep"
+    ))
     .expect_err("capturing a tensor should consume it");
 
     assert!(errors.iter().any(|error| {
@@ -185,21 +124,9 @@ fn closure_capture_consumes_outer_tensor_carrying_adt() {
     // regress — the outer `p` would survive the closure capture and
     // the second `use_params(p)` would type-check, hiding a use-after-
     // consume.
-    let errors = check_surf(
-        r#"
-type Params[n] =
-  | Params { weight: tensor[n, f32] }
-
-sig use_params[n]: Params[n] -> bool
-def use_params(p) = true
-
-def bad[n](p: Params[n]) -> bool =
-  {
-    f = fn () -> use_params(p)
-    use_params(p)
-  }
-"#,
-    )
+    let errors = check_core(include_str!(
+        "fixtures/core/tests/linearity/closure_capture_consumes_outer_tensor_carrying_adt.0.deep"
+    ))
     .expect_err("capturing a tensor-carrying ADT must consume it");
 
     assert!(
@@ -213,18 +140,9 @@ def bad[n](p: Params[n]) -> bool =
 
 #[test]
 fn match_consumes_tuple_scrutinee() {
-    let errors = check_surf(
-        r#"
-def bad(pair: (tensor[4, f32], i32)) -> i32 =
-  {
-    n: i32 = match pair with {
-      | (x, _) => 1
-    }
-    again: (tensor[4, f32], i32) = pair
-    n
-  }
-"#,
-    )
+    let errors = check_core(include_str!(
+        "fixtures/core/tests/linearity/match_consumes_tuple_scrutinee.0.deep"
+    ))
     .expect_err("reusing a tuple carrying a tensor after match should fail");
 
     assert!(
@@ -236,50 +154,25 @@ def bad(pair: (tensor[4, f32], i32)) -> i32 =
 
 #[test]
 fn tensor_shape_queries_do_not_consume_tensor_inputs() {
-    check_surf(
-        r#"
-def ok(x: tensor[2, 3, f32]) -> i64 =
-  {
-    r: i32 = rank(x)
-    c: i64 = shape(x, 1)
-    n: i64 = numel(x)
-    _ = drop(x)
-    c
-  }
-"#,
-    )
+    check_core(include_str!(
+        "fixtures/core/tests/linearity/tensor_shape_queries_do_not_consume_tensor_inputs.0.deep"
+    ))
     .expect("shape queries should be observational, not consuming");
 }
 
 #[test]
 fn to_list_does_not_consume_tensor_input() {
-    check_surf(
-        r#"
-def ok(x: tensor[4, f32]) -> tensor[4, f32] =
-  {
-    xs: List[f32] = to_list(x)
-    _ = drop(xs)
-    y: tensor[4, f32] = relu(x)
-    _ = drop(x)
-    y
-  }
-"#,
-    )
+    check_core(include_str!(
+        "fixtures/core/tests/linearity/to_list_does_not_consume_tensor_input.0.deep"
+    ))
     .expect("to_list reads the tensor without freeing it, so x must remain live");
 }
 
 #[test]
 fn to_list_still_flags_use_after_genuine_consume() {
-    let errors = check_surf(
-        r#"
-def bad(x: tensor[4, f32]) -> tensor[4, f32] =
-  {
-    y: tensor[4, f32] = realize(x)
-    xs: List[f32] = to_list(x)
-    y
-  }
-"#,
-    )
+    let errors = check_core(include_str!(
+        "fixtures/core/tests/linearity/to_list_still_flags_use_after_genuine_consume.0.deep"
+    ))
     .expect_err("to_list after a consuming use of x should still be rejected");
 
     assert!(errors.iter().any(|error| {
@@ -290,32 +183,16 @@ def bad(x: tensor[4, f32]) -> tensor[4, f32] =
 
 #[test]
 fn tensor_to_scalar_does_not_consume_tensor_input() {
-    check_surf(
-        r#"
-def ok(x: tensor[f32]) -> tensor[f32] =
-  {
-    v: f32 = tensor_to_scalar(x)
-    _ = drop(v)
-    y: tensor[f32] = relu(x)
-    _ = drop(x)
-    y
-  }
-"#,
-    )
+    check_core(include_str!(
+        "fixtures/core/tests/linearity/tensor_to_scalar_does_not_consume_tensor_input.0.deep"
+    ))
     .expect("tensor_to_scalar reads the tensor without freeing it, so x must remain live");
 }
 
 #[test]
 fn tensor_to_scalar_still_flags_use_after_genuine_consume() {
-    let errors = check_surf(
-        r#"
-def bad(x: tensor[f32]) -> tensor[f32] =
-  {
-    y: tensor[f32] = realize(x)
-    v: f32 = tensor_to_scalar(x)
-    y
-  }
-"#,
+    let errors = check_core(
+        include_str!("fixtures/core/tests/linearity/tensor_to_scalar_still_flags_use_after_genuine_consume.0.deep"),
     )
     .expect_err("tensor_to_scalar after a consuming use of x should still be rejected");
 
@@ -333,15 +210,9 @@ fn len_does_not_consume_list_argument() {
     // Deep-tag-colliding identifier that desugars through the MetaExpr
     // param form #343 began consume-tracking — so this is a faithful
     // regression for the School `_step_list` read-then-reuse shape.
-    check_surf(
-        r#"
-def ok[k](params: List[tensor[k, f32]]) -> List[tensor[k, f32]] =
-  {
-    n: i64 = len(params)
-    params
-  }
-"#,
-    )
+    check_core(include_str!(
+        "fixtures/core/tests/linearity/len_does_not_consume_list_argument.0.deep"
+    ))
     .expect("len reads the list without freeing it, so params must remain live (chelis#527)");
 }
 
@@ -349,16 +220,9 @@ def ok[k](params: List[tensor[k, f32]]) -> List[tensor[k, f32]] =
 fn index_does_not_consume_list_argument() {
     // chelis#527: `index` retains the element it returns and reads the
     // list via a `const *` (`chelis_list_index`), never freeing it.
-    check_surf(
-        r#"
-def ok[k](params: List[tensor[k, f32]]) -> List[tensor[k, f32]] =
-  {
-    first: tensor[k, f32] = index(params, 0i64)
-    _ = drop(first)
-    params
-  }
-"#,
-    )
+    check_core(include_str!(
+        "fixtures/core/tests/linearity/index_does_not_consume_list_argument.0.deep"
+    ))
     .expect(
         "index reads an element without freeing the list, so params must remain live (chelis#527)",
     );
@@ -369,17 +233,9 @@ fn list_len_then_index_then_reuse_compiles() {
     // The full School `_step_list` read-then-reuse shape: read the
     // length and an element, then hand the list onward.  Compiled
     // clean at 0.10.0, regressed at 0.10.1 (chelis#527).
-    check_surf(
-        r#"
-def step[k](params: List[tensor[k, f32]]) -> List[tensor[k, f32]] =
-  {
-    n: i64 = len(params)
-    first: tensor[k, f32] = index(params, 0i64)
-    _ = drop(first)
-    params
-  }
-"#,
-    )
+    check_core(include_str!(
+        "fixtures/core/tests/linearity/list_len_then_index_then_reuse_compiles.0.deep"
+    ))
     .expect("read length + element then reuse the list must compile (chelis#527)");
 }
 
@@ -388,16 +244,9 @@ fn len_still_flags_use_after_genuine_consume() {
     // Negative parity: borrowing on `len` must not blind the checker
     // to a real prior consume.  An explicit `drop` frees `params`, so
     // the later `len(params)` borrow-read is a use-after-consume.
-    let errors = check_surf(
-        r#"
-def bad[k](params: List[tensor[k, f32]]) -> i64 =
-  {
-    _ = drop(params)
-    n: i64 = len(params)
-    n
-  }
-"#,
-    )
+    let errors = check_core(include_str!(
+        "fixtures/core/tests/linearity/len_still_flags_use_after_genuine_consume.0.deep"
+    ))
     .expect_err("len after dropping params should still be rejected");
 
     assert!(errors.iter().any(|error| {
@@ -409,16 +258,9 @@ def bad[k](params: List[tensor[k, f32]]) -> i64 =
 #[test]
 fn index_still_flags_use_after_genuine_consume() {
     // Negative parity for `index`, mirroring the `len` case above.
-    let errors = check_surf(
-        r#"
-def bad[k](params: List[tensor[k, f32]]) -> tensor[k, f32] =
-  {
-    _ = drop(params)
-    first: tensor[k, f32] = index(params, 0i64)
-    first
-  }
-"#,
-    )
+    let errors = check_core(include_str!(
+        "fixtures/core/tests/linearity/index_still_flags_use_after_genuine_consume.0.deep"
+    ))
     .expect_err("index after dropping params should still be rejected");
 
     assert!(errors.iter().any(|error| {
@@ -438,15 +280,9 @@ fn len_explicit_container_borrow_is_a_type_error() {
     // codegen — a worse footgun than a clear front-end error. This locks
     // the rejection so a future signature change cannot silently admit
     // `len(&xs)`.
-    let errors = typecheck_surf(
-        r#"
-def bad[k](params: List[tensor[k, f32]]) -> i64 =
-  {
-    n: i64 = len(&params)
-    n
-  }
-"#,
-    )
+    let errors = typecheck_core(include_str!(
+        "fixtures/core/tests/linearity/len_explicit_container_borrow_is_a_type_error.0.deep"
+    ))
     .expect_err("explicit &List is not a supported surface form for len");
 
     // The diagnostic must point at the real problem — `len` auto-borrows, so
@@ -465,15 +301,9 @@ def bad[k](params: List[tensor[k, f32]]) -> i64 =
 fn index_explicit_container_borrow_is_a_type_error() {
     // Negative parity for `index`, mirroring the `len` case above:
     // `index(&xs, i)` is rejected at check time (chelis#527).
-    let errors = typecheck_surf(
-        r#"
-def bad[k](params: List[tensor[k, f32]]) -> tensor[k, f32] =
-  {
-    first: tensor[k, f32] = index(&params, 0i64)
-    first
-  }
-"#,
-    )
+    let errors = typecheck_core(include_str!(
+        "fixtures/core/tests/linearity/index_explicit_container_borrow_is_a_type_error.0.deep"
+    ))
     .expect_err("explicit &List is not a supported surface form for index");
 
     assert!(errors.iter().any(|error| {
@@ -494,15 +324,9 @@ fn len_of_non_container_does_not_mention_auto_borrow() {
     // different mistake, so it must keep the plain "expects List or Dict
     // input" diagnostic and must NOT misleadingly claim `len` auto-borrows
     // an argument that is not even a container.
-    let errors = typecheck_surf(
-        r#"
-def bad(x: f32) -> i64 =
-  {
-    n: i64 = len(x)
-    n
-  }
-"#,
-    )
+    let errors = typecheck_core(include_str!(
+        "fixtures/core/tests/linearity/len_of_non_container_does_not_mention_auto_borrow.0.deep"
+    ))
     .expect_err("len of a scalar is a type error");
 
     assert!(errors.iter().any(|error| {
@@ -514,34 +338,16 @@ def bad(x: f32) -> i64 =
 
 #[test]
 fn grad_accepts_function_with_borrowed_tensor_parameter() {
-    check_surf(
-        r#"
-def loss(x: &tensor[4, f32]) -> tensor[f32] = sum(mul(x, x), 0)
-
-def ok(x: tensor[4, f32]) -> tensor[4, f32] =
-  {
-    g: tensor[4, f32] = grad(loss)(x)
-    _ = drop(x)
-    g
-  }
-"#,
-    )
+    check_core(include_str!(
+        "fixtures/core/tests/linearity/grad_accepts_function_with_borrowed_tensor_parameter.0.deep"
+    ))
     .expect("grad(f)(x) should auto-borrow when f takes a borrowed tensor");
 }
 
 #[test]
 fn vmap_lifts_function_with_borrowed_tensor_parameter() {
-    check_surf(
-        r#"
-def activate(x: &tensor[4, f32]) -> tensor[4, f32] = relu(x)
-
-def ok(xs: tensor[batch, 4, f32]) -> tensor[batch, 4, f32] =
-  {
-    ys: tensor[batch, 4, f32] = vmap(activate)(xs)
-    _ = drop(xs)
-    ys
-  }
-"#,
-    )
+    check_core(include_str!(
+        "fixtures/core/tests/linearity/vmap_lifts_function_with_borrowed_tensor_parameter.0.deep"
+    ))
     .expect("vmap should preserve borrowed tensor parameters while adding the batch axis");
 }

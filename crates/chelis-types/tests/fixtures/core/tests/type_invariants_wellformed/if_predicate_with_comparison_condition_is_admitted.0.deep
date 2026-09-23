@@ -1,0 +1,31 @@
+(module {surf_path: "M"}
+  m
+  (deftype {invariant: (fn {}
+                          (params {} p)
+                          (if {span: "surf:31..89"}
+                            (app {span: "surf:34..48"}
+                              (var {} gte)
+                              (access {span: "surf:34..41"}
+                                (var {span: "surf:34..35"} p)
+                                value)
+                              (lit {span: "surf:45..48", type: (t-prim {} f32)} 0.0))
+                            (app {span: "surf:54..68"}
+                              (var {} lte)
+                              (access {span: "surf:54..61"}
+                                (var {span: "surf:54..55"} p)
+                                value)
+                              (lit {span: "surf:65..68", type: (t-prim {} f32)} 1.0))
+                            (app {span: "surf:74..89"}
+                              (var {} gte)
+                              (access {span: "surf:74..81"}
+                                (var {span: "surf:74..75"} p)
+                                value)
+                              (app {span: "surf:85..89"}
+                                (var {} neg)
+                                (lit {span: "surf:86..89", type: (t-prim {} f32)} 1.0))))),
+             invariant_amenability: "linear",
+             opaque: true
+           }
+    T
+    ()
+    (variant {} T (field {} value (t-prim {} f32)))))

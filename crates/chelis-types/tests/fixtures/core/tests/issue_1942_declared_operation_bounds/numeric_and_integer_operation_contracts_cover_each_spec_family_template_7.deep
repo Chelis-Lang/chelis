@@ -1,0 +1,17 @@
+(def {} op (var {} __CORE_ARG_0__))
+
+(defsig {dtype_bounds: {p: numeric}}
+  g
+  (p)
+  (t-fn {}
+    (t-tensor {} (d-lit {} 3) (t-var {} p))
+    (t-tensor {} (d-lit {} 3) (t-var {} p))))
+
+(def {}
+  g
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {}
+      (var {} op)
+      (var {} x)
+      (var {} x))))

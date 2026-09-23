@@ -1,0 +1,15 @@
+(defsig {}
+  run
+  (t-fn {} (t-tensor {} (d-lit {} 4) (t-prim {} f32)) (t-var {} _)))
+
+(def {}
+  run
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:28..45"}
+      (var {span: "surf:28..35"} reshape)
+      (var {span: "surf:36..37"} x)
+      (app {span: "surf:38..44"}
+        (var {} Cons)
+        (lit {span: "surf:39..43", type: (t-prim {} i64)} 3)
+        (var {} Nil)))))

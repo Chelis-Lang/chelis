@@ -1,0 +1,6 @@
+(deftype {}
+  Carrier
+  (n)
+  (variant {}
+    Carrier
+    (field {} values (t-tensor {} (d-var {} n) (t-prim {} f32)))))

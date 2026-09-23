@@ -1,0 +1,17 @@
+(module {surf_path: "IndirectLater"}
+  indirectlater
+  (def {}
+    u
+    (app {span: "surf:26..33"}
+      (var {span: "surf:26..30"} ping)
+      (lit {span: "surf:31..32", type: (t-prim {} i32)} 1)))
+  (def {} v1 (lit {span: "surf:40..41", type: (t-prim {} i32)} 5))
+  (defsig {} ping (t-fn {} (t-prim {} i32) (t-prim {} i32)))
+  (def {}
+    ping
+    (fn {}
+      (params {} (n {type: (t-var {} _)}))
+      (app {span: "surf:69..79"}
+        (var {span: "surf:69..72"} add)
+        (var {span: "surf:73..74"} n)
+        (var {span: "surf:76..78"} v1)))))

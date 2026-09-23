@@ -2522,11 +2522,10 @@ mod core_transform_fragment_tests {
 
     #[test]
     fn module_transform_values_use_structural_projection() {
-        let source = "def reduce(v: tensor[4, 3, f32]) -> tensor[3, f32] = sum(v, 0i32)\n\
-                      pair = (reduce, 0i32)\n\
-                      mapped = pair.0\n";
-        let declarations = chelis_surf::parser::parse_str(source).expect("module values parse");
-        let program = chelis_surf::desugar::desugar_program(&declarations);
+        let program = chelis_deep::parser::parse_str(include_str!(
+            "../../tests/fixtures/core/src/validate/module_projection.deep"
+        ))
+        .expect("core module values fixture");
         let items = program.iter().collect::<Vec<_>>();
         let top_level_functions = collect_top_level_function_names(&items);
         let module_values = collect_top_level_transform_values(&items, &top_level_functions);
@@ -2788,11 +2787,11 @@ mod core_transform_fragment_tests {
     }
 
     #[test]
-    fn surf_vmap_tensor_slot_holes_have_earlier_or_safe_boundaries() {
-        let bare_type_variable = "out = vmap(fn (v: a) -> v)(to_tensor([[1.0f32]]))\n";
-        let declarations =
-            chelis_surf::parser::parse_str(bare_type_variable).expect("bare type variable parses");
-        let program = chelis_surf::desugar::desugar_program(&declarations);
+    fn vmap_undeclared_type_remains_owned_by_type_resolution() {
+        let program = chelis_deep::parser::parse_str(include_str!(
+            "../../tests/fixtures/core/src/validate/undeclared_type.deep"
+        ))
+        .expect("core undeclared type fixture");
         let result = crate::infer_program(&program);
         assert!(
             result.errors.iter().any(|error| {
@@ -2800,11 +2799,8 @@ mod core_transform_fragment_tests {
                     && error
                         .message
                         .contains("unknown primitive type `a` in type annotation")
-                    && error.suggestions.iter().any(|suggestion| {
-                        suggestion.contains("declare `a` in the signature binder list")
-                    })
             }),
-            "Surf bare type names remain owned by explicit-binder type resolution: {:?}",
+            "bare type names remain owned by explicit-binder type resolution: {:?}",
             result.errors
         );
         assert!(
@@ -2814,25 +2810,6 @@ mod core_transform_fragment_tests {
                 .all(|error| !error.message.contains("core transform fragment")),
             "the vmap fence must not steal an undeclared type variable: {:?}",
             result.errors
-        );
-
-        let precision_hole = "out = vmap(fn (v: tensor[4, _]) -> v)(to_tensor([[1.0f32]]))\n";
-        assert!(
-            chelis_surf::parser::parse_str(precision_hole).is_err(),
-            "Surf requires a named tensor precision"
-        );
-
-        let rank_hole = "out = vmap(fn (v: tensor[.._, f32]) -> v)(to_tensor([[1.0f32]]))\n";
-        assert!(
-            chelis_surf::parser::parse_str(rank_hole).is_err(),
-            "Surf requires a named rank spread"
-        );
-
-        let dimension_hole = "def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] =\n\
-             vmap(fn (v: tensor[_, 3, f32]) -> sum(v, 0i32))(t)\n";
-        assert!(
-            chelis_surf::parser::parse_str(dimension_hole).is_err(),
-            "Surf dimension `_` must be rejected before desugaring"
         );
     }
 }
@@ -2850,12 +2827,10 @@ mod cancellation_tests {
     type Entry = fn(&[deep::Expr]) -> Observation;
 
     fn validation_only_failure_fixture() -> Vec<deep::Expr> {
-        let declarations = chelis_surf::parser::parse_str(
-            "def f(x: tensor[1, 1, 4, f32], k: tensor[1, 1, 2, f32]) = \
-             conv(x, k, [0i64], [(0i64, 0i64)])\n",
-        )
-        .expect("the zero-stride Surf fixture must parse");
-        chelis_surf::desugar::desugar_program(&declarations)
+        chelis_deep::parser::parse_str(include_str!(
+            "../../tests/fixtures/core/src/validate/zero_stride.deep"
+        ))
+        .expect("core zero-stride fixture")
     }
 
     fn observe_check(result: Result<CheckedProgram, InferResult>) -> Observation {

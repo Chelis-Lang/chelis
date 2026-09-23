@@ -1,0 +1,13 @@
+(defsig {} use (t-fn {} (t-prim {} i32)))
+
+(def {}
+  use
+  (fn {}
+    (params {})
+    (let {}
+      (bind {}
+        op
+        (var {} sin))
+      (app {}
+        (var {} op)
+        (lit {surf_literal_style: "explicit", type: (t-prim {} i32)} 1)))))

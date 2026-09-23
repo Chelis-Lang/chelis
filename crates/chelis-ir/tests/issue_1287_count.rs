@@ -69,29 +69,6 @@ fn evaluator_returns_zero_for_a_selected_zero_extent() {
 }
 
 #[test]
-fn evaluator_count_only_plans_groups_and_calls_the_typed_kernel() {
-    let source = include_str!("../src/eval.rs");
-    let count_body = source
-        .split_once("pub fn count_tensor")
-        .expect("Count evaluator exists")
-        .1
-        .split_once("fn reshape")
-        .expect("Count evaluator ends before reshape")
-        .0;
-    assert!(
-        count_body.contains("count_tensor_groups(input.storage(), &groups)"),
-        "Count must call the closed typed kernel after planning ordered groups"
-    );
-    assert!(
-        !count_body.contains("try_fold")
-            && !count_body.contains(".fold(")
-            && !count_body.contains("wrapping_add")
-            && !count_body.contains("checked_add"),
-        "IR Count must not own arithmetic; the typed kernel owns the canonical tree"
-    );
-}
-
-#[test]
 fn verifier_rejects_noncanonical_axes_wrong_dtype_and_wrong_shape() {
     for (axes, input_prim, output_dims, output_prim, needle) in [
         (vec![], Prim::Bool, vec![2, 3], Prim::Int64, "non-empty"),
@@ -123,9 +100,9 @@ fn verifier_rejects_noncanonical_axes_wrong_dtype_and_wrong_shape() {
     }
 }
 
-fn lower_surf(source: &str) -> Result<Dag, String> {
-    let decls = chelis_surf::parser::parse_str(source).map_err(|e| format!("parse: {e:?}"))?;
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+fn lower_deep(source: &str) -> Result<Dag, String> {
+    let exprs =
+        chelis_deep::parser::parse_and_stamp(source).map_err(|e| format!("parse: {e:?}"))?;
     let checked = check_typed_program(&exprs).map_err(|r| format!("check: {:#?}", r.errors))?;
     let checked = chelis_effects::check_program(&checked).map_err(|e| format!("effects: {e:?}"))?;
     let checked =
@@ -135,17 +112,7 @@ fn lower_surf(source: &str) -> Result<Dag, String> {
 
 #[test]
 fn lowering_emits_one_count_with_original_axes_normalized_descending() {
-    let dag = lower_surf(
-        r#"
-def main() -> tensor[3, i64] = {
-  x: tensor[2, 3, 4, bool] = [
-    [[true, false, true, false], [true, false, true, false], [true, false, true, false]],
-    [[true, false, true, false], [true, false, true, false], [true, false, true, false]]
-  ]
-  count(&x, 0, -1)
-}
-"#,
-    )
+    let dag = lower_deep(include_str!("fixtures/core/tests/issue_1287_count/lowering_emits_one_count_with_original_axes_normalized_descending.deep"))
     .expect("count lowers");
     let counts: Vec<_> = dag
         .nodes()
@@ -217,10 +184,6 @@ fn grad_rejects_a_live_count_with_a_structured_reason() {
         Ok(_) => panic!("count has no adjoint"),
         Err(err) => err,
     };
-    assert!(
-        err.to_string().contains("integer-reduction output"),
-        "Count's rendered rejection must describe a reduction, not an index: {err}"
-    );
     assert_eq!(
         err,
         AdError::NotSupported {

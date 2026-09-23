@@ -1,0 +1,24 @@
+(defsig {}
+  g
+  (a n)
+  (t-fn {}
+    (t-tensor {} (d-var {} n) (t-prim {} f32))
+    (t-tuple {} (t-prim {} i64) (t-prim {} i64))
+    (t-tensor {} (d-var {} a) (d-var {} n) (t-prim {} f32))))
+
+(def {}
+  g
+  (fn {}
+    (params {} (b {type: (t-var {} _)}) (t {type: (t-var {} _)}))
+    (app {span: "surf:69..105"}
+      (var {span: "surf:69..75"} insert)
+      (var {span: "surf:76..77"} b)
+      (lit {span: "surf:79..80", type: (t-prim {} i32)} 0)
+      (app {span: "surf:82..104"}
+        (var {span: "surf:82..85"} add)
+        (tuple-get {span: "surf:86..89"}
+          (var {span: "surf:86..87"} t)
+          (lit {type: (t-prim {} i32)} 0))
+        (cast {span: "surf:91..103"}
+          (lit {span: "surf:96..97", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 0)
+          (t-prim {} i64))))))

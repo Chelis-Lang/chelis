@@ -1,0 +1,10 @@
+(def {}
+  y
+  (cast {span: "surf:4..31"}
+    (app {span: "surf:9..25"}
+      (var {span: "surf:9..18"} to_tensor)
+      (app {span: "surf:19..24"}
+        (var {} Cons)
+        (lit {span: "surf:20..23", type: (t-prim {} f32)} 1.5)
+        (var {} Nil)))
+    (t-prim {} f64)))

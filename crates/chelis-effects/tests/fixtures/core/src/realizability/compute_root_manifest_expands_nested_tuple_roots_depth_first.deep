@@ -1,0 +1,13 @@
+(def {}
+  result
+  (tuple {span: "surf:9..53"}
+    (cast {span: "surf:10..22"}
+      (lit {span: "surf:15..16", surf_literal_style: "unsuffixed", type: (t-prim {} i32)} 1)
+      (t-prim {} i32))
+    (tuple {span: "surf:24..52"}
+      (cast {span: "surf:25..37"}
+        (lit {span: "surf:30..31", surf_literal_style: "unsuffixed", type: (t-prim {} i32)} 2)
+        (t-prim {} i32))
+      (cast {span: "surf:39..51"}
+        (lit {span: "surf:44..45", surf_literal_style: "unsuffixed", type: (t-prim {} i32)} 3)
+        (t-prim {} i32)))))

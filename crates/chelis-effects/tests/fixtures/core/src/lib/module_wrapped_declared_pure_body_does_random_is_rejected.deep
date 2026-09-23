@@ -1,0 +1,28 @@
+(module {surf_path: "Frag.Effect"}
+  frag.effect
+  (export {} entry)
+  (defsig {}
+    noisy
+    (t-fn {}
+      (t-tensor {} (d-lit {} 8) (t-prim {} f32))
+      (t-tensor {} (d-lit {} 8) (t-prim {} f32))))
+  (def {}
+    noisy
+    (fn {}
+      (params {} (x {type: (t-var {} _)}))
+      (app {span: "surf:83..98"}
+        (var {span: "surf:83..90"} dropout)
+        (var {span: "surf:91..92"} x)
+        (lit {span: "surf:94..97", type: (t-prim {} f32)} 0.5))))
+  (defsig {}
+    entry
+    (t-fn {eff: (effects {})}
+      (t-tensor {} (d-lit {} 8) (t-prim {} f32))
+      (t-tensor {} (d-lit {} 8) (t-prim {} f32))))
+  (def {}
+    entry
+    (fn {}
+      (params {} (x {type: (t-var {} _)}))
+      (app {span: "surf:154..162"}
+        (var {span: "surf:154..159"} noisy)
+        (var {span: "surf:160..161"} x)))))

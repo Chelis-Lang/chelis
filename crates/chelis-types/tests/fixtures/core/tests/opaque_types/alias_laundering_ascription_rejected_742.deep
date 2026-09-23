@@ -1,0 +1,9 @@
+(module {surf_path: "Agent.Alias"}
+  agent.alias
+  (typealias {} P2 () (t-adt {} Probability))
+  (defsig {} forge (t-fn {} (t-prim {} f32) (t-adt {} P2)))
+  (def {}
+    forge
+    (fn {}
+      (params {} (x {type: (t-var {} _)}))
+      (lit {span: "surf:67..75", type: (t-adt {} P2)} 0.5))))

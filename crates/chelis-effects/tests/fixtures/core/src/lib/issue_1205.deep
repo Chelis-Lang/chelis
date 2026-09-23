@@ -1,0 +1,57 @@
+(module {surf_path: "FrontEndPerformance.Template"}
+  frontendperformance.template
+  (defsig {}
+    bc
+    (t-fn {} (t-prim {} f32) (t-tensor {} (d-lit {} 8) (t-prim {} f32))))
+  (def {}
+    bc
+    (fn {}
+      (params {} (c {type: (t-var {} _)}))
+      (app {span: "surf:71..119"}
+        (var {span: "surf:71..78"} reshape)
+        (app {span: "surf:79..110"}
+          (var {span: "surf:79..85"} insert)
+          (app {span: "surf:86..100"}
+            (var {span: "surf:86..95"} to_tensor)
+            (app {span: "surf:96..99"}
+              (var {} Cons)
+              (var {span: "surf:97..98"} c)
+              (var {} Nil)))
+          (lit {span: "surf:102..103", type: (t-prim {} i32)} 0)
+          (lit {span: "surf:105..109", type: (t-prim {} i64)} 8))
+        (app {span: "surf:112..118"}
+          (var {} Cons)
+          (lit {span: "surf:113..117", type: (t-prim {} i64)} 8)
+          (var {} Nil)))))
+  (defsig {}
+    st
+    (t-fn {}
+      (t-tensor {} (d-lit {} 8) (t-prim {} f32))
+      (t-prim {} i64)
+      (t-tensor {} (d-lit {} 8) (t-prim {} f32))))
+  (def {}
+    st
+    (fn {}
+      (params {} (s {type: (t-var {} _)}) (i {type: (t-var {} _)}))
+      (if {span: "surf:174..211"}
+        (app {span: "surf:177..189"}
+          (var {span: "surf:177..180"} gte)
+          (var {span: "surf:181..182"} i)
+          (lit {span: "surf:184..188", type: (t-prim {} i64)} 5))
+        (var {span: "surf:195..196"} s)
+        (var {span: "surf:202..211"} STEP_BODY))))
+  (def {}
+    r
+    (app {span: "surf:216..266"}
+      (var {span: "surf:216..221"} index)
+      (app {span: "surf:222..259"}
+        (var {span: "surf:222..229"} to_list)
+        (app {span: "surf:230..258"}
+          (var {span: "surf:230..232"} st)
+          (app {span: "surf:233..251"}
+            (var {span: "surf:233..235"} bc)
+            (cast {span: "surf:236..250"}
+              (lit {span: "surf:241..244", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 1.0)
+              (t-prim {} f32)))
+          (lit {span: "surf:253..257", type: (t-prim {} i64)} 0)))
+      (lit {span: "surf:261..265", type: (t-prim {} i64)} 0))))

@@ -1,0 +1,30 @@
+(defsig {}
+  f
+  (t-fn {}
+    (t-tensor {} (d-lit {} 4) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 4) (t-prim {} f32))))
+
+(def {}
+  f
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (let {span: "surf:48..130"}
+      (bind {}
+        y
+        (var {span: "surf:74..75", surf_binding_type: "explicit", type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} x))
+      (let {}
+        (bind {}
+          r
+          (pipe {span: "surf:100..112",
+                  surf_binding_type: "explicit",
+                  type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))
+                }
+            (var {span: "surf:100..101"} y)
+            (fn {span: "surf:105..112", surf_pipe_stage: "call-first"}
+              (params {} __chelis_pipe)
+              (realize {span: "surf:105..112"}
+                (var {span: "surf:105..112"} __chelis_pipe)))))
+        (app {span: "surf:117..126"}
+          (var {span: "surf:117..120"} add)
+          (var {span: "surf:121..122"} x)
+          (var {span: "surf:124..125"} r))))))

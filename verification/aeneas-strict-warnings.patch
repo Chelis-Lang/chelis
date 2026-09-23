@@ -1,0 +1,80 @@
+--- a/Main.ml
++++ b/Main.ml
+@@ -40,13 +40,6 @@
+   let mctx = Charon.NameMatcher.ctx_from_crate c in
+   let open ExtractBuiltin in
+   NameMatcherMap.mem mctx name m
+-
+-let matches_name_with_generics (c : crate) (name : Types.name)
+-    (generics : Types.generic_args) (m : 'a ExtractName.NameMatcherMap.t) : bool
+-    =
+-  let mctx = Charon.NameMatcher.ctx_from_crate c in
+-  let open ExtractBuiltin in
+-  Option.is_some (NameMatcherMap.find_with_generics_opt mctx name generics m)
+ 
+ let activated_loggers : (EL.level * string) list ref = ref []
+ 
+@@ -617,15 +610,16 @@
+         let trait_decls =
+           LlbcAst.TraitDeclId.Map.filter
+             (fun _ (d : LlbcAst.trait_decl) ->
+-              let names_map = ExtractBuiltin.builtin_trait_decls_map () in
+               (not d.item_meta.is_local)
+-              && not (matches_name m d.item_meta.name names_map))
++              && Option.is_none
++                   (ExtractBuiltin.find_trait_decl_info
++                      (NameMatcher.ctx_from_crate m)
++                      d.item_meta.name))
+             trait_decls
+         in
+         let trait_impls =
+           List.filter_map
+             (fun (d : LlbcAst.trait_impl) ->
+-              let names_map = ExtractBuiltin.builtin_trait_impls_map () in
+               match
+                 LlbcAst.TraitDeclId.Map.find_opt d.impl_trait.id m.trait_decls
+               with
+@@ -633,9 +627,10 @@
+               | Some trait_decl ->
+                   if
+                     (not d.item_meta.is_local)
+-                    && not
+-                         (matches_name_with_generics m trait_decl.item_meta.name
+-                            d.impl_trait.generics names_map)
++                    && Option.is_none
++                         (ExtractBuiltin.find_trait_impl_info
++                            (NameMatcher.ctx_from_crate m)
++                            trait_decl.item_meta.name d.impl_trait.generics)
+                   then Some (d, trait_decl)
+                   else None)
+             (LlbcAst.TraitImplId.Map.values trait_impls)
+@@ -734,14 +729,21 @@
+           false)
+       in
+ 
+-      (* Print a warning if we had to extract opaque definitions and the option
+-         [-split-file] is not on *)
+-      if !extracted_opaque && not !split_files then
+-        log#lwarning
+-          (lazy
+-            "The crate contains extracted external, unknown definitions: we \
+-             advise using the option -split-files to allow manually providing \
+-             these definitions in separate files.");
++      (* Diagnose unknown external definitions when no separate implementation
++         files are requested, respecting the strict-warning mode. *)
++      let has_errors =
++        if !extracted_opaque && not !split_files then (
++          let message =
++            lazy
++              "The crate contains extracted external, unknown definitions: we \
++               advise using the option -split-files to allow manually \
++               providing these definitions in separate files."
++          in
++          if !warnings_as_errors then log#lerror message
++          else log#lwarning message;
++          has_errors || !warnings_as_errors)
++        else has_errors
++      in
+ 
+       (* Print error diagnostics *)
+       (if !print_error_diagnostics && !Errors.error_list <> [] then

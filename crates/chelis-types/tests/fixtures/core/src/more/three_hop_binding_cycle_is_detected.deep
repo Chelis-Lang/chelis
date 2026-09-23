@@ -1,0 +1,11 @@
+(def {}
+  a
+  (var {span: "surf:5..23", type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} b))
+
+(def {}
+  b
+  (var {span: "surf:30..48", type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} c))
+
+(def {}
+  c
+  (var {span: "surf:55..73", type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} a))

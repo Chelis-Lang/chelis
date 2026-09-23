@@ -1,0 +1,6 @@
+(module {surf_path: "M"}
+  m
+  (deftype {}
+    Point
+    ()
+    (variant {} Point (field {} x (t-prim {} f32)) (field {} y (t-prim {} f32)))))

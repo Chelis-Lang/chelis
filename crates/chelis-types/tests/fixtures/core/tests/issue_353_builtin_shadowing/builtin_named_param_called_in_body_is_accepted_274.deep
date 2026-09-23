@@ -1,0 +1,18 @@
+(module {surf_path: "ParamCall"}
+  paramcall
+  (defsig {}
+    apply
+    (t-fn {}
+      (t-fn {} (t-prim {} f64) (t-prim {} i64) (t-prim {} f64))
+      (t-prim {} f64)
+      (t-prim {} f64)))
+  (def {}
+    apply
+    (fn {}
+      (params {} (round_to {type: (t-var {} _)}) (x {type: (t-var {} _)}))
+      (app {span: "surf:75..100"}
+        (var {span: "surf:75..83"} round_to)
+        (var {span: "surf:84..85"} x)
+        (cast {span: "surf:87..99"}
+          (lit {span: "surf:92..93", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 0)
+          (t-prim {} i64))))))

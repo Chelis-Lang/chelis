@@ -1,0 +1,11 @@
+(defsig {} lib_assert_eq (t-fn {} (t-prim {} i64) (t-prim {} i64) (t-unit {})))
+
+(def {}
+  lib_assert_eq
+  (fn {}
+    (params {} (a {type: (t-var {} _)}) (b {type: (t-var {} _)}))
+    (app {span: "surf:45..82"}
+      (var {span: "surf:45..59"} test_assert_eq)
+      (var {span: "surf:60..61"} a)
+      (var {span: "surf:63..64"} b)
+      (lit {span: "surf:66..81", type: (t-prim {} string)} "lib_assert_eq"))))

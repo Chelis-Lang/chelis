@@ -1,0 +1,24 @@
+(defsig {} probe (t-fn {} (t-prim {} f32) (t-prim {} f32)))
+
+(def {}
+  probe
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:27..48"}
+      (var {span: "surf:27..30"} sub)
+      (var {span: "surf:31..32"} x)
+      (app {span: "surf:34..47"}
+        (var {span: "surf:34..44"} frobnicate)
+        (var {span: "surf:45..46"} x)))))
+
+(defsig {} main (t-fn {} (t-prim {} f32)))
+
+(def {}
+  main
+  (fn {}
+    (params {})
+    (app {span: "surf:69..90"}
+      (var {span: "surf:69..74"} probe)
+      (cast {span: "surf:75..89"}
+        (lit {span: "surf:80..83", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 1.0)
+        (t-prim {} f32)))))

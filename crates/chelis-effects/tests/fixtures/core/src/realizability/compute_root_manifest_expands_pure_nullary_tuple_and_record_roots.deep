@@ -1,0 +1,40 @@
+(deftype {}
+  Pair
+  ()
+  (variant {}
+    Pair
+    (field {} left (t-prim {} i32))
+    (field {} right (t-prim {} i32))))
+
+(defsig {} tupled (t-fn {} (t-tuple {} (t-prim {} i32) (t-prim {} i32))))
+
+(def {}
+  tupled
+  (fn {}
+    (params {})
+    (tuple {span: "surf:74..102"}
+      (cast {span: "surf:75..87"}
+        (lit {span: "surf:80..81", surf_literal_style: "unsuffixed", type: (t-prim {} i32)} 1)
+        (t-prim {} i32))
+      (cast {span: "surf:89..101"}
+        (lit {span: "surf:94..95", surf_literal_style: "unsuffixed", type: (t-prim {} i32)} 2)
+        (t-prim {} i32)))))
+
+(defsig {} answer (t-fn {} (t-adt {} Pair)))
+
+(def {}
+  answer
+  (fn {}
+    (params {})
+    (record {span: "surf:126..174"}
+      Pair
+      (kv {}
+        left
+        (cast {span: "surf:139..151"}
+          (lit {span: "surf:144..145", surf_literal_style: "unsuffixed", type: (t-prim {} i32)} 3)
+          (t-prim {} i32)))
+      (kv {}
+        right
+        (cast {span: "surf:160..172"}
+          (lit {span: "surf:165..166", surf_literal_style: "unsuffixed", type: (t-prim {} i32)} 4)
+          (t-prim {} i32))))))

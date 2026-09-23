@@ -1,0 +1,34 @@
+(defsig {}
+  sample
+  (m n)
+  (t-fn {}
+    (t-tensor {} (d-var {} m) (t-prim {} f32))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 2) (d-lit {} 2) (t-prim {} f32))))
+
+(def {}
+  sample
+  (fn {}
+    (params {} (source {type: (t-var {} _)}) (x {type: (t-var {} _)}))
+    (let {span: "surf:83..168"}
+      (bind {}
+        dead
+        (app {span: "surf:93..116"}
+          (var {span: "surf:93..100"} dropout)
+          (var {span: "surf:101..107"} source)
+          (lit {span: "surf:109..115", surf_literal_style: "explicit", type: (t-prim {} f32)} 0.0)))
+      (app {span: "surf:118..166"}
+        (var {span: "surf:118..125"} dropout)
+        (app {span: "surf:126..157"}
+          (var {span: "surf:126..133"} reshape)
+          (var {span: "surf:134..135"} x)
+          (app {span: "surf:137..156"}
+            (var {} Cons)
+            (app {span: "surf:138..149"}
+              (var {span: "surf:138..143"} numel)
+              (var {span: "surf:144..148"} dead))
+            (app {}
+              (var {} Cons)
+              (lit {span: "surf:151..155", type: (t-prim {} i64)} 2)
+              (var {} Nil))))
+        (lit {span: "surf:159..165", surf_literal_style: "explicit", type: (t-prim {} f32)} 0.5)))))

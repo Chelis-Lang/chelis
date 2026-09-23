@@ -1,0 +1,33 @@
+(module {surf_path: "Repro.ConcatShadow"}
+  repro.concatshadow
+  (def {}
+    rows
+    (app {span: "surf:34..79"}
+      (var {} Cons)
+      (app {span: "surf:35..78"}
+        (var {span: "surf:35..44"} to_tensor)
+        (app {span: "surf:45..77"}
+          (var {} Cons)
+          (cast {span: "surf:46..60"}
+            (lit {span: "surf:51..54", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 1.0)
+            (t-prim {} f32))
+          (app {}
+            (var {} Cons)
+            (cast {span: "surf:62..76"}
+              (lit {span: "surf:67..70", surf_literal_style: "unsuffixed", type: (t-prim {} f32)} 2.0)
+              (t-prim {} f32))
+            (var {} Nil))))
+      (var {} Nil)))
+  (defsig {}
+    cat_shadow
+    (t-fn {}
+      (t-adt {} List (t-tensor {} (d-lit {} 2) (t-prim {} f32)))
+      (t-tensor {} (d-lit {} 9) (t-prim {} f32))))
+  (def {}
+    cat_shadow
+    (fn {}
+      (params {} (rows {type: (t-var {} _)}))
+      (app {span: "surf:145..160"}
+        (var {span: "surf:145..151"} concat)
+        (var {span: "surf:152..156"} rows)
+        (lit {span: "surf:158..159", type: (t-prim {} i32)} 0)))))

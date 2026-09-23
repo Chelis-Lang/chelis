@@ -14,22 +14,19 @@
 //! as the monolithic flow, so library-internal linearity is validated
 //! before any new-code check runs.
 
-use chelis_surf::desugar::desugar_program;
-use chelis_surf::parser::parse_str;
 use chelis_types::{
     build_type_env_from_library, check_ir_program, check_ir_with_context, check_linearity,
     check_linearity_with_context, check_typed_program,
 };
 
-fn surf_to_deep(source: &str) -> Vec<chelis_deep::Expr> {
-    let decls = parse_str(source).expect("surf parse");
-    desugar_program(&decls)
+fn parse_core_fixture(source: &str) -> Vec<chelis_deep::Expr> {
+    chelis_deep::parser::parse_str(source).expect("Deep fixture")
 }
 
 fn check_library_with_linearity(library_src: &str) -> chelis_types::CheckedProgram {
     // Library leg: full IR check check, then linearity. Mirrors what the
     // production pipeline does before stashing a CompiledContext.
-    let library_deep = surf_to_deep(library_src);
+    let library_deep = parse_core_fixture(library_src);
     let checked = check_ir_program(&library_deep)
         .unwrap_or_else(|e| panic!("library IR check check failed: {:?}", e.errors));
     check_linearity(&checked).expect("library linearity must be clean")
@@ -40,9 +37,9 @@ fn check_new_with_context(
     new_src: &str,
 ) -> Result<(), Vec<chelis_types::errors::CheckError>> {
     let library_program = check_library_with_linearity(library_src);
-    let ctx =
-        build_type_env_from_library(&surf_to_deep(library_src)).expect("library context build OK");
-    let new_deep = surf_to_deep(new_src);
+    let ctx = build_type_env_from_library(&parse_core_fixture(library_src))
+        .expect("library context build OK");
+    let new_deep = parse_core_fixture(new_src);
     let new_checked = check_ir_with_context(&ctx, &new_deep)
         .unwrap_or_else(|e| panic!("with-context IR check failed: {:?}", e.errors));
     check_linearity_with_context(&library_program, &new_checked).map(|_| ())
@@ -53,7 +50,7 @@ fn check_monolithic_combined(
     new_src: &str,
 ) -> Result<(), Vec<chelis_types::errors::CheckError>> {
     let combined_src = format!("{library_src}\n{new_src}");
-    let combined_deep = surf_to_deep(&combined_src);
+    let combined_deep = parse_core_fixture(&combined_src);
     let checked = check_typed_program(&combined_deep)
         .unwrap_or_else(|e| panic!("monolithic IR check failed: {:?}", e.errors));
     check_linearity(&checked).map(|_| ())
@@ -68,11 +65,12 @@ fn library_consume_does_not_steal_new_code_input_tensor() {
     // code calls it with its OWN input tensor. The new-code call should
     // consume only the new-code's `my_x`, not anything carried over from
     // the library body.
-    let library_src = "def lib_consume(t: tensor[4, f32]) -> tensor[4, f32] = realize(t)";
-    let new_src = r#"
-def caller(my_x: tensor[4, f32]) -> tensor[4, f32] =
-  lib_consume(my_x)
-"#;
+    let library_src = include_str!(
+        "fixtures/core/tests/linearity_with_context/library_consume_does_not_steal_new_code_input_tensor_71.deep"
+    );
+    let new_src = include_str!(
+        "fixtures/core/tests/linearity_with_context/library_consume_does_not_steal_new_code_input_tensor_72.deep"
+    );
 
     check_new_with_context(library_src, new_src)
         .expect("calling library tensor-consuming def on new-code input must be linearity-clean");
@@ -84,19 +82,12 @@ fn library_matmul_call_on_new_code_inputs_succeeds() {
     // matmul-like def, called by new code on its own input tensors.
     // Both new-code inputs must be consumed exactly once at the call;
     // no leak of library param names.
-    let library_src = r#"
-def lib_matmul(a: &tensor[4, f32], b: &tensor[4, f32]) -> tensor[4, f32] =
-  add(a, b)
-"#;
-    let new_src = r#"
-def caller(my_x: tensor[4, f32], my_w: tensor[4, f32]) -> tensor[4, f32] =
-  {
-    out: tensor[4, f32] = lib_matmul(my_x, my_w)
-    _ = drop(my_x)
-    _ = drop(my_w)
-    out
-  }
-"#;
+    let library_src = include_str!(
+        "fixtures/core/tests/linearity_with_context/library_matmul_call_on_new_code_inputs_succeeds_87.deep"
+    );
+    let new_src = include_str!(
+        "fixtures/core/tests/linearity_with_context/library_matmul_call_on_new_code_inputs_succeeds_91.deep"
+    );
 
     check_new_with_context(library_src, new_src).expect("library matmul call on new-code tensors");
 }
@@ -107,16 +98,12 @@ fn new_code_consuming_fanout_is_accepted_with_context() {
     // once by the library call. The implicit linearity model treats this as
     // source fan-out and inserts an IR Copy during lowering, so the
     // with-context checker must agree with the monolithic checker.
-    let library_src = r#"
-def lib_id(t: tensor[4, f32]) -> tensor[4, f32] = t
-"#;
-    let new_src = r#"
-def bad(my_x: tensor[4, f32]) -> tensor[4, f32] =
-  {
-    y: tensor[4, f32] = realize(my_x)
-    lib_id(my_x)
-  }
-"#;
+    let library_src = include_str!(
+        "fixtures/core/tests/linearity_with_context/new_code_consuming_fanout_is_accepted_with_context_110.deep"
+    );
+    let new_src = include_str!(
+        "fixtures/core/tests/linearity_with_context/new_code_consuming_fanout_is_accepted_with_context_113.deep"
+    );
 
     let with_ctx = check_new_with_context(library_src, new_src);
     let mono = check_monolithic_combined(library_src, new_src);
@@ -134,13 +121,12 @@ fn library_def_reference_is_non_linear_no_consumption() {
     // Just referencing `lib_id` (not calling it) must not trigger any
     // linearity error. Library def types are functions, which are
     // non-linear — they carry no tensor content directly.
-    let library_src = r#"
-def lib_id(t: tensor[4, f32]) -> tensor[4, f32] = t
-"#;
-    let new_src = r#"
-def use_lib(my_x: tensor[4, f32]) -> tensor[4, f32] =
-  lib_id(my_x)
-"#;
+    let library_src = include_str!(
+        "fixtures/core/tests/linearity_with_context/library_def_reference_is_non_linear_no_consumption_137.deep"
+    );
+    let new_src = include_str!(
+        "fixtures/core/tests/linearity_with_context/library_def_reference_is_non_linear_no_consumption_140.deep"
+    );
     check_new_with_context(library_src, new_src).expect("library def reference is non-consuming");
 }
 
@@ -151,23 +137,20 @@ fn no_leak_between_snippets_against_same_library() {
     // Snippet A uses consuming fan-out, which is valid in the implicit
     // linearity model. After running it, snippet B must still succeed. This
     // exercises function-purity: no shared mutable checker state.
-    let library_program =
-        check_library_with_linearity("def lib_id(t: tensor[4, f32]) -> tensor[4, f32] = t");
+    let library_program = check_library_with_linearity(include_str!(
+        "fixtures/core/tests/linearity_with_context/no_leak_between_snippets_against_same_library_155.deep"
+    ));
 
-    let lib_deep = surf_to_deep("def lib_id(t: tensor[4, f32]) -> tensor[4, f32] = t");
+    let lib_deep = parse_core_fixture(include_str!(
+        "fixtures/core/tests/linearity_with_context/no_leak_between_snippets_against_same_library_157.deep"
+    ));
     let ctx = build_type_env_from_library(&lib_deep).expect("ctx OK");
 
     // Snippet A: consuming fan-out — accepted and handled later by Copy
     // insertion during lowering.
-    let bad_deep = surf_to_deep(
-        r#"
-def bad(my_x: tensor[4, f32]) -> tensor[4, f32] =
-  {
-    y: tensor[4, f32] = realize(my_x)
-    lib_id(my_x)
-  }
-"#,
-    );
+    let bad_deep = parse_core_fixture(include_str!(
+        "fixtures/core/tests/linearity_with_context/no_leak_between_snippets_against_same_library_163.deep"
+    ));
     let bad_checked = check_ir_with_context(&ctx, &bad_deep).expect("IR check clean");
     let fanout_res = check_linearity_with_context(&library_program, &bad_checked);
     assert!(
@@ -177,7 +160,9 @@ def bad(my_x: tensor[4, f32]) -> tensor[4, f32] =
     );
 
     // Snippet B: clean — must still succeed despite snippet A's failure.
-    let good_deep = surf_to_deep("def good(my_x: tensor[4, f32]) -> tensor[4, f32] = lib_id(my_x)");
+    let good_deep = parse_core_fixture(include_str!(
+        "fixtures/core/tests/linearity_with_context/no_leak_between_snippets_against_same_library_180.deep"
+    ));
     let good_checked = check_ir_with_context(&ctx, &good_deep).expect("IR check clean");
     let good_res = check_linearity_with_context(&library_program, &good_checked);
     assert!(
@@ -191,15 +176,12 @@ def bad(my_x: tensor[4, f32]) -> tensor[4, f32] =
 
 #[test]
 fn parity_pair_one_clean_library_call() {
-    let library_src = "def lib_relu(t: &tensor[4, f32]) -> tensor[4, f32] = relu(t)";
-    let new_src = r#"
-def caller(my_x: tensor[4, f32]) -> tensor[4, f32] =
-  {
-    y: tensor[4, f32] = lib_relu(my_x)
-    _ = drop(my_x)
-    y
-  }
-"#;
+    let library_src = include_str!(
+        "fixtures/core/tests/linearity_with_context/parity_pair_one_clean_library_call_194.deep"
+    );
+    let new_src = include_str!(
+        "fixtures/core/tests/linearity_with_context/parity_pair_one_clean_library_call_195.deep"
+    );
 
     let with_ctx = check_new_with_context(library_src, new_src);
     let mono = check_monolithic_combined(library_src, new_src);
@@ -213,14 +195,12 @@ def caller(my_x: tensor[4, f32]) -> tensor[4, f32] =
 
 #[test]
 fn parity_pair_two_consuming_fanout_accepted() {
-    let library_src = "def lib_id(t: tensor[4, f32]) -> tensor[4, f32] = t";
-    let new_src = r#"
-def bad(my_x: tensor[4, f32]) -> tensor[4, f32] =
-  {
-    y: tensor[4, f32] = realize(my_x)
-    lib_id(my_x)
-  }
-"#;
+    let library_src = include_str!(
+        "fixtures/core/tests/linearity_with_context/parity_pair_two_consuming_fanout_accepted_216.deep"
+    );
+    let new_src = include_str!(
+        "fixtures/core/tests/linearity_with_context/parity_pair_two_consuming_fanout_accepted_217.deep"
+    );
 
     let with_ctx = check_new_with_context(library_src, new_src);
     let mono = check_monolithic_combined(library_src, new_src);
@@ -235,18 +215,12 @@ def bad(my_x: tensor[4, f32]) -> tensor[4, f32] =
 
 #[test]
 fn parity_pair_three_borrow_keeps_caller_live() {
-    let library_src = r#"
-def lib_rank(t: &tensor[4, f32]) -> i32 = rank(t)
-"#;
-    let new_src = r#"
-def caller(my_x: tensor[4, f32]) -> tensor[4, f32] =
-  {
-    n: i32 = lib_rank(my_x)
-    y: tensor[4, f32] = relu(my_x)
-    _ = drop(my_x)
-    y
-  }
-"#;
+    let library_src = include_str!(
+        "fixtures/core/tests/linearity_with_context/parity_pair_three_borrow_keeps_caller_live_238.deep"
+    );
+    let new_src = include_str!(
+        "fixtures/core/tests/linearity_with_context/parity_pair_three_borrow_keeps_caller_live_241.deep"
+    );
 
     let with_ctx = check_new_with_context(library_src, new_src);
     let mono = check_monolithic_combined(library_src, new_src);
@@ -262,17 +236,12 @@ def caller(my_x: tensor[4, f32]) -> tensor[4, f32] =
 fn parity_pair_four_copy_allows_reuse() {
     // Explicit `copy` remains valid under the implicit model. Same
     // semantics with or without context.
-    let library_src = "def lib_consume(t: tensor[4, f32]) -> tensor[4, f32] = realize(t)";
-    let new_src = r#"
-def caller(my_x: tensor[4, f32]) -> tensor[4, f32] =
-  {
-    y: tensor[4, f32] = lib_consume(copy(my_x))
-    out: tensor[4, f32] = add(my_x, y)
-    _ = drop(my_x)
-    _ = drop(y)
-    out
-  }
-"#;
+    let library_src = include_str!(
+        "fixtures/core/tests/linearity_with_context/parity_pair_four_copy_allows_reuse_265.deep"
+    );
+    let new_src = include_str!(
+        "fixtures/core/tests/linearity_with_context/parity_pair_four_copy_allows_reuse_266.deep"
+    );
 
     let with_ctx = check_new_with_context(library_src, new_src);
     let mono = check_monolithic_combined(library_src, new_src);
@@ -285,18 +254,12 @@ def caller(my_x: tensor[4, f32]) -> tensor[4, f32] =
 fn parity_pair_five_observational_query_does_not_consume() {
     // Library def whose new-code call passes a tensor through an
     // observational builtin (`shape`) — must not consume `my_x`.
-    let library_src = r#"
-def lib_shape0(t: &tensor[2, 3, f32]) -> i64 = shape(t, 0)
-"#;
-    let new_src = r#"
-def caller(my_x: tensor[2, 3, f32]) -> tensor[2, 3, f32] =
-  {
-    n: i64 = lib_shape0(my_x)
-    y: tensor[2, 3, f32] = relu(my_x)
-    _ = drop(my_x)
-    y
-  }
-"#;
+    let library_src = include_str!(
+        "fixtures/core/tests/linearity_with_context/parity_pair_five_observational_query_does_not_consume_288.deep"
+    );
+    let new_src = include_str!(
+        "fixtures/core/tests/linearity_with_context/parity_pair_five_observational_query_does_not_consume_291.deep"
+    );
 
     let with_ctx = check_new_with_context(library_src, new_src);
     let mono = check_monolithic_combined(library_src, new_src);
@@ -323,20 +286,12 @@ fn library_assert_then_assert_does_not_double_consume_caller() {
     // internally — but the new-code caller's `actual` is its OWN
     // separate tensor. The call sites pass `actual` to two consecutive
     // library calls, which monolithic linearity accepts.
-    let library_src = r#"
-def assert_shape_lib(t: &tensor[4, f32]) -> i32 = rank(t)
-def assert_close_lib(a: &tensor[4, f32], b: &tensor[4, f32]) -> i32 = rank(a)
-"#;
-    let new_src = r#"
-def caller(actual: tensor[4, f32], expected: tensor[4, f32]) -> i32 =
-  {
-    _shape: i32 = assert_shape_lib(&actual)
-    close: i32 = assert_close_lib(actual, expected)
-    _ = drop(actual)
-    _ = drop(expected)
-    close
-  }
-"#;
+    let library_src = include_str!(
+        "fixtures/core/tests/linearity_with_context/library_assert_then_assert_does_not_double_consume_caller_326.deep"
+    );
+    let new_src = include_str!(
+        "fixtures/core/tests/linearity_with_context/library_assert_then_assert_does_not_double_consume_caller_330.deep"
+    );
 
     let with_ctx = check_new_with_context(library_src, new_src);
     let mono = check_monolithic_combined(library_src, new_src);
@@ -363,21 +318,13 @@ def caller(actual: tensor[4, f32], expected: tensor[4, f32]) -> i32 =
 /// production corpus. With-context must agree.
 #[test]
 fn library_underscore_discard_then_call_with_context_matches_monolithic() {
-    let library_src = r#"
-def assert_shape_lib(t: &tensor[4, f32], n: i64) -> i32 = rank(t)
-def assert_close_lib(a: &tensor[4, f32], b: &tensor[4, f32]) -> i32 = rank(a)
-"#;
+    let library_src = include_str!(
+        "fixtures/core/tests/linearity_with_context/library_underscore_discard_then_call_with_context_matches_monolithic_366.deep"
+    );
     // Use `_ =` discard form, mirroring the chelis-std pattern.
-    let new_src = r#"
-def caller(actual: tensor[4, f32], expected: tensor[4, f32]) -> i32 =
-  {
-    _ = assert_shape_lib(actual, cast(4, i64))
-    close: i32 = assert_close_lib(actual, expected)
-    _ = drop(actual)
-    _ = drop(expected)
-    close
-  }
-"#;
+    let new_src = include_str!(
+        "fixtures/core/tests/linearity_with_context/library_underscore_discard_then_call_with_context_matches_monolithic_371.deep"
+    );
 
     let with_ctx = check_new_with_context(library_src, new_src);
     let mono = check_monolithic_combined(library_src, new_src);
@@ -399,20 +346,12 @@ def caller(actual: tensor[4, f32], expected: tensor[4, f32]) -> i32 =
 /// pipeline), the with-context variant must accept too.
 #[test]
 fn library_calls_aliased_without_explicit_borrow_match_monolithic() {
-    let library_src = r#"
-def assert_shape_lib(t: &tensor[4, f32], n: i64) -> i32 = rank(t)
-def assert_close_lib(a: &tensor[4, f32], b: &tensor[4, f32]) -> i32 = rank(a)
-"#;
-    let new_src = r#"
-def caller(actual: tensor[4, f32], expected: tensor[4, f32]) -> i32 =
-  {
-    _shape: i32 = assert_shape_lib(actual, cast(4, i64))
-    close: i32 = assert_close_lib(actual, expected)
-    _ = drop(actual)
-    _ = drop(expected)
-    close
-  }
-"#;
+    let library_src = include_str!(
+        "fixtures/core/tests/linearity_with_context/library_calls_aliased_without_explicit_borrow_match_monolithic_402.deep"
+    );
+    let new_src = include_str!(
+        "fixtures/core/tests/linearity_with_context/library_calls_aliased_without_explicit_borrow_match_monolithic_406.deep"
+    );
 
     let with_ctx = check_new_with_context(library_src, new_src);
     let mono = check_monolithic_combined(library_src, new_src);
@@ -441,20 +380,12 @@ fn library_two_consecutive_borrowing_calls_do_not_consume() {
     // function. Mirrors the actual chelis-std pattern where
     // `assert_shape(&t)` and `assert_close_tensor(&a, &b)` are
     // observational.
-    let library_src = r#"
-def lib_a(t: &tensor[4, f32]) -> i32 = rank(t)
-def lib_b(t: &tensor[4, f32]) -> i32 = rank(t)
-"#;
-    let new_src = r#"
-def caller(actual: tensor[4, f32]) -> tensor[4, f32] =
-  {
-    _x: i32 = lib_a(actual)
-    _y: i32 = lib_b(actual)
-    y: tensor[4, f32] = relu(actual)
-    _ = drop(actual)
-    y
-  }
-"#;
+    let library_src = include_str!(
+        "fixtures/core/tests/linearity_with_context/library_two_consecutive_borrowing_calls_do_not_consume_444.deep"
+    );
+    let new_src = include_str!(
+        "fixtures/core/tests/linearity_with_context/library_two_consecutive_borrowing_calls_do_not_consume_448.deep"
+    );
 
     let with_ctx = check_new_with_context(library_src, new_src);
     let mono = check_monolithic_combined(library_src, new_src);
@@ -478,16 +409,12 @@ fn library_tensor_carrying_adt_borrow_is_accepted_with_context() {
     // populates `tensor_carrying_adts` from the LIBRARY half too — not
     // only the new-code half. Pre-fix, the library declaration was
     // invisible to the carrier set and the borrow was rejected.
-    let library_src = r#"
-type BatchNormParams[n] =
-  | BatchNormParams { gamma: tensor[n, f32], beta: tensor[n, f32] }
-
-sig lib_borrow_params[n]: &BatchNormParams[n] -> bool
-def lib_borrow_params(p) = true
-"#;
-    let new_src = r#"
-def use_params[n](p: BatchNormParams[n]) -> bool = lib_borrow_params(&p)
-"#;
+    let library_src = include_str!(
+        "fixtures/core/tests/linearity_with_context/library_tensor_carrying_adt_borrow_is_accepted_with_context_481.deep"
+    );
+    let new_src = include_str!(
+        "fixtures/core/tests/linearity_with_context/library_tensor_carrying_adt_borrow_is_accepted_with_context_488.deep"
+    );
 
     let with_ctx = check_new_with_context(library_src, new_src);
     let mono = check_monolithic_combined(library_src, new_src);
@@ -518,18 +445,12 @@ fn new_code_adt_wrapping_library_tensor_adt_borrow_is_accepted_with_context() {
     // local sets, then unioned) this regressed silently: `Outer` was
     // not in the carrier set and `&o` was rejected with
     // `InvalidBorrow`.
-    let library_src = r#"
-type Inner[n] =
-  | Inner { values: tensor[n, f32] }
-"#;
-    let new_src = r#"
-type Outer[n] =
-  | Outer { inner: Inner[n] }
-
-sig borrow_outer[n]: &Outer[n] -> bool
-def borrow_outer(o) = true
-def consume_outer[n](o: Outer[n]) -> bool = borrow_outer(&o)
-"#;
+    let library_src = include_str!(
+        "fixtures/core/tests/linearity_with_context/new_code_adt_wrapping_library_tensor_adt_borrow_is_accepted_with_context_521.deep"
+    );
+    let new_src = include_str!(
+        "fixtures/core/tests/linearity_with_context/new_code_adt_wrapping_library_tensor_adt_borrow_is_accepted_with_context_525.deep"
+    );
 
     let with_ctx = check_new_with_context(library_src, new_src);
     let mono = check_monolithic_combined(library_src, new_src);
@@ -573,22 +494,15 @@ fn check_linearity_with_context_is_pure_across_repeated_calls() {
     // so `&o` would be rejected with `InvalidBorrow` if linearity
     // saw it correctly. A stale cached carrier set from a prior
     // call to library A would silently mis-accept it.
-    let lib_a = r#"
-type Carrier[n] =
-  | Carrier { values: tensor[n, f32] }
-"#;
-    let lib_b = r#"
-type Carrier[n] =
-  | Carrier { tag: i32 }
-"#;
-    let new_src = r#"
-type Outer[n] =
-  | Outer { inner: Carrier[n] }
-
-sig borrow_outer[n]: &Outer[n] -> bool
-def borrow_outer(o) = true
-def consume_outer[n](o: Outer[n]) -> bool = borrow_outer(&o)
-"#;
+    let lib_a = include_str!(
+        "fixtures/core/tests/linearity_with_context/check_linearity_with_context_is_pure_across_repeated_calls_576.deep"
+    );
+    let lib_b = include_str!(
+        "fixtures/core/tests/linearity_with_context/check_linearity_with_context_is_pure_across_repeated_calls_580.deep"
+    );
+    let new_src = include_str!(
+        "fixtures/core/tests/linearity_with_context/check_linearity_with_context_is_pure_across_repeated_calls_584.deep"
+    );
 
     // Interleave the calls to make any leaked state fail loudly.
     for _ in 0..3 {
@@ -627,16 +541,9 @@ fn empty_library_matches_monolithic() {
     // would pass `check_linearity` on its own. The two paths must
     // agree.
     let empty_lib_program = check_library_with_linearity("");
-    let new_deep = surf_to_deep(
-        r#"
-def f(x: tensor[4, f32]) -> tensor[4, f32] =
-  {
-    y: tensor[4, f32] = relu(x)
-    _ = drop(x)
-    y
-  }
-"#,
-    );
+    let new_deep = parse_core_fixture(include_str!(
+        "fixtures/core/tests/linearity_with_context/empty_library_matches_monolithic_631.deep"
+    ));
     let ctx_empty = chelis_types::TypeEnv::empty();
     let new_checked = check_ir_with_context(&ctx_empty, &new_deep).expect("IR check clean");
     let res = check_linearity_with_context(&empty_lib_program, &new_checked);

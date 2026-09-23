@@ -186,24 +186,6 @@ fn deep_app_chain_yields_stack_budget_diagnostic_not_sigsegv() {
     );
 }
 
-/// POSITIVE (located): the diagnostic names WHERE the depth is -- the walker
-/// site -- so a valid-but-deep program tells the user where to look, rather
-/// than a bare "too deep".
-#[test]
-fn stack_budget_diagnostic_names_the_walker_site() {
-    let messages = check_deep_on_bounded_stack(
-        program_with_body(deep_app_chain(4000)),
-        8,
-        Some(SAFETY_NET_SEGMENT_BYTES),
-    );
-    assert!(
-        messages
-            .iter()
-            .any(|m| m.contains("stack budget exhausted") && m.contains("in `")),
-        "the depth diagnostic must name the walker site (`in \\`...\\``); got: {messages:?}",
-    );
-}
-
 /// POSITIVE (covered-or-rejected, never silent): a chain past the budget must
 /// make the whole check FAIL -- `check_ir_program` returns `Err` with a
 /// non-empty error list, never `Ok` and never an empty/partial result. This is

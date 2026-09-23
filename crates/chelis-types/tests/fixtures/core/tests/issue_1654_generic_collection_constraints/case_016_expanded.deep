@@ -1,0 +1,11 @@
+(def {} return_len (fn {} (params {}) (var {span: "surf:19..22"} len)))
+
+(def {}
+  measure
+  (app {span: "surf:33..45"} (var {span: "surf:33..43"} return_len)))
+
+(def {}
+  out
+  (app {span: "surf:52..65"}
+    (var {span: "surf:52..59"} measure)
+    (lit {span: "surf:60..64", type: (t-prim {} i64)} 1)))

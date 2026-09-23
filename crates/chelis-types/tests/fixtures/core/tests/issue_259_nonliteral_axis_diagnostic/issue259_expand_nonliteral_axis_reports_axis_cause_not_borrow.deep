@@ -1,0 +1,36 @@
+(defsig {}
+  consumer
+  (m n)
+  (t-fn {}
+    (t-ref {} (t-tensor {} (d-var {} m) (d-var {} n) (t-prim {} f32)))
+    (t-tensor {} (d-var {} m) (d-var {} n) (t-prim {} f32))))
+
+(def {}
+  consumer
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (copy {span: "surf:66..73"} (var {span: "surf:71..72"} x))))
+
+(defsig {}
+  go
+  (n)
+  (t-fn {}
+    (t-tensor {} (d-var {} n) (t-prim {} f32))
+    (t-prim {} i32)
+    (t-tensor {} (d-lit {} 4) (d-var {} n) (t-prim {} f32))))
+
+(def {}
+  go
+  (fn {}
+    (params {} (x {type: (t-var {} _)}) (ax {type: (t-var {} _)}))
+    (let {span: "surf:135..180"}
+      (bind {}
+        y
+        (app {span: "surf:143..163"}
+          (var {span: "surf:143..149"} insert)
+          (borrow {span: "surf:150..152"} (var {span: "surf:151..152"} x))
+          (var {span: "surf:154..156"} ax)
+          (lit {span: "surf:158..162", type: (t-prim {} i64)} 4)))
+      (app {span: "surf:166..178"}
+        (var {span: "surf:166..174"} consumer)
+        (borrow {span: "surf:175..177"} (var {span: "surf:176..177"} y))))))

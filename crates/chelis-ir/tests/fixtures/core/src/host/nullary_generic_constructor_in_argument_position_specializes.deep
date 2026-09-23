@@ -1,0 +1,55 @@
+(deftype {}
+  Store
+  (a)
+  (variant {} Vacant)
+  (variant {}
+    Held
+    (field {} key (t-prim {} string))
+    (field {} value (t-var {} a))))
+
+(defsig {} fresh_store (a) (t-fn {} (t-adt {} Store (t-var {} a))))
+
+(def {} fresh_store (fn {} (params {}) (var {span: "surf:93..99"} Vacant)))
+
+(defsig {}
+  unwrap
+  (a)
+  (t-fn {} (t-adt {} Store (t-var {} a)) (t-var {} a) (t-var {} a)))
+
+(def {}
+  unwrap
+  (fn {}
+    (params {} (s {type: (t-var {} _)}) (fallback {type: (t-var {} _)}))
+    (match {span: "surf:147..217"}
+      (var {span: "surf:153..154"} s)
+      (arm {} (pat-ctor {} Vacant) () (var {span: "surf:174..182"} fallback))
+      (arm {}
+        (pat-record {}
+          Held
+          (kv {} key (pat-var {} k))
+          (kv {} value (pat-var {} v)))
+        ()
+        (var {span: "surf:214..215"} v)))))
+
+(defsig {} seed (a) (t-fn {} (t-var {} a) (t-var {} a)))
+
+(def {}
+  seed
+  (fn {}
+    (params {} (value {type: (t-var {} _)}))
+    (app {span: "surf:247..275"}
+      (var {span: "surf:247..253"} unwrap)
+      (app {span: "surf:254..267"} (var {span: "surf:254..265"} fresh_store))
+      (var {span: "surf:269..274"} value))))
+
+(defsig {} read (t-fn {} (t-prim {} i64)))
+
+(def {}
+  read
+  (fn {}
+    (params {})
+    (app {span: "surf:296..314"}
+      (var {span: "surf:296..300"} seed)
+      (cast {span: "surf:301..313"}
+        (lit {span: "surf:306..307", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 7)
+        (t-prim {} i64)))))

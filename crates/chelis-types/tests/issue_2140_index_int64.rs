@@ -1,8 +1,5 @@
 //! chelis#2140: direct `index` applications require the exact i64 index type.
 
-use chelis_deep::Expr;
-use chelis_macros::{ExpansionOptions, expand_program};
-use chelis_surf::{desugar::desugar_program, parser::parse_str};
 use chelis_types::errors::{CheckError, CheckErrorKind};
 use chelis_types::{check_ir_program, check_typed_program};
 
@@ -16,11 +13,8 @@ fn rendered(errors: &[CheckError]) -> Vec<String> {
 }
 
 fn whole_program(source: &str) -> [(&'static str, Result<(), Vec<CheckError>>); 2] {
-    let parsed = parse_str(source).expect("valid Surf");
-    let desugared = desugar_program(&parsed);
-    let expanded: Vec<Expr> = expand_program(&desugared, &ExpansionOptions::default())
-        .expect("macro expansion")
-        .into_exprs();
+    let desugared: Vec<chelis_deep::Expr> =
+        chelis_deep::parse_and_stamp_file(source).expect("valid core fixture");
     [
         (
             "typed",
@@ -30,7 +24,7 @@ fn whole_program(source: &str) -> [(&'static str, Result<(), Vec<CheckError>>); 
         ),
         (
             "IR",
-            check_ir_program(&expanded)
+            check_ir_program(&desugared)
                 .map(|_| ())
                 .map_err(|report| report.errors),
         ),
@@ -68,15 +62,33 @@ fn assert_index_type_rejected(label: &str, source: &str, index_type: &str) {
 
 #[test]
 fn direct_index_accepts_exact_i64_at_both_checker_ingresses() {
-    assert_accepted("exact i64 index", "out: i64 = index([1i64], 0i64)\n");
+    assert_accepted(
+        "exact i64 index",
+        include_str!(
+            "fixtures/core/tests/issue_2140_index_int64/direct_index_accepts_exact_i64_at_both_checker_ingresses.0.deep"
+        ),
+    );
 }
 
 #[test]
 fn direct_index_rejects_every_other_integer_width_at_both_checker_ingresses() {
     // Mutation-equivalent negative control: restoring Prim::is_integer() in
     // the direct route makes every one of these witnesses incorrectly pass.
-    for (index_type, literal) in [("i8", "0i8"), ("i16", "0i16"), ("i32", "0i32")] {
-        let source = format!("out: i64 = index([1i64], {literal})\n");
+    for index_type in ["i8", "i16", "i32"] {
+        let source = format!(
+            r#"(defsig {{}} out (t-prim {{}} i64))
+
+(def {{}}
+  out
+  (app {{span: "surf:11..30"}}
+    (var {{span: "surf:11..16"}} index)
+    (app {{span: "surf:17..23"}}
+      (var {{}} Cons)
+      (lit {{span: "surf:18..22", type: (t-prim {{}} i64)}} 1)
+      (var {{}} Nil))
+    (lit {{span: "surf:25..29", type: (t-prim {{}} {index_type})}} 0)))
+"#
+        );
         assert_index_type_rejected(index_type, &source, index_type);
     }
 }
@@ -86,7 +98,21 @@ fn direct_index_rejects_active_non_integer_primitives_at_both_checker_ingresses(
     // Reserved f8e4m3 is rejected earlier by its UnsupportedTensorPrecision
     // owner and therefore must not be forced through this operation-owned guard.
     for index_type in ["f16", "bf16", "f32", "f64", "bool", "string"] {
-        let source = format!("def pick(xs: List[i64], i: {index_type}) -> i64 = index(xs, i)\n");
+        let source = format!(
+            r#"(defsig {{}}
+  pick
+  (t-fn {{}} (t-adt {{}} List (t-prim {{}} i64)) (t-prim {{}} {index_type}) (t-prim {{}} i64)))
+
+(def {{}}
+  pick
+  (fn {{}}
+    (params {{}} (xs {{type: (t-var {{}} _)}}) (i {{type: (t-var {{}} _)}}))
+    (app {{span: "surf:41..53"}}
+      (var {{span: "surf:41..46"}} index)
+      (var {{span: "surf:47..49"}} xs)
+      (var {{span: "surf:51..52"}} i))))
+"#
+        );
         assert_index_type_rejected(index_type, &source, index_type);
     }
 }

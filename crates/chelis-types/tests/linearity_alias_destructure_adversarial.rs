@@ -7,21 +7,20 @@
 //! Each fixture has a pinned expected outcome; see the surrounding
 //! doc comment for the shape under test.
 
-use chelis_surf::desugar::desugar_program;
-use chelis_surf::parser::parse_str;
+use chelis_deep::parser::parse_str;
 use chelis_types::errors::CheckErrorKind;
 use chelis_types::{check_linearity, check_typed_program};
 
 fn linearity_errors(source: &str) -> Vec<chelis_types::errors::CheckError> {
-    let decls = parse_str(source).expect("surf parse should succeed");
-    let deep = desugar_program(&decls);
+    let decls = parse_str(source).expect("Deep fixture parse should succeed");
+    let deep = decls;
     let checked = check_typed_program(&deep).expect("type check should succeed");
     check_linearity(&checked).expect_err("linearity check must error")
 }
 
 fn assert_linearity_clean(source: &str) {
-    let decls = parse_str(source).expect("surf parse should succeed");
-    let deep = desugar_program(&decls);
+    let decls = parse_str(source).expect("Deep fixture parse should succeed");
+    let deep = decls;
     let checked = check_typed_program(&deep).expect("type check should succeed");
     check_linearity(&checked).expect("linearity check should not error");
 }
@@ -39,17 +38,9 @@ fn assert_linearity_clean(source: &str) {
 /// to confirm `resolve_alias_chain` walks past depth 1.
 #[test]
 fn alias_chain_three_levels_propagates_consume() {
-    let errors = linearity_errors(
-        r#"
-def f(x: tensor[4, f32]) -> tensor[4, f32] =
-  {
-    y: tensor[4, f32] = x
-    z: tensor[4, f32] = y
-    r: tensor[4, f32] = realize(z)
-    add(x, r)
-  }
-"#,
-    );
+    let errors = linearity_errors(include_str!(
+        "fixtures/core/tests/linearity_alias_destructure_adversarial/alias_chain_three_levels_propagates_consume_43.deep"
+    ));
     assert!(
         errors.iter().any(|e| {
             matches!(e.kind, CheckErrorKind::UseAfterConsume) && e.message.contains("variable `x`")
@@ -61,19 +52,9 @@ def f(x: tensor[4, f32]) -> tensor[4, f32] =
 /// Four-level alias chain. Stress the chain walk one step further.
 #[test]
 fn alias_chain_four_levels_propagates_consume() {
-    let errors = linearity_errors(
-        r#"
-def f(x: tensor[4, f32]) -> tensor[4, f32] =
-  {
-    a: tensor[4, f32] = x
-    b: tensor[4, f32] = a
-    c: tensor[4, f32] = b
-    d: tensor[4, f32] = c
-    r: tensor[4, f32] = realize(d)
-    add(x, r)
-  }
-"#,
-    );
+    let errors = linearity_errors(include_str!(
+        "fixtures/core/tests/linearity_alias_destructure_adversarial/alias_chain_four_levels_propagates_consume_65.deep"
+    ));
     assert!(
         errors.iter().any(|e| {
             matches!(e.kind, CheckErrorKind::UseAfterConsume) && e.message.contains("variable `x`")
@@ -86,18 +67,9 @@ def f(x: tensor[4, f32]) -> tensor[4, f32] =
 /// chain tail should not error.
 #[test]
 fn alias_chain_four_levels_consume_at_tail_only_passes() {
-    assert_linearity_clean(
-        r#"
-def f(x: tensor[4, f32]) -> tensor[4, f32] =
-  {
-    a: tensor[4, f32] = x
-    b: tensor[4, f32] = a
-    c: tensor[4, f32] = b
-    d: tensor[4, f32] = c
-    realize(d)
-  }
-"#,
-    );
+    assert_linearity_clean(include_str!(
+        "fixtures/core/tests/linearity_alias_destructure_adversarial/alias_chain_four_levels_consume_at_tail_only_passes_90.deep"
+    ));
 }
 
 // ============================================================
@@ -114,16 +86,9 @@ def f(x: tensor[4, f32]) -> tensor[4, f32] =
 /// map. This fixture confirms the contract.
 #[test]
 fn alias_then_pipe_stage_consume_propagates() {
-    let errors = linearity_errors(
-        r#"
-def f(x: tensor[4, f32]) -> tensor[4, f32] =
-  {
-    y: tensor[4, f32] = x
-    r: tensor[4, f32] = y |> realize
-    add(x, r)
-  }
-"#,
-    );
+    let errors = linearity_errors(include_str!(
+        "fixtures/core/tests/linearity_alias_destructure_adversarial/alias_then_pipe_stage_consume_propagates_118.deep"
+    ));
     assert!(
         errors.iter().any(|e| {
             matches!(e.kind, CheckErrorKind::UseAfterConsume) && e.message.contains("variable `x`")
@@ -136,16 +101,9 @@ def f(x: tensor[4, f32]) -> tensor[4, f32] =
 /// shape as pipe but the alias is consumed as an app-arg.
 #[test]
 fn alias_then_app_arg_consume_propagates() {
-    let errors = linearity_errors(
-        r#"
-def f(x: tensor[4, f32]) -> tensor[4, f32] =
-  {
-    y: tensor[4, f32] = x
-    r: tensor[4, f32] = realize(y)
-    add(x, r)
-  }
-"#,
-    );
+    let errors = linearity_errors(include_str!(
+        "fixtures/core/tests/linearity_alias_destructure_adversarial/alias_then_app_arg_consume_propagates_140.deep"
+    ));
     assert!(
         errors.iter().any(|e| {
             matches!(e.kind, CheckErrorKind::UseAfterConsume) && e.message.contains("variable `x`")
@@ -167,17 +125,9 @@ def f(x: tensor[4, f32]) -> tensor[4, f32] =
 /// `tuple_get_element_type` as recursive — verify behavior.
 #[test]
 fn nested_tuple_destructure_double_realize_errors() {
-    let errors = linearity_errors(
-        r#"
-def f(p: ((tensor[4, f32], tensor[4, f32]), tensor[4, f32])) -> tensor[4, f32] =
-  {
-    (inner, c) = p
-    (a, b) = inner
-    r1: tensor[4, f32] = realize(a)
-    realize(a)
-  }
-"#,
-    );
+    let errors = linearity_errors(include_str!(
+        "fixtures/core/tests/linearity_alias_destructure_adversarial/nested_tuple_destructure_double_realize_errors_171.deep"
+    ));
     assert!(
         errors.iter().any(|e| {
             matches!(e.kind, CheckErrorKind::UseAfterConsume) && e.message.contains("variable `a`")
@@ -191,36 +141,18 @@ def f(p: ((tensor[4, f32], tensor[4, f32]), tensor[4, f32])) -> tensor[4, f32] =
 /// pass: every leaf component is realized exactly once.
 #[test]
 fn nested_tuple_destructure_single_consume_each_passes() {
-    assert_linearity_clean(
-        r#"
-def f(p: ((tensor[4, f32], tensor[4, f32]), tensor[4, f32])) -> tensor[4, f32] =
-  {
-    (inner, c) = p
-    (a, b) = inner
-    r1: tensor[4, f32] = realize(a)
-    r2: tensor[4, f32] = realize(b)
-    add(r1, r2)
-  }
-"#,
-    );
+    assert_linearity_clean(include_str!(
+        "fixtures/core/tests/linearity_alias_destructure_adversarial/nested_tuple_destructure_single_consume_each_passes_195.deep"
+    ));
 }
 
 /// Triple-nested destructure (3-level) — error on duplicate consume of
 /// innermost component.
 #[test]
 fn triple_nested_destructure_double_consume_errors() {
-    let errors = linearity_errors(
-        r#"
-def f(p: (((tensor[4, f32], tensor[4, f32]), tensor[4, f32]), tensor[4, f32])) -> tensor[4, f32] =
-  {
-    (mid, w) = p
-    (inner, c) = mid
-    (a, b) = inner
-    r1: tensor[4, f32] = realize(a)
-    realize(a)
-  }
-"#,
-    );
+    let errors = linearity_errors(include_str!(
+        "fixtures/core/tests/linearity_alias_destructure_adversarial/triple_nested_destructure_double_consume_errors_213.deep"
+    ));
     assert!(
         errors.iter().any(|e| {
             matches!(e.kind, CheckErrorKind::UseAfterConsume) && e.message.contains("variable `a`")
@@ -238,18 +170,9 @@ def f(p: (((tensor[4, f32], tensor[4, f32]), tensor[4, f32]), tensor[4, f32])) -
 /// propagate to the inner component.
 #[test]
 fn nested_destructure_alias_consume_errors() {
-    let errors = linearity_errors(
-        r#"
-def f(p: ((tensor[4, f32], tensor[4, f32]), tensor[4, f32])) -> tensor[4, f32] =
-  {
-    (inner, c) = p
-    (a, b) = inner
-    y: tensor[4, f32] = a
-    r: tensor[4, f32] = realize(y)
-    add(a, r)
-  }
-"#,
-    );
+    let errors = linearity_errors(include_str!(
+        "fixtures/core/tests/linearity_alias_destructure_adversarial/nested_destructure_alias_consume_errors_242.deep"
+    ));
     assert!(
         errors.iter().any(|e| {
             matches!(e.kind, CheckErrorKind::UseAfterConsume) && e.message.contains("variable `a`")

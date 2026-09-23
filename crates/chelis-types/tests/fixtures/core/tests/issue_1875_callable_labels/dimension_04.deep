@@ -1,0 +1,53 @@
+(defsig {}
+  apply_it
+  (d b)
+  (t-fn {}
+    (t-fn {}
+      (t-tensor {} (d-var {} d) (d-lit {} 2) (t-prim {} f32))
+      (t-var {} b))
+    (t-tensor {} (d-var {} d) (d-lit {} 2) (t-prim {} f32))
+    (t-var {} b)))
+
+(def {}
+  apply_it
+  (fn {}
+    (params {} (f {type: (t-var {} _)}) (t {type: (t-var {} _)}))
+    (app {span: "surf:70..74"}
+      (var {span: "surf:70..71"} f)
+      (var {span: "surf:72..73"} t))))
+
+(defsig {}
+  run
+  (d e)
+  (t-fn {}
+    (t-tensor {} (d-var {} d) (d-lit {} 2) (t-prim {} f32))
+    (t-tensor {} (d-name {} row) (d-name {} col) (t-prim {} f32))
+    (t-tensor {} (d-lit {} 1) (t-prim {} i32))
+    (t-tensor {} (d-var {} e) (d-lit {} 1) (t-prim {} f32))))
+
+(def {}
+  run
+  (fn {}
+    (params {}
+      (x {type: (t-var {} _)})
+      (g {type: (t-var {} _)})
+      (i {type: (t-var {} _)}))
+    (app {span: "surf:171..229"}
+      (var {span: "surf:171..179"} apply_it)
+      (fn {span: "surf:180..218"}
+        (params {} v)
+        (let {span: "surf:190..218"}
+          (bind {}
+            r
+            (app {span: "surf:196..213"}
+              (var {span: "surf:196..202"} gather)
+              (var {span: "surf:203..204"} v)
+              (var {span: "surf:205..206"} i)
+              (app {span: "surf:207..212"}
+                (var {} neg)
+                (lit {span: "surf:208..212", surf_literal_style: "explicit", type: (t-prim {} i32)} 1))))
+          (var {span: "surf:215..216"} r)))
+      (app {span: "surf:219..228"}
+        (var {span: "surf:219..223"} tag2)
+        (var {span: "surf:224..225"} x)
+        (var {span: "surf:226..227"} g)))))

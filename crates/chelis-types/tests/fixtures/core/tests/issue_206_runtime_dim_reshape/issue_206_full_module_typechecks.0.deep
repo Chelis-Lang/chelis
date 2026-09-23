@@ -1,0 +1,53 @@
+(module {surf_path: "Probe.Runtime"}
+  probe.runtime
+  (export {} bias_broadcast flatten_batch)
+  (defsig {}
+    bias_broadcast
+    (n)
+    (t-fn {}
+      (t-ref {} (t-tensor {} (d-var {} n) (d-lit {} 4) (t-prim {} f32)))
+      (t-ref {} (t-tensor {} (d-lit {} 4) (t-prim {} f32)))
+      (t-tensor {} (d-var {} n) (d-lit {} 4) (t-prim {} f32))))
+  (def {}
+    bias_broadcast
+    (fn {}
+      (params {} x b)
+      (app {span: "surf:171..207"}
+        (var {span: "surf:171..177"} insert)
+        (var {span: "surf:178..179"} b)
+        (lit {span: "surf:181..182", type: (t-prim {} i32)} 0)
+        (app {span: "surf:184..206"}
+          (var {span: "surf:184..189"} shape)
+          (var {span: "surf:190..191"} x)
+          (cast {span: "surf:193..205"}
+            (lit {span: "surf:198..199", surf_literal_style: "unsuffixed", type: (t-prim {} i32)} 0)
+            (t-prim {} i32))))))
+  (defsig {}
+    flatten_batch
+    (n)
+    (t-fn {}
+      (t-ref {} (t-tensor {} (d-var {} n) (d-lit {} 4) (t-prim {} f32)))
+      (t-tensor {} (d-var {} n) (d-lit {} 4) (t-prim {} f32))))
+  (def {}
+    flatten_batch
+    (fn {}
+      (params {} x)
+      (app {span: "surf:294..355"}
+        (var {span: "surf:294..301"} reshape)
+        (var {span: "surf:302..303"} x)
+        (app {span: "surf:305..354"}
+          (var {} Cons)
+          (cast {span: "surf:306..339"}
+            (app {span: "surf:311..333"}
+              (var {span: "surf:311..316"} shape)
+              (var {span: "surf:317..318"} x)
+              (cast {span: "surf:320..332"}
+                (lit {span: "surf:325..326", surf_literal_style: "unsuffixed", type: (t-prim {} i32)} 0)
+                (t-prim {} i32)))
+            (t-prim {} i64))
+          (app {}
+            (var {} Cons)
+            (cast {span: "surf:341..353"}
+              (lit {span: "surf:346..347", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 4)
+              (t-prim {} i64))
+            (var {} Nil)))))))

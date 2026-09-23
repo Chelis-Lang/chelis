@@ -1,0 +1,13 @@
+(defsig {}
+  bad
+  (t-fn {}
+    (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} bool))
+    (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} i64))))
+
+(def {}
+  bad
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (app {span: "surf:54..63"}
+      (var {span: "surf:54..59"} count)
+      (borrow {span: "surf:60..62"} (var {span: "surf:61..62"} x)))))

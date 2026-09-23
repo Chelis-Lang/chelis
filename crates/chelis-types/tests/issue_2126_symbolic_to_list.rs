@@ -2,8 +2,7 @@
 //! the authored tensor precision remains polymorphic.
 
 use chelis_deep::Expr;
-use chelis_macros::{ExpansionOptions, expand_program};
-use chelis_surf::{desugar::desugar_program, parser::parse_str};
+
 use chelis_types::errors::{CheckError, CheckErrorKind};
 use chelis_types::{check_ir_program, check_typed_program};
 
@@ -16,12 +15,9 @@ fn rendered(errors: &[CheckError]) -> String {
     messages.join("\n")
 }
 
-fn both_ingresses(source: &str) -> [(&'static str, Result<(), Vec<CheckError>>); 2] {
-    let parsed = parse_str(source).expect("valid Surf");
-    let desugared = desugar_program(&parsed);
-    let expanded: Vec<Expr> = expand_program(&desugared, &ExpansionOptions::default())
-        .expect("macro expansion")
-        .into_exprs();
+fn both_ingresses(source: (&str, &str)) -> [(&'static str, Result<(), Vec<CheckError>>); 2] {
+    let desugared: Vec<Expr> = serde_json::from_str(source.0).expect("legacy fixture");
+    let expanded: Vec<Expr> = serde_json::from_str(source.1).expect("expanded fixture");
     [
         (
             "typed",
@@ -38,22 +34,22 @@ fn both_ingresses(source: &str) -> [(&'static str, Result<(), Vec<CheckError>>);
     ]
 }
 
-fn assert_accepts(label: &str, source: &str) {
+fn assert_accepts(label: &str, source: (&str, &str)) {
     for (ingress, result) in both_ingresses(source) {
         if let Err(errors) = result {
             panic!(
-                "{label} [{ingress}] unexpectedly rejected:\n{}\nsource:\n{source}",
+                "{label} [{ingress}] unexpectedly rejected:\n{}\nsource:\n{source:?}",
                 rendered(&errors)
             );
         }
     }
 }
 
-fn assert_rejects(label: &str, source: &str, expected: &str) {
+fn assert_rejects(label: &str, source: (&str, &str), expected: &str) {
     for (ingress, result) in both_ingresses(source) {
         let errors = match result {
             Err(errors) => errors,
-            Ok(()) => panic!("{label} [{ingress}] unexpectedly accepted:\n{source}"),
+            Ok(()) => panic!("{label} [{ingress}] unexpectedly accepted:\n{source:?}"),
         };
         assert!(
             errors
@@ -75,15 +71,25 @@ fn symbolic_to_list_preserves_the_list_constructor_and_leaf_type() {
     for (label, source) in [
         (
             "i16 leaf",
-            "def first[n, p](values: tensor[n, p]) -> p = \
-             index(to_list(values), 0i64)\n\
-             out: i16 = first(to_tensor([cast(321, i16), cast(7, i16)]))\n",
+            (
+                include_str!(
+                    "fixtures/core/tests/issue_2126_symbolic_to_list/symbolic_to_list_preserves_the_list_constructor_and_leaf_type_0_legacy.json"
+                ),
+                include_str!(
+                    "fixtures/core/tests/issue_2126_symbolic_to_list/symbolic_to_list_preserves_the_list_constructor_and_leaf_type_0_expanded.json"
+                ),
+            ),
         ),
         (
             "bool leaf",
-            "def first[n, p](values: tensor[n, p]) -> p = \
-             index(to_list(values), 0i64)\n\
-             out: bool = first(to_tensor([true, false]))\n",
+            (
+                include_str!(
+                    "fixtures/core/tests/issue_2126_symbolic_to_list/symbolic_to_list_preserves_the_list_constructor_and_leaf_type_1_legacy.json"
+                ),
+                include_str!(
+                    "fixtures/core/tests/issue_2126_symbolic_to_list/symbolic_to_list_preserves_the_list_constructor_and_leaf_type_1_expanded.json"
+                ),
+            ),
         ),
     ] {
         assert_accepts(label, source);
@@ -94,11 +100,14 @@ fn symbolic_to_list_preserves_the_list_constructor_and_leaf_type() {
 fn explicit_list_annotation_remains_a_positive_control() {
     assert_accepts(
         "explicit List[p]",
-        "def first[n, p](values: tensor[n, p]) -> p = {\n\
-         xs: List[p] = to_list(values)\n\
-         index(xs, 0i64)\n\
-         }\n\
-         out: i16 = first(to_tensor([cast(321, i16), cast(7, i16)]))\n",
+        (
+            include_str!(
+                "fixtures/core/tests/issue_2126_symbolic_to_list/explicit_list_annotation_remains_a_positive_control_2_legacy.json"
+            ),
+            include_str!(
+                "fixtures/core/tests/issue_2126_symbolic_to_list/explicit_list_annotation_remains_a_positive_control_2_expanded.json"
+            ),
+        ),
     );
 }
 
@@ -106,7 +115,14 @@ fn explicit_list_annotation_remains_a_positive_control() {
 fn symbolic_to_list_cannot_narrow_a_rigid_dtype_binder_to_string() {
     assert_rejects(
         "string result",
-        "def bad[n, p](values: tensor[n, p]) -> List[string] = to_list(values)\n",
+        (
+            include_str!(
+                "fixtures/core/tests/issue_2126_symbolic_to_list/symbolic_to_list_cannot_narrow_a_rigid_dtype_binder_to_string_3_legacy.json"
+            ),
+            include_str!(
+                "fixtures/core/tests/issue_2126_symbolic_to_list/symbolic_to_list_cannot_narrow_a_rigid_dtype_binder_to_string_3_expanded.json"
+            ),
+        ),
         "[04-INF-6]",
     );
 }
@@ -115,7 +131,14 @@ fn symbolic_to_list_cannot_narrow_a_rigid_dtype_binder_to_string() {
 fn a_genuinely_unknown_collection_constructor_still_rejects() {
     assert_rejects(
         "unknown index operand",
-        "def at(xs, i: i64) = index(xs, i)\n",
+        (
+            include_str!(
+                "fixtures/core/tests/issue_2126_symbolic_to_list/a_genuinely_unknown_collection_constructor_still_rejects_4_legacy.json"
+            ),
+            include_str!(
+                "fixtures/core/tests/issue_2126_symbolic_to_list/a_genuinely_unknown_collection_constructor_still_rejects_4_expanded.json"
+            ),
+        ),
         "unresolved `index` shape obligation",
     );
 }

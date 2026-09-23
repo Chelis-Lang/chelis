@@ -1,0 +1,33 @@
+(module {surf_path: "Local"}
+  local
+  (defsig {}
+    f
+    (t-fn {}
+      (t-ref {} (t-tensor {} (d-name {} batch) (t-prim {} f32)))
+      (t-tensor {} (d-name {} batch) (t-prim {} f32))))
+  (def {}
+    f
+    (fn {}
+      (params {} (x {type: (t-var {} _)}))
+      (let {span: "surf:67..88"}
+        (bind {}
+          sum
+          (app {span: "surf:75..82"}
+            (var {span: "surf:75..79"} relu)
+            (var {span: "surf:80..81"} x)))
+        (var {span: "surf:83..86"} sum))))
+  (def {}
+    out
+    (app {span: "surf:95..120"}
+      (var {span: "surf:95..96"} f)
+      (app {span: "surf:97..119"}
+        (var {span: "surf:97..106"} to_tensor)
+        (app {span: "surf:107..118"}
+          (var {} Cons)
+          (lit {span: "surf:108..111", type: (t-prim {} f32)} 1.0)
+          (app {}
+            (var {} Cons)
+            (app {span: "surf:113..117"}
+              (var {} neg)
+              (lit {span: "surf:114..117", type: (t-prim {} f32)} 2.0))
+            (var {} Nil)))))))

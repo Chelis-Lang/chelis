@@ -1,0 +1,12 @@
+(deftype {} Pair () (variant {} Pair (t-prim {} i32) (t-prim {} i32)))
+
+(def {}
+  result
+  (app {span: "surf:38..70"}
+    (var {span: "surf:38..42"} Pair)
+    (cast {span: "surf:43..55"}
+      (lit {span: "surf:48..49", surf_literal_style: "unsuffixed", type: (t-prim {} i32)} 1)
+      (t-prim {} i32))
+    (cast {span: "surf:57..69"}
+      (lit {span: "surf:62..63", surf_literal_style: "unsuffixed", type: (t-prim {} i32)} 2)
+      (t-prim {} i32))))

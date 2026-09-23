@@ -1,0 +1,36 @@
+@@HELPER@@
+
+(defsig {}
+  pick
+  (t-fn {}
+    (t-tuple {} (t-tensor {} (d-lit {} 3) (t-prim {} f32)) (t-prim {} i32))
+    (t-tensor {} (t-prim {} f32))))
+
+(def {}
+  pick
+  (fn {}
+    (params {} (pair {type: (t-var {} _)}))
+    (app {span: "surf:80..89"}
+      (var {span: "surf:80..81"} g)
+      (tuple-get {span: "surf:82..88"}
+        (var {span: "surf:82..86"} pair)
+        (lit {type: (t-prim {} i32)} 0)))))
+
+(def {}
+  f
+  (app {span: "surf:94..143"}
+    (var {span: "surf:94..98"} pick)
+    (tuple {span: "surf:99..142"}
+      (app {span: "surf:100..135"}
+        (var {span: "surf:100..109"} to_tensor)
+        (app {span: "surf:110..134"}
+          (var {} Cons)
+          (lit {span: "surf:111..117", surf_literal_style: "explicit", type: (t-prim {} f32)} 1.0)
+          (app {}
+            (var {} Cons)
+            (lit {span: "surf:119..125", surf_literal_style: "explicit", type: (t-prim {} f32)} 2.0)
+            (app {}
+              (var {} Cons)
+              (lit {span: "surf:127..133", surf_literal_style: "explicit", type: (t-prim {} f32)} 4.0)
+              (var {} Nil)))))
+      (lit {span: "surf:137..141", surf_literal_style: "explicit", type: (t-prim {} i32)} 7))))
