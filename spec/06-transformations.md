@@ -390,7 +390,7 @@ carrier is a backend capability gap, not a language restriction.
 - `with seed(...)` fixes [05-RNG-1]'s stream for the complete forward and
   reverse execution; random source words and the seed have zero cotangent,
   while [05-OP-8]'s bounds, [05-OP-37]'s data input, and the stdlib graphs use
-  their exact pathwise adjoints and [05-OP-37]'s rate rejects `grad`
+  their exact pathwise adjoints and [05-OP-37] states the rate's contract
 
 `with device(...)` is not a DAG-to-DAG transform. It selects the declared
 `Resource(Device)` region at the checked execution boundary; a target
@@ -422,7 +422,7 @@ Conceptually, the default-axis form `vmap(f)` is equivalent to:
 vmap(f)(x) = stack([f(x[i]) for i in batch_dimension])
 ```
 
-But it is **not** implemented as a loop. Instead, it is a DAG rewrite that lifts every operation to operate over the additional batch dimension. For a `Random` `f`, [05-RNG-1] assigns each row the ordinals of the sequential evaluation in increasing row order, so the equation above holds bit for bit.
+But it is **not** implemented as a loop. Instead, it is a DAG rewrite that lifts every operation to operate over the additional batch dimension. [05-RNG-1] governs the random ordinals of a vmapped `Random` function.
 
 The executable [`vmap_tensor_capture.ch`](../examples/vmap_tensor_capture.ch)
 demonstrates that the mapped input varies by row while one lexical tensor

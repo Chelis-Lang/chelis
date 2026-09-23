@@ -2496,8 +2496,9 @@ def validate_normative_contract(
             "no f32 public-rate signature, f64 funnel, unscaled-dropout alias, or "
             "special `rate >= 1` default exists",
             "pathwise adjoint reuses the exact saved mask",
-            "Dropped elements contribute positive zero",
-            "contributions combine by the canonical adjacent-pair balanced tree",
+            "the language does not differentiate that selection",
+            "`AdRejectionReason::RandomSelectionParameter`; otherwise the rate "
+            "receives the exact zero cotangent",
             "mask comparison itself has zero cotangent",
             "has no accumulator parameter",
         ),

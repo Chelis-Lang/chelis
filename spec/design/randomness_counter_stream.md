@@ -8,7 +8,7 @@ This document plans how the implementation reaches the randomness semantics the 
 - spec/06 §2.11 and §3.2;
 - spec/07 §2.
 
-It decides no semantics. Where it restates a rule, the numbered spec wins.
+It decides no language semantics. Where it restates a rule, the numbered spec wins. The one normative change it needs, to spec/10 §3.2's wire layout, lands with phase 3.
 
 The alternative language design, explicit single-use keys, is `randomness_explicit_keys.md`. Phases 1 to 3, 5 and 6 below are needed under either design. Section 4 says exactly which parts are specific to the counter stream.
 
@@ -16,13 +16,13 @@ The alternative language design, explicit single-use keys, is `randomness_explic
 
 The assessment found that only `dropout` follows [05-RNG-1], and only inside fixed-control execution plans:
 - `uniform_like` uses an older mixing whose draws mirror each other in every lane (#2408);
-- eval `vmap` draws at seed 0 (#2409);
+- `vmap` over a random function violates the sequential reading in both lanes: eval draws at seed 0, and C draws the whole batch at one ordinal (#2409);
 - compiled C consumes an ordinal for an unselected arm (#2410).
 
-The following spec-legal programs run nowhere:
-- runtime rates and bounds;
-- dropout under runtime control in eval (#2405);
-- dropout under `vmap`.
+These spec-legal programs are rejected:
+- runtime rates and bounds, in every lane (#2411);
+- dropout under runtime control or recursion, in eval (#2405);
+- dropout under `vmap`, in C.
 
 Four implementation choices cause this:
 
@@ -60,7 +60,7 @@ The frame is held:
 **Controls are operands.**
 - `Dropout(x, rate)` and `UniformLike(template, low, high)` take their rate and bounds as ordinary scalar inputs of dtype `p`. The spec says so ([05-OP-8], [05-OP-37]).
 - A random node carries a static site identity and no key. The executing frame supplies the key when the node is entered.
-- Wire and serialized-library layouts change accordingly, under a versioned schema bump (spec/10 already types `Dropout.rate` as a scalar carrier).
+- Wire and serialized-library layouts change accordingly, under a versioned schema bump. spec/10 §3.2 currently makes the rate and bounds node fields, gives both random nodes a `seed` field, and limits `Dropout.inputs` to the data input. It is amended in the same change.
 
 **Every draw is entered or not, by execution.**
 - A draw inside a selected arm is entered.
@@ -69,7 +69,7 @@ The frame is held:
 
 **`vmap` and `par` follow the sequential reading ([05-RNG-1]).**
 - When the vmapped body enters a static number `k` of draws per row, row `b`'s `j`-th draw takes ordinal `c0 + b·k + j`, which the batched kernel computes from the base `c0`.
-- When activation makes per-row counts data-dependent, the row bases are an exclusive prefix sum of the per-row counts.
+- When activation makes per-row counts data-dependent, the row bases are an exclusive prefix sum of the per-row counts. Rows whose counts depend on their own earlier draws are evaluated in row order.
 - `par` branch bases are the sequential prefix of branch counts, in source order.
 
 **Gradient replay is an occurrence tape.** Each entered draw in the forward pass appends its site and key to the invocation's tape. The backward pass, and checkpoint recomputation, read keys back from the tape without touching the frame. This admits recursion, dynamic control and nested `grad` with no per-site restriction (spec/06 §2.10.1). The tape replaces the per-site key table and the static spine requirement.
@@ -99,13 +99,17 @@ Each phase is one pull request with its own red-team rounds. The oracle for ever
    - Controls become operands and keys come from the frame.
    - The interpreter gains conforming `dropout` and `uniform_like` builtins.
    - Plans become the frame plus the tape; the classifier, the profile and the legacy random lowering are deleted.
+   - spec/10 §3.2's wire layout is amended to carry the operands and drop the baked key.
    - Oracle: runtime rates and bounds run in eval and C and match the reference; dropout under a runtime `if` or `match` runs in eval; nothing selects an executor by static classification.
 4. **Lane defects.**
    - `vmap` under the sequential reading (#2409);
    - activation on every lowered unselected draw (#2410);
    - the direct-return result-claim failure (#2407).
+   - Oracle: the vmap and unselected-arm probes match the reference in both lanes, and #2407's program runs.
 5. **Rate rejection.** `AdRejectionReason::RandomSelectionParameter` and its registry row, per the amended [05-OP-37] (#2421).
+   - Oracle: a rate reached through adjoint-contract operations rejects with the typed reason; the same program with `stop_gradient(rate)`, or with a rate independent of the parameters, differentiates.
 6. **Compiled dropout everywhere (#1192, #1872).** Tensor kernels, HIP and Metal use the kernel boundary. The remaining compiled-lane dropout rejections are removed.
+   - Oracle: the stream corpus builds and runs on C, HIP and Metal and matches the reference.
 
 ## 4. What is specific to the counter stream
 

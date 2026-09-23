@@ -52,8 +52,9 @@ The names below are placeholders for the decision.
 ## 4. What changes
 
 **Spec.**
-- spec/04 §7: `Random` is removed from the effect vocabulary, and `with seed` is removed.
+- spec/04 §7: `Random` is removed from the effect vocabulary, and `with seed` is removed. The §1.1 dtype list gains `key`.
 - spec/02: the grammar for `with seed` is removed, and `Key`, `split` and `fold_in` are added.
+- spec/03: `handle-effect` loses its `random` kind, leaving `resource`.
 - spec/05: [05-RNG-1] is recast over keys; [05-OP-8] and [05-OP-37] take a key operand; new atoms are added for the key operations.
 - spec/06: §2.11 and §3.2 get key rules.
 - spec/07: §2 needs no ordinal rule.

@@ -44,9 +44,9 @@ That last one is a biased estimate of the gradient of the expected result. For i
 | Lane | Random state | What conforms | What does not |
 |---|---|---|---|
 | eval, fixed-control plans (`chelis-ir/src/evaluation.rs`) | `RandomExecutionContext {seed, counter}` and a per-site key table | `dropout` at every float dtype, including gradient replay | Only programs the static-controls classifier admits. Every draw site must be entered exactly once. |
-| eval, host interpreter (`compiler-api/src/runtime/eval.rs`) | `random_seed`, `random_counter` | none | Has no `dropout`, so it reports "unknown runtime name". Its `uniform_like` uses the older mixing. |
+| eval, host interpreter (`chelis-compiler-api/src/runtime/eval.rs`) | `random_seed`, `random_counter` | none | Has no `dropout`, so it reports "unknown runtime name". Its `uniform_like` uses the older mixing. |
 | plain DAG evaluator (`chelis-ir/src/eval.rs`) | the node's baked `seed` | none | Uses the older `uniform_like` mixing, and an older plan-less dropout formula reachable through eval `vmap` |
-| compiled C (`backend-c/src/host_emit.rs`) | a threaded `chelis_rng_state {seed, counter, active}` | `dropout` in straight-line code, under recursion, and under a host `if` | Rejects `dropout` inside tensor kernels. Uses the older `uniform_like` mixing. Consumes an ordinal for an unselected arm. |
+| compiled C (`chelis-backend-c/src/host_emit.rs`) | a threaded `chelis_rng_state {seed, counter, active}` | `dropout` in straight-line code, under recursion, and under a host `if` | Rejects `dropout` inside tensor kernels. Uses the older `uniform_like` mixing. Consumes an ordinal for an unselected arm. |
 | HIP and Metal | none | none | `dropout` rejected (#1192); older `uniform_like` mixing |
 
 The older `uniform_like` mixing computes `splitmix(seed ^ c·G ^ i·G)`, with G = `0x9E3779B97F4A7C15`. That word is symmetric in `c` and `i`: element `i` of draw `c` equals element `c` of draw `i`, and every diagonal element equals the same seed-only value. The symmetry was checked exhaustively for `c, i < 40`.
@@ -66,8 +66,8 @@ The older `uniform_like` mixing computes `splitmix(seed ^ c·G ^ i·G)`, with G 
 | runtime dropout rate | "unknown runtime name `dropout`" | "requires a statically-resolvable rate (Chelis-Lang/chelis#776)" | misleading rejection (#2411) |
 | nested `with seed` | inner restarts at 0; outer resumes at `(7,1)` | same | conforming |
 | `grad` through dropout | `2·mask(7,0)`, next draw `(7,1)` | same | conforming |
-| `vmap` over `uniform_like`, seeds 7 and 123 | identical output for both seeds: seed 0 | handler seed, one batched ordinal | silently wrong in eval (#2409) |
-| a draw after `vmap` | caller's counter not advanced | advanced | lanes disagree (#2409) |
+| `vmap` over `uniform_like`, seeds 7 and 123 | identical output for both seeds: seed 0 | handler seed, one batched ordinal | silently wrong in eval; C is also wrong under the sequential reading decided on 2026-09-23 (#2409) |
+| a draw after `vmap` | caller's counter not advanced | advanced by one | lanes disagree (#2409) |
 | `uniform_like` under a scalar `if` whose arm is not selected | no ordinal consumed | one ordinal consumed | silently wrong in C (#2410) |
 | `par`, `fold` of runtime length, identical calls, f64 with seed -5 | matches the reference | matches | conforming |
 

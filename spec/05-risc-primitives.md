@@ -1029,14 +1029,15 @@ compile-time-only alias.
 > output cotangent through the exact graph `denom = sub(1p, rate)` then
 > `div(g_i, denom)`; `1p` is the exact integer one represented at `p` and
 > both primitives finalize before their consumer under [04-NUM-8]. The rate
-> has no adjoint: along a fixed stream the result jumps wherever the rate
-> crosses a sampled unit value, so the derivative of the sample path with
-> respect to the rate is not the derivative of the expected result. `grad`
-> rejects a graph in which the rate depends on a differentiated input with
-> `AdRejectionReason::RandomSelectionParameter`; `stop_gradient(rate)`
-> ([05-OP-42]) states that the rate is constant. The mask comparison itself has
-> zero cotangent. The operation has no accumulator parameter. (The typed
-> rejection is not yet implemented; chelis#2421.)
+> selects which elements the mask keeps, and the language does not
+> differentiate that selection. When a differentiated parameter reaches the
+> rate through a data-flow path whose every operation has an adjoint contract
+> (a path through a zero-cotangent operation or a [05-OP-42] `stop_gradient`
+> does not count), `grad` rejects with
+> `AdRejectionReason::RandomSelectionParameter`; otherwise the rate receives
+> the exact zero cotangent. The mask comparison itself has zero cotangent.
+> The operation has no accumulator parameter. (The typed rejection is not yet
+> implemented; chelis#2421.)
 
 > **[05-RNG-1]** Every conforming evaluation of a `with seed(N)` program
 > produces byte-identical random results for the same seed, dynamic
@@ -1059,13 +1060,11 @@ compile-time-only alias.
 >
 > The ordinal counts the random primitives entered under the innermost active
 > `with seed` handler, in execution order, from zero at the handler's entry.
-> Calls made inside the handler share its ordinal. Leaving a handler, normally
-> or by a trap, restores the enclosing handler's seed and next ordinal. An `if`
-> or `match` enters only its selected arm, whatever representation an
-> implementation chooses for the condition, so the random primitives of an
-> arm that is not selected consume no ordinal; the arguments of an
-> application, including both branch arguments of `where`, are entered before
-> it. `vmap(f)(x)` assigns ordinals as its definition `stack([f(x[i]) ...])`
+> Calls made inside the handler share its ordinal. Leaving a handler restores
+> the enclosing handler's seed and next ordinal. An `if` or `match` enters only
+> its selected arm, whatever representation an implementation chooses for the
+> condition, so the random primitives of an arm that is not selected consume
+> no ordinal. `vmap(f)(x)` assigns ordinals as its definition `stack([f(x[i]) ...])`
 > would when the rows are evaluated in increasing index order, and `par`
 > assigns them as sequential evaluation of its branches in source order
 > would. (Not every lane meets this rule yet; chelis#2413 tracks the gaps.)
@@ -4131,8 +4130,8 @@ default casts use [04-NUM-14]'s exact backward cast. `cast_trunc`,
 `cast_saturate`, `cast_wrap`, `and`, `or`, `not`,
 `count`, `argmax_reduce`, and `argmin_reduce` likewise reject `grad` under their atoms.
 [05-OP-37]'s rate rejects `grad` with
-`AdRejectionReason::RandomSelectionParameter`, while its data input keeps its
-exact adjoint.
+`AdRejectionReason::RandomSelectionParameter` when a differentiated parameter
+reaches it as that atom states, while its data input keeps its exact adjoint.
 The `wrap_*` operations and integer reduction/unary forms are forward-only
 because integer values do not carry cotangents. Integer `floor`, `ceil`, and
 `round` are exact identities and may be erased before AD. The `Diff` effect
