@@ -50,6 +50,15 @@ pub struct CodegenResult {
     pub output_labels: Vec<String>,
     /// Unresolved symbolic dimensions that the generated function binds from input metadata.
     pub symbolic_dims: Vec<String>,
+    /// Definitions withheld from the published surface under
+    /// `spec/04-type-system.md` [04-EFF-3], in source spelling.
+    ///
+    /// Withholding is the right emission decision, but it is invisible in the
+    /// artifact: the caller sees a header that simply lacks an entry. The
+    /// build command reports these so the author learns which definitions were
+    /// not published and why, instead of discovering it at link time
+    /// (chelis#2318).
+    pub withheld_entries: Vec<String>,
 }
 
 impl CodegenResult {
@@ -211,6 +220,7 @@ pub fn codegen_host_program_with_external_tensor_helpers(
         .iter()
         .cloned()
         .collect::<chelis_unord::UnordSet<_>>();
+    let withheld_entries = host_emit::withheld_entry_names(&abi_program);
     let c_source = host_emit::emit_host_abi_program(&abi_program, func_name, &external_helpers)?;
     let h_header = host_emit::emit_host_abi_header(&abi_program, func_name)?;
     let (c_source, h_header) = seal_generated_artifact(func_name, &c_source, &h_header)?;
@@ -228,6 +238,7 @@ pub fn codegen_host_program_with_external_tensor_helpers(
         input_labels: Vec::new(),
         output_labels: Vec::new(),
         symbolic_dims: Vec::new(),
+        withheld_entries,
     })
 }
 
@@ -301,6 +312,7 @@ pub fn codegen_with_options(
         input_labels,
         output_labels,
         symbolic_dims,
+        withheld_entries: Vec::new(),
     })
 }
 
@@ -347,6 +359,7 @@ pub fn codegen_evaluation_with_options(
             h_header,
             requirements: toolchain::CodegenRequirements { wants_openmp: true, needs_blas: false },
             input_labels, output_labels, symbolic_dims,
+            withheld_entries: Vec::new(),
         })
     })
 }

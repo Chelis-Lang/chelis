@@ -35,14 +35,24 @@
 //! owned body inside the seeded scope. Rejecting it would make the ordinary
 //! library pattern uncompilable.
 //!
-//! So a `Random`-carrying definition is DEMOTED: its body is still emitted for
-//! the program's own seeded callers, and only the unusable public wrapper and
-//! its header declaration are withheld. Demotion is rejected instead when the
-//! program has no globals, because `emit_main` is emitted exactly when globals
-//! exist — with none, there is no internal caller, the demoted definition is
-//! unreachable, and withholding it would silently delete the only thing the
-//! author asked to build. A publishable sibling does not excuse that deletion:
-//! `e2` would still have exported `bc`, but `draw` is the point of `e2`.
+//! So the decision is made PER ENTRY, at each publication site:
+//!
+//! * A path that publishes one entry per definition withholds the offending
+//!   one — from the header and from external linkage — and the program's other
+//!   entries are unaffected. That is what keeps a library-shaped module legal.
+//! * A path that publishes a single entry for the whole program has no sibling
+//!   to keep, so withholding and emitting nothing are the same thing, and the
+//!   build is rejected instead of silently producing an empty artifact.
+//!
+//! Two earlier revisions decided this program-wide instead, and both were
+//! rejected by review. `globals.is_empty()` rejected a seeded helper beside its
+//! seeded caller. A whole-program "does any `with seed(...)` appear" test then
+//! both over-rejected — it failed the repository's own `chelis-std` random,
+//! kaiming and xavier modules, a regression against base — and under-protected,
+//! because a seeded draw in the SAME definition as an unseeded one satisfied it
+//! and left the tensor-DAG path publishing the defect verbatim.
+//! `a_seeded_sibling_draw_does_not_admit_an_unseeded_one` and
+//! `a_library_shaped_module_with_pure_siblings_still_builds` pin both halves.
 //!
 //! ## Spec authority
 //!
@@ -58,10 +68,12 @@
 //!
 //! ## Test roles
 //!
-//! * `dag_lane_*` and `host_lane_*` are the two NEGATIVE cases, one per lane —
-//!   the silent draw and the abort respectively. Both are rejected: neither
-//!   program opens an RNG scope, so neither has any internal caller that could
-//!   discharge the effect.
+//! * `dag_lane_*` and `host_lane_*` are the two NEGATIVE cases, one per
+//!   emission path — the silent draw and the abort respectively. They differ
+//!   in OUTCOME because the paths differ: the tensor-DAG path publishes one
+//!   entry for the whole program, so withholding leaves nothing and the build
+//!   is rejected; the host path publishes one entry per definition, so the
+//!   offender is withheld and its siblings survive.
 //! * `random_carrying_def_discharged_by_its_caller_still_builds` and
 //!   `def_that_discharges_its_own_random_is_a_valid_public_entry` are POSITIVE
 //!   PARITY: the rejection must not widen to legal programs.
@@ -81,13 +93,31 @@ mod common;
 
 use common::{gcc_available, link_generated, parse_tensor_data, write_file};
 
-/// The issue's `e1`: a foldable template, so the draw routes to the
-/// tensor-DAG lane. This one returned values against an inactive RNG.
+/// A single TENSOR-parameter entry, which routes to the tensor-DAG emitter.
+///
+/// The parameter type is the whole point. `chelis build` selects its emitter by
+/// the entry's SIGNATURE SHAPE, not by template foldability: a tensor parameter
+/// goes to `emit_dag_with_options`, a scalar one to host-ABI emission. An
+/// earlier revision of these tests used `c: f32` here and called it the "DAG
+/// lane", so both negatives exercised the SAME path and this one was never
+/// covered — which is how the reported defect survived a fix and a review
+/// round. Changing this line back to a scalar silently retires the coverage.
 const DAG_LANE_EXPORT: &str =
-    "def draw(c: f32) -> tensor[4, f32] = uniform_like(to_tensor([c, c, c, c]), 2.0f32, 5.0f32)\n";
+    "def draw(x: tensor[4, f32]) -> tensor[4, f32] = uniform_like(x, 2.0f32, 5.0f32)\n";
 
-/// The issue's `e2`: a runtime-derived template, so the draw routes to the C
-/// host lane. This one aborted at the first call.
+/// The same lane, reached through a program that DOES open a seed scope — in
+/// the very same definition as the unseeded draw.
+///
+/// A whole-program "does any `with seed(...)` appear" precondition admits this
+/// and then leaves the tensor-DAG emitter unguarded, which is how red-team
+/// round 2 reproduced the defect after round 1's repair. The admission
+/// decision has to be per entry.
+const DAG_LANE_PARTIALLY_SEEDED: &str = "def draw(x: tensor[4, f32]) -> tensor[4, f32] = \
+     add(with seed(7i64) { uniform_like(x, 1.0f32, 2.0f32) }, \
+     uniform_like(x, 2.0f32, 5.0f32))\n";
+
+/// The issue's `e2`: two scalar-parameter defs. This one aborted at the first
+/// call before the fix.
 const HOST_LANE_EXPORT: &str = "def bc(c: f32) -> tensor[4, f32] = to_tensor([c, c, c, c])\n\
      def draw(c: f32) -> tensor[4, f32] = uniform_like(bc(c), 2.0f32, 5.0f32)\n";
 
@@ -181,14 +211,47 @@ fn dag_lane_export_with_undischarged_random_is_rejected() {
 /// NEGATIVE: the C host lane. Before the fix this built and aborted at the
 /// first call with `uniform_like requires an active host RNG scope`, exit 134.
 ///
-/// Like `e1` this is rejected, and for the same reason: the program opens no
-/// `with seed(...)` region anywhere, so nothing in it can call `draw` under a
-/// handler. A publishable sibling (`bc`, which carries no `Random`) does not
-/// change that — `draw` is the point of the program, and withholding it while
-/// exporting `bc` would delete what the author asked for.
+/// Unlike `e1`, this program has a publishable sibling (`bc`, which carries no
+/// `Random`), and this emission path publishes one entry per definition. So
+/// `draw` is WITHHELD and `bc` is published, rather than the whole build being
+/// rejected. What [04-EFF-3] forbids is emitting `draw` over an inactive RNG,
+/// and that is what must be gone.
+///
+/// This program is structurally identical to a library module — one
+/// `Random`-carrying definition beside pure ones — so rejecting it would
+/// reject `packages/chelis-std/src/init/`. The two cannot be distinguished
+/// from source, which is why withholding is reported rather than fatal
+/// (`a_withheld_entry_is_reported_on_stderr`).
 #[test]
-fn host_lane_export_with_undischarged_random_is_rejected() {
-    assert_eff3_rejection(HOST_LANE_EXPORT, "host_lane");
+fn host_lane_export_with_undischarged_random_is_withheld_not_published() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("host_lane.ch");
+    let out_dir = dir.path().join("host_lane-out");
+    write_file(&path, HOST_LANE_EXPORT);
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let header = std::fs::read_to_string(out_dir.join("host_lane.h")).expect("generated header");
+    assert!(
+        !header.contains("chelis_fn_64726177"),
+        "[04-EFF-3] `draw` carries an undischarged Random and must not be \
+         published. Header:\n{header}",
+    );
+    assert!(
+        header.contains("chelis_fn_6263"),
+        "`bc` carries no Random and must stay published; withholding must not \
+         widen to its siblings. Header:\n{header}",
+    );
 }
 
 /// The rejection must explain itself: why the entry cannot exist, and what to
@@ -199,9 +262,14 @@ fn the_rejection_names_the_cause_and_both_remedies() {
     let (ok, stderr) = build_result(DAG_LANE_EXPORT, "message");
     assert!(!ok, "expected a rejection");
     for fragment in [
+        // Cause, then why no caller can help, then why withholding is not an
+        // option here, then both remedies. An earlier revision asserted
+        // "opens no `with seed(...)` region anywhere" — the whole-program
+        // precondition that red-team round 2 showed was both too broad and
+        // too weak, and which this revision deleted.
         "nothing inside it handles that effect",
         "no RNG frame",
-        "opens no `with seed(...)` region anywhere",
+        "no other definition left to publish in its place",
         "wrap the body in `with seed(...) { ... }`",
         "call it from a seeded region",
     ] {
@@ -451,4 +519,90 @@ fn demotion_does_not_change_what_the_program_computes() {
              did not run under the program's seeded scope",
         );
     }
+}
+
+/// REGRESSION, chelis#2318 round 2: a seeded region in the SAME definition as
+/// an unseeded draw must not admit the entry.
+///
+/// Round 1's repair used a whole-program precondition — "does any
+/// `with seed(...)` appear anywhere" — and this program satisfies it from
+/// inside the offending definition itself. The tensor-DAG emitter was then
+/// completely unguarded: `check` scored 1.0, the build exited 0, and the
+/// published entry baked `CHELIS_EFFECTIVE_UNIFORM_SEED(0ULL)`, reproducing
+/// the reported defect verbatim.
+#[test]
+fn a_seeded_sibling_draw_does_not_admit_an_unseeded_one() {
+    assert_eff3_rejection(DAG_LANE_PARTIALLY_SEEDED, "partial_seed");
+}
+
+/// POSITIVE PARITY, chelis#2318 round 2: the repository's own stdlib shape.
+///
+/// `packages/chelis-std/src/init/random.ch` declares `normal_like ! { Random }`
+/// beside pure helpers and contains NO `with seed` anywhere — the §7.1
+/// caller-supplies-the-handler pattern this change argues must stay legal.
+/// Round 1's repair rejected that file outright, a regression against base
+/// that the in-repo suites missed because nothing built a library-shaped file.
+#[test]
+fn a_library_shaped_module_with_pure_siblings_still_builds() {
+    let program = "def noise(x: tensor[4, f32]) -> tensor[4, f32] = \
+                   uniform_like(x, 0.0f32, 1.0f32)\n\
+                   def square(x: tensor[4, f32]) -> tensor[4, f32] = mul(x, x)\n\
+                   def double(x: tensor[4, f32]) -> tensor[4, f32] = add(x, x)\n";
+    let (ok, stderr) = build_result(program, "libshape");
+    // Distinguish "rejected by [04-EFF-3]" from "this fixture stopped type
+    // checking": an earlier version used `mul(x, 2.0f32)`, which [05-OP] does
+    // not admit, so the test failed for a reason that had nothing to do with
+    // the rule under test.
+    // Match the ERROR, not the string: a withheld helper now emits a
+    // `warning: [04-EFF-3]` line on this very program, and matching the bare
+    // atom id would trip on it.
+    assert!(
+        !stderr.contains("error: [04-EFF-3]") && !stderr.contains("unsupported:"),
+        "a library-shaped module must not be REJECTED by [04-EFF-3]; being \
+         warned about its withheld helper is correct. stderr:\n{stderr}",
+    );
+    assert!(
+        ok,
+        "a library-shaped module (a Random-carrying helper beside pure \
+         siblings, no seed anywhere) must keep building; its helper is \
+         withheld, not the whole file rejected. stderr:\n{stderr}",
+    );
+}
+
+/// Withholding must not be silent.
+///
+/// A withheld entry is invisible in the artifact — the caller just gets a
+/// header that lacks it, and finds out at link time. Before this warning, the
+/// only trace was a comment buried in the generated `.c`, and `e2` built with
+/// zero bytes on stderr. The build still succeeds: the artifact is valid and
+/// its other entries are usable.
+#[test]
+fn a_withheld_entry_is_reported_on_stderr() {
+    let (ok, stderr) = build_result(HOST_LANE_EXPORT, "warned");
+    assert!(ok, "the program must still build: {stderr}");
+    assert!(
+        stderr.contains("warning: [04-EFF-3]"),
+        "withholding must be reported, not silent; stderr:\n{stderr}",
+    );
+    assert!(
+        stderr.contains("`draw`"),
+        "the warning must name the withheld definition; stderr:\n{stderr}",
+    );
+    assert!(
+        stderr.contains("no RNG frame"),
+        "the warning must say why it could not be published; stderr:\n{stderr}",
+    );
+}
+
+/// The converse: a program with nothing withheld must warn about nothing.
+/// A warning that fires on every build teaches nobody anything.
+#[test]
+fn a_program_with_nothing_withheld_does_not_warn() {
+    let (ok, stderr) = build_result(SELF_HANDLED_ENTRY, "unwarned");
+    assert!(ok, "the self-handled entry must build: {stderr}");
+    assert!(
+        !stderr.contains("[04-EFF-3]"),
+        "an entry that discharges its own Random is published, so nothing was \
+         withheld and nothing should be reported; stderr:\n{stderr}",
+    );
 }

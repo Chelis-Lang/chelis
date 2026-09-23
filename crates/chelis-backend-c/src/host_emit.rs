@@ -221,7 +221,7 @@ pub(crate) fn emit_host_abi_program(
     external_helpers: &UnordSet<String>,
 ) -> Result<String, Unsupported> {
     let program = projected.program();
-    reject_when_no_handler_can_reach_a_demoted_entry(program)?;
+    reject_when_nothing_remains_publishable(program)?;
     let _site_identity_count = projected.sites().len();
     // Emit helpers and functions into a body buffer first so we can detect which
     // runtime headers they transitively require (e.g. `chelis_math.h` on macOS
@@ -2648,7 +2648,7 @@ fn emit_function(
     //
     // Demote rather than reject here. The owned body above is still emitted,
     // so the program's own seeded callers keep working; only the unusable
-    // public wrapper is withheld. `reject_when_no_handler_can_reach_a_demoted_entry`
+    // public wrapper is withheld. `reject_when_nothing_remains_publishable`
     // owns the case where demotion would leave nothing to publish.
     //
     // chelis#1872's `emit.rs` guard states the same rule, but it lives in
@@ -10396,45 +10396,55 @@ fn is_demoted_by_eff3(function: &HostFunction) -> bool {
         && !function.is_monomorphized_specialization()
 }
 
-/// [04-EFF-3] admission for the whole program: demote, then reject.
+/// The definitions this emission will withhold under [04-EFF-3], in source
+/// spelling, so the build command can tell the author.
 ///
-/// A `Random`-carrying definition is *demoted* — emitted for the program's own
-/// seeded callers but never published as a public entry. That keeps the
-/// ordinary library pattern compiling: the stdlib's own random helpers carry an
-/// undischarged `Random` and are discharged by their callers
-/// (`spec/04-type-system.md` §7.1).
+/// Read from the same `is_demoted_by_eff3` disposition the emitter itself
+/// uses, so the report cannot drift from what was actually withheld.
+pub(crate) fn withheld_entry_names(projected: &ProjectedHostProgram<'_>) -> Vec<String> {
+    projected
+        .program()
+        .functions
+        .iter()
+        .filter(|function| is_demoted_by_eff3(function))
+        .map(|function| function.name.clone())
+        .collect()
+}
+
+/// [04-EFF-3] for this emission path: demote per entry, reject only when
+/// demotion leaves nothing to publish.
 ///
-/// Demotion is only honest when the program has an internal caller that could
-/// discharge the effect. When the program opens NO RNG scope anywhere, nothing
-/// in it can ever call the demoted definition under a handler, so its only
-/// possible consumer was the public entry [04-EFF-3] forbids. Withholding it
-/// then deletes the one thing the author asked to build, so the build is
-/// rejected loudly instead.
+/// This path publishes ONE ENTRY PER DEFINITION, so a `Random`-carrying
+/// definition can simply be withheld while its siblings stay published. That
+/// is what keeps the library shape legal — `packages/chelis-std/src/init/`
+/// declares `normal_like ! { Random }` beside pure helpers with no `with
+/// seed(...)` anywhere, and rejecting that file is a regression.
 ///
-/// `chelis_ir::host::host_program_opens_rng_scope` is the signal, and it is
-/// deliberately NOT call-graph reachability. Two earlier revisions tried
-/// reachability and both wrongly rejected `def keep(x) = dropout(x, 0.5f32)`
-/// beside `def sample(x) = with seed(42i64) { keep(x) }`:
+/// Rejection is reserved for the case where withholding leaves NO published
+/// entry and the program has no `main`: the artifact would then be empty, and
+/// emitting nothing silently deletes the only thing the author asked to build.
 ///
-/// * `globals.is_empty()` — that program has no globals, but its helper has a
-///   perfectly good caller.
-/// * the host call graph — `sample`'s body does not name `keep` at all. The
-///   draw is INLINED into `sample`'s DAG tensor helper, so inlining erases the
-///   edge and every inlined helper reads as dead.
-///
-/// Both are locked by `cli::fixed_control_c_entry_is_independent_of_host_siblings`
-/// (chelis#1872).
-///
-/// The signal over-approximates in the safe direction: an unrelated handler
-/// elsewhere in the program makes this demote rather than reject, which still
-/// removes the unusable entry and still records why in the artifact.
-fn reject_when_no_handler_can_reach_a_demoted_entry(
-    program: &HostProgram,
-) -> Result<(), Unsupported> {
+/// The signal is deliberately not "does the program open an RNG scope". Two
+/// earlier revisions decided program-wide and both were rejected by review:
+/// `globals.is_empty()` rejected a seeded helper beside its seeded caller, and
+/// the RNG-scope test both over-rejected (it failed the repository's own
+/// `chelis-std` modules) and under-protected (a seeded draw in the same
+/// definition as an unseeded one satisfied it). The tensor-DAG path carries
+/// its own terminal, in `chelis-cli`, because it publishes a single entry for
+/// the whole program and so has no sibling to keep.
+fn reject_when_nothing_remains_publishable(program: &HostProgram) -> Result<(), Unsupported> {
+    if !program.globals.is_empty() {
+        return Ok(());
+    }
     let Some(first_demoted) = program.functions.iter().find(|f| is_demoted_by_eff3(f)) else {
         return Ok(());
     };
-    if chelis_ir::host::host_program_opens_rng_scope(program) {
+    let any_publishable = program.functions.iter().any(|f| {
+        f.origin == chelis_ir::host::HostFunctionOrigin::Authored
+            && !f.is_monomorphized_specialization()
+            && !is_demoted_by_eff3(f)
+    });
+    if any_publishable {
         return Ok(());
     }
     Err(public_entry_inherits_random(&first_demoted.name))

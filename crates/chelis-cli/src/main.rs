@@ -4099,6 +4099,21 @@ fn cmd_build(
                 let result = chelis_backend_c::codegen_host_program(&verified, func_name)?;
                 cmd_build_c_result(result, &c_name, output, &symbolic_dims, requires_main)
             } else {
+                // [04-EFF-3] on the tensor-DAG emission path. This lane
+                // publishes ONE entry for the whole program, so a definition
+                // carrying an undischarged `Random` cannot be withheld the way
+                // the host lane withholds it -- withholding here would leave no
+                // entry at all. This is therefore the "nothing left to publish"
+                // terminal, reached per entry.
+                //
+                // It must live on this path specifically: `chelis build`
+                // selects its emitter by the entry's SIGNATURE SHAPE, which
+                // nothing in host emission can see. A guard placed only there
+                // leaves this lane publishing an entry that draws against an
+                // inactive RNG -- chelis#2318 red-team rounds 1 and 2 both
+                // found exactly that, the second time through a program whose
+                // own seeded sibling satisfied a whole-program precondition.
+                reject_dag_entry_inheriting_random(checked)?;
                 shared_compiler_gate(
                     chelis_compiler_api::compiler::reject_unsupported_effect_ops(
                         &dag,
@@ -4440,6 +4455,21 @@ fn cmd_build_deep(
                 let result = chelis_backend_c::codegen_host_program(&verified, func_name)?;
                 cmd_build_c_result(result, &c_name, output, &symbolic_dims, requires_main)
             } else {
+                // [04-EFF-3] on the tensor-DAG emission path. This lane
+                // publishes ONE entry for the whole program, so a definition
+                // carrying an undischarged `Random` cannot be withheld the way
+                // the host lane withholds it -- withholding here would leave no
+                // entry at all. This is therefore the "nothing left to publish"
+                // terminal, reached per entry.
+                //
+                // It must live on this path specifically: `chelis build`
+                // selects its emitter by the entry's SIGNATURE SHAPE, which
+                // nothing in host emission can see. A guard placed only there
+                // leaves this lane publishing an entry that draws against an
+                // inactive RNG -- chelis#2318 red-team rounds 1 and 2 both
+                // found exactly that, the second time through a program whose
+                // own seeded sibling satisfied a whole-program precondition.
+                reject_dag_entry_inheriting_random(checked)?;
                 shared_compiler_gate(
                     chelis_compiler_api::compiler::reject_unsupported_effect_ops(
                         &dag,
@@ -10334,6 +10364,48 @@ fn cmd_validate(
     }
 }
 
+/// `spec/04-type-system.md` [04-EFF-3] for the tensor-DAG emission path.
+///
+/// The host lane withholds a `Random`-carrying definition from its published
+/// surface and keeps building, because it publishes one entry per definition
+/// and the siblings remain useful. This lane publishes a single entry for the
+/// whole program, so there is no sibling to keep: withholding is indistinguishable
+/// from emitting nothing, and emitting nothing silently would delete the one
+/// thing the author asked to build.
+///
+/// The disposition read here is the same authoritative per-def effect row the
+/// host lane carries on `HostFunction::inherits_random`
+/// (`chelis_effects::def_effect_rows`), so the two paths cannot disagree about
+/// which definitions are affected -- only about what to do when one is.
+fn reject_dag_entry_inheriting_random(
+    checked: &chelis_types::CheckedProgram,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let carriers: Vec<String> = chelis_effects::def_effect_rows(checked)
+        .into_iter()
+        .filter(|(_, effects)| effects.contains(&chelis_types::types::Effect::Random))
+        .map(|(name, _)| name)
+        .collect();
+    if carriers.is_empty() {
+        return Ok(());
+    }
+    let named = carriers
+        .iter()
+        .map(|name| format!("`{name}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(format!(
+        "[04-EFF-3]: {named} draws from `Random` and nothing inside it handles that \
+         effect, so it can only run under a seed its caller supplies. A public entry's \
+         ABI has no RNG frame to carry one, and this program compiles to a single \
+         entry, so there is no other definition left to publish in its place. \
+         Emitting it would hand the body an inactive RNG and return draws no \
+         `with seed(...)` can reproduce. Either wrap the body in \
+         `with seed(...) {{ ... }}` so it is a self-contained entry, or call it from \
+         a seeded region and let that region be the entry instead."
+    )
+    .into())
+}
+
 fn cmd_build_c(
     dag: chelis_ir::dag::Dag,
     c_name: &c_source_name::CSourceName,
@@ -10367,6 +10439,30 @@ fn cmd_build_c(
     cmd_build_c_result(result, c_name, output, &symbolic_dims, requires_main)
 }
 
+/// Tell the author which definitions [04-EFF-3] withheld, and why.
+///
+/// This is a warning, not an error: the artifact is valid and its other
+/// entries are usable. What must not happen is silence — an author who wrote
+/// a definition expecting to call it from C should not discover its absence
+/// from a linker error.
+fn report_withheld_entries(withheld: &[String]) {
+    if withheld.is_empty() {
+        return;
+    }
+    let named = withheld
+        .iter()
+        .map(|name| format!("`{name}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    eprintln!(
+        "warning: [04-EFF-3]: {named} draws from `Random` that no handler inside it \
+         discharges, so no public entry was emitted for it. A public entry's ABI has \
+         no RNG frame to carry the seed such a body needs. The rest of this program \
+         was built normally, and the definition is still callable from a seeded region \
+         inside it. To publish it, wrap its body in `with seed(...) {{ ... }}`."
+    );
+}
+
 fn cmd_build_c_result(
     result: chelis_backend_c::CodegenResult,
     c_name: &c_source_name::CSourceName,
@@ -10374,6 +10470,11 @@ fn cmd_build_c_result(
     symbolic_dims: &[String],
     requires_main: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // [04-EFF-3] withheld one or more definitions from the published surface.
+    // That is the correct emission decision, but it is invisible in the
+    // artifact — the author just gets a header missing an entry, and finds out
+    // at link time. Say so here (chelis#2318).
+    report_withheld_entries(&result.withheld_entries);
     let out_dir = output
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));

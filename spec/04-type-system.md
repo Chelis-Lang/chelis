@@ -2745,18 +2745,29 @@ execution boundaries reject an unhandled `Test` effect.
 > host-C admission boundary only; it does not define device-label vocabulary,
 > placement, transfer, or accelerator-target semantics.
 
-> **[04-EFF-3]** Before emitting a host-C artifact, the build boundary SHALL
-> reject every public entry whose body can perform a `Random` effect that no
-> handler inside that body discharges. The public entry ABI carries no RNG
-> frame, so no caller can supply the seed such a body requires. The rejection
-> SHALL occur before any artifact or emission observation is produced, and SHALL
-> apply identically on every emission path; a path that instead emits an entry
-> holding an inactive RNG state is non-conforming, whether the resulting draw
-> traps or returns a value. An entry whose body discharges its own `Random` with
-> `with seed(...)` is admitted, and so is a definition carrying an undischarged
-> `Random` that is not itself a public entry: such a definition is an ordinary
-> function whose caller supplies the handler. This rule governs admission only;
-> `spec/05-risc-primitives.md` [05-RNG-1] owns the seeded stream it admits.
+> **[04-EFF-3]** A public entry SHALL NOT be emitted for a definition whose
+> body performs a `Random` effect that no handler inside that body discharges.
+> The public entry ABI carries no RNG frame, so no caller can supply the seed
+> such a body requires, and an entry emitted over an inactive RNG state is
+> non-conforming whether the resulting draw traps or returns a value.
+>
+> This rule binds every emission path. Where a path publishes one entry per
+> definition, the offending definition SHALL be withheld from the published
+> surface and from external linkage, and the program's other entries SHALL be
+> unaffected. Where a path publishes a single entry for the whole program,
+> withholding it leaves nothing to publish, so the build SHALL be rejected
+> before any artifact or emission observation is produced.
+>
+> A definition that discharges its own `Random` with `with seed(...)` is
+> admitted. So is one carrying an undischarged `Random` that is not itself
+> published as a public entry: it is an ordinary function whose caller supplies
+> the handler, and withholding it SHALL NOT reject the program that defines it.
+> A handler elsewhere in the program does not admit a definition that does not
+> contain one, and a handler in the same definition admits only the draws it
+> encloses.
+>
+> This rule governs admission only; `spec/05-risc-primitives.md` [05-RNG-1]
+> owns the seeded stream it admits.
 
 Inference and checking obey these rules:
 
