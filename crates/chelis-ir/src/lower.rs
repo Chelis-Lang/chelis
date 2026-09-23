@@ -2420,13 +2420,25 @@ pub(crate) fn prepare_subexpr_lowering_context(
     // this per subexpression (chelis#2207, and the free `*_with_context`
     // entries below). `PROGRAM_DEF_FOLD_PASSES` is how a test holds that
     // caller to it.
+    //
+    // A table with no pipe in it keeps its `Arc`:
+    // the host runtime prepares a context per `grad` or `vmap` application,
+    // and copying every definition, the standard library's included, on each
+    // one made applications scale with the program (chelis#2434).
     PROGRAM_DEF_FOLD_PASSES.with(|passes| passes.set(passes.get() + 1));
-    let program_defs = Arc::new(
+    let folded: Vec<(String, Expr)> = program_defs
+        .iter()
+        .filter_map(|(name, body)| {
+            chelis_deep::pipe::fold_pipes_if_changed(body).map(|body| (name.clone(), body))
+        })
+        .collect();
+    let program_defs = if folded.is_empty() {
         program_defs
-            .iter()
-            .map(|(name, body)| (name.clone(), chelis_deep::pipe::fold_pipes(body)))
-            .collect::<BTreeMap<_, _>>(),
-    );
+    } else {
+        let mut defs = (*program_defs).clone();
+        defs.extend(folded);
+        Arc::new(defs)
+    };
     let program_types = full_type_env
         .iter()
         .map(|(name, ty_expr)| (name.clone(), LowerCtx::type_from_type_expr(ty_expr)))
@@ -20929,6 +20941,46 @@ mod fused_zero_tests {
 mod tests {
     use super::*;
     use crate::verify;
+
+    /// chelis#2434: preparing a lowering context must not copy a definition
+    /// table that has no pipe to fold. The host runtime prepares one per
+    /// `grad` or `vmap` application, so a copy there scales every application
+    /// with the whole program, the standard library's definitions included.
+    /// A table with a pipe is still folded.
+    #[test]
+    fn a_pipe_free_definition_table_keeps_its_arc() {
+        let parse = |source: &str| {
+            chelis_deep::parser::parse_str(source)
+                .expect("the fixture parses")
+                .remove(0)
+        };
+        let context_defs = |defs: &Arc<BTreeMap<String, Expr>>| {
+            prepare_subexpr_lowering_context(
+                &BTreeMap::new(),
+                Arc::clone(defs),
+                Arc::new(BTreeMap::new()),
+            )
+            .program_defs
+        };
+
+        let pipe_free = Arc::new(BTreeMap::from([(
+            "f".to_string(),
+            parse("(fn {} (params {} x) (app {} (var {} g) (var {} x)))"),
+        )]));
+        assert!(
+            Arc::ptr_eq(&context_defs(&pipe_free), &pipe_free),
+            "#2434: a pipe-free definition table is shared, not copied"
+        );
+
+        let piped = Arc::new(BTreeMap::from([(
+            "f".to_string(),
+            parse("(fn {} (params {} x) (pipe {} (var {} x) (var {} g)))"),
+        )]));
+        let folded = context_defs(&piped);
+        assert!(!Arc::ptr_eq(&folded, &piped));
+        let body = chelis_deep::printer::print_expr_flat(&folded["f"]);
+        assert!(!body.contains("pipe"), "the pipe must fold: {body}");
+    }
 
     #[test]
     fn precision_variable_reader_reads_a_decoded_node() {

@@ -128,12 +128,26 @@ thread_local! {
     /// Expression nodes copied by the pipe fold on this thread since the last
     /// reset (chelis#2207). Counted at the copy, never estimated.
     static FOLD_COPIED_NODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// The subset of those nodes rebuilt through the validating node
+    /// constructor rather than copied (chelis#2434).
+    static FOLD_REBUILT_NODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// Record one expression node of the fold's result.
-fn count_copied_node() {
+/// Record one expression node of the fold's result that was rebuilt.
+fn count_rebuilt_node() {
     #[cfg(test)]
-    FOLD_COPIED_NODES.with(|nodes| nodes.set(nodes.get() + 1));
+    {
+        FOLD_COPIED_NODES.with(|nodes| nodes.set(nodes.get() + 1));
+        FOLD_REBUILT_NODES.with(|nodes| nodes.set(nodes.get() + 1));
+    }
+}
+
+/// Copy the unchanged subtree `expr` into the fold's result, recording the
+/// nodes copied.
+fn copied(expr: &Expr) -> Expr {
+    #[cfg(test)]
+    FOLD_COPIED_NODES.with(|nodes| nodes.set(nodes.get() + expr_nodes(expr)));
+    expr.clone()
 }
 
 /// Expression nodes in `expr`, every carrier included; metadata is not
@@ -156,10 +170,18 @@ pub(crate) fn fold_copied_nodes() -> usize {
     FOLD_COPIED_NODES.with(std::cell::Cell::get)
 }
 
-/// Reset [`fold_copied_nodes`] for this thread.
+/// Expression nodes the pipe fold rebuilt on this thread since the last
+/// reset.
+#[cfg(test)]
+pub(crate) fn fold_rebuilt_nodes() -> usize {
+    FOLD_REBUILT_NODES.with(std::cell::Cell::get)
+}
+
+/// Reset [`fold_copied_nodes`] and [`fold_rebuilt_nodes`] for this thread.
 #[cfg(test)]
 pub(crate) fn reset_fold_copied_nodes() {
     FOLD_COPIED_NODES.with(|nodes| nodes.set(0));
+    FOLD_REBUILT_NODES.with(|nodes| nodes.set(0));
 }
 
 /// Fold every `Pipe` in `expr`, innermost first.
@@ -173,10 +195,14 @@ pub(crate) fn reset_fold_copied_nodes() {
 /// folds its input before any of its stack-guarded walkers runs, and the fold
 /// has no diagnostic channel of its own, so a recursive fold would abort the
 /// process on the same deep input those walkers reject with a typed
-/// diagnostic. Every expression node of the result is built exactly once,
-/// from its already-folded children, so the work is linear in the size of the
-/// tree (chelis#2207); a subtree with no pipe in it comes back equal to the
-/// input.
+/// diagnostic.
+///
+/// Only a node with a folded pipe at or below it is rebuilt, through the
+/// validating node constructor, from its already-folded children. A subtree
+/// with no pipe in it is not rebuilt: it is copied once, where a rebuilt
+/// ancestor needs it or at the root, so the work is linear in the size of the
+/// tree (chelis#2207) and a pipe-free tree costs one copy, not one validated
+/// rebuild per node (chelis#2434).
 ///
 /// Every carrier is walked, because a pipe can sit inside any of them: a
 /// typed pipe-stage parameter arrives as a `MetaExpr` wrapper, and a stage
@@ -185,43 +211,65 @@ pub(crate) fn reset_fold_copied_nodes() {
 /// real program failing rather than a malformed tree. Metadata values are
 /// copied as written.
 pub fn fold_pipes(expr: &Expr) -> Expr {
+    fold_pipes_if_changed(expr).unwrap_or_else(|| copied(expr))
+}
+
+/// [`fold_pipes`], reporting whether anything moved: `Some(folded)` when at
+/// least one `Pipe` in `expr` was folded, `None` when `expr` has none and
+/// would fold to itself. A caller that can keep its input pays nothing for a
+/// pipe-free tree.
+pub fn fold_pipes_if_changed(expr: &Expr) -> Option<Expr> {
     enum Step<'a> {
         Enter(&'a Expr),
         Exit(&'a Expr, usize),
     }
     let mut steps = vec![Step::Enter(expr)];
-    let mut values: Vec<Expr> = Vec::new();
+    // `None` stands for a subtree with no pipe in it, still unchanged.
+    let mut values: Vec<Option<Expr>> = Vec::new();
     while let Some(step) = steps.pop() {
         match step {
-            Step::Enter(expr) => {
-                let children: &[Expr] = match expr {
-                    Expr::Atom(..) | Expr::Map(..) => {
-                        count_copied_node();
-                        values.push(expr.clone());
-                        continue;
-                    }
-                    Expr::MetaExpr(meta_expr, _) => std::slice::from_ref(meta_expr.expr.as_ref()),
-                    Expr::Node(node, _) => node.children_slice(),
-                    Expr::BareList(items, _) => items,
-                    Expr::UnknownForm(data) => &data.children,
-                };
-                steps.push(Step::Exit(expr, children.len()));
-                steps.extend(children.iter().rev().map(Step::Enter));
-            }
+            Step::Enter(expr) => match fold_children_of(expr) {
+                None => values.push(None),
+                Some(children) => {
+                    steps.push(Step::Exit(expr, children.len()));
+                    steps.extend(children.iter().rev().map(Step::Enter));
+                }
+            },
             Step::Exit(expr, child_count) => {
                 let start = values
                     .len()
                     .checked_sub(child_count)
                     .expect("the fold's step and value stacks stay balanced");
-                let children = values.split_off(start);
-                count_copied_node();
-                values.push(rebuild_folded(expr, children));
+                let folded = values.split_off(start);
+                let is_pipe = matches!(expr, Expr::Node(node, _) if node.tag() == DeepTag::Pipe);
+                if !is_pipe && folded.iter().all(Option::is_none) {
+                    values.push(None);
+                    continue;
+                }
+                let children = folded
+                    .into_iter()
+                    .zip(fold_children_of(expr).unwrap_or_default())
+                    .map(|(folded, original)| folded.unwrap_or_else(|| copied(original)))
+                    .collect();
+                count_rebuilt_node();
+                values.push(Some(rebuild_folded(expr, children)));
             }
         }
     }
     let folded = values.pop().expect("the fold produces its root");
     debug_assert!(values.is_empty(), "the fold produces exactly one root");
     folded
+}
+
+/// The children the fold descends into, or `None` for a leaf.
+fn fold_children_of(expr: &Expr) -> Option<&[Expr]> {
+    match expr {
+        Expr::Atom(..) | Expr::Map(..) => None,
+        Expr::MetaExpr(meta_expr, _) => Some(std::slice::from_ref(meta_expr.expr.as_ref())),
+        Expr::Node(node, _) => Some(node.children_slice()),
+        Expr::BareList(items, _) => Some(items),
+        Expr::UnknownForm(data) => Some(&data.children),
+    }
 }
 
 /// Rebuild `expr` over its folded `children`, folding it too when it is a
@@ -440,6 +488,54 @@ mod tests {
             "#2207: doubling the chain depth must at most triple the nodes the fold copies; \
              depth 64 copied {small} and depth 128 copied {large}, a factor of {}",
             large / small.max(1)
+        );
+    }
+
+    /// chelis#2434: a node with no pipe at or below it must not be rebuilt
+    /// through the validating node constructor. The host runtime prepares a
+    /// lowering context per `grad` or `vmap` application and folds every
+    /// program definition there, so a fold that rebuilt every node doubled the
+    /// cost of each application in a package that includes the standard
+    /// library. Only the ancestors of a folded pipe are rebuilt; everything
+    /// else is copied, and a pipe-free tree reports no change at all.
+    ///
+    /// Evidentiary status: REGRESSION TEST. With the exit step rebuilding
+    /// every node, as the chelis#2427 worklist did, a pipe-free chain reported
+    /// a change and this test failed at its first assertion. The copy-count
+    /// test above passed under that mutation: it counts nodes copied, and a
+    /// rebuilt node is copied too.
+    #[test]
+    fn only_the_ancestors_of_a_folded_pipe_are_rebuilt() {
+        const DEPTH: usize = 64;
+        let mut pipe_free = "(var {} x)".to_string();
+        let mut with_pipe = "(pipe {} (var {} x) (var {} f))".to_string();
+        for _ in 0..DEPTH {
+            pipe_free = format!("(app {{}} (var {{}} g) {pipe_free})");
+            with_pipe = format!("(app {{}} (var {{}} g) {with_pipe})");
+        }
+        let pipe_free = parse_str(&pipe_free).expect("parse").remove(0);
+        let with_pipe = parse_str(&with_pipe).expect("parse").remove(0);
+
+        reset_fold_copied_nodes();
+        assert_eq!(fold_pipes_if_changed(&pipe_free), None);
+        assert_eq!(fold_pipes(&pipe_free), pipe_free);
+        assert_eq!(
+            fold_rebuilt_nodes(),
+            0,
+            "#2434: a pipe-free tree is copied, never rebuilt"
+        );
+        assert_eq!(fold_copied_nodes(), expr_nodes(&pipe_free));
+
+        reset_fold_copied_nodes();
+        let folded = fold_pipes_if_changed(&with_pipe).expect("the pipe folds");
+        assert!(
+            !crate::printer::print_canonical_flat(std::slice::from_ref(&folded)).contains("pipe")
+        );
+        assert_eq!(
+            fold_rebuilt_nodes(),
+            DEPTH + 1,
+            "#2434: only the pipe and its {DEPTH} ancestors are rebuilt; each sibling \
+             `(var {{}} g)` is copied"
         );
     }
 
