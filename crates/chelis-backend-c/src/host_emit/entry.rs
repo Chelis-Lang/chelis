@@ -639,15 +639,23 @@ mod tests {
             "dominated",
             options,
             &projection.variants[0][0],
+            #[cfg(feature = "native-random-observer")]
+            None,
         )
         .unwrap();
         assert!(
             !discharged.contains("numeric trap: domain in load at i64"),
             "{discharged}"
         );
-        let full =
-            CEmitter::emit_verified_dag_with_options(dag.emission(), "unguarded", options, &[])
-                .unwrap();
+        let full = CEmitter::emit_verified_dag_with_options(
+            dag.emission(),
+            "unguarded",
+            options,
+            &[],
+            #[cfg(feature = "native-random-observer")]
+            None,
+        )
+        .unwrap();
         assert_eq!(
             full.matches("numeric trap: domain in load at i64").count(),
             1,

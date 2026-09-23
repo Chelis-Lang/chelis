@@ -34,11 +34,7 @@ use chelis_types::dtype_semantics::{
 };
 use chelis_types::dtype_semantics::{DropoutParameters, PreparedDropout, UniformLikeParameters};
 use chelis_types::types::Prim;
-use chelis_types::{PreparedUniformLike, RandomKey, scalar_from_f64, uniform_like_bound_adjoint};
-
-/// Public evaluator entry points that do not inherit an enclosing handler
-/// still evaluate a path-sensitive DAG from the beginning of its stream.
-const INITIAL_RANDOM_STREAM_ORDINAL: u64 = 0;
+use chelis_types::{PreparedUniformLike, RandomKey, uniform_like_bound_adjoint};
 
 #[derive(Debug, Clone)]
 pub struct TensorValue {
@@ -370,46 +366,6 @@ fn cast_trunc_value(input: &TensorValue, dst: Prim) -> Result<TensorValue, Strin
     let storage = chelis_types::cast_trunc_tensor("cast_trunc", input.storage().to_raw(), dst)
         .map_err(|trap| trap.to_string())?;
     Ok(TensorValue::from_storage(input.shape.clone(), storage))
-}
-
-/// A `dropout` node reached without a fixed-control plan frame has no
-/// [05-RNG-1] key: its graph seed pre-mixes an ordinal fixed at lowering
-/// time, and the formula that used to consume it was not [05-OP-37]. The
-/// evaluator refuses it rather than return a mask the spec does not define
-/// (chelis#2405). Every [05-OP-37] draw runs through `ExecutionFrame::dropout`.
-fn plan_less_dropout(node: NodeId) -> String {
-    chelis_types::unsupported::Unsupported::new(
-        chelis_types::unsupported::UnsupportedKind::Op("dropout".into()),
-        format!(
-            "tensor graph node {} evaluated without a fixed-control plan",
-            node.0
-        ),
-        chelis_types::unsupported::Stage::Runtime,
-        chelis_types::unimplemented_rejection!(
-            2413,
-            "this draw was reached in a region lowered without a fixed-control plan, so it has no [05-RNG-1] key; drawing in such a region is not yet supported"
-        ),
-    )
-    .to_string()
-}
-
-fn uniform_like(
-    shape: &[usize],
-    low: f64,
-    high: f64,
-    key: RandomKey,
-    prim: Prim,
-) -> Result<TensorValue, String> {
-    let bound = |value| scalar_from_f64("uniform_like", Prim::F32, value);
-    let prepared = PreparedUniformLike::new(
-        prim,
-        numel(shape),
-        bound(low).map_err(|trap| trap.to_string())?,
-        bound(high).map_err(|trap| trap.to_string())?,
-    )
-    .map_err(|error| error.to_string())?;
-    let storage = prepared.apply(key).map_err(|error| error.to_string())?;
-    Ok(TensorValue::from_storage(shape.to_vec(), storage))
 }
 
 /// The Random handler state one graph evaluation reads through its
@@ -1976,13 +1932,20 @@ fn validate_shape_against_type(
 /// silent out-of-bounds read in the evaluator. Scoped to shrink/stride bounds
 /// on live nodes only: the full structural `verify` would reject the dead
 /// symbolic-dim-source Loads that root-scoped eval keeps alive.
-fn verify_bound_movement_bounds(dag: &Dag, live: Option<&[bool]>) -> Result<(), String> {
-    for node in dag.nodes() {
-        if live.is_none_or(|mask| mask.get(node.id.0).copied().unwrap_or(false)) {
-            verify_bound_movement_node(dag, node)?;
-        }
-    }
-    Ok(())
+/// The post-bind movement-bound failure of each live node. Each is raised
+/// when its node's turn comes, so an earlier node's trap, a draw's rate
+/// validation among them, is reported first as the sequential reading orders
+/// it.
+fn bound_movement_failures(dag: &Dag, live: Option<&[bool]>) -> UnordMap<NodeId, String> {
+    dag.nodes()
+        .iter()
+        .filter(|node| live.is_none_or(|mask| mask.get(node.id.0).copied().unwrap_or(false)))
+        .filter_map(|node| {
+            verify_bound_movement_node(dag, node)
+                .err()
+                .map(|error| (node.id, error))
+        })
+        .collect()
 }
 
 fn verify_bound_movement_node(dag: &Dag, node: &DagNode) -> Result<(), String> {
@@ -2489,8 +2452,8 @@ fn live_mask_from(dag: &Dag, mut stack: Vec<NodeId>) -> Vec<bool> {
 /// other value once the last step that reads it has run. An entrypoint that
 /// names no roots cannot know what to keep, so it keeps everything: that is
 /// the all-values API the tracker preserves, and `eval_tensor`,
-/// `eval_tensor_with`, `eval_tensor_with_strict`, the segment entrypoint and
-/// both plan entrypoints all use it.
+/// `eval_tensor_with`, `eval_tensor_with_strict` and the segment entrypoint
+/// all use it.
 ///
 /// The live mask travels with the selection rather than beside it, so a run
 /// cannot mask off one set of nodes while retaining the roots of another.
@@ -2498,9 +2461,9 @@ fn live_mask_from(dag: &Dag, mut stack: Vec<NodeId>) -> Vec<bool> {
 enum EvaluationScope<'a> {
     /// Execute every node in the graph and return every value.
     WholeDag,
-    /// Execute only the masked nodes and return every executed value. A plan
-    /// masks nothing off in practice but still names no roots, so it cannot
-    /// say which values are results.
+    /// Execute only the masked nodes and return every executed value: the
+    /// all-values baseline the reclamation tests measure against.
+    #[cfg(test)]
     MaskedAllValues(&'a [bool]),
     /// Execute only the masked nodes and return exactly `roots`. Every other
     /// value is freed after the last step that reads it.
@@ -2514,6 +2477,7 @@ impl<'a> EvaluationScope<'a> {
     fn live(&self) -> Option<&'a [bool]> {
         match self {
             Self::WholeDag => None,
+            #[cfg(test)]
             Self::MaskedAllValues(live) => Some(live),
             Self::Roots { live, .. } => Some(live),
         }
@@ -2522,7 +2486,9 @@ impl<'a> EvaluationScope<'a> {
     /// The values this run must keep, or `None` when it keeps all of them.
     fn retained_roots(&self) -> Option<&'a [NodeId]> {
         match self {
-            Self::WholeDag | Self::MaskedAllValues(_) => None,
+            Self::WholeDag => None,
+            #[cfg(test)]
+            Self::MaskedAllValues(_) => None,
             Self::Roots { roots, .. } => Some(roots),
         }
     }
@@ -2531,7 +2497,6 @@ impl<'a> EvaluationScope<'a> {
 /// One evaluation's outputs, and what holding them cost.
 struct EvaluatedValues {
     values: UnordMap<NodeId, TensorValue>,
-    random_counter: u64,
     /// The most entries `values` ever held at once, sampled after each node's
     /// own value is inserted and before that step's reclamation runs, so it
     /// records the true transient rather than the post-reclamation residue.
@@ -2581,17 +2546,14 @@ struct EvaluatedValues {
 /// safe.
 fn value_free_schedule(
     dag: &Dag,
-    order: &[crate::execution_spine::Step],
+    order: &[NodeId],
     live: Option<&[bool]>,
     local_guard_sites: &UnordMap<NodeId, Vec<(usize, crate::axis_sources::LocalGuardClaim)>>,
     retain: &[NodeId],
 ) -> Vec<Vec<NodeId>> {
     let mut last_use: Vec<Option<usize>> = vec![None; dag.len()];
     let mut produced_at: Vec<Option<usize>> = vec![None; dag.len()];
-    for (index, step) in order.iter().enumerate() {
-        let crate::execution_spine::Step::Node(id) = step else {
-            continue;
-        };
+    for (index, id) in order.iter().enumerate() {
         let Some(node) = dag.get(*id) else {
             continue;
         };
@@ -2759,8 +2721,6 @@ fn eval_tensor_internal<F>(
     dag: &Dag,
     scope: EvaluationScope<'_>,
     strict_loads: bool,
-    random_counter: u64,
-    execution: Option<&mut crate::evaluation::ExecutionFrame<'_>>,
     load_input: F,
 ) -> Result<EvaluatedValues, String>
 where
@@ -2770,21 +2730,16 @@ where
         dag,
         scope,
         strict_loads,
-        random_counter,
-        execution,
         &mut RandomFrame::unhandled(),
         &[],
         load_input,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn eval_tensor_internal_with_result_claims<F>(
     dag: &Dag,
     scope: EvaluationScope<'_>,
     strict_loads: bool,
-    random_counter: u64,
-    mut execution: Option<&mut crate::evaluation::ExecutionFrame<'_>>,
     random_frame: &mut RandomFrame,
     result_claims: &[crate::TensorType],
     mut load_input: F,
@@ -2799,7 +2754,6 @@ where
         needs_symbolic_binding,
         symbolic_selection,
     } = prepare_tensor_inputs(dag, live, strict_loads, |name, _| Ok(load_input(name)))?;
-    let mut path_random_counter = random_counter;
     // Guard claims come from the unbound DAG; observed extents come from
     // actual caller inputs. Both host lanes consume the same individual
     // schedule before symbolic inference or dependent operations. Missing
@@ -2894,6 +2848,7 @@ where
     }
 
     let mut prebound_dims: UnordMap<String, usize> = UnordMap::new();
+    let mut movement_failures: UnordMap<NodeId, String> = UnordMap::new();
     let bound_dag = if needs_symbolic_binding {
         let (mut bindings, deliberately_unbound) =
             infer_symbolic_bindings_from_inputs(dag, &resolved_inputs, &symbolic_selection)?;
@@ -2923,9 +2878,8 @@ where
         // bounds on LIVE nodes only — the full `verify` would flag the dead
         // symbolic-dim-source Loads that root-scoped eval deliberately keeps
         // alive ("node N is dangling"), over-rejecting legitimate programs.
-        if execution.is_none() {
-            verify_bound_movement_bounds(&bound, live)?;
-        }
+        // Each failure is raised at its node, before the node executes.
+        movement_failures = bound_movement_failures(&bound, live);
         bound
     } else {
         dag.clone()
@@ -3003,14 +2957,11 @@ where
     // load behind an `Option` test.
     let cancel = chelis_types::current_cancel_token();
 
-    let order = match execution.as_ref() {
-        Some(frame) => frame.steps().to_vec(),
-        None => bound_dag
-            .nodes()
-            .iter()
-            .map(|node| crate::execution_spine::Step::Node(node.id))
-            .collect(),
-    };
+    let order = bound_dag
+        .nodes()
+        .iter()
+        .map(|node| node.id)
+        .collect::<Vec<_>>();
     // chelis#828 work class 1. Built from the BOUND graph, whose node ids
     // `bind_symbolic_dims` preserves, and from the same live mask and guard
     // sites the loop below consults, so a step's reads in the scan are exactly
@@ -3019,17 +2970,7 @@ where
         .retained_roots()
         .map(|roots| value_free_schedule(&bound_dag, &order, live, &local_guard_sites, roots));
 
-    for (index, step) in order.into_iter().enumerate() {
-        let id = match step {
-            crate::execution_spine::Step::Node(id) => id,
-            crate::execution_spine::Step::Control { control, .. } => {
-                execution
-                    .as_deref_mut()
-                    .expect("only source plans have controls")
-                    .control(control)?;
-                continue;
-            }
-        };
+    for (index, id) in order.into_iter().enumerate() {
         let node = bound_dag
             .get(id)
             .ok_or("evaluation schedule references a missing node")?;
@@ -3043,8 +2984,8 @@ where
         {
             continue;
         }
-        if execution.is_some() {
-            verify_bound_movement_node(&bound_dag, node)?;
+        if let Some(failure) = movement_failures.remove(&node.id) {
+            return Err(failure);
         }
         if matches!(node.op, RiscOp::DrawKey { .. }) {
             let key = eval_draw_key(node, &values, random_frame)?;
@@ -3466,57 +3407,6 @@ where
             // backend's `rintf` under the default rounding mode. NOT
             // `f64::round`, which rounds half away from zero.
             RiscOp::Round => unary_elementwise(ElementwiseUnOp::Round, &values[&node.inputs[0]])?,
-            RiscOp::BakedUniformLike { low, high, seed } => {
-                let key = if let Some(frame) = execution.as_deref_mut() {
-                    let active = match node.inputs.get(1) {
-                        Some(activation) => match values[activation].storage().to_raw() {
-                            RawTensor::Int(values) if values.len() == 1 => values[0] != 0,
-                            _ => {
-                                return Err(
-                                    "uniform_like path activation is not a scalar Bool".into()
-                                );
-                            }
-                        },
-                        None => true,
-                    };
-                    frame.uniform_key(node.id, *seed, active)?
-                } else if let Some(activation) = node.inputs.get(1) {
-                    let active = match values[activation].storage().to_raw() {
-                        RawTensor::Int(values) if values.len() == 1 => values[0] != 0,
-                        _ => {
-                            return Err(format!(
-                                "uniform_like path activation at node {} is not a scalar Bool",
-                                node.id.0
-                            ));
-                        }
-                    };
-                    if active {
-                        Some((*seed, path_random_counter))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-                // Planned and activation-gated draws carry the handler seed
-                // and take their ordinal at execution; an ungated legacy node
-                // carries the [05-RNG-1] draw key its lowering fixed. An
-                // inactive gated draw's values are discarded by its blend.
-                let draw_key = key.map_or(
-                    RandomKey::from_derived_bits(*seed),
-                    |(raw_seed, ordinal)| RandomKey::from_counter(raw_seed, ordinal),
-                );
-                if execution.is_none() && key.is_some() {
-                    path_random_counter = path_random_counter.saturating_add(1);
-                }
-                uniform_like(
-                    &values[&node.inputs[0]].shape.clone(),
-                    *low,
-                    *high,
-                    draw_key,
-                    out_prim,
-                )?
-            }
             RiscOp::Dropout | RiscOp::DropoutReplay => {
                 let data = &values[&node.inputs[0]];
                 match random_operand_key(node, 2, &values, &keys)? {
@@ -3569,10 +3459,6 @@ where
             RiscOp::DrawKey { .. } => {
                 unreachable!("draw keys are evaluated before the value match")
             }
-            RiscOp::BakedDropout { rate, seed } => match execution.as_deref_mut() {
-                Some(frame) => frame.dropout(node.id, &values[&node.inputs[0]], *rate, *seed)?,
-                None => return Err(plan_less_dropout(node.id)),
-            },
             RiscOp::MaxElem => binary_elementwise(
                 ElementwiseBinOp::Max,
                 &values[&node.inputs[0]],
@@ -4073,7 +3959,6 @@ where
 
     Ok(EvaluatedValues {
         values,
-        random_counter: path_random_counter,
         peak_live_values,
         peak_live_elements,
     })
@@ -4162,66 +4047,6 @@ fn local_guard_verdict(
     Ok(())
 }
 
-/// Evaluate a source-owned plan. The context records the executed prefix on
-/// both success and failure; legacy Dag-only entrypoints remain unchanged.
-///
-/// Inputs may first be resolved with [`prepare_tensor_plan_inputs`]. Execute
-/// the same plan using a lookup into that map to avoid repeating provider effects.
-pub fn eval_tensor_plan_with_strict<F>(
-    plan: &crate::evaluation::EvaluationPlan,
-    context: &mut crate::evaluation::RandomExecutionContext,
-    load_input: F,
-) -> Result<UnordMap<NodeId, TensorValue>, String>
-where
-    F: FnMut(&str) -> Option<TensorValue>,
-{
-    let dag = plan.dag_for_inspection();
-    let starting_counter = context.state().counter;
-    let mut frame = plan.frame(context)?;
-    // Plan validation requires the complete selected graph, including dead
-    // executed nodes. Value liveness must not prune this execution slice.
-    let live = vec![true; dag.len()];
-    eval_tensor_internal(
-        dag,
-        // A plan entrypoint names no roots, so it cannot say which values are
-        // results and keeps all of them (chelis#828).
-        EvaluationScope::MaskedAllValues(&live),
-        true,
-        starting_counter,
-        Some(&mut frame),
-        load_input,
-    )
-    .map(|evaluated| evaluated.values)
-}
-
-/// Execute the same source plan with invocation-local literal result claims.
-/// The extra obligations neither modify the DAG nor replace its own guards.
-pub fn eval_tensor_plan_with_result_claims<F>(
-    plan: &crate::evaluation::EvaluationPlan,
-    context: &mut crate::evaluation::RandomExecutionContext,
-    result_claims: &[crate::TensorType],
-    load_input: F,
-) -> Result<UnordMap<NodeId, TensorValue>, String>
-where
-    F: FnMut(&str) -> Option<TensorValue>,
-{
-    let dag = plan.dag_for_inspection();
-    let starting_counter = context.state().counter;
-    let mut frame = plan.frame(context)?;
-    let live = vec![true; dag.len()];
-    eval_tensor_internal_with_result_claims(
-        dag,
-        EvaluationScope::MaskedAllValues(&live),
-        true,
-        starting_counter,
-        Some(&mut frame),
-        &mut RandomFrame::unhandled(),
-        result_claims,
-        load_input,
-    )
-    .map(|evaluated| evaluated.values)
-}
-
 /// Why a selected-input preparation callback is being queried.
 /// This is an input obligation, not declaration identity or a cache certificate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4273,60 +4098,6 @@ where
     reject_drop_roots(dag, roots)?;
     let live = (!roots.is_empty()).then(|| activation_live_mask(dag, roots));
     prepare_tensor_inputs(dag, live.as_deref(), true, load_input).map(|prepared| prepared.inputs)
-}
-
-/// Resolve every selected plan input, including value-dead executed loads,
-/// without starting an execution frame or advancing `context`.
-///
-/// Plan integrity and inherited seed are validated before provider effects.
-/// Provider ordering, errors and deferred value validation follow
-/// [`prepare_tensor_roots_inputs`]. Execute this same plan with a map lookup;
-/// the caller may first incorporate provider effects into its execution context.
-pub fn prepare_tensor_plan_inputs<F>(
-    plan: &crate::evaluation::EvaluationPlan,
-    context: &crate::evaluation::RandomExecutionContext,
-    mut load_input: F,
-) -> Result<UnordMap<String, TensorValue>, String>
-where
-    F: FnMut(&str) -> Result<Option<TensorValue>, String>,
-{
-    prepare_tensor_plan_inputs_with_demand(plan, context, |name, _| load_input(name))
-}
-
-/// Role-aware form of [`prepare_tensor_plan_inputs`]. Every retained plan Load
-/// is Selected, even if value-dead. Plan/seed validation precedes the provider;
-/// preparation does not start a frame or advance the supplied context.
-pub fn prepare_tensor_plan_inputs_with_demand<F>(
-    plan: &crate::evaluation::EvaluationPlan,
-    context: &crate::evaluation::RandomExecutionContext,
-    load_input: F,
-) -> Result<UnordMap<String, TensorValue>, String>
-where
-    F: FnMut(&str, TensorInputDemand) -> Result<Option<TensorValue>, String>,
-{
-    plan.validate_for_context(context)?;
-    let dag = plan.dag_for_inspection();
-    let live = vec![true; dag.len()];
-    prepare_tensor_inputs(dag, Some(&live), true, load_input).map(|prepared| prepared.inputs)
-}
-
-pub(crate) fn eval_tensor_segment_with_strict<F>(
-    dag: &Dag,
-    frame: &mut crate::evaluation::ExecutionFrame<'_>,
-    load_input: F,
-) -> Result<UnordMap<NodeId, TensorValue>, String>
-where
-    F: FnMut(&str) -> Option<TensorValue>,
-{
-    eval_tensor_internal(
-        dag,
-        EvaluationScope::WholeDag,
-        true,
-        0,
-        Some(frame),
-        load_input,
-    )
-    .map(|evaluated| evaluated.values)
 }
 
 /// The extent an op-computed axis is about to produce, read from the site
@@ -4472,15 +4243,8 @@ pub fn eval_tensor_with<F>(
 where
     F: FnMut(&str) -> Option<TensorValue>,
 {
-    eval_tensor_internal(
-        dag,
-        EvaluationScope::WholeDag,
-        false,
-        INITIAL_RANDOM_STREAM_ORDINAL,
-        None,
-        load_input,
-    )
-    .map(|evaluated| evaluated.values)
+    eval_tensor_internal(dag, EvaluationScope::WholeDag, false, load_input)
+        .map(|evaluated| evaluated.values)
 }
 
 pub fn eval_tensor_with_strict<F>(
@@ -4490,15 +4254,8 @@ pub fn eval_tensor_with_strict<F>(
 where
     F: FnMut(&str) -> Option<TensorValue>,
 {
-    eval_tensor_internal(
-        dag,
-        EvaluationScope::WholeDag,
-        true,
-        INITIAL_RANDOM_STREAM_ORDINAL,
-        None,
-        load_input,
-    )
-    .map(|evaluated| evaluated.values)
+    eval_tensor_internal(dag, EvaluationScope::WholeDag, true, load_input)
+        .map(|evaluated| evaluated.values)
 }
 
 /// Evaluate `roots` and return their values.
@@ -4518,15 +4275,8 @@ where
 {
     if roots.is_empty() {
         // Empty roots select the whole DAG, which is the all-values contract.
-        return eval_tensor_internal(
-            dag,
-            EvaluationScope::WholeDag,
-            false,
-            INITIAL_RANDOM_STREAM_ORDINAL,
-            None,
-            load_input,
-        )
-        .map(|evaluated| evaluated.values);
+        return eval_tensor_internal(dag, EvaluationScope::WholeDag, false, load_input)
+            .map(|evaluated| evaluated.values);
     }
     reject_drop_roots(dag, roots)?;
     let live = live_mask_for_roots(dag, roots);
@@ -4534,8 +4284,6 @@ where
         dag,
         EvaluationScope::Roots { live: &live, roots },
         false,
-        INITIAL_RANDOM_STREAM_ORDINAL,
-        None,
         load_input,
     )
     .map(|evaluated| evaluated.values)
@@ -4558,15 +4306,8 @@ where
 {
     if roots.is_empty() {
         // Empty roots select the whole DAG, which is the all-values contract.
-        return eval_tensor_internal(
-            dag,
-            EvaluationScope::WholeDag,
-            true,
-            INITIAL_RANDOM_STREAM_ORDINAL,
-            None,
-            load_input,
-        )
-        .map(|evaluated| evaluated.values);
+        return eval_tensor_internal(dag, EvaluationScope::WholeDag, true, load_input)
+            .map(|evaluated| evaluated.values);
     }
     reject_drop_roots(dag, roots)?;
     let live = live_mask_for_roots(dag, roots);
@@ -4574,84 +4315,9 @@ where
         dag,
         EvaluationScope::Roots { live: &live, roots },
         true,
-        INITIAL_RANDOM_STREAM_ORDINAL,
-        None,
         load_input,
     )
     .map(|evaluated| evaluated.values)
-}
-
-/// Evaluate roots while threading the executed Random path's next ordinal.
-/// Only `UniformLike` nodes carrying a scalar Bool activation participate;
-/// ordinary baked-seed DAGs retain their historical behavior.
-///
-/// The returned map holds exactly the named roots; see
-/// [`eval_tensor_roots_with_strict`]. Empty roots select the whole DAG and
-/// keep the all-values contract.
-pub fn eval_tensor_roots_with_strict_random_progress<F>(
-    dag: &Dag,
-    roots: &[NodeId],
-    random_counter: u64,
-    load_input: F,
-) -> Result<(UnordMap<NodeId, TensorValue>, u64), String>
-where
-    F: FnMut(&str) -> Option<TensorValue>,
-{
-    if roots.is_empty() {
-        // Empty roots select the whole DAG, which is the all-values contract.
-        return eval_tensor_internal(
-            dag,
-            EvaluationScope::WholeDag,
-            true,
-            random_counter,
-            None,
-            load_input,
-        )
-        .map(|evaluated| (evaluated.values, evaluated.random_counter));
-    }
-    reject_drop_roots(dag, roots)?;
-    let live = live_mask_for_roots(dag, roots);
-    eval_tensor_internal(
-        dag,
-        EvaluationScope::Roots { live: &live, roots },
-        true,
-        random_counter,
-        None,
-        load_input,
-    )
-    .map(|evaluated| (evaluated.values, evaluated.random_counter))
-}
-
-/// Evaluate roots with the caller's literal result obligations at their
-/// producing operations, retaining the ordinary executed Random prefix.
-///
-/// The returned map holds exactly the named roots. Unlike the other
-/// root-scoped entry points this one has no empty-roots fallback: empty roots
-/// mask every node off, so nothing executes and the result is empty. Callers
-/// that want the whole DAG use [`eval_tensor_with_strict`].
-pub fn eval_tensor_roots_with_result_claims<F>(
-    dag: &Dag,
-    roots: &[NodeId],
-    random_counter: u64,
-    result_claims: &[crate::TensorType],
-    load_input: F,
-) -> Result<(UnordMap<NodeId, TensorValue>, u64), String>
-where
-    F: FnMut(&str) -> Option<TensorValue>,
-{
-    reject_drop_roots(dag, roots)?;
-    let live = live_mask_for_roots(dag, roots);
-    eval_tensor_internal_with_result_claims(
-        dag,
-        EvaluationScope::Roots { live: &live, roots },
-        true,
-        random_counter,
-        None,
-        &mut RandomFrame::unhandled(),
-        result_claims,
-        load_input,
-    )
-    .map(|evaluated| (evaluated.values, evaluated.random_counter))
 }
 
 /// Evaluate `roots` with strict loads, taking every draw key from `frame`.
@@ -4672,7 +4338,8 @@ where
 }
 
 /// [`eval_tensor_roots_with_frame`] with invocation-local literal result
-/// claims, as [`eval_tensor_roots_with_result_claims`] checks them.
+/// claims checked against the realized roots. Unlike
+/// [`eval_tensor_roots_with_strict`], empty roots select no value node.
 pub fn eval_tensor_roots_with_frame_and_result_claims<F>(
     dag: &Dag,
     roots: &[NodeId],
@@ -4689,8 +4356,6 @@ where
         dag,
         EvaluationScope::Roots { live: &live, roots },
         true,
-        INITIAL_RANDOM_STREAM_ORDINAL,
-        None,
         frame,
         result_claims,
         load_input,
@@ -4758,83 +4423,6 @@ mod tests {
             dims: dims.iter().copied().map(DimInfo::Lit).collect(),
             precision,
         }
-    }
-
-    #[test]
-    fn path_sensitive_uniform_like_advances_only_active_nodes() {
-        let mut dag = Dag::new();
-        let ty = tensor_ty(&[2], Prim::F32);
-        let template = dag.add_node(
-            RiscOp::Load {
-                name: "template".into(),
-            },
-            vec![],
-            ty.clone(),
-            None,
-        );
-        let inactive = dag.add_node(
-            RiscOp::synth_const(Prim::Bool, 0.0),
-            vec![],
-            tensor_ty(&[], Prim::Bool),
-            None,
-        );
-        let active = dag.add_node(
-            RiscOp::synth_const(Prim::Bool, 1.0),
-            vec![],
-            tensor_ty(&[], Prim::Bool),
-            None,
-        );
-        let skipped = dag.add_node(
-            RiscOp::BakedUniformLike {
-                low: 0.0,
-                high: 1.0,
-                seed: 17,
-            },
-            vec![template, inactive],
-            ty.clone(),
-            None,
-        );
-        let executed = dag.add_node(
-            RiscOp::BakedUniformLike {
-                low: 0.0,
-                high: 1.0,
-                seed: 17,
-            },
-            vec![template, active],
-            ty,
-            None,
-        );
-        dag.add_root(skipped);
-        dag.add_root(executed);
-
-        let roots = dag.roots().to_vec();
-        let (values, next) =
-            eval_tensor_roots_with_strict_random_progress(&dag, &roots, 7, |name| {
-                (name == "template").then(|| TensorValue::from_vec(vec![2], vec![0.0; 2]))
-            })
-            .expect("path-sensitive Random DAG evaluates");
-        assert_eq!(next, 8, "only the active draw consumes an ordinal");
-        let expected = |ordinal: u64| {
-            TensorValue::from_vec(
-                vec![2],
-                (0..2)
-                    .map(|index| f64::from(spec_uniform_unit(17, ordinal, index) as f32))
-                    .collect(),
-            )
-        };
-        assert_eq!(values[&executed], expected(7));
-        let skipped_expected =
-            uniform_like(&[2], 0.0, 1.0, RandomKey::from_derived_bits(17), Prim::F32).unwrap();
-        assert_eq!(values[&skipped], skipped_expected);
-
-        let (values, next) =
-            eval_tensor_roots_with_strict_random_progress(&dag, &roots, u64::MAX, |name| {
-                (name == "template").then(|| TensorValue::from_vec(vec![2], vec![0.0; 2]))
-            })
-            .expect("legacy Random progress retains its saturation boundary");
-        assert_eq!(next, u64::MAX);
-        assert_eq!(values[&executed], expected(u64::MAX));
-        assert_eq!(values[&skipped], skipped_expected);
     }
 
     #[test]
@@ -6055,6 +5643,26 @@ mod tests {
         z ^ (z >> 31)
     }
 
+    /// The `[05-OP-8]` kernel over a shape, f32 bounds and one draw key.
+    fn uniform_like(
+        shape: &[usize],
+        low: f64,
+        high: f64,
+        key: RandomKey,
+        prim: Prim,
+    ) -> Result<TensorValue, String> {
+        let bound = |value| chelis_types::scalar_from_f64("uniform_like", Prim::F32, value);
+        let prepared = PreparedUniformLike::new(
+            prim,
+            numel(shape),
+            bound(low).map_err(|trap| trap.to_string())?,
+            bound(high).map_err(|trap| trap.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        let storage = prepared.apply(key).map_err(|error| error.to_string())?;
+        Ok(TensorValue::from_storage(shape.to_vec(), storage))
+    }
+
     fn spec_uniform_key(seed: u64, ordinal: u64) -> u64 {
         seed ^ spec_uniform_splitmix64(ordinal).rotate_left(17)
     }
@@ -6073,14 +5681,7 @@ mod tests {
         // sampler `chelis_uniform_sample_f32`. Seed 42, ordinal 0, shape [8],
         // [2,5); the bits are exact-rational evaluations of [05-RNG-1] and
         // [05-OP-8] (`rng_ref.py uniform 42 0 8 2 5 f32`, chelis#2408).
-        let out = uniform_like(
-            &[8],
-            2.0,
-            5.0,
-            RandomKey::from_derived_bits(spec_uniform_key(42, 0)),
-            Prim::F32,
-        )
-        .unwrap();
+        let out = uniform_like(&[8], 2.0, 5.0, RandomKey::from_counter(42, 0), Prim::F32).unwrap();
         let bits = |index: usize| (out.to_f64_lossy_vec()[index] as f32).to_bits();
         // elem[6]: where an f64 affine rounded to f32 lands 1 ULP away.
         assert_eq!(bits(6), 0x4068_3468);
@@ -6098,14 +5699,8 @@ mod tests {
     #[test]
     fn uniform_like_f32_affine_negative_range_is_f32() {
         // chelis#770: negative range, seed 42, ordinal 0, index 3, [-3, -1).
-        let out = uniform_like(
-            &[8],
-            -3.0,
-            -1.0,
-            RandomKey::from_derived_bits(spec_uniform_key(42, 0)),
-            Prim::F32,
-        )
-        .unwrap();
+        let out =
+            uniform_like(&[8], -3.0, -1.0, RandomKey::from_counter(42, 0), Prim::F32).unwrap();
         assert_eq!(
             out.to_f64_lossy_vec()[3].to_bits(),
             (f32::from_bits(0xc03b_a886) as f64).to_bits(),
@@ -6114,14 +5709,7 @@ mod tests {
 
     #[test]
     fn uniform_like_f64_uses_the_f64_affine() {
-        let out = uniform_like(
-            &[8],
-            2.0,
-            5.0,
-            RandomKey::from_derived_bits(spec_uniform_key(42, 0)),
-            Prim::F64,
-        )
-        .unwrap();
+        let out = uniform_like(&[8], 2.0, 5.0, RandomKey::from_counter(42, 0), Prim::F64).unwrap();
         let expected = (5.0f64 - 2.0).mul_add(spec_uniform_unit(42, 0, 4), 2.0);
         assert_eq!(expected.to_bits(), 0x4000_bff3_3038_5719);
         assert_eq!(out.to_f64_lossy_vec()[4].to_bits(), expected.to_bits());
@@ -6681,7 +6269,6 @@ mod tests {
 mod value_reclamation {
     use super::*;
     use crate::dag::RiscOp;
-    use crate::execution_spine::Step;
     use chelis_types::types::Prim;
 
     fn vec3() -> TensorType {
@@ -6713,15 +6300,7 @@ mod value_reclamation {
     }
 
     fn run(dag: &Dag, scope: EvaluationScope<'_>) -> EvaluatedValues {
-        eval_tensor_internal(
-            dag,
-            scope,
-            true,
-            INITIAL_RANDOM_STREAM_ORDINAL,
-            None,
-            load_x(),
-        )
-        .expect("the fixture evaluates")
+        eval_tensor_internal(dag, scope, true, load_x()).expect("the fixture evaluates")
     }
 
     fn elements(values: &UnordMap<NodeId, TensorValue>, id: NodeId) -> Vec<f64> {
@@ -6942,8 +6521,14 @@ mod value_reclamation {
     fn empty_roots_select_nothing_for_the_result_claims_entry_point() {
         let (dag, root) = neg_chain(4);
 
-        let (empty, _) = eval_tensor_roots_with_result_claims(&dag, &[], 0, &[], load_x())
-            .expect("empty roots are not an error");
+        let empty = eval_tensor_roots_with_frame_and_result_claims(
+            &dag,
+            &[],
+            &mut RandomFrame::unhandled(),
+            &[],
+            load_x(),
+        )
+        .expect("empty roots are not an error");
         assert!(
             empty.is_empty(),
             "every node is masked off, so nothing executes"
@@ -6955,8 +6540,14 @@ mod value_reclamation {
         assert_eq!(whole.len(), dag.len());
 
         // And with a root named, it returns that root alone.
-        let (scoped, _) = eval_tensor_roots_with_result_claims(&dag, &[root], 0, &[], load_x())
-            .expect("named root");
+        let scoped = eval_tensor_roots_with_frame_and_result_claims(
+            &dag,
+            &[root],
+            &mut RandomFrame::unhandled(),
+            &[],
+            load_x(),
+        )
+        .expect("named root");
         assert_eq!(scoped.len(), 1);
         assert_eq!(elements(&scoped, root), vec![1.0, 2.0, 3.0]);
     }
@@ -7039,8 +6630,8 @@ mod value_reclamation {
     // that never frees anything.
     // ------------------------------------------------------------------
 
-    fn node_order(dag: &Dag) -> Vec<Step> {
-        dag.nodes().iter().map(|node| Step::Node(node.id)).collect()
+    fn node_order(dag: &Dag) -> Vec<NodeId> {
+        dag.nodes().iter().map(|node| node.id).collect()
     }
 
     /// The step index at which `id` is scheduled to be freed, or `None` when

@@ -1,4 +1,6 @@
 //! CLI execution of [05-OP-37], without relabeling compiled dropout.
+mod common;
+
 use assert_cmd::Command;
 use serde_json::Value;
 
@@ -148,7 +150,7 @@ fn executable_example_survives_format_check_and_exact_eval() {
 }
 
 #[test]
-fn invalid_empty_rate_is_a_real_cli_error_and_a_runtime_rate_builds() {
+fn invalid_empty_rate_traps_in_eval_and_c_and_a_runtime_rate_builds() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("dropout.ch");
     std::fs::write(&file, "def empty() -> tensor[0, f32] = to_tensor([])\ndef invalid(x: tensor[0, f32]) -> tensor[0, f32] = dropout(x, 1.0f32)\ndef main() = with seed(42i64) { invalid(empty()) }\n").unwrap();
@@ -161,6 +163,32 @@ fn invalid_empty_rate_is_a_real_cli_error_and_a_runtime_rate_builds() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(
+        text.contains("numeric trap: domain in dropout at f32"),
+        "{text}"
+    );
+    // Compiled C traps the same invalid rate at its draw, as eval does, even
+    // over an empty tensor.
+    let invalid_out = dir.path().join("invalid-out");
+    let output = cli(&[
+        "build",
+        path,
+        "--target",
+        "c",
+        "--output",
+        invalid_out.to_str().unwrap(),
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(common::link_generated(&invalid_out, "dropout.c", "dropout").success());
+    let run = std::process::Command::new(invalid_out.join("dropout"))
+        .output()
+        .unwrap();
+    assert!(!run.status.success());
+    let text = String::from_utf8_lossy(&run.stderr);
     assert!(
         text.contains("numeric trap: domain in dropout at f32"),
         "{text}"

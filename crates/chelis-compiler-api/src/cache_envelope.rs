@@ -97,9 +97,11 @@ impl CachePayload for crate::StdLibContext {
     // V23 retains checker-owned local tensor-ascription obligations.
     // V24 retains TypeEnv callable provenance for contextual grad selectors.
     // V25: the V19 single-node-spelling reason above, for the standard library.
-    // V26 (chelis#2413): the lowered library's random draws are key-operand
-    // nodes fed by `DrawKey`, and new `RiscOp` variants shift bincode indices.
-    const FORMAT_VERSION: u32 = 26;
+    // V27 (chelis#2413): the lowered library's random draws are key-operand
+    // nodes fed by `DrawKey` and the baked random variants are gone, so
+    // bincode variant indices shift. V26 was an intermediate state of the same
+    // change and never shipped.
+    const FORMAT_VERSION: u32 = 27;
     const KEY_DOMAIN: &'static [u8] = b"chelis_std_typecheck_v";
 }
 

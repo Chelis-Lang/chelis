@@ -3265,13 +3265,6 @@ impl RandomKey {
         }
     }
 
-    /// Rebuild a key from the bits of a key a lane already derived through
-    /// [`RandomKey::from_counter`]. The legacy lowering bakes such bits into
-    /// its uniform node; nothing else may invent key bits.
-    pub fn from_derived_bits(bits: u64) -> Self {
-        Self { bits }
-    }
-
     /// The key word, for native ports of the kernels below.
     pub fn bits(self) -> u64 {
         self.bits

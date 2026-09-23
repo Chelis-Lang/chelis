@@ -292,7 +292,7 @@ pub(crate) fn verified_execution_host_from_source(
         plan.expect("source uses the planned host lane"),
     )
     .expect("select planned C host payload");
-    assert!(!plan.has_unplanned_dropout_helper());
+    assert!(plan.has_dropout_helpers());
     let manifested = chelis_types::manifest::ManifestedProgram::new(
         checked,
         manifest,
@@ -306,7 +306,7 @@ pub(crate) fn verified_execution_host_from_source(
 }
 
 #[test]
-fn fixed_control_host_helper_uses_the_active_invocation_rng() {
+fn drawing_host_helper_uses_the_active_invocation_rng() {
     let verified = verified_execution_host_from_source(
         r#"
 def keep[p: Float](x: tensor[4, p]) -> tensor[4, p] = dropout(x, cast(0.5, p))
@@ -323,18 +323,17 @@ result = with seed(42i64) {
         "scope-0 execution must distinguish inactive state from active seed zero:\n{c}"
     );
     assert!(
-        c.contains("__chelis_fixed_seed = __chelis_rng->seed")
-            && c.contains("__chelis_rng->counter = __chelis_fixed_counter"),
+        c.contains("__chelis_rng->seed") && c.contains("__chelis_rng->counter++"),
         "the private helper must consume and commit its caller-owned stream:\n{c}"
     );
     for helper in [
         "static inline uint64_t chelis_random_mix",
-        "static inline double chelis_dropout_unit(",
+        "static inline double chelis_random_unit(",
     ] {
         assert_eq!(
             c.matches(helper).count(),
             1,
-            "fixed-control sampler support is emitted once per translation unit: {helper}"
+            "the Random stream support is emitted once per translation unit: {helper}"
         );
     }
     #[cfg(not(feature = "native-random-observer"))]

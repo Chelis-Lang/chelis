@@ -710,42 +710,17 @@ pub enum RiscOp {
     /// that would NaN on non-positive inputs. Backends emit
     /// `1.0f / x` (or the f64 / mixed-precision analog).
     Recip,
-    /// The pre-key-operand `[05-OP-8]` node: bounds and seed are fixed
-    /// payload rather than operands. It keeps its serialized name.
-    #[serde(rename = "UniformLike")]
-    BakedUniformLike {
-        low: f64,
-        high: f64,
-        /// The handler seed's bits when the draw takes its ordinal at
-        /// execution (a fixed-control plan site, or a draw gated by an
-        /// activation input). Otherwise the `[05-RNG-1]` draw key
-        /// (`chelis_types::RandomKey::from_counter`) that the legacy lowering fixed
-        /// from the handler seed and a lowering-time ordinal.
-        seed: u64,
-    },
-    /// The pre-key-operand `[05-OP-37]` node, a fixed rate and seed payload.
-    /// It keeps its serialized name.
-    #[serde(rename = "Dropout")]
-    BakedDropout {
-        rate: f64,
-        seed: u64,
-    },
     /// `[05-OP-8]` with operand controls. Inputs are `[template, low, high,
     /// key]`, optionally followed by one rank-0 Bool activation. The template
     /// supplies only the shape and dtype `p`; `low` and `high` are rank-0
     /// floats of dtype `p`, or f32 while the checker's bound signature is f32
     /// (chelis#1295); `key` is this draw's `Prim::Key`, consumed here. An
-    /// inactive draw validates nothing and produces positive zeros. Its
-    /// serialized name stays distinct from the baked node's until that node
-    /// is deleted.
-    #[serde(rename = "KeyedUniformLike")]
+    /// inactive draw validates nothing and produces positive zeros.
     UniformLike,
     /// `[05-OP-37]` with an operand rate. Inputs are `[x, rate, key]`,
     /// optionally followed by one rank-0 Bool activation; `rate` is a rank-0
     /// value of `x`'s dtype and `key` is consumed here. An inactive draw
-    /// validates nothing and produces positive zeros. Its serialized name
-    /// stays distinct from the baked node's until that node is deleted.
-    #[serde(rename = "KeyedDropout")]
+    /// validates nothing and produces positive zeros.
     Dropout,
     /// AD-only `[05-OP-37]` pathwise input adjoint. Inputs are `[g, rate,
     /// key]`, optionally followed by the forward draw's activation. It reads
@@ -1392,8 +1367,8 @@ impl RiscOp {
             Self::Ceil => Semantic(Id::Ceil),
             Self::Round => Semantic(Id::Round),
             Self::Recip => Semantic(Id::Recip),
-            Self::BakedUniformLike { .. } | Self::UniformLike => Semantic(Id::UniformLike),
-            Self::BakedDropout { .. } | Self::Dropout => Semantic(Id::Dropout),
+            Self::UniformLike => Semantic(Id::UniformLike),
+            Self::Dropout => Semantic(Id::Dropout),
             Self::DropoutReplay => Semantic(Id::DropoutReplay),
             Self::UniformBoundAdjoint { .. } => Semantic(Id::UniformBoundAdjoint),
             // The counter-stream bridge supplies a key; it is not a Table-A
@@ -1756,9 +1731,7 @@ impl RiscOp {
             RiscOp::Logical(_) | RiscOp::Where => false,
 
             // Stochastic ops have no deterministic value to bound.
-            RiscOp::BakedUniformLike { .. }
-            | RiscOp::BakedDropout { .. }
-            | RiscOp::UniformLike
+            RiscOp::UniformLike
             | RiscOp::Dropout
             | RiscOp::DropoutReplay
             | RiscOp::UniformBoundAdjoint { .. }
@@ -2537,8 +2510,6 @@ fn shape_source_for_axis(dag: &Dag, id: NodeId, axis: usize) -> Option<(String, 
         | RiscOp::Ceil
         | RiscOp::Round
         | RiscOp::Relu
-        | RiscOp::BakedUniformLike { .. }
-        | RiscOp::BakedDropout { .. }
         | RiscOp::UniformLike
         | RiscOp::Dropout
         | RiscOp::DropoutReplay => shape_source_for_axis(dag, *node.inputs.first()?, axis),
@@ -3520,12 +3491,6 @@ mod tests {
             RiscOp::Ceil,
             RiscOp::Round,
             RiscOp::Recip,
-            RiscOp::BakedUniformLike {
-                low: 0.0,
-                high: 1.0,
-                seed: 7,
-            },
-            RiscOp::BakedDropout { rate: 0.5, seed: 7 },
             RiscOp::UniformLike,
             RiscOp::Dropout,
             RiscOp::DropoutReplay,
@@ -3620,8 +3585,8 @@ mod tests {
         // identities so they cannot inherit a verifier disposition.
         assert_eq!(
             all.len(),
-            64,
-            "one_of_every_risc_op must list all 64 classified samples"
+            62,
+            "one_of_every_risc_op must list all 62 classified samples"
         );
 
         // The classifier returns a definite bool for every variant (no
@@ -3632,8 +3597,8 @@ mod tests {
         // Pinned partition per beacon_plan.md §3.1: the elementwise math
         // (5 binary/cmp + 13 unary, including `round`), 5 reductions, 6
         // movement, 4 memory/blas value nodes (Const, ConstTensor, Load,
-        // BlasMatmul), and Cast are targetable (34); stochastic (2, plus the
-        // key-operand draws, their two AD replays and the draw key: 7),
+        // BlasMatmul), and Cast are targetable (34); stochastic (the two
+        // key-operand draws, their two AD replays and the draw key: 5),
         // arg-reductions (2), integer floor/trunc division and remainder (3),
         // `cast_trunc` (1, chelis#759), one_hot (1), the `Shape` metadata read
         // (1), sparse gather/scatter (4, including element-wise
@@ -3643,14 +3608,15 @@ mod tests {
         // own transformers. chelis#1464 adds the [05-OP-68] guarded abort to
         // the excluded side (+1 = 25): an abort is a control effect, not an
         // output envelope, and relaxing it to its fallback's envelope would
-        // drop the trap. The chelis#2413 key-operand IR adds five more
-        // stochastic nodes (+5 = 30).
+        // drop the trap. The chelis#2413 key-operand IR replaces the two
+        // baked draws with the two key-operand draws and adds their two
+        // AD replays and the draw key (+3 = 28).
         assert_eq!(
             targetable, 34,
             "targetable op count drifted from the pinned WI-2 subset"
         );
         assert_eq!(
-            excluded, 30,
+            excluded, 28,
             "excluded op count drifted from the pinned WI-2 subset"
         );
 
@@ -3670,7 +3636,7 @@ mod tests {
             "Cast is real-valued-first targetable (beacon_plan.md §6)"
         );
         assert!(
-            !RiscOp::BakedDropout { rate: 0.5, seed: 0 }.is_verifier_targetable(),
+            !RiscOp::Dropout.is_verifier_targetable(),
             "stochastic ops have no deterministic envelope to bound"
         );
         assert!(

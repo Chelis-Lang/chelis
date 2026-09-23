@@ -15,7 +15,8 @@
 
 mod support;
 use chelis_ir::dag::{
-    ComparisonKind, Dag, DimInfo, ExtremaKind, ExtremaOperand, RiscOp, RtAxis, RtDim, TensorType,
+    ComparisonKind, Dag, DimInfo, ExtremaKind, ExtremaOperand, NodeId, RiscOp, RtAxis, RtDim,
+    TensorType,
 };
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
 use chelis_ir::fuse::fuse;
@@ -1185,6 +1186,49 @@ int main(void) {{
         .collect()
 }
 
+/// `uniform_like(template, 2.0f32, 5.0f32)` under a `with seed(seed)` region
+/// lowered in the same graph, whose key the HIP lane computes at emission.
+fn scoped_uniform_like(dag: &mut Dag, template: NodeId, ty: TensorType, seed: i64) -> NodeId {
+    let rank0 = |precision| TensorType {
+        dims: vec![],
+        precision,
+    };
+    let seed = dag.add_node(
+        RiscOp::synth_const(Prim::Int64, seed as f64),
+        vec![],
+        rank0(Prim::Int64),
+        None,
+    );
+    let low = dag.add_node(
+        RiscOp::synth_const(Prim::F32, 2.0),
+        vec![],
+        rank0(Prim::F32),
+        None,
+    );
+    let high = dag.add_node(
+        RiscOp::synth_const(Prim::F32, 5.0),
+        vec![],
+        rank0(Prim::F32),
+        None,
+    );
+    let key = dag.add_node(
+        RiscOp::DrawKey {
+            handler: chelis_ir::dag::RandomHandler::Scoped { instance: 0 },
+            draw: chelis_ir::dag::RandomDraw::UniformLike,
+            dtype: ty.precision,
+        },
+        vec![seed, low, high],
+        rank0(Prim::Key),
+        None,
+    );
+    dag.add_node(
+        RiscOp::UniformLike,
+        vec![template, low, high, key],
+        ty,
+        None,
+    )
+}
+
 #[test]
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn uniform_like_fma_gpu_bit_exact_matches_eval_and_c() {
@@ -1195,17 +1239,8 @@ fn uniform_like_fma_gpu_bit_exact_matches_eval_and_c() {
         vec_f32(8),
         None,
     );
-    // An ungated node carries its [05-RNG-1] draw key: seed 42, ordinal 0.
-    let out = dag.add_node(
-        RiscOp::BakedUniformLike {
-            low: 2.0,
-            high: 5.0,
-            seed: chelis_types::RandomKey::from_counter(42, 0).bits(),
-        },
-        vec![template],
-        vec_f32(8),
-        None,
-    );
+    // A `with seed(42)` region's first draw key: seed 42, ordinal 0.
+    let out = scoped_uniform_like(&mut dag, template, vec_f32(8), 42);
     dag.add_root(out);
 
     let actual = compile_and_run_output_f32_bits(&dag, "uniform_like_fma");
@@ -1234,16 +1269,7 @@ fn issue_937_uniform_like_f64_gpu_bit_exact_matches_shared_sampler() {
         None,
     );
     let key = chelis_types::RandomKey::from_counter(42, 0);
-    let out = dag.add_node(
-        RiscOp::BakedUniformLike {
-            low: 2.0,
-            high: 5.0,
-            seed: key.bits(),
-        },
-        vec![template],
-        vec_f64(8),
-        None,
-    );
+    let out = scoped_uniform_like(&mut dag, template, vec_f64(8), 42);
     dag.add_root(out);
 
     let actual = compile_and_run_output_f64_bits(&dag, "uniform_like_f64");

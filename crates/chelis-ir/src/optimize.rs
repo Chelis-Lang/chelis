@@ -303,18 +303,6 @@ pub fn project_program_roots_with_remap(dag: &Dag) -> (Dag, UnordMap<NodeId, Nod
     dead_code_eliminate_impl(dag, &[], true, DrawLiveness::Program)
 }
 
-/// A selected execution slice has its own explicit roots/retention set.
-/// Unrelated Stores and interface loads are not implicit observations here.
-pub(crate) fn project_execution_slice(
-    dag: &Dag,
-    retained: &[NodeId],
-    roots: &[NodeId],
-) -> (Dag, UnordMap<NodeId, NodeId>) {
-    let mut selected = dag.clone();
-    selected.set_roots(roots.to_vec());
-    dead_code_eliminate_impl(&selected, retained, false, DrawLiveness::Program)
-}
-
 fn dead_code_eliminate_impl(
     dag: &Dag,
     retained: &[NodeId],
@@ -570,7 +558,6 @@ pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
                     | RiscOp::CheckedReshapeExtent { .. }
                     | RiscOp::CheckedUnitAxis { .. }
             )
-            && !(matches!(node.op, RiscOp::BakedUniformLike { .. }) && node.inputs.len() == 2)
             && !matches!(node.op, RiscOp::DrawKey { .. })
             && let Some(&existing) = seen.get(&cse_key)
         {
@@ -1406,29 +1393,52 @@ mod tests {
             },
             None,
         );
+        let low = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 2.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
+        let high = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 5.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
         for _ in 0..2 {
-            let draw = dag.add_node(
-                RiscOp::BakedUniformLike {
-                    low: 2.0,
-                    high: 5.0,
-                    seed: 42,
+            let key = dag.add_node(
+                RiscOp::DrawKey {
+                    handler: crate::dag::RandomHandler::Inherited,
+                    draw: crate::dag::RandomDraw::UniformLike,
+                    dtype: Prim::F32,
                 },
-                vec![template, active],
+                vec![low, high, active],
+                TensorType {
+                    dims: vec![],
+                    precision: Prim::Key,
+                },
+                None,
+            );
+            let draw = dag.add_node(
+                RiscOp::UniformLike,
+                vec![template, low, high, key, active],
                 scalar_f32(),
                 None,
             );
             dag.add_root(draw);
         }
         let optimized = common_subexpr_eliminate(&dag);
-        let (values, counter) = crate::eval::eval_tensor_roots_with_strict_random_progress(
+        let mut frame = crate::eval::RandomFrame::inherited(42, 0);
+        let values = crate::eval::eval_tensor_roots_with_frame(
             &optimized,
             optimized.roots(),
-            0,
+            &mut frame,
             |_| None,
         )
         .unwrap();
         assert_eq!(
-            counter, 2,
+            frame.inherited_counter(),
+            Some(2),
             "equal source syntax must still consume two draws"
         );
         assert_eq!(optimized.roots().len(), 2);

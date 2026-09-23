@@ -38,6 +38,8 @@ fn build_uniform_like_dag(low: f64, high: f64, seed: u64) -> Dag {
     build_uniform_like_dag_for(Prim::F32, low, high, seed)
 }
 
+/// `uniform_like(template, low, high)` as the first draw of a `with
+/// seed(seed)` region lowered in the graph: the key is `(seed, 0)`.
 fn build_uniform_like_dag_for(precision: Prim, low: f64, high: f64, seed: u64) -> Dag {
     let mut dag = Dag::new();
     let template = dag.add_node(
@@ -46,29 +48,66 @@ fn build_uniform_like_dag_for(precision: Prim, low: f64, high: f64, seed: u64) -
         tensor(precision, 4),
         None,
     );
-    dag.add_node(
-        RiscOp::BakedUniformLike { low, high, seed },
-        vec![template],
+    let rank0 = |precision| TensorType {
+        dims: vec![],
+        precision,
+    };
+    let low = dag.add_node(
+        RiscOp::synth_const(Prim::F32, low),
+        vec![],
+        rank0(Prim::F32),
+        None,
+    );
+    let high = dag.add_node(
+        RiscOp::synth_const(Prim::F32, high),
+        vec![],
+        rank0(Prim::F32),
+        None,
+    );
+    let seed = dag.add_node(
+        RiscOp::synth_const(Prim::Int64, seed as f64),
+        vec![],
+        rank0(Prim::Int64),
+        None,
+    );
+    let key = dag.add_node(
+        RiscOp::DrawKey {
+            handler: chelis_ir::dag::RandomHandler::Scoped { instance: 0 },
+            draw: chelis_ir::dag::RandomDraw::UniformLike,
+            dtype: precision,
+        },
+        vec![seed, low, high],
+        rank0(Prim::Key),
+        None,
+    );
+    let draw = dag.add_node(
+        RiscOp::UniformLike,
+        vec![template, low, high, key],
         tensor(precision, 4),
         None,
     );
+    dag.add_root(draw);
     dag
+}
+
+/// The output slot of the graph's draw.
+fn draw_slot(dag: &Dag) -> String {
+    format!("t{}_data", dag.roots()[0].0)
 }
 
 #[test]
 fn issue_937_uniform_like_emits_dtype_specific_sampler_and_storage() {
-    let f64_src = emit_dag(
-        &build_uniform_like_dag_for(Prim::F64, 0.1, 0.9, 17),
-        "uniform_f64",
-    )
-    .unwrap();
+    let f64_dag = build_uniform_like_dag_for(Prim::F64, 0.1, 0.9, 17);
+    let slot = draw_slot(&f64_dag);
+    let f64_src = emit_dag(&f64_dag, "uniform_f64").unwrap();
     assert!(f64_src.contains("static inline double chelis_uniform_sample_f64("));
-    assert!(f64_src.contains("((double*)t1_data)[i] = chelis_uniform_sample_f64("));
-    assert!(f64_src.contains("chelis_f64_from_bits("));
+    assert!(f64_src.contains(&format!(
+        "((double*){slot})[i] = chelis_uniform_sample_f64("
+    )));
     assert!(
         !f64_src
             .lines()
-            .any(|line| line.contains("t1_data)[i]") && line.contains("sample_f32")),
+            .any(|line| line.contains(&format!("{slot})[i]")) && line.contains("sample_f32")),
         "f64 output must never widen an f32 sample:\n{f64_src}"
     );
 
@@ -76,13 +115,11 @@ fn issue_937_uniform_like_emits_dtype_specific_sampler_and_storage() {
         (Prim::F16, "chelis_f32_to_f16"),
         (Prim::Bf16, "chelis_f32_to_bf16"),
     ] {
-        let src = emit_dag(
-            &build_uniform_like_dag_for(precision, 0.1, 0.9, 17),
-            "uniform_reduced",
-        )
-        .unwrap();
+        let dag = build_uniform_like_dag_for(precision, 0.1, 0.9, 17);
+        let slot = draw_slot(&dag);
+        let src = emit_dag(&dag, "uniform_reduced").unwrap();
         assert!(src.contains("chelis_uniform_sample_f32("));
-        assert!(src.contains(&format!("((uint16_t*)t1_data)[i] = {conversion}(")));
+        assert!(src.contains(&format!("((uint16_t*){slot})[i] = {conversion}(")));
     }
 }
 
@@ -99,8 +136,8 @@ fn issue_248_uniform_like_low_arg_emits_exact_bit_pattern() {
 
     let low_bits = (low as f32).to_bits();
     let high_bits = (high as f32).to_bits();
-    let low_needle = format!("chelis_f32_from_bits(0x{low_bits:08x}u)");
-    let high_needle = format!("chelis_f32_from_bits(0x{high_bits:08x}u)");
+    let low_needle = format!("0x{low_bits:08x}");
+    let high_needle = format!("0x{high_bits:08x}");
 
     assert!(
         src.contains(&low_needle),
@@ -408,10 +445,10 @@ int main(void) {
         panic!("emitted f64 C did not compile/run");
     };
     let bound = |value| chelis_types::scalar_from_f64("test", Prim::F32, value).unwrap();
-    // The node bakes key word 42 itself, so the reference draws under that key.
+    // The region's first draw takes key (42, 0).
     let sampled = chelis_types::PreparedUniformLike::new(Prim::F64, 4, bound(2.0), bound(5.0))
         .unwrap()
-        .apply(chelis_types::RandomKey::from_derived_bits(42))
+        .apply(chelis_types::RandomKey::from_counter(42, 0))
         .unwrap();
     let expected = (0..4)
         .map(|index| format!("{:016x}", sampled.scalar_at(index).as_f64_lossy().to_bits()))

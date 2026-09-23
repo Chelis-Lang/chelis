@@ -59,9 +59,9 @@ pub fn lower_checked(
     finish_isolated_lowering(checked, mode, lower_result)
 }
 
-/// Select fixed-control C host execution before legacy value-only lowering.
-/// A selected host payload has no independently emitted top-level DAG, hence
-/// no positional root binding. Ordinary programs retain the existing lowering
+/// Select the C host program for a program whose tensor helpers draw
+/// `dropout`, before value-only lowering. A selected host payload has no
+/// independently emitted top-level DAG, hence no positional root binding. Ordinary programs retain the existing lowering
 /// and root-count guards; a failed collecting lowerer is never a recovery hint.
 /// `AllowHostBackend` asks for the CLI's host selection policy: it permits a
 /// nonfatal raw-lowering decline only when the collected host requires that
@@ -85,7 +85,7 @@ pub fn lower_checked_for_c_execution(
 }
 
 /// Opt-in pass capture follows the same C lane and ordinary root guards.
-/// Captures never make an ordinary helper into a planned execution helper.
+/// Captures never change which host program the lane selects.
 #[cfg(feature = "lowering-trace")]
 pub fn lower_checked_for_c_execution_with_trace(
     checked: CheckedCompilation,
@@ -119,10 +119,7 @@ fn finish_c_execution_lowering(
     ),
     CoreLowerError,
 > {
-    if host
-        .as_ref()
-        .is_some_and(|plan| plan.has_execution_helpers())
-    {
+    if host.as_ref().is_some_and(|plan| plan.has_dropout_helpers()) {
         let lowered = finish_lowering(
             checked,
             Dag::new(),
@@ -155,40 +152,6 @@ fn finish_c_execution_lowering(
             })?;
         Ok((lowered, ordinary, None))
     }
-}
-
-/// Additive evaluator products derived from the same sealed checked source.
-/// Ordinary lowering/cache carriers remain unchanged and cannot stand in for
-/// this non-serialized execution transport.
-pub fn lower_checked_for_evaluation(
-    checked: &CheckedCompilation,
-) -> Result<chelis_ir::lower::EvaluationProgram, CoreLowerError> {
-    chelis_ir::lower::try_lower_program_to_evaluation_library(checked.program())
-        .map(|library| library.program().clone())
-        .map_err(CoreLowerError::Lower)
-}
-
-pub fn lower_checked_with_evaluation_context(
-    checked: &ContextCheckedCompilation<'_>,
-    evaluation: &chelis_ir::lower::EvaluationLibrary,
-) -> Result<chelis_ir::lower::EvaluationProgram, CoreLowerError> {
-    if evaluation.library_for_inspection().library_proof_id()
-        != checked.library().program().library_proof_id()
-    {
-        return Err(CoreLowerError::Lower(
-            LowerDiagnostic::new(
-                "the evaluation library does not match its checked context",
-                None,
-                None,
-            )
-            .fatal(),
-        ));
-    }
-    chelis_ir::lower::try_lower_program_with_evaluation_context(
-        evaluation,
-        checked.extension().program(),
-    )
-    .map_err(CoreLowerError::Lower)
 }
 
 struct LoweredProgram {
@@ -414,11 +377,7 @@ mod tests {
             let (actual, ordinary_host, plan) =
                 lower_checked_for_c_execution(checked.clone(), &manifest, mode).unwrap();
             assert_eq!(ordinary_host.is_some(), expected_host.is_some());
-            assert!(
-                !plan
-                    .as_ref()
-                    .is_some_and(|plan| plan.has_execution_helpers())
-            );
+            assert!(!plan.as_ref().is_some_and(|plan| plan.has_dropout_helpers()));
             assert_eq!(actual.named_roots(), ordinary.named_roots());
             assert_eq!(actual.forward_node_index(), ordinary.forward_node_index());
             assert_eq!(actual.dag().nodes().len(), ordinary.dag().nodes().len());

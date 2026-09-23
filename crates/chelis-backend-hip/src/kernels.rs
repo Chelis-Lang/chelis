@@ -2483,13 +2483,41 @@ mod tests {
             ty.clone(),
             None,
         );
-        let draw = dag.add_node(
-            RiscOp::BakedUniformLike {
-                low: 0.0,
-                high: 1.0,
-                seed: 7,
+        let rank0 = |precision| TensorType {
+            dims: vec![],
+            precision,
+        };
+        let low = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 0.0),
+            vec![],
+            rank0(Prim::F32),
+            None,
+        );
+        let high = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 1.0),
+            vec![],
+            rank0(Prim::F32),
+            None,
+        );
+        let seed = dag.add_node(
+            RiscOp::synth_const(Prim::Int64, 7.0),
+            vec![],
+            rank0(Prim::Int64),
+            None,
+        );
+        let key = dag.add_node(
+            RiscOp::DrawKey {
+                handler: chelis_ir::dag::RandomHandler::Scoped { instance: 0 },
+                draw: chelis_ir::dag::RandomDraw::UniformLike,
+                dtype: Prim::F32,
             },
-            vec![template],
+            vec![seed, low, high],
+            rank0(Prim::Key),
+            None,
+        );
+        let draw = dag.add_node(
+            RiscOp::UniformLike,
+            vec![template, low, high, key],
             ty,
             None,
         );

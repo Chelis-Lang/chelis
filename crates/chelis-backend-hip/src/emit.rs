@@ -771,6 +771,9 @@ impl HipEmitter {
             if self.reduction_inlined.contains(&node.id.0) {
                 continue;
             }
+            if Self::read_only_at_emission(node, dag) {
+                continue;
+            }
             match &node.op {
                 // WS-A4: `accumulator` is read inside
                 // `reduction_kernel_sources` (it picks the
@@ -1412,12 +1415,11 @@ impl HipEmitter {
             RiscOp::Floor => Some(format!("kernel_floor_{}", kind_for_node(node)?.suffix())),
             RiscOp::Ceil => Some(format!("kernel_ceil_{}", kind_for_node(node)?.suffix())),
             RiscOp::Round => Some(format!("kernel_round_{}", kind_for_node(node)?.suffix())),
-            RiscOp::BakedUniformLike { .. } | RiscOp::UniformLike => Some(format!(
+            RiscOp::UniformLike => Some(format!(
                 "kernel_uniform_like_{}",
                 kind_for_node(node)?.suffix()
             )),
-            RiscOp::BakedDropout { .. }
-            | RiscOp::Drop
+            RiscOp::Drop
             | RiscOp::Dropout
             | RiscOp::DropoutReplay
             | RiscOp::UniformBoundAdjoint { .. }
@@ -1833,9 +1835,7 @@ impl HipEmitter {
             RiscOp::Round => {
                 kernels::unary_func(self.kernel_rank, name, "rintf", elem_for_unary()?)
             }
-            RiscOp::BakedUniformLike { .. } | RiscOp::UniformLike => {
-                kernels::uniform_like(self.kernel_rank, name, elem_for_unary()?)
-            }
+            RiscOp::UniformLike => kernels::uniform_like(self.kernel_rank, name, elem_for_unary()?),
             // WS-A4: bind `accumulator` instead of `..`. The fused
             // reduction path is f32-only today (its source kernel
             // template doesn't carry a dtype suffix); the unfused path
@@ -2124,6 +2124,7 @@ impl HipEmitter {
                 .unwrap_or_else(|| panic!("op {:?} has no kernel name", node.op)))
         };
         match &node.op {
+            RiscOp::Const { .. } if Self::read_only_at_emission(node, dag) => {}
             RiscOp::Const { value } => {
                 self.emit_const(id, value.as_f64_lossy(), &node.output_type)?
             }
@@ -2308,12 +2309,6 @@ impl HipEmitter {
                 &node.inputs,
                 &node.output_type,
             ),
-            RiscOp::BakedUniformLike { low, high, seed } => {
-                self.emit_uniform_like_launch(id, *low, *high, *seed, &node.output_type)?
-            }
-            RiscOp::BakedDropout { .. } => {
-                unreachable!("dropout should be rejected before HIP code generation")
-            }
             RiscOp::DrawKey {
                 handler,
                 draw: chelis_ir::dag::RandomDraw::UniformLike,
@@ -3036,6 +3031,21 @@ impl HipEmitter {
         );
         self.indent -= 1;
         self.line("}");
+    }
+
+    /// A constant only draw keys read: the literal seed of a `with seed`
+    /// region, which [`Self::record_scoped_draw_key`] reads at emission, so it
+    /// has no device value.
+    fn read_only_at_emission(node: &DagNode, dag: VerifiedDagView<'_>) -> bool {
+        matches!(node.op, RiscOp::Const { .. }) && {
+            let mut consumers = dag
+                .nodes()
+                .iter()
+                .filter(|consumer| consumer.inputs.contains(&node.id))
+                .peekable();
+            consumers.peek().is_some()
+                && consumers.all(|consumer| matches!(consumer.op, RiscOp::DrawKey { .. }))
+        }
     }
 
     /// The HIP lane's counter-stream bridge
@@ -4784,8 +4794,6 @@ impl HipEmitter {
             | RiscOp::Floor
             | RiscOp::Ceil
             | RiscOp::Round
-            | RiscOp::BakedUniformLike { .. }
-            | RiscOp::BakedDropout { .. }
             | RiscOp::UniformLike
             | RiscOp::Dropout
             | RiscOp::DropoutReplay
@@ -5731,6 +5739,55 @@ mod tests {
 
     /// Issue #251 (parallel #248): `uniform_like` `low` / `high` args must
     /// emit through `chelis_f32_from_bits`, not a lossy `{:.8}f` literal.
+    /// `uniform_like(template, low, high)` as the first draw of a `with
+    /// seed(seed)` region in the graph, whose key the HIP lane computes.
+    fn scoped_uniform(
+        dag: &mut Dag,
+        template: NodeId,
+        ty: TensorType,
+        (low, high): (f64, f64),
+        seed: i64,
+    ) -> NodeId {
+        let rank0 = |precision| TensorType {
+            dims: vec![],
+            precision,
+        };
+        let low = dag.add_node(
+            RiscOp::synth_const(Prim::F32, low),
+            vec![],
+            rank0(Prim::F32),
+            None,
+        );
+        let high = dag.add_node(
+            RiscOp::synth_const(Prim::F32, high),
+            vec![],
+            rank0(Prim::F32),
+            None,
+        );
+        let seed = dag.add_node(
+            RiscOp::synth_const(Prim::Int64, seed as f64),
+            vec![],
+            rank0(Prim::Int64),
+            None,
+        );
+        let key = dag.add_node(
+            RiscOp::DrawKey {
+                handler: chelis_ir::dag::RandomHandler::Scoped { instance: 0 },
+                draw: chelis_ir::dag::RandomDraw::UniformLike,
+                dtype: ty.precision,
+            },
+            vec![seed, low, high],
+            rank0(Prim::Key),
+            None,
+        );
+        dag.add_node(
+            RiscOp::UniformLike,
+            vec![template, low, high, key],
+            ty,
+            None,
+        )
+    }
+
     /// The reproducer `1e-40` collapses to `0.0f` under `%.8`.
     #[test]
     fn issue_251_uniform_like_args_emit_exact_bit_pattern() {
@@ -5745,12 +5802,7 @@ mod tests {
             vec_f32(8),
             None,
         );
-        let u = dag.add_node(
-            RiscOp::BakedUniformLike { low, high, seed: 7 },
-            vec![like],
-            vec_f32(8),
-            None,
-        );
+        let u = scoped_uniform(&mut dag, like, vec_f32(8), (low, high), 7);
         dag.add_root(u);
         let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
 
@@ -5775,7 +5827,7 @@ mod tests {
         // Negative parity: no lossy decimal literal for the collapsed
         // denormal `low`.
         assert!(
-            !hip.contains("float t1_low = 0.00000000f;"),
+            !hip.contains(&format!("float t{}_low = 0.00000000f;", u.0)),
             "uniform_like must not emit a lossy `{{:.8}}f` literal:\n{hip}"
         );
     }
@@ -5793,22 +5845,13 @@ mod tests {
             vec_f64(8),
             None,
         );
-        let u = dag.add_node(
-            RiscOp::BakedUniformLike {
-                low,
-                high,
-                seed: 17,
-            },
-            vec![like],
-            vec_f64(8),
-            None,
-        );
+        let u = scoped_uniform(&mut dag, like, vec_f64(8), (low, high), 17);
         dag.add_root(u);
         let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
 
         assert!(hip.contains("__device__ double chelis_uniform_sample_f64("));
-        assert!(hip.contains("double t1_low = chelis_f64_from_bits("));
-        assert!(hip.contains("double t1_high = chelis_f64_from_bits("));
+        assert!(hip.contains(&format!("double t{}_low = chelis_f64_from_bits(", u.0)));
+        assert!(hip.contains(&format!("double t{}_high = chelis_f64_from_bits(", u.0)));
         assert!(hip.contains("double low, double high"));
         assert!(hip.contains("out[i] = chelis_uniform_sample_f64("));
         assert!(

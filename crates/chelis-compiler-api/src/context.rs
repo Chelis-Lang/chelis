@@ -40,7 +40,6 @@ use std::fmt;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
 
 use crate::compiler::{CompilerError, bail_if_cancelled, cancelled_or};
 use crate::schema::{Diagnostic, GeneralKind};
@@ -172,7 +171,6 @@ pub struct CompiledContext {
     pub(crate) library: crate::pipeline::CheckedLibrary,
     /// Lowered library carrier. Feeds `lower_program_with_context`.
     pub(crate) library_dag: crate::pipeline::LoweredLibrary,
-    evaluation_library: Arc<OnceLock<chelis_ir::lower::EvaluationLibrary>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -230,7 +228,6 @@ impl CompiledContextWire {
             reef_state: self.reef_state,
             library,
             library_dag,
-            evaluation_library: Arc::new(OnceLock::new()),
         })
     }
 }
@@ -268,29 +265,11 @@ impl<'de> Deserialize<'de> for CompiledContext {
             reef_state: wire.reef_state,
             library,
             library_dag,
-            evaluation_library: Arc::new(OnceLock::new()),
         })
     }
 }
 
 impl CompiledContext {
-    pub(crate) fn evaluation_library(
-        &self,
-    ) -> Result<&chelis_ir::lower::EvaluationLibrary, chelis_ir::lower::LowerDiagnostic> {
-        if let Some(library) = self.evaluation_library.get() {
-            return Ok(library);
-        }
-        let library =
-            chelis_ir::lower::try_lower_program_to_evaluation_library(self.library.program())?;
-        // A concurrent first caller may have installed the same immutable
-        // source-derived product. Do not memoize a cancellation or error.
-        let _ = self.evaluation_library.set(library);
-        Ok(self
-            .evaluation_library
-            .get()
-            .expect("successful evaluation library initialization"))
-    }
-
     pub(crate) fn checked_library(&self) -> &crate::pipeline::CheckedLibrary {
         &self.library
     }
@@ -880,9 +859,11 @@ const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V23\n";
 /// V27 (chelis#1125): Deep `Expr` and `Atom` lost the legacy list and tag
 /// variants, so bincode variant indices shifted, and the lowered library's
 /// program definitions and signatures are node-spelled on every ingress.
-/// V28 (chelis#2413): the lowered library's random draws are key-operand
-/// nodes fed by `DrawKey`, and new `RiscOp` variants shift bincode indices.
-const CACHE_FORMAT_VERSION: u32 = 28;
+/// V29 (chelis#2413): the lowered library's random draws are key-operand
+/// nodes fed by `DrawKey` and the baked random variants are gone, so bincode
+/// variant indices shift. V28 was an intermediate state of the same change
+/// and never shipped.
+const CACHE_FORMAT_VERSION: u32 = 29;
 
 /// On-disk envelope for the Phase I cache. The full file layout is:
 ///
@@ -1372,7 +1353,6 @@ pub fn compile_reef_context(
         reef_state,
         library,
         library_dag,
-        evaluation_library: Arc::new(OnceLock::new()),
     })
 }
 
@@ -1594,7 +1574,7 @@ mod tests {
     #[test]
     fn cache_format_version_tracks_the_key_operand_random_nodes() {
         assert_eq!(CACHE_MAGIC, b"CHELIS_CTX_V23\n");
-        assert_eq!(CACHE_FORMAT_VERSION, 28);
+        assert_eq!(CACHE_FORMAT_VERSION, 29);
     }
 
     /// chelis#1156: the cache identity must distinguish two BUILDS, not
@@ -1753,22 +1733,6 @@ mod tests {
         let restored: Vec<chelis_surf::ast::Decl> =
             bincode::deserialize(&bytes).expect("decode current Surf AST with bincode");
         assert_eq!(restored, decls);
-    }
-
-    #[test]
-    fn evaluation_library_memo_is_shared_source_only_and_not_serialized() {
-        let (_dir, root) = path_dep_fixture();
-        let context = compile_reef_context(Path::new("/tmp/x"), &root).unwrap();
-        let bytes = context.encode().unwrap();
-        assert!(context.evaluation_library.get().is_none());
-        let library = context.evaluation_library().unwrap();
-        let cloned = context.clone();
-        assert!(std::ptr::eq(library, cloned.evaluation_library().unwrap()));
-        assert_eq!(context.encode().unwrap(), bytes);
-        let restored = CompiledContext::decode(&bytes).unwrap();
-        assert!(restored.evaluation_library.get().is_none());
-        restored.evaluation_library().unwrap();
-        assert_eq!(restored.encode().unwrap(), bytes);
     }
 
     #[test]

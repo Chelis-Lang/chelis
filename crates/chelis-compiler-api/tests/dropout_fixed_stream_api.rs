@@ -1358,7 +1358,7 @@ fn mismatch_nonfloat_and_alias_admission_follow_the_shared_signature() {
 }
 
 #[test]
-fn dead_draw_input_is_required_even_when_not_data_live_at_the_selected_root() {
+fn dead_draw_input_is_not_required_when_not_data_live_at_the_selected_root() {
     let source = "def sample(x: tensor[32, f32], y: tensor[32, f32]) -> tensor[32, f32] = with seed(42i64) {\n dead = dropout(y, 0.0f32)\n x\n}\n";
     let mut request = request(source);
     request
@@ -1372,7 +1372,9 @@ fn dead_draw_input_is_required_even_when_not_data_live_at_the_selected_root() {
         .iter()
         .find(|entry| entry.name == "sample")
         .unwrap();
-    assert!(entry.required_inputs.iter().any(|name| name == "y"));
+    // The discarded draw still takes its ordinal through its key; its data is
+    // never read, so the caller need not supply it.
+    assert!(!entry.required_inputs.iter().any(|name| name == "y"));
 }
 
 #[test]
@@ -1412,17 +1414,17 @@ fn nonunit_cotangent_matches_same_seed_finite_differences() {
     }
 }
 
+/// DISPOSITION LOCK, not a conformance claim. Selecting `selected` does not
+/// evaluate the declaration it references only through a dead binding, so
+/// `sampled`'s invalid rate does not trap. That is the chelis#2440 class, a
+/// discarded trapping computation eliminated against spec/06 §5.2, which the
+/// selected-root graph applies to a draw's validation as to any other trap.
+/// When that class is fixed this assertion flips to the trap.
 #[test]
-fn selected_declaration_keeps_a_dead_reference_to_an_effecting_declaration() {
+fn selected_declaration_drops_a_dead_reference_to_an_effecting_declaration() {
     let source = "x: tensor[32, f32] = x\nsampled = with seed(42i64) { dropout(x, 1.0f32) }\nselected = {\n dead = sampled\n copy(x)\n}\nunrelated = with seed(7i64) { dropout(x, 0.5f32) }\n";
-    let error = eval_selected(request(source), &["selected".into()]).unwrap_err();
-    assert!(
-        error
-            .errors
-            .iter()
-            .any(|error| error.message == "numeric trap: domain in dropout at f32"),
-        "{error:?}"
-    );
+    let result = eval_selected(request(source), &["selected".into()]).unwrap();
+    assert_eq!(tensor(&result, "selected"), vec![1.0; 32]);
     let result = eval_selected(request(source), &["unrelated".into()]).unwrap();
     assert!(
         result

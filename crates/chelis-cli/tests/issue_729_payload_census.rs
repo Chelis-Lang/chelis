@@ -12,12 +12,8 @@
 //! authority is verified by `capacity_census_wire`; this small tripwire also
 //! rejects reintroducing the retired raw random-parameter fields.
 //!
-//! The remaining native IR list (separate from wire authority):
-//!
-//! * `UniformLike { low, high }` and `Dropout { rate }` - float-only op
-//!   PARAMETERS (RNG bounds and a probability). Their f32-domain values
-//!   are stored as exact f64 images here; no tensor element payload or
-//!   integer capacity crosses these fields.
+//! The native IR list is empty: the random operations' bounds and rate are
+//! operand nodes, not op fields (chelis#2413).
 //!
 //! Prove's own `f64` fields (`ad_rail`/`arb_oracle` box and range
 //! bounds) are real-valued ENVELOPE mathematics, not dtype-carrying
@@ -89,13 +85,7 @@ fn risc_op_has_no_unsealed_numeric_payload_beyond_the_census() {
     let fields = raw_float_payload_fields(block);
     assert_eq!(
         fields,
-        vec![
-            // UniformLike bounds + Dropout rate: exact images of
-            // float-only f32-domain parameters.
-            "high: f64".to_string(),
-            "low: f64".to_string(),
-            "rate: f64".to_string(),
-        ],
+        Vec::<String>::new(),
         "a raw float payload field entered or left `RiscOp` without a \
          census entry. Sealed constants go through the dtype_semantics \
          module (chelis#856); anything else needs a citation HERE and, \

@@ -339,8 +339,6 @@ fn agreement_op_for_risc(op: &RiscOp) -> AgreementOp {
         | RiscOp::Ceil
         | RiscOp::Round
         | RiscOp::Recip
-        | RiscOp::BakedUniformLike { .. }
-        | RiscOp::BakedDropout { .. }
         // [05-RNG-1] makes every random result bit-identical across lanes,
         // and a draw key is a word no lane observes as a result.
         | RiscOp::UniformLike

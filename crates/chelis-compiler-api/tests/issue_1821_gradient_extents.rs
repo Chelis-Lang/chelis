@@ -381,7 +381,6 @@ fn fixed_control_gradients_keep_the_same_authored_activation_claim() {
 fn subexpression_context_does_not_replace_an_authored_binder_with_inferred_spelling() {
     use chelis_ir::dag::{DimInfo, TensorType};
     use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
-    use chelis_ir::host::RandomLoweringState;
     use chelis_ir::lower::SubexprLoweringContext;
     use chelis_types::types::Prim;
     use chelis_unord::UnordMap;
@@ -404,19 +403,15 @@ fn subexpression_context_does_not_replace_an_authored_binder_with_inferred_spell
         dims: vec![DimInfo::Named(name.into(), None)],
         precision: Prim::F32,
     };
-    let (dag, _) = context
-        .lower_with_random_state(
-            &expression,
-            UnordMap::from([
-                ("left".into(), shape_type("left_length")),
-                ("right".into(), shape_type("right_length")),
-            ]),
-            RandomLoweringState {
-                seed: None,
-                counter: 0,
-            },
-        )
-        .unwrap();
+    let dag = chelis_ir::lower::try_lower_subexpr_program_with_context(
+        &expression,
+        UnordMap::from([
+            ("left".into(), shape_type("left_length")),
+            ("right".into(), shape_type("right_length")),
+        ]),
+        &context,
+    )
+    .unwrap();
     for width in [2, 3] {
         let result = eval_tensor_roots_with_strict(&dag, dag.roots(), |name| {
             Some(TensorValue::from_vec(

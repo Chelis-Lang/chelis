@@ -690,8 +690,6 @@ fn classify_nodes(
                 | RiscOp::Floor
                 | RiscOp::Ceil
                 | RiscOp::Round
-                | RiscOp::BakedUniformLike { .. }
-                | RiscOp::BakedDropout { .. }
                 | RiscOp::UniformLike
                 | RiscOp::Dropout
                 | RiscOp::DropoutReplay

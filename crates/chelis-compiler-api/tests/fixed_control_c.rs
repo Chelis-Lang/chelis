@@ -1,14 +1,15 @@
-//! Native execution of the sealed, unfused fixed-control backend entry.
-//! These are not compiler-API source admission or certificate-transport tests.
+//! Native execution of the unfused C entry for a graph that draws through
+//! draw keys. These are not compiler-API source admission or
+//! certificate-transport tests.
 mod ownership_support;
 
+use chelis_ir::Dag;
 use chelis_ir::dag::{DimInfo, TensorType};
-use chelis_ir::evaluation::{EvaluationPlan, RandomExecutionContext};
-use chelis_ir::host::RandomLoweringState;
+use chelis_ir::eval::{RandomFrame, TensorValue, eval_tensor_roots_with_frame};
 use chelis_types::types::Prim;
 use chelis_unord::UnordMap;
 
-fn plan(source: &str, prim: Prim, count: usize) -> EvaluationPlan {
+fn lowered(source: &str, prim: Prim, count: usize) -> Dag {
     let inputs = [(
         "x".into(),
         TensorType {
@@ -18,32 +19,19 @@ fn plan(source: &str, prim: Prim, count: usize) -> EvaluationPlan {
     )]
     .into_iter()
     .collect();
-    plan_with_inputs(source, inputs)
+    lowered_with_inputs(source, inputs)
 }
 
-fn plan_with_inputs(source: &str, inputs: UnordMap<String, TensorType>) -> EvaluationPlan {
+fn lowered_with_inputs(source: &str, inputs: UnordMap<String, TensorType>) -> Dag {
     let expr = chelis_deep::parser::parse_str(source)
         .unwrap()
         .pop()
         .unwrap();
-    chelis_ir::lower::try_lower_subexpr_evaluation_plan(
-        &expr,
-        inputs,
-        UnordMap::new(),
-        UnordMap::new(),
-        &RandomExecutionContext::new(RandomLoweringState {
-            seed: Some(42),
-            counter: 0,
-        }),
-    )
-    .unwrap()
+    chelis_ir::lower::try_lower_subexpr_program(&expr, inputs, UnordMap::new(), UnordMap::new())
+        .unwrap()
 }
 
-fn checked_body_plan(
-    source: &str,
-    inputs: UnordMap<String, TensorType>,
-    context: &RandomExecutionContext,
-) -> EvaluationPlan {
+fn checked_body_dag(source: &str, inputs: UnordMap<String, TensorType>) -> Dag {
     let parsed = chelis_surf::parser::parse_str(source).unwrap();
     let checked = chelis_types::check_ir_program(
         &chelis_surf::desugar::desugar_program(&parsed).expect("Surf fixture must desugar"),
@@ -79,14 +67,35 @@ fn checked_body_plan(
         .expect("checked sample definition")
         .1;
     assert_eq!(sample.tag(), Some(chelis_deep::tag::DeepTag::Fn));
-    chelis_ir::lower::try_lower_subexpr_evaluation_plan(
+    chelis_ir::lower::try_lower_subexpr_program(
         &children(sample)[1],
         inputs,
         UnordMap::new(),
         defs.clone(),
-        context,
     )
     .unwrap()
+}
+
+/// The public four-argument C entry for `dag`, emitted unfused.
+fn native(
+    dag: &Dag,
+) -> Result<chelis_backend_c::CodegenResult, chelis_types::unsupported::Unsupported> {
+    let options = chelis_backend_c::CodegenOptions::default();
+    let selected = chelis_backend_c::prepare_dag_for_codegen(dag.clone(), options);
+    let verified = chelis_ir::ownership::verify_ownership(
+        chelis_ir::ownership::lower_dag_ownership(selected).unwrap(),
+    )
+    .unwrap();
+    chelis_backend_c::codegen_with_options(verified, "sample", options)
+}
+
+fn root_value(
+    dag: &Dag,
+    frame: &mut RandomFrame,
+    input: impl Fn(&str) -> Option<TensorValue>,
+) -> TensorValue {
+    let values = eval_tensor_roots_with_frame(dag, dag.roots(), frame, input).unwrap();
+    values[&dag.roots()[0]].clone()
 }
 
 #[test]
@@ -129,40 +138,29 @@ fn native_empty_and_zero_rate_calls_consume_one_ordinal_before_the_next_draw() {
                         )
                     })
                     .collect();
-                let artifact = chelis_backend_c::codegen_evaluation_with_options(
-                    plan_with_inputs(&source, inputs)
-                        .verify_ownership()
-                        .unwrap(),
-                    "sample",
-                    Default::default(),
-                )
-                .unwrap();
-                assert_eq!(artifact.input_labels, ["prefix", "x"]);
+                let artifact = native(&lowered_with_inputs(&source, inputs)).unwrap();
+                // The discarded draw's data is never read: its key, not its
+                // data, takes the ordinal, so `prefix` is no entry input.
+                assert_eq!(artifact.input_labels, ["x"]);
                 let generated = ownership_support::GeneratedProgram::from_codegen(&artifact);
                 let driver = format!(
                     r#"
 int main(void) {{
-    int64_t prefix_n = {count}, n = 32;
-    chelis_tensor *inputs[] = {{
-        chelis_alloc(1, &prefix_n, CHELIS_DTYPE_F32),
-        chelis_alloc(1, &n, CHELIS_DTYPE_F32)
-    }};
-    for (int i = 0; i < 2; ++i) {{
-        chelis_tensor_write *write = chelis_tensor_begin_write(inputs[i]);
-        chelis_fill_scalar(write, chelis_scalar_from_bits(CHELIS_DTYPE_F32, 0x3f800000u));
-        chelis_tensor_end_write(write);
-    }}
+    int64_t n = 32;
+    chelis_tensor *x = chelis_alloc(1, &n, CHELIS_DTYPE_F32);
+    chelis_tensor_write *write = chelis_tensor_begin_write(x);
+    chelis_fill_scalar(write, chelis_scalar_from_bits(CHELIS_DTYPE_F32, 0x3f800000u));
+    chelis_tensor_end_write(write);
     const uint32_t expected[] = {{{expected}}};
     for (int repeat = 0; repeat < 4; ++repeat) {{
         chelis_tensor *outputs[1];
-        sample(inputs, 2, outputs, 1);
+        sample(&x, 1, outputs, 1);
         chelis_read_view view = chelis_tensor_read_view(outputs[0]);
         assert(view.dtype == CHELIS_DTYPE_F32 && view.count == n);
         assert(memcmp(view.data, expected, sizeof(expected)) == 0);
         chelis_tensor_release(outputs[0]);
     }}
-    chelis_tensor_release(inputs[0]);
-    chelis_tensor_release(inputs[1]);
+    chelis_tensor_release(x);
     return 0;
 }}
 "#
@@ -185,7 +183,7 @@ fn sealed_native_dropout_matches_evaluator_and_restarts_each_public_invocation()
             let source = format!(
                 "(handle-effect {{effect: random}} (lit {{type: (t-prim {{}} i64)}} 42) (app {{}} (var {{}} dropout) (var {{}} x) (lit {{type: (t-prim {{}} {dtype})}} 0.1)))"
             );
-            let plan = plan(&source, prim, count);
+            let dag = lowered(&source, prim, count);
             let input = chelis_types::finalize_tensor(
                 "test",
                 prim,
@@ -194,18 +192,10 @@ fn sealed_native_dropout_matches_evaluator_and_restarts_each_public_invocation()
                 ),
             )
             .unwrap();
-            let mut context = RandomExecutionContext::new(RandomLoweringState {
-                seed: Some(42),
-                counter: 0,
+            let mut frame = RandomFrame::inherited(42, 0);
+            let output = &root_value(&dag, &mut frame, |_| {
+                Some(TensorValue::from_storage(vec![count], input.clone()))
             });
-            let values = chelis_ir::eval::eval_tensor_plan_with_strict(&plan, &mut context, |_| {
-                Some(chelis_ir::eval::TensorValue::from_storage(
-                    vec![count],
-                    input.clone(),
-                ))
-            })
-            .unwrap();
-            let output = &values[&plan.dag_for_inspection().roots()[0]];
             let bits = |values: Vec<f64>| {
                 let words = values
                     .into_iter()
@@ -225,12 +215,7 @@ fn sealed_native_dropout_matches_evaluator_and_restarts_each_public_invocation()
             };
             let expected = bits(output.to_f64_lossy_vec());
             let input_bits = bits(input.to_f64_lossy_vec());
-            let artifact = chelis_backend_c::codegen_evaluation_with_options(
-                plan.verify_ownership().unwrap(),
-                "sample",
-                Default::default(),
-            )
-            .unwrap();
+            let artifact = native(&dag).unwrap();
             let generated = ownership_support::GeneratedProgram::from_codegen(&artifact);
             let driver = format!(
                 r#"
@@ -262,9 +247,10 @@ int main(void) {{
             );
             ownership_support::balanced(&ownership_support::run(&generated, &driver));
             if prim == Prim::F32 && count == 32 {
+                let root = dag.roots()[0].0;
                 let reciprocal = artifact.c_source.replace(
-                    " / chelis_f32_from_bits(0x3f666666u)",
-                    " * (1.0f / chelis_f32_from_bits(0x3f666666u))",
+                    &format!(" / t{root}_denom;"),
+                    &format!(" * (1.0f / t{root}_denom);"),
                 );
                 assert_ne!(reciprocal, artifact.c_source);
                 assert_native_value_failure(generated.with_source(reciprocal), &driver);
@@ -284,11 +270,8 @@ fn native_replay_nested_restore_and_next_uniform_follow_source_steps() {
         let source = format!(
             "def loss(x: tensor[32, f32]) -> tensor[f32] ! {{ Random }} = sum(dropout(x, 0.5f32), 0)\ndef sample(x: tensor[32, f32]) -> tensor[32, f32] = {body}\n"
         );
-        let mut context = RandomExecutionContext::new(RandomLoweringState {
-            seed: Some(7),
-            counter: 13,
-        });
-        let plan = checked_body_plan(
+        let mut frame = RandomFrame::inherited(7, 13);
+        let dag = checked_body_dag(
             &source,
             [(
                 "x".into(),
@@ -299,37 +282,32 @@ fn native_replay_nested_restore_and_next_uniform_follow_source_steps() {
             )]
             .into_iter()
             .collect(),
-            &context,
         );
         assert!(
-            plan.dag_for_inspection()
-                .nodes()
+            dag.nodes()
                 .iter()
-                .filter(|node| matches!(node.op, chelis_ir::dag::RiscOp::BakedDropout { .. }))
+                .filter(|node| matches!(
+                    node.op,
+                    chelis_ir::dag::RiscOp::Dropout | chelis_ir::dag::RiscOp::DropoutReplay
+                ))
                 .count()
                 >= 2
         );
-        let values = chelis_ir::eval::eval_tensor_plan_with_strict(&plan, &mut context, |_| {
-            Some(chelis_ir::eval::TensorValue::from_vec(
-                vec![32],
-                vec![1.0; 32],
-            ))
-        })
-        .unwrap();
-        assert_eq!(context.state().seed, Some(7));
-        assert_eq!(context.state().counter, 13);
-        let expected = values[&plan.dag_for_inspection().roots()[0]]
+        let value = root_value(&dag, &mut frame, |_| {
+            Some(TensorValue::from_vec(vec![32], vec![1.0; 32]))
+        });
+        assert_eq!(
+            frame.inherited_counter(),
+            Some(13),
+            "scoped draws leave the inherited stream alone"
+        );
+        let expected = value
             .to_f64_lossy_vec()
             .into_iter()
             .map(|value| format!("0x{:x}u", (value as f32).to_bits()))
             .collect::<Vec<_>>()
             .join(",");
-        let artifact = chelis_backend_c::codegen_evaluation_with_options(
-            plan.verify_ownership().unwrap(),
-            "sample",
-            Default::default(),
-        )
-        .unwrap();
+        let artifact = native(&dag).unwrap();
         let generated = ownership_support::GeneratedProgram::from_codegen(&artifact);
         let driver = format!(
             r#"
@@ -357,10 +335,10 @@ int main(void) {{
         // These native corruptions must be caught by complete value comparison
         // and by the existing ownership ledger, not by emitted-text assertions.
         if body.contains("dead =") {
-            let wrong_draw = artifact.c_source.replace(
-                "__chelis_fixed_counter++",
-                "(__chelis_fixed_counter++ + 1ULL)",
-            );
+            let counter = first_scoped_counter(&artifact.c_source);
+            let wrong_draw = artifact
+                .c_source
+                .replace(&format!("{counter}++"), &format!("({counter}++ + 1ULL)"));
             assert_ne!(wrong_draw, artifact.c_source);
             assert_native_value_failure(generated.with_source(wrong_draw), &driver);
             let release = artifact
@@ -536,17 +514,29 @@ int main(void) {{
     )
 }
 
-fn corrupt_contiguous_dropout(
+/// The first scoped draw counter the emitted C advances.
+fn first_scoped_counter(source: &str) -> String {
+    let start = source
+        .find("__chelis_scoped_counter_")
+        .expect("a scoped draw counter");
+    let digits = source[start + "__chelis_scoped_counter_".len()..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>();
+    format!("__chelis_scoped_counter_{digits}")
+}
+
+/// Rewrite the one emitted per-element assignment of the dropout or replay
+/// `node`.
+fn corrupt_keyed_dropout(
     source: &str,
     node: chelis_ir::dag::NodeId,
     corrupt: impl FnOnce(&str) -> String,
 ) -> String {
-    let prefix = format!("__out_{}[i] = ", node.0);
+    let target = format!(")t{}_data)[i] = ", node.0);
     let lines = source
         .lines()
-        .filter(|line| {
-            line.trim_start().starts_with(&prefix) && line.contains("chelis_dropout_unit")
-        })
+        .filter(|line| line.contains(&target) && line.contains("chelis_random_unit"))
         .collect::<Vec<_>>();
     assert_eq!(lines.len(), 1, "actual emitted dropout assignment");
     let replacement = corrupt(lines[0]);
@@ -557,8 +547,47 @@ fn corrupt_contiguous_dropout(
     source.replacen(lines[0], &replacement, 1)
 }
 
-fn source_ad_plan(prim: Prim, rate: &str) -> (EvaluationPlan, chelis_ir::dag::NodeId) {
-    use chelis_ir::evaluation::RandomSite;
+/// The kept operand the dropout assignment of `node` divides.
+fn kept_operand(line: &str, node: chelis_ir::dag::NodeId) -> String {
+    let end = line
+        .find(&format!(" / t{}_denom", node.0))
+        .expect("the kept branch divides by the denominator");
+    let bytes = line.as_bytes();
+    let mut start = end;
+    let group = |start: &mut usize, open: u8, close: u8| {
+        if *start == 0 || bytes[*start - 1] != close {
+            return false;
+        }
+        let mut depth = 0;
+        while *start > 0 {
+            *start -= 1;
+            if bytes[*start] == close {
+                depth += 1;
+            } else if bytes[*start] == open {
+                depth -= 1;
+                if depth == 0 {
+                    return true;
+                }
+            }
+        }
+        panic!("unbalanced kept operand in {line}");
+    };
+    group(&mut start, b'[', b']');
+    group(&mut start, b'(', b')');
+    while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_') {
+        start -= 1;
+    }
+    line[start..end].to_string()
+}
+
+/// The dropped branch's value in the dropout assignment.
+fn dropped_value(line: &str) -> String {
+    let start = line.find(" ? ").expect("mask ternary") + 3;
+    let end = start + line[start..].find(" : ").expect("mask ternary");
+    line[start..end].to_string()
+}
+
+fn source_ad_dag(prim: Prim, rate: &str) -> (Dag, chelis_ir::dag::NodeId) {
     let dtype = prim.name();
     let source = format!(
         "def sample(x: tensor[4, {dtype}], weights: tensor[4, {dtype}]) -> tensor[4, {dtype}] = with seed(42i64) {{\n loss = fn (v: tensor[4, {dtype}]) -> tensor_to_scalar(sum(mul(dropout(v, {rate}{dtype}), weights), 0i32))\n grad(loss)(x)\n}}\n"
@@ -575,46 +604,24 @@ fn source_ad_plan(prim: Prim, rate: &str) -> (EvaluationPlan, chelis_ir::dag::No
             )
         })
         .collect();
-    let plan = checked_body_plan(
-        &source,
-        inputs,
-        &RandomExecutionContext::new(RandomLoweringState {
-            seed: Some(7),
-            counter: 13,
-        }),
-    );
-    let replay = plan
-        .clone()
-        .verify_ownership()
-        .unwrap()
-        .with_emission(|owned, execution| {
-            let sites = owned
-                .emission()
-                .nodes()
-                .iter()
-                .filter_map(|node| execution.site(node.id).map(|site| (node.id, site)))
-                .collect::<Vec<_>>();
-            match sites.as_slice() {
-                [
-                    (_, RandomSite::Forward { draw: forward, .. }),
-                    (node, RandomSite::Replay { draw }),
-                ] if draw == forward => *node,
-                other => panic!("actual forward/replay pair: {other:?}"),
-            }
-        });
-    (plan, replay)
+    let dag = checked_body_dag(&source, inputs);
+    let replays = dag
+        .nodes()
+        .iter()
+        .filter(|node| matches!(node.op, chelis_ir::dag::RiscOp::DropoutReplay))
+        .map(|node| node.id)
+        .collect::<Vec<_>>();
+    let [replay] = replays.as_slice() else {
+        panic!("one actual replay: {replays:?}");
+    };
+    (dag, *replay)
 }
 
 #[test]
 fn native_source_ad_replays_signed_and_nonfinite_stored_words() {
     for words in special_words() {
-        let (plan, replay) = source_ad_plan(words.prim, "0.5");
-        let artifact = chelis_backend_c::codegen_evaluation_with_options(
-            plan.verify_ownership().unwrap(),
-            "sample",
-            Default::default(),
-        )
-        .unwrap();
+        let (dag, replay) = source_ad_dag(words.prim, "0.5");
+        let artifact = native(&dag).unwrap();
         let generated = ownership_support::GeneratedProgram::from_codegen(&artifact);
         let mut labels = artifact.input_labels.clone();
         labels.sort();
@@ -627,18 +634,14 @@ fn native_source_ad_replays_signed_and_nonfinite_stored_words() {
         });
         let driver = special_word_driver(&words, &artifact.input_labels, expected);
         ownership_support::balanced(&ownership_support::run(&generated, &driver));
-        let value = if matches!(words.prim, Prim::F16 | Prim::Bf16) {
-            "__av".into()
-        } else {
-            format!("__in_a_{}[i]", replay.0)
-        };
         let abs = if words.prim == Prim::F64 {
             "fabs"
         } else {
             "fabsf"
         };
-        let mutant = corrupt_contiguous_dropout(&artifact.c_source, replay, |line| {
-            line.replace(&format!("({value}) /"), &format!("{abs}({value}) /"))
+        let mutant = corrupt_keyed_dropout(&artifact.c_source, replay, |line| {
+            let value = kept_operand(line, replay);
+            line.replace(&format!("{value} /"), &format!("{abs}({value}) /"))
         });
         assert_native_value_failure(generated.with_source(mutant), &driver);
     }
@@ -654,14 +657,9 @@ fn native_special_words_reject_mask_sign_and_nan_corruption() {
             let source = format!(
                 "(handle-effect {{effect: random}} (lit {{type: (t-prim {{}} i64)}} 42) (app {{}} (var {{}} dropout) (var {{}} x) (lit {{type: (t-prim {{}} {dtype})}} {rate})))"
             );
-            let plan = plan(&source, words.prim, 4);
-            let node = plan.dag_for_inspection().roots()[0];
-            let artifact = chelis_backend_c::codegen_evaluation_with_options(
-                plan.verify_ownership().unwrap(),
-                "sample",
-                Default::default(),
-            )
-            .unwrap();
+            let dag = lowered(&source, words.prim, 4);
+            let node = dag.roots()[0];
+            let artifact = native(&dag).unwrap();
             let generated = ownership_support::GeneratedProgram::from_codegen(&artifact);
             assert_eq!(artifact.input_labels, ["x"]);
             let expected = std::array::from_fn(|offset| {
@@ -678,32 +676,39 @@ fn native_special_words_reject_mask_sign_and_nan_corruption() {
             let driver = special_word_driver(&words, &artifact.input_labels, expected);
             ownership_support::balanced(&ownership_support::run(&generated, &driver));
             if rate == "0.5" {
-                let value = if matches!(words.prim, Prim::F16 | Prim::Bf16) {
-                    "__av".into()
-                } else {
-                    format!("__in_a_{}[i]", node.0)
-                };
                 let abs = if words.prim == Prim::F64 {
                     "fabs"
                 } else {
                     "fabsf"
                 };
+                let narrow = match words.prim {
+                    Prim::F16 => "chelis_f32_to_f16",
+                    Prim::Bf16 => "chelis_f32_to_bf16",
+                    _ => "",
+                };
                 // Normalize finite zeros so only dropped nonfinite values
                 // discriminate this multiplication mutant, not the -0 case.
-                let masked = corrupt_contiguous_dropout(&artifact.c_source, node, |line| {
-                    line.replace("? 0 :", &format!("? {abs}(0.0f * ({value})) :"))
+                let masked = corrupt_keyed_dropout(&artifact.c_source, node, |line| {
+                    let value = kept_operand(line, node);
+                    let dropped = dropped_value(line);
+                    line.replacen(
+                        &format!("? {dropped} :"),
+                        &format!("? {narrow}({abs}(0.0f * ({value}))) :"),
+                        1,
+                    )
                 });
                 assert_native_value_failure(generated.with_source(masked), &driver);
-                let sign = corrupt_contiguous_dropout(&artifact.c_source, node, |line| {
+                let sign = corrupt_keyed_dropout(&artifact.c_source, node, |line| {
+                    let value = kept_operand(line, node);
                     line.replace(
-                        &format!("({value}) /"),
+                        &format!("{value} /"),
                         &format!("(({value}) == 0 ? 0 : ({value})) /"),
                     )
                 });
                 assert_native_value_failure(generated.with_source(sign), &driver);
-                let nan = corrupt_contiguous_dropout(&artifact.c_source, node, |line| {
+                let nan = corrupt_keyed_dropout(&artifact.c_source, node, |line| {
                     format!(
-                        "{line}\n{{ {ctype} bits; memcpy(&bits, &__out_{id}[i], sizeof(bits)); if (bits == UINT64_C(0x{canonical:x})) {{ bits ^= 1; memcpy(&__out_{id}[i], &bits, sizeof(bits)); }} }}",
+                        "{line}\n{{ {ctype} bits; memcpy(&bits, &(({ctype}*)t{id}_data)[i], sizeof(bits)); if (bits == UINT64_C(0x{canonical:x})) {{ bits ^= 1; memcpy(&(({ctype}*)t{id}_data)[i], &bits, sizeof(bits)); }} }}",
                         ctype = words.ctype,
                         id = node.0,
                         canonical = words.input[5]
@@ -779,13 +784,8 @@ fn native_source_ad_replay_finalizes_nonbinary_rate_division() {
         let expected: [[u64; 4]; 4] = std::array::from_fn(|offset| {
             std::array::from_fn(|i| if i == 3 { 0 } else { result[(offset + i) % 4] })
         });
-        let (plan, replay) = source_ad_plan(words.prim, "0.1");
-        let artifact = chelis_backend_c::codegen_evaluation_with_options(
-            plan.verify_ownership().unwrap(),
-            "sample",
-            Default::default(),
-        )
-        .unwrap();
+        let (dag, replay) = source_ad_dag(words.prim, "0.1");
+        let artifact = native(&dag).unwrap();
         let generated = ownership_support::GeneratedProgram::from_codegen(&artifact);
         let mut labels = artifact.input_labels.clone();
         labels.sort();
@@ -795,8 +795,9 @@ fn native_source_ad_replay_finalizes_nonbinary_rate_division() {
 
         let denominator = literal(denominator);
         let reciprocal = literal(reciprocal);
-        let multiplied = corrupt_contiguous_dropout(&artifact.c_source, replay, |line| {
-            line.replace(&format!(" / {denominator}"), &format!(" * {reciprocal}"))
+        let divisor_text = format!(" / t{}_denom", replay.0);
+        let multiplied = corrupt_keyed_dropout(&artifact.c_source, replay, |line| {
+            line.replace(&divisor_text, &format!(" * {reciprocal}"))
         });
         assert_native_value_failure(generated.with_source(multiplied), &driver);
 
@@ -809,8 +810,8 @@ fn native_source_ad_replay_finalizes_nonbinary_rate_division() {
             Prim::F64 => format!("((double)(float){denominator})"),
             _ => unreachable!(),
         };
-        let divisor = corrupt_contiguous_dropout(&artifact.c_source, replay, |line| {
-            line.replace(&format!(" / {denominator}"), &format!(" / {wrong_divisor}"))
+        let divisor = corrupt_keyed_dropout(&artifact.c_source, replay, |line| {
+            line.replace(&divisor_text, &format!(" / {wrong_divisor}"))
         });
         assert_native_value_failure(generated.with_source(divisor), &driver);
     }
@@ -853,14 +854,9 @@ fn native_mask_threshold_uses_arithmetic_width_and_strict_less_than() {
             let source = format!(
                 "(handle-effect {{effect: random}} (lit {{type: (t-prim {{}} i64)}} {seed}) (app {{}} (var {{}} dropout) (var {{}} x) (lit {{type: (t-prim {{}} {dtype})}} 0.5)))"
             );
-            let plan = plan(&source, words.prim, 4);
-            let node = plan.dag_for_inspection().roots()[0];
-            let artifact = chelis_backend_c::codegen_evaluation_with_options(
-                plan.verify_ownership().unwrap(),
-                "sample",
-                Default::default(),
-            )
-            .unwrap();
+            let dag = lowered(&source, words.prim, 4);
+            let node = dag.roots()[0];
+            let artifact = native(&dag).unwrap();
             let generated = ownership_support::GeneratedProgram::from_codegen(&artifact);
             assert_eq!(artifact.input_labels, ["x"]);
             let mask = if words.prim == Prim::F64 {
@@ -879,28 +875,28 @@ fn native_mask_threshold_uses_arithmetic_width_and_strict_less_than() {
             let driver = native_word_driver(&words, &artifact.input_labels, &input, &expected);
             ownership_support::balanced(&ownership_support::run(&generated, &driver));
             if case == 1 {
-                let inclusive = corrupt_contiguous_dropout(&artifact.c_source, node, |line| {
+                let inclusive = corrupt_keyed_dropout(&artifact.c_source, node, |line| {
                     line.replace(" < ", " <= ")
                 });
                 assert_native_value_failure(generated.with_source(inclusive), &driver);
             }
             if case == 0 {
                 let (from, to) = if words.prim == Prim::F64 {
-                    ("chelis_dropout_unit(", "chelis_dropout_unit_f32(")
+                    ("= chelis_random_unit(", "= (float)chelis_random_unit(")
                 } else {
-                    ("chelis_dropout_unit_f32(", "chelis_dropout_unit(")
+                    ("= (float)chelis_random_unit(", "= chelis_random_unit(")
                 };
-                let width = corrupt_contiguous_dropout(&artifact.c_source, node, |line| {
-                    line.replace(from, to)
-                });
+                let width =
+                    corrupt_keyed_dropout(&artifact.c_source, node, |line| line.replace(from, to));
                 assert_native_value_failure(generated.with_source(width), &driver);
             }
             if case == 3 && matches!(words.prim, Prim::F16 | Prim::Bf16) {
-                let unit =
-                    "chelis_dropout_unit_f32(__chelis_draw_seed_0, __chelis_draw_ordinal_0, i)";
-                let rounded = format!("chelis_{dtype}_to_f32(chelis_f32_to_{dtype}({unit}))");
-                let storage = corrupt_contiguous_dropout(&artifact.c_source, node, |line| {
-                    line.replace(unit, &rounded)
+                let storage = corrupt_keyed_dropout(&artifact.c_source, node, |line| {
+                    let start = line.find("(float)chelis_random_unit(").expect("f32 unit");
+                    let end = start + line[start..].find(" < ").expect("mask comparison");
+                    let unit = &line[start..end];
+                    let rounded = format!("chelis_{dtype}_to_f32(chelis_f32_to_{dtype}({unit}))");
+                    line.replacen(unit, &rounded, 1)
                 });
                 assert_native_value_failure(generated.with_source(storage), &driver);
             }
@@ -930,25 +926,19 @@ fn native_dropout_preserves_signed_zero_and_nonfinite_classes() {
         let source = format!(
             "(handle-effect {{effect: random}} (lit {{type: (t-prim {{}} i64)}} 42) (app {{}} (var {{}} dropout) (var {{}} x) (lit {{type: (t-prim {{}} f32)}} {rate})))"
         );
-        let plan = plan(&source, Prim::F32, input.len());
-        let mut context = RandomExecutionContext::new(RandomLoweringState {
-            seed: Some(42),
-            counter: 13,
-        });
-        let values = chelis_ir::eval::eval_tensor_plan_with_strict(&plan, &mut context, |_| {
-            Some(chelis_ir::eval::TensorValue::from_vec(
+        let dag = lowered(&source, Prim::F32, input.len());
+        let mut frame = RandomFrame::inherited(42, 13);
+        let expected: Vec<f32> = root_value(&dag, &mut frame, |_| {
+            Some(TensorValue::from_vec(
                 vec![input.len()],
                 input.iter().map(|&value| f64::from(value)).collect(),
             ))
         })
-        .unwrap();
-        let expected: Vec<f32> = values[&plan.dag_for_inspection().roots()[0]]
-            .to_f64_lossy_vec()
-            .into_iter()
-            .map(|value| value as f32)
-            .collect();
-        assert_eq!(context.state().seed, Some(42));
-        assert_eq!(context.state().counter, 13);
+        .to_f64_lossy_vec()
+        .into_iter()
+        .map(|value| value as f32)
+        .collect();
+        assert_eq!(frame.inherited_counter(), Some(13));
         if rate == "0.0" {
             assert_eq!(expected[1].to_bits(), (-0.0_f32).to_bits());
             assert!(expected[3].is_infinite() && expected[5].is_nan());
@@ -960,12 +950,7 @@ fn native_dropout_preserves_signed_zero_and_nonfinite_classes() {
                     .any(|(before, after)| { !before.is_finite() && after.to_bits() == 0 })
             );
         }
-        let artifact = chelis_backend_c::codegen_evaluation_with_options(
-            plan.verify_ownership().unwrap(),
-            "sample",
-            Default::default(),
-        )
-        .unwrap();
+        let artifact = native(&dag).unwrap();
         let generated = ownership_support::GeneratedProgram::from_codegen(&artifact);
         let bits = |values: &[f32]| {
             values
@@ -1014,28 +999,22 @@ int main(void) {{
 
 #[test]
 fn public_native_entry_does_not_invent_an_inherited_random_context() {
-    let plan = plan(
+    let dag = lowered(
         "(app {} (var {} dropout) (var {} x) (lit {type: (t-prim {} f32)} 0.5))",
         Prim::F32,
         32,
     );
-    let error = chelis_backend_c::codegen_evaluation_with_options(
-        plan.verify_ownership().unwrap(),
-        "sample",
-        Default::default(),
-    )
-    .err()
-    .expect("unhandled export must reject");
+    let error = native(&dag).err().expect("unhandled export must reject");
     assert!(error.to_string().contains("inherited Random"), "{error}");
 }
 
 #[test]
-fn native_entry_rejects_invalid_stored_rates_even_for_empty_inputs() {
-    for (dtype, prim) in [
-        ("f16", Prim::F16),
-        ("bf16", Prim::Bf16),
-        ("f32", Prim::F32),
-        ("f64", Prim::F64),
+fn native_entry_traps_invalid_rates_even_for_empty_inputs() {
+    for (dtype, prim, tag) in [
+        ("f16", Prim::F16, "CHELIS_DTYPE_F16"),
+        ("bf16", Prim::Bf16, "CHELIS_DTYPE_BF16"),
+        ("f32", Prim::F32, "CHELIS_DTYPE_F32"),
+        ("f64", Prim::F64, "CHELIS_DTYPE_F64"),
     ] {
         for rate in ["-0.5", "1.0"] {
             let source = format!(
@@ -1043,14 +1022,22 @@ fn native_entry_rejects_invalid_stored_rates_even_for_empty_inputs() {
                  (app {{}} (var {{}} dropout) (var {{}} x) \
                  (lit {{type: (t-prim {{}} {dtype})}} {rate})))"
             );
-            let error = chelis_backend_c::codegen_evaluation_with_options(
-                plan(&source, prim, 0).verify_ownership().unwrap(),
-                "sample",
-                Default::default(),
-            )
-            .err()
-            .expect("invalid static rate cannot produce an artifact");
-            assert!(error.to_string().contains("domain in dropout"), "{error}");
+            let artifact = native(&lowered(&source, prim, 0)).unwrap();
+            let generated = ownership_support::GeneratedProgram::from_codegen(&artifact);
+            // [05-OP-37] validates the rate at the draw, before its key, even
+            // when the operand is empty.
+            let driver = format!(
+                r#"
+int main(void) {{
+    int64_t n = 0;
+    chelis_tensor *x = chelis_alloc(1, &n, {tag});
+    chelis_tensor *outputs[1];
+    sample(&x, 1, outputs, 1);
+    return 0;
+}}
+"#
+            );
+            ownership_support::run_expect_failure(&generated, &driver);
         }
     }
 }

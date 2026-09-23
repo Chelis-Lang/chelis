@@ -7,33 +7,15 @@ use chelis_ir::dag::{
     FusedStep, FusedStepOp, LogicalKind, NodeId, ReduceWindowKind, RiscOp, RtAxis, RtDim,
     TensorType,
 };
-use chelis_ir::evaluation::{DrawId, EvaluationEmissionView, RandomSite};
-#[cfg(feature = "native-random-observer")]
-use chelis_ir::execution_spine::SourceKind;
-use chelis_ir::execution_spine::{Control, Step};
 use chelis_ir::ownership::{
     CStorageLane, ReusableOwnedStorage, VerifiedDagAction, VerifiedDagProgram, VerifiedDagView,
     VerifiedStoragePlan, plan_c_storage, plan_c_storage_layout,
 };
-use chelis_types::dtype_semantics::DropoutParameters;
 use chelis_types::types::Prim;
 use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
 use chelis_types::{CheckedCastKind, CheckedCastPlan, ElementRef, NumericTrap, ScalarValue};
 
 use crate::memory::{MemoryPlan, NodeMemoryKind};
-
-/// Fixed-control dropout's keyed unit, over the `[05-RNG-1]` stream helpers
-/// that every translation unit emits before it.
-pub(crate) const FIXED_DROPOUT_HELPERS: &[&str] = &[
-    "/* CHELIS_DROPOUT_HELPERS_BEGIN */",
-    "static inline double chelis_dropout_unit(uint64_t seed, uint64_t ordinal, uint64_t index) {",
-    "    return chelis_random_unit(chelis_random_key(seed, ordinal), index);",
-    "}",
-    "static inline float chelis_dropout_unit_f32(uint64_t seed, uint64_t ordinal, uint64_t index) {",
-    "    return (float)chelis_dropout_unit(seed, ordinal, index);",
-    "}",
-    "/* CHELIS_DROPOUT_HELPERS_END */",
-];
 
 #[cfg(not(feature = "native-random-observer"))]
 fn private_random_context_param() -> &'static str {
@@ -119,6 +101,13 @@ pub struct CEmitter {
     /// Whether this function receives the host's private `__chelis_rng`
     /// frame. Only such a helper can take an inherited draw key.
     private_random_context: bool,
+    /// Each draw key's observed `(draw, scope)` identity
+    /// (`random_observer::draw_key_identities`).
+    #[cfg(feature = "native-random-observer")]
+    observed_draws: BTreeMap<NodeId, (usize, usize)>,
+    /// The producer label an observed event carries: this function's name.
+    #[cfg(feature = "native-random-observer")]
+    observer_producer: String,
 }
 
 #[derive(Debug, Clone)]
@@ -135,69 +124,28 @@ enum SparseEmission {
     Elements,
 }
 
-enum UniformSeed {
-    Legacy(u64),
-    Saved(DrawId),
-}
-
 #[derive(Clone, Copy)]
 enum UnaryEmission {
     Neg,
-    Dropout {
-        rate: ScalarValue,
-        denominator: ScalarValue,
-        draw: DrawId,
-    },
 }
 
 impl UnaryEmission {
     fn expression(self, value: &str) -> String {
         match self {
             Self::Neg => format!("-{value}"),
-            Self::Dropout {
-                rate,
-                denominator,
-                draw,
-            } => {
-                let literal = |value: ScalarValue| {
-                    if value.prim() == Prim::F64 {
-                        format!(
-                            "chelis_f64_from_bits(UINT64_C(0x{:016x}))",
-                            value.as_f64_lossy().to_bits()
-                        )
-                    } else {
-                        format!(
-                            "chelis_f32_from_bits(0x{:08x}u)",
-                            (value.as_f64_lossy() as f32).to_bits()
-                        )
-                    }
-                };
-                let sample = if rate.prim() == Prim::F64 {
-                    "chelis_dropout_unit"
-                } else {
-                    "chelis_dropout_unit_f32"
-                };
-                let draw = draw.index();
-                // The unary loop supplies a nonnegative linear i. The sampler's
-                // declared parameter performs its exact unsigned conversion.
-                format!(
-                    "({sample}(__chelis_draw_seed_{draw}, __chelis_draw_ordinal_{draw}, i) < {} ? 0 : ({value}) / {})",
-                    literal(rate),
-                    literal(denominator)
-                )
-            }
         }
     }
 }
 
-fn unsupported_fixed_execution(detail: impl Into<String>) -> Unsupported {
+/// A draw key the emitter cannot take.
+fn unsupported_random_emission(detail: impl Into<String>) -> Unsupported {
     Unsupported::new(
-        UnsupportedKind::Op("fixed-control Random".into()),
+        UnsupportedKind::Op("Random draw key".into()),
         detail.into(),
         Stage::Codegen("c"),
         chelis_types::deliberate_rejection!(
             "[04-TOT-2]",
-            "native fixed-control emission requires exact source execution and ownership authority"
+            "native draw-key emission requires the handler the key belongs to"
         ),
     )
 }
@@ -232,7 +180,6 @@ struct CFusedReuse {
 /// Public tensor entries construct this without discharged host obligations.
 struct InvocationEmission<'a> {
     private_random_context: bool,
-    execution: Option<EvaluationEmissionView<'a>>,
     entry_coverage: &'a [chelis_ir::axis_sources::EntryExtentGuard],
     #[cfg(feature = "native-random-observer")]
     source_location: Option<(usize, usize)>,
@@ -252,40 +199,13 @@ impl CEmitter {
         options: crate::CodegenOptions,
     ) -> Result<String, Unsupported> {
         let mut plan = plan_c_storage(dag).map_err(unsupported_storage_plan)?;
-        Self::emit_storage_plan_with_options(&mut plan, func_name, options, None)
-    }
-
-    pub(crate) fn emit_evaluation(
-        dag: VerifiedDagProgram,
-        execution: EvaluationEmissionView<'_>,
-        func_name: &str,
-        options: crate::CodegenOptions,
-    ) -> Result<String, Unsupported> {
-        for node in dag.emission().nodes() {
-            if matches!(execution.site(node.id), Some(RandomSite::Forward { scope, .. }) if scope.index() == 0)
-            {
-                return Err(unsupported_fixed_execution(
-                    "public tensor entry cannot receive inherited Random",
-                ));
-            }
-            if matches!(
-                node.op,
-                RiscOp::FusedElem { .. } | RiscOp::BlasMatmul { .. }
-            ) {
-                return Err(unsupported_fixed_execution(
-                    "fixed-control emission requires the unfused payload",
-                ));
-            }
-        }
-        let mut storage = plan_c_storage(dag).map_err(unsupported_storage_plan)?;
-        Self::emit_storage_plan_with_options(&mut storage, func_name, options, Some(execution))
+        Self::emit_storage_plan_with_options(&mut plan, func_name, options)
     }
 
     fn emit_storage_plan_with_options(
         plan: &mut VerifiedStoragePlan<CStorageLane>,
         func_name: &str,
         options: crate::CodegenOptions,
-        execution: Option<EvaluationEmissionView<'_>>,
     ) -> Result<String, Unsupported> {
         let memory_plan = MemoryPlan::from_shared(plan);
         let nodes = plan
@@ -311,7 +231,6 @@ impl CEmitter {
             options,
             InvocationEmission {
                 private_random_context: false,
-                execution,
                 entry_coverage: &[],
                 #[cfg(feature = "native-random-observer")]
                 source_location: None,
@@ -319,11 +238,14 @@ impl CEmitter {
         )
     }
 
+    /// `source_location` names the helper slot an observed invocation admits
+    /// for a helper that draws.
     pub(crate) fn emit_verified_dag_with_options(
         dag: VerifiedDagView<'_>,
         func_name: &str,
         options: crate::CodegenOptions,
         entry_coverage: &[chelis_ir::axis_sources::EntryExtentGuard],
+        #[cfg(feature = "native-random-observer")] source_location: Option<(usize, usize)>,
     ) -> Result<String, Unsupported> {
         let mut plan = plan_c_storage_layout(dag).map_err(unsupported_storage_plan)?;
         let memory_plan = MemoryPlan::from_layout(&plan);
@@ -345,56 +267,9 @@ impl CEmitter {
             options,
             InvocationEmission {
                 private_random_context: true,
-                execution: None,
                 entry_coverage,
                 #[cfg(feature = "native-random-observer")]
-                source_location: None,
-            },
-        )
-    }
-
-    pub(crate) fn emit_verified_evaluation_with_options(
-        dag: VerifiedDagView<'_>,
-        execution: EvaluationEmissionView<'_>,
-        func_name: &str,
-        options: crate::CodegenOptions,
-        entry_coverage: &[chelis_ir::axis_sources::EntryExtentGuard],
-        #[cfg(feature = "native-random-observer")] source_location: (usize, usize),
-    ) -> Result<String, Unsupported> {
-        for node in dag.nodes() {
-            if matches!(
-                node.op,
-                RiscOp::FusedElem { .. } | RiscOp::BlasMatmul { .. }
-            ) {
-                return Err(unsupported_fixed_execution(
-                    "fixed-control emission requires the unfused payload",
-                ));
-            }
-        }
-        let mut plan = plan_c_storage_layout(dag).map_err(unsupported_storage_plan)?;
-        let memory_plan = MemoryPlan::from_layout(&plan);
-        let nodes = dag.nodes().iter().map(|node| node.id).collect::<Vec<_>>();
-        let mut fused_reuse = BTreeMap::new();
-        for node in nodes {
-            if let Some(token) = plan
-                .take_reuse_for(node)
-                .map_err(unsupported_storage_plan)?
-            {
-                fused_reuse.insert(node, token);
-            }
-        }
-        Self::emit_preplanned(
-            dag,
-            memory_plan,
-            fused_reuse,
-            func_name,
-            options,
-            InvocationEmission {
-                private_random_context: true,
-                execution: Some(execution),
-                entry_coverage,
-                #[cfg(feature = "native-random-observer")]
-                source_location: Some(source_location),
+                source_location,
             },
         )
     }
@@ -409,7 +284,6 @@ impl CEmitter {
     ) -> Result<String, Unsupported> {
         let InvocationEmission {
             private_random_context,
-            execution,
             entry_coverage,
             #[cfg(feature = "native-random-observer")]
             source_location,
@@ -562,6 +436,10 @@ impl CEmitter {
                 .map(|node| node.output_type.dims.len()),
             write_nodes: chelis_unord::UnordSet::new(),
             private_random_context,
+            #[cfg(feature = "native-random-observer")]
+            observed_draws: crate::random_observer::draw_key_identities(dag),
+            #[cfg(feature = "native-random-observer")]
+            observer_producer: String::new(),
         };
 
         e.line("#include \"chelis_runtime.h\"");
@@ -611,11 +489,6 @@ impl CEmitter {
         e.line("    return fma(high - low, chelis_random_unit(key, index), low);");
         e.line("}");
         e.line("/* CHELIS_UNIFORM_HELPERS_END */");
-        if execution.is_some() {
-            for line in FIXED_DROPOUT_HELPERS {
-                e.line(line);
-            }
-        }
         // [05-OP-31]/[05-OP-44] make every published host tensor descriptor
         // canonical row-major storage.  The old runtime ABI exposed mutable
         // stride fields and therefore needed a runtime contiguity probe; the
@@ -629,9 +502,6 @@ impl CEmitter {
         e.line("    (void)tensor;");
         e.line("    return 1;");
         e.line("}");
-        e.line("#endif");
-        e.line("#ifndef CHELIS_EFFECTIVE_UNIFORM_KEY");
-        e.line("#define CHELIS_EFFECTIVE_UNIFORM_KEY(key) (key)");
         e.line("#endif");
         e.line("");
         let needs_checked_cast_conversion_helpers = dag.nodes().iter().any(|node| {
@@ -670,6 +540,10 @@ impl CEmitter {
         // contains non-identifier bytes the emitted C will fail to compile,
         // which is the desired outcome (loud failure, not silent injection).
         let func_name_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(func_name);
+        #[cfg(feature = "native-random-observer")]
+        {
+            e.observer_producer = format!("\"{func_name_fmt}\"");
+        }
         // Only host-owned tensor helpers receive the invocation context.
         // Standalone/public kernels keep the four-argument tensor ABI.
         let random_param = if private_random_context {
@@ -702,11 +576,11 @@ impl CEmitter {
             e.line(&format!("if (__chelis_observer != NULL) {{ const __chelis_random_call_frame *call = __chelis_observer->calls; __chelis_observer->admitted = __chelis_helper_saved_admitted && call != NULL && call->certified && call->source != NULL && call->source->kind == 3 && call->source->unit.value == {unit}ULL && call->source->target.value == {helper}ULL; }}"));
         }
 
-        if private_random_context && execution.is_none() {
+        if private_random_context {
             e.line("(void)__chelis_rng;");
         }
         #[cfg(feature = "native-random-observer")]
-        if private_random_context && execution.is_none() {
+        if private_random_context {
             e.line("(void)__chelis_observer;");
         }
 
@@ -756,184 +630,7 @@ impl CEmitter {
         e.emit_input_shape_preamble(dag, &input_slots, func_name);
         e.emit_scoped_random_counters(dag)?;
 
-        let inherits_random = execution.is_some_and(|execution| {
-            dag.nodes().iter().any(|node| {
-                matches!(
-                    execution.site(node.id),
-                    Some(RandomSite::Forward { scope, .. }) if scope.index() == 0
-                )
-            })
-        });
-        if execution.is_some() {
-            if private_random_context && inherits_random {
-                e.line("if (__chelis_rng == NULL || !__chelis_rng->active) {");
-                e.indent += 1;
-                e.line(&format!(
-                    "fprintf(stderr, \"{func_name_fmt}: inherited Random requires an active host RNG scope\\n\");"
-                ));
-                e.line("abort();");
-                e.indent -= 1;
-                e.line("}");
-                e.line("uint64_t __chelis_fixed_seed = __chelis_rng->seed, __chelis_fixed_counter = __chelis_rng->counter;");
-            } else {
-                e.line("uint64_t __chelis_fixed_seed = 0ULL, __chelis_fixed_counter = 0ULL;");
-            }
-            #[cfg(feature = "native-random-observer")]
-            if private_random_context {
-                e.line(
-                    "int __chelis_fixed_active = (__chelis_rng != NULL && __chelis_rng->active);",
-                );
-                e.line("if (__chelis_fixed_active) { __chelis_fixed_seed = __chelis_rng->seed; __chelis_fixed_counter = __chelis_rng->counter; }");
-            }
-        }
-        let ordinary_steps;
-        let steps = if let Some(execution) = execution {
-            execution.steps()
-        } else {
-            ordinary_steps = dag
-                .nodes()
-                .iter()
-                .map(|node| Step::Node(node.id))
-                .collect::<Vec<_>>();
-            &ordinary_steps
-        };
-        #[cfg(feature = "native-random-observer")]
-        let (forward_occurrences, draw_scopes) = execution.map_or_else(
-            || (BTreeMap::new(), BTreeMap::new()),
-            |execution| {
-                let mut occurrences = BTreeMap::new();
-                let mut scopes = BTreeMap::new();
-                for source in execution.source() {
-                    if let SourceKind::Forward { node, draw, scope } = source.kind {
-                        occurrences.insert(node.0, source.id.index());
-                        scopes.insert(draw.index(), scope.index());
-                    }
-                }
-                (occurrences, scopes)
-            },
-        );
-        for step in steps {
-            let node = match *step {
-                Step::Control {
-                    occurrence: _occurrence,
-                    control: Control::Enter { scope, seed },
-                } => {
-                    let scope = scope.index();
-                    e.line(&format!("uint64_t __chelis_saved_seed_{scope} = __chelis_fixed_seed, __chelis_saved_counter_{scope} = __chelis_fixed_counter;"));
-                    #[cfg(feature = "native-random-observer")]
-                    if private_random_context {
-                        e.line(&format!(
-                            "int __chelis_saved_active_{scope} = __chelis_fixed_active;"
-                        ));
-                        for line in crate::random_observer::push_frame(
-                            "",
-                            &format!("__chelis_fixed_observer_frame_{scope}"),
-                            &format!(
-                                "(chelis_rng_state){{__chelis_saved_seed_{scope}, __chelis_saved_counter_{scope}, __chelis_saved_active_{scope}}}"
-                            ),
-                        ) {
-                            e.line(&line);
-                        }
-                    }
-                    e.line(&format!(
-                        "__chelis_fixed_seed = {seed}ULL; __chelis_fixed_counter = 0ULL;"
-                    ));
-                    #[cfg(feature = "native-random-observer")]
-                    if private_random_context {
-                        e.line("__chelis_fixed_active = 1;");
-                        e.line(&crate::random_observer::record(
-                            "",
-                            "__CHELIS_RANDOM_OBSERVER_FIXED_ENTER",
-                            "__CHELIS_RANDOM_OBSERVER_FIXED_IDENTITY",
-                            &format!("\"{func_name_fmt}\""),
-                            Some(_occurrence.index()),
-                            None,
-                            Some(scope),
-                            "(chelis_rng_state){__chelis_fixed_seed, __chelis_fixed_counter, __chelis_fixed_active}",
-                            None,
-                        ));
-                    }
-                    continue;
-                }
-                Step::Control {
-                    occurrence: _occurrence,
-                    control: Control::Leave { scope },
-                } => {
-                    let scope = scope.index();
-                    e.line(&format!("__chelis_fixed_seed = __chelis_saved_seed_{scope}; __chelis_fixed_counter = __chelis_saved_counter_{scope};"));
-                    #[cfg(feature = "native-random-observer")]
-                    if private_random_context {
-                        e.line(&format!(
-                            "__chelis_fixed_active = __chelis_saved_active_{scope};"
-                        ));
-                        e.line(&crate::random_observer::pop_frame(
-                            "",
-                            &format!("__chelis_fixed_observer_frame_{scope}"),
-                        ));
-                        e.line(&crate::random_observer::record(
-                            "",
-                            "__CHELIS_RANDOM_OBSERVER_FIXED_LEAVE",
-                            "__CHELIS_RANDOM_OBSERVER_FIXED_IDENTITY",
-                            &format!("\"{func_name_fmt}\""),
-                            Some(_occurrence.index()),
-                            None,
-                            Some(scope),
-                            "(chelis_rng_state){__chelis_fixed_seed, __chelis_fixed_counter, __chelis_fixed_active}",
-                            None,
-                        ));
-                    }
-                    continue;
-                }
-                Step::Node(id) => dag
-                    .get(id)
-                    .ok_or_else(|| unsupported_fixed_execution("missing scheduled node"))?,
-            };
-            // Source entry belongs to the schedule driver, not a numerical
-            // expression or tensor loop. Replay never enters this branch.
-            if let Some(RandomSite::Forward { draw, .. }) =
-                execution.and_then(|view| view.site(node.id))
-            {
-                let index = draw.index();
-                e.line(&format!("uint64_t __chelis_draw_seed_{index} = __chelis_fixed_seed, __chelis_draw_ordinal_{index} = __chelis_fixed_counter++;"));
-                #[cfg(feature = "native-random-observer")]
-                if private_random_context {
-                    e.line(&crate::random_observer::record(
-                        "",
-                        "__CHELIS_RANDOM_OBSERVER_FORWARD",
-                        "__CHELIS_RANDOM_OBSERVER_FIXED_IDENTITY",
-                        &format!("\"{func_name_fmt}\""),
-                        forward_occurrences.get(&node.id.0).copied(),
-                        Some(index),
-                        draw_scopes.get(&index).copied(),
-                        "(chelis_rng_state){__chelis_fixed_seed, __chelis_fixed_counter, __chelis_fixed_active}",
-                        Some((
-                            &format!("__chelis_draw_seed_{index}"),
-                            &format!("__chelis_draw_ordinal_{index}"),
-                        )),
-                    ));
-                }
-            }
-            #[cfg(feature = "native-random-observer")]
-            if private_random_context
-                && let Some(RandomSite::Replay { draw }) =
-                    execution.and_then(|view| view.site(node.id))
-            {
-                let index = draw.index();
-                e.line(&crate::random_observer::record(
-                    "",
-                    "__CHELIS_RANDOM_OBSERVER_REPLAY",
-                    "__CHELIS_RANDOM_OBSERVER_FIXED_IDENTITY",
-                    &format!("\"{func_name_fmt}\""),
-                    None,
-                    Some(index),
-                    draw_scopes.get(&index).copied(),
-                    "(chelis_rng_state){__chelis_fixed_seed, __chelis_fixed_counter, __chelis_fixed_active}",
-                    Some((
-                        &format!("__chelis_draw_seed_{index}"),
-                        &format!("__chelis_draw_ordinal_{index}"),
-                    )),
-                ));
-            }
+        for node in dag.nodes() {
             // Skip FusedElem nodes inlined into a trailing reduction.
             if e.reduction_inlined.contains(&node.id.0) {
                 continue;
@@ -947,11 +644,7 @@ impl CEmitter {
                 e.emit_load(node.id.0, input_idx);
             } else {
                 e.emit_span_comments(node);
-                if let Some(execution) = execution {
-                    e.emit_fixed_node(node, dag, execution)?;
-                } else {
-                    e.emit_node(node, dag)?;
-                }
+                e.emit_node(node, dag)?;
             }
             let mut realized = e
                 .inherited_result_sites
@@ -999,11 +692,6 @@ impl CEmitter {
             .collect::<Vec<_>>();
         for id in write_nodes {
             e.line(&format!("chelis_tensor_end_write(t{}_write_guard);", id));
-        }
-
-        if private_random_context && inherits_random {
-            e.line("__chelis_rng->seed = __chelis_fixed_seed;");
-            e.line("__chelis_rng->counter = __chelis_fixed_counter;");
         }
 
         // Transfer program-owned outputs to the caller. A bare Load is an
@@ -1793,27 +1481,23 @@ impl CEmitter {
             // which defaults to ties-to-even — matching the evaluator's
             // `f64::round_ties_even`. (`roundf` would be ties-away-from-zero.)
             RiscOp::Round => self.emit_unary_func(id, "rintf", &node.inputs, &node.output_type),
-            RiscOp::BakedUniformLike { low, high, seed } => self.emit_uniform_like(
-                id,
-                *low,
-                *high,
-                UniformSeed::Legacy(*seed),
-                &node.inputs,
-                &node.output_type,
-            ),
-            RiscOp::BakedDropout { .. } => {
-                return Err(unsupported_fixed_execution(
-                    "dropout requires a sealed source execution plan",
-                ));
-            }
             RiscOp::DrawKey {
                 handler,
                 draw,
                 dtype,
             } => self.emit_draw_key(node, *handler, *draw, *dtype, dag)?,
-            RiscOp::Dropout | RiscOp::DropoutReplay => self.emit_keyed_dropout(node, dag),
+            RiscOp::Dropout => self.emit_keyed_dropout(node, dag),
+            RiscOp::DropoutReplay => {
+                #[cfg(feature = "native-random-observer")]
+                self.record_observed_replay(node);
+                self.emit_keyed_dropout(node, dag)
+            }
             RiscOp::UniformLike => self.emit_keyed_uniform_like(node, dag),
-            RiscOp::UniformBoundAdjoint { bound } => self.emit_uniform_bound_adjoint(node, *bound),
+            RiscOp::UniformBoundAdjoint { bound } => {
+                #[cfg(feature = "native-random-observer")]
+                self.record_observed_replay(node);
+                self.emit_uniform_bound_adjoint(node, *bound)
+            }
             RiscOp::Copy => self.emit_realize(id, &node.inputs, &node.output_type),
             RiscOp::Drop => {
                 let action = dag.action_for_node(node.id).ok_or_else(|| {
@@ -4618,69 +4302,6 @@ impl CEmitter {
         }
     }
 
-    fn emit_fixed_node(
-        &mut self,
-        node: &DagNode,
-        dag: VerifiedDagView<'_>,
-        execution: EvaluationEmissionView<'_>,
-    ) -> Result<(), Unsupported> {
-        let parameters = if let RiscOp::BakedDropout { rate, .. } = node.op {
-            let rate = chelis_types::scalar_from_f64("dropout", node.output_type.precision, rate)
-                .map_err(|error| unsupported_fixed_execution(error.to_string()))?;
-            Some(
-                DropoutParameters::new(node.output_type.precision, rate)
-                    .map_err(|error| unsupported_fixed_execution(error.to_string()))?,
-            )
-        } else {
-            None
-        };
-        let draw = match execution.site(node.id) {
-            Some(RandomSite::Forward { draw, .. }) => Some(draw),
-            Some(RandomSite::Replay { draw }) => Some(draw),
-            None => None,
-        };
-        match node.op {
-            RiscOp::BakedDropout { .. } => {
-                let draw =
-                    draw.ok_or_else(|| unsupported_fixed_execution("dropout has no source key"))?;
-                let parameters = parameters.expect("validated dropout parameters");
-                let denominator = parameters
-                    .denominator()
-                    .map_err(|error| unsupported_fixed_execution(error.to_string()))?;
-                self.emit_unary(
-                    node.id.0,
-                    UnaryEmission::Dropout {
-                        rate: parameters.rate(),
-                        denominator,
-                        draw,
-                    },
-                    &node.inputs,
-                    &node.output_type,
-                );
-                Ok(())
-            }
-            RiscOp::BakedUniformLike { low, high, .. } => {
-                if node.inputs.len() != 1 {
-                    return Err(unsupported_fixed_execution(
-                        "fixed-control Uniform cannot carry a dynamic activation",
-                    ));
-                }
-                let draw =
-                    draw.ok_or_else(|| unsupported_fixed_execution("uniform has no source key"))?;
-                self.emit_uniform_like(
-                    node.id.0,
-                    low,
-                    high,
-                    UniformSeed::Saved(draw),
-                    &node.inputs,
-                    &node.output_type,
-                );
-                Ok(())
-            }
-            _ => self.emit_node(node, dag),
-        }
-    }
-
     /// Declare one zero-based counter per scoped handler region whose draw
     /// keys this function takes (`spec/design/randomness_counter_stream.md`
     /// §2). An inherited draw needs the host's private Random frame, which a
@@ -4699,7 +4320,7 @@ impl CEmitter {
                     handler: chelis_ir::dag::RandomHandler::Inherited,
                     ..
                 } if !self.private_random_context => {
-                    return Err(unsupported_fixed_execution(
+                    return Err(unsupported_random_emission(
                         "public tensor entry cannot receive inherited Random",
                     ));
                 }
@@ -4760,6 +4381,15 @@ impl CEmitter {
         let active = Self::rank0_bool_expr(node.inputs.get(seed_slots + draw.control_count()));
         self.line(&format!("int t{id}_active = {active};"));
         self.line(&format!("uint64_t t{id}_key = 0ULL;"));
+        // The observer reports the seed and ordinal a key was taken from.
+        #[cfg(feature = "native-random-observer")]
+        let observed = self.private_random_context;
+        #[cfg(feature = "native-random-observer")]
+        if observed {
+            self.line(&format!(
+                "uint64_t t{id}_seed = 0ULL, t{id}_ordinal = 0ULL;"
+            ));
+        }
         self.line(&format!("if (t{id}_active) {{"));
         self.indent += 1;
         match draw {
@@ -4808,6 +4438,19 @@ impl CEmitter {
                 self.line("abort();");
                 self.indent -= 1;
                 self.line("}");
+                #[cfg(feature = "native-random-observer")]
+                if observed {
+                    self.line(&format!(
+                        "t{id}_seed = __chelis_rng->seed; t{id}_ordinal = __chelis_rng->counter++;"
+                    ));
+                    self.line(&format!(
+                        "t{id}_key = chelis_random_key(t{id}_seed, t{id}_ordinal);"
+                    ));
+                    self.record_observed_forward(node.id, "*__chelis_rng".to_string());
+                    self.indent -= 1;
+                    self.line("}");
+                    return Ok(());
+                }
                 self.line(&format!(
                     "t{id}_key = chelis_random_key(__chelis_rng->seed, __chelis_rng->counter++);"
                 ));
@@ -4820,8 +4463,25 @@ impl CEmitter {
                         _ => None,
                     })
                     .ok_or_else(|| {
-                        unsupported_fixed_execution("a scoped draw key requires its literal seed")
+                        unsupported_random_emission("a scoped draw key requires its literal seed")
                     })?;
+                #[cfg(feature = "native-random-observer")]
+                if observed {
+                    self.line(&format!(
+                        "t{id}_seed = UINT64_C(0x{:016x}); t{id}_ordinal = __chelis_scoped_counter_{instance}++;",
+                        seed as u64
+                    ));
+                    self.line(&format!(
+                        "t{id}_key = chelis_random_key(t{id}_seed, t{id}_ordinal);"
+                    ));
+                    self.record_observed_forward(
+                        node.id,
+                        format!("(chelis_rng_state){{t{id}_seed, __chelis_scoped_counter_{instance}, 1}}"),
+                    );
+                    self.indent -= 1;
+                    self.line("}");
+                    return Ok(());
+                }
                 self.line(&format!(
                     "t{id}_key = chelis_random_key(UINT64_C(0x{:016x}), __chelis_scoped_counter_{instance}++);",
                     seed as u64
@@ -4831,6 +4491,53 @@ impl CEmitter {
         self.indent -= 1;
         self.line("}");
         Ok(())
+    }
+
+    /// Record a forward draw: the key's handler state after the draw, and the
+    /// seed and ordinal it used.
+    #[cfg(feature = "native-random-observer")]
+    fn record_observed_forward(&mut self, key: NodeId, state: String) {
+        let (draw, scope) = self.observed_draws[&key];
+        let id = key.0;
+        let line = crate::random_observer::record(
+            "",
+            "__CHELIS_RANDOM_OBSERVER_FORWARD",
+            "__CHELIS_RANDOM_OBSERVER_FIXED_IDENTITY",
+            &self.observer_producer,
+            Some(draw),
+            Some(draw),
+            Some(scope),
+            &state,
+            Some((&format!("t{id}_seed"), &format!("t{id}_ordinal"))),
+        );
+        self.line(&line);
+    }
+
+    /// Record a replay reading its forward draw's key, when that draw ran.
+    #[cfg(feature = "native-random-observer")]
+    fn record_observed_replay(&mut self, node: &DagNode) {
+        if !self.private_random_context {
+            return;
+        }
+        let key = node.inputs[2];
+        let (draw, scope) = self.observed_draws[&key];
+        let id = key.0;
+        let line = crate::random_observer::record(
+            "",
+            "__CHELIS_RANDOM_OBSERVER_REPLAY",
+            "__CHELIS_RANDOM_OBSERVER_FIXED_IDENTITY",
+            &self.observer_producer,
+            None,
+            Some(draw),
+            Some(scope),
+            "*__chelis_rng",
+            Some((&format!("t{id}_seed"), &format!("t{id}_ordinal"))),
+        );
+        self.line(&format!("if (t{id}_active) {{"));
+        self.indent += 1;
+        self.line(&line);
+        self.indent -= 1;
+        self.line("}");
     }
 
     /// Fill `t{id}` with positive zeros: an inactive draw's discarded value.
@@ -5031,80 +4738,6 @@ impl CEmitter {
                 Self::f32_to_reduced_fn(prim)
             )),
         }
-    }
-
-    fn emit_uniform_like(
-        &mut self,
-        id: usize,
-        low: f64,
-        high: f64,
-        seed: UniformSeed,
-        inputs: &[NodeId],
-        ty: &TensorType,
-    ) {
-        self.emit_slot_wrapper(id, ty);
-        if let UniformSeed::Saved(draw) = seed {
-            let draw = draw.index();
-            self.line(&format!("uint64_t t{id}_key = chelis_random_key(__chelis_draw_seed_{draw}, __chelis_draw_ordinal_{draw});"));
-        } else if let UniformSeed::Legacy(seed) = seed {
-            if let Some(activation) = inputs.get(1) {
-                // The activation is a rank-0 Bool predicate, and chelis#1308's
-                // tagged-carrier ABI stores Bool tensors as one uint8 per
-                // element. Reading it through `(float*)` was correct only under
-                // the pre-#1308 float-backed Bool storage; against uint8
-                // storage it reads one valid byte plus three out-of-bounds
-                // heap bytes, so an untaken branch's gate could go active on
-                // whatever the allocator left there (Linux CI caught the RNG
-                // parity break; macOS zero-fill masked it).
-                self.line(&format!(
-                    "int t{id}_active = ((const uint8_t*)t{}_data)[0] != 0 ? 1 : 0;",
-                    activation.0
-                ));
-                self.line(&format!(
-                "uint64_t t{id}_key = t{id}_active ? CHELIS_EFFECTIVE_UNIFORM_KEY({seed}ULL) : {seed}ULL;"
-            ));
-            } else {
-                self.line(&format!(
-                    "uint64_t t{id}_key = CHELIS_EFFECTIVE_UNIFORM_KEY({seed}ULL);"
-                ));
-            }
-        }
-        self.line("#pragma omp parallel for");
-        self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
-        self.indent += 1;
-        // [05-OP-8]: the source bounds have f32 dtype. f64 output widens
-        // those exact stored images and samples in f64; f32 samples in
-        // f32; f16/bf16 sample in f32 and round once at the final store.
-        let low_bits = Self::f64_to_f32_truncate(low).to_bits();
-        let high_bits = Self::f64_to_f32_truncate(high).to_bits();
-        let low_f32 = format!("chelis_f32_from_bits(0x{low_bits:08x}u)");
-        let high_f32 = format!("chelis_f32_from_bits(0x{high_bits:08x}u)");
-        match ty.precision {
-            Prim::F64 => {
-                let low_wide_bits = (Self::f64_to_f32_truncate(low) as f64).to_bits();
-                let high_wide_bits = (Self::f64_to_f32_truncate(high) as f64).to_bits();
-                self.line(&format!(
-                    "((double*)t{id}_data)[i] = chelis_uniform_sample_f64(t{id}_key, (uint64_t)i, chelis_f64_from_bits(UINT64_C(0x{low_wide_bits:016x})), chelis_f64_from_bits(UINT64_C(0x{high_wide_bits:016x})));"
-                ));
-            }
-            Prim::F32 => {
-                self.line(&format!(
-                    "((float*)t{id}_data)[i] = chelis_uniform_sample_f32(t{id}_key, (uint64_t)i, {low_f32}, {high_f32});"
-                ));
-            }
-            Prim::F16 | Prim::Bf16 => {
-                let store = Self::f32_to_reduced_fn(ty.precision);
-                self.line(&format!(
-                    "((uint16_t*)t{id}_data)[i] = {store}(chelis_uniform_sample_f32(t{id}_key, (uint64_t)i, {low_f32}, {high_f32}));"
-                ));
-            }
-            other => panic!(
-                "uniform_like requires an active float output dtype, got `{}`",
-                other.name()
-            ),
-        }
-        self.indent -= 1;
-        self.line("}");
     }
 
     // ---- Fused elementwise helpers ----
@@ -9479,8 +9112,12 @@ mod tests {
     }
 
     #[test]
-    fn path_sensitive_uniform_reads_float_backed_bool_and_gates_counter() {
+    fn path_sensitive_uniform_reads_uint8_bool_and_gates_counter() {
         let mut dag = Dag::new();
+        let rank0 = |precision| TensorType {
+            dims: vec![],
+            precision,
+        };
         let template = dag.add_node(
             RiscOp::Load {
                 name: "template".into(),
@@ -9492,31 +9129,57 @@ mod tests {
         let activation = dag.add_node(
             RiscOp::synth_const(Prim::Bool, 1.0),
             vec![],
-            TensorType {
-                dims: vec![],
-                precision: Prim::Bool,
-            },
+            rank0(Prim::Bool),
             None,
         );
-        dag.add_node(
-            RiscOp::BakedUniformLike {
-                low: 0.0,
-                high: 1.0,
-                seed: 11,
+        let seed = dag.add_node(
+            RiscOp::synth_const(Prim::Int64, 11.0),
+            vec![],
+            rank0(Prim::Int64),
+            None,
+        );
+        let low = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 0.0),
+            vec![],
+            rank0(Prim::F32),
+            None,
+        );
+        let high = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 1.0),
+            vec![],
+            rank0(Prim::F32),
+            None,
+        );
+        let key = dag.add_node(
+            RiscOp::DrawKey {
+                handler: chelis_ir::dag::RandomHandler::Scoped { instance: 0 },
+                draw: chelis_ir::dag::RandomDraw::UniformLike,
+                dtype: Prim::F32,
             },
-            vec![template, activation],
+            vec![seed, low, high, activation],
+            rank0(Prim::Key),
+            None,
+        );
+        let draw = dag.add_node(
+            RiscOp::UniformLike,
+            vec![template, low, high, key, activation],
             vec_f32(2),
             None,
         );
+        dag.add_root(draw);
         let c = emit_test_dag(&dag, "test_fn").unwrap();
         // chelis#1308 stores Bool tensors as one uint8 per element; the
         // draw gate must read the predicate at that width. A `(float*)`
         // read of the one-byte allocation is out of bounds and
         // platform-divergent (the Linux-only RNG parity break on PR #1302).
-        assert!(c.contains("((const uint8_t*)t1_data)[0] != 0"));
-        assert!(c.contains("? CHELIS_EFFECTIVE_UNIFORM_KEY(11ULL) : 11ULL"));
-        assert!(!c.contains("((float*)t1_data)[0] != 0.0f"));
-        assert!(!c.contains("((bool*)t1_data)"));
+        let gate = format!("(((const uint8_t*)t{}_data)[0] != 0)", activation.0);
+        assert!(
+            c.contains(&format!("int t{}_active = {gate};", key.0)),
+            "{c}"
+        );
+        assert!(c.contains("__chelis_scoped_counter_0++"), "{c}");
+        assert!(!c.contains(&format!("((float*)t{}_data)[0] != 0.0f", activation.0)));
+        assert!(!c.contains(&format!("((bool*)t{}_data)", activation.0)));
     }
 
     #[test]

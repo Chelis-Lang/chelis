@@ -1626,7 +1626,6 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             | RiscOp::Floor
             | RiscOp::Ceil
             | RiscOp::Round
-            | RiscOp::BakedDropout { .. }
             | RiscOp::Copy
             | RiscOp::Drop
             | RiscOp::Realize
@@ -1702,24 +1701,6 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             | RiscOp::DropoutReplay
             | RiscOp::UniformBoundAdjoint { .. }
             | RiscOp::DrawKey { .. } => verify_random_operands(dag, node, &mut errors),
-            RiscOp::BakedUniformLike { .. } => {
-                if !matches!(arity, 1 | 2) {
-                    errors.push(format!(
-                        "op {:?} at node {} expects 1 or 2 inputs, got {}",
-                        node.op, node.id.0, arity
-                    ));
-                }
-                if arity == 2
-                    && let Some(activation) = dag.get(node.inputs[1])
-                    && (activation.output_type.precision != Prim::Bool
-                        || !activation.output_type.dims.is_empty())
-                {
-                    errors.push(format!(
-                        "uniform_like at node {} requires a scalar Bool path activation, got {:?}",
-                        node.id.0, activation.output_type
-                    ));
-                }
-            }
             // chelis#616: movement ops (and `Reshape`, whose runtime target
             // extents work the same way) carry a tensor at `inputs[0]` plus zero
             // or more rank-0 integer bound scalars at `inputs[1..]` (node-valued
@@ -2395,26 +2376,6 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                         "numeric op Abs at node {} requires float or signed-integer input, got {:?}",
                         node.id.0, input.output_type.precision
                     ));
-                }
-            }
-            RiscOp::BakedUniformLike { .. } => {
-                if matches!(arity, 1 | 2)
-                    && let Some(input) = dag.get(node.inputs[0])
-                {
-                    if !input.output_type.precision.is_float() {
-                        errors.push(format!(
-                            "uniform_like at node {} requires a float template, got {:?}",
-                            node.id.0, input.output_type.precision
-                        ));
-                    }
-                    if node.output_type.precision != input.output_type.precision {
-                        errors.push(format!(
-                            "uniform_like at node {} output precision {:?} must match template precision {:?}",
-                            node.id.0,
-                            node.output_type.precision,
-                            input.output_type.precision
-                        ));
-                    }
                 }
             }
             _ => {}
@@ -4731,6 +4692,46 @@ mod tests {
         );
     }
 
+    /// A key-operand `UniformLike` over `template` with an inherited draw
+    /// key and optional `activation`.
+    fn keyed_uniform(dag: &mut Dag, template: NodeId, activation: Option<NodeId>) {
+        let ty = dag.get(template).unwrap().output_type.clone();
+        let low = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 0.0),
+            vec![],
+            TensorType::scalar_f32(),
+            None,
+        );
+        let high = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 1.0),
+            vec![],
+            TensorType::scalar_f32(),
+            None,
+        );
+        let key = dag.add_node(
+            RiscOp::DrawKey {
+                handler: crate::dag::RandomHandler::Inherited,
+                draw: crate::dag::RandomDraw::UniformLike,
+                dtype: ty.precision,
+            },
+            [low, high].into_iter().chain(activation).collect(),
+            TensorType {
+                dims: vec![],
+                precision: Prim::Key,
+            },
+            None,
+        );
+        dag.add_node(
+            RiscOp::UniformLike,
+            [template, low, high, key]
+                .into_iter()
+                .chain(activation)
+                .collect(),
+            ty,
+            None,
+        );
+    }
+
     #[test]
     fn uniform_like_rejects_non_float_template() {
         let mut dag = Dag::new();
@@ -4743,23 +4744,14 @@ mod tests {
                 name: "template".into(),
             },
             vec![],
-            ty.clone(),
-            None,
-        );
-        dag.add_node(
-            RiscOp::BakedUniformLike {
-                low: 0.0,
-                high: 1.0,
-                seed: 7,
-            },
-            vec![template],
             ty,
             None,
         );
+        keyed_uniform(&mut dag, template, None);
         assert!(
             verify(&dag)
                 .iter()
-                .any(|error| error.contains("requires a float template"))
+                .any(|error| error.contains("must preserve its template's float dtype and rank"))
         );
     }
 
@@ -4775,7 +4767,7 @@ mod tests {
                 name: "template".into(),
             },
             vec![],
-            ty.clone(),
+            ty,
             None,
         );
         let wrong_activation = dag.add_node(
@@ -4786,20 +4778,11 @@ mod tests {
             TensorType::scalar_f32(),
             None,
         );
-        dag.add_node(
-            RiscOp::BakedUniformLike {
-                low: 0.0,
-                high: 1.0,
-                seed: 7,
-            },
-            vec![template, wrong_activation],
-            ty,
-            None,
-        );
+        keyed_uniform(&mut dag, template, Some(wrong_activation));
         assert!(
             verify(&dag)
                 .iter()
-                .any(|error| error.contains("requires a scalar Bool path activation"))
+                .any(|error| error.contains("requires a rank-0 Bool activation"))
         );
     }
 

@@ -77,7 +77,6 @@ pub use chelis_pipeline_core::{
     analyze_prepared, analyze_prepared_library, analyze_prepared_library_with_base,
     analyze_prepared_with_library, check_prepared_library, complete_checks,
     complete_context_checks, complete_context_library_checks, complete_library_checks,
-    lower_checked_for_evaluation, lower_checked_with_evaluation_context,
 };
 
 /// The closed set of supported pipeline goals.

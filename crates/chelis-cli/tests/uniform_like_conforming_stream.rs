@@ -277,7 +277,7 @@ fn sample_body(checked: &chelis_types::CheckedProgram) -> chelis_deep::Expr {
 ///   from the evaluation's inherited frame;
 /// - "plan": a fixed-control evaluation plan, whose draws take their key from
 ///   the executing frame's `(seed, ordinal)`.
-fn dag_lanes(source: &str, prim: Prim, len: u64, seed: i64) -> [(&'static str, Vec<u64>); 2] {
+fn dag_lane(source: &str, prim: Prim, len: u64, seed: i64) -> (&'static str, Vec<u64>) {
     let checked = checked_program(source);
     let body = sample_body(&checked);
     let inputs: UnordMap<String, chelis_ir::dag::TensorType> = [(
@@ -300,46 +300,22 @@ fn dag_lanes(source: &str, prim: Prim, len: u64, seed: i64) -> [(&'static str, V
             .map(|value| stored_bits(prim, value))
             .collect::<Vec<_>>()
     };
-    let legacy = chelis_ir::lower::try_lower_subexpr_program(
+    let dag = chelis_ir::lower::try_lower_subexpr_program(
         &body,
-        inputs.clone(),
+        inputs,
         UnordMap::new(),
         UnordMap::new(),
     )
     .unwrap();
     let mut frame = chelis_ir::eval::RandomFrame::inherited(seed as u64, 0);
     let values =
-        chelis_ir::eval::eval_tensor_roots_with_frame(&legacy, legacy.roots(), &mut frame, |_| {
+        chelis_ir::eval::eval_tensor_roots_with_frame(&dag, dag.roots(), &mut frame, |_| {
             Some(template.clone())
         })
         .unwrap();
     let next = frame.inherited_counter().expect("an inherited frame");
     assert!(next > 0, "the draw keys consumed no ordinal");
-    let legacy_bits = bits(&values[&legacy.roots()[0]]);
-    let mut context =
-        chelis_ir::evaluation::RandomExecutionContext::new(chelis_ir::host::RandomLoweringState {
-            seed: Some(seed as u64),
-            counter: 0,
-        });
-    let plan = chelis_ir::lower::try_lower_subexpr_evaluation_plan(
-        &body,
-        inputs,
-        UnordMap::new(),
-        UnordMap::new(),
-        &context,
-    )
-    .unwrap();
-    let values = chelis_ir::eval::eval_tensor_plan_with_strict(&plan, &mut context, |_| {
-        Some(template.clone())
-    })
-    .unwrap();
-    assert_eq!(
-        context.state().counter,
-        next,
-        "the plan and the lowering agree on ordinals"
-    );
-    let plan_bits = bits(&values[&plan.dag_for_inspection().roots()[0]]);
-    [("DAG", legacy_bits), ("plan", plan_bits)]
+    ("DAG", bits(&values[&dag.roots()[0]]))
 }
 
 fn hex(bits: &[u64]) -> Vec<String> {
@@ -401,13 +377,8 @@ fn uniform_like_draws_the_spec_stream_in_eval_c_and_the_dag_evaluator() {
     for (row, (name, dtype, prim, seed)) in cells.iter().enumerate() {
         let (prim, seed) = (*prim, *seed);
         let expected = expected_draws(prim, seed);
-        let [dag, plan] = dag_lanes(&sample_source(dtype, LEN, &draws), prim, LEN, seed);
-        for (lane, actual) in [
-            ("eval", &eval[row]),
-            ("C", &compiled[row]),
-            (dag.0, &dag.1),
-            (plan.0, &plan.1),
-        ] {
+        let dag = dag_lane(&sample_source(dtype, LEN, &draws), prim, LEN, seed);
+        for (lane, actual) in [("eval", &eval[row]), ("C", &compiled[row]), (dag.0, &dag.1)] {
             if *actual != expected {
                 failures.push(format!(
                     "{lane} {name} (seed {seed}):\n  actual   {:?}\n  expected {:?}",
@@ -436,7 +407,7 @@ fn draw_c_element_i_is_not_draw_i_element_c() {
     );
     const ROWS: usize = 4;
     let names = [("square".to_string(), Prim::F64)];
-    let [dag, plan] = dag_lanes(
+    let dag = dag_lane(
         &sample_source("f64", ROWS as u64, &[("0.0f32", "1.0f32"); ROWS]),
         Prim::F64,
         ROWS as u64,
@@ -449,7 +420,6 @@ fn draw_c_element_i_is_not_draw_i_element_c() {
         ),
         ("C", c_lane(SYMMETRY_PROGRAM, &names).remove(0)),
         dag,
-        plan,
     ];
     for (lane, row) in lanes {
         let square = row

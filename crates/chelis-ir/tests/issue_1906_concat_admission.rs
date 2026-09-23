@@ -17,7 +17,7 @@ fn checked(src: &str) -> chelis_types::CheckedProgram {
 
 fn decision(source: &str, name: &str, kernel: bool) {
     let program = checked(source);
-    let result = host_def_kernel(&HostLoweringSession::new(&program), name, None)
+    let result = host_def_kernel(&HostLoweringSession::new(&program), name)
         .map(|value| value.is_some())
         .map_err(|error| error.to_string());
     assert_eq!(result, Ok(kernel), "{source}");
@@ -146,7 +146,7 @@ fn computed_dynamic_extent_is_not_claimed_as_supported_host_partition() {
     let program = checked(
         "def run[s](x: tensor[s, *, f32]) -> tensor[s, *, f32] = {\n z = mul(x, x)\n softmax(concat([z, z], 1i32), -1)\n}\n",
     );
-    let error = host_def_kernel(&HostLoweringSession::new(&program), "run", None)
+    let error = host_def_kernel(&HostLoweringSession::new(&program), "run")
         .expect_err("computed concat stays outside this admission class");
     assert!(
         error

@@ -5,8 +5,6 @@ use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, ExprCarrier, Metadata};
 use chelis_ir::dag::{DimInfo, TensorType};
 use chelis_ir::eval::{TensorInputDemand, TensorValue as IrTensorValue};
-use chelis_ir::evaluation::{EvaluationProfile, RandomExecutionContext};
-use chelis_ir::host::RandomLoweringState;
 use chelis_ir::lower::SubexprLoweringContext;
 use chelis_types::types::{NominalArg, Prim, TensorPrec, Type, TypeVar};
 
@@ -409,14 +407,12 @@ impl<'a> EvalContext<'a> {
         // function signature. A nested function-valued capture then reaches
         // lowering as rank zero and corrupts the backward DAG (chelis#676).
         let mut program_defs = self.program.defs().clone();
-        let mut captures_closures = false;
         for (name, value) in captured_env.to_sorted() {
             if let RuntimeValue::Closure {
                 checked_function, ..
             } = value
             {
                 program_defs.insert(name.clone(), checked_function.as_ref().clone());
-                captures_closures = true;
             }
         }
 
@@ -457,16 +453,6 @@ impl<'a> EvalContext<'a> {
             ));
         }
 
-        // Classify against the definition universe the lowering reads. With no
-        // captured closure that universe is the program's own table, so the
-        // scope's cached snapshot gives the identical answer without copying
-        // the table on every application (chelis#2405). A captured closure
-        // changes the universe, and only then is the copy classified.
-        let profile = if captures_closures {
-            chelis_ir::lower::evaluation_profile(&app_expr, &program_defs)
-        } else {
-            self.program_evaluation_profile(&app_expr)
-        };
         // #1821/#1920: inference renames result dimensions (n -> d43),
         // while invocation witnesses retain the authored parameter binders.
         // Give both routes the declared signature alongside checked types,
@@ -484,32 +470,12 @@ impl<'a> EvalContext<'a> {
                 self.declared_signatures.clone(),
             )
         };
-        let mut execution_plan = None;
-        let lower_result = if profile == EvaluationProfile::FixedControl {
-            let context = RandomExecutionContext::new(RandomLoweringState {
-                seed: self.random_seed,
-                counter: self.random_counter,
-            });
-            lowering
-                .lower_evaluation_plan(&app_expr, scoped_types, &context)
-                .map(|plan| {
-                    let dag = plan.dag_for_inspection().clone();
-                    execution_plan = Some(plan);
-                    (dag, self.random_counter)
-                })
-        } else {
-            lowering
-                .lower_with_random_state(
-                    &app_expr,
-                    scoped_types,
-                    RandomLoweringState {
-                        seed: self.random_seed,
-                        counter: self.random_counter,
-                    },
-                )
-                .map(|(dag, random)| (dag, random.counter))
-        };
-        let (dag, _) = match lower_result {
+        let lower_result = chelis_ir::lower::try_lower_subexpr_program_with_context(
+            &app_expr,
+            scoped_types,
+            &lowering,
+        );
+        let dag = match lower_result {
             Ok(result) => result,
             Err(diagnostic) => {
                 let kind_label = match kind {
@@ -543,8 +509,7 @@ impl<'a> EvalContext<'a> {
         if roots.is_empty() {
             // Preserve the historical empty-root early-return behavior. In
             // particular, [] must not turn an empty legacy grad into ALL-node
-            // input preparation. A source-owned plan, or a graph that draws,
-            // still executes below.
+            // input preparation. A graph that draws still executes below.
             if matches!(kind, TransformKind::Grad)
                 && !arg_repacks.is_empty()
                 && arg_repacks.iter().all(
@@ -563,7 +528,7 @@ impl<'a> EvalContext<'a> {
                 } else {
                     RuntimeValue::Tuple(empty_slots.collect::<Result<_, _>>()?)
                 };
-                if execution_plan.is_none() && !draws {
+                if !draws {
                     return Ok(packed);
                 }
                 empty_packed = Some(packed);
@@ -614,10 +579,6 @@ impl<'a> EvalContext<'a> {
         // inputs requested by the same selection authority as execution.
         // A provider error is an entered initializer's error, not an evaluator
         // missing-input diagnostic; preserve it without the legacy prefix.
-        let preparation_context = RandomExecutionContext::new(RandomLoweringState {
-            seed: self.random_seed,
-            counter: self.random_counter,
-        });
         let mut provider_failed = false;
         let prepare_input = |name: &str, demand: TensorInputDemand| {
             // eval_compiled supplies manifested Tensor-lane root values in
@@ -657,26 +618,19 @@ impl<'a> EvalContext<'a> {
                 }
             }
         };
-        let prepared_inputs = if let Some(plan) = &execution_plan {
-            chelis_ir::eval::prepare_tensor_plan_inputs_with_demand(
-                plan,
-                &preparation_context,
-                prepare_input,
-            )
-        } else {
+        let prepared_inputs =
             chelis_ir::eval::prepare_tensor_roots_inputs_with_demand(&dag, &roots, prepare_input)
-        }
-        .map_err(|error| {
-            if provider_failed || execution_plan.is_some() {
-                error
-            } else {
-                let kind_label = match kind {
-                    TransformKind::Grad => "grad",
-                    TransformKind::Vmap => "vmap",
-                };
-                format!("host runtime `{kind_label}` evaluation failed: {error}")
-            }
-        })?;
+                .map_err(|error| {
+                if provider_failed {
+                    error
+                } else {
+                    let kind_label = match kind {
+                        TransformKind::Grad => "grad",
+                        TransformKind::Vmap => "vmap",
+                    };
+                    format!("host runtime `{kind_label}` evaluation failed: {error}")
+                }
+            })?;
         // A served capture must match its authored-rank `Load`. Capture-aware
         // vmap preserves that raw load and gives its mapped identity an
         // explicit rank-inserting movement, so the batch axis never widens the
@@ -703,23 +657,13 @@ impl<'a> EvalContext<'a> {
             }
         }
         let load = |name: &str| prepared_inputs.get(name).cloned();
-        let result = if let Some(plan) = &execution_plan {
-            let mut context = RandomExecutionContext::new(RandomLoweringState {
-                seed: self.random_seed,
-                counter: self.random_counter,
-            });
-            let result = chelis_ir::eval::eval_tensor_plan_with_strict(plan, &mut context, load);
-            self.random_counter = context.state().counter;
-            result.map(|values| (values, self.random_counter))
-        } else {
-            let mut frame = self.random_frame();
-            let result =
-                chelis_ir::eval::eval_tensor_roots_with_frame(&dag, &roots, &mut frame, load);
-            self.commit_random_frame(&frame);
-            result.map(|values| (values, self.random_counter))
-        };
-        let (values, _) = result.map_err(|err| {
-            if execution_plan.is_some() {
+        let mut frame = self.random_frame();
+        let result = chelis_ir::eval::eval_tensor_roots_with_frame(&dag, &roots, &mut frame, load);
+        self.commit_random_frame(&frame);
+        let values = result.map_err(|err| {
+            // [04-NUM-9]: a numeric trap renders byte-identically on every
+            // surface, so it takes no prefix.
+            if err.starts_with(chelis_types::NUMERIC_TRAP_PREFIX) {
                 return err;
             }
             let kind_label = match kind {

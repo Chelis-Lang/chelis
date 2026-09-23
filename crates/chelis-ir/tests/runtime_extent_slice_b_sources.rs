@@ -619,7 +619,7 @@ fn unsupported_but_well_typed_mapping_yields_the_registered_receipt_not_an_ice()
 
 /// The number of `RiscOp` variants the table below must construct. Bumping
 /// it without adding a row makes the coverage assertion fail.
-const RISC_OP_VARIANTS: usize = 70;
+const RISC_OP_VARIANTS: usize = 68;
 
 /// Adding a `RiscOp` variant breaks this match, which is what forces the
 /// table in `every_risc_op_yields_exactly_one_source_per_output_axis` to
@@ -651,54 +651,52 @@ fn variant_index(op: &RiscOp) -> usize {
         RiscOp::Ceil => 20,
         RiscOp::Round => 21,
         RiscOp::Recip => 22,
-        RiscOp::BakedUniformLike { .. } => 23,
-        RiscOp::BakedDropout { .. } => 24,
-        RiscOp::Sum { .. } => 25,
-        RiscOp::Count { .. } => 26,
-        RiscOp::MaxReduce { .. } => 27,
-        RiscOp::MinReduce { .. } => 28,
-        RiscOp::ProdReduce { .. } => 29,
-        RiscOp::ReduceWindow { .. } => 30,
-        RiscOp::ReduceWindowGrad { .. } => 31,
-        RiscOp::Argmax { .. } => 32,
-        RiscOp::Argmin { .. } => 33,
-        RiscOp::Reshape { .. } => 34,
-        RiscOp::Permute { .. } => 35,
-        RiscOp::Expand { .. } => 36,
-        RiscOp::OneHot { .. } => 37,
-        RiscOp::Pad { .. } => 38,
-        RiscOp::Shrink { .. } => 39,
-        RiscOp::Stride { .. } => 40,
-        RiscOp::Shape { .. } => 41,
-        RiscOp::Const { .. } => 42,
-        RiscOp::ConstTensor { .. } => 43,
-        RiscOp::Load { .. } => 44,
-        RiscOp::Store { .. } => 45,
-        RiscOp::Copy => 46,
-        RiscOp::Drop => 47,
-        RiscOp::Realize => 48,
-        RiscOp::Cast { .. } => 49,
-        RiscOp::CastTrunc { .. } => 50,
-        RiscOp::FusedElem { .. } => 51,
-        RiscOp::BlasMatmul { .. } => 52,
-        RiscOp::Gather { .. } => 53,
-        RiscOp::ScatterAdd { .. } => 54,
-        RiscOp::Scatter { .. } => 55,
-        RiscOp::ScatterElements { .. } => 56,
-        RiscOp::Relu => 57,
-        RiscOp::ReluAdjoint => 58,
-        RiscOp::ExtentWitness { .. } => 59,
-        RiscOp::CheckedReshapeExtent { .. } => 60,
-        RiscOp::CheckedUnitAxis { .. } => 61,
-        RiscOp::Mod => 62,
-        RiscOp::Logical(_) => 63,
-        RiscOp::Where => 64,
-        RiscOp::UniformLike => 65,
-        RiscOp::Dropout => 66,
-        RiscOp::DropoutReplay => 67,
-        RiscOp::UniformBoundAdjoint { .. } => 68,
-        RiscOp::DrawKey { .. } => 69,
-        RiscOp::GuardedFail { .. } => 70,
+        RiscOp::Sum { .. } => 23,
+        RiscOp::Count { .. } => 24,
+        RiscOp::MaxReduce { .. } => 25,
+        RiscOp::MinReduce { .. } => 26,
+        RiscOp::ProdReduce { .. } => 27,
+        RiscOp::ReduceWindow { .. } => 28,
+        RiscOp::ReduceWindowGrad { .. } => 29,
+        RiscOp::Argmax { .. } => 30,
+        RiscOp::Argmin { .. } => 31,
+        RiscOp::Reshape { .. } => 32,
+        RiscOp::Permute { .. } => 33,
+        RiscOp::Expand { .. } => 34,
+        RiscOp::OneHot { .. } => 35,
+        RiscOp::Pad { .. } => 36,
+        RiscOp::Shrink { .. } => 37,
+        RiscOp::Stride { .. } => 38,
+        RiscOp::Shape { .. } => 39,
+        RiscOp::Const { .. } => 40,
+        RiscOp::ConstTensor { .. } => 41,
+        RiscOp::Load { .. } => 42,
+        RiscOp::Store { .. } => 43,
+        RiscOp::Copy => 44,
+        RiscOp::Drop => 45,
+        RiscOp::Realize => 46,
+        RiscOp::Cast { .. } => 47,
+        RiscOp::CastTrunc { .. } => 48,
+        RiscOp::FusedElem { .. } => 49,
+        RiscOp::BlasMatmul { .. } => 50,
+        RiscOp::Gather { .. } => 51,
+        RiscOp::ScatterAdd { .. } => 52,
+        RiscOp::Scatter { .. } => 53,
+        RiscOp::ScatterElements { .. } => 54,
+        RiscOp::Relu => 55,
+        RiscOp::ReluAdjoint => 56,
+        RiscOp::ExtentWitness { .. } => 57,
+        RiscOp::CheckedReshapeExtent { .. } => 58,
+        RiscOp::CheckedUnitAxis { .. } => 59,
+        RiscOp::Mod => 60,
+        RiscOp::Logical(_) => 61,
+        RiscOp::Where => 62,
+        RiscOp::UniformLike => 63,
+        RiscOp::Dropout => 64,
+        RiscOp::DropoutReplay => 65,
+        RiscOp::UniformBoundAdjoint { .. } => 66,
+        RiscOp::DrawKey { .. } => 67,
+        RiscOp::GuardedFail { .. } => 68,
     }
 }
 
@@ -845,15 +843,6 @@ fn every_risc_op_yields_exactly_one_source_per_output_axis() {
         RiscOp::Copy,
         RiscOp::Drop,
         RiscOp::Realize,
-        RiscOp::BakedUniformLike {
-            low: 0.0,
-            high: 1.0,
-            seed: 7,
-        },
-        RiscOp::BakedDropout {
-            rate: 0.5,
-            seed: 11,
-        },
         RiscOp::Store { name: "out".into() },
     ] {
         nodes.push(add(&mut dag, op, vec![f], f32_23()));
@@ -1468,13 +1457,35 @@ fn a_shape_preserving_axis_over_a_literal_operand_resolves_to_the_literal() {
         ty(vec![DimInfo::Lit(3)], Prim::F32),
         None,
     );
-    let noised = dag.add_node(
-        RiscOp::BakedUniformLike {
-            low: 0.0,
-            high: 1.0,
-            seed: 42,
+    let bound = |dag: &mut Dag, value| {
+        dag.add_node(
+            RiscOp::synth_const(Prim::F32, value),
+            vec![],
+            scalar(Prim::F32),
+            None,
+        )
+    };
+    let low = bound(&mut dag, 0.0);
+    let high = bound(&mut dag, 1.0);
+    let key_seed = dag.add_node(
+        RiscOp::synth_const(Prim::Int64, 42.0),
+        vec![],
+        scalar(Prim::Int64),
+        None,
+    );
+    let key = dag.add_node(
+        RiscOp::DrawKey {
+            handler: RandomHandler::Scoped { instance: 0 },
+            draw: RandomDraw::UniformLike,
+            dtype: Prim::F32,
         },
-        vec![filled],
+        vec![key_seed, low, high],
+        scalar(Prim::Key),
+        None,
+    );
+    let noised = dag.add_node(
+        RiscOp::UniformLike,
+        vec![filled, low, high, key],
         ty(vec![named("d43")], Prim::F32),
         None,
     );
