@@ -197,12 +197,14 @@ pub(crate) fn reset_fold_copied_nodes() {
 /// process on the same deep input those walkers reject with a typed
 /// diagnostic.
 ///
-/// Only a node with a folded pipe at or below it is rebuilt, through the
+/// Only a node with a `Pipe` at or below it is rebuilt, through the
 /// validating node constructor, from its already-folded children. A subtree
 /// with no pipe in it is not rebuilt: it is copied once, where a rebuilt
 /// ancestor needs it or at the root, so the work is linear in the size of the
 /// tree (chelis#2207) and a pipe-free tree costs one copy, not one validated
-/// rebuild per node (chelis#2434).
+/// rebuild per node (chelis#2434). That copy is the derived `Clone`, which
+/// does recurse on the native stack, at roughly four times a `Drop`'s stack per
+/// level; [`fold_pipes_if_changed`] makes no copy of a pipe-free tree at all.
 ///
 /// Every carrier is walked, because a pipe can sit inside any of them: a
 /// typed pipe-stage parameter arrives as a `MetaExpr` wrapper, and a stage
@@ -214,10 +216,11 @@ pub fn fold_pipes(expr: &Expr) -> Expr {
     fold_pipes_if_changed(expr).unwrap_or_else(|| copied(expr))
 }
 
-/// [`fold_pipes`], reporting whether anything moved: `Some(folded)` when at
-/// least one `Pipe` in `expr` was folded, `None` when `expr` has none and
-/// would fold to itself. A caller that can keep its input pays nothing for a
-/// pipe-free tree.
+/// [`fold_pipes`], reporting whether the tree held a pipe: `None` when `expr`
+/// contains no `Pipe` node and would fold to itself, `Some(folded)` otherwise.
+/// A pipe whose stage cannot be applied stays unfolded, so `Some` can hold a
+/// tree equal to the input. A caller that can keep its input pays nothing for
+/// a pipe-free tree.
 pub fn fold_pipes_if_changed(expr: &Expr) -> Option<Expr> {
     enum Step<'a> {
         Enter(&'a Expr),
