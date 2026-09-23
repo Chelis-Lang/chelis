@@ -48,6 +48,8 @@ const FIELD_HOLDER: &str = "
     (deftype {} Boxed () (variant {} Boxed (field {} r (t-ref {} (t-tensor {}
       (d-lit {} 3) (t-prim {} f32))))))";
 
+/// The guarded `Left` arm is followed by an unguarded one because a guarded
+/// arm covers nothing (spec/04-type-system.md section 2.4, [04-PAT-2]).
 #[test]
 fn guarded_match_tail_accepts_the_same_owned_return_on_both_ingresses() {
     let diagnostics = ingress_messages(&format!(
@@ -64,6 +66,7 @@ fn guarded_match_tail_accepts_the_same_owned_return_on_both_ingresses() {
                    (lit {{type: (t-prim {{}} i32)}} 1)
                    (lit {{type: (t-prim {{}} i32)}} 1))
                  (var {{}} value))
+               (arm {{}} (pat-ctor {{}} Left) () (var {{}} value))
                (arm {{}} (pat-ctor {{}} Right) () (var {{}} value)))))"
     ));
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
@@ -86,6 +89,7 @@ fn guarded_match_tail_rejects_a_different_return_on_both_ingresses() {
                    (lit {{type: (t-prim {{}} i32)}} 1)
                    (lit {{type: (t-prim {{}} i32)}} 1))
                  (var {{}} expected))
+               (arm {{}} (pat-ctor {{}} Left) () (var {{}} expected))
                (arm {{}} (pat-ctor {{}} Right) () (var {{}} wrong)))))"
     ));
     assert!(
@@ -96,6 +100,8 @@ fn guarded_match_tail_rejects_a_different_return_on_both_ingresses() {
     );
 }
 
+/// The guarded `Left` arm is followed by an unguarded one because a guarded
+/// arm covers nothing (spec/04-type-system.md section 2.4, [04-PAT-2]).
 #[test]
 fn same_local_alias_spelling_does_not_merge_distinct_borrowed_parameters() {
     let diagnostics = ingress_messages(&format!(
@@ -111,6 +117,8 @@ fn same_local_alias_spelling_does_not_merge_distinct_borrowed_parameters() {
              (match {{}} (var {{}} choice)
                (arm {{}} (pat-ctor {{}} Left)
                  (lit {{type: (t-prim {{}} bool)}} true)
+                 (let {{}} (bind {{}} result (var {{}} left)) (var {{}} result)))
+               (arm {{}} (pat-ctor {{}} Left) ()
                  (let {{}} (bind {{}} result (var {{}} left)) (var {{}} result)))
                (arm {{}} (pat-ctor {{}} Right) ()
                  (let {{}} (bind {{}} result (var {{}} right)) (var {{}} result))))))"

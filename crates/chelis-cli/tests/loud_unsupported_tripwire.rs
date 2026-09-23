@@ -385,13 +385,15 @@ const BASELINE: &[Entry] = &[
     (
         Pat::UnwrapOrDefault,
         "crates/chelis-ir/src/host.rs",
-        5,
+        4,
         "one effect-kind extraction fallback removed by the Phase 2 typed \
          decoder and one generic-ADT substitution default removed by the \
          applied-type Result boundary; source-reconstructed ADT parameters \
          now come from the checker registry; the typed annotation migration \
          consolidates two optional callable type constructors into one; the \
-         remaining 5 pre-existing non-censused uses stay frozen",
+         empty field list for a constructor pattern with no definition went \
+         with the per-type match paths (chelis#2446); the remaining 4 \
+         pre-existing non-censused uses stay frozen",
     ),
     (
         Pat::UnwrapOrDefault,

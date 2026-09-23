@@ -168,6 +168,8 @@ fn empty_match_guards_are_structural_on_both_ingresses() {
     let _ = checked_pair(&source);
 }
 
+/// The guarded `Left` arm is followed by an unguarded one because a guarded
+/// arm covers nothing (spec/04-type-system.md section 2.4, [04-PAT-2]).
 #[test]
 fn non_boolean_match_guards_have_ordered_ingress_parity() {
     let source = format!(
@@ -175,6 +177,7 @@ fn non_boolean_match_guards_have_ordered_ingress_parity() {
           (arm {{}} (pat-ctor {{}} Left)
             (lit {{type: (t-prim {{}} i32)}} 1)
             (lit {{type: (t-prim {{}} i32)}} 1))
+          (arm {{}} (pat-ctor {{}} Left) () (lit {{type: (t-prim {{}} i32)}} 1))
           (arm {{}} (pat-ctor {{}} Right) () (lit {{type: (t-prim {{}} i32)}} 2)))))"
     );
     let (ir, typed) = rejection_pair(&source);

@@ -9576,249 +9576,217 @@ fn lower_match_host_expr(
         .ok_or_else(|| host_expr_lowering_error(match_expr, "a `match` node has no scrutinee"))?;
     let scrutinee = lower_host_expr(scrutinee_node, program, scope, tensor_helpers)?;
     let scrutinee_ty = host_expr_type(&scrutinee);
-    if matches!(
-        scrutinee_ty,
-        HostTypeTerm::Int64
-            | HostTypeTerm::Float64
-            | HostTypeTerm::Float32
-            | HostTypeTerm::Bool
-            | HostTypeTerm::String
-    ) {
-        return lower_literal_match_host_expr(
-            match_expr,
-            list,
-            program,
-            scope,
-            tensor_helpers,
-            scrutinee,
-            scrutinee_ty,
-        );
-    }
-    if matches!(scrutinee_ty, HostTypeTerm::List(_)) {
-        return lower_list_match_host_expr(
-            match_expr,
-            list,
-            program,
-            scope,
-            tensor_helpers,
-            scrutinee,
-            scrutinee_ty,
-            expected_ty,
-        );
-    }
-    let mut bind_name = "value".to_string();
-    let mut some_expr = None;
-    let mut none_expr = None;
-    let mut generic_arms = Vec::new();
-    let mut generic_default = None;
-    let option_match = matches!(&scrutinee_ty, HostTypeTerm::Option(_));
-
+    // [04-PAT-2]: every scrutinee type goes through one ordered planner, so an
+    // arm is selected only when its pattern matches and its guard holds, in
+    // declaration order. A per-type dispatch used to drop guards and variable
+    // arms (chelis#2445) and send every scalar it did not list, and every
+    // tuple, into the Option path (chelis#2446).
+    let mut names = HostMatchNameSupply::new(match_expr, scope);
+    let mut arms = Vec::new();
     for arm in kids.iter().skip(1) {
-        let Some(arm_list) = as_node(arm) else {
-            continue;
+        let Some((DeepTag::Arm, _, arm_kids)) = stamped_parts(arm) else {
+            return Err(host_expr_lowering_error(
+                match_expr,
+                "a `match` child is not an `arm`",
+            ));
         };
-        if arm_list.tag() != DeepTag::Arm {
-            continue;
-        }
-        let arm_kids = arm_list.children_slice();
-        let Some(pattern) = arm_kids.first().and_then(as_node) else {
-            continue;
+        let [pattern, guard, body] = arm_kids else {
+            return Err(host_expr_lowering_error(
+                match_expr,
+                "a match arm is not exactly a pattern, a guard and a body",
+            ));
         };
-        if pattern.tag() == DeepTag::PatWild {
-            let body = arm_kids.get(2).ok_or_else(|| {
-                host_expr_lowering_error(match_expr, "a wildcard match arm has no body")
-            })?;
-            generic_default = Some(Box::new(lower_host_expr_with_expected_opt(
-                body,
-                program,
-                scope,
-                tensor_helpers,
-                expected_ty,
-            )?));
-            continue;
-        }
-        if let DeepTag::PatCtor | DeepTag::PatRecord = pattern.tag() {
-            let ctor = pattern.children_slice().first().and_then(symbol_name);
-            match ctor {
-                Some("Some") if option_match => {
-                    if let Some(bound) = pattern.children_slice().get(1).and_then(as_node)
-                        && bound.tag() == DeepTag::PatVar
-                        && let Some(name) = bound.children_slice().first().and_then(symbol_name)
-                    {
-                        bind_name = name.to_string();
-                    }
-                    let mut scoped = scope.clone();
-                    scoped.insert(bind_name.clone(), option_inner_type(&scrutinee));
-                    let body = arm_kids.get(2).ok_or_else(|| {
-                        host_expr_lowering_error(match_expr, "a `Some` match arm has no body")
-                    })?;
-                    some_expr = Some(lower_host_expr_with_expected_opt(
-                        body,
-                        program,
-                        &scoped,
-                        tensor_helpers,
-                        expected_ty,
-                    )?);
-                }
-                Some("None") if option_match => {
-                    let body = arm_kids.get(2).ok_or_else(|| {
-                        host_expr_lowering_error(match_expr, "a `None` match arm has no body")
-                    })?;
-                    none_expr = Some(lower_host_expr_with_expected_opt(
-                        body,
-                        program,
-                        scope,
-                        tensor_helpers,
-                        expected_ty,
-                    )?);
-                }
-                Some(ctor_name) => {
-                    let ctor_fields = match resolve_adt_constructor_definition_for_type(
-                        program,
-                        ctor_name,
-                        &scrutinee_ty,
-                    ) {
-                        AdtConstructorResolution::Unique(definition) => {
-                            instantiate_adt_constructor(program, &definition, &scrutinee_ty)
-                                .map_err(|error| {
-                                    host_expr_lowering_error(
-                                        match_expr,
-                                        format!(
-                                            "match constructor `{ctor_name}` is not concretely instantiated: {error}"
-                                        ),
-                                    )
-                                })?
-                                .fields
-                        }
-                        // The field list decides which index each binder
-                        // reads, so answering an ambiguous pattern with
-                        // either candidate silently binds the other
-                        // package's field (chelis#1271). The `type_env`
-                        // fallback below is for names that are not
-                        // constructors at all and must not absorb this.
-                        AdtConstructorResolution::Ambiguous(candidates) => {
-                            return Err(ambiguous_constructor_error(
-                                match_expr,
-                                ctor_name,
-                                &candidates,
-                            ));
-                        }
-                        AdtConstructorResolution::Missing => program
-                            .type_env()
-                            .get(ctor_name)
-                            .and_then(parse_fn_type_expr)
-                            .map(|(args, _)| {
-                                args.into_iter()
-                                    .map(|ty| HostAdtField { name: None, ty })
-                                    .collect::<Vec<_>>()
-                            })
-                            .unwrap_or_default(),
-                    };
-                    let mut scoped = scope.clone();
-                    let mut bindings = Vec::new();
-                    for (field_index, subpat, field_ty) in
-                        pattern_field_bindings(pattern, &ctor_fields)
-                    {
-                        let Some(subpat_list) = as_node(subpat) else {
-                            continue;
-                        };
-                        if subpat_list.tag() != DeepTag::PatVar {
-                            continue;
-                        }
-                        let Some(name) = subpat_list.children_slice().first().and_then(symbol_name)
-                        else {
-                            continue;
-                        };
-                        let ty = field_ty
-                            .or_else(|| expr_type(subpat))
-                            .unwrap_or_else(fresh_host_inference);
-                        scoped.insert(name.to_string(), ty.clone());
-                        bindings.push(HostPatternBinding {
-                            name: name.to_string(),
-                            ty,
-                            field_index,
-                        });
-                    }
-                    generic_arms.push(HostMatchArm {
-                        ctor: ctor_name.to_string(),
-                        bindings,
-                        expr: lower_host_expr_with_expected_opt(
-                            arm_kids.get(2).ok_or_else(|| {
-                                host_expr_lowering_error(match_expr, "an ADT match arm has no body")
-                            })?,
-                            program,
-                            &scoped,
-                            tensor_helpers,
-                            expected_ty,
-                        )?,
-                    });
-                }
-                None => {}
-            }
-        }
+        let guard = match guard.carrier() {
+            ExprCarrier::StructuralList([]) => None,
+            _ => Some(guard),
+        };
+        arms.push(lower_host_match_arm(
+            match_expr,
+            (pattern, guard, body),
+            &scrutinee_ty,
+            program,
+            scope,
+            tensor_helpers,
+            expected_ty,
+            &mut names,
+        )?);
     }
-
-    let ty = {
-        let explicit = expr_host_type(match_expr, program, scope);
-        if explicit.is_unresolved() {
-            // For ADT matches with multiple arms, Some/None exprs aren't set —
-            // the arm bodies live in `generic_arms` / `generic_default`. Fall
-            // back through those first so the match's result type reflects the
-            // arms' actual shape. Otherwise Unit propagates and the match
-            // target is emitted as `int`, which is the wrong C type for any
-            // pointer-valued arm (regression hit by Coral groupby's
-            // `next = match agg_spec { ... }` ADT match).
-            let arm_ty = generic_arms
-                .iter()
-                .map(|arm| host_expr_type(&arm.expr))
-                .find(|ty| !ty.is_unresolved())
-                .or_else(|| {
-                    generic_default
-                        .as_deref()
-                        .map(host_expr_type)
-                        .filter(|ty| !ty.is_unresolved())
-                });
-            if let Some(ty) = arm_ty {
-                ty
-            } else {
-                let some = some_expr.as_ref().ok_or_else(|| {
-                    host_expr_lowering_error(match_expr, "an Option match has no `Some` arm")
-                })?;
-                let none = none_expr.as_ref().ok_or_else(|| {
-                    host_expr_lowering_error(match_expr, "an Option match has no `None` arm")
-                })?;
-                let some_ty = host_expr_type(some);
-                if some_ty.is_unresolved() {
-                    host_expr_type(none)
-                } else {
-                    some_ty
-                }
-            }
-        } else {
-            explicit
-        }
+    let explicit = expr_host_type(match_expr, program, scope);
+    let result_ty = if explicit.is_unresolved() {
+        arms.iter()
+            .map(|arm| host_expr_type(&arm.body))
+            .find(|ty| !ty.is_unresolved())
+            .or_else(|| expected_ty.cloned())
+            .ok_or_else(|| {
+                host_expr_lowering_error(match_expr, "a match has no concretely typed arm body")
+            })?
+    } else {
+        explicit
     };
-
-    if matches!(scrutinee_ty, HostTypeTerm::Adt(_, _)) {
-        return Ok(HostExpr::new(HostExprKind::MatchAdt {
-            scrutinee: Box::new(scrutinee),
-            arms: generic_arms,
-            default_expr: generic_default,
-            ty,
-        }));
+    let scrutinee_name = names.fresh("__chelis_match_scrutinee");
+    let scrutinee_var = HostExpr::new(HostExprKind::Var(
+        scrutinee_name.clone(),
+        scrutinee_ty.clone(),
+    ));
+    let no_arm_selected = || {
+        HostExpr::new(HostExprKind::Builtin {
+            name: "fail".to_string(),
+            args: vec![HostExpr::new(HostExprKind::String(
+                "non-exhaustive runtime match".to_string(),
+            ))],
+            ty: result_ty.clone(),
+        })
+    };
+    let mut decision = no_arm_selected();
+    for arm in arms.into_iter().rev() {
+        decision = match arm.test {
+            // The rest of the match sits at the one failure exit of the
+            // pattern or at a `false` guard, so it is emitted at most once.
+            None => {
+                let success = match arm.guard {
+                    Some(guard) => HostExpr::new(HostExprKind::If {
+                        cond: Box::new(guard),
+                        then_expr: Box::new(arm.body),
+                        else_expr: Box::new(decision.clone()),
+                        ty: result_ty.clone(),
+                    }),
+                    None => arm.body,
+                };
+                compile_host_pattern(
+                    &arm.plan,
+                    scrutinee_var.clone(),
+                    success,
+                    decision,
+                    &result_ty,
+                    &mut names,
+                )
+            }
+            // Otherwise a `bool` test decides the arm, so the rest of the
+            // match is still emitted once rather than once per exit. Emitting
+            // it once per exit would compound: the rest can hold further
+            // arms, or a body that is itself a match. The two passes over the
+            // scrutinee each carry only what they need. The test carries the
+            // pattern's tests and the names its guard reads. The selected
+            // pass carries the pattern's constructor and, below it, only its
+            // bindings: the test has already matched everything else, so no
+            // sub-pattern that binds nothing is read or tested again there.
+            // An unused owned field, and an owned ADT scrutinee consumed by a
+            // branching arm, are never released (chelis#2458).
+            Some(test_plan) => {
+                let test = compile_host_pattern(
+                    &test_plan,
+                    scrutinee_var.clone(),
+                    arm.guard
+                        .unwrap_or_else(|| HostExpr::new(HostExprKind::Bool(true))),
+                    HostExpr::new(HostExprKind::Bool(false)),
+                    &HostTypeTerm::Bool,
+                    &mut names,
+                );
+                let selected = compile_host_pattern(
+                    &arm.plan.binding_pass(),
+                    scrutinee_var.clone(),
+                    arm.body,
+                    no_arm_selected(),
+                    &result_ty,
+                    &mut names,
+                );
+                HostExpr::new(HostExprKind::If {
+                    cond: Box::new(test),
+                    then_expr: Box::new(selected),
+                    else_expr: Box::new(decision),
+                    ty: result_ty.clone(),
+                })
+            }
+        };
     }
-
-    let some_expr = some_expr
-        .ok_or_else(|| host_expr_lowering_error(match_expr, "an Option match has no `Some` arm"))?;
-    let none_expr = none_expr
-        .ok_or_else(|| host_expr_lowering_error(match_expr, "an Option match has no `None` arm"))?;
-    Ok(HostExpr::new(HostExprKind::MatchOption {
-        scrutinee: Box::new(scrutinee),
-        bind_name,
-        some_expr: Box::new(some_expr),
-        none_expr: Box::new(none_expr),
-        ty,
+    Ok(HostExpr::new(HostExprKind::Let {
+        bindings: vec![HostBinding {
+            name: scrutinee_name,
+            display_name: None,
+            display_roots: Vec::new(),
+            ty: scrutinee_ty,
+            value: scrutinee,
+        }],
+        body: Box::new(decision),
+        ty: result_ty,
     }))
+}
+
+/// One match arm, lowered for the ordered decision in
+/// [`lower_match_host_expr`].
+struct LoweredHostMatchArm {
+    /// The pattern the body destructures under.
+    plan: HostPatternPlan,
+    /// A second plan of the same pattern, under fresh names, that decides the
+    /// arm as a `bool` together with the guard: its tests, and only the
+    /// bindings the guard reads. `None` when the pattern and guard together
+    /// have at most one failure exit.
+    test: Option<HostPatternPlan>,
+    /// The lowered guard, in the scope of `test` when there is one and of
+    /// `plan` otherwise.
+    guard: Option<HostExpr>,
+    body: HostExpr,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_host_match_arm(
+    match_expr: &Expr,
+    (pattern, guard, body): (&Expr, Option<&Expr>, &Expr),
+    scrutinee_ty: &HostTypeTerm,
+    program: &HostLoweringSession<'_>,
+    scope: &UnordMap<String, HostTypeTerm>,
+    tensor_helpers: &mut TensorHelperSink,
+    expected_ty: Option<&HostTypeTerm>,
+    names: &mut HostMatchNameSupply,
+) -> Result<LoweredHostMatchArm, crate::lower::LowerDiagnostic> {
+    // A pattern binder is renamed to a fresh name before its guard and body
+    // lower, so a failed pattern's bindings cannot capture a later arm.
+    let lower_in_scope = |plan: &HostPatternPlan,
+                          expr: &Expr,
+                          expected: Option<&HostTypeTerm>,
+                          tensor_helpers: &mut TensorHelperSink| {
+        let mut scoped = scope.clone();
+        plan.extend_scope(&mut scoped);
+        let mut renames = Vec::new();
+        plan.collect_renames(&mut renames);
+        let renamed = rename_bound_names(expr, &renames, &UnordSet::new());
+        lower_host_expr_with_expected_opt(&renamed, program, &scoped, tensor_helpers, expected)
+    };
+    let plan = plan_host_pattern(pattern, scrutinee_ty, program, match_expr, names)?;
+    let test = (plan.failure_exits() + usize::from(guard.is_some()) > 1)
+        .then(|| {
+            let mut guard_names = UnordSet::new();
+            if let Some(guard) = guard {
+                collect_occurring_names(guard, &mut guard_names);
+            }
+            plan_host_pattern(pattern, scrutinee_ty, program, match_expr, names)
+                .map(|test| test.test_pass(&guard_names))
+        })
+        .transpose()?;
+    let guard = guard
+        .map(|guard| {
+            let lowered = lower_in_scope(
+                test.as_ref().unwrap_or(&plan),
+                guard,
+                Some(&HostTypeTerm::Bool),
+                tensor_helpers,
+            )?;
+            match host_expr_type(&lowered) {
+                HostTypeTerm::Bool | HostTypeTerm::Never => Ok(lowered),
+                other => Err(host_expr_lowering_error(
+                    match_expr,
+                    format!("a match arm guard lowers to `{other:?}`, not `bool`"),
+                )),
+            }
+        })
+        .transpose()?;
+    let body = lower_in_scope(&plan, body, expected_ty, tensor_helpers)?;
+    Ok(LoweredHostMatchArm {
+        plan,
+        test,
+        guard,
+        body,
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -9856,6 +9824,169 @@ enum HostPatternPlan {
 }
 
 impl HostPatternPlan {
+    /// Whether the pattern binds any name.
+    fn binds_a_name(&self) -> bool {
+        match self {
+            Self::Bind { .. } | Self::As { .. } => true,
+            Self::ListCons { head, tail, .. } => head.binds_a_name() || tail.binds_a_name(),
+            Self::Tuple(items) => items.iter().any(|(item, _)| item.binds_a_name()),
+            Self::OptionSome { inner, .. } => inner.binds_a_name(),
+            Self::Adt { fields, .. } => fields.iter().any(|(_, field, _)| field.binds_a_name()),
+            Self::Wild | Self::Literal(_) | Self::ListNil | Self::OptionNone => false,
+        }
+    }
+
+    /// The same pattern with `f` applied to each immediate sub-pattern.
+    fn map_sub_patterns(&self, f: fn(&Self) -> Self) -> Self {
+        match self {
+            Self::As {
+                source_name,
+                lowered_name,
+                ty,
+                inner,
+            } => Self::As {
+                source_name: source_name.clone(),
+                lowered_name: lowered_name.clone(),
+                ty: ty.clone(),
+                inner: Box::new(f(inner)),
+            },
+            Self::ListCons {
+                head,
+                tail,
+                element_ty,
+                list_ty,
+            } => Self::ListCons {
+                head: Box::new(f(head)),
+                tail: Box::new(f(tail)),
+                element_ty: element_ty.clone(),
+                list_ty: list_ty.clone(),
+            },
+            Self::Tuple(items) => Self::Tuple(
+                items
+                    .iter()
+                    .map(|(item, ty)| (f(item), ty.clone()))
+                    .collect(),
+            ),
+            Self::OptionSome { inner, inner_ty } => Self::OptionSome {
+                inner: Box::new(f(inner)),
+                inner_ty: inner_ty.clone(),
+            },
+            Self::Adt { ctor, fields } => Self::Adt {
+                ctor: ctor.clone(),
+                fields: fields
+                    .iter()
+                    .map(|(index, field, ty)| (*index, f(field), ty.clone()))
+                    .collect(),
+            },
+            Self::Wild
+            | Self::Bind { .. }
+            | Self::Literal(_)
+            | Self::ListNil
+            | Self::OptionNone => self.clone(),
+        }
+    }
+
+    /// The pass that decides an arm: every test of the pattern, and only the
+    /// bindings whose source name is in `read`, the names its guard reads.
+    /// Every other binder becomes a wildcard, so its part of the value is not
+    /// read.
+    fn test_pass(&self, read: &UnordSet<String>) -> Self {
+        match self {
+            Self::Bind { source_name, .. } if !read.contains(source_name) => Self::Wild,
+            Self::As {
+                source_name, inner, ..
+            } if !read.contains(source_name) => inner.test_pass(read),
+            Self::As {
+                source_name,
+                lowered_name,
+                ty,
+                inner,
+            } => Self::As {
+                source_name: source_name.clone(),
+                lowered_name: lowered_name.clone(),
+                ty: ty.clone(),
+                inner: Box::new(inner.test_pass(read)),
+            },
+            Self::ListCons {
+                head,
+                tail,
+                element_ty,
+                list_ty,
+            } => Self::ListCons {
+                head: Box::new(head.test_pass(read)),
+                tail: Box::new(tail.test_pass(read)),
+                element_ty: element_ty.clone(),
+                list_ty: list_ty.clone(),
+            },
+            Self::Tuple(items) => Self::Tuple(
+                items
+                    .iter()
+                    .map(|(item, ty)| (item.test_pass(read), ty.clone()))
+                    .collect(),
+            ),
+            Self::OptionSome { inner, inner_ty } => Self::OptionSome {
+                inner: Box::new(inner.test_pass(read)),
+                inner_ty: inner_ty.clone(),
+            },
+            Self::Adt { ctor, fields } => Self::Adt {
+                ctor: ctor.clone(),
+                fields: fields
+                    .iter()
+                    .map(|(index, field, ty)| (*index, field.test_pass(read), ty.clone()))
+                    .collect(),
+            },
+            Self::Wild
+            | Self::Bind { .. }
+            | Self::Literal(_)
+            | Self::ListNil
+            | Self::OptionNone => self.clone(),
+        }
+    }
+
+    /// The pass that destructures a value its arm's test has already
+    /// matched: the pattern's own constructor, and below it only the
+    /// bindings. Every sub-pattern that binds no name becomes a wildcard,
+    /// because the test has already matched it. The top keeps its shape so
+    /// the selected arm still consumes the scrutinee, which leaves the test
+    /// only borrowing it: a test's arm branches, and an owned ADT scrutinee
+    /// consumed by a branching arm is never released (chelis#2458).
+    fn binding_pass(&self) -> Self {
+        match self {
+            Self::Literal(_) => Self::Wild,
+            // `whole @ Box(3, _)` names the whole value; the constructor
+            // under it is still the top.
+            Self::As { .. } => self.map_sub_patterns(Self::binding_pass),
+            _ => self.map_sub_patterns(Self::bound_part),
+        }
+    }
+
+    fn bound_part(&self) -> Self {
+        if self.binds_a_name() {
+            self.map_sub_patterns(Self::bound_part)
+        } else {
+            Self::Wild
+        }
+    }
+
+    /// How many places [`compile_host_pattern`] puts its failure
+    /// continuation for this pattern.
+    fn failure_exits(&self) -> usize {
+        match self {
+            Self::Wild | Self::Bind { .. } => 0,
+            Self::Literal(_) | Self::ListNil | Self::OptionNone => 1,
+            Self::As { inner, .. } => inner.failure_exits(),
+            Self::ListCons { head, tail, .. } => 1 + head.failure_exits() + tail.failure_exits(),
+            Self::Tuple(items) => items.iter().map(|(item, _)| item.failure_exits()).sum(),
+            Self::OptionSome { inner, .. } => 1 + inner.failure_exits(),
+            Self::Adt { fields, .. } => {
+                1 + fields
+                    .iter()
+                    .map(|(_, field, _)| field.failure_exits())
+                    .sum::<usize>()
+            }
+        }
+    }
+
     fn extend_scope(&self, scope: &mut UnordMap<String, HostTypeTerm>) {
         match self {
             Self::Bind {
@@ -9948,94 +10079,6 @@ impl HostMatchNameSupply {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn lower_list_match_host_expr(
-    match_expr: &Expr,
-    list: &Node,
-    program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
-    tensor_helpers: &mut TensorHelperSink,
-    scrutinee: HostExpr,
-    scrutinee_ty: HostTypeTerm,
-    expected_ty: Option<&HostTypeTerm>,
-) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
-    let mut names = HostMatchNameSupply::new(match_expr, scope);
-    let mut arms = Vec::new();
-    for arm in list.children_slice().iter().skip(1) {
-        let Some((DeepTag::Arm, _, arm_kids)) = stamped_parts(arm) else {
-            continue;
-        };
-        let pattern = arm_kids.first().ok_or_else(|| {
-            host_expr_lowering_error(match_expr, "a List match arm has no pattern")
-        })?;
-        let plan = plan_host_pattern(pattern, &scrutinee_ty, program, match_expr, &mut names)?;
-        let mut scoped = scope.clone();
-        plan.extend_scope(&mut scoped);
-        let body = arm_kids
-            .get(2)
-            .ok_or_else(|| host_expr_lowering_error(match_expr, "a List match arm has no body"))?;
-        let mut renames = Vec::new();
-        plan.collect_renames(&mut renames);
-        let renamed_body = rename_bound_names(body, &renames, &UnordSet::new());
-        let body = lower_host_expr_with_expected_opt(
-            &renamed_body,
-            program,
-            &scoped,
-            tensor_helpers,
-            expected_ty,
-        )?;
-        arms.push((plan, body));
-    }
-    let explicit = expr_host_type(match_expr, program, scope);
-    let result_ty = if explicit.is_unresolved() {
-        arms.iter()
-            .map(|(_, body)| host_expr_type(body))
-            .find(|ty| !ty.is_unresolved())
-            .or_else(|| expected_ty.cloned())
-            .ok_or_else(|| {
-                host_expr_lowering_error(
-                    match_expr,
-                    "a List match has no concretely typed arm body",
-                )
-            })?
-    } else {
-        explicit
-    };
-    let scrutinee_name = names.fresh("__chelis_list_match");
-    let scrutinee_var = HostExpr::new(HostExprKind::Var(
-        scrutinee_name.clone(),
-        scrutinee_ty.clone(),
-    ));
-    let mut decision = HostExpr::new(HostExprKind::Builtin {
-        name: "fail".to_string(),
-        args: vec![HostExpr::new(HostExprKind::String(
-            "non-exhaustive runtime match".to_string(),
-        ))],
-        ty: result_ty.clone(),
-    });
-    for (plan, body) in arms.into_iter().rev() {
-        decision = compile_host_pattern(
-            &plan,
-            scrutinee_var.clone(),
-            body,
-            decision,
-            &result_ty,
-            &mut names,
-        );
-    }
-    Ok(HostExpr::new(HostExprKind::Let {
-        bindings: vec![HostBinding {
-            name: scrutinee_name,
-            display_name: None,
-            display_roots: Vec::new(),
-            ty: scrutinee_ty,
-            value: scrutinee,
-        }],
-        body: Box::new(decision),
-        ty: result_ty,
-    }))
-}
-
 fn plan_host_pattern(
     pattern: &Expr,
     expected_ty: &HostTypeTerm,
@@ -10046,13 +10089,13 @@ fn plan_host_pattern(
     let Some((tag, _, kids)) = stamped_parts(pattern) else {
         return Err(host_expr_lowering_error(
             match_expr,
-            "a List match contains a malformed pattern",
+            "a match contains a malformed pattern",
         ));
     };
     let malformed = |detail: &str| {
         host_expr_lowering_error(
             match_expr,
-            format!("a List match contains a malformed pattern: {detail}"),
+            format!("a match contains a malformed pattern: {detail}"),
         )
     };
     match tag {
@@ -10298,37 +10341,47 @@ fn compile_host_pattern(
                 result_ty,
                 names,
             );
-            let decomposed = HostExpr::new(HostExprKind::Let {
-                bindings: vec![
-                    HostBinding {
-                        name: head_name,
-                        display_name: None,
-                        display_roots: Vec::new(),
+            // A wildcard head or tail is neither tested nor bound, so it is
+            // not read out of the list either.
+            let mut bindings = Vec::with_capacity(2);
+            if !matches!(**head, HostPatternPlan::Wild) {
+                bindings.push(HostBinding {
+                    name: head_name,
+                    display_name: None,
+                    display_roots: Vec::new(),
+                    ty: element_ty.clone(),
+                    value: HostExpr::new(HostExprKind::Builtin {
+                        name: "index".to_string(),
+                        args: vec![value.clone(), HostExpr::new(HostExprKind::Int(0))],
                         ty: element_ty.clone(),
-                        value: HostExpr::new(HostExprKind::Builtin {
-                            name: "index".to_string(),
-                            args: vec![value.clone(), HostExpr::new(HostExprKind::Int(0))],
-                            ty: element_ty.clone(),
-                        }),
-                    },
-                    HostBinding {
-                        name: tail_name,
-                        display_name: None,
-                        display_roots: Vec::new(),
+                    }),
+                });
+            }
+            if !matches!(**tail, HostPatternPlan::Wild) {
+                bindings.push(HostBinding {
+                    name: tail_name,
+                    display_name: None,
+                    display_roots: Vec::new(),
+                    ty: list_ty.clone(),
+                    value: HostExpr::new(HostExprKind::Builtin {
+                        // The tail is [05-OP-54]'s List slice, `skip`.
+                        // `drop` is [05-OP-67]'s one-argument linearity
+                        // consume and would bind the tail to unit.
+                        name: "skip".to_string(),
+                        args: vec![value.clone(), HostExpr::new(HostExprKind::Int(1))],
                         ty: list_ty.clone(),
-                        value: HostExpr::new(HostExprKind::Builtin {
-                            // The tail is [05-OP-54]'s List slice, `skip`.
-                            // `drop` is [05-OP-67]'s one-argument linearity
-                            // consume and would bind the tail to unit.
-                            name: "skip".to_string(),
-                            args: vec![value.clone(), HostExpr::new(HostExprKind::Int(1))],
-                            ty: list_ty.clone(),
-                        }),
-                    },
-                ],
-                body: Box::new(matched_head),
-                ty: result_ty.clone(),
-            });
+                    }),
+                });
+            }
+            let decomposed = if bindings.is_empty() {
+                matched_head
+            } else {
+                HostExpr::new(HostExprKind::Let {
+                    bindings,
+                    body: Box::new(matched_head),
+                    ty: result_ty.clone(),
+                })
+            };
             if_matches(
                 HostExpr::new(HostExprKind::Builtin {
                     name: "neq".to_string(),
@@ -10396,6 +10449,11 @@ fn compile_host_pattern(
             let mut bindings = Vec::with_capacity(fields.len());
             let mut body = success;
             for (field_index, field, field_ty) in fields.iter().rev() {
+                // A wildcard field is neither tested nor bound, so it is not
+                // read out of the value either.
+                if matches!(field, HostPatternPlan::Wild) {
+                    continue;
+                }
                 let name = names.fresh("__chelis_adt_field");
                 body = compile_host_pattern(
                     field,
@@ -10424,79 +10482,6 @@ fn compile_host_pattern(
             })
         }
     }
-}
-
-fn lower_literal_match_host_expr(
-    match_expr: &Expr,
-    list: &Node,
-    program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
-    tensor_helpers: &mut TensorHelperSink,
-    scrutinee: HostExpr,
-    scrutinee_ty: HostTypeTerm,
-) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
-    let kids = list.children_slice();
-    let mut literal_arms = Vec::new();
-    let mut default_expr = None;
-    for arm in kids.iter().skip(1) {
-        let Some(arm_list) = as_node(arm) else {
-            continue;
-        };
-        if arm_list.tag() != DeepTag::Arm {
-            continue;
-        }
-        let arm_kids = arm_list.children_slice();
-        let Some(pattern) = arm_kids.first().and_then(as_node) else {
-            continue;
-        };
-        let body = lower_host_expr(
-            arm_kids.get(2).ok_or_else(|| {
-                host_expr_lowering_error(match_expr, "a literal match arm has no body")
-            })?,
-            program,
-            scope,
-            tensor_helpers,
-        )?;
-        match pattern.tag() {
-            DeepTag::PatWild => default_expr = Some(body),
-            DeepTag::PatLit => {
-                if let Some(lit) = pattern
-                    .children_slice()
-                    .first()
-                    .and_then(|expr| host_literal_expr(expr, &scrutinee_ty))
-                {
-                    literal_arms.push((lit, body));
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let explicit = expr_host_type(match_expr, program, scope);
-    let mut body = default_expr.ok_or_else(|| {
-        host_expr_lowering_error(
-            match_expr,
-            "a host-lowered literal match requires an explicit default arm",
-        )
-    })?;
-    let result_ty = if explicit.is_unresolved() {
-        host_expr_type(&body)
-    } else {
-        explicit
-    };
-    for (lit, arm_expr) in literal_arms.into_iter().rev() {
-        body = HostExpr::new(HostExprKind::If {
-            cond: Box::new(HostExpr::new(HostExprKind::Builtin {
-                name: "eq".to_string(),
-                args: vec![scrutinee.clone(), lit],
-                ty: HostTypeTerm::Bool,
-            })),
-            then_expr: Box::new(arm_expr),
-            else_expr: Box::new(body),
-            ty: result_ty.clone(),
-        });
-    }
-    Ok(body)
 }
 
 fn host_literal_expr(expr: &Expr, expected_ty: &HostTypeTerm) -> Option<HostExpr> {

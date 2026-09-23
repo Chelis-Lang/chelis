@@ -318,6 +318,19 @@ fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
     &rest[..end]
 }
 
+/// The field index of every `chelis_adt_get_field` read in an emitted body,
+/// in order. Reading the index rather than a whole call keeps the row off the
+/// emitter's temporary numbering, which says nothing about field layout.
+fn adt_field_reads(body: &str) -> Vec<&str> {
+    body.match_indices("chelis_adt_get_field(")
+        .map(|(start, _)| {
+            let call = &body[start..];
+            let args = &call[..call.find(')').expect("field read is closed")];
+            args.rsplit_once(", ").expect("field read has an index").1
+        })
+        .collect()
+}
+
 /// `chelis check` must keep scoring the app 1.0 with no errors in both
 /// graphs. The issue's whole shape is that the checked program is fine
 /// and lowering disagrees with it, so a "fix" that made the checker
@@ -488,8 +501,9 @@ fn match_destructuring_binds_the_authored_packages_field_index() {
         function_body(solo.source(), signature),
         "a match arm must bind the authored declaration's field index"
     );
-    assert!(
-        body.contains("chelis_adt_get_field(__adt_0, 1)"),
+    assert_eq!(
+        adt_field_reads(body),
+        ["1"],
         "`amount` is field 1 in the authored declaration; emitted body was:\n{body}"
     );
 }
@@ -726,8 +740,9 @@ fn module_qualified_constructors_in_one_package_keep_their_own_field_order() {
         "`amount` is field 0 in Demo.Alpha; emitted body was:\n{alpha}"
     );
     let beta = function_body(source, "float pkg__demo__Demo__Beta__value(chelis_adt* w)");
-    assert!(
-        beta.contains("chelis_adt_get_field(__adt_0, 1)"),
+    assert_eq!(
+        adt_field_reads(beta),
+        ["1"],
         "`amount` is field 1 in Demo.Beta; emitted body was:\n{beta}"
     );
 

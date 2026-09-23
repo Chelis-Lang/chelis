@@ -459,11 +459,12 @@ reannotation, and linearity annotation.
 
 The type checker verifies that `match` expressions cover all variants. Missing variants are a type error, not a warning.
 
-A top-level irrefutable arm covers the match: a bare variable pattern
-(`| x =>`) or an as-pattern whose inner pattern is irrefutable
-(`| q @ x =>`, `| q @ _ =>`). The coverage applies at the arm level
-only; a variable pattern NESTED inside a constructor or record pattern
-does not cover the other variants.
+A top-level irrefutable arm without a guard covers the match: a bare
+variable pattern (`| x =>`) or an as-pattern whose inner pattern is
+irrefutable (`| q @ x =>`, `| q @ _ =>`). The coverage applies at the arm
+level only; a variable pattern NESTED inside a constructor or record pattern
+does not cover the other variants. A guarded arm covers nothing
+([04-PAT-2]).
 
 Coverage is a separate question from whether a pattern is admissible at the
 scrutinee type at all.
@@ -493,6 +494,27 @@ scrutinee type at all.
 
 (Matching a float pattern at the scrutinee's width is not yet fully
 implemented: chelis#2438.)
+
+> **[04-PAT-2]** A `match` evaluates its scrutinee once and tries its arms in
+> declaration order. An arm is selected when its pattern matches the scrutinee
+> and its guard, if it has one, evaluates to `true`; the `match` evaluates to
+> the selected arm's body, evaluated in that arm's scope. A guard is evaluated
+> only after its arm's pattern has matched, in the arm's scope: every name the
+> pattern binds is visible to it, bound to the part of the scrutinee it matched,
+> as is every name visible at the `match`. A guard has type `bool`, under the
+> same obligation as an `if` condition (§3.2). When a guard evaluates to
+> `false`, its arm is not selected, the bindings its pattern introduced are
+> discarded, and matching continues with the next arm. No guard is evaluated for
+> an arm whose pattern did not match or for any arm after the selected one, and
+> a guard whose evaluation traps makes the `match` trap rather than reading as
+> `false`. Because a guard can be `false`, a guarded arm contributes nothing to
+> the coverage §2.4 requires: a top-level irrefutable arm covers the match only
+> when it has no guard, and a variant is covered only by an arm without a guard.
+> An arm without a guard carries `()` in the Deep guard slot
+> (`spec/03-deep-syntax.md` §2.3) and is selected whenever its pattern matches.
+> Every execution lane SHALL implement this rule: a lane that cannot lower a
+> guarded arm SHALL reject the program with a diagnostic, and SHALL NOT drop the
+> guard, drop the arm, or select an arm whose guard is `false`.
 
 ### 2.5 Opaque Types
 
@@ -1065,9 +1087,10 @@ guard.
 **Match:**
 ```
     Γ ⊢ e : τₛ
-    For each (arm {} pᵢ () bᵢ):
+    For each (arm {} pᵢ gᵢ bᵢ):
+        Γ, bindings(pᵢ, τₛ) ⊢ gᵢ : bool      when gᵢ is not ()
         Γ, bindings(pᵢ, τₛ) ⊢ bᵢ : τᵣ
-    patterns {pᵢ} are exhaustive over τₛ
+    patterns {pᵢ | gᵢ is ()} are exhaustive over τₛ
     ──────────────────────────────────────
     Γ ⊢ (match {} e arm₁ ... armₙ) : τᵣ
 ```
@@ -1075,7 +1098,9 @@ guard.
 `bindings(p, τₛ)` is defined only when `p` is admissible at the scrutinee type
 `τₛ`. An inadmissible pattern is a type error at its own arm, not an arm that
 contributes no bindings. A `pat-lit` binds nothing and contributes exactly one
-constraint on `τₛ`, which [04-PAT-1] states.
+constraint on `τₛ`, which [04-PAT-1] states. A guard `gᵢ` carries the
+obligation an `if` condition does, discharged by unifying its type with
+`bool`; [04-PAT-2] states what it does at run time.
 
 **Pipe:**
 ```

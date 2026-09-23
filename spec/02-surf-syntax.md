@@ -776,6 +776,9 @@ match n with {
 }
 ```
 
+A guard runs after its pattern matches, and a `false` guard passes control to
+the next arm (`spec/04-type-system.md` [04-PAT-2]).
+
 Record patterns allow punning and ignore unmentioned fields. Field order doesn't matter.
 
 Surf has no or-patterns; write separate arms.

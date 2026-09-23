@@ -614,10 +614,14 @@ fn nested_option_match_releases_the_scrutinee_on_both_selected_arms() {
         &format!("{}__chelis_owned_body", authored_function_symbol("choose")),
     );
 
+    // Two selected arms, plus the path on which no arm is selected: after
+    // `None` fails, the ordered planner tests `Some(flag)` on its own, and
+    // that test's `None` exit is the no-arm-selected failure ([04-PAT-2],
+    // chelis#2445).
     assert_eq!(
         choose.matches("chelis_option_release(__let_0);").count(),
-        2,
-        "each selected match arm must release the borrowed scrutinee after its final use:\n{choose}"
+        3,
+        "each path out of the match must release the borrowed scrutinee after its final use:\n{choose}"
     );
 }
 
