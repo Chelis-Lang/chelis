@@ -72,7 +72,7 @@ fn embedding_and_masking_do_not_compute_with_unselected_nonfinite_values() {
 }
 
 #[test]
-fn softmax_nontrailing_axis_values_and_explicit_backend_limits() {
+fn softmax_nontrailing_axis_values() {
     for dtype in ["f16", "bf16", "f32", "f64"] {
         let source = format!(
             "def f(x: tensor[2,3,{dtype}]) -> tensor[2,3,{dtype}] = softmax(x,0)\nx: tensor[2,3,{dtype}] = reshape(to_tensor([0.0{dtype},0.0{dtype},0.0{dtype},0.0{dtype},0.0{dtype},0.0{dtype}]),[2i64,3i64])\nresult = f(x)\n"
@@ -81,40 +81,13 @@ fn softmax_nontrailing_axis_values_and_explicit_backend_limits() {
             parse_tensor_data(&evaluate(&source), "result"),
             vec![0.5; 6]
         );
-        if dtype == "f64" {
-            // Existing #729 C max_reduce capability gap: execute and assert
-            // the loud rejection, without narrowing the normative signature.
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("softmax_f64.ch");
-            std::fs::write(&path, &source).unwrap();
-            let output = Command::cargo_bin("chelis")
-                .unwrap()
-                .env("CHELIS_STYLE_GATE_DISABLE", "1")
-                .arg("build")
-                .arg(path)
-                .args(["--target", "c", "--output"])
-                .arg(dir.path().join("out"))
-                .output()
-                .unwrap();
-            assert!(!output.status.success());
-            let diagnostic = String::from_utf8(output.stderr).unwrap();
-            assert!(
-                diagnostic.contains("op `max_reduce` on `f64` tensors"),
-                "{diagnostic}"
-            );
-            assert!(
-                diagnostic.contains("unimplemented chelis#729"),
-                "{diagnostic}"
-            );
-        } else {
-            assert_eq!(
-                parse_tensor_data(
-                    &build_and_run(&source, &format!("softmax_axis0_{dtype}")),
-                    "result"
-                ),
-                vec![0.5; 6]
-            );
-        }
+        assert_eq!(
+            parse_tensor_data(
+                &build_and_run(&source, &format!("softmax_axis0_{dtype}")),
+                "result"
+            ),
+            vec![0.5; 6]
+        );
     }
 }
 
