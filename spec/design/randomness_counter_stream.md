@@ -21,7 +21,7 @@ The assessment found that only `dropout` follows [05-RNG-1], and only inside fix
 
 These spec-legal programs are rejected:
 - runtime rates and bounds, in every lane (#2411);
-- dropout under runtime control or recursion, in eval (#2405);
+- dropout under runtime control or recursion, in eval (#2405), and under runtime control on some compiled C entry paths (#1192, #1872);
 - dropout under `vmap`, in C.
 
 Four implementation choices cause this:

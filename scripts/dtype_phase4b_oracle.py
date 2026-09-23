@@ -2497,6 +2497,10 @@ def validate_normative_contract(
             "special `rate >= 1` default exists",
             "pathwise adjoint reuses the exact saved mask",
             "the language does not differentiate that selection",
+            "through a data-flow path on which every operand slot has an adjoint "
+            "contract",
+            "a path through a zero-cotangent slot or a [05-OP-42] `stop_gradient` "
+            "does not count",
             "`AdRejectionReason::RandomSelectionParameter`; otherwise the rate "
             "receives the exact zero cotangent",
             "mask comparison itself has zero cotangent",

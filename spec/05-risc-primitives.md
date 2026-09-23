@@ -1031,9 +1031,9 @@ compile-time-only alias.
 > both primitives finalize before their consumer under [04-NUM-8]. The rate
 > selects which elements the mask keeps, and the language does not
 > differentiate that selection. When a differentiated parameter reaches the
-> rate through a data-flow path whose every operation has an adjoint contract
-> (a path through a zero-cotangent operation or a [05-OP-42] `stop_gradient`
-> does not count), `grad` rejects with
+> rate through a data-flow path on which every operand slot has an adjoint
+> contract (a path through a zero-cotangent slot or a [05-OP-42]
+> `stop_gradient` does not count), `grad` rejects with
 > `AdRejectionReason::RandomSelectionParameter`; otherwise the rate receives
 > the exact zero cotangent. The mask comparison itself has zero cotangent.
 > The operation has no accumulator parameter. (The typed rejection is not yet
