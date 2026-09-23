@@ -6,6 +6,7 @@
 use chelis_ir::Dag;
 use chelis_ir::dag::{DimInfo, RiscOp, TensorType};
 use chelis_ir::eval::{RandomFrame, TensorValue, eval_tensor_roots_with_frame};
+use chelis_types::dtype_semantics::{RawTensor, finalize_tensor};
 use chelis_types::types::Prim;
 use chelis_unord::UnordMap;
 
@@ -424,21 +425,26 @@ fn source_ad_replays_a_mask_with_no_extra_draw_and_preserves_dead_forward_calls(
     }
 }
 
-/// chelis#2410: a runtime `if` lowered into a kernel `where` computes both
-/// arms, so a `dropout` in either arm would take an ordinal in the unselected
-/// one, which [05-RNG-1]'s sequential reading does not give it. With no random
-/// activation to gate the draw, lowering refuses it with a typed, nonfatal
-/// #2410 rejection, so a caller with a host lane runs the branch as control
-/// flow instead. `uniform_like` keeps #2410's existing behaviour, and a
-/// literal condition lowers only its taken arm.
+/// [05-RNG-1] enters only the selected arm of a runtime `if`. A kernel
+/// `where` computes both arms, so every draw lowered in an arm carries the
+/// arm's path condition as its activation, on its draw key and on its
+/// primitive: an unselected draw neither validates its controls nor takes an
+/// ordinal (chelis#2410). Rows cover both primitives, both arms, a nested
+/// arm, and a runtime bound that traps when it is validated. A literal
+/// condition lowers only its taken arm, with no activation.
 ///
-/// Evidentiary status: REGRESSION TEST for the refusal rows (at 3b5f029d8 the
-/// `dropout` rows lowered to an unconditional draw).
+/// Evidentiary status: REGRESSION TEST. At dcc9256c4 lowering refused every
+/// `dropout` row with a #2410 rejection, and the `uniform_like` rows drew
+/// with no activation: the unselected arm took an ordinal and trapped on
+/// its invalid bound.
 #[test]
-fn a_dropout_in_an_unactivated_where_arm_is_refused_with_a_typed_rejection() {
-    let lower_if = |condition: &str, then: &str, otherwise: &str| {
-        let source = format!("(if {{}} {condition} {then} {otherwise})");
-        let expression = chelis_deep::parser::parse_str(&source)
+fn a_draw_in_a_runtime_arm_is_activated_by_its_arm_path() {
+    let scalar = |precision| TensorType {
+        dims: Vec::new(),
+        precision,
+    };
+    let lower_arm = |source: &str| {
+        let expression = chelis_deep::parser::parse_str(source)
             .unwrap()
             .pop()
             .unwrap();
@@ -450,36 +456,131 @@ fn a_dropout_in_an_unactivated_where_arm_is_refused_with_a_typed_rejection() {
                 precision: Prim::F32,
             },
         );
-        inputs.insert(
-            "flag".into(),
-            TensorType {
-                dims: Vec::new(),
-                precision: Prim::Bool,
-            },
-        );
+        for name in ["flag", "inner"] {
+            inputs.insert(name.into(), scalar(Prim::Bool));
+        }
+        inputs.insert("low".into(), scalar(Prim::F32));
         chelis_ir::lower::try_lower_subexpr_program(
             &expression,
             inputs,
             UnordMap::new(),
             UnordMap::new(),
         )
+        .unwrap()
+    };
+    let run_arm = |dag: &Dag, flag: bool, inner: bool, low: f64, frame: &mut RandomFrame| {
+        let values = eval_tensor_roots_with_frame(dag, dag.roots(), frame, |name| match name {
+            "x" => Some(TensorValue::from_vec(vec![4], vec![1.0; 4])),
+            "flag" | "inner" => Some(
+                TensorValue::finalize_from_wide_int(
+                    "arm flag",
+                    Prim::Bool,
+                    Vec::new(),
+                    vec![i64::from(if name == "flag" { flag } else { inner })],
+                )
+                .unwrap(),
+            ),
+            "low" => Some(TensorValue::from_storage(
+                Vec::new(),
+                finalize_tensor("arm bound", Prim::F32, RawTensor::Float(vec![low])).unwrap(),
+            )),
+            _ => None,
+        })?;
+        Ok::<_, String>(values[&dag.roots()[0]].to_f64_lossy_vec())
     };
     let dropout = "(app {} (var {} dropout) (var {} x) (lit {type: (t-prim {} f32)} 0.5))";
-    let uniform = "(app {} (var {} uniform_like) (var {} x) (lit {type: (t-prim {} f32)} 0.0) (lit {type: (t-prim {} f32)} 1.0))";
-    let (runtime, x) = ("(var {} flag)", "(var {} x)");
-    for (then, otherwise) in [(dropout, x), (x, dropout)] {
-        let refusal =
-            lower_if(runtime, then, otherwise).expect_err("a where-arm dropout must be refused");
-        assert!(!refusal.fatal, "a host lane may own the branch: {refusal}");
-        let unsupported = refusal.unsupported().expect("a typed rejection");
-        assert!(
-            unsupported.to_string().contains("chelis#2410"),
-            "{unsupported}"
-        );
+    let uniform =
+        "(app {} (var {} uniform_like) (var {} x) (var {} low) (lit {type: (t-prim {} f32)} 1.0))";
+    let x = "(var {} x)";
+    for draw in [dropout, uniform] {
+        let rows = [
+            (
+                format!("(if {{}} (var {{}} flag) {draw} {x})"),
+                [true, true],
+            ),
+            (
+                format!("(if {{}} (var {{}} flag) {x} {draw})"),
+                [false, true],
+            ),
+            (
+                format!("(if {{}} (var {{}} flag) (if {{}} (var {{}} inner) {draw} {x}) {x})"),
+                [true, true],
+            ),
+            (
+                format!("(if {{}} (var {{}} flag) {x} (if {{}} (var {{}} inner) {x} {draw}))"),
+                [false, false],
+            ),
+        ];
+        for (source, [selected_flag, selected_inner]) in rows {
+            let dag = lower_arm(&source);
+            let mut activated = 0;
+            for node in dag.nodes() {
+                let fixed = match node.op {
+                    RiscOp::DrawKey { draw, .. } => draw.control_count(),
+                    RiscOp::Dropout => 3,
+                    RiscOp::UniformLike => 4,
+                    _ => continue,
+                };
+                let activation = node.inputs.get(fixed).copied();
+                assert!(
+                    activation.is_some(),
+                    "{source}: {:?} is unactivated",
+                    node.op
+                );
+                assert_eq!(
+                    dag.get(activation.unwrap()).unwrap().output_type,
+                    scalar(Prim::Bool)
+                );
+                activated += 1;
+            }
+            assert_eq!(activated, 2, "{source}");
+            for flag in [false, true] {
+                for inner in [false, true] {
+                    let selected = flag == selected_flag
+                        && (!source.contains("inner") || inner == selected_inner);
+                    // A valid bound: the selected arm takes one ordinal.
+                    let mut frame = RandomFrame::inherited(42, 0);
+                    let values = run_arm(&dag, flag, inner, 0.0, &mut frame).unwrap();
+                    assert_eq!(
+                        counter(&frame),
+                        u64::from(selected),
+                        "{source} {flag} {inner}"
+                    );
+                    if !selected {
+                        assert_eq!(values, vec![1.0; 4], "{source} {flag} {inner}");
+                    }
+                    // A bound above `high`: validated, and so trapping, only
+                    // in the selected arm. `dropout`'s literal rate is valid.
+                    let mut frame = RandomFrame::inherited(42, 0);
+                    let invalid = run_arm(&dag, flag, inner, 2.0, &mut frame);
+                    if selected && draw == uniform {
+                        let error = invalid.unwrap_err();
+                        assert!(error.contains("domain in uniform_like"), "{error}");
+                        assert_eq!(counter(&frame), 0, "validation consumes no ordinal");
+                    } else {
+                        invalid.unwrap_or_else(|error| panic!("{source} {flag} {inner}: {error}"));
+                    }
+                }
+            }
+        }
     }
-    let draws = |dag: &Dag, op: fn(&RiscOp) -> bool| dag.nodes().iter().any(|node| op(&node.op));
-    let literal = lower_if("(lit {type: (t-prim {} bool)} true)", dropout, x).unwrap();
-    assert!(draws(&literal, |op| matches!(op, RiscOp::Dropout)));
-    let uniform = lower_if(runtime, uniform, x).unwrap();
-    assert!(draws(&uniform, |op| matches!(op, RiscOp::UniformLike)));
+    let literal = lower_arm(&format!(
+        "(if {{}} (lit {{type: (t-prim {{}} bool)}} true) {dropout} {x})"
+    ));
+    assert!(
+        !literal
+            .nodes()
+            .iter()
+            .any(|node| matches!(node.op, RiscOp::Where))
+    );
+    let key = literal
+        .nodes()
+        .iter()
+        .find(|node| matches!(node.op, RiscOp::DrawKey { .. }))
+        .expect("the taken arm draws");
+    assert_eq!(
+        key.inputs.len(),
+        1,
+        "a literal condition adds no activation"
+    );
 }

@@ -1828,3 +1828,127 @@ fn grad_of_a_captured_drawing_closure_still_sees_its_draw() {
     assert_eq!(tensor(&result, "main.0"), mask(0));
     assert_eq!(tensor(&result, "main.1"), mask(1));
 }
+
+/// [05-RNG-1] enters only the selected arm of a runtime `if`, so in the DAG
+/// evaluator a draw in an unselected arm neither validates its controls nor
+/// takes an ordinal (chelis#2410): the whole-program graph computes both arms
+/// of a `where`, and each draw there carries its arm's path condition as its
+/// activation. Each row adds the arm's value to a later draw, so a shifted
+/// ordinal changes the result. Flags come from data, so lowering cannot fold
+/// them.
+///
+/// Evidentiary status: REGRESSION TEST for the `uniform_like` rows with a
+/// later draw and for the `dropout` rows under `grad`: at dcc9256c4 the former
+/// took ordinal 1 for the later draw and the latter were refused with the
+/// #2410 rejection. The invalid-bound row passed there.
+#[test]
+fn a_draw_in_an_unselected_arm_takes_no_ordinal_in_the_dag_evaluator() {
+    let sum = "tensor_to_scalar(sum(copy(x), 0i32))";
+    let selected = |body: &str| {
+        format!(
+            "def selected(x: tensor[32, f32]) -> tensor[32, f32] = with seed(42i64) {{\n s = {sum}\n{body}}}\n"
+        )
+    };
+    let unit = |ordinal| spec_unit_uniform(42, ordinal, 32);
+    let add = |left: &[f32], right: &[f32]| -> Vec<f32> {
+        left.iter()
+            .zip(right)
+            .map(|(left, right)| left + right)
+            .collect()
+    };
+    let as_f32 = |values: Vec<f64>| {
+        values
+            .into_iter()
+            .map(|value| value as f32)
+            .collect::<Vec<_>>()
+    };
+    let ones = vec![1.0_f32; 32];
+    // [05-OP-37] at rate 0.25 over ones: a kept element is `1 / 0.75` at
+    // binary32.
+    let quarter_rate = unit(0)
+        .into_iter()
+        .map(|unit| if unit < 0.25 { 0.0 } else { 1.0_f32 / 0.75_f32 })
+        .collect::<Vec<_>>();
+    let noisy = "def layer(x: tensor[32, f32], noisy: bool, eps: f32) -> tensor[32, f32] ! { Random } = if noisy then add(copy(x), uniform_like(x, neg(eps), eps)) else x\n";
+    let loss = |comparison: &str| {
+        format!(
+            "def loss(x: tensor[32, f32]) -> tensor[f32] ! {{ Random }} = if {comparison}({sum}, 0.0f32) then sum(dropout(x, 0.5f32), 0i32) else sum(x, 0i32)\n"
+        )
+    };
+    let rows = [
+        (
+            "uniform, invalid run-time bounds, unselected",
+            format!(
+                "{noisy}{}",
+                selected(" layer(x, lt(s, 0.0f32), sub(0.0f32, s))\n")
+            ),
+            ones.clone(),
+        ),
+        (
+            "uniform, valid run-time bounds, unselected, then a draw",
+            format!(
+                "{noisy}{}",
+                selected(
+                    " add(layer(copy(x), lt(s, 0.0f32), s), uniform_like(x, 0.0f32, 1.0f32))\n"
+                )
+            ),
+            add(&ones, &unit(0)),
+        ),
+        (
+            "uniform in a nested arm, then a draw",
+            format!(
+                "def pick(x: tensor[32, f32], a: bool, b: bool) -> tensor[32, f32] ! {{ Random }} = if a then if b then uniform_like(x, 0.0f32, 1.0f32) else x else x\n{}",
+                selected(
+                    " add(pick(copy(x), gt(s, 0.0f32), lt(s, 0.0f32)), uniform_like(x, 0.0f32, 1.0f32))\n"
+                )
+            ),
+            add(&ones, &unit(0)),
+        ),
+        (
+            "dropout in both arms, then a draw",
+            format!(
+                "def pick(x: tensor[32, f32], flag: bool) -> tensor[32, f32] ! {{ Random }} = if flag then dropout(x, 0.5f32) else dropout(x, 0.25f32)\n{}",
+                selected(" add(pick(copy(x), lt(s, 0.0f32)), dropout(x, 0.5f32))\n")
+            ),
+            add(&quarter_rate, &as_f32(mask(1))),
+        ),
+        (
+            "grad through an unselected drawing arm, then a draw",
+            format!(
+                "{}{}",
+                loss("lt"),
+                selected(" add(grad(loss)(copy(x)), dropout(x, 0.5f32))\n")
+            ),
+            add(&ones, &as_f32(mask(0))),
+        ),
+        (
+            "grad through a selected drawing arm, then a draw",
+            format!(
+                "{}{}",
+                loss("gt"),
+                selected(" add(grad(loss)(copy(x)), dropout(x, 0.5f32))\n")
+            ),
+            add(&as_f32(mask(0)), &as_f32(mask(1))),
+        ),
+    ];
+    assert_ne!(unit(0), unit(1));
+    let mut failures = Vec::new();
+    for (row, source, expected) in rows {
+        match eval_selected(request(&source), &["selected".into()]) {
+            Ok(result) => {
+                let actual = as_f32(tensor(&result, "selected"));
+                let bits = |values: &[f32]| {
+                    values
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>()
+                };
+                if bits(&actual) != bits(&expected) {
+                    failures.push(format!("{row}: {actual:?}"));
+                }
+            }
+            Err(error) => failures.push(format!("{row}: {error:?}")),
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

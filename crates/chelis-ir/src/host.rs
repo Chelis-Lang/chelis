@@ -4099,11 +4099,10 @@ fn cached_def_effect_rows(
 /// lane the non-fatal fall-through (chelis#1515) already chose, so the emitted
 /// program is unchanged, which the corpus capture proves rather than assumes.
 ///
-/// `admit_dropout` lets a kernel carry `dropout` outside a runtime `if`. A
-/// runtime `if` lowers into a kernel as a `where` that computes both arms, and
-/// a draw in the unselected arm would take an ordinal the spec's sequential
-/// reading does not give it (chelis#2410), so a `dropout` under one keeps the
-/// def in host code, where the branch executes as control flow.
+/// `admit_dropout` lets a kernel carry `dropout`. A runtime `if` lowers into a
+/// kernel as a `where` that computes both arms, and each draw there carries
+/// its arm's path as its activation, so an unselected arm neither validates
+/// nor takes an ordinal (chelis#2410).
 pub(crate) fn body_form_the_dag_cannot_carry(
     program: &HostLoweringSession<'_>,
     body: &Expr,
@@ -4119,7 +4118,6 @@ pub(crate) fn body_form_the_dag_cannot_carry(
         #[cfg(test)]
         def_visits: 0,
         admit_dropout,
-        runtime_branch_depth: 0,
         scopes: vec![
             params
                 .iter()
@@ -4188,14 +4186,11 @@ struct UncarriableWalk<'a> {
     #[cfg(test)]
     def_visits: usize,
     admit_dropout: bool,
-    /// How many runtime `if` arms enclose the walked expression.
-    runtime_branch_depth: usize,
     scopes: Vec<UnordMap<String, AdmissionBinding>>,
 }
 
 struct CompletedAdmission {
     inputs: Vec<AdmissionBinding>,
-    under_runtime_branch: bool,
     reason: Option<String>,
 }
 
@@ -4295,14 +4290,9 @@ impl UncarriableWalk<'_> {
         match node.tag() {
             DeepTag::Var => {
                 let name = kids.first().and_then(symbol_name)?;
-                if self.bound(name).is_none()
-                    && name == "dropout"
-                    && let Some(reason) = self.dropout_admission()
-                {
-                    return reason;
-                }
                 if self.bound(name).is_some()
                     || BUILTIN_NAMES.contains(&name)
+                    || (self.admit_dropout && name == "dropout")
                     || name.chars().next().is_some_and(char::is_uppercase)
                 {
                     return None;
@@ -4390,19 +4380,7 @@ impl UncarriableWalk<'_> {
                     // the checker has already bound every value name. A callee
                     // that is neither a builtin nor a definition is walked as a
                     // name and reported as unresolvable.
-                    if name == "dropout"
-                        && let Some(reason) = self.dropout_admission()
-                    {
-                        if reason.is_some() {
-                            return reason;
-                        }
-                        return kids
-                            .iter()
-                            .skip(1)
-                            .filter(|kid| !is_bare_lowercase_var(kid))
-                            .find_map(|kid| self.expr(kid));
-                    }
-                    if BUILTIN_NAMES.contains(&name) {
+                    if BUILTIN_NAMES.contains(&name) || (self.admit_dropout && name == "dropout") {
                         return kids
                             .iter()
                             .skip(1)
@@ -4529,33 +4507,8 @@ impl UncarriableWalk<'_> {
                 }
                 None
             }
-            DeepTag::If if self.admit_dropout => {
-                let (condition, arms) = kids.split_first()?;
-                if let Some(found) = self.expr(condition) {
-                    return Some(found);
-                }
-                let runtime = usize::from(!is_literal_bool(condition));
-                self.runtime_branch_depth += runtime;
-                let found = arms.iter().find_map(|arm| self.expr(arm));
-                self.runtime_branch_depth -= runtime;
-                found
-            }
             _ => kids.iter().find_map(|kid| self.expr(kid)),
         }
-    }
-
-    /// `None` when `dropout` is not admitted, so the name is walked like any
-    /// other free name; `Some(None)` when a kernel carries it here; and
-    /// `Some(Some(reason))` when a runtime `if` arm encloses it.
-    fn dropout_admission(&self) -> Option<Option<String>> {
-        if !self.admit_dropout {
-            return None;
-        }
-        Some((self.runtime_branch_depth > 0).then(|| {
-            "a `dropout` under a runtime `if`, whose kernel `where` would draw in the \
-             unselected arm (chelis#2410)"
-                .to_string()
-        }))
     }
 
     fn def(
@@ -4605,12 +4558,11 @@ impl UncarriableWalk<'_> {
         // Compare exact facts (including constructor status), not a wildcard
         // join or a name-only visited bit that conflates distinct actuals.
         let inputs: Vec<_> = params.iter().map(|(_, binding)| binding.clone()).collect();
-        let under_runtime_branch = self.runtime_branch_depth > 0;
-        if let Some(completed) = self.completed.get(name).and_then(|contexts| {
-            contexts.iter().find(|context| {
-                context.inputs == inputs && context.under_runtime_branch == under_runtime_branch
-            })
-        }) {
+        if let Some(completed) = self
+            .completed
+            .get(name)
+            .and_then(|contexts| contexts.iter().find(|context| context.inputs == inputs))
+        {
             return completed.reason.clone();
         }
         self.active.insert(name.to_string());
@@ -4631,7 +4583,6 @@ impl UncarriableWalk<'_> {
                 .or_default()
                 .push(CompletedAdmission {
                     inputs,
-                    under_runtime_branch,
                     reason: found.clone(),
                 });
         }
@@ -4815,20 +4766,6 @@ fn is_literal_int_list(expr: &Expr) -> bool {
             .iter()
             .all(|elem| crate::lower::extract_int_for_dim(elem).is_some())
     })
-}
-
-/// A `true` or `false` literal, the only `if` condition the admission walk
-/// treats as static.
-fn is_literal_bool(expr: &Expr) -> bool {
-    match expr {
-        Expr::Atom(Atom::Bool(_), _) => true,
-        Expr::MetaExpr(meta, _) => is_literal_bool(&meta.expr),
-        Expr::Node(..) => matches!(
-            stamped_parts(expr),
-            Some((DeepTag::Lit, _, kids)) if kids.first().is_some_and(is_literal_bool)
-        ),
-        _ => false,
-    }
 }
 
 /// A fill value `lower_builtin_app` resolves statically for `pad`: a numeric
@@ -20316,7 +20253,6 @@ mod tests {
                 cycle_cutoff: false,
                 def_visits: 0,
                 admit_dropout: false,
-                runtime_branch_depth: 0,
                 scopes: vec![UnordMap::from([(
                     "x".to_string(),
                     AdmissionBinding {
@@ -20353,7 +20289,6 @@ mod tests {
             cycle_cutoff: false,
             def_visits: 0,
             admit_dropout: false,
-            runtime_branch_depth: 0,
             scopes: vec![UnordMap::from([(
                 "xs".to_string(),
                 AdmissionBinding {
@@ -20410,7 +20345,6 @@ mod tests {
             cycle_cutoff: false,
             def_visits: 0,
             admit_dropout: false,
-            runtime_branch_depth: 0,
             scopes: Vec::new(),
         }
     }

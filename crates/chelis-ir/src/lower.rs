@@ -6915,10 +6915,13 @@ struct LowerCtx<'program> {
     program_types: Arc<BTreeMap<String, TensorType>>,
     program_defs: Arc<BTreeMap<String, Expr>>,
     program_signatures: Arc<BTreeMap<String, Expr>>,
-    /// Scalar Bool activation for path-sensitive Random nodes inside an AD
-    /// transform. `None` is the ordinary static-ordinal lane; `Some` makes
-    /// each draw consume the handled stream only when its executed path is
-    /// active at runtime.
+    /// Scalar Bool under which a subcontext's graph is entered, conjoined
+    /// with every `if` arm predicate [`Self::branch_path_condition`] holds.
+    /// A staged host segment is entered whenever it executes, so it starts
+    /// at a constant `true`; a `grad` body is spliced back into its caller's
+    /// position, so it starts at the caller's [`Self::draw_activation`].
+    /// `None` outside those subcontexts, where the branch path alone is the
+    /// path.
     random_path_condition: Option<NodeId>,
     /// The `with seed` handler region lowered inside this graph that encloses
     /// the expression being lowered, or `None` when draws inherit the stream
@@ -6930,13 +6933,6 @@ struct LowerCtx<'program> {
     /// whose graph is spliced back continues this numbering and hands it
     /// back, so instances stay unique after the splice.
     next_random_instance: u32,
-    /// How many runtime `if` arms, lowered into a `Where` that computes both
-    /// arms with no [`Self::random_path_condition`] to activate their draws,
-    /// enclose the expression being lowered. A `dropout` drawn under one
-    /// would take an ordinal in the unselected arm (chelis#2410), so
-    /// [`Self::lower_keyed_draw`] refuses it. The `grad` subcontext inherits
-    /// the count because its graph is spliced back into the arm.
-    unactivated_arm_depth: usize,
     /// chelis#1464: depth of `if` branches currently being lowered. A
     /// `fail(...)` lowered at depth > 0 that `lower_if` did NOT recognize
     /// directly is an INDIRECT trap (behind a helper call or a `let`); it
@@ -7084,7 +7080,6 @@ impl<'program> LowerCtx<'program> {
             random_path_condition: None,
             random_scope: None,
             next_random_instance: 0,
-            unactivated_arm_depth: 0,
             if_branch_depth: 0,
             linearity,
             inlining_depths: UnordMap::new(),
@@ -7271,8 +7266,8 @@ impl<'program> LowerCtx<'program> {
     /// [`RiscOp::DrawKey`] that takes the next ordinal of the enclosing
     /// handler, then the primitive consuming that key. The draw key reads the
     /// innermost `with seed` region lowered in this graph, else the stream the
-    /// graph's caller holds. Both nodes carry today's path activation where
-    /// lowering has one, and nowhere else.
+    /// graph's caller holds. Both nodes carry the position's
+    /// [`Self::draw_activation`] when it has one.
     fn lower_keyed_draw(
         &mut self,
         draw: crate::dag::RandomDraw,
@@ -7281,9 +7276,6 @@ impl<'program> LowerCtx<'program> {
         ty: TensorType,
     ) -> NodeId {
         let span = self.current_span_id.clone();
-        if draw == crate::dag::RandomDraw::Dropout && self.unactivated_arm_depth > 0 {
-            self.reject_dropout_in_unactivated_arm(span.clone());
-        }
         let scalar = |precision| TensorType {
             dims: Vec::new(),
             precision,
@@ -7311,7 +7303,7 @@ impl<'program> LowerCtx<'program> {
             }
             None => (crate::dag::RandomHandler::Inherited, None),
         };
-        let activation = self.random_path_condition;
+        let activation = self.draw_activation();
         let key = self.dag.add_node(
             RiscOp::DrawKey {
                 handler,
@@ -7337,30 +7329,17 @@ impl<'program> LowerCtx<'program> {
         self.dag.add_node(op, inputs, ty, span)
     }
 
-    /// A runtime `if` lowered into a `Where` computes both arms, and with no
-    /// random path to activate it a `dropout` in the unselected arm would take
-    /// an ordinal the sequential reading of [05-RNG-1] does not give it
-    /// (chelis#2410). Refused rather than drawn, as the compiled lanes did
-    /// before the key-operand IR. Non-fatal, so the host lane, where the
-    /// branch executes as control flow, can own the expression instead.
-    fn reject_dropout_in_unactivated_arm(&self, span_id: Option<String>) -> ! {
-        raise_lowering_diagnostic(LowerDiagnostic::from_unsupported(
-            Unsupported::new(
-                UnsupportedKind::Construct(
-                    "`dropout` under a runtime `if` lowered into a kernel `where`".to_string(),
-                ),
-                "IR lowering",
-                Stage::Lowering,
-                chelis_types::unimplemented_rejection!(
-                    2410,
-                    "a kernel `where` computes both arms of a runtime `if`, so a draw in \
-                     the unselected arm would take an ordinal the sequential reading does \
-                     not give it"
-                ),
-            ),
-            None,
-            span_id,
-        ))
+    /// The activation of a draw lowered at the current position: the path
+    /// condition under which [05-RNG-1] enters its source position, or `None`
+    /// when every execution of this graph enters it. A runtime `if` lowered
+    /// into a `Where` computes both arms, so a draw in an arm takes an ordinal
+    /// and validates its controls only when this is true (chelis#2410).
+    ///
+    /// Where [`Self::random_path_condition`] is set it already conjoins every
+    /// arm predicate [`Self::branch_path_condition`] holds with the
+    /// subcontext's entry, so it is the stronger of the two.
+    fn draw_activation(&self) -> Option<NodeId> {
+        self.random_path_condition.or(self.branch_path_condition)
     }
 
     fn attach_reuse_hint(
@@ -10208,21 +10187,27 @@ impl<'program> LowerCtx<'program> {
         // scoped instances continue this graph's numbering.
         subctx.random_scope = self.random_scope;
         subctx.next_random_instance = self.next_random_instance;
-        subctx.unactivated_arm_depth = self.unactivated_arm_depth;
         subctx.allow_host_list_ad_rewrites = true;
         // Subctx inherits the parent's current span so synthesized loads
         // for grad's parameters carry the grad-call's span.
         subctx.current_span_id = self.current_span_id.clone();
-        let random_path_true = subctx.dag.add_node(
-            RiscOp::synth_const(Prim::Bool, 1.0),
-            vec![],
-            TensorType {
-                dims: Vec::new(),
-                precision: Prim::Bool,
-            },
-            subctx.current_span_id.clone(),
-        );
-        subctx.random_path_condition = Some(random_path_true);
+        // The body is spliced back at this position, so its draws are
+        // entered exactly when the position is. A position every execution
+        // enters activates them with a constant; one inside a runtime `if`
+        // arm passes its activation in through a Load the splice resolves.
+        let caller_draw_activation = self.draw_activation();
+        if caller_draw_activation.is_none() {
+            let random_path_true = subctx.dag.add_node(
+                RiscOp::synth_const(Prim::Bool, 1.0),
+                vec![],
+                TensorType {
+                    dims: Vec::new(),
+                    precision: Prim::Bool,
+                },
+                subctx.current_span_id.clone(),
+            );
+            subctx.random_path_condition = Some(random_path_true);
+        }
         let captured_bindings = self.seed_subctx_with_lexical_scope(&mut subctx, &param_names);
         // Generated structured-leaf Loads share one name-keyed splice map
         // with ordinary parameters and captured values. Keep a fresh-name
@@ -10239,6 +10224,29 @@ impl<'program> LowerCtx<'program> {
                     .map(|(name, _)| name.clone()),
             )
             .collect::<UnordSet<_>>();
+        let caller_activation_arg = caller_draw_activation.map(|activation| {
+            let mut suffix = 0usize;
+            let load_name = loop {
+                let candidate = format!("__chelis_grad_draw_activation_{suffix}");
+                if used_load_names.insert(candidate.clone()) {
+                    break candidate;
+                }
+                suffix += 1;
+            };
+            let load = subctx.dag.add_node(
+                RiscOp::Load {
+                    name: load_name.as_str().into(),
+                },
+                vec![],
+                TensorType {
+                    dims: Vec::new(),
+                    precision: Prim::Bool,
+                },
+                subctx.current_span_id.clone(),
+            );
+            subctx.random_path_condition = Some(load);
+            (load_name, activation)
+        });
         let mut wrt = Vec::new();
         // Actual argument node backing each `wrt` load, in `wrt` order
         // (tensor param -> the argument node, ADT field -> the field node).
@@ -10461,6 +10469,7 @@ impl<'program> LowerCtx<'program> {
             })
             .chain(adt_arg_map_entries)
             .chain(captured_bindings.into_sorted())
+            .chain(caller_activation_arg)
             .collect::<UnordMap<_, _>>();
         let specialized_grad_dag = Self::remap_callable_dim_symbols(
             &grad_result.dag,
@@ -18003,6 +18012,7 @@ impl<'program> LowerCtx<'program> {
         on_true: bool,
     ) -> LoweredValue {
         let saved = self.branch_path_condition;
+        let saved_random_path = self.random_path_condition;
         let path_ty = TensorType {
             dims: Vec::new(),
             precision: Prim::Bool,
@@ -18021,15 +18031,26 @@ impl<'program> LowerCtx<'program> {
             Some(parent) => self.dag.add_node(
                 RiscOp::Logical(LogicalKind::And),
                 vec![parent, predicate],
-                path_ty,
+                path_ty.clone(),
                 self.current_span_id.clone(),
             ),
             None => predicate,
         });
+        // The random path conjoins the same predicate, so a draw in the
+        // surviving arm is not entered when the `fail` arm is selected.
+        if let Some(parent) = saved_random_path {
+            self.random_path_condition = Some(self.dag.add_node(
+                RiscOp::Logical(LogicalKind::And),
+                vec![parent, predicate],
+                path_ty,
+                self.current_span_id.clone(),
+            ));
+        }
         self.if_branch_depth += 1;
         let lowered = self.lower_expr(branch);
         self.if_branch_depth -= 1;
         self.branch_path_condition = saved;
+        self.random_path_condition = saved_random_path;
         lowered
     }
 
@@ -18389,9 +18410,6 @@ impl<'program> LowerCtx<'program> {
             None => cond,
         });
         let saved_random_path = self.random_path_condition;
-        // Without a random path, both arms' draws execute unconditionally.
-        let unactivated = usize::from(saved_random_path.is_none());
-        self.unactivated_arm_depth += unactivated;
         if let Some(parent_path) = saved_random_path {
             let path_ty = TensorType {
                 dims: Vec::new(),
@@ -18451,7 +18469,6 @@ impl<'program> LowerCtx<'program> {
         let else_value = self.lower_expr(else_expr);
         self.if_branch_depth -= 1;
         let else_node = self.expect_runtime_if_branch(else_value, "else", span);
-        self.unactivated_arm_depth -= unactivated;
         self.random_path_condition = saved_random_path;
         self.branch_path_condition = saved_branch_path;
         let stamped_out_ty = self.type_from_meta(meta);

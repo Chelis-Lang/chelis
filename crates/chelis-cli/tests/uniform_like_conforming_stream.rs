@@ -1,8 +1,9 @@
 //! [05-RNG-1] and [05-OP-8]: straight-line `uniform_like` draws produce the
 //! spec's words and sampler arithmetic, bit for bit, in `chelis eval`, in
 //! compiled C, and in the DAG evaluator (whole-program lowering and
-//! fixed-control plans). The programs take no `vmap` or unselected arm, whose
-//! ordinals are chelis#2409's and chelis#2410's.
+//! fixed-control plans). The stream programs take no `vmap`, whose ordinals
+//! are chelis#2409's; a draw in an unselected arm takes no ordinal and
+//! validates nothing (chelis#2410).
 //!
 //! The reference below transcribes the two atoms from the spec text. It never
 //! calls an evaluator, a lowering, or a `chelis_types` sampler, so a lane that
@@ -586,4 +587,287 @@ fn compiled_c_traps_invalid_run_time_uniform_bounds_before_the_draw() {
         );
         assert!(run.stdout.is_empty(), "{name} printed a draw");
     }
+}
+
+/// A printed root's values: a tensor's data, or a scalar as one value.
+fn printed_root(stdout: &str, root: &str) -> Vec<f64> {
+    let prefix = format!("{root} = ");
+    let line = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix(&prefix))
+        .unwrap_or_else(|| panic!("no `{root}` in:\n{stdout}"));
+    if line.starts_with("tensor(") {
+        return common::parse_tensor_data(stdout, root);
+    }
+    vec![line.trim().parse().expect("a numeric scalar")]
+}
+
+/// One expected root: exact binary32 values, or a binary32 reduction whose
+/// summation order the reference does not model.
+enum Root {
+    Exact(Vec<f64>),
+    Sum(f64),
+}
+
+/// [05-RNG-1] enters only the selected arm of a runtime `if` or `match`, so a
+/// `uniform_like` in an unselected arm neither validates its bounds nor
+/// takes an ordinal (chelis#2410). A kernel `where` computes both arms, so
+/// each draw there carries its arm's path condition as its activation. The
+/// flags are computed from data, so no lane can fold them. Rows cover run-time
+/// bounds that would trap if validated, eval's named-axis route, a local
+/// ascription, a nested arm, a `match` arm, `grad` through an unselected arm,
+/// and chelis#2410's own reproducer.
+///
+/// Evidentiary status: REGRESSION TEST. At dcc9256c4 compiled C trapped on
+/// `helper_invalid_bounds` and shifted the later draw of
+/// `helper_valid_bounds`, `ascribed_helper` and `issue_2410` by one ordinal,
+/// and eval trapped on `routed_invalid_bounds` and shifted the later draw of
+/// `routed_valid_bounds` and `routed_literal`. The other rows passed there.
+#[test]
+fn a_uniform_like_in_an_unselected_arm_takes_no_ordinal_in_eval_or_c() {
+    assert!(
+        common::gcc_available(),
+        "C toolchain required; no lane may skip"
+    );
+    let unit = |c: u64, len: u64| {
+        (0..len)
+            .map(|i| {
+                f64::from(f32::from_bits(
+                    spec_bits(Prim::F32, 7, c, i, 0.0, 1.0) as u32
+                ))
+            })
+            .collect::<Vec<_>>()
+    };
+    let ones = |len| vec![1.0; len];
+    let x8 = "x = to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32, 1.0f32, 1.0f32, 1.0f32, 1.0f32])";
+    let sum = "tensor_to_scalar(sum(copy(x), 0i32))";
+    let handled =
+        |body: &str| format!("def main() =\n  with seed(7i64) {{\n    {x8}\n{body}  }}\n");
+    let noisy_helper = "def layer(x: tensor[8, f32], noisy: bool, eps: f32) -> tensor[8, f32] ! { Random } = if noisy then add(copy(x), uniform_like(x, neg(eps), eps)) else x\n";
+    let routed = |bounds: &str| {
+        format!(
+            "def layer(x: tensor[seq, f32], noisy: bool, eps: f32) -> f32 ! {{ Random }} = tensor_to_scalar(sum(if noisy then uniform_like(x, {bounds}) else x, seq))\n"
+        )
+    };
+    let routed_body = |comparison: &str, eps: &str| {
+        format!(
+            "    s = {sum}\n    noisy = {comparison}(s, 0.0f32)\n    y = layer(copy(x), noisy, {eps})\n    z = uniform_like(x, 0.0f32, 1.0f32)\n    (y, z)\n"
+        )
+    };
+    let pick = "def pick(x: tensor[8, f32], flag: bool) -> tensor[8, f32] ! { Random } = if flag then uniform_like(x, 0.0f32, 1.0f32) else x\n";
+    let rows = [
+        (
+            "helper_invalid_bounds",
+            format!(
+                "{noisy_helper}{}",
+                handled(&format!(
+                    "    s = {sum}\n    layer(x, lt(s, 0.0f32), sub(0.0f32, s))\n"
+                ))
+            ),
+            vec![("main", Root::Exact(ones(8)))],
+        ),
+        (
+            "inline_invalid_bounds",
+            handled(&format!(
+                "    s = {sum}\n    eps = sub(0.0f32, s)\n    if lt(s, 0.0f32) then uniform_like(x, neg(eps), eps) else x\n"
+            )),
+            vec![("main", Root::Exact(ones(8)))],
+        ),
+        (
+            "helper_valid_bounds",
+            format!(
+                "{noisy_helper}{}",
+                handled(&format!(
+                    "    s = {sum}\n    y = layer(copy(x), lt(s, 0.0f32), s)\n    z = uniform_like(x, 0.0f32, 1.0f32)\n    (y, z)\n"
+                ))
+            ),
+            vec![
+                ("main.0", Root::Exact(ones(8))),
+                ("main.1", Root::Exact(unit(0, 8))),
+            ],
+        ),
+        (
+            "routed_invalid_bounds",
+            format!(
+                "{}{}",
+                routed("neg(eps), eps"),
+                handled(&routed_body("lt", "sub(0.0f32, s)"))
+            ),
+            vec![
+                ("main.0", Root::Exact(vec![8.0])),
+                ("main.1", Root::Exact(unit(0, 8))),
+            ],
+        ),
+        (
+            "routed_valid_bounds",
+            format!(
+                "{}{}",
+                routed("neg(eps), eps"),
+                handled(&routed_body("lt", "s"))
+            ),
+            vec![
+                ("main.0", Root::Exact(vec![8.0])),
+                ("main.1", Root::Exact(unit(0, 8))),
+            ],
+        ),
+        (
+            "routed_literal",
+            format!(
+                "{}{}",
+                routed("0.0f32, 1.0f32"),
+                handled(&routed_body("lt", "s"))
+            ),
+            vec![
+                ("main.0", Root::Exact(vec![8.0])),
+                ("main.1", Root::Exact(unit(0, 8))),
+            ],
+        ),
+        (
+            "routed_literal_taken",
+            format!(
+                "{}{}",
+                routed("0.0f32, 1.0f32"),
+                handled(&routed_body("gt", "s"))
+            ),
+            vec![
+                ("main.0", Root::Sum(unit(0, 8).iter().sum())),
+                ("main.1", Root::Exact(unit(1, 8))),
+            ],
+        ),
+        (
+            "ascribed_inline",
+            handled(&format!(
+                "    noisy = lt({sum}, 0.0f32)\n    y: tensor[8, f32] = if noisy then uniform_like(copy(x), 0.0f32, 1.0f32) else copy(x)\n    z = uniform_like(x, 0.0f32, 1.0f32)\n    (y, z)\n"
+            )),
+            vec![
+                ("main.0", Root::Exact(ones(8))),
+                ("main.1", Root::Exact(unit(0, 8))),
+            ],
+        ),
+        (
+            "ascribed_helper",
+            format!(
+                "{pick}{}",
+                handled(&format!(
+                    "    y: tensor[8, f32] = pick(copy(x), lt({sum}, 0.0f32))\n    z = uniform_like(x, 0.0f32, 1.0f32)\n    (y, z)\n"
+                ))
+            ),
+            vec![
+                ("main.0", Root::Exact(ones(8))),
+                ("main.1", Root::Exact(unit(0, 8))),
+            ],
+        ),
+        (
+            "issue_2410",
+            format!(
+                "{pick}{}",
+                handled(&format!(
+                    "    flag = gt({sum}, 0.0f32)\n    a = pick(copy(x), flag)\n    b = pick(copy(x), not(flag))\n    unused = uniform_like(copy(x), 0.0f32, 1.0f32)\n    c = uniform_like(x, 0.0f32, 1.0f32)\n    (a, b, c)\n"
+                ))
+            ),
+            vec![
+                ("main.0", Root::Exact(unit(0, 8))),
+                ("main.1", Root::Exact(ones(8))),
+                ("main.2", Root::Exact(unit(2, 8))),
+            ],
+        ),
+        (
+            "nested_arm",
+            format!(
+                "def pick(x: tensor[8, f32], a: bool, b: bool) -> tensor[8, f32] ! {{ Random }} = if a then if b then uniform_like(x, 0.0f32, 1.0f32) else x else x\n{}",
+                handled(&format!(
+                    "    s = {sum}\n    y = pick(copy(x), gt(s, 0.0f32), lt(s, 0.0f32))\n    z = uniform_like(x, 0.0f32, 1.0f32)\n    (y, z)\n"
+                ))
+            ),
+            vec![
+                ("main.0", Root::Exact(ones(8))),
+                ("main.1", Root::Exact(unit(0, 8))),
+            ],
+        ),
+        (
+            "match_arm",
+            format!(
+                "type Mode =\n  | Train\n  | Infer\ndef apply_mode(x: tensor[8, f32], m: Mode) -> tensor[8, f32] ! {{ Random }} =\n  match m with {{\n    | Train => uniform_like(x, 0.0f32, 1.0f32)\n    | Infer => x\n  }}\n{}",
+                handled(&format!(
+                    "    m = if gt({sum}, 100.0f32) then Train else Infer\n    y = apply_mode(copy(x), m)\n    z = uniform_like(x, 0.0f32, 1.0f32)\n    (y, z)\n"
+                ))
+            ),
+            vec![
+                ("main.0", Root::Exact(ones(8))),
+                ("main.1", Root::Exact(unit(0, 8))),
+            ],
+        ),
+        (
+            "grad_untaken_invalid_bounds",
+            format!(
+                "def loss(x: tensor[8, f32]) -> tensor[f32] ! {{ Random }} = {{\n  s = {sum}\n  if lt(s, 0.0f32) then sum(add(copy(x), uniform_like(x, s, neg(s))), 0i32) else sum(x, 0i32)\n}}\n{}",
+                handled(
+                    "    g = grad(loss)(copy(x))\n    after = uniform_like(x, 0.0f32, 1.0f32)\n    (g, after)\n"
+                )
+            ),
+            vec![
+                ("main.0", Root::Exact(ones(8))),
+                ("main.1", Root::Exact(unit(0, 8))),
+            ],
+        ),
+    ];
+    assert_ne!(unit(0, 8), unit(1, 8));
+    let bits = |values: &[f64]| {
+        values
+            .iter()
+            .map(|value| (*value as f32).to_bits())
+            .collect::<Vec<_>>()
+    };
+    let mut failures = Vec::new();
+    for (name, source, expected) in rows {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(format!("{name}.ch"));
+        common::write_file(&path, &source);
+        let eval = cli(&["eval", "--file", path.to_str().unwrap()]);
+        if !eval.status.success() {
+            failures.push(format!(
+                "{name} eval: {}",
+                String::from_utf8_lossy(&eval.stderr)
+            ));
+            continue;
+        }
+        let eval = String::from_utf8(eval.stdout).unwrap();
+        let out_dir = dir.path().join("out");
+        succeeded(
+            cli(&[
+                "build",
+                path.to_str().unwrap(),
+                "--target",
+                "c",
+                "--output",
+                out_dir.to_str().unwrap(),
+            ]),
+            name,
+        );
+        assert!(common::link_generated(&out_dir, &format!("{name}.c"), name).success());
+        let run = std::process::Command::new(out_dir.join(name))
+            .output()
+            .unwrap();
+        if !run.status.success() {
+            failures.push(format!(
+                "{name} C: {}",
+                String::from_utf8_lossy(&run.stderr)
+            ));
+            continue;
+        }
+        let compiled = String::from_utf8(run.stdout).unwrap();
+        for (root, expected) in &expected {
+            for (lane, stdout) in [("eval", &eval), ("C", &compiled)] {
+                let actual = printed_root(stdout, root);
+                let matches = match expected {
+                    Root::Exact(values) => bits(&actual) == bits(values),
+                    Root::Sum(total) => actual.len() == 1 && (actual[0] - total).abs() < 1e-4,
+                };
+                if !matches {
+                    failures.push(format!("{name} {lane} {root}: {actual:?}"));
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
