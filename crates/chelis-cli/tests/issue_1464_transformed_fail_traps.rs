@@ -623,6 +623,84 @@ fn a_fail_in_an_unselected_match_arm_still_differentiates() {
     );
 }
 
+/// chelis#2368: a guarded abort whose result nothing consumes must still
+/// fire. [05-OP-68] says it may not be removed, and an abort has no consumer
+/// by design — so value reachability, which every pruner in the compiler
+/// derives liveness from, is the wrong criterion for it.
+///
+/// Three independent liveness computations swept it before this: the DCE
+/// pass, grad's own pruner, and the evaluator's root mask. A fix at any one
+/// of them leaves the bug alive, which is why the predicate is shared.
+#[test]
+fn a_guard_whose_value_is_discarded_still_aborts() {
+    let source = "module Repro.DiscardedGuard\n\
+         def loss(x: tensor[1, f32]) -> tensor[f32] = {\n\
+           ignored = fail(\"discarded boom\")\n\
+           sum(x, cast(0, i32))\n\
+         }\n\
+         out = grad(loss)(to_tensor([cast(3.0, f32)]))\n";
+    let evaluated = eval(source, "discarded_guard");
+    let stdout = String::from_utf8_lossy(&evaluated.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&evaluated.stderr).into_owned();
+    assert!(
+        !evaluated.status.success(),
+        "a discarded guard must still abort: stdout={stdout}"
+    );
+    assert!(
+        !stdout.contains("data=[1.0]"),
+        "the surrounding value must not be returned: {stdout}"
+    );
+    assert!(
+        stderr.contains("discarded boom"),
+        "the authored message must survive; got: {stderr}"
+    );
+}
+
+#[test]
+fn a_guarded_if_whose_value_is_discarded_still_aborts() {
+    // The issue's own reproducer: the guard is a whole `if` whose result is
+    // bound and never used.
+    let source = "module Repro.DiscardedGuardedIf\n\
+         def loss(x: tensor[1, f32]) -> tensor[f32] = {\n\
+           unused = if gt(tensor_to_scalar(sum(&x, cast(0, i32))), cast(0.5, f32)) \
+           then fail(\"discarded guard fired\") else sum(mul(&x, &x), cast(0, i32))\n\
+           sum(x, cast(0, i32))\n\
+         }\n\
+         out = grad(loss)(to_tensor([cast(3.0, f32)]))\n";
+    let evaluated = eval(source, "discarded_guarded_if");
+    let stderr = String::from_utf8_lossy(&evaluated.stderr).into_owned();
+    assert!(
+        !evaluated.status.success(),
+        "stdout={}",
+        String::from_utf8_lossy(&evaluated.stdout)
+    );
+    assert!(stderr.contains("discarded guard fired"), "got: {stderr}");
+}
+
+#[test]
+fn a_discarded_guard_that_does_not_fire_leaves_the_value_alone() {
+    // The negative control. Keeping the guard alive must not change the
+    // answer when its condition is false.
+    let source = "module Repro.DiscardedUntaken\n\
+         def loss(x: tensor[1, f32]) -> tensor[f32] = {\n\
+           unused = if gt(tensor_to_scalar(sum(&x, cast(0, i32))), cast(99.0, f32)) \
+           then fail(\"must not fire\") else sum(mul(&x, &x), cast(0, i32))\n\
+           sum(x, cast(0, i32))\n\
+         }\n\
+         out = grad(loss)(to_tensor([cast(3.0, f32)]))\n";
+    let evaluated = eval(source, "discarded_untaken");
+    let stdout = String::from_utf8_lossy(&evaluated.stdout).into_owned();
+    assert!(
+        evaluated.status.success(),
+        "an untaken discarded guard must not abort: stderr={}",
+        String::from_utf8_lossy(&evaluated.stderr)
+    );
+    assert!(
+        stdout.contains("data=[1.0]"),
+        "grad of sum(x) is 1; got: {stdout}"
+    );
+}
+
 /// A `fail` with no enclosing `if` and NO transform is still the host lane's
 /// whole-value abort.
 ///

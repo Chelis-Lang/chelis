@@ -2732,7 +2732,15 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             && !dag.is_root(node.id)
             && !is_implicit_root
             && consumers[node.id.0] == 0
-            && !matches!(node.op, RiscOp::Store { .. } | RiscOp::Drop)
+            // chelis#2368 / [05-OP-68]: a guarded abort joins `Store` and
+            // `Drop` as an effect node. Its result may legitimately have no
+            // consumer — the abort is the point — so requiring one would
+            // force it back into the value graph, which is exactly the
+            // reachability criterion that let DCE sweep it.
+            && !matches!(
+                node.op,
+                RiscOp::Store { .. } | RiscOp::Drop | RiscOp::GuardedFail { .. }
+            )
         {
             errors.push(format!(
                 "node {} is dangling: it has no consumers and is not a DAG root",
