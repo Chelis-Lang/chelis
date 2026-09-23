@@ -15,7 +15,8 @@ structure that the compiler cannot recover automatically.
 
 The semantics of `par` do not require a particular scheduler. A conforming
 implementation may execute it sequentially or in parallel, but observable results must
-be identical.
+be identical. Random draws in `par` branches take the ordinals [05-RNG-1] assigns
+to sequential evaluation of the branches in source order.
 
 ## 3. Backend Mapping
 
