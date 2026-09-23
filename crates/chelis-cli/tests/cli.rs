@@ -9657,10 +9657,10 @@ fn concrete_static_rate_local_helper_executes_eval_and_native_c() {
     );
     assert_eq!(String::from_utf8(result.stdout).unwrap(), expected);
 
-    // [05-OP-37]: a runtime rate is an ordinary operand, so the public
-    // entry builds (chelis#2411). This program has no export list, so every
-    // top-level def is public (§2 Surf), and a public invocation owns no
-    // Random handler: its inherited draw aborts instead of drawing seed zero.
+    // [05-OP-37]: a runtime rate is an ordinary operand (chelis#2411). This
+    // program has no export list, so every top-level def is public (§2 Surf),
+    // and a public tensor entry owns no Random handler: its inherited draw is
+    // refused at build time instead of drawing seed zero.
     write_file(
         &source,
         "def keep(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = dropout(x, rate)\n",
@@ -9672,16 +9672,19 @@ fn concrete_static_rate_local_helper_executes_eval_and_native_c() {
         .assert()
         .success();
     let runtime_rate = dir.path().join("runtime_rate");
-    Command::cargo_bin("chelis")
+    let refused = Command::cargo_bin("chelis")
         .unwrap()
         .arg("build")
         .arg(&source)
         .arg("--output")
         .arg(&runtime_rate)
         .assert()
-        .success();
-    let generated = fs::read_to_string(runtime_rate.join("static_rate.c")).unwrap();
-    assert!(generated.contains("inherited Random requires an active host RNG scope"));
+        .failure();
+    let stderr = String::from_utf8_lossy(&refused.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains("public tensor entry cannot receive inherited Random"),
+        "{stderr}"
+    );
 }
 
 /// [05-OP-37]/[05-RNG-1]: a concrete call of a dtype-generic static-rate
