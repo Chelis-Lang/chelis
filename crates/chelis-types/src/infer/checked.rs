@@ -68,9 +68,9 @@ pub(super) struct InferenceProduct {
     /// [`Self::instantiation_dvars_since`]).
     ///
     /// A ledger keyed by the callee's node address was the alternative and is
-    /// worse here: the `Expr::Node` ingress path rebuilds a TEMPORARY `List`
-    /// for tag dispatch, so the address the Var rule could write is not the
-    /// address the application rule holds. A slot on `Subst` cleared by
+    /// worse here: the Var rule and the application rule would have to agree
+    /// on which address names the callee, a second identity to keep in step
+    /// with the positional pairing that already holds. A slot on `Subst` cleared by
     /// convention at each call site was the other, and that is the
     /// flag-by-convention shape chelis#1835 exists to remove.
     ///
@@ -137,7 +137,7 @@ pub(super) enum DeferredShapeRule {
     LayerNorm,
     Conv,
     ScatterElements {
-        list: deep::List,
+        node: DeepNode,
     },
     /// chelis#1512: any other checked route that returned early on an
     /// unresolved operand. The replay re-enters `finish_unified_app` itself
@@ -148,7 +148,7 @@ pub(super) enum DeferredShapeRule {
     /// The rule, not the inference entry point, is what replays.
     ShapeRoute {
         route: ShapeRouteKind,
-        list: deep::List,
+        node: DeepNode,
         kids: Vec<deep::Expr>,
     },
     PostApp {
@@ -156,12 +156,11 @@ pub(super) enum DeferredShapeRule {
         /// declaration boundary; they differ only in how much of the call is
         /// re-decided.
         replay: PostAppReplay,
-        /// Address of the `deep::List` this call was registered from, the
-        /// same identity `expr_key` uses for owner stamps. The rule owns a
-        /// CLONE of that node, so the address has to be recorded rather than
-        /// read back off the copy.
+        /// Address of the `app` node this call was registered from. The rule
+        /// owns a CLONE of that node, so the address has to be recorded rather
+        /// than read back off the copy.
         site: usize,
-        list: deep::List,
+        node: DeepNode,
         kids: Vec<deep::Expr>,
         func_name: String,
         env: Box<Env>,
@@ -225,13 +224,6 @@ pub(super) struct TypeStampEpoch {
     id: u64,
     owners: UnordMap<usize, StampRequirement>,
     writes: UnordMap<usize, Vec<OwnerTypeWrite>>,
-    /// Transitional per-node bridge identities. A `Node::to_list` reader
-    /// clones children, so pointer-keyed owner writes from that temporary
-    /// view must resolve back to the original stamped child registered by
-    /// `begin_root`. The whole-tree normalization boundary is gone; this map
-    /// remains only until the individual inference readers consume Nodes
-    /// directly.
-    bridge_aliases: UnordMap<usize, usize>,
 }
 
 #[derive(Clone, Copy)]
@@ -331,7 +323,6 @@ impl InferenceProduct {
             id,
             owners: UnordMap::new(),
             writes: UnordMap::new(),
-            bridge_aliases: UnordMap::new(),
         };
         register_annotation_owners(root, &mut epoch);
         self.active_epoch = Some(epoch);
@@ -730,9 +721,8 @@ impl InferenceProduct {
 
     /// chelis#1512: the ledger identity of one call.
     ///
-    /// Identity is the address of the `deep::List` node in the tree the
-    /// traversal is walking, the same identity `expr_key` uses for owner
-    /// stamps. One case is not that tree: during a `PostApp` replay the
+    /// Identity is the address of the `app` node in the tree the traversal is
+    /// walking. One case is not that tree: during a `PostApp` replay the
     /// caller holds the ledger's own clone, which is dropped when the replay
     /// iteration ends, so this translates that clone back to the original
     /// site. Every key this returns therefore names a node that outlives the
@@ -741,8 +731,8 @@ impl InferenceProduct {
     /// address, and a later allocation reusing it would make
     /// [`Self::has_post_app_check_for`] answer for an unrelated live call
     /// (round 2 P2-1, latent: 0 collisions in 2,000 runs, never observed).
-    pub(super) fn post_app_key(&self, list: &deep::List) -> usize {
-        let addr = std::ptr::from_ref(list).addr();
+    pub(super) fn post_app_key(&self, node: &DeepNode) -> usize {
+        let addr = std::ptr::from_ref(node).addr();
         match self.replaying_post_app {
             Some((clone_addr, original_site)) if clone_addr == addr => original_site,
             _ => addr,
@@ -757,8 +747,8 @@ impl InferenceProduct {
     /// The invariant is still real, so it is asserted here rather than left to
     /// the first callee that does.
     #[cfg(test)]
-    pub(super) fn post_app_replays_for(&self, list: &deep::List) -> Vec<PostAppReplay> {
-        let key = self.post_app_key(list);
+    pub(super) fn post_app_replays_for(&self, node: &DeepNode) -> Vec<PostAppReplay> {
+        let key = self.post_app_key(node);
         self.deferred_shape_checks
             .iter()
             .filter_map(|check| match &check.rule {
@@ -769,8 +759,8 @@ impl InferenceProduct {
     }
 
     /// Is this call already suspended, under either replay kind?
-    pub(super) fn has_post_app_check_for(&self, list: &deep::List) -> bool {
-        let key = self.post_app_key(list);
+    pub(super) fn has_post_app_check_for(&self, node: &DeepNode) -> bool {
+        let key = self.post_app_key(node);
         self.deferred_shape_checks.iter().any(
             |check| matches!(&check.rule, DeferredShapeRule::PostApp { site, .. } if *site == key),
         )
@@ -781,8 +771,8 @@ impl InferenceProduct {
     /// A dtype-admissibility entry does not answer yes: the route registration
     /// replaces it rather than standing down for it, because re-entering
     /// `finish_unified_app` runs those same validators on its way to the route.
-    pub(super) fn has_route_check_for(&self, list: &deep::List) -> bool {
-        let key = self.post_app_key(list);
+    pub(super) fn has_route_check_for(&self, node: &DeepNode) -> bool {
+        let key = self.post_app_key(node);
         self.deferred_shape_checks.iter().any(|check| {
             matches!(
                 &check.rule,
@@ -805,8 +795,8 @@ impl InferenceProduct {
     /// filtering the duplicate out afterwards: a filter keyed on the message
     /// cannot tell a re-report from a second call that legitimately fails the
     /// same way, and these diagnostics carry no span to tell them apart.
-    pub(super) fn cancel_post_app_check_for(&mut self, list: &deep::List) {
-        let key = self.post_app_key(list);
+    pub(super) fn cancel_post_app_check_for(&mut self, node: &DeepNode) {
+        let key = self.post_app_key(node);
         self.deferred_shape_checks.retain(
             |check| !matches!(&check.rule, DeferredShapeRule::PostApp { site, .. } if *site == key),
         );
@@ -900,21 +890,21 @@ impl InferenceProduct {
                         .iter()
                         .any(|variable| failed_parameters.contains(variable))
                 });
-                let DeferredShapeRule::ShapeRoute { route, list, kids } = &check.rule else {
+                let DeferredShapeRule::ShapeRoute { route, node, kids } = &check.rule else {
                     return None;
                 };
                 shares_failed_parameter.then(|| {
                     (
                         check.id,
                         route.clone(),
-                        list.clone(),
+                        node.clone(),
                         kids.clone(),
                         check.arg_tys.clone(),
                     )
                 })
             })
             .collect();
-        for (id, route, list, kids, pending_arguments) in candidates {
+        for (id, route, node, kids, pending_arguments) in candidates {
             let settled: Vec<_> = pending_arguments
                 .iter()
                 .map(|ty| structural.apply(&subst.apply(ty)))
@@ -931,7 +921,7 @@ impl InferenceProduct {
             let mut trial_subst = subst.clone();
             let result = check_shape_route_signature(
                 &route,
-                &list,
+                &node,
                 &kids,
                 &settled,
                 &mut trial_vg,
@@ -1065,10 +1055,10 @@ impl InferenceProduct {
                     subst,
                     errors,
                 ),
-                DeferredShapeRule::ScatterElements { list } => {
-                    let kids = children(list);
+                DeferredShapeRule::ScatterElements { node } => {
+                    let kids = node.children_slice();
                     check_scatter_elements(
-                        list,
+                        node,
                         kids,
                         &check.arg_tys,
                         check.result_ty.clone(),
@@ -1076,11 +1066,11 @@ impl InferenceProduct {
                         errors,
                     )
                 }
-                DeferredShapeRule::ShapeRoute { route, list, kids } => {
+                DeferredShapeRule::ShapeRoute { route, node, kids } => {
                     let settled: Vec<Type> =
                         check.arg_tys.iter().map(|ty| subst.apply(ty)).collect();
                     let produced =
-                        check_shape_route_signature(route, list, kids, &settled, vg, subst, errors);
+                        check_shape_route_signature(route, node, kids, &settled, vg, subst, errors);
                     reconcile_replayed_result(
                         &route.builtin(),
                         &check.result_ty,
@@ -1091,7 +1081,7 @@ impl InferenceProduct {
                 }
                 DeferredShapeRule::PostApp {
                     replay: PostAppReplay::DtypeAdmissibility,
-                    list,
+                    node,
                     kids,
                     func_name,
                     env,
@@ -1100,14 +1090,14 @@ impl InferenceProduct {
                     let settled: Vec<Type> =
                         check.arg_tys.iter().map(|ty| subst.apply(ty)).collect();
                     replay_dtype_admissibility(
-                        list, kids, func_name, env, &settled, vg, subst, errors, self,
+                        node, kids, func_name, env, &settled, vg, subst, errors, self,
                     );
                     continue;
                 }
                 DeferredShapeRule::PostApp {
                     replay: PostAppReplay::Route,
                     site,
-                    list,
+                    node,
                     kids,
                     func_name,
                     env,
@@ -1115,13 +1105,13 @@ impl InferenceProduct {
                     let settled: Vec<Type> =
                         check.arg_tys.iter().map(|ty| subst.apply(ty)).collect();
                     let mut replay_env = (**env).clone();
-                    // chelis#1512 round 2 P2-1: `list` is the ledger's own
+                    // chelis#1512 round 2 P2-1: `node` is the ledger's own
                     // clone and dies with this iteration. Carry the original
                     // site so a route that re-registers inside the replay
                     // keys its entry by the live node, not by this clone.
-                    self.replaying_post_app = Some((std::ptr::from_ref(list).addr(), *site));
+                    self.replaying_post_app = Some((std::ptr::from_ref(node).addr(), *site));
                     let replayed = finish_unified_app(
-                        list,
+                        node,
                         kids,
                         Some(func_name.clone()),
                         settled,
@@ -1220,7 +1210,7 @@ impl InferenceProduct {
         let Some(epoch) = self.active_epoch.as_mut() else {
             return;
         };
-        let key = epoch.canonical_key(expr_key(expr));
+        let key = expr_key(expr);
         if !epoch.owners.contains_key(&key) {
             return;
         }
@@ -1229,70 +1219,6 @@ impl InferenceProduct {
             .entry(key)
             .or_default()
             .push(OwnerTypeWrite { ty, source });
-    }
-
-    pub(super) fn register_bridge_children(
-        &mut self,
-        stamped_children: &[deep::Expr],
-        bridged_children: &[deep::Expr],
-    ) {
-        let Some(epoch) = self.active_epoch.as_mut() else {
-            return;
-        };
-        debug_assert_eq!(stamped_children.len(), bridged_children.len());
-        let mut pending = stamped_children
-            .iter()
-            .zip(bridged_children)
-            .collect::<Vec<_>>();
-        while let Some((stamped, bridged)) = pending.pop() {
-            let stamped_key = epoch.canonical_key(expr_key(stamped));
-            epoch.bridge_aliases.insert(expr_key(bridged), stamped_key);
-            // PP7/E5e justified symmetric site: this walk compares the two
-            // already-paired representations created by the root adapter.
-            // Every arm requires the same carrier on both sides; a mismatch
-            // takes the explicit no-recursion arm rather than masquerading
-            // as a successful semantic read.
-            match (stamped, bridged) {
-                (deep::Expr::Node(left, _), deep::Expr::Node(right, _)) => {
-                    pending.extend(left.children_slice().iter().zip(right.children_slice()));
-                    pending.extend(
-                        metadata_expression_leaves(left.meta())
-                            .into_iter()
-                            .zip(metadata_expression_leaves(right.meta())),
-                    );
-                }
-                (deep::Expr::List(left, _), deep::Expr::List(right, _)) => {
-                    pending.extend(left.elements.iter().zip(&right.elements));
-                }
-                (deep::Expr::BareList(left, _), deep::Expr::BareList(right, _)) => {
-                    pending.extend(left.iter().zip(right));
-                }
-                (deep::Expr::Map(left, _), deep::Expr::Map(right, _)) => {
-                    pending.extend(
-                        metadata_expression_leaves(left)
-                            .into_iter()
-                            .zip(metadata_expression_leaves(right)),
-                    );
-                }
-                (deep::Expr::MetaExpr(left, _), deep::Expr::MetaExpr(right, _)) => {
-                    pending.push((&left.expr, &right.expr));
-                    pending.extend(
-                        metadata_expression_leaves(&left.metadata)
-                            .into_iter()
-                            .zip(metadata_expression_leaves(&right.metadata)),
-                    );
-                }
-                (deep::Expr::UnknownForm(left), deep::Expr::UnknownForm(right)) => {
-                    pending.extend(left.children.iter().zip(&right.children));
-                    pending.extend(
-                        metadata_expression_leaves(&left.meta)
-                            .into_iter()
-                            .zip(metadata_expression_leaves(&right.meta)),
-                    );
-                }
-                _ => {}
-            }
-        }
     }
 
     pub(super) fn record_builtin_selection(
@@ -1416,19 +1342,11 @@ impl InferenceProduct {
             None => {
                 let construct = match expr.carrier() {
                     deep::ExprCarrier::DecodedNode(tag, _, _) => tag.as_str(),
-                    deep::ExprCarrier::UndecodableHead(head, _, _) => match expr {
-                        // The old diagnostic named an UnknownForm's preserved
-                        // head, but described every undecoded raw List as an
-                        // untagged transitional list.
-                        deep::Expr::UnknownForm(_) => head,
-                        deep::Expr::List(_, _) => "<untagged-list>",
-                        _ => unreachable!("only List and UnknownForm have undecodable heads"),
-                    },
+                    deep::ExprCarrier::UndecodableHead(head, _, _) => head,
                     deep::ExprCarrier::StructuralList(_) => "<bare-list>",
                     deep::ExprCarrier::Atom(_) => "<atom>",
                     deep::ExprCarrier::MetadataMap(_) => "<map>",
                     deep::ExprCarrier::MetadataExpression(_) => "<meta-expr>",
-                    deep::ExprCarrier::MalformedLegacyList(_) => "<untagged-list>",
                 };
                 errors.push(internal_owner_stamp_error(format!(
                     "missing authoritative type stamp for {role} `{construct}`"
@@ -1450,7 +1368,7 @@ impl InferenceProduct {
             ));
             return None;
         };
-        let key = epoch.canonical_key(expr_key(expr));
+        let key = expr_key(expr);
         let Some(writes) = epoch.writes.get(&key) else {
             errors.push(internal_owner_stamp_error(
                 "canonical inference could not find an already-inferred child stamp".to_string(),
@@ -1560,18 +1478,6 @@ pub(super) fn shape_operand_awaits_binding(ty: &Type, subst: &Subst) -> bool {
     }
 }
 
-impl TypeStampEpoch {
-    fn canonical_key(&self, mut key: usize) -> usize {
-        while let Some(next) = self.bridge_aliases.get(&key).copied() {
-            if next == key {
-                break;
-            }
-            key = next;
-        }
-        key
-    }
-}
-
 pub(super) fn expr_key(expr: &deep::Expr) -> usize {
     std::ptr::from_ref(expr).addr()
 }
@@ -1604,12 +1510,6 @@ pub(super) fn register_annotation_owners(expr: &deep::Expr, epoch: &mut TypeStam
         deep::ExprCarrier::StructuralList(children)
         | deep::ExprCarrier::UndecodableHead(_, _, children) => {
             for child in children {
-                register_annotation_owners(child, epoch);
-            }
-            return;
-        }
-        deep::ExprCarrier::MalformedLegacyList(list) => {
-            for child in &list.elements {
                 register_annotation_owners(child, epoch);
             }
             return;
@@ -1722,12 +1622,22 @@ pub(crate) fn run_reconcile_mutation_case(
     (produced.to_string(), bound)
 }
 
+/// The `app` owner the mutation cases stamp. Its callee is a `var`, which
+/// carries no type stamp of its own, so every case observes only the `app`
+/// owner's stamp as it did when the owner was a childless `app`.
+#[cfg(test)]
+fn mutation_case_app(args: Vec<deep::Expr>) -> deep::Expr {
+    let mut children = vec![stamped_node_expr(DeepTag::Var, vec![symbol_expr("f")])];
+    children.extend(args);
+    stamped_node_expr(DeepTag::App, children)
+}
+
 #[cfg(test)]
 pub(crate) fn run_type_stamp_mutation_case(
     case: TypeStampMutationCase,
     errors: &mut DiagnosticSink<'_>,
 ) -> bool {
-    let owner = node_expr(DeepTag::App, vec![]);
+    let owner = mutation_case_app(vec![]);
     let mut product = InferenceProduct::default();
     product.begin_root(&owner);
     match case {
@@ -1749,7 +1659,7 @@ pub(crate) fn run_type_stamp_mutation_case(
             true
         }
         TypeStampMutationCase::UnregisteredSynthesized => {
-            let synthesized = node_expr(DeepTag::Var, vec![symbol_expr("temporary")]);
+            let synthesized = stamped_node_expr(DeepTag::Var, vec![symbol_expr("temporary")]);
             product.record_bypass(
                 &synthesized,
                 Type::Prim(Prim::Int64),
@@ -1762,19 +1672,13 @@ pub(crate) fn run_type_stamp_mutation_case(
                 .is_none()
         }
         TypeStampMutationCase::RuntimeNonStampOwnerLookup => {
-            let runtime_child = node_expr(DeepTag::Var, vec![symbol_expr("x")]);
-            let root = node_expr(DeepTag::App, vec![runtime_child]);
+            let runtime_child = stamped_node_expr(DeepTag::Var, vec![symbol_expr("x")]);
+            let root = stamped_node_expr(DeepTag::App, vec![runtime_child]);
             let mut product = InferenceProduct::default();
             product.begin_root(&root);
-            // chelis#1107 amendment (justified-safe, not routed): `root` is
-            // built two lines above by this file's own `node_expr`, which
-            // returns `deep::Expr::List` unconditionally. No stamped `Node`
-            // can reach this reader -- it is `#[cfg(test)]` mutation-case
-            // scaffolding over a locally constructed value, not program input.
-            let deep::Expr::List(root_list, _) = &root else {
-                unreachable!("node_expr produces a list")
-            };
-            let runtime_child = &children(root_list)[0];
+            let (_, _, root_children) =
+                stamped_parts(&root).expect("`stamped_node_expr` builds a decoded node");
+            let runtime_child = &root_children[0];
             product.record_canonical(runtime_child, Type::Prim(Prim::Int64));
             product.current_owner_type(runtime_child, &Subst::new(), errors)
                 == Some(Type::Prim(Prim::Int64))
@@ -1794,7 +1698,7 @@ pub(crate) fn run_finalization_mutation_case(
     case: FinalizationMutationCase,
     errors: &mut DiagnosticSink<'_>,
 ) {
-    let runtime = node_expr(DeepTag::App, vec![]);
+    let runtime = mutation_case_app(vec![]);
     let mut signature_context = SignatureInferenceMetadata::default();
     let annotated = match case {
         FinalizationMutationCase::MissingRuntimeStamp => vec![runtime],
@@ -2533,10 +2437,9 @@ pub(super) fn effects_only_rewrite_matches(
 
 pub(super) fn effects_only_expr_matches(before: &deep::Expr, after: &deep::Expr) -> bool {
     stack_guard!("effects_only_expr_matches", before, false);
-    // PP7/E5e justified symmetric site: this is strict representation
-    // equality modulo derived effects. List is compared only with List,
-    // beside the corresponding Node/BareList/UnknownForm arms; `_ => false`
-    // explicitly rejects a carrier mismatch.
+    // Strict representation equality modulo derived effects. Each carrier is
+    // compared only with the same carrier; `_ => false` explicitly rejects a
+    // carrier mismatch.
     match (before, after) {
         (deep::Expr::Atom(before_atom, before_span), deep::Expr::Atom(after_atom, after_span)) => {
             before_atom == after_atom && before_span == after_span
@@ -2556,27 +2459,6 @@ pub(super) fn effects_only_expr_matches(before: &deep::Expr, after: &deep::Expr)
                     false,
                 )
                 && effects_only_expr_matches(&before_meta.expr, &after_meta.expr)
-        }
-        (deep::Expr::List(before_list, before_span), deep::Expr::List(after_list, after_span)) => {
-            before_span == after_span
-                && before_list.elements.len() == after_list.elements.len()
-                && before_list
-                    .elements
-                    .iter()
-                    .zip(&after_list.elements)
-                    .enumerate()
-                    .all(|(index, (before_element, after_element))| {
-                        if index == 1
-                            && let (
-                                deep::Expr::Map(before_map, before_map_span),
-                                deep::Expr::Map(after_map, after_map_span),
-                            ) = (before_element, after_element)
-                        {
-                            return before_map_span == after_map_span
-                                && metadata_matches_except_effects(before_map, after_map, true);
-                        }
-                        effects_only_expr_matches(before_element, after_element)
-                    })
         }
         (deep::Expr::Node(before_node, before_span), deep::Expr::Node(after_node, after_span)) => {
             before_span == after_span
@@ -2661,8 +2543,8 @@ fn expression_without_derived_effects(
         expr,
         Err(EffectComparisonError)
     );
-    // PP7/E5e producer exception: the exhaustive transformer rebuilds every
-    // expression as the same carrier while removing only derived effects.
+    // The exhaustive transformer rebuilds every expression as the same carrier
+    // while removing only derived effects.
     Ok(match expr {
         deep::Expr::Atom(..) => expr.clone(),
         deep::Expr::Map(meta, span) => {
@@ -2689,22 +2571,6 @@ fn expression_without_derived_effects(
             ),
             *span,
         ),
-        deep::Expr::List(list, span) => {
-            let mut elements = Vec::with_capacity(list.elements.len());
-            for (index, value) in list.elements.iter().enumerate() {
-                if index == 1
-                    && let deep::Expr::Map(meta, span) = value
-                {
-                    elements.push(deep::Expr::Map(
-                        metadata_without_derived_effects(meta, true)?,
-                        *span,
-                    ));
-                } else {
-                    elements.push(expression_without_derived_effects(value)?);
-                }
-            }
-            deep::Expr::List(deep::List { elements }, *span)
-        }
         deep::Expr::BareList(values, span) => deep::Expr::BareList(
             values
                 .iter()
@@ -2723,9 +2589,4 @@ fn expression_without_derived_effects(
             span: data.span,
         })),
     })
-}
-fn metadata_expression_leaves(meta: &deep::Metadata) -> Vec<&deep::Expr> {
-    let mut leaves = Vec::new();
-    meta.visit_expressions(&mut |value, _| leaves.push(value));
-    leaves
 }

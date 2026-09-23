@@ -149,31 +149,6 @@ impl AdtRegistry {
         let variant_start;
         if children.len() > 1 {
             match &children[1] {
-                deep::Expr::List(list, _) => {
-                    // Could be (a b) or (variant ...) -- check if first elem is a variant tag
-                    if let Some(tag) = list.tag() {
-                        if tag == DeepTag::Variant || tag == DeepTag::Field {
-                            // No type params, this is already a variant
-                            variant_start = 1;
-                        } else {
-                            // Type params list: elements are symbols
-                            for el in &list.elements {
-                                if let deep::Expr::Atom(deep::Atom::Name(s), _) = el {
-                                    type_params.push(s.clone());
-                                }
-                            }
-                            variant_start = 2;
-                        }
-                    } else {
-                        // Elements might be bare symbols for type params
-                        for el in &list.elements {
-                            if let deep::Expr::Atom(deep::Atom::Name(s), _) = el {
-                                type_params.push(s.clone());
-                            }
-                        }
-                        variant_start = 2;
-                    }
-                }
                 deep::Expr::Node(node, _)
                     if matches!(node.tag(), DeepTag::Variant | DeepTag::Field) =>
                 {
@@ -228,8 +203,7 @@ impl AdtRegistry {
                 | deep::ExprCarrier::UndecodableHead(_, _, _)
                 | deep::ExprCarrier::Atom(_)
                 | deep::ExprCarrier::MetadataMap(_)
-                | deep::ExprCarrier::MetadataExpression(_)
-                | deep::ExprCarrier::MalformedLegacyList(_) => continue,
+                | deep::ExprCarrier::MetadataExpression(_) => continue,
             };
             if vchildren.is_empty() {
                 continue;
@@ -266,8 +240,7 @@ impl AdtRegistry {
                     | deep::ExprCarrier::UndecodableHead(_, _, _)
                     | deep::ExprCarrier::Atom(_)
                     | deep::ExprCarrier::MetadataMap(_)
-                    | deep::ExprCarrier::MetadataExpression(_)
-                    | deep::ExprCarrier::MalformedLegacyList(_) => {
+                    | deep::ExprCarrier::MetadataExpression(_) => {
                         // Positional type argument
                         let ftype = self.expand_aliases(&resolver.resolve(field_expr)?.into_type());
                         fields.push((None, ftype));

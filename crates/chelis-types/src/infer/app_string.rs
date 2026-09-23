@@ -28,7 +28,7 @@ use super::*;
 #[allow(clippy::too_many_arguments)]
 pub(super) fn string_route_result(
     fname: &str,
-    list: &deep::List,
+    node: &DeepNode,
     arg_tys: &[Type],
     result_ty: &Type,
     site: &UnresolvedOperandSite<'_>,
@@ -56,8 +56,8 @@ pub(super) fn string_route_result(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!("char_code expects string input, got {other}"),
                                 ),
                                 vec![],
@@ -86,8 +86,8 @@ pub(super) fn string_route_result(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!("char_from_code expects i64 input, got {other}"),
                                 ),
                                 vec![],
@@ -116,8 +116,8 @@ pub(super) fn string_route_result(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!("string_len expects string input, got {other}"),
                                 ),
                                 vec![],
@@ -137,8 +137,8 @@ pub(super) fn string_route_result(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!("string_concat expects string arguments, got {other}"),
                                 ),
                                 vec![],
@@ -159,8 +159,8 @@ pub(super) fn string_route_result(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!("string_slice expects string input, got {other}"),
                                 ),
                                 vec![],
@@ -179,8 +179,8 @@ pub(super) fn string_route_result(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!(
                                         "string_slice expects integer index arguments; arg {} was {other}",
                                         index + 1
@@ -203,8 +203,8 @@ pub(super) fn string_route_result(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!("{} expects string arguments, got {other}", fname),
                                 ),
                                 vec![],
@@ -234,8 +234,8 @@ pub(super) fn string_route_result(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!("string_trim expects string input, got {other}"),
                                 ),
                                 vec![],
@@ -267,8 +267,8 @@ pub(super) fn string_route_result(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!("to_int expects string input, got {other}"),
                                 ),
                                 vec![],
@@ -297,8 +297,8 @@ pub(super) fn string_route_result(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!("to_float expects string input, got {other}"),
                                 ),
                                 vec![],

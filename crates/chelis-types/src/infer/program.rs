@@ -759,8 +759,6 @@ pub(crate) fn build_type_env_from_library_in_session(
     library_exprs: &[deep::Expr],
     errors: &mut DiagnosticSink<'_>,
 ) -> Result<TypeEnv, InferStats> {
-    // Normalize Node → List while preserving BareList structural role
-    // (#908 producer switch).
     let normalized = normalize_program_input(library_exprs);
     let library_exprs = &normalized;
     // Reset the stack-exhaustion flag for this check unit; drained below
@@ -819,9 +817,8 @@ pub(crate) fn build_type_env_from_library_in_session(
     // suppression to distinguish library refs from new-code refs.
     let mut library_def_names = chelis_unord::UnordSet::new();
     for expr in top_level_decl_items(library_exprs) {
-        if let deep::Expr::List(list, _) = expr
-            && get_tag(list) == Some(DeepTag::Def)
-            && let Some(name) = children(list).first().and_then(symbol_name)
+        if let Some((DeepTag::Def, _, kids)) = stamped_parts(expr)
+            && let Some(name) = kids.first().and_then(symbol_name)
         {
             library_def_names.insert(name.to_string());
         }
@@ -928,9 +925,7 @@ pub(crate) fn build_compiled_library_context_in_session(
     // anything reads this program. This entry annotates `library_exprs`
     // directly rather than through a checked-program call, so without the
     // fold here a library's pipe would reach `annotated_exprs` unfolded and
-    // the lowerer would refuse it. The carrier is deliberately NOT normalized
-    // here: chelis#1023 pins that a stamped program stays stamped, and this
-    // entry never normalized it.
+    // the lowerer would refuse it.
     let folded = chelis_deep::pipe::fold_program_pipes(library_exprs);
     let library_exprs = &folded[..];
     let stack_scope = StackExhaustionScope::enter();
@@ -967,9 +962,8 @@ pub(crate) fn build_compiled_library_context_in_session(
     // Capture library def names before consuming `state` into `TypeEnv`.
     let mut library_def_names = chelis_unord::UnordSet::new();
     for expr in top_level_decl_items(library_exprs) {
-        if let deep::Expr::List(list, _) = expr
-            && get_tag(list) == Some(DeepTag::Def)
-            && let Some(name) = children(list).first().and_then(symbol_name)
+        if let Some((DeepTag::Def, _, kids)) = stamped_parts(expr)
+            && let Some(name) = kids.first().and_then(symbol_name)
         {
             library_def_names.insert(name.to_string());
         }
@@ -1087,9 +1081,7 @@ pub(crate) fn build_compiled_library_context_with_base_in_session(
     // anything reads this program. This entry annotates `library_exprs`
     // directly rather than through a checked-program call, so without the
     // fold here a library's pipe would reach `annotated_exprs` unfolded and
-    // the lowerer would refuse it. The carrier is deliberately NOT normalized
-    // here: chelis#1023 pins that a stamped program stays stamped, and this
-    // entry never normalized it.
+    // the lowerer would refuse it.
     let folded = chelis_deep::pipe::fold_program_pipes(library_exprs);
     let library_exprs = &folded[..];
     let stack_scope = StackExhaustionScope::enter();
@@ -1138,9 +1130,8 @@ pub(crate) fn build_compiled_library_context_with_base_in_session(
     // distinguishes library refs (base + this layer) from new-code refs.
     let mut library_def_names = base.inner().library_def_names.clone();
     for expr in top_level_decl_items(library_exprs) {
-        if let deep::Expr::List(list, _) = expr
-            && get_tag(list) == Some(DeepTag::Def)
-            && let Some(name) = children(list).first().and_then(symbol_name)
+        if let Some((DeepTag::Def, _, kids)) = stamped_parts(expr)
+            && let Some(name) = kids.first().and_then(symbol_name)
         {
             library_def_names.insert(name.to_string());
         }
@@ -1268,8 +1259,6 @@ pub(crate) fn check_ir_with_signature_context_in_session(
     new_exprs: &[deep::Expr],
     errors: &mut DiagnosticSink<'_>,
 ) -> Result<CheckedProgram, InferStats> {
-    // Normalize Node → List while preserving BareList structural role
-    // (#908 producer switch).
     let normalized = normalize_program_input(new_exprs);
     let new_exprs = &normalized;
     // Reset the stack-exhaustion flag for this check unit; drained into the
@@ -1391,10 +1380,8 @@ pub(crate) fn check_typed_program_in_session(
     // and the annotation pass below, so a bail in either surfaces as a hard
     // located failure rather than a partially-annotated `Ok`.
     let stack_scope = StackExhaustionScope::enter();
-    // One tree for inference and annotation: the pipe fold ONLY, not the
-    // carrier normalization. chelis#1023 pins that a stamped program stays
-    // stamped through the checker's output, and this entry deliberately
-    // passes its input through untouched otherwise.
+    // One tree for inference and annotation: the pipe fold, and nothing else
+    // (chelis#1023 pins that the checker's output keeps its input's nodes).
     let exprs = &chelis_deep::pipe::fold_program_pipes(exprs)[..];
     let product = infer_program_with_product_in_session(exprs, errors);
     let stats = product.stats();
@@ -1447,8 +1434,6 @@ pub(crate) fn infer_ir_program_in_session(
     exprs: &[deep::Expr],
     errors: &mut DiagnosticSink<'_>,
 ) -> InferStats {
-    // Normalize Node → List while preserving BareList structural role
-    // (#908 producer switch).
     let normalized = normalize_program_input(exprs);
     let exprs = &normalized;
     let stack_scope = StackExhaustionScope::enter();
@@ -1890,7 +1875,6 @@ fn deep_type_contains_hole(expr: &deep::Expr) -> bool {
         return kids.iter().any(deep_type_contains_hole);
     }
     match expr {
-        deep::Expr::List(list, _) => list.elements.iter().any(deep_type_contains_hole),
         deep::Expr::BareList(elements, _) => elements.iter().any(deep_type_contains_hole),
         deep::Expr::MetaExpr(meta, _) => deep_type_contains_hole(&meta.expr),
         _ => false,
@@ -2273,9 +2257,6 @@ pub(super) fn prebind_cyclic_component_schemes(
                     deep::Expr::Node(node, _) if node.tag() == DeepTag::Params => {
                         node.child_count()
                     }
-                    deep::Expr::List(params, _) if get_tag(params) == Some(DeepTag::Params) => {
-                        children(params).len()
-                    }
                     deep::Expr::BareList(elements, _) => elements.len(),
                     _ => continue,
                 };
@@ -2455,20 +2436,8 @@ pub(super) fn collect_ir_types_with_origins<'a>(
     }
 }
 
-/// Iteratively convert `Expr::Node` → `Expr::List` for the pointer-keyed type
-/// stamp system and existing List-based inference dispatch while preserving
-/// `Expr::BareList` as a structural carrier. The explicit heap worklist is
-/// required because this boundary runs before the guarded inference walkers:
-/// native recursion here would abort on the same deep input those walkers
-/// must reject with a typed diagnostic. This is the transitional normalization
-/// boundary for the #908 producer switch; once all inference functions are
-/// migrated to accept Node directly, this becomes dead code.
-fn normalize_nodes_to_lists(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
-    exprs.iter().map(normalize_node_to_list).collect()
-}
-
-/// The checker's input normalization: carriers to lists, then pipes folded
-/// into the applications they denote.
+/// The checker's input normalization: pipes folded into the applications they
+/// denote. Every checker entry otherwise sees exactly the tree it was given.
 ///
 /// chelis#1923: `spec/02-surf-syntax.md` §0.1 makes a pipe notation for
 /// first-argument insertion, and every consumer that reconstructed the
@@ -2478,194 +2447,7 @@ fn normalize_nodes_to_lists(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
 /// is the checker's output and what the lowerer, linearity, the effect pass
 /// and the caches all read, still carrying the `Pipe` node.
 fn normalize_program_input(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
-    chelis_deep::pipe::fold_program_pipes(&normalize_nodes_to_lists(exprs))
-}
-
-fn normalize_node_to_list(expr: &deep::Expr) -> deep::Expr {
-    enum Action<'a> {
-        Visit(&'a deep::Expr),
-        FinishList {
-            element_count: usize,
-            span: Span,
-        },
-        FinishBareList {
-            element_count: usize,
-            span: Span,
-        },
-        FinishMap {
-            map: &'a deep::Metadata,
-            span: Span,
-        },
-        FinishMetaExpr {
-            meta: &'a deep::MetaExpr,
-            span: Span,
-        },
-        FinishNode {
-            tag: DeepTag,
-            meta: &'a deep::Metadata,
-            child_count: usize,
-            span: Span,
-        },
-        FinishUnknownForm(&'a deep::UnknownFormData),
-    }
-
-    fn split_tail(values: &mut Vec<deep::Expr>, count: usize) -> Vec<deep::Expr> {
-        let start = values
-            .len()
-            .checked_sub(count)
-            .expect("normalization action/value stacks remain balanced");
-        values.split_off(start)
-    }
-
-    fn metadata_leaves(meta: &deep::Metadata) -> Vec<&deep::Expr> {
-        let mut leaves = Vec::new();
-        meta.visit_expressions(&mut |value, _| leaves.push(value));
-        leaves
-    }
-    fn rebuild_metadata(meta: &deep::Metadata, normalized: Vec<deep::Expr>) -> deep::Metadata {
-        let mut normalized = normalized.into_iter();
-        let result = meta
-            .try_map_leaves::<chelis_deep::metadata::MetadataError>(&mut |_, _| {
-                Ok(normalized
-                    .next()
-                    .expect("one worklist value per metadata leaf"))
-            })
-            .expect("carrier normalization preserves payload admission");
-        assert!(
-            normalized.next().is_none(),
-            "all metadata worklist values consumed"
-        );
-        result
-    }
-    let mut actions = vec![Action::Visit(expr)];
-    let mut values = Vec::new();
-
-    while let Some(action) = actions.pop() {
-        match action {
-            Action::Visit(expr) => match expr {
-                deep::Expr::Atom(atom, span) => {
-                    values.push(deep::Expr::Atom(atom.clone(), *span));
-                }
-                deep::Expr::List(list, span) => {
-                    actions.push(Action::FinishList {
-                        element_count: list.elements.len(),
-                        span: *span,
-                    });
-                    actions.extend(list.elements.iter().rev().map(Action::Visit));
-                }
-                deep::Expr::Map(map, span) => {
-                    actions.push(Action::FinishMap { map, span: *span });
-                    actions.extend(metadata_leaves(map).into_iter().rev().map(Action::Visit));
-                }
-                deep::Expr::MetaExpr(meta, span) => {
-                    actions.push(Action::FinishMetaExpr { meta, span: *span });
-                    actions.push(Action::Visit(&meta.expr));
-                    actions.extend(
-                        metadata_leaves(&meta.metadata)
-                            .into_iter()
-                            .rev()
-                            .map(Action::Visit),
-                    );
-                }
-                deep::Expr::Node(node, span) => {
-                    actions.push(Action::FinishNode {
-                        tag: node.tag(),
-                        meta: node.meta(),
-                        child_count: node.child_count(),
-                        span: *span,
-                    });
-                    actions.extend(node.children_slice().iter().rev().map(Action::Visit));
-                    actions.extend(
-                        metadata_leaves(node.meta())
-                            .into_iter()
-                            .rev()
-                            .map(Action::Visit),
-                    );
-                }
-                deep::Expr::BareList(elements, span) => {
-                    actions.push(Action::FinishBareList {
-                        element_count: elements.len(),
-                        span: *span,
-                    });
-                    actions.extend(elements.iter().rev().map(Action::Visit));
-                }
-                deep::Expr::UnknownForm(data) => {
-                    actions.push(Action::FinishUnknownForm(data));
-                    actions.extend(data.children.iter().rev().map(Action::Visit));
-                    actions.extend(
-                        metadata_leaves(&data.meta)
-                            .into_iter()
-                            .rev()
-                            .map(Action::Visit),
-                    );
-                }
-            },
-            Action::FinishList {
-                element_count,
-                span,
-            } => {
-                let elements = split_tail(&mut values, element_count);
-                values.push(deep::Expr::List(deep::List { elements }, span));
-            }
-            Action::FinishBareList {
-                element_count,
-                span,
-            } => {
-                let elements = split_tail(&mut values, element_count);
-                values.push(deep::Expr::BareList(elements, span));
-            }
-            Action::FinishMap { map, span } => {
-                let normalized = split_tail(&mut values, metadata_leaves(map).len());
-                values.push(deep::Expr::Map(rebuild_metadata(map, normalized), span));
-            }
-            Action::FinishMetaExpr { meta, span } => {
-                let mut normalized =
-                    split_tail(&mut values, metadata_leaves(&meta.metadata).len() + 1);
-                let normalized_expr = normalized.pop().expect("MetaExpr visits its expression");
-                values.push(deep::Expr::MetaExpr(
-                    deep::MetaExpr {
-                        metadata: rebuild_metadata(&meta.metadata, normalized),
-                        expr: Box::new(normalized_expr),
-                    },
-                    span,
-                ));
-            }
-            Action::FinishNode {
-                tag,
-                meta,
-                child_count,
-                span,
-            } => {
-                let metadata_count = metadata_leaves(meta).len();
-                let mut normalized = split_tail(&mut values, metadata_count + child_count);
-                let children = normalized.split_off(metadata_count);
-                let mut elements = vec![
-                    deep::Expr::Atom(deep::Atom::Tag(tag), span),
-                    deep::Expr::Map(rebuild_metadata(meta, normalized), span),
-                ];
-                elements.extend(children);
-                values.push(deep::Expr::List(deep::List { elements }, span));
-            }
-            Action::FinishUnknownForm(data) => {
-                let metadata_count = metadata_leaves(&data.meta).len();
-                let mut normalized = split_tail(&mut values, metadata_count + data.children.len());
-                let children = normalized.split_off(metadata_count);
-                values.push(deep::Expr::UnknownForm(Box::new(deep::UnknownFormData {
-                    head: data.head.clone(),
-                    meta: rebuild_metadata(&data.meta, normalized),
-                    children,
-                    span: data.span,
-                })));
-            }
-        }
-    }
-
-    assert_eq!(
-        values.len(),
-        1,
-        "one normalization root produces exactly one expression"
-    );
-    values.pop().expect("normalization produced its root")
+    chelis_deep::pipe::fold_program_pipes(exprs)
 }
 
 #[cfg(test)]
@@ -2680,61 +2462,6 @@ pub(crate) fn builtin_selection_probe(
 #[cfg(test)]
 mod component_level_scope_tests {
     use super::*;
-
-    fn span() -> Span {
-        Span::new(0, 0)
-    }
-
-    fn name(value: &str) -> deep::Expr {
-        deep::Expr::Atom(deep::Atom::Name(value.to_string()), span())
-    }
-
-    #[test]
-    fn carrier_normalization_preserves_structural_role_and_legacy_negatives() {
-        for structural in [
-            deep::Expr::BareList(
-                vec![
-                    name("x"),
-                    deep::Expr::Map(deep::Metadata::default(), span()),
-                ],
-                span(),
-            ),
-            deep::Expr::BareList(vec![name("copy"), name("fill")], span()),
-        ] {
-            assert!(matches!(
-                normalize_node_to_list(&structural).carrier(),
-                deep::ExprCarrier::StructuralList(_)
-            ));
-        }
-
-        let undecodable = deep::Expr::List(
-            deep::List {
-                elements: vec![
-                    name("future-form"),
-                    deep::Expr::Map(deep::Metadata::default(), span()),
-                ],
-            },
-            span(),
-        );
-        assert!(matches!(
-            normalize_node_to_list(&undecodable).carrier(),
-            deep::ExprCarrier::UndecodableHead("future-form", _, _)
-        ));
-
-        let malformed = deep::Expr::List(
-            deep::List {
-                elements: vec![
-                    deep::Expr::Atom(deep::Atom::Tag(DeepTag::Copy), span()),
-                    name("value"),
-                ],
-            },
-            span(),
-        );
-        assert!(matches!(
-            normalize_node_to_list(&malformed).carrier(),
-            deep::ExprCarrier::MalformedLegacyList(_)
-        ));
-    }
 
     fn mutual_defs() -> Vec<deep::Expr> {
         chelis_deep::parser::parse_str(

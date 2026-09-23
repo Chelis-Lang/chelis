@@ -140,7 +140,6 @@ pub(super) fn defsig_parts(
 fn binder_list_items(expr: &deep::Expr) -> Option<&[deep::Expr]> {
     match expr {
         deep::Expr::BareList(items, _) => Some(items),
-        deep::Expr::List(list, _) if get_tag(list).is_none() => Some(&list.elements),
         _ => None,
     }
 }

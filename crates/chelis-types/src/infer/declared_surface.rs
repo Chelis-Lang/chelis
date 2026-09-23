@@ -48,7 +48,7 @@ pub(crate) fn resolve_declared_surface_in_session(
     let stack_scope = StackExhaustionScope::enter();
     fn validate_carriers(expr: &deep::Expr, sink: &mut DiagnosticSink<'_>) {
         stack_guard!("validate_carriers", expr);
-        if let Some((tag, meta, children)) = stamped_parts(expr) {
+        if let Some((tag, _, children)) = stamped_parts(expr) {
             // Node binder roles also admit patterns. Declaration collectors
             // require names here and otherwise skip the malformed declaration.
             if matches!(
@@ -69,14 +69,6 @@ pub(crate) fn resolve_declared_surface_in_session(
                         vec![],
                     )
                     .at_offset(expr.span().offset),
-                );
-            }
-            if let Err(error) =
-                chelis_deep::node::Node::try_new(tag, meta.clone(), children.to_vec())
-            {
-                sink.push(
-                    CheckError::new(CheckErrorKind::MalformedForm, error.to_string(), vec![])
-                        .at_offset(expr.span().offset),
                 );
             }
             for child in children {
@@ -136,7 +128,6 @@ pub(crate) fn resolve_declared_surface_in_session(
             match tag {
                 DeepTag::Deftype | DeepTag::Typealias => {
                     let params = match &children[1] {
-                        deep::Expr::List(list, _) => list.elements.as_slice(),
                         deep::Expr::BareList(elements, _) => elements.as_slice(),
                         _ => unreachable!("validated type parameter list"),
                     };
@@ -270,95 +261,145 @@ mod tests {
 
     #[test]
     fn malformed_declaration_parts_never_form_a_partial_surface() {
-        // The text parser already rejects these shapes. Exercise the public
-        // API's legacy programmatic Expr ingress directly, without pretending
-        // an invalid tree crossed the Node construction gate.
+        // The text parser already rejects these shapes. Build them through
+        // the public node constructor instead: a row the constructor refuses
+        // cannot reach the API at all, and every row it admits must be
+        // rejected by the API rather than form a partial surface.
+        type Built = Result<deep::Expr, chelis_deep::node::NodeError>;
         let span = Span::new(0, 0);
         let name = |name: &str| deep::Expr::Atom(deep::Atom::Name(name.to_string()), span);
         let params = |names| deep::Expr::BareList(names, span);
-        let form = |tag, children: Vec<deep::Expr>| {
-            deep::Expr::List(
-                deep::List {
-                    elements: [
-                        vec![
-                            deep::Expr::Atom(deep::Atom::Tag(tag), span),
-                            deep::Expr::Map(deep::Metadata::default(), span),
-                        ],
-                        children,
-                    ]
-                    .concat(),
-                },
-                span,
-            )
+        let form = |tag, children: Vec<deep::Expr>| -> Built {
+            DeepNode::try_new(tag, deep::Metadata::default(), children)
+                .map(|node| deep::Expr::Node(Box::new(node), span))
         };
-        let number = deep::Expr::Atom(deep::Atom::Int(1), span);
-        let float = form(DeepTag::TPrim, vec![name("f64")]);
-        for source in [
-            form(DeepTag::Defsig, vec![name("f")]),
-            form(DeepTag::Defsig, vec![number.clone(), float.clone()]),
-            form(
-                DeepTag::Typealias,
-                vec![number.clone(), params(vec![]), float.clone()],
+        let number = || deep::Expr::Atom(deep::Atom::Int(1), span);
+        let float = || form(DeepTag::TPrim, vec![name("f64")]);
+        let rows: Vec<(&str, Built)> = vec![
+            (
+                "defsig without a type",
+                form(DeepTag::Defsig, vec![name("f")]),
             ),
-            form(DeepTag::Deftype, vec![number.clone(), params(vec![])]),
-            form(
-                DeepTag::Deftype,
-                vec![
-                    name("A"),
-                    params(vec![]),
-                    form(DeepTag::Variant, vec![number.clone(), float.clone()]),
-                ],
+            (
+                "defsig with a numeric name",
+                (|| form(DeepTag::Defsig, vec![number(), float()?]))(),
             ),
-            form(
-                DeepTag::Deftype,
-                vec![
-                    name("A"),
-                    params(vec![]),
+            (
+                "typealias with a numeric name",
+                (|| form(DeepTag::Typealias, vec![number(), params(vec![]), float()?]))(),
+            ),
+            (
+                "deftype with a numeric name",
+                form(DeepTag::Deftype, vec![number(), params(vec![])]),
+            ),
+            (
+                "variant with a numeric name",
+                (|| {
                     form(
-                        DeepTag::Variant,
+                        DeepTag::Deftype,
                         vec![
                             name("A"),
-                            form(DeepTag::Field, vec![number.clone(), float.clone()]),
+                            params(vec![]),
+                            form(DeepTag::Variant, vec![number(), float()?])?,
                         ],
-                    ),
-                ],
+                    )
+                })(),
             ),
-            form(
-                DeepTag::Deftype,
-                vec![
-                    name("A"),
-                    params(vec![]),
+            (
+                "field with a numeric name",
+                (|| {
                     form(
-                        DeepTag::Variant,
-                        vec![name("A"), form(DeepTag::Field, vec![name("x")])],
-                    ),
-                ],
+                        DeepTag::Deftype,
+                        vec![
+                            name("A"),
+                            params(vec![]),
+                            form(
+                                DeepTag::Variant,
+                                vec![name("A"), form(DeepTag::Field, vec![number(), float()?])?],
+                            )?,
+                        ],
+                    )
+                })(),
             ),
-            form(
-                DeepTag::Typealias,
-                vec![name("A"), params(vec![number.clone()]), float.clone()],
+            (
+                "field without a type",
+                (|| {
+                    form(
+                        DeepTag::Deftype,
+                        vec![
+                            name("A"),
+                            params(vec![]),
+                            form(
+                                DeepTag::Variant,
+                                vec![name("A"), form(DeepTag::Field, vec![name("x")])?],
+                            )?,
+                        ],
+                    )
+                })(),
             ),
-            form(
-                DeepTag::Typealias,
-                vec![
-                    name("A"),
-                    params(vec![]),
-                    form(DeepTag::TAdt, vec![name("Absent")]),
-                ],
+            (
+                "numeric type parameter",
+                (|| {
+                    form(
+                        DeepTag::Typealias,
+                        vec![name("A"), params(vec![number()]), float()?],
+                    )
+                })(),
             ),
-            form(
-                DeepTag::Typealias,
-                vec![
-                    name("A"),
-                    params(vec![name("a"), name("a")]),
-                    form(DeepTag::TVar, vec![name("a")]),
-                ],
+            (
+                "absent alias target",
+                (|| {
+                    form(
+                        DeepTag::Typealias,
+                        vec![
+                            name("A"),
+                            params(vec![]),
+                            form(DeepTag::TAdt, vec![name("Absent")])?,
+                        ],
+                    )
+                })(),
             ),
-            form(DeepTag::Deftype, vec![name("A"), params(vec![]), float]),
-            form(DeepTag::Import, vec![name("Absent")]),
-            number,
-        ] {
-            assert!(resolve_declared_surface(&[source]).is_err());
+            (
+                "duplicate type parameter",
+                (|| {
+                    form(
+                        DeepTag::Typealias,
+                        vec![
+                            name("A"),
+                            params(vec![name("a"), name("a")]),
+                            form(DeepTag::TVar, vec![name("a")])?,
+                        ],
+                    )
+                })(),
+            ),
+            (
+                "deftype with a non-variant member",
+                (|| form(DeepTag::Deftype, vec![name("A"), params(vec![]), float()?]))(),
+            ),
+            (
+                "import without a name list",
+                form(DeepTag::Import, vec![name("Absent")]),
+            ),
+            ("a bare number", Ok(number())),
+        ];
+        let mut admitted = 0;
+        for (row, built) in rows {
+            match built {
+                Ok(source) => {
+                    admitted += 1;
+                    assert!(
+                        resolve_declared_surface(&[source]).is_err(),
+                        "{row}: an admitted malformed declaration formed a surface"
+                    );
+                }
+                Err(error) => assert!(
+                    matches!(error, chelis_deep::node::NodeError::ArityViolation { .. }),
+                    "{row}: the node constructor refused it for an unexpected reason: {error}"
+                ),
+            }
         }
+        // Most rows are admitted by the constructor, so the API's own
+        // rejection stays exercised.
+        assert!(admitted >= 9, "only {admitted} rows reached the API");
     }
 }

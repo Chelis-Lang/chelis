@@ -5,7 +5,7 @@ use super::*;
 /// Enforce [05-SPARSE-1]. Unlike `scatter`, indices and updates keep the data
 /// rank and share one shape; the result always has the data type.
 pub(super) fn check_scatter_elements(
-    list: &deep::List,
+    node: &DeepNode,
     kids: &[deep::Expr],
     arg_tys: &[Type],
     pending_ty: Type,
@@ -13,7 +13,7 @@ pub(super) fn check_scatter_elements(
     errors: &mut DiagnosticSink<'_>,
 ) -> Type {
     if arg_tys.len() != 4 {
-        return report_builtin_arity(errors, list, "scatter_elements", 4, arg_tys.len());
+        return report_builtin_arity(errors, node, "scatter_elements", 4, arg_tys.len());
     }
     let data_ty = subst.apply(&arg_tys[0]);
     let indices_ty = subst.apply(&arg_tys[1]);
@@ -26,8 +26,8 @@ pub(super) fn check_scatter_elements(
                 errors,
                 CheckError::new(
                     CheckErrorKind::TypeMismatch,
-                    with_macro_provenance(
-                        &deep::Expr::List(list.clone(), zero_span()),
+                    with_node_provenance(
+                        node,
                         format!("scatter_elements expects tensor data, got {other}"),
                     ),
                     vec![],
@@ -43,8 +43,8 @@ pub(super) fn check_scatter_elements(
                 errors,
                 CheckError::new(
                     CheckErrorKind::TypeMismatch,
-                    with_macro_provenance(
-                        &deep::Expr::List(list.clone(), zero_span()),
+                    with_node_provenance(
+                        node,
                         format!("scatter_elements expects i32 or i64 tensor indices, got {other}"),
                     ),
                     vec![],
@@ -57,8 +57,8 @@ pub(super) fn check_scatter_elements(
             errors,
             CheckError::new(
                 CheckErrorKind::TypeMismatch,
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
+                with_node_provenance(
+                    node,
                     format!(
                         "scatter_elements expects i32 or i64 tensor indices, got tensor[..., {}]",
                         index_prec.name()
@@ -76,8 +76,8 @@ pub(super) fn check_scatter_elements(
                 errors,
                 CheckError::new(
                     CheckErrorKind::TypeMismatch,
-                    with_macro_provenance(
-                        &deep::Expr::List(list.clone(), zero_span()),
+                    with_node_provenance(
+                        node,
                         format!("scatter_elements expects tensor updates, got {other}"),
                     ),
                     vec![],
@@ -133,7 +133,7 @@ pub(super) fn check_scatter_elements(
         kids.get(4),
         &subst.apply(&arg_tys[3]),
         &data_ty,
-        list,
+        node,
         errors,
     ) {
         Ok(axis) => axis,

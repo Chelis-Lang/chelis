@@ -17,7 +17,7 @@ fn csv_table_ty() -> Type {
 
 fn reject_host_builtin_slot(
     errors: &mut DiagnosticSink<'_>,
-    list: &deep::List,
+    node: &DeepNode,
     fname: &str,
     slot_description: &str,
     got: &Type,
@@ -26,8 +26,8 @@ fn reject_host_builtin_slot(
         errors,
         CheckError::new(
             CheckErrorKind::TypeMismatch,
-            with_macro_provenance(
-                &deep::Expr::List(list.clone(), zero_span()),
+            with_node_provenance(
+                node,
                 format!("{fname} expects {slot_description}, got {got}"),
             ),
             vec![],
@@ -37,7 +37,7 @@ fn reject_host_builtin_slot(
 
 fn unify_host_slot(
     errors: &mut DiagnosticSink<'_>,
-    list: &deep::List,
+    node: &DeepNode,
     fname: &str,
     slot: &Type,
     expected: &Type,
@@ -62,7 +62,7 @@ fn unify_host_slot(
         );
         return None;
     }
-    unify_host_slot_eager(errors, list, fname, slot, expected, slot_description, subst)
+    unify_host_slot_eager(errors, node, fname, slot, expected, slot_description, subst)
 }
 
 /// Unify a host-lane slot and reject an unresolved operand immediately: the
@@ -87,7 +87,7 @@ fn unify_host_slot(
 /// chelis#1489 rather than being bolted on here.
 fn unify_host_slot_eager(
     errors: &mut DiagnosticSink<'_>,
-    list: &deep::List,
+    node: &DeepNode,
     fname: &str,
     slot: &Type,
     expected: &Type,
@@ -97,7 +97,7 @@ fn unify_host_slot_eager(
     if unify(slot, expected, subst).is_err() {
         return Some(reject_host_builtin_slot(
             errors,
-            list,
+            node,
             fname,
             slot_description,
             &subst.apply(slot),
@@ -109,7 +109,7 @@ fn unify_host_slot_eager(
 #[allow(clippy::too_many_arguments)]
 fn loose_integer_host_slot(
     errors: &mut DiagnosticSink<'_>,
-    list: &deep::List,
+    node: &DeepNode,
     fname: &str,
     slot: &Type,
     slot_description: &str,
@@ -122,20 +122,20 @@ fn loose_integer_host_slot(
         _ => false,
     };
     (!ok).then(|| {
-        reject_host_builtin_slot(errors, list, fname, slot_description, &subst.apply(slot))
+        reject_host_builtin_slot(errors, node, fname, slot_description, &subst.apply(slot))
     })
 }
 
 /// [05-OP-1]'s current f32/f64 `round_to` checker boundary.
 pub(super) fn check_round_to_builtin_signature(
-    list: &deep::List,
+    node: &DeepNode,
     arg_tys: &[Type],
     subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
 ) -> Type {
     const FNAME: &str = "round_to";
     if arg_tys.len() != 2 {
-        return report_builtin_arity(errors, list, FNAME, 2, arg_tys.len());
+        return report_builtin_arity(errors, node, FNAME, 2, arg_tys.len());
     }
     let operand = type_for_readonly_check(&arg_tys[0], subst);
     let result = match &operand {
@@ -145,7 +145,7 @@ pub(super) fn check_round_to_builtin_signature(
         Type::Var(_) => {
             if let Some(error) = unify_host_slot_eager(
                 errors,
-                list,
+                node,
                 FNAME,
                 &operand,
                 &Type::Prim(Prim::F64),
@@ -159,7 +159,7 @@ pub(super) fn check_round_to_builtin_signature(
         other => {
             return reject_host_builtin_slot(
                 errors,
-                list,
+                node,
                 FNAME,
                 "an f64 or f32 first argument",
                 other,
@@ -169,7 +169,7 @@ pub(super) fn check_round_to_builtin_signature(
     let places = type_for_readonly_check(&arg_tys[1], subst);
     if let Some(error) = loose_integer_host_slot(
         errors,
-        list,
+        node,
         FNAME,
         &places,
         "an integer `places` second argument",
@@ -183,7 +183,7 @@ pub(super) fn check_round_to_builtin_signature(
 /// [05-OP-2..5]'s CSV carrier is exactly `List[Dict[string,string]]`.
 pub(super) fn check_csv_builtin_signature(
     fname: &str,
-    list: &deep::List,
+    node: &DeepNode,
     arg_tys: &[Type],
     subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
@@ -194,14 +194,14 @@ pub(super) fn check_csv_builtin_signature(
         _ => 2,
     };
     if arg_tys.len() != expected_arity {
-        return report_builtin_arity(errors, list, fname, expected_arity, arg_tys.len());
+        return report_builtin_arity(errors, node, fname, expected_arity, arg_tys.len());
     }
 
     macro_rules! require_slot {
         ($idx:expr, $expected:expr, $desc:expr) => {{
             let slot = type_for_readonly_check(&arg_tys[$idx], subst);
             if let Some(error) =
-                unify_host_slot(errors, list, fname, &slot, &$expected, $desc, subst)
+                unify_host_slot(errors, node, fname, &slot, &$expected, $desc, subst)
             {
                 return error;
             }
@@ -239,7 +239,7 @@ pub(super) fn check_csv_builtin_signature(
             let row = type_for_readonly_check(&arg_tys[1], subst);
             if let Some(error) = loose_integer_host_slot(
                 errors,
-                list,
+                node,
                 fname,
                 &row,
                 "an integer row index second argument",
