@@ -525,3 +525,65 @@ fn a_hip_tensor_entry_passes_its_handlers_draw_key_to_both_entry_points() {
         "device entry"
     );
 }
+
+/// [05-OP-8] in compiled C: bounds that are not finite, reversed, or whose
+/// width overflows at the arithmetic dtype trap Domain as `uniform_like`
+/// before the draw produces a value. The non-finite bounds come from run-time
+/// arithmetic, so no literal gate can catch them first.
+///
+/// Evidentiary status: COVERAGE LOCK, not a regression test: compiled C traps
+/// these at 3b5f029d8 too. Removing the emitted bound check makes every row
+/// return a value instead.
+#[test]
+fn compiled_c_traps_invalid_run_time_uniform_bounds_before_the_draw() {
+    assert!(
+        common::gcc_available(),
+        "C toolchain required; no lane may skip"
+    );
+    let setup = "x = to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32])\n    s = tensor_to_scalar(sum(copy(x), 0i32))";
+    let rows = [
+        (
+            "infinite_high",
+            "hi = div(1.0f32, sub(s, s))\n    uniform_like(x, 0.0f32, hi)",
+        ),
+        (
+            "nan_high",
+            "hi = div(sub(s, s), sub(s, s))\n    uniform_like(x, 0.0f32, hi)",
+        ),
+        ("reversed", "uniform_like(x, s, 1.0f32)"),
+        (
+            "overflowing_width",
+            "uniform_like(x, mul(s, -7.5e37f32), mul(s, 7.5e37f32))",
+        ),
+    ];
+    for (name, body) in rows {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join(format!("{name}.ch"));
+        std::fs::write(
+            &source,
+            format!("def main() =\n  with seed(7i64) {{\n    {setup}\n    {body}\n  }}\n"),
+        )
+        .unwrap();
+        let out = dir.path().join("out");
+        succeeded(
+            cli(&[
+                "build",
+                source.to_str().unwrap(),
+                "--target",
+                "c",
+                "--output",
+                out.to_str().unwrap(),
+            ]),
+            name,
+        );
+        assert!(common::link_generated(&out, &format!("{name}.c"), name).success());
+        let run = std::process::Command::new(out.join(name)).output().unwrap();
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        assert!(!run.status.success(), "{name} returned a value");
+        assert!(
+            stderr.contains("numeric trap: domain in uniform_like at f32"),
+            "{name}: {stderr}"
+        );
+        assert!(run.stdout.is_empty(), "{name} printed a draw");
+    }
+}
