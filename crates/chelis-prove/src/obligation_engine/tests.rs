@@ -378,57 +378,49 @@ def make(xs: tensor[1, {width}]) -> Counter = Counter {{ n: (0 : {width}) }}
 }
 
 #[test]
-fn zero_arg_constant_discovery_matches_stamped_and_legacy_module_carriers() {
+fn zero_arg_constant_discovery_reads_the_stamped_module() {
     let source = r#"(module {} M
         (def {} value (lit {} 1))
         (def {} zero (fn {} (params {}) (lit {} 2)))
         (def {} unary (fn {} (params {} x) (lit {} 3))))"#;
     let stamped =
         chelis_deep::parse_and_stamp_file(source).expect("constant-discovery fixture stamps");
-    let legacy = crate::deep_compat::normalize_nodes_to_lists(&stamped);
 
     let expected = vec!["value".to_string(), "zero".to_string()];
     assert_eq!(module_zero_arg_scalar_defs(&stamped), expected);
-    assert_eq!(module_zero_arg_scalar_defs(&legacy), expected);
 }
 
 #[test]
-fn undecodable_source_variants_keep_engine_children_and_binders_distinct() {
+fn unknown_forms_expose_no_engine_children_or_binder() {
     let span = Span::new(0, 0);
     let child = Expr::Atom(Atom::Name("child".into()), span);
-    let legacy = Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Name("binder".into()), span),
-                Expr::Map(Metadata::default(), span),
-                child.clone(),
-            ],
-        },
+    let structural = Expr::BareList(
+        vec![
+            Expr::Atom(Atom::Name("binder".into()), span),
+            Expr::Map(Metadata::default(), span),
+        ],
         span,
     );
     let unknown = Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
         head: "binder".into(),
         meta: Metadata::default(),
-        children: vec![child.clone()],
+        children: vec![child],
         span,
     }));
 
-    assert_eq!(binder_name(&legacy), Some("binder"));
+    assert_eq!(binder_name(&structural), Some("binder"));
     assert_eq!(binder_name(&unknown), None);
-    assert_eq!(node_children(&legacy), std::slice::from_ref(&child));
     assert!(node_children(&unknown).is_empty());
 }
 
 #[test]
-fn producer_param_discovery_keeps_malformed_legacy_module_and_binder() {
+fn producer_param_discovery_keeps_a_malformed_structural_binder() {
     let span = Span::new(0, 0);
-    let malformed_param = Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Name("x".into()), span),
-                Expr::Atom(Atom::Int(0), span),
-            ],
-        },
+    let malformed_param = Expr::BareList(
+        vec![
+            Expr::Atom(Atom::Name("x".into()), span),
+            Expr::Atom(Atom::Int(0), span),
+        ],
         span,
     );
     let params = deep_node("params", vec![malformed_param]);
@@ -440,41 +432,29 @@ fn producer_param_discovery_keeps_malformed_legacy_module_and_binder() {
         ],
     );
     let def = deep_node("def", vec![deep_sym("make"), function]);
-    let module = Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::Module), span),
-                Expr::Atom(Atom::Int(0), span),
-                deep_sym("M"),
-                def,
-            ],
-        },
-        span,
-    );
+    let module = deep_node("module", vec![deep_sym("M"), def]);
 
     assert_eq!(producer_param_names(&[module], "make"), ["x"]);
 }
 
+/// chelis#1125: the injection matched only the deleted list spelling of a
+/// module, so a stamped module never received the obligation defs and they
+/// landed at top level, outside the module that makes the opaque type's
+/// field access legal.
 #[test]
-fn defining_module_injection_keeps_all_malformed_legacy_list_elements() {
+fn defining_module_injection_appends_to_the_module_node() {
     let span = Span::new(0, 0);
-    let deftype = deep_node("deftype", vec![deep_sym("Token")]);
-    let module = Expr::List(
-        List {
-            elements: vec![Expr::Atom(Atom::Tag(DeepTag::Module), span), deftype],
-        },
-        span,
+    let deftype = deep_node(
+        "deftype",
+        vec![deep_sym("Token"), Expr::BareList(vec![], span)],
     );
-    let marker = deep_sym("marker");
+    let module = deep_node("module", vec![deep_sym("M"), deftype]);
+    let marker = deep_node("def", vec![deep_sym("marker"), deep_var("Token")]);
 
     let injected = inject_into_defining_module(&[module], "Token", vec![marker.clone()]);
-    assert_eq!(
-        injected.len(),
-        1,
-        "the legacy module search traversed every raw list element"
-    );
-    let Expr::List(module, _) = &injected[0] else {
-        panic!("legacy module carrier is preserved")
+    assert_eq!(injected.len(), 1, "the defs join the defining module");
+    let Expr::Node(module, _) = &injected[0] else {
+        panic!("the module node is preserved")
     };
-    assert_eq!(module.elements.last(), Some(&marker));
+    assert_eq!(module.children_slice().last(), Some(&marker));
 }

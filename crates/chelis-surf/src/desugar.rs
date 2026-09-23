@@ -84,16 +84,10 @@ pub fn desugar_program_with_context(
     })?;
     let resolved_grad_indices = GradSelectorResolver::resolve_program_with_context(decls, context)?;
     let ctx = DesugarCtx::new(decls, resolved_grad_indices);
-    let exprs: Vec<deep::Expr> = decls
+    Ok(decls
         .iter()
         .flat_map(|decl| ctx.desugar_decl(decl))
-        .collect();
-    // The desugar internally produces `Expr::Node` (proving structural
-    // correctness via `Node::new` validation). Normalize to `Expr::List`
-    // at the output boundary so downstream consumers work unchanged during
-    // the transition period (#908). Once all consumers handle Node
-    // directly, remove this normalization.
-    Ok(normalize_to_lists(&exprs))
+        .collect())
 }
 
 pub fn desugar_decl_only(decl: &Decl) -> Result<Vec<deep::Expr>, DesugarError> {
@@ -102,9 +96,7 @@ pub fn desugar_decl_only(decl: &Decl) -> Result<Vec<deep::Expr>, DesugarError> {
 
 pub fn desugar_expr_only(expr: &Expr) -> Result<deep::Expr, DesugarError> {
     let resolved_grad_indices = GradSelectorResolver::resolve_expression(expr)?;
-    Ok(normalize_single(
-        &DesugarCtx::with_resolved_grad_indices(resolved_grad_indices).desugar_expr(expr),
-    ))
+    Ok(DesugarCtx::with_resolved_grad_indices(resolved_grad_indices).desugar_expr(expr))
 }
 
 /// Desugar an expression using the declarations that establish its callable
@@ -126,66 +118,7 @@ pub fn desugar_expr_in_program_scope(
     })?;
     let resolved_grad_indices =
         GradSelectorResolver::resolve_expression_in_program(decls, expr, bound_names)?;
-    Ok(normalize_single(
-        &DesugarCtx::new(decls, resolved_grad_indices).desugar_expr_with_scope(expr, bound_names),
-    ))
-}
-
-fn normalize_to_lists(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
-    exprs.iter().map(normalize_single).collect()
-}
-
-fn normalize_single(expr: &deep::Expr) -> deep::Expr {
-    match expr {
-        deep::Expr::Node(node, span) => {
-            // `to_list` clones all descendants. Normalizing that clone again
-            // at every child made a nested let chain quadratic. Construct the
-            // same transition representation while visiting each child once.
-            let mut elements = Vec::with_capacity(node.child_count() + 2);
-            elements.push(deep::Expr::Atom(deep::Atom::Tag(node.tag()), *span));
-            elements.push(deep::Expr::Map(
-                node.meta()
-                    .map_expressions(&mut |v, _| normalize_single(v))
-                    .expect("normalization preserves annotations"),
-                *span,
-            ));
-            elements.extend(node.children_slice().iter().map(normalize_single));
-            deep::Expr::List(deep::List { elements }, *span)
-        }
-        deep::Expr::List(list, span) => {
-            let elements = list.elements.iter().map(normalize_single).collect();
-            deep::Expr::List(deep::List { elements }, *span)
-        }
-        deep::Expr::BareList(elems, span) => {
-            let elements = elems.iter().map(normalize_single).collect();
-            deep::Expr::List(deep::List { elements }, *span)
-        }
-        deep::Expr::Map(map, span) => deep::Expr::Map(
-            map.map_expressions(&mut |v, _| normalize_single(v))
-                .expect("normalization preserves annotations"),
-            *span,
-        ),
-        deep::Expr::MetaExpr(meta, span) => deep::Expr::MetaExpr(
-            deep::MetaExpr {
-                metadata: meta
-                    .metadata
-                    .map_expressions(&mut |v, _| normalize_single(v))
-                    .expect("normalization preserves annotations"),
-                expr: Box::new(normalize_single(&meta.expr)),
-            },
-            *span,
-        ),
-        deep::Expr::UnknownForm(data) => deep::Expr::UnknownForm(Box::new(deep::UnknownFormData {
-            head: data.head.clone(),
-            meta: data
-                .meta
-                .map_expressions(&mut |v, _| normalize_single(v))
-                .expect("normalization preserves annotations"),
-            children: data.children.iter().map(normalize_single).collect(),
-            span: data.span,
-        })),
-        other => other.clone(),
-    }
+    Ok(DesugarCtx::new(decls, resolved_grad_indices).desugar_expr_with_scope(expr, bound_names))
 }
 
 #[derive(Default)]
@@ -1100,11 +1033,6 @@ fn deep_parameter_name(expr: &deep::Expr) -> Option<String> {
             .first()
             .and_then(deep_symbol_name)
             .map(str::to_string),
-        deep::Expr::List(list, _) => list
-            .elements
-            .first()
-            .and_then(deep_symbol_name)
-            .map(str::to_string),
         _ => None,
     }
 }
@@ -1243,10 +1171,6 @@ fn int(n: i64) -> deep::Expr {
     deep::Expr::Atom(deep::Atom::Int(n), sp())
 }
 
-fn meta_empty() -> deep::Expr {
-    deep::Expr::Map(deep::Metadata::default(), sp())
-}
-
 fn surf_span_id(span: Span) -> Option<String> {
     if span.len == 0 {
         None
@@ -1296,21 +1220,12 @@ fn with_metadata_value(expr: deep::Expr, value: M) -> deep::Expr {
                 .expect("desugared annotation has an admissible owner");
             deep::Expr::Node(node, span)
         }
-        deep::Expr::List(mut list, span) => {
-            if let Some(deep::Expr::Map(meta, _)) = list.elements.get_mut(1) {
-                meta.replace(value);
-            }
-            deep::Expr::List(list, span)
-        }
         other => other,
     }
 }
 fn has_type_metadata(expr: &deep::Expr) -> bool {
     match expr {
         deep::Expr::Node(node, _) => node.meta().ty().is_some(),
-        deep::Expr::List(list, _) => {
-            matches!(list.elements.get(1), Some(deep::Expr::Map(meta, _)) if meta.ty().is_some())
-        }
         _ => false,
     }
 }
@@ -1329,20 +1244,23 @@ fn node(tag: DeepTag, children: Vec<deep::Expr>) -> deep::Expr {
     )
 }
 
-/// Build a compiler-internal pre-expansion node (`defmacro` /
-/// `macro-invoke`), whose tags are deliberately OUTSIDE the public
-/// 62-tag vocabulary (spec/03 macro boundary rule) and therefore stay
-/// symbol-headed. chelis-macros expands these away before any public
-/// consumer dispatches on tags; they are a recorded raw-string entry
+/// Build a compiler-internal pre-expansion form (`defmacro`), whose tag is
+/// deliberately OUTSIDE the public 62-tag vocabulary (spec/03 macro
+/// boundary rule) and therefore stays an undecoded head: an `UnknownForm`,
+/// exactly as the stamper carries it. chelis-macros expands it away before
+/// any public consumer dispatches on tags; it is a recorded raw-string entry
 /// point per checker_totality.md §C1.2.
 fn internal_node(tag: &str, children: Vec<deep::Expr>) -> deep::Expr {
     debug_assert!(
         DeepTag::parse(tag).is_none(),
         "vocabulary tags must go through the typed `node` constructor"
     );
-    let mut elements = vec![sym(tag), meta_empty()];
-    elements.extend(children);
-    deep::Expr::List(deep::List { elements }, sp())
+    deep::Expr::UnknownForm(Box::new(deep::UnknownFormData {
+        head: tag.to_string(),
+        meta: deep::Metadata::default(),
+        children,
+        span: sp(),
+    }))
 }
 
 /// Attach `dtype_bounds` metadata for every bounded binder in `binders`
@@ -1389,7 +1307,6 @@ fn node_meta(tag: DeepTag, meta: deep::Expr, children: Vec<deep::Expr>) -> deep:
 fn with_structural_span(expr: deep::Expr, span: Span) -> deep::Expr {
     match expr {
         deep::Expr::Atom(atom, _) => deep::Expr::Atom(atom, span),
-        deep::Expr::List(list, _) => deep::Expr::List(list, span),
         deep::Expr::Map(map, _) => deep::Expr::Map(map, span),
         deep::Expr::MetaExpr(meta, _) => deep::Expr::MetaExpr(meta, span),
         deep::Expr::Node(node, _) => deep::Expr::Node(node, span),
@@ -1500,12 +1417,7 @@ fn desugar_param_with_annotation(param: &Param, annotation: Option<deep::Expr>) 
             },
             sp(),
         ),
-        Some(ty) => deep::Expr::List(
-            deep::List {
-                elements: vec![sym(&param.name), meta_with_type(ty)],
-            },
-            sp(),
-        ),
+        Some(ty) => bare_list(vec![sym(&param.name), meta_with_type(ty)]),
         None => sym(&param.name),
     }
 }
@@ -1580,7 +1492,7 @@ fn typed_param_needs_meta_wrapper(name: &str) -> bool {
 /// Inject a type annotation into the metadata of a desugared expression.
 fn inject_type_metadata(expr: deep::Expr, ty: deep::Expr) -> deep::Expr {
     match expr {
-        deep::Expr::Node(..) | deep::Expr::List(..) => with_metadata_value(expr, type_metadata(ty)),
+        deep::Expr::Node(..) => with_metadata_value(expr, type_metadata(ty)),
         other => node_meta(DeepTag::Var, meta_with_type(ty), vec![other]),
     }
 }
@@ -1620,16 +1532,6 @@ fn apply_effect_metadata(ty_expr: deep::Expr, effects: &Option<Vec<EffectExpr>>)
                     .expect("effect annotation must preserve the stamped Node invariant");
             }
             deep::Expr::Node(node, span)
-        }
-        (Some(effects), deep::Expr::List(list, span)) => {
-            let mut elements = list.elements;
-            if matches!(
-                elements.first(),
-                Some(deep::Expr::Atom(deep::Atom::Tag(DeepTag::TFn), _))
-            ) {
-                elements[1] = meta_with_entries(vec![M::Eff(desugar_effect_set(effects))]);
-            }
-            deep::Expr::List(deep::List { elements }, span)
         }
         (_, other) => other,
     }
@@ -3868,12 +3770,6 @@ mod tests {
             .find_map(|expr| match expr {
                 deep::Expr::Node(node, _) if node.tag() == DeepTag::Def => {
                     node.meta().property_contracts()
-                }
-                deep::Expr::List(list, _) if list.tag() == Some(DeepTag::Def) => {
-                    match list.elements.get(1) {
-                        Some(deep::Expr::Map(meta, _)) => meta.property_contracts(),
-                        _ => None,
-                    }
                 }
                 _ => None,
             })

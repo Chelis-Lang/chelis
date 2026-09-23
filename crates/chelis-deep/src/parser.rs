@@ -473,55 +473,6 @@ fn parse_with_source(tokens: &[Token], source: Option<&str>) -> Result<Vec<Expr>
     Ok(typed)
 }
 
-/// Decode-once stamping for hand-built `Expr::List` trees in tests.
-///
-/// **DEPRECATED**: Only needed by test code that manually constructs
-/// `Expr::List`. New test code should use `Expr::node()` or parse via
-/// `parse_str()` instead.
-pub fn stamp_tags(exprs: &mut [Expr]) {
-    use crate::ast::Atom;
-    fn stamp(expr: &mut Expr) {
-        match expr {
-            Expr::List(list, _) => {
-                if let Some(Expr::Atom(atom, _)) = list.elements.first_mut()
-                    && let Atom::Name(symbol) = &*atom
-                    && let Some(tag) = crate::tag::DeepTag::parse(symbol)
-                {
-                    *atom = Atom::Tag(tag);
-                }
-                for child in list.elements.iter_mut() {
-                    stamp(child);
-                }
-            }
-            Expr::Map(map, _) => {
-                *map = map
-                    .map_expressions(&mut |value, _| {
-                        let mut value = value.clone();
-                        stamp(&mut value);
-                        value
-                    })
-                    .expect("stamping preserves metadata shape");
-            }
-            Expr::MetaExpr(meta, _) => {
-                stamp(&mut meta.expr);
-                meta.metadata = meta
-                    .metadata
-                    .map_expressions(&mut |value, _| {
-                        let mut value = value.clone();
-                        stamp(&mut value);
-                        value
-                    })
-                    .expect("stamping preserves metadata shape");
-            }
-            Expr::Atom(_, _) => {}
-            Expr::Node(..) | Expr::BareList(..) | Expr::UnknownForm(..) => {}
-        }
-    }
-    for expr in exprs.iter_mut() {
-        stamp(expr);
-    }
-}
-
 /// The raw parser mirrors the typed parser but constructs `RawExpr`/`RawAtom`
 /// instead of `Expr`/`Atom`. No tag stamping, no typed-literal collapse.
 fn parse_raw_syntax(tokens: &[Token], source: Option<&str>) -> Result<Vec<RawExpr>, ParseError> {

@@ -45,8 +45,6 @@ use chelis_deep::{Atom, DeepTag};
 use crate::errors::{CheckError, CheckErrorKind, ErrorWitness, report_witness};
 use crate::session::DiagnosticSink;
 
-use super::common::stamped_parts;
-
 /// Read the child at `index` of a form that reads that child's content, where
 /// the form declares a default for the child being absent.
 ///
@@ -177,7 +175,6 @@ fn malformed_slot(
 fn describe_slot_child(expr: &deep::Expr) -> String {
     match expr {
         deep::Expr::Atom(Atom::Name(name), _) => format!("symbol `{name}`"),
-        deep::Expr::Atom(Atom::Tag(tag), _) => format!("the tag word `{}`", tag.as_str()),
         deep::Expr::Atom(Atom::Int(value), _) => format!("integer literal {value}"),
         deep::Expr::Atom(Atom::Float(value), _) => format!("float literal {value}"),
         deep::Expr::Atom(Atom::Bool(value), _) => format!("bool literal {value}"),
@@ -187,9 +184,6 @@ fn describe_slot_child(expr: &deep::Expr) -> String {
         deep::Expr::BareList(items, _) if items.is_empty() => "an empty list".to_string(),
         deep::Expr::BareList(..) => "a headless list".to_string(),
         deep::Expr::UnknownForm(data) => format!("an unrecognized form `{}`", data.head),
-        deep::Expr::Node(..) | deep::Expr::List(..) => match stamped_parts(expr) {
-            Some((tag, _, _)) => format!("a `{}` form", tag.as_str()),
-            None => "an untagged list".to_string(),
-        },
+        deep::Expr::Node(node, _) => format!("a `{}` form", node.tag().as_str()),
     }
 }

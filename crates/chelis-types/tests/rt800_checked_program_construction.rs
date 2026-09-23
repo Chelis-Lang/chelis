@@ -1,4 +1,4 @@
-use chelis_deep::ast::{Atom, Expr, List};
+use chelis_deep::ast::{Atom, Expr};
 use chelis_deep::{DeepTag, Span};
 use chelis_types::{CheckedProgram, check_ir_program, check_linearity};
 
@@ -30,87 +30,12 @@ fn mutate_annotation_leaves(
     changed
 }
 
-fn legacy_mutation_metadata(metadata: &chelis_deep::Metadata) -> chelis_deep::Metadata {
-    metadata
-        .map_expressions(&mut |value, _| legacy_mutation_expr(value))
-        .expect("legacy mutation conversion preserves metadata payloads")
-}
-
-fn legacy_mutation_expr(expr: &Expr) -> Expr {
-    match expr {
-        Expr::Node(node, span) => {
-            let list = node.to_list(*span);
-            Expr::List(
-                List {
-                    elements: list.elements.iter().map(legacy_mutation_expr).collect(),
-                },
-                *span,
-            )
-        }
-        Expr::BareList(elements, span) => {
-            Expr::BareList(elements.iter().map(legacy_mutation_expr).collect(), *span)
-        }
-        Expr::List(list, span) => Expr::List(
-            List {
-                elements: list.elements.iter().map(legacy_mutation_expr).collect(),
-            },
-            *span,
-        ),
-        Expr::Map(metadata, span) => Expr::Map(legacy_mutation_metadata(metadata), *span),
-        Expr::MetaExpr(metadata_expr, span) => Expr::MetaExpr(
-            chelis_deep::ast::MetaExpr {
-                metadata: legacy_mutation_metadata(&metadata_expr.metadata),
-                expr: Box::new(legacy_mutation_expr(&metadata_expr.expr)),
-            },
-            *span,
-        ),
-        Expr::UnknownForm(data) => {
-            let mut elements = vec![
-                Expr::Atom(Atom::Name(data.head.clone()), data.span),
-                Expr::Map(legacy_mutation_metadata(&data.meta), data.span),
-            ];
-            elements.extend(data.children.iter().map(legacy_mutation_expr));
-            Expr::List(List { elements }, data.span)
-        }
-        Expr::Atom(..) => expr.clone(),
-    }
-}
-
-fn legacy_mutation_candidate(checked: &CheckedProgram) -> Vec<Expr> {
-    checked
-        .annotated_exprs()
-        .iter()
-        .map(legacy_mutation_expr)
-        .collect()
-}
-
 fn mutate_first_decoded_node(
     expr: &mut Expr,
     target: DeepTag,
     mutator: &mut impl FnMut(&mut chelis_deep::Metadata, &mut Vec<Expr>) -> bool,
 ) -> bool {
     match expr {
-        Expr::List(list, _) => {
-            let target_parts = match list.elements.as_slice() {
-                [
-                    Expr::Atom(Atom::Tag(tag), _),
-                    Expr::Map(metadata, metadata_span),
-                    children @ ..,
-                ] if *tag == target => Some((metadata.clone(), *metadata_span, children.to_vec())),
-                _ => None,
-            };
-            if let Some((mut metadata, metadata_span, mut children)) = target_parts
-                && mutator(&mut metadata, &mut children)
-            {
-                let head = list.elements[0].clone();
-                list.elements = vec![head, Expr::Map(metadata, metadata_span)];
-                list.elements.extend(children);
-                return true;
-            }
-            list.elements
-                .iter_mut()
-                .any(|element| mutate_first_decoded_node(element, target, mutator))
-        }
         Expr::Node(node, span) => {
             let tag = node.tag();
             let mut metadata = node.meta().clone();
@@ -158,10 +83,6 @@ fn replace_symbol(expr: &mut Expr, from: &str, to: &str) -> bool {
             *name = to.to_string();
             true
         }
-        Expr::List(list, _) => list
-            .elements
-            .iter_mut()
-            .any(|element| replace_symbol(element, from, to)),
         Expr::Map(map, _) => mutate_annotation_leaves(map, |value| replace_symbol(value, from, to)),
         Expr::MetaExpr(meta, _) => {
             replace_symbol(&mut meta.expr, from, to)
@@ -200,16 +121,6 @@ fn replace_symbol(expr: &mut Expr, from: &str, to: &str) -> bool {
 
 fn remove_first_metadata_key(expr: &mut Expr, key: chelis_deep::annotations::MetadataKey) -> bool {
     match expr {
-        Expr::List(list, _) => {
-            if let Some(Expr::Map(meta, _)) = list.elements.get_mut(1)
-                && meta.remove(key).is_some()
-            {
-                return true;
-            }
-            list.elements
-                .iter_mut()
-                .any(|element| remove_first_metadata_key(element, key))
-        }
         Expr::Map(map, _) => {
             mutate_annotation_leaves(map, |value| remove_first_metadata_key(value, key))
         }
@@ -293,29 +204,33 @@ fn mutate_type_metadata(exprs: &mut [Expr]) {
     assert!(replace_symbol(&mut exprs[0], "f32", "f64"));
 }
 
-fn mutate_eff_metadata(exprs: &mut [Expr]) {
-    assert!(mutate_first_decoded_node(
-        &mut exprs[0],
-        DeepTag::Fn,
-        &mut |metadata, _| {
-            metadata
-                .insert(chelis_deep::annotations::MetadataValue::Eff(
-                    chelis_deep::annotations::EffectSet::new(
-                        chelis_deep::Metadata::default(),
-                        vec![],
-                        Span::new(0, 0),
-                    ),
-                ))
-                .unwrap();
-            true
-        }
-    ));
+/// `eff` belongs on a `t-fn` type, so a `fn` node carrying it has no admitted
+/// spelling: return the `Node` constructor's rejection of that candidate.
+fn eff_metadata_rejection(exprs: &mut [Expr]) -> String {
+    let mut rejection = None;
+    mutate_first_decoded_node(&mut exprs[0], DeepTag::Fn, &mut |metadata, children| {
+        let mut metadata = metadata.clone();
+        metadata
+            .insert(chelis_deep::annotations::MetadataValue::Eff(
+                chelis_deep::annotations::EffectSet::new(
+                    chelis_deep::Metadata::default(),
+                    vec![],
+                    Span::new(0, 0),
+                ),
+            ))
+            .unwrap();
+        let error = chelis_deep::node::Node::try_new(DeepTag::Fn, metadata, children.clone())
+            .expect_err("a fn node cannot carry eff metadata");
+        rejection = Some(error.to_string());
+        false
+    });
+    rejection.expect("fixture contains a fn node")
 }
 
 fn mutate_span(exprs: &mut [Expr]) {
     match &mut exprs[0] {
-        Expr::List(_, span) => *span = Span::new(span.offset + 1, span.len),
-        other => panic!("expected list root, got {other:?}"),
+        Expr::Node(_, span) => *span = Span::new(span.offset + 1, span.len),
+        other => panic!("expected node root, got {other:?}"),
     }
 }
 
@@ -326,51 +241,39 @@ fn remove_type_stamp(exprs: &mut [Expr]) {
     ));
 }
 
-fn root_metadata_mut(exprs: &mut [Expr]) -> &mut chelis_deep::Metadata {
-    let Expr::List(root, _) = &mut exprs[0] else {
-        panic!("expected list root");
+fn root_metadata(exprs: &[Expr]) -> chelis_deep::Metadata {
+    let Expr::Node(root, _) = &exprs[0] else {
+        panic!("expected node root");
     };
-    let Expr::Map(meta, _) = &mut root.elements[1] else {
-        panic!("expected canonical root metadata");
+    root.meta().clone()
+}
+
+fn replace_root_metadata(exprs: &mut [Expr], metadata: chelis_deep::Metadata) {
+    let Expr::Node(root, _) = &mut exprs[0] else {
+        panic!("expected node root");
     };
-    meta
+    root.try_replace_meta(metadata)
+        .expect("root metadata replacement preserves the Node invariant");
 }
 
 #[test]
 fn effect_only_reannotation_preserves_every_checked_context() {
     let checked = checked_program();
-    for (carrier, mut annotated) in [
-        ("successor", checked.annotated_exprs().to_vec()),
-        ("legacy", legacy_mutation_candidate(&checked)),
-    ] {
-        add_effects_metadata(&mut annotated);
-        let expected_annotated = annotated.clone();
+    let mut annotated = checked.annotated_exprs().to_vec();
+    add_effects_metadata(&mut annotated);
+    let expected_annotated = annotated.clone();
 
-        let rewritten = checked
-            .try_with_effect_annotations(annotated)
-            .unwrap_or_else(|errors| panic!("{carrier} effects rewrite failed: {errors:?}"));
+    let rewritten = checked
+        .try_with_effect_annotations(annotated)
+        .unwrap_or_else(|errors| panic!("effects rewrite failed: {errors:?}"));
 
-        assert_eq!(
-            rewritten.annotated_exprs(),
-            expected_annotated,
-            "{carrier} carrier"
-        );
-        assert_eq!(
-            rewritten.type_env(),
-            checked.type_env(),
-            "{carrier} carrier"
-        );
-        assert_eq!(
-            rewritten.signature_inference(),
-            checked.signature_inference(),
-            "{carrier} carrier"
-        );
-        assert_eq!(
-            rewritten.linearity(),
-            checked.linearity(),
-            "{carrier} carrier"
-        );
-    }
+    assert_eq!(rewritten.annotated_exprs(), expected_annotated);
+    assert_eq!(rewritten.type_env(), checked.type_env());
+    assert_eq!(
+        rewritten.signature_inference(),
+        checked.signature_inference()
+    );
+    assert_eq!(rewritten.linearity(), checked.linearity());
 }
 
 #[test]
@@ -378,37 +281,37 @@ fn non_effect_reannotation_mutations_are_rejected_exactly_once() {
     type MutationCase = (&'static str, fn(&mut [Expr]), &'static str);
 
     let checked = checked_program();
-    let cases: [MutationCase; 6] = [
+    let cases: [MutationCase; 5] = [
         ("body", mutate_body, "effects-only"),
         ("structure", mutate_structure, "effects-only"),
         ("type metadata", mutate_type_metadata, "effects-only"),
-        ("eff metadata", mutate_eff_metadata, "metadata `eff`"),
         ("span", mutate_span, "effects-only"),
         ("missing type stamp", remove_type_stamp, "effects-only"),
     ];
 
-    for (carrier, candidate) in [
-        ("successor", checked.annotated_exprs().to_vec()),
-        ("legacy", legacy_mutation_candidate(&checked)),
-    ] {
-        for (label, mutate, diagnostic) in cases {
-            let mut forged = candidate.clone();
-            mutate(&mut forged);
-            let result = checked
-                .try_with_effect_annotations(forged)
-                .expect_err("non-effects mutation must not reconstruct success");
-            assert_eq!(
-                result.errors.len(),
-                1,
-                "{carrier} {label} mutation must report exactly once: {:?}",
-                result.errors
-            );
-            assert!(
-                result.errors[0].message.contains(diagnostic),
-                "{carrier} {label} mutation must name its metadata or ownership boundary: {:?}",
-                result.errors
-            );
-        }
+    let candidate = checked.annotated_exprs().to_vec();
+    let eff = eff_metadata_rejection(&mut candidate.clone());
+    assert!(
+        eff.contains("metadata `eff`"),
+        "eff metadata mutation must name its metadata boundary: {eff}"
+    );
+    for (label, mutate, diagnostic) in cases {
+        let mut forged = candidate.clone();
+        mutate(&mut forged);
+        let result = checked
+            .try_with_effect_annotations(forged)
+            .expect_err("non-effects mutation must not reconstruct success");
+        assert_eq!(
+            result.errors.len(),
+            1,
+            "{label} mutation must report exactly once: {:?}",
+            result.errors
+        );
+        assert!(
+            result.errors[0].message.contains(diagnostic),
+            "{label} mutation must name its metadata or ownership boundary: {:?}",
+            result.errors
+        );
     }
 }
 
@@ -416,20 +319,21 @@ fn non_effect_reannotation_mutations_are_rejected_exactly_once() {
 fn typed_metadata_canonicalizes_order_and_rejects_duplicate_effect_rows() {
     let checked = checked_program();
     let mut reordered = checked.annotated_exprs().to_vec();
-    let root = root_metadata_mut(&mut reordered);
+    let root = root_metadata(&reordered);
     let mut values = root.values().cloned().collect::<Vec<_>>();
     values.reverse();
     let reversed = chelis_deep::Metadata::try_from_values(values).unwrap();
-    assert_eq!(*root, reversed);
-    *root = reversed;
+    assert_eq!(root, reversed);
+    replace_root_metadata(&mut reordered, reversed);
     checked.try_with_effect_annotations(reordered).unwrap();
 
     let mut candidate = checked.annotated_exprs().to_vec();
-    let root = root_metadata_mut(&mut candidate);
+    let mut root = root_metadata(&candidate);
     let before = root.clone();
     let duplicate = root.values().next().unwrap().clone();
     assert!(root.insert(duplicate).is_err());
-    assert_eq!(*root, before);
+    assert_eq!(root, before);
+    replace_root_metadata(&mut candidate, root);
     add_effects_metadata(&mut candidate);
     assert!(mutate_first_decoded_node(
         &mut candidate[0],

@@ -113,7 +113,6 @@ fn collect_pattern_binder_names(expr: &Expr, out: &mut Vec<String>) {
 fn parts(expr: &Expr) -> Option<(DeepTag, &[Expr])> {
     match expr {
         Expr::Node(node, _) => Some((node.tag(), node.children_slice())),
-        Expr::List(list, _) => Some((list.tag()?, list.elements.get(2..).unwrap_or_default())),
         _ => None,
     }
 }

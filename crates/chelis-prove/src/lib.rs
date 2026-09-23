@@ -35,7 +35,6 @@ pub mod carcara_audit;
 pub mod composition;
 pub mod concrete_eval;
 pub mod contracts;
-mod deep_compat;
 pub mod discharge;
 pub mod dispatch;
 pub mod engine_registry;

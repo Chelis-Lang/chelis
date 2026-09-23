@@ -8,7 +8,7 @@ use chelis_deep::CastMode;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_tuple(
-    list: &deep::List,
+    node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
     subst: &mut Subst,
@@ -16,7 +16,7 @@ pub(super) fn infer_tuple(
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
 ) -> Type {
-    let kids = children(list);
+    let kids = node.children_slice();
     let elems: Vec<Type> = kids
         .iter()
         .map(|e| infer_expr(e, env, vg, subst, adt_reg, errors, product))
@@ -74,7 +74,7 @@ pub(super) fn describe_tuple_index(expr: &deep::Expr) -> String {
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_tuple_get(
-    list: &deep::List,
+    node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
     subst: &mut Subst,
@@ -82,9 +82,9 @@ pub(super) fn infer_tuple_get(
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
 ) -> Type {
-    let kids = children(list);
+    let kids = node.children_slice();
     if kids.len() < 2 {
-        return malformed_form(list, "tuple-get", "a tuple expression and an index", errors);
+        return malformed_form(node, "tuple-get", "a tuple expression and an index", errors);
     }
 
     let tuple_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
@@ -223,7 +223,7 @@ pub(super) fn resolve_record_head<'a>(
 /// errors instead of silently untyped).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_record(
-    list: &deep::List,
+    node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
     subst: &mut Subst,
@@ -231,10 +231,10 @@ pub(super) fn infer_record(
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
 ) -> Type {
-    let kids = children(list);
+    let kids = node.children_slice();
     let Some(head) = kids.first().and_then(symbol_name) else {
         return malformed_form(
-            list,
+            node,
             "record",
             "a symbol constructor head as its first child",
             errors,
@@ -245,9 +245,8 @@ pub(super) fn infer_record(
         // Infer field values so nested errors still surface, then
         // reject the unknown constructor.
         for kv_expr in kids.iter().skip(1) {
-            if let deep::Expr::List(kv_list, _) = kv_expr
-                && get_tag(kv_list) == Some(DeepTag::Kv)
-                && let Some(value) = children(kv_list).get(1)
+            if let Some((DeepTag::Kv, _, kv_children)) = stamped_parts(kv_expr)
+                && let Some(value) = kv_children.get(1)
             {
                 infer_expr(value, env, vg, subst, adt_reg, errors, product);
             }
@@ -277,9 +276,8 @@ pub(super) fn infer_record(
     let head_is_alias = adt_reg.resolve_alias(head).is_some();
     if !head_is_opaque && !head_is_alias && constructor_out_of_scope(head, env) {
         for kv_expr in kids.iter().skip(1) {
-            if let deep::Expr::List(kv_list, _) = kv_expr
-                && get_tag(kv_list) == Some(DeepTag::Kv)
-                && let Some(value) = children(kv_list).get(1)
+            if let Some((DeepTag::Kv, _, kv_children)) = stamped_parts(kv_expr)
+                && let Some(value) = kv_children.get(1)
             {
                 infer_expr(value, env, vg, subst, adt_reg, errors, product);
             }
@@ -290,10 +288,7 @@ pub(super) fn infer_record(
                 CheckErrorKind::UnknownConstructor {
                     identifier: head.to_string(),
                 },
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
-                    format!("unknown constructor: {head}"),
-                ),
+                with_node_provenance(node, format!("unknown constructor: {head}")),
                 vec![format!(
                     "Constructor '{head}' is not in scope. Declare it locally or \
                  add it to an import (e.g. `import Mod ({head})`)"
@@ -364,8 +359,8 @@ pub(super) fn infer_record(
         // `arity_contract(Kv)` is `Fixed(2)` and `Node::try_new` enforces it at
         // the stamp boundary, so `(kv {} r)` is rejected as
         // `wrong child count for 'kv': expected Fixed(2), got 1` before inference
-        // ever runs; this arm is reachable only from the producerless legacy
-        // `Expr::List` carrier, and it keeps the pre-fix behaviour untouched.
+        // ever runs, and no other spelling of a `kv` node exists; the let-else
+        // only keeps this read total.
         let Some(value) = kv_kids.get(1) else {
             continue;
         };
@@ -527,7 +522,7 @@ pub(super) fn instantiated_field_types(
 /// D-CHECK prerequisite inference).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_access(
-    list: &deep::List,
+    node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
     subst: &mut Subst,
@@ -535,10 +530,10 @@ pub(super) fn infer_access(
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
 ) -> Type {
-    let kids = children(list);
+    let kids = node.children_slice();
     if kids.len() < 2 {
         return malformed_form(
-            list,
+            node,
             "access",
             "a target expression and a field name",
             errors,
@@ -696,7 +691,7 @@ pub(super) fn infer_access(
 /// functional record update (RFC D-CHECK prerequisite inference).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_record_update(
-    list: &deep::List,
+    node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
     subst: &mut Subst,
@@ -704,10 +699,10 @@ pub(super) fn infer_record_update(
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
 ) -> Type {
-    let kids = children(list);
+    let kids = node.children_slice();
     if kids.is_empty() {
         return malformed_form(
-            list,
+            node,
             "record-update",
             "a target expression to update",
             errors,
@@ -743,8 +738,8 @@ pub(super) fn infer_record_update(
         // `arity_contract(Kv)` is `Fixed(2)` and `Node::try_new` enforces it at
         // the stamp boundary, so `(kv {} r)` is rejected as
         // `wrong child count for 'kv': expected Fixed(2), got 1` before inference
-        // ever runs; this arm is reachable only from the producerless legacy
-        // `Expr::List` carrier, and it keeps the pre-fix behaviour untouched.
+        // ever runs, and no other spelling of a `kv` node exists; the let-else
+        // only keeps this read total.
         let Some(value) = kv_kids.get(1) else {
             continue;
         };
@@ -840,7 +835,8 @@ pub(super) fn infer_record_update(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_cast(
-    list: &deep::List,
+    expr: &deep::Expr,
+    node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
     subst: &mut Subst,
@@ -848,9 +844,9 @@ pub(super) fn infer_cast(
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
 ) -> Type {
-    let kids = children(list);
+    let kids = node.children_slice();
     if kids.len() < 2 {
-        return malformed_form(list, "cast", "an expression and a target type", errors);
+        return malformed_form(node, "cast", "an expression and a target type", errors);
     }
     // chelis#874 Slice 2: the optional [05-OP-6] mode selector at child 2.
     // `deep::cast_mode_of` handled absence internally and returned a `Result`,
@@ -886,7 +882,6 @@ pub(super) fn infer_cast(
     // primitive symbols are retained for historical compatibility; canonical
     // `t-prim` still goes through the resolver's metadata and exact-arity
     // checks before semantic cast classification.
-    let cast_owner = deep::Expr::List(list.clone(), span_of_list(list));
     let (resolved_target, target_location) = {
         let mut resolver = DeepTypeResolver::new(
             TypeUseSite::CastTarget,
@@ -895,7 +890,7 @@ pub(super) fn infer_cast(
             vg,
             errors,
         )
-        .with_diagnostic_owner(&cast_owner);
+        .with_diagnostic_owner(expr);
         let target = match resolver.resolve_cast_target(&kids[1]) {
             Ok(target) => target,
             Err(witness) => return propagate(&witness),

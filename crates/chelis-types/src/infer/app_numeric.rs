@@ -326,7 +326,7 @@ pub(super) fn precision_variable_verdict(
 /// produces. All three validators route their precision arm through here, so
 /// one operand shape cannot be handled three ways.
 pub(super) fn decide_precision_variable_operand(
-    list: &deep::List,
+    node: &DeepNode,
     fname: &str,
     var: TypeVar,
     env: &Env,
@@ -353,11 +353,7 @@ pub(super) fn decide_precision_variable_operand(
             let (kind, message, hints) = family_policy_rejection(fname, &subject, required);
             reject(
                 errors,
-                CheckError::new(
-                    kind,
-                    with_macro_provenance(&deep::Expr::List(list.clone(), zero_span()), message),
-                    hints,
-                ),
+                CheckError::new(kind, with_node_provenance(node, message), hints),
             )
         }
     }
@@ -549,7 +545,7 @@ pub(super) fn operand_dtype_rejection(
 /// early rejection type and its diagnostic.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn validate_numeric_and_reduction_arguments(
-    list: &deep::List,
+    node: &DeepNode,
     kids: &[deep::Expr],
     func_name: &Option<String>,
     arg_tys: &[Type],
@@ -593,7 +589,7 @@ pub(super) fn validate_numeric_and_reduction_arguments(
                 // declaration boundary.
                 Type::Tensor(_, TensorPrec::Var(var)) => {
                     if let Some(rejected) =
-                        decide_precision_variable_operand(list, fname, *var, env, subst, errors)
+                        decide_precision_variable_operand(node, fname, *var, env, subst, errors)
                     {
                         return Some(rejected);
                     }
@@ -603,14 +599,7 @@ pub(super) fn validate_numeric_and_reduction_arguments(
                     {
                         reject!(
                             errors,
-                            CheckError::new(
-                                kind,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    message,
-                                ),
-                                hints,
-                            ),
+                            CheckError::new(kind, with_node_provenance(node, message,), hints,),
                         );
                     }
                 }
@@ -647,7 +636,7 @@ pub(super) fn validate_numeric_and_reduction_arguments(
                 // chelis#1805, as in the loop above.
                 Type::Tensor(_, TensorPrec::Var(var)) => {
                     if let Some(rejected) =
-                        decide_precision_variable_operand(list, fname, *var, env, subst, errors)
+                        decide_precision_variable_operand(node, fname, *var, env, subst, errors)
                     {
                         return Some(rejected);
                     }
@@ -658,8 +647,8 @@ pub(super) fn validate_numeric_and_reduction_arguments(
                         errors,
                         CheckError::new(
                             CheckErrorKind::TypeMismatch,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
+                            with_node_provenance(
+                                node,
                                 format!("{} expects tensor input, got {}", fname, resolved),
                             ),
                             vec![],
@@ -670,14 +659,7 @@ pub(super) fn validate_numeric_and_reduction_arguments(
             if let Some((kind, message, hints)) = operand_dtype_rejection(fname, &resolved) {
                 reject!(
                     errors,
-                    CheckError::new(
-                        kind,
-                        with_macro_provenance(
-                            &deep::Expr::List(list.clone(), zero_span()),
-                            message,
-                        ),
-                        hints,
-                    ),
+                    CheckError::new(kind, with_node_provenance(node, message,), hints,),
                 );
             }
         }
@@ -698,8 +680,8 @@ pub(super) fn validate_numeric_and_reduction_arguments(
                         errors,
                         CheckError::new(
                             CheckErrorKind::TypeMismatch,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
+                            with_node_provenance(
+                                node,
                                 format!("{} expects i32 axis, got {}", fname, resolved),
                             ),
                             vec![],
@@ -726,8 +708,8 @@ pub(super) fn validate_numeric_and_reduction_arguments(
                 errors,
                 CheckError::new(
                     CheckErrorKind::DimensionMismatch,
-                    with_macro_provenance(
-                        &deep::Expr::List(list.clone(), zero_span()),
+                    with_node_provenance(
+                        node,
                         format!(
                             "softmax axis {raw} is out of bounds for rank {} tensor",
                             dims.len()
@@ -750,7 +732,7 @@ pub(super) fn validate_numeric_and_reduction_arguments(
 /// not one of these operations.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn integer_binop_result_type(
-    list: &deep::List,
+    node: &DeepNode,
     func_name: Option<&str>,
     arg_tys: &[Type],
     vg: &mut VarGen,
@@ -811,8 +793,8 @@ pub(super) fn integer_binop_result_type(
                     errors,
                     CheckError::new(
                         CheckErrorKind::TypeMismatch,
-                        with_macro_provenance(
-                            &deep::Expr::List(list.clone(), zero_span()),
+                        with_node_provenance(
+                            node,
                             format!(
                                 "{} requires matching integer arguments, got {} and {}",
                                 fname, lhs, rhs
@@ -883,8 +865,8 @@ pub(super) fn integer_binop_result_type(
                     errors,
                     CheckError::new(
                         CheckErrorKind::TypeMismatch,
-                        with_macro_provenance(
-                            &deep::Expr::List(list.clone(), zero_span()),
+                        with_node_provenance(
+                            node,
                             format!(
                                 "{} requires integer lhs and shift amount, got {} and {}",
                                 fname, lhs, rhs

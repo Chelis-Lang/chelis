@@ -6,13 +6,6 @@ use chelis_surf::parser::parse_str;
 fn node_parts(expr: &Expr) -> Option<(DeepTag, &Metadata, &[Expr])> {
     match expr {
         Expr::Node(node, _) => Some((node.tag(), node.meta(), node.children_slice())),
-        Expr::List(list, _) => {
-            let tag = list.tag()?;
-            let Expr::Map(meta, _) = list.elements.get(1)? else {
-                return None;
-            };
-            Some((tag, meta, &list.elements[2..]))
-        }
         _ => None,
     }
 }

@@ -53,14 +53,10 @@ fn annotated_bare_list_parameter_preserves_runtime_name_and_declared_type() {
     use chelis_deep::annotations::{MetadataValue, TypeSyntax};
 
     let span = Span::new(0, 0);
-    let declared_type = Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::TPrim), span),
-                Expr::Map(Metadata::default(), span),
-                Expr::Atom(Atom::Name("f64".to_string()), span),
-            ],
-        },
+    let declared_type = Expr::node(
+        DeepTag::TPrim,
+        Metadata::default(),
+        vec![Expr::Atom(Atom::Name("f64".to_string()), span)],
         span,
     );
     let parameter = Expr::BareList(
@@ -168,51 +164,6 @@ fn issue_1125_eval_raw_expr(expr: &Expr) -> Result<RuntimeValue, String> {
     ctx.eval_expr(expr)
 }
 
-fn issue_1125_legacy_carrier(expr: &Expr) -> Expr {
-    match expr {
-        Expr::Node(node, span) => {
-            let mut elements = vec![
-                Expr::Atom(Atom::Tag(node.tag()), *span),
-                Expr::Map(node.meta().clone(), *span),
-            ];
-            elements.extend(node.children_slice().iter().map(issue_1125_legacy_carrier));
-            Expr::List(List { elements }, *span)
-        }
-        Expr::List(list, span) => Expr::List(
-            List {
-                elements: list
-                    .elements
-                    .iter()
-                    .map(issue_1125_legacy_carrier)
-                    .collect(),
-            },
-            *span,
-        ),
-        Expr::BareList(elements, span) => Expr::BareList(
-            elements.iter().map(issue_1125_legacy_carrier).collect(),
-            *span,
-        ),
-        Expr::UnknownForm(data) => Expr::UnknownForm(Box::new(chelis_deep::ast::UnknownFormData {
-            head: data.head.clone(),
-            meta: data.meta.clone(),
-            children: data
-                .children
-                .iter()
-                .map(issue_1125_legacy_carrier)
-                .collect(),
-            span: data.span,
-        })),
-        Expr::MetaExpr(meta, span) => Expr::MetaExpr(
-            chelis_deep::ast::MetaExpr {
-                metadata: meta.metadata.clone(),
-                expr: Box::new(issue_1125_legacy_carrier(&meta.expr)),
-            },
-            *span,
-        ),
-        Expr::Atom(..) | Expr::Map(..) => expr.clone(),
-    }
-}
-
 fn issue_1125_eval_checked_root(
     checked: &CheckedProgram,
     exprs: &[Expr],
@@ -272,26 +223,53 @@ fn issue_1125_gradient_values(value: &RuntimeValue) -> Vec<f64> {
 }
 
 #[test]
-fn runtime_grad_wrt_preserves_successor_and_legacy_carrier_parity() {
+fn runtime_grad_wrt_reads_the_checked_program() {
     let checked = checked_surf(
         "def pair(x: f32, y: f32) -> f32 = mul(x, y)\n\
          out = grad(pair, wrt=y)(2.0f32, 3.0f32)\n",
     );
-    let legacy = checked
-        .exprs()
-        .iter()
-        .map(issue_1125_legacy_carrier)
-        .collect::<Vec<_>>();
 
-    let successor =
-        issue_1125_eval_checked_root(&checked, checked.exprs(), "out").expect("successor grad");
-    let transitional = issue_1125_eval_checked_root(&checked, &legacy, "out").expect("legacy grad");
+    let gradient = issue_1125_eval_checked_root(&checked, checked.exprs(), "out").expect("grad");
 
-    assert_eq!(issue_1125_gradient_values(&successor), vec![2.0]);
-    assert_eq!(
-        issue_1125_gradient_values(&successor),
-        issue_1125_gradient_values(&transitional)
+    assert_eq!(issue_1125_gradient_values(&gradient), vec![2.0]);
+}
+
+/// chelis#1125: an explicitly typed binding stamps `surf_binding_type` on the
+/// bound `grad` node, and spec/03 section 1.1 admits that key only on a bind
+/// value. Applying the captured transform splices the node into the callee
+/// slot of a synthesized `app`, where the node gate refuses the key, so the
+/// splice must leave the binding origin behind.
+#[test]
+fn runtime_grad_bound_with_an_explicit_type_applies() {
+    let checked = checked_surf(
+        "def sq(x: f32) -> f32 = mul(x, x)\n\
+         out = {\n\
+           g: (f32) -> f32 = grad(sq)\n\
+           g(3.0f32)\n\
+         }\n",
     );
+
+    let gradient = issue_1125_eval_checked_root(&checked, checked.exprs(), "out").expect("grad");
+
+    assert_eq!(issue_1125_gradient_values(&gradient), vec![6.0]);
+}
+
+/// The twin of `runtime_grad_bound_with_an_explicit_type_applies` for the
+/// differentiated function: an explicitly typed local `fn` carries
+/// `surf_binding_type` into the captured closure that the transform installs
+/// as a program definition for lowering.
+#[test]
+fn runtime_grad_of_a_function_bound_with_an_explicit_type_applies() {
+    let checked = checked_surf(
+        "out = {\n\
+           f: (f32) -> f32 = fn (x: f32) -> mul(x, x)\n\
+           grad(f)(3.0f32)\n\
+         }\n",
+    );
+
+    let gradient = issue_1125_eval_checked_root(&checked, checked.exprs(), "out").expect("grad");
+
+    assert_eq!(issue_1125_gradient_values(&gradient), vec![6.0]);
 }
 
 #[test]
@@ -311,8 +289,6 @@ fn runtime_closure_preserves_the_original_checked_function_carrier() {
         ],
         span,
     );
-    let transitional = issue_1125_legacy_carrier(&successor);
-
     let RuntimeValue::Closure {
         checked_function: successor_checked,
         ..
@@ -320,48 +296,28 @@ fn runtime_closure_preserves_the_original_checked_function_carrier() {
     else {
         panic!("successor function must evaluate to a closure")
     };
-    let RuntimeValue::Closure {
-        checked_function: transitional_checked,
-        ..
-    } = issue_1125_eval_raw_expr(&transitional).expect("legacy closure")
-    else {
-        panic!("legacy function must evaluate to a closure")
-    };
 
     assert!(matches!(successor_checked.as_ref(), Expr::Node(..)));
-    assert!(matches!(transitional_checked.as_ref(), Expr::List(..)));
     assert_eq!(
         chelis_deep::printer::print_canonical_flat(&[successor_checked.as_ref().clone()]),
-        chelis_deep::printer::print_canonical_flat(&[transitional_checked.as_ref().clone()])
+        chelis_deep::printer::print_canonical_flat(&[successor])
     );
 }
 
 #[test]
-fn runtime_eval_reads_successor_and_legacy_nodes_identically() {
+fn runtime_eval_reads_a_decoded_literal_node() {
     use chelis_deep::Span;
 
     let span = Span::new(4, 12);
     let value = Expr::Atom(Atom::Int(7), span);
-    let successor = Expr::node(DeepTag::Lit, Metadata::default(), vec![value.clone()], span);
-    let legacy = Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::Lit), span),
-                Expr::Map(Metadata::default(), span),
-                value,
-            ],
-        },
-        span,
-    );
+    let successor = Expr::node(DeepTag::Lit, Metadata::default(), vec![value], span);
 
     let successor = issue_1125_eval_raw_expr(&successor).expect("successor literal evaluates");
-    let legacy = issue_1125_eval_raw_expr(&legacy).expect("legacy literal evaluates");
-    assert_eq!(render_value(&successor), render_value(&legacy));
     assert_eq!(render_value(&successor), "7");
 }
 
 #[test]
-fn runtime_match_patterns_preserve_successor_and_legacy_carrier_parity() {
+fn runtime_match_patterns_read_decoded_nodes() {
     use chelis_deep::Span;
 
     let span = Span::new(4, 12);
@@ -380,19 +336,12 @@ fn runtime_match_patterns_preserve_successor_and_legacy_carrier_parity() {
             ),
         ],
     );
-    let legacy = issue_1125_legacy_carrier(&successor);
-
     let successor = issue_1125_eval_raw_expr(&successor);
-    let legacy = issue_1125_eval_raw_expr(&legacy);
     assert_eq!(successor.as_ref().map(render_value), Ok("42".to_string()));
-    assert_eq!(
-        successor.as_ref().map(render_value),
-        legacy.as_ref().map(render_value)
-    );
 }
 
 #[test]
-fn runtime_pattern_reader_has_complete_successor_and_legacy_parity() {
+fn runtime_pattern_reader_matches_every_decoded_pattern() {
     use chelis_deep::Span;
 
     let span = Span::new(4, 12);
@@ -481,28 +430,10 @@ fn runtime_pattern_reader_has_complete_successor_and_legacy_parity() {
     let adt_fields = UnordMap::new();
 
     for (value, successor) in cases {
-        let legacy = issue_1125_legacy_carrier(&successor);
         let mut successor_bindings = Frame::new();
-        let mut legacy_bindings = Frame::new();
         assert_eq!(
             pattern_matches(&value, &successor, &mut successor_bindings, &adt_fields),
             Ok(true)
-        );
-        assert_eq!(
-            pattern_matches(&value, &legacy, &mut legacy_bindings, &adt_fields),
-            Ok(true)
-        );
-        let rendered_bindings = |bindings: &Frame| {
-            bindings
-                .to_sorted()
-                .into_iter()
-                .map(|(name, value)| (name.clone(), render_value(value)))
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(
-            rendered_bindings(&successor_bindings),
-            rendered_bindings(&legacy_bindings),
-            "successor and transitional patterns must bind the same names"
         );
     }
 
@@ -554,30 +485,6 @@ fn runtime_eval_rejects_each_nonruntime_carrier_explicitly() {
                 span,
             })),
             "unknown form `future-form` is not a runtime expression",
-        ),
-        (
-            Expr::List(
-                List {
-                    elements: vec![
-                        Expr::Atom(Atom::Name("future-legacy".to_string()), span),
-                        Expr::Map(Metadata::default(), span),
-                    ],
-                },
-                span,
-            ),
-            "unknown form `future-legacy` is not a runtime expression",
-        ),
-        (
-            Expr::List(
-                List {
-                    elements: vec![
-                        Expr::Atom(Atom::Tag(DeepTag::Lit), span),
-                        Expr::Atom(Atom::Name("not-metadata".to_string()), span),
-                    ],
-                },
-                span,
-            ),
-            "malformed legacy list is not a runtime expression",
         ),
         (
             Expr::Atom(Atom::Name("leaf".to_string()), span),
@@ -678,16 +585,6 @@ fn runtime_nested_owner_readers_reject_malformed_children() {
         issue_1125_eval_raw_expr(&malformed_match)
             .expect_err("a malformed match arm must not disappear"),
         "match arm must be a decoded `arm` node"
-    );
-}
-
-#[test]
-fn runtime_eval_reader_has_no_node_to_list_bridge() {
-    let source = include_str!("eval.rs");
-    let forbidden = [".to_", "list("].concat();
-    assert!(
-        !source.contains(&forbidden),
-        "runtime evaluation and result-claim placement must consume ExprCarrier directly"
     );
 }
 
@@ -1427,12 +1324,12 @@ fn literal_seed_read_at_full_i64_width() {
     use chelis_deep::Span;
     let sp = Span::new(0, 0);
     let node = |tag: &str, children: Vec<Expr>| {
-        let mut elements = vec![
-            Expr::Atom(Atom::Tag(DeepTag::parse(tag).unwrap()), sp),
-            Expr::Map(Metadata::default(), sp),
-        ];
-        elements.extend(children);
-        Expr::List(List { elements }, sp)
+        Expr::node(
+            DeepTag::parse(tag).unwrap(),
+            Metadata::default(),
+            children,
+            sp,
+        )
     };
     // (lit {type: (t-prim {} i32)} 4294967295) — the exact shape desugar
     // emits for `seed(4294967295)`.
@@ -1441,19 +1338,12 @@ fn literal_seed_read_at_full_i64_width() {
             "t-prim",
             vec![Expr::Atom(Atom::Name("i32".to_string()), sp)],
         );
-        Expr::List(
-            List {
-                elements: vec![
-                    Expr::Atom(Atom::Tag(DeepTag::Lit), sp),
-                    Expr::Map(
-                        Metadata::from(chelis_deep::annotations::MetadataValue::Type(
-                            chelis_deep::annotations::TypeSyntax::try_new(t_int32).unwrap(),
-                        )),
-                        sp,
-                    ),
-                    Expr::Atom(Atom::Int(n), sp),
-                ],
-            },
+        Expr::node(
+            DeepTag::Lit,
+            Metadata::from(chelis_deep::annotations::MetadataValue::Type(
+                chelis_deep::annotations::TypeSyntax::try_new(t_int32).unwrap(),
+            )),
+            vec![Expr::Atom(Atom::Int(n), sp)],
             sp,
         )
     };
@@ -2147,11 +2037,11 @@ fn eval_deep_with_bindings(
     let source = format!("probe = {surf_expr}\n");
     let decls = chelis_surf::parser::parse_str(&source).expect("surf parse");
     let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
-    let Expr::List(def, _) = &exprs[0] else {
+    let Expr::Node(def, _) = &exprs[0] else {
         panic!("desugaring a top-level binding yields one def form");
     };
-    // `(def {} <name> <body>)`: the body is the fourth element.
-    let body = def.elements[3].clone();
+    // `(def {} <name> <body>)`: the body is the second child.
+    let body = def.children_slice()[1].clone();
 
     let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
     let mut ctx = EvalContext {

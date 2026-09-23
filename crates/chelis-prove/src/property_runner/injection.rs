@@ -19,7 +19,7 @@
 
 use chelis_deep::Span;
 use chelis_deep::annotations::{MetadataKey as K, MetadataValue as M, TypeSyntax};
-use chelis_deep::ast::{Atom, Expr, List, Metadata};
+use chelis_deep::ast::{Atom, Expr, Metadata};
 use chelis_deep::{DeepTag, ExprCarrier};
 use chelis_surf::ast::{Decl, Param, TypeExpr};
 use chelis_types::types::Prim;
@@ -640,15 +640,12 @@ fn sym(s: &str) -> Expr {
     Expr::Atom(Atom::Name(s.to_string()), span0())
 }
 fn node(tag: &str, kids: Vec<Expr>) -> Expr {
-    let mut elements = vec![
-        Expr::Atom(
-            Atom::Tag(DeepTag::parse(tag).expect("vocabulary builder")),
-            span0(),
-        ),
-        Expr::Map(Metadata::default(), span0()),
-    ];
-    elements.extend(kids);
-    Expr::List(List { elements }, span0())
+    Expr::node(
+        DeepTag::parse(tag).expect("vocabulary builder"),
+        Metadata::default(),
+        kids,
+        span0(),
+    )
 }
 fn var_node(name: &str) -> Expr {
     node("var", vec![sym(name)])
@@ -658,12 +655,7 @@ fn typed_lit(prim: &str, value: Expr) -> Expr {
     entries.replace(M::Type(
         TypeSyntax::try_new(node("t-prim", vec![sym(prim)])).expect("primitive type"),
     ));
-    Expr::List(
-        List {
-            elements: vec![sym("lit"), Expr::Map(entries, span0()), value],
-        },
-        span0(),
-    )
+    Expr::node(DeepTag::Lit, entries, vec![value], span0())
 }
 fn scalar_lit(prim: &str, value: ScalarValue) -> Expr {
     debug_assert_eq!(value.prim().name(), prim);
@@ -682,7 +674,6 @@ fn bool_lit(v: bool) -> Expr {
 fn list_tag(expr: &Expr) -> Option<DeepTag> {
     match expr.carrier() {
         ExprCarrier::DecodedNode(tag, _, _) => Some(tag),
-        ExprCarrier::MalformedLegacyList(list) => list.tag(),
         ExprCarrier::StructuralList(_)
         | ExprCarrier::UndecodableHead(_, _, _)
         | ExprCarrier::Atom(_)
@@ -697,24 +688,11 @@ fn child0_sym(expr: &Expr) -> Option<&str> {
             Expr::Atom(Atom::Name(s), _) => Some(s.as_str()),
             _ => None,
         },
-        ExprCarrier::UndecodableHead(_, _, children) if matches!(expr, Expr::List(_, _)) => {
-            match children.first()? {
-                Expr::Atom(Atom::Name(s), _) => Some(s.as_str()),
-                _ => None,
-            }
-        }
-        ExprCarrier::MalformedLegacyList(list) if list.elements.len() >= 3 => {
-            match &list.elements[2] {
-                Expr::Atom(Atom::Name(s), _) => Some(s.as_str()),
-                _ => None,
-            }
-        }
         ExprCarrier::StructuralList(_)
         | ExprCarrier::UndecodableHead(_, _, _)
         | ExprCarrier::Atom(_)
         | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_)
-        | ExprCarrier::MalformedLegacyList(_) => None,
+        | ExprCarrier::MetadataExpression(_) => None,
     }
 }
 
@@ -726,19 +704,9 @@ fn module_defines(expr: &Expr, type_name: &str) -> bool {
         ExprCarrier::DecodedNode(_, _, children) => children
             .iter()
             .any(|child| module_defines(child, type_name)),
-        ExprCarrier::UndecodableHead(_, _, _) => match expr {
-            Expr::List(list, _) => list
-                .elements
-                .iter()
-                .any(|child| module_defines(child, type_name)),
-            Expr::UnknownForm(_) => false,
-            _ => unreachable!(),
-        },
-        ExprCarrier::MalformedLegacyList(list) => list
-            .elements
-            .iter()
-            .any(|child| module_defines(child, type_name)),
-        ExprCarrier::StructuralList(_) | ExprCarrier::MetadataExpression(_) => false,
+        ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::MetadataExpression(_) => false,
         ExprCarrier::Atom(_) | ExprCarrier::MetadataMap(_) => false,
     }
 }
@@ -750,11 +718,16 @@ fn inject_into_module(exprs: &[Expr], type_name: &str, def: Expr) -> Vec<Expr> {
         if !injected
             && list_tag(expr) == Some(DeepTag::Module)
             && (type_name.is_empty() || module_defines(expr, type_name))
-            && let Expr::List(l, span) = expr
+            && let Expr::Node(module, span) = expr
         {
-            let mut elements = l.elements.clone();
-            elements.push(def.clone());
-            out.push(Expr::List(List { elements }, *span));
+            let mut children = module.children_slice().to_vec();
+            children.push(def.clone());
+            out.push(Expr::node(
+                module.tag(),
+                module.meta().clone(),
+                children,
+                *span,
+            ));
             injected = true;
         } else {
             out.push(expr.clone());
@@ -772,17 +745,22 @@ fn inject_first_module(exprs: &[Expr], def: Expr) -> Vec<Expr> {
 
 fn strip_invariant_meta(expr: &Expr) -> Expr {
     match expr {
-        Expr::List(list, span) => {
-            let mut elements: Vec<Expr> = list.elements.iter().map(strip_invariant_meta).collect();
-            if (list.tag() == Some(DeepTag::Deftype))
-                && let Some(Expr::Map(map, mspan)) = elements.get(1)
-            {
-                let mut metadata = map.clone();
+        Expr::Node(node, span) => {
+            let mut metadata = node.meta().clone();
+            if node.tag() == DeepTag::Deftype {
                 metadata.remove(K::Invariant);
                 metadata.remove(K::InvariantAmenability);
-                elements[1] = Expr::Map(metadata, *mspan);
             }
-            Expr::List(List { elements }, *span)
+            let children = node
+                .children_slice()
+                .iter()
+                .map(strip_invariant_meta)
+                .collect();
+            Expr::node(node.tag(), metadata, children, *span)
+        }
+        // A structural list is walked as the untagged list it replaced was.
+        Expr::BareList(elements, span) => {
+            Expr::BareList(elements.iter().map(strip_invariant_meta).collect(), *span)
         }
         other => other.clone(),
     }
@@ -857,19 +835,10 @@ type Probability =
     }
 
     #[test]
-    fn module_search_rejects_unknown_form_but_keeps_legacy_name_head_recursion() {
+    fn module_search_does_not_recurse_into_unknown_forms() {
         let span = span0();
-        let deftype = node("deftype", vec![sym("Token")]);
-        let legacy = Expr::List(
-            List {
-                elements: vec![
-                    Expr::Atom(Atom::Name("future-wrapper".into()), span),
-                    Expr::Map(Metadata::default(), span),
-                    deftype.clone(),
-                ],
-            },
-            span,
-        );
+        let deftype = node("deftype", vec![sym("Token"), Expr::BareList(vec![], span)]);
+        assert!(module_defines(&deftype, "Token"));
         let unknown = Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
             head: "future-wrapper".into(),
             meta: Metadata::default(),
@@ -877,7 +846,6 @@ type Probability =
             span,
         }));
 
-        assert!(module_defines(&legacy, "Token"));
         assert!(!module_defines(&unknown, "Token"));
     }
 
@@ -887,7 +855,10 @@ type Probability =
         let wrapped = Expr::MetaExpr(
             chelis_deep::MetaExpr {
                 metadata: Metadata::default(),
-                expr: Box::new(node("deftype", vec![sym("Token")])),
+                expr: Box::new(node(
+                    "deftype",
+                    vec![sym("Token"), Expr::BareList(vec![], span)],
+                )),
             },
             span,
         );

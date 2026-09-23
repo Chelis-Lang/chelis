@@ -33,13 +33,6 @@ fn find_tagged<'a>(expr: &'a Expr, tag: &str) -> Option<&'a Expr> {
         return Some(expr);
     }
     match expr {
-        Expr::List(list, _) => {
-            for child in &list.elements {
-                if let Some(found) = find_tagged(child, tag) {
-                    return Some(found);
-                }
-            }
-        }
         Expr::Node(node, _) => {
             if let Some(found) = node.meta().find_expression(|value| find_tagged(value, tag)) {
                 return Some(found);
@@ -88,16 +81,10 @@ fn find_tagged<'a>(expr: &'a Expr, tag: &str) -> Option<&'a Expr> {
     None
 }
 
-/// Extract the `type` entry from either stamped or legacy node metadata.
+/// Extract the `type` entry from stamped node metadata.
 fn type_metadata(expr: &Expr) -> Option<&Expr> {
     let meta = match expr {
         Expr::Node(node, _) => node.meta(),
-        Expr::List(list, _) => {
-            let Expr::Map(meta, _) = list.elements.get(1)? else {
-                return None;
-            };
-            meta
-        }
         _ => return None,
     };
     meta.ty().map(|ty| ty.expression())

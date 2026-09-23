@@ -93,7 +93,6 @@ fn inline_function(expr: &deep::Expr) -> Option<FunctionDef> {
     let body = kids.get(1)?.clone();
     let param_exprs = match params_expr {
         deep::Expr::Node(node, _) if node.tag() == DeepTag::Params => node.children_slice(),
-        deep::Expr::List(list, _) if get_tag(list) == Some(DeepTag::Params) => children(list),
         deep::Expr::BareList(elements, _) => elements.as_slice(),
         _ => return None,
     };
@@ -190,7 +189,7 @@ fn analyze_expr(
                 union_children(&data.children, locals, summaries, movement_deps)
             }
             deep::Expr::Atom(_, _) => ParamDeps::new(),
-            deep::Expr::List(_, _) | deep::Expr::Node(_, _) => ParamDeps::new(),
+            deep::Expr::Node(_, _) => ParamDeps::new(),
         };
     };
 
@@ -415,7 +414,7 @@ fn walk_vmap_sites(
                 walk_vmap_sites(child, defs, summaries, errors);
             }
         }
-        deep::Expr::Atom(_, _) | deep::Expr::List(_, _) | deep::Expr::Node(_, _) => {}
+        deep::Expr::Atom(_, _) | deep::Expr::Node(_, _) => {}
     }
 }
 

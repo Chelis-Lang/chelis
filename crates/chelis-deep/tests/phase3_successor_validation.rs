@@ -10,7 +10,7 @@ use chelis_deep::role::AritySpec;
 use chelis_deep::span::Span;
 use chelis_deep::tag::DeepTag;
 use chelis_deep::validate::{WarningKind, find_raw_vocabulary_tag, validate};
-use chelis_deep::{Atom, Expr, List, Metadata, UnknownFormData, parse_and_stamp};
+use chelis_deep::{Atom, Expr, Metadata, UnknownFormData, parse_and_stamp};
 
 fn probe(value: Expr) -> Result<Metadata, chelis_deep::metadata::MetadataError> {
     let mut metadata = Metadata::default();
@@ -24,17 +24,15 @@ fn sp() -> Span {
     Span::new(0, 0)
 }
 
+/// A vocabulary head that bypassed stamping. The stamper builds a `Node` for
+/// every decodable head, so only a hand-built `UnknownForm` can carry one.
 fn raw_vocabulary_form(tag: &str) -> Expr {
-    Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Name(tag.to_string()), sp()),
-                Expr::Map(Metadata::default(), sp()),
-                Expr::Atom(Atom::Int(0), sp()),
-            ],
-        },
-        sp(),
-    )
+    Expr::UnknownForm(Box::new(UnknownFormData {
+        head: tag.to_string(),
+        meta: Metadata::default(),
+        children: vec![Expr::Atom(Atom::Int(0), sp())],
+        span: sp(),
+    }))
 }
 
 fn assert_raw_tag_is_found_and_validated(expr: Expr, expected: &str) {
@@ -191,12 +189,7 @@ fn construction_gate_descends_through_every_unvalidated_carrier() {
         (
             "if",
             Expr::BareList(
-                vec![Expr::List(
-                    List {
-                        elements: vec![raw_vocabulary_form("if")],
-                    },
-                    sp(),
-                )],
+                vec![Expr::BareList(vec![raw_vocabulary_form("if")], sp())],
                 sp(),
             ),
         ),
@@ -374,6 +367,8 @@ fn grad_admission_accepts_one_optional_selector_and_rejects_extra_children() {
     ));
 }
 
+/// A vocabulary word has one atom spelling, a name, and a name is never a
+/// runtime expression.
 #[test]
 fn node_constructor_rejects_tag_atom_at_runtime_expr_slot() {
     let result = Node::try_new(
@@ -381,11 +376,14 @@ fn node_constructor_rejects_tag_atom_at_runtime_expr_slot() {
         Metadata::default(),
         vec![
             Expr::Atom(Atom::Name("f".to_string()), sp()),
-            Expr::Atom(Atom::Tag(DeepTag::Lit), sp()),
+            Expr::Atom(Atom::Name("lit".to_string()), sp()),
         ],
     );
 
-    assert!(matches!(result, Err(NodeError::TagAtExprSlot { .. })));
+    assert!(matches!(
+        result,
+        Err(NodeError::NameAtExprSlot { ref name, .. }) if name == "lit"
+    ));
 }
 
 #[test]

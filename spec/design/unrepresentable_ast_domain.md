@@ -548,7 +548,10 @@ The same change set recorded four related decisions:
   (blocked on chelis#1082): `Node::to_list` constructs it, 39 production
   `.to_list(` call sites and three normalize bridges consume it, so the
   deletion belongs to the same atomic change that removes `Expr::List`
-  (#1023 §B row 5), not to the #885 contract slice.
+  (#1023 §B row 5), not to the #885 contract slice. That change landed with
+  chelis#1125's completion (decision row 23 of
+  `spec/design/checker_totality.md`): `Atom::Tag`, `Expr::List`, `List`,
+  `Node::to_list`, and every normalize bridge were removed together.
 - **`spec/03-deep-syntax.md` §7.2 now owns the role contract** as
   numbered-spec text: [03-ROLE-1] (total (tag, index) → role
   classification; a bare identifier at a structural/type/effect-handler
@@ -583,10 +586,10 @@ shape validator, not to downstream compiler APIs.
 Payload construction enforces local shape. Node construction, deserialization
 and transactional replacement enforce placement on the owning node. Complete
 program boundaries additionally check parent/sibling relationships, including
-Surf dimension groups. These boundaries still defend against ungated legacy
-`Expr::List` structure; general List retirement belongs to #1029.
-Runtime and type wrappers validate recursive roles, including legacy children
-inside otherwise validated nodes. Semantic type, effect and binder resolution
+Surf dimension groups. The legacy `Expr::List` structure these boundaries
+once also had to defend against no longer exists (#1029, retired with #1125).
+Runtime and type wrappers validate recursive roles, including children inside
+otherwise validated nodes. Semantic type, effect and binder resolution
 remains with the owning checkers: a well-shaped annotation does not establish
 semantic agreement or make a producer's claim trustworthy.
 

@@ -2,7 +2,7 @@ use chelis_deep::DeepTag;
 use chelis_unord::{UnordMap, UnordSet};
 use std::collections::BTreeMap;
 
-use chelis_deep::ast::{Atom, Expr, List, Metadata};
+use chelis_deep::ast::{Atom, Expr, Metadata};
 use chelis_ir::eval::TensorValue as IrTensorValue;
 use chelis_ir::lower::top_level_lowering_map;
 use chelis_types::{
@@ -890,11 +890,6 @@ fn top_level_items(exprs: &[Expr]) -> Vec<&Expr> {
 
 fn collect_top_level_items<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
     match expr {
-        Expr::List(list, _) if tag(list) == Some(DeepTag::Module) => {
-            for child in list.elements.iter().skip(3) {
-                collect_top_level_items(child, out);
-            }
-        }
         Expr::Node(node, _) if node.tag() == DeepTag::Module => {
             for child in node.children_slice().iter().skip(1) {
                 collect_top_level_items(child, out);
@@ -1098,17 +1093,6 @@ struct EvalContext<'a> {
     cancel: Option<chelis_types::CancelToken>,
 }
 
-fn tag(list: &List) -> Option<DeepTag> {
-    list.tag()
-}
-
-fn get_meta(list: &List) -> Option<&Metadata> {
-    match list.elements.get(1) {
-        Some(Expr::Map(map, _)) => Some(map),
-        _ => None,
-    }
-}
-
 /// True when the checked-program effect annotation on this node carries a
 /// NON-EMPTY effect row. `chelis_effects`' `update_effect_metadata`
 /// stamps an `(effects ...)` node under the `"effects"` meta key on a
@@ -1119,7 +1103,6 @@ fn get_meta(list: &List) -> Option<&Metadata> {
 /// must not run its effect at display time.
 fn carries_effect_row(expr: &Expr) -> bool {
     let meta = match expr {
-        Expr::List(list, _) => get_meta(list),
         Expr::Node(node, _) => Some(node.meta()),
         _ => None,
     };
@@ -1131,7 +1114,6 @@ fn carries_effect_row(expr: &Expr) -> bool {
 
 fn tagged_expr_children(expr: &Expr) -> Option<(DeepTag, &[Expr])> {
     match expr {
-        Expr::List(list, _) => tag(list).map(|tag| (tag, children(list))),
         Expr::Node(node, _) => Some((node.tag(), node.children_slice())),
         _ => None,
     }
@@ -1150,14 +1132,6 @@ fn lit_meta_prim(meta: &Metadata) -> Option<Prim> {
 fn lit_meta_type_var_name(meta: &Metadata) -> Option<&str> {
     let ty_expr = meta.ty()?.expression();
     chelis_deep::exact_type_variable_name(ty_expr)
-}
-
-fn children(list: &List) -> &[Expr] {
-    if list.elements.len() > 2 {
-        &list.elements[2..]
-    } else {
-        &[]
-    }
 }
 
 fn symbol_name(expr: &Expr) -> Option<&str> {
@@ -1192,8 +1166,8 @@ fn int_value(expr: &Expr) -> Option<i64> {
 fn literal_seed_i64(expr: &Expr) -> Option<i64> {
     match expr {
         Expr::Atom(Atom::Int(value), _) => Some(*value),
-        Expr::List(list, _) if tag(list) == Some(DeepTag::Lit) => {
-            children(list).first().and_then(literal_seed_i64)
+        Expr::Node(node, _) if node.tag() == DeepTag::Lit => {
+            node.children_slice().first().and_then(literal_seed_i64)
         }
         _ => None,
     }

@@ -619,8 +619,8 @@ mod tests {
     use crate::stdlib_cache::build_stdlib_context;
 
     #[test]
-    fn cache_format_version_tracks_type_env_callable_provenance() {
-        assert_eq!(LIBRARY_CACHE_FORMAT_VERSION, 18);
+    fn cache_format_version_tracks_the_single_node_spelling() {
+        assert_eq!(LIBRARY_CACHE_FORMAT_VERSION, 19);
     }
 
     #[test]

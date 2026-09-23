@@ -7,7 +7,7 @@ use super::*;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_grad(
-    list: &deep::List,
+    node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
     subst: &mut Subst,
@@ -15,9 +15,9 @@ pub(super) fn infer_grad(
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
 ) -> Type {
-    let kids = children(list);
+    let kids = node.children_slice();
     if kids.is_empty() {
-        return malformed_form(list, "grad", "a function argument to differentiate", errors);
+        return malformed_form(node, "grad", "a function argument to differentiate", errors);
     }
 
     let f_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
@@ -40,7 +40,7 @@ pub(super) fn infer_grad(
                 );
             }
 
-            match grad_result_type(list, &args, adt_reg, errors) {
+            match grad_result_type(node, &args, adt_reg, errors) {
                 Some(grad_ret) => Type::Fn(args, Box::new(grad_ret)),
                 None => vg.fresh_type(),
             }
@@ -78,7 +78,7 @@ pub(super) fn grad_output_supported(ty: &Type) -> bool {
 }
 
 pub(super) fn grad_result_type(
-    list: &deep::List,
+    node: &DeepNode,
     args: &[Type],
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
@@ -87,7 +87,7 @@ pub(super) fn grad_result_type(
     // diagnostic was pushed", the pre-existing convention at this boundary.
     // `.ok()?` preserves it exactly; threading the witness further is plumbing
     // this change does not take on.
-    let targets = if let Some(indices) = grad_wrt_indices(list, errors).ok()? {
+    let targets = if let Some(indices) = grad_wrt_indices(node, errors).ok()? {
         let mut selected = Vec::with_capacity(indices.len());
         for index in indices {
             let Some(arg) = args.get(index) else {
@@ -155,10 +155,10 @@ fn wrt_selector(expr: &deep::Expr) -> Option<WrtSelector<'_>> {
 }
 
 pub(super) fn grad_wrt_indices(
-    list: &deep::List,
+    node: &DeepNode,
     errors: &mut DiagnosticSink<'_>,
 ) -> Result<Option<Vec<usize>>, ErrorWitness> {
-    let kids = children(list);
+    let kids = node.children_slice();
 
     // Issue #216: cast-aware so a Deep-direct grad node with cast-wrapped
     // wrt indices peels to the underlying int and trips the
@@ -355,7 +355,7 @@ pub(super) fn grad_argument_type(arg: &Type, adt_reg: &AdtRegistry) -> Option<Ty
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_vmap(
-    list: &deep::List,
+    node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
     subst: &mut Subst,
@@ -363,9 +363,9 @@ pub(super) fn infer_vmap(
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
 ) -> Type {
-    let kids = children(list);
+    let kids = node.children_slice();
     if kids.is_empty() {
-        return malformed_form(list, "vmap", "a function argument to map", errors);
+        return malformed_form(node, "vmap", "a function argument to map", errors);
     }
 
     // Issue #216: cast-aware so a Deep-direct vmap node with a cast-
@@ -604,7 +604,7 @@ pub(super) fn vmap_transform_result_type(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_def(
-    list: &deep::List,
+    node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
     subst: &mut Subst,
@@ -612,14 +612,14 @@ pub(super) fn infer_def(
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
 ) -> Type {
-    let kids = children(list);
+    let kids = node.children_slice();
     if kids.len() < 2 {
-        return malformed_form(list, "def", "a name and a body expression", errors);
+        return malformed_form(node, "def", "a name and a body expression", errors);
     }
 
     let name = match symbol_name(&kids[0]) {
         Some(n) => n.to_string(),
-        None => return malformed_form(list, "def", "a symbol name as its first child", errors),
+        None => return malformed_form(node, "def", "a symbol name as its first child", errors),
     };
 
     let body_level = subst.enter_level(vg);

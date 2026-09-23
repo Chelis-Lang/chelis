@@ -432,7 +432,7 @@ fn describe_grammar_error(e: &PredGrammarError) -> String {
 // ===========================================================================
 
 // chelis#1125 PP7 / spec/04-type-system.md §10 [04-TOT-5]: these three
-// readers are the whole module's view of a Deep node, and they were
+// readers are the whole module's view of a Deep node, and they were once
 // `Expr::List`-only. On the stamped ingress every node arrives as an
 // `Expr::Node`, so `tag` returned `None` for the `module` wrapper,
 // `flatten_with_modules` never descended into it, and NO `deftype` was ever
@@ -447,7 +447,6 @@ fn describe_grammar_error(e: &PredGrammarError) -> String {
 fn tag(expr: &Expr) -> Option<DeepTag> {
     match expr {
         Expr::Node(node, _) => Some(node.tag()),
-        Expr::List(list, _) => list.tag(),
         _ => None,
     }
 }
@@ -455,7 +454,6 @@ fn tag(expr: &Expr) -> Option<DeepTag> {
 fn children(expr: &Expr) -> &[Expr] {
     match expr {
         Expr::Node(node, _) => node.children_slice(),
-        Expr::List(list, _) if list.elements.len() >= 2 => &list.elements[2..],
         _ => &[],
     }
 }
@@ -478,10 +476,6 @@ fn var_name(expr: &Expr) -> Option<&str> {
 fn meta_map(expr: &Expr) -> Option<&chelis_deep::Metadata> {
     match expr {
         Expr::Node(node, _) => Some(node.meta()),
-        Expr::List(list, _) => match list.elements.get(1) {
-            Some(Expr::Map(map, _)) => Some(map),
-            _ => None,
-        },
         _ => None,
     }
 }

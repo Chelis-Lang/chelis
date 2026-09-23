@@ -2,7 +2,7 @@ use chelis_deep::DeepTag;
 use chelis_unord::UnordMap;
 use std::fs;
 
-use chelis_deep::ast::{Atom, Expr, ExprCarrier, List};
+use chelis_deep::ast::{Atom, Expr, ExprCarrier};
 use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::TensorValue as IrTensorValue;
 use chelis_ir::evaluation::RandomExecutionContext;
@@ -184,22 +184,20 @@ fn sequential_eval_let_chain(expr: &Expr) -> Option<SequentialEvalLetChain<'_>> 
         }
     };
 
-    let span = expr.span();
-    let mut bind_elements = vec![
-        Expr::Atom(Atom::Tag(DeepTag::Bind), span),
-        Expr::Map(Metadata::default(), span),
-    ];
+    // Every pair keeps its binder and binding-value positions, so each
+    // initializer's binding-origin metadata stays admitted.
+    let mut bind_children = Vec::with_capacity(bindings.len() * 2);
     for binding in &bindings {
-        bind_elements.push(binding.binding.clone());
-        bind_elements.push(binding.initializer.clone());
+        bind_children.push(binding.binding.clone());
+        bind_children.push(binding.initializer.clone());
     }
     Some(SequentialEvalLetChain {
         bindings,
-        bind_expr: Expr::List(
-            List {
-                elements: bind_elements,
-            },
-            span,
+        bind_expr: Expr::node(
+            DeepTag::Bind,
+            Metadata::default(),
+            bind_children,
+            expr.span(),
         ),
         body,
     })
@@ -255,13 +253,10 @@ fn declared_literal_result_extents(declared: Option<&Expr>) -> Option<(usize, Ve
     let (_, dim_exprs) = tensor_type_dim_exprs(declared?)?;
     let mut axes = Vec::new();
     for (axis, dim_expr) in dim_exprs.iter().enumerate() {
-        let Some(dim_list) = as_list(dim_expr) else {
+        let Some((DeepTag::DLit, dim_kids)) = tagged_expr_children(dim_expr) else {
             continue;
         };
-        if tag(dim_list) != Some(DeepTag::DLit) {
-            continue;
-        }
-        if let Some(required) = children(dim_list).first().and_then(int_value) {
+        if let Some(required) = dim_kids.first().and_then(int_value) {
             axes.push((axis, required));
         }
     }
@@ -270,11 +265,10 @@ fn declared_literal_result_extents(declared: Option<&Expr>) -> Option<(usize, Ve
 
 fn tensor_type_dim_exprs(expr: &Expr) -> Option<(&Expr, &[Expr])> {
     let stripped = strip_type_wrappers(expr);
-    let list = as_list(stripped)?;
-    if tag(list) != Some(DeepTag::TTensor) {
+    let (DeepTag::TTensor, kids) = tagged_expr_children(stripped)? else {
         return None;
-    }
-    children(list).split_last()
+    };
+    kids.split_last()
 }
 
 /// [05-HOST-4]: choose the first invalid host name in the declared order.
@@ -679,14 +673,6 @@ impl<'a> EvalNode<'a> {
 fn rebuild_eval_node(node: EvalNode<'_>, metadata: Metadata, children: Vec<Expr>) -> Expr {
     match node.expr {
         Expr::Node(_, span) => Expr::node(node.tag, metadata, children, *span),
-        Expr::List(list, span) => {
-            let mut elements = Vec::with_capacity(children.len() + 2);
-            elements.push(list.elements[0].clone());
-            let metadata_span = list.elements.get(1).map(Expr::span).unwrap_or(*span);
-            elements.push(Expr::Map(metadata, metadata_span));
-            elements.extend(children);
-            Expr::List(List { elements }, *span)
-        }
         _ => unreachable!("decoded EvalNode must retain a decoded carrier"),
     }
 }
@@ -700,8 +686,7 @@ fn attach_missing_checked_type(argument: &Expr, ty: &Expr) -> Expr {
         | ExprCarrier::UndecodableHead(_, _, _)
         | ExprCarrier::Atom(_)
         | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_)
-        | ExprCarrier::MalformedLegacyList(_) => return argument.clone(),
+        | ExprCarrier::MetadataExpression(_) => return argument.clone(),
     };
     if node.metadata.ty().is_some() {
         return argument.clone();
@@ -1222,9 +1207,6 @@ impl<'a> EvalContext<'a> {
             ExprCarrier::UndecodableHead(head, _, _) => {
                 Err(format!("unknown form `{head}` is not a runtime expression"))
             }
-            ExprCarrier::MalformedLegacyList(_) => {
-                Err("malformed legacy list is not a runtime expression".to_string())
-            }
         }
     }
 
@@ -1446,8 +1428,7 @@ impl<'a> EvalContext<'a> {
                 | ExprCarrier::UndecodableHead(_, _, _)
                 | ExprCarrier::Atom(_)
                 | ExprCarrier::MetadataMap(_)
-                | ExprCarrier::MetadataExpression(_)
-                | ExprCarrier::MalformedLegacyList(_) => {
+                | ExprCarrier::MetadataExpression(_) => {
                     return Err("record field must be a decoded `kv` node".to_string());
                 }
             };
@@ -1591,7 +1572,6 @@ impl<'a> EvalContext<'a> {
             value
                 if match value.carrier() {
                     ExprCarrier::StructuralList(elements) => elements.is_empty(),
-                    ExprCarrier::MalformedLegacyList(list) => list.elements.is_empty(),
                     ExprCarrier::DecodedNode(_, _, _)
                     | ExprCarrier::UndecodableHead(_, _, _)
                     | ExprCarrier::Atom(_)
@@ -1668,8 +1648,7 @@ impl<'a> EvalContext<'a> {
             | ExprCarrier::UndecodableHead(_, _, _)
             | ExprCarrier::Atom(_)
             | ExprCarrier::MetadataMap(_)
-            | ExprCarrier::MetadataExpression(_)
-            | ExprCarrier::MalformedLegacyList(_) => {
+            | ExprCarrier::MetadataExpression(_) => {
                 return Err("fn params malformed".to_string());
             }
         };
@@ -2168,8 +2147,7 @@ impl<'a> EvalContext<'a> {
             | ExprCarrier::UndecodableHead(_, _, _)
             | ExprCarrier::Atom(_)
             | ExprCarrier::MetadataMap(_)
-            | ExprCarrier::MetadataExpression(_)
-            | ExprCarrier::MalformedLegacyList(_) => {}
+            | ExprCarrier::MetadataExpression(_) => {}
         }
         let value = self.eval_expr(expr)?;
         if claims.iter().all(|claim| claim.axes.is_empty()) {
@@ -2221,8 +2199,7 @@ impl<'a> EvalContext<'a> {
             | ExprCarrier::UndecodableHead(_, _, _)
             | ExprCarrier::Atom(_)
             | ExprCarrier::MetadataMap(_)
-            | ExprCarrier::MetadataExpression(_)
-            | ExprCarrier::MalformedLegacyList(_) => {
+            | ExprCarrier::MetadataExpression(_) => {
                 return Err("let missing bindings".to_string());
             }
         };
@@ -2482,8 +2459,7 @@ impl<'a> EvalContext<'a> {
             | ExprCarrier::UndecodableHead(_, _, _)
             | ExprCarrier::Atom(_)
             | ExprCarrier::MetadataMap(_)
-            | ExprCarrier::MetadataExpression(_)
-            | ExprCarrier::MalformedLegacyList(_) => {
+            | ExprCarrier::MetadataExpression(_) => {
                 return Err("tuple-get index must be a literal".to_string());
             }
         };
@@ -2531,8 +2507,7 @@ impl<'a> EvalContext<'a> {
                 | ExprCarrier::UndecodableHead(_, _, _)
                 | ExprCarrier::Atom(_)
                 | ExprCarrier::MetadataMap(_)
-                | ExprCarrier::MetadataExpression(_)
-                | ExprCarrier::MalformedLegacyList(_) => {
+                | ExprCarrier::MetadataExpression(_) => {
                     return Err("match arm must be a decoded `arm` node".to_string());
                 }
             };
@@ -2883,8 +2858,7 @@ impl<'a> EvalContext<'a> {
                 | ExprCarrier::UndecodableHead(_, _, _)
                 | ExprCarrier::Atom(_)
                 | ExprCarrier::MetadataMap(_)
-                | ExprCarrier::MetadataExpression(_)
-                | ExprCarrier::MalformedLegacyList(_) => None,
+                | ExprCarrier::MetadataExpression(_) => None,
             })
             .and_then(symbol_name)
             .ok_or_else(|| "cast missing target type".to_string())?;
@@ -4810,24 +4784,11 @@ mod tensor_entry_actualization_tests {
     use super::*;
 
     fn type_expr(source: &str) -> Expr {
-        let parsed = chelis_deep::parser::parse_str(source)
+        chelis_deep::parser::parse_str(source)
             .expect("type expression parses")
             .into_iter()
             .next()
-            .expect("one type expression");
-        fn legacy(expr: &Expr) -> Expr {
-            let ExprCarrier::DecodedNode(tag, metadata, children) = expr.carrier() else {
-                return expr.clone();
-            };
-            let span = expr.span();
-            let mut elements = vec![
-                Expr::Atom(Atom::Tag(tag), span),
-                Expr::Map(metadata.clone(), span),
-            ];
-            elements.extend(children.iter().map(legacy));
-            Expr::List(List { elements }, span)
-        }
-        legacy(&parsed)
+            .expect("one type expression")
     }
 
     fn wrapped(expr: Expr) -> Expr {

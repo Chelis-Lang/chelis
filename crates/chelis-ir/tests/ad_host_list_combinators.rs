@@ -1,19 +1,8 @@
-use chelis_deep::ast::{Atom, Expr, List};
+use chelis_deep::ExprCarrier;
+use chelis_deep::ast::{Atom, Expr};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
 use chelis_ir::lower::lower_subexpr_program;
 use chelis_unord::UnordMap;
-
-fn get_tag(list: &List) -> Option<chelis_deep::DeepTag> {
-    list.tag()
-}
-
-fn children(list: &List) -> &[Expr] {
-    if list.elements.len() > 2 {
-        &list.elements[2..]
-    } else {
-        &[]
-    }
-}
 
 fn checked_surf(src: &str) -> chelis_types::CheckedProgram {
     let decls = chelis_surf::parser::parse_str(src).expect("surf parse");
@@ -38,13 +27,9 @@ fn checked_surf(src: &str) -> chelis_types::CheckedProgram {
 }
 
 fn def_name_and_body(expr: &Expr) -> Option<(String, Expr)> {
-    let Expr::List(list, _) = expr else {
+    let ExprCarrier::DecodedNode(chelis_deep::DeepTag::Def, _, kids) = expr.carrier() else {
         return None;
     };
-    if get_tag(list) != Some(chelis_deep::DeepTag::Def) {
-        return None;
-    }
-    let kids = children(list);
     let name = match kids.first()? {
         Expr::Atom(Atom::Name(name), _) => name.clone(),
         _ => return None,

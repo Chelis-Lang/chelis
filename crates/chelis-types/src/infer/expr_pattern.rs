@@ -7,7 +7,7 @@ use super::*;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_match(
-    list: &deep::List,
+    node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
     subst: &mut Subst,
@@ -15,10 +15,10 @@ pub(super) fn infer_match(
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
 ) -> Type {
-    let kids = children(list);
+    let kids = node.children_slice();
     if kids.is_empty() {
         return malformed_form(
-            list,
+            node,
             "match",
             "a scrutinee expression and at least one arm",
             errors,
@@ -34,7 +34,7 @@ pub(super) fn infer_match(
     // as a silent `Type::Error` (census-verified silent-through).
     if kids.len() < 2 {
         return malformed_form(
-            list,
+            node,
             "match",
             "at least one arm after the scrutinee",
             errors,
@@ -76,7 +76,6 @@ pub(super) fn infer_match(
                 let guard = &arm_kids[1];
                 let empty_guard = match guard.carrier() {
                     deep::ExprCarrier::StructuralList(elements) => elements.is_empty(),
-                    deep::ExprCarrier::MalformedLegacyList(list) => list.elements.is_empty(),
                     deep::ExprCarrier::DecodedNode(_, _, _)
                     | deep::ExprCarrier::UndecodableHead(_, _, _)
                     | deep::ExprCarrier::Atom(_)
@@ -133,8 +132,8 @@ pub(super) fn infer_match(
                 let names: Vec<&str> = missing.iter().map(|s| s.as_str()).collect();
                 errors.push(CheckError::new(
                     CheckErrorKind::NonExhaustiveMatch,
-                    with_macro_provenance(
-                        &deep::Expr::List(list.clone(), zero_span()),
+                    with_node_provenance(
+                        node,
                         format!("non-exhaustive match: missing variants {:?}", names),
                     ),
                     vec![],
@@ -915,10 +914,10 @@ fn report_literal_pattern_error(
 /// added that does not fold, and saying so is worth more than typing it a
 /// second way.
 pub(super) fn pipe_reached_inference_unfolded(
-    list: &deep::List,
+    node: &DeepNode,
     errors: &mut DiagnosticSink<'_>,
 ) -> Type {
-    let stages = children(list).len().saturating_sub(1);
+    let stages = node.children_slice().len().saturating_sub(1);
     report(
         errors,
         CheckError::new(

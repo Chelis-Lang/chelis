@@ -3,8 +3,7 @@
 use chelis_deep::{DeepTag, Expr, ExprCarrier, parse_and_stamp_file};
 use chelis_types::errors::CheckError;
 use chelis_types::{CheckedProgram, check_ir_program, check_typed_program};
-use quote::ToTokens;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use syn::visit::Visit;
 
 fn legacy(source: &str) -> Vec<Expr> {
@@ -100,39 +99,6 @@ fn parameter_type(program: &CheckedProgram, def_name: &str, param_name: &str) ->
     )
 }
 
-fn assert_no_legacy_list(expr: &Expr) {
-    fn check_metadata(metadata: &chelis_deep::Metadata) {
-        metadata.visit_expressions(&mut |expr, _| assert_no_legacy_list(expr));
-    }
-
-    match expr {
-        Expr::List(_, _) => panic!("stamped annotation output degraded to Expr::List: {expr:?}"),
-        Expr::Node(node, _) => {
-            check_metadata(node.meta());
-            for child in node.children_slice() {
-                assert_no_legacy_list(child);
-            }
-        }
-        Expr::BareList(elements, _) => {
-            for element in elements {
-                assert_no_legacy_list(element);
-            }
-        }
-        Expr::UnknownForm(data) => {
-            check_metadata(&data.meta);
-            for child in &data.children {
-                assert_no_legacy_list(child);
-            }
-        }
-        Expr::Map(metadata, _) => check_metadata(metadata),
-        Expr::MetaExpr(meta, _) => {
-            check_metadata(&meta.metadata);
-            assert_no_legacy_list(&meta.expr);
-        }
-        Expr::Atom(_, _) => {}
-    }
-}
-
 #[test]
 fn declared_function_parameter_types_are_written_on_both_carriers() {
     let source = "
@@ -148,24 +114,21 @@ fn declared_function_parameter_types_are_written_on_both_carriers() {
         "(t-prim {} i32)"
     );
 
-    assert!(
-        matches!(function_params(&ir, "identity"), Expr::List(_, _)),
-        "legacy ingress must retain its transitional params carrier"
-    );
-    assert!(
-        matches!(function_params(&typed, "identity"), Expr::Node(_, _)),
-        "stamped ingress must retain its Params node"
-    );
-    let ExprCarrier::DecodedNode(DeepTag::Def, _, typed_def) =
-        named_def(&typed, "identity").carrier()
-    else {
-        unreachable!()
-    };
-    assert!(
-        matches!(typed_def[1], Expr::Node(_, _)),
-        "annotation must preserve the stamped function carrier"
-    );
-    assert_no_legacy_list(named_def(&typed, "identity"));
+    for (ingress, program) in [("lenient", &ir), ("stamped", &typed)] {
+        assert!(
+            matches!(function_params(program, "identity"), Expr::Node(_, _)),
+            "{ingress} ingress must retain its Params node"
+        );
+        let ExprCarrier::DecodedNode(DeepTag::Def, _, def) =
+            named_def(program, "identity").carrier()
+        else {
+            unreachable!()
+        };
+        assert!(
+            matches!(def[1], Expr::Node(_, _)),
+            "{ingress} annotation must preserve the stamped function carrier"
+        );
+    }
 }
 
 #[test]
@@ -227,46 +190,13 @@ fn non_boolean_match_guards_have_ordered_ingress_parity() {
 
 #[test]
 fn present_structural_match_guards_reject_on_both_ingresses() {
-    use chelis_deep::{Atom, List, Metadata, Span};
+    use chelis_deep::{Atom, Metadata, Span};
 
     let span = Span::new(0, 0);
     let name = |value: &str| Expr::Atom(Atom::Name(value.to_string()), span);
     let int = |value| Expr::Atom(Atom::Int(value), span);
-    let legacy_node = |tag: DeepTag, children: Vec<Expr>| {
-        let mut elements = vec![
-            Expr::Atom(Atom::Tag(tag), span),
-            Expr::Map(Metadata::default(), span),
-        ];
-        elements.extend(children);
-        Expr::List(List { elements }, span)
-    };
     let stamped_node = |tag, children| Expr::node(tag, Metadata::default(), children, span);
 
-    let legacy_program = vec![legacy_node(
-        DeepTag::Def,
-        vec![
-            name("guarded"),
-            legacy_node(
-                DeepTag::Match,
-                vec![
-                    legacy_node(DeepTag::Lit, vec![int(0)]),
-                    legacy_node(
-                        DeepTag::Arm,
-                        vec![
-                            legacy_node(DeepTag::PatWild, vec![]),
-                            Expr::List(
-                                List {
-                                    elements: vec![int(1)],
-                                },
-                                span,
-                            ),
-                            legacy_node(DeepTag::Lit, vec![int(2)]),
-                        ],
-                    ),
-                ],
-            ),
-        ],
-    )];
     let stamped_program = vec![stamped_node(
         DeepTag::Def,
         vec![
@@ -288,19 +218,18 @@ fn present_structural_match_guards_reject_on_both_ingresses() {
         ],
     )];
 
-    let legacy_errors = check_ir_program(&legacy_program)
-        .expect_err("a present malformed legacy guard must reject")
+    let ir_errors = check_ir_program(&stamped_program)
+        .expect_err("a present structural guard must reject on the IR ingress")
         .errors;
     let stamped_errors = check_typed_program(&stamped_program)
         .expect_err("a present structural guard must reject")
         .errors;
-    assert!(!legacy_errors.is_empty());
+    assert!(!ir_errors.is_empty());
     assert!(!stamped_errors.is_empty());
 }
 
 #[derive(Default)]
 struct DispatchMatches<'ast> {
-    list: Vec<&'ast syn::ExprMatch>,
     node: Vec<&'ast syn::ExprMatch>,
 }
 
@@ -317,13 +246,6 @@ fn path_name(expr: &syn::Expr) -> Option<String> {
 impl<'ast> Visit<'ast> for DispatchMatches<'ast> {
     fn visit_expr_match(&mut self, node: &'ast syn::ExprMatch) {
         match node.expr.as_ref() {
-            syn::Expr::Call(call)
-                if path_name(call.func.as_ref()).as_deref() == Some("get_tag")
-                    && call.args.len() == 1
-                    && call.args.first().and_then(path_name).as_deref() == Some("list") =>
-            {
-                self.list.push(node);
-            }
             syn::Expr::MethodCall(call)
                 if call.method == "tag"
                     && path_name(call.receiver.as_ref()).as_deref() == Some("node") =>
@@ -350,39 +272,14 @@ impl<'ast> Visit<'ast> for DeepTags {
     }
 }
 
-fn transparent_body(expr: &syn::Expr) -> &syn::Expr {
-    let syn::Expr::Block(block) = expr else {
-        return expr;
-    };
-    let [syn::Stmt::Expr(inner, None)] = block.block.stmts.as_slice() else {
-        return expr;
-    };
-    if block.attrs.is_empty() {
-        transparent_body(inner)
-    } else {
-        expr
-    }
-}
-
-fn normalized_dispatch_body(body: &syn::Expr) -> String {
-    transparent_body(body)
-        .to_token_stream()
-        .to_string()
-        .replace("& list", "list")
-}
-
-fn dispatch_map(dispatch: &syn::ExprMatch) -> BTreeMap<String, String> {
-    let mut result = BTreeMap::new();
+fn dispatched_tags(dispatch: &syn::ExprMatch) -> BTreeSet<String> {
+    let mut result = BTreeSet::new();
     for arm in &dispatch.arms {
         let mut tags = DeepTags::default();
         tags.visit_pat(&arm.pat);
-        if tags.0.is_empty() {
-            continue;
-        }
-        let body = normalized_dispatch_body(&arm.body);
         for tag in tags.0 {
             assert!(
-                result.insert(tag.clone(), body.clone()).is_none(),
+                result.insert(tag.clone()),
                 "duplicate disposition for {tag}"
             );
         }
@@ -391,7 +288,7 @@ fn dispatch_map(dispatch: &syn::ExprMatch) -> BTreeMap<String, String> {
 }
 
 #[test]
-fn residual_root_adapter_is_an_exact_closed_disposition_twin() {
+fn root_node_dispatch_names_every_deep_tag() {
     let source = include_str!("../src/infer/expr.rs");
     let syntax = syn::parse_file(source).expect("inference source parses");
     let function = syntax
@@ -408,37 +305,15 @@ fn residual_root_adapter_is_an_exact_closed_disposition_twin() {
         .expect("root inference function remains present");
     let mut matches = DispatchMatches::default();
     matches.visit_block(&function.block);
-    assert_eq!(matches.list.len(), 1, "expected one legacy List dispatch");
     assert_eq!(matches.node.len(), 1, "expected one stamped Node dispatch");
 
-    let list_dispatch = dispatch_map(matches.list[0]);
-    let node_dispatch = dispatch_map(matches.node[0]);
     let vocabulary = DeepTag::ALL
         .iter()
         .map(|tag| format!("{tag:?}"))
         .collect::<BTreeSet<_>>();
-
     assert_eq!(
-        list_dispatch, node_dispatch,
-        "each carrier must use the same complete semantic syntax for every tag, \
-         including child selection, ordering, multiplicity, and helper arguments"
+        dispatched_tags(matches.node[0]),
+        vocabulary,
+        "the root dispatch must name every tag in an explicit arm, never absorb one in a catch-all"
     );
-    assert_eq!(
-        node_dispatch.keys().cloned().collect::<BTreeSet<_>>(),
-        vocabulary
-    );
-}
-
-#[test]
-fn annotation_slice_has_no_new_node_to_list_reader() {
-    for source in [
-        include_str!("../src/infer/annotate.rs"),
-        include_str!("../src/infer/checked.rs"),
-        include_str!("../src/infer/expr_pattern.rs"),
-    ] {
-        assert!(
-            !source.contains(".to_list("),
-            "annotation readers must consume Expr::carrier directly"
-        );
-    }
 }

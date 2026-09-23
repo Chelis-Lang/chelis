@@ -711,14 +711,6 @@ fn line_col(source: &str, offset: usize) -> (usize, usize) {
 fn deep_node_parts(expr: &deep::Expr) -> Option<(DeepTag, &deep::Metadata, &[deep::Expr])> {
     match expr {
         deep::Expr::Node(node, _) => Some((node.tag(), node.meta(), node.children_slice())),
-        deep::Expr::List(list, _) => {
-            let tag = list.tag()?;
-            let meta = match list.elements.get(1)? {
-                deep::Expr::Map(meta, _) => meta,
-                _ => return None,
-            };
-            Some((tag, meta, list.elements.get(2..)?))
-        }
         _ => None,
     }
 }
@@ -742,7 +734,7 @@ fn type_name_from_meta(expr: &deep::Expr) -> Option<&str> {
 
 fn type_name_from_meta_expr(expr: &deep::Expr) -> Option<&str> {
     match expr {
-        deep::Expr::Node(..) | deep::Expr::List(..) => type_name_from_meta(expr),
+        deep::Expr::Node(..) => type_name_from_meta(expr),
         deep::Expr::MetaExpr(meta, _) => meta
             .metadata
             .ty()
