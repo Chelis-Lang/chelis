@@ -3024,12 +3024,10 @@ pub fn compare_scalar_tensor(
 /// Round a compile-time float bound to `prim`'s exact value, the way the
 /// evaluator does when it stores one.
 ///
-/// What a float-target `cast` does to a statically resolvable literal, for the
-/// legacy `extract_f64_value` fold that still serves the non-execution
-/// `dropout` arm.
+/// What a float-target `cast` does to a statically resolvable literal.
 ///
-/// `uniform_like` bounds do NOT come through here: they stage through
-/// `static_controls::scalar` (IR) and `StagedBound` (C), which reach the same
+/// Random controls do NOT come through here: they are operands the IR lanes
+/// evaluate and `StagedBound` (C) folds, and both reach the same
 /// `finalize_scalar` chokepoint via `cast_raw`/`cast_scalar`.
 ///
 /// chelis#2316: both of them used to recurse THROUGH a `cast` and keep the

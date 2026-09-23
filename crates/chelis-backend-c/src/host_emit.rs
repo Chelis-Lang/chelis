@@ -10223,8 +10223,8 @@ impl BinaryElementwiseFunc {
 /// defaulted — silently substituting `[0, 1)` for an unreadable bound is the
 /// exact chelis#776 failure this must not reintroduce.
 ///
-/// chelis#2316: the value is staged exactly as `chelis-ir`'s
-/// `static_controls::scalar` stages it — an integer leaf stays EXACT through
+/// chelis#2316: the value is staged exactly as the IR lanes evaluate the
+/// bound's operand graph — an integer leaf stays EXACT through
 /// i64 and a float leaf stays at its source dtype until a cast finalizes it —
 /// and every transition goes through the shared `chelis_types` cast
 /// primitives. Both lanes therefore apply the same roundings in the same
