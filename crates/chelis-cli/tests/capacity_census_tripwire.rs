@@ -33,7 +33,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use chelis_deep::tag::DeepTag;
-use chelis_deep::{Atom, Expr, List};
+use chelis_deep::{Atom, Expr};
 use chelis_types::types::Prim;
 use serde::{Deserialize, Serialize};
 
@@ -5270,7 +5270,7 @@ fn planted_numeric_adt(variant_name: &str) -> Expr {
         Default::default(),
         vec![
             Expr::Atom(Atom::Name("Json".to_string()), span),
-            Expr::List(List { elements: vec![] }, span),
+            Expr::BareList(vec![], span),
             variant,
         ],
         span,
@@ -5646,7 +5646,7 @@ fn std_adt_integer_carrier_is_numeric_op_not_a_seam() {
         Default::default(),
         vec![
             Expr::Atom(Atom::Name("Json".to_string()), span),
-            Expr::List(List { elements: vec![] }, span),
+            Expr::BareList(vec![], span),
             variant,
         ],
         span,
