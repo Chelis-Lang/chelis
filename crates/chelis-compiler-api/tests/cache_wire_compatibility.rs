@@ -387,13 +387,9 @@ fn current_compiled_disk_and_worker_preserve_scalar_storage_bits_and_reconstruct
         .unwrap()
         .unwrap();
     let worker = CompiledContext::decode(&bytes).unwrap();
-    assert_current_literal_result(
-        &serde_json::to_value(&context).unwrap()["library_dag"],
-    );
+    assert_current_literal_result(&serde_json::to_value(&context).unwrap()["library_dag"]);
     for restored in [&disk, &worker] {
-        assert_current_literal_result(
-            &serde_json::to_value(restored).unwrap()["library_dag"],
-        );
+        assert_current_literal_result(&serde_json::to_value(restored).unwrap()["library_dag"]);
         assert_eq!(
             historical_producer::context_numeric_payloads(restored),
             expected
