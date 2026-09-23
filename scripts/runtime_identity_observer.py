@@ -518,7 +518,10 @@ def collect_unit(real_rustc, args):
     # Implicit std/core/alloc and compiler-builtins are real code inputs too.
     # A mutable custom sysroot cannot borrow the compiler's version string as
     # evidence for the library bytes that its compilation actually consumes.
-    library_dir = Path(probe([real_rustc, *clean_probe_args(args), "--print=target-libdir"]).strip())
+    toolchain_directories = probe([real_rustc, *clean_probe_args(args), "--print=sysroot", "--print=target-libdir"]).splitlines()
+    if len(toolchain_directories) != 2 or not all(toolchain_directories):
+        raise ObservationError("compiler did not expose its sysroot and target library directory")
+    sysroot, library_dir = (Path(path).absolute() for path in toolchain_directories)
     libraries = enumerate_files(library_dir)
     if not libraries:
         raise ObservationError(f"empty compiler target library directory: {library_dir}")
@@ -588,6 +591,9 @@ def collect_unit(real_rustc, args):
     if values(args, "-l") or native_searches:
         raise ObservationError("CHELIS_IDENTITY_UNOBSERVABLE_NATIVE: native linker inputs require compiler-bound observations")
     mappings = [(str(manifest_dir), prefix), (str(workspace), "workspace")]
+    mappings.append((str(sysroot), "toolchain/sysroot"))
+    if os.environ.get("CHELIS_IDENTITY_BACKEND") == "nix" and os.environ.get("NIX_BUILD_TOP"):
+        mappings.append((str(Path(os.environ["NIX_BUILD_TOP"]).absolute()), "build"))
     if out:
         mappings.insert(0, (out, prefix + "/generated"))
     tools = []

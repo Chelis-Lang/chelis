@@ -173,6 +173,38 @@ class ObservationFailureTests(unittest.TestCase):
         with self.assertRaisesRegex(observer.ObservationError, "stale source/input inventory"):
             observer.check_receipt(receipt)
 
+    @unittest.skipUnless(HELPER and RUSTC, "requires compiled adapter and native rustc")
+    def test_relocated_sysroot_and_nix_build_root_preserve_descriptor(self):
+        standard = Path(observer.probe([RUSTC, "--print=target-libdir"]).strip())
+        descriptors = []
+        for label in ("original", "relocated"):
+            build_root = self.root / ("build-" + label)
+            subject = build_root / "source"
+            subject.mkdir(parents=True)
+            (subject / "Cargo.toml").write_text('[package]\nname="sysroot-probe"\nversion="0.0.0"\nedition="2021"\n[workspace]\n')
+            (subject / "probe.h").write_text("#define SYSROOT_PROBE_WIDTH 8\n")
+            source = subject / "lib.rs"
+            source.write_text("pub fn width() -> usize { core::mem::size_of::<u64>() }\n")
+            sysroot = self.root / ("toolchain-" + label)
+            libraries = sysroot / "lib/rustlib" / standard.parent.name / "lib"
+            libraries.mkdir(parents=True)
+            for original in standard.iterdir():
+                (libraries / original.name).symlink_to(original, target_is_directory=original.is_dir())
+            os.environ.update({"CARGO_MANIFEST_DIR": str(subject), "CARGO_PKG_NAME": "sysroot-probe",
+                               "CARGO_PKG_VERSION": "0.0.0", "CHELIS_IDENTITY_PACKAGE_SOURCE": "path:.",
+                               "CHELIS_IDENTITY_WORKSPACE": str(subject), "NIX_BUILD_TOP": str(build_root),
+                               "CHELIS_IDENTITY_PROVENANCE": "source-worktree"})
+            receipt = observer.collect_unit(RUSTC, [
+                str(source), "--crate-name", "sysroot_probe", "--crate-type", "lib",
+                "--sysroot", str(sysroot), "--remap-path-prefix=" + str(build_root) + "=/",
+                "--remap-path-prefix=" + str(sysroot) + "=/rustc"])
+            receipt["profile"] = "debug"
+            output = build_root / "record"
+            output.mkdir()
+            observer.emit_producer(receipt, "runtime", output)
+            descriptors.append(receipt["descriptor"])
+        self.assertEqual(descriptors[0], descriptors[1])
+
     @unittest.skipUnless(RUSTC, "requires native rustc")
     def test_metadata_only_binary_outputs_match_compiler_artifact_events(self):
         source = self.root / "main.rs"
