@@ -6053,7 +6053,7 @@ fn is_shape_sensitive_builtin_app(expr: &Expr) -> bool {
 /// on a bind value (spec/03 section 1.1). A node built elsewhere from a bind
 /// value's metadata leaves the key with the binding, because the node gate
 /// refuses it at any other position.
-pub(crate) fn without_binding_origin(meta: &Metadata) -> Metadata {
+pub fn without_binding_origin(meta: &Metadata) -> Metadata {
     let mut meta = meta.clone();
     meta.remove(chelis_deep::annotations::MetadataKey::SurfBindingType);
     meta

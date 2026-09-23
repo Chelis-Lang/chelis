@@ -81,7 +81,10 @@ impl CachePayload for crate::LibraryContext {
     // V16: definition-checked operation contracts and operand-value restrictions.
     // V17 retains checker-owned local tensor-ascription obligations.
     // V18 retains TypeEnv callable provenance for contextual grad selectors.
-    const FORMAT_VERSION: u32 = 18;
+    // V19 (chelis#1125): Deep `Expr` and `Atom` lost the legacy list and tag
+    // variants, so bincode variant indices shifted, and checked type
+    // annotations are node-spelled on every ingress.
+    const FORMAT_VERSION: u32 = 19;
     const KEY_DOMAIN: &'static [u8] = b"chelis_library_typecheck_v";
 }
 
@@ -93,7 +96,8 @@ impl CachePayload for crate::StdLibContext {
     // V22 retains distinct literal-result declaration tokens and producer ownership.
     // V23 retains checker-owned local tensor-ascription obligations.
     // V24 retains TypeEnv callable provenance for contextual grad selectors.
-    const FORMAT_VERSION: u32 = 24;
+    // V25: the V19 single-node-spelling reason above, for the standard library.
+    const FORMAT_VERSION: u32 = 25;
     const KEY_DOMAIN: &'static [u8] = b"chelis_std_typecheck_v";
 }
 

@@ -93,7 +93,7 @@ fn version_changes_alone_reject_old_subcontexts_before_payload_decode() {
             "stdlib-v15-key-input.bin",
             "stdlib-v15.tc",
             b"chelis_std_typecheck_v".as_slice(),
-            24_u32,
+            25_u32,
             stdlib_cache_key_input_bytes(&std_decls, [0x5a; 32]),
             std_key,
         ),
@@ -101,7 +101,7 @@ fn version_changes_alone_reject_old_subcontexts_before_payload_decode() {
             "library-v11-key-input.bin",
             "library-v11.tc",
             b"chelis_library_typecheck_v".as_slice(),
-            18_u32,
+            19_u32,
             library_cache_key_input_bytes(&dep_decls, std_key),
             lib_key,
         ),
@@ -152,7 +152,7 @@ fn current_numeric_subcontexts_roundtrip_through_actual_cache_codecs() {
         .unwrap();
     let std_key = stdlib_cache_key(&std_decls, [0x5a; 32]);
     let lib_key = library_cache_key(&dep_decls, std_key);
-    historical_producer::assert_literal_result(
+    assert_current_literal_result(
         &serde_json::to_value(std_context.library_dag().unwrap().raw()).unwrap(),
     );
     let dir = tempfile::tempdir().unwrap();
@@ -166,7 +166,7 @@ fn current_numeric_subcontexts_roundtrip_through_actual_cache_codecs() {
     let lib_hit = cache_envelope::load::<LibraryContext>(&lib_path, lib_key)
         .unwrap()
         .unwrap();
-    historical_producer::assert_literal_result(
+    assert_current_literal_result(
         &serde_json::to_value(std_hit.library_dag().unwrap().raw()).unwrap(),
     );
     assert_eq!(
@@ -182,6 +182,56 @@ fn current_numeric_subcontexts_roundtrip_through_actual_cache_codecs() {
 #[allow(dead_code)]
 #[path = "fixtures/cache_wire_v3/producer.rs"]
 mod historical_producer;
+
+/// The current-producer twin of `historical_producer::assert_literal_result`.
+/// The historical harness reads the JSON spelling its own commit wrote, where
+/// a Deep node was a tagged list; the current lowered library spells every
+/// node as `Expr::Node` (chelis#1125), so the current controls decode the
+/// definition and read the same exact result type through the node API.
+fn assert_current_literal_result(library: &serde_json::Value) {
+    use chelis_deep::{Atom, DeepTag, Expr};
+
+    let definitions = library["program_defs"].as_object().unwrap();
+    let selected: Vec<_> = definitions
+        .iter()
+        .filter(|(name, _)| name.ends_with("fixture_literal"))
+        .collect();
+    assert_eq!(
+        selected.len(),
+        1,
+        "fixture must contain exactly one literal-result declaration"
+    );
+    let definition: Expr = serde_json::from_value(selected[0].1.clone()).unwrap();
+    let Expr::Node(definition, _) = definition else {
+        panic!("the checked definition is a decoded node");
+    };
+    let signature = definition
+        .meta()
+        .ty()
+        .expect("the checked definition carries its type")
+        .expression();
+    let Expr::Node(signature, _) = signature else {
+        panic!("the signature is a decoded node");
+    };
+    assert_eq!(signature.tag(), DeepTag::TFn);
+    let Some(Expr::Node(result, _)) = signature.children_slice().last() else {
+        panic!("the signature has a decoded result type");
+    };
+    assert_eq!(result.tag(), DeepTag::TTensor);
+    let [Expr::Node(extent, _), Expr::Node(dtype, _)] = result.children_slice() else {
+        panic!("the result type has one extent and one dtype");
+    };
+    assert_eq!(extent.tag(), DeepTag::DLit);
+    assert!(matches!(
+        extent.children_slice(),
+        [Expr::Atom(Atom::Int(4), _)]
+    ));
+    assert_eq!(dtype.tag(), DeepTag::TPrim);
+    assert!(matches!(
+        dtype.children_slice(),
+        [Expr::Atom(Atom::Name(name), _)] if name == "f32"
+    ));
+}
 
 // These expectations are constructed independently from the actual producer's
 // observations. Neither cache roundtrip supplies its own expected numeric bits.
@@ -337,11 +387,11 @@ fn current_compiled_disk_and_worker_preserve_scalar_storage_bits_and_reconstruct
         .unwrap()
         .unwrap();
     let worker = CompiledContext::decode(&bytes).unwrap();
-    historical_producer::assert_literal_result(
+    assert_current_literal_result(
         &serde_json::to_value(&context).unwrap()["library_dag"],
     );
     for restored in [&disk, &worker] {
-        historical_producer::assert_literal_result(
+        assert_current_literal_result(
             &serde_json::to_value(restored).unwrap()["library_dag"],
         );
         assert_eq!(
