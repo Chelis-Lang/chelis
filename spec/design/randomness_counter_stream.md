@@ -47,7 +47,7 @@ The draw key of the counter stream is `key = seed_bits XOR rotl64(splitmix64(c),
 
 This boundary is also the one the explicit-key design needs; only the supplier of `key` differs.
 
-**Random nodes take a key operand.** In the IR the data input stays first, because shape and ownership analyses read `inputs[0]` as the tensor:
+**Random nodes take a key operand.** In the IR the data input stays first, because `shape_source_for_axis` reads `inputs[0]` as the tensor:
 - `Dropout[x, rate, key(, active)]`;
 - `UniformLike[template, low, high, key(, active)]`.
 
@@ -65,7 +65,11 @@ This is the explicit-key IR. Only the key source changes at the switch.
 - in the DAG evaluator, a `RandomFrame` argument;
 - in generated C, today's `chelis_rng_state`.
 
-`DrawKey` is effectful: a DCE root, never merged, never folded or recomputed, and ordered as today. A scoped `with seed` inside a kernel takes its seed as an operand, so runtime seeds work. The bridge keeps today's `vmap` and unselected-arm counts (#2409, #2410). It exists so that the IR rewrite has a bit-identical oracle.
+`DrawKey` is effectful: a DCE root, never merged, never folded or recomputed, and ordered as today. It takes its kernel's controls as ordering inputs, and advances the frame only after they validate, preserving [05-OP-37]'s "validation consumes no ordinal". A scoped `with seed` inside a kernel carries its literal seed.
+
+`DrawKey` takes the arm's path condition wherever lowering computes both arms of a scalar `if`. It advances the frame only when active, which closes #2410 in phase 3.
+
+`vmap` over a function that draws is refused with a typed #2409 rejection in both lanes until the switch defines it. Today eval draws at seed 0, and C draws one batched ordinal. Both are silently non-conforming, so they become loud.
 
 **Gradient replay reads the key edge.** `DropoutReplay` and `UniformBoundAdjoint` read the forward node's key, and recomputation gives the same bits. That edge replaces the per-site key table, its "entered twice" check and the static-spine requirement. Recursion, dynamic control and nested `grad` need nothing more (spec/06 §2.10.1).
 
@@ -81,7 +85,11 @@ This is the explicit-key IR. Only the key source changes at the switch.
 - the plan-less dropout formula (`chelis-ir/src/eval.rs` ~373-403);
 - the older uniform mixing (`uniform_sample`'s `seed ^ i·G`, the interpreter's `seed ^ c·G`, and the emitted C equivalents).
 
-Fixed-control plans, `evaluation.rs` and `execution_spine.rs` are deleted: the key edge subsumes them. LaCaDiLE certification export remains opt-in and reads the symbolic key derivations.
+Fixed-control plans and the random parts of `evaluation.rs` and `execution_spine.rs` are deleted: the key edge subsumes them. Two things survive until the switch:
+- the spine's Resource-requirement capture, which the `compilation-trace` feature reads, moves to `lowering_trace.rs`;
+- `random_observer.rs` is ported to observe `DrawKey` nodes.
+
+LaCaDiLE certification export remains opt-in and reads the symbolic key derivations.
 
 ## 3. Phases
 
@@ -101,13 +109,14 @@ Each phase is one pull request with its own red-team rounds. The oracle for ever
    6. spec/10 §3.2 and the changelog.
 
    Oracles:
-   - every program that ran at the base produces identical bits;
-   - runtime rates, bounds and seeds, and dropout under runtime `if`/`match`/recursion, run in eval and C and match the reference;
-   - the rate rejection fires, and `stop_gradient(rate)` differentiates;
+   - every program that ran at the base produces identical bits, except programs that `vmap` a random function (now refused, #2409) and C programs that drew in an unselected arm (now conforming, #2410);
+   - runtime rates and bounds, and dropout under runtime `if`/`match`/recursion, run in eval and C and match the reference;
+   - a rate reached through adjoint-contract slots rejects with `RandomSelectionParameter`, with the rejection registry regenerated, while `stop_gradient(rate)` and a rate independent of the parameters both differentiate;
    - no `EvaluationProfile` remains.
+   - Before the fence is added, the shells are searched for `vmap` over random functions, and any use is reported.
 4. **Lane defects.** The direct-return result-claim failure (#2407).
    - Oracle: #2407's program runs.
-   - The counter-only repairs of #2409 and #2410 are not built; the switch to explicit keys supersedes them.
+   - #2409's `vmap` ordinals are not built: phase 3 fences them, and the switch defines `vmap` over keys.
 5. **Rate rejection.** Folded into phase 3.
 6. **Compiled dropout everywhere (#1192, #1872).** Tensor kernels, HIP and Metal use the kernel boundary. The remaining compiled-lane dropout rejections are removed.
    - Oracle: the stream corpus builds and runs on C, HIP and Metal and matches the reference.

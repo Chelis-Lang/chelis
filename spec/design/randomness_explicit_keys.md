@@ -2,7 +2,7 @@
 
 Tracker: chelis#2413. Status: **decided 2026-09-23 (Robert).** Chelis moves from the counter stream of [05-RNG-1] to explicit keys, after the phases shared by both designs (`randomness_counter_stream.md` phases 1 to 3).
 
-Until the language change lands, the numbered spec still specifies the counter stream, and every lane must keep meeting it. The numbered chapters are amended in the same change set as the switch (§5, step 3). This document plans that change; it does not decide semantics ahead of those amendments.
+Until the language change lands, the numbered spec still specifies the counter stream, and every lane must keep meeting it, apart from the gaps tracked under #2413. The numbered chapters are amended in the same change set as the switch (§5, step 3). This document plans that change; it does not decide semantics ahead of those amendments.
 
 ## 1. Why
 
@@ -22,19 +22,23 @@ The counter stream is the special case of this design in which the compiler pick
 
 | Form | Meaning |
 |---|---|
-| `key` | A non-numeric element dtype: no arithmetic, cast or comparison. A scalar `key` is a value; `tensor[n, key]` holds a batch of keys. |
+| `key` | A non-numeric element dtype: no arithmetic, cast or comparison. A scalar `key` is a value; `tensor[n, key]` holds a batch of keys (see below). |
 | `key(seed: i64) -> key` | The root key of a seed: the seed's two's-complement bits, with no mixing. |
 | `split(k: key) -> (key, key)` | `(derive(k, 0), derive(k, 1))`. |
 | `split(k: key, n) -> tensor[n, key]` | Row `j` is `fold_in(k, j)`. |
-| `fold_in(k: key, n: i64) -> key` | `derive(derive(k, 2), n)`. |
+| `fold_in(k: key, n: i64) -> key` | `derive(derive(k, 2), n)`, with `n` read as its two's-complement 64 bits. |
 | `dropout(k: key, x: &tensor[D,p], rate: p) -> tensor[D,p]` | [05-OP-37], with `k` in place of the handler's seed and ordinal. |
 | `uniform_like(k: key, t: &tensor[D,p], low: p, high: p) -> tensor[D,p]` | [05-OP-8], likewise. |
 
 Here `derive(k, j) = splitmix64(k XOR rotl64(splitmix64(j), 29))`. These are LaCaDiLE PR #80's definitions, so the language and the model agree bit for bit. The derivation is a finalised mix, never a bare XOR of per-index terms: a chained `fold_in(fold_in(k, a), b)` would otherwise be symmetric in `a` and `b`, the defect #2408 found in the older `uniform_like` mixing.
 
-**Keys are affine: each key is used at most once.** Passing a key to a random primitive, `split` or `fold_in` consumes it. The compiler never inserts a `copy` of a key, so reuse is a type error, and dropping an unused key is allowed. Affinity propagates to tuples, lists and data types that contain a key. The JAX idiom of repeated `fold_in(k, step)` on one retained key is written `split(k, n)` instead: consuming `k` once yields `n` keys.
+**Keys are affine: each key is used at most once.** Passing a key to a random primitive, `split` or `fold_in` consumes it. No `copy` of a key exists, whether written or compiler-inserted, so reuse is a type error, and dropping an unused key is allowed. Affinity propagates to tuples, lists and data types that contain a key.
 
-**The `Random` effect and `with seed` are deleted.** A function that draws takes a `key` parameter, and its signature is the marker. The unhandled-`Random` check error goes, and so does the escape class #2318 guards against. `chelis manifest` reports key provenance instead of `Random`-annotated operations.
+A `tensor[n, key]` is one affine value. It cannot be borrowed, and no operation that reads or copies elements (`expand`, gather, indexing, reshape, and every other read-only tensor operation) accepts it. Its rows are consumed only by `vmap` over its leading axis, which gives each row to one application, or by a consuming unstack into a list of keys.
+
+The JAX idiom of repeated `fold_in(k, step)` on one retained key is written `split(k, n)` instead: consuming `k` once yields `n` keys.
+
+**The `Random` effect and `with seed` are deleted.** A function that draws takes a `key` parameter, and its signature is the marker. The unhandled-`Random` check error goes, and so does the escape class #2318 guards against.
 
 ## 3. Semantics
 
@@ -63,9 +67,9 @@ Phase 3 of `randomness_counter_stream.md` gives random nodes a key operand. That
 - in the interim, the bridge op `DrawKey` computes `ofDrawKey` from today's counter frame;
 - under C, keys come from `KeyFromSeed`, `Split`, `SplitN` and `FoldIn` nodes.
 
-The following are unchanged by the switch: the kernels, the random nodes, their adjoints, their wire shape, the key-consume-once verifier rule and the replay reads.
+The following are unchanged by the switch: the scalar-key kernels, the random nodes, their adjoints, their wire shape, the key-consume-once verifier rule and the replay reads. The switch adds `vmap`'s lifting of a random node over a `tensor[n, key]` operand, with row `b`'s words `word(key[b], i)`: a new shape rule and a per-row kernel.
 
-The bridge exists to give the IR rewrite a bit-identical oracle. Every program that ran before phase 3 must produce the same bits after it. Only the switch changes random outputs.
+The bridge exists to give the IR rewrite a bit-identical oracle. Phase 3 states which programs keep identical bits.
 
 ## 5. What changes
 
@@ -90,20 +94,22 @@ The bridge exists to give the IR rewrite a bit-identical oracle. Every program t
 - **spec/08:** replace host Random state with key carriers for public entries.
 - **spec/10:** WireDag gains the key ops and loses `DrawKey`; execution values gain the key carrier.
 
-**Implementation, after phase 3:**
-1. Key operations in the IR, verifier, evaluators and C emission, with the next wire version.
-2. The checker: the `key` dtype, affine linearity, and key-typed signatures.
-3. **The switch, in one change set.** The surface, host lowering of key values, C host key locals, public-entry key parameters and the numbered-spec amendments land together. Deleted in the same change set: `DrawKey`, the counter frame, `chelis_rng_state` and its threading, the `with seed` host form, the random observer, and the `Random` effect rows.
-4. Carriers: execution values, a published `chelis_key` with its census row, and Python bindings.
-5. chelis-std (`normal_like` splits its key for its two uniforms; the initialisers take a key), then the examples, with `reef.lock` and the dist binaries committed.
-6. A breaking changelog fragment.
+**Implementation, after phase 3.** Each step lands with the numbered-spec text it implements.
+1. **Additive key operations.** The `key` dtype (spec/04 §1.1) and new atoms for `key`, `split`, `fold_in` and `derive` (spec/05). The IR operations, verifier, evaluators and C emission for them, and the `vmap` lifting over key rows. The next wire version, with spec/10 amended in the same step.
+2. **The checker.** Affine linearity for keys and key tensors (spec/04's linearity rules) and key-typed signatures.
+3. **The switch, in one change set.** It lands together:
+   - the surface;
+   - host lowering of key values, and C host key locals;
+   - public-entry key parameters, with the published `chelis_key` carrier, its census row, execution values and Python bindings;
+   - chelis-std: `normal_like` splits its key for its two uniforms, the initialisers take a key, and `stdlib_numeric_manifest.md`'s signatures follow;
+   - the examples, with `reef.lock` and the dist binaries committed;
+   - `chelis manifest` reporting key provenance;
+   - the remaining numbered-spec amendments.
 
-**Shells** (a minor release; every shell bumps):
-- **nautilus:** its samplers take a key; two-draw samplers split it.
-- **shoals:** path generators use `split(k, n_steps)`; tests pass `key(7i64)`; pinned outputs and manual gates are regenerated.
-- **school:** the dropout layer's private counter becomes a key argument. `random_unit()`, stochastic depth and model constructors take keys, and the training loop splits a key per step.
-- **hull:** its `with seed` handler and `(seed, ordinal)` state are replaced by key paths mirroring LaCaDiLE's `KeyPath`, in lockstep with the compiler.
-- **calcify and hydronnx:** they emit key threading.
+   Deleted in the same change set: `DrawKey`, the counter frame, `chelis_rng_state` and its threading, the `with seed` host form, the random observer, and the `Random` effect rows.
+4. A breaking changelog fragment, and the shell releases.
+
+**Shells** (a minor release; every shell bumps). The affected set is derived at switch time, not listed here. Search every Chelis-Lang repository and spec document for `with seed`, `Random`, and each random builtin and helper. That search already includes hello-chelis, the spec registry, and the canonical reference's randomness paragraphs. Hull moves in lockstep with the compiler, because it differential-tests it.
 
 **Superseded issues.** #2409 (`vmap` ordinals) and #2410 (unselected-arm ordinals) close when the switch lands, because keys remove ordinals. Until then, the phase 3 bridge keeps today's behaviour for both, which is out of spec and tracked. Anything silently wrong in a new way must be fenced.
 
