@@ -164,6 +164,27 @@ fn zero_rate_is_an_identity_at_empty_and_nonempty_shapes() {
     }
 }
 
+/// [05-OP-37]: an accepted call enters once and takes one ordinal whatever
+/// its shape, the empty tensor and the zero rate included. Ported from the
+/// fixed-control plan test `accepted_empty_and_zero_rate_calls_each_enter_once`,
+/// which the key-operand switch deleted with the plans.
+///
+/// Evidentiary status: COVERAGE LOCK; it passes at 3b5f029d8. A zero-rate
+/// call that skipped its draw key fails the counter assertion.
+#[test]
+fn accepted_empty_and_zero_rate_calls_each_take_one_ordinal() {
+    let zero = "(lit {type: (t-prim {} f32)} 0.0)";
+    let source = format!(
+        "(app {{}} (var {{}} dropout) (app {{}} (var {{}} dropout) (var {{}} x) {zero}) {zero})"
+    );
+    for count in [0, 1, 32] {
+        let dag = lower(&source, count, UnordMap::new());
+        let mut frame = RandomFrame::inherited(42, 0);
+        assert_eq!(run(&dag, count, &mut frame).unwrap(), vec![1.0; count]);
+        assert_eq!(counter(&frame), 2, "count={count}");
+    }
+}
+
 #[test]
 fn invalid_rates_trap_even_when_the_tensor_is_empty() {
     // Nonfinite rates are covered at the kernel boundary; these are finite
