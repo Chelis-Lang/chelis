@@ -306,7 +306,7 @@ pub(crate) fn verified_execution_host_from_source(
 }
 
 #[test]
-fn drawing_host_helper_uses_the_active_invocation_rng() {
+fn fixed_control_host_helper_uses_the_active_invocation_rng() {
     let verified = verified_execution_host_from_source(
         r#"
 def keep[p: Float](x: tensor[4, p]) -> tensor[4, p] = dropout(x, cast(0.5, p))
