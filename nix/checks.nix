@@ -215,21 +215,48 @@ let
         "$observer" inspect cli "$cli" > "$out/cli.json"
         "$observer" inspect python "$python" > "$out/python.json"
         "$observer" inspect runtime "$changed_runtime" > "$out/ownership-ledger-runtime.json"
+        "$observer" inspect-provenance runtime "$runtime" > "$out/runtime-provenance.json"
+        "$observer" inspect-provenance cli "$cli" > "$out/cli-provenance.json"
+        "$observer" inspect-provenance python "$python" > "$out/python-provenance.json"
+        "$observer" inspect-provenance runtime "$changed_runtime" > "$out/ownership-ledger-runtime-provenance.json"
         "$observer" verify-producers --runtime "$runtime" --cli "$cli" --python "$python"
-        python3 - "$observer" "$changed_runtime" "$cli" "$python" "$out" \
-          ${runtimeIdentityMissingInput.out} <<'PY'
+        python3 - "$observer" "$runtime" "$changed_runtime" "$cli" "$python" "$out" \
+          ${runtimeIdentityMissingInput.out} "${pkgs.stdenv.hostPlatform.system}" <<'PY'
         import json
-        import re
+        import hashlib
         import subprocess
         import sys
         from pathlib import Path
 
-        observer, changed_runtime, cli, python, output, failed = sys.argv[1:]
+        observer, runtime, changed_runtime, cli, python, output, failed, system = sys.argv[1:]
         output, failed = Path(output), Path(failed)
+        artifacts = {
+            "runtime": runtime,
+            "cli": cli,
+            "python": python,
+            "ownership-ledger-runtime": changed_runtime,
+        }
+        (output / "artifacts.json").write_text(json.dumps({
+            "builder": "nix runtime-identity-producers",
+            "system": system,
+            "artifacts": {
+                kind: {
+                    "path": path,
+                    "sha256": hashlib.sha256(Path(path).read_bytes()).hexdigest(),
+                }
+                for kind, path in artifacts.items()
+            },
+        }, indent=2, sort_keys=True) + "\n")
         descriptors = {
             kind: json.loads((output / f"{kind}.json").read_text())
             for kind in ("runtime", "cli", "python", "ownership-ledger-runtime")
         }
+        provenance = {
+            kind: json.loads((output / f"{kind}-provenance.json").read_text())
+            for kind in ("runtime", "cli", "python", "ownership-ledger-runtime")
+        }
+        if any(value.get("mode") != "sealed_distribution" for value in provenance.values()):
+            raise SystemExit(f"Nix producer provenance was not explicitly sealed: {provenance}")
         # verify-producers stops at the first mismatch. Independently decoded
         # CLI/Python equality makes that same rejection apply to both consumers.
         if not descriptors["runtime"] == descriptors["cli"] == descriptors["python"]:
