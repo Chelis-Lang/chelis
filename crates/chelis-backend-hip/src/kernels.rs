@@ -2459,6 +2459,68 @@ extern \"C\" __global__ void {kernel_name}(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+    use chelis_ir::ownership::{lower_dag_ownership, verify_ownership};
+    use chelis_types::types::Prim;
+
+    // chelis#2408: the HIP device helpers are a port of the C backend's
+    // [05-RNG-1] word and [05-OP-8] samplers, which the CLI spec oracle holds
+    // to the spec bit for bit. Respelled with C's declaration words, every
+    // device helper must appear verbatim in the standalone C kernel prelude,
+    // so a changed rotation, multiplier or operation order fails here.
+    #[test]
+    fn random_device_helpers_are_the_c_backend_port() {
+        let mut dag = Dag::new();
+        let ty = TensorType {
+            dims: vec![DimInfo::Lit(2)],
+            precision: Prim::F32,
+        };
+        let template = dag.add_node(
+            RiscOp::Load {
+                name: "template".into(),
+            },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let draw = dag.add_node(
+            RiscOp::UniformLike {
+                low: 0.0,
+                high: 1.0,
+                seed: 7,
+            },
+            vec![template],
+            ty,
+            None,
+        );
+        dag.add_root(draw);
+        let options = chelis_backend_c::CodegenOptions::default();
+        let prepared = chelis_backend_c::prepare_dag_for_codegen(dag, options);
+        let verified = verify_ownership(lower_dag_ownership(prepared).expect("ownership lowers"))
+            .expect("uniform DAG verifies");
+        let c = chelis_backend_c::codegen_with_options(verified, "draw", options)
+            .expect("uniform DAG emits C")
+            .c_source;
+        let prelude = c
+            .split("/* CHELIS_UNIFORM_HELPERS_BEGIN */\n")
+            .nth(1)
+            .and_then(|rest| rest.split("/* CHELIS_UNIFORM_HELPERS_END */").next())
+            .expect("the C kernel carries the Random prelude");
+        let respelled = NUMERIC_DEVICE_HELPERS
+            .replace("__device__ ", "static inline ")
+            .replace("unsigned long long", "uint64_t");
+        let helpers = respelled
+            .split_inclusive("\n}\n")
+            .map(str::trim_end)
+            .collect::<Vec<_>>();
+        assert_eq!(helpers.len(), 4, "device helpers:\n{respelled}");
+        for helper in helpers {
+            assert!(
+                prelude.contains(helper),
+                "HIP helper differs from the C port:\n{helper}\nC prelude:\n{prelude}"
+            );
+        }
+    }
 
     #[test]
     fn reduced_float_conversions_emit_round_to_nearest_ties_to_even() {
