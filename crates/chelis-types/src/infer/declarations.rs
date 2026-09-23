@@ -2372,9 +2372,9 @@ pub(super) fn validate_deferred_opaque_uses(
                 let opaque_in_scope = *any_opaque_in_scope
                     .get_or_insert_with(|| adt_reg.defs.values().any(|def| def.opaque));
                 if opaque_in_scope
-                    && let Some(error) = crate::opacity::with_context(|ctx| {
-                        crate::opacity::unresolved_target_error(ctx, action)
-                    })
+                    && let Some(error) = errors
+                        .opacity_context()
+                        .map(|ctx| crate::opacity::unresolved_target_error(ctx, action))
                 {
                     errors.push(error);
                 }

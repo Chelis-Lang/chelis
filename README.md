@@ -347,9 +347,13 @@ The [patch dependency audit and source proposal](ARCHITECTURE.md#production-ad-p
 record remaining dependencies and the limits of that audit. The
 [explicit-state runtime cutover](ARCHITECTURE.md#explicit-state-cutover) now gives
 `HostLoweringSession` ownership of specialization, inlining, preflight, and scoped
-type-substitution state. Nested calls and unwind cleanup are covered by native
-regressions. The panic/cancellation shell remains native; this ownership change
-is not host-lowering extraction or a wrapper correspondence proof.
+type-substitution state. `DiagnosticSink` now owns scoped checker opacity policy;
+both inference drivers retain module attribution and cached library exports without
+ambient opacity TLS. Native regressions cover session isolation, nested scopes,
+unwind restoration, and retention of authoritative diagnostics. Recursive-group and
+linker-provenance state, plus the panic/cancellation shell, remain native. These
+ownership changes are not checker/host-lowering extraction or wrapper correspondence
+proofs.
 
 Whole `chelis_pipeline_core` extraction is still blocked before LLBC generation:
 Charon rejects the thread-local reference reached through

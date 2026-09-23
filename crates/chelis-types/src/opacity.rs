@@ -1,9 +1,9 @@
-//! Thread-local opacity context for checker-enforced opaque types
+//! Session-owned opacity context for checker-enforced opaque types
 //! (RFC D-CHECK, spec/design/opaque_invariants_rfc.md).
 //!
 //! Enforcement runs INSIDE inference (post-annotation passes are
 //! unsound: type stamps are dropped on Error-typed nodes and `var`s),
-//! so the inference hooks need ambient access to:
+//! so the inference hooks read the authoritative diagnostic sink's policy:
 //!
 //! - the current module key and current top-level decl name,
 //! - per-module export sets and a top-level binding -> module map
@@ -13,9 +13,9 @@
 //!
 //! The opaque map itself lives on [`crate::adt::AdtDef`]
 //! (`opaque` + `defining_module`), which persists through the
-//! compiled-context caches; this context carries only the per-run
+//! compiled-context caches; the diagnostic sink carries only the per-run
 //! program-shape data. Unlike declaration-local type binders and signatures,
-//! opacity is intentionally a whole-check contextual policy; binder/type
+//! opacity is a whole-check contextual policy scoped to that sink; binder/type
 //! resolution state remains explicit on `Env` and annotation contexts.
 //!
 //! When no context is installed (e.g. annotation passes that re-run
@@ -23,7 +23,6 @@
 //! drivers that install it remain the single source of violations.
 
 use chelis_unord::UnordSet;
-use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
@@ -79,8 +78,8 @@ impl OpacityModuleMeta {
     }
 }
 
-/// Per-run opacity context installed by the inference drivers after
-/// declaration collection.
+/// Per-run opacity context owned by the diagnostic sink and scoped by the
+/// inference drivers after declaration collection.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct OpacityContextData {
     /// Module key the item currently being inferred belongs to.
@@ -103,7 +102,6 @@ impl OpacityContextData {
 }
 
 thread_local! {
-    static OPACITY_CONTEXT: RefCell<Option<OpacityContextData>> = const { RefCell::new(None) };
     /// RT-1 F2-bypass / RFC v5: in-process provenance flag, TRUE only
     /// while checking decls produced by the reef LINKER (which is the
     /// sole legitimate producer of the `Pkg__`/`pkg__` internal-name
@@ -142,42 +140,6 @@ pub(crate) fn linked_program() -> bool {
     LINKED_PROGRAM.with(std::cell::Cell::get)
 }
 
-/// Install `data` for the duration of the returned guard, restoring
-/// the previous value (typically `None`) on drop so nested or
-/// re-entrant inference passes do not leak state.
-pub(crate) fn install_opacity_context(data: OpacityContextData) -> OpacityGuard {
-    let previous = OPACITY_CONTEXT.with(|cell| cell.borrow_mut().replace(data));
-    OpacityGuard { previous }
-}
-
-pub(crate) struct OpacityGuard {
-    previous: Option<OpacityContextData>,
-}
-
-impl Drop for OpacityGuard {
-    fn drop(&mut self) {
-        let restored = self.previous.take();
-        OPACITY_CONTEXT.with(|cell| *cell.borrow_mut() = restored);
-    }
-}
-
-/// Update the per-item position (module key + decl name) as the
-/// driver loop advances. No-op when no context is installed.
-pub(crate) fn set_current_item(module: Option<String>, decl: Option<String>) {
-    OPACITY_CONTEXT.with(|cell| {
-        if let Some(data) = cell.borrow_mut().as_mut() {
-            data.current_module = module;
-            data.current_decl = decl;
-        }
-    });
-}
-
-/// Run `f` against the installed context, or return `None` when no
-/// context is installed (enforcement disabled for this pass).
-pub(crate) fn with_context<R>(f: impl FnOnce(&OpacityContextData) -> R) -> Option<R> {
-    OPACITY_CONTEXT.with(|cell| cell.borrow().as_ref().map(f))
-}
-
 // ── Inference hooks (RFC D-CHECK rejection set) ──────────────────
 
 /// Core rejection: `adt_name` was constructed/inspected via `action`
@@ -202,14 +164,13 @@ pub(crate) fn check_opaque_use(
     let Some(defining) = def.defining_module.as_deref() else {
         return false;
     };
-    let error = with_context(|ctx| {
+    let error = errors.opacity_context().and_then(|ctx| {
         if ctx.current_module.as_deref() == Some(defining) {
             None
         } else {
             Some(violation_error(ctx, action, adt_name, defining))
         }
-    })
-    .flatten();
+    });
     match error {
         Some(error) => {
             errors.push(error);
@@ -282,7 +243,7 @@ pub(crate) fn check_unexported_reference(
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
 ) -> bool {
-    let error = with_context(|ctx| {
+    let error = errors.opacity_context().and_then(|ctx| {
         // RT-1 F1: canonicalize the reference to its binding key
         // (handles reef bare un-imported references), then attribute.
         let binding_key = resolve_binding_key(name, &ctx.meta.bindings)?;
@@ -317,8 +278,7 @@ pub(crate) fn check_unexported_reference(
             }
         }
         None
-    })
-    .flatten();
+    });
     match error {
         Some(error) => {
             errors.push(error);
@@ -567,9 +527,7 @@ fn mentions_inner(
 
 // ── D-CHECK error contract ───────────────────────────────────────
 
-/// The action vocabulary for the pinned violation message shape (see
-/// `crates/chelis-types/tests/opaque_types.rs` for the byte-exact
-/// contract tests).
+/// The operation rejected at an opaque type's module boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OpaqueAction {
     RecordConstruction,

@@ -179,8 +179,9 @@ Full-core extraction must model a thread-indexed TLS store, shared cancellation 
 process-global state, and exit outcomes separately from graph values. At minimum:
 
 - `CancelTokenGuard` restores the previous per-thread token on normal return and
-  unwinding. Linked-program and opacity guards likewise carry scoped state. A TLS read
-  cannot be replaced by a fresh unrelated global value.
+  unwinding, as does the linked-program guard. `OpacityScope` instead restores
+  policy owned by its checker session. A TLS read cannot be replaced by a fresh
+  unrelated global value.
 - Cancellation uses shared `Arc<AtomicBool>` identity and relaxed atomic accesses;
   a concurrent model must account for permitted observations, not assume an immediately
   synchronized ordinary Boolean.
@@ -228,6 +229,21 @@ proof. It does not establish extracted semantics for `RefCell` accesses or guard
 destruction. Panic/cancellation services, global inference IDs, persistent thread
 counters, stack growth, and the native catch boundary remain unchanged.
 
+Checker opacity now lives on the authoritative `DiagnosticSink`, not in
+`OPACITY_CONTEXT` TLS. `OpacityScope` borrows that same sink and restores the previous
+policy on return or unwind without replacing its diagnostics or witness table.
+Module/declaration updates and deferred opacity checks use the explicit carrier in
+both inference drivers and recursive sweeps. Annotation-only sessions start with no
+policy; another active checker session cannot enable or disable their enforcement.
+The persisted `TypeEnv` opacity metadata and its serialization layout are unchanged.
+
+Native scope regressions exercise two live sessions on one thread, nested return
+and unwind, and retention of authoritative violations. The native API smoke covers
+plain/IR diagnostic parity, serialized and layered library contexts, exported
+producer access, cancellation followed by reuse, and four concurrent checks.
+This removes one checker TLS family; it does not establish extracted checker
+semantics or a relation for scope destruction and the native runtime shell.
+
 Keep one production implementation: no `_for_lean` checker, global-to-constant
 substitution, or opaque successful fallback.
 
@@ -239,7 +255,8 @@ remain inputs with their existing seals; an invocation state must not mint them.
 
 | State family | Owner or remaining target | Required behavior |
 | --- | --- | --- |
-| `GROUP_CTX`, opacity context, linked-program provenance | Checker invocation frames | Save and restore the previous frame, including reentrant checking and exceptional exit. Keep provenance construction at the trusted link boundary. |
+| Former `OPACITY_CONTEXT` | `DiagnosticSink::opacity` and `OpacityScope` (implemented) | Restore the enclosing policy on return/unwind; keep diagnostics and witnesses in the same sink. Independent sessions never inherit another session's policy. |
+| `GROUP_CTX`, linked-program provenance | Checker invocation frames (remaining) | Preserve recursive-group pins and cleanup; isolate reentrant checks. Keep provenance construction at the trusted link boundary and restore the previous link scope. |
 | Former `INLINING_STACK`, tensor-helper preflight stack, `ACTIVE_TYPE_SUBST` | `HostLoweringSession::invocation` and scoped guards (implemented) | Preserve scope order and the current specialization's bindings. Nested sessions do not share mutable frames. |
 | Former `MONO_SPECIALIZATIONS` and `MonoProbeGuard` | Host invocation state plus scoped probe snapshot (implemented) | Preserve entry initialization, completion order, and rollback of speculative definitions and in-progress entries. Rollback restores the outer snapshot; it does not clear it. |
 | Panic-suppression flags | Explicit per-thread shell state | Preserve clear-to-false behavior and the explicit re-enable in `raise_fatal_lowering_diagnostic`; do not apply a uniform restore-previous rule. |

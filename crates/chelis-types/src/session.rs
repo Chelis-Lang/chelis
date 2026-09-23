@@ -9,6 +9,7 @@
 use crate::context::TypeEnv;
 use crate::errors::{CheckError, ErrorWitness};
 use crate::infer::{CheckedProgram, InferResult, InferStats, SignatureInferenceMetadata};
+use crate::opacity::OpacityContextData;
 use chelis_unord::UnordMap;
 
 #[cfg(test)]
@@ -92,9 +93,38 @@ enum TypeResolutionDiagnosticOwner {
 pub struct DiagnosticSink<'session> {
     errors: &'session mut Vec<CheckError>,
     type_resolution_witnesses: UnordMap<(TypeResolutionDiagnosticOwner, String), ErrorWitness>,
+    opacity: Option<OpacityContextData>,
 }
 
-impl DiagnosticSink<'_> {
+impl<'session> DiagnosticSink<'session> {
+    /// Install this inference pass's policy without opening another diagnostic
+    /// destination. The scope restores the enclosing pass on return or unwind.
+    pub(crate) fn install_opacity_context(
+        &mut self,
+        context: OpacityContextData,
+    ) -> OpacityScope<'_, 'session> {
+        let previous = self.opacity.replace(context);
+        OpacityScope {
+            sink: self,
+            previous,
+        }
+    }
+
+    pub(crate) fn opacity_context(&self) -> Option<&OpacityContextData> {
+        self.opacity.as_ref()
+    }
+
+    pub(crate) fn set_opacity_current_item(
+        &mut self,
+        module: Option<String>,
+        declaration: Option<String>,
+    ) {
+        if let Some(context) = self.opacity.as_mut() {
+            context.current_module = module;
+            context.current_decl = declaration;
+        }
+    }
+
     pub(crate) fn push(&mut self, error: CheckError) {
         self.errors.push(error);
     }
@@ -212,6 +242,26 @@ impl DiagnosticSink<'_> {
     }
 }
 
+/// A scoped policy change borrowing the existing authoritative sink. No
+/// diagnostic vector or witness table is replaced, copied, or discarded.
+#[must_use = "opacity enforcement lasts only while this scope is held"]
+pub(crate) struct OpacityScope<'sink, 'session> {
+    sink: &'sink mut DiagnosticSink<'session>,
+    previous: Option<OpacityContextData>,
+}
+
+impl<'session> OpacityScope<'_, 'session> {
+    pub(crate) fn sink(&mut self) -> &mut DiagnosticSink<'session> {
+        self.sink
+    }
+}
+
+impl Drop for OpacityScope<'_, '_> {
+    fn drop(&mut self) {
+        self.sink.opacity = self.previous.take();
+    }
+}
+
 #[cfg(test)]
 mod diagnostic_checkpoint_tests {
     use super::*;
@@ -227,6 +277,7 @@ mod diagnostic_checkpoint_tests {
         let mut sink = DiagnosticSink {
             errors: &mut errors,
             type_resolution_witnesses: UnordMap::new(),
+            opacity: None,
         };
         let checkpoint = sink.checkpoint();
         sink.push(diagnostic("first new diagnostic"));
@@ -245,6 +296,7 @@ mod diagnostic_checkpoint_tests {
         let mut sink = DiagnosticSink {
             errors: &mut errors,
             type_resolution_witnesses: UnordMap::new(),
+            opacity: None,
         };
         sink.push(diagnostic("earlier diagnostic"));
         let checkpoint = sink.checkpoint();
@@ -255,6 +307,108 @@ mod diagnostic_checkpoint_tests {
             .map(|error| error.message.as_str())
             .collect::<Vec<_>>();
         assert_eq!(messages, ["new diagnostic"]);
+    }
+}
+
+#[cfg(test)]
+mod opacity_scope_tests {
+    use super::*;
+    use crate::errors::CheckErrorKind;
+    use crate::opacity::{OpaqueAction, check_opaque_use};
+
+    fn library() -> TypeEnv {
+        let program = chelis_deep::parse_and_stamp_file(include_str!(
+            "../tests/fixtures/core/tests/opaque_types/shared_104.deep"
+        ))
+        .expect("opaque library parses");
+        crate::build_type_env_from_library(&program).expect("opaque library checks")
+    }
+
+    fn policy(library: &TypeEnv, module: &str) -> OpacityContextData {
+        let mut context = OpacityContextData::from_meta(library.inner().opacity.clone());
+        context.current_module = Some(module.to_string());
+        context
+    }
+
+    fn rejects_construction(library: &TypeEnv, sink: &mut DiagnosticSink<'_>) -> bool {
+        check_opaque_use(
+            OpaqueAction::RecordConstruction,
+            "Probability",
+            &library.inner().adt_reg,
+            sink,
+        )
+    }
+
+    #[test]
+    fn opacity_policy_belongs_to_the_diagnostic_session_not_the_thread() {
+        let library = library();
+        let report = run_result(|outer| {
+            let mut outer_scope = outer.install_opacity_context(policy(&library, "agent.strategy"));
+            let outer = outer_scope.sink();
+
+            // Annotation-only sessions do not inherit another check's policy.
+            run_result(|annotation| {
+                assert!(!rejects_construction(&library, annotation));
+                Ok(())
+            })
+            .expect("an inactive session does not enforce the outer policy");
+
+            run_result(|inner| {
+                let mut inner_scope = inner.install_opacity_context(policy(&library, "stats.prob"));
+                assert!(rejects_construction(&library, outer));
+                assert!(!rejects_construction(&library, inner_scope.sink()));
+                Ok(())
+            })
+            .expect("the defining module remains authorized");
+            Ok(())
+        })
+        .expect_err("the outer session still rejects construction outside the defining module");
+
+        assert_eq!(report.errors.len(), 1);
+        assert!(matches!(
+            report.errors[0].kind,
+            CheckErrorKind::OpaqueTypeViolation
+        ));
+    }
+
+    #[test]
+    fn opacity_scopes_restore_policy_on_return_and_unwind_without_losing_errors() {
+        let library = library();
+        let report = run_result(|sink| {
+            {
+                let mut outer_scope = sink.install_opacity_context(policy(&library, "stats.prob"));
+                let outer = outer_scope.sink();
+                {
+                    let mut inner_scope =
+                        outer.install_opacity_context(policy(&library, "agent.strategy"));
+                    assert!(rejects_construction(&library, inner_scope.sink()));
+                }
+                assert!(!rejects_construction(&library, outer));
+
+                let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let mut inner_scope =
+                        outer.install_opacity_context(policy(&library, "agent.strategy"));
+                    assert!(rejects_construction(&library, inner_scope.sink()));
+                    std::panic::panic_any("abort nested opacity check");
+                }));
+                assert!(unwind.is_err());
+                assert!(!rejects_construction(&library, outer));
+
+                outer.set_opacity_current_item(Some("agent.strategy".into()), None);
+                assert!(rejects_construction(&library, outer));
+            }
+            assert!(!rejects_construction(&library, sink));
+            Ok(())
+        })
+        .expect_err("scope restoration must retain every authoritative violation");
+
+        assert_eq!(report.errors.len(), 3);
+        assert!(
+            report
+                .errors
+                .iter()
+                .all(|error| matches!(error.kind, CheckErrorKind::OpaqueTypeViolation))
+        );
     }
 }
 
@@ -293,6 +447,7 @@ mod rejected_signature_resolution_tests {
             let mut sink = DiagnosticSink {
                 errors: &mut errors,
                 type_resolution_witnesses: UnordMap::new(),
+                opacity: None,
             };
             let mut resolver = DeepTypeResolver::new(
                 TypeUseSite::Defsig,
@@ -379,6 +534,7 @@ pub(crate) fn infer_program(exprs: &[chelis_deep::Expr]) -> InferResult {
             let mut sink = DiagnosticSink {
                 errors: &mut errors,
                 type_resolution_witnesses: UnordMap::new(),
+                opacity: None,
             };
             match admit_metadata(exprs, &mut sink) {
                 Ok(()) => crate::infer::infer_program_in_session(exprs, &mut sink),
@@ -404,6 +560,7 @@ mod authoritative_type_stamp_tests {
             let mut sink = DiagnosticSink {
                 errors: &mut errors,
                 type_resolution_witnesses: UnordMap::new(),
+                opacity: None,
             };
             run_type_stamp_mutation_case(case, &mut sink)
         };
@@ -488,6 +645,7 @@ mod unresolved_operand_reconcile_tests {
             let mut sink = DiagnosticSink {
                 errors: &mut errors,
                 type_resolution_witnesses: UnordMap::new(),
+                opacity: None,
             };
             run_reconcile_mutation_case(case, &mut sink)
         };
@@ -564,6 +722,7 @@ mod annotated_totality_finalization_tests {
             let mut sink = DiagnosticSink {
                 errors: &mut errors,
                 type_resolution_witnesses: UnordMap::new(),
+                opacity: None,
             };
             run_finalization_mutation_case(case, &mut sink);
         }
@@ -622,6 +781,7 @@ fn run_result<T>(
         let mut sink = DiagnosticSink {
             errors: &mut errors,
             type_resolution_witnesses: UnordMap::new(),
+            opacity: None,
         };
         run(&mut sink)
     };
@@ -748,6 +908,7 @@ pub(crate) fn infer_ir_program(exprs: &[chelis_deep::Expr]) -> InferResult {
             let mut sink = DiagnosticSink {
                 errors: &mut errors,
                 type_resolution_witnesses: UnordMap::new(),
+                opacity: None,
             };
             match admit_metadata(exprs, &mut sink) {
                 Ok(()) => crate::infer::infer_ir_program_in_session(exprs, &mut sink),

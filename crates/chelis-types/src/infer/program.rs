@@ -266,7 +266,7 @@ fn sweep_recursive_collection_contracts(
             }
             let (module, expr) = &items[*declaration_index];
             scratch.begin_root(expr);
-            crate::opacity::set_current_item(
+            errors.set_opacity_current_item(
                 crate::opacity::module_key_for_item(module.as_deref(), Some(name)),
                 Some(name.clone()),
             );
@@ -469,9 +469,9 @@ pub(super) fn infer_program_with_product_in_session(
     // context so the inference hooks see module identity, exports,
     // and producer text. Dropped at the end of this function.
     let opacity_meta = build_opacity_meta(&items, &adt_reg, &env);
-    let _opacity_guard = crate::opacity::install_opacity_context(
-        crate::opacity::OpacityContextData::from_meta(opacity_meta),
-    );
+    let mut opacity_scope =
+        errors.install_opacity_context(crate::opacity::OpacityContextData::from_meta(opacity_meta));
+    let errors = opacity_scope.sink();
 
     // Second pass: infer def bodies. Same module-descent rationale as the
     // declaration pass — without it, the entire HM checker is a no-op on
@@ -575,7 +575,7 @@ pub(super) fn infer_program_with_product_in_session(
             let (module, expr) = &items[declaration_index];
             product.begin_root(expr);
             let decl_name = top_level_decl_name(expr);
-            crate::opacity::set_current_item(
+            errors.set_opacity_current_item(
                 crate::opacity::module_key_for_item(module.as_deref(), decl_name),
                 decl_name.map(str::to_string),
             );
@@ -689,7 +689,7 @@ pub(super) fn infer_program_with_product_in_session(
             }
         }
     }
-    crate::opacity::set_current_item(None, None);
+    errors.set_opacity_current_item(None, None);
     env.set_current_declaration_ordinal(None);
 
     if cancellation_gate(errors) {
@@ -1514,9 +1514,10 @@ pub(super) fn infer_ir_program_with_state(
     // and install the per-run context for the inference hooks.
     let phase_meta = build_opacity_meta(&items, &state.adt_reg, &state.env);
     state.opacity.merge_from(&phase_meta);
-    let _opacity_guard = crate::opacity::install_opacity_context(
+    let mut opacity_scope = errors.install_opacity_context(
         crate::opacity::OpacityContextData::from_meta(state.opacity.clone()),
     );
+    let errors = opacity_scope.sink();
 
     // Per-decl profile: when CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL=1, emit
     // one stderr line per top-level decl with its name and inference time.
@@ -1632,7 +1633,7 @@ pub(super) fn infer_ir_program_with_state(
                 None
             };
             let decl_name = top_level_decl_name(expr);
-            crate::opacity::set_current_item(
+            errors.set_opacity_current_item(
                 crate::opacity::module_key_for_item(module.as_deref(), decl_name),
                 decl_name.map(str::to_string),
             );
@@ -1761,7 +1762,7 @@ pub(super) fn infer_ir_program_with_state(
             }
         }
     }
-    crate::opacity::set_current_item(None, None);
+    errors.set_opacity_current_item(None, None);
     state.env.set_current_declaration_ordinal(None);
 
     if cancelled() {
