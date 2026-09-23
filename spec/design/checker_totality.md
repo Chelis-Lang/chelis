@@ -2965,8 +2965,9 @@ remove the cause. A vocabulary node still has two admitted spellings,
 still depends on the ingress. Surf desugaring builds `Node` and then rewrites
 its whole output to `List` at the boundary; the serialized-IR checker entries
 rewrite stamped input to `List` through `normalize_nodes_to_lists`;
-`chelis-prove`'s `deep_compat` does the same for part of the prover; the `.dp`
-stamper and the typed checker entry deliver `Node`. Every reader therefore
+`chelis-prove`'s `deep_compat` does the same for part of the prover, and
+the CLI's `normalize_deep_nodes` rewrites every macro-expanded `.ch` program;
+the `.dp` stamper and the typed checker entry deliver `Node`. Every reader therefore
 still owes both spellings. The accessor shows the cost itself: Surf's boundary
 also rewrites every `BareList` into an untagged `List`, which `carrier()`
 classifies as `UndecodableHead` when its second element is a map and as
@@ -2984,8 +2985,9 @@ instances decides the completion:
 
 1. **Delete the second spelling.** `Expr::List`, `struct List`, `Atom::Tag`,
    `Node::to_list`, and `ExprCarrier::MalformedLegacyList` are removed, with
-   the three normalizers: Surf's output boundary, the checker's
-   `normalize_nodes_to_lists`, and `deep_compat`. Every producer builds
+   the four normalizers: Surf's output boundary, the checker's
+   `normalize_nodes_to_lists`, `deep_compat`, and the CLI's
+   `normalize_deep_nodes`. Every producer builds
    `Expr::Node`, `Expr::BareList`, or `Expr::UnknownForm`, and the stamper's
    per-role table is the one rule deciding which.
 2. **Rewrite, never drop.** Every reader that matched `List` stops compiling
@@ -4125,7 +4127,7 @@ is also separate.
 | 20 | which of the two checker pass sets is correct, and whether one shared driver replaces the two inference functions | DECIDED 2026-09-08 and IMPLEMENTED 2026-09-16: union plus dispositions. All four entries run the spec-required surviving checks through `validate_semantic_program`; `report_initialization_errors` lives there, `chelis_deep::validate` is deleted as a duplicate, and stamped input is preserved rather than normalized. [05-OP-51] owns convolution's static-versus-runtime domain split. Five backend-capability restrictions (termination, symbolic conv metadata, `mean` and `layer_norm` axis concreteness, and conv's literal-operand demand) relocate to [#730]. Both drivers use declaration-local external-input prebinding under [04-INF-4] and defsig-less function-header prebinding under [04-INF-2]/[04-INF-3]; body metadata never publishes an eager value. Union alone and union plus normalization remain rejected by the measured contract and carrier failures | [04-TOT-5] + PP9 |
 | 21 | whether a borrow's target type is decided at the borrow arm or after def-level resolution, and whether the #256 deferred classification survives [04-INF-6] ([#1589]) | DECIDED by `spec/04` §8.2, which already states it: the inner "must be — or must ultimately resolve to — a tensor or a tensor-carrying value", and classification is deferred when it is not yet known. No language decision is open. The reading that a borrow is decided where it is written is REFUTED by execution: disabling `validate_deferred_borrow_vars` makes `def use_it[a](seed: a) -> bool = { v = seed  consume_any(&v) }` score 1.00 with no errors, reopening the #256 round-2 unsoundness, and turns all three of the suite's deferred-path tests red, so the validator is live code and its two acceptance tests were merely relabelled by [#1542]. The issue's original premise that an inferred parameter "rejects at the borrow arm" is also wrong: measured, the borrow arm defers, the validator resolves it `sound=true`, and the 0.80 `InvalidBorrow` comes from linearity's `check_borrow_arg`, which failed closed because `expr_type` returns `None` for a `(var ..)` node whose parameter annotation is a synthesized hole. The repair reads the resolved `&T` the annotate pass already stamps on the `borrow` node. Rows C/E/F/G of the [#1589] header matrix become accepted regression rows; rows I/J/K stay rejected as locks on the validator's reject branch; §8.2's `relu` example is corrected, because unresolved dimension variables never reach the deferral | `spec/04` §8.2 + PP6 residue |
 | 22 | whether a `defsig` occurrence may introduce a type, dimension, or rank binder | DECIDED 2026-09-17 for [#1854]: no. Surf's `[..]` list and Deep's structural `defsig` binder-list child are the only authored declaration-binder sources. Unlisted variable nodes reject; unknown scalar/precision names remain primitive requests and receive an unknown-dtype diagnostic with a nearest active spelling. The regex/alias heuristic alternative is rejected because it leaves an open typo class | spec/02 P4b + spec/03 §2.2/§2.5.1 + spec/04 §3.1.3/§5.8.1 + PP6 |
-| 23 | whether PP7 completes by ratcheting the transitional `Expr::List` spelling (E5d lint, E5e sweep) or by deleting it | DECIDED 2026-09-22: delete it. Two spellings of one construct make every reader owe both, and the total accessor itself classifies a Surf structural list differently from the same list stamped from `.dp`. `Expr::List`, `struct List`, `Atom::Tag`, `Node::to_list`, `ExprCarrier::MalformedLegacyList`, and the three normalizers are removed; every former `List` reader is rewritten, never dropped into a catch-all. E5d is withdrawn and E5e subsumed; [#1320] is subsumed because the binder walks compile only once they read `Node(Bind)`. Acceptance adds a producer-agreement test and a pre/post differential over the example corpus to the unchanged PP7 parity set | [04-TOT-5] + PP7 + [#1029] |
+| 23 | whether PP7 completes by ratcheting the transitional `Expr::List` spelling (E5d lint, E5e sweep) or by deleting it | DECIDED 2026-09-22: delete it. Two spellings of one construct make every reader owe both, and the total accessor itself classifies a Surf structural list differently from the same list stamped from `.dp`. `Expr::List`, `struct List`, `Atom::Tag`, `Node::to_list`, `ExprCarrier::MalformedLegacyList`, and the four normalizers are removed; every former `List` reader is rewritten, never dropped into a catch-all. E5d is withdrawn and E5e subsumed; [#1320] is subsumed because the binder walks compile only once they read `Node(Bind)`. Acceptance adds a producer-agreement test and a pre/post differential over the example corpus to the unchanged PP7 parity set | [04-TOT-5] + PP7 + [#1029] |
 
 ## Contract summary
 
