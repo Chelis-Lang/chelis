@@ -796,7 +796,6 @@ fn f16_round_agrees_with_evaluator() {
 // Reductions: MinReduce, ProdReduce
 // ---------------------------------------------------------------------
 
-#[allow(dead_code)] // helper for the future MinReduce/ProdReduce port
 fn run_scalar_reduce_reduced(
     test_name: &str,
     prec: Prim,
@@ -860,71 +859,50 @@ int main(void) {{
     );
 }
 
-// MinReduce and ProdReduce on bf16/f16 panic at codegen time today:
-// `emit_reduce_simple` (crates/chelis-backend-c/src/emit.rs:3540; see
-// WS-A1 / F1 guard) is f32-hardcoded. Widening to bf16/f16 is a
-// non-trivial change (it must thread through the `chelis_bf16_to_f32` /
-// `chelis_f32_to_bf16` convert-then-reduce pattern that Sum and
-// MaxReduce already follow); per the WS-Cleanup-Fixups brief
-// ("FIXUP only; no new architectural changes") we pin the structural
-// gap with rejection tests rather than expand emit_reduce_simple
-// here. Closure path: when emit_reduce_simple gains the
-// convert-then-reduce arm for reduced floats, flip these to active
-// agreement tests against the evaluator.
-
-#[test]
-fn bf16_min_reduce_is_structurally_unsupported_today() {
+/// Evaluator reference for a vec -> scalar reduction over reduced floats.
+fn scalar_reduce_eval(op: RiscOp, prec: Prim, vals: &[f32]) -> f64 {
+    let n = vals.len();
     let mut dag = Dag::new();
     let load = dag.add_node(
         RiscOp::Load { name: "x".into() },
         vec![],
-        vec_ty(4, Prim::Bf16),
+        vec_ty(n, prec),
         None,
     );
-    dag.add_node(
-        RiscOp::MinReduce { axis: 0 },
-        vec![load],
-        scalar_ty(Prim::Bf16),
-        None,
-    );
-    // chelis#730 Phase 1: the former f32-hardcoded panic is a section C2
-    // diagnostic through the Result channel.
-    let err = codegen(&dag, "bf16_min_reduce_reject_probe")
-        .map(|_| ())
-        .expect_err("a bf16 min_reduce must be rejected, not emitted");
-    let rendered = err.to_string();
-    assert!(
-        rendered.starts_with("unsupported:") && rendered.contains("bf16"),
-        "the rejection must be branded and name the dtype; got: {rendered}"
-    );
+    dag.add_node(op, vec![load], scalar_ty(prec), None);
+    let inputs: UnordMap<String, chelis_ir::eval::TensorValue> = [(
+        "x".into(),
+        chelis_ir::eval::TensorValue::from_vec(vec![n], vals.iter().map(|&v| v as f64).collect()),
+    )]
+    .into_iter()
+    .collect();
+    let out = eval_tensor(&dag, &inputs).unwrap();
+    out[&NodeId(dag.len() - 1)].to_f64_lossy_vec()[0]
+}
+
+// MinReduce on bf16/f16 is emitted by `emit_reduce_extreme`, which widens
+// reduced floats to f32 arithmetic (chelis#1281). The minimum is one of the
+// rounded inputs, so the C result must equal the evaluator exactly.
+#[test]
+fn bf16_min_reduce_agrees_with_evaluator() {
+    let vals = [3.5_f32, -1.25, 2.0, 0.5];
+    let op = RiscOp::MinReduce { axis: 0 };
+    let expected = scalar_reduce_eval(op.clone(), Prim::Bf16, &vals);
+    run_scalar_reduce_reduced("bf16_min_reduce", Prim::Bf16, &vals, op, expected, 0.0);
 }
 
 #[test]
-fn f16_min_reduce_is_structurally_unsupported_today() {
-    let mut dag = Dag::new();
-    let load = dag.add_node(
-        RiscOp::Load { name: "x".into() },
-        vec![],
-        vec_ty(4, Prim::F16),
-        None,
-    );
-    dag.add_node(
-        RiscOp::MinReduce { axis: 0 },
-        vec![load],
-        scalar_ty(Prim::F16),
-        None,
-    );
-    // chelis#730 Phase 1: the former f32-hardcoded panic is a section C2
-    // diagnostic through the Result channel.
-    let err = codegen(&dag, "f16_min_reduce_reject_probe")
-        .map(|_| ())
-        .expect_err("a f16 min_reduce must be rejected, not emitted");
-    let rendered = err.to_string();
-    assert!(
-        rendered.starts_with("unsupported:") && rendered.contains("f16"),
-        "the rejection must be branded and name the dtype; got: {rendered}"
-    );
+fn f16_min_reduce_agrees_with_evaluator() {
+    let vals = [3.5_f32, -1.25, 2.0, 0.5];
+    let op = RiscOp::MinReduce { axis: 0 };
+    let expected = scalar_reduce_eval(op.clone(), Prim::F16, &vals);
+    run_scalar_reduce_reduced("f16_min_reduce", Prim::F16, &vals, op, expected, 0.0);
 }
+
+// ProdReduce on bf16/f16 is still rejected at codegen: `emit_reduce_simple`
+// is f32-hardcoded (WS-A1 / F1 guard). Closure path: when it gains the
+// convert-then-reduce arm for reduced floats, flip these to agreement tests
+// like the MinReduce ones above.
 
 #[test]
 fn bf16_prod_reduce_is_structurally_unsupported_today() {

@@ -130,7 +130,9 @@ fn compile_kernel_only(test_name: &str, c_source: &str) -> Result<(), String> {
     let obj = dir.join("kernel.o");
     let compile = Command::new("gcc")
         .args([
-            "-O0",
+            // `-O2`, not `-O0`: the Nix toolchain enables `_FORTIFY_SOURCE`,
+            // which glibc rejects without optimization under `-Werror`.
+            "-O2",
             "-std=c11",
             "-c",
             "-Werror",

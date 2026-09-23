@@ -124,6 +124,7 @@ Each row names its governing atom.
 | `Numeric:gelu:TableA` | [05-OP-48] |
 | `Numeric:gt:TableA` | [05-OP-36] |
 | `Numeric:gte:TableA` | [05-OP-36] |
+| `Numeric:guarded_fail:TableA` | [05-OP-68] |
 | `Numeric:insert:TableA` | [05-OP-49] |
 | `Numeric:layer_norm:TableA` | [05-OP-51] |
 | `Numeric:log:TableA` | [05-OP-46] |

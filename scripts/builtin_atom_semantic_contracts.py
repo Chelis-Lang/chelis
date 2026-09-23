@@ -63,6 +63,12 @@ CLAUSES = {
     62: ("axis:i32", "nonempty List of equal-rank tensors", "split the upstream cotangent at the exact source boundaries"),
     63: ("[04-NUM-14]'s checked cast domain", "fractional float-to-integer conversion traps Domain", "No intermediate float image"),
     67: ("takes exactly one argument of any language type", "linearity operation, not a container operation", "a two-argument call is an arity error", "receives no cotangent"),
+    68: (
+        "the result is the fallback's stored bits unchanged",
+        "the operation aborts with its message",
+        "may not be removed or reordered with respect to another observable effect",
+        "The fallback receives the result's cotangent unchanged",
+    ),
 }
 
 # Cross-chapter domain contradictions caught during semantic review. Requiring
