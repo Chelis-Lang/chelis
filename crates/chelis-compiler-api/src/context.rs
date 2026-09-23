@@ -880,7 +880,9 @@ const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V23\n";
 /// V27 (chelis#1125): Deep `Expr` and `Atom` lost the legacy list and tag
 /// variants, so bincode variant indices shifted, and the lowered library's
 /// program definitions and signatures are node-spelled on every ingress.
-const CACHE_FORMAT_VERSION: u32 = 27;
+/// V28 (chelis#2413): the lowered library's random draws are key-operand
+/// nodes fed by `DrawKey`, and new `RiscOp` variants shift bincode indices.
+const CACHE_FORMAT_VERSION: u32 = 28;
 
 /// On-disk envelope for the Phase I cache. The full file layout is:
 ///
@@ -1590,9 +1592,9 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn cache_format_version_tracks_the_single_node_spelling() {
+    fn cache_format_version_tracks_the_key_operand_random_nodes() {
         assert_eq!(CACHE_MAGIC, b"CHELIS_CTX_V23\n");
-        assert_eq!(CACHE_FORMAT_VERSION, 27);
+        assert_eq!(CACHE_FORMAT_VERSION, 28);
     }
 
     /// chelis#1156: the cache identity must distinguish two BUILDS, not

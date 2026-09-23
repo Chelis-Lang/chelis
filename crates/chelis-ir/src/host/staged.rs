@@ -438,6 +438,9 @@ impl Partition<'_> {
                         site: crate::dag::ExtentWitnessSite::LocalAscriptionClaim { .. },
                         ..
                     }
+                    // A key is never a dependency: its consumer, retained
+                    // here, reads it, and the draw executes with its segment.
+                    | RiscOp::DrawKey { .. }
                 )
             })
             .map(|node| node.id)

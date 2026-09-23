@@ -407,7 +407,11 @@ impl<'a> EvalContext<'a> {
             self.random_counter = context.state().counter;
             result
         } else {
-            chelis_ir::eval::eval_tensor_roots_with_strict(&dag, &roots, load)
+            let mut frame = self.random_frame();
+            let result =
+                chelis_ir::eval::eval_tensor_roots_with_frame(&dag, &roots, &mut frame, load);
+            self.commit_random_frame(&frame);
+            result
         };
         let values = result.map_err(|err| {
             if execution_plan.is_some() {

@@ -143,7 +143,6 @@ pub(super) fn reject_test_assert_close_tensor_operand_dtypes(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn reject_inadmissible_operand_dtypes(
     node: &DeepNode,
-    kids: &[deep::Expr],
     func_name: Option<&str>,
     arg_tys: &[Type],
     env: &Env,
@@ -221,7 +220,7 @@ pub(super) fn reject_inadmissible_operand_dtypes(
             }
         }
 
-        for (index, arg_ty) in arg_tys.iter().enumerate().skip(1).take(2) {
+        for arg_ty in arg_tys.iter().skip(1).take(2) {
             let resolved = type_for_readonly_check(arg_ty, subst);
             match &resolved {
                 Type::Prim(Prim::F32) => {}
@@ -248,25 +247,6 @@ pub(super) fn reject_inadmissible_operand_dtypes(
                         ),
                     );
                 }
-            }
-
-            if let Some(expr) = kids.get(index + 1)
-                && !is_static_numeric_bound(expr)
-            {
-                return reject(
-                    errors,
-                    CheckError::new(
-                        CheckErrorKind::TypeMismatch,
-                        with_node_provenance(
-                            node,
-                            "uniform_like currently requires literal low/high bounds \
-                         (a numeric literal, optionally negated or cast to a float \
-                         type); a runtime-computed bound is not supported"
-                                .to_string(),
-                        ),
-                        vec![],
-                    ),
-                );
             }
         }
     }

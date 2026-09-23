@@ -4034,7 +4034,7 @@ fn cmd_build(
     if !entry_root_names.is_empty() {
         dag.set_roots(selected);
     }
-    dag = chelis_ir::optimize::dead_code_eliminate(&dag);
+    dag = chelis_ir::optimize::project_program_roots(&dag);
     let func_name = file
         .file_stem()
         .and_then(|s| s.to_str())
@@ -4389,7 +4389,7 @@ fn cmd_build_deep(
     if !entry_root_names.is_empty() {
         dag.set_roots(selected);
     }
-    dag = chelis_ir::optimize::dead_code_eliminate(&dag);
+    dag = chelis_ir::optimize::project_program_roots(&dag);
     let func_name = file
         .file_stem()
         .and_then(|s| s.to_str())

@@ -380,60 +380,25 @@ fn different_seeds_produce_different_draws_with_runtime_template() {
     );
 }
 
-/// Negative parity. chelis#2120 widens only the TEMPLATE contract. The separate
-/// chelis#776 bounds gate is a checker rejection and must stay closed, with the
-/// same message on both lanes — a C emission arm must not become a back door to
-/// runtime-computed bounds.
+/// chelis#2411/#2413: runtime-computed bounds are ordinary [05-OP-8] scalar
+/// operands. The host and DAG lanes both draw from the computed range, and
+/// agree with eval bit for bit.
 #[test]
-fn runtime_computed_bounds_remain_rejected_in_both_lanes() {
-    const EXPECTED: &str = "uniform_like currently requires literal low/high bounds";
+fn runtime_computed_bounds_sample_in_both_lanes() {
     let src = "def bc(c: f32) -> tensor[8, f32] = \
                to_tensor([c, c, c, c, c, c, c, c])\n\
                def lo(x: f32) -> f32 = mul(x, 2.0f32)\n\
                sampled = with seed(42i64) \
                { uniform_like(bc(cast(0.5, f32)), lo(cast(1.0, f32)), 5.0f32) }\n";
-
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("neg.ch");
-    let out_dir = dir.path().join("neg-out");
-    write_file(&path, src);
-
-    let build = Command::cargo_bin("chelis")
-        .expect("binary")
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args([
-            "build",
-            path.to_str().unwrap(),
-            "--target",
-            "c",
-            "--output",
-            out_dir.to_str().unwrap(),
-        ])
-        .output()
-        .expect("chelis build should run");
+    let eval = eval_sampled(src);
     assert!(
-        !build.status.success(),
-        "runtime-computed bounds must still be rejected by `chelis build`",
+        eval.iter().all(|sample| (2.0..5.0).contains(sample)),
+        "{eval:?}"
     );
-    let build_err = String::from_utf8_lossy(&build.stderr).to_string();
-    assert!(
-        build_err.contains(EXPECTED),
-        "build rejection should cite the chelis#776 bounds gate, got: {build_err}",
-    );
-
-    let eval = Command::cargo_bin("chelis")
-        .expect("binary")
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["eval", "--file", path.to_str().unwrap()])
-        .output()
-        .expect("chelis eval should run");
-    assert!(
-        !eval.status.success(),
-        "runtime-computed bounds must still be rejected by `chelis eval`",
-    );
-    let eval_err = String::from_utf8_lossy(&eval.stderr).to_string();
-    assert!(
-        eval_err.contains(EXPECTED),
-        "eval rejection should cite the chelis#776 bounds gate, got: {eval_err}",
-    );
+    if !gcc_available() {
+        eprintln!("skipping the C lane: no host C compiler");
+        return;
+    }
+    let c = c_sampled(src, "runtime_bounds");
+    assert_f32_bit_parity(&eval, &c, "runtime bounds");
 }

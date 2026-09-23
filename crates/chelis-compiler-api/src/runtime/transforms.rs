@@ -509,7 +509,7 @@ impl<'a> EvalContext<'a> {
                 )
                 .map(|(dag, random)| (dag, random.counter))
         };
-        let (dag, next_random_counter) = match lower_result {
+        let (dag, _) = match lower_result {
             Ok(result) => result,
             Err(diagnostic) => {
                 let kind_label = match kind {
@@ -522,12 +522,12 @@ impl<'a> EvalContext<'a> {
                 ));
             }
         };
-        let starting_random_counter = self.random_counter;
-        let path_sensitive_random = dag.nodes().iter().any(|node| {
-            matches!(node.op, chelis_ir::dag::RiscOp::BakedUniformLike { .. })
-                && node.inputs.len() == 2
-        });
-        let baked_random_progress = execution_plan.is_none() && !path_sensitive_random;
+        // A draw key advances the handler whether or not a root reads it, so
+        // a graph that draws executes even when it has no roots.
+        let draws = dag
+            .nodes()
+            .iter()
+            .any(|node| matches!(node.op, chelis_ir::dag::RiscOp::DrawKey { .. }));
 
         // Forward-evaluate the lowered DAG, satisfying `RiscOp::Load`
         // by looking up placeholder names in our staged inputs (or
@@ -543,10 +543,8 @@ impl<'a> EvalContext<'a> {
         if roots.is_empty() {
             // Preserve the historical empty-root early-return behavior. In
             // particular, [] must not turn an empty legacy grad into ALL-node
-            // input preparation. A source-owned plan still executes below.
-            if baked_random_progress {
-                self.random_counter = next_random_counter;
-            }
+            // input preparation. A source-owned plan, or a graph that draws,
+            // still executes below.
             if matches!(kind, TransformKind::Grad)
                 && !arg_repacks.is_empty()
                 && arg_repacks.iter().all(
@@ -565,7 +563,9 @@ impl<'a> EvalContext<'a> {
                 } else {
                     RuntimeValue::Tuple(empty_slots.collect::<Result<_, _>>()?)
                 };
-                if execution_plan.is_none() { return Ok(packed); }
+                if execution_plan.is_none() && !draws {
+                    return Ok(packed);
+                }
                 empty_packed = Some(packed);
             }
             if empty_packed.is_none() {
@@ -702,12 +702,6 @@ impl<'a> EvalContext<'a> {
                 ));
             }
         }
-        // Preparation and capture validation can fail before the callee is
-        // entered. Publish the baked lane's existing static progression only
-        // once those fallible steps have succeeded; its sampler is unchanged.
-        if baked_random_progress {
-            self.random_counter = next_random_counter;
-        }
         let load = |name: &str| prepared_inputs.get(name).cloned();
         let result = if let Some(plan) = &execution_plan {
             let mut context = RandomExecutionContext::new(RandomLoweringState {
@@ -718,14 +712,13 @@ impl<'a> EvalContext<'a> {
             self.random_counter = context.state().counter;
             result.map(|values| (values, self.random_counter))
         } else {
-            chelis_ir::eval::eval_tensor_roots_with_strict_random_progress(
-                &dag,
-                &roots,
-                starting_random_counter,
-                load,
-            )
+            let mut frame = self.random_frame();
+            let result =
+                chelis_ir::eval::eval_tensor_roots_with_frame(&dag, &roots, &mut frame, load);
+            self.commit_random_frame(&frame);
+            result.map(|values| (values, self.random_counter))
         };
-        let (values, executed_random_counter) = result.map_err(|err| {
+        let (values, _) = result.map_err(|err| {
             if execution_plan.is_some() {
                 return err;
             }
@@ -735,9 +728,6 @@ impl<'a> EvalContext<'a> {
             };
             format!("host runtime `{kind_label}` evaluation failed: {err}")
         })?;
-        if execution_plan.is_none() && path_sensitive_random {
-            self.random_counter = executed_random_counter;
-        }
         if let Some(packed) = empty_packed {
             return Ok(packed);
         }

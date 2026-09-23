@@ -841,14 +841,15 @@ fn def_kernel_plannings(source: &str) -> (String, u64) {
 /// chelis#2392: a recursive program applies its helpers many times.
 /// `def_kernel` used to skip its memo beneath a recursive caller and re-plan
 /// every applied helper per application. A helper that draws no Random is
-/// planned once however many times the recursion applies it, while a drawing
-/// helper, whose kernel depends on the stream position, is still planned per
-/// application. chelis#2405 retired the inherited execution exclusion this
-/// counted beneath, so the receipt now counts every planning.
+/// planned once however many times the recursion applies it. chelis#2413
+/// gives a drawing helper the same memo: its draw keys read the frame it is
+/// evaluated with, so its kernel no longer depends on the stream position.
+/// chelis#2405 retired the inherited execution exclusion this counted
+/// beneath, so the receipt now counts every planning.
 ///
 /// Evidentiary status: REGRESSION TEST for the non-drawing row (it fails on
-/// the #2392 base, where the count grows with the depth) and DISPOSITION LOCK
-/// for the drawing row (unchanged behaviour the memo must not break).
+/// the #2392 base, where the count grows with the depth) and for the drawing
+/// row (it fails on the #2413 base, which re-planned per application).
 #[test]
 fn issue_2392_kernel_under_recursion_is_planned_once_per_helper() {
     let program = |depth: i64| {
@@ -881,9 +882,9 @@ fn issue_2392_kernel_under_recursion_is_planned_once_per_helper() {
     let (_, shallow_draws) = def_kernel_plannings(&drawing(4));
     let (_, deep_draws) = def_kernel_plannings(&drawing(12));
     assert_eq!(
-        deep_draws - shallow_draws,
-        8,
-        "a Random-drawing kernel is re-planned on every application"
+        shallow_draws, deep_draws,
+        "a Random-drawing kernel takes its keys from the evaluation frame, so it is \
+         planned once like any other kernel"
     );
 }
 

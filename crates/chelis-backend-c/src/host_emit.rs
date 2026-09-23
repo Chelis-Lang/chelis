@@ -3556,40 +3556,19 @@ impl<'a> HostEmitter<'a> {
                 ));
             }
         };
-        let low = static_float_bound(args.get(1)).ok_or_else(|| unresolved_uniform_bound("low"))?;
-        let high =
-            static_float_bound(args.get(2)).ok_or_else(|| unresolved_uniform_bound("high"))?;
+        // [05-OP-8]: each bound is an f32 scalar operand. A bound the emitter
+        // can fold is stamped as its exact f32 image, as the DAG lane folds
+        // it; any other bound is the host scalar the arguments computed.
+        let low_f32_expr = uniform_bound_f32_expr(args.get(1), arg_vars.get(1), "low")?;
+        let high_f32_expr = uniform_bound_f32_expr(args.get(2), arg_vars.get(2), "high")?;
+        let low_f64_expr = format!("((double)({low_f32_expr}))");
+        let high_f64_expr = format!("((double)({high_f32_expr}))");
 
-        // [05-OP-8] / chelis#248: the sampler sees the byte-identical f32
-        // narrowing of each source bound, not a decimal round-trip. The f64
-        // arm widens those SAME truncated images, exactly as
-        // `emit::emit_uniform_like` and `host_ops::uniform_like_value` do.
-        let low_f32 = low as f32;
-        let high_f32 = high as f32;
-        let low_f32_expr = format!(
-            "chelis_f32_from_bits(UINT32_C(0x{:08x}))",
-            low_f32.to_bits()
-        );
-        let high_f32_expr = format!(
-            "chelis_f32_from_bits(UINT32_C(0x{:08x}))",
-            high_f32.to_bits()
-        );
-        let low_f64_expr = format!(
-            "chelis_f64_from_bits(UINT64_C(0x{:016x}))",
-            f64::from(low_f32).to_bits()
-        );
-        let high_f64_expr = format!(
-            "chelis_f64_from_bits(UINT64_C(0x{:016x}))",
-            f64::from(high_f32).to_bits()
-        );
-
-        // An inactive scope is reachable, not an internal desync: a
-        // top-level binding with an unhandled `Random` is a hard check error,
-        // but an exported `def` carrying one is not, and its generated
-        // wrapper initializes `__chelis_rng` inactive. Abort there rather
-        // than let `chelis_effective_uniform_key` silently return the baked
-        // operand without advancing the counter, which would both return the
-        // wrong value and desync every later draw in the scope.
+        // A draw outside an active scope is reachable, not an internal
+        // desync: a top-level binding with an unhandled `Random` is a hard
+        // check error, but an exported `def` carrying one is not, and its
+        // generated wrapper initializes `__chelis_rng` inactive. Abort there
+        // rather than draw from a stream no handler owns.
         let key = self.next_temp("uniform_key");
         self.lines.push(format!(
             "{}if (__chelis_rng == NULL || !__chelis_rng->active) {{",
@@ -3601,8 +3580,48 @@ impl<'a> HostEmitter<'a> {
         ));
         self.lines.push(format!("{}    abort();", self.indent));
         self.lines.push(format!("{}}}", self.indent));
+        // [05-OP-8] validates finite bounds, `low <= high` and a finite
+        // difference at the draw's arithmetic width before it consumes an
+        // ordinal: f64 subtracts the widened bounds, every other float dtype
+        // subtracts in f32.
+        let low = self.next_temp("uniform_low");
+        let high = self.next_temp("uniform_high");
+        let dtype = self.next_temp("uniform_dtype");
+        let ind = self.indent.clone();
         self.lines.push(format!(
-            "{}uint64_t {key} = CHELIS_EFFECTIVE_UNIFORM_KEY(0ULL);",
+            "{ind}float {low} = {low_f32_expr}, {high} = {high_f32_expr};"
+        ));
+        self.lines.push(format!(
+            "{ind}int {dtype} = (int)chelis_host_tensor_dtype({template});"
+        ));
+        self.lines.push(format!(
+            "{ind}if (!(isfinite({low}) && isfinite({high}) && {low} <= {high} && ({dtype} == {f64} ? isfinite((double){high} - (double){low}) : isfinite({high} - {low})))) {{",
+            f64 = chelis_vocab::RuntimeDType::F64.c_macro(),
+        ));
+        self.lines.push(format!("{ind}    switch ({dtype}) {{"));
+        for (runtime, prim) in [
+            (chelis_vocab::RuntimeDType::F32, Prim::F32),
+            (chelis_vocab::RuntimeDType::F64, Prim::F64),
+            (chelis_vocab::RuntimeDType::F16, Prim::F16),
+            (chelis_vocab::RuntimeDType::Bf16, Prim::Bf16),
+        ] {
+            let trap = chelis_types::NumericTrap::Domain {
+                op: "uniform_like",
+                prim,
+            }
+            .to_string();
+            self.lines.push(format!(
+                "{ind}    case {}: chelis_numeric_trap({trap:?}); break;",
+                runtime.c_macro()
+            ));
+        }
+        self.lines.push(format!(
+            "{ind}    default: fprintf(stderr, \"uniform_like unsupported dtype %d\\n\", {dtype}); abort();"
+        ));
+        self.lines.push(format!("{ind}    }}"));
+        self.lines.push(format!("{ind}}}"));
+        self.lines.push(format!(
+            "{}uint64_t {key} = chelis_random_key(__chelis_rng->seed, __chelis_rng->counter++);",
             self.indent
         ));
 
@@ -10352,23 +10371,35 @@ fn static_float_bound(expr: Option<&HostExpr>) -> Option<f64> {
         .map(|value| value.as_f64_lossy())
 }
 
-/// The loud terminal for a `uniform_like` bound this emitter cannot fold.
-fn unresolved_uniform_bound(which: &str) -> Unsupported {
-    Unsupported::new(
-        UnsupportedKind::Builtin("uniform_like".to_string()),
-        "`chelis build` host emission",
-        Stage::Codegen("c"),
-        chelis_types::deliberate_rejection!(
-            "[04-TOT-2]",
-            "uniform_like's bounds must be static literals the emitter can narrow to f32 \
-             exactly; the checker already rejects a runtime-computed bound, so an \
-             unreadable one here is an internal desync"
-        ),
-    )
-    .with_supported_alternative(match which {
-        "low" => "give `uniform_like` a literal low bound",
-        _ => "give `uniform_like` a literal high bound",
-    })
+/// The C `float` expression of one `[05-OP-8]` bound: the exact f32 image of
+/// a bound the emitter folds, else the f32 host scalar the arguments computed.
+fn uniform_bound_f32_expr(
+    expr: Option<&HostExpr>,
+    var: Option<&(String, HostType)>,
+    which: &str,
+) -> Result<String, Unsupported> {
+    if let Some(bound) = static_float_bound(expr) {
+        let bits = (bound as f32).to_bits();
+        return Ok(format!("chelis_f32_from_bits(UINT32_C(0x{bits:08x}))"));
+    }
+    match var {
+        Some((name, HostType::Float32)) => Ok(format!("((float)({name}))")),
+        _ => Err(Unsupported::new(
+            UnsupportedKind::Builtin("uniform_like".to_string()),
+            "`chelis build` host emission",
+            Stage::Codegen("c"),
+            chelis_types::deliberate_rejection!(
+                "[04-TOT-2]",
+                "uniform_like's bounds are f32 scalars; the checker types them so, so a \
+                 bound that is neither a foldable literal nor an f32 host scalar here is \
+                 an internal desync"
+            ),
+        )
+        .with_supported_alternative(match which {
+            "low" => "give `uniform_like` an f32 low bound",
+            _ => "give `uniform_like` an f32 high bound",
+        })),
+    }
 }
 
 /// One arm of the runtime-dtype dispatch emitted by the elementwise

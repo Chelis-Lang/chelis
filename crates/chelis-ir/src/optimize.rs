@@ -272,7 +272,35 @@ pub(crate) fn dead_code_eliminate_with_retained(
     dag: &Dag,
     retained: &[NodeId],
 ) -> (Dag, UnordMap<NodeId, NodeId>) {
-    dead_code_eliminate_impl(dag, retained, true)
+    dead_code_eliminate_impl(dag, retained, true, DrawLiveness::Activation)
+}
+
+/// Which draw keys a dead-code pass keeps (`spec/design/randomness_counter_stream.md` §2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DrawLiveness {
+    /// The graph is one activation, a kernel or helper body run once per
+    /// call: every draw key executes, because an unused draw still takes its
+    /// handler's ordinal.
+    Activation,
+    /// The graph holds several independently executed regions, such as a
+    /// program's top-level definitions. A draw key executes when its value is
+    /// reachable from the kept roots or another draw of its `with seed` region
+    /// does; an inherited draw that nothing reaches belongs to a region that
+    /// does not execute.
+    Program,
+}
+
+/// [`dead_code_eliminate`] over a graph that holds several independently
+/// executed regions, such as a lowered program or its projection onto
+/// selected entry roots. A region's draws survive together when the region
+/// executes; draws of regions no kept root reaches are removed.
+pub fn project_program_roots(dag: &Dag) -> Dag {
+    project_program_roots_with_remap(dag).0
+}
+
+/// [`project_program_roots`] with the `old_id -> new_id` remapping.
+pub fn project_program_roots_with_remap(dag: &Dag) -> (Dag, UnordMap<NodeId, NodeId>) {
+    dead_code_eliminate_impl(dag, &[], true, DrawLiveness::Program)
 }
 
 /// A selected execution slice has its own explicit roots/retention set.
@@ -284,13 +312,14 @@ pub(crate) fn project_execution_slice(
 ) -> (Dag, UnordMap<NodeId, NodeId>) {
     let mut selected = dag.clone();
     selected.set_roots(roots.to_vec());
-    dead_code_eliminate_impl(&selected, retained, false)
+    dead_code_eliminate_impl(&selected, retained, false, DrawLiveness::Program)
 }
 
 fn dead_code_eliminate_impl(
     dag: &Dag,
     retained: &[NodeId],
     implicit_observations: bool,
+    draws: DrawLiveness,
 ) -> (Dag, UnordMap<NodeId, NodeId>) {
     let n = dag.len();
     if n == 0 {
@@ -311,9 +340,14 @@ fn dead_code_eliminate_impl(
     }
     for node in dag.nodes() {
         // A draw key is effectful: it advances its handler even when its key
-        // is never read, so it is an observation like a Store.
-        if implicit_observations && matches!(node.op, RiscOp::Store { .. } | RiscOp::DrawKey { .. })
-        {
+        // is never read, so in one activation it is an observation like a
+        // Store.
+        let observed = match node.op {
+            RiscOp::Store { .. } => true,
+            RiscOp::DrawKey { .. } => draws == DrawLiveness::Activation,
+            _ => false,
+        };
+        if implicit_observations && observed {
             live[node.id.0] = true;
         }
     }
@@ -326,26 +360,36 @@ fn dead_code_eliminate_impl(
         }
     }
 
-    // Propagate liveness backward.
-    for i in (0..n).rev() {
-        if live[i] {
-            for &input in &dag.nodes()[i].inputs {
-                live[input.0] = true;
+    // Propagate liveness backward, then, over a program's regions, close it
+    // over the draws of every live `with seed` region.
+    loop {
+        for i in (0..n).rev() {
+            if live[i] {
+                for &input in &dag.nodes()[i].inputs {
+                    live[input.0] = true;
+                }
+                if let Some(reusable_input) = dag.nodes()[i].reusable_input {
+                    live[reusable_input.0] = true;
+                }
+                // chelis#384/#397: a shape-only dependency (the `x` whose
+                // runtime shape supplies an `expand` extent) is consumed for
+                // its shape, not its data, so it is not in `inputs`. Keep it
+                // live so its `Load` survives and the symbolic dim it declares
+                // retains its source. See `DagNode::shape_deps`.
+                for &dep in &dag.nodes()[i].shape_deps {
+                    live[dep.0] = true;
+                }
+                for &dep in &dag.nodes()[i].result_claim_deps {
+                    live[dep.0] = true;
+                }
             }
-            if let Some(reusable_input) = dag.nodes()[i].reusable_input {
-                live[reusable_input.0] = true;
-            }
-            // chelis#384/#397: a shape-only dependency (the `x` whose runtime
-            // shape supplies an `expand` extent) is consumed for its
-            // shape, not its data, so it is not in `inputs`. Keep it live so
-            // its `Load` survives and the symbolic dim it declares retains its
-            // source. See `DagNode::shape_deps`.
-            for &dep in &dag.nodes()[i].shape_deps {
-                live[dep.0] = true;
-            }
-            for &dep in &dag.nodes()[i].result_claim_deps {
-                live[dep.0] = true;
-            }
+        }
+        let peers = dag.unlive_scoped_draw_peers(&live);
+        if peers.is_empty() {
+            break;
+        }
+        for peer in peers {
+            live[peer.0] = true;
         }
     }
 

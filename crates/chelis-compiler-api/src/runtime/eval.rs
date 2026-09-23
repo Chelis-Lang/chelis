@@ -4,11 +4,9 @@ use std::fs;
 
 use chelis_deep::ast::{Atom, Expr, ExprCarrier};
 use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
-use chelis_ir::eval::TensorValue as IrTensorValue;
+use chelis_ir::eval::{RandomFrame, TensorValue as IrTensorValue};
 use chelis_ir::evaluation::RandomExecutionContext;
-use chelis_ir::host::{
-    HostDefEvaluationPlan, HostDefKernel, RandomLoweringState, host_def_evaluation_plan,
-};
+use chelis_ir::host::{HostDefEvaluationPlan, RandomLoweringState, host_def_evaluation_plan};
 use chelis_ir::tier2;
 use chelis_types::{
     CompareOp, ElementRef, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, StorageView, types::Prim,
@@ -710,6 +708,25 @@ fn source_call_with_checked_argument_types(node: EvalNode<'_>, types: &[Option<E
 }
 
 impl<'a> EvalContext<'a> {
+    /// The Random frame a graph evaluation takes its draw keys from: the
+    /// interpreter's handler at its next ordinal, or no inherited handler
+    /// (`spec/design/randomness_counter_stream.md` §2). An inherited draw
+    /// under no handler is an evaluation error, never a seed-zero draw.
+    pub(super) fn random_frame(&self) -> RandomFrame {
+        match self.random_seed {
+            Some(seed) => RandomFrame::inherited(seed, self.random_counter),
+            None => RandomFrame::unhandled(),
+        }
+    }
+
+    /// Publish the ordinals a graph evaluation took from
+    /// [`Self::random_frame`], including those taken before an error.
+    pub(super) fn commit_random_frame(&mut self, frame: &RandomFrame) {
+        if let Some(counter) = frame.inherited_counter() {
+            self.random_counter = counter;
+        }
+    }
+
     /// The classification of `expr` against the program's own definitions.
     ///
     /// `chelis_ir::lower::evaluation_profile` sorts and deep-clones the whole
@@ -819,14 +836,12 @@ impl<'a> EvalContext<'a> {
         let kernel = host_def_evaluation_plan(session, name, &RandomExecutionContext::new(random))
             .map_err(|diagnostic| diagnostic.to_string())?
             .map(Arc::new);
+        // A kernel's draws take their keys from the frame it is evaluated
+        // with, so only a context-bound execution plan is lowered again.
         let context_bound = kernel
             .as_ref()
             .is_some_and(|kernel| kernel.plan().is_some() || kernel.staged_plan().is_some());
-        if !context_bound
-            && !kernel
-                .as_ref()
-                .is_some_and(|kernel| kernel_draws_random(kernel.kernel_for_inspection()))
-        {
+        if !context_bound {
             self.def_kernels.insert(name.to_string(), kernel.clone());
         }
         Ok(kernel)
@@ -926,11 +941,6 @@ impl<'a> EvalContext<'a> {
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
-        let draws_random = kernel_draws_random(kernel);
-        let path_sensitive_random = kernel.dag.nodes().iter().any(|node| {
-            matches!(node.op, RiscOp::BakedUniformLike { .. }) && node.inputs.len() == 2
-        });
-        let starting_counter = self.random_counter;
         let tensor_bindings = self.tensor_bindings;
         let host_bindings = &self.declaration_values;
         if let Some(plan) = execution_plan {
@@ -958,10 +968,11 @@ impl<'a> EvalContext<'a> {
             self.result_producer = result_producer;
             return Ok(value);
         }
-        let (values, executed_counter) = chelis_ir::eval::eval_tensor_roots_with_result_claims(
+        let mut frame = self.random_frame();
+        let result = chelis_ir::eval::eval_tensor_roots_with_frame_and_result_claims(
             &kernel.dag,
             &roots,
-            starting_counter,
+            &mut frame,
             &result_claims,
             |load| {
                 staged
@@ -973,14 +984,9 @@ impl<'a> EvalContext<'a> {
                         _ => None,
                     })
             },
-        )?;
-        if draws_random {
-            self.random_counter = if path_sensitive_random {
-                executed_counter
-            } else {
-                kernel.next_random_counter.unwrap_or(executed_counter)
-            };
-        }
+        );
+        self.commit_random_frame(&frame);
+        let values = result?;
         let value = pack_dag_roots(&kernel.dag, &roots, &values, name)?;
         self.result_producer = result_producer;
         Ok(value)
@@ -1107,15 +1113,15 @@ impl<'a> EvalContext<'a> {
                         frame.with_context(|context| self.random_counter = context.state().counter);
                         result?
                     } else {
-                        let (computed, counter) =
-                            chelis_ir::eval::eval_tensor_roots_with_strict_random_progress(
-                                dag,
-                                dag.roots(),
-                                self.random_counter,
-                                |input| inputs.get(input).cloned(),
-                            )?;
-                        self.random_counter = counter;
-                        computed
+                        let mut frame = self.random_frame();
+                        let computed = chelis_ir::eval::eval_tensor_roots_with_frame(
+                            dag,
+                            dag.roots(),
+                            &mut frame,
+                            |input| inputs.get(input).cloned(),
+                        );
+                        self.commit_random_frame(&frame);
+                        computed?
                     };
                     for (output, root) in outputs.iter().zip(dag.roots()) {
                         let value = computed
@@ -4757,17 +4763,6 @@ fn runtime_values_equal(lhs: &RuntimeValue, rhs: &RuntimeValue) -> Result<bool, 
     }
 }
 
-/// Whether a kernel's DAG draws from the Random stream; such a kernel is
-/// lowered per application and advances `random_counter` when applied.
-fn kernel_draws_random(kernel: &HostDefKernel) -> bool {
-    kernel.dag.nodes().iter().any(|node| {
-        matches!(
-            node.op,
-            RiscOp::BakedUniformLike { .. } | RiscOp::BakedDropout { .. }
-        )
-    })
-}
-
 /// One evaluated argument as the kernel `Load` its declared parameter names.
 /// A tensor finalizes at the declared element dtype, the same ingress the
 /// interpreter applies to its own frame (chelis#729); a scalar becomes an
@@ -5022,13 +5017,23 @@ mod legacy_capture_order_tests {
             .dag
             .nodes()
             .iter()
-            .filter(|node| matches!(node.op, RiscOp::BakedUniformLike { .. }))
+            .filter(|node| matches!(node.op, RiscOp::UniformLike))
             .collect();
         assert_eq!(draws.len(), 1);
         assert_eq!(
             draws[0].inputs.len(),
-            1,
-            "legacy baked-key UniformLike, not activated path"
+            4,
+            "key-operand UniformLike with no path activation"
+        );
+        assert!(
+            matches!(
+                graph.dag.get(draws[0].inputs[3]).map(|key| &key.op),
+                Some(RiscOp::DrawKey {
+                    handler: chelis_ir::dag::RandomHandler::Inherited,
+                    ..
+                })
+            ),
+            "the helper draws the caller's inherited stream"
         );
         assert_eq!(
             (ctx.random_counter, ctx.transcript.clone()),

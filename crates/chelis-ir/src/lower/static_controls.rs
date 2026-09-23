@@ -587,6 +587,19 @@ impl<'a> Profile<'a> {
                 self.reason.get_or_insert(Reason::RuntimeRate);
             }
         }
+        // A runtime `uniform_like` bound is an operand only the key-operand
+        // lowering carries; a fixed-control plan bakes its bounds.
+        if let Some(("uniform_like", args)) = app_var_name_and_args(expr)
+            && !env.bound.contains("uniform_like")
+            && !self.has_def("uniform_like")
+            && args
+                .iter()
+                .skip(1)
+                .take(2)
+                .any(|bound| env.scalar(bound).is_none())
+        {
+            self.reason.get_or_insert(Reason::RuntimeRate);
+        }
         if tag == DeepTag::Var {
             if let Some(closure) = self.callable(expr, env) {
                 self.apply(closure, &[], depth, depth, env);

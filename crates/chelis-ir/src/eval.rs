@@ -2420,32 +2420,49 @@ where
     Ok(inputs)
 }
 
+/// The nodes `roots` need over a graph that holds several independently
+/// executed regions: a draw key runs when its value is reachable or another
+/// draw of its `with seed` region runs (`Dag::unlive_scoped_draw_peers`).
 fn live_mask_for_roots(dag: &Dag, roots: &[NodeId]) -> Vec<bool> {
-    let mut live = vec![false; dag.len()];
-    let mut stack: Vec<NodeId> = roots.to_vec();
-    // A draw key advances its handler whether or not its value is read, so
-    // every draw key executes with the requested roots.
+    live_mask_from(dag, roots.to_vec())
+}
+
+/// The nodes one activation of `dag` runs for `roots`: every draw key
+/// executes whether or not its value is read, because an unused draw still
+/// takes its handler's ordinal.
+fn activation_live_mask(dag: &Dag, roots: &[NodeId]) -> Vec<bool> {
+    let mut stack = roots.to_vec();
     stack.extend(
         dag.nodes()
             .iter()
             .filter(|node| matches!(node.op, RiscOp::DrawKey { .. }))
             .map(|node| node.id),
     );
-    while let Some(id) = stack.pop() {
-        if live[id.0] {
-            continue;
+    live_mask_from(dag, stack)
+}
+
+fn live_mask_from(dag: &Dag, mut stack: Vec<NodeId>) -> Vec<bool> {
+    let mut live = vec![false; dag.len()];
+    loop {
+        while let Some(id) = stack.pop() {
+            if live[id.0] {
+                continue;
+            }
+            live[id.0] = true;
+            if let Some(node) = dag.get(id) {
+                stack.extend(node.inputs.iter().copied());
+                // chelis#616: a runtime-dim declarer kept via `shape_deps`
+                // must actually EVALUATE so the mid-evaluation binding sees
+                // its extent (the consumer reads the dim, not the value).
+                stack.extend(node.shape_deps.iter().copied());
+                stack.extend(node.result_claim_deps.iter().copied());
+            }
         }
-        live[id.0] = true;
-        if let Some(node) = dag.get(id) {
-            stack.extend(node.inputs.iter().copied());
-            // chelis#616: a runtime-dim declarer kept via `shape_deps` must
-            // actually EVALUATE so the mid-evaluation binding sees its
-            // extent (the consumer reads the dim, not the value).
-            stack.extend(node.shape_deps.iter().copied());
-            stack.extend(node.result_claim_deps.iter().copied());
+        stack = dag.unlive_scoped_draw_peers(&live);
+        if stack.is_empty() {
+            return live;
         }
     }
-    live
 }
 
 /// The node selection an evaluation runs under, and which of its values the
@@ -4246,7 +4263,7 @@ where
     F: FnMut(&str, TensorInputDemand) -> Result<Option<TensorValue>, String>,
 {
     reject_drop_roots(dag, roots)?;
-    let live = (!roots.is_empty()).then(|| live_mask_for_roots(dag, roots));
+    let live = (!roots.is_empty()).then(|| activation_live_mask(dag, roots));
     prepare_tensor_inputs(dag, live.as_deref(), true, load_input).map(|prepared| prepared.inputs)
 }
 
@@ -4659,7 +4676,7 @@ where
     F: FnMut(&str) -> Option<TensorValue>,
 {
     reject_drop_roots(dag, roots)?;
-    let live = live_mask_for_roots(dag, roots);
+    let live = activation_live_mask(dag, roots);
     eval_tensor_internal_with_result_claims(
         dag,
         EvaluationScope::Roots { live: &live, roots },
@@ -5990,7 +6007,9 @@ mod tests {
     /// path's determinism and seed sensitivity are pinned in
     /// `tests/dropout_fixed_stream_ir.rs`.
     #[test]
-    fn lowered_dropout_without_a_plan_is_refused() {
+    fn lowered_dropout_draws_its_scoped_key() {
+        // A dropout lowered inside `with seed(42)` draws that handler's
+        // ordinal 0 through its draw key, with no execution plan.
         let src = r#"
             (def {} x (lit {type: (t-tensor {} (d-lit {} 32) (t-prim {} f32))} 1.0))
             (def {} y
@@ -5999,18 +6018,25 @@ mod tests {
                 (app {} (var {} dropout) (var {} x) (lit {type: (t-prim {} f32)} 0.5))))
         "#;
         let dag = lower(src);
-        assert!(
-            dag.nodes()
-                .iter()
-                .any(|node| matches!(node.op, RiscOp::BakedDropout { .. }))
-        );
-        let error = eval_tensor(&dag, &UnordMap::new()).unwrap_err();
-        assert!(
-            error.starts_with("unsupported: op `dropout` on tensor graph node ")
-                && error.contains("evaluated without a fixed-control plan (runtime)")
-                && error.contains("unimplemented chelis#2413"),
-            "{error}"
-        );
+        let values = eval_tensor(&dag, &UnordMap::new()).expect("a scoped dropout evaluates");
+        let dropout = dag
+            .nodes()
+            .iter()
+            .find(|node| matches!(node.op, RiscOp::Dropout))
+            .expect("a key-operand dropout")
+            .id;
+        // [05-OP-37] at f32: drop when the f32-rounded unit is below 0.5,
+        // else 1 / (1 - 0.5) = 2 exactly.
+        let expected = (0..32)
+            .map(|index| {
+                if (spec_uniform_unit(42, 0, index) as f32) < 0.5 {
+                    0.0
+                } else {
+                    2.0
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(values[&dropout].to_f64_lossy_vec(), expected);
     }
 
     // [05-RNG-1] transcribed from the spec text, never the kernel.

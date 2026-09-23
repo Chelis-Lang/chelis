@@ -148,7 +148,7 @@ fn executable_example_survives_format_check_and_exact_eval() {
 }
 
 #[test]
-fn invalid_empty_rate_is_a_real_cli_error_and_runtime_rate_c_build_stays_unsupported() {
+fn invalid_empty_rate_is_a_real_cli_error_and_a_runtime_rate_builds() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("dropout.ch");
     std::fs::write(&file, "def empty() -> tensor[0, f32] = to_tensor([])\ndef invalid(x: tensor[0, f32]) -> tensor[0, f32] = dropout(x, 1.0f32)\ndef main() = with seed(42i64) { invalid(empty()) }\n").unwrap();
@@ -165,6 +165,7 @@ fn invalid_empty_rate_is_a_real_cli_error_and_runtime_rate_c_build_stays_unsuppo
         text.contains("numeric trap: domain in dropout at f32"),
         "{text}"
     );
+    // A runtime rate is an ordinary operand (chelis#2411).
     std::fs::write(&file, "def sample(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(42i64) { dropout(x, rate) }\n").unwrap();
     assert!(cli(&["fmt", "--inplace", path]).status.success());
     let output = cli(&[
@@ -175,14 +176,9 @@ fn invalid_empty_rate_is_a_real_cli_error_and_runtime_rate_c_build_stays_unsuppo
         "--output",
         dir.path().join("out").to_str().unwrap(),
     ]);
-    assert!(!output.status.success());
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
     assert!(
-        text.contains("statically-resolvable rate") || text.contains("RuntimeRate"),
-        "{text}"
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }

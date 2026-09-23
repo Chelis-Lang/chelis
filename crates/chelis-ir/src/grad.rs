@@ -141,8 +141,10 @@ impl fmt::Display for AdError {
                 AdRejectionReason::RandomSelectionParameter => write!(
                     f,
                     "grad: a differentiated parameter reaches the rate of {op}, which selects \
-                     the kept elements and is not differentiable ([05-OP-37]); wrap the rate \
-                     in stop_gradient to treat it as a constant"
+                     the kept elements and is not differentiable ([05-OP-37]); the spec's \
+                     escape hatch is stop_gradient(rate), which treats the rate as a constant \
+                     but is not implemented yet (chelis#1312), so compute the rate from values \
+                     that are not differentiated"
                 ),
                 AdRejectionReason::EmptyOrMissingOutput => write!(
                     f,

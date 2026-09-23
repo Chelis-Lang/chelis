@@ -550,8 +550,8 @@ mod tests {
     const TEST_SOURCE_DIGEST: [u8; 32] = [0x5a; 32];
 
     #[test]
-    fn cache_format_version_tracks_the_single_node_spelling() {
-        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 25);
+    fn cache_format_version_tracks_the_key_operand_random_nodes() {
+        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 26);
     }
 
     #[test]

@@ -184,16 +184,16 @@ def dag_cases():
                 )
             )
 
-    empty = {"schema_version": 16, "nodes": [], "roots": []}
+    empty = {"schema_version": 17, "nodes": [], "roots": []}
     add("empty", empty, True)
-    for version in (None, 10, 11, 12, 13, 14, 15, 17):
+    for version in (None, 10, 11, 12, 13, 14, 15, 16, 18):
         value = {**empty, "schema_version": version}
         if version is None:
             del value["schema_version"]
         add("version-" + str(version), value, False)
     scalar = {"dtype": "f64", "bits": "8000000000000000"}
     const = {
-        "schema_version": 16,
+        "schema_version": 17,
         "nodes": [
             {
                 "shape_deps": [],
@@ -229,7 +229,7 @@ def dag_cases():
 
     def graph(op):
         return {
-            "schema_version": 16,
+            "schema_version": 17,
             "nodes": [
                 copy.deepcopy(load),
                 {
@@ -298,7 +298,7 @@ def dag_cases():
     witness_node["op"]["name"] = "witness"
     witness_node["output_type"]["dims"] = [{"kind": "lit", "size": 4}]
     reference_graph = {
-        "schema_version": 16,
+        "schema_version": 17,
         "nodes": [
             value_node,
             witness_node,
@@ -401,7 +401,7 @@ def dag_cases():
             add(f"owner-{owner}-to-end", changed, False, "forbids the to_end carrier")
 
     witness = {
-        "schema_version": 16,
+        "schema_version": 17,
         "nodes": [
             copy.deepcopy(load),
             {
@@ -593,6 +593,62 @@ def dag_cases():
         ] = value
         add(name, bad, False)
 
+    # Wire v17 (chelis#2413): a scoped draw key's handler instance is an
+    # opaque `with seed` region identity. It admits the complete u32 domain
+    # but never a signed, wider or fractional numeric representation.
+    def random_node(index, op, inputs, output_type):
+        return {
+            "shape_deps": [],
+            "span_id": None,
+            "merged_spans": [],
+            "id": index,
+            "op": op,
+            "inputs": inputs,
+            "output_type": output_type,
+        }
+
+    vector = {"dims": [{"kind": "lit", "size": 2}], "precision": "f32"}
+    random_scoped = {
+        "schema_version": 17,
+        "nodes": [
+            random_node(0, {"kind": "load", "name": "x"}, [], vector),
+            random_node(
+                1,
+                {"kind": "const", "value": {"dtype": "f32", "bits": "3f000000"}},
+                [],
+                {"dims": [], "precision": "f32"},
+            ),
+            random_node(
+                2,
+                {"kind": "const", "value": {"dtype": "int64", "value": 7}},
+                [],
+                {"dims": [], "precision": "int64"},
+            ),
+            random_node(
+                3,
+                {
+                    "kind": "draw_key",
+                    "handler": {"kind": "scoped", "instance": 4294967295},
+                    "draw": "dropout",
+                    "dtype": "f32",
+                },
+                [2, 1],
+                {"dims": [], "precision": "key"},
+            ),
+            random_node(4, {"kind": "dropout"}, [0, 1, 3], vector),
+        ],
+        "roots": [4],
+    }
+    add("random-scoped-owned", random_scoped, True)
+    for name, value in (
+        ("random-instance-negative", -1),
+        ("random-instance-4294967296", 4294967296),
+        ("random-instance-float", 7.0),
+    ):
+        bad = copy.deepcopy(random_scoped)
+        bad["nodes"][3]["op"]["handler"]["instance"] = value
+        add(name, bad, False)
+
     # The named form observes the same tensor axis as an earlier Caller
     # witness and retains that declaring witness as its sole shape dependency.
     # It is a distinct representation from the literal form above: neither
@@ -651,7 +707,7 @@ def result_reference_cases():
 
     cases = []
     dag = {
-        "schema_version": 16,
+        "schema_version": 17,
         "nodes": [
             {
                 "shape_deps": [],
@@ -705,7 +761,7 @@ def result_reference_cases():
                             "outside the owning DAG",
                         )
                     )
-        for version in (10, 11, 12, 13, 14, 15, 17):
+        for version in (10, 11, 12, 13, 14, 15, 16, 18):
             bad = copy.deepcopy(good)
             bad["dag"]["schema_version"] = version
             cases.append(

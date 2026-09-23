@@ -202,7 +202,6 @@ pub(super) fn finish_unified_app(
 
     if let Some(rejected) = reject_inadmissible_operand_dtypes(
         node,
-        kids,
         func_name.as_deref(),
         &arg_tys,
         env,

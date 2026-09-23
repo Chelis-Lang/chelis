@@ -148,19 +148,20 @@ fn wire_risc_op_mirror_has_no_unsealed_numeric_payload_beyond_the_census() {
 }
 
 #[test]
-fn retired_wire_random_parameters_cannot_regain_raw_float_admission() {
+fn retired_wire_random_parameters_cannot_return_as_fields() {
     let source =
         std::fs::read_to_string(repo_root().join("crates/chelis-compiler-api/src/schema.rs"))
             .expect("schema.rs readable");
     let block = enum_block(&source, "WireRiscOp");
     assert!(raw_float_payload_fields(block).is_empty());
-    for field in ["low", "high", "rate"] {
-        let sealed = format!("{field}: ScalarValue");
-        assert_eq!(block.matches(&sealed).count(), 1, "{sealed}");
-        for raw in ["f32", "f64", "Vec<f32>", "Vec<f64>"] {
-            let unsealed = format!("{field}: {raw}");
-            let mutation = block.replace(&sealed, &unsealed);
-            assert_eq!(raw_float_payload_fields(&mutation), [unsealed]);
-        }
+    // Wire v17 (chelis#2413): random controls and seeds are earlier operand
+    // nodes, so no random operation carries a numeric field at all.
+    for field in ["low:", "high:", "rate:", "seed:"] {
+        assert!(!block.contains(field), "WireRiscOp regained `{field}`");
+    }
+    // A control that returned as a raw field line would still be refused.
+    for raw in ["f32", "f64", "Vec<f32>", "Vec<f64>"] {
+        let mutation = block.replace("    UniformLike {},", &format!("    low: {raw},"));
+        assert_eq!(raw_float_payload_fields(&mutation), [format!("low: {raw}")]);
     }
 }

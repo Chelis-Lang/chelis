@@ -179,20 +179,6 @@ fn assert_f32_bit_equal(label: &str, eval: &[f64], c: &[f64]) {
     }
 }
 
-/// Extract the two `chelis_f32_from_bits(0x...u)` constants baked at the
-/// uniform-sample call site of a generated `.dp` C kernel.
-fn baked_bound_bits(c_src: &str) -> Vec<u32> {
-    let mut out = Vec::new();
-    let mut rest = c_src;
-    while let Some(idx) = rest.find("chelis_f32_from_bits(0x") {
-        let hex = &rest[idx + "chelis_f32_from_bits(0x".len()..];
-        let end = hex.find('u').expect("bits literal ends with u");
-        out.push(u32::from_str_radix(&hex[..end], 16).expect("hex bits"));
-        rest = &hex[end..];
-    }
-    out
-}
-
 /// The P0-shape probe: `(par {} 2.0 3.0)` as a `uniform_like` low bound.
 /// spec/03-deep-syntax.md §2.3: `par` evaluates its children in order and
 /// returns the LAST child's value, so the bound's value is 3.0. Contract
@@ -207,25 +193,19 @@ fn redteam_par_bound_folds_par_value_or_rejects() {
         // The checker rejected the pathological bound: consistent, no finding.
         return;
     }
-    let dir = tempdir().expect("tempdir");
-    let out_dir = dir.path().join("parbound-out");
-    let c_src = build_c(PAR_BOUND_DP, ".dp", "parbound", &out_dir);
-    let bits = baked_bound_bits(&c_src);
-    assert!(
-        bits.contains(&3.0f32.to_bits()),
-        "checker accepted the par bound, so the baked low must be par's value \
-         3.0 (spec/03 §2.3: last child); baked f32 bit patterns: \
-         {bits:08x?} (2.0f = {:08x})",
-        2.0f32.to_bits()
-    );
-    // Eval lane must also honor par semantics: all samples in [3,5).
+    // The bound is an ordinary operand (chelis#2413), so both lanes evaluate
+    // par's value 3.0 (spec/03 §2.3: last child) and sample [3,5).
     let eval = parse_tensor_data(&eval_stdout(PAR_BOUND_DP, ".dp"), "sampled");
-    for (i, v) in eval.iter().enumerate() {
-        assert!(
-            (3.0..5.0).contains(v),
-            "eval elem[{i}] = {v} must lie in [3,5) per par semantics"
-        );
+    let c = c_sampled(PAR_BOUND_DP, ".dp", "parbound");
+    for (lane, samples) in [("eval", &eval), ("C", &c)] {
+        for (i, v) in samples.iter().enumerate() {
+            assert!(
+                (3.0..5.0).contains(v),
+                "{lane} elem[{i}] = {v} must lie in [3,5) per par semantics"
+            );
+        }
     }
+    assert_f32_bit_equal("par bound eval-vs-C", &eval, &c);
 }
 
 /// Nested-wrapper control: neg(neg(3.0)) folds to 3.0 in both accept sets;
@@ -238,21 +218,17 @@ fn redteam_double_neg_bound_parity() {
         (score - 1.0).abs() < 1e-9,
         "double-neg bound must be accepted (both fold sets resolve it), got {score}"
     );
-    let dir = tempdir().expect("tempdir");
-    let out_dir = dir.path().join("dblneg-out");
-    let c_src = build_c(DOUBLE_NEG_DP, ".dp", "dblneg", &out_dir);
-    let bits = baked_bound_bits(&c_src);
-    assert!(
-        bits.contains(&3.0f32.to_bits()),
-        "baked low must be neg(neg(3.0)) = 3.0f; baked bits: {bits:08x?}"
-    );
     let eval = parse_tensor_data(&eval_stdout(DOUBLE_NEG_DP, ".dp"), "sampled");
-    for (i, v) in eval.iter().enumerate() {
-        assert!(
-            (3.0..5.0).contains(v),
-            "eval elem[{i}] = {v} must lie in [3,5)"
-        );
+    let c = c_sampled(DOUBLE_NEG_DP, ".dp", "dblneg");
+    for (lane, samples) in [("eval", &eval), ("C", &c)] {
+        for (i, v) in samples.iter().enumerate() {
+            assert!(
+                (3.0..5.0).contains(v),
+                "{lane} elem[{i}] = {v} must lie in [3,5)"
+            );
+        }
     }
+    assert_f32_bit_equal("double-neg bound eval-vs-C", &eval, &c);
 }
 
 /// chelis#771 boundary seed through the handler-scope threading path: the

@@ -2197,6 +2197,35 @@ impl Dag {
         &self.roots
     }
 
+    /// Draw keys of a `with seed` region lowered in this graph that are not
+    /// yet live although another draw key of the same region is
+    /// (`spec/design/randomness_counter_stream.md` §2). A region's draws take
+    /// consecutive ordinals of its own counter, so once the region executes
+    /// none of them may be skipped, unused results included. A liveness pass
+    /// over a graph holding several independently executed regions marks
+    /// these, propagates their inputs, and repeats until none remain.
+    pub fn unlive_scoped_draw_peers(&self, live: &[bool]) -> Vec<NodeId> {
+        let scoped = |node: &DagNode| match node.op {
+            RiscOp::DrawKey {
+                handler: RandomHandler::Scoped { instance },
+                ..
+            } => Some(instance),
+            _ => None,
+        };
+        let live_regions = self
+            .nodes
+            .iter()
+            .filter(|node| live[node.id.0])
+            .filter_map(scoped)
+            .collect::<std::collections::BTreeSet<_>>();
+        self.nodes
+            .iter()
+            .filter(|node| !live[node.id.0])
+            .filter(|node| scoped(node).is_some_and(|instance| live_regions.contains(&instance)))
+            .map(|node| node.id)
+            .collect()
+    }
+
     pub fn set_roots(&mut self, roots: Vec<NodeId>) {
         self.roots = roots;
     }

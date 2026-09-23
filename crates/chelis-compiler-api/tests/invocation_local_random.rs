@@ -291,8 +291,10 @@ fn hooked(c: &GeneratedProgram) -> GeneratedProgram {
 
 #[test]
 fn reentrant_public_entry_starts_its_own_context() {
+    // The reentrant call is itself handled: an unhandled public draw has no
+    // stream to draw from and aborts rather than draw at seed zero.
     let c = emit(SOURCE, "seeded");
-    let draw = c.symbol("draw").to_string();
+    let draw = c.symbol("other").to_string();
     let seeded = c.symbol("seeded").to_string();
     let driver = format!(
         r#"
@@ -321,7 +323,7 @@ int main(void) {{
     return 0;
 }}
 "#,
-        zero = bits(0, 0),
+        zero = bits(4294967295, 0),
         expected = bits(42, 0)
     );
     balanced(&run(&hooked(&c), &driver));

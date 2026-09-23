@@ -1865,7 +1865,7 @@ fn resolve_in_context_entry<'a>(
     })?;
     let mut scoped = compiled.dag.clone();
     scoped.set_roots(vec![root]);
-    let scoped = chelis_ir::optimize::dead_code_eliminate(&scoped);
+    let scoped = chelis_ir::optimize::project_program_roots(&scoped);
     Ok(Some((selected.as_str(), scoped)))
 }
 
@@ -5173,7 +5173,11 @@ pub fn reject_unsupported_effect_ops(
     target: BuildTarget,
 ) -> std::result::Result<(), CompilerError> {
     for node in dag.nodes() {
-        if matches!(&node.op, RiscOp::BakedDropout { .. }) {
+        // The C lane emits a key-operand dropout from its draw key; a device
+        // target has no port of the kernel yet.
+        let keyed_off_c =
+            target != BuildTarget::C && matches!(&node.op, RiscOp::Dropout | RiscOp::DropoutReplay);
+        if keyed_off_c || matches!(&node.op, RiscOp::BakedDropout { .. }) {
             return Err(unsupported_gate_error(
                 format!("compiled `dropout` op at lowered node {}", node.id.0),
                 target.as_str(),
@@ -6834,22 +6838,6 @@ fn wire_axis(value: usize) -> WireResult<i32> {
     i32::try_from(value).map_err(|_| "wire axis exceeds i32".to_string())
 }
 
-fn wire_float_parameter(value: f64, precision: Prim) -> WireResult<chelis_types::ScalarValue> {
-    if !value.is_finite() || !matches!(precision, Prim::F16 | Prim::Bf16 | Prim::F32 | Prim::F64) {
-        return Err(
-            "wire random parameter requires a finite value at the active float dtype".to_string(),
-        );
-    }
-    let scalar = chelis_types::scalar_from_f64("wire_parameter", precision, value)
-        .map_err(|error| error.to_string())?;
-    if scalar.as_f64_lossy().to_bits() != value.to_bits() {
-        return Err(
-            "IR random parameter is not an exact stored value of its active dtype".to_string(),
-        );
-    }
-    Ok(scalar)
-}
-
 fn wire_dag(dag: &Dag) -> WireResult<WireDag> {
     let wire = WireDag {
         schema_version: crate::schema::WIRE_DAG_SCHEMA_VERSION,
@@ -6880,7 +6868,7 @@ fn wire_dag_node(node: &chelis_ir::dag::DagNode) -> WireResult<WireDagNode> {
         span_id: node.span_id.clone(),
         merged_spans: node.merged_spans.clone(),
         id: crate::schema::host_index(node.id.0),
-        op: wire_op(&node.op, node.output_type.precision)?,
+        op: wire_op(&node.op)?,
         inputs: node
             .inputs
             .iter()
@@ -6948,7 +6936,7 @@ fn wire_bound(b: &RtDim) -> WireResult<WireRtDim> {
     })
 }
 
-fn wire_op(op: &RiscOp, precision: Prim) -> WireResult<WireRiscOp> {
+fn wire_op(op: &RiscOp) -> WireResult<WireRiscOp> {
     Ok(match op {
         RiscOp::Add => WireRiscOp::Add,
         RiscOp::Sub => WireRiscOp::Sub,
@@ -7010,20 +6998,41 @@ fn wire_op(op: &RiscOp, precision: Prim) -> WireResult<WireRiscOp> {
         RiscOp::Floor => WireRiscOp::Floor,
         RiscOp::Ceil => WireRiscOp::Ceil,
         RiscOp::Round => WireRiscOp::Round,
-        RiscOp::BakedUniformLike { low, high, seed } => WireRiscOp::UniformLike {
-            low: wire_float_parameter(*low, precision)?,
-            high: wire_float_parameter(*high, precision)?,
-            seed: *seed,
+        RiscOp::UniformLike => WireRiscOp::UniformLike {},
+        RiscOp::Dropout => WireRiscOp::Dropout {},
+        RiscOp::DropoutReplay => WireRiscOp::DropoutReplay {},
+        RiscOp::UniformBoundAdjoint { bound } => WireRiscOp::UniformBoundAdjoint {
+            bound: match bound {
+                chelis_ir::dag::UniformBound::Low => crate::schema::WireUniformBound::Low,
+                chelis_ir::dag::UniformBound::High => crate::schema::WireUniformBound::High,
+            },
         },
-        RiscOp::BakedDropout { rate, seed } => WireRiscOp::Dropout {
-            rate: wire_float_parameter(*rate, precision)?,
-            seed: *seed,
+        RiscOp::DrawKey {
+            handler,
+            draw,
+            dtype,
+        } => WireRiscOp::DrawKey {
+            handler: match handler {
+                chelis_ir::dag::RandomHandler::Inherited => {
+                    crate::schema::WireRandomHandler::Inherited
+                }
+                chelis_ir::dag::RandomHandler::Scoped { instance } => {
+                    crate::schema::WireRandomHandler::Scoped {
+                        instance: *instance,
+                    }
+                }
+            },
+            draw: match draw {
+                chelis_ir::dag::RandomDraw::Dropout => crate::schema::WireRandomDraw::Dropout,
+                chelis_ir::dag::RandomDraw::UniformLike => {
+                    crate::schema::WireRandomDraw::UniformLike
+                }
+            },
+            dtype: dtype.interchange_name().to_string(),
         },
-        RiscOp::UniformLike
-        | RiscOp::Dropout
-        | RiscOp::DropoutReplay
-        | RiscOp::UniformBoundAdjoint { .. }
-        | RiscOp::DrawKey { .. } => {
+        // A baked node belongs to a fixed-control execution plan, which is
+        // never a WireDag transport.
+        RiscOp::BakedUniformLike { .. } | RiscOp::BakedDropout { .. } => {
             return Err(format!(
                 "`{}` has no WireDag spelling in schema version {}",
                 chelis_ir::grad::risc_op_name(op),
@@ -7681,10 +7690,6 @@ mod tests {
 
     #[test]
     fn wire_producer_rejects_numeric_narrowing_instead_of_repairing_ir() {
-        assert!(wire_float_parameter(f64::from(0.1_f32), Prim::F32).is_ok());
-        assert!(wire_float_parameter(0.1_f64, Prim::F32).is_err());
-        assert!(wire_float_parameter(f64::NAN, Prim::F64).is_err());
-        assert!(wire_float_parameter(1.0, Prim::Int64).is_err());
         assert_eq!(wire_axis(0).unwrap(), 0);
         assert!(wire_axis(usize::MAX).is_err());
         assert_eq!(wire_extent(0).unwrap().get(), 0);

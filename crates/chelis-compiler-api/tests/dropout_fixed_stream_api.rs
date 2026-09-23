@@ -1267,21 +1267,18 @@ fn dropout_failure_preserves_only_the_executed_output_prefix() {
 }
 
 #[test]
-fn runtime_rate_keeps_explicit_legacy_dispatch_and_dynamic_control_does_not() {
+fn runtime_rate_and_dynamic_control_both_draw_the_handled_stream() {
     let ones = std::iter::repeat_n("1.0f32", 32)
         .collect::<Vec<_>>()
         .join(", ");
     let source = format!(
         "def excluded(x: tensor[32, f32], rate: f32) = (dropout(x, rate), 7i64)\ndef main() = with seed(42i64) {{ excluded(to_tensor([{ones}]), 0.5f32) }}\n"
     );
-    let error = eval_selected(request(&source), &["main".into()]).unwrap_err();
-    assert_eq!(error.stage, "lower", "{error:?}");
-    assert!(
-        error.errors.iter().any(|error| error
-            .message
-            .contains("requires a statically-resolvable rate")),
-        "{error:?}"
-    );
+    // [05-OP-37]: a runtime rate is an ordinary operand, so the helper draws
+    // the handled stream's ordinal 0 (chelis#2411).
+    let result = eval_selected(request(&source), &["main".into()])
+        .unwrap_or_else(|error| panic!("{error:?}"));
+    assert_eq!(tensor(&result, "main.0"), mask(0));
     // chelis#2405: a dynamic caller no longer excludes its fixed-rate helper,
     // which runs its own plan on the handled stream.
     let source = format!(
@@ -1618,15 +1615,24 @@ fn uniform_draws_beneath_recursion_keep_their_stream() {
 /// Evidentiary status: REGRESSION TEST (every row returns values, not an
 /// error, without the fence).
 #[test]
-fn plan_less_dropout_under_grad_of_dynamic_control_or_vmap_is_refused() {
+fn dropout_under_grad_of_dynamic_control_draws_and_vmap_is_refused() {
     let ones = ones32();
     let row = "[1.0f32, 1.0f32, 1.0f32, 1.0f32]";
+    // Dropout under a runtime `if` inside `grad` draws the taken arm's key at
+    // ordinal 0 and replays it for the pathwise adjoint; the following draw
+    // takes ordinal 1.
+    let source = format!(
+        "def loss(x: tensor[32, f32]) -> tensor[f32] ! {{ Random }} = if gt(tensor_to_scalar(sum(copy(x), 0i32)), 0.0f32) then sum(dropout(x, 0.5f32), 0i32) else sum(x, 0i32)\ndef main() = with seed(42i64) {{\n x = to_tensor([{ones}])\n g = grad(loss)(copy(x))\n after = dropout(x, 0.5f32)\n (g, after)\n}}\n"
+    );
+    let result = eval_selected(request(&source), &["main".into()])
+        .unwrap_or_else(|error| panic!("{error:?}"));
+    assert_eq!(tensor(&result, "main.0"), mask(0));
+    assert_eq!(tensor(&result, "main.1"), mask(1));
+    // chelis#2409: vmap over a function that draws has no conforming stream
+    // until explicit keys, so it is refused rather than drawn at seed zero.
     let vmap_keep =
         "def keep(x: tensor[4, f32]) -> tensor[4, f32] ! { Random } = dropout(x, 0.5f32)\n";
     for source in [
-        format!(
-            "def loss(x: tensor[32, f32]) -> tensor[f32] ! {{ Random }} = if gt(tensor_to_scalar(sum(copy(x), 0i32)), 0.0f32) then sum(dropout(x, 0.5f32), 0i32) else sum(x, 0i32)\ndef main() = with seed(42i64) {{\n x = to_tensor([{ones}])\n g = grad(loss)(copy(x))\n after = dropout(x, 0.5f32)\n (g, after)\n}}\n"
-        ),
         format!(
             "{vmap_keep}def main() = with seed(42i64) {{\n xs = to_tensor([{row}, {row}, {row}])\n ys = vmap(keep)(xs)\n after = dropout(to_tensor({row}), 0.5f32)\n (ys, after)\n}}\n"
         ),
@@ -1635,14 +1641,12 @@ fn plan_less_dropout_under_grad_of_dynamic_control_or_vmap_is_refused() {
         ),
     ] {
         let error = eval_selected(request(&source), &["main".into()]).unwrap_err();
-        assert_eq!(error.stage, "eval", "{source}\n{error:?}");
         assert!(
             error.errors.iter().any(|error| {
-                error.message.contains("unsupported: op `dropout` on ")
-                    && error
-                        .message
-                        .contains("without a fixed-control plan (runtime)")
-                    && error.message.contains("unimplemented chelis#2413")
+                error
+                    .message
+                    .contains("`vmap` over a function that draws from `Random`")
+                    && error.message.contains("unimplemented chelis#2409")
             }),
             "{source}\n{error:?}"
         );

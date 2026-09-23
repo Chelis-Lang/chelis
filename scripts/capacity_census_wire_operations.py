@@ -1,4 +1,4 @@
-"""Exact semantic registration of axis parameters and handled random seeds.
+"""Exact semantic registration of axis parameters.
 
 These registrations supply operation semantics, not transport membership. Codec,
 owner/rank admission, and execution evidence are independent requirements.
@@ -54,15 +54,6 @@ def operation_contracts():
             "axis-domain `i32`",
         )
     )
-    for owner, number in (("UniformLike", 8), ("Dropout", 37)):
-        result.append(
-            OperationContract(
-                schema + "WireRiscOp::" + owner + ".seed",
-                ("primitive", "u64"),
-                f"[05-OP-{number}]",
-                "handled seed" if number == 8 else "[05-RNG-1]",
-            )
-        )
     return tuple(sorted(result, key=lambda c: c.field))
 
 

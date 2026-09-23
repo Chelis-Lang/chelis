@@ -89,23 +89,17 @@ fn source_name_for_c_symbol(symbol: &str) -> String {
 /// than skipping the file: a bare skip stops measuring quietly, and deleting
 /// the assertion would make the census's claim smaller than its name.
 ///
-/// The staged Dropout example still reaches chelis#1192 before any C exists.
-/// Fixed-control Dropout is compiled and joins the ordinary guard census.
-/// Annotated concat/softmax executes on Eval, but C host emission refuses
-/// softmax; `parity_annotated_concat_softmax_eval_and_c_rejection` owns the
-/// full-value positive and exact C diagnostic. No C guard artifact exists.
-/// When either build succeeds, its row fails and must join the guard census.
-fn refused_by_a_capability_gate() -> [(&'static str, &'static str); 2] {
-    [
-        (
-            "dropout_staged_claim.ch",
-            "unimplemented chelis#1192: compiled `dropout` kernels are not implemented",
-        ),
-        (
-            "annotated_concat_softmax.ch",
-            unsupported_wording::stderr("annotated_concat_softmax_c"),
-        ),
-    ]
+/// Dropout, staged or fixed-control, is compiled and joins the ordinary guard
+/// census (chelis#2413). Annotated concat/softmax executes on Eval, but C
+/// host emission refuses softmax;
+/// `parity_annotated_concat_softmax_eval_and_c_rejection` owns the full-value
+/// positive and exact C diagnostic. No C guard artifact exists. When its
+/// build succeeds, its row fails and must join the guard census.
+fn refused_by_a_capability_gate() -> [(&'static str, &'static str); 1] {
+    [(
+        "annotated_concat_softmax.ch",
+        unsupported_wording::stderr("annotated_concat_softmax_c"),
+    )]
 }
 
 /// A two-row operand: `min(2, 4) = 2`.

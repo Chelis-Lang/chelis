@@ -122,6 +122,11 @@ pub struct HipEmitter {
     device_entrypoint_mode: bool,
     /// Shared specialization for every kernel and its launch arguments.
     kernel_rank: usize,
+    /// The next ordinal of each scoped Random handler region, advanced in
+    /// node order as each of its draw keys is emitted.
+    scoped_draws: BTreeMap<u32, u64>,
+    /// The emission-time key of each emitted draw key, by node.
+    draw_keys: BTreeMap<NodeId, u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -432,6 +437,8 @@ impl HipEmitter {
                 .collect(),
             extra_peak_device_bytes_estimate: 0,
             device_entrypoint_mode: false,
+            scoped_draws: BTreeMap::new(),
+            draw_keys: BTreeMap::new(),
             kernel_rank: match dag
                 .nodes()
                 .iter()
@@ -1405,13 +1412,12 @@ impl HipEmitter {
             RiscOp::Floor => Some(format!("kernel_floor_{}", kind_for_node(node)?.suffix())),
             RiscOp::Ceil => Some(format!("kernel_ceil_{}", kind_for_node(node)?.suffix())),
             RiscOp::Round => Some(format!("kernel_round_{}", kind_for_node(node)?.suffix())),
-            RiscOp::BakedUniformLike { .. } => Some(format!(
+            RiscOp::BakedUniformLike { .. } | RiscOp::UniformLike => Some(format!(
                 "kernel_uniform_like_{}",
                 kind_for_node(node)?.suffix()
             )),
             RiscOp::BakedDropout { .. }
             | RiscOp::Drop
-            | RiscOp::UniformLike
             | RiscOp::Dropout
             | RiscOp::DropoutReplay
             | RiscOp::UniformBoundAdjoint { .. }
@@ -1827,7 +1833,7 @@ impl HipEmitter {
             RiscOp::Round => {
                 kernels::unary_func(self.kernel_rank, name, "rintf", elem_for_unary()?)
             }
-            RiscOp::BakedUniformLike { .. } => {
+            RiscOp::BakedUniformLike { .. } | RiscOp::UniformLike => {
                 kernels::uniform_like(self.kernel_rank, name, elem_for_unary()?)
             }
             // WS-A4: bind `accumulator` instead of `..`. The fused
@@ -2308,8 +2314,16 @@ impl HipEmitter {
             RiscOp::BakedDropout { .. } => {
                 unreachable!("dropout should be rejected before HIP code generation")
             }
-            RiscOp::UniformLike
-            | RiscOp::Dropout
+            RiscOp::DrawKey {
+                handler,
+                draw: chelis_ir::dag::RandomDraw::UniformLike,
+                dtype,
+            } => self.record_scoped_draw_key(node, *handler, *dtype, dag)?,
+            RiscOp::UniformLike => {
+                let (low, high, key) = self.keyed_uniform_like_parameters(node, dag)?;
+                self.emit_uniform_like_launch(id, low, high, key, &node.output_type)?
+            }
+            RiscOp::Dropout
             | RiscOp::DropoutReplay
             | RiscOp::UniformBoundAdjoint { .. }
             | RiscOp::DrawKey { .. } => {
@@ -3022,6 +3036,96 @@ impl HipEmitter {
         );
         self.indent -= 1;
         self.line("}");
+    }
+
+    /// The HIP lane's counter-stream bridge
+    /// (`spec/design/randomness_counter_stream.md` §2): a device kernel has no
+    /// host Random frame, so only a draw key of a `with seed` region lowered
+    /// inside this graph, with literal bounds and no activation, has a key the
+    /// emitter can compute. Each region's ordinals count from zero in node
+    /// order, as its scoped counter does in the other lanes, and the bounds
+    /// are validated before the ordinal is taken ([05-OP-8]).
+    fn record_scoped_draw_key(
+        &mut self,
+        node: &DagNode,
+        handler: chelis_ir::dag::RandomHandler,
+        dtype: Prim,
+        dag: VerifiedDagView<'_>,
+    ) -> Result<(), Unsupported> {
+        let bridge = |reason: &str| {
+            Unsupported::new(
+                UnsupportedKind::Op("DrawKey".to_string()),
+                format!("a HIP draw key {reason}"),
+                Stage::Codegen("hip"),
+                chelis_types::unimplemented_rejection!(
+                    1192,
+                    "the HIP lane computes a draw key only for a `with seed` region in the \
+                     same kernel with literal bounds; compiled randomness on every target is \
+                     phase 6 of chelis#2413"
+                ),
+            )
+        };
+        let chelis_ir::dag::RandomHandler::Scoped { instance } = handler else {
+            return Err(bridge("that inherits its caller's Random stream"));
+        };
+        if node.inputs.len() != 3 {
+            return Err(bridge("under a runtime activation"));
+        }
+        let literal = |input: NodeId| match dag.get(input).map(|node| &node.op) {
+            Some(RiscOp::Const { value }) => Some(*value),
+            _ => None,
+        };
+        let seed = literal(node.inputs[0])
+            .and_then(|seed| seed.as_i64_exact())
+            .ok_or_else(|| bridge("without its literal seed"))?;
+        let (Some(low), Some(high)) = (literal(node.inputs[1]), literal(node.inputs[2])) else {
+            return Err(bridge("with runtime bounds"));
+        };
+        chelis_types::dtype_semantics::UniformLikeParameters::new(dtype, low, high)
+            .map_err(|error| bridge(&format!("whose literal bounds trap: {error}")))?;
+        let ordinal = self.scoped_draws.entry(instance).or_insert(0);
+        let key = chelis_types::RandomKey::from_counter(seed as u64, *ordinal).bits();
+        *ordinal += 1;
+        self.draw_keys.insert(node.id, key);
+        Ok(())
+    }
+
+    /// The literal f32 bounds and emission-time key of a keyed `UniformLike`
+    /// whose draw key [`Self::record_scoped_draw_key`] computed.
+    fn keyed_uniform_like_parameters(
+        &self,
+        node: &DagNode,
+        dag: VerifiedDagView<'_>,
+    ) -> Result<(f64, f64, u64), Unsupported> {
+        let unsupported = || {
+            Unsupported::new(
+                UnsupportedKind::Op("UniformLike".to_string()),
+                "a HIP uniform_like without an emission-time draw key",
+                Stage::Codegen("hip"),
+                chelis_types::unimplemented_rejection!(
+                    1192,
+                    "the HIP lane computes a draw key only for a `with seed` region in the \
+                     same kernel with literal bounds; compiled randomness on every target is \
+                     phase 6 of chelis#2413"
+                ),
+            )
+        };
+        if node.inputs.len() != 4 {
+            return Err(unsupported());
+        }
+        let bound = |input: NodeId| match dag.get(input).map(|node| &node.op) {
+            Some(RiscOp::Const { value }) => Some(value.as_f64_lossy()),
+            _ => None,
+        };
+        let key = self
+            .draw_keys
+            .get(&node.inputs[3])
+            .copied()
+            .ok_or_else(unsupported)?;
+        match (bound(node.inputs[1]), bound(node.inputs[2])) {
+            (Some(low), Some(high)) => Ok((low, high, key)),
+            _ => Err(unsupported()),
+        }
     }
 
     fn emit_uniform_like_launch(

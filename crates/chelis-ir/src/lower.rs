@@ -460,6 +460,40 @@ fn raise_fatal_lowering_error(
     raise_lowering_diagnostic(LowerDiagnostic::new(message, span, span_id).fatal())
 }
 
+/// chelis#2409: `vmap` over a function that draws has no conforming reading
+/// under the counter-stream bridge. Eval drew every row at seed zero and C
+/// drew the whole batch at one ordinal, both silently outside spec/06 §3.2.
+/// Until explicit keys define `vmap` over key rows
+/// (`spec/design/randomness_explicit_keys.md`), every lane refuses it.
+fn reject_vmap_over_draws(body_dag: &Dag, transform: &str, body: &Expr) {
+    let draws = body_dag.nodes().iter().any(|node| {
+        matches!(
+            node.op,
+            RiscOp::DrawKey { .. } | RiscOp::BakedDropout { .. } | RiscOp::BakedUniformLike { .. }
+        )
+    });
+    if draws {
+        raise_fatal_unsupported(
+            Unsupported::new(
+                UnsupportedKind::Construct(format!(
+                    "`{transform}` over a function that draws from `Random`"
+                )),
+                "IR lowering",
+                Stage::Lowering,
+                chelis_types::unimplemented_rejection!(
+                    2409,
+                    "vmap over a function that draws has no conforming batched stream \
+                     until explicit random keys define vmap over key rows; the previous \
+                     lowering drew every row at seed zero in eval and the whole batch at \
+                     one ordinal in C"
+                ),
+            ),
+            Some(body.span()),
+            body.span_id().map(ToOwned::to_owned),
+        );
+    }
+}
+
 fn raise_fatal_unsupported(
     unsupported: Unsupported,
     span: Option<Span>,
@@ -1154,7 +1188,13 @@ fn lower_program_to_library_inner(
     } else {
         Vec::new()
     };
-    let (dce_dag, remap) = crate::optimize::dead_code_eliminate_with_retained(&ctx.dag, &retained);
+    // A program's top-level definitions are independently executed regions,
+    // so an unreached region's draws are not kept alive by the others.
+    let (dce_dag, remap) = if retained.is_empty() {
+        crate::optimize::project_program_roots_with_remap(&ctx.dag)
+    } else {
+        crate::optimize::dead_code_eliminate_with_retained(&ctx.dag, &retained)
+    };
     log_sub("dce", &mut sub_t);
     let (copy_dag, linear_remap) = insert_copy_nodes_for_consuming_fanout(&dce_dag);
     log_sub("implicit_copy_nodes", &mut sub_t);
@@ -7718,6 +7758,14 @@ fn permuted_tensor_type(ty: &TensorType, axes: &[usize]) -> TensorType {
     }
 }
 
+/// One `with seed` handler region lowered inside a graph: its literal seed's
+/// two's-complement bits and the region's scoped handler instance.
+#[derive(Debug, Clone, Copy)]
+struct RandomScope {
+    instance: u32,
+    seed: u64,
+}
+
 struct LowerCtx<'program> {
     host_program: Option<&'program crate::host::HostLoweringSession<'program>>,
     host_sources: Vec<crate::host::staged::HostSource>,
@@ -7826,6 +7874,16 @@ struct LowerCtx<'program> {
     /// each draw consume the handled stream only when its executed path is
     /// active at runtime.
     random_path_condition: Option<NodeId>,
+    /// The `with seed` handler region lowered inside this graph that encloses
+    /// the expression being lowered, or `None` when draws inherit the stream
+    /// the graph's caller holds (`spec/design/randomness_counter_stream.md`
+    /// §2). Each region gets its own [`crate::dag::RandomHandler::Scoped`]
+    /// instance, so two regions with equal seeds keep separate counters.
+    random_scope: Option<RandomScope>,
+    /// The next unused scoped-handler instance in this graph. A subcontext
+    /// whose graph is spliced back continues this numbering and hands it
+    /// back, so instances stay unique after the splice.
+    next_random_instance: u32,
     /// chelis#1464: depth of `if` branches currently being lowered. A
     /// `fail(...)` lowered at depth > 0 that `lower_if` did NOT recognize
     /// directly is an INDIRECT trap (behind a helper call or a `let`); it
@@ -7981,6 +8039,8 @@ impl<'program> LowerCtx<'program> {
             random_seed: None,
             random_counter: 0,
             random_path_condition: None,
+            random_scope: None,
+            next_random_instance: 0,
             if_branch_depth: 0,
             execution: None,
             execution_scope: crate::evaluation::ScopeId(0),
@@ -8167,6 +8227,74 @@ impl<'program> LowerCtx<'program> {
             }
         });
         TensorType { dims, precision }
+    }
+
+    /// Lower one draw of a key-operand random primitive
+    /// (`spec/design/randomness_counter_stream.md` §2): a
+    /// [`RiscOp::DrawKey`] that takes the next ordinal of the enclosing
+    /// handler, then the primitive consuming that key. The draw key reads the
+    /// innermost `with seed` region lowered in this graph, else the stream the
+    /// graph's caller holds. Both nodes carry today's path activation where
+    /// lowering has one, and nowhere else.
+    fn lower_keyed_draw(
+        &mut self,
+        draw: crate::dag::RandomDraw,
+        data: NodeId,
+        controls: &[NodeId],
+        ty: TensorType,
+    ) -> NodeId {
+        let span = self.current_span_id.clone();
+        let scalar = |precision| TensorType {
+            dims: Vec::new(),
+            precision,
+        };
+        let (handler, seed) = match self.random_scope {
+            Some(scope) => {
+                let value = chelis_types::finalize_scalar(
+                    "with seed",
+                    Prim::Int64,
+                    chelis_types::RawScalar::Int(scope.seed as i64),
+                )
+                .expect("an i64 seed is exact at i64");
+                let seed = self.dag.add_node(
+                    RiscOp::Const { value },
+                    Vec::new(),
+                    scalar(Prim::Int64),
+                    span.clone(),
+                );
+                (
+                    crate::dag::RandomHandler::Scoped {
+                        instance: scope.instance,
+                    },
+                    Some(seed),
+                )
+            }
+            None => (crate::dag::RandomHandler::Inherited, None),
+        };
+        let activation = self.random_path_condition;
+        let key = self.dag.add_node(
+            RiscOp::DrawKey {
+                handler,
+                draw,
+                dtype: ty.precision,
+            },
+            seed.into_iter()
+                .chain(controls.iter().copied())
+                .chain(activation)
+                .collect(),
+            scalar(Prim::Key),
+            span.clone(),
+        );
+        let op = match draw {
+            crate::dag::RandomDraw::Dropout => RiscOp::Dropout,
+            crate::dag::RandomDraw::UniformLike => RiscOp::UniformLike,
+        };
+        let inputs = std::iter::once(data)
+            .chain(controls.iter().copied())
+            .chain(std::iter::once(key))
+            .chain(activation)
+            .collect();
+        self.dag.add_node(op, inputs, ty, span)
     }
 
     fn attach_reuse_hint(
@@ -11126,6 +11254,8 @@ impl<'program> LowerCtx<'program> {
         // lowering context otherwise silently falls back to seed zero.
         subctx.random_seed = self.random_seed;
         subctx.random_counter = self.random_counter;
+        subctx.random_scope = self.random_scope;
+        subctx.next_random_instance = self.next_random_instance;
         if self.execution.is_some() {
             subctx.execution = Some(crate::evaluation::ExecutionMetadata::new(self.random_seed));
         }
@@ -11298,6 +11428,7 @@ impl<'program> LowerCtx<'program> {
         // expression in the same `with seed` region; otherwise that expression
         // reuses the grad forward pass's random source words.
         self.random_counter = subctx.random_counter;
+        self.next_random_instance = subctx.next_random_instance;
         if subctx
             .callable_dependency_state
             .output_depends_on_unresolved(&subctx.dag, output)
@@ -12574,6 +12705,7 @@ impl<'program> LowerCtx<'program> {
         // runtime extent witness.
         let captured_bindings = self.seed_subctx_with_lexical_scope(&mut subctx, &param_names);
         let root_value = subctx.lower_resolved_body(fn_expr, &param_names, body);
+        reject_vmap_over_draws(&subctx.dag, "vmap", body);
         for root in root_value.flatten_nodes() {
             subctx.dag.add_root(root);
         }
@@ -12864,6 +12996,7 @@ impl<'program> LowerCtx<'program> {
         let output = subctx
             .lower_resolved_body(fn_expr, &param_names, body)
             .expect_node("vmap(grad(...)) requires a scalar floating output");
+        reject_vmap_over_draws(&subctx.dag, "vmap(grad(...))", body);
         if subctx
             .callable_dependency_state
             .output_depends_on_unresolved(&subctx.dag, output)
@@ -13414,33 +13547,32 @@ impl<'program> LowerCtx<'program> {
             }
             "uniform_like" if args.len() == 3 => {
                 let template = self.lower_expr_node(&args[0], "uniform_like template");
+                // UniformLike is shape-preserving over its template input, so
+                // its type is the template's actual tensor type, not an
+                // absent `type` annotation's rank-0 default (Bucket-5).
+                let resolved_ty = self
+                    .dag
+                    .get(template)
+                    .map(|node| node.output_type.clone())
+                    .unwrap_or_else(|| ty.clone());
+                if self.execution.is_none() {
+                    // [05-OP-8]: the bounds are ordinary scalar operands,
+                    // validated by the draw at execution before it consumes
+                    // an ordinal.
+                    let low = self.lower_expr_node(&args[1], "uniform_like low bound");
+                    let high = self.lower_expr_node(&args[2], "uniform_like high bound");
+                    let node = self.lower_keyed_draw(
+                        crate::dag::RandomDraw::UniformLike,
+                        template,
+                        &[low, high],
+                        resolved_ty,
+                    );
+                    return self.attach_reuse_hint(node, app_span, &[template]);
+                }
                 // chelis#776: statically resolve each bound (through neg /
-                // float-cast wrappers) or fail loudly — never the silent [0,1)
-                // default that dropped a wrapped or computed range in codegen.
-                // chelis#2316: resolve through the TYPED fold, the same path
-                // `dropout` uses. The legacy f64 extractor read a literal's
-                // value without its declared dtype and lost an enclosing
-                // cast's target, so a bound spelled with suffixes or cast
-                // chains was baked at the wrong value. `static_rate` keeps an
-                // integer leaf exact through i64 and a typed leaf at its
-                // source dtype until the checked cast, then finalizes ONCE
-                // here -- `[04-LIT-1]`'s "SHALL NOT pass through f64 first".
-                //
-                // f32 is the target because the whole `uniform_like` pipeline
-                // bakes f32 bounds (`chelis_uniform_sample_f32`, and the f64
-                // sampler widens the same f32 bits). Changing that is a
-                // separate decision, not this one.
-                //
-                // The typed fold resolves an integer-target cast to an exact
-                // value, but chelis#776 deliberately refuses to let a
-                // dtype-changing cast launder a bound, and
-                // `uniform_like_integer_cast_bound_fails_loudly` pins that.
-                // Keep the refusal here, where a `cast` is always one the
-                // author wrote: a Deep `lit` carries its dtype in `type:`
-                // metadata, so this lane never sees a synthesized cast. The
-                // host lane must NOT copy this guard -- there a literal's
-                // declared dtype IS a synthesized cast ([04-LIT-1]), and
-                // rejecting it broke `cast(3i32, f32)` in round 2.
+                // float-cast wrappers) or fail loudly. chelis#2316: resolve
+                // through the TYPED fold, as `dropout` does. The fixed-control
+                // plan bakes f32 bounds.
                 self.reject_integer_target_bound_cast(&args[1], "low bound");
                 self.reject_integer_target_bound_cast(&args[2], "high bound");
                 let low = self
@@ -13449,56 +13581,8 @@ impl<'program> LowerCtx<'program> {
                 let high = self
                     .resolve_static_scalar_arg(&args[2], Prim::F32, "uniform_like", "high bound")
                     .as_f64_lossy();
-                let (seed, activation) = if self.execution.is_some() {
-                    (
-                        self.random_seed.unwrap_or(COMPILED_HANDLER_OWNED_SEED),
-                        self.random_path_condition,
-                    )
-                } else {
-                    match self.random_path_condition {
-                        Some(activation) => {
-                            // A path-sensitive DAG has two owners. Eval lowering
-                            // carries the handler's concrete seed here. Compiled-C
-                            // helper lowering cannot bake that runtime value, and
-                            // `CHELIS_EFFECTIVE_UNIFORM_KEY` deliberately ignores
-                            // this operand whenever the activation is true. Keep
-                            // the neutral placeholder explicit instead of hiding
-                            // it behind an Option fallback.
-                            let seed = match self.random_seed {
-                                Some(seed) => seed,
-                                None => COMPILED_HANDLER_OWNED_SEED,
-                            };
-                            (seed, Some(activation))
-                        }
-                        None => {
-                            // An ungated legacy draw's ordinal is fixed here,
-                            // so the node carries its [05-RNG-1] draw key
-                            // rather than the handler seed (chelis#2408).
-                            let key = chelis_types::RandomKey::from_counter(
-                                self.random_seed.unwrap_or(0),
-                                self.random_counter,
-                            )
-                            .bits();
-                            self.random_counter = self.random_counter.saturating_add(1);
-                            (key, None)
-                        }
-                    }
-                };
-                // When no `type` metadata is attached to the `app` form
-                // (as is common when the host lane drives sub-expression
-                // lowering through `lower_subexpr_program` from a
-                // handle-effect tensor-helper call), the supplied `ty`
-                // is `default_type()` (rank-0 scalar). UniformLike is
-                // shape-preserving over its template input, so prefer
-                // the template's actual tensor type to avoid emitting a
-                // rank-0 alloc that the host emitter then renders as
-                // `(int[]){1}` and a 1-element loop. Bucket-5 closure.
-                let inferred_ty = self
-                    .dag
-                    .get(template)
-                    .map(|node| node.output_type.clone())
-                    .unwrap_or_else(|| ty.clone());
-                let resolved_ty = inferred_ty;
+                let seed = self.random_seed.unwrap_or(COMPILED_HANDLER_OWNED_SEED);
+                let activation = self.random_path_condition;
                 let node = self.dag.add_node(
                     RiscOp::BakedUniformLike { low, high, seed },
                     activation.map_or_else(|| vec![template], |active| vec![template, active]),
@@ -13512,39 +13596,31 @@ impl<'program> LowerCtx<'program> {
             }
             "dropout" if args.len() == 2 => {
                 let x = self.lower_expr_node(&args[0], "dropout input");
-                // chelis#776 (same silent-substitution shape as uniform_like's
-                // bounds): a wrapped/computed rate must resolve statically or
-                // fail loudly, never silently become 0.0 (no-op dropout).
-                let inferred_ty = self
+                // Dropout preserves its operand's shape. Inlined AD metadata
+                // can still name the callee's formal axes after a runtime
+                // reshape; those names are not independent extent sources.
+                let resolved_ty = self
                     .dag
                     .get(x)
                     .map(|node| node.output_type.clone())
                     .unwrap_or_else(|| ty.clone());
-                // Dropout preserves its operand's shape. Inlined AD metadata
-                // can still name the callee's formal axes after a runtime
-                // reshape; those names are not independent extent sources.
-                let resolved_ty = inferred_ty;
-                let (rate, seed) = if self.execution.is_some() {
-                    let rate = self.resolve_static_scalar_arg(
-                        &args[1],
-                        resolved_ty.precision,
-                        "dropout",
-                        "rate",
+                if self.execution.is_none() {
+                    // [05-OP-37]: the rate is an ordinary scalar operand of
+                    // `x`'s dtype, validated by the draw at execution before
+                    // it consumes an ordinal.
+                    let rate = self.lower_expr_node(&args[1], "dropout rate");
+                    let node = self.lower_keyed_draw(
+                        crate::dag::RandomDraw::Dropout,
+                        x,
+                        &[rate],
+                        resolved_ty,
                     );
-                    (
-                        rate.as_f64_lossy(),
-                        self.random_seed.unwrap_or(COMPILED_HANDLER_OWNED_SEED),
-                    )
-                } else {
-                    // Legacy host dispatch does not transport specialized
-                    // rate provenance. Keep its precise pre-execution
-                    // rejection until that separate boundary supports plans.
-                    let rate = self.resolve_static_f64_arg(&args[1], "dropout", "rate");
-                    let seed = self.random_seed.unwrap_or(0)
-                        ^ self.random_counter.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-                    self.random_counter = self.random_counter.saturating_add(1);
-                    (rate, seed)
-                };
+                    return self.attach_reuse_hint(node, app_span, &[x]);
+                }
+                let rate = self
+                    .resolve_static_scalar_arg(&args[1], resolved_ty.precision, "dropout", "rate")
+                    .as_f64_lossy();
+                let seed = self.random_seed.unwrap_or(COMPILED_HANDLER_OWNED_SEED);
                 let node = self.dag.add_node(
                     RiscOp::BakedDropout { rate, seed },
                     vec![x],
@@ -18174,6 +18250,15 @@ impl<'program> LowerCtx<'program> {
                 });
                 self.random_seed = Some(seed);
                 self.random_counter = 0;
+                let saved_random_scope = self.random_scope;
+                self.random_scope = Some(RandomScope {
+                    instance: self.next_random_instance,
+                    seed,
+                });
+                self.next_random_instance = self
+                    .next_random_instance
+                    .checked_add(1)
+                    .expect("scoped Random handler instances fit u32");
                 let saved_scope = self.execution_scope;
                 if let Some(execution) = &mut self.execution {
                     self.execution_scope = crate::evaluation::ScopeId(execution.scopes.len());
@@ -18199,6 +18284,7 @@ impl<'program> LowerCtx<'program> {
                 }
                 self.random_seed = saved_seed;
                 self.random_counter = saved_counter;
+                self.random_scope = saved_random_scope;
                 self.execution_scope = saved_scope;
                 result
             }
@@ -18246,161 +18332,6 @@ impl<'program> LowerCtx<'program> {
         )?;
         let signed = value.as_i64_exact()?;
         Some(signed as u64)
-    }
-
-    /// Extract a compile-time-constant f64 from an expression, seeing through
-    /// the statically-resolvable, value-carrying wrappers a numeric literal
-    /// can arrive in: a `(lit ...)` node, a `neg(...)` of an extractable value,
-    /// and a `cast(..., <float prim>)` of an extractable value. A float-target
-    /// cast is folded through its target's rounding via
-    /// `chelis_types::dtype_semantics::round_float_bound`, which is the single
-    /// definition of that rounding; an integer-target cast *changes* the value
-    /// by truncation, so it is NOT folded — it returns `None` and the caller
-    /// fails loudly rather than baking a guessed truncation into codegen. Any
-    /// other form (a runtime variable, arithmetic, a `shape()` read) also
-    /// returns `None`.
-    ///
-    /// chelis#2316: this used to claim "a float-target cast preserves the
-    /// numeric value" and recurse straight through. That is true only for
-    /// targets that cannot narrow the value it already holds; f16 and bf16
-    /// round, so the fold kept the innermost literal and the compiled lanes
-    /// sampled an interval the source never declared.
-    ///
-    /// chelis#776: this used to see through neither `cast` nor `neg`, so a
-    /// wrapped bound fell to a caller `unwrap_or(default)` and silently
-    /// replaced the user's value with the [0,1) default in the compiled lane
-    /// (the #703 silent-substitution class). Callers that bake this into
-    /// codegen now go through [`Self::resolve_static_f64_arg`], which turns an
-    /// unresolvable value into a loud lowering error.
-    /// Legacy numeric-control folding at an inlined call site. A checked
-    /// float cast can name the callee's precision binder even though the
-    /// caller has already monomorphized it; consult that exact substitution
-    /// instead of treating the source spelling as unresolved. No value is
-    /// evaluated here, and integer casts remain deliberately unsupported.
-    fn extract_f64_value(expr: &Expr, substitutions: &UnordMap<String, Prim>) -> Option<f64> {
-        match expr {
-            Expr::Atom(Atom::Float(f), _) => Some(*f),
-            Expr::Atom(Atom::Int(n), _) => Some(*n as f64),
-            Expr::Node(_, _) => {
-                let (tag, _, kids) = stamped_parts(expr)?;
-                match tag {
-                    // cast(<inner>, <target>): value-preserving only for a float
-                    // target; an integer target truncates and is left unresolved
-                    // (chelis#776 — go loud, do not guess the cast semantics).
-                    DeepTag::Cast => {
-                        let inner = kids.first()?;
-                        let target = kids.get(1)?;
-                        let target = Self::try_extract_prim(target)
-                            .or_else(|| static_controls::type_prim(target, substitutions));
-                        match target {
-                            // chelis#2316: honour the cast's TARGET dtype.
-                            // Recursing straight through kept the innermost
-                            // literal, which is only correct when the target
-                            // cannot narrow; `cast(cast(x, f16), f32)` then
-                            // baked an unrounded bound both compiled lanes
-                            // agreed on and `eval` did not.
-                            Some(prim) if prim.is_float() => {
-                                let inner = Self::extract_f64_value(inner, substitutions)?;
-                                chelis_types::dtype_semantics::round_float_bound(prim, inner)
-                            }
-                            _ => None,
-                        }
-                    }
-                    // neg(<inner>): unary minus desugars to
-                    // `(app {} (var {} neg) <inner>)`.
-                    DeepTag::App
-                        if kids
-                            .first()
-                            .is_some_and(|callee| expr_is_var_named(callee, "neg")) =>
-                    {
-                        let inner = kids.get(1)?;
-                        Self::extract_f64_value(inner, substitutions).map(|v| -v)
-                    }
-                    // Only `(lit {} <atom>)` owns this value slot. Reading the
-                    // first child of an arbitrary composite silently folded
-                    // `(par {} 2.0 3.0)` to 2.0 even though `par`'s value is
-                    // its last child, 3.0 (chelis#794). Composite semantics
-                    // belong to ordinary lowering; this static extractor
-                    // rejects them instead of guessing or dropping effects.
-                    DeepTag::Lit => {
-                        let raw = match kids.first() {
-                            Some(Expr::Atom(Atom::Float(f), _)) => *f,
-                            Some(Expr::Atom(Atom::Int(n), _)) => *n as f64,
-                            _ => return None,
-                        };
-                        // chelis#2316 round 2: a `lit` carries its OWN declared
-                        // dtype, and the evaluator finalizes the literal at that
-                        // dtype before any enclosing cast rounds it again.
-                        // Returning the raw `Atom::Float` skipped that step, so
-                        // `cast(cast(0.015632629860192537f32, f16), f32)` rounded
-                        // f64 -> f16 in ONE step here while eval rounded
-                        // f64 -> f32 -> f16 in two. The host lane never had the
-                        // bug because `HostExprKind::Float` already holds the
-                        // finalized value, so fixing only the cast arm left the
-                        // two compiled lanes DISAGREEING -- the lane split
-                        // `assign_uniform_like` warns about, where template
-                        // foldability becomes observable again (chelis#2120).
-                        //
-                        // An integer-typed literal is exact at its own dtype, so
-                        // finalizing it changes nothing; an unresolved type leaves
-                        // the raw value, matching the pre-existing disposition.
-                        match expr_type_metadata(expr)
-                            .and_then(|ty| static_controls::type_prim(ty, substitutions))
-                        {
-                            Some(prim) if prim.is_float() => {
-                                chelis_types::dtype_semantics::round_float_bound(prim, raw)
-                            }
-                            _ => Some(raw),
-                        }
-                    }
-                    _ => None,
-                }
-            }
-            _ => None,
-        }
-    }
-
-    /// Resolve a builtin argument that is baked into the emitted kernel as a
-    /// compile-time constant (a `uniform_like` bound, a `dropout` rate, a `pad`
-    /// fill), or raise a loud lowering error. A silent `unwrap_or(default)` at
-    /// these sites substitutes a wrong value into a program that compiles and
-    /// runs — the #703 class; here it silently collapsed a wrapped or computed
-    /// `uniform_like` range to the [0,1) default (chelis#776). An unresolvable
-    /// argument is therefore a build failure, never a default.
-    ///
-    /// The error is *fatal* on purpose: a non-fatal lowering error at these
-    /// sites is caught by the host-emit backend's speculative sub-lowering and
-    /// laundered into a silent `/* unsupported builtin */ 0` stub (a null
-    /// tensor), which is just a different silent miscompile. A fatal error
-    /// surfaces as a user-facing build error instead — the same pathway the
-    /// `grad`-of-non-differentiable rejection uses (issue #197). `chelis eval`
-    /// stays correct: it interprets the `with seed { ... }` program through its
-    /// own evaluator and does not require this DAG lowering to succeed, so a
-    /// runtime bound that fails the build still evaluates to the right range.
-    fn resolve_static_f64_arg(&self, expr: &Expr, builtin: &str, arg_desc: &str) -> f64 {
-        let value = if builtin == "dropout" {
-            self.static_rate(expr).map(|value| match value {
-                StagedScalar::Typed(value) => value.as_f64_lossy(),
-                StagedScalar::Raw(chelis_types::RawScalar::Float(value)) => value,
-                StagedScalar::Raw(chelis_types::RawScalar::Int(value)) => value as f64,
-            })
-        } else {
-            Self::extract_f64_value(expr, &self.prec_substitutions)
-        };
-        value.unwrap_or_else(|| {
-            let found = expr.tag().map(DeepTag::as_str).unwrap_or("expression");
-            raise_fatal_lowering_error(
-                format!(
-                    "`{builtin}` requires a statically-resolvable {arg_desc}, but the \
-                     compiled-backend lowering cannot fold `{found}` to a compile-time \
-                     constant. Use a numeric literal (optionally negated or cast to a \
-                     float type); a runtime-computed value is not supported here \
-                     (Chelis-Lang/chelis#776)"
-                ),
-                Some(expr.span()),
-                expr.span_id().map(ToOwned::to_owned),
-            )
-        })
     }
 
     /// Raise chelis#776's loud refusal when a `uniform_like` bound contains a
@@ -24310,55 +24241,6 @@ mod tests {
     }
 
     #[test]
-    fn issue_794_static_float_extraction_rejects_par_instead_of_folding_first_child() {
-        let mut exprs = chelis_deep::parser::parse_str("(par {} 2.0 3.0)").expect("parse par");
-        let par = exprs.pop().expect("one par expression");
-        assert_eq!(
-            LowerCtx::extract_f64_value(&par, &UnordMap::new()),
-            None,
-            "a composite `par` is not a static literal: reading its first child \
-             would substitute 2.0 for its specified last-child value 3.0"
-        );
-
-        let literal = chelis_deep::parser::parse_str("(lit {type: (t-prim {} f64)} 3.0)")
-            .expect("parse literal")
-            .pop()
-            .expect("one literal");
-        assert_eq!(
-            LowerCtx::extract_f64_value(&literal, &UnordMap::new()),
-            Some(3.0),
-            "narrowing the extractor must preserve the admitted literal path"
-        );
-    }
-
-    #[test]
-    fn static_float_extraction_requires_an_explicit_float_target_substitution() {
-        let cast = chelis_deep::parser::parse_str(
-            "(cast {type: (t-prim {} f32)} (lit {} 0.5) (t-var {} p))",
-        )
-        .expect("parse cast")
-        .pop()
-        .expect("one cast expression");
-
-        let mut float = UnordMap::new();
-        float.insert("p".to_string(), Prim::F32);
-        assert_eq!(LowerCtx::extract_f64_value(&cast, &float), Some(0.5));
-
-        let mut integer = UnordMap::new();
-        integer.insert("p".to_string(), Prim::Int32);
-        assert_eq!(
-            LowerCtx::extract_f64_value(&cast, &integer),
-            None,
-            "a surrounding float result claim must not turn an integer cast into an identity"
-        );
-        assert_eq!(
-            LowerCtx::extract_f64_value(&cast, &UnordMap::new()),
-            None,
-            "checked metadata is not a substitute for a missing call-site binding"
-        );
-    }
-
-    #[test]
     fn issue_794_negative_explicit_seed_reinterprets_signed_int64_bits() {
         let expr = chelis_deep::parser::parse_str(
             "(handle-effect {effect: random} \
@@ -24384,19 +24266,24 @@ mod tests {
             ctx.dag
         });
         let dag = outcome.expect("signed i64 seeds are valid");
+        // The handled draw is scoped to its own literal seed, never the
+        // enclosing state's seed 7.
         let seed = dag
             .nodes()
             .iter()
             .find_map(|node| match node.op {
-                RiscOp::BakedUniformLike { seed, .. } => Some(seed),
+                RiscOp::DrawKey {
+                    handler: crate::dag::RandomHandler::Scoped { .. },
+                    ..
+                } => match &dag.get(node.inputs[0]).expect("seed input").op {
+                    RiscOp::Const { value } => value.as_i64_exact(),
+                    _ => None,
+                },
                 _ => None,
             })
-            .expect("handled body contains a uniform_like node");
-        // The ungated legacy node carries ordinal 0's [05-RNG-1] draw key,
-        // `seed_bits ^ rotl64(splitmix64(0), 17)`; `splitmix64(0)` is the
-        // standard SplitMix64 constant 0xe220a8397b1dcdaf.
+            .expect("handled body draws a scoped key from a literal seed");
         assert_eq!(
-            seed ^ 0xe220_a839_7b1d_cdaf_u64.rotate_left(17),
+            seed as u64,
             u64::MAX,
             "[05-RNG-1] reinterprets -1i64 as its uint64 two's-complement bits"
         );
@@ -26004,31 +25891,45 @@ mod regression_tests {
     const WRAPPED_ARG_TEMPLATE: &str =
         "(lit {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} 0.0)";
 
-    fn uniform_like_low_high(dag: &Dag) -> (f64, f64) {
-        dag.nodes()
+    /// The controls of the lowered key-operand draw in `dag`, evaluated under
+    /// an inherited handler: a bound or rate is an ordinary operand, so a
+    /// wrapped or computed one reaches the kernel at its evaluated value.
+    fn keyed_draw_controls(dag: &Dag) -> Result<Vec<f64>, String> {
+        let node = dag
+            .nodes()
             .iter()
-            .find_map(|node| match node.op {
-                RiscOp::BakedUniformLike { low, high, .. } => Some((low, high)),
-                _ => None,
-            })
-            .expect("expected a UniformLike node in the lowered DAG")
+            .find(|node| matches!(node.op, RiscOp::UniformLike | RiscOp::Dropout))
+            .expect("expected a key-operand draw in the lowered DAG");
+        let count = if matches!(node.op, RiscOp::Dropout) {
+            1
+        } else {
+            2
+        };
+        let controls = node.inputs[1..=count].to_vec();
+        let mut frame = crate::eval::RandomFrame::inherited(7, 0);
+        let values =
+            crate::eval::eval_tensor_roots_with_frame(dag, &controls, &mut frame, |_| None)?;
+        Ok(controls
+            .iter()
+            .map(|control| values[control].to_f64_lossy_vec()[0])
+            .collect())
     }
 
     #[test]
-    fn uniform_like_cast_wrapped_bounds_resolve_statically() {
+    fn uniform_like_cast_wrapped_bounds_are_operands() {
         let src = format!(
             "(app {{}} (var {{}} uniform_like) {WRAPPED_ARG_TEMPLATE} \
              (cast {{}} (lit {{}} 2.0) (t-prim {{}} f32)) \
              (cast {{}} (lit {{}} 5.0) (t-prim {{}} f32)))"
         );
         assert_eq!(
-            uniform_like_low_high(&parse_and_lower_unchecked(&src)),
-            (2.0, 5.0)
+            keyed_draw_controls(&parse_and_lower_unchecked(&src)),
+            Ok(vec![2.0, 5.0])
         );
     }
 
     #[test]
-    fn uniform_like_negative_literal_bounds_resolve_statically() {
+    fn uniform_like_negative_literal_bounds_are_operands() {
         // `-3.0` / `-1.0` desugar to `(app {} (var {} neg) (lit ...))`.
         let src = format!(
             "(app {{}} (var {{}} uniform_like) {WRAPPED_ARG_TEMPLATE} \
@@ -26036,13 +25937,13 @@ mod regression_tests {
              (app {{}} (var {{}} neg) (lit {{}} 1.0)))"
         );
         assert_eq!(
-            uniform_like_low_high(&parse_and_lower_unchecked(&src)),
-            (-3.0, -1.0)
+            keyed_draw_controls(&parse_and_lower_unchecked(&src)),
+            Ok(vec![-3.0, -1.0])
         );
     }
 
     #[test]
-    fn uniform_like_mixed_neg_and_cast_bounds_resolve_statically() {
+    fn uniform_like_mixed_neg_and_cast_bounds_are_operands() {
         // low = cast(neg(3.0), f32); high = cast(5.0, f32).
         let src = format!(
             "(app {{}} (var {{}} uniform_like) {WRAPPED_ARG_TEMPLATE} \
@@ -26050,81 +25951,75 @@ mod regression_tests {
              (cast {{}} (lit {{}} 5.0) (t-prim {{}} f32)))"
         );
         assert_eq!(
-            uniform_like_low_high(&parse_and_lower_unchecked(&src)),
-            (-3.0, 5.0)
+            keyed_draw_controls(&parse_and_lower_unchecked(&src)),
+            Ok(vec![-3.0, 5.0])
         );
     }
 
     #[test]
-    fn uniform_like_runtime_bound_fails_loudly_not_silent_default() {
-        // A runtime add is not statically foldable: the lowering must raise,
-        // never silently substitute the [0,1) default (the #703 class).
+    fn uniform_like_runtime_bound_is_an_operand_not_a_default() {
+        // [05-OP-8]: a runtime-computed bound is an ordinary scalar operand.
+        // It reaches the kernel at its computed value, never a [0,1) default
+        // (the #703 class the static fold used to guard against).
         let src = format!(
             "(app {{}} (var {{}} uniform_like) {WRAPPED_ARG_TEMPLATE} \
              (app {{}} (var {{}} add) (lit {{}} 2.0) (lit {{}} 1.0)) \
              (lit {{}} 5.0))"
         );
-        let err = std::panic::catch_unwind(|| {
-            let _ = parse_and_lower_unchecked(&src);
-        })
-        .expect_err("a runtime uniform_like bound must fail lowering");
-        let msg = captured_lower_message(err);
-        assert!(
-            msg.contains("uniform_like")
-                && msg.contains("statically-resolvable")
-                && msg.contains("chelis#776"),
-            "unexpected diagnostic: {msg}"
+        assert_eq!(
+            keyed_draw_controls(&parse_and_lower_unchecked(&src)),
+            Ok(vec![3.0, 5.0])
         );
     }
 
     #[test]
-    fn uniform_like_integer_cast_bound_fails_loudly() {
-        // A dtype-changing cast (even the exactly integral 2.0 -> i32) is
-        // NOT accepted as a static uniform_like bound. The lowering fails
-        // loudly rather than let a cast launder the bound contract
-        // (chelis#776).
+    fn uniform_like_integer_bound_is_refused_before_the_draw() {
+        // A dtype-changing cast yields an integer bound, which [05-OP-8]'s
+        // f32-or-`p` bound contract refuses when the draw validates its
+        // controls, before it takes an ordinal.
         let src = format!(
             "(app {{}} (var {{}} uniform_like) {WRAPPED_ARG_TEMPLATE} \
              (cast {{}} (lit {{}} 2.0) (t-prim {{}} i32)) \
              (lit {{}} 5.0))"
         );
-        let err = std::panic::catch_unwind(|| {
-            let _ = parse_and_lower_unchecked(&src);
-        })
-        .expect_err("an integer-cast uniform_like bound must fail lowering");
-        assert!(captured_lower_message(err).contains("statically-resolvable"));
-    }
-
-    fn dropout_rate(dag: &Dag) -> f64 {
-        dag.nodes()
-            .iter()
-            .find_map(|node| match node.op {
-                RiscOp::BakedDropout { rate, .. } => Some(rate),
-                _ => None,
-            })
-            .expect("expected a Dropout node in the lowered DAG")
+        let dag = parse_and_lower_unchecked(&src);
+        let mut frame = crate::eval::RandomFrame::inherited(7, 0);
+        let error =
+            crate::eval::eval_tensor_roots_with_frame(&dag, dag.roots(), &mut frame, |_| None)
+                .expect_err("an integer uniform_like bound must not draw");
+        assert!(error.contains("uniform_like"), "unexpected error: {error}");
+        assert_eq!(
+            frame.inherited_counter(),
+            Some(0),
+            "no ordinal was consumed"
+        );
     }
 
     #[test]
-    fn dropout_cast_wrapped_rate_resolves_statically() {
+    fn dropout_cast_wrapped_rate_is_an_operand() {
         let src = format!(
             "(app {{}} (var {{}} dropout) {WRAPPED_ARG_TEMPLATE} \
              (cast {{}} (lit {{}} 0.25) (t-prim {{}} f32)))"
         );
-        assert_eq!(dropout_rate(&parse_and_lower_unchecked(&src)), 0.25);
+        assert_eq!(
+            keyed_draw_controls(&parse_and_lower_unchecked(&src)),
+            Ok(vec![0.25])
+        );
     }
 
     #[test]
-    fn dropout_runtime_rate_fails_loudly() {
+    fn dropout_runtime_rate_is_an_operand() {
+        // [05-OP-37]: the rate is an ordinary scalar operand of `x`'s dtype.
         let src = format!("(app {{}} (var {{}} dropout) {WRAPPED_ARG_TEMPLATE} (var {{}} r))");
-        let err = std::panic::catch_unwind(|| {
-            let _ = parse_and_lower_unchecked(&src);
-        })
-        .expect_err("a runtime dropout rate must fail lowering");
-        let msg = captured_lower_message(err);
+        let dag = parse_and_lower_unchecked(&src);
+        let dropout = dag
+            .nodes()
+            .iter()
+            .find(|node| matches!(node.op, RiscOp::Dropout))
+            .expect("expected a key-operand dropout");
         assert!(
-            msg.contains("dropout") && msg.contains("statically-resolvable"),
-            "unexpected diagnostic: {msg}"
+            matches!(&dag.get(dropout.inputs[1]).expect("rate").op, RiscOp::Load { name } if name.as_str() == "r"),
+            "the runtime rate must reach the kernel as its operand"
         );
     }
 

@@ -273,8 +273,8 @@ fn sample_body(checked: &chelis_types::CheckedProgram) -> chelis_deep::Expr {
 }
 
 /// The two DAG evaluator lanes for `sample` under `seed`:
-/// - "DAG": the legacy lowering, whose draws carry a key fixed at lowering
-///   time from the lowering context's seed and counter;
+/// - "DAG": the key-operand lowering, whose draw keys take their ordinals
+///   from the evaluation's inherited frame;
 /// - "plan": a fixed-control evaluation plan, whose draws take their key from
 ///   the executing frame's `(seed, ordinal)`.
 fn dag_lanes(source: &str, prim: Prim, len: u64, seed: i64) -> [(&'static str, Vec<u64>); 2] {
@@ -300,21 +300,21 @@ fn dag_lanes(source: &str, prim: Prim, len: u64, seed: i64) -> [(&'static str, V
             .map(|value| stored_bits(prim, value))
             .collect::<Vec<_>>()
     };
-    let (legacy, next) = chelis_ir::lower::try_lower_subexpr_program_with_random_state_progress(
+    let legacy = chelis_ir::lower::try_lower_subexpr_program(
         &body,
         inputs.clone(),
         UnordMap::new(),
         UnordMap::new(),
-        Some(seed as u64),
-        0,
     )
     .unwrap();
-    assert!(next > 0, "the legacy lowering consumed no ordinal");
-    let values = chelis_ir::eval::eval_tensor(
-        &legacy,
-        &[("x".to_string(), template.clone())].into_iter().collect(),
-    )
-    .unwrap();
+    let mut frame = chelis_ir::eval::RandomFrame::inherited(seed as u64, 0);
+    let values =
+        chelis_ir::eval::eval_tensor_roots_with_frame(&legacy, legacy.roots(), &mut frame, |_| {
+            Some(template.clone())
+        })
+        .unwrap();
+    let next = frame.inherited_counter().expect("an inherited frame");
+    assert!(next > 0, "the draw keys consumed no ordinal");
     let legacy_bits = bits(&values[&legacy.roots()[0]]);
     let mut context =
         chelis_ir::evaluation::RandomExecutionContext::new(chelis_ir::host::RandomLoweringState {

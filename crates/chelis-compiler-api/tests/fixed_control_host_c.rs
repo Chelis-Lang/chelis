@@ -161,13 +161,19 @@ result = with seed(42i64) {
 }
 
 #[test]
-fn concrete_wrappers_do_not_admit_runtime_controls_or_gpu_dropout() {
+fn concrete_wrappers_admit_runtime_rates_but_not_runtime_seeds_or_gpu_dropout() {
+    // [05-OP-37]: a runtime rate is an ordinary operand the C draw validates
+    // at execution (chelis#2411).
+    compile_for_execution(CompileRequest {
+        source_kind: SourceKind::Surf,
+        source: "def keep[p: Float](x: tensor[4,p], rate: p) -> tensor[4,p] = dropout(x, rate)\n\
+                 def run(x: tensor[4,f32], rate: f32) -> tensor[4,f32] = with seed(42i64) { keep(x, rate) }"
+            .into(),
+        target: CompileTarget::C,
+        entry_name: Some("run".into()),
+    })
+    .unwrap_or_else(|error| panic!("a runtime dropout rate compiles for C: {error:?}"));
     let cases = [
-        (
-            CompileTarget::C,
-            "def keep[p: Float](x: tensor[4,p], rate: p) -> tensor[4,p] = dropout(x, rate)\n\
-             def run(x: tensor[4,f32], rate: f32) -> tensor[4,f32] = with seed(42i64) { keep(x, rate) }",
-        ),
         (
             CompileTarget::C,
             "def keep(x: tensor[4,f32], seed: i64) -> tensor[4,f32] = with seed(seed) { dropout(x, 0.5f32) }\n\

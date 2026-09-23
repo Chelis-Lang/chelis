@@ -322,28 +322,27 @@ fn integer_target_cast_bound_is_rejected_by_the_checker_before_the_fold() {
     );
 }
 
-/// NEGATIVE PARITY (chelis#776): a genuinely runtime-computed bound is the
-/// checker's reject case and must stay rejected in both lanes.
+/// chelis#2411/#2413: a runtime-computed bound is an ordinary [05-OP-8] scalar
+/// operand. Both lanes draw from its computed value, bit for bit.
 #[test]
-fn runtime_computed_bound_is_still_rejected() {
+fn runtime_computed_bound_samples_in_both_lanes() {
     let program = "lo = cast(0.3, f32)\n\
                    template = to_tensor([cast(0.5, f32), cast(0.5, f32), \
                    cast(0.5, f32), cast(0.5, f32)])\n\
                    sampled = with seed(42i64) \
                    { uniform_like(copy(template), cast(lo, f32), 0.9f32) }\n";
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("runtime_bound.ch");
-    write_file(&path, program);
-    let out = Command::cargo_bin("chelis")
-        .expect("binary")
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["eval", "--file", path.to_str().unwrap()])
-        .output()
-        .expect("chelis eval should run");
+    let eval = eval_sampled(program);
+    let low = f64::from(0.3f32);
     assert!(
-        !out.status.success(),
-        "a runtime-computed bound must stay rejected (chelis#776)",
+        eval.iter().all(|sample| (low..0.9).contains(sample)),
+        "{eval:?}"
     );
+    if !gcc_available() {
+        eprintln!("skipping the C lane: no host C compiler");
+        return;
+    }
+    let c = c_sampled(program, "runtime_bound");
+    assert_f32_bit_parity(&eval, &c, "runtime bound");
 }
 
 /// REGRESSION, chelis#2316 round 2: a literal carrying an explicit narrower
