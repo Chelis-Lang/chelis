@@ -2110,7 +2110,7 @@
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_preplanned",
-      "sample": "static inline float chelis_uniform_sample_f32(uint64_t seed, uint64_t index, float low, float hig..."
+      "sample": "static inline uint64_t chelis_random_mix(uint64_t value) {"
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_realize",
@@ -2182,7 +2182,7 @@
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_uniform_like",
-      "sample": "uint64_t t{id}_seed = __chelis_draw_seed_{draw} ^ (__chelis_draw_ordinal_{draw} * 0x9E3779B97F4A7..."
+      "sample": "uint64_t t{id}_key = chelis_random_key(__chelis_draw_seed_{draw}, __chelis_draw_ordinal_{draw});"
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::integer_abs_expr",
@@ -2202,7 +2202,7 @@
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=FIXED_DROPOUT_HELPERS",
-      "sample": "static inline uint64_t chelis_dropout_mix(uint64_t value) {"
+      "sample": "static inline double chelis_dropout_unit(uint64_t seed, uint64_t ordinal, uint64_t index) {"
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_abi.rs|owner=HostAbiType::c_type_name",
@@ -2214,7 +2214,7 @@
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_abi_tests.rs|owner=fixed_control_host_helper_uses_the_active_invocation_rng",
-      "sample": "static inline uint64_t chelis_dropout_mix"
+      "sample": "static inline uint64_t chelis_random_mix"
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_abi_tests.rs|owner=supported_concrete_types_map_to_exact_c_host_abis",
@@ -2322,7 +2322,7 @@
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=append_uniform_sample_helper",
-      "sample": "static inline float chelis_uniform_sample_f32(uint64_t seed, uint64_t index, float low, float hig..."
+      "sample": "static inline uint64_t chelis_random_mix(uint64_t value) {"
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=cast_float_as_double",
@@ -2762,7 +2762,7 @@
     },
     {
       "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/lower.rs|owner=LowerCtx < 'program >::lower_builtin_app",
-      "sample": "self . random_counter . wrapping_mul (0x9E37_79B9_7F4A_7C15)"
+      "sample": "self . random_counter . saturating_add (1)"
     },
     {
       "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/lower.rs|owner=LowerCtx < 'program >::lower_plain_callable_app",
@@ -3010,7 +3010,7 @@
     },
     {
       "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/eval.rs|owner=eval_tensor_internal_with_result_claims",
-      "sample": "path_random_counter . wrapping_mul (0x9E37_79B9_7F4A_7C15)"
+      "sample": "path_random_counter . saturating_add (1)"
     }
   ]
 }

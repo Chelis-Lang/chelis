@@ -9,23 +9,25 @@ def seeded(x: tensor[2, f32]) -> tensor[2, f32] = with seed(42i64) { draw(x) }
 def other(x: tensor[2, f32]) -> tensor[2, f32] = with seed(4294967295i64) { draw(x) }
 "#;
 
-// Deliberately observe the legacy sampler. Changing storage does not authorize
-// changing its seed formula or substituting the fixed-control evaluator stream.
+// [05-RNG-1] and [05-OP-8] transcribed from the spec text. Over [0, 1) the
+// fused multiply-add stores the unit value rounded to the element dtype.
 fn bits(seed: u64, ordinal: u64) -> String {
     stored_bits("f32", seed, ordinal)
+}
+
+fn splitmix64(mut word: u64) -> u64 {
+    word = word.wrapping_add(0x9E3779B97F4A7C15);
+    word = (word ^ (word >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+    word = (word ^ (word >> 27)).wrapping_mul(0x94D049BB133111EB);
+    word ^ (word >> 31)
 }
 
 fn stored_bits(dtype: &str, seed: u64, ordinal: u64) -> String {
     (0..2_u64)
         .map(|index| {
-            let mut word = seed
-                ^ ordinal.wrapping_mul(0x9E3779B97F4A7C15)
-                ^ index.wrapping_mul(0x9E3779B97F4A7C15);
-            word ^= word >> 30;
-            word = word.wrapping_mul(0xBF58476D1CE4E5B9);
-            word ^= word >> 27;
-            word = word.wrapping_mul(0x94D049BB133111EB);
-            word ^= word >> 31;
+            let word = splitmix64(
+                seed ^ splitmix64(ordinal).rotate_left(17) ^ splitmix64(index).rotate_left(41),
+            );
             let unit = (word >> 11) as f64 / (1_u64 << 53) as f64;
             let raw = match dtype {
                 "f64" => unit.to_bits(),

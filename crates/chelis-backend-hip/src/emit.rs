@@ -3007,7 +3007,7 @@ impl HipEmitter {
         id: usize,
         low: f64,
         high: f64,
-        seed: u64,
+        key: u64,
         ty: &TensorType,
     ) -> Result<(), Unsupported> {
         self.emit_slot_wrapper(id, ty);
@@ -3040,7 +3040,7 @@ impl HipEmitter {
                 ));
             }
         }
-        self.line(&format!("unsigned long long t{id}_seed = {seed}ULL;"));
+        self.line(&format!("unsigned long long t{id}_key = {key}ULL;"));
         self.line(&format!(
             "chelis_device_metadata t{id}_size = d_t{id}->count;"
         ));
@@ -3049,7 +3049,7 @@ impl HipEmitter {
             "chelis_device_metadata t{id}_out_ndim = d_t{id}->rank;"
         ));
         self.line(&format!(
-            "void *args[] = {{ &t{id}_low, &t{id}_high, &t{id}_seed, &p_t{id}, {out_shape_refs}, &t{id}_out_ndim, &t{id}_size }};",
+            "void *args[] = {{ &t{id}_low, &t{id}_high, &t{id}_key, &p_t{id}, {out_shape_refs}, &t{id}_out_ndim, &t{id}_size }};",
             out_shape_refs = self.shape_arg_refs(id, "out"),
         ));
         self.emit_kernel_launch_expr(

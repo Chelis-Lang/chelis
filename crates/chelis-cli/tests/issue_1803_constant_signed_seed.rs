@@ -32,17 +32,20 @@ fn mix64(mut value: u64) -> u64 {
     value ^ (value >> 31)
 }
 
-// Pin the existing uniform stream, including the next call ordinal. This
-// admission repair does not replace uniform's legacy source-word algorithm
-// with the canonical Dropout stream defined by [05-RNG-1].
+fn splitmix64(value: u64) -> u64 {
+    mix64(value.wrapping_add(0x9e3779b97f4a7c15))
+}
+
+// Pin the [05-RNG-1] uniform stream over [0, 1), including the next call
+// ordinal: the stored value is the unit value rounded to the dtype.
 fn expected(seed: i64, narrow: bool) -> Vec<u64> {
     (0u64..2)
         .flat_map(|ordinal| {
             (0u64..8).map(move |index| {
-                let word = mix64(
+                let word = splitmix64(
                     seed as u64
-                        ^ ordinal.wrapping_mul(0x9e3779b97f4a7c15)
-                        ^ index.wrapping_mul(0x9e3779b97f4a7c15),
+                        ^ splitmix64(ordinal).rotate_left(17)
+                        ^ splitmix64(index).rotate_left(41),
                 );
                 bits((word >> 11) as f64 / 9_007_199_254_740_992.0, narrow)
             })
@@ -194,7 +197,7 @@ fn shadowed_neg_cannot_substitute_a_constant_for_a_runtime_seed() {
 #[test]
 fn signed_seed_dropout_evaluator_preserves_canonical_masks_and_next_draw() {
     use chelis_compiler_api::schema::{EvalResult, ExecutionValue};
-    let splitmix = |value: u64| mix64(value.wrapping_add(0x9e3779b97f4a7c15));
+    let splitmix = splitmix64;
     for seed in [-1i64, i64::MIN, i64::MAX] {
         let dir = tempdir().unwrap();
         let surf = dir.path().join("dropout.ch");

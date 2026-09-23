@@ -26,7 +26,8 @@
 //!   `(handle-effect {effect: name} arg body)` — exactly two children. A third
 //!   child is structurally malformed ([04-TOT-3]); Phase 1 rejects `!= 2`.
 //! * `baked_seed_deterministic`: PR #793 moved the cli.rs expectation to a
-//!   baked `CHELIS_EFFECTIVE_UNIFORM_SEED(7ULL)`; the generated C and its
+//!   baked `CHELIS_EFFECTIVE_UNIFORM_KEY(...)` operand (a seed before
+//!   chelis#2408, the [05-RNG-1] draw key since); the generated C and its
 //!   runtime output must be run-to-run deterministic and eval-bit-identical.
 
 #![allow(clippy::uninlined_format_args)]
@@ -284,13 +285,17 @@ fn redteam_negative_dp_seed_not_silently_dropped() {
     let dir = tempdir().expect("tempdir");
     let out_dir = dir.path().join("negseed-out");
     let c_src = build_c(NEGATIVE_SEED_DP, ".dp", "negseed", &out_dir);
+    // Ordinal 0's [05-RNG-1] draw key under seed bits 0, the default stream:
+    // `0 ^ rotl64(splitmix64(0), 17)`, where `splitmix64(0)` is the standard
+    // SplitMix64 constant 0xe220a8397b1dcdaf.
+    let default_key = 0xe220_a839_7b1d_cdaf_u64.rotate_left(17);
     assert!(
-        !c_src.contains("CHELIS_EFFECTIVE_UNIFORM_SEED(0ULL"),
+        !c_src.contains(&format!("CHELIS_EFFECTIVE_UNIFORM_KEY({default_key}ULL")),
         "checker-accepted seed -1 must not silently bake the seed-0/default \
          stream into C; generated:\n{}",
         c_src
             .lines()
-            .filter(|l| l.contains("EFFECTIVE_UNIFORM_SEED"))
+            .filter(|l| l.contains("EFFECTIVE_UNIFORM_KEY"))
             .collect::<Vec<_>>()
             .join("\n")
     );

@@ -181,8 +181,11 @@ fn actuals_run_once_in_primal_order_before_written_wrt_result_order() {
 }
 
 const DRAW: &str = "uniform_like(to_tensor([0.0f32, 0.0f32]), 0.0f32, 1.0f32)";
-const INITIALIZED: [&str; 2] = ["3e40ae19", "3f5a27eb"];
-const PARENT_FIRST: [&str; 2] = ["3f2759ea", "3f3dd732"];
+// [05-RNG-1]/[05-OP-8] over [0, 1) at f32, ordinal 0: seed 17 for the
+// declaration's initializer and seed 42 for the parent's draw
+// (`rng_ref.py uniform SEED 0 2 0 1 f32`).
+const INITIALIZED: [&str; 2] = ["3f3ab37e", "3ed865f8"];
+const PARENT_FIRST: [&str; 2] = ["3e1caae7", "3f127a5d"];
 
 fn initialized_loss(failing: bool) -> String {
     let tail = if failing {

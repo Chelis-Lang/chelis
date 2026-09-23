@@ -13454,7 +13454,7 @@ impl<'program> LowerCtx<'program> {
                             // A path-sensitive DAG has two owners. Eval lowering
                             // carries the handler's concrete seed here. Compiled-C
                             // helper lowering cannot bake that runtime value, and
-                            // `CHELIS_EFFECTIVE_UNIFORM_SEED` deliberately ignores
+                            // `CHELIS_EFFECTIVE_UNIFORM_KEY` deliberately ignores
                             // this operand whenever the activation is true. Keep
                             // the neutral placeholder explicit instead of hiding
                             // it behind an Option fallback.
@@ -13465,10 +13465,15 @@ impl<'program> LowerCtx<'program> {
                             (seed, Some(activation))
                         }
                         None => {
-                            let seed = self.random_seed.unwrap_or(0)
-                                ^ self.random_counter.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                            // An ungated legacy draw's ordinal is fixed here,
+                            // so the node carries its [05-RNG-1] draw key
+                            // rather than the handler seed (chelis#2408).
+                            let key = chelis_types::random_draw_key(
+                                self.random_seed.unwrap_or(0),
+                                self.random_counter,
+                            );
                             self.random_counter = self.random_counter.saturating_add(1);
-                            (seed, None)
+                            (key, None)
                         }
                     }
                 };
@@ -24376,8 +24381,11 @@ mod tests {
                 _ => None,
             })
             .expect("handled body contains a uniform_like node");
+        // The ungated legacy node carries ordinal 0's [05-RNG-1] draw key,
+        // `seed_bits ^ rotl64(splitmix64(0), 17)`; `splitmix64(0)` is the
+        // standard SplitMix64 constant 0xe220a8397b1dcdaf.
         assert_eq!(
-            seed,
+            seed ^ 0xe220_a839_7b1d_cdaf_u64.rotate_left(17),
             u64::MAX,
             "[05-RNG-1] reinterprets -1i64 as its uint64 two's-complement bits"
         );

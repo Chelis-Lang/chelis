@@ -104,7 +104,9 @@ fn assert_sample(result: &EvalResult, sum: &str) {
         result,
         &[
             ("main.0", tagged(&[], "f32", &[sum])),
-            ("main.1", tagged(&[2], "f32", &["3e68de41", "3f38fdad"])),
+            // [05-RNG-1]/[05-OP-8] for seed 42, ordinal 5 (after five
+            // discarded draws), [0, 1), f32: `rng_ref.py uniform 42 5 2 0 1 f32`.
+            ("main.1", tagged(&[2], "f32", &["3f5b1b74", "3daedee7"])),
         ],
         &["entry"],
     );

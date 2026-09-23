@@ -86,7 +86,7 @@ fn assert_values(formal: bool, body: &str, captured_bits: &str, transcript: &[&s
         }
         expected.push((
             format!("{entry}.1"),
-            tensor(&[2], &["3e68de41", "3f38fdad"]),
+            tensor(&[2], &["3f5b1b74", "3daedee7"]),
         ));
     }
     let roots = result["roots"].as_array().unwrap();

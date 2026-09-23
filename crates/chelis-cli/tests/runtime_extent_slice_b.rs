@@ -3141,7 +3141,9 @@ const UNIFORM_OVER_EXPORTED_STRIDE: &str = "module Repro.UniformExportedStride\n
 
 /// Build, link, run and evaluate one nullary-kernel program, and assert that
 /// both lanes print `expected` and that no synthesized `d<N>` name survives
-/// into the emitted C.
+/// into the emitted C. The expected data are the [05-RNG-1]/[05-OP-8] draws
+/// for seed 42 (ordinal 0, and ordinal 1 for the second `noise`) through the
+/// programs' f32 additions, evaluated with exact rationals (chelis#2408).
 fn assert_nullary_kernel_lanes_agree(stem: &str, source: &str, expected: &str) {
     let dir = tempfile::tempdir().expect("tempdir");
     let (ok, out) = eval_result(&dir, &format!("{stem}_eval.ch"), source);
@@ -3177,7 +3179,7 @@ fn issue_1556_uniform_over_an_inlined_parameter_builds_and_runs() {
     assert_nullary_kernel_lanes_agree(
         "uniform_inline",
         UNIFORM_OVER_INLINED_PARAMETER,
-        "data=[4.3952804, 4.3952804, 4.5689626]",
+        "data=[4.0660806, 3.811798, 3.626719]",
     );
 }
 
@@ -3187,7 +3189,7 @@ fn a_nullary_kernel_whose_inlined_parameter_is_sized_by_a_stride_builds_and_runs
     assert_nullary_kernel_lanes_agree(
         "uniform_inline_stride",
         UNIFORM_OVER_INLINED_STRIDE,
-        "data=[1.6537157, 1.7415649, 1.849176]",
+        "data=[1.1529957, 1.5721796, 1.1494875]",
     );
 }
 
@@ -3197,7 +3199,7 @@ fn an_exported_stride_under_an_inlined_uniform_parameter_builds_and_runs() {
     assert_nullary_kernel_lanes_agree(
         "uniform_exported_stride",
         UNIFORM_OVER_EXPORTED_STRIDE,
-        "data=[1.6537157, 3.7415648, 5.849176]",
+        "data=[1.1529957, 3.5721796, 5.1494875]",
     );
 }
 

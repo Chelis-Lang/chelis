@@ -3277,9 +3277,10 @@ impl<'a> PreparedDropout<'a> {
         let wide_rate = self.parameters.rate().as_f64_lossy();
         let zero = cast_raw("dropout", RawScalar::Int(0), prim)?;
         let denominator = self.parameters.denominator()?;
+        let key = random_draw_key(seed, ordinal);
         let mut output = Vec::with_capacity(self.input.len());
         for index in 0..self.input.len() {
-            let exact_unit = dropout_random_unit(seed, ordinal, index as u64);
+            let exact_unit = random_unit(key, index as u64);
             let arithmetic_unit = if prim == Prim::F64 {
                 exact_unit
             } else {
@@ -3295,22 +3296,44 @@ impl<'a> PreparedDropout<'a> {
     }
 }
 
-fn dropout_splitmix64(mut value: u64) -> u64 {
+// [05-RNG-1]'s `splitmix64`: add the golden gamma, xor-shift 30 and
+// multiply, xor-shift 27 and multiply, then xor-shift 31, all modulo 2^64.
+fn random_splitmix64(mut value: u64) -> u64 {
     value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
     value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
     value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
     value ^ (value >> 31)
 }
 
-fn dropout_random_unit(seed: u64, ordinal: u64, index: u64) -> f64 {
-    let word = dropout_splitmix64(
-        seed ^ dropout_splitmix64(ordinal).rotate_left(17)
-            ^ dropout_splitmix64(index).rotate_left(41),
-    );
-    ((word >> 11) as f64) / ((1u64 << 53) as f64)
+/// The counter stream's key for one entered random primitive:
+/// `seed_bits XOR rotl64(splitmix64(ordinal), 17)`, where `seed_bits` is the
+/// handled i64 seed's two's-complement bits and `ordinal` is the zero-based
+/// call ordinal of `[05-RNG-1]`.
+///
+/// This and [`random_word`] are the one kernel boundary of the Random effect
+/// (chelis#2408): every Rust lane derives a draw's element words from its key
+/// here, and the emitted C and HIP samplers are ports of the same two
+/// functions. A key is all a sampler knows about the stream it draws from.
+pub fn random_draw_key(seed_bits: u64, ordinal: u64) -> u64 {
+    seed_bits ^ random_splitmix64(ordinal).rotate_left(17)
 }
 
-/// Deterministic `[05-OP-8]` sample at the requested float width.
+/// `[05-RNG-1]`'s source word for flat element `index` of the draw keyed by
+/// `key`: `splitmix64(key XOR rotl64(splitmix64(index), 41))`. XOR is
+/// associative, so with `key` from [`random_draw_key`] this is the atom's
+/// `splitmix64(seed_bits ^ rotl64(splitmix64(c),17) ^ rotl64(splitmix64(i),41))`.
+fn random_word(key: u64, index: u64) -> u64 {
+    random_splitmix64(key ^ random_splitmix64(index).rotate_left(41))
+}
+
+/// `[05-RNG-1]`'s unit value: the word's high 53 bits over `2^53`, which f64
+/// represents exactly.
+fn random_unit(key: u64, index: u64) -> f64 {
+    ((random_word(key, index) >> 11) as f64) / ((1u64 << 53) as f64)
+}
+
+/// Deterministic `[05-OP-8]` sample of flat element `index` of the draw keyed
+/// by `key` (see [`random_draw_key`]), at the requested float width.
 ///
 /// The bounds already carry their required f32 dtype. f64 computes the
 /// affine transform in f64 from the exact f32 images; f32 computes it at
@@ -3319,7 +3342,7 @@ pub fn uniform_sample(
     prim: Prim,
     low: f32,
     high: f32,
-    seed: u64,
+    key: u64,
     index: u64,
 ) -> Result<ScalarValue, NumericKernelError> {
     if !prim.is_float() {
@@ -3329,13 +3352,7 @@ pub fn uniform_sample(
             actual: prim,
         });
     }
-    let mut x = seed ^ index.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    x ^= x >> 30;
-    x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    x ^= x >> 27;
-    x = x.wrapping_mul(0x94D0_49BB_1331_11EB);
-    x ^= x >> 31;
-    let unit = ((x >> 11) as f64) / ((1u64 << 53) as f64);
+    let unit = random_unit(key, index);
     let value = if prim == Prim::F64 {
         (f64::from(high) - f64::from(low)).mul_add(unit, f64::from(low))
     } else {
@@ -3782,6 +3799,7 @@ pub fn tensor_from_scalars(prim: Prim, values: &[ScalarValue]) -> TensorStorage 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     fn fin(prim: Prim, x: f64) -> Result<ScalarValue, NumericTrap> {
         finalize_scalar("test_op", prim, RawScalar::Float(x))
@@ -3906,12 +3924,10 @@ mod tests {
     fn prepared_dropout_rounds_the_unit_before_comparing_and_finalizes_division() {
         let rate = f32::from_bits(0x3e1c_aae7);
         assert_eq!(
-            dropout_splitmix64(
-                42 ^ dropout_splitmix64(0).rotate_left(17) ^ dropout_splitmix64(0).rotate_left(41)
-            ),
+            random_word(random_draw_key(42, 0), 0),
             0x272a_b9a7_3115_2a2c
         );
-        let unit = dropout_random_unit(42, 0, 0);
+        let unit = random_unit(random_draw_key(42, 0), 0);
         assert_eq!((unit as f32).to_bits(), rate.to_bits());
         assert!(
             unit < f64::from(rate),
@@ -3968,11 +3984,87 @@ mod tests {
         }
     }
 
+    // [05-RNG-1] transcribed from the spec text for the kernel tests below.
+    fn spec_unit(seed_bits: u64, ordinal: u64, index: u64) -> f64 {
+        fn splitmix64(x: u64) -> u64 {
+            let mut z = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+        let word = splitmix64(
+            seed_bits ^ splitmix64(ordinal).rotate_left(17) ^ splitmix64(index).rotate_left(41),
+        );
+        (word >> 11) as f64 / (1_u64 << 53) as f64
+    }
+
+    #[test]
+    fn the_draw_key_and_word_are_the_05_rng_1_word() {
+        for seed_bits in [0, 42, (-1_i64) as u64, i64::MIN as u64] {
+            for ordinal in [0, 1, 2, 17, u64::MAX] {
+                let key = random_draw_key(seed_bits, ordinal);
+                for index in [0, 1, 5, 1 << 40, u64::MAX] {
+                    assert_eq!(
+                        random_unit(key, index).to_bits(),
+                        spec_unit(seed_bits, ordinal, index).to_bits(),
+                        "seed {seed_bits:#x} ordinal {ordinal} index {index}"
+                    );
+                }
+            }
+        }
+    }
+
+    // chelis#2408: the retired mixing computed `seed ^ c*G ^ i*G`, so element i
+    // of draw c equalled element c of draw i, and every diagonal element was
+    // the same seed-only value.
+    #[test]
+    fn draw_c_element_i_is_not_draw_i_element_c() {
+        const N: u64 = 32;
+        for seed_bits in [42, (-1_i64) as u64] {
+            let unit = |c: u64, i: u64| random_unit(random_draw_key(seed_bits, c), i).to_bits();
+            for c in 0..N {
+                for i in (c + 1)..N {
+                    assert_ne!(unit(c, i), unit(i, c), "seed {seed_bits:#x} ({c}, {i})");
+                }
+            }
+            let diagonal = (0..N).map(|c| unit(c, c)).collect::<BTreeSet<_>>();
+            assert_eq!(diagonal.len(), N as usize, "seed {seed_bits:#x}");
+        }
+    }
+
+    #[test]
+    fn uniform_sampler_is_the_05_op_8_affine_of_the_spec_unit() {
+        for (seed_bits, ordinal) in [(42, 0), ((-1_i64) as u64, 3)] {
+            let key = random_draw_key(seed_bits, ordinal);
+            for (low, high) in [(2.0f32, 5.0f32), (-1.0, 3.0), (0.0, 1.0)] {
+                for index in 0..16 {
+                    let unit = spec_unit(seed_bits, ordinal, index);
+                    let narrow = (high - low).mul_add(unit as f32, low);
+                    let wide = (f64::from(high) - f64::from(low)).mul_add(unit, f64::from(low));
+                    for (prim, expected) in [
+                        (Prim::F64, wide),
+                        (Prim::F32, f64::from(narrow)),
+                        (Prim::F16, f64::from(half::f16::from_f32(narrow))),
+                        (Prim::Bf16, f64::from(half::bf16::from_f32(narrow))),
+                    ] {
+                        let value = uniform_sample(prim, low, high, key, index).unwrap();
+                        assert_eq!(value.prim(), prim);
+                        assert_eq!(
+                            value.as_f64_lossy().to_bits(),
+                            expected.to_bits(),
+                            "{prim:?} [{low}, {high}) seed {seed_bits:#x} ordinal {ordinal} index {index}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn uniform_sampler_dispatches_at_the_output_dtype_width() {
         let low = 2.0f32;
         let high = 7.0f32;
-        let seed = 42;
+        let seed = random_draw_key(42, 0);
         let index = 4;
         let f32_value = uniform_sample(Prim::F32, low, high, seed, index).unwrap();
         let f64_value = uniform_sample(Prim::F64, low, high, seed, index).unwrap();

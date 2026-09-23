@@ -1862,7 +1862,7 @@ fn staged_sources_preserve_handled_random_progress() {
                 let expected = if n == 2 {
                     // Reference the numeric sampler directly, independently of
                     // either compiler lane's staging, seed and draw scheduling.
-                    let effective_seed = seed ^ draw.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                    let key = chelis_types::random_draw_key(seed, draw);
                     Expected::TensorF32Bits(
                         vec![2, 2],
                         (0..4)
@@ -1871,7 +1871,7 @@ fn staged_sources_preserve_handled_random_progress() {
                                     chelis_types::types::Prim::F32,
                                     2.0,
                                     5.0,
-                                    effective_seed,
+                                    key,
                                     index,
                                 )
                                 .unwrap()

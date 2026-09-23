@@ -3159,28 +3159,19 @@ pub(super) fn builtin_name(expr: &Expr) -> Option<&str> {
     BUILTIN_NAMES.contains(&name).then_some(name)
 }
 
-#[cfg(test)]
-fn dropout_sample(seed: u64, index: u64) -> f64 {
-    let mut x = seed ^ index.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    x ^= x >> 30;
-    x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    x ^= x >> 27;
-    x = x.wrapping_mul(0x94D0_49BB_1331_11EB);
-    x ^= x >> 31;
-    ((x >> 11) as f64) / ((1u64 << 53) as f64)
-}
-
+/// Fill `template`'s shape and dtype with the `[05-OP-8]` draw keyed by `key`
+/// (`chelis_types::random_draw_key`).
 pub(super) fn uniform_like_value(
     template: &RuntimeTensorValue,
     low: f64,
     high: f64,
-    seed: u64,
+    key: u64,
 ) -> RuntimeTensorValue {
     let low = low as f32;
     let high = high as f32;
     let values = (0..template.value.len())
         .map(|index| {
-            uniform_sample(template.precision, low, high, seed, index as u64)
+            uniform_sample(template.precision, low, high, key, index as u64)
                 .expect("uniform_like checker admits only active float dtypes")
         })
         .collect::<Vec<_>>();
@@ -3193,12 +3184,30 @@ pub(super) fn uniform_like_value(
 #[cfg(test)]
 mod uniform_like_affine_tests {
     //! chelis#770/#937: `uniform_like_value` routes through the shared
-    //! per-dtype sampler used by the IR evaluator. These pin the exact
-    //! widened-f32 output at seed=42 / shape=[8] and the 1-ULP gap the old
-    //! f64 affine left at elem[4] of [2,5), plus a negative range (unit-level
-    //! only: the C cross-lane path can't be driven with a bare negative
-    //! literal, a separate lowering gap).
+    //! per-dtype sampler used by the IR evaluator. These pin the draw for seed
+    //! 42 and ordinal 0 over shape [8], at elements where the single-rounding
+    //! f32 FMA differs from the old f64 affine and from a two-rounding f32
+    //! affine, plus a negative range. The pinned bits are exact-rational
+    //! evaluations of [05-RNG-1] and [05-OP-8] from the spec text
+    //! (`rng_ref.py uniform 42 0 8 2 5 f32`, chelis#2408).
     use super::*;
+
+    // [05-RNG-1] transcribed from the spec text, never the kernel.
+    fn splitmix64(x: u64) -> u64 {
+        let mut z = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    fn key(seed: u64, ordinal: u64) -> u64 {
+        seed ^ splitmix64(ordinal).rotate_left(17)
+    }
+
+    fn unit(seed: u64, ordinal: u64, index: u64) -> f64 {
+        let word = splitmix64(key(seed, ordinal) ^ splitmix64(index).rotate_left(41));
+        (word >> 11) as f64 / (1_u64 << 53) as f64
+    }
 
     fn template_f32(n: usize) -> RuntimeTensorValue {
         RuntimeTensorValue::from_wide("test", Prim::F32, vec![n], vec![0.0; n])
@@ -3210,66 +3219,39 @@ mod uniform_like_affine_tests {
             .expect("zero template finalizes at f64")
     }
 
+    fn f32_bits(out: &RuntimeTensorValue, index: usize) -> u32 {
+        (out.value.to_f64_lossy_vec()[index] as f32).to_bits()
+    }
+
     #[test]
     fn affine_mirrors_c_f32_sampler_positive_range() {
-        let out = uniform_like_value(&template_f32(8), 2.0, 5.0, 42);
-        // Single correctly-rounded FMA, conforming to the compiled C sampler.
-        // elem[4]: where the pre-#770 f64 affine rounded to the adjacent f32
-        // (0x404215a9) instead of the sampler's 0x404215aa.
-        assert_eq!(
-            out.value.to_f64_lossy_vec()[4].to_bits(),
-            (f32::from_bits(0x404215aa) as f64).to_bits(),
-            "elem[4] must be the C f32 sampler value (0x404215aa), got {} (f32 bits {:#010x})",
-            out.value.to_f64_lossy_vec()[4],
-            (out.value.to_f64_lossy_vec()[4] as f32).to_bits(),
-        );
-        let old_f64_affine = 2.0 + (5.0 - 2.0) * dropout_sample(42, 4);
-        assert_eq!((old_f64_affine as f32).to_bits(), 0x404215a9);
-        assert_ne!(
-            (out.value.to_f64_lossy_vec()[4] as f32).to_bits(),
-            (old_f64_affine as f32).to_bits(),
-            "the fix must not reproduce the old f64-affine rounding",
-        );
-        // elem[6]/[7]: where a single-rounding FMA and a plain two-rounding
-        // affine disagree by 1 ULP — the exact bit the compiled C lane flips
-        // between `-ffp-contract=fast` (FMA, 0x408f5273) and `=off` (two
-        // roundings, 0x408f5274). Pin the FMA values; show two-rounding differs.
-        assert_eq!(
-            out.value.to_f64_lossy_vec()[6].to_bits(),
-            (f32::from_bits(0x408f5273) as f64).to_bits(),
-            "elem[6] must be the single-rounding FMA value (0x408f5273)",
-        );
-        assert_eq!(
-            out.value.to_f64_lossy_vec()[7].to_bits(),
-            (f32::from_bits(0x403ec1e7) as f64).to_bits(),
-            "elem[7] must be the single-rounding FMA value (0x403ec1e7)",
-        );
-        let unit6 = dropout_sample(42, 6) as f32;
-        let two_rounding_6 = 2.0f32 + (5.0f32 - 2.0f32) * unit6;
-        assert_eq!(two_rounding_6.to_bits(), 0x408f5274);
-        assert_ne!(
-            (out.value.to_f64_lossy_vec()[6] as f32).to_bits(),
-            two_rounding_6.to_bits(),
-        );
+        let out = uniform_like_value(&template_f32(8), 2.0, 5.0, key(42, 0));
+        // elem[6]: the single-rounding FMA gives 0x40683468 where the old f64
+        // affine rounded to the adjacent f32.
+        assert_eq!(f32_bits(&out, 6), 0x4068_3468);
+        let old_f64_affine = 2.0 + (5.0 - 2.0) * unit(42, 0, 6);
+        assert_eq!((old_f64_affine as f32).to_bits(), 0x4068_3467);
+        // elem[2]: a plain two-rounding `low + span * unit` differs by 1 ULP,
+        // the bit the compiled C lane would flip between `-ffp-contract=fast`
+        // and `=off` without its explicit `fmaf`.
+        assert_eq!(f32_bits(&out, 2), 0x401c_b39d);
+        let two_rounding_2 = 2.0f32 + (5.0f32 - 2.0f32) * (unit(42, 0, 2) as f32);
+        assert_eq!(two_rounding_2.to_bits(), 0x401c_b39c);
+        assert_eq!(f32_bits(&out, 7), 0x401b_f5fc);
     }
 
     #[test]
     fn affine_is_f32_for_negative_range() {
-        let out = uniform_like_value(&template_f32(8), -3.0, -1.0, 42);
-        assert_eq!(
-            out.value.to_f64_lossy_vec()[3].to_bits(),
-            (f32::from_bits(0xc010167a) as f64).to_bits(),
-            "elem[3] must be the C f32 sampler value for [-3,-1) (0xc010167a)",
-        );
+        let out = uniform_like_value(&template_f32(8), -3.0, -1.0, key(42, 0));
+        assert_eq!(f32_bits(&out, 3), 0xc03b_a886);
     }
 
     #[test]
     fn affine_uses_f64_storage_and_f64_arithmetic_for_f64_template() {
-        let out = uniform_like_value(&template_f64(8), 2.0, 5.0, 42);
+        let out = uniform_like_value(&template_f64(8), 2.0, 5.0, key(42, 0));
         assert_eq!(out.precision, Prim::F64);
-        let expected = uniform_sample(Prim::F64, 2.0, 5.0, 42, 4)
-            .expect("f64 sample")
-            .as_f64_lossy();
+        let expected = (5.0f64 - 2.0).mul_add(unit(42, 0, 4), 2.0);
+        assert_eq!(expected.to_bits(), 0x4000_bff3_3038_5719);
         assert_eq!(out.value.element_f64_lossy(4).to_bits(), expected.to_bits());
         assert_ne!(
             out.value.element_f64_lossy(4).to_bits(),

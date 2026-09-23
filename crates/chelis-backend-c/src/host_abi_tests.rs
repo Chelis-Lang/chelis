@@ -327,12 +327,16 @@ result = with seed(42i64) {
             && c.contains("__chelis_rng->counter = __chelis_fixed_counter"),
         "the private helper must consume and commit its caller-owned stream:\n{c}"
     );
-    assert_eq!(
-        c.matches("static inline uint64_t chelis_dropout_mix")
-            .count(),
-        1,
-        "fixed-control sampler support is emitted once per translation unit"
-    );
+    for helper in [
+        "static inline uint64_t chelis_random_mix",
+        "static inline double chelis_dropout_unit(",
+    ] {
+        assert_eq!(
+            c.matches(helper).count(),
+            1,
+            "fixed-control sampler support is emitted once per translation unit: {helper}"
+        );
+    }
     #[cfg(not(feature = "native-random-observer"))]
     assert!(
         !c.contains("CHELIS_NATIVE_RANDOM_OBSERVER")

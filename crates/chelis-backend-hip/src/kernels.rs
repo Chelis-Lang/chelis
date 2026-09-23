@@ -163,27 +163,27 @@ __device__ chelis_u16 chelis_f32_to_f16(float value) {
 }
 ";
 
-/// Device-side helpers needed only by uniform random kernels.
+/// Device-side helpers needed only by uniform random kernels: the HIP port
+/// of `chelis_types::dtype_semantics`'s `[05-RNG-1]` word and `[05-OP-8]`
+/// samplers (chelis#2408). A sampler takes the draw key the lowering baked,
+/// never a seed.
 pub const NUMERIC_DEVICE_HELPERS: &str = "\
-__device__ float chelis_uniform_sample_f32(unsigned long long seed, unsigned long long index, float low, float high) {
-    unsigned long long x = seed ^ (index * 0x9E3779B97F4A7C15ULL);
-    x ^= x >> 30;
-    x *= 0xBF58476D1CE4E5B9ULL;
-    x ^= x >> 27;
-    x *= 0x94D049BB133111EBULL;
-    x ^= x >> 31;
-    double unit = (double)(x >> 11) / (double)(1ULL << 53);
-    return fmaf(high - low, (float)unit, low);
+__device__ unsigned long long chelis_random_mix(unsigned long long value) {
+    value += 0x9E3779B97F4A7C15ULL;
+    value = (value ^ (value >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    value = (value ^ (value >> 27)) * 0x94D049BB133111EBULL;
+    return value ^ (value >> 31);
 }
-__device__ double chelis_uniform_sample_f64(unsigned long long seed, unsigned long long index, double low, double high) {
-    unsigned long long x = seed ^ (index * 0x9E3779B97F4A7C15ULL);
-    x ^= x >> 30;
-    x *= 0xBF58476D1CE4E5B9ULL;
-    x ^= x >> 27;
-    x *= 0x94D049BB133111EBULL;
-    x ^= x >> 31;
-    double unit = (double)(x >> 11) / (double)(1ULL << 53);
-    return fma(high - low, unit, low);
+__device__ double chelis_random_unit(unsigned long long key, unsigned long long index) {
+    unsigned long long element = chelis_random_mix(index);
+    unsigned long long word = chelis_random_mix(key ^ ((element << 41) | (element >> 23)));
+    return (double)(word >> 11) / (double)(1ULL << 53);
+}
+__device__ float chelis_uniform_sample_f32(unsigned long long key, unsigned long long index, float low, float high) {
+    return fmaf(high - low, (float)chelis_random_unit(key, index), low);
+}
+__device__ double chelis_uniform_sample_f64(unsigned long long key, unsigned long long index, double low, double high) {
+    return fma(high - low, chelis_random_unit(key, index), low);
 }
 ";
 
@@ -1388,12 +1388,12 @@ pub fn uniform_like(rank: usize, kernel_name: &str, kind: ElemKind) -> String {
     format!(
         "{DEVICE_HELPERS}{NUMERIC_DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}(
-    {ty} low, {ty} high, unsigned long long seed,
+    {ty} low, {ty} high, unsigned long long key,
     {ty} *out, {out_shape}, chelis_device_metadata out_ndim, chelis_device_metadata out_size) {{
 {build_out_sh}
   chelis_device_metadata i = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= out_size) return;
-  out[i] = {sampler}(seed, (unsigned long long)i, low, high);
+  out[i] = {sampler}(key, (unsigned long long)i, low, high);
 }}
 ",
         out_shape = shape_params(rank, "out"),
@@ -2459,6 +2459,68 @@ extern \"C\" __global__ void {kernel_name}(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+    use chelis_ir::ownership::{lower_dag_ownership, verify_ownership};
+    use chelis_types::types::Prim;
+
+    // chelis#2408: the HIP device helpers are a port of the C backend's
+    // [05-RNG-1] word and [05-OP-8] samplers, which the CLI spec oracle holds
+    // to the spec bit for bit. Respelled with C's declaration words, every
+    // device helper must appear verbatim in the standalone C kernel prelude,
+    // so a changed rotation, multiplier or operation order fails here.
+    #[test]
+    fn random_device_helpers_are_the_c_backend_port() {
+        let mut dag = Dag::new();
+        let ty = TensorType {
+            dims: vec![DimInfo::Lit(2)],
+            precision: Prim::F32,
+        };
+        let template = dag.add_node(
+            RiscOp::Load {
+                name: "template".into(),
+            },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let draw = dag.add_node(
+            RiscOp::UniformLike {
+                low: 0.0,
+                high: 1.0,
+                seed: 7,
+            },
+            vec![template],
+            ty,
+            None,
+        );
+        dag.add_root(draw);
+        let options = chelis_backend_c::CodegenOptions::default();
+        let prepared = chelis_backend_c::prepare_dag_for_codegen(dag, options);
+        let verified = verify_ownership(lower_dag_ownership(prepared).expect("ownership lowers"))
+            .expect("uniform DAG verifies");
+        let c = chelis_backend_c::codegen_with_options(verified, "draw", options)
+            .expect("uniform DAG emits C")
+            .c_source;
+        let prelude = c
+            .split("/* CHELIS_UNIFORM_HELPERS_BEGIN */\n")
+            .nth(1)
+            .and_then(|rest| rest.split("/* CHELIS_UNIFORM_HELPERS_END */").next())
+            .expect("the C kernel carries the Random prelude");
+        let respelled = NUMERIC_DEVICE_HELPERS
+            .replace("__device__ ", "static inline ")
+            .replace("unsigned long long", "uint64_t");
+        let helpers = respelled
+            .split_inclusive("\n}\n")
+            .map(str::trim_end)
+            .collect::<Vec<_>>();
+        assert_eq!(helpers.len(), 4, "device helpers:\n{respelled}");
+        for helper in helpers {
+            assert!(
+                prelude.contains(helper),
+                "HIP helper differs from the C port:\n{helper}\nC prelude:\n{prelude}"
+            );
+        }
+    }
 
     #[test]
     fn reduced_float_conversions_emit_round_to_nearest_ties_to_even() {
