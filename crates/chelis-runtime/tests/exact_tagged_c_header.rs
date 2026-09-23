@@ -242,6 +242,9 @@ fn published_runtime_header_compiles_as_c11_and_cxx17() {
             .arg("-Wextra")
             .arg("-Werror")
             .arg("-pedantic-errors")
+            // The Nix compiler wrapper injects linker flags that
+            // `-fsyntax-only` never consumes; clang reports them as unused.
+            .arg("-Wno-unused-command-line-argument")
             .arg("-I")
             .arg(include_dir())
             .arg("-fsyntax-only")
