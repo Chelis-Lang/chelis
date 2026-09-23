@@ -25,17 +25,19 @@ env:
 
 jobs:
   # Devenv-backed jobs retain their execution budget plus 25 minutes for cold setup.
+  #
+  # Runs on main (the nightly schedule and dispatches on main) execute every job
+  # except test-telemetry on the self-hosted warm runners, which substitute from
+  # the private Nix/Kache caches instead of rebuilding from source. The warm
+  # broker admits each of these jobs only from refs/heads/main, so a dispatch on
+  # any other branch (candidate validation) stays GitHub-hosted. test-telemetry
+  # keeps the hosted uv-managed interpreter.
   full-workspace:
     name: Full Workspace (Linux, shard ${{ matrix.shard }}/4)
     strategy:
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4]
-    # Runs on main (the nightly schedule and dispatches on main) execute the
-    # heaviest pass on the self-hosted warm runners so it substitutes from the
-    # private Nix/Kache caches instead of rebuilding from source. The warm
-    # broker admits this job only from refs/heads/main, so a dispatch on any
-    # other branch (candidate validation) stays GitHub-hosted.
     runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
     defaults:
       run:
@@ -91,7 +93,7 @@ jobs:
 
   native-random-observer-debt:
     name: Native Random Observer Debt
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
     defaults:
       run:
         shell: chelis-ci-shell run {0}
@@ -147,7 +149,7 @@ jobs:
 
   script-nightly:
     name: Script Integration Tests (Linux)
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
     defaults:
       run:
         shell: chelis-ci-shell run {0}
@@ -217,7 +219,7 @@ jobs:
 
   dtype-phase3-oracle:
     name: Dtype Phase 0-3 Oracle
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
     defaults:
       run:
         shell: chelis-ci-shell run {0}
@@ -318,7 +320,7 @@ jobs:
 
   faithful-observation-phase2-oracle:
     name: Faithful Observation Phase 2 Oracle
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
     defaults:
       run:
         shell: chelis-ci-shell run {0}
@@ -352,7 +354,7 @@ jobs:
 
   compiled-value-ownership-phase0-oracle:
     name: Compiled Value Ownership Phase 2 Oracle
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
     defaults:
       run:
         shell: chelis-ci-shell run {0}
@@ -387,7 +389,7 @@ jobs:
 
   runtime-representation-phase0-oracle:
     name: Runtime Representation Phase 2 Oracle
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
     defaults:
       run:
         shell: chelis-ci-shell run {0}
@@ -437,7 +439,7 @@ jobs:
 
   runtime-extent-oracle:
     name: Runtime Extent Oracle (chelis#1277)
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
     defaults:
       run:
         shell: chelis-ci-shell run {0}
@@ -484,7 +486,7 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4]
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
     defaults:
       run:
         shell: chelis-ci-shell run {0}
@@ -540,7 +542,7 @@ jobs:
 
   generalize-sweep-oracle:
     name: Typecheck Level Generalization Oracle
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
     permissions:
       contents: read
     needs: [generalize-sweep-oracle-shard]
@@ -557,7 +559,7 @@ jobs:
       fail-fast: false
       matrix:
         slice: [frontend, domain]
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
     defaults:
       run:
         shell: chelis-ci-shell run {0}
@@ -593,7 +595,7 @@ jobs:
 
   backend-sanitizers-full:
     name: Backend Sanitizers (Full)
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
     defaults:
       run:
         shell: chelis-ci-shell run {0}
@@ -718,7 +720,7 @@ jobs:
     name: Surface nightly status
     needs: [script-nightly, dtype-phase3-oracle, faithful-observation-phase2-oracle, compiled-value-ownership-phase0-oracle, runtime-representation-phase0-oracle, runtime-extent-oracle, generalize-sweep-oracle-shard, full-workspace, native-random-observer-debt, integration-support, backend-sanitizers-full]
     if: always() && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
     permissions:
       issues: write
     steps:
