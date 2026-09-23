@@ -31,12 +31,12 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4]
-    # workflow_dispatch runs the heaviest pass on the self-hosted warm runners so
-    # it substitutes from the private Nix/Kache caches instead of rebuilding from
-    # source. The warm broker does not admit the `schedule` event, so the nightly
-    # cron still runs github-hosted; dispatch this workflow (gh workflow run
-    # heavy-e2e.yml) to exercise full-workspace on warm.
-    runs-on: ${{ github.event_name == 'workflow_dispatch' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
+    # Runs on main (the nightly schedule and dispatches on main) execute the
+    # heaviest pass on the self-hosted warm runners so it substitutes from the
+    # private Nix/Kache caches instead of rebuilding from source. The warm
+    # broker admits this job only from refs/heads/main, so a dispatch on any
+    # other branch (candidate validation) stays GitHub-hosted.
+    runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
     defaults:
       run:
         shell: chelis-ci-shell run {0}
