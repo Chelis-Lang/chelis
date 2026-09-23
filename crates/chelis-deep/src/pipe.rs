@@ -66,10 +66,12 @@ fn unary_param(stage: &Expr) -> Option<&str> {
 /// General lambdas retain ordinary application semantics: even one use of a
 /// parameter can be conditional, deferred, shadowed, or preceded by effects.
 ///
-/// `None` when the stage cannot be an application's callee: a pipe stage is
-/// an inference-bypass child, so a hand-built `Pipe` node can carry a bare
-/// name there, which no `app` node admits. The pipe then stays unfolded for
-/// the consumers' fail-closed pipe rejection.
+/// `None` when no `app` node admits the synthesized application. A pipe stage
+/// is an inference-bypass child, so a hand-built `Pipe` node can carry a bare
+/// name there. A stage whose own metadata is bound to its tag cannot lend it
+/// to an `app` either, and valid Surf reaches that case:
+/// `x |> grad(f, wrt=v)` copies `grad`'s `wrt` (chelis#2430). The pipe then
+/// stays unfolded for the consumers' fail-closed pipe rejection.
 fn fold_stage(stage: &Expr, acc: Expr) -> Option<Expr> {
     if let Some(param) = unary_param(stage)
         && let Some((_, _, stage_kids)) = stamped(stage)

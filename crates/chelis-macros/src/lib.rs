@@ -1158,6 +1158,27 @@ fn annotate_source_expr(expr: &Expr, invocation: &MacroSource) -> Expr {
             map_meta_entries(meta, |value| annotate_source_expr(value, invocation)),
             expr.span(),
         ),
+        // An inline-annotated parameter `(x {type: T})` is one binder the
+        // template wrote, and its map is that binder's metadata. Provenance
+        // goes on the map, and, as for a node, the annotation's values (the
+        // type syntax) are not stamped again.
+        ExprCarrier::StructuralList(
+            [
+                name @ Expr::Atom(Atom::Name(_), _),
+                Expr::Map(metadata, map_span),
+            ],
+        ) => {
+            let mut metadata = metadata.clone();
+            if metadata.source().is_none() {
+                metadata
+                    .insert(MetadataValue::Source(invocation.clone()))
+                    .expect("source is absent");
+            }
+            Expr::BareList(
+                vec![name.clone(), Expr::Map(metadata, *map_span)],
+                expr.span(),
+            )
+        }
         ExprCarrier::StructuralList(elements) => Expr::BareList(
             elements
                 .iter()

@@ -32,6 +32,33 @@ def f(x: tensor[4, f32]) -> tensor[4, f32] = relu_ref(x)
     assert!(text.contains("source: (relu_ref"));
 }
 
+/// Provenance on a macro-introduced typed parameter lands on the parameter's
+/// own map, as it does on a node, and not on the type syntax inside it.
+#[test]
+fn typed_parameter_source_stays_on_the_parameter_map() {
+    let text = expand_surf(
+        r#"
+macro add_one_to(v) = (fn (y: f32) -> add(y, v))(1.0f32)
+def run(y: f32) -> f32 = add_one_to(y)
+"#,
+    );
+    // The canonical printer wraps long maps; compare on single spaces.
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    assert!(
+        flat.contains("(y_macro_0 {source: (add_one_to"),
+        "the renamed parameter must carry the invocation provenance:\n{text}"
+    );
+    assert!(
+        flat.contains("type: (t-prim {} f32) }))"),
+        "the parameter's own type syntax must stay unannotated:\n{text}"
+    );
+    assert!(
+        !flat.contains("(t-prim {source:"),
+        "provenance must not be stamped onto the type syntax:\n{text}"
+    );
+}
+
 #[test]
 fn parsed_deep_internal_macro_expands_from_raw_form_boundary() {
     let deep = chelis_deep::parser::parse_str(
