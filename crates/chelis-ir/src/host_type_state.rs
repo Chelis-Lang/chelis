@@ -316,9 +316,6 @@ pub fn decode_host_type(expr: &Expr) -> Result<HostTypeTerm, HostTypeDecodeError
     let (tag, children) = match expr.carrier() {
         ExprCarrier::DecodedNode(tag, _, children) => (tag, children),
         ExprCarrier::MetadataExpression(meta) => return decode_host_type(&meta.expr),
-        ExprCarrier::MalformedLegacyList(list) => {
-            return Err(malformed_legacy_type_node(list));
-        }
         ExprCarrier::StructuralList(_)
         | ExprCarrier::UndecodableHead(_, _, _)
         | ExprCarrier::Atom(_)
@@ -388,7 +385,6 @@ pub fn decode_host_type_metadata(expr: &Expr) -> Result<HostTypeTerm, HostTypeDe
                 decode_host_type_metadata(&meta.expr)
             }
         }
-        ExprCarrier::MalformedLegacyList(list) => Err(malformed_legacy_type_node(list)),
         ExprCarrier::StructuralList(_) | ExprCarrier::Atom(_) | ExprCarrier::MetadataMap(_) => {
             Err(HostTypeDecodeError::MissingTypeMetadata)
         }
@@ -443,8 +439,7 @@ fn decode_precision(expr: &Expr) -> Result<HostPrecisionTerm, HostTypeDecodeErro
         | ExprCarrier::UndecodableHead(_, _, _)
         | ExprCarrier::Atom(_)
         | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_)
-        | ExprCarrier::MalformedLegacyList(_) => {
+        | ExprCarrier::MetadataExpression(_) => {
             return Err(malformed("tensor precision is not a type node"));
         }
     };
@@ -480,8 +475,7 @@ fn decode_shape_slot(expr: &Expr) -> Result<HostShapeSlot, HostTypeDecodeError> 
         | ExprCarrier::UndecodableHead(_, _, _)
         | ExprCarrier::Atom(_)
         | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_)
-        | ExprCarrier::MalformedLegacyList(_) => {
+        | ExprCarrier::MetadataExpression(_) => {
             return Err(malformed("tensor dimension is not a dimension node"));
         }
     };
@@ -525,8 +519,7 @@ fn decode_adt_type(children: &[Expr]) -> Result<HostTypeTerm, HostTypeDecodeErro
                 | ExprCarrier::UndecodableHead(_, _, _)
                 | ExprCarrier::Atom(_)
                 | ExprCarrier::MetadataMap(_)
-                | ExprCarrier::MetadataExpression(_)
-                | ExprCarrier::MalformedLegacyList(_) => {
+                | ExprCarrier::MetadataExpression(_) => {
                     return Err(malformed("expected a Deep type node"));
                 }
             };
@@ -556,14 +549,6 @@ fn decode_adt_type(children: &[Expr]) -> Result<HostTypeTerm, HostTypeDecodeErro
             "reserved host ADT `{name}` has the wrong arity"
         ))),
         _ => Ok(HostTypeTerm::Adt(name.to_string(), args)),
-    }
-}
-
-fn malformed_legacy_type_node(list: &chelis_deep::List) -> HostTypeDecodeError {
-    match list.elements.get(1) {
-        Some(Expr::Map(_, _)) => malformed("type node has no symbolic tag"),
-        Some(_) => malformed("type node metadata slot is not a map"),
-        None => malformed("type node has no metadata slot"),
     }
 }
 

@@ -41,7 +41,6 @@ fn collect_input_spans(exprs: &[Expr]) -> BTreeSet<String> {
             acc.insert(s.to_owned());
         }
         match expr {
-            Expr::List(list, _) => list.elements.iter().for_each(|child| walk(child, acc)),
             Expr::Node(node, _) => {
                 node.meta().visit_syntax(&mut |_, value| walk(value, acc));
                 node.children_slice()
@@ -505,7 +504,7 @@ fn var_ref_inherits_enclosing_apps_span_via_current_span_id() {
 fn atom_symbol_ref_to_let_bound_name_records_span_on_cached_node() {
     // `^{span "atom_use"} a` is the legacy MetaExpr form: `Expr::MetaExpr`
     // wraps a bare `Atom::Name("a")`. `lower_expr` does NOT pull a
-    // span from a MetaExpr (only from `Expr::List` via `span_id()`), so
+    // span from a MetaExpr (only from a stamped node via `span_id()`), so
     // the parent app's span threads through `current_span_id` to the
     // bare-atom lowering. We exercise that path indirectly with a
     // span-bearing parent expr that contains a bare-symbol child.

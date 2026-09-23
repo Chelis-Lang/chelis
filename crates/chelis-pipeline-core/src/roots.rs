@@ -79,7 +79,6 @@ fn collect_checked_decl_names(
 
 fn tagged_children(expr: &DeepExpr) -> Option<(DeepTag, &[DeepExpr])> {
     match expr {
-        DeepExpr::List(list, _) => Some((list.tag()?, list.elements.get(2..)?)),
         DeepExpr::Node(node, _) => Some((node.tag(), node.children_slice())),
         _ => None,
     }
@@ -119,10 +118,6 @@ fn extend_root_names(
 
 fn expr_type_metadata(expr: &DeepExpr) -> Option<&DeepExpr> {
     let metadata = match expr {
-        DeepExpr::List(list, _) => match list.elements.get(1) {
-            Some(DeepExpr::Map(metadata, _)) => metadata,
-            _ => return None,
-        },
         DeepExpr::Node(node, _) => node.meta(),
         _ => return None,
     };

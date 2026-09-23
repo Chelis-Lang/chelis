@@ -467,10 +467,6 @@ fn strip_meta(expr: &Expr) -> &Expr {
 
 fn tag_and_children(expr: &Expr) -> Option<(DeepTag, &[Expr])> {
     match strip_meta(expr) {
-        Expr::List(list, _) => {
-            let tag = list.tag()?;
-            Some((tag, list.elements.get(2..)?))
-        }
         Expr::Node(node, _) => Some((node.tag(), node.children_slice())),
         _ => None,
     }
