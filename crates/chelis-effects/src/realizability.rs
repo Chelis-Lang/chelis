@@ -11,8 +11,6 @@
 use chelis_unord::UnordSet;
 use std::collections::{BTreeMap, BTreeSet};
 
-#[cfg(test)]
-use chelis_deep::ast::List;
 use chelis_deep::{
     DeepTag, ExprCarrier,
     ast::{Atom, Expr, Metadata},
@@ -351,13 +349,9 @@ fn expr_needs_host(
             });
             true
         }
-        ExprCarrier::UndecodableHead(head, _, _) => {
+        ExprCarrier::UndecodableHead(_, _, _) => {
             reasons.push(HostReason::UnrecognizedTag {
-                tag: if matches!(expr, Expr::UnknownForm(_)) {
-                    "<unknown-form>".to_string()
-                } else {
-                    head.to_string()
-                },
+                tag: "<unknown-form>".to_string(),
             });
             true
         }
@@ -369,29 +363,6 @@ fn expr_needs_host(
             reasons,
             inputs,
         ),
-        ExprCarrier::MalformedLegacyList(list) => {
-            if let Some((tag, children)) = tagged_children(expr) {
-                return tagged_needs_host(
-                    tag,
-                    tagged_meta(expr),
-                    children,
-                    &LaneWalkContext {
-                        lane_by_def,
-                        target_prims,
-                        type_env,
-                    },
-                    reasons,
-                    inputs,
-                );
-            }
-            reasons.push(HostReason::UnrecognizedTag {
-                tag: list
-                    .unknown_tag_symbol()
-                    .unwrap_or("<untagged-list>")
-                    .to_string(),
-            });
-            true
-        }
     }
 }
 
@@ -518,18 +489,6 @@ fn tagged_needs_host(
 fn tagged_children(expr: &Expr) -> Option<(DeepTag, &[Expr])> {
     match expr.carrier() {
         ExprCarrier::DecodedNode(tag, _, children) => Some((tag, children)),
-        ExprCarrier::MalformedLegacyList(list) => list.tag().map(|tag| {
-            let children = if list.elements.len() > 2
-                && matches!(list.elements.get(1), Some(Expr::Map(_, _)))
-            {
-                &list.elements[2..]
-            } else if list.elements.len() > 1 {
-                &list.elements[1..]
-            } else {
-                &[]
-            };
-            (tag, children)
-        }),
         ExprCarrier::StructuralList(_)
         | ExprCarrier::UndecodableHead(_, _, _)
         | ExprCarrier::Atom(_)
@@ -541,14 +500,8 @@ fn tagged_children(expr: &Expr) -> Option<(DeepTag, &[Expr])> {
 fn tagged_meta(expr: &Expr) -> Option<&Metadata> {
     match expr.carrier() {
         ExprCarrier::DecodedNode(_, metadata, _) => Some(metadata),
-        ExprCarrier::UndecodableHead(_, metadata, _) => {
-            matches!(expr, Expr::List(_, _)).then_some(metadata)
-        }
-        ExprCarrier::MalformedLegacyList(list) => match list.elements.get(1) {
-            Some(Expr::Map(metadata, _)) => Some(metadata),
-            _ => None,
-        },
-        ExprCarrier::StructuralList(_)
+        ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::StructuralList(_)
         | ExprCarrier::Atom(_)
         | ExprCarrier::MetadataMap(_)
         | ExprCarrier::MetadataExpression(_) => None,
@@ -725,17 +678,15 @@ fn collect_top_level_dependencies_scoped(
             }
         }
         ExprCarrier::UndecodableHead(_, _, elements) => {
-            if matches!(expr, Expr::UnknownForm(_)) {
-                for child in elements {
-                    collect_top_level_dependencies_scoped(
-                        child,
-                        current_def,
-                        top_level_names,
-                        bound,
-                        dependencies,
-                        references_self,
-                    );
-                }
+            for child in elements {
+                collect_top_level_dependencies_scoped(
+                    child,
+                    current_def,
+                    top_level_names,
+                    bound,
+                    dependencies,
+                    references_self,
+                );
             }
         }
         ExprCarrier::MetadataExpression(meta) => collect_top_level_dependencies_scoped(
@@ -746,10 +697,7 @@ fn collect_top_level_dependencies_scoped(
             dependencies,
             references_self,
         ),
-        ExprCarrier::DecodedNode(_, _, _)
-        | ExprCarrier::Atom(_)
-        | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MalformedLegacyList(_) => {}
+        ExprCarrier::DecodedNode(_, _, _) | ExprCarrier::Atom(_) | ExprCarrier::MetadataMap(_) => {}
     }
 }
 
@@ -768,11 +716,6 @@ fn dependency_param_name(param: &Expr) -> Option<String> {
             elements.first().and_then(symbol_name).map(str::to_string)
         }
         ExprCarrier::UndecodableHead(head, _, _) => Some(head.to_string()),
-        ExprCarrier::MalformedLegacyList(list) => list
-            .elements
-            .first()
-            .and_then(symbol_name)
-            .map(str::to_string),
         ExprCarrier::Atom(_) | ExprCarrier::MetadataMap(_) => None,
     }
 }
@@ -813,16 +756,11 @@ fn dependency_binding_names(expr: &Expr, names: &mut BTreeSet<String>) {
             }
         }
         ExprCarrier::UndecodableHead(_, _, elements) => {
-            if matches!(expr, Expr::UnknownForm(_)) {
-                for child in elements {
-                    dependency_binding_names(child, names);
-                }
+            for child in elements {
+                dependency_binding_names(child, names);
             }
         }
-        ExprCarrier::DecodedNode(_, _, _)
-        | ExprCarrier::Atom(_)
-        | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MalformedLegacyList(_) => {}
+        ExprCarrier::DecodedNode(_, _, _) | ExprCarrier::Atom(_) | ExprCarrier::MetadataMap(_) => {}
     }
 }
 
@@ -835,18 +773,6 @@ fn type_expr_contains_tensor(expr: &Expr) -> bool {
             children.iter().any(type_expr_contains_tensor)
         }
         ExprCarrier::MetadataExpression(meta) => type_expr_contains_tensor(&meta.expr),
-        ExprCarrier::MalformedLegacyList(list) => {
-            let children = if list.elements.len() > 2
-                && matches!(list.elements.get(1), Some(Expr::Map(_, _)))
-            {
-                &list.elements[2..]
-            } else if list.elements.len() > 1 {
-                &list.elements[1..]
-            } else {
-                &[]
-            };
-            children.iter().any(type_expr_contains_tensor)
-        }
         ExprCarrier::Atom(_) | ExprCarrier::MetadataMap(_) => false,
     }
 }
@@ -920,20 +846,10 @@ fn extract_prims_recursive(expr: &Expr, out: &mut Vec<Prim>) {
                 extract_prims_recursive(elem, out);
             }
         }
-        ExprCarrier::UndecodableHead(_, _, _) => {
-            if let Expr::List(list, _) = expr {
-                for elem in &list.elements {
-                    extract_prims_recursive(elem, out);
-                }
-            }
-        }
         ExprCarrier::MetadataExpression(meta) => extract_prims_recursive(&meta.expr, out),
-        ExprCarrier::MalformedLegacyList(list) => {
-            for elem in &list.elements {
-                extract_prims_recursive(elem, out);
-            }
-        }
-        ExprCarrier::Atom(_) | ExprCarrier::MetadataMap(_) => {}
+        ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_) => {}
     }
 }
 
@@ -2002,10 +1918,10 @@ mod tests {
     // fell through to Tensor with no reason. It must fail closed too.
     #[test]
     fn untagged_list_routes_host_fail_closed() {
-        let list = List {
-            elements: vec![Expr::Atom(Atom::Int(0), chelis_deep::Span::new(0, 0))],
-        };
-        let expr = Expr::List(list, chelis_deep::Span::new(0, 0));
+        let expr = Expr::BareList(
+            vec![Expr::Atom(Atom::Int(0), chelis_deep::Span::new(0, 0))],
+            chelis_deep::Span::new(0, 0),
+        );
         let lane_by_def: BTreeMap<String, Lane> = BTreeMap::new();
         let target: UnordSet<Prim> = C_PRIMS.iter().copied().collect();
         let type_env: BTreeMap<String, Expr> = BTreeMap::new();
@@ -2027,8 +1943,8 @@ mod tests {
     }
 
     #[test]
-    fn empty_legacy_list_routes_host_fail_closed() {
-        let expr = Expr::List(List { elements: vec![] }, chelis_deep::Span::new(0, 0));
+    fn empty_bare_list_routes_host_with_the_bare_list_reason() {
+        let expr = Expr::BareList(vec![], chelis_deep::Span::new(0, 0));
         let lane_by_def: BTreeMap<String, Lane> = BTreeMap::new();
         let target: UnordSet<Prim> = C_PRIMS.iter().copied().collect();
         let type_env: BTreeMap<String, Expr> = BTreeMap::new();
@@ -2046,59 +1962,18 @@ mod tests {
         assert_eq!(
             reasons,
             [HostReason::UnrecognizedTag {
-                tag: "<untagged-list>".to_string(),
+                tag: "<bare-list>".to_string(),
             }]
         );
     }
 
     #[test]
-    fn raw_name_that_spells_a_known_tag_routes_host_fail_closed() {
-        let span = chelis_deep::Span::new(0, 0);
-        let expr = Expr::List(
-            List {
-                elements: vec![Expr::Atom(Atom::Name("app".to_string()), span)],
-            },
-            span,
-        );
-        let lane_by_def: BTreeMap<String, Lane> = BTreeMap::new();
-        let target: UnordSet<Prim> = C_PRIMS.iter().copied().collect();
-        let type_env: BTreeMap<String, Expr> = BTreeMap::new();
-        let mut reasons = Vec::new();
-        let mut inputs = BTreeSet::new();
-
-        assert!(expr_needs_host(
-            &expr,
-            &lane_by_def,
-            &target,
-            &type_env,
-            &mut reasons,
-            &mut inputs,
-        ));
-        assert_eq!(
-            reasons,
-            [HostReason::UnrecognizedTag {
-                tag: "app".to_string(),
-            }]
-        );
-    }
-
-    #[test]
-    fn undecodable_source_variants_keep_dependency_traversal_distinct() {
+    fn undecodable_head_children_reach_dependency_traversal() {
         let span = chelis_deep::Span::new(0, 0);
         let dependency = Expr::node(
             DeepTag::Var,
             Metadata::default(),
             vec![Expr::Atom(Atom::Name("dep".into()), span)],
-            span,
-        );
-        let legacy = Expr::List(
-            List {
-                elements: vec![
-                    Expr::Atom(Atom::Name("future-wrapper".into()), span),
-                    Expr::Map(Metadata::default(), span),
-                    dependency.clone(),
-                ],
-            },
             span,
         );
         let unknown = Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
@@ -2122,15 +1997,7 @@ mod tests {
             );
             dependencies
         };
-        assert!(
-            collect(&legacy).is_empty(),
-            "a raw name-headed List was opaque to dependency traversal before migration"
-        );
         assert_eq!(collect(&unknown), top_level_names);
-
-        let mut legacy_bindings = BTreeSet::new();
-        dependency_binding_names(&legacy, &mut legacy_bindings);
-        assert!(legacy_bindings.is_empty());
 
         let mut unknown_bindings = BTreeSet::new();
         dependency_binding_names(&unknown, &mut unknown_bindings);
@@ -2138,15 +2005,13 @@ mod tests {
     }
 
     #[test]
-    fn dependency_param_name_preserves_intentional_undecodable_parity() {
+    fn dependency_param_name_reads_typed_and_undecodable_params() {
         let span = chelis_deep::Span::new(0, 0);
-        let legacy = Expr::List(
-            List {
-                elements: vec![
-                    Expr::Atom(Atom::Name("param".into()), span),
-                    Expr::Map(Metadata::default(), span),
-                ],
-            },
+        let typed = Expr::BareList(
+            vec![
+                Expr::Atom(Atom::Name("param".into()), span),
+                Expr::Map(Metadata::default(), span),
+            ],
             span,
         );
         let unknown = Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
@@ -2156,26 +2021,17 @@ mod tests {
             span,
         }));
 
-        assert_eq!(dependency_param_name(&legacy).as_deref(), Some("param"));
+        assert_eq!(dependency_param_name(&typed).as_deref(), Some("param"));
         assert_eq!(dependency_param_name(&unknown).as_deref(), Some("param"));
     }
 
     #[test]
-    fn tagged_metadata_keeps_raw_legacy_and_unknown_form_distinct() {
+    fn tagged_metadata_declines_unknown_forms() {
         let span = chelis_deep::Span::new(0, 0);
         let ty = chelis_deep::parse_and_stamp_type("(t-prim {} f64)").expect("type stamps");
         let metadata = Metadata::from(chelis_deep::annotations::MetadataValue::Type(
             chelis_deep::annotations::TypeSyntax::try_new(ty).expect("type metadata"),
         ));
-        let legacy = Expr::List(
-            List {
-                elements: vec![
-                    Expr::Atom(Atom::Name("future-wrapper".into()), span),
-                    Expr::Map(metadata.clone(), span),
-                ],
-            },
-            span,
-        );
         let unknown = Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
             head: "future-wrapper".into(),
             meta: metadata,
@@ -2183,142 +2039,7 @@ mod tests {
             span,
         }));
 
-        assert!(tagged_meta(&legacy).is_some());
         assert!(tagged_meta(&unknown).is_none());
-    }
-
-    #[test]
-    fn malformed_legacy_realizability_readers_keep_positional_data() {
-        let span = chelis_deep::Span::new(0, 0);
-        let tensor = Expr::node(
-            DeepTag::TTensor,
-            Metadata::default(),
-            vec![Expr::Atom(Atom::Name("f32".into()), span)],
-            span,
-        );
-        let malformed_type = Expr::List(
-            List {
-                elements: vec![
-                    Expr::Atom(Atom::Tag(DeepTag::TTuple), span),
-                    Expr::Atom(Atom::Int(0), span),
-                    tensor,
-                ],
-            },
-            span,
-        );
-        assert!(
-            type_expr_contains_tensor(&malformed_type),
-            "the legacy type reader traversed positional children despite malformed metadata"
-        );
-        let lane_by_def = BTreeMap::new();
-        let target: UnordSet<Prim> = C_PRIMS.iter().copied().collect();
-        let type_env = BTreeMap::new();
-        let mut reasons = Vec::new();
-        let mut inputs = BTreeSet::new();
-        let malformed_literal = Expr::List(
-            List {
-                elements: vec![
-                    Expr::Atom(Atom::Tag(DeepTag::Lit), span),
-                    Expr::Atom(Atom::Int(0), span),
-                    Expr::Atom(Atom::Int(1), span),
-                ],
-            },
-            span,
-        );
-        assert!(
-            !expr_needs_host(
-                &malformed_literal,
-                &lane_by_def,
-                &target,
-                &type_env,
-                &mut reasons,
-                &mut inputs,
-            ),
-            "the pre-change tagged List path classified known malformed tags by their prior semantics"
-        );
-        assert!(reasons.is_empty());
-        assert!(inputs.is_empty());
-
-        let malformed_param = Expr::List(
-            List {
-                elements: vec![
-                    Expr::Atom(Atom::Name("input".into()), span),
-                    Expr::Atom(Atom::Int(0), span),
-                ],
-            },
-            span,
-        );
-        assert_eq!(
-            dependency_param_name(&malformed_param).as_deref(),
-            Some("input")
-        );
-
-        let metadata = Metadata::default();
-        let malformed_metadata = Expr::List(
-            List {
-                elements: vec![Expr::Atom(Atom::Int(0), span), Expr::Map(metadata, span)],
-            },
-            span,
-        );
-        assert!(
-            tagged_meta(&malformed_metadata).is_some(),
-            "the legacy metadata reader inspected the second list element"
-        );
-
-        let body = Expr::node(
-            DeepTag::Lit,
-            Metadata::default(),
-            vec![Expr::Atom(Atom::Int(1), span)],
-            span,
-        );
-        let def = Expr::node(
-            DeepTag::Def,
-            Metadata::default(),
-            vec![Expr::Atom(Atom::Name("answer".into()), span), body],
-            span,
-        );
-        let module = Expr::List(
-            List {
-                elements: vec![
-                    Expr::Atom(Atom::Tag(DeepTag::Module), span),
-                    Expr::Atom(Atom::Int(0), span),
-                    Expr::Atom(Atom::Name("M".into()), span),
-                    def,
-                ],
-            },
-            span,
-        );
-        let type_env = BTreeMap::from([(
-            "answer".to_string(),
-            Expr::node(
-                DeepTag::TPrim,
-                Metadata::default(),
-                vec![Expr::Atom(Atom::Name("i32".into()), span)],
-                span,
-            ),
-        )]);
-        let realizability = RealizabilityResult {
-            lane_by_def: BTreeMap::from([("answer".to_string(), Lane::Tensor)]),
-            required_inputs_by_def: BTreeMap::new(),
-            reasons_by_def: BTreeMap::new(),
-        };
-        let mut entries = Vec::new();
-        collect_manifest_entries(
-            &module,
-            &type_env,
-            &chelis_types::adt::AdtRegistry::new(),
-            &BTreeMap::new(),
-            &realizability,
-            &mut entries,
-        );
-        assert_eq!(
-            entries
-                .iter()
-                .map(|entry| entry.name.as_str())
-                .collect::<Vec<_>>(),
-            ["answer"],
-            "the production manifest walk must retain descendants of a malformed module carrier"
-        );
     }
 
     #[test]
@@ -2331,16 +2052,6 @@ mod tests {
             span,
         );
         let structural = Expr::BareList(vec![f64_type.clone()], span);
-        let legacy_undecodable = Expr::List(
-            List {
-                elements: vec![
-                    Expr::Atom(Atom::Name("future-type-wrapper".into()), span),
-                    Expr::Map(Metadata::default(), span),
-                    f64_type.clone(),
-                ],
-            },
-            span,
-        );
         let unknown = Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
             head: "future-type-wrapper".into(),
             meta: Metadata::default(),
@@ -2349,10 +2060,6 @@ mod tests {
         }));
 
         assert_eq!(extract_prims_from_type_expr(&structural), vec![Prim::F64]);
-        assert_eq!(
-            extract_prims_from_type_expr(&legacy_undecodable),
-            vec![Prim::F64]
-        );
         assert!(
             extract_prims_from_type_expr(&unknown).is_empty(),
             "UnknownForm was opaque to primitive extraction before carrier migration"

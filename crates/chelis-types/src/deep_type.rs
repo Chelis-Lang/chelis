@@ -390,7 +390,7 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
                 canonical: false,
             });
         }
-        if matches!(expr, deep::Expr::List(_, _) | deep::Expr::Node(_, _)) {
+        if matches!(expr, deep::Expr::Node(_, _)) {
             let (form_tag, tag, children) = self.type_form_expr(expr)?;
             if form_tag == Some(DeepTag::TPrim) {
                 let name = self.one_symbol(tag, children)?;
@@ -783,33 +783,10 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
     }
 
     /// Decode-once (chelis#731 Phase 3): the decoded tag drives dispatch;
-    /// the string is the diagnostic spelling. `None` with a symbol string
-    /// is the raw-string boundary (a lenient-parsed unknown head), which
-    /// the dispatch rejects with the same unknown-tag diagnostic as any
-    /// non-type vocabulary tag.
-    fn type_form<'b>(
-        &mut self,
-        list: &'b deep::List,
-    ) -> Result<(Option<DeepTag>, &'b str, &'b [deep::Expr]), ErrorWitness> {
-        let (tag, tag_str) = match list.elements.first() {
-            Some(deep::Expr::Atom(deep::Atom::Tag(tag), _)) => (Some(*tag), tag.as_str()),
-            Some(deep::Expr::Atom(deep::Atom::Name(name), _)) => (None, name.as_str()),
-            _ => {
-                return Err(self.malformed(format!(
-                    "malformed Deep type form in {}: expected a tag symbol",
-                    self.use_site.label()
-                )));
-            }
-        };
-        if !matches!(list.elements.get(1), Some(deep::Expr::Map(_, _))) {
-            return Err(self.malformed(format!(
-                "malformed `{tag_str}` in {}: the metadata map must be present at element 1",
-                self.use_site.label()
-            )));
-        }
-        Ok((tag, tag_str, &list.elements[2..]))
-    }
-
+    /// the string is the diagnostic spelling. `None` with a head string is
+    /// the raw-string boundary (an undecodable head), which the dispatch
+    /// rejects with the same unknown-tag diagnostic as any non-type
+    /// vocabulary tag.
     fn type_form_expr<'b>(
         &mut self,
         expr: &'b deep::Expr,
@@ -818,7 +795,6 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
             deep::Expr::Node(node, _) => {
                 Ok((Some(node.tag()), node.tag().as_str(), node.children_slice()))
             }
-            deep::Expr::List(list, _) => self.type_form(list),
             deep::Expr::UnknownForm(data) => {
                 Ok((None, data.head.as_str(), data.children.as_slice()))
             }
@@ -1207,12 +1183,6 @@ fn render_expr(expr: &deep::Expr) -> String {
     match expr {
         deep::Expr::Atom(deep::Atom::Name(name), _) => name.clone(),
         deep::Expr::Atom(atom, _) => format!("{atom:?}"),
-        deep::Expr::List(list, _) => list
-            .elements
-            .first()
-            .and_then(symbol_name)
-            .unwrap_or("<list>")
-            .to_string(),
         deep::Expr::Map(_, _) => "<metadata-map>".to_string(),
         deep::Expr::MetaExpr(_, _) => "<metadata-expression>".to_string(),
         deep::Expr::Node(node, _) => node.tag().as_str().to_string(),

@@ -877,7 +877,10 @@ const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V23\n";
 /// V24 retains literal-result declaration tokens in the lowered library.
 /// V25 retains checker-owned local tensor-ascription obligations.
 /// V26 retains TypeEnv callable provenance for contextual grad selectors.
-const CACHE_FORMAT_VERSION: u32 = 26;
+/// V27 (chelis#1125): Deep `Expr` and `Atom` lost the legacy list and tag
+/// variants, so bincode variant indices shifted, and the lowered library's
+/// program definitions and signatures are node-spelled on every ingress.
+const CACHE_FORMAT_VERSION: u32 = 27;
 
 /// On-disk envelope for the Phase I cache. The full file layout is:
 ///
@@ -1528,23 +1531,19 @@ fn library_structural_summary(exprs: &[chelis_deep::ast::Expr]) -> (usize, usize
     let mut modules = 0usize;
     let mut decls = 0usize;
     for expr in exprs {
-        let chelis_deep::ast::Expr::List(list, _) = expr else {
+        let chelis_deep::ast::Expr::Node(node, _) = expr else {
             continue;
         };
         // Match the `top_level_decl_items` walk: descend through
         // `(module {} name children...)`.
-        let tag = list.tag();
+        let tag = Some(node.tag());
         if tag == Some(DeepTag::Module) {
             modules += 1;
-            for child in list.elements.iter().skip(3) {
-                if let chelis_deep::ast::Expr::List(child_list, _) = child
-                    && matches!(
-                        child_list.tag(),
-                        Some(
-                            DeepTag::Def | DeepTag::Defsig | DeepTag::Deftype | DeepTag::Typealias
-                        )
-                    )
-                {
+            for child in node.children_slice().iter().skip(1) {
+                if matches!(
+                    child.tag(),
+                    Some(DeepTag::Def | DeepTag::Defsig | DeepTag::Deftype | DeepTag::Typealias)
+                ) {
                     decls += 1;
                 }
             }
@@ -1591,9 +1590,9 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn cache_format_version_tracks_type_env_callable_provenance() {
+    fn cache_format_version_tracks_the_single_node_spelling() {
         assert_eq!(CACHE_MAGIC, b"CHELIS_CTX_V23\n");
-        assert_eq!(CACHE_FORMAT_VERSION, 26);
+        assert_eq!(CACHE_FORMAT_VERSION, 27);
     }
 
     /// chelis#1156: the cache identity must distinguish two BUILDS, not
@@ -1789,7 +1788,7 @@ mod tests {
         let unversioned = bincode::serialize(&context).expect("raw positional payload");
         let error = CompiledContext::decode(&unversioned).expect_err("no raw fallback");
         assert!(error.contains("magic"), "{error}");
-        for version in [21_u32, 22, 23, 24, 25, CACHE_FORMAT_VERSION + 1] {
+        for version in [21_u32, 22, 23, 24, 25, 26, CACHE_FORMAT_VERSION + 1] {
             let mut truncated = CACHE_MAGIC.to_vec();
             truncated.extend_from_slice(&version.to_le_bytes());
             let error = CompiledContext::decode(&truncated)

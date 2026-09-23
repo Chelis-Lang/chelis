@@ -930,8 +930,7 @@ fn deep_node_parts(expr: &DeepExpr) -> Option<(DeepTag, &[DeepExpr])> {
         | ExprCarrier::UndecodableHead(_, _, _)
         | ExprCarrier::Atom(_)
         | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_)
-        | ExprCarrier::MalformedLegacyList(_) => None,
+        | ExprCarrier::MetadataExpression(_) => None,
     }
 }
 
@@ -941,12 +940,8 @@ fn deep_param_name(expr: &DeepExpr) -> Option<&str> {
     }
     match expr.carrier() {
         ExprCarrier::StructuralList(elements) => elements.first().and_then(deep_symbol_text),
-        ExprCarrier::UndecodableHead(head, _, _) if matches!(expr, DeepExpr::List(_, _)) => {
-            Some(head)
-        }
-        ExprCarrier::UndecodableHead(_, _, _) => None,
-        ExprCarrier::MalformedLegacyList(list) => list.elements.first().and_then(deep_symbol_text),
-        ExprCarrier::DecodedNode(_, _, _)
+        ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::DecodedNode(_, _, _)
         | ExprCarrier::Atom(_)
         | ExprCarrier::MetadataMap(_)
         | ExprCarrier::MetadataExpression(_) => None,
@@ -1920,15 +1915,13 @@ mod tests {
     }
 
     #[test]
-    fn deep_param_name_rejects_unknown_form_but_keeps_legacy_name_head() {
+    fn deep_param_name_rejects_unknown_form_but_reads_a_structural_param() {
         let span = sp();
-        let legacy = DeepExpr::List(
-            chelis_deep::List {
-                elements: vec![
-                    DeepExpr::Atom(DeepAtom::Name("x".into()), span),
-                    DeepExpr::Map(chelis_deep::Metadata::default(), span),
-                ],
-            },
+        let structural = DeepExpr::BareList(
+            vec![
+                DeepExpr::Atom(DeepAtom::Name("x".into()), span),
+                DeepExpr::Map(chelis_deep::Metadata::default(), span),
+            ],
             span,
         );
         let unknown = DeepExpr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
@@ -1937,17 +1930,15 @@ mod tests {
             children: Vec::new(),
             span,
         }));
-        let malformed = DeepExpr::List(
-            chelis_deep::List {
-                elements: vec![
-                    DeepExpr::Atom(DeepAtom::Name("x".into()), span),
-                    DeepExpr::Atom(DeepAtom::Int(0), span),
-                ],
-            },
+        let malformed = DeepExpr::BareList(
+            vec![
+                DeepExpr::Atom(DeepAtom::Name("x".into()), span),
+                DeepExpr::Atom(DeepAtom::Int(0), span),
+            ],
             span,
         );
 
-        assert_eq!(deep_param_name(&legacy), Some("x"));
+        assert_eq!(deep_param_name(&structural), Some("x"));
         assert_eq!(deep_param_name(&unknown), None);
         assert_eq!(deep_param_name(&malformed), Some("x"));
     }

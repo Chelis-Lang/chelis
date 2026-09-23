@@ -9,7 +9,7 @@ use std::fs;
 use std::path::Path;
 
 use chelis_deep::Span;
-use chelis_deep::ast::{Atom, Expr, List, Metadata};
+use chelis_deep::ast::{Atom, Expr, Metadata};
 use chelis_deep::parser::parse_str;
 use chelis_ir::{
     ConcreteHostType, HostInferenceVar, HostPrecisionTerm, HostShapeSlot, HostShapeTerm,
@@ -159,13 +159,6 @@ fn raw_decoder_preserves_exact_primitives_and_polymorphic_names() {
     );
 }
 
-fn legacy_node(expr: &Expr) -> Expr {
-    let Expr::Node(node, span) = expr else {
-        panic!("test fixture must be a decoded node");
-    };
-    Expr::List(node.to_list(*span), *span)
-}
-
 fn type_metadata(type_expr: Expr) -> Metadata {
     Metadata::from(chelis_deep::annotations::MetadataValue::Type(
         chelis_deep::annotations::TypeSyntax::try_new(type_expr)
@@ -174,7 +167,7 @@ fn type_metadata(type_expr: Expr) -> Metadata {
 }
 
 #[test]
-fn raw_decoder_matches_successor_and_legacy_carriers() {
+fn raw_decoder_reads_decoded_type_nodes() {
     for source in [
         "(t-prim {} i64)",
         "(t-ref {} (t-prim {} f32))",
@@ -184,17 +177,12 @@ fn raw_decoder_matches_successor_and_legacy_carriers() {
         "(t-fn {} (t-prim {} i32) (t-prim {} bool))",
     ] {
         let successor = parse_one(source);
-        let legacy = legacy_node(&successor);
-        assert_eq!(
-            decode_host_type(&legacy),
-            decode_host_type(&successor),
-            "{source}"
-        );
+        assert!(decode_host_type(&successor).is_ok(), "{source}");
     }
 }
 
 #[test]
-fn metadata_decoder_matches_undecodable_successor_and_legacy_carriers() {
+fn metadata_decoder_reads_undecodable_carrier_metadata() {
     let span = Span::new(0, 0);
     let metadata = type_metadata(parse_one("(t-prim {} i64)"));
     let successor = Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
@@ -203,21 +191,8 @@ fn metadata_decoder_matches_undecodable_successor_and_legacy_carriers() {
         children: vec![],
         span,
     }));
-    let legacy = Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Name("future-literal".into()), span),
-                Expr::Map(metadata, span),
-            ],
-        },
-        span,
-    );
     assert!(matches!(
         successor.carrier(),
-        chelis_deep::ExprCarrier::UndecodableHead(..)
-    ));
-    assert!(matches!(
-        legacy.carrier(),
         chelis_deep::ExprCarrier::UndecodableHead(..)
     ));
     assert_eq!(
@@ -226,10 +201,6 @@ fn metadata_decoder_matches_undecodable_successor_and_legacy_carriers() {
             Prim::Int64
         )))
     );
-    assert_eq!(
-        decode_host_type_metadata(&legacy),
-        decode_host_type_metadata(&successor)
-    );
 
     let missing_successor = Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
         head: "future-literal".into(),
@@ -237,86 +208,15 @@ fn metadata_decoder_matches_undecodable_successor_and_legacy_carriers() {
         children: vec![],
         span,
     }));
-    let missing_legacy = Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Name("future-literal".into()), span),
-                Expr::Map(Metadata::default(), span),
-            ],
-        },
-        span,
-    );
     assert_eq!(
         decode_host_type_metadata(&missing_successor),
         Err(HostTypeDecodeError::MissingTypeMetadata)
     );
-    assert_eq!(
-        decode_host_type_metadata(&missing_legacy),
-        decode_host_type_metadata(&missing_successor)
-    );
-}
-
-#[test]
-fn raw_decoder_preserves_nested_legacy_precision_parity() {
-    let span = Span::new(0, 0);
-    let dim = parse_one("(d-lit {} 4)");
-    let precision = parse_one("(t-var {} p)");
-    let successor = Expr::node(
-        chelis_deep::DeepTag::TTensor,
-        Metadata::default(),
-        vec![dim.clone(), precision.clone()],
-        span,
-    );
-    let nested_legacy = Expr::node(
-        chelis_deep::DeepTag::TTensor,
-        Metadata::default(),
-        vec![dim, legacy_node(&precision)],
-        span,
-    );
-    assert_eq!(
-        decode_host_type(&nested_legacy),
-        decode_host_type(&successor)
-    );
-    assert_eq!(
-        decode_host_type(&legacy_node(&nested_legacy)),
-        decode_host_type(&successor)
-    );
-
-    let malformed_precision = Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(chelis_deep::DeepTag::TVar), span),
-                Expr::Atom(Atom::Name("not-metadata".into()), span),
-                Expr::Atom(Atom::Name("p".into()), span),
-            ],
-        },
-        span,
-    );
-    let malformed_tensor = Expr::node(
-        chelis_deep::DeepTag::TTensor,
-        Metadata::default(),
-        vec![parse_one("(d-lit {} 4)"), malformed_precision],
-        span,
-    );
-    assert!(matches!(
-        decode_host_type(&malformed_tensor),
-        Err(HostTypeDecodeError::MalformedTypeSyntax { .. })
-    ));
 }
 
 #[test]
 fn raw_decoder_fails_closed_for_every_non_type_carrier_class() {
     let span = Span::new(0, 0);
-    let malformed = Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(chelis_deep::DeepTag::TPrim), span),
-                Expr::Atom(Atom::Name("not-metadata".into()), span),
-                Expr::Atom(Atom::Name("i64".into()), span),
-            ],
-        },
-        span,
-    );
     let rejected = [
         Expr::BareList(vec![], span),
         Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
@@ -327,7 +227,6 @@ fn raw_decoder_fails_closed_for_every_non_type_carrier_class() {
         })),
         Expr::Atom(Atom::Name("i64".into()), span),
         Expr::Map(Metadata::default(), span),
-        malformed,
     ];
 
     for expr in rejected {
@@ -343,23 +242,10 @@ fn raw_decoder_fails_closed_for_every_non_type_carrier_class() {
 
 #[test]
 fn raw_decoder_rejects_malformed_and_unknown_syntax_without_a_term() {
-    // The parser now rejects a zero-child `t-prim` before it can reach the
-    // decoder. Construct the controlled legacy mutation directly so this
-    // remains a decoder failure-state test rather than a parser test.
+    // The parser rejects a zero-child `t-prim` before it can reach the
+    // decoder, and a stamped node cannot carry one.
     let span = Span::new(0, 0);
-    let malformed = Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(chelis_deep::DeepTag::TPrim), span),
-                Expr::Map(Metadata::default(), span),
-            ],
-        },
-        span,
-    );
-    assert!(matches!(
-        decode_host_type(&malformed),
-        Err(HostTypeDecodeError::MalformedTypeSyntax { .. })
-    ));
+    assert!(parse_str("(t-prim {})").is_err());
 
     let unknown = parse_one("(t-prim {} float24)");
     assert_eq!(

@@ -26,7 +26,7 @@ use super::*;
 /// operand never acquires an outer constructor cannot be shown to be well
 /// typed, and accepting it is how chelis#1512's witnesses reached the backend.
 pub(super) struct UnresolvedOperandSite<'a> {
-    list: &'a deep::List,
+    node: &'a DeepNode,
     kids: &'a [deep::Expr],
     fname: &'a str,
     env: &'a Env,
@@ -34,13 +34,13 @@ pub(super) struct UnresolvedOperandSite<'a> {
 
 impl<'a> UnresolvedOperandSite<'a> {
     pub(super) fn new(
-        list: &'a deep::List,
+        node: &'a DeepNode,
         kids: &'a [deep::Expr],
         fname: &'a str,
         env: &'a Env,
     ) -> Self {
         Self {
-            list,
+            node,
             kids,
             fname,
             env,
@@ -59,7 +59,7 @@ impl<'a> UnresolvedOperandSite<'a> {
         // A route that inspects several operands reaches such an arm once per
         // unresolved operand. One suspended entry per CALL is what the replay
         // needs; a second would re-enter the route and report twice.
-        if product.has_route_check_for(self.list) {
+        if product.has_route_check_for(self.node) {
             return;
         }
         // chelis#1512 follow-up: a dtype-admissibility suspension for this same
@@ -68,12 +68,12 @@ impl<'a> UnresolvedOperandSite<'a> {
         // re-enters that function and runs them again before it reaches the
         // route. The route replay therefore subsumes the narrower one, and
         // keeping both would run the validators twice.
-        product.cancel_post_app_check_for(self.list);
+        product.cancel_post_app_check_for(self.node);
         product.defer_shape_check(
             DeferredShapeRule::PostApp {
                 replay: PostAppReplay::Route,
-                site: product.post_app_key(self.list),
-                list: self.list.clone(),
+                site: product.post_app_key(self.node),
+                node: self.node.clone(),
                 kids: self.kids.to_vec(),
                 func_name: self.fname.to_string(),
                 env: Box::new(self.env.clone()),
@@ -127,13 +127,13 @@ impl<'a> UnresolvedOperandSite<'a> {
         }
         // One entry per CALL, as above: a validator that reads several operands
         // reaches its unresolved arm once per operand.
-        if product.has_post_app_check_for(self.list) {
+        if product.has_post_app_check_for(self.node) {
             return;
         }
         let rule = DeferredShapeRule::PostApp {
             replay: PostAppReplay::DtypeAdmissibility,
-            site: product.post_app_key(self.list),
-            list: self.list.clone(),
+            site: product.post_app_key(self.node),
+            node: self.node.clone(),
             kids: self.kids.to_vec(),
             func_name: self.fname.to_string(),
             env: Box::new(self.env.clone()),
@@ -168,13 +168,13 @@ pub(super) struct DtypeAdmissibilitySite<'a> {
 
 impl<'a> DtypeAdmissibilitySite<'a> {
     pub(super) fn new(
-        list: &'a deep::List,
+        node: &'a DeepNode,
         kids: &'a [deep::Expr],
         fname: &'a str,
         env: &'a Env,
     ) -> Self {
         Self {
-            site: UnresolvedOperandSite::new(list, kids, fname, env),
+            site: UnresolvedOperandSite::new(node, kids, fname, env),
         }
     }
 
@@ -234,7 +234,7 @@ impl ShapeRouteKind {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn defer_or_check_shape_route(
     route: ShapeRouteKind,
-    list: &deep::List,
+    node: &DeepNode,
     kids: &[deep::Expr],
     arg_tys: Vec<Type>,
     vg: &mut VarGen,
@@ -254,7 +254,7 @@ pub(super) fn defer_or_check_shape_route(
         product.defer_shape_check(
             DeferredShapeRule::ShapeRoute {
                 route,
-                list: list.clone(),
+                node: node.clone(),
                 kids: kids.to_vec(),
             },
             Vec::new(),
@@ -263,13 +263,13 @@ pub(super) fn defer_or_check_shape_route(
         );
         return result;
     }
-    check_shape_route_signature(&route, list, kids, &arg_tys, vg, subst, errors)
+    check_shape_route_signature(&route, node, kids, &arg_tys, vg, subst, errors)
 }
 
 /// The one entry both the eager pass and the ledger replay call.
 pub(super) fn check_shape_route_signature(
     route: &ShapeRouteKind,
-    list: &deep::List,
+    node: &DeepNode,
     kids: &[deep::Expr],
     arg_tys: &[Type],
     vg: &mut VarGen,
@@ -277,15 +277,15 @@ pub(super) fn check_shape_route_signature(
     errors: &mut DiagnosticSink<'_>,
 ) -> Type {
     match route {
-        ShapeRouteKind::Permute => check_permute_signature(list, kids, arg_tys, subst, errors),
-        ShapeRouteKind::Shrink => check_shrink_signature(list, kids, arg_tys, subst, errors),
-        ShapeRouteKind::Stride => check_stride_signature(list, kids, arg_tys, subst, errors),
-        ShapeRouteKind::Pad => check_pad_signature(list, kids, arg_tys, vg, subst, errors),
+        ShapeRouteKind::Permute => check_permute_signature(node, kids, arg_tys, subst, errors),
+        ShapeRouteKind::Shrink => check_shrink_signature(node, kids, arg_tys, subst, errors),
+        ShapeRouteKind::Stride => check_stride_signature(node, kids, arg_tys, subst, errors),
+        ShapeRouteKind::Pad => check_pad_signature(node, kids, arg_tys, vg, subst, errors),
         ShapeRouteKind::ReduceWindow { name } => {
-            check_reduce_window_signature(list, kids, name, arg_tys, subst, errors)
+            check_reduce_window_signature(node, kids, name, arg_tys, subst, errors)
         }
         ShapeRouteKind::Reshape { input_var_name } => check_reshape_signature(
-            list,
+            node,
             kids,
             input_var_name.as_deref(),
             arg_tys,
@@ -313,7 +313,7 @@ pub(super) fn check_shape_route_signature(
 /// no arm here can suspend the call a second time.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn replay_dtype_admissibility(
-    list: &deep::List,
+    node: &DeepNode,
     kids: &[deep::Expr],
     func_name: &str,
     env: &Env,
@@ -327,7 +327,7 @@ pub(super) fn replay_dtype_admissibility(
     let mut route_observed = false;
     let result_ty = Type::Unit;
     if validate_numeric_and_reduction_arguments(
-        list,
+        node,
         kids,
         &owned_name,
         arg_tys,
@@ -344,7 +344,7 @@ pub(super) fn replay_dtype_admissibility(
         return;
     }
     if reject_inadmissible_operand_dtypes(
-        list,
+        node,
         kids,
         Some(func_name),
         arg_tys,
@@ -361,7 +361,7 @@ pub(super) fn replay_dtype_admissibility(
         return;
     }
     let _ = integer_binop_result_type(
-        list,
+        node,
         Some(func_name),
         arg_tys,
         vg,

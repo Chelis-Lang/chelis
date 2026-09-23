@@ -19,11 +19,9 @@
 //! * both polarities: the dispatched tags still check cleanly on a
 //!   well-typed control program.
 
-mod support;
-
 use chelis_deep::parser::parse_str;
 use chelis_deep::role::{AritySpec, ChildStampRole, arity_contract, child_stamp_role};
-use chelis_deep::{Atom, DeepTag, Expr, List, Metadata, Span};
+use chelis_deep::{Atom, DeepTag, Expr, Metadata, Span};
 use chelis_types::errors::CheckErrorKind;
 use chelis_types::infer_program;
 
@@ -199,15 +197,10 @@ fn unknown_tag_outside_the_vocabulary_keeps_the_raw_string_loud_arm() {
 /// raw-string arm (there is no tag string to decode).
 #[test]
 fn untagged_list_in_expression_position_is_rejected_loudly() {
-    // The stamped source boundary rejects this shape. Retain the checker
-    // oracle through the still-public programmatic legacy carrier until
-    // `Expr::List` is deleted by the #1023 migration.
-    let untagged = Expr::List(
-        List {
-            elements: vec![Expr::Atom(Atom::Int(0), zero())],
-        },
-        zero(),
-    );
+    // The stamped source boundary rejects this shape. A programmatic
+    // producer can still place a structural bare list in an expression slot,
+    // so the checker oracle stays.
+    let untagged = Expr::BareList(vec![Expr::Atom(Atom::Int(0), zero())], zero());
     let def = Expr::node(
         DeepTag::Def,
         Metadata::default(),
@@ -258,21 +251,15 @@ fn block_checks_every_child_not_only_the_last() {
 
 #[test]
 fn childless_block_is_malformed() {
+    // A childless block has no value. The stamped `Node` constructor is the
+    // only way to build a vocabulary node, so it cannot reach the checker.
     assert!(
         parse_str("(def {} f (block {}))").is_err(),
         "the stamped constructor must reject a childless block at ingress"
     );
-
-    // [04-TOT-3] still binds malformed nodes that reach the checker through
-    // the deprecated legacy carrier. The stamped `Node` can no longer be
-    // widened after construction, so the legacy `List` is the remaining
-    // route by which a childless block reaches the checker.
-    let errors = infer_program(&support::parse_unchecked_legacy("(def {} f (block {}))")).errors;
     assert!(
-        errors
-            .iter()
-            .any(|e| matches!(e.kind, CheckErrorKind::MalformedForm)),
-        "a childless block has no value and must be MalformedForm; got {errors:?}"
+        chelis_deep::node::Node::try_new(DeepTag::Block, Metadata::default(), Vec::new()).is_err(),
+        "the programmatic Node constructor must reject a childless block"
     );
 }
 

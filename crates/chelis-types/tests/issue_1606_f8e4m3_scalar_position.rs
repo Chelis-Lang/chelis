@@ -136,53 +136,17 @@ fn assert_api_diagnostic_counts(
     }
 }
 
-fn legacy_list_root(expr: &chelis_deep::Expr) -> chelis_deep::Expr {
-    let chelis_deep::Expr::Node(node, span) = expr else {
-        panic!("fixture must be a stamped node: {expr:?}");
-    };
-    let mut elements = vec![
-        chelis_deep::Expr::Atom(
-            chelis_deep::Atom::Tag(node.tag()),
-            chelis_deep::Span::new(span.offset + 1, 1),
-        ),
-        chelis_deep::Expr::Map(
-            node.meta().clone(),
-            chelis_deep::Span::new(span.offset + 2, 2),
-        ),
-    ];
-    elements.extend(node.children_slice().iter().cloned());
-    chelis_deep::Expr::List(chelis_deep::List { elements }, *span)
-}
-
-fn defsig_parameter_as_legacy_list(mut program: Vec<chelis_deep::Expr>) -> Vec<chelis_deep::Expr> {
-    let chelis_deep::Expr::Node(defsig, defsig_span) = program.remove(0) else {
-        panic!("fixture starts with defsig");
-    };
-    let (defsig_tag, defsig_meta, mut defsig_children) = defsig.into_parts();
-    let chelis_deep::Expr::Node(signature, signature_span) = defsig_children.remove(1) else {
-        panic!("defsig type is a stamped function type");
-    };
-    let (signature_tag, signature_meta, mut signature_children) = signature.into_parts();
-    signature_children[0] = legacy_list_root(&signature_children[0]);
-    defsig_children.push(chelis_deep::Expr::node(
-        signature_tag,
-        signature_meta,
-        signature_children,
-        signature_span,
-    ));
-    program.insert(
-        0,
-        chelis_deep::Expr::node(defsig_tag, defsig_meta, defsig_children, defsig_span),
-    );
-    program
-}
-
-fn fn_params_as_bare_list(mut program: Vec<chelis_deep::Expr>) -> Vec<chelis_deep::Expr> {
+/// Rebuild the property def with its fn's `params` node replaced by a
+/// structural list, returning the def constructor's rejection: the
+/// `property_quantifiers` metadata must match a canonical params node.
+fn fn_params_as_bare_list_rejection(
+    mut program: Vec<chelis_deep::Expr>,
+) -> chelis_deep::node::NodeError {
     let def_index = program
         .iter()
         .position(|expr| expr.tag() == Some(chelis_deep::DeepTag::Def))
         .expect("fixture contains a property def");
-    let chelis_deep::Expr::Node(def, def_span) = program.remove(def_index) else {
+    let chelis_deep::Expr::Node(def, _) = program.remove(def_index) else {
         panic!("property def is a stamped node");
     };
     let (def_tag, def_meta, mut def_children) = def.into_parts();
@@ -197,32 +161,11 @@ fn fn_params_as_bare_list(mut program: Vec<chelis_deep::Expr>) -> Vec<chelis_dee
         0,
         chelis_deep::Expr::BareList(params.children_slice().to_vec(), params_span),
     );
-    let mut function_elements = vec![
-        chelis_deep::Expr::Atom(chelis_deep::Atom::Tag(function_tag), function_span),
-        chelis_deep::Expr::Map(function_meta, function_span),
-    ];
-    function_elements.extend(function_children);
-    def_children.push(chelis_deep::Expr::List(
-        chelis_deep::List {
-            elements: function_elements,
-        },
-        function_span,
-    ));
-    let mut def_elements = vec![
-        chelis_deep::Expr::Atom(chelis_deep::Atom::Tag(def_tag), def_span),
-        chelis_deep::Expr::Map(def_meta, def_span),
-    ];
-    def_elements.extend(def_children);
-    program.insert(
-        def_index,
-        chelis_deep::Expr::List(
-            chelis_deep::List {
-                elements: def_elements,
-            },
-            def_span,
-        ),
-    );
-    program
+    let function = chelis_deep::node::Node::try_new(function_tag, function_meta, function_children)
+        .expect("a fn node admits a structural params list");
+    def_children.push(chelis_deep::Expr::Node(Box::new(function), function_span));
+    chelis_deep::node::Node::try_new(def_tag, def_meta, def_children)
+        .expect_err("a noncanonical params carrier must fail closed at the def constructor")
 }
 
 fn assert_rejected(src: &str, position: &str) {
@@ -629,33 +572,17 @@ fn property_copy_ownership_fails_closed_per_invalid_or_noncanonical_slot() {
             );
         }
 
-        let noncanonical = fn_params_as_bare_list(hand_authored_deep_property_slots(
+        // A noncanonical params carrier has no admitted spelling: the def
+        // constructor checks `property_quantifiers` against the fn's params.
+        let noncanonical = fn_params_as_bare_list_rejection(hand_authored_deep_property_slots(
             std::slice::from_ref(&reserved),
             std::slice::from_ref(&reserved),
             "(lit {} true)",
         ));
-        for (entry, result) in [
-            ("ir", check_ir_program(&noncanonical)),
-            ("typed", check_typed_program(&noncanonical)),
-        ] {
-            let report = result.expect_err("a noncanonical params carrier must fail closed");
-            assert_eq!(
-                report.errors.len(),
-                1,
-                "{entry}/{name}: {:?}",
-                report.errors
-            );
-            assert!(
-                matches!(report.errors[0].kind, CheckErrorKind::MalformedForm),
-                "{entry}/{name}: {:?}",
-                report.errors
-            );
-            assert!(
-                report.errors[0].message.contains("property_quantifiers"),
-                "{entry}/{name}: {:?}",
-                report.errors
-            );
-        }
+        assert!(
+            noncanonical.to_string().contains("property_quantifiers"),
+            "{name}: {noncanonical}"
+        );
 
         let malformed_source = hand_authored_deep_property_slots_source(
             &[reserved.clone(), "(t-prim {} f32)".to_string()],
@@ -713,38 +640,6 @@ fn nominal_arity_recovery_visits_every_header_owned_type_argument() {
         for (application, reserved, label) in cases {
             let program = hand_authored_nominal_property(&application);
             assert_api_diagnostic_counts(&program, reserved, 1, &format!("{name}/{label}"));
-        }
-    }
-}
-
-#[test]
-fn property_copy_ownership_accepts_the_transitional_list_type_carrier() {
-    use chelis_types::errors::CheckErrorKind;
-
-    for name in ["f8e4m3", "f8e5m2"] {
-        for ty in [
-            format!("(t-prim {{doc: \"same\"}} {name})"),
-            format!(
-                "(t-tensor {{doc: \"same\"}} \
-                   (d-lit {{}} 3) (t-prim {{}} {name}))"
-            ),
-        ] {
-            let program =
-                defsig_parameter_as_legacy_list(hand_authored_deep_property_types(&ty, &ty));
-            for (entry, result) in [
-                ("ir", check_ir_program(&program)),
-                ("typed", check_typed_program(&program)),
-            ] {
-                let report = result.expect_err("the reserved dtype must reject");
-                assert_eq!(report.errors.len(), 1, "{entry}/{name}/{ty}: {report:?}");
-                assert!(
-                    matches!(
-                        report.errors[0].kind,
-                        CheckErrorKind::UnsupportedTensorPrecision
-                    ),
-                    "{entry}/{name}/{ty}: {report:?}"
-                );
-            }
         }
     }
 }

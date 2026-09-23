@@ -2,12 +2,77 @@
 //! Baseline defects were first reproduced through the legacy Dag evaluator.
 //! These conformance probes now exercise the additive source-plan boundary;
 //! legacy APIs are intentionally not relabeled as repaired.
+use chelis_deep::{Atom, DeepTag, ExprCarrier};
 use chelis_ir::dag::{DimInfo, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_plan_with_strict};
-use chelis_ir::evaluation::{EvaluationPlan, RandomExecutionContext};
+use chelis_ir::evaluation::{
+    EvaluationPlan, EvaluationProfile, LegacyEvaluationReason, RandomExecutionContext,
+};
 use chelis_ir::host::RandomLoweringState;
+use chelis_types::CheckedProgram;
 use chelis_types::types::Prim;
 use chelis_unord::UnordMap;
+
+fn checked_static_profiles(source: &str) -> [EvaluationProfile; 2] {
+    let declarations = chelis_surf::parser::parse_str(source).expect("Surf fixture parses");
+    let deep =
+        chelis_surf::desugar::desugar_program(&declarations).expect("Surf fixture must desugar");
+    let checked = [
+        chelis_types::check_typed_program(&deep)
+            .unwrap_or_else(|report| panic!("typed ingress failed: {:?}", report.errors)),
+        chelis_types::check_ir_program(&deep)
+            .unwrap_or_else(|report| panic!("IR ingress failed: {:?}", report.errors)),
+    ];
+    checked.map(|program| checked_static_profile(&program))
+}
+
+fn checked_static_profile(program: &CheckedProgram) -> EvaluationProfile {
+    let mut defs = UnordMap::new();
+    for expr in program.exprs() {
+        let ExprCarrier::DecodedNode(DeepTag::Def, _, children) = expr.carrier() else {
+            continue;
+        };
+        let Some(ExprCarrier::Atom(Atom::Name(name))) =
+            children.first().map(chelis_deep::Expr::carrier)
+        else {
+            continue;
+        };
+        let body = children.get(1).expect("checked def retains its body");
+        defs.insert(name.clone(), body.clone());
+    }
+    let sample = defs.get("sample").expect("fixture defines `sample`");
+    chelis_ir::lower::evaluation_profile(sample, &defs)
+}
+
+#[test]
+fn static_control_readers_accept_fixed_nested_helpers_on_both_ingresses() {
+    let source = "def keep[p: Float](x: tensor[8, p], rate: p) -> tensor[8, p] = dropout(x, rate)\n\
+                  def sample(x: tensor[8, f32]) -> tensor[8, f32] = {\n\
+                    rate = cast(0.5, f32)\n\
+                    loss = fn (v: tensor[8, f32]) -> tensor_to_scalar(sum(keep(v, rate), 0i32))\n\
+                    grad(loss)(x)\n\
+                  }";
+    assert_eq!(
+        checked_static_profiles(source),
+        [EvaluationProfile::FixedControl; 2]
+    );
+}
+
+#[test]
+fn static_control_readers_reject_changed_closure_captures_on_both_ingresses() {
+    let source = "
+        def sample(x: tensor[8, f32]) -> tensor[8, f32] = {
+          rate = 0.5f32
+          apply = fn (v: tensor[8, f32]) -> dropout(v, rate)
+          rate = 0.25f32
+          apply(x)
+        }
+    ";
+    assert_eq!(
+        checked_static_profiles(source),
+        [EvaluationProfile::Legacy(LegacyEvaluationReason::RuntimeRate); 2]
+    );
+}
 
 // #1764: admission and lowering must specialize the same typed rate, before AD.
 fn typed_rate_plan(source: &str) -> Result<EvaluationPlan, String> {
@@ -413,12 +478,6 @@ fn source_profile_names_exclusions_before_plan_construction() {
             "(app {} (var {} dropout) (var {} x) (var {} rate))".into(),
             Reason::RuntimeRate,
         ),
-        // An excluded pure declaration must not become NoDropout and then
-        // silently join a selected fixed-control declaration's plan.
-        (
-            "(if {} (var {} condition) (var {} x) (var {} y))".into(),
-            Reason::DynamicControl,
-        ),
     ] {
         let expression = chelis_deep::parser::parse_str(&source)
             .unwrap()
@@ -443,6 +502,47 @@ fn source_profile_names_exclusions_before_plan_construction() {
         .unwrap_err();
         assert!(error.message.contains(&format!("{reason:?}")), "{error:?}");
         assert_eq!(context.state().counter, 9);
+    }
+}
+
+/// chelis#2405: for dispatch, every exclusion reason says why a reachable
+/// draw cannot be planned, so runtime control that reaches no draw is
+/// `NoDropout`. Plan admission is a different question, whether the
+/// execution spine can lower the source, and it still refuses that control.
+#[test]
+fn source_profile_of_draw_free_control_is_no_dropout() {
+    use chelis_ir::evaluation::{EvaluationProfile, LegacyEvaluationReason as Reason};
+    for source in [
+        "(if {} (var {} condition) (var {} x) (var {} y))",
+        "(match {} (var {} mode) (arm {} (pat-wild {}) () (var {} x)))",
+    ] {
+        let expression = chelis_deep::parser::parse_str(source)
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(
+            chelis_ir::lower::evaluation_profile(&expression, &UnordMap::new()),
+            EvaluationProfile::Legacy(Reason::NoDropout),
+            "{source}"
+        );
+        let context = RandomExecutionContext::new(RandomLoweringState {
+            seed: Some(42),
+            counter: 9,
+        });
+        let error = chelis_ir::lower::try_lower_subexpr_evaluation_plan(
+            &expression,
+            UnordMap::new(),
+            UnordMap::new(),
+            UnordMap::new(),
+            &context,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .message
+                .contains("outside the fixed-control evaluation profile: DynamicControl"),
+            "{source}: {error:?}"
+        );
     }
 }
 

@@ -1159,11 +1159,6 @@ fn walk_for_tensor_precision(
                 walk_for_tensor_precision(child, errors, seen, owner);
             }
         }
-        deep::ExprCarrier::MalformedLegacyList(list) => {
-            for element in &list.elements {
-                walk_for_tensor_precision(element, errors, seen, owner);
-            }
-        }
     }
 }
 
@@ -1223,9 +1218,8 @@ pub(super) fn build_def_param_scope(
     scope
 }
 
-/// The `[name, {type: T}]` element sequence shared by the two carriers an
-/// inline-annotated param can arrive in: a tagless `Expr::List` on the
-/// serialized-IR ingress and an `Expr::BareList` on the stamped one.
+/// The `[name, {type: T}]` element sequence of an inline-annotated param,
+/// which every ingress carries as an `Expr::BareList`.
 fn inline_param_parts(elements: &[deep::Expr]) -> Option<(String, Option<deep::Expr>)> {
     let Some(deep::Expr::Atom(deep::Atom::Name(name), _)) = elements.first() else {
         return None;
@@ -1245,7 +1239,6 @@ pub(super) fn param_name_and_inline_type(
 ) -> Option<(String, Option<deep::Expr>)> {
     match param {
         deep::Expr::Atom(deep::Atom::Name(name), _) => Some((name.clone(), None)),
-        deep::Expr::List(list, _) => inline_param_parts(&list.elements),
         // chelis#1125 PP7 finding 1 / [04-TOT-5]: an inline-annotated param
         // `(x {type: T})` is a TAGLESS list, so the stamp pass produces an
         // `Expr::BareList`, not an `Expr::Node`. `build_def_param_scope` was
@@ -1275,9 +1268,6 @@ pub(super) fn extract_fn_params_and_body(expr: &deep::Expr) -> Option<(Vec<Strin
     let body_expr = kids.get(1)?;
     let params = match params_expr {
         deep::Expr::Node(node, _) if node.tag() == DeepTag::Params => node.children_slice(),
-        deep::Expr::List(params_list, _) if get_tag(params_list) == Some(DeepTag::Params) => {
-            children(params_list)
-        }
         deep::Expr::BareList(elements, _) => elements.as_slice(),
         _ => return None,
     };
@@ -1312,24 +1302,22 @@ pub(super) fn validate_ir_expr(
 ) -> StaticValue {
     stack_guard!("validate_ir_expr", expr, StaticValue::Unknown);
     match expr {
-        deep::Expr::List(list, _) => {
-            if get_tag(list) == Some(DeepTag::Module) {
-                for elem in list.elements.iter().skip(3) {
+        deep::Expr::Node(node, _) => {
+            if node.tag() == DeepTag::Module {
+                for elem in node.children_slice().iter().skip(1) {
                     validate_ir_expr(elem, type_env, static_env, declared_signatures, errors);
                 }
                 return StaticValue::Unknown;
             }
-            if get_tag(list) == Some(DeepTag::Def) {
-                if let Some(metadata) = get_meta(list) {
-                    validate_expression_metadata(
-                        metadata,
-                        type_env,
-                        static_env,
-                        declared_signatures,
-                        errors,
-                    );
-                }
-                let kids = children(list);
+            if node.tag() == DeepTag::Def {
+                validate_expression_metadata(
+                    node.meta(),
+                    type_env,
+                    static_env,
+                    declared_signatures,
+                    errors,
+                );
+                let kids = node.children_slice();
                 let Some(name) = kids.first().and_then(symbol_name) else {
                     return StaticValue::Unknown;
                 };
@@ -1353,11 +1341,20 @@ pub(super) fn validate_ir_expr(
                 static_env.insert(name.to_string(), value);
                 return StaticValue::Unknown;
             }
-            if get_tag(list) == Some(DeepTag::Fn) {
-                let scoped_env = extend_ir_env_with_fn_params(list, type_env);
+            if node.tag() == DeepTag::Fn {
+                let scoped_env = extend_ir_env_with_fn_params(node, type_env);
                 let mut scoped_static_env = static_env.clone();
-                bind_fn_params_unknown(list, &mut scoped_static_env);
-                for elem in &list.elements {
+                bind_fn_params_unknown(node, &mut scoped_static_env);
+                node.meta().visit_syntax(&mut |_, value| {
+                    validate_ir_expr(
+                        value,
+                        &scoped_env,
+                        &mut scoped_static_env,
+                        declared_signatures,
+                        errors,
+                    );
+                });
+                for elem in node.children_slice() {
                     validate_ir_expr(
                         elem,
                         &scoped_env,
@@ -1368,8 +1365,8 @@ pub(super) fn validate_ir_expr(
                 }
                 return StaticValue::Unknown;
             }
-            if get_tag(list) == Some(DeepTag::Arm) {
-                let kids = children(list);
+            if node.tag() == DeepTag::Arm {
+                let kids = node.children_slice();
                 let mut scoped_static_env = static_env.clone();
                 if let Some(pattern) = kids.first() {
                     for name in chelis_deep::pattern_binder_names(pattern) {
@@ -1389,8 +1386,8 @@ pub(super) fn validate_ir_expr(
                 }
                 return StaticValue::Unknown;
             }
-            if get_tag(list) == Some(DeepTag::Let) {
-                let kids = children(list);
+            if node.tag() == DeepTag::Let {
+                let kids = node.children_slice();
                 let mut scoped_static_env = static_env.clone();
                 // Clone the type env on let-scope entry so each binding's
                 // derivable IR-shape-sensitive type (e.g. conv's output
@@ -1435,22 +1432,20 @@ pub(super) fn validate_ir_expr(
                 }
                 return StaticValue::Unknown;
             }
-            if let Some(tag) = get_tag(list) {
-                // `par` (sequential v1, spec/03-deep-syntax.md §2.3) and `jit`
-                // (compilation trigger, §2.7) are spec-blessed pass-through
-                // forms at Phase 0 evaluation. The validator used to reject
-                // both; the rejection is removed because lowering handles them
-                // (see `lower_par` and the `jit` lowering arm).
-                if tag == DeepTag::App
-                    && let Some(func_name) = active_ir_builtin_name(list, static_env)
-                    && is_ir_shape_sensitive_builtin(func_name)
-                {
-                    validate_ir_builtin_semantic_requirements(list, func_name, type_env, errors);
-                }
+            // `par` (sequential v1, spec/03-deep-syntax.md §2.3) and `jit`
+            // (compilation trigger, §2.7) are spec-blessed pass-through
+            // forms at Phase 0 evaluation. The validator used to reject
+            // both; the rejection is removed because lowering handles them
+            // (see `lower_par` and the `jit` lowering arm).
+            if node.tag() == DeepTag::App
+                && let Some(func_name) = active_ir_builtin_name(node, static_env)
+                && is_ir_shape_sensitive_builtin(func_name)
+            {
+                validate_ir_builtin_semantic_requirements(node, func_name, type_env, errors);
             }
 
-            if get_tag(list) == Some(DeepTag::Var)
-                && let Some(name) = children(list).first().and_then(symbol_name)
+            if node.tag() == DeepTag::Var
+                && let Some(name) = node.children_slice().first().and_then(symbol_name)
             {
                 return if name == "Nil" {
                     StaticValue::List(Vec::new())
@@ -1461,11 +1456,11 @@ pub(super) fn validate_ir_expr(
                         .unwrap_or(StaticValue::Unknown)
                 };
             }
-            if get_tag(list) == Some(DeepTag::Lit) {
+            if node.tag() == DeepTag::Lit {
                 return literal_static_value(expr);
             }
-            if get_tag(list) == Some(DeepTag::Cast) {
-                let kids = children(list);
+            if node.tag() == DeepTag::Cast {
+                let kids = node.children_slice();
                 return kids
                     .first()
                     .map(|inner| {
@@ -1473,8 +1468,8 @@ pub(super) fn validate_ir_expr(
                     })
                     .unwrap_or(StaticValue::Unknown);
             }
-            if get_tag(list) == Some(DeepTag::App) {
-                let kids = children(list);
+            if node.tag() == DeepTag::App {
+                let kids = node.children_slice();
                 let func_name = kids
                     .first()
                     .and_then(app_builtin_name)
@@ -1499,7 +1494,10 @@ pub(super) fn validate_ir_expr(
                 return StaticValue::Unknown;
             }
 
-            for elem in &list.elements {
+            node.meta().visit_syntax(&mut |_, value| {
+                validate_ir_expr(value, type_env, static_env, declared_signatures, errors);
+            });
+            for elem in node.children_slice() {
                 validate_ir_expr(elem, type_env, static_env, declared_signatures, errors);
             }
             StaticValue::Unknown
@@ -1523,11 +1521,6 @@ pub(super) fn validate_ir_expr(
             )
         }
         deep::Expr::Atom(_, _) => literal_static_value(expr),
-        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
-        deep::Expr::Node(node, span) => {
-            let bridged = deep::Expr::List(node.to_list(*span), *span);
-            validate_ir_expr(&bridged, type_env, static_env, declared_signatures, errors)
-        }
         deep::Expr::BareList(elems, _) => {
             let mut last = StaticValue::Unknown;
             for child in elems {
@@ -1620,11 +1613,6 @@ fn reject_unknown_metadata_forms(expr: &deep::Expr, errors: &mut DiagnosticSink<
                 reject_unknown_metadata_forms(child, errors);
             }
         }
-        deep::ExprCarrier::MalformedLegacyList(list) => {
-            for child in &list.elements {
-                reject_unknown_metadata_forms(child, errors);
-            }
-        }
         deep::ExprCarrier::Atom(_) => {}
     }
 }
@@ -1635,10 +1623,6 @@ fn reject_unknown_metadata_forms(expr: &deep::Expr, errors: &mut DiagnosticSink<
 /// alias-resolved ADT field types without reparsing authored declarations.
 pub fn type_to_deep_expr(ty: &Type) -> deep::Expr {
     type_to_deep_expr_with(ty, stamped_node_expr)
-}
-
-pub(super) fn type_to_legacy_deep_expr(ty: &Type) -> deep::Expr {
-    type_to_deep_expr_with(ty, node_expr)
 }
 
 type NodeBuilder = fn(DeepTag, Vec<deep::Expr>) -> deep::Expr;
@@ -1713,15 +1697,6 @@ fn dim_to_deep_expr_with(dim: &Dim, make_node: NodeBuilder) -> deep::Expr {
     }
 }
 
-pub(super) fn node_expr(tag: DeepTag, children: Vec<deep::Expr>) -> deep::Expr {
-    let mut elements = vec![
-        deep::Expr::Atom(deep::Atom::Tag(tag), zero_span()),
-        deep::Expr::Map(deep::Metadata::default(), zero_span()),
-    ];
-    elements.extend(children);
-    deep::Expr::List(deep::List { elements }, zero_span())
-}
-
 pub(super) fn stamped_node_expr(tag: DeepTag, children: Vec<deep::Expr>) -> deep::Expr {
     deep::Expr::node(tag, deep::Metadata::default(), children, zero_span())
 }
@@ -1734,27 +1709,8 @@ pub(super) fn zero_span() -> Span {
     Span::new(0, 0)
 }
 
-pub(super) fn span_of_expr(expr: &deep::Expr) -> Span {
-    match expr {
-        deep::Expr::Atom(_, span)
-        | deep::Expr::List(_, span)
-        | deep::Expr::Map(_, span)
-        | deep::Expr::MetaExpr(_, span)
-        | deep::Expr::Node(_, span)
-        | deep::Expr::BareList(_, span) => *span,
-        deep::Expr::UnknownForm(data) => data.span,
-    }
-}
-
-pub(super) fn span_of_list(list: &deep::List) -> Span {
-    list.elements
-        .first()
-        .map(span_of_expr)
-        .unwrap_or_else(zero_span)
-}
-
-pub(super) fn ir_builtin_name(list: &deep::List) -> Option<&str> {
-    ir_builtin_name_of_expr(list.elements.get(2)?)
+pub(super) fn ir_builtin_name(node: &DeepNode) -> Option<&str> {
+    ir_builtin_name_of_expr(node.children_slice().first()?)
 }
 
 /// Preserve ordinary lexical precedence when this post-inference validator
@@ -1762,10 +1718,10 @@ pub(super) fn ir_builtin_name(list: &deep::List) -> Option<&str> {
 /// scoped binding environment: function parameters, sequential let binders,
 /// and pattern binders are inserted before their bodies are visited.
 pub(super) fn active_ir_builtin_name<'a>(
-    list: &'a deep::List,
+    node: &'a DeepNode,
     static_env: &UnordMap<String, StaticValue>,
 ) -> Option<&'a str> {
-    ir_builtin_name(list).filter(|name| compiler_name_is_active(name, static_env))
+    ir_builtin_name(node).filter(|name| compiler_name_is_active(name, static_env))
 }
 
 pub(super) fn compiler_name_is_active(
@@ -1775,11 +1731,9 @@ pub(super) fn compiler_name_is_active(
     !builtins::BUILTIN_NAMES.contains(&name) || !static_env.contains_key(name)
 }
 
-/// The builtin callee name of an `app`'s callee child, on either carrier.
+/// The builtin callee name of an `app`'s callee child.
 ///
-/// chelis#1107 amendment: `validate_ir_expr` bridges a stamped `Expr::Node`
-/// one level (`Node::to_list`), so the callee child it hands on is still an
-/// `Expr::Node`. The previous `List`-only read returned `None` for every
+/// chelis#1107 amendment: a `List`-only read here returned `None` for every
 /// stamped callee, which silently disabled the shape-sensitivity and
 /// output-type derivation below on the stamped carrier.
 pub(super) fn ir_builtin_name_of_expr(func_expr: &deep::Expr) -> Option<&str> {
@@ -1788,25 +1742,6 @@ pub(super) fn ir_builtin_name_of_expr(func_expr: &deep::Expr) -> Option<&str> {
     };
     match kids.first() {
         Some(deep::Expr::Atom(deep::Atom::Name(name), _)) => Some(name.as_str()),
-        _ => None,
-    }
-}
-
-/// Borrow `expr` as a `deep::List`, materializing a one-level bridge for a
-/// stamped `Expr::Node` into `storage`.
-///
-/// chelis#1107 amendment: the `derive_*` output-type family threads
-/// `&deep::List` through several helpers. Rather than change all of their
-/// signatures, the entry points bridge once here; every leaf reader they call
-/// (`tensor_precision_expr`, `ir_builtin_name`, …) is carrier-agnostic, so one
-/// level is enough.
-pub(super) fn as_list<'a>(
-    expr: &'a deep::Expr,
-    storage: &'a mut Option<deep::List>,
-) -> Option<&'a deep::List> {
-    match expr {
-        deep::Expr::List(list, _) => Some(list),
-        deep::Expr::Node(node, span) => Some(storage.insert(node.to_list(*span))),
         _ => None,
     }
 }
@@ -1850,54 +1785,28 @@ pub(super) fn expr_type_expr(expr: &deep::Expr, type_env: &IrTypeEnv) -> Option<
             }
             None
         }
-        deep::Expr::List(list, _) => {
-            if let Some(meta) = get_meta(list)
-                && let Some(ty) = meta.ty()
-            {
-                return Some(ty.expression().clone());
-            }
-            if get_tag(list) == Some(DeepTag::Var)
-                && let Some(name) = children(list).first().and_then(symbol_name)
-            {
-                return type_env.get(name).cloned();
-            }
-            None
-        }
         deep::Expr::MetaExpr(meta, _) => expr_type_expr(&meta.expr, type_env),
         _ => None,
     }
 }
 
 pub(super) fn extend_ir_env_with_fn_params(
-    fn_list: &deep::List,
+    fn_node: &DeepNode,
     type_env: &ShapeTypeEnv,
 ) -> ShapeTypeEnv {
     let mut scoped = type_env.clone();
-    let Some(params_expr) = children(fn_list).first() else {
+    let Some(params_expr) = fn_node.children_slice().first() else {
         return scoped;
     };
-    // chelis#1107 amendment: carrier-preserving read. `validate_ir_expr`
-    // bridges only the `fn` node, so `(params {} ...)` arrives as `Expr::Node`.
     let Some((DeepTag::Params, _, param_entries)) = stamped_parts(params_expr) else {
         return scoped;
     };
     for param in param_entries {
         // An inline-annotated entry `(x {type: T})` is symbol-headed, so the
         // stamp pass carries it as `Expr::BareList`, never a `Node` -- this
-        // one needs its own arm rather than `stamped_parts`.
-        // chelis#1107 amendment (justified-safe, not routed): this match
-        // handles every carrier a params entry can take -- `List` (legacy) and
-        // `BareList` (stamped, symbol-headed) -- so there is no fall-through.
+        // one needs its own arm rather than `stamped_parts`. A bare name has
+        // no inline annotation to record.
         let (name, meta) = match param {
-            deep::Expr::List(param_list, _) => {
-                let Some(name) = param_list.elements.first().and_then(symbol_name) else {
-                    continue;
-                };
-                let Some(meta) = get_meta(param_list) else {
-                    continue;
-                };
-                (name, meta)
-            }
             deep::Expr::BareList(elems, _) => {
                 let Some(name) = elems.first().and_then(symbol_name) else {
                     continue;
@@ -1926,13 +1835,13 @@ pub(super) fn extend_ir_env_with_fn_params(
 }
 
 pub(super) fn validate_ir_builtin_semantic_requirements(
-    list: &deep::List,
+    node: &DeepNode,
     func_name: &str,
     type_env: &ShapeTypeEnv,
     errors: &mut DiagnosticSink<'_>,
 ) {
     if func_name == "conv" {
-        validate_conv_semantic_requirements(list, type_env, errors);
+        validate_conv_semantic_requirements(node, type_env, errors);
     }
 }
 
@@ -1947,7 +1856,7 @@ pub(super) fn validate_ir_builtin_semantic_requirements(
 /// that JSON tooling already understands (RT-205 F6).
 pub(super) fn validator_error(
     kind: CheckErrorKind,
-    call_site: &deep::List,
+    call_site: &DeepNode,
     message: String,
     suggestions: Vec<String>,
 ) -> CheckError {
@@ -1961,16 +1870,17 @@ pub(super) fn validator_error(
 /// Render the call site's source span as a parenthesized suffix
 /// (e.g. ` (at surf:144..165)`). Returns `None` when the call site
 /// carries no `:span` metadata so the unmodified message is used.
-pub(super) fn validator_span_suffix(call_site: &deep::List) -> Option<String> {
-    let meta = get_meta(call_site)?;
-    meta.span_id().map(|v| format!("(at {})", v.value()))
+pub(super) fn validator_span_suffix(call_site: &DeepNode) -> Option<String> {
+    call_site
+        .meta()
+        .span_id()
+        .map(|v| format!("(at {})", v.value()))
 }
 
-/// Extract the `:span` metadata string from a list node, if present.
+/// Extract the `:span` metadata string from a node, if present.
 /// Used to propagate external span identifiers into check diagnostics.
-pub(super) fn list_span_id(list: &deep::List) -> Option<&str> {
-    let meta = get_meta(list)?;
-    meta.span_id().map(|v| v.value())
+pub(super) fn node_span_id(node: &DeepNode) -> Option<&str> {
+    node.meta().span_id().map(|v| v.value())
 }
 
 /// Parse the start byte offset from a span identifier string.
@@ -1995,11 +1905,11 @@ pub(super) fn parse_span_offset(span_id: &str) -> Option<usize> {
 /// legal language inputs and retain runtime guards; backend capability limits
 /// are not checker signatures.
 pub(super) fn validate_conv_semantic_requirements(
-    list: &deep::List,
+    node: &DeepNode,
     type_env: &ShapeTypeEnv,
     errors: &mut DiagnosticSink<'_>,
 ) {
-    let [_, _, _, input, kernel, strides, padding] = list.elements.as_slice() else {
+    let [_, input, kernel, strides, padding] = node.children_slice() else {
         return;
     };
     let input_dims =
@@ -2025,7 +1935,7 @@ pub(super) fn validate_conv_semantic_requirements(
         Err(message) => {
             errors.push(validator_error(
                 CheckErrorKind::DimensionMismatch,
-                list,
+                node,
                 message,
                 vec![],
             ));
@@ -2047,7 +1957,7 @@ pub(super) fn validate_conv_semantic_requirements(
         if matches!(kernel, DeepDimKind::Lit(value) if *value <= 0) {
             errors.push(validator_error(
                 CheckErrorKind::DimensionMismatch,
-                list,
+                node,
                 format!("conv requires positive kernel extents at spatial axis {axis}"),
                 vec![],
             ));
@@ -2057,7 +1967,7 @@ pub(super) fn validate_conv_semantic_requirements(
             continue;
         };
         if conv_output_extent(*input, *kernel, stride, low, high).is_none() {
-            errors.push(validator_error(CheckErrorKind::DimensionMismatch, list,
+            errors.push(validator_error(CheckErrorKind::DimensionMismatch, node,
                 match input.checked_add(low).and_then(|n| n.checked_add(high)) {
                     Some(padded) if *kernel > padded => format!("IR builtin `conv` output spatial axis {axis}: kernel must fit the padded input"),
                     _ => format!("IR builtin `conv` output spatial axis {axis} arithmetic overflows i64"),
@@ -2117,20 +2027,19 @@ pub(super) fn derive_ir_builtin_output_type(
     type_env: &ShapeTypeEnv,
     static_env: &UnordMap<String, StaticValue>,
 ) -> Option<deep::Expr> {
-    // chelis#1107 amendment: carrier-preserving entry. The `derive_*` helpers
-    // below take `&deep::List`, so bridge a stamped Node once here.
-    let mut bridge = None;
-    let list = as_list(expr, &mut bridge)?;
-    if get_tag(list) != Some(DeepTag::App) {
+    let deep::Expr::Node(node, _) = expr else {
+        return None;
+    };
+    if node.tag() != DeepTag::App {
         return None;
     }
-    let func_name = active_ir_builtin_name(list, static_env)?;
+    let func_name = active_ir_builtin_name(node, static_env)?;
     match func_name {
-        "conv" => derive_conv_output_type(list, type_env),
+        "conv" => derive_conv_output_type(node, type_env),
         // softmax takes a (tensor, axis) tuple but its output shape
         // equals the input tensor's shape, but it is intentionally not in the
         // rank-polymorphism Identity class because its axis is positional.
-        "softmax" => derive_unary_shape_passthrough(list, type_env, static_env),
+        "softmax" => derive_unary_shape_passthrough(node, type_env, static_env),
         // The central shape registry owns every shape-identity builtin. This
         // resolver must consume that registry directly: a second manual
         // allowlist omitted floor_div/mod/clamp/where/bitwise identities and
@@ -2139,7 +2048,7 @@ pub(super) fn derive_ir_builtin_output_type(
         // registry-owned path preserves their inferred shapes without
         // restoring a second spelling list here.
         _ if crate::shape_class(func_name) == crate::ShapeClass::Identity => {
-            derive_identity_shape_passthrough(list, type_env, static_env)
+            derive_identity_shape_passthrough(node, type_env, static_env)
         }
         _ => None,
     }
@@ -2151,11 +2060,11 @@ pub(super) fn derive_ir_builtin_output_type(
 /// resolves to conv's derived output type, peeking through any
 /// borrow wrapper as usual (RT-205 round-2 F2).
 pub(super) fn derive_unary_shape_passthrough(
-    list: &deep::List,
+    node: &DeepNode,
     type_env: &ShapeTypeEnv,
     static_env: &UnordMap<String, StaticValue>,
 ) -> Option<deep::Expr> {
-    let arg = list.elements.get(3)?;
+    let arg = node.children_slice().get(1)?;
     resolve_let_value_tensor_type(arg, type_env, static_env)
 }
 
@@ -2167,13 +2076,13 @@ pub(super) fn derive_unary_shape_passthrough(
 /// promotion are ordinary inference's; this helper carries an exact shape to
 /// the exact-shape validators (`conv` chaining, RT-205) and nothing else.
 pub(super) fn derive_identity_shape_passthrough(
-    list: &deep::List,
+    node: &DeepNode,
     type_env: &ShapeTypeEnv,
     static_env: &UnordMap<String, StaticValue>,
 ) -> Option<deep::Expr> {
-    list.elements
+    node.children_slice()
         .iter()
-        .skip(3)
+        .skip(1)
         .find_map(|argument| resolve_let_value_tensor_type(argument, type_env, static_env))
 }
 
@@ -2193,22 +2102,18 @@ fn resolve_let_value_tensor_type(
 /// Derive all convolution spatial extents, preserving the batch dimension's
 /// original symbolic identity when it is not a literal.
 pub(super) fn derive_conv_output_type(
-    list: &deep::List,
+    node: &DeepNode,
     type_env: &ShapeTypeEnv,
 ) -> Option<deep::Expr> {
-    let input_ty = arg_tensor_type_expr(list.elements.get(3)?, type_env)?;
-    let kernel_ty = arg_tensor_type_expr(list.elements.get(4)?, type_env)?;
+    let args = node.children_slice();
+    let input_ty = arg_tensor_type_expr(args.get(1)?, type_env)?;
+    let kernel_ty = arg_tensor_type_expr(args.get(2)?, type_env)?;
     let input_dims = tensor_dims_from_type_expr(&input_ty)?;
     let kernel_dims = tensor_dims_from_type_expr(&kernel_ty)?;
     if input_dims.len() < 3 || input_dims.len() != kernel_dims.len() {
         return None;
     }
-    let params = conv_parameters(
-        list.elements.get(5)?,
-        list.elements.get(6)?,
-        input_dims.len() - 2,
-    )
-    .ok()??;
+    let params = conv_parameters(args.get(3)?, args.get(4)?, input_dims.len() - 2).ok()??;
     let mut trailing = vec![match kernel_dims[0] {
         DeepDimKind::Lit(n) => n,
         _ => return None,
@@ -2235,19 +2140,13 @@ pub(super) fn derive_conv_output_type(
 /// so the caller can carry it forward verbatim when synthesizing a
 /// derived tensor type (RT-205 round-3 F-C, symbolic batch propagation).
 pub(super) fn tensor_dim_exprs_from_type_expr(expr: &deep::Expr) -> Option<Vec<deep::Expr>> {
-    let list = match expr {
-        deep::Expr::List(list, _) => list,
-        _ => return None,
-    };
-    if get_tag(list) == Some(DeepTag::TRef) {
-        return children(list)
-            .first()
-            .and_then(tensor_dim_exprs_from_type_expr);
+    let (tag, _, kids) = stamped_parts(expr)?;
+    if tag == DeepTag::TRef {
+        return kids.first().and_then(tensor_dim_exprs_from_type_expr);
     }
-    if get_tag(list) != Some(DeepTag::TTensor) {
+    if tag != DeepTag::TTensor {
         return None;
     }
-    let kids = children(list);
     if kids.is_empty() {
         return None;
     }
@@ -2283,29 +2182,18 @@ pub(super) fn build_tensor_type_expr_with_batch(
     prec: deep::Expr,
 ) -> deep::Expr {
     let zero = zero_span();
-    let empty_meta = || deep::Metadata::default();
     let make_d_lit = |v: i64| {
-        deep::Expr::List(
-            deep::List {
-                elements: vec![
-                    deep::Expr::Atom(deep::Atom::Tag(DeepTag::DLit), zero),
-                    deep::Expr::Map(empty_meta(), zero),
-                    deep::Expr::Atom(deep::Atom::Int(v), zero),
-                ],
-            },
-            zero,
+        stamped_node_expr(
+            DeepTag::DLit,
+            vec![deep::Expr::Atom(deep::Atom::Int(v), zero)],
         )
     };
-    let mut elements = vec![
-        deep::Expr::Atom(deep::Atom::Tag(DeepTag::TTensor), zero),
-        deep::Expr::Map(empty_meta(), zero),
-    ];
-    elements.push(batch_dim);
+    let mut children = vec![batch_dim];
     for &d in other_dims {
-        elements.push(make_d_lit(d));
+        children.push(make_d_lit(d));
     }
-    elements.push(prec);
-    deep::Expr::List(deep::List { elements }, zero)
+    children.push(prec);
+    stamped_node_expr(DeepTag::TTensor, children)
 }
 
 // ── Helpers ──────────────────────────────────────────────────────
@@ -2330,45 +2218,35 @@ pub(super) fn annotated_totality_invariant_traces(exprs: &[deep::Expr]) -> Vec<S
         match expr {
             deep::Expr::Atom(_, _) | deep::Expr::Map(_, _) => {}
             deep::Expr::MetaExpr(meta, _) => walk(&meta.expr, traces),
-            deep::Expr::List(list, _) => {
-                let tag = get_tag(list);
-                let requires_stamp = tag.is_some_and(|tag| {
-                    tag == DeepTag::Fn
-                        || matches!(tag, DeepTag::PatVar | DeepTag::PatAs)
-                        || should_attach_type_metadata(tag)
-                });
-                if requires_stamp && !get_meta(list).is_some_and(|meta| meta.ty().is_some()) {
+            deep::Expr::Node(node, _) => {
+                let tag = node.tag();
+                let requires_stamp = tag == DeepTag::Fn
+                    || matches!(tag, DeepTag::PatVar | DeepTag::PatAs)
+                    || should_attach_type_metadata(tag);
+                if requires_stamp && node.meta().ty().is_none() {
                     traces.push(format!(
                         "annotated `{}` node is missing its type stamp",
-                        tag.map(DeepTag::as_str).unwrap_or("<untagged-list>")
+                        tag.as_str()
                     ));
                 }
 
-                let kids = children(list);
+                let kids = node.children_slice();
                 for (index, child) in kids.iter().enumerate() {
                     // Decode-once: `child_stamp_role` is total over
                     // `DeepTag`, so the version-skew arm is
                     // unrepresentable; untagged structural lists take the
-                    // recursive walk.
-                    match tag.map(|tag| child_stamp_role(tag, index, kids.len())) {
-                        Some(
-                            ChildStampRole::RuntimeExpr | ChildStampRole::ExplicitInferenceBypass,
-                        )
-                        | None => walk(child, traces),
-                        Some(
-                            ChildStampRole::Syntax
-                            | ChildStampRole::Selector
-                            | ChildStampRole::EffectHandler
-                            | ChildStampRole::Binder
-                            | ChildStampRole::Type,
-                        ) => {}
+                    // `BareList` walk below.
+                    match child_stamp_role(tag, index, kids.len()) {
+                        ChildStampRole::RuntimeExpr | ChildStampRole::ExplicitInferenceBypass => {
+                            walk(child, traces)
+                        }
+                        ChildStampRole::Syntax
+                        | ChildStampRole::Selector
+                        | ChildStampRole::EffectHandler
+                        | ChildStampRole::Binder
+                        | ChildStampRole::Type => {}
                     }
                 }
-            }
-            // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
-            deep::Expr::Node(node, span) => {
-                let bridged = deep::Expr::List(node.to_list(*span), *span);
-                walk(&bridged, traces);
             }
             deep::Expr::BareList(elems, _) => {
                 for child in elems {

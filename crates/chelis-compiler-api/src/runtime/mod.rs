@@ -2,7 +2,7 @@ use chelis_deep::DeepTag;
 use chelis_unord::{UnordMap, UnordSet};
 use std::collections::BTreeMap;
 
-use chelis_deep::ast::{Atom, Expr, List, Metadata};
+use chelis_deep::ast::{Atom, Expr, Metadata};
 use chelis_ir::eval::TensorValue as IrTensorValue;
 use chelis_ir::lower::top_level_lowering_map;
 use chelis_types::{
@@ -627,13 +627,11 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
         session: Some(chelis_ir::host::HostLoweringSession::new(eval_program)),
         active_declaration_names: Vec::new(),
         def_kernels: UnordMap::new(),
-        excluded_def_kernels: UnordMap::new(),
         transcript: Vec::new(),
         transcript_capture: crate::transcript_capture::current_transcript_capture(),
         resolving_top_levels: Vec::new(),
         random_seed: None,
         random_counter: 0,
-        execution_exclusion: None,
         cancel: chelis_types::current_cancel_token(),
     };
 
@@ -892,11 +890,6 @@ fn top_level_items(exprs: &[Expr]) -> Vec<&Expr> {
 
 fn collect_top_level_items<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
     match expr {
-        Expr::List(list, _) if tag(list) == Some(DeepTag::Module) => {
-            for child in list.elements.iter().skip(3) {
-                collect_top_level_items(child, out);
-            }
-        }
         Expr::Node(node, _) if node.tag() == DeepTag::Module => {
             for child in node.children_slice().iter().skip(1) {
                 collect_top_level_items(child, out);
@@ -1086,63 +1079,18 @@ struct EvalContext<'a> {
     /// DAG draws no Random and is reused across applications. A Random-drawing
     /// kernel is re-lowered per application and never cached (see
     /// `EvalContext::def_kernel`).
-    def_kernels: UnordMap<String, Option<std::sync::Arc<DefEvaluationKernel>>>,
-    /// The same decision for an application under an execution exclusion,
-    /// which plans through the legacy kernel entry. Cached on the same terms
-    /// as `def_kernels`: a Random-drawing kernel depends on the stream
-    /// position and is re-lowered per application (chelis#2392).
-    excluded_def_kernels: UnordMap<String, Option<std::sync::Arc<DefEvaluationKernel>>>,
+    def_kernels: UnordMap<String, Option<std::sync::Arc<chelis_ir::host::HostDefEvaluationPlan>>>,
     transcript: Vec<String>,
     transcript_capture: Option<crate::TranscriptCapture>,
     resolving_top_levels: Vec<String>,
     random_seed: Option<u64>,
     random_counter: u64,
-    /// An explicitly excluded caller keeps all nested dispatch legacy. This
-    /// is an admission decision, not recovery from a plan error.
-    execution_exclusion: Option<chelis_ir::evaluation::LegacyEvaluationReason>,
     /// Cooperative cancellation flag (chelis#914), captured ONCE from the
     /// thread-local install point at construction so the per-node-visit
     /// check in [`Self::eval_expr`] is a relaxed atomic load rather than a
     /// TLS lookup. `None` — the default when no caller installed a token —
     /// makes the check a single `Option` discriminant test.
     cancel: Option<chelis_types::CancelToken>,
-}
-
-enum DefEvaluationKernel {
-    Legacy(chelis_ir::host::HostDefKernel),
-    Planned(chelis_ir::host::HostDefEvaluationPlan),
-}
-
-impl DefEvaluationKernel {
-    fn kernel_for_inspection(&self) -> &chelis_ir::host::HostDefKernel {
-        match self {
-            Self::Legacy(kernel) => kernel,
-            Self::Planned(plan) => plan.kernel_for_inspection(),
-        }
-    }
-    fn plan(&self) -> Option<&chelis_ir::evaluation::EvaluationPlan> {
-        match self {
-            Self::Legacy(_) => None,
-            Self::Planned(plan) => plan.plan(),
-        }
-    }
-    fn staged_plan(&self) -> Option<&chelis_ir::evaluation::StagedEvaluationPlan> {
-        match self {
-            Self::Legacy(_) => None,
-            Self::Planned(plan) => plan.staged_plan(),
-        }
-    }
-}
-
-fn tag(list: &List) -> Option<DeepTag> {
-    list.tag()
-}
-
-fn get_meta(list: &List) -> Option<&Metadata> {
-    match list.elements.get(1) {
-        Some(Expr::Map(map, _)) => Some(map),
-        _ => None,
-    }
 }
 
 /// True when the checked-program effect annotation on this node carries a
@@ -1155,7 +1103,6 @@ fn get_meta(list: &List) -> Option<&Metadata> {
 /// must not run its effect at display time.
 fn carries_effect_row(expr: &Expr) -> bool {
     let meta = match expr {
-        Expr::List(list, _) => get_meta(list),
         Expr::Node(node, _) => Some(node.meta()),
         _ => None,
     };
@@ -1167,7 +1114,6 @@ fn carries_effect_row(expr: &Expr) -> bool {
 
 fn tagged_expr_children(expr: &Expr) -> Option<(DeepTag, &[Expr])> {
     match expr {
-        Expr::List(list, _) => tag(list).map(|tag| (tag, children(list))),
         Expr::Node(node, _) => Some((node.tag(), node.children_slice())),
         _ => None,
     }
@@ -1186,14 +1132,6 @@ fn lit_meta_prim(meta: &Metadata) -> Option<Prim> {
 fn lit_meta_type_var_name(meta: &Metadata) -> Option<&str> {
     let ty_expr = meta.ty()?.expression();
     chelis_deep::exact_type_variable_name(ty_expr)
-}
-
-fn children(list: &List) -> &[Expr] {
-    if list.elements.len() > 2 {
-        &list.elements[2..]
-    } else {
-        &[]
-    }
 }
 
 fn symbol_name(expr: &Expr) -> Option<&str> {
@@ -1228,8 +1166,8 @@ fn int_value(expr: &Expr) -> Option<i64> {
 fn literal_seed_i64(expr: &Expr) -> Option<i64> {
     match expr {
         Expr::Atom(Atom::Int(value), _) => Some(*value),
-        Expr::List(list, _) if tag(list) == Some(DeepTag::Lit) => {
-            children(list).first().and_then(literal_seed_i64)
+        Expr::Node(node, _) if node.tag() == DeepTag::Lit => {
+            node.children_slice().first().and_then(literal_seed_i64)
         }
         _ => None,
     }

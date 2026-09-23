@@ -60,7 +60,7 @@ fn flagship_guarded_option_lowers_to_smt_property() {
 }
 
 #[test]
-fn guarded_opaque_field_rewrite_matches_successor_and_legacy_carriers() {
+fn guarded_opaque_field_rewrite_reads_a_decoded_access_node() {
     let invariant = collect_opaque_invariants(&deep_of(GUARDED_OPTION))
         .into_iter()
         .next()
@@ -83,17 +83,8 @@ fn guarded_opaque_field_rewrite_matches_successor_and_legacy_carriers() {
         ],
         span,
     );
-    let legacy = crate::deep_compat::normalize_nodes_to_lists(std::slice::from_ref(&successor))
-        .into_iter()
-        .next()
-        .expect("one normalized expression");
-
     assert_eq!(
         var_name(&rewrite_opaque_field_access(&successor, &opaque_params)),
-        Some("p.value")
-    );
-    assert_eq!(
-        var_name(&rewrite_opaque_field_access(&legacy, &opaque_params)),
         Some("p.value")
     );
 
@@ -107,42 +98,36 @@ fn guarded_opaque_field_rewrite_matches_successor_and_legacy_carriers() {
 }
 
 #[test]
-fn undecodable_source_variants_keep_tier_b_children_and_params_distinct() {
+fn unknown_forms_expose_no_tier_b_children_or_param() {
     let span = chelis_deep::Span::new(0, 0);
     let child = Expr::Atom(Atom::Name("child".into()), span);
-    let legacy = Expr::List(
-        chelis_deep::List {
-            elements: vec![
-                Expr::Atom(Atom::Name("param".into()), span),
-                Expr::Map(Default::default(), span),
-                child.clone(),
-            ],
-        },
+    let structural = Expr::BareList(
+        vec![
+            Expr::Atom(Atom::Name("param".into()), span),
+            Expr::Map(Default::default(), span),
+        ],
         span,
     );
     let unknown = Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
         head: "param".into(),
         meta: Default::default(),
-        children: vec![child.clone()],
+        children: vec![child],
         span,
     }));
 
-    assert_eq!(inline_param_name(&legacy), Some("param"));
+    assert_eq!(inline_param_name(&structural), Some("param"));
     assert_eq!(inline_param_name(&unknown), None);
-    assert_eq!(children(&legacy), std::slice::from_ref(&child));
     assert!(children(&unknown).is_empty());
 }
 
 #[test]
-fn producer_lookup_keeps_malformed_legacy_module_and_inline_param() {
+fn producer_lookup_keeps_a_malformed_structural_inline_param() {
     let span = chelis_deep::Span::new(0, 0);
-    let malformed_param = Expr::List(
-        chelis_deep::List {
-            elements: vec![
-                Expr::Atom(Atom::Name("x".into()), span),
-                Expr::Atom(Atom::Int(0), span),
-            ],
-        },
+    let malformed_param = Expr::BareList(
+        vec![
+            Expr::Atom(Atom::Name("x".into()), span),
+            Expr::Atom(Atom::Int(0), span),
+        ],
         span,
     );
     let params = Expr::node(
@@ -171,15 +156,10 @@ fn producer_lookup_keeps_malformed_legacy_module_and_inline_param() {
         vec![Expr::Atom(Atom::Name("make".into()), span), function],
         span,
     );
-    let module = Expr::List(
-        chelis_deep::List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::Module), span),
-                Expr::Atom(Atom::Int(0), span),
-                Expr::Atom(Atom::Name("M".into()), span),
-                def,
-            ],
-        },
+    let module = Expr::node(
+        DeepTag::Module,
+        Default::default(),
+        vec![Expr::Atom(Atom::Name("M".into()), span), def],
         span,
     );
 

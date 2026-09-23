@@ -19,36 +19,9 @@ fn expanded_surf(source: &str) -> Vec<Expr> {
         .into_exprs()
 }
 
-fn tag(expr: &Expr) -> Option<&str> {
-    let Expr::List(list, _) = expr else {
-        return None;
-    };
-    // Decode-once: the spelling comes from the decoded tag, never a raw
-    // element-0 string.
-    list.tag().map(|tag| tag.as_str())
-}
-
-fn carries_type_stamp(expr: &Expr) -> bool {
-    let Expr::List(list, _) = expr else {
-        return false;
-    };
-    let Some(Expr::Map(meta, _)) = list.elements.get(1) else {
-        return false;
-    };
-    meta.ty().is_some()
-}
-
 fn collect_tag_stamp_state(expr: &Expr, wanted: &str, out: &mut Vec<bool>) {
     match expr {
         Expr::Atom(_, _) => {}
-        Expr::List(list, _) => {
-            if tag(expr) == Some(wanted) {
-                out.push(carries_type_stamp(expr));
-            }
-            for child in &list.elements {
-                collect_tag_stamp_state(child, wanted, out);
-            }
-        }
         Expr::Map(meta, _) => {
             meta.visit_expressions(&mut |value, _| collect_tag_stamp_state(value, wanted, out));
         }
@@ -58,6 +31,11 @@ fn collect_tag_stamp_state(expr: &Expr, wanted: &str, out: &mut Vec<bool>) {
                 .visit_expressions(&mut |value, _| collect_tag_stamp_state(value, wanted, out));
         }
         Expr::Node(node, _) => {
+            // Decode-once: the spelling comes from the decoded tag, never a
+            // raw head string.
+            if node.tag().as_str() == wanted {
+                out.push(node.meta().ty().is_some());
+            }
             node.meta()
                 .visit_expressions(&mut |value, _| collect_tag_stamp_state(value, wanted, out));
             for child in node.children_iter() {

@@ -19,7 +19,7 @@ pub(super) enum OwnedTypeMetadataResolution {
 /// Both `DeepTag::Copy` arms were byte-identical apart from how they spelled
 /// the list, so they were two chances to fix a bug once (chelis#1489).
 fn infer_copy(
-    list: &deep::List,
+    node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
     subst: &mut Subst,
@@ -27,7 +27,7 @@ fn infer_copy(
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
 ) -> Type {
-    let kids = children(list);
+    let kids = node.children_slice();
     if let Some(inner) = kids.first() {
         let inner_ty = infer_expr(inner, env, vg, subst, adt_reg, errors, product);
         let resolved = subst.apply(&inner_ty);
@@ -71,7 +71,7 @@ fn infer_copy(
             },
         }
     } else {
-        malformed_form(list, "copy", "one wrapped expression", errors)
+        malformed_form(node, "copy", "one wrapped expression", errors)
     }
 }
 
@@ -204,20 +204,23 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
 
     let result = match expr {
         deep::Expr::Atom(atom, _) => infer_atom(atom, errors),
-        deep::Expr::List(list, _) => {
+        deep::Expr::Map(_, _) => Type::Unit,
+        deep::Expr::MetaExpr(meta, _) => {
+            infer_expr(&meta.expr, env, vg, subst, adt_reg, errors, product)
+        }
+        deep::Expr::Node(node, _) => {
             // chelis#731 Phase 3 (checker_totality.md §C4.2): dispatch on
-            // the typed closed vocabulary. The serialized form and the
-            // in-memory AST stay frozen; the enum is derived from the tag
-            // string here, at the chokepoint. The match is exhaustive with
-            // no `_` arm, so a 63rd `DeepTag` variant fails to compile
-            // until this dispatch chooses its disposition.
-            match get_tag(list) {
-                Some(DeepTag::Var) => infer_var(list, env, vg, subst, adt_reg, errors, product),
-                Some(DeepTag::Lit) => {
-                    infer_lit(list, env, vg, adt_reg, errors, type_metadata_resolution)
-                }
-                Some(DeepTag::App) => infer_app(
-                    list,
+            // the typed closed vocabulary. A vocabulary node has the single
+            // spelling `Expr::Node` whatever its ingress (chelis#1125). The
+            // match is exhaustive with no `_` arm, so a 63rd `DeepTag`
+            // variant fails to compile until this dispatch chooses its
+            // disposition.
+            match node.tag() {
+                DeepTag::Var => infer_var(node, env, vg, subst, adt_reg, errors, product),
+                DeepTag::Lit => infer_lit(node, env, vg, adt_reg, errors, type_metadata_resolution),
+                DeepTag::App => infer_app(
+                    expr,
+                    node,
                     env,
                     vg,
                     subst,
@@ -226,8 +229,8 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
                     product,
                     expected_result,
                 ),
-                Some(DeepTag::Fn) => infer_fn(
-                    list,
+                DeepTag::Fn => infer_fn(
+                    node,
                     env,
                     vg,
                     subst,
@@ -236,32 +239,28 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
                     product,
                     declaration_diagnostic_owner,
                 ),
-                Some(DeepTag::Let) => infer_let(list, env, vg, subst, adt_reg, errors, product),
-                Some(DeepTag::If) => infer_if(list, env, vg, subst, adt_reg, errors, product),
-                Some(DeepTag::Match) => infer_match(list, env, vg, subst, adt_reg, errors, product),
-                Some(DeepTag::Pipe) => pipe_reached_inference_unfolded(list, errors),
-                Some(DeepTag::Tuple) => infer_tuple(list, env, vg, subst, adt_reg, errors, product),
-                Some(DeepTag::TupleGet) => {
-                    infer_tuple_get(list, env, vg, subst, adt_reg, errors, product)
+                DeepTag::Let => infer_let(node, env, vg, subst, adt_reg, errors, product),
+                DeepTag::If => infer_if(expr, node, env, vg, subst, adt_reg, errors, product),
+                DeepTag::Match => infer_match(node, env, vg, subst, adt_reg, errors, product),
+                DeepTag::Pipe => pipe_reached_inference_unfolded(node, errors),
+                DeepTag::Tuple => infer_tuple(node, env, vg, subst, adt_reg, errors, product),
+                DeepTag::TupleGet => {
+                    infer_tuple_get(node, env, vg, subst, adt_reg, errors, product)
                 }
-                Some(DeepTag::Record) => {
-                    infer_record(list, env, vg, subst, adt_reg, errors, product)
+                DeepTag::Record => infer_record(node, env, vg, subst, adt_reg, errors, product),
+                DeepTag::Access => infer_access(node, env, vg, subst, adt_reg, errors, product),
+                DeepTag::RecordUpdate => {
+                    infer_record_update(node, env, vg, subst, adt_reg, errors, product)
                 }
-                Some(DeepTag::Access) => {
-                    infer_access(list, env, vg, subst, adt_reg, errors, product)
-                }
-                Some(DeepTag::RecordUpdate) => {
-                    infer_record_update(list, env, vg, subst, adt_reg, errors, product)
-                }
-                Some(DeepTag::Cast) => infer_cast(list, env, vg, subst, adt_reg, errors, product),
-                Some(DeepTag::Grad) => infer_grad(list, env, vg, subst, adt_reg, errors, product),
-                Some(DeepTag::Vmap) => infer_vmap(list, env, vg, subst, adt_reg, errors, product),
-                Some(DeepTag::Def) => infer_def(list, env, vg, subst, adt_reg, errors, product),
-                Some(DeepTag::Defsig) => {
+                DeepTag::Cast => infer_cast(expr, node, env, vg, subst, adt_reg, errors, product),
+                DeepTag::Grad => infer_grad(node, env, vg, subst, adt_reg, errors, product),
+                DeepTag::Vmap => infer_vmap(node, env, vg, subst, adt_reg, errors, product),
+                DeepTag::Def => infer_def(node, env, vg, subst, adt_reg, errors, product),
+                DeepTag::Defsig => {
                     // Already handled in first pass
                     Type::Unit
                 }
-                Some(DeepTag::Deftype | DeepTag::Typealias) => {
+                DeepTag::Deftype | DeepTag::Typealias => {
                     // Already handled in first pass
                     Type::Unit
                 }
@@ -276,23 +275,21 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
                 // explicit no-op keeps that behavior while satisfying the
                 // every-tag-has-a-disposition contract (never the loud arm,
                 // which would wrongly flag a well-formed `(export ...)`).
-                Some(
-                    DeepTag::Module
-                    | DeepTag::Import
-                    | DeepTag::ImportAll
-                    | DeepTag::Export
-                    | DeepTag::Defdim,
-                ) => Type::Unit,
-                Some(DeepTag::Block) => {
+                DeepTag::Module
+                | DeepTag::Import
+                | DeepTag::ImportAll
+                | DeepTag::Export
+                | DeepTag::Defdim => Type::Unit,
+                DeepTag::Block => {
                     // chelis#859: sequenced expressions; the value (and
                     // type) is the last child's (spec/03 §2.3). Every child
                     // is checked in order so non-last children keep their
                     // own diagnostics. A childless block has no value and
                     // is malformed ([04-TOT-3]); lowering raises on the
                     // same shape.
-                    let kids = children(list);
+                    let kids = node.children_slice();
                     if kids.is_empty() {
-                        malformed_form(list, "block", "at least one child expression", errors)
+                        malformed_form(node, "block", "at least one child expression", errors)
                     } else {
                         let mut last_ty = Type::Unit;
                         for kid in kids {
@@ -301,37 +298,37 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
                         last_ty
                     }
                 }
-                Some(DeepTag::Par) => {
+                DeepTag::Par => {
                     // par: evaluate all children, return type of last (v1: sequential)
-                    let kids = children(list);
+                    let kids = node.children_slice();
                     let mut last_ty = Type::Unit;
                     for kid in kids {
                         last_ty = infer_expr(kid, env, vg, subst, adt_reg, errors, product);
                     }
                     last_ty
                 }
-                Some(DeepTag::Jit) => {
+                DeepTag::Jit => {
                     // jit: compilation trigger; semantically a no-op at eval
                     // (spec/03-deep-syntax.md §2.7). Type is the type of the
                     // wrapped expression.
-                    let kids = children(list);
+                    let kids = node.children_slice();
                     if let Some(inner) = kids.first() {
                         infer_expr(inner, env, vg, subst, adt_reg, errors, product)
                     } else {
-                        malformed_form(list, "jit", "one wrapped expression", errors)
+                        malformed_form(node, "jit", "one wrapped expression", errors)
                     }
                 }
-                Some(DeepTag::Realize) => {
-                    let kids = children(list);
+                DeepTag::Realize => {
+                    let kids = node.children_slice();
                     if let Some(inner) = kids.first() {
                         infer_expr(inner, env, vg, subst, adt_reg, errors, product)
                     } else {
-                        malformed_form(list, "realize", "one wrapped expression", errors)
+                        malformed_form(node, "realize", "one wrapped expression", errors)
                     }
                 }
-                Some(DeepTag::Copy) => infer_copy(list, env, vg, subst, adt_reg, errors, product),
-                Some(DeepTag::Borrow) => {
-                    let kids = children(list);
+                DeepTag::Copy => infer_copy(node, env, vg, subst, adt_reg, errors, product),
+                DeepTag::Borrow => {
+                    let kids = node.children_slice();
                     if let Some(inner) = kids.first() {
                         let inner_ty = infer_expr(inner, env, vg, subst, adt_reg, errors, product);
                         let resolved = subst.apply(&inner_ty);
@@ -387,11 +384,11 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
                             ),
                         }
                     } else {
-                        malformed_form(list, "borrow", "one wrapped expression", errors)
+                        malformed_form(node, "borrow", "one wrapped expression", errors)
                     }
                 }
-                Some(DeepTag::HandleEffect) => {
-                    infer_handle_effect(list, env, vg, subst, adt_reg, errors, product)
+                DeepTag::HandleEffect => {
+                    infer_handle_effect(node, env, vg, subst, adt_reg, errors, product)
                 }
                 // chelis#731 Phase 3 [04-TOT-1]: in-vocabulary tags with no
                 // expression-position inference case: declaration internals,
@@ -405,217 +402,6 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
                 // chelis#709 class defect). Before Phase 3 these fell through
                 // the unknown-tag wildcard, whose message wrongly claimed
                 // they were outside the vocabulary.
-                Some(
-                    undispatched @ (DeepTag::Variant
-                    | DeepTag::Field
-                    | DeepTag::Arm
-                    | DeepTag::PatVar
-                    | DeepTag::PatLit
-                    | DeepTag::PatCtor
-                    | DeepTag::PatTuple
-                    | DeepTag::PatRecord
-                    | DeepTag::PatWild
-                    | DeepTag::PatAs
-                    | DeepTag::TPrim
-                    | DeepTag::TFn
-                    | DeepTag::TTensor
-                    | DeepTag::TRef
-                    | DeepTag::TAdt
-                    | DeepTag::TVar
-                    | DeepTag::TUnit
-                    | DeepTag::TTuple
-                    | DeepTag::DName
-                    | DeepTag::DVar
-                    | DeepTag::DLit
-                    | DeepTag::DRank
-                    | DeepTag::Quote
-                    | DeepTag::Unquote
-                    | DeepTag::Splice
-                    | DeepTag::Params
-                    | DeepTag::Bind
-                    | DeepTag::Kv
-                    | DeepTag::Effects
-                    | DeepTag::Resource),
-                ) => {
-                    let named = undispatched.as_str();
-                    report(
-                        errors,
-                        CheckError::new(
-                            CheckErrorKind::UnknownForm,
-                            format!(
-                                "Deep tag `{named}` has no expression-position checker \
-                             disposition (helper/pattern/type syntax outside its owning \
-                             form, or an expression form with no implemented case; \
-                             spec/03-deep-syntax.md; chelis#731 [04-TOT-1])"
-                            ),
-                            vec![],
-                        ),
-                    )
-                }
-                None => {
-                    // chelis#731 [04-TOT-1] / §C1.2: the raw-string entry
-                    // boundary. The parser already screens the 62-tag closed
-                    // vocabulary, so a string that does not decode here came
-                    // from input that never crossed the parser (programmatic
-                    // Deep construction) or from version skew - never
-                    // ordinary parsed input. Reject it loudly rather than
-                    // returning a silent `Type::Error` that would exempt the
-                    // whole subtree from checking (the chelis#709 class
-                    // defect: the default must be to fail).
-                    let named = list.unknown_tag_symbol().unwrap_or("<none>");
-                    report(
-                        errors,
-                        CheckError::new(
-                            CheckErrorKind::UnknownForm,
-                            format!(
-                                "unknown Deep tag `{named}` has no checker disposition \
-                             (not in the 62-tag closed vocabulary of \
-                             spec/03-deep-syntax.md; chelis#731 [04-TOT-1])"
-                            ),
-                            vec![],
-                        ),
-                    )
-                }
-            }
-        }
-        deep::Expr::Map(_, _) => Type::Unit,
-        deep::Expr::MetaExpr(meta, _) => {
-            infer_expr(&meta.expr, env, vg, subst, adt_reg, errors, product)
-        }
-        deep::Expr::Node(node, span) => {
-            // PP7/E5e audited symmetric root adapter, not an independent
-            // child reader: this arm and the `Expr::List` arm above have the
-            // same exhaustive `DeepTag` dispositions, and the bridge copies
-            // metadata and children without recursively changing their
-            // carriers. E5e migrated the dispatched helpers' bare child
-            // reads to `Expr::carrier`, so no nested decision relies on this
-            // shallow conversion. Removing this last root adapter requires
-            // changing every tag-specific `infer_*(&List, ...)` signature;
-            // that is the #1029 carrier-deletion refactor, not a leaf-reader
-            // repair. Keep this exception visible rather than presenting the
-            // inference audit as a universal no-bridge claim.
-            let list = node.to_list(*span);
-            product.register_bridge_children(node.children_slice(), children(&list));
-            match node.tag() {
-                DeepTag::Var => infer_var(&list, env, vg, subst, adt_reg, errors, product),
-                DeepTag::Lit => {
-                    infer_lit(&list, env, vg, adt_reg, errors, type_metadata_resolution)
-                }
-                DeepTag::App => infer_app(
-                    &list,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    product,
-                    expected_result,
-                ),
-                DeepTag::Fn => infer_fn(
-                    &list,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    product,
-                    declaration_diagnostic_owner,
-                ),
-                DeepTag::Let => infer_let(&list, env, vg, subst, adt_reg, errors, product),
-                DeepTag::If => infer_if(&list, env, vg, subst, adt_reg, errors, product),
-                DeepTag::Match => infer_match(&list, env, vg, subst, adt_reg, errors, product),
-                DeepTag::Pipe => pipe_reached_inference_unfolded(&list, errors),
-                DeepTag::Tuple => infer_tuple(&list, env, vg, subst, adt_reg, errors, product),
-                DeepTag::TupleGet => {
-                    infer_tuple_get(&list, env, vg, subst, adt_reg, errors, product)
-                }
-                DeepTag::Record => infer_record(&list, env, vg, subst, adt_reg, errors, product),
-                DeepTag::Access => infer_access(&list, env, vg, subst, adt_reg, errors, product),
-                DeepTag::RecordUpdate => {
-                    infer_record_update(&list, env, vg, subst, adt_reg, errors, product)
-                }
-                DeepTag::Cast => infer_cast(&list, env, vg, subst, adt_reg, errors, product),
-                DeepTag::Grad => infer_grad(&list, env, vg, subst, adt_reg, errors, product),
-                DeepTag::Vmap => infer_vmap(&list, env, vg, subst, adt_reg, errors, product),
-                DeepTag::Def => infer_def(&list, env, vg, subst, adt_reg, errors, product),
-                DeepTag::Defsig => Type::Unit,
-                DeepTag::Deftype | DeepTag::Typealias => Type::Unit,
-                DeepTag::Module
-                | DeepTag::Import
-                | DeepTag::ImportAll
-                | DeepTag::Export
-                | DeepTag::Defdim => Type::Unit,
-                DeepTag::Block => {
-                    let kids = children(&list);
-                    if kids.is_empty() {
-                        malformed_form(&list, "block", "at least one child expression", errors)
-                    } else {
-                        let mut last_ty = Type::Unit;
-                        for kid in kids {
-                            last_ty = infer_expr(kid, env, vg, subst, adt_reg, errors, product);
-                        }
-                        last_ty
-                    }
-                }
-                DeepTag::Par => {
-                    let kids = children(&list);
-                    let mut last_ty = Type::Unit;
-                    for kid in kids {
-                        last_ty = infer_expr(kid, env, vg, subst, adt_reg, errors, product);
-                    }
-                    last_ty
-                }
-                DeepTag::Jit => {
-                    let kids = children(&list);
-                    if let Some(inner) = kids.first() {
-                        infer_expr(inner, env, vg, subst, adt_reg, errors, product)
-                    } else {
-                        malformed_form(&list, "jit", "one wrapped expression", errors)
-                    }
-                }
-                DeepTag::Realize => {
-                    let kids = children(&list);
-                    if let Some(inner) = kids.first() {
-                        infer_expr(inner, env, vg, subst, adt_reg, errors, product)
-                    } else {
-                        malformed_form(&list, "realize", "one wrapped expression", errors)
-                    }
-                }
-                DeepTag::Copy => infer_copy(&list, env, vg, subst, adt_reg, errors, product),
-                DeepTag::Borrow => {
-                    let kids = children(&list);
-                    if let Some(inner) = kids.first() {
-                        let inner_ty = infer_expr(inner, env, vg, subst, adt_reg, errors, product);
-                        let resolved = subst.apply(&inner_ty);
-                        match resolved {
-                            Type::Ref(_) => resolved,
-                            Type::Tensor(_, _)
-                            | Type::Adt(_, _)
-                            | Type::KindedAdt(_, _)
-                            | Type::Tuple(_)
-                            | Type::Error(_) => Type::Ref(Box::new(resolved)),
-                            Type::Var(tv) => {
-                                subst.record_deferred_borrow_var(tv);
-                                Type::Ref(Box::new(Type::Var(tv)))
-                            }
-                            _ => report(
-                                errors,
-                                CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    format!(
-                                        "borrow requires tensor or tensor-carrying input, got {resolved}"
-                                    ),
-                                    vec!["Use `&x` only with tensor values".to_string()],
-                                ),
-                            ),
-                        }
-                    } else {
-                        malformed_form(&list, "borrow", "one wrapped expression", errors)
-                    }
-                }
-                DeepTag::HandleEffect => {
-                    infer_handle_effect(&list, env, vg, subst, adt_reg, errors, product)
-                }
                 undispatched @ (DeepTag::Variant
                 | DeepTag::Field
                 | DeepTag::Arm
@@ -670,10 +456,10 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
         // and count the node as typed. So `(def {} f ())` type-checked
         // clean through `check_typed_program`, which walks stamped Deep
         // directly, while `check_ir_program` rejected the same program
-        // loudly because it normalizes `BareList` into a tagless
-        // `Expr::List` first and lands on the `None` arm below. Same
-        // program, two verdicts, and the permissive one scored a form with
-        // no honest type as checked (the chelis#873-shape fail-open).
+        // loudly because it normalized `BareList` into a tagless legacy
+        // list first. Same program, two verdicts, and the permissive one
+        // scored a form with no honest type as checked (the chelis#873-shape
+        // fail-open).
         //
         // A headless list has no expression-position type in any position,
         // so the disposition is the sibling arms' loud rejection. Per
@@ -806,7 +592,7 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
 ///   (target knowledge, chelis#735). Checking the expression bounds the handler.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_handle_effect(
-    list: &deep::List,
+    node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
     subst: &mut Subst,
@@ -814,7 +600,7 @@ pub(super) fn infer_handle_effect(
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
 ) -> Type {
-    let kids = children(list);
+    let kids = node.children_slice();
     // Structural arity: spec/03-deep-syntax.md gives `handle-effect` EXACTLY
     // two children -- `(handle-effect {effect: K} <handler> <body>)`. Any other
     // count is malformed Deep; reject loudly ([04-TOT-3]). A THIRD child in
@@ -823,7 +609,7 @@ pub(super) fn infer_handle_effect(
     // tolerating `>= 2` would be a fitness-honesty hole.
     if kids.len() != 2 {
         return malformed_form(
-            list,
+            node,
             "handle-effect",
             "exactly two children (a handler expression and a body)",
             errors,
@@ -843,7 +629,7 @@ pub(super) fn infer_handle_effect(
     // over `EffectKind` (no wildcard arm). Adding a kind is a compile error
     // here until this checker case handles it. Decode failures preserve the
     // missing/malformed/unknown distinction from the shared Deep adapter.
-    match decode_effect_kind(list) {
+    match decode_effect_kind(node.meta()) {
         Ok(EffectKind::Random) => {
             // Preserve the literal suffix diagnostic and its priority. The
             // effects gate owns signed literal admission, evaluated with
@@ -1012,29 +798,11 @@ pub(super) fn infer_atom(atom: &deep::Atom, errors: &mut DiagnosticSink<'_>) -> 
                 vec![format!("to reference a binding, write `(var {{}} {name})`")],
             ),
         ),
-        deep::Atom::Tag(tag) => report(
-            errors,
-            CheckError::new(
-                CheckErrorKind::MalformedForm,
-                format!(
-                    "a decoded tag atom `{}` outside a list's tag position is structural \
-                     syntax, not an expression, and cannot be typed or lowered to the \
-                     executable IR (spec/design/loud_unsupported.md section C1.4; \
-                     chelis#710 form 4)",
-                    tag.as_str()
-                ),
-                vec![format!(
-                    "`{}` names a form; write `({} {{}} ...)` to use it as one",
-                    tag.as_str(),
-                    tag.as_str()
-                )],
-            ),
-        ),
     }
 }
 
 pub(super) fn infer_var(
-    list: &deep::List,
+    node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
     subst: &Subst,
@@ -1042,7 +810,7 @@ pub(super) fn infer_var(
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
 ) -> Type {
-    let kids = children(list);
+    let kids = node.children_slice();
     if let Some(name) = kids.first().and_then(|e| symbol_name(e)) {
         // chelis#317: a nullary constructor at a construction site (a bare
         // `Alpha`, desugared to `(var Alpha)`) or an applied constructor
@@ -1056,16 +824,13 @@ pub(super) fn infer_var(
                 CheckErrorKind::UnknownConstructor {
                     identifier: name.to_string(),
                 },
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
-                    format!("unknown constructor: {name}"),
-                ),
+                with_node_provenance(node, format!("unknown constructor: {name}")),
                 vec![format!(
                     "Constructor '{name}' is not in scope. Declare it locally or add it \
                      to an import (e.g. `import Mod ({name})`)"
                 )],
             );
-            if let Some(sid) = list_span_id(list) {
+            if let Some(sid) = node_span_id(node) {
                 if let Some(off) = parse_span_offset(sid) {
                     err.span_offset = Some(off);
                 }
@@ -1101,7 +866,7 @@ pub(super) fn infer_var(
                 // record the instantiation minted for an in-group reference
                 // so the group can be validated for uniform recursive
                 // instantiation.
-                let span_id = list_span_id(list).map(str::to_string);
+                let span_id = node_span_id(node).map(str::to_string);
                 let span_offset = span_id.as_deref().and_then(parse_span_offset);
                 super::recursion::record_occurrence(
                     name,
@@ -1125,13 +890,10 @@ pub(super) fn infer_var(
                 CheckErrorKind::UnboundVariable {
                     identifier: name.to_string(),
                 },
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
-                    format!("unbound variable: {name}"),
-                ),
+                with_node_provenance(node, format!("unbound variable: {name}")),
                 vec![format!("Check spelling of '{}'", name)],
             );
-            if let Some(sid) = list_span_id(list) {
+            if let Some(sid) = node_span_id(node) {
                 if let Some(off) = parse_span_offset(sid) {
                     err.span_offset = Some(off);
                 }
@@ -1140,20 +902,20 @@ pub(super) fn infer_var(
             report(errors, err)
         }
     } else {
-        malformed_form(list, "var", "a symbol name as its first child", errors)
+        malformed_form(node, "var", "a symbol name as its first child", errors)
     }
 }
 
 pub(super) fn infer_lit(
-    list: &deep::List,
+    node: &DeepNode,
     env: &Env,
     vg: &mut VarGen,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     type_metadata_resolution: Option<&mut Option<OwnedTypeMetadataResolution>>,
 ) -> Type {
-    let meta = get_meta(list);
-    let kids = children(list);
+    let meta = node.meta();
+    let kids = node.children_slice();
 
     // D1 (WS-A0 RT-1 fixup): per spec/04-type-system.md §5.3 last
     // paragraph, the lexer parses unsuffixed integer literals at i64
@@ -1173,20 +935,17 @@ pub(super) fn infer_lit(
     // i8 (range [-128, 127]) and silently wraps to -56 if not
     // diagnosed here. Mirror the i32 check for the i8 and i16 rows.
     let value_atom = kids.first();
-    // chelis#1125 PP7 / [04-TOT-5]: read the `type:` metadata VALUE through
-    // the carrier-preserving `stamped_parts`. `Node::to_list` clones the
-    // metadata map verbatim, so on the stamped ingress this value is still an
-    // `Expr::Node` even though the enclosing `lit` arrived here as a rebuilt
-    // `List`. The old `Expr::List`-only destructure therefore selected no
-    // range-check row at all, and `(lit {type: (t-prim {} i8)} 200)` was
-    // accepted by `check_typed_program` while `check_ir_program` rejected it.
-    let meta_prim_name =
-        meta.and_then(|m| m.ty())
-            .and_then(|ty| match stamped_parts(ty.expression()) {
-                Some((DeepTag::TPrim, _, prim_kids)) => prim_kids.first().and_then(symbol_name),
-                _ => None,
-            });
-    let integer_source_marker = meta.and_then(|m| m.literal_source()).is_some();
+    // chelis#1125 PP7 / [04-TOT-5]: an `Expr::List`-only destructure of the
+    // `type:` metadata VALUE selected no range-check row at all on the stamped
+    // ingress, and `(lit {type: (t-prim {} i8)} 200)` was accepted by
+    // `check_typed_program` while `check_ir_program` rejected it.
+    let meta_prim_name = meta
+        .ty()
+        .and_then(|ty| match stamped_parts(ty.expression()) {
+            Some((DeepTag::TPrim, _, prim_kids)) => prim_kids.first().and_then(symbol_name),
+            _ => None,
+        });
+    let integer_source_marker = meta.literal_source().is_some();
     if let Some(prim_name) = meta_prim_name
         && let Some(deep::Expr::Atom(deep::Atom::Int(n), _)) = value_atom
     {
@@ -1254,7 +1013,7 @@ pub(super) fn infer_lit(
     }
 
     // Check metadata for type annotation
-    if let Some(ty) = meta.and_then(|m| m.ty()) {
+    if let Some(ty) = meta.ty() {
         let val = ty.expression();
         let resolved = match resolve_deep_type_with_diagnostic_owner(
             val,
@@ -1416,9 +1175,9 @@ pub(super) fn infer_lit(
             deep::Expr::Atom(deep::Atom::Float(_), _) => Type::Prim(Prim::F32),
             deep::Expr::Atom(deep::Atom::Bool(_), _) => Type::Prim(Prim::Bool),
             deep::Expr::Atom(deep::Atom::Str(_), _) => Type::Prim(Prim::String),
-            _ => malformed_form(list, "lit", "a scalar atom value", errors),
+            _ => malformed_form(node, "lit", "a scalar atom value", errors),
         }
     } else {
-        malformed_form(list, "lit", "a value atom or a `type:` annotation", errors)
+        malformed_form(node, "lit", "a value atom or a `type:` annotation", errors)
     }
 }

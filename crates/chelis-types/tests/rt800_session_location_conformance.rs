@@ -2,8 +2,6 @@
 //! The intentional `infer_var` mutation is represented by `errors::report`'s
 //! compile-fail oracle instead of being planted in production source.
 
-mod support;
-
 use chelis_deep::parser::parse_str as parse_deep_lenient;
 use chelis_macros::{ExpansionOptions, expand_program};
 use chelis_surf::desugar::desugar_program;
@@ -54,16 +52,15 @@ fn einsum_with_only_equation_and_one_operand_reports_one_arity_root() {
 
 #[test]
 fn cast_operand_and_target_failures_remain_two_independent_roots() {
-    let exprs = support::parse_unchecked_legacy(
-        "(def {} bad (cast {} (var {} missing_value) (t-prim {} f32 extra)))",
-    );
-    let errors = check_ir_program(&exprs)
-        .expect_err("adversarial Deep fixture must be rejected")
-        .errors;
+    // A wrong-arity target such as `(t-prim {} f32 extra)` has no admitted
+    // carrier (the stamped `Node` constructor rejects it at ingress), so the
+    // failing target here is an unknown primitive.
+    let errors =
+        deep_errors("(def {} bad (cast {} (var {} missing_value) (t-prim {} MissingTarget)))");
     assert_eq!(
         errors.len(),
         2,
-        "the bad operand and malformed target are independent roots: {errors:?}"
+        "the bad operand and unknown target are independent roots: {errors:?}"
     );
     assert!(
         errors
@@ -72,9 +69,9 @@ fn cast_operand_and_target_failures_remain_two_independent_roots() {
         "{errors:?}"
     );
     assert!(
-        errors.iter().any(|error| {
-            matches!(error.kind, CheckErrorKind::MalformedForm) && error.message.contains("t-prim")
-        }),
+        errors
+            .iter()
+            .any(|error| error.message.contains("MissingTarget")),
         "{errors:?}"
     );
 }

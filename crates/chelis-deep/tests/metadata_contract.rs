@@ -465,52 +465,40 @@ fn resource_effect_metadata_requires_string_devices_at_every_ingress() {
     }
 }
 
+/// A nested runtime child cannot hide below a typed ancestor in an
+/// unvalidated carrier: the only spelling of a nested `app` is a validated
+/// `Node`, which refuses a bare name at a runtime position when it is built,
+/// so every payload the constructor sees already carries its roles.
 #[test]
-fn expression_metadata_validates_nested_runtime_roles_on_legacy_carriers() {
-    use chelis_deep::List;
-    let legacy_app = |child: Expr| {
-        Expr::List(
-            List {
-                elements: vec![
-                    Expr::Atom(Atom::Tag(DeepTag::App), ZERO),
-                    Expr::Map(Metadata::default(), ZERO),
-                    child,
-                ],
-            },
-            ZERO,
-        )
-    };
+fn expression_metadata_nested_runtime_roles_are_enforced_at_construction() {
     for key in [
         "property_seed",
         "property_samples",
         "property_tolerance",
         "property_preconditions",
     ] {
-        for valid in [true, false] {
-            let child = if valid {
-                Expr::node(
-                    DeepTag::Var,
-                    Metadata::default(),
-                    vec![Expr::Atom(Atom::Name("missing".into()), ZERO)],
-                    ZERO,
-                )
-            } else {
-                Expr::Atom(Atom::Name("missing".into()), ZERO)
-            };
-            // A typed runtime ancestor does not prove legacy descendants' roles.
-            let mut payload = Expr::node(
-                DeepTag::Tuple,
-                Metadata::default(),
-                vec![legacy_app(child)],
-                ZERO,
-            );
-            if key == "property_preconditions" {
-                payload = Expr::node(DeepTag::Tuple, Metadata::default(), vec![payload], ZERO);
-            }
-            let admitted = RuntimeExpression::try_new(payload);
-            assert_eq!(admitted.is_ok(), valid, "constructor {key}: {admitted:?}");
+        let child = Expr::node(
+            DeepTag::Var,
+            Metadata::default(),
+            vec![Expr::Atom(Atom::Name("missing".into()), ZERO)],
+            ZERO,
+        );
+        let app = Expr::node(DeepTag::App, Metadata::default(), vec![child], ZERO);
+        let mut payload = Expr::node(DeepTag::Tuple, Metadata::default(), vec![app], ZERO);
+        if key == "property_preconditions" {
+            payload = Expr::node(DeepTag::Tuple, Metadata::default(), vec![payload], ZERO);
         }
+        let admitted = RuntimeExpression::try_new(payload);
+        assert!(admitted.is_ok(), "constructor {key}: {admitted:?}");
     }
+    assert!(matches!(
+        Node::try_new(
+            DeepTag::App,
+            Metadata::default(),
+            vec![Expr::Atom(Atom::Name("missing".into()), ZERO)],
+        ),
+        Err(chelis_deep::node::NodeError::NameAtExprSlot { .. })
+    ));
 }
 
 #[test]

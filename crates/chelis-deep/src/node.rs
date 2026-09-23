@@ -11,9 +11,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::Metadata;
-use crate::ast::{Atom, Expr, List};
+use crate::ast::{Atom, Expr};
 use crate::role::{AritySpec, ChildStampRole, arity_contract, child_stamp_role};
-use crate::span::Span;
 use crate::tag::DeepTag;
 
 /// Error from `Node::try_new` — a child violated its role constraint or
@@ -27,13 +26,6 @@ pub enum NodeError {
         tag: DeepTag,
         index: usize,
         name: String,
-    },
-    /// A transitional decoded tag atom appeared where a runtime expression
-    /// node is required.
-    TagAtExprSlot {
-        tag: DeepTag,
-        index: usize,
-        child_tag: DeepTag,
     },
     /// Child count violates `arity_contract`.
     ArityViolation {
@@ -63,17 +55,6 @@ impl std::fmt::Display for NodeError {
                     tag.as_str()
                 )
             }
-            NodeError::TagAtExprSlot {
-                tag,
-                index,
-                child_tag,
-            } => write!(
-                f,
-                "transitional tag atom `{}` at RuntimeExpr child position \
-                 (tag={}, index={index}); construct a validated Node expression",
-                child_tag.as_str(),
-                tag.as_str()
-            ),
             NodeError::ArityViolation {
                 tag,
                 expected,
@@ -120,8 +101,7 @@ pub enum ChildRef<'a> {
 
 /// A stamped vocabulary node with private fields.
 ///
-/// Invariant: no `Atom::Name` or `Atom::Tag` at a `RuntimeExpr` child
-/// position. Enforced at construction (both `try_new` and `new`
+/// Invariant: no `Atom::Name` at a `RuntimeExpr` child position. Enforced at construction (both `try_new` and `new`
 /// validate in all build modes).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Node {
@@ -179,28 +159,17 @@ impl Node {
         }
 
         // Per-child role check: RuntimeExpr positions contain expression
-        // nodes or literal atoms, never structural names or the transitional
-        // Atom::Tag carrier.
+        // nodes or literal atoms, never structural names.
         for (index, child) in children.iter().enumerate() {
             let role = child_stamp_role(tag, index, n);
-            if role == ChildStampRole::RuntimeExpr {
-                match child {
-                    Expr::Atom(Atom::Name(s), _) => {
-                        return Err(NodeError::NameAtExprSlot {
-                            tag,
-                            index,
-                            name: s.clone(),
-                        });
-                    }
-                    Expr::Atom(Atom::Tag(child_tag), _) => {
-                        return Err(NodeError::TagAtExprSlot {
-                            tag,
-                            index,
-                            child_tag: *child_tag,
-                        });
-                    }
-                    _ => {}
-                }
+            if role == ChildStampRole::RuntimeExpr
+                && let Expr::Atom(Atom::Name(s), _) = child
+            {
+                return Err(NodeError::NameAtExprSlot {
+                    tag,
+                    index,
+                    name: s.clone(),
+                });
             }
         }
 
@@ -293,25 +262,6 @@ impl Node {
     /// reopen the validated domain; mutable access is intentionally absent.
     pub fn children_slice(&self) -> &[Expr] {
         &self.children
-    }
-
-    // === Bridge: reconstruct List for transition-period consumers ===
-
-    /// Reconstruct the canonical `List` representation that existing
-    /// consumer dispatch functions (`infer_var`, `infer_app`, etc.)
-    /// expect. This is a **transitional bridge**: once all consumers are
-    /// migrated to use the Node API directly, this method becomes dead
-    /// code and should be removed.
-    ///
-    /// The returned List has the same shape as what `Expr::node()` would
-    /// produce: `elements[0]` = `Atom::Tag(self.tag)`,
-    /// `elements[1]` = `Map(self.meta)`, `elements[2..]` = children.
-    pub fn to_list(&self, span: Span) -> List {
-        let mut elements = Vec::with_capacity(self.children.len() + 2);
-        elements.push(Expr::Atom(Atom::Tag(self.tag), span));
-        elements.push(Expr::Map(self.meta.clone(), span));
-        elements.extend(self.children.clone());
-        List { elements }
     }
 
     // === Role-typed accessors ===
@@ -542,16 +492,14 @@ mod tests {
     /// one, the lowering-boundary assertion still catches it.
     #[test]
     fn construction_scan_stops_at_a_stamped_node_boundary() {
-        let raw = Expr::List(
-            List {
-                elements: vec![
-                    Expr::Atom(Atom::Name("lit".to_string()), sp()),
-                    Expr::Map(Metadata::default(), sp()),
-                    int(0),
-                ],
-            },
-            sp(),
-        );
+        // A raw-string vocabulary head can only be spelled as an
+        // `UnknownForm` whose head decodes; the stamper never builds one.
+        let raw = Expr::UnknownForm(Box::new(crate::ast::UnknownFormData {
+            head: "lit".to_string(),
+            meta: Metadata::default(),
+            children: vec![int(0)],
+            span: sp(),
+        }));
 
         // Unreachable outside this module: the fields are private.
         let smuggled = Expr::Node(

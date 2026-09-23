@@ -27,7 +27,7 @@ use super::*;
 /// decide anyway.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn reject_test_assert_close_tensor_operand_dtypes(
-    list: &deep::List,
+    node: &DeepNode,
     arg_tys: &[Type],
     subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
@@ -43,8 +43,8 @@ pub(super) fn reject_test_assert_close_tensor_operand_dtypes(
                 errors,
                 CheckError::new(
                     CheckErrorKind::PrecisionMismatch,
-                    with_macro_provenance(
-                        &deep::Expr::List(list.clone(), zero_span()),
+                    with_node_provenance(
+                        node,
                         format!(
                             "test_assert_close_tensor expects tensors at one active float dtype, got `{}`",
                             prim.name()
@@ -76,8 +76,8 @@ pub(super) fn reject_test_assert_close_tensor_operand_dtypes(
                 errors,
                 CheckError::new(
                     CheckErrorKind::TypeMismatch,
-                    with_macro_provenance(
-                        &deep::Expr::List(list.clone(), zero_span()),
+                    with_node_provenance(
+                        node,
                         format!("test_assert_close_tensor expects tensor arguments, got {other}"),
                     ),
                     vec![],
@@ -96,8 +96,8 @@ pub(super) fn reject_test_assert_close_tensor_operand_dtypes(
                         errors,
                         CheckError::new(
                             CheckErrorKind::PrecisionMismatch,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
+                            with_node_provenance(
+                                node,
                                 format!(
                                     "test_assert_close_tensor tolerance dtype `{}` must equal tensor dtype `{}`",
                                     tolerance_prim.name(),
@@ -121,8 +121,8 @@ pub(super) fn reject_test_assert_close_tensor_operand_dtypes(
                     errors,
                     CheckError::new(
                         CheckErrorKind::PrecisionMismatch,
-                        with_macro_provenance(
-                            &deep::Expr::List(list.clone(), zero_span()),
+                        with_node_provenance(
+                            node,
                             format!(
                                 "test_assert_close_tensor tolerance must have the tensor's active float dtype, got {other}"
                             ),
@@ -142,7 +142,7 @@ pub(super) fn reject_test_assert_close_tensor_operand_dtypes(
 /// inference rule, exactly as the inline checks did.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn reject_inadmissible_operand_dtypes(
-    list: &deep::List,
+    node: &DeepNode,
     kids: &[deep::Expr],
     func_name: Option<&str>,
     arg_tys: &[Type],
@@ -159,7 +159,7 @@ pub(super) fn reject_inadmissible_operand_dtypes(
     {
         *checked_route_observed = true;
         if let Some(rejected) = reject_test_assert_close_tensor_operand_dtypes(
-            list, arg_tys, subst, errors, suspension, result_ty, product,
+            node, arg_tys, subst, errors, suspension, result_ty, product,
         ) {
             return Some(rejected);
         }
@@ -181,8 +181,8 @@ pub(super) fn reject_inadmissible_operand_dtypes(
                         errors,
                         CheckError::new(
                             CheckErrorKind::TypeMismatch,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
+                            with_node_provenance(
+                                node,
                                 format!(
                                     "uniform_like expects a float tensor template, got {}",
                                     resolved
@@ -207,8 +207,8 @@ pub(super) fn reject_inadmissible_operand_dtypes(
                         errors,
                         CheckError::new(
                             CheckErrorKind::TypeMismatch,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
+                            with_node_provenance(
+                                node,
                                 format!(
                                     "uniform_like expects tensor template input, got {}",
                                     resolved
@@ -237,8 +237,8 @@ pub(super) fn reject_inadmissible_operand_dtypes(
                         errors,
                         CheckError::new(
                             CheckErrorKind::TypeMismatch,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
+                            with_node_provenance(
+                                node,
                                 format!(
                                     "uniform_like expects f32 bounds for args 2-3, got {}",
                                     resolved
@@ -257,8 +257,8 @@ pub(super) fn reject_inadmissible_operand_dtypes(
                     errors,
                     CheckError::new(
                         CheckErrorKind::TypeMismatch,
-                        with_macro_provenance(
-                            &deep::Expr::List(list.clone(), zero_span()),
+                        with_node_provenance(
+                            node,
                             "uniform_like currently requires literal low/high bounds \
                          (a numeric literal, optionally negated or cast to a float \
                          type); a runtime-computed bound is not supported"
@@ -302,8 +302,8 @@ pub(super) fn reject_inadmissible_operand_dtypes(
                         errors,
                         CheckError::new(
                             CheckErrorKind::TypeMismatch,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
+                            with_node_provenance(
+                                node,
                                 format!(
                                     "dropout expects a tensor at an active float dtype, got {}",
                                     resolved
@@ -333,8 +333,8 @@ pub(super) fn reject_inadmissible_operand_dtypes(
                         errors,
                         CheckError::new(
                             CheckErrorKind::TypeMismatch,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
+                            with_node_provenance(
+                                node,
                                 format!(
                                     "dropout rate must have the input tensor's active float dtype, got {}",
                                     resolved

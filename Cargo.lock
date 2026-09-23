@@ -753,8 +753,6 @@ name = "chelis-pred"
 version = "0.18.11"
 dependencies = [
  "chelis-deep",
- "proc-macro2",
- "syn 2.0.117",
  "thiserror 2.0.18",
 ]
 

@@ -158,17 +158,12 @@ fn module_decl_exprs(exprs: &[Expr]) -> Vec<Expr> {
     exprs
         .iter()
         .find_map(|expr| match expr {
-            Expr::List(list, _) if is_tag(list, "module") => Some(list.elements[3..].to_vec()),
             Expr::Node(node, _) if node.tag() == chelis_deep::DeepTag::Module => {
                 Some(node.children_slice()[1..].to_vec())
             }
             _ => None,
         })
         .expect("single module")
-}
-
-fn is_tag(list: &chelis_deep::List, tag: &str) -> bool {
-    matches!(list.tag(), Some(found) if found.as_str() == tag)
 }
 
 fn assert_insertion_faithful(original: &str, rewritten: &str, inserted: &str, index: usize) {

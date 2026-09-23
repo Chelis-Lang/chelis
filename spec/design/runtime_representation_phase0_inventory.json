@@ -2737,10 +2737,6 @@
       "sample": "lhs . evaluate (bindings) ? . checked_mul (rhs . evaluate (bindings) ?)"
     },
     {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/eval.rs|owner=dropout_sample",
-      "sample": "index . wrapping_mul (0x9E37_79B9_7F4A_7C15)"
-    },
-    {
       "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/host.rs|owner=infer_app_expr_host_type",
       "sample": "kids . len () . saturating_sub (2)"
     },

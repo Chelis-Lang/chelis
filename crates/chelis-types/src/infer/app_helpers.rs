@@ -37,7 +37,7 @@ pub(super) fn auto_borrow_call_arg_types(
 /// Keeping unification and family-failure cleanup here prevents such a route
 /// from becoming a second admission mechanism.
 pub(super) fn unify_checked_call_contract(
-    list: &deep::List,
+    site: &deep::Expr,
     func_ty: &Type,
     arg_tys: &[Type],
     vg: &mut VarGen,
@@ -68,11 +68,11 @@ pub(super) fn unify_checked_call_contract(
                 return Err(rejected);
             }
             let mut error: CheckError = te.into();
-            if let Some(id) = list_span_id(list) {
+            if let Some(id) = site.span_id() {
                 error.span_offset = parse_span_offset(id);
                 error.span_id = Some(id.to_string());
             } else {
-                let offset = span_of_list(list).offset;
+                let offset = site.span().offset;
                 if offset > 0 {
                     error.span_offset = Some(offset);
                 }
@@ -117,8 +117,7 @@ pub(super) fn shape_a_relaxed_return(
         | deep::ExprCarrier::UndecodableHead(_, _, _)
         | deep::ExprCarrier::Atom(_)
         | deep::ExprCarrier::MetadataMap(_)
-        | deep::ExprCarrier::MetadataExpression(_)
-        | deep::ExprCarrier::MalformedLegacyList(_) => return None,
+        | deep::ExprCarrier::MetadataExpression(_) => return None,
     };
 
     // The body's inferred type and the declared type both must be
@@ -315,8 +314,7 @@ fn descend_to_tail_parameter(
         | deep::ExprCarrier::UndecodableHead(_, _, _)
         | deep::ExprCarrier::Atom(_)
         | deep::ExprCarrier::MetadataMap(_)
-        | deep::ExprCarrier::MetadataExpression(_)
-        | deep::ExprCarrier::MalformedLegacyList(_) => return None,
+        | deep::ExprCarrier::MetadataExpression(_) => return None,
     };
     match tag {
         // The leaf. This is deliberately not a separate reader: every other
@@ -385,8 +383,7 @@ fn descend_to_tail_parameter(
                     | deep::ExprCarrier::UndecodableHead(_, _, _)
                     | deep::ExprCarrier::Atom(_)
                     | deep::ExprCarrier::MetadataMap(_)
-                    | deep::ExprCarrier::MetadataExpression(_)
-                    | deep::ExprCarrier::MalformedLegacyList(_) => return None,
+                    | deep::ExprCarrier::MetadataExpression(_) => return None,
                 };
                 let pattern = arm_children.first()?;
                 let mut arm_roots = roots.clone();

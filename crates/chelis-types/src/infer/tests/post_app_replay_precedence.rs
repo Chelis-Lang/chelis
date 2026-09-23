@@ -30,7 +30,7 @@ use crate::infer::checked::PostAppReplay;
 use crate::infer::operand_deferral::{DtypeAdmissibilitySite, UnresolvedOperandSite};
 
 fn probe() -> (
-    deep::List,
+    DeepNode,
     Vec<deep::Expr>,
     Env,
     InferenceProduct,
@@ -38,7 +38,11 @@ fn probe() -> (
     Vec<Type>,
 ) {
     (
-        deep::List { elements: vec![] },
+        DeepNode::new(
+            DeepTag::Var,
+            deep::Metadata::default(),
+            vec![symbol_expr("probe")],
+        ),
         Vec::new(),
         Env::new(),
         InferenceProduct::default(),
@@ -50,13 +54,13 @@ fn probe() -> (
 /// The two capabilities over one call: the route dispatch's site and the dtype
 /// validators' site. Only `finish_unified_app` holds both.
 fn sites<'a>(
-    list: &'a deep::List,
+    node: &'a DeepNode,
     kids: &'a [deep::Expr],
     env: &'a Env,
 ) -> (UnresolvedOperandSite<'a>, DtypeAdmissibilitySite<'a>) {
     (
-        UnresolvedOperandSite::new(list, kids, "probe", env),
-        DtypeAdmissibilitySite::new(list, kids, "probe", env),
+        UnresolvedOperandSite::new(node, kids, "probe", env),
+        DtypeAdmissibilitySite::new(node, kids, "probe", env),
     )
 }
 
@@ -65,19 +69,19 @@ fn sites<'a>(
 /// arm is never re-entered.
 #[test]
 fn a_route_registration_replaces_a_dtype_suspension_for_the_same_call() {
-    let (list, kids, env, mut product, subst, arg_tys) = probe();
-    let (route, dtype) = sites(&list, &kids, &env);
+    let (node, kids, env, mut product, subst, arg_tys) = probe();
+    let (route, dtype) = sites(&node, &kids, &env);
 
     dtype.register(&arg_tys, &Type::Unit, &subst, &mut product);
     assert_eq!(
-        product.post_app_replays_for(&list),
+        product.post_app_replays_for(&node),
         vec![PostAppReplay::DtypeAdmissibility],
         "the dtype validator registers first, as it runs first"
     );
 
     route.register(&arg_tys, &Type::Unit, &mut product);
     assert_eq!(
-        product.post_app_replays_for(&list),
+        product.post_app_replays_for(&node),
         vec![PostAppReplay::Route],
         "the route replay re-enters `finish_unified_app`, which runs the dtype validators on \
          its way to the route, so it must REPLACE the narrower entry rather than be skipped"
@@ -89,13 +93,13 @@ fn a_route_registration_replaces_a_dtype_suspension_for_the_same_call() {
 /// covers it. One entry per call either way, so neither validator runs twice.
 #[test]
 fn a_dtype_suspension_after_a_route_registration_is_a_no_op() {
-    let (list, kids, env, mut product, subst, arg_tys) = probe();
-    let (route, dtype) = sites(&list, &kids, &env);
+    let (node, kids, env, mut product, subst, arg_tys) = probe();
+    let (route, dtype) = sites(&node, &kids, &env);
 
     route.register(&arg_tys, &Type::Unit, &mut product);
     dtype.register(&arg_tys, &Type::Unit, &subst, &mut product);
     assert_eq!(
-        product.post_app_replays_for(&list),
+        product.post_app_replays_for(&node),
         vec![PostAppReplay::Route],
         "a second entry for one call would replay the route twice"
     );

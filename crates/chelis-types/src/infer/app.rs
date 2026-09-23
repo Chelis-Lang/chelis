@@ -38,7 +38,8 @@ impl ListAxis {
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_app(
-    list: &deep::List,
+    expr: &deep::Expr,
+    node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
     subst: &mut Subst,
@@ -49,7 +50,7 @@ pub(super) fn infer_app(
 ) -> Type {
     // Preserve lexical ownership before inference mutates the environment.
     // This is discovery metadata, not a backend acceptance decision.
-    let kids = children(list);
+    let kids = node.children_slice();
     let builtin = kids.first().and_then(|callee| {
         let (tag, _, parts) = stamped_parts(callee)?;
         if tag != DeepTag::Var {
@@ -63,7 +64,8 @@ pub(super) fn infer_app(
     });
     let checkpoint = errors.checkpoint();
     let result = infer_app_inner(
-        list,
+        expr,
+        node,
         env,
         vg,
         subst,
@@ -114,7 +116,8 @@ pub(super) fn infer_app(
 
 #[allow(clippy::too_many_arguments)]
 fn infer_app_inner(
-    list: &deep::List,
+    expr: &deep::Expr,
+    node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
     subst: &mut Subst,
@@ -123,9 +126,9 @@ fn infer_app_inner(
     product: &mut InferenceProduct,
     expected_result: Option<&Type>,
 ) -> Type {
-    let kids = children(list);
+    let kids = node.children_slice();
     if kids.is_empty() {
-        return malformed_form(list, "app", "a callee expression", errors);
+        return malformed_form(node, "app", "a callee expression", errors);
     }
 
     // Check if func is a comparison op (for special return type handling)
@@ -154,11 +157,11 @@ fn infer_app_inner(
     });
 
     if matches!(func_name.as_deref(), Some("permute")) {
-        return infer_permute_app(list, env, vg, subst, adt_reg, errors, product);
+        return infer_permute_app(node, env, vg, subst, adt_reg, errors, product);
     }
 
     if matches!(func_name.as_deref(), Some("reshape")) {
-        let inferred = infer_reshape_app(list, env, vg, subst, adt_reg, errors, product);
+        let inferred = infer_reshape_app(node, env, vg, subst, adt_reg, errors, product);
         if let Some(expected) = env.exact_stdlib_expected_result()
             && matches!(expected, Type::Tensor(_, _))
         {
@@ -172,15 +175,15 @@ fn infer_app_inner(
     }
 
     if matches!(func_name.as_deref(), Some("shrink")) {
-        return infer_shrink_app(list, env, vg, subst, adt_reg, errors, product);
+        return infer_shrink_app(node, env, vg, subst, adt_reg, errors, product);
     }
 
     if matches!(func_name.as_deref(), Some("pad")) {
-        return infer_pad_app(list, env, vg, subst, adt_reg, errors, product);
+        return infer_pad_app(node, env, vg, subst, adt_reg, errors, product);
     }
 
     if matches!(func_name.as_deref(), Some("stride")) {
-        return infer_stride_app(list, env, vg, subst, adt_reg, errors, product);
+        return infer_stride_app(node, env, vg, subst, adt_reg, errors, product);
     }
 
     // chelis#339: the anchored named-axis expand form `expand(x, new, size,
@@ -200,7 +203,7 @@ fn infer_app_inner(
         } else {
             "expand"
         };
-        return infer_expand_app(callee, list, env, vg, subst, adt_reg, errors, product);
+        return infer_expand_app(callee, node, env, vg, subst, adt_reg, errors, product);
     }
 
     // chelis#339 Part 2: variadic named-axis reduction `sum(x, seq, head)`.
@@ -225,7 +228,7 @@ fn infer_app_inner(
     ) && kids.len() >= 4
     {
         return infer_reduction_app(
-            list,
+            node,
             func_name.as_deref().unwrap(),
             env,
             vg,
@@ -243,7 +246,8 @@ fn infer_app_inner(
         )
     ) {
         return infer_reduce_window_app(
-            list,
+            expr,
+            node,
             func_name.as_deref().unwrap(),
             env,
             vg,
@@ -402,7 +406,7 @@ fn infer_app_inner(
         if arg_tys.len() != 1 {
             return_with_collection_cleanup!(report_builtin_arity(
                 errors,
-                list,
+                node,
                 "drop",
                 1,
                 arg_tys.len()
@@ -445,11 +449,11 @@ fn infer_app_inner(
                     "For concrete f32 values, another explicit spelling is `gt(xs, expand(to_tensor([1.5f32]), 0i32, shape(xs, 0i32)))`.".to_string(),
                 ],
             );
-            if let Some(id) = list_span_id(list) {
+            if let Some(id) = node_span_id(node) {
                 error.span_offset = parse_span_offset(id);
                 error.span_id = Some(id.to_string());
             } else {
-                let off = span_of_list(list).offset;
+                let off = expr.span().offset;
                 if off > 0 {
                     error.span_offset = Some(off);
                 }
@@ -472,7 +476,7 @@ fn infer_app_inner(
                 Type::Prim(prim) | Type::Tensor(_, TensorPrec::Concrete(prim)) if !prim.is_integer())
         })
         && let Some(rejected) = integer_binop_result_type(
-            list, Some(fname), &arg_tys, vg, subst, errors, None, &Type::Unit, product,
+            node, Some(fname), &arg_tys, vg, subst, errors, None, &Type::Unit, product,
         )
     {
         // Preserve the existing direct operation's diagnostic. Symbolic
@@ -520,19 +524,12 @@ fn infer_app_inner(
             if let Some((kind, message, hints)) = operand_dtype_rejection(fname, &resolved) {
                 return_with_collection_cleanup!(report(
                     errors,
-                    CheckError::new(
-                        kind,
-                        with_macro_provenance(
-                            &deep::Expr::List(list.clone(), zero_span()),
-                            message,
-                        ),
-                        hints,
-                    ),
+                    CheckError::new(kind, with_node_provenance(node, message,), hints,),
                 ));
             }
             if let Type::Tensor(_, TensorPrec::Var(var)) = resolved
                 && let Some(rejected) =
-                    decide_precision_variable_operand(list, fname, var, env, subst, errors)
+                    decide_precision_variable_operand(node, fname, var, env, subst, errors)
             {
                 return_with_collection_cleanup!(rejected);
             }
@@ -546,7 +543,7 @@ fn infer_app_inner(
     // wrappers pass this precheck and are constrained by the shared variable.
     if matches!(func_name.as_deref(), Some("test_assert_close_tensor"))
         && let Some(rejected) = reject_test_assert_close_tensor_operand_dtypes(
-            list,
+            node,
             &arg_tys,
             subst,
             errors,
@@ -568,7 +565,7 @@ fn infer_app_inner(
     // `postprocess_application`; every unambiguous builtin is screened here.
     if let Some(fname) = func_name.as_deref()
         && fname != "concat"
-        && let Err(rejected) = enforce_registered_axis_dtypes(fname, &arg_tys, list, errors)
+        && let Err(rejected) = enforce_registered_axis_dtypes(fname, &arg_tys, node, errors)
     {
         return_with_collection_cleanup!(rejected);
     }
@@ -586,8 +583,8 @@ fn infer_app_inner(
             errors,
             CheckError::new(
                 CheckErrorKind::TypeMismatch,
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
+                with_node_provenance(
+                    node,
                     format!(
                         "{callee} expects an i64 size (write Ni64 or cast(N, i64)), \
                          got {}",
@@ -670,8 +667,8 @@ fn infer_app_inner(
                     errors,
                     CheckError::new(
                         CheckErrorKind::DimensionMismatch,
-                        with_macro_provenance(
-                            &deep::Expr::List(list.clone(), zero_span()),
+                        with_node_provenance(
+                            node,
                             format!(
                                 "list element rank mismatch: {} dims vs {} dims; \
                              List[tensor[...]] requires rank-uniform elements \
@@ -783,7 +780,7 @@ fn infer_app_inner(
         );
     }
     let mut ret_tv =
-        match unify_checked_call_contract(list, &func_ty, &arg_tys, vg, subst, errors, product) {
+        match unify_checked_call_contract(expr, &func_ty, &arg_tys, vg, subst, errors, product) {
             Ok(ret_ty) => ret_ty,
             Err(rejected) => return_with_collection_cleanup!(rejected),
         };
@@ -802,7 +799,7 @@ fn infer_app_inner(
     let checkpoint = errors.checkpoint();
     let contract_name = func_name.clone();
     let applied = finish_unified_app(
-        list,
+        node,
         kids,
         func_name,
         arg_tys,
@@ -817,7 +814,7 @@ fn infer_app_inner(
     );
     if errors.iter_since(checkpoint).next().is_some() {
         subst.cancel_collection_contract_application(collection_contract_mark);
-        product.cancel_post_app_check_for(list);
+        product.cancel_post_app_check_for(node);
     } else {
         product.record_call_result_contracts(&func_ty, contract_name.as_deref(), env, subst);
     }

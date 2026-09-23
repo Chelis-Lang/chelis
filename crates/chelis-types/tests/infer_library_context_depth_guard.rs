@@ -23,7 +23,8 @@
 //! See docs/investigations/wi1_infer_recursion_depth.md and the
 //! `STACK_RED_ZONE_BYTES` doc-comment in crates/chelis-types/src/infer.rs.
 
-use chelis_deep::ast::{Atom, Expr, List, Metadata};
+use chelis_deep::DeepTag;
+use chelis_deep::ast::{Atom, Expr, Metadata};
 use chelis_deep::span::Span;
 use chelis_types::{
     TypeEnv, build_compiled_library_context, build_compiled_library_context_with_base,
@@ -33,28 +34,18 @@ fn sym(s: &str) -> Expr {
     Expr::Atom(Atom::Name(s.to_string()), Span::new(0, 0))
 }
 
-fn empty_meta() -> Expr {
-    Expr::Map(Metadata::default(), Span::new(0, 0))
+fn node(tag: DeepTag, children: Vec<Expr>) -> Expr {
+    Expr::node(tag, Metadata::default(), children, Span::new(0, 0))
 }
 
 /// `(var name)`.
 fn var(name: &str) -> Expr {
-    Expr::List(
-        List {
-            elements: vec![sym("var"), empty_meta(), sym(name)],
-        },
-        Span::new(0, 0),
-    )
+    node(DeepTag::Var, vec![sym(name)])
 }
 
 /// `(app func arg)`.
 fn app(func: Expr, arg: Expr) -> Expr {
-    Expr::List(
-        List {
-            elements: vec![sym("app"), empty_meta(), func, arg],
-        },
-        Span::new(0, 0),
-    )
+    node(DeepTag::App, vec![func, arg])
 }
 
 /// A left-nested curried application of `depth` distinct names:
@@ -73,62 +64,80 @@ fn deep_app_chain(depth: usize) -> Expr {
 /// library-compile pipeline (inference, precision/invariant validation,
 /// annotation) runs over it.
 fn library_with_body(body: Expr) -> Vec<Expr> {
-    let params = Expr::List(
-        List {
-            elements: vec![sym("params"), empty_meta()],
-        },
-        Span::new(0, 0),
-    );
-    let func = Expr::List(
-        List {
-            elements: vec![sym("fn"), empty_meta(), params, body],
-        },
-        Span::new(0, 0),
-    );
-    let def = Expr::List(
-        List {
-            elements: vec![sym("def"), empty_meta(), sym("lib_main"), func],
-        },
-        Span::new(0, 0),
-    );
+    let params = node(DeepTag::Params, Vec::new());
+    let func = node(DeepTag::Fn, vec![params, body]);
+    let def = node(DeepTag::Def, vec![sym("lib_main"), func]);
     vec![def]
 }
 
-/// Run `build_compiled_library_context` on a worker thread with an explicit
-/// stack size. Returns `Ok` with the error messages on `Err`, or an empty
-/// vector on `Ok` -- so a test can distinguish "rejected with diagnostics"
-/// from "silently passed". Reaching the join at all proves the guard (not a
-/// SIGSEGV) bounded the recursion; an abort would take down the whole test
-/// process. 8 MiB matches the default `chelis check` main-thread stack on
-/// Linux.
-fn library_context_on_bounded_stack(library: Vec<Expr>, stack_mib: usize) -> Vec<String> {
+/// The grown-segment size the library entries check on. Both entries run on
+/// a freshly grown segment (`run_on_grown_stack`), and the production 512 MiB
+/// segment checks a 4000-deep chain to completion without reaching the
+/// guard. Shrinking it to 8 MiB, the size `infer_recursion_depth_guard.rs`
+/// pins and the default `chelis check` main-thread stack on Linux, makes the
+/// 4000-deep chain exhaust the byte budget so the per-site guard is what
+/// stops it.
+const SAFETY_NET_SEGMENT_BYTES: usize = 8 * 1024 * 1024;
+
+/// Run `check` on a worker thread with an explicit stack size and the grown
+/// segment pinned at `SAFETY_NET_SEGMENT_BYTES`. Returns the error messages
+/// on `Err`, or an empty vector on `Ok` -- so a test can distinguish
+/// "rejected with diagnostics" from "silently passed". Reaching the join at
+/// all proves the guard (not a SIGSEGV) bounded the recursion; an abort would
+/// take down the whole test process.
+fn on_bounded_stack(
+    thread_name: &str,
+    library: Vec<Expr>,
+    stack_mib: usize,
+    check: fn(&[Expr]) -> Vec<String>,
+) -> Vec<String> {
     std::thread::Builder::new()
-        .name("infer-library-depth-guard-test".to_string())
+        .name(thread_name.to_string())
         .stack_size(stack_mib * 1024 * 1024)
-        .spawn(move || match build_compiled_library_context(&library) {
-            Ok(_) => Vec::new(),
-            Err(result) => result.errors.iter().map(|e| e.message.clone()).collect(),
+        .spawn(move || {
+            chelis_types::set_grow_segment_bytes_for_test(SAFETY_NET_SEGMENT_BYTES);
+            let messages = check(&library);
+
+            // The entries borrow their input, so the worker drops the deep
+            // fixture after the guarded check returns. Dropping a nested
+            // `Expr` is itself recursive; run it on a production-sized
+            // segment so teardown cannot overflow the bounded worker.
+            chelis_types::reset_grow_segment_bytes_for_test();
+            chelis_types::run_on_grown_stack(|| drop(library));
+            messages
         })
         .expect("spawn library-context worker thread")
         .join()
         .expect("worker thread aborted (stack overflow?) instead of returning")
 }
 
+/// Run `build_compiled_library_context` on the bounded worker.
+fn library_context_on_bounded_stack(library: Vec<Expr>, stack_mib: usize) -> Vec<String> {
+    on_bounded_stack(
+        "infer-library-depth-guard-test",
+        library,
+        stack_mib,
+        |library| match build_compiled_library_context(library) {
+            Ok(_) => Vec::new(),
+            Err(result) => result.errors.iter().map(|e| e.message.clone()).collect(),
+        },
+    )
+}
+
 /// Same, for the layered `_with_base` entry, stacked on the empty base.
 fn library_context_with_base_on_bounded_stack(library: Vec<Expr>, stack_mib: usize) -> Vec<String> {
-    std::thread::Builder::new()
-        .name("infer-library-base-depth-guard-test".to_string())
-        .stack_size(stack_mib * 1024 * 1024)
-        .spawn(move || {
+    on_bounded_stack(
+        "infer-library-base-depth-guard-test",
+        library,
+        stack_mib,
+        |library| {
             let base = TypeEnv::empty();
-            match build_compiled_library_context_with_base(&base, &library) {
+            match build_compiled_library_context_with_base(&base, library) {
                 Ok(_) => Vec::new(),
                 Err(result) => result.errors.iter().map(|e| e.message.clone()).collect(),
             }
-        })
-        .expect("spawn layered library-context worker thread")
-        .join()
-        .expect("worker thread aborted (stack overflow?) instead of returning")
+        },
+    )
 }
 
 /// POSITIVE (covered-or-rejected, never silent): a chain past the stack budget

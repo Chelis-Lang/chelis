@@ -2,7 +2,7 @@ use chelis_deep::DeepTag;
 use chelis_unord::{UnordMap, UnordSet};
 
 use chelis_deep::Span;
-use chelis_deep::ast::{Atom, Expr, ExprCarrier, List, Metadata};
+use chelis_deep::ast::{Atom, Expr, ExprCarrier, Metadata};
 use chelis_ir::dag::{DimInfo, TensorType};
 use chelis_ir::eval::{TensorInputDemand, TensorValue as IrTensorValue};
 use chelis_ir::evaluation::{EvaluationProfile, RandomExecutionContext};
@@ -201,8 +201,7 @@ impl<'a> EvalContext<'a> {
             | ExprCarrier::UndecodableHead(_, _, _)
             | ExprCarrier::Atom(_)
             | ExprCarrier::MetadataMap(_)
-            | ExprCarrier::MetadataExpression(_)
-            | ExprCarrier::MalformedLegacyList(_) => {
+            | ExprCarrier::MetadataExpression(_) => {
                 return Err(format!(
                     "host runtime: `{}` transform is not a decoded runtime node",
                     expected_tag.as_str()
@@ -378,18 +377,22 @@ impl<'a> EvalContext<'a> {
             None => arg_repacks.into_iter().map(|(_, plan)| plan).collect(),
         };
 
-        // Synthesize `(app {} <transform-expr> <arg-expr_0> ...)`.
-        let mut app_elements: Vec<Expr> = Vec::with_capacity(3 + arg_exprs.len());
-        app_elements.push(Expr::Atom(Atom::Tag(DeepTag::App), span));
-        app_elements.push(Expr::Map(Metadata::default(), span));
-        app_elements.push(transform_expr.clone());
-        app_elements.extend(arg_exprs);
-        let app_expr = Expr::List(
-            List {
-                elements: app_elements,
-            },
-            span,
+        // Synthesize `(app {} <transform-expr> <arg-expr_0> ...)`. A transform
+        // captured from a bind value carries that binding's origin, which the
+        // callee slot does not admit (spec/03 section 1.1), so it stays behind.
+        let Expr::Node(transform_node, transform_span) = transform_expr else {
+            unreachable!("the transform carrier was decoded above");
+        };
+        let callee = Expr::node(
+            transform_node.tag(),
+            chelis_ir::lower::without_binding_origin(transform_node.meta()),
+            transform_node.children_slice().to_vec(),
+            *transform_span,
         );
+        let mut app_children: Vec<Expr> = Vec::with_capacity(1 + arg_exprs.len());
+        app_children.push(callee);
+        app_children.extend(arg_exprs);
+        let app_expr = empty_node(DeepTag::App, app_children, span);
 
         let scoped_types: UnordMap<String, TensorType> = placeholder_names
             .iter()
@@ -406,12 +409,14 @@ impl<'a> EvalContext<'a> {
         // function signature. A nested function-valued capture then reaches
         // lowering as rank zero and corrupts the backward DAG (chelis#676).
         let mut program_defs = self.program.defs().clone();
+        let mut captures_closures = false;
         for (name, value) in captured_env.to_sorted() {
             if let RuntimeValue::Closure {
                 checked_function, ..
             } = value
             {
                 program_defs.insert(name.clone(), checked_function.as_ref().clone());
+                captures_closures = true;
             }
         }
 
@@ -452,7 +457,16 @@ impl<'a> EvalContext<'a> {
             ));
         }
 
-        let profile = self.execution_profile(&app_expr, &program_defs);
+        // Classify against the definition universe the lowering reads. With no
+        // captured closure that universe is the program's own table, so the
+        // scope's cached snapshot gives the identical answer without copying
+        // the table on every application (chelis#2405). A captured closure
+        // changes the universe, and only then is the copy classified.
+        let profile = if captures_closures {
+            chelis_ir::lower::evaluation_profile(&app_expr, &program_defs)
+        } else {
+            self.program_evaluation_profile(&app_expr)
+        };
         // #1821/#1920: inference renames result dimensions (n -> d43),
         // while invocation witnesses retain the authored parameter binders.
         // Give both routes the declared signature alongside checked types,
@@ -833,8 +847,7 @@ fn grad_wrt_indices_from_transform(transform_expr: &Expr) -> Result<Option<Vec<u
         | ExprCarrier::UndecodableHead(_, _, _)
         | ExprCarrier::Atom(_)
         | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_)
-        | ExprCarrier::MalformedLegacyList(_) => {
+        | ExprCarrier::MetadataExpression(_) => {
             return Err("host runtime: `grad` transform is not a decoded runtime node".to_string());
         }
     };
@@ -984,8 +997,7 @@ fn grad_type_expr_has_float(
         | ExprCarrier::UndecodableHead(_, _, _)
         | ExprCarrier::Atom(_)
         | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_)
-        | ExprCarrier::MalformedLegacyList(_) => (None, &[][..]),
+        | ExprCarrier::MetadataExpression(_) => (None, &[][..]),
     };
     match node_tag {
         Some(DeepTag::TPrim) => kids
@@ -1148,28 +1160,26 @@ fn stage_grad_list_value(
     }
 }
 
-fn make_tuple_expr(elements: Vec<Expr>, span: Span) -> Expr {
-    Expr::List(
-        List {
-            elements: std::iter::once(Expr::Atom(Atom::Tag(DeepTag::Tuple), span))
-                .chain(std::iter::once(Expr::Map(Metadata::default(), span)))
-                .chain(elements)
-                .collect(),
-        },
+/// A decoded node with an empty metadata map.
+fn empty_node(tag: DeepTag, children: Vec<Expr>, span: Span) -> Expr {
+    Expr::node(tag, Metadata::default(), children, span)
+}
+
+/// `(var {} name)`.
+pub(super) fn var_expr(name: &str, span: Span) -> Expr {
+    empty_node(
+        DeepTag::Var,
+        vec![Expr::Atom(Atom::Name(name.to_string()), span)],
         span,
     )
 }
 
+fn make_tuple_expr(elements: Vec<Expr>, span: Span) -> Expr {
+    empty_node(DeepTag::Tuple, elements, span)
+}
+
 fn make_unit_expr(span: Span) -> Expr {
-    Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::Tuple), span),
-                Expr::Map(Metadata::default(), span),
-            ],
-        },
-        span,
-    )
+    empty_node(DeepTag::Tuple, Vec::new(), span)
 }
 
 fn make_adt_construction_exprs(
@@ -1180,43 +1190,20 @@ fn make_adt_construction_exprs(
 ) -> Expr {
     match field_names {
         Some(names) if names.len() == field_exprs.len() => {
-            let mut elements = vec![
-                Expr::Atom(Atom::Tag(DeepTag::Record), span),
-                Expr::Map(Metadata::default(), span),
-                Expr::Atom(Atom::Name(ctor.to_string()), span),
-            ];
-            elements.extend(names.iter().zip(field_exprs).map(|(name, expr)| {
-                Expr::List(
-                    List {
-                        elements: vec![
-                            Expr::Atom(Atom::Tag(DeepTag::Kv), span),
-                            Expr::Map(Metadata::default(), span),
-                            Expr::Atom(Atom::Name(name.clone()), span),
-                            expr,
-                        ],
-                    },
+            let mut children = vec![Expr::Atom(Atom::Name(ctor.to_string()), span)];
+            children.extend(names.iter().zip(field_exprs).map(|(name, expr)| {
+                empty_node(
+                    DeepTag::Kv,
+                    vec![Expr::Atom(Atom::Name(name.clone()), span), expr],
                     span,
                 )
             }));
-            Expr::List(List { elements }, span)
+            empty_node(DeepTag::Record, children, span)
         }
         _ => {
-            let mut elements = vec![
-                Expr::Atom(Atom::Tag(DeepTag::App), span),
-                Expr::Map(Metadata::default(), span),
-                Expr::List(
-                    List {
-                        elements: vec![
-                            Expr::Atom(Atom::Tag(DeepTag::Var), span),
-                            Expr::Map(Metadata::default(), span),
-                            Expr::Atom(Atom::Name(ctor.to_string()), span),
-                        ],
-                    },
-                    span,
-                ),
-            ];
-            elements.extend(field_exprs);
-            Expr::List(List { elements }, span)
+            let mut children = vec![var_expr(ctor, span)];
+            children.extend(field_exprs);
+            empty_node(DeepTag::App, children, span)
         }
     }
 }
@@ -1226,36 +1213,11 @@ fn make_adt_construction_exprs(
 /// every scalar or tensor leaf owns one typed placeholder, so reverse mode can
 /// reconstruct the complete primal runtime shape and order.
 fn make_list_construction_expr(elements: Vec<Expr>, span: Span) -> Expr {
-    let mut tail = Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::Var), span),
-                Expr::Map(Metadata::default(), span),
-                Expr::Atom(Atom::Name("Nil".to_string()), span),
-            ],
-        },
-        span,
-    );
+    let mut tail = var_expr("Nil", span);
     for element in elements.into_iter().rev() {
-        tail = Expr::List(
-            List {
-                elements: vec![
-                    Expr::Atom(Atom::Tag(DeepTag::App), span),
-                    Expr::Map(Metadata::default(), span),
-                    Expr::List(
-                        List {
-                            elements: vec![
-                                Expr::Atom(Atom::Tag(DeepTag::Var), span),
-                                Expr::Map(Metadata::default(), span),
-                                Expr::Atom(Atom::Name("Cons".to_string()), span),
-                            ],
-                        },
-                        span,
-                    ),
-                    element,
-                    tail,
-                ],
-            },
+        tail = empty_node(
+            DeepTag::App,
+            vec![var_expr("Cons", span), element, tail],
             span,
         );
     }
@@ -1349,8 +1311,7 @@ fn resolve_transform_fn_for_formals<'a>(
             | ExprCarrier::UndecodableHead(_, _, _)
             | ExprCarrier::Atom(_)
             | ExprCarrier::MetadataMap(_)
-            | ExprCarrier::MetadataExpression(_)
-            | ExprCarrier::MalformedLegacyList(_) => return None,
+            | ExprCarrier::MetadataExpression(_) => return None,
         };
         match tag {
             DeepTag::Fn => return Some((current, vmap_axis)),
@@ -1398,8 +1359,7 @@ fn static_usize_value(expr: &Expr) -> Option<usize> {
         | ExprCarrier::UndecodableHead(_, _, _)
         | ExprCarrier::Atom(_)
         | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_)
-        | ExprCarrier::MalformedLegacyList(_) => None,
+        | ExprCarrier::MetadataExpression(_) => None,
     }
 }
 
@@ -1452,8 +1412,7 @@ pub(super) fn param_type_expr_at(fn_expr: &Expr, index: usize) -> Option<&Expr> 
         | ExprCarrier::UndecodableHead(_, _, _)
         | ExprCarrier::Atom(_)
         | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_)
-        | ExprCarrier::MalformedLegacyList(_) => return None,
+        | ExprCarrier::MetadataExpression(_) => return None,
     };
     let params = match params.carrier() {
         ExprCarrier::DecodedNode(DeepTag::Params, _, children) => children,
@@ -1462,8 +1421,7 @@ pub(super) fn param_type_expr_at(fn_expr: &Expr, index: usize) -> Option<&Expr> 
         | ExprCarrier::UndecodableHead(_, _, _)
         | ExprCarrier::Atom(_)
         | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_)
-        | ExprCarrier::MalformedLegacyList(_) => return None,
+        | ExprCarrier::MetadataExpression(_) => return None,
     };
     param_decl_type_expr(params.get(index)?)
 }
@@ -1481,8 +1439,7 @@ pub(super) fn extract_prim_from_type_expr(expr: &Expr) -> Option<Prim> {
         | ExprCarrier::UndecodableHead(_, _, _)
         | ExprCarrier::Atom(_)
         | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_)
-        | ExprCarrier::MalformedLegacyList(_) => return None,
+        | ExprCarrier::MetadataExpression(_) => return None,
     };
     match node_tag {
         DeepTag::TPrim => kids.first().and_then(symbol_name).and_then(prim_from_name),
@@ -1543,46 +1500,27 @@ pub(super) fn make_var_with_type(name: &str, ty: &TensorType, span: Span) -> Exp
         Prim::Bool => "bool",
         Prim::String => "string",
     };
-    let prim_node = Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::TPrim), span),
-                Expr::Map(Metadata::default(), span),
-                Expr::Atom(Atom::Name(prim_name.to_string()), span),
-            ],
-        },
+    let prim_node = empty_node(
+        DeepTag::TPrim,
+        vec![Expr::Atom(Atom::Name(prim_name.to_string()), span)],
         span,
     );
     let ty_expr = if ty.dims.is_empty() {
         prim_node
     } else {
-        let mut tensor_elems = vec![
-            Expr::Atom(Atom::Tag(DeepTag::TTensor), span),
-            Expr::Map(Metadata::default(), span),
-        ];
-        for dim in &ty.dims {
-            tensor_elems.push(dim_to_expr(dim, span));
-        }
-        tensor_elems.push(prim_node);
-        Expr::List(
-            List {
-                elements: tensor_elems,
-            },
-            span,
-        )
+        let mut tensor_children: Vec<Expr> =
+            ty.dims.iter().map(|dim| dim_to_expr(dim, span)).collect();
+        tensor_children.push(prim_node);
+        empty_node(DeepTag::TTensor, tensor_children, span)
     };
     let mut meta = Metadata::default();
     meta.replace(chelis_deep::annotations::MetadataValue::Type(
         chelis_deep::annotations::TypeSyntax::try_new(ty_expr).expect("runtime type annotation"),
     ));
-    Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::Var), span),
-                Expr::Map(meta, span),
-                Expr::Atom(Atom::Name(name.to_string()), span),
-            ],
-        },
+    Expr::node(
+        DeepTag::Var,
+        meta,
+        vec![Expr::Atom(Atom::Name(name.to_string()), span)],
         span,
     )
 }
@@ -1598,28 +1536,19 @@ fn make_integer_literal_with_type(value: i64, precision: Prim, span: Span) -> Ex
         Prim::Int64 => "i64",
         _ => panic!("integer transform argument unexpectedly declared with non-integer dtype"),
     };
-    let prim_node = Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::TPrim), span),
-                Expr::Map(Metadata::default(), span),
-                Expr::Atom(Atom::Name(prim_name.to_string()), span),
-            ],
-        },
+    let prim_node = empty_node(
+        DeepTag::TPrim,
+        vec![Expr::Atom(Atom::Name(prim_name.to_string()), span)],
         span,
     );
     let mut meta = Metadata::default();
     meta.replace(chelis_deep::annotations::MetadataValue::Type(
         chelis_deep::annotations::TypeSyntax::try_new(prim_node).expect("runtime type annotation"),
     ));
-    Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::Lit), span),
-                Expr::Map(meta, span),
-                Expr::Atom(Atom::Int(value), span),
-            ],
-        },
+    Expr::node(
+        DeepTag::Lit,
+        meta,
+        vec![Expr::Atom(Atom::Int(value), span)],
         span,
     )
 }
@@ -1627,52 +1556,33 @@ fn make_integer_literal_with_type(value: i64, precision: Prim, span: Span) -> Ex
 /// Build a `(lit {type: (t-prim {} bool)} value)` expression for a concrete
 /// non-differentiable transform argument.
 fn make_bool_literal_with_type(value: bool, span: Span) -> Expr {
-    let prim_node = Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::TPrim), span),
-                Expr::Map(Metadata::default(), span),
-                Expr::Atom(Atom::Name("bool".to_string()), span),
-            ],
-        },
+    let prim_node = empty_node(
+        DeepTag::TPrim,
+        vec![Expr::Atom(Atom::Name("bool".to_string()), span)],
         span,
     );
     let mut meta = Metadata::default();
     meta.replace(chelis_deep::annotations::MetadataValue::Type(
         chelis_deep::annotations::TypeSyntax::try_new(prim_node).expect("runtime type annotation"),
     ));
-    Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::Lit), span),
-                Expr::Map(meta, span),
-                Expr::Atom(Atom::Bool(value), span),
-            ],
-        },
+    Expr::node(
+        DeepTag::Lit,
+        meta,
+        vec![Expr::Atom(Atom::Bool(value), span)],
         span,
     )
 }
 
 fn dim_to_expr(dim: &DimInfo, span: Span) -> Expr {
     match dim {
-        DimInfo::Lit(value) => Expr::List(
-            List {
-                elements: vec![
-                    Expr::Atom(Atom::Tag(DeepTag::DLit), span),
-                    Expr::Map(Metadata::default(), span),
-                    Expr::Atom(Atom::Int(*value as i64), span),
-                ],
-            },
+        DimInfo::Lit(value) => empty_node(
+            DeepTag::DLit,
+            vec![Expr::Atom(Atom::Int(*value as i64), span)],
             span,
         ),
-        DimInfo::Named(name, _) => Expr::List(
-            List {
-                elements: vec![
-                    Expr::Atom(Atom::Tag(DeepTag::DName), span),
-                    Expr::Map(Metadata::default(), span),
-                    Expr::Atom(Atom::Name(name.clone()), span),
-                ],
-            },
+        DimInfo::Named(name, _) => empty_node(
+            DeepTag::DName,
+            vec![Expr::Atom(Atom::Name(name.clone()), span)],
             span,
         ),
     }
@@ -1688,8 +1598,7 @@ pub(super) fn var_name(expr: &Expr) -> Option<&str> {
         | ExprCarrier::UndecodableHead(_, _, _)
         | ExprCarrier::Atom(_)
         | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_)
-        | ExprCarrier::MalformedLegacyList(_) => None,
+        | ExprCarrier::MetadataExpression(_) => None,
     }
 }
 
@@ -1701,7 +1610,7 @@ pub(super) fn runtime_param_name(expr: &Expr) -> Option<&str> {
 pub(super) fn runtime_param_parts(expr: &Expr) -> Option<(&str, Option<&Metadata>)> {
     match expr {
         Expr::Atom(Atom::Name(name), _) => Some((name.as_str(), None)),
-        Expr::BareList(elements, _) | Expr::List(List { elements }, _) => {
+        Expr::BareList(elements, _) => {
             let [Expr::Atom(Atom::Name(name), _), Expr::Map(metadata, _)] = elements.as_slice()
             else {
                 return None;
@@ -1715,13 +1624,6 @@ pub(super) fn runtime_param_parts(expr: &Expr) -> Option<(&str, Option<&Metadata
             Some((name.as_str(), Some(&metadata_expr.metadata)))
         }
         Expr::Node(..) | Expr::UnknownForm(..) | Expr::Atom(..) | Expr::Map(..) => None,
-    }
-}
-
-pub(super) fn as_list(expr: &Expr) -> Option<&List> {
-    match expr {
-        Expr::List(list, _) => Some(list),
-        _ => None,
     }
 }
 
@@ -1751,7 +1653,6 @@ fn scan_expr_for_host_only(expr: &Expr, hit: &mut Option<String>, vars: &mut Vec
             scan_expr_for_host_only(&meta.expr, hit, vars);
             return;
         }
-        ExprCarrier::MalformedLegacyList(list) => (None, list.elements.as_slice()),
         ExprCarrier::Atom(_) | ExprCarrier::MetadataMap(_) => return,
     };
     if tag == Some(DeepTag::App)
@@ -1863,15 +1764,6 @@ mod issue_1125_carrier_reader_tests {
         Expr::node(tag, Metadata::default(), children, span())
     }
 
-    fn legacy(tag: DeepTag, children: Vec<Expr>) -> Expr {
-        let mut elements = vec![
-            Expr::Atom(Atom::Tag(tag), span()),
-            Expr::Map(Metadata::default(), span()),
-        ];
-        elements.extend(children);
-        Expr::List(List { elements }, span())
-    }
-
     fn name(value: &str) -> Expr {
         Expr::Atom(Atom::Name(value.to_string()), span())
     }
@@ -1891,9 +1783,8 @@ mod issue_1125_carrier_reader_tests {
     }
 
     #[test]
-    fn grad_wrt_function_resolution_and_parameter_types_have_carrier_parity() {
+    fn grad_wrt_function_resolution_and_parameter_types_read_decoded_nodes() {
         let successor_type = node(DeepTag::TPrim, vec![name("f32")]);
-        let legacy_type = legacy(DeepTag::TPrim, vec![name("f32")]);
         let successor_fn = node(
             DeepTag::Fn,
             vec![
@@ -1907,19 +1798,6 @@ mod issue_1125_carrier_reader_tests {
                 node(DeepTag::Var, vec![name("body")]),
             ],
         );
-        let legacy_fn = legacy(
-            DeepTag::Fn,
-            vec![
-                legacy(
-                    DeepTag::Params,
-                    vec![
-                        typed_param("x", legacy_type.clone()),
-                        typed_param("y", legacy_type),
-                    ],
-                ),
-                legacy(DeepTag::Var, vec![name("body")]),
-            ],
-        );
         let successor_transform = node(
             DeepTag::Grad,
             vec![
@@ -1927,64 +1805,30 @@ mod issue_1125_carrier_reader_tests {
                 node(DeepTag::Lit, vec![Expr::Atom(Atom::Int(1), span())]),
             ],
         );
-        let legacy_transform = legacy(
-            DeepTag::Grad,
-            vec![
-                legacy(DeepTag::Var, vec![name("pair")]),
-                legacy(DeepTag::Lit, vec![Expr::Atom(Atom::Int(1), span())]),
-            ],
-        );
         let successor_defs = UnordMap::from_iter([("pair".to_string(), successor_fn.clone())]);
-        let legacy_defs = UnordMap::from_iter([("pair".to_string(), legacy_fn.clone())]);
 
         assert_eq!(
             grad_wrt_indices_from_transform(&successor_transform).unwrap(),
             Some(vec![1])
         );
-        assert_eq!(
-            grad_wrt_indices_from_transform(&successor_transform).unwrap(),
-            grad_wrt_indices_from_transform(&legacy_transform).unwrap()
-        );
         assert!(resolve_transform_fn_for_formals(&successor_transform, &successor_defs).is_some());
-        assert!(resolve_transform_fn_for_formals(&legacy_transform, &legacy_defs).is_some());
         assert_eq!(
             param_type_expr_at(&successor_fn, 1).and_then(extract_prim_from_type_expr),
             Some(Prim::F32)
-        );
-        assert_eq!(
-            param_type_expr_at(&successor_fn, 1).and_then(extract_prim_from_type_expr),
-            param_type_expr_at(&legacy_fn, 1).and_then(extract_prim_from_type_expr)
         );
 
         let successor_host_only = node(
             DeepTag::App,
             vec![node(DeepTag::Var, vec![name("tensor_scan")])],
         );
-        let legacy_host_only = legacy(
-            DeepTag::App,
-            vec![legacy(DeepTag::Var, vec![name("tensor_scan")])],
-        );
         assert_eq!(
             find_reachable_host_only_builtin_call(&successor_host_only, &UnordMap::new()),
             Some("tensor_scan".to_string())
-        );
-        assert_eq!(
-            find_reachable_host_only_builtin_call(&successor_host_only, &UnordMap::new()),
-            find_reachable_host_only_builtin_call(&legacy_host_only, &UnordMap::new())
         );
     }
 
     #[test]
     fn transform_readers_explicitly_decline_unrelated_carriers() {
-        let malformed = Expr::List(
-            List {
-                elements: vec![
-                    Expr::Atom(Atom::Tag(DeepTag::Grad), span()),
-                    name("not-metadata"),
-                ],
-            },
-            span(),
-        );
         let unrelated = [
             Expr::BareList(vec![name("pair")], span()),
             Expr::UnknownForm(Box::new(UnknownFormData {
@@ -2002,7 +1846,6 @@ mod issue_1125_carrier_reader_tests {
                 },
                 span(),
             ),
-            malformed,
         ];
         let defs = UnordMap::new();
         for carrier in unrelated {

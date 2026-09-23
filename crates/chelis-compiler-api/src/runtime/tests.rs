@@ -53,14 +53,10 @@ fn annotated_bare_list_parameter_preserves_runtime_name_and_declared_type() {
     use chelis_deep::annotations::{MetadataValue, TypeSyntax};
 
     let span = Span::new(0, 0);
-    let declared_type = Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::TPrim), span),
-                Expr::Map(Metadata::default(), span),
-                Expr::Atom(Atom::Name("f64".to_string()), span),
-            ],
-        },
+    let declared_type = Expr::node(
+        DeepTag::TPrim,
+        Metadata::default(),
+        vec![Expr::Atom(Atom::Name("f64".to_string()), span)],
         span,
     );
     let parameter = Expr::BareList(
@@ -158,61 +154,14 @@ fn issue_1125_eval_raw_expr(expr: &Expr) -> Result<RuntimeValue, String> {
         session: None,
         active_declaration_names: Vec::new(),
         def_kernels: UnordMap::new(),
-        excluded_def_kernels: UnordMap::new(),
         transcript: Vec::new(),
         transcript_capture: None,
         resolving_top_levels: Vec::new(),
         random_seed: None,
         random_counter: 0,
-        execution_exclusion: None,
         cancel: None,
     };
     ctx.eval_expr(expr)
-}
-
-fn issue_1125_legacy_carrier(expr: &Expr) -> Expr {
-    match expr {
-        Expr::Node(node, span) => {
-            let mut elements = vec![
-                Expr::Atom(Atom::Tag(node.tag()), *span),
-                Expr::Map(node.meta().clone(), *span),
-            ];
-            elements.extend(node.children_slice().iter().map(issue_1125_legacy_carrier));
-            Expr::List(List { elements }, *span)
-        }
-        Expr::List(list, span) => Expr::List(
-            List {
-                elements: list
-                    .elements
-                    .iter()
-                    .map(issue_1125_legacy_carrier)
-                    .collect(),
-            },
-            *span,
-        ),
-        Expr::BareList(elements, span) => Expr::BareList(
-            elements.iter().map(issue_1125_legacy_carrier).collect(),
-            *span,
-        ),
-        Expr::UnknownForm(data) => Expr::UnknownForm(Box::new(chelis_deep::ast::UnknownFormData {
-            head: data.head.clone(),
-            meta: data.meta.clone(),
-            children: data
-                .children
-                .iter()
-                .map(issue_1125_legacy_carrier)
-                .collect(),
-            span: data.span,
-        })),
-        Expr::MetaExpr(meta, span) => Expr::MetaExpr(
-            chelis_deep::ast::MetaExpr {
-                metadata: meta.metadata.clone(),
-                expr: Box::new(issue_1125_legacy_carrier(&meta.expr)),
-            },
-            *span,
-        ),
-        Expr::Atom(..) | Expr::Map(..) => expr.clone(),
-    }
 }
 
 fn issue_1125_eval_checked_root(
@@ -255,13 +204,11 @@ fn issue_1125_eval_checked_root(
         session: Some(chelis_ir::host::HostLoweringSession::new(checked)),
         active_declaration_names: Vec::new(),
         def_kernels: UnordMap::new(),
-        excluded_def_kernels: UnordMap::new(),
         transcript: Vec::new(),
         transcript_capture: None,
         resolving_top_levels: Vec::new(),
         random_seed: None,
         random_counter: 0,
-        execution_exclusion: None,
         cancel: None,
     };
     ctx.resolve_top_level(root)
@@ -276,26 +223,53 @@ fn issue_1125_gradient_values(value: &RuntimeValue) -> Vec<f64> {
 }
 
 #[test]
-fn runtime_grad_wrt_preserves_successor_and_legacy_carrier_parity() {
+fn runtime_grad_wrt_reads_the_checked_program() {
     let checked = checked_surf(
         "def pair(x: f32, y: f32) -> f32 = mul(x, y)\n\
          out = grad(pair, wrt=y)(2.0f32, 3.0f32)\n",
     );
-    let legacy = checked
-        .exprs()
-        .iter()
-        .map(issue_1125_legacy_carrier)
-        .collect::<Vec<_>>();
 
-    let successor =
-        issue_1125_eval_checked_root(&checked, checked.exprs(), "out").expect("successor grad");
-    let transitional = issue_1125_eval_checked_root(&checked, &legacy, "out").expect("legacy grad");
+    let gradient = issue_1125_eval_checked_root(&checked, checked.exprs(), "out").expect("grad");
 
-    assert_eq!(issue_1125_gradient_values(&successor), vec![2.0]);
-    assert_eq!(
-        issue_1125_gradient_values(&successor),
-        issue_1125_gradient_values(&transitional)
+    assert_eq!(issue_1125_gradient_values(&gradient), vec![2.0]);
+}
+
+/// chelis#1125: an explicitly typed binding stamps `surf_binding_type` on the
+/// bound `grad` node, and spec/03 section 1.1 admits that key only on a bind
+/// value. Applying the captured transform splices the node into the callee
+/// slot of a synthesized `app`, where the node gate refuses the key, so the
+/// splice must leave the binding origin behind.
+#[test]
+fn runtime_grad_bound_with_an_explicit_type_applies() {
+    let checked = checked_surf(
+        "def sq(x: f32) -> f32 = mul(x, x)\n\
+         out = {\n\
+           g: (f32) -> f32 = grad(sq)\n\
+           g(3.0f32)\n\
+         }\n",
     );
+
+    let gradient = issue_1125_eval_checked_root(&checked, checked.exprs(), "out").expect("grad");
+
+    assert_eq!(issue_1125_gradient_values(&gradient), vec![6.0]);
+}
+
+/// The twin of `runtime_grad_bound_with_an_explicit_type_applies` for the
+/// differentiated function: an explicitly typed local `fn` carries
+/// `surf_binding_type` into the captured closure that the transform installs
+/// as a program definition for lowering.
+#[test]
+fn runtime_grad_of_a_function_bound_with_an_explicit_type_applies() {
+    let checked = checked_surf(
+        "out = {\n\
+           f: (f32) -> f32 = fn (x: f32) -> mul(x, x)\n\
+           grad(f)(3.0f32)\n\
+         }\n",
+    );
+
+    let gradient = issue_1125_eval_checked_root(&checked, checked.exprs(), "out").expect("grad");
+
+    assert_eq!(issue_1125_gradient_values(&gradient), vec![6.0]);
 }
 
 #[test]
@@ -315,8 +289,6 @@ fn runtime_closure_preserves_the_original_checked_function_carrier() {
         ],
         span,
     );
-    let transitional = issue_1125_legacy_carrier(&successor);
-
     let RuntimeValue::Closure {
         checked_function: successor_checked,
         ..
@@ -324,48 +296,28 @@ fn runtime_closure_preserves_the_original_checked_function_carrier() {
     else {
         panic!("successor function must evaluate to a closure")
     };
-    let RuntimeValue::Closure {
-        checked_function: transitional_checked,
-        ..
-    } = issue_1125_eval_raw_expr(&transitional).expect("legacy closure")
-    else {
-        panic!("legacy function must evaluate to a closure")
-    };
 
     assert!(matches!(successor_checked.as_ref(), Expr::Node(..)));
-    assert!(matches!(transitional_checked.as_ref(), Expr::List(..)));
     assert_eq!(
         chelis_deep::printer::print_canonical_flat(&[successor_checked.as_ref().clone()]),
-        chelis_deep::printer::print_canonical_flat(&[transitional_checked.as_ref().clone()])
+        chelis_deep::printer::print_canonical_flat(&[successor])
     );
 }
 
 #[test]
-fn runtime_eval_reads_successor_and_legacy_nodes_identically() {
+fn runtime_eval_reads_a_decoded_literal_node() {
     use chelis_deep::Span;
 
     let span = Span::new(4, 12);
     let value = Expr::Atom(Atom::Int(7), span);
-    let successor = Expr::node(DeepTag::Lit, Metadata::default(), vec![value.clone()], span);
-    let legacy = Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::Lit), span),
-                Expr::Map(Metadata::default(), span),
-                value,
-            ],
-        },
-        span,
-    );
+    let successor = Expr::node(DeepTag::Lit, Metadata::default(), vec![value], span);
 
     let successor = issue_1125_eval_raw_expr(&successor).expect("successor literal evaluates");
-    let legacy = issue_1125_eval_raw_expr(&legacy).expect("legacy literal evaluates");
-    assert_eq!(render_value(&successor), render_value(&legacy));
     assert_eq!(render_value(&successor), "7");
 }
 
 #[test]
-fn runtime_match_patterns_preserve_successor_and_legacy_carrier_parity() {
+fn runtime_match_patterns_read_decoded_nodes() {
     use chelis_deep::Span;
 
     let span = Span::new(4, 12);
@@ -384,19 +336,12 @@ fn runtime_match_patterns_preserve_successor_and_legacy_carrier_parity() {
             ),
         ],
     );
-    let legacy = issue_1125_legacy_carrier(&successor);
-
     let successor = issue_1125_eval_raw_expr(&successor);
-    let legacy = issue_1125_eval_raw_expr(&legacy);
     assert_eq!(successor.as_ref().map(render_value), Ok("42".to_string()));
-    assert_eq!(
-        successor.as_ref().map(render_value),
-        legacy.as_ref().map(render_value)
-    );
 }
 
 #[test]
-fn runtime_pattern_reader_has_complete_successor_and_legacy_parity() {
+fn runtime_pattern_reader_matches_every_decoded_pattern() {
     use chelis_deep::Span;
 
     let span = Span::new(4, 12);
@@ -485,28 +430,10 @@ fn runtime_pattern_reader_has_complete_successor_and_legacy_parity() {
     let adt_fields = UnordMap::new();
 
     for (value, successor) in cases {
-        let legacy = issue_1125_legacy_carrier(&successor);
         let mut successor_bindings = Frame::new();
-        let mut legacy_bindings = Frame::new();
         assert_eq!(
             pattern_matches(&value, &successor, &mut successor_bindings, &adt_fields),
             Ok(true)
-        );
-        assert_eq!(
-            pattern_matches(&value, &legacy, &mut legacy_bindings, &adt_fields),
-            Ok(true)
-        );
-        let rendered_bindings = |bindings: &Frame| {
-            bindings
-                .to_sorted()
-                .into_iter()
-                .map(|(name, value)| (name.clone(), render_value(value)))
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(
-            rendered_bindings(&successor_bindings),
-            rendered_bindings(&legacy_bindings),
-            "successor and transitional patterns must bind the same names"
         );
     }
 
@@ -558,30 +485,6 @@ fn runtime_eval_rejects_each_nonruntime_carrier_explicitly() {
                 span,
             })),
             "unknown form `future-form` is not a runtime expression",
-        ),
-        (
-            Expr::List(
-                List {
-                    elements: vec![
-                        Expr::Atom(Atom::Name("future-legacy".to_string()), span),
-                        Expr::Map(Metadata::default(), span),
-                    ],
-                },
-                span,
-            ),
-            "unknown form `future-legacy` is not a runtime expression",
-        ),
-        (
-            Expr::List(
-                List {
-                    elements: vec![
-                        Expr::Atom(Atom::Tag(DeepTag::Lit), span),
-                        Expr::Atom(Atom::Name("not-metadata".to_string()), span),
-                    ],
-                },
-                span,
-            ),
-            "malformed legacy list is not a runtime expression",
         ),
         (
             Expr::Atom(Atom::Name("leaf".to_string()), span),
@@ -682,16 +585,6 @@ fn runtime_nested_owner_readers_reject_malformed_children() {
         issue_1125_eval_raw_expr(&malformed_match)
             .expect_err("a malformed match arm must not disappear"),
         "match arm must be a decoded `arm` node"
-    );
-}
-
-#[test]
-fn runtime_eval_reader_has_no_node_to_list_bridge() {
-    let source = include_str!("eval.rs");
-    let forbidden = [".to_", "list("].concat();
-    assert!(
-        !source.contains(&forbidden),
-        "runtime evaluation and result-claim placement must consume ExprCarrier directly"
     );
 }
 
@@ -855,6 +748,11 @@ fn issue_1829_interpreter_entry_bounds_kernel_decision_probes() {
 /// the `APPLICATIONS` applications; the per-call clone is what this receipt
 /// pins out. The `snapshots >= 1` guard keeps the receipt from passing while
 /// measuring nothing, mirroring the #1829 tensor row's own guard.
+///
+/// chelis#2405 retired the per-closure admission. The ask that remains per
+/// application is the applied top-level definition's own profile, so each
+/// application now calls `step`, and a second receipt holds that profile to
+/// one derivation however many times `step` is applied.
 #[test]
 fn issue_2059_execution_profile_defs_snapshot_is_program_scoped() {
     const HELPERS: usize = 40;
@@ -866,12 +764,13 @@ fn issue_2059_execution_profile_defs_snapshot_is_program_scoped() {
     for level in 0..HELPERS {
         source.push_str(&format!("def helper{level}(x: i64) -> i64 = add(x, x)\n"));
     }
+    source.push_str("def step(acc: i64, x: i64) -> i64 = add(acc, x)\n");
     // One closure, applied once per list element by `fold`. Each application
-    // routes through `admit_execution_profile`. `result` is a top-level value
-    // binding so the interpreter evaluates it rather than binding the fold's
-    // callable as a thunk.
+    // applies the top-level `step`, which asks for its profile. `result` is a
+    // top-level value binding so the interpreter evaluates it rather than
+    // binding the fold's callable as a thunk.
     source.push_str(&format!(
-        "result = fold(fn (acc: i64, x: i64) -> add(acc, x), \
+        "result = fold(fn (acc: i64, x: i64) -> step(acc, x), \
          cast(0, i64), range(cast(0, i64), cast({APPLICATIONS}, i64)))\n"
     ));
 
@@ -882,10 +781,12 @@ fn issue_2059_execution_profile_defs_snapshot_is_program_scoped() {
         bindings: None,
     };
     super::eval::reset_execution_profile_defs_snapshots();
+    super::program_scope::take_def_profile_derivations();
     let outcome =
         evaluate_host_program_with_library_and_types(&checked, None, None, inputs, None, None)
             .expect("#2059 fixture evaluates");
     let snapshots = super::eval::execution_profile_defs_snapshots();
+    let derivations = super::program_scope::take_def_profile_derivations();
 
     let result = outcome
         .host_bindings
@@ -908,22 +809,27 @@ fn issue_2059_execution_profile_defs_snapshot_is_program_scoped() {
          across all {APPLICATIONS} closure applications; {snapshots} builds means the per-call \
          clone regressed"
     );
+    assert_eq!(
+        derivations, 1,
+        "#2405: `step`'s own profile must be derived once and reused across all \
+         {APPLICATIONS} applications; {derivations} derivations means it is asked per call"
+    );
 }
 
 /// Evaluate `source` and return its `result` binding with the number of
-/// kernel plannings performed under an execution exclusion.
-fn excluded_kernel_plannings(source: &str) -> (String, u64) {
+/// definition kernel plannings performed.
+fn def_kernel_plannings(source: &str) -> (String, u64) {
     let checked = checked_surf(source);
     let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
     let inputs = HostEvaluationInputs {
         roots: &empty_tensors,
         bindings: None,
     };
-    super::eval::take_excluded_def_kernel_plannings();
+    super::eval::take_def_kernel_plannings();
     let outcome =
         evaluate_host_program_with_library_and_types(&checked, None, None, inputs, None, None)
             .expect("#2392 fixture evaluates");
-    let plannings = super::eval::take_excluded_def_kernel_plannings();
+    let plannings = super::eval::take_def_kernel_plannings();
     let result = outcome
         .host_bindings
         .get("result")
@@ -932,18 +838,19 @@ fn excluded_kernel_plannings(source: &str) -> (String, u64) {
     (result, plannings)
 }
 
-/// chelis#2392: a recursive definition is `RecursiveControl`, so its whole
-/// dynamic extent runs under an execution exclusion. `def_kernel` used to
-/// skip its memo there and re-plan every applied helper per application.
-/// A helper that draws no Random is now planned once however many times the
-/// recursion applies it, while a drawing helper, whose kernel depends on the
-/// stream position, is still planned per application.
+/// chelis#2392: a recursive program applies its helpers many times.
+/// `def_kernel` used to skip its memo beneath a recursive caller and re-plan
+/// every applied helper per application. A helper that draws no Random is
+/// planned once however many times the recursion applies it, while a drawing
+/// helper, whose kernel depends on the stream position, is still planned per
+/// application. chelis#2405 retired the inherited execution exclusion this
+/// counted beneath, so the receipt now counts every planning.
 ///
 /// Evidentiary status: REGRESSION TEST for the non-drawing row (it fails on
-/// the base, where the count grows with the depth) and DISPOSITION LOCK for
-/// the drawing row (unchanged behaviour the memo must not break).
+/// the #2392 base, where the count grows with the depth) and DISPOSITION LOCK
+/// for the drawing row (unchanged behaviour the memo must not break).
 #[test]
-fn issue_2392_excluded_kernel_is_planned_once_per_helper() {
+fn issue_2392_kernel_under_recursion_is_planned_once_per_helper() {
     let program = |depth: i64| {
         format!(
             "def double(x: tensor[4, f32]) -> tensor[4, f32] = add(x, x)\n\
@@ -951,17 +858,17 @@ fn issue_2392_excluded_kernel_is_planned_once_per_helper() {
              result = tensor_to_scalar(sum(walk({depth}i64, to_tensor([1.0f32, 0.0f32, 0.0f32, 0.0f32])), 0i32))\n"
         )
     };
-    let (shallow, shallow_plannings) = excluded_kernel_plannings(&program(4));
-    let (deep, deep_plannings) = excluded_kernel_plannings(&program(12));
+    let (shallow, shallow_plannings) = def_kernel_plannings(&program(4));
+    let (deep, deep_plannings) = def_kernel_plannings(&program(12));
     assert_eq!(shallow, "16.0");
     assert_eq!(deep, "4096.0");
     assert!(
         shallow_plannings >= 1,
-        "the fixture must reach the excluded kernel decision"
+        "the fixture must reach the kernel decision"
     );
     assert_eq!(
         shallow_plannings, deep_plannings,
-        "excluded plannings must not grow with the number of applications"
+        "plannings must not grow with the number of applications"
     );
 
     let drawing = |depth: i64| {
@@ -971,12 +878,63 @@ fn issue_2392_excluded_kernel_is_planned_once_per_helper() {
              result = with seed(7i64) {{ tensor_to_scalar(sum(walk({depth}i64, to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32])), 0i32)) }}\n"
         )
     };
-    let (_, shallow_draws) = excluded_kernel_plannings(&drawing(4));
-    let (_, deep_draws) = excluded_kernel_plannings(&drawing(12));
+    let (_, shallow_draws) = def_kernel_plannings(&drawing(4));
+    let (_, deep_draws) = def_kernel_plannings(&drawing(12));
     assert_eq!(
         deep_draws - shallow_draws,
         8,
         "a Random-drawing kernel is re-planned on every application"
+    );
+}
+
+/// Evaluate `source` and return its `result` binding with the number of
+/// classification definition tables built.
+fn evaluation_definition_builds(source: &str) -> (String, u64) {
+    let checked = checked_surf(source);
+    let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
+    let inputs = HostEvaluationInputs {
+        roots: &empty_tensors,
+        bindings: None,
+    };
+    chelis_ir::lower::reset_evaluation_definition_builds();
+    let outcome =
+        evaluate_host_program_with_library_and_types(&checked, None, None, inputs, None, None)
+            .expect("#2405 transform fixture evaluates");
+    let builds = chelis_ir::lower::evaluation_definition_builds();
+    let result = outcome
+        .host_bindings
+        .get("result")
+        .map(render_value)
+        .expect("#2405 transform fixture binds `result`");
+    (result, builds)
+}
+
+/// chelis#2405 round 2: a `grad` applied beneath recursion classifies its
+/// application against the scope's one definition snapshot. The retired
+/// exclusion used to skip that classification; before this receipt each
+/// application copied the whole table and derived its draw reachability
+/// again, so the count grew with the recursion depth.
+///
+/// Evidentiary status: REGRESSION TEST (the count is `depth + 1` when the
+/// transform classifies against a per-application copy).
+#[test]
+fn issue_2405_recursive_grad_builds_one_definition_snapshot() {
+    let program = |depth: i64| {
+        format!(
+            "def loss(x: tensor[4, f32]) -> tensor[f32] = sum(mul(copy(x), x), 0i32)\n\
+             def descend(n: i64, x: tensor[4, f32]) -> tensor[4, f32] = if eq(n, 0i64) then x else descend(sub(n, 1i64), sub(copy(x), grad(loss)(x)))\n\
+             result = tensor_to_scalar(sum(descend({depth}i64, to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32])), 0i32))\n"
+        )
+    };
+    // Each step maps x to x - 2x = -x.
+    let (shallow, shallow_builds) = evaluation_definition_builds(&program(4));
+    let (deep, deep_builds) = evaluation_definition_builds(&program(13));
+    assert_eq!(shallow, "10.0");
+    assert_eq!(deep, "-10.0");
+    assert_eq!(
+        (shallow_builds, deep_builds),
+        (1, 1),
+        "one program-scoped definition snapshot, however many `grad` applications"
     );
 }
 
@@ -1217,13 +1175,11 @@ fn dropout_entered_error_prefix_and_nested_handler_unwind_preserve_parent() {
         session: Some(chelis_ir::host::HostLoweringSession::new(&checked)),
         active_declaration_names: Vec::new(),
         def_kernels: UnordMap::new(),
-        excluded_def_kernels: UnordMap::new(),
         transcript: Vec::new(),
         transcript_capture: None,
         resolving_top_levels: Vec::new(),
         random_seed: Some(42),
         random_counter: 5,
-        execution_exclusion: None,
         cancel: None,
     };
     let argument = RuntimeValue::Tensor(RuntimeTensorValue::new(IrTensorValue::from_storage(
@@ -1368,12 +1324,12 @@ fn literal_seed_read_at_full_i64_width() {
     use chelis_deep::Span;
     let sp = Span::new(0, 0);
     let node = |tag: &str, children: Vec<Expr>| {
-        let mut elements = vec![
-            Expr::Atom(Atom::Tag(DeepTag::parse(tag).unwrap()), sp),
-            Expr::Map(Metadata::default(), sp),
-        ];
-        elements.extend(children);
-        Expr::List(List { elements }, sp)
+        Expr::node(
+            DeepTag::parse(tag).unwrap(),
+            Metadata::default(),
+            children,
+            sp,
+        )
     };
     // (lit {type: (t-prim {} i32)} 4294967295) — the exact shape desugar
     // emits for `seed(4294967295)`.
@@ -1382,19 +1338,12 @@ fn literal_seed_read_at_full_i64_width() {
             "t-prim",
             vec![Expr::Atom(Atom::Name("i32".to_string()), sp)],
         );
-        Expr::List(
-            List {
-                elements: vec![
-                    Expr::Atom(Atom::Tag(DeepTag::Lit), sp),
-                    Expr::Map(
-                        Metadata::from(chelis_deep::annotations::MetadataValue::Type(
-                            chelis_deep::annotations::TypeSyntax::try_new(t_int32).unwrap(),
-                        )),
-                        sp,
-                    ),
-                    Expr::Atom(Atom::Int(n), sp),
-                ],
-            },
+        Expr::node(
+            DeepTag::Lit,
+            Metadata::from(chelis_deep::annotations::MetadataValue::Type(
+                chelis_deep::annotations::TypeSyntax::try_new(t_int32).unwrap(),
+            )),
+            vec![Expr::Atom(Atom::Int(n), sp)],
             sp,
         )
     };
@@ -2088,11 +2037,11 @@ fn eval_deep_with_bindings(
     let source = format!("probe = {surf_expr}\n");
     let decls = chelis_surf::parser::parse_str(&source).expect("surf parse");
     let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
-    let Expr::List(def, _) = &exprs[0] else {
+    let Expr::Node(def, _) = &exprs[0] else {
         panic!("desugaring a top-level binding yields one def form");
     };
-    // `(def {} <name> <body>)`: the body is the fourth element.
-    let body = def.elements[3].clone();
+    // `(def {} <name> <body>)`: the body is the second child.
+    let body = def.children_slice()[1].clone();
 
     let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
     let mut ctx = EvalContext {
@@ -2111,13 +2060,11 @@ fn eval_deep_with_bindings(
         session: None,
         active_declaration_names: Vec::new(),
         def_kernels: UnordMap::new(),
-        excluded_def_kernels: UnordMap::new(),
         transcript: Vec::new(),
         transcript_capture: None,
         resolving_top_levels: Vec::new(),
         random_seed: None,
         random_counter: 0,
-        execution_exclusion: None,
         cancel: None,
     };
     for (name, value) in args {

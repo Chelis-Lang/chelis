@@ -1,4 +1,4 @@
-# Randomness as a runtime primitive: the counter stream (option A)
+# Randomness as a runtime primitive: shared phases and the counter bridge
 
 Tracker: chelis#2413. Evidence: `docs/investigations/randomness_assessment_2026_09_22.md`.
 
@@ -10,7 +10,7 @@ This document plans how the implementation reaches the randomness semantics the 
 
 It decides no language semantics. Where it restates a rule, the numbered spec wins. The one normative change it needs, to spec/10 §3.2's wire layout, lands with phase 3.
 
-The alternative language design, explicit single-use keys, is `randomness_explicit_keys.md`. Phases 1 to 3, 5 and 6 below are needed under either design. Section 4 says exactly which parts are specific to the counter stream.
+On 2026-09-23 Chelis decided to move to explicit single-use keys (`randomness_explicit_keys.md`). Phases 1 to 3, 5 and 6 below are shared by both designs. Phase 3's key-operand IR is the explicit-key IR, with a bridge that computes today's counter keys until the switch. No new counter-only ordinal machinery is built (new activation counting, `vmap` and `par` bases), because keys remove ordinals.
 
 ## 1. Where the implementation stands
 
@@ -47,32 +47,31 @@ The draw key of the counter stream is `key = seed_bits XOR rotl64(splitmix64(c),
 
 This boundary is also the one the explicit-key design needs; only the supplier of `key` differs.
 
-**Random state is runtime state.** Each executor holds a random frame: a stack of `(seed, next ordinal)` entries, one per active `with seed` handler.
-- **Entering a draw** takes the next ordinal and returns its key.
-- **Leaving a handler**, normally or by a trap, restores the enclosing entry, as [05-RNG-1] states.
+**Random nodes take a key operand.** In the IR the data input stays first, because `shape_source_for_axis` reads `inputs[0]` as the tensor:
+- `Dropout[x, rate, key(, active)]`;
+- `UniformLike[template, low, high, key(, active)]`.
 
-The frame is held:
-- by the host interpreter, which already has `random_seed` and `random_counter`;
-- by the DAG evaluator, as an explicit frame argument, since plan-less graph execution goes away;
-- by generated C, whose `chelis_rng_state` already exists;
-- by GPU launches, which receive the ordinal base and return the count consumed.
+Rate and bounds are ordinary scalar operands of dtype `p`, as [05-OP-8] and [05-OP-37] say. `key` is a new non-numeric dtype (`Prim::Key`) with an opaque carrier (`RandomKey` in `dtype_semantics.rs`), and kernels are pure once they have their key. The optional Bool `active` input keeps an unselected `where`-lowered arm from validating, and so trapping on, a runtime control.
 
-**Controls are operands.**
-- `Dropout(x, rate)` and `UniformLike(template, low, high)` take their rate and bounds as ordinary scalar inputs of dtype `p`. The spec says so ([05-OP-8], [05-OP-37]).
-- A random node carries a static site identity and no key. The executing frame supplies the key when the node is entered.
-- Wire and serialized-library layouts change accordingly, under a versioned schema bump. spec/10 §3.2 currently makes the rate and bounds node fields, gives both random nodes a `seed` field, and limits `Dropout.inputs` to the data input. It is amended in the same change.
+The verifier adds three rules:
+- each key value has at most one consuming use;
+- AD replay nodes read their forward node's key without consuming it;
+- a key given to any other operation is rejected.
 
-**Every draw is entered or not, by execution.**
-- A draw inside a selected arm is entered.
-- A draw inside an unselected arm is not, including when a kernel computes both arms of a lowered scalar `if`. Such a draw carries an activation input, and the kernel's reported count is the number of activated draws.
-- A draw inside an argument of `where` is always entered.
+This is the explicit-key IR. Only the key source changes at the switch.
 
-**`vmap` and `par` follow the sequential reading ([05-RNG-1]).**
-- When the vmapped body enters a static number `k` of draws per row, row `b`'s `j`-th draw takes ordinal `c0 + b·k + j`, which the batched kernel computes from the base `c0`.
-- When activation makes per-row counts data-dependent, the row bases are an exclusive prefix sum of the per-row counts. Rows whose counts depend on their own earlier draws are evaluated in row order.
-- `par` branch bases are the sequential prefix of branch counts, in source order.
+**The bridge key source.** Until the switch, `DrawKey{handler: Inherited | Scoped{instance}}` produces the key of its handler's next ordinal, `ofDrawKey(seed, c) = seed_bits XOR rotl64(splitmix64(c), 17)`, from a runtime frame:
+- in the host interpreter, today's `random_seed` and `random_counter`, with no seed-0 fallback;
+- in the DAG evaluator, a `RandomFrame` argument;
+- in generated C, today's `chelis_rng_state`.
 
-**Gradient replay is an occurrence tape.** Each entered draw in the forward pass appends its site and key to the invocation's tape. The backward pass, and checkpoint recomputation, read keys back from the tape without touching the frame. This admits recursion, dynamic control and nested `grad` with no per-site restriction (spec/06 §2.10.1). The tape replaces the per-site key table and the static spine requirement.
+`DrawKey` is effectful: a DCE root, never merged, never folded or recomputed, and ordered as today. It advances the frame exactly when today's lowering consumes an ordinal. Where lowering attaches today's `random_path_condition` (`lower.rs`, the AD transform subcontexts), `DrawKey` carries it as an activation and advances only when it is true; nowhere else is an activation added. It takes its kernel's controls as ordering inputs and, when active, advances the frame only after they validate, preserving [05-OP-37]'s "validation consumes no ordinal". When inactive, it neither validates nor advances. A scoped `with seed` inside a kernel carries its literal seed.
+
+`vmap` over a function that draws is refused with a typed #2409 rejection in both lanes until the switch defines it. Today eval draws at seed 0, and C draws one batched ordinal. Both are silently non-conforming, so they become loud.
+
+**Gradient replay reads the key edge.** `DropoutReplay` and `UniformBoundAdjoint` read the forward node's key, and recomputation gives the same bits. That edge replaces the per-site key table, its "entered twice" check and the static-spine requirement. Recursion, dynamic control and nested `grad` need nothing more (spec/06 §2.10.1).
+
+**Wire.** WireDag moves to the next schema version. The cached lowered library bumps its format version, and spec/10 §3.2 is amended in the same change: random nodes carry no fields; their inputs are the data or template, the controls, the key and an optional activation; and `key` is a structural precision with no literal carrier, so every key is produced by a node.
 
 **The rate is not differentiable.** Following the amended [05-OP-37], adjoint construction rejects a rate that depends on a differentiated input, with `AdRejectionReason::RandomSelectionParameter`. `stop_gradient(rate)` is the explicit way to treat such a rate as constant. `uniform_like`'s bounds keep their exact reparameterisation adjoints.
 
@@ -84,7 +83,12 @@ The frame is held:
 - the plan-less dropout formula (`chelis-ir/src/eval.rs` ~373-403);
 - the older uniform mixing (`uniform_sample`'s `seed ^ i·G`, the interpreter's `seed ^ c·G`, and the emitted C equivalents).
 
-Fixed-control plans survive only as what the general frame and tape subsume. LaCaDiLE certification export remains opt-in and keeps producing its fragment's graphs from the same frame and tape.
+Fixed-control plans and the random parts of `evaluation.rs` and `execution_spine.rs` are deleted: the key edge subsumes them. Three consumers of those parts are kept:
+- the spine's Resource-requirement capture moves to `lowering_trace.rs`, because the `compilation-trace` feature reads it;
+- the `compilation-trace` feature's fixed-entry selection (`compiler.rs`, around lines 2188-2205) selects the lowered kernel with its `DrawKey` nodes;
+- `random_observer.rs` is ported to observe `DrawKey` nodes until the switch deletes it.
+
+LaCaDiLE certification export remains opt-in and reads the symbolic key derivations.
 
 ## 3. Phases
 
@@ -95,30 +99,37 @@ Each phase is one pull request with its own red-team rounds. The oracle for ever
    - Dropout-free programs are unchanged.
 2. **One generator (#2408).** `uniform_like` joins the kernel boundary above in every lane. The older mixing and the plan-less dropout formula are deleted.
    - This changes every `uniform_like`-derived value: `normal_like`, the Kaiming and Xavier initialisers, and shell distributions. Shells' pinned random outputs are regenerated in the release that ships it, with a migration note.
-3. **Runtime primitive (#2411).**
-   - Controls become operands and keys come from the frame.
-   - The interpreter gains conforming `dropout` and `uniform_like` builtins.
-   - Plans become the frame plus the tape; the classifier, the profile and the legacy random lowering are deleted.
-   - spec/10 §3.2's wire layout is amended to carry the operands and drop the baked key.
-   - Oracle: runtime rates and bounds run in eval and C and match the reference; dropout under a runtime `if` or `match` runs in eval; nothing selects an executor by static classification.
-4. **Lane defects.**
-   - `vmap` under the sequential reading (#2409);
-   - activation on every lowered unselected draw (#2410);
-   - the direct-return result-claim failure (#2407).
-   - Oracle: the vmap and unselected-arm probes match the reference in both lanes, and #2407's program runs.
-5. **Rate rejection.** `AdRejectionReason::RandomSelectionParameter` and its registry row, per the amended [05-OP-37] (#2421).
-   - Oracle: a rate reached through adjoint-contract operations rejects with the typed reason; the same program with `stop_gradient(rate)`, or with a rate independent of the parameters, differentiates.
+3. **Key-operand IR with the bridge (#2411, #2421).** One PR, in six commits:
+   1. the key carrier and the kernel signatures `apply(key)`;
+   2. a mechanical rename of the old nodes;
+   3. the new nodes, `Prim::Key`, the verifier rules, the `RandomFrame` evaluator, `grad` (including the `RandomSelectionParameter` rejection, which phase 3 needs because it is the first phase in which a rate can depend on a parameter) and C emission;
+   4. conforming `dropout` and `uniform_like` interpreter builtins;
+   5. the switch of lowering to the new nodes, deleting plans, the spine, the classifier, the profile, the static-rate grammar and the old nodes, with the wire and cache version bumps;
+   6. spec/10 §3.2 and the changelog.
+
+   Oracles:
+   - every program that ran at the base produces identical bits, except programs that `vmap` a random function, which are now refused (#2409);
+   - the reference-match oracle excludes C programs that draw in an unselected arm, which stay shifted by one ordinal until the switch (#2410);
+   - runtime rates and bounds, and dropout under runtime `if`/`match`/recursion, run in eval and C and match the reference;
+   - a rate reached through adjoint-contract slots rejects with `RandomSelectionParameter`, with the rejection registry regenerated, while `stop_gradient(rate)` and a rate independent of the parameters both differentiate;
+   - no `EvaluationProfile` remains.
+   - Before the fence is added, the shells are searched for `vmap` over random functions, and any use is reported.
+4. **Lane defects.** The direct-return result-claim failure (#2407).
+   - Oracle: #2407's program runs.
+   - #2409's `vmap` ordinals are not built: phase 3 fences them, and the switch defines `vmap` over keys.
+5. **Rate rejection.** Folded into phase 3.
 6. **Compiled dropout everywhere (#1192, #1872).** Tensor kernels, HIP and Metal use the kernel boundary. The remaining compiled-lane dropout rejections are removed.
    - Oracle: the stream corpus builds and runs on C, HIP and Metal and matches the reference.
 
-## 4. What is specific to the counter stream
+## 4. What the switch to explicit keys deletes
 
-Only these parts would change under the explicit-key design:
-- the frame's `(seed, ordinal)` stack and the key formula `seed_bits XOR rotl64(splitmix64(c), 17)`;
-- the ordinal bookkeeping for activation, `vmap` row bases and `par` branch bases;
-- the `with seed` handler plumbing in each executor.
+These parts are the bridge. The switch deletes them:
+- `DrawKey`;
+- the `RandomFrame` and the interpreter's counter;
+- `chelis_rng_state` and its threading;
+- the `with seed` plumbing in each executor.
 
-Everything else carries over unchanged: the kernel boundary, operands instead of baked controls, the occurrence tape, rate rejection, and the deletions.
+Everything else carries over unchanged: the kernel boundary, operand controls, the key edge for replay, rate rejection, and the deletions above.
 
 The counter stream's lasting costs are these:
 - a draw's value depends on how many draws preceded it, so adding a draw to a library helper shifts every later value in its callers;

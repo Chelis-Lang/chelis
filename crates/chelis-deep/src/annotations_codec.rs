@@ -347,17 +347,12 @@ impl MacroSource {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) enum WireExpr {
     Atom(Atom, Span),
-    List(WireList, Span),
     Map(WireMetadata, Span),
     MetaExpr(WireMetaExpr, Span),
     Node(Box<WireNode>, Span),
     BareList(Vec<WireExpr>, Span),
     UnknownForm(Box<WireUnknown>),
     ExtensionData(crate::ExtensionData),
-}
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub(crate) struct WireList {
-    pub(crate) elements: Vec<WireExpr>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct WireMetadata {
@@ -389,7 +384,6 @@ impl WireExpr {
             Self::Atom(atom, span) => RawExpr::Atom(
                 match atom {
                     Atom::Name(v) => RawAtom::Symbol(v),
-                    Atom::Tag(v) => RawAtom::Symbol(v.as_str().into()),
                     Atom::Int(v) => RawAtom::Int(v),
                     Atom::Float(v) => RawAtom::Float(v),
                     Atom::Str(v) => RawAtom::Str(v),
@@ -397,9 +391,6 @@ impl WireExpr {
                 },
                 span,
             ),
-            Self::List(v, span) => {
-                RawExpr::List(v.elements.into_iter().map(Self::into_raw).collect(), span)
-            }
             Self::BareList(v, span) => {
                 RawExpr::List(v.into_iter().map(Self::into_raw).collect(), span)
             }
@@ -429,7 +420,7 @@ impl WireExpr {
     }
 }
 // Serde preserves the carrier of genuine expression leaves. It is not a
-// parser: a List with an undecoded vocabulary head is rejected, not restamped.
+// parser: a node is rebuilt through `Node::try_new`, never restamped.
 impl WireExpr {
     fn into_ast(self, key: &str) -> Result<Expr, MetadataError> {
         Ok(match self {
@@ -441,16 +432,6 @@ impl WireExpr {
                 ));
             }
             Self::Atom(atom, span) => Expr::Atom(atom, span),
-            Self::List(list, span) => Expr::List(
-                crate::List {
-                    elements: list
-                        .elements
-                        .into_iter()
-                        .map(|v| v.into_ast(key))
-                        .collect::<Result<_, _>>()?,
-                },
-                span,
-            ),
             Self::Map(map, span) => Expr::Map(map.into_metadata()?, span),
             Self::MetaExpr(meta, span) => Expr::MetaExpr(
                 crate::MetaExpr {
@@ -877,12 +858,6 @@ impl WireExpr {
     pub(crate) fn from_ast(expr: &Expr) -> Self {
         match expr {
             Expr::Atom(a, span) => Self::Atom(a.clone(), *span),
-            Expr::List(v, span) => Self::List(
-                WireList {
-                    elements: v.elements.iter().map(Self::from_ast).collect(),
-                },
-                *span,
-            ),
             Expr::Map(v, span) => Self::Map(WireMetadata::from_metadata(v), *span),
             Expr::MetaExpr(v, span) => Self::MetaExpr(
                 WireMetaExpr {

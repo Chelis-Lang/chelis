@@ -372,19 +372,17 @@ fn metadata_rewrites_visit_structural_annotations_without_rewriting_roots() {
 #[test]
 fn expression_payload_admission_rejects_undecoded_vocabulary() {
     use chelis_deep::annotations::{RuntimeExpression, TypeSyntax};
-    use chelis_deep::{Atom, Expr, List, Metadata, Span};
+    use chelis_deep::{Atom, Expr, Metadata, Span, UnknownFormData};
     let span = Span::new(0, 0);
+    // A vocabulary head that bypassed stamping: only a hand-built
+    // `UnknownForm` can carry one.
     let raw = |tag: &str| {
-        Expr::List(
-            List {
-                elements: vec![
-                    Expr::Atom(Atom::Name(tag.into()), span),
-                    Expr::Map(Metadata::default(), span),
-                    Expr::Atom(Atom::Name("x".into()), span),
-                ],
-            },
+        Expr::UnknownForm(Box::new(UnknownFormData {
+            head: tag.into(),
+            meta: Metadata::default(),
+            children: vec![Expr::Atom(Atom::Name("x".into()), span)],
             span,
-        )
+        }))
     };
     assert!(TypeSyntax::try_new(raw("t-var")).is_err());
     assert!(RuntimeExpression::try_new(raw("var")).is_err());
@@ -413,18 +411,14 @@ fn expression_payload_admission_rejects_undecoded_vocabulary() {
 
 #[test]
 fn serde_metadata_does_not_restamp_an_invalid_typed_payload() {
-    use chelis_deep::{Atom, Expr, List, Metadata, Span};
+    use chelis_deep::{Atom, Expr, Metadata, Span, UnknownFormData};
     let span = Span::new(0, 0);
-    let raw = Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Name("var".into()), span),
-                Expr::Map(Metadata::default(), span),
-                Expr::Atom(Atom::Name("x".into()), span),
-            ],
-        },
+    let raw = Expr::UnknownForm(Box::new(UnknownFormData {
+        head: "var".into(),
+        meta: Metadata::default(),
+        children: vec![Expr::Atom(Atom::Name("x".into()), span)],
         span,
-    );
+    }));
     let wire = serde_json::json!({"entries": [["custom", raw]]});
     assert!(serde_json::from_value::<Metadata>(wire).is_err());
     let typed = parse_str("(var {custom: (var {} x), source: (m (var {} historical))} x)").unwrap();
@@ -449,16 +443,16 @@ fn serde_preserves_existing_expression_leaf_carriers() {
     };
     use chelis_deep::{Atom, DeepTag, Expr, Metadata, Span};
     let span = Span::new(3, 4);
-    let legacy = |tag, child| {
+    let stamped = |tag, child| {
         let node = chelis_deep::node::Node::new(tag, Metadata::default(), vec![child]);
-        Expr::List(node.to_list(span), span)
+        Expr::Node(Box::new(node), span)
     };
-    let variable = RuntimeExpression::try_new(legacy(
+    let variable = RuntimeExpression::try_new(stamped(
         DeepTag::Var,
         Expr::Atom(Atom::Name("x".into()), span),
     ))
     .unwrap();
-    let ty = TypeSyntax::try_new(legacy(
+    let ty = TypeSyntax::try_new(stamped(
         DeepTag::TPrim,
         Expr::Atom(Atom::Name("f32".into()), span),
     ))
@@ -528,7 +522,6 @@ fn serde_rejects_duplicate_core_and_extension_entries_in_json_and_binary() {
     #[allow(dead_code)]
     enum Wire {
         Atom(chelis_deep::Atom, chelis_deep::Span),
-        List,
         Map,
         MetaExpr,
         Node,

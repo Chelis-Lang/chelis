@@ -50,9 +50,6 @@ fn surf_to_deep(source: &str) -> Vec<Expr> {
 /// Does this expression, or anything under it, carry a `pipe` node?
 fn contains_pipe(expr: &Expr) -> bool {
     match expr {
-        Expr::List(list, _) => {
-            list.tag() == Some(DeepTag::Pipe) || list.elements.iter().any(contains_pipe)
-        }
         Expr::Node(node, _) => {
             node.tag() == DeepTag::Pipe || node.children_slice().iter().any(contains_pipe)
         }

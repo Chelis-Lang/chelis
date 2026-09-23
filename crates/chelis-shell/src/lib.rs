@@ -384,11 +384,7 @@ fn canonical_variables(
                     visit(child, variables)?;
                 }
             }
-            Expr::Map(..)
-            | Expr::MetaExpr(..)
-            | Expr::List(..)
-            | Expr::BareList(..)
-            | Expr::UnknownForm(..) => {
+            Expr::Map(..) | Expr::MetaExpr(..) | Expr::BareList(..) | Expr::UnknownForm(..) => {
                 return Err(validation_error(
                     "type representation contains a non-type carrier",
                 ));

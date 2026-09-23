@@ -544,10 +544,9 @@ fn parse_invariant_fn(expr: &Expr) -> Option<(String, Expr)> {
     Some((binder.to_string(), body.clone()))
 }
 
-/// Borrow the common stamped shape without reconstructing a legacy `List`.
+/// Borrow the stamped shape of a decoded node.
 fn expr_parts(expr: &Expr) -> Option<(DeepTag, &Metadata, &[Expr])> {
     match expr {
-        Expr::List(list, _) => Some((tag(list)?, get_meta(list)?, children(list))),
         Expr::Node(node, _) => Some((node.tag(), node.meta(), node.children_slice())),
         _ => None,
     }
@@ -586,11 +585,6 @@ fn strip_annotation_spans(metadata: &mut chelis_deep::Metadata) {
 
 fn strip_span_meta(expr: &mut Expr) {
     match expr {
-        Expr::List(list, _) => {
-            for element in &mut list.elements {
-                strip_span_meta(element);
-            }
-        }
         Expr::Map(map, _) => {
             strip_annotation_spans(map);
         }
@@ -600,15 +594,19 @@ fn strip_span_meta(expr: &mut Expr) {
         }
         Expr::Atom(_, _) => {}
         Expr::Node(..) => {
-            // Bridge: convert Node to List in place so mutable meta stripping works (#908).
+            // A node has no mutable parts: take it apart, strip its metadata
+            // and children, and rebuild it. Removing `span` keys cannot
+            // invalidate a node, so the rebuild re-admits what it received.
             let placeholder = Expr::Atom(Atom::Bool(false), Span::new(0, 0));
-            match std::mem::replace(expr, placeholder) {
-                Expr::Node(node, span) => {
-                    *expr = Expr::List(node.to_list(span), span);
-                    strip_span_meta(expr);
-                }
-                _ => unreachable!(),
+            let Expr::Node(node, span) = std::mem::replace(expr, placeholder) else {
+                unreachable!("matched Node above");
+            };
+            let (tag, mut metadata, mut children) = node.into_parts();
+            strip_annotation_spans(&mut metadata);
+            for child in &mut children {
+                strip_span_meta(child);
             }
+            *expr = Expr::node(tag, metadata, children, span);
         }
         // chelis#1087: span metadata inside either transitional variant
         // would otherwise leak into the rendered invariant text.
@@ -826,13 +824,11 @@ pub(crate) fn revalidate_adt_value(
         session: None,
         active_declaration_names: Vec::new(),
         def_kernels: UnordMap::new(),
-        excluded_def_kernels: UnordMap::new(),
         transcript: Vec::new(),
         transcript_capture: None,
         resolving_top_levels: Vec::new(),
         random_seed: None,
         random_counter: 0,
-        execution_exclusion: None,
         // Invariant predicates run inside an enclosing evaluation, so they
         // honour whatever token that evaluation installed (chelis#914).
         cancel: chelis_types::current_cancel_token(),
@@ -952,7 +948,6 @@ mod tests {
             Expr::MetaExpr(meta, _) => {
                 metadata_has_span(&meta.metadata) || mentions_span_key(&meta.expr)
             }
-            Expr::List(list, _) => list.elements.iter().any(mentions_span_key),
             Expr::Node(node, _) => {
                 metadata_has_span(node.meta())
                     || node.children_slice().iter().any(mentions_span_key)

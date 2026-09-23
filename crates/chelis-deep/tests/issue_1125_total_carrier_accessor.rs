@@ -1,6 +1,6 @@
 use chelis_deep::{
-    Atom, DeepTag, Expr, ExprCarrier, List, MetaExpr, Metadata, Span, UnknownFormData,
-    authoring::rename_function, parse_and_stamp_file,
+    Atom, DeepTag, Expr, ExprCarrier, MetaExpr, Metadata, Span, UnknownFormData,
+    authoring::rename_function, parse_and_stamp_file, parse_and_stamp_runtime_exprs,
 };
 
 fn span() -> Span {
@@ -11,28 +11,10 @@ fn name(value: &str) -> Expr {
     Expr::Atom(Atom::Name(value.to_string()), span())
 }
 
-fn legacy_node(tag: DeepTag, children: Vec<Expr>) -> Expr {
-    Expr::List(
-        List {
-            elements: std::iter::once(Expr::Atom(Atom::Tag(tag), span()))
-                .chain(std::iter::once(Expr::Map(Metadata::default(), span())))
-                .chain(children)
-                .collect(),
-        },
-        span(),
-    )
-}
-
-fn legacy_unknown(head: &str, children: Vec<Expr>) -> Expr {
-    Expr::List(
-        List {
-            elements: std::iter::once(name(head))
-                .chain(std::iter::once(Expr::Map(Metadata::default(), span())))
-                .chain(children)
-                .collect(),
-        },
-        span(),
-    )
+fn parse_runtime_expr(source: &str) -> Expr {
+    let mut exprs = parse_and_stamp_runtime_exprs(source).expect("fixture must stamp");
+    assert_eq!(exprs.len(), 1, "one expression");
+    exprs.remove(0)
 }
 
 fn decoded_parts(expr: &Expr) -> (DeepTag, &Metadata, &[Expr]) {
@@ -97,10 +79,6 @@ fn contains_structural_names(expr: &Expr, expected: &[&str]) -> bool {
             });
             found
         }
-        ExprCarrier::MalformedLegacyList(list) => list
-            .elements
-            .iter()
-            .any(|child| contains_structural_names(child, expected)),
         ExprCarrier::Atom(_) => false,
     }
 }
@@ -138,25 +116,21 @@ fn contains_structural_head(expr: &Expr, expected: &str) -> bool {
             });
             found
         }
-        ExprCarrier::MalformedLegacyList(list) => list
-            .elements
-            .iter()
-            .any(|child| contains_structural_head(child, expected)),
         ExprCarrier::Atom(_) => false,
     }
 }
 
 #[test]
-fn decoded_node_read_is_identical_for_successor_and_legacy_carriers() {
-    let successor = Expr::node(
+fn decoded_node_read_is_identical_for_constructed_and_parsed_nodes() {
+    let constructed = Expr::node(
         DeepTag::Var,
         Metadata::default(),
-        vec![name("successor")],
+        vec![name("constructed")],
         span(),
     );
-    let legacy = legacy_node(DeepTag::Var, vec![name("legacy")]);
+    let parsed = parse_runtime_expr("(var {} parsed)");
 
-    for (expr, expected_name) in [(&successor, "successor"), (&legacy, "legacy")] {
+    for (expr, expected_name) in [(&constructed, "constructed"), (&parsed, "parsed")] {
         let (tag, metadata, children) = decoded_parts(expr);
         assert_eq!(tag, DeepTag::Var);
         assert!(metadata.is_empty());
@@ -178,53 +152,37 @@ fn legal_legacy_structural_lists_share_the_structural_disposition() {
       (var {} x))))";
     let stamped = parse_and_stamp_file(source).expect("fixture must stamp");
     let renamed =
-        rename_function(&stamped, "target", "renamed").expect("authoring normalization succeeds");
+        rename_function(&stamped, "target", "renamed").expect("authoring rewrite succeeds");
 
     assert!(
         renamed
             .module
             .iter()
             .any(|expr| contains_structural_head(expr, "x")),
-        "an annotated binder must remain a structural-list carrier after authoring normalization"
+        "an annotated binder must remain a structural-list carrier after an authoring rewrite"
     );
     assert!(
         renamed
             .module
             .iter()
             .any(|expr| contains_structural_names(expr, &["copy", "fill"])),
-        "an import name list must remain a structural-list carrier after authoring normalization"
+        "an import name list must remain a structural-list carrier after an authoring rewrite"
     );
-
-    let undecodable = legacy_unknown("future-form", vec![]);
-    assert!(matches!(
-        undecodable.carrier(),
-        ExprCarrier::UndecodableHead("future-form", _, [])
-    ));
-    let malformed = Expr::List(
-        List {
-            elements: vec![Expr::Atom(Atom::Tag(DeepTag::Copy), span()), name("value")],
-        },
-        span(),
-    );
-    assert!(matches!(
-        malformed.carrier(),
-        ExprCarrier::MalformedLegacyList(_)
-    ));
 }
 
 #[test]
-fn undecodable_head_read_is_identical_for_successor_and_legacy_carriers() {
-    let successor = Expr::UnknownForm(Box::new(UnknownFormData {
-        head: "future-successor".to_string(),
+fn undecodable_head_read_is_identical_for_constructed_and_parsed_forms() {
+    let constructed = Expr::UnknownForm(Box::new(UnknownFormData {
+        head: "future-constructed".to_string(),
         meta: Metadata::default(),
-        children: vec![name("successor-payload")],
+        children: vec![name("constructed-payload")],
         span: span(),
     }));
-    let legacy = legacy_unknown("future-legacy", vec![name("legacy-payload")]);
+    let parsed = parse_runtime_expr("(future-parsed {} parsed-payload)");
 
     for (expr, expected_head, expected_payload) in [
-        (&successor, "future-successor", "successor-payload"),
-        (&legacy, "future-legacy", "legacy-payload"),
+        (&constructed, "future-constructed", "constructed-payload"),
+        (&parsed, "future-parsed", "parsed-payload"),
     ] {
         let (head, metadata, children) = undecodable_parts(expr);
         assert_eq!(head, expected_head);
@@ -242,52 +200,31 @@ fn undecodable_legacy_head_retains_its_external_span_id() {
         chelis_deep::parser::parse_str(r#"(future-form {span: "legacy-unknown"} payload)"#)
             .expect("legacy metadata fixture parses")
             .remove(0);
-    let Expr::BareList(elements, _) = parsed else {
+    let Expr::BareList(elements, _) = &parsed else {
         panic!("unstamped source list must retain its structural role");
     };
     let Expr::Map(metadata, _) = &elements[1] else {
         panic!("fixture must contain metadata in the legacy metadata slot");
     };
-    let metadata = metadata.clone();
 
-    let undecodable = Expr::List(
-        List {
-            elements: vec![
-                name("future-form"),
-                Expr::Map(metadata.clone(), span()),
-                name("payload"),
-            ],
-        },
-        span(),
-    );
+    let undecodable = Expr::UnknownForm(Box::new(UnknownFormData {
+        head: "future-form".to_string(),
+        meta: metadata.clone(),
+        children: vec![name("payload")],
+        span: span(),
+    }));
     assert!(matches!(
         undecodable.carrier(),
         ExprCarrier::UndecodableHead("future-form", _, _)
     ));
     assert_eq!(undecodable.span_id(), Some("legacy-unknown"));
 
-    let known = Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::Var), span()),
-                Expr::Map(metadata, span()),
-                name("value"),
-            ],
-        },
-        span(),
-    );
+    let known = parse_runtime_expr(r#"(var {span: "legacy-unknown"} value)"#);
     assert_eq!(known.span_id(), Some("legacy-unknown"));
 
-    let malformed = Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::Var), span()),
-                name("not-metadata"),
-            ],
-        },
-        span(),
-    );
-    assert_eq!(malformed.span_id(), None);
+    // A structural list carries no node metadata, even when one of its
+    // elements is a map holding a span.
+    assert_eq!(parsed.span_id(), None);
 }
 
 #[test]
@@ -305,16 +242,6 @@ fn accessor_has_an_explicit_disposition_for_every_non_node_carrier() {
         MetaExpr {
             metadata: Metadata::default(),
             expr: Box::new(name("wrapped")),
-        },
-        span(),
-    );
-    let malformed = Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::Var), span()),
-                name("not-metadata"),
-                name("payload"),
-            ],
         },
         span(),
     );
@@ -341,52 +268,22 @@ fn accessor_has_an_explicit_disposition_for_every_non_node_carrier() {
         ExprCarrier::MetadataExpression(MetaExpr { expr, .. })
             if matches!(expr.as_ref(), Expr::Atom(Atom::Name(found), _) if found == "wrapped")
     ));
-    assert!(matches!(
-        malformed.carrier(),
-        ExprCarrier::MalformedLegacyList(list) if list.elements.len() == 3
-    ));
 }
 
+/// A node or unknown form without its metadata slot has no in-memory
+/// spelling: the stamper rejects it at ingress, so no reader can decode it
+/// silently or mistake it for an undecodable head.
 #[test]
 fn malformed_legacy_heads_are_not_silently_decoded_or_treated_as_undecodable() {
-    let tagged_missing_metadata = Expr::List(
-        List {
-            elements: vec![Expr::Atom(Atom::Tag(DeepTag::Var), span()), name("x")],
-        },
-        span(),
-    );
-    let tagged_wrong_metadata = Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::Var), span()),
-                name("not-metadata"),
-                name("x"),
-            ],
-        },
-        span(),
-    );
-    let unknown_missing_metadata = Expr::List(
-        List {
-            elements: vec![name("future-form")],
-        },
-        span(),
-    );
-    let unknown_wrong_metadata = Expr::List(
-        List {
-            elements: vec![name("future-form"), name("not-metadata"), name("payload")],
-        },
-        span(),
-    );
-
     for malformed in [
-        &tagged_missing_metadata,
-        &tagged_wrong_metadata,
-        &unknown_missing_metadata,
-        &unknown_wrong_metadata,
+        "(var x)",
+        "(var not-metadata x)",
+        "(future-form)",
+        "(future-form not-metadata payload)",
     ] {
-        assert!(matches!(
-            malformed.carrier(),
-            ExprCarrier::MalformedLegacyList(_)
-        ));
+        assert!(
+            parse_and_stamp_runtime_exprs(malformed).is_err(),
+            "`{malformed}` must be rejected at ingress"
+        );
     }
 }

@@ -188,7 +188,6 @@ fn deep_type_has_hole(root: &chelis_deep::Expr) -> bool {
             continue;
         }
         match expr {
-            chelis_deep::Expr::List(list, _) => worklist.extend(list.elements.iter()),
             chelis_deep::Expr::BareList(elements, _) => worklist.extend(elements.iter()),
             chelis_deep::Expr::MetaExpr(meta, _) => worklist.push(&meta.expr),
             _ => {}

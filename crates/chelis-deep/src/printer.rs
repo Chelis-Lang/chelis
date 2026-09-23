@@ -4,7 +4,7 @@
 //! files and `chelis deep`.
 
 use crate::annotations_codec::{
-    WireExpr, WireList as List, WireMetaExpr as MetaExpr, WireMetadata as MetaMap, WireNode,
+    WireExpr, WireMetaExpr as MetaExpr, WireMetadata as MetaMap, WireNode,
 };
 use crate::ast::{Atom, Expr};
 use crate::span::Span;
@@ -92,21 +92,11 @@ impl Printer {
             WireExpr::Atom(atom, _) => Self::fmt_atom(atom),
             WireExpr::Map(map, _) => self.fmt_map(map, indent),
             WireExpr::MetaExpr(meta, _) => self.fmt_meta_expr(meta, indent),
-            WireExpr::List(list, _) => self.fmt_list(list, indent),
-            WireExpr::Node(node, _) => {
-                // Render a stamped Node back as its canonical list form.
-                let list = node_to_list(node.as_ref());
-                self.fmt_list(&list, indent)
-            }
-            WireExpr::BareList(elems, _) => {
-                let list = List {
-                    elements: elems.clone(),
-                };
-                self.fmt_list(&list, indent)
-            }
+            WireExpr::Node(node, _) => self.fmt_node(node, indent),
+            WireExpr::BareList(elems, _) => self.fmt_list(elems, indent),
             WireExpr::UnknownForm(data) => {
-                let list = unknown_form_to_list(&data.head, &data.meta, &data.children);
-                self.fmt_list(&list, indent)
+                let elements = unknown_form_elements(&data.head, &data.meta, &data.children);
+                self.fmt_list(&elements, indent)
             }
         }
     }
@@ -117,20 +107,11 @@ impl Printer {
             WireExpr::Atom(atom, _) => Self::fmt_atom(atom),
             WireExpr::Map(map, _) => Self::fmt_map_flat(map),
             WireExpr::MetaExpr(meta, _) => self.fmt_meta_expr_flat(meta),
-            WireExpr::List(list, _) => self.fmt_list_flat(list),
-            WireExpr::Node(node, _) => {
-                let list = node_to_list(node.as_ref());
-                self.fmt_list_flat(&list)
-            }
-            WireExpr::BareList(elems, _) => {
-                let list = List {
-                    elements: elems.clone(),
-                };
-                self.fmt_list_flat(&list)
-            }
+            WireExpr::Node(node, _) => self.fmt_node_flat(node),
+            WireExpr::BareList(elems, _) => self.fmt_list_flat(elems),
             WireExpr::UnknownForm(data) => {
-                let list = unknown_form_to_list(&data.head, &data.meta, &data.children);
-                self.fmt_list_flat(&list)
+                let elements = unknown_form_elements(&data.head, &data.meta, &data.children);
+                self.fmt_list_flat(&elements)
             }
         }
     }
@@ -138,7 +119,6 @@ impl Printer {
     fn fmt_atom(atom: &Atom) -> String {
         match atom {
             Atom::Name(s) => s.clone(),
-            Atom::Tag(tag) => tag.as_str().to_string(),
             Atom::Int(n) => n.to_string(),
             Atom::Float(f) => {
                 let s = f.to_string();
@@ -165,40 +145,56 @@ impl Printer {
         }
     }
 
-    fn fmt_list(&self, list: &List, indent: usize) -> String {
-        let flat = self.fmt_list_flat(list);
-        if self.mode == PrintMode::Flat || self.force_flat_list(list) {
+    /// A stamped node prints as its canonical `(tag {meta} children...)`
+    /// form, with the tag regenerated from the decoded [`DeepTag`].
+    fn fmt_node(&self, node: &WireNode, indent: usize) -> String {
+        let flat = self.fmt_node_flat(node);
+        if self.mode == PrintMode::Flat || force_flat_tag(node.tag) {
             return flat;
         }
-        if !self.force_break_list(list) && indent + flat.len() <= self.max_width {
+        if !force_break_tag(node.tag) && indent + flat.len() <= self.max_width {
             return flat;
         }
-
-        if let Some(output) = self.fmt_canonical_node(list, indent) {
-            return output;
-        }
-
-        self.fmt_generic_list_broken(list, indent)
+        self.fmt_canonical_node(node, indent)
     }
 
-    fn fmt_list_flat(&self, list: &List) -> String {
-        let parts: Vec<String> = list
-            .elements
+    fn fmt_node_flat(&self, node: &WireNode) -> String {
+        let parts: Vec<String> = [
+            node.tag.as_str().to_string(),
+            Self::fmt_map_flat(&node.meta),
+        ]
+        .into_iter()
+        .chain(node.children.iter().map(|expr| self.fmt_expr_flat(expr)))
+        .collect();
+        format!("({})", parts.join(" "))
+    }
+
+    /// A structural list, or an unknown form's head-map-children sequence.
+    fn fmt_list(&self, elements: &[WireExpr], indent: usize) -> String {
+        let flat = self.fmt_list_flat(elements);
+        if self.mode == PrintMode::Flat || indent + flat.len() <= self.max_width {
+            return flat;
+        }
+        self.fmt_generic_list_broken(elements, indent)
+    }
+
+    fn fmt_list_flat(&self, elements: &[WireExpr]) -> String {
+        let parts: Vec<String> = elements
             .iter()
             .map(|expr| self.fmt_expr_flat(expr))
             .collect();
         format!("({})", parts.join(" "))
     }
 
-    fn fmt_canonical_node(&self, list: &List, indent: usize) -> Option<String> {
-        let (tag, meta, children) = canonical_node_parts(list)?;
-        let tag = tag.as_str();
+    fn fmt_canonical_node(&self, node: &WireNode, indent: usize) -> String {
+        let tag = node.tag.as_str();
+        let children = &node.children;
         let meta_indent = indent + 1 + tag.len() + 1;
-        let meta_text = self.fmt_map(meta, meta_indent);
+        let meta_text = self.fmt_map(&node.meta, meta_indent);
         let header = format!("({tag} {meta_text}");
 
         if children.is_empty() {
-            return Some(format!("{header})"));
+            return format!("{header})");
         }
 
         let child_indent = indent + self.indent_step;
@@ -218,21 +214,18 @@ impl Printer {
             .last_mut()
             .expect("canonical node has at least one child line")
             .push(')');
-        Some(lines.join("\n"))
+        lines.join("\n")
     }
 
-    fn fmt_generic_list_broken(&self, list: &List, indent: usize) -> String {
-        if list.elements.is_empty() {
+    fn fmt_generic_list_broken(&self, elements: &[WireExpr], indent: usize) -> String {
+        let Some((first, rest)) = elements.split_first() else {
             return "()".to_string();
-        }
+        };
 
         let child_indent = indent + self.indent_step;
         let prefix = " ".repeat(child_indent);
-        let mut lines = vec![format!(
-            "({}",
-            self.fmt_expr(&list.elements[0], child_indent)
-        )];
-        for child in &list.elements[1..] {
+        let mut lines = vec![format!("({}", self.fmt_expr(first, child_indent))];
+        for child in rest {
             let rendered = self.fmt_expr(child, child_indent);
             let mut child_lines = rendered.lines();
             if let Some(first) = child_lines.next() {
@@ -334,67 +327,42 @@ impl Printer {
             .collect();
         format!("^{{{}}}", parts.join(" "))
     }
-
-    fn force_flat_list(&self, list: &List) -> bool {
-        let Some((tag, _, _)) = canonical_node_parts(list) else {
-            return false;
-        };
-        matches!(
-            tag,
-            DeepTag::Var
-                | DeepTag::Lit
-                | DeepTag::DName
-                | DeepTag::DVar
-                | DeepTag::DLit
-                | DeepTag::DRank
-                | DeepTag::TPrim
-        )
-    }
-
-    fn force_break_list(&self, list: &List) -> bool {
-        let Some((tag, _, _)) = canonical_node_parts(list) else {
-            return false;
-        };
-        matches!(tag, DeepTag::Fn | DeepTag::Let | DeepTag::Bind)
-    }
 }
 
-fn canonical_node_parts(list: &List) -> Option<(DeepTag, &MetaMap, &[WireExpr])> {
-    match list.elements.as_slice() {
-        [
-            WireExpr::Atom(Atom::Tag(tag), _),
-            WireExpr::Map(meta, _),
-            children @ ..,
-        ] => Some((*tag, meta, children)),
-        _ => None,
-    }
+/// Leaf tags that always print on one line.
+fn force_flat_tag(tag: DeepTag) -> bool {
+    matches!(
+        tag,
+        DeepTag::Var
+            | DeepTag::Lit
+            | DeepTag::DName
+            | DeepTag::DVar
+            | DeepTag::DLit
+            | DeepTag::DRank
+            | DeepTag::TPrim
+    )
 }
 
-/// Reconstruct a canonical `List` from a stamped `Node` for printing.
-fn node_to_list(node: &WireNode) -> List {
-    let span = Span::new(0, 0);
-    let mut elements = vec![
-        WireExpr::Atom(Atom::Tag(node.tag), span),
-        WireExpr::Map(node.meta.clone(), span),
-    ];
-    elements.extend(node.children.iter().cloned());
-    List { elements }
+/// Binding forms that always break their children onto separate lines.
+fn force_break_tag(tag: DeepTag) -> bool {
+    matches!(tag, DeepTag::Fn | DeepTag::Let | DeepTag::Bind)
 }
 
-/// Reconstruct a `List` from an `UnknownForm` for printing.
-fn unknown_form_to_list(head: &str, meta: &MetaMap, children: &[WireExpr]) -> List {
+/// The printed element sequence of an `UnknownForm`: its head symbol, its
+/// metadata map, then its children.
+fn unknown_form_elements(head: &str, meta: &MetaMap, children: &[WireExpr]) -> Vec<WireExpr> {
     let span = Span::new(0, 0);
     let mut elements = Vec::with_capacity(children.len() + 2);
     elements.push(WireExpr::Atom(Atom::Name(head.to_string()), span));
     elements.push(WireExpr::Map(meta.clone(), span));
     elements.extend(children.iter().cloned());
-    List { elements }
+    elements
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{Atom, Expr, List, MetaExpr, Metadata};
+    use crate::ast::{Atom, Expr, MetaExpr, Metadata};
     use crate::span::Span;
 
     fn sp() -> Span {
@@ -430,22 +398,13 @@ mod tests {
         }
         metadata
     }
-    fn map_expr(entries: Vec<(&str, Expr)>) -> Expr {
-        Expr::Map(metadata(entries), sp())
-    }
-
     fn node(tag: &str, meta: Vec<(&str, Expr)>, children: Vec<Expr>) -> Expr {
-        let mut elements = vec![sym(tag), map_expr(meta)];
-        elements.extend(children);
-        let mut expr = Expr::List(List { elements }, sp());
-        // Mirror the parser's decode-once stamping so these hand-built
-        // trees match what every real consumer sees.
-        crate::parser::stamp_tags(std::slice::from_mut(&mut expr));
-        expr
+        let tag = DeepTag::parse(tag).expect("fixture tags are in the closed vocabulary");
+        Expr::node(tag, metadata(meta), children, sp())
     }
 
     fn generic_list(elements: Vec<Expr>) -> Expr {
-        Expr::List(List { elements }, sp())
+        Expr::BareList(elements, sp())
     }
 
     fn meta_expr(entries: Vec<(&str, Expr)>, expr: Expr) -> Expr {

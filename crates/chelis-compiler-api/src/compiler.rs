@@ -3860,7 +3860,7 @@ fn manifested_program_for_eval<'a>(
 /// Refine selected Host-call admission from the same kernel input carrier
 /// that runtime stages, including declared shape witnesses. The temporary
 /// product is never reused for execution: runtime owns its current Random
-/// context, inherited exclusion, and any entered lowering error.
+/// context and any entered lowering error.
 fn selected_host_input_demand(
     compiled: &CompiledSource,
     name: &str,
@@ -3963,19 +3963,6 @@ fn checked_def_order(program: &CheckedProgram) -> UnordMap<&str, usize> {
 fn deep_tagged_children(expr: &DeepExpr) -> Option<(DeepTag, &[DeepExpr])> {
     match expr {
         DeepExpr::Node(node, _) => Some((node.tag(), node.children_slice())),
-        DeepExpr::List(list, _) => {
-            let tag = list.tag()?;
-            let children = if list.elements.len() > 2
-                && matches!(list.elements.get(1), Some(DeepExpr::Map(_, _)))
-            {
-                &list.elements[2..]
-            } else if list.elements.len() > 1 {
-                &list.elements[1..]
-            } else {
-                &[]
-            };
-            Some((tag, children))
-        }
         _ => None,
     }
 }
@@ -4277,7 +4264,6 @@ fn deep_expr_tag(expr: &DeepExpr) -> Option<DeepTag> {
 
 fn deep_decl_name(expr: &DeepExpr) -> Option<&str> {
     match expr {
-        DeepExpr::List(list, _) => list.elements.get(2).and_then(symbol_name),
         DeepExpr::Node(node, _) => node.children_slice().first().and_then(symbol_name),
         _ => None,
     }
@@ -4292,10 +4278,6 @@ fn deep_def_has_role(expr: &DeepExpr, expected: &str) -> bool {
         return false;
     }
     let meta = match expr {
-        DeepExpr::List(list, _) => match list.elements.get(1) {
-            Some(DeepExpr::Map(meta, _)) => meta,
-            _ => return false,
-        },
         DeepExpr::Node(node, _) => node.meta(),
         _ => return false,
     };

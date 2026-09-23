@@ -23,8 +23,7 @@ pub fn literal_seed(expr: &Expr, neg_is_builtin: bool) -> Option<crate::ScalarVa
                 | ExprCarrier::UndecodableHead(_, _, _)
                 | ExprCarrier::Atom(_)
                 | ExprCarrier::MetadataMap(_)
-                | ExprCarrier::MetadataExpression(_)
-                | ExprCarrier::MalformedLegacyList(_) => return None,
+                | ExprCarrier::MetadataExpression(_) => return None,
             }
         }
         ExprCarrier::DecodedNode(_, _, _)
@@ -32,8 +31,7 @@ pub fn literal_seed(expr: &Expr, neg_is_builtin: bool) -> Option<crate::ScalarVa
         | ExprCarrier::UndecodableHead(_, _, _)
         | ExprCarrier::Atom(_)
         | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_)
-        | ExprCarrier::MalformedLegacyList(_) => return None,
+        | ExprCarrier::MetadataExpression(_) => return None,
     }
     constant_seed(expr, neg_is_builtin)
 }
@@ -55,8 +53,7 @@ fn primitive(expr: &Expr) -> Option<Prim> {
         | ExprCarrier::UndecodableHead(_, _, _)
         | ExprCarrier::Atom(_)
         | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_)
-        | ExprCarrier::MalformedLegacyList(_) => return None,
+        | ExprCarrier::MetadataExpression(_) => return None,
     };
     let [Expr::Atom(Atom::Name(name), _)] = kids else {
         return None;
@@ -74,8 +71,7 @@ fn expr_is_var_named(expr: &Expr, expected: &str) -> bool {
         | ExprCarrier::UndecodableHead(_, _, _)
         | ExprCarrier::Atom(_)
         | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_)
-        | ExprCarrier::MalformedLegacyList(_) => false,
+        | ExprCarrier::MetadataExpression(_) => false,
     }
 }
 
@@ -87,7 +83,6 @@ fn optional_scalar_prim(expr: &Expr) -> Option<Option<Prim>> {
         ExprCarrier::DecodedNode(_, metadata, _) | ExprCarrier::UndecodableHead(_, metadata, _) => {
             metadata
         }
-        ExprCarrier::MalformedLegacyList(_) => return None,
         ExprCarrier::StructuralList(_)
         | ExprCarrier::Atom(_)
         | ExprCarrier::MetadataMap(_)
@@ -116,8 +111,7 @@ fn extract_type_checked_literal(expr: &Expr) -> Option<crate::ScalarValue> {
         | ExprCarrier::UndecodableHead(_, _, _)
         | ExprCarrier::Atom(_)
         | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_)
-        | ExprCarrier::MalformedLegacyList(_) => return None,
+        | ExprCarrier::MetadataExpression(_) => return None,
     };
     let [Expr::Atom(atom, _)] = kids else {
         return None;
@@ -139,7 +133,7 @@ fn extract_type_checked_literal(expr: &Expr) -> Option<crate::ScalarValue> {
         (Atom::Bool(value), Prim::Bool, None) => {
             scalar_from_i64("lit", Prim::Bool, i64::from(*value)).ok()
         }
-        (Atom::Str(_) | Atom::Name(_) | Atom::Tag(_), _, _)
+        (Atom::Str(_) | Atom::Name(_), _, _)
         | (Atom::Int(_) | Atom::Float(_) | Atom::Bool(_), _, _) => None,
     }
 }
@@ -212,15 +206,14 @@ fn extract_type_checked_scalar(expr: &Expr, neg_is_builtin: bool) -> Option<crat
         ExprCarrier::StructuralList(_)
         | ExprCarrier::UndecodableHead(_, _, _)
         | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_)
-        | ExprCarrier::MalformedLegacyList(_) => None,
+        | ExprCarrier::MetadataExpression(_) => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chelis_deep::{ExprCarrier, List, MetaExpr, Metadata, Span, UnknownFormData};
+    use chelis_deep::{ExprCarrier, MetaExpr, Metadata, Span, UnknownFormData};
 
     fn span() -> Span {
         Span::new(0, 0)
@@ -257,112 +250,41 @@ mod tests {
         i64_literal_with_type(value, i64_type())
     }
 
-    fn legacy_node(expr: &Expr) -> Expr {
-        let Expr::Node(node, span) = expr else {
-            panic!("test fixture must be a decoded node");
-        };
-        Expr::List(node.to_list(*span), *span)
+    #[test]
+    fn seed_reader_reads_a_decoded_literal() {
+        let literal = i64_literal(7);
+        assert!(literal_seed(&literal, true).is_some());
+        assert!(constant_seed(&literal, true).is_some());
     }
 
     #[test]
-    fn seed_reader_matches_successor_and_legacy_carriers() {
-        let successor = i64_literal(7);
-        let legacy = legacy_node(&successor);
-
-        let successor_literal = literal_seed(&successor, true);
-        let legacy_literal = literal_seed(&legacy, true);
-        assert!(successor_literal.is_some());
-        assert_eq!(legacy_literal, successor_literal);
-
-        let successor_constant = constant_seed(&successor, true);
-        let legacy_constant = constant_seed(&legacy, true);
-        assert!(successor_constant.is_some());
-        assert_eq!(legacy_constant, successor_constant);
-    }
-
-    #[test]
-    fn seed_reader_preserves_nested_legacy_type_parity() {
-        let successor_type = i64_type();
-        let successor = i64_literal_with_type(7, successor_type.clone());
-        let nested_legacy = i64_literal_with_type(7, legacy_node(&successor_type));
-        let fully_legacy = legacy_node(&nested_legacy);
-
-        let expected_literal = literal_seed(&successor, true);
-        assert!(expected_literal.is_some());
-        assert_eq!(literal_seed(&nested_legacy, true), expected_literal);
-        assert_eq!(literal_seed(&fully_legacy, true), expected_literal);
-
-        let expected_constant = constant_seed(&successor, true);
-        assert!(expected_constant.is_some());
-        assert_eq!(constant_seed(&nested_legacy, true), expected_constant);
-        assert_eq!(constant_seed(&fully_legacy, true), expected_constant);
-    }
-
-    #[test]
-    fn optional_scalar_reader_matches_undecodable_successor_and_legacy_carriers() {
+    fn optional_scalar_reader_reads_undecodable_carrier_metadata() {
         let span = span();
         let metadata = type_metadata(i64_type());
-        let successor = Expr::UnknownForm(Box::new(UnknownFormData {
+        let undecodable = Expr::UnknownForm(Box::new(UnknownFormData {
             head: "future-literal".into(),
-            meta: metadata.clone(),
+            meta: metadata,
             children: vec![],
             span,
         }));
-        let legacy = Expr::List(
-            List {
-                elements: vec![
-                    Expr::Atom(Atom::Name("future-literal".into()), span),
-                    Expr::Map(metadata, span),
-                ],
-            },
-            span,
-        );
         assert!(matches!(
-            successor.carrier(),
+            undecodable.carrier(),
             ExprCarrier::UndecodableHead(..)
         ));
-        assert!(matches!(legacy.carrier(), ExprCarrier::UndecodableHead(..)));
-        assert_eq!(optional_scalar_prim(&successor), Some(Some(Prim::Int64)));
-        assert_eq!(
-            optional_scalar_prim(&legacy),
-            optional_scalar_prim(&successor)
-        );
+        assert_eq!(optional_scalar_prim(&undecodable), Some(Some(Prim::Int64)));
 
-        let missing_successor = Expr::UnknownForm(Box::new(UnknownFormData {
+        let missing = Expr::UnknownForm(Box::new(UnknownFormData {
             head: "future-literal".into(),
             meta: Metadata::default(),
             children: vec![],
             span,
         }));
-        let missing_legacy = Expr::List(
-            List {
-                elements: vec![
-                    Expr::Atom(Atom::Name("future-literal".into()), span),
-                    Expr::Map(Metadata::default(), span),
-                ],
-            },
-            span,
-        );
-        assert_eq!(optional_scalar_prim(&missing_successor), Some(None));
-        assert_eq!(
-            optional_scalar_prim(&missing_legacy),
-            optional_scalar_prim(&missing_successor)
-        );
+        assert_eq!(optional_scalar_prim(&missing), Some(None));
     }
 
     #[test]
     fn seed_reader_declines_every_nondecoded_carrier() {
         let span = span();
-        let malformed = Expr::List(
-            List {
-                elements: vec![
-                    Expr::Atom(Atom::Tag(DeepTag::Lit), span),
-                    Expr::Atom(Atom::Name("not-metadata".into()), span),
-                    Expr::Atom(Atom::Int(7), span),
-                ],
-            },
-            span,
-        );
         let carriers = [
             Expr::BareList(vec![Expr::Atom(Atom::Int(7), span)], span),
             Expr::UnknownForm(Box::new(UnknownFormData {
@@ -380,7 +302,6 @@ mod tests {
                 },
                 span,
             ),
-            malformed,
         ];
 
         for expr in carriers {

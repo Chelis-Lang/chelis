@@ -102,7 +102,6 @@ fn collect_input_spans(exprs: &[Expr]) -> BTreeSet<String> {
             acc.insert(s.to_owned());
         }
         match expr {
-            Expr::List(list, _) => list.elements.iter().for_each(|child| walk(child, acc)),
             Expr::Node(node, _) => {
                 node.meta().visit_syntax(&mut |_, value| walk(value, acc));
                 node.children_slice()
