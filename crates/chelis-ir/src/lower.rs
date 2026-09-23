@@ -6049,6 +6049,16 @@ fn is_shape_sensitive_builtin_app(expr: &Expr) -> bool {
     )
 }
 
+/// `surf_binding_type` records how a binding was written and is admitted only
+/// on a bind value (spec/03 section 1.1). A node built elsewhere from a bind
+/// value's metadata leaves the key with the binding, because the node gate
+/// refuses it at any other position.
+pub(crate) fn without_binding_origin(meta: &Metadata) -> Metadata {
+    let mut meta = meta.clone();
+    meta.remove(chelis_deep::annotations::MetadataKey::SurfBindingType);
+    meta
+}
+
 /// Borrow the canonical stamped shape of a decoded node.
 fn stamped_parts(expr: &Expr) -> Option<(DeepTag, &Metadata, &[Expr])> {
     match expr.carrier() {
@@ -8817,11 +8827,15 @@ impl<'program> LowerCtx<'program> {
                             span,
                         )
                     }));
-                    (DeepTag::Record, host.metadata.clone(), children)
+                    (
+                        DeepTag::Record,
+                        without_binding_origin(&host.metadata),
+                        children,
+                    )
                 } else if fields.is_empty() {
                     (
                         DeepTag::Var,
-                        host.metadata.clone(),
+                        without_binding_origin(&host.metadata),
                         vec![Expr::Atom(Atom::Name(ctor.clone()), span)],
                     )
                 } else {
@@ -8836,7 +8850,11 @@ impl<'program> LowerCtx<'program> {
                             .iter()
                             .map(|field| expression(ctx, field, captures, span)),
                     );
-                    (DeepTag::App, host.metadata.clone(), children)
+                    (
+                        DeepTag::App,
+                        without_binding_origin(&host.metadata),
+                        children,
+                    )
                 }
             } else {
                 let stage_value = match value {

@@ -15121,6 +15121,22 @@ fn is_inlinable_callable_binding_value(expr: &Expr) -> bool {
     }
 }
 
+/// A callable bind value leaves its bind slot when it is substituted into a
+/// use site, so its binding origin stays behind
+/// ([`crate::lower::without_binding_origin`]).
+fn without_binding_origin(value: Expr) -> Expr {
+    let Expr::Node(node, span) = value else {
+        return value;
+    };
+    let (tag, meta, children) = node.into_parts();
+    Expr::node(
+        tag,
+        crate::lower::without_binding_origin(&meta),
+        children,
+        span,
+    )
+}
+
 fn inline_local_callable_lets(expr: &Expr) -> Expr {
     let (list, span) = match expr {
         Expr::Node(list, span) => (list, span),
@@ -15168,6 +15184,7 @@ fn inline_local_callable_lets(expr: &Expr) -> Expr {
         };
         let value = inline_local_callable_lets(value);
         if is_inlinable_callable_binding_value(&value) {
+            let value = without_binding_origin(value);
             // β-substitute the callable into every use site in the body.
             // This applies to local fn bindings (`let f = fn (x) => …; f(y)`),
             // and also to higher-order callable forms `grad`, `vmap`, and
@@ -21526,6 +21543,28 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
             chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
         chelis_types::check_ir_program(&deep)
             .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors))
+    }
+
+    /// A typed local callable carries `surf_binding_type` on its bind value.
+    /// Inlining moves that value into callee position, where the node gate
+    /// refuses the key, so the binding origin must stay with the binding.
+    #[test]
+    fn typed_local_callable_inlines_without_its_binding_origin() {
+        let checked = surf_check(
+            "def f(x: f32) -> f32 = {\n  \
+               g: (f32) -> f32 = fn (y: f32) -> add(y, y)\n  \
+               g(x)\n\
+             }\n\
+             r = f(cast(2.0, f32))\n",
+        );
+        let binding_origin = chelis_deep::printer::print_canonical(checked.exprs());
+        assert!(
+            binding_origin.contains("surf_binding_type"),
+            "the fixture must carry a binding origin on its callable: {binding_origin}"
+        );
+        if let Err(diagnostic) = try_lower_compiled_program(&checked) {
+            panic!("a typed local callable must inline: {}", diagnostic.message);
+        }
     }
 
     /// chelis#2181: a callee that takes a function-typed parameter, whose
