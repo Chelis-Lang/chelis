@@ -499,8 +499,8 @@ mod tests {
     /// lowering context per `grad` or `vmap` application and folds every
     /// program definition there, so a fold that rebuilt every node doubled the
     /// cost of each application in a package that includes the standard
-    /// library. Only the ancestors of a folded pipe are rebuilt; everything
-    /// else is copied, and a pipe-free tree reports no change at all.
+    /// library. Only a pipe and its ancestors are rebuilt; everything else
+    /// is copied, and a pipe-free tree reports no change at all.
     ///
     /// Evidentiary status: REGRESSION TEST. With the exit step rebuilding
     /// every node, as the chelis#2427 worklist did, a pipe-free chain reported
@@ -543,7 +543,7 @@ mod tests {
     }
 
     /// The fold runs before the checker's stack-guarded walkers and has no
-    /// diagnostic channel, so it must not recurse on the native stack: a
+    /// diagnostic channel, so its walk must not recurse on the native stack: a
     /// 5000-deep `app` chain with a pipe at its bottom folds on a 256 KiB
     /// thread. Building, comparing and dropping the trees recurse, so they run
     /// on a large-stack thread; only the fold runs on the small stack.
