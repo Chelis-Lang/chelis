@@ -24,7 +24,7 @@ use std::{
 };
 
 use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind, TensorValue};
-use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr, List as DeepList, Metadata};
+use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr, Metadata};
 use chelis_surf::ast::{
     BinOp, Decl, Expr, LetBinding, LetPattern, Literal, Param, PropertyOption, TensorPrecision,
     TypeExpr,
@@ -4466,10 +4466,8 @@ fn deep_proposition(preconditions: &[DeepExpr], body: &DeepExpr) -> DeepExpr {
 // Deep metadata helpers
 // ===========================================================================
 
-/// Observe either stamped `Node` or transitional canonical `List` through one
-/// consumer view. This does not normalize, clone, or reconstruct the tree: new
-/// file ingress stays in the role-typed representation while legacy callers
-/// remain readable until the carrier is deleted atomically.
+/// Borrow a decoded node's tag, metadata and children without cloning or
+/// reconstructing the tree.
 fn deep_node_parts(expr: &DeepExpr) -> Option<(DeepTag, &Metadata, &[DeepExpr])> {
     match expr.carrier() {
         ExprCarrier::DecodedNode(tag, metadata, children) => Some((tag, metadata, children)),
@@ -4477,8 +4475,7 @@ fn deep_node_parts(expr: &DeepExpr) -> Option<(DeepTag, &Metadata, &[DeepExpr])>
         | ExprCarrier::UndecodableHead(_, _, _)
         | ExprCarrier::Atom(_)
         | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_)
-        | ExprCarrier::MalformedLegacyList(_) => None,
+        | ExprCarrier::MetadataExpression(_) => None,
     }
 }
 
@@ -4605,15 +4602,8 @@ fn deep_param(expr: &DeepExpr) -> Option<Param> {
             elements.first().and_then(symbol_text)?,
             elements.get(1).and_then(meta_map),
         ),
-        ExprCarrier::UndecodableHead(head, metadata, _) if matches!(expr, DeepExpr::List(_, _)) => {
-            (head, Some(metadata))
-        }
-        ExprCarrier::UndecodableHead(_, _, _) => return None,
-        ExprCarrier::MalformedLegacyList(list) => (
-            list.elements.first().and_then(symbol_text)?,
-            list.elements.get(1).and_then(meta_map),
-        ),
-        ExprCarrier::DecodedNode(_, _, _)
+        ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::DecodedNode(_, _, _)
         | ExprCarrier::Atom(_)
         | ExprCarrier::MetadataMap(_)
         | ExprCarrier::MetadataExpression(_) => return None,
@@ -4682,36 +4672,16 @@ fn deep_bool(value: bool) -> DeepExpr {
 fn deep_string(value: &str) -> DeepExpr {
     DeepExpr::Atom(DeepAtom::Str(value.to_string()), deep_span())
 }
-fn deep_map(values: Vec<M>) -> DeepExpr {
-    DeepExpr::Map(
-        Metadata::try_from_values(values).expect("distinct producer annotations"),
-        deep_span(),
-    )
-}
-fn deep_list(elements: Vec<DeepExpr>) -> DeepExpr {
-    DeepExpr::List(DeepList { elements }, deep_span())
-}
 fn deep_node(tag: &str, children: Vec<DeepExpr>) -> DeepExpr {
-    let mut elements = vec![
-        DeepExpr::Atom(
-            DeepAtom::Tag(DeepTag::parse(tag).expect("vocabulary builder")),
-            deep_span(),
-        ),
-        deep_map(Vec::new()),
-    ];
-    elements.extend(children);
-    deep_list(elements)
+    deep_node_meta(tag, Vec::new(), children)
 }
 fn deep_node_meta(tag: &str, entries: Vec<M>, children: Vec<DeepExpr>) -> DeepExpr {
-    let mut elements = vec![
-        DeepExpr::Atom(
-            DeepAtom::Tag(DeepTag::parse(tag).expect("vocabulary builder")),
-            deep_span(),
-        ),
-        deep_map(entries),
-    ];
-    elements.extend(children);
-    deep_list(elements)
+    DeepExpr::node(
+        DeepTag::parse(tag).expect("vocabulary builder"),
+        Metadata::try_from_values(entries).expect("distinct producer annotations"),
+        children,
+        deep_span(),
+    )
 }
 fn deep_var(name: &str) -> DeepExpr {
     deep_node("var", vec![deep_symbol(name)])

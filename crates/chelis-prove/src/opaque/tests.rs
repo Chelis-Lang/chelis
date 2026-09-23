@@ -21,66 +21,34 @@ type Probability =
 def probability(x: f32) -> Probability = Probability { value: x }
 ";
 
-fn decoded_list(tag: DeepTag, children: Vec<Expr>) -> Expr {
+fn decoded_node(tag: DeepTag, children: Vec<Expr>) -> Expr {
     let span = chelis_deep::Span::new(0, 0);
-    let mut elements = vec![
-        Expr::Atom(Atom::Tag(tag), span),
-        Expr::Map(Metadata::default(), span),
-    ];
-    elements.extend(children);
-    Expr::List(chelis_deep::List { elements }, span)
+    Expr::node(tag, Metadata::default(), children, span)
 }
 
 #[test]
-fn undecodable_source_variants_keep_opaque_children_and_annotations_distinct() {
+fn unknown_forms_expose_no_opaque_children_or_annotations() {
     let span = chelis_deep::Span::new(0, 0);
     let child = Expr::Atom(Atom::Name("child".into()), span);
-    let legacy = Expr::List(
-        chelis_deep::List {
-            elements: vec![
-                Expr::Atom(Atom::Name("future".into()), span),
-                Expr::Map(Metadata::default(), span),
-                child.clone(),
-            ],
-        },
-        span,
-    );
     let unknown = Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
         head: "future".into(),
         meta: Metadata::default(),
-        children: vec![child.clone()],
+        children: vec![child],
         span,
     }));
 
-    assert_eq!(children(&legacy), std::slice::from_ref(&child));
     assert!(children(&unknown).is_empty());
-    assert!(annotations(&legacy).is_some());
     assert!(annotations(&unknown).is_none());
-
-    let malformed = Expr::List(
-        chelis_deep::List {
-            elements: vec![
-                Expr::Atom(Atom::Int(0), span),
-                Expr::Map(Metadata::default(), span),
-                child.clone(),
-            ],
-        },
-        span,
-    );
-    assert_eq!(children(&malformed), std::slice::from_ref(&child));
-    assert!(annotations(&malformed).is_some());
 }
 
 #[test]
-fn typed_predicate_binder_rejects_unknown_form_but_keeps_legacy_list() {
+fn typed_predicate_binder_rejects_unknown_form_but_reads_a_structural_param() {
     let span = chelis_deep::Span::new(0, 0);
-    let legacy_param = Expr::List(
-        chelis_deep::List {
-            elements: vec![
-                Expr::Atom(Atom::Name("p".into()), span),
-                Expr::Map(Metadata::default(), span),
-            ],
-        },
+    let structural_param = Expr::BareList(
+        vec![
+            Expr::Atom(Atom::Name("p".into()), span),
+            Expr::Map(Metadata::default(), span),
+        ],
         span,
     );
     let unknown_param = Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
@@ -89,47 +57,32 @@ fn typed_predicate_binder_rejects_unknown_form_but_keeps_legacy_list() {
         children: Vec::new(),
         span,
     }));
-    let malformed_param = Expr::List(
-        chelis_deep::List {
-            elements: vec![
-                Expr::Atom(Atom::Name("p".into()), span),
-                Expr::Atom(Atom::Int(0), span),
-            ],
-        },
+    let malformed_param = Expr::BareList(
+        vec![
+            Expr::Atom(Atom::Name("p".into()), span),
+            Expr::Atom(Atom::Int(0), span),
+        ],
         span,
     );
     let predicate = |param| {
-        decoded_list(
+        decoded_node(
             DeepTag::Fn,
             vec![
-                decoded_list(DeepTag::Params, vec![param]),
+                decoded_node(DeepTag::Params, vec![param]),
                 Expr::Atom(Atom::Bool(true), span),
             ],
         )
     };
 
-    assert_eq!(predicate_binder(&predicate(legacy_param)), Some("p".into()));
+    assert_eq!(
+        predicate_binder(&predicate(structural_param)),
+        Some("p".into())
+    );
     assert_eq!(predicate_binder(&predicate(unknown_param)), None);
     assert_eq!(
         predicate_binder(&predicate(malformed_param)),
         Some("p".into())
     );
-}
-
-#[test]
-fn opaque_collection_keeps_descendants_of_malformed_legacy_module() {
-    let span = chelis_deep::Span::new(0, 0);
-    let mut elements = vec![
-        Expr::Atom(Atom::Tag(DeepTag::Module), span),
-        Expr::Atom(Atom::Int(0), span),
-        Expr::Atom(Atom::Name("Outer".into()), span),
-    ];
-    elements.extend(deep_of(PROB));
-    let module = Expr::List(chelis_deep::List { elements }, span);
-
-    let invariants = collect_opaque_invariants(&[module]);
-    assert_eq!(invariants.len(), 1);
-    assert_eq!(invariants[0].type_name, "Probability");
 }
 
 #[test]

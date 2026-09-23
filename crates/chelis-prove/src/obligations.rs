@@ -123,7 +123,6 @@ pub struct ObligationCollection {
 fn tag(expr: &Expr) -> Option<DeepTag> {
     match expr.carrier() {
         ExprCarrier::DecodedNode(tag, _, _) => Some(tag),
-        ExprCarrier::MalformedLegacyList(list) => list.tag(),
         ExprCarrier::StructuralList(_)
         | ExprCarrier::UndecodableHead(_, _, _)
         | ExprCarrier::Atom(_)
@@ -135,16 +134,11 @@ fn tag(expr: &Expr) -> Option<DeepTag> {
 fn children(expr: &Expr) -> &[Expr] {
     match expr.carrier() {
         ExprCarrier::DecodedNode(_, _, children) => children,
-        ExprCarrier::UndecodableHead(_, _, children) if matches!(expr, Expr::List(_, _)) => {
-            children
-        }
-        ExprCarrier::MalformedLegacyList(list) if list.elements.len() >= 2 => &list.elements[2..],
         ExprCarrier::StructuralList(_)
         | ExprCarrier::UndecodableHead(_, _, _)
         | ExprCarrier::Atom(_)
         | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_)
-        | ExprCarrier::MalformedLegacyList(_) => &[],
+        | ExprCarrier::MetadataExpression(_) => &[],
     }
 }
 
@@ -273,13 +267,6 @@ pub fn decompose_return(
 fn is_opaque(expr: &Expr) -> bool {
     let meta = match expr.carrier() {
         ExprCarrier::DecodedNode(_, metadata, _) => metadata,
-        ExprCarrier::UndecodableHead(_, metadata, _) if matches!(expr, Expr::List(_, _)) => {
-            metadata
-        }
-        ExprCarrier::MalformedLegacyList(list) => match list.elements.get(1) {
-            Some(Expr::Map(metadata, _)) => metadata,
-            _ => return false,
-        },
         ExprCarrier::StructuralList(_)
         | ExprCarrier::UndecodableHead(_, _, _)
         | ExprCarrier::Atom(_)
