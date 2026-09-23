@@ -1,6 +1,6 @@
 //! Chelis #1125 PP7 E5e: macro readers consume the total Deep carrier view.
 
-use chelis_deep::ast::{Atom, Expr, ExprCarrier, List, MetaExpr, Metadata, UnknownFormData};
+use chelis_deep::ast::{Atom, Expr, ExprCarrier, MetaExpr, Metadata, UnknownFormData};
 use chelis_deep::{DeepTag, Span};
 use chelis_macros::{ExpansionError, ExpansionOptions, expand_program};
 
@@ -16,25 +16,15 @@ fn decoded(tag: DeepTag, children: Vec<Expr>) -> Expr {
     Expr::node(tag, Metadata::default(), children, sp())
 }
 
+/// A head that did not decode, with its metadata and children: the one
+/// in-memory spelling of a raw-string form.
 fn raw_form(head: &str, children: Vec<Expr>) -> Expr {
-    let mut elements = vec![name(head), Expr::Map(Metadata::default(), sp())];
-    elements.extend(children);
-    Expr::List(List { elements }, sp())
-}
-
-fn transitional_decoded(tag: DeepTag, children: Vec<Expr>) -> Expr {
-    let mut elements = vec![
-        Expr::Atom(Atom::Tag(tag), sp()),
-        Expr::Map(Metadata::default(), sp()),
-    ];
-    elements.extend(children);
-    Expr::List(List { elements }, sp())
-}
-
-fn malformed_form(head: Expr, children: Vec<Expr>) -> Expr {
-    let mut elements = vec![head, name("not-metadata")];
-    elements.extend(children);
-    Expr::List(List { elements }, sp())
+    Expr::UnknownForm(Box::new(UnknownFormData {
+        head: head.to_string(),
+        meta: Metadata::default(),
+        children,
+        span: sp(),
+    }))
 }
 
 fn options() -> ExpansionOptions {
@@ -62,30 +52,8 @@ fn macro_call(name_value: &str, argument: Expr) -> Expr {
     )
 }
 
-fn transitional_macro_call(name_value: &str, argument: Expr) -> Expr {
-    transitional_decoded(
-        DeepTag::App,
-        vec![decoded(DeepTag::Var, vec![name(name_value)]), argument],
-    )
-}
-
-fn direct_invalid_result_error(argument: Expr) -> ExpansionError {
-    let nested_call = transitional_macro_call("identity", argument);
-    let successor_parent = decoded(
-        DeepTag::App,
-        vec![decoded(DeepTag::Var, vec![name("sink")]), nested_call],
-    );
-    let program = vec![
-        macro_definition("identity", decoded(DeepTag::Var, vec![name("value")])),
-        successor_parent,
-    ];
-
-    expand_program(&program, &options())
-        .expect_err("an invalid direct macro result must reject at successor reconstruction")
-}
-
 fn direct_invalid_body_result_error(body: Expr) -> ExpansionError {
-    let nested_call = transitional_macro_call(
+    let nested_call = macro_call(
         "invalid_body",
         decoded(DeepTag::Lit, vec![Expr::Atom(Atom::Int(0), sp())]),
     );
@@ -104,7 +72,7 @@ fn assert_successor_decoded_carriers(expr: &Expr) {
         ExprCarrier::DecodedNode(_, metadata, children) => {
             assert!(
                 matches!(expr, Expr::Node(_, _)),
-                "a successor decoded node must not be rewritten into a legacy List: {expr:?}"
+                "a decoded node must remain a stamped Node: {expr:?}"
             );
             metadata.visit_syntax(&mut |_, value| assert_successor_decoded_carriers(value));
             for child in children {
@@ -129,11 +97,6 @@ fn assert_successor_decoded_carriers(expr: &Expr) {
             meta.metadata
                 .visit_syntax(&mut |_, value| assert_successor_decoded_carriers(value));
             assert_successor_decoded_carriers(&meta.expr);
-        }
-        ExprCarrier::MalformedLegacyList(list) => {
-            for element in &list.elements {
-                assert_successor_decoded_carriers(element);
-            }
         }
         ExprCarrier::Atom(_) => {}
     }
@@ -181,15 +144,6 @@ fn macro_walks_preserve_every_explicit_nondecoded_carrier_role() {
             children: vec![name("payload")],
             span: sp(),
         })),
-        Expr::List(
-            List {
-                elements: vec![
-                    Expr::Atom(Atom::Tag(DeepTag::Var), sp()),
-                    name("not-metadata"),
-                ],
-            },
-            sp(),
-        ),
     ];
 
     let expanded = expand_program(&carriers, &options()).expect("nondecoded carrier walk succeeds");
@@ -218,10 +172,6 @@ fn macro_walks_preserve_every_explicit_nondecoded_carrier_role() {
     assert!(matches!(
         expanded.exprs()[4].carrier(),
         ExprCarrier::UndecodableHead("future-form", _, _)
-    ));
-    assert!(matches!(
-        expanded.exprs()[5].carrier(),
-        ExprCarrier::MalformedLegacyList(_)
     ));
 }
 
@@ -300,31 +250,6 @@ fn macro_free_odd_bind_keeps_its_unpaired_child() {
 }
 
 #[test]
-fn malformed_macro_body_is_opaque_to_substitution_hygiene_and_source_annotation() {
-    let malformed_fn = malformed_form(
-        Expr::Atom(Atom::Tag(DeepTag::Fn), sp()),
-        vec![
-            decoded(DeepTag::Params, vec![name("x")]),
-            decoded(
-                DeepTag::Var,
-                vec![decoded(DeepTag::Var, vec![name("value")])],
-            ),
-        ],
-    );
-    let program = vec![
-        macro_definition("opaque", malformed_fn.clone()),
-        macro_call("opaque", decoded(DeepTag::Var, vec![name("argument")])),
-    ];
-
-    let expanded = expand_program(&program, &options()).expect("macro expansion succeeds");
-    assert_eq!(
-        expanded.exprs(),
-        std::slice::from_ref(&malformed_fn),
-        "a malformed semantic carrier must remain byte-for-byte structurally opaque"
-    );
-}
-
-#[test]
 fn macro_body_odd_bind_survives_substitution_and_hygiene() {
     let body = decoded(
         DeepTag::Let,
@@ -364,61 +289,19 @@ fn macro_body_odd_bind_survives_substitution_and_hygiene() {
     assert_eq!(bind_children[2], name("dangling"));
 }
 
+/// A macro whose body is a bare name places that name at its caller's
+/// runtime slot; the stamped parent refuses it with a typed error rather
+/// than panicking during reconstruction.
 #[test]
-fn malformed_raw_macro_call_is_not_admitted_or_rewritten() {
-    let malformed_call = malformed_form(name("macro-invoke"), vec![name("keep"), name("argument")]);
-    let program = vec![
-        macro_definition("keep", decoded(DeepTag::Var, vec![name("value")])),
-        malformed_call.clone(),
-    ];
-
-    let expanded = expand_program(&program, &options()).expect("malformed raw call stays opaque");
-    assert_eq!(
-        expanded.exprs(),
-        std::slice::from_ref(&malformed_call),
-        "a malformed raw call must not be admitted or rewritten"
-    );
-}
-
-#[test]
-fn malformed_transitional_call_rejects_instead_of_panicking_during_reconstruction() {
-    let body = decoded(
-        DeepTag::App,
-        vec![
-            decoded(DeepTag::Var, vec![name("callee")]),
-            decoded(DeepTag::Var, vec![name("value")]),
-        ],
-    );
-    let malformed_call = transitional_decoded(
-        DeepTag::App,
-        vec![decoded(DeepTag::Var, vec![name("wrap")]), name("bare")],
-    );
-    let program = vec![macro_definition("wrap", body), malformed_call];
-
-    let error = expand_program(&program, &options())
-        .expect_err("a bare runtime argument must reject without reconstruction panic");
+fn direct_name_result_under_successor_parent_is_typed_rejection() {
+    let error = direct_invalid_body_result_error(name("bare"));
+    assert!(matches!(error, ExpansionError::InvalidNode(_)));
     assert!(
         error
             .to_string()
             .contains("structural name `bare` at RuntimeExpr child position"),
         "the rejection must retain the deciding successor-node invariant: {error}"
     );
-}
-
-#[test]
-fn direct_name_result_under_successor_parent_is_typed_rejection() {
-    assert!(matches!(
-        direct_invalid_result_error(name("bare")),
-        ExpansionError::InvalidNode(_)
-    ));
-}
-
-#[test]
-fn direct_tag_result_under_successor_parent_is_typed_rejection() {
-    assert!(matches!(
-        direct_invalid_result_error(Expr::Atom(Atom::Tag(DeepTag::Lit), sp())),
-        ExpansionError::InvalidNode(_)
-    ));
 }
 
 #[test]
