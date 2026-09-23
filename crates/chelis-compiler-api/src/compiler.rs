@@ -3860,7 +3860,7 @@ fn manifested_program_for_eval<'a>(
 /// Refine selected Host-call admission from the same kernel input carrier
 /// that runtime stages, including declared shape witnesses. The temporary
 /// product is never reused for execution: runtime owns its current Random
-/// context, inherited exclusion, and any entered lowering error.
+/// context and any entered lowering error.
 fn selected_host_input_demand(
     compiled: &CompiledSource,
     name: &str,

@@ -33,6 +33,22 @@ thread_local! {
     /// `prepare_subexpr_lowering_context` folds every definition it admits,
     /// so this rises once per context prepared, never once per definition.
     static PROGRAM_DEF_FOLD_PASSES: Cell<u64> = const { Cell::new(0) };
+    /// Counts [`EvaluationDefinitions`] built on this thread (chelis#2405).
+    /// Each build copies a definition table and derives its draw
+    /// reachability, so a program-scoped caller builds one per program.
+    static EVALUATION_DEFINITION_BUILDS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// [`EvaluationDefinitions`] built on this thread since the last reset: a
+/// counted receipt that a caller classifying per application reads one
+/// program-scoped table rather than copying one per ask.
+pub fn evaluation_definition_builds() -> u64 {
+    EVALUATION_DEFINITION_BUILDS.with(Cell::get)
+}
+
+/// Reset [`evaluation_definition_builds`] for this thread.
+pub fn reset_evaluation_definition_builds() {
+    EVALUATION_DEFINITION_BUILDS.with(|builds| builds.set(0));
 }
 
 /// Whole-program definition folds on this thread since the last reset.
@@ -1962,8 +1978,8 @@ fn try_lower_subexpr_evaluation_with_ordered_inputs_impl(
     execution: &crate::evaluation::RandomExecutionContext,
     options: SubexprLoweringOptions,
 ) -> Result<crate::evaluation::EvaluationPlan, LowerDiagnostic> {
-    if let crate::evaluation::EvaluationProfile::Legacy(reason) = context
-        .evaluation_profile_with_resource_policy(expr, &scoped_types, options.resource_policy)
+    if let crate::evaluation::EvaluationProfile::Legacy(reason) =
+        context.spine_profile_with_resource_policy(expr, &scoped_types, options.resource_policy)
         && reason != crate::evaluation::LegacyEvaluationReason::NoDropout
     {
         return Err(LowerDiagnostic::new(
@@ -2054,6 +2070,9 @@ pub(crate) struct TensorCallsiteSpecialization {
 pub struct SubexprLoweringContext {
     program_types: Arc<BTreeMap<String, TensorType>>,
     program_defs: Arc<BTreeMap<String, Expr>>,
+    /// `program_defs`' draw reachability, built on the first profile ask
+    /// and shared by every clone of this context (chelis#2405).
+    draw_reach: Arc<OnceLock<static_controls::DrawReach>>,
     program_signatures: Arc<BTreeMap<String, Expr>>,
     local_tensor_ascriptions: Arc<Vec<chelis_types::CheckedLocalTensorAscription>>,
     tensor_specialization: TensorCallsiteSpecialization,
@@ -2341,6 +2360,25 @@ impl SubexprLoweringContext {
         )
     }
 
+    /// Plan admission: whether the execution spine may lower `expr` (see
+    /// `static_controls::spine_profile_excluding`), with bound inputs
+    /// shadowing same-named definitions as in the dispatch profile.
+    fn spine_profile_with_resource_policy(
+        &self,
+        expr: &Expr,
+        bound: &[(String, TensorType)],
+        resource_policy: crate::evaluation::ResourcePolicy,
+    ) -> crate::evaluation::EvaluationProfile {
+        let excluded = bound.iter().map(|(name, _)| name.clone()).collect();
+        static_controls::spine_profile_excluding(
+            expr,
+            &self.program_defs,
+            &excluded,
+            bound,
+            resource_policy,
+        )
+    }
+
     fn evaluation_profile_with_resource_policy(
         &self,
         expr: &Expr,
@@ -2354,6 +2392,8 @@ impl SubexprLoweringContext {
         static_controls::profile_excluding(
             expr,
             &self.program_defs,
+            self.draw_reach
+                .get_or_init(|| static_controls::DrawReach::new(&self.program_defs)),
             &excluded,
             bound,
             resource_policy,
@@ -2394,6 +2434,7 @@ pub(crate) fn prepare_subexpr_lowering_context(
     SubexprLoweringContext {
         program_types: Arc::new(program_types),
         program_defs,
+        draw_reach: Arc::default(),
         program_signatures,
         local_tensor_ascriptions: Arc::new(Vec::new()),
         tensor_specialization: TensorCallsiteSpecialization::default(),
@@ -4591,6 +4632,7 @@ pub fn top_level_lowering_map(
         signatures: &top_level_sigs,
         dtype_bound_names: &dtype_bound_names,
         body_profiles: RefCell::default(),
+        draw_reach: std::cell::OnceCell::new(),
     };
     let mut cache = BTreeMap::new();
     let mut visiting = UnordSet::new();
@@ -4639,6 +4681,7 @@ pub fn top_level_lowering_map_with_context(
         signatures: &top_level_sigs,
         dtype_bound_names: &dtype_bound_names,
         body_profiles: RefCell::default(),
+        draw_reach: std::cell::OnceCell::new(),
     };
     let mut cache = library.lowered_names.clone();
     let mut visiting = UnordSet::new();
@@ -4718,6 +4761,7 @@ pub fn expr_is_dag_lowerable(expr: &Expr, program: &CheckedProgram) -> bool {
         signatures: &top_level_sigs,
         dtype_bound_names: &dtype_bound_names,
         body_profiles: RefCell::default(),
+        draw_reach: std::cell::OnceCell::new(),
     };
     let mut cache = BTreeMap::new();
     let mut visiting = UnordSet::new();
@@ -5366,6 +5410,9 @@ struct LowerabilityTypes<'a> {
     /// classifier walks the whole reachable call graph, so each definition is
     /// profiled once per lowering-map computation (chelis#2391).
     body_profiles: RefCell<UnordMap<String, crate::evaluation::EvaluationProfile>>,
+    /// That same table's draw reachability, derived on the first ask
+    /// (chelis#2405).
+    draw_reach: std::cell::OnceCell<static_controls::DrawReach>,
 }
 
 impl LowerabilityTypes<'_> {
@@ -5378,11 +5425,22 @@ impl LowerabilityTypes<'_> {
         if let Some(profile) = self.body_profiles.borrow().get(name) {
             return *profile;
         }
-        let profile = evaluation_profile_from_defs(body, top_level_defs);
+        let profile = self.profile(body, top_level_defs);
         self.body_profiles
             .borrow_mut()
             .insert(name.to_owned(), profile);
         profile
+    }
+
+    fn profile(
+        &self,
+        expr: &Expr,
+        top_level_defs: &BTreeMap<String, Expr>,
+    ) -> crate::evaluation::EvaluationProfile {
+        let reach = self
+            .draw_reach
+            .get_or_init(|| static_controls::DrawReach::new(top_level_defs));
+        evaluation_profile_from_defs(expr, top_level_defs, reach)
     }
 }
 
@@ -5524,7 +5582,7 @@ fn expr_depends_on_nonlowerable_name(
                 == crate::evaluation::EvaluationProfile::Legacy(
                     crate::evaluation::LegacyEvaluationReason::RuntimeRate,
                 )
-                && evaluation_profile_from_defs(expr, top_level_defs)
+                && types.profile(expr, top_level_defs)
                     == crate::evaluation::EvaluationProfile::FixedControl))
         {
             if def_body_requires_host_runtime(body) || !visiting.insert(name.clone()) {
@@ -6123,42 +6181,52 @@ pub fn evaluation_profile(
     expr: &Expr,
     program_defs: &UnordMap<String, Expr>,
 ) -> crate::evaluation::EvaluationProfile {
-    evaluation_profile_from_defs(
+    evaluation_profile_sorted(
         expr,
-        &program_defs
-            .to_sorted()
-            .into_iter()
-            .map(|(name, body)| (name.clone(), body.clone()))
-            .collect(),
+        &EvaluationDefinitions::new(
+            program_defs
+                .to_sorted()
+                .into_iter()
+                .map(|(name, body)| (name.clone(), body.clone()))
+                .collect(),
+        ),
     )
 }
 
-/// Like [`evaluation_profile`] but over a caller-owned, already-sorted def
-/// map. A program-scoped caller (the interpreter) builds the sorted snapshot
-/// once and reuses it across the many classifications one evaluation performs,
-/// instead of re-cloning every definition on every ask (chelis#2059). The
-/// classification is identical to [`evaluation_profile`]; only the redundant
-/// per-ask sort-and-clone is lifted out.
-pub fn evaluation_profile_sorted(
-    expr: &Expr,
-    program_defs: &BTreeMap<String, Expr>,
-) -> crate::evaluation::EvaluationProfile {
-    evaluation_profile_from_defs(expr, program_defs)
+/// A program's sorted definition table with the draw reachability the
+/// classifier reads beside it. A program-scoped caller (the interpreter)
+/// builds it once and reuses it across the many classifications one
+/// evaluation performs, instead of re-cloning every definition (chelis#2059)
+/// or re-deriving which definitions reach a draw (chelis#2405) on every ask.
+#[derive(Debug)]
+pub struct EvaluationDefinitions {
+    defs: BTreeMap<String, Expr>,
+    reach: static_controls::DrawReach,
 }
 
-/// [`evaluation_profile_sorted`] with every name in `shadowed` treated as
-/// absent from `program_defs`, as a copy of the table without those names
-/// would classify, for a caller whose bindings shadow same-named
-/// definitions (chelis#2391 retired the per-ask copy).
-pub fn evaluation_profile_sorted_shadowing(
+impl EvaluationDefinitions {
+    pub fn new(defs: BTreeMap<String, Expr>) -> Self {
+        EVALUATION_DEFINITION_BUILDS.with(|builds| builds.set(builds.get() + 1));
+        let reach = static_controls::DrawReach::new(&defs);
+        Self { defs, reach }
+    }
+
+    pub fn get(&self, name: &str) -> Option<&Expr> {
+        self.defs.get(name)
+    }
+}
+
+/// Like [`evaluation_profile`] but over a caller-owned definition table. The
+/// classification is identical to [`evaluation_profile`]; only the redundant
+/// per-ask sort, clone and reachability derivation are lifted out.
+pub fn evaluation_profile_sorted(
     expr: &Expr,
-    program_defs: &BTreeMap<String, Expr>,
-    shadowed: &UnordSet<String>,
+    definitions: &EvaluationDefinitions,
 ) -> crate::evaluation::EvaluationProfile {
-    static_controls::profile_excluding(
+    static_controls::profile(
         expr,
-        program_defs,
-        shadowed,
+        &definitions.defs,
+        &definitions.reach,
         &[],
         crate::evaluation::ResourcePolicy::Legacy,
     )
@@ -6167,10 +6235,12 @@ pub fn evaluation_profile_sorted_shadowing(
 fn evaluation_profile_from_defs(
     expr: &Expr,
     program_defs: &BTreeMap<String, Expr>,
+    reach: &static_controls::DrawReach,
 ) -> crate::evaluation::EvaluationProfile {
     static_controls::profile(
         expr,
         program_defs,
+        reach,
         &[],
         crate::evaluation::ResourcePolicy::Legacy,
     )
@@ -8636,7 +8706,16 @@ impl<'program> LowerCtx<'program> {
             .expect("evaluation lowering owns execution metadata")
             .spine
             .full_occurrence_count();
-        let profile = evaluation_profile_from_defs(expr, &self.program_defs);
+        // Whether this declaration is lowered with the execution spine is a
+        // spine-admission question, not a dispatch one: draw-free structure
+        // the spine cannot carry keeps the compatibility route (chelis#2405).
+        let profile = static_controls::spine_profile_excluding(
+            expr,
+            &self.program_defs,
+            &UnordSet::new(),
+            &[],
+            crate::evaluation::ResourcePolicy::Legacy,
+        );
         let compatibility = !matches!(
             profile,
             crate::evaluation::EvaluationProfile::FixedControl
@@ -21261,6 +21340,7 @@ mod tests {
         let context = SubexprLoweringContext {
             program_types: Arc::new(BTreeMap::new()),
             program_defs: Arc::new(BTreeMap::new()),
+            draw_reach: Arc::default(),
             program_signatures: Arc::new(BTreeMap::new()),
             local_tensor_ascriptions: Arc::new(Vec::new()),
             tensor_specialization: TensorCallsiteSpecialization::default(),
@@ -21433,6 +21513,7 @@ mod tests {
             signatures: &signatures,
             dtype_bound_names: &dtype_bound_names,
             body_profiles: RefCell::default(),
+            draw_reach: std::cell::OnceCell::new(),
         };
         let mut cache = BTreeMap::from([("bad".into(), false)]);
         expr_depends_on_nonlowerable_name(
@@ -21530,6 +21611,7 @@ mod tests {
         let context = SubexprLoweringContext {
             program_types: Arc::new(BTreeMap::new()),
             program_defs: Arc::new(BTreeMap::new()),
+            draw_reach: Arc::default(),
             program_signatures: Arc::new(BTreeMap::new()),
             local_tensor_ascriptions: Arc::new(vec![ascription.clone()]),
             tensor_specialization: TensorCallsiteSpecialization::default(),

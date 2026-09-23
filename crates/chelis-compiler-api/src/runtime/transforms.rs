@@ -409,12 +409,14 @@ impl<'a> EvalContext<'a> {
         // function signature. A nested function-valued capture then reaches
         // lowering as rank zero and corrupts the backward DAG (chelis#676).
         let mut program_defs = self.program.defs().clone();
+        let mut captures_closures = false;
         for (name, value) in captured_env.to_sorted() {
             if let RuntimeValue::Closure {
                 checked_function, ..
             } = value
             {
                 program_defs.insert(name.clone(), checked_function.as_ref().clone());
+                captures_closures = true;
             }
         }
 
@@ -455,7 +457,16 @@ impl<'a> EvalContext<'a> {
             ));
         }
 
-        let profile = self.execution_profile(&app_expr, &program_defs);
+        // Classify against the definition universe the lowering reads. With no
+        // captured closure that universe is the program's own table, so the
+        // scope's cached snapshot gives the identical answer without copying
+        // the table on every application (chelis#2405). A captured closure
+        // changes the universe, and only then is the copy classified.
+        let profile = if captures_closures {
+            chelis_ir::lower::evaluation_profile(&app_expr, &program_defs)
+        } else {
+            self.program_evaluation_profile(&app_expr)
+        };
         // #1821/#1920: inference renames result dimensions (n -> d43),
         // while invocation witnesses retain the authored parameter binders.
         // Give both routes the declared signature alongside checked types,

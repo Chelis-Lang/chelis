@@ -824,13 +824,11 @@ pub(crate) fn revalidate_adt_value(
         session: None,
         active_declaration_names: Vec::new(),
         def_kernels: UnordMap::new(),
-        excluded_def_kernels: UnordMap::new(),
         transcript: Vec::new(),
         transcript_capture: None,
         resolving_top_levels: Vec::new(),
         random_seed: None,
         random_counter: 0,
-        execution_exclusion: None,
         // Invariant predicates run inside an enclosing evaluation, so they
         // honour whatever token that evaluation installed (chelis#914).
         cancel: chelis_types::current_cancel_token(),
