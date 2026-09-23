@@ -913,7 +913,7 @@
       "file": "expr_pattern.rs",
       "function": "check_literal_pattern",
       "ordinal": 1,
-      "pattern": "resolved , Type::Var(_) | Type::Error(_)",
+      "pattern": "Type::Var(var)",
       "disposition": "not_a_route"
     },
     {

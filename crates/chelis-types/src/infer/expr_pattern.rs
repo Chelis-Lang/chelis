@@ -257,7 +257,7 @@ pub(super) fn pattern_bindings(
                 // do not contain expression nodes" -- so `(pat-lit {} (lit {} 1))`
                 // is malformed Deep rather than a typing question, and the read
                 // belongs here rather than inside `check_literal_pattern`, which
-                // returns early on an unresolved or already-failed scrutinee.
+                // returns early on a flexible or already-failed scrutinee.
                 // Structural well-formedness must not depend on the scrutinee's
                 // type. Before this, `literal_pattern_atom` returned `None` for
                 // any non-atom child and the [04-PAT-1] check silently declined,
@@ -270,7 +270,7 @@ pub(super) fn pattern_bindings(
                     literal_pattern_atom,
                     errors,
                 ) {
-                    check_literal_pattern(pat, atom, scrutinee_ty, subst, adt_reg, errors);
+                    check_literal_pattern(pat, atom, scrutinee_ty, env, subst, adt_reg, errors);
                 }
             }
             DeepTag::PatCtor => {
@@ -706,14 +706,7 @@ impl LiteralPatternAtom<'_> {
     fn rendered(&self) -> String {
         match self {
             LiteralPatternAtom::Integer(value) => value.to_string(),
-            LiteralPatternAtom::Float(value) => {
-                let printed = value.to_string();
-                if printed.contains(['.', 'e', 'E', 'n', 'i']) {
-                    printed
-                } else {
-                    format!("{printed}.0")
-                }
-            }
+            LiteralPatternAtom::Float(value) => render_float_value(*value),
             LiteralPatternAtom::Bool(value) => value.to_string(),
             LiteralPatternAtom::Str(value) => format!("{value:?}"),
         }
@@ -778,26 +771,43 @@ fn literal_pattern_atom(value: &deep::Expr) -> Option<LiteralPatternAtom<'_>> {
 /// is admissible against every integer primitive. Unifying it with §5.3's
 /// `i32` default instead would reject `match x_int64 with { | 1 => ... }` and
 /// leave no spelling for an `i64` literal pattern.
+///
+/// chelis#2442: a scrutinee whose type is a rigid authored binder is decided
+/// too, at every instantiation the binder admits
+/// ([`check_literal_pattern_at_binder`]).
 fn check_literal_pattern(
     pat: &deep::Expr,
     atom: LiteralPatternAtom<'_>,
     scrutinee_ty: &Type,
+    env: &Env,
     subst: &Subst,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
 ) {
     let resolved = adt_reg.expand_aliases(&subst.apply(scrutinee_ty));
-    // An unresolved scrutinee decides nothing yet, and an already-failed one
+    // A flexible scrutinee decides nothing yet, and an already-failed one
     // owns its own diagnostic: reporting here would either invent a rejection
     // or cascade off a root cause reported upstream (chelis#731 section C3).
+    //
+    // chelis#2442: a variable that an authored binder of the enclosing
+    // declaration resolves to is NOT unresolved. [04-INF-6] quantifies it over
+    // every instantiation its declaration admits, so it is decided here. Only
+    // a variable no authored binder denotes keeps the early return.
     //
     // chelis#1525: this early return is why the structural read of the value
     // child does NOT live here. Well-formedness of the `pat-lit` form cannot
     // depend on whether the scrutinee's type happens to be resolved, so the
     // caller reads the slot first and this function receives an atom it can
     // always decide about.
-    if matches!(resolved, Type::Var(_) | Type::Error(_)) {
-        return;
+    match &resolved {
+        Type::Var(var) => {
+            if let Some((binder, bound)) = env.authored_type_binder(*var, subst) {
+                check_literal_pattern_at_binder(pat, &atom, binder, bound, errors);
+            }
+            return;
+        }
+        Type::Error(_) => return,
+        _ => {}
     }
 
     let Type::Prim(prim) = &resolved else {
@@ -820,14 +830,9 @@ fn check_literal_pattern(
         return;
     };
 
-    let admissible = match &atom {
-        LiteralPatternAtom::Integer(_) => prim.is_integer(),
-        LiteralPatternAtom::Float(_) => prim.is_float(),
-        LiteralPatternAtom::Bool(_) => *prim == Prim::Bool,
-        LiteralPatternAtom::Str(_) => *prim == Prim::String,
-    };
-    if !admissible {
-        report_literal_pattern_error(
+    match literal_pattern_failure_at(*prim, &atom) {
+        None => {}
+        Some(PatternFailure::Family) => report_literal_pattern_error(
             pat,
             errors,
             format!(
@@ -851,36 +856,25 @@ fn check_literal_pattern(
                  available here (spec/02-surf-syntax.md section P10a)",
                 atom.admissible_scrutinee(),
             )],
-        );
-        return;
-    }
-
-    if let LiteralPatternAtom::Integer(literal) = &atom
-        && let Some((low, high)) = prim.integer_range()
-        && (*literal < low || *literal > high)
-    {
-        report_literal_pattern_error(
+        ),
+        Some(PatternFailure::OutOfRange { low, high }) => report_literal_pattern_error(
             pat,
             errors,
             format!(
-                "integer literal pattern `{literal}` is outside the `{}` range \
+                "integer literal pattern `{}` is outside the `{}` range \
                  [{low}, {high}], so this arm could never match \
                  (spec/04-type-system.md [04-PAT-1], section 5.3)",
+                atom.rendered(),
                 prim.name(),
             ),
             vec![format!(
                 "Use a value the scrutinee's `{}` width can hold, or widen the scrutinee",
                 prim.name(),
             )],
-        );
-    }
-
-    // [04-LIT-2]: a float pattern binds at the scrutinee's float width, and an
-    // infinity there is not a literal.
-    if let LiteralPatternAtom::Float(value) = &atom
-        && super::literal_width::literal_is_non_finite_at(*prim, &deep::Atom::Float(*value))
-    {
-        report_literal_pattern_error(
+        ),
+        // [04-LIT-2]: a float pattern binds at the scrutinee's float width, and
+        // an infinity there is not a literal.
+        Some(PatternFailure::NonFinite) => report_literal_pattern_error(
             pat,
             errors,
             format!(
@@ -894,8 +888,358 @@ fn check_literal_pattern(
                 "Use a value the scrutinee's `{}` width can hold, or widen the scrutinee",
                 prim.name(),
             )],
+        ),
+    }
+}
+
+/// Why a literal pattern cannot bind at one primitive under [04-PAT-1].
+#[derive(Clone, Copy)]
+enum PatternFailure {
+    /// The atom's family disagrees with the primitive's ([04-LIT-1]).
+    Family,
+    /// An integer atom outside the primitive's `[low, high]` range.
+    OutOfRange { low: i64, high: i64 },
+    /// A float atom that rounds to infinity at the primitive ([04-LIT-2]).
+    NonFinite,
+}
+
+/// [04-PAT-1]'s decision at one primitive. A concrete scrutinee asks it once
+/// and a rigid binder asks it at every member of its family, so the two can
+/// never disagree about what one member admits.
+fn literal_pattern_failure_at(prim: Prim, atom: &LiteralPatternAtom<'_>) -> Option<PatternFailure> {
+    let admissible = match atom {
+        LiteralPatternAtom::Integer(_) => prim.is_integer(),
+        LiteralPatternAtom::Float(_) => prim.is_float(),
+        LiteralPatternAtom::Bool(_) => prim == Prim::Bool,
+        LiteralPatternAtom::Str(_) => prim == Prim::String,
+    };
+    if !admissible {
+        return Some(PatternFailure::Family);
+    }
+    match atom {
+        LiteralPatternAtom::Integer(literal) => prim
+            .integer_range()
+            .filter(|(low, high)| literal < low || literal > high)
+            .map(|(low, high)| PatternFailure::OutOfRange { low, high }),
+        LiteralPatternAtom::Float(value) => {
+            super::literal_width::literal_is_non_finite_at(prim, &deep::Atom::Float(*value))
+                .then_some(PatternFailure::NonFinite)
+        }
+        LiteralPatternAtom::Bool(_) | LiteralPatternAtom::Str(_) => None,
+    }
+}
+
+/// The members of a dtype family, integers narrowest first and then the
+/// floats in [`Prim::ACTIVE_FLOATS`] order, so a rejection names the same
+/// member on every run.
+fn family_members(family: TypeVarRestriction) -> impl Iterator<Item = Prim> {
+    Prim::ACTIVE_INTEGERS
+        .into_iter()
+        .chain(Prim::ACTIVE_FLOATS)
+        .filter(move |prim| family.admits(*prim))
+}
+
+/// chelis#2442: [04-PAT-1] against a rigid authored binder.
+///
+/// [04-INF-6] makes the binder denote every instantiation its declaration
+/// admits and requires the body to check at each, and [04-LIT-2] binds a
+/// literal pattern at the scrutinee's primitive, so the pattern binds at every
+/// member of the binder's family. It is rejected at the first member that
+/// refuses it. An unbounded binder ([04-DTYPE-2]) admits non-primitive types,
+/// against which no literal pattern is admissible, so it refuses every
+/// literal pattern.
+///
+/// The repair never adds a conversion to the pattern: a literal pattern
+/// carries no suffix and no cast. It names a spelling that checks and matches
+/// exactly the scrutinee values equal to the literal at every member, without
+/// a cast that can trap ([`binder_pattern_repair`]).
+fn check_literal_pattern_at_binder(
+    pat: &deep::Expr,
+    atom: &LiteralPatternAtom<'_>,
+    binder: &str,
+    bound: Option<TypeVarRestriction>,
+    errors: &mut DiagnosticSink<'_>,
+) {
+    let Some(family) = bound.map(TypeVarRestriction::precision_family) else {
+        report_literal_pattern_error(
+            pat,
+            errors,
+            format!(
+                "{} literal pattern `{}` cannot match a scrutinee of type `{binder}`: \
+                 `{binder}` declares no dtype-family bound, so [04-INF-6] makes it denote \
+                 every type, including non-primitive instantiations such as a tensor or a \
+                 record, and a literal pattern is admissible only against a primitive \
+                 scrutinee (spec/04-type-system.md [04-PAT-1], [04-DTYPE-2])",
+                atom.family(),
+                atom.rendered(),
+            ),
+            vec![unbounded_binder_pattern_repair(atom, binder)],
+        );
+        return;
+    };
+    let Some((member, failure)) = family_members(family).find_map(|member| {
+        literal_pattern_failure_at(member, atom).map(|failure| (member, failure))
+    }) else {
+        return;
+    };
+    let reason = match failure {
+        PatternFailure::Family => format!(
+            "the pattern denotes no value, because {} literal patterns denote only {} \
+             ([04-LIT-1])",
+            atom.family(),
+            atom.admissible_primitives(),
+        ),
+        PatternFailure::OutOfRange { low, high } => {
+            format!("the value is outside its range [{low}, {high}]")
+        }
+        PatternFailure::NonFinite => {
+            "the value rounds to infinity, which no literal denotes".to_string()
+        }
+    };
+    report_literal_pattern_error(
+        pat,
+        errors,
+        format!(
+            "{} literal pattern `{}` cannot match a scrutinee of type `{binder}`: \
+             [04-INF-6] makes `{binder}: {}` denote every admissible instantiation, and at \
+             `{}` {reason}, so this arm could never match there \
+             (spec/04-type-system.md [04-PAT-1], [04-LIT-2])",
+            atom.family(),
+            atom.rendered(),
+            family.family_name(),
+            member.name(),
+        ),
+        vec![binder_pattern_repair(atom, binder, family)],
+    );
+}
+
+/// The repair for a literal pattern under an unbounded binder: declare the
+/// family the pattern's own kind denotes, and, when the pattern is still
+/// refused there, that family's repair too.
+fn unbounded_binder_pattern_repair(atom: &LiteralPatternAtom<'_>, binder: &str) -> String {
+    let family = match atom {
+        LiteralPatternAtom::Integer(_) => TypeVarRestriction::ActiveInt,
+        LiteralPatternAtom::Float(_) => TypeVarRestriction::ActiveFloat,
+        LiteralPatternAtom::Bool(_) | LiteralPatternAtom::Str(_) => {
+            return format!(
+                "No dtype family contains {}; give the scrutinee {} in place of `{binder}`",
+                atom.admissible_primitives(),
+                atom.admissible_scrutinee(),
+            );
+        }
+    };
+    let declare = format!(
+        "Declare `{binder}: {}`, the family {} literal patterns denote",
+        family.family_name(),
+        atom.family(),
+    );
+    if family_members(family).any(|member| literal_pattern_failure_at(member, atom).is_some()) {
+        format!(
+            "{declare}. The pattern is refused there too: {}",
+            binder_pattern_repair(atom, binder, family)
+        )
+    } else {
+        declare
+    }
+}
+
+/// The exact value a numeric literal pattern is written with, before any
+/// member of a family binds it.
+#[derive(Clone, Copy)]
+enum PatternValue {
+    Integer(i64),
+    Float(f64),
+}
+
+/// `2^53`: every integer of smaller magnitude converts to `f64` exactly.
+const F64_EXACT_INTEGER_LIMIT: f64 = 9_007_199_254_740_992.0;
+/// `2^63`: no `i64` converts to an `f64` of larger magnitude.
+const I64_MAGNITUDE_LIMIT: f64 = 9_223_372_036_854_775_808.0;
+
+impl PatternValue {
+    fn of(atom: &LiteralPatternAtom<'_>) -> Option<Self> {
+        match atom {
+            LiteralPatternAtom::Integer(value) => Some(PatternValue::Integer(*value)),
+            LiteralPatternAtom::Float(value) => Some(PatternValue::Float(*value)),
+            LiteralPatternAtom::Bool(_) | LiteralPatternAtom::Str(_) => None,
+        }
+    }
+
+    /// The value as an `i64`, when it is an integer an `i64` can hold.
+    fn as_integer(self) -> Option<i64> {
+        match self {
+            PatternValue::Integer(value) => Some(value),
+            PatternValue::Float(value) => (value.is_finite()
+                && value.fract() == 0.0
+                && (-I64_MAGNITUDE_LIMIT..I64_MAGNITUDE_LIMIT).contains(&value))
+            .then_some(value as i64),
+        }
+    }
+
+    /// The value as an `f64`. Exact whenever [`Self::held_exactly_at`] holds
+    /// for `f64`, which is the only case a repair spells it.
+    fn as_f64(self) -> f64 {
+        match self {
+            PatternValue::Integer(value) => value as f64,
+            PatternValue::Float(value) => value,
+        }
+    }
+
+    /// Whether `prim` holds this value exactly: an integer width holds it when
+    /// it is an integer in range, and a float width when binding the literal
+    /// there ([04-LIT-2]'s one finalization) leaves it unchanged.
+    fn held_exactly_at(self, prim: Prim) -> bool {
+        if let Some((low, high)) = prim.integer_range() {
+            return self
+                .as_integer()
+                .is_some_and(|value| (low..=high).contains(&value));
+        }
+        let atom = match self {
+            PatternValue::Integer(value) => deep::Atom::Int(value),
+            PatternValue::Float(value) => deep::Atom::Float(value),
+        };
+        super::literal_width::literal_value_at_float(prim, &atom).is_some_and(|bound| {
+            bound.is_finite()
+                && match self {
+                    PatternValue::Integer(value) => {
+                        bound.fract() == 0.0 && bound as i128 == i128::from(value)
+                    }
+                    PatternValue::Float(value) => bound == value,
+                }
+        })
+    }
+}
+
+/// A float value as a literal body: it keeps a fractional part so it reads as
+/// a float, and `70000.0` does not read as the integer `70000`.
+fn render_float_value(value: f64) -> String {
+    let printed = value.to_string();
+    if printed.contains(['.', 'e', 'E', 'n', 'i']) {
+        printed
+    } else {
+        format!("{printed}.0")
+    }
+}
+
+/// chelis#2442: what to write instead of a literal pattern a bounded binder
+/// refuses.
+///
+/// Every repair checks under the binder and matches exactly the scrutinee
+/// values equal to the literal, at every member of the family, with no cast
+/// that can trap. The value `V` decides which:
+///
+/// - no member holds `V` exactly (a fractional value under `Int`, a boolean
+///   under any family): the arm matches nothing at any instantiation, so the
+///   repair deletes it;
+/// - every member holds `V` exactly under `Int` or `Float`: the pattern in the
+///   family's own kind (`| 0.0 =>` for `| 0 =>` under `Float`);
+/// - every member holds `V` exactly under `Numeric`, so `V` is an integer in
+///   `i8`'s range: the comparison `eq(x, cast(V, p))`, which binds `V`
+///   exactly at every member;
+/// - otherwise, a comparison that widens the scrutinee to the family's widest
+///   member, where it converts without trapping and `V` is exact:
+///   `eq(cast(x, i64), Vi64)` under `Int`, `eq(cast(x, f64), Vf64)` under
+///   `Float` and `Numeric`. Under `Numeric` an `i64` wider than `2^53` rounds
+///   at `f64`; it can only land on a `V` whose magnitude is between `2^53`
+///   and `2^63`, and for that value no trap-free comparison is exact, so the
+///   repair narrows the binder instead.
+///
+/// A comparison is placed in an `if` ahead of the match ([`compare_before_match`]).
+fn binder_pattern_repair(
+    atom: &LiteralPatternAtom<'_>,
+    binder: &str,
+    family: TypeVarRestriction,
+) -> String {
+    let family_name = family.family_name();
+    let Some(value) = PatternValue::of(atom) else {
+        return format!(
+            "No member of `{family_name}` is {}, so this arm matches no value at any \
+             instantiation: delete it",
+            atom.admissible_primitives(),
+        );
+    };
+    let members: Vec<Prim> = family_members(family).collect();
+    if !members.iter().any(|member| value.held_exactly_at(*member)) {
+        return format!(
+            "No member of `{family_name}` holds the value `{}` exactly, so this arm matches \
+             no value at any instantiation: delete it",
+            atom.rendered(),
         );
     }
+    let held_everywhere = members.iter().all(|member| value.held_exactly_at(*member));
+    let no_suffix = "a literal pattern itself carries no suffix and no cast \
+                     (spec/02-surf-syntax.md section P10a)";
+    match (family, value.as_integer()) {
+        (TypeVarRestriction::ActiveInt, Some(integer)) if held_everywhere => {
+            return format!(
+                "Write the pattern as an integer, `| {integer} =>`, which denotes the same \
+                 value exactly at every member of `Int`; {no_suffix}"
+            );
+        }
+        (TypeVarRestriction::ActiveFloat, _) if held_everywhere => {
+            return format!(
+                "Write the pattern as a float, `| {} =>`, which denotes the same value \
+                 exactly at every member of `Float`; {no_suffix}",
+                render_float_value(value.as_f64()),
+            );
+        }
+        (TypeVarRestriction::ActiveNumeric, Some(integer)) if held_everywhere => {
+            return format!(
+                "Compare before the match: {}. `cast({integer}, {binder})` binds {integer} \
+                 exactly at every member of `Numeric`; {no_suffix}",
+                compare_before_match(&format!("eq(x, cast({integer}, {binder}))")),
+            );
+        }
+        _ => {}
+    }
+    let (widest, spelled) = match family {
+        TypeVarRestriction::ActiveInt => (
+            Prim::Int64,
+            value
+                .as_integer()
+                .map(|integer| format!("{integer}i64"))
+                .expect("a value some Int member holds is an i64"),
+        ),
+        _ => {
+            let magnitude = value.as_f64().abs();
+            if !value.held_exactly_at(Prim::F64)
+                || (family == TypeVarRestriction::ActiveNumeric
+                    && (F64_EXACT_INTEGER_LIMIT..=I64_MAGNITUDE_LIMIT).contains(&magnitude))
+            {
+                return format!(
+                    "No comparison that cannot trap is exact at every member of \
+                     `{family_name}` for `{}`, because at `f64` an `i64` near it rounds \
+                     onto the same value. Declare `{binder}` with the family this arm is \
+                     meant for, `Int` or `Float`, and compare at that family's widest member",
+                    atom.rendered(),
+                );
+            }
+            (
+                Prim::F64,
+                format!("{}f64", render_float_value(value.as_f64())),
+            )
+        }
+    };
+    let widest = widest.name();
+    format!(
+        "Compare at `{widest}` before the match: {}. Every member of `{family_name}` \
+         converts to `{widest}` without trapping, and the comparison holds exactly when the \
+         value is `{}`; {no_suffix}",
+        compare_before_match(&format!("eq(cast(x, {widest}), {spelled})")),
+        atom.rendered(),
+    )
+}
+
+/// A repair's comparison, placed in an `if` ahead of the match: the literal
+/// arm's body becomes the `then` branch and the remaining arms stay in the
+/// `else` match. A guard would say the same thing, but the eval and C lanes
+/// ignore a guard at run time (chelis#2445), so a guard repair would check
+/// clean and then answer wrongly.
+fn compare_before_match(condition: &str) -> String {
+    format!(
+        "`if {condition} then <this arm's body> else match x with {{ <the other arms> }}`, \
+         with `x` the value this pattern matched"
+    )
 }
 
 /// Push one [04-PAT-1] rejection, located at the pattern node so downstream

@@ -184,6 +184,10 @@ impl Prim {
     /// [`Prim::is_float`] and every float-family enumeration read.
     pub const ACTIVE_FLOATS: [Prim; 4] = [Prim::F32, Prim::F64, Prim::F16, Prim::Bf16];
 
+    /// The active signed integer dtypes of §1.1, narrowest first: the one list
+    /// [`Prim::is_integer`] and every integer-family enumeration read.
+    pub const ACTIVE_INTEGERS: [Prim; 4] = [Prim::Int8, Prim::Int16, Prim::Int32, Prim::Int64];
+
     /// Parse a primitive type from its canonical name.
     pub fn parse_name(s: &str) -> Option<Prim> {
         match s {
@@ -279,7 +283,7 @@ impl Prim {
 
     /// True for all signed integer dtypes in the active set per §1.1.
     pub fn is_integer(&self) -> bool {
-        matches!(self, Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64)
+        Self::ACTIVE_INTEGERS.contains(self)
     }
 
     /// The representable `[min, max]` range of a signed integer width, or
