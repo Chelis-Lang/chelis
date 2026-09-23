@@ -1,6 +1,8 @@
-//! [05-RNG-1] and [05-OP-8]: `uniform_like` draws the canonical counter
-//! stream, bit for bit, in `chelis eval`, in compiled C, and in the DAG
-//! evaluator (whole-program lowering and fixed-control plans).
+//! [05-RNG-1] and [05-OP-8]: straight-line `uniform_like` draws produce the
+//! spec's words and sampler arithmetic, bit for bit, in `chelis eval`, in
+//! compiled C, and in the DAG evaluator (whole-program lowering and
+//! fixed-control plans). The programs take no `vmap` or unselected arm, whose
+//! ordinals are chelis#2409's and chelis#2410's.
 //!
 //! The reference below transcribes the two atoms from the spec text. It never
 //! calls an evaluator, a lowering, or a `chelis_types` sampler, so a lane that
@@ -48,9 +50,12 @@ fn spec_unit(seed: i64, c: u64, i: u64) -> f64 {
     (word >> 11) as f64 / (1_u64 << 53) as f64
 }
 
-/// [05-OP-8]'s stored element bits. f64 is one f64 fused multiply-add over the
-/// exactly widened bounds; f32 is one f32 fused multiply-add of `round_f32(u)`;
-/// f16 and bf16 take the f32 result and narrow it once.
+/// The stored element bits of [05-OP-8]'s sampler arithmetic at each dtype,
+/// over f32 bounds. [05-OP-8] requires bounds of the template's dtype; the
+/// checker still admits only f32 bounds (chelis#1295), so these rows check the
+/// arithmetic, not the bound signature. f64 is one f64 fused multiply-add over
+/// the exactly widened bounds; f32 is one f32 fused multiply-add of
+/// `round_f32(u)`; f16 and bf16 take that f32 result and narrow it once.
 fn spec_bits(prim: Prim, seed: i64, c: u64, i: u64, low: f32, high: f32) -> u64 {
     let unit = spec_unit(seed, c, i);
     let narrow = (high - low).mul_add(unit as f32, low);
