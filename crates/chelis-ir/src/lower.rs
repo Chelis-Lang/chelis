@@ -6799,6 +6799,13 @@ struct LowerCtx<'program> {
     /// whose graph is spliced back continues this numbering and hands it
     /// back, so instances stay unique after the splice.
     next_random_instance: u32,
+    /// How many runtime `if` arms, lowered into a `Where` that computes both
+    /// arms with no [`Self::random_path_condition`] to activate their draws,
+    /// enclose the expression being lowered. A `dropout` drawn under one
+    /// would take an ordinal in the unselected arm (chelis#2410), so
+    /// [`Self::lower_keyed_draw`] refuses it. The `grad` subcontext inherits
+    /// the count because its graph is spliced back into the arm.
+    unactivated_arm_depth: usize,
     /// chelis#1464: depth of `if` branches currently being lowered. A
     /// `fail(...)` lowered at depth > 0 that `lower_if` did NOT recognize
     /// directly is an INDIRECT trap (behind a helper call or a `let`); it
@@ -6946,6 +6953,7 @@ impl<'program> LowerCtx<'program> {
             random_path_condition: None,
             random_scope: None,
             next_random_instance: 0,
+            unactivated_arm_depth: 0,
             if_branch_depth: 0,
             linearity,
             inlining_depths: UnordMap::new(),
@@ -7142,6 +7150,9 @@ impl<'program> LowerCtx<'program> {
         ty: TensorType,
     ) -> NodeId {
         let span = self.current_span_id.clone();
+        if draw == crate::dag::RandomDraw::Dropout && self.unactivated_arm_depth > 0 {
+            self.reject_dropout_in_unactivated_arm(span.clone());
+        }
         let scalar = |precision| TensorType {
             dims: Vec::new(),
             precision,
@@ -7193,6 +7204,32 @@ impl<'program> LowerCtx<'program> {
             .chain(activation)
             .collect();
         self.dag.add_node(op, inputs, ty, span)
+    }
+
+    /// A runtime `if` lowered into a `Where` computes both arms, and with no
+    /// random path to activate it a `dropout` in the unselected arm would take
+    /// an ordinal the sequential reading of [05-RNG-1] does not give it
+    /// (chelis#2410). Refused rather than drawn, as the compiled lanes did
+    /// before the key-operand IR. Non-fatal, so the host lane, where the
+    /// branch executes as control flow, can own the expression instead.
+    fn reject_dropout_in_unactivated_arm(&self, span_id: Option<String>) -> ! {
+        raise_lowering_diagnostic(LowerDiagnostic::from_unsupported(
+            Unsupported::new(
+                UnsupportedKind::Construct(
+                    "`dropout` under a runtime `if` lowered into a kernel `where`".to_string(),
+                ),
+                "IR lowering",
+                Stage::Lowering,
+                chelis_types::unimplemented_rejection!(
+                    2410,
+                    "a kernel `where` computes both arms of a runtime `if`, so a draw in \
+                     the unselected arm would take an ordinal the sequential reading does \
+                     not give it"
+                ),
+            ),
+            None,
+            span_id,
+        ))
     }
 
     fn attach_reuse_hint(
@@ -10040,6 +10077,7 @@ impl<'program> LowerCtx<'program> {
         // scoped instances continue this graph's numbering.
         subctx.random_scope = self.random_scope;
         subctx.next_random_instance = self.next_random_instance;
+        subctx.unactivated_arm_depth = self.unactivated_arm_depth;
         subctx.allow_host_list_ad_rewrites = true;
         // Subctx inherits the parent's current span so synthesized loads
         // for grad's parameters carry the grad-call's span.
@@ -18220,6 +18258,9 @@ impl<'program> LowerCtx<'program> {
             None => cond,
         });
         let saved_random_path = self.random_path_condition;
+        // Without a random path, both arms' draws execute unconditionally.
+        let unactivated = usize::from(saved_random_path.is_none());
+        self.unactivated_arm_depth += unactivated;
         if let Some(parent_path) = saved_random_path {
             let path_ty = TensorType {
                 dims: Vec::new(),
@@ -18279,6 +18320,7 @@ impl<'program> LowerCtx<'program> {
         let else_value = self.lower_expr(else_expr);
         self.if_branch_depth -= 1;
         let else_node = self.expect_runtime_if_branch(else_value, "else", span);
+        self.unactivated_arm_depth -= unactivated;
         self.random_path_condition = saved_random_path;
         self.branch_path_condition = saved_branch_path;
         let stamped_out_ty = self.type_from_meta(meta);

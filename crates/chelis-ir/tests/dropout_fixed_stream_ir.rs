@@ -402,3 +402,63 @@ fn source_ad_replays_a_mask_with_no_extra_draw_and_preserves_dead_forward_calls(
         assert_eq!(counter(&frame), 1);
     }
 }
+
+/// chelis#2410: a runtime `if` lowered into a kernel `where` computes both
+/// arms, so a `dropout` in either arm would take an ordinal in the unselected
+/// one, which [05-RNG-1]'s sequential reading does not give it. With no random
+/// activation to gate the draw, lowering refuses it with a typed, nonfatal
+/// #2410 rejection, so a caller with a host lane runs the branch as control
+/// flow instead. `uniform_like` keeps #2410's existing behaviour, and a
+/// literal condition lowers only its taken arm.
+///
+/// Evidentiary status: REGRESSION TEST for the refusal rows (at 3b5f029d8 the
+/// `dropout` rows lowered to an unconditional draw).
+#[test]
+fn a_dropout_in_an_unactivated_where_arm_is_refused_with_a_typed_rejection() {
+    let lower_if = |condition: &str, then: &str, otherwise: &str| {
+        let source = format!("(if {{}} {condition} {then} {otherwise})");
+        let expression = chelis_deep::parser::parse_str(&source)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let mut inputs = UnordMap::new();
+        inputs.insert(
+            "x".into(),
+            TensorType {
+                dims: vec![DimInfo::Lit(4)],
+                precision: Prim::F32,
+            },
+        );
+        inputs.insert(
+            "flag".into(),
+            TensorType {
+                dims: Vec::new(),
+                precision: Prim::Bool,
+            },
+        );
+        chelis_ir::lower::try_lower_subexpr_program(
+            &expression,
+            inputs,
+            UnordMap::new(),
+            UnordMap::new(),
+        )
+    };
+    let dropout = "(app {} (var {} dropout) (var {} x) (lit {type: (t-prim {} f32)} 0.5))";
+    let uniform = "(app {} (var {} uniform_like) (var {} x) (lit {type: (t-prim {} f32)} 0.0) (lit {type: (t-prim {} f32)} 1.0))";
+    let (runtime, x) = ("(var {} flag)", "(var {} x)");
+    for (then, otherwise) in [(dropout, x), (x, dropout)] {
+        let refusal =
+            lower_if(runtime, then, otherwise).expect_err("a where-arm dropout must be refused");
+        assert!(!refusal.fatal, "a host lane may own the branch: {refusal}");
+        let unsupported = refusal.unsupported().expect("a typed rejection");
+        assert!(
+            unsupported.to_string().contains("chelis#2410"),
+            "{unsupported}"
+        );
+    }
+    let draws = |dag: &Dag, op: fn(&RiscOp) -> bool| dag.nodes().iter().any(|node| op(&node.op));
+    let literal = lower_if("(lit {type: (t-prim {} bool)} true)", dropout, x).unwrap();
+    assert!(draws(&literal, |op| matches!(op, RiscOp::Dropout)));
+    let uniform = lower_if(runtime, uniform, x).unwrap();
+    assert!(draws(&uniform, |op| matches!(op, RiscOp::UniformLike)));
+}

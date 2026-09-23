@@ -210,3 +210,94 @@ fn invalid_empty_rate_traps_in_eval_and_c_and_a_runtime_rate_builds() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// [05-RNG-1] over f32 ones at rate 0.5, transcribed independently of every
+/// evaluator: the mask for `ordinal` under `seed`, scaled by `1 / (1 - rate)`.
+fn reference_mask(seed: u64, ordinal: u64, count: u64) -> Vec<f64> {
+    fn mix(mut x: u64) -> u64 {
+        x = x.wrapping_add(0x9e3779b97f4a7c15);
+        x = (x ^ (x >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+        x = (x ^ (x >> 27)).wrapping_mul(0x94d049bb133111eb);
+        x ^ (x >> 31)
+    }
+    (0..count)
+        .map(|index| {
+            let word = mix(seed ^ mix(ordinal).rotate_left(17) ^ mix(index).rotate_left(41));
+            let unit = ((word >> 11) as f64 / 9007199254740992.0) as f32;
+            if unit < 0.5 { 0.0 } else { 2.0 }
+        })
+        .collect()
+}
+
+/// [05-RNG-1]: a `dropout` in the unselected arm of a runtime `if` takes no
+/// ordinal. Inlined into a caller's tensor segment the `if` would become a
+/// kernel `where` that draws in both arms (chelis#2410), so IR lowering
+/// refuses the draw and compiled C runs the branch as host control flow, as
+/// eval does. The flags are computed from data, so no lane can fold them.
+///
+/// Evidentiary status: REGRESSION TEST. At 3b5f029d8 compiled C gave the
+/// later draw the (7, 1) and (7, 2) masks, and the `not(flag)` call of the
+/// last program an extra ordinal.
+#[test]
+fn a_dropout_in_an_unselected_runtime_arm_takes_no_ordinal_in_eval_or_c() {
+    let layer = "def layer(x: tensor[8, f32], training: bool) -> tensor[8, f32] ! { Random } = if training then dropout(x, 0.5f32) else x\n";
+    let ones = "x = to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32, 1.0f32, 1.0f32, 1.0f32, 1.0f32])";
+    let not_training = "training = lt(tensor_to_scalar(sum(copy(x), 0i32)), 0.0f32)";
+    let programs = [
+        (
+            "inline_flag",
+            format!(
+                "{layer}def main() =\n  with seed(7i64) {{\n    {ones}\n    {not_training}\n    y = layer(copy(x), training)\n    z = dropout(x, 0.5f32)\n    (y, z)\n  }}\n"
+            ),
+            vec![vec![1.0; 8], reference_mask(7, 0, 8)],
+        ),
+        (
+            "two_layers",
+            format!(
+                "{layer}def model(x: tensor[8, f32], training: bool) -> tensor[8, f32] ! {{ Random }} = layer(layer(x, training), training)\ndef main() =\n  with seed(7i64) {{\n    {ones}\n    {not_training}\n    out = model(copy(x), training)\n    noise = dropout(x, 0.5f32)\n    (out, noise)\n  }}\n"
+            ),
+            vec![vec![1.0; 8], reference_mask(7, 0, 8)],
+        ),
+        (
+            "taken_then_untaken",
+            format!(
+                "{layer}def main() =\n  with seed(7i64) {{\n    {ones}\n    flag = gt(tensor_to_scalar(sum(copy(x), 0i32)), 0.0f32)\n    a = layer(copy(x), flag)\n    b = dropout(copy(x), 0.5f32)\n    c = layer(copy(x), not(flag))\n    d = dropout(x, 0.5f32)\n    (a, b, c, d)\n  }}\n"
+            ),
+            vec![
+                reference_mask(7, 0, 8),
+                reference_mask(7, 1, 8),
+                vec![1.0; 8],
+                reference_mask(7, 2, 8),
+            ],
+        ),
+    ];
+    assert_ne!(reference_mask(7, 0, 8), reference_mask(7, 1, 8));
+    for (name, source, expected) in programs {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(format!("{name}.ch"));
+        std::fs::write(&file, &source).unwrap();
+        let path = file.to_str().unwrap();
+        assert!(cli(&["fmt", "--inplace", path]).status.success(), "{name}");
+        let eval = cli(&["eval", "--file", path]);
+        assert!(
+            eval.status.success(),
+            "{name}: {}",
+            String::from_utf8_lossy(&eval.stderr)
+        );
+        let eval = String::from_utf8(eval.stdout).unwrap();
+        let compiled = common::build_and_run(&std::fs::read_to_string(&file).unwrap(), name);
+        for (index, expected) in expected.iter().enumerate() {
+            let root = format!("main.{index}");
+            assert_eq!(
+                &common::parse_tensor_data(&eval, &root),
+                expected,
+                "{name} eval {root}"
+            );
+            assert_eq!(
+                &common::parse_tensor_data(&compiled, &root),
+                expected,
+                "{name} C {root}"
+            );
+        }
+    }
+}
