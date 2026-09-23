@@ -262,7 +262,7 @@ numeric fields: their controls and their key are operand nodes.
 and at most one rank-zero Bool path activation. `Dropout.inputs` is its data
 input, its rate, its key, and at most one activation. The bounds and the rate
 are rank-zero operands of the template's or input's exact active float dtype.
-(The `f32` bounds of a non-`f32` template are still accepted; chelis#1295.)
+(Not fully implemented; chelis#1295.)
 Both operations preserve the first input's exact shape and dtype. Their
 value-domain checks remain [05-OP-8/37], before Random consumption; the codec
 neither inserts casts nor implements an adjoint. `DropoutReplay.inputs` is
