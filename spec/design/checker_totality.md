@@ -2916,11 +2916,15 @@ enum a traversal must exhaust, not an `Option` it may drop.
   `rewrite_opaque_field_access`'s recursion, and `rebuild`'s tag copy. Making
   `tag` and `children` carrier-complete was measured, not assumed, to be
   insufficient on its own.
-- **E5d, the lint and its corpus.** Roughly 250 lines.
+- **E5d, the lint and its corpus.** Roughly 250 lines. **Withdrawn
+  2026-09-22** by the completion below: with one spelling per construct there
+  is nothing for a lint to ratchet.
 - **E5e, the remaining sites.** The 59 unadjudicated guarded-arm sites and the
   19 never-adjudicated ones the audit inventories, swept behind E5b so the
   sweep has one accessor to route to. Unbounded until E5b lands; do not
-  estimate it before then.
+  estimate it before then. **Subsumed 2026-09-22** by the completion below:
+  the remaining inventory is the set of readers that stop compiling when the
+  second spelling is deleted.
 
 The five slices exceed one pull request's hand-written budget together. E5a is
 one pull request; E5b with E5c is a second; E5d is a third. E5e is its own,
@@ -2948,10 +2952,62 @@ Acceptance is every row green under the command that owns it. The tide row is a
 warning it exercises fires only when `smt` is off. The third is the CI step E5c
 owes, and today nothing runs it.
 
-E5d's ratchet is proved by a different command again, because a lint is not a
-test: plant a bare `Expr::List` destructure in a guarded match arm inside
-`infer/`, and `chelis lint --check .` must reject it; removing the plant must
-make that command green.
+E5d's ratchet was to be proved by a different command again, because a lint is
+not a test. The completion below withdraws it, and the compiler's exhaustiveness
+check replaces the planted-violation command.
+
+#### Completion: one spelling per construct (decided 2026-09-22)
+
+E5a through E5c, and the E5b and E5e slices that followed them, repaired every
+measured row and gave readers one total view, `Expr::carrier()`. They did not
+remove the cause. A vocabulary node still has two admitted spellings,
+`Expr::Node` and the transitional `Expr::List`, and which one a reader receives
+still depends on the ingress. Surf desugaring builds `Node` and then rewrites
+its whole output to `List` at the boundary; the serialized-IR checker entries
+rewrite stamped input to `List` through `normalize_nodes_to_lists`;
+`chelis-prove`'s `deep_compat` does the same for part of the prover; the `.dp`
+stamper and the typed checker entry deliver `Node`. Every reader therefore
+still owes both spellings. The accessor shows the cost itself: Surf's boundary
+also rewrites every `BareList` into an untagged `List`, which `carrier()`
+classifies as `UndecodableHead` when its second element is a map and as
+`MalformedLegacyList` otherwise, while the same structural list stamped from
+`.dp` text is a `StructuralList`. Even the total view sees one construct two
+ways.
+
+E5d and E5e manage that duplication rather than remove it. A changed-line lint
+recognizes a spelling; it does not see a reader reached through an alias, a
+macro, or a helper, and it says nothing about the readers already on `main`.
+The E5e sweep is unbounded by this design's own account, and each slice adds
+arms for a representation [#1029] exists to delete. The project's tenet that
+prefers the design making a defect class impossible over a ratchet on its
+instances decides the completion:
+
+1. **Delete the second spelling.** `Expr::List`, `struct List`, `Atom::Tag`,
+   `Node::to_list`, and `ExprCarrier::MalformedLegacyList` are removed, with
+   the three normalizers: Surf's output boundary, the checker's
+   `normalize_nodes_to_lists`, and `deep_compat`. Every producer builds
+   `Expr::Node`, `Expr::BareList`, or `Expr::UnknownForm`, and the stamper's
+   per-role table is the one rule deciding which.
+2. **Rewrite, never drop.** Every reader that matched `List` stops compiling
+   and is rewritten against `Node`, `BareList`, `UnknownForm`, or `carrier()`.
+   A removed `List` arm is replaced by its equivalent arm, never absorbed into
+   a catch-all, unless the reader is shown to be dead. This subsumes [#1320]:
+   the macro binder walks compile only once they read `Node(Bind)`.
+3. **Retire the ratchet.** E5d is withdrawn and E5e subsumed, as recorded in
+   the deliverables above. The compiler enforces the rule for every reader,
+   not only for changed lines.
+
+After the deletion, [04-TOT-5]'s carrier clause holds by construction for the
+node spellings: a program has one in-memory representation whatever its
+ingress, so no reader can see one entry's spelling and miss the other's. What
+stays checkable is that the two producers agree, since Surf desugaring and the
+`.dp` stamper each build trees. The completion oracle is therefore three
+parts: the PP7 parity set above, unchanged and green; a producer-agreement
+test over the executable examples, asserting that desugaring a Surf program
+yields the same tree, spans aside, as stamping the Deep text it prints to;
+and a differential run of `check`, `eval`, and C `build` over the same corpus
+against the pre-deletion compiler, identical except where a row records an
+intended repair.
 
 #### What PP7 does not establish
 
@@ -4069,6 +4125,7 @@ is also separate.
 | 20 | which of the two checker pass sets is correct, and whether one shared driver replaces the two inference functions | DECIDED 2026-09-08 and IMPLEMENTED 2026-09-16: union plus dispositions. All four entries run the spec-required surviving checks through `validate_semantic_program`; `report_initialization_errors` lives there, `chelis_deep::validate` is deleted as a duplicate, and stamped input is preserved rather than normalized. [05-OP-51] owns convolution's static-versus-runtime domain split. Five backend-capability restrictions (termination, symbolic conv metadata, `mean` and `layer_norm` axis concreteness, and conv's literal-operand demand) relocate to [#730]. Both drivers use declaration-local external-input prebinding under [04-INF-4] and defsig-less function-header prebinding under [04-INF-2]/[04-INF-3]; body metadata never publishes an eager value. Union alone and union plus normalization remain rejected by the measured contract and carrier failures | [04-TOT-5] + PP9 |
 | 21 | whether a borrow's target type is decided at the borrow arm or after def-level resolution, and whether the #256 deferred classification survives [04-INF-6] ([#1589]) | DECIDED by `spec/04` §8.2, which already states it: the inner "must be — or must ultimately resolve to — a tensor or a tensor-carrying value", and classification is deferred when it is not yet known. No language decision is open. The reading that a borrow is decided where it is written is REFUTED by execution: disabling `validate_deferred_borrow_vars` makes `def use_it[a](seed: a) -> bool = { v = seed  consume_any(&v) }` score 1.00 with no errors, reopening the #256 round-2 unsoundness, and turns all three of the suite's deferred-path tests red, so the validator is live code and its two acceptance tests were merely relabelled by [#1542]. The issue's original premise that an inferred parameter "rejects at the borrow arm" is also wrong: measured, the borrow arm defers, the validator resolves it `sound=true`, and the 0.80 `InvalidBorrow` comes from linearity's `check_borrow_arg`, which failed closed because `expr_type` returns `None` for a `(var ..)` node whose parameter annotation is a synthesized hole. The repair reads the resolved `&T` the annotate pass already stamps on the `borrow` node. Rows C/E/F/G of the [#1589] header matrix become accepted regression rows; rows I/J/K stay rejected as locks on the validator's reject branch; §8.2's `relu` example is corrected, because unresolved dimension variables never reach the deferral | `spec/04` §8.2 + PP6 residue |
 | 22 | whether a `defsig` occurrence may introduce a type, dimension, or rank binder | DECIDED 2026-09-17 for [#1854]: no. Surf's `[..]` list and Deep's structural `defsig` binder-list child are the only authored declaration-binder sources. Unlisted variable nodes reject; unknown scalar/precision names remain primitive requests and receive an unknown-dtype diagnostic with a nearest active spelling. The regex/alias heuristic alternative is rejected because it leaves an open typo class | spec/02 P4b + spec/03 §2.2/§2.5.1 + spec/04 §3.1.3/§5.8.1 + PP6 |
+| 23 | whether PP7 completes by ratcheting the transitional `Expr::List` spelling (E5d lint, E5e sweep) or by deleting it | DECIDED 2026-09-22: delete it. Two spellings of one construct make every reader owe both, and the total accessor itself classifies a Surf structural list differently from the same list stamped from `.dp`. `Expr::List`, `struct List`, `Atom::Tag`, `Node::to_list`, `ExprCarrier::MalformedLegacyList`, and the three normalizers are removed; every former `List` reader is rewritten, never dropped into a catch-all. E5d is withdrawn and E5e subsumed; [#1320] is subsumed because the binder walks compile only once they read `Node(Bind)`. Acceptance adds a producer-agreement test and a pre/post differential over the example corpus to the unchanged PP7 parity set | [04-TOT-5] + PP7 + [#1029] |
 
 ## Contract summary
 
