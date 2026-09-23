@@ -698,8 +698,10 @@ pub(crate) fn resolve_declared_surface(
 pub(crate) fn build_compiled_library_context(
     exprs: &[chelis_deep::Expr],
 ) -> Result<(TypeEnv, CheckedProgram), InferResult> {
-    run_with_metadata(exprs, |sink| {
-        crate::infer::build_compiled_library_context_in_session(exprs, sink)
+    crate::infer::run_on_grown_stack(|| {
+        run_with_metadata(exprs, |sink| {
+            crate::infer::build_compiled_library_context_in_session(exprs, sink)
+        })
     })
 }
 
@@ -707,8 +709,10 @@ pub(crate) fn build_compiled_library_context_with_base(
     base: &TypeEnv,
     exprs: &[chelis_deep::Expr],
 ) -> Result<(TypeEnv, CheckedProgram), InferResult> {
-    run_with_metadata(exprs, |sink| {
-        crate::infer::build_compiled_library_context_with_base_in_session(base, exprs, sink)
+    crate::infer::run_on_grown_stack(|| {
+        run_with_metadata(exprs, |sink| {
+            crate::infer::build_compiled_library_context_with_base_in_session(base, exprs, sink)
+        })
     })
 }
 
