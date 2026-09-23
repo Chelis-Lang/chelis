@@ -1,8 +1,8 @@
 //! chelis#1512 round 2 P2-1: the `PostApp` ledger key names a node that
 //! outlives its entry.
 //!
-//! The entry is keyed by the address of the call's `deep::List`. On the replay
-//! path the caller holds the ledger's own CLONE of that list, which is dropped
+//! The entry is keyed by the address of the call's `app` node. On the replay
+//! path the caller holds the ledger's own CLONE of that node, which is dropped
 //! when the replay iteration ends, so a route that re-registers during a
 //! replay used to store an address freed moments later. Nothing observed a
 //! collision, but `has_post_app_check_for` answering for an unrelated live

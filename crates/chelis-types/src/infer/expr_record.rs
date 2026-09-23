@@ -359,8 +359,8 @@ pub(super) fn infer_record(
         // `arity_contract(Kv)` is `Fixed(2)` and `Node::try_new` enforces it at
         // the stamp boundary, so `(kv {} r)` is rejected as
         // `wrong child count for 'kv': expected Fixed(2), got 1` before inference
-        // ever runs; this arm is reachable only from the producerless legacy
-        // `Expr::List` carrier, and it keeps the pre-fix behaviour untouched.
+        // ever runs, and no other spelling of a `kv` node exists; the let-else
+        // only keeps this read total.
         let Some(value) = kv_kids.get(1) else {
             continue;
         };
@@ -738,8 +738,8 @@ pub(super) fn infer_record_update(
         // `arity_contract(Kv)` is `Fixed(2)` and `Node::try_new` enforces it at
         // the stamp boundary, so `(kv {} r)` is rejected as
         // `wrong child count for 'kv': expected Fixed(2), got 1` before inference
-        // ever runs; this arm is reachable only from the producerless legacy
-        // `Expr::List` carrier, and it keeps the pre-fix behaviour untouched.
+        // ever runs, and no other spelling of a `kv` node exists; the let-else
+        // only keeps this read total.
         let Some(value) = kv_kids.get(1) else {
             continue;
         };
