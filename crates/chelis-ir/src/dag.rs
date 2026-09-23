@@ -1238,6 +1238,18 @@ pub enum RiscAtomDisposition {
 }
 
 impl RiscOp {
+    /// chelis#2368 / [05-OP-68]: operations that must execute because of
+    /// what they DO, not because something consumes their result.
+    ///
+    /// Every liveness computation in the compiler derives "live" from value
+    /// reachability, and an abort has no consumer by design, so each one
+    /// needs this seed. `Store` is deliberately NOT here: it carries its own
+    /// `implicit_observations` gating, because a projected execution slice
+    /// legitimately excludes an unrelated store.
+    pub const fn is_unconditional_effect(&self) -> bool {
+        matches!(self, Self::GuardedFail { .. })
+    }
+
     pub const fn atom_disposition(&self) -> RiscAtomDisposition {
         use RiscAtomDisposition::{Semantic, Structural};
         use RiscAtomIdentity as Id;

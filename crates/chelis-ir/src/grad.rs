@@ -769,7 +769,11 @@ fn prune_to_requested_outputs(
         live[root.0] = true;
     }
     for node in dag.nodes() {
-        if matches!(node.op, RiscOp::Store { .. }) {
+        // chelis#2368: `Store` and every unconditional effect. grad has its
+        // own pruner, separate from `optimize::dead_code_eliminate`, so the
+        // seed has to be repeated here — the definition is shared even where
+        // the loop is not.
+        if matches!(node.op, RiscOp::Store { .. }) || node.op.is_unconditional_effect() {
             live[node.id.0] = true;
         }
     }
