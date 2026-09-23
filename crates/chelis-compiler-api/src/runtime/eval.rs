@@ -2533,6 +2533,16 @@ impl<'a> EvalContext<'a> {
                         self.binding_types.insert(name.clone(), None);
                     }
                 }
+                // [04-PAT-2]: the guard runs only after the pattern matched,
+                // in the arm's scope. `false` discards the arm's bindings and
+                // tries the next arm; a failing guard fails the match.
+                let selected = self.eval_match_guard(&arm_kids[1]);
+                if !matches!(selected, Ok(true)) {
+                    self.bindings = saved;
+                    self.binding_types = saved_types;
+                    selected?;
+                    continue;
+                }
                 let value = self.eval_under_result_claim(&arm_kids[2], claims);
                 self.bindings = saved;
                 self.binding_types = saved_types;
@@ -2542,6 +2552,21 @@ impl<'a> EvalContext<'a> {
             self.binding_types = saved_types;
         }
         Err("non-exhaustive runtime match".to_string())
+    }
+
+    /// An arm without a guard carries `()` in its guard slot and is selected
+    /// whenever its pattern matches.
+    fn eval_match_guard(&mut self, guard: &Expr) -> Result<bool, String> {
+        if matches!(guard.carrier(), ExprCarrier::StructuralList([])) {
+            return Ok(true);
+        }
+        match self.eval_expr(guard)? {
+            RuntimeValue::Bool(selected) => Ok(selected),
+            other => Err(format!(
+                "match arm guard must be bool, got {}",
+                render_value(&other)
+            )),
+        }
     }
 
     pub(super) fn apply_resolved_callable(

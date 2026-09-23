@@ -340,6 +340,95 @@ fn runtime_match_patterns_read_decoded_nodes() {
     assert_eq!(successor.as_ref().map(render_value), Ok("42".to_string()));
 }
 
+/// `(match {} (lit {} scrutinee) (arm {} (pat-var {} flag) guard (lit {} 1))
+/// (arm {} (pat-wild {}) () fallback))`: the first arm's guard is `guard`,
+/// and the second arm is guardless.
+fn guarded_match(scrutinee: bool, guard: Expr, fallback: Expr) -> Expr {
+    let span = chelis_deep::Span::new(4, 12);
+    let node = |tag, children| Expr::node(tag, Metadata::default(), children, span);
+    node(
+        DeepTag::Match,
+        vec![
+            node(DeepTag::Lit, vec![Expr::Atom(Atom::Bool(scrutinee), span)]),
+            node(
+                DeepTag::Arm,
+                vec![
+                    node(
+                        DeepTag::PatVar,
+                        vec![Expr::Atom(Atom::Name("flag".to_string()), span)],
+                    ),
+                    guard,
+                    node(DeepTag::Lit, vec![Expr::Atom(Atom::Int(1), span)]),
+                ],
+            ),
+            node(
+                DeepTag::Arm,
+                vec![
+                    node(DeepTag::PatWild, vec![]),
+                    Expr::BareList(vec![], span),
+                    fallback,
+                ],
+            ),
+        ],
+    )
+}
+
+fn raw_var(name: &str) -> Expr {
+    let span = chelis_deep::Span::new(4, 12);
+    Expr::node(
+        DeepTag::Var,
+        Metadata::default(),
+        vec![Expr::Atom(Atom::Name(name.to_string()), span)],
+        span,
+    )
+}
+
+fn raw_int(value: i64) -> Expr {
+    let span = chelis_deep::Span::new(4, 12);
+    Expr::node(
+        DeepTag::Lit,
+        Metadata::default(),
+        vec![Expr::Atom(Atom::Int(value), span)],
+        span,
+    )
+}
+
+/// REGRESSION TEST ([04-PAT-2], chelis#2445). The guard reads the binding
+/// its own pattern introduced, and a `false` guard passes control to the next
+/// arm. Before the fix the guard slot was never read, so the first arm won for
+/// both scrutinees.
+#[test]
+fn runtime_match_guard_reads_its_binding_and_false_tries_the_next_arm() {
+    let selected = issue_1125_eval_raw_expr(&guarded_match(true, raw_var("flag"), raw_int(2)));
+    assert_eq!(selected.as_ref().map(render_value), Ok("1".to_string()));
+    let skipped = issue_1125_eval_raw_expr(&guarded_match(false, raw_var("flag"), raw_int(2)));
+    assert_eq!(skipped.as_ref().map(render_value), Ok("2".to_string()));
+}
+
+/// REGRESSION TEST ([04-PAT-2]). A skipped arm's bindings are discarded: the
+/// next arm cannot read `flag`. Before the fix the first arm was selected, so
+/// the fallback never ran.
+#[test]
+fn runtime_match_guard_that_is_false_discards_its_bindings() {
+    let result = issue_1125_eval_raw_expr(&guarded_match(false, raw_var("flag"), raw_var("flag")));
+    let error = result.expect_err("the skipped arm's `flag` must not reach the next arm");
+    assert!(error.contains("flag"), "{error}");
+}
+
+/// REGRESSION TEST, negative parity ([04-PAT-2]). A guard that cannot be
+/// evaluated fails the match rather than reading as `false`, and a guard that
+/// is not a `bool` is rejected rather than read as truthy. Before the fix both
+/// programs returned the first arm's `1`.
+#[test]
+fn runtime_match_guard_that_fails_or_is_not_bool_fails_the_match() {
+    let unbound = issue_1125_eval_raw_expr(&guarded_match(true, raw_var("missing"), raw_int(2)));
+    let error = unbound.expect_err("a failing guard must fail the match");
+    assert!(error.contains("missing"), "{error}");
+    let not_bool = issue_1125_eval_raw_expr(&guarded_match(true, raw_int(7), raw_int(2)));
+    let error = not_bool.expect_err("a non-bool guard must fail the match");
+    assert!(error.contains("match arm guard must be bool"), "{error}");
+}
+
 #[test]
 fn runtime_pattern_reader_matches_every_decoded_pattern() {
     use chelis_deep::Span;
