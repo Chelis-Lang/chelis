@@ -7870,7 +7870,7 @@ struct ShellTypeVariableRenamer {
 
 impl ShellTypeVariableRenamer {
     fn rewrite(&mut self, expr: &chelis_deep::Expr) -> chelis_deep::Expr {
-        use chelis_deep::{Expr as DeepExpr, List, MetaExpr, UnknownFormData};
+        use chelis_deep::{Expr as DeepExpr, MetaExpr, UnknownFormData};
 
         match expr {
             DeepExpr::Atom(..) => expr.clone(),
@@ -7891,19 +7891,6 @@ impl ShellTypeVariableRenamer {
                     .map(|(index, child)| self.rewrite_child(tag, index, child))
                     .collect();
                 DeepExpr::node(tag, self.rewrite_meta(node.meta()), children, *span)
-            }
-            DeepExpr::List(list, span) => {
-                let tag = list.tag();
-                let elements = list
-                    .elements
-                    .iter()
-                    .enumerate()
-                    .map(|(index, child)| match tag {
-                        Some(tag) if index >= 2 => self.rewrite_child(tag, index - 2, child),
-                        _ => self.rewrite(child),
-                    })
-                    .collect();
-                DeepExpr::List(List { elements }, *span)
             }
             DeepExpr::BareList(children, span) => DeepExpr::BareList(
                 children.iter().map(|child| self.rewrite(child)).collect(),
@@ -8673,10 +8660,10 @@ fn sig_type_repr(module: &ModuleSource, name: &str) -> Result<Option<String>, St
     let Some(expr) = deep.first() else {
         return Ok(None);
     };
-    let chelis_deep::ast::Expr::List(list, _) = expr else {
+    let chelis_deep::ast::Expr::Node(node, _) = expr else {
         return Ok(None);
     };
-    Ok(list.elements.get(3).map(canonical_shell_type_repr))
+    Ok(node.children_slice().get(1).map(canonical_shell_type_repr))
 }
 
 fn symbol_effects(module: &ModuleSource, name: &str) -> Vec<String> {
