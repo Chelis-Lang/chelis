@@ -2,7 +2,7 @@
 
 Tracker: chelis#2413. Status: **decided 2026-09-23 (Robert).** Chelis moves from the counter stream of [05-RNG-1] to explicit keys, after the phases shared by both designs (`randomness_counter_stream.md` phases 1 to 3).
 
-Until the language change lands, the numbered spec still specifies the counter stream, and every lane must keep meeting it, apart from the gaps tracked under #2413. The numbered chapters are amended in the same change set as the switch (§5, step 3). This document plans that change; it does not decide semantics ahead of those amendments.
+Until the language change lands, the numbered spec still specifies the counter stream, and every lane must keep meeting it, apart from the gaps tracked under #2413. The numbered chapters are amended together with the implementation steps in §5, each step with the text it implements. This document plans that change; it does not decide semantics ahead of those amendments.
 
 ## 1. Why
 
@@ -32,9 +32,12 @@ The counter stream is the special case of this design in which the compiler pick
 
 Here `derive(k, j) = splitmix64(k XOR rotl64(splitmix64(j), 29))`. These are LaCaDiLE PR #80's definitions, so the language and the model agree bit for bit. The derivation is a finalised mix, never a bare XOR of per-index terms: a chained `fold_in(fold_in(k, a), b)` would otherwise be symmetric in `a` and `b`, the defect #2408 found in the older `uniform_like` mixing.
 
-**Keys are affine: each key is used at most once.** Passing a key to a random primitive, `split` or `fold_in` consumes it. No `copy` of a key exists, whether written or compiler-inserted, so reuse is a type error, and dropping an unused key is allowed. Affinity propagates to tuples, lists and data types that contain a key.
+**Keys are affine: each key is used at most once.** Passing a key to a random primitive, `split` or `fold_in` consumes it. The rule is stated on the category, not per container. A value that is a key, or that contains one (a tuple, record, list, data type or `tensor[n, key]`), cannot be borrowed, cannot be copied (whether by an explicit or a compiler-inserted `copy`), and has no read that leaves it live. A key is reached only by consuming its holder:
+- a destructuring `match` or `let` pattern;
+- `vmap` over a key axis, which gives each row to one application;
+- a key-consuming operation.
 
-A `tensor[n, key]` is one affine value. It cannot be borrowed, and no operation that reads or copies elements (`expand`, gather, indexing, reshape, and every other read-only tensor operation) accepts it. Its rows are consumed only by `vmap` over its leading axis, which gives each row to one application, or by a consuming unstack into a list of keys.
+Backward-pass replay reads are the only exception. Reuse is therefore a type error, and dropping an unused key is allowed.
 
 The JAX idiom of repeated `fold_in(k, step)` on one retained key is written `split(k, n)` instead: consuming `k` once yields `n` keys.
 
@@ -98,6 +101,7 @@ The bridge exists to give the IR rewrite a bit-identical oracle. Phase 3 states 
 1. **Additive key operations.** The `key` dtype (spec/04 §1.1) and new atoms for `key`, `split`, `fold_in` and `derive` (spec/05). The IR operations, verifier, evaluators and C emission for them, and the `vmap` lifting over key rows. The next wire version, with spec/10 amended in the same step.
 2. **The checker.** Affine linearity for keys and key tensors (spec/04's linearity rules) and key-typed signatures.
 3. **The switch, in one change set.** It lands together:
+   - removal of phase 3's `vmap` fence (#2409), now that `vmap` over key rows is defined;
    - the surface;
    - host lowering of key values, and C host key locals;
    - public-entry key parameters, with the published `chelis_key` carrier, its census row, execution values and Python bindings;
@@ -111,7 +115,10 @@ The bridge exists to give the IR rewrite a bit-identical oracle. Phase 3 states 
 
 **Shells** (a minor release; every shell bumps). The affected set is derived at switch time, not listed here. Search every Chelis-Lang repository and spec document for `with seed`, `Random`, and each random builtin and helper. That search already includes hello-chelis, the spec registry, and the canonical reference's randomness paragraphs. Hull moves in lockstep with the compiler, because it differential-tests it.
 
-**Superseded issues.** #2409 (`vmap` ordinals) and #2410 (unselected-arm ordinals) close when the switch lands, because keys remove ordinals. Until then, the phase 3 bridge keeps today's behaviour for both, which is out of spec and tracked. Anything silently wrong in a new way must be fenced.
+**Superseded issues.** #2409 (`vmap` ordinals) and #2410 (unselected-arm ordinals) close when the switch lands, because keys remove ordinals. Until then:
+- phase 3 refuses `vmap` over a function that draws, because eval's bits would otherwise change to a different non-conforming value;
+- C's unselected-arm count stays as today, out of spec and tracked;
+- anything silently wrong in a new way must be fenced.
 
 ## 6. LaCaDiLE
 

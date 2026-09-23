@@ -67,8 +67,6 @@ This is the explicit-key IR. Only the key source changes at the switch.
 
 `DrawKey` is effectful: a DCE root, never merged, never folded or recomputed, and ordered as today. It takes its kernel's controls as ordering inputs, and advances the frame only after they validate, preserving [05-OP-37]'s "validation consumes no ordinal". A scoped `with seed` inside a kernel carries its literal seed.
 
-`DrawKey` takes the arm's path condition wherever lowering computes both arms of a scalar `if`. It advances the frame only when active, which closes #2410 in phase 3.
-
 `vmap` over a function that draws is refused with a typed #2409 rejection in both lanes until the switch defines it. Today eval draws at seed 0, and C draws one batched ordinal. Both are silently non-conforming, so they become loud.
 
 **Gradient replay reads the key edge.** `DropoutReplay` and `UniformBoundAdjoint` read the forward node's key, and recomputation gives the same bits. That edge replaces the per-site key table, its "entered twice" check and the static-spine requirement. Recursion, dynamic control and nested `grad` need nothing more (spec/06 §2.10.1).
@@ -85,9 +83,10 @@ This is the explicit-key IR. Only the key source changes at the switch.
 - the plan-less dropout formula (`chelis-ir/src/eval.rs` ~373-403);
 - the older uniform mixing (`uniform_sample`'s `seed ^ i·G`, the interpreter's `seed ^ c·G`, and the emitted C equivalents).
 
-Fixed-control plans and the random parts of `evaluation.rs` and `execution_spine.rs` are deleted: the key edge subsumes them. Two things survive until the switch:
-- the spine's Resource-requirement capture, which the `compilation-trace` feature reads, moves to `lowering_trace.rs`;
-- `random_observer.rs` is ported to observe `DrawKey` nodes.
+Fixed-control plans and the random parts of `evaluation.rs` and `execution_spine.rs` are deleted: the key edge subsumes them. Three consumers of those parts are kept:
+- the spine's Resource-requirement capture moves to `lowering_trace.rs`, because the `compilation-trace` feature reads it;
+- the `compilation-trace` feature's fixed-entry selection (`compiler.rs`, around lines 2188-2205) selects the lowered kernel with its `DrawKey` nodes;
+- `random_observer.rs` is ported to observe `DrawKey` nodes until the switch deletes it.
 
 LaCaDiLE certification export remains opt-in and reads the symbolic key derivations.
 
@@ -109,7 +108,8 @@ Each phase is one pull request with its own red-team rounds. The oracle for ever
    6. spec/10 §3.2 and the changelog.
 
    Oracles:
-   - every program that ran at the base produces identical bits, except programs that `vmap` a random function (now refused, #2409) and C programs that drew in an unselected arm (now conforming, #2410);
+   - every program that ran at the base produces identical bits, except programs that `vmap` a random function, which are now refused (#2409);
+   - the reference-match oracle excludes C programs that draw in an unselected arm, which stay shifted by one ordinal until the switch (#2410);
    - runtime rates and bounds, and dropout under runtime `if`/`match`/recursion, run in eval and C and match the reference;
    - a rate reached through adjoint-contract slots rejects with `RandomSelectionParameter`, with the rejection registry regenerated, while `stop_gradient(rate)` and a rate independent of the parameters both differentiate;
    - no `EvaluationProfile` remains.
