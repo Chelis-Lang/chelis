@@ -9662,15 +9662,16 @@ fn lower_match_host_expr(
                 )
             }
             // Otherwise a `bool` test decides the arm, so the rest of the
-            // match is still emitted once rather than once per exit, and the
-            // body destructures again under its own names. Every failure exit
-            // of that second destructuring is unreachable. Emitting the rest
-            // once per exit would compound: the rest can hold further arms,
-            // or a body that is itself a match. The test has already matched
-            // the pattern's literals, so the second destructuring does not
-            // test them again: that test would only add a branch to the arm,
-            // and an owned ADT scrutinee is not released on a branching arm
-            // (chelis#2458).
+            // match is still emitted once rather than once per exit. Emitting
+            // it once per exit would compound: the rest can hold further
+            // arms, or a body that is itself a match. The two passes over the
+            // scrutinee each carry only what they need. The test carries the
+            // pattern's tests and the names its guard reads. The selected
+            // pass carries the pattern's constructor and, below it, only its
+            // bindings: the test has already matched everything else, so no
+            // sub-pattern that binds nothing is read or tested again there.
+            // An unused owned field, and an owned ADT scrutinee consumed by a
+            // branching arm, are never released (chelis#2458).
             Some(test_plan) => {
                 let test = compile_host_pattern(
                     &test_plan,
@@ -9682,7 +9683,7 @@ fn lower_match_host_expr(
                     &mut names,
                 );
                 let selected = compile_host_pattern(
-                    &arm.plan.without_literal_tests(),
+                    &arm.plan.binding_pass(),
                     scrutinee_var.clone(),
                     arm.body,
                     no_arm_selected(),
@@ -9717,8 +9718,9 @@ struct LoweredHostMatchArm {
     /// The pattern the body destructures under.
     plan: HostPatternPlan,
     /// A second plan of the same pattern, under fresh names, that decides the
-    /// arm as a `bool` together with the guard. `None` when the pattern and
-    /// guard together have at most one failure exit.
+    /// arm as a `bool` together with the guard: its tests, and only the
+    /// bindings the guard reads. `None` when the pattern and guard together
+    /// have at most one failure exit.
     test: Option<HostPatternPlan>,
     /// The lowered guard, in the scope of `test` when there is one and of
     /// `plan` otherwise.
@@ -9752,7 +9754,14 @@ fn lower_host_match_arm(
     };
     let plan = plan_host_pattern(pattern, scrutinee_ty, program, match_expr, names)?;
     let test = (plan.failure_exits() + usize::from(guard.is_some()) > 1)
-        .then(|| plan_host_pattern(pattern, scrutinee_ty, program, match_expr, names))
+        .then(|| {
+            let mut guard_names = UnordSet::new();
+            if let Some(guard) = guard {
+                collect_occurring_names(guard, &mut guard_names);
+            }
+            plan_host_pattern(pattern, scrutinee_ty, program, match_expr, names)
+                .map(|test| test.test_pass(&guard_names))
+        })
         .transpose()?;
     let guard = guard
         .map(|guard| {
@@ -9815,11 +9824,21 @@ enum HostPatternPlan {
 }
 
 impl HostPatternPlan {
-    /// The same pattern with every literal test removed, for destructuring a
-    /// value already known to match it.
-    fn without_literal_tests(&self) -> Self {
+    /// Whether the pattern binds any name.
+    fn binds_a_name(&self) -> bool {
         match self {
-            Self::Literal(_) => Self::Wild,
+            Self::Bind { .. } | Self::As { .. } => true,
+            Self::ListCons { head, tail, .. } => head.binds_a_name() || tail.binds_a_name(),
+            Self::Tuple(items) => items.iter().any(|(item, _)| item.binds_a_name()),
+            Self::OptionSome { inner, .. } => inner.binds_a_name(),
+            Self::Adt { fields, .. } => fields.iter().any(|(_, field, _)| field.binds_a_name()),
+            Self::Wild | Self::Literal(_) | Self::ListNil | Self::OptionNone => false,
+        }
+    }
+
+    /// The same pattern with `f` applied to each immediate sub-pattern.
+    fn map_sub_patterns(&self, f: fn(&Self) -> Self) -> Self {
+        match self {
             Self::As {
                 source_name,
                 lowered_name,
@@ -9829,7 +9848,7 @@ impl HostPatternPlan {
                 source_name: source_name.clone(),
                 lowered_name: lowered_name.clone(),
                 ty: ty.clone(),
-                inner: Box::new(inner.without_literal_tests()),
+                inner: Box::new(f(inner)),
             },
             Self::ListCons {
                 head,
@@ -9837,29 +9856,112 @@ impl HostPatternPlan {
                 element_ty,
                 list_ty,
             } => Self::ListCons {
-                head: Box::new(head.without_literal_tests()),
-                tail: Box::new(tail.without_literal_tests()),
+                head: Box::new(f(head)),
+                tail: Box::new(f(tail)),
                 element_ty: element_ty.clone(),
                 list_ty: list_ty.clone(),
             },
             Self::Tuple(items) => Self::Tuple(
                 items
                     .iter()
-                    .map(|(item, ty)| (item.without_literal_tests(), ty.clone()))
+                    .map(|(item, ty)| (f(item), ty.clone()))
                     .collect(),
             ),
             Self::OptionSome { inner, inner_ty } => Self::OptionSome {
-                inner: Box::new(inner.without_literal_tests()),
+                inner: Box::new(f(inner)),
                 inner_ty: inner_ty.clone(),
             },
             Self::Adt { ctor, fields } => Self::Adt {
                 ctor: ctor.clone(),
                 fields: fields
                     .iter()
-                    .map(|(index, field, ty)| (*index, field.without_literal_tests(), ty.clone()))
+                    .map(|(index, field, ty)| (*index, f(field), ty.clone()))
                     .collect(),
             },
-            Self::Wild | Self::Bind { .. } | Self::ListNil | Self::OptionNone => self.clone(),
+            Self::Wild
+            | Self::Bind { .. }
+            | Self::Literal(_)
+            | Self::ListNil
+            | Self::OptionNone => self.clone(),
+        }
+    }
+
+    /// The pass that decides an arm: every test of the pattern, and only the
+    /// bindings whose source name is in `read`, the names its guard reads.
+    /// Every other binder becomes a wildcard, so its part of the value is not
+    /// read.
+    fn test_pass(&self, read: &UnordSet<String>) -> Self {
+        match self {
+            Self::Bind { source_name, .. } if !read.contains(source_name) => Self::Wild,
+            Self::As {
+                source_name, inner, ..
+            } if !read.contains(source_name) => inner.test_pass(read),
+            Self::As {
+                source_name,
+                lowered_name,
+                ty,
+                inner,
+            } => Self::As {
+                source_name: source_name.clone(),
+                lowered_name: lowered_name.clone(),
+                ty: ty.clone(),
+                inner: Box::new(inner.test_pass(read)),
+            },
+            Self::ListCons {
+                head,
+                tail,
+                element_ty,
+                list_ty,
+            } => Self::ListCons {
+                head: Box::new(head.test_pass(read)),
+                tail: Box::new(tail.test_pass(read)),
+                element_ty: element_ty.clone(),
+                list_ty: list_ty.clone(),
+            },
+            Self::Tuple(items) => Self::Tuple(
+                items
+                    .iter()
+                    .map(|(item, ty)| (item.test_pass(read), ty.clone()))
+                    .collect(),
+            ),
+            Self::OptionSome { inner, inner_ty } => Self::OptionSome {
+                inner: Box::new(inner.test_pass(read)),
+                inner_ty: inner_ty.clone(),
+            },
+            Self::Adt { ctor, fields } => Self::Adt {
+                ctor: ctor.clone(),
+                fields: fields
+                    .iter()
+                    .map(|(index, field, ty)| (*index, field.test_pass(read), ty.clone()))
+                    .collect(),
+            },
+            Self::Wild
+            | Self::Bind { .. }
+            | Self::Literal(_)
+            | Self::ListNil
+            | Self::OptionNone => self.clone(),
+        }
+    }
+
+    /// The pass that destructures a value its arm's test has already
+    /// matched: the pattern's own constructor, and below it only the
+    /// bindings. Every sub-pattern that binds no name becomes a wildcard,
+    /// because the test has already matched it. The top keeps its shape so
+    /// the selected arm still consumes the scrutinee, which leaves the test
+    /// only borrowing it: a test's arm branches, and an owned ADT scrutinee
+    /// consumed by a branching arm is never released (chelis#2458).
+    fn binding_pass(&self) -> Self {
+        match self {
+            Self::Literal(_) => Self::Wild,
+            _ => self.map_sub_patterns(Self::bound_part),
+        }
+    }
+
+    fn bound_part(&self) -> Self {
+        if self.binds_a_name() {
+            self.map_sub_patterns(Self::bound_part)
+        } else {
+            Self::Wild
         }
     }
 
@@ -10236,37 +10338,47 @@ fn compile_host_pattern(
                 result_ty,
                 names,
             );
-            let decomposed = HostExpr::new(HostExprKind::Let {
-                bindings: vec![
-                    HostBinding {
-                        name: head_name,
-                        display_name: None,
-                        display_roots: Vec::new(),
+            // A wildcard head or tail is neither tested nor bound, so it is
+            // not read out of the list either.
+            let mut bindings = Vec::with_capacity(2);
+            if !matches!(**head, HostPatternPlan::Wild) {
+                bindings.push(HostBinding {
+                    name: head_name,
+                    display_name: None,
+                    display_roots: Vec::new(),
+                    ty: element_ty.clone(),
+                    value: HostExpr::new(HostExprKind::Builtin {
+                        name: "index".to_string(),
+                        args: vec![value.clone(), HostExpr::new(HostExprKind::Int(0))],
                         ty: element_ty.clone(),
-                        value: HostExpr::new(HostExprKind::Builtin {
-                            name: "index".to_string(),
-                            args: vec![value.clone(), HostExpr::new(HostExprKind::Int(0))],
-                            ty: element_ty.clone(),
-                        }),
-                    },
-                    HostBinding {
-                        name: tail_name,
-                        display_name: None,
-                        display_roots: Vec::new(),
+                    }),
+                });
+            }
+            if !matches!(**tail, HostPatternPlan::Wild) {
+                bindings.push(HostBinding {
+                    name: tail_name,
+                    display_name: None,
+                    display_roots: Vec::new(),
+                    ty: list_ty.clone(),
+                    value: HostExpr::new(HostExprKind::Builtin {
+                        // The tail is [05-OP-54]'s List slice, `skip`.
+                        // `drop` is [05-OP-67]'s one-argument linearity
+                        // consume and would bind the tail to unit.
+                        name: "skip".to_string(),
+                        args: vec![value.clone(), HostExpr::new(HostExprKind::Int(1))],
                         ty: list_ty.clone(),
-                        value: HostExpr::new(HostExprKind::Builtin {
-                            // The tail is [05-OP-54]'s List slice, `skip`.
-                            // `drop` is [05-OP-67]'s one-argument linearity
-                            // consume and would bind the tail to unit.
-                            name: "skip".to_string(),
-                            args: vec![value.clone(), HostExpr::new(HostExprKind::Int(1))],
-                            ty: list_ty.clone(),
-                        }),
-                    },
-                ],
-                body: Box::new(matched_head),
-                ty: result_ty.clone(),
-            });
+                    }),
+                });
+            }
+            let decomposed = if bindings.is_empty() {
+                matched_head
+            } else {
+                HostExpr::new(HostExprKind::Let {
+                    bindings,
+                    body: Box::new(matched_head),
+                    ty: result_ty.clone(),
+                })
+            };
             if_matches(
                 HostExpr::new(HostExprKind::Builtin {
                     name: "neq".to_string(),

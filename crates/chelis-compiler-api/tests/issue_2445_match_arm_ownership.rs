@@ -3,17 +3,20 @@
 //!
 //! When an arm's pattern and guard have more than one failure exit, host
 //! lowering decides the arm with a `bool` test and the selected body
-//! destructures the scrutinee again ([04-PAT-2]). Testing a literal
-//! sub-pattern again in that second destructuring put a branch inside the arm,
-//! and an owned ADT scrutinee is not released on a branching arm
-//! (chelis#2458), so programs that were balanced before the planner leaked
-//! their scrutinee on every call. The second destructuring now skips the
-//! literals the test already matched.
+//! destructures the scrutinee again ([04-PAT-2]). Each pass carries only what
+//! it needs: the test carries the pattern's tests and the names its guard
+//! reads, and the selected pass carries the pattern's constructor and its
+//! bindings. Before that, the test read owned fields that nothing used, and
+//! the selected pass re-tested literals and nested constructors that bound
+//! nothing, which put a branch inside the arm. An owned ADT scrutinee is not
+//! released on a branching arm (chelis#2458), so programs that were balanced
+//! before the planner leaked on every call.
 //!
 //! Oracle: the compiled program runs against the `ownership-ledger` runtime,
-//! and every allocation must be finalized with no live owner left. Nested
-//! constructor sub-patterns such as `Box(Some(n))` still branch inside the
-//! arm and are chelis#2458's to fix; they are not claimed here.
+//! and every allocation must be finalized with no live owner left. A nested
+//! constructor sub-pattern that binds a name, such as `Box(Some(n))`, still
+//! branches inside the selected arm and is chelis#2458's to fix; it is not
+//! claimed here.
 
 mod ownership_support;
 
@@ -64,5 +67,86 @@ fn a_record_arm_with_a_literal_field_releases_its_scrutinee() {
          b = cls(Rect { w: 5.0, h: 2.0, tag: \"t\" })\n\
          c = cls(Circle { r: 1.0 })\n",
         "b = 2\nc = 0\n",
+    );
+}
+
+/// `f` called 100 times on `arg`, summed, for a program whose `f` holds the
+/// arm under test.
+fn repeated(declarations: &str, arm: &str, result: &str, arg: &str) -> String {
+    format!(
+        "{declarations}\
+         def f(v: Wrapped) -> {result} =\n  match v with {{\n    | {arm} => 1{result}\n    | _ => 0{result}\n  }}\n\
+         def repeat(k: i64, acc: {result}) -> {result} =\n  \
+         if eq(k, 0i64) then acc else repeat(sub(k, 1i64), add(acc, f({arg})))\n\
+         a = repeat(100i64, 0{result})\n"
+    )
+}
+
+/// REGRESSION TEST. On `d23960ff5` the arm's test read the string field
+/// bound to `s`, which nothing uses, and released it on neither branch: the
+/// ledger ended with 100 live owners, and `leaks --atExit` counted 300 leaked
+/// blocks.
+#[test]
+fn a_test_does_not_read_a_field_only_the_body_binds() {
+    assert_balanced(
+        "unused_owned_field",
+        &repeated(
+            "type Wrapped =\n  | Box(i64, string)\n  | NoBox\n",
+            "Box(3, s)",
+            "i64",
+            "Box(3i64, \"abc\")",
+        ),
+        "a = 100\n",
+    );
+}
+
+/// REGRESSION TEST. On `d23960ff5` the selected pass re-tested `ModeA`, a
+/// nested constructor that binds nothing: the ledger ended with 400 live
+/// owners, and `leaks --atExit` counted 900 leaked blocks.
+#[test]
+fn a_nested_nullary_constructor_is_not_tested_again() {
+    assert_balanced(
+        "nested_nullary",
+        &repeated(
+            "type Mode =\n  | ModeA\n  | ModeB\ntype Wrapped =\n  | W(Mode)\n  | X\n",
+            "W(ModeA)",
+            "i32",
+            "W(ModeA)",
+        ),
+        "a = 100\n",
+    );
+}
+
+/// REGRESSION TEST. On `d23960ff5` the selected pass re-tested `Some(_)`:
+/// the ledger ended with 300 live owners, and `leaks --atExit` counted 600
+/// leaked blocks.
+#[test]
+fn a_nested_option_that_binds_nothing_is_not_tested_again() {
+    assert_balanced(
+        "nested_option",
+        &repeated(
+            "type Wrapped =\n  | Box(Option[i64])\n  | NoBox\n",
+            "Box(Some(_))",
+            "i32",
+            "Box(Some(3i64))",
+        ),
+        "a = 100\n",
+    );
+}
+
+/// REGRESSION TEST. On `d23960ff5` the selected pass re-tested `Nil`: the
+/// ledger ended with 400 live owners, and `leaks --atExit` counted 900 leaked
+/// blocks.
+#[test]
+fn a_nested_empty_list_is_not_tested_again() {
+    assert_balanced(
+        "nested_nil",
+        &repeated(
+            "type Wrapped =\n  | Items(List[i64], string)\n  | Empty\n",
+            "Items(Nil, _)",
+            "i32",
+            "Items([], \"x\")",
+        ),
+        "a = 100\n",
     );
 }
