@@ -31,6 +31,7 @@ tempfile = "3"
 [build-dependencies]
 chelis-runtime-identity.workspace = true
 chelis-runtime-identity-build.workspace = true
+pyo3-build-config = { version = "0.24", features = ["resolve-config"] }
 
 [dev-dependencies]
 assert_cmd = "2"
