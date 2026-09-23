@@ -345,8 +345,11 @@ AD/verifier refactors; the public generic `UnordMap::FromIterator` is unchanged.
 
 The [patch dependency audit and source proposal](ARCHITECTURE.md#production-ad-patch-audit-and-source-proposal)
 record remaining dependencies and the limits of that audit. The
-[explicit-state runtime proposal](ARCHITECTURE.md#explicit-state-cutover-proposal)
-describes the TLS/unwind cutover; it is a design, not an implemented replacement.
+[explicit-state runtime cutover](ARCHITECTURE.md#explicit-state-cutover) now gives
+`HostLoweringSession` ownership of specialization, inlining, preflight, and scoped
+type-substitution state. Nested calls and unwind cleanup are covered by native
+regressions. The panic/cancellation shell remains native; this ownership change
+is not host-lowering extraction or a wrapper correspondence proof.
 
 Whole `chelis_pipeline_core` extraction is still blocked before LLBC generation:
 Charon rejects the thread-local reference reached through

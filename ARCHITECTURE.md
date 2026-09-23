@@ -205,11 +205,31 @@ gradient alongside `d(x*x)/dx = 4` at `x = 2`, and cancellation-token restoratio
 a caught unwind with isolation on a second thread. These are concrete boundary checks,
 not universal proofs.
 
-### Explicit-state cutover proposal
+### Explicit-state cutover
 
-This is a design, not an implemented runtime replacement. Keep one production
-implementation: no `_for_lean` checker, global-to-constant substitution, or opaque
-successful fallback.
+Host lowering now owns its invocation state in `HostLoweringSession`, separate from
+the program-bound fact caches. The existing session reference carried by `LowerCtx`
+also carries specialization state through staged DAG lowering; public function
+signatures and checked-program identity are unchanged.
+
+`HostInvocationGuard` starts each whole-program call with empty state and restores
+its caller on return or unwind. Inlining and pointer-keyed preflight facts have
+session-bound scope guards. Type-substitution guards move the previous map into the
+guard and restore it on exit: nested bindings replace rather than extend the outer
+map, and type decoding no longer clones that map. `MonoProbeGuard` still snapshots
+and restores the complete specialization state, including emission order and
+in-progress recursive entries.
+
+Native regressions cover nested substitutions, duplicate inlining scopes, preflight
+pointer isolation between programs, fatal-probe retries, and retained recursive
+calls and definition order after speculative or failed lowering. This is a production
+Rust ownership cutover, not host-lowering Lean extraction or a wrapper correspondence
+proof. It does not establish extracted semantics for `RefCell` accesses or guard
+destruction. Panic/cancellation services, global inference IDs, persistent thread
+counters, stack growth, and the native catch boundary remain unchanged.
+
+Keep one production implementation: no `_for_lean` checker, global-to-constant
+substitution, or opaque successful fallback.
 
 The extraction boundary should separate an explicit invocation state from a native
 runtime shell. Reuse `HostLoweringSession`, `LowerCtx`, and the authoritative
@@ -217,20 +237,20 @@ runtime shell. Reuse `HostLoweringSession`, `LowerCtx`, and the authoritative
 Checked-program/library provenance, local tensor obligations, and root manifests
 remain inputs with their existing seals; an invocation state must not mint them.
 
-| Existing state | Proposed owner | Required behavior |
+| State family | Owner or remaining target | Required behavior |
 | --- | --- | --- |
 | `GROUP_CTX`, opacity context, linked-program provenance | Checker invocation frames | Save and restore the previous frame, including reentrant checking and exceptional exit. Keep provenance construction at the trusted link boundary. |
-| `INLINING_STACK`, tensor-helper preflight stack, `ACTIVE_TYPE_SUBST` | Lowering invocation frames | Preserve push/pop order and the current specialization's bindings. Do not share mutable frames between threads. |
-| `MONO_SPECIALIZATIONS` and `MonoProbeGuard` | Host lowering session plus scoped probe snapshot | Preserve entry initialization, completion order, and rollback of speculative definitions and in-progress entries. Rollback restores the outer snapshot; it does not clear it. |
+| Former `INLINING_STACK`, tensor-helper preflight stack, `ACTIVE_TYPE_SUBST` | `HostLoweringSession::invocation` and scoped guards (implemented) | Preserve scope order and the current specialization's bindings. Nested sessions do not share mutable frames. |
+| Former `MONO_SPECIALIZATIONS` and `MonoProbeGuard` | Host invocation state plus scoped probe snapshot (implemented) | Preserve entry initialization, completion order, and rollback of speculative definitions and in-progress entries. Rollback restores the outer snapshot; it does not clear it. |
 | Panic-suppression flags | Explicit per-thread shell state | Preserve clear-to-false behavior and the explicit re-enable in `raise_fatal_lowering_diagnostic`; do not apply a uniform restore-previous rule. |
 | Cancellation token identity and relaxed loads | Native runtime services | Keep shared token identity and the original polling points. A frozen entry Boolean is not equivalent to cancellation arriving during a check. |
 | Atomic host-inference IDs, persistent thread counters, panic hook | Native runtime services | Preserve allocation/observation order and lifetime across invocations, including native ID wrapping or an explicit no-wrap bound. Resetting a global ID supply per run can invalidate identity comparisons. |
 | Stack growth, depth guards, first stack-bail record | Native resource boundary | Preserve the first reported site/span and normal-versus-abort behavior. Arbitrary Lean fuel is not a replacement for native stack availability. |
 
-Migration order:
+Remaining runtime migration and verification:
 
-1. Thread the existing state through one subsystem's complete call graph, retaining
-   the public native shell and removing that subsystem's TLS reads. Mutable state
+1. Apply the same ownership cutover to the remaining stateful subsystems, retaining
+   the public native shell and removing each subsystem's TLS reads. Mutable state
    belongs to the invocation; immutable checked-program facts can remain borrowed.
    Do not clone the entire program or runtime state at every recursive call.
 2. Make scope entry and exit explicit, with separate restore, clear, and rollback
@@ -250,8 +270,8 @@ Migration order:
    still required for the public entry point; retaining a native shell is not
    full-core extraction.
 
-Acceptance for that future cutover: identical ordered roots, values and diagnostics
-on success/rejection; nested cancellation/link/opacity restoration; suppression
+Acceptance for the complete runtime cutover additionally requires identical ordered
+roots, values and diagnostics on success/rejection; nested cancellation/link/opacity restoration; suppression
 clear/re-enable behavior across nested catches; speculative monomorphization rollback
 without leaked definitions; cancellation during a run and isolation across threads;
 unchanged panic-hook/finalizer order and first stack-bail receipt. Existing native

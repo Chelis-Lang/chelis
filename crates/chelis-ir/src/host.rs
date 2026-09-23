@@ -28,32 +28,12 @@ use crate::host_type_state::{
 use crate::lower::top_level_lowering_map;
 
 thread_local! {
-    // Tracks top-level callee names currently being inlined by
-    // `inline_top_level_host_call`. Prevents infinite specialization for
-    // recursive/mutually recursive definitions — the specialized body would
-    // re-encounter the same call and inline forever.
-    static INLINING_STACK: RefCell<UnordSet<String>> = RefCell::new(UnordSet::new());
-    // The per-program memos that used to live here are fields of
-    // `HostLoweringSession` (chelis#1835). The push/pop stacks stay: they
-    // track where the lowerer currently IS, which is a property of the
-    // thread's call stack rather than of the program.
-    static TENSOR_HELPER_PREFLIGHT_STACK:
-        RefCell<Vec<UnordMap<usize, TensorHelperPreflightFacts>>> = const { RefCell::new(Vec::new()) };
     // chelis#1829: kernel-decision summary probes that missed the memo and ran
     // a full callee lowering. `HostWorkProfile` beside it is `cfg(test)`-only
     // and therefore invisible to downstream crates, so this one is always
     // compiled: it lets a counted receipt in `chelis-compiler-api` bound the
     // interpreter's probe work without a wall clock.
     static HOST_SUMMARY_PROBE_BUILDS: Cell<u64> = const { Cell::new(0) };
-    // chelis#1158: bounded memoized monomorphization of recursive generic
-    // host calls. Keyed by the callee's canonical checked type application;
-    // one specialized definition per key, with in-progress entries visible
-    // so a recursive edge lowers to an ordinary call to the (possibly
-    // still-lowering) specialized symbol. Lifetime: one `lower_host_program`
-    // invocation (cleared at its entry, drained into the emitted program at
-    // its exit).
-    static MONO_SPECIALIZATIONS: RefCell<MonoSpecializationState> =
-        RefCell::new(MonoSpecializationState::default());
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -191,6 +171,55 @@ struct MonoSpecializationState {
     in_progress: Vec<InProgressMonoSpecialization>,
 }
 
+/// Mutable state of one host-lowering invocation, separate from program facts.
+/// Each scope borrows its own cell only to read or update it, never across a
+/// recursive lowering call. The session carried through `LowerCtx` owns these
+/// cells; a nested entry's fresh session cannot read or clear its caller's state.
+#[derive(Default)]
+struct HostInvocationState {
+    inlining: RefCell<UnordSet<String>>,
+    preflight: RefCell<Vec<UnordMap<usize, TensorHelperPreflightFacts>>>,
+    type_subst: RefCell<UnordMap<String, HostTypeTerm>>,
+    mono: RefCell<MonoSpecializationState>,
+}
+
+impl HostInvocationState {
+    fn swap(&self, other: &mut Self) {
+        std::mem::swap(&mut *self.inlining.borrow_mut(), other.inlining.get_mut());
+        std::mem::swap(&mut *self.preflight.borrow_mut(), other.preflight.get_mut());
+        std::mem::swap(
+            &mut *self.type_subst.borrow_mut(),
+            other.type_subst.get_mut(),
+        );
+        std::mem::swap(&mut *self.mono.borrow_mut(), other.mono.get_mut());
+    }
+}
+
+/// A whole-program call starts empty and restores its caller on every exit.
+/// Moving the state, rather than cloning it, also preserves nested invocation
+/// ownership without copying completed specializations or pointer-keyed facts.
+struct HostInvocationGuard<'a> {
+    state: &'a HostInvocationState,
+    previous: HostInvocationState,
+}
+
+impl<'a> HostInvocationGuard<'a> {
+    fn begin(program: &'a HostLoweringSession<'_>) -> Self {
+        let mut previous = HostInvocationState::default();
+        program.invocation.swap(&mut previous);
+        Self {
+            state: &program.invocation,
+            previous,
+        }
+    }
+}
+
+impl Drop for HostInvocationGuard<'_> {
+    fn drop(&mut self) {
+        self.state.swap(&mut self.previous);
+    }
+}
+
 /// RAII guard making speculative lowering side-effect-free on the
 /// specialization state (harden-bounded-monomorphization D1): the state is
 /// snapshotted at probe entry and restored on drop, so a probe can neither
@@ -198,21 +227,23 @@ struct MonoSpecializationState {
 /// definition was never pushed. Restore (not clear) semantics preserve an
 /// outer in-progress frame when a probe runs while a specialization body is
 /// itself being lowered.
-struct MonoProbeGuard {
+struct MonoProbeGuard<'a> {
+    state: &'a RefCell<MonoSpecializationState>,
     snapshot: MonoSpecializationState,
 }
 
-impl MonoProbeGuard {
-    fn begin() -> Self {
-        MonoProbeGuard {
-            snapshot: MONO_SPECIALIZATIONS.with(|state| state.borrow().clone()),
+impl<'a> MonoProbeGuard<'a> {
+    fn begin(program: &'a HostLoweringSession<'_>) -> Self {
+        Self {
+            state: &program.invocation.mono,
+            snapshot: program.invocation.mono.borrow().clone(),
         }
     }
 }
 
-impl Drop for MonoProbeGuard {
+impl Drop for MonoProbeGuard<'_> {
     fn drop(&mut self) {
-        MONO_SPECIALIZATIONS.with(|state| *state.borrow_mut() = std::mem::take(&mut self.snapshot));
+        std::mem::swap(&mut *self.state.borrow_mut(), &mut self.snapshot);
     }
 }
 
@@ -231,18 +262,37 @@ fn fresh_host_inference() -> HostTypeTerm {
     ))
 }
 
-fn is_inlining(name: &str) -> bool {
-    INLINING_STACK.with(|stack| stack.borrow().contains(name))
+fn is_inlining(name: &str, program: &HostLoweringSession<'_>) -> bool {
+    program.invocation.inlining.borrow().contains(name)
 }
 
-fn push_inlining(name: &str) -> bool {
-    INLINING_STACK.with(|stack| stack.borrow_mut().insert(name.to_string()))
+/// A repeated name belongs to the outer scope; only its owner removes it.
+struct InliningGuard<'a> {
+    stack: &'a RefCell<UnordSet<String>>,
+    name: &'a str,
+    inserted: bool,
 }
 
-fn pop_inlining(name: &str) {
-    INLINING_STACK.with(|stack| {
-        stack.borrow_mut().remove(name);
-    });
+impl<'a> InliningGuard<'a> {
+    fn begin(name: &'a str, program: &'a HostLoweringSession<'_>) -> Self {
+        Self {
+            stack: &program.invocation.inlining,
+            name,
+            inserted: program
+                .invocation
+                .inlining
+                .borrow_mut()
+                .insert(name.to_string()),
+        }
+    }
+}
+
+impl Drop for InliningGuard<'_> {
+    fn drop(&mut self) {
+        if self.inserted {
+            self.stack.borrow_mut().remove(self.name);
+        }
+    }
 }
 
 /// The per-program facts host lowering derives once and reads many times.
@@ -275,8 +325,8 @@ struct DefLaneFacts {
     dynamic_to_tensor_def_summaries: RefCell<Option<Arc<BTreeMap<String, bool>>>>,
 }
 
-/// One host-lowering session: a checked program, plus the facts host lowering
-/// derives from it.
+/// One host-lowering session: a checked program, its derived facts, and the
+/// explicit state shared by recursive lowering within this invocation.
 ///
 /// This is the representation chelis#1835 puts where a thread-local memo used
 /// to be. That memo was seven caches keyed on
@@ -294,7 +344,7 @@ struct DefLaneFacts {
 ///   cannot outlive it.
 /// - Nested entries are two sessions that share nothing, so a whole-program
 ///   lowering reached from inside an evaluation can neither read nor clear
-///   the evaluation's facts. The arming flag had no way to express that.
+///   the evaluation's facts, specializations, or scoped lowering state.
 /// - An entry point that does not establish a session does not compile, which
 ///   is the part no convention could supply.
 ///
@@ -304,15 +354,16 @@ struct DefLaneFacts {
 pub struct HostLoweringSession<'program> {
     program: &'program CheckedProgram,
     facts: DefLaneFacts,
+    invocation: HostInvocationState,
 }
 
 impl<'program> HostLoweringSession<'program> {
-    /// Begin a session over `program`. Nothing is derived here; every field
-    /// fills in on its first miss.
+    /// Begin an empty invocation over `program`. Derived facts fill on demand.
     pub fn new(program: &'program CheckedProgram) -> Self {
         Self {
             program,
             facts: DefLaneFacts::default(),
+            invocation: HostInvocationState::default(),
         }
     }
 
@@ -340,16 +391,12 @@ impl Deref for HostLoweringSession<'_> {
     }
 }
 
-/// A caught lowering panic cannot leave a session's facts WRONG, only
-/// incomplete. Every field is written once, with a fully computed value, and
-/// a `RefCell` guard releases its borrow while unwinding, so a retry after a
-/// caught panic recomputes the missing fact rather than reading a half-built
-/// one. `try_lower_compiled_program_with_lane_overrides` runs the whole-program
-/// lowering inside `catch_lowering_external` while holding the session, and
-/// this is the claim that call site needs. Asserting it here rather than with
-/// an `AssertUnwindSafe` at the call site keeps the claim attached to the type
-/// that has to satisfy it, so a future field cannot smuggle itself past a
-/// blanket assertion.
+/// A caught lowering panic cannot leave cached facts half-built: each is
+/// installed only after its computation finishes. Scoped inlining, preflight,
+/// and type-substitution guards restore their state on unwind. Specializations
+/// are restored by the enclosing whole-invocation or speculative-probe guard.
+/// `RefCell` borrows end before those guards run. Keep this claim on the owner
+/// rather than hiding new fields behind a call-site `AssertUnwindSafe`.
 impl std::panic::RefUnwindSafe for HostLoweringSession<'_> {}
 
 /// Kernel-decision summary probes on this thread that missed the memo and ran
@@ -415,38 +462,39 @@ impl CallableScope {
 /// owned Deep expression they describe. Host lowering creates rewritten body
 /// trees for callable-let substitution; their addresses are stable only while
 /// that body is being lowered and must never escape into a program-wide cache.
-struct TensorHelperPreflightGuard;
+struct TensorHelperPreflightGuard<'a> {
+    stack: &'a RefCell<Vec<UnordMap<usize, TensorHelperPreflightFacts>>>,
+}
 
-impl TensorHelperPreflightGuard {
-    fn begin(expr: &Expr, program: &HostLoweringSession<'_>) -> Self {
+impl<'a> TensorHelperPreflightGuard<'a> {
+    fn begin(expr: &Expr, program: &'a HostLoweringSession<'_>) -> Self {
         let summaries = cached_dynamic_to_tensor_def_summaries(program);
         let mut facts = UnordMap::new();
         analyze_tensor_helper_preflight(expr, &summaries, &mut facts);
-        TENSOR_HELPER_PREFLIGHT_STACK.with(|stack| stack.borrow_mut().push(facts));
-        Self
+        let stack = &program.invocation.preflight;
+        stack.borrow_mut().push(facts);
+        Self { stack }
     }
 
-    fn begin_if_uncovered(expr: &Expr, program: &HostLoweringSession<'_>) -> Option<Self> {
+    fn begin_if_uncovered(expr: &Expr, program: &'a HostLoweringSession<'_>) -> Option<Self> {
         let key = expr as *const Expr as usize;
-        let covered = TENSOR_HELPER_PREFLIGHT_STACK.with(|stack| {
-            stack
-                .borrow()
-                .iter()
-                .rev()
-                .any(|facts| facts.contains_key(&key))
-        });
+        let covered = program
+            .invocation
+            .preflight
+            .borrow()
+            .iter()
+            .rev()
+            .any(|facts| facts.contains_key(&key));
         (!covered).then(|| Self::begin(expr, program))
     }
 }
 
-impl Drop for TensorHelperPreflightGuard {
+impl Drop for TensorHelperPreflightGuard<'_> {
     fn drop(&mut self) {
-        TENSOR_HELPER_PREFLIGHT_STACK.with(|stack| {
-            stack
-                .borrow_mut()
-                .pop()
-                .expect("tensor-helper preflight guards must be balanced");
-        });
+        self.stack
+            .borrow_mut()
+            .pop()
+            .expect("tensor-helper preflight guards must be balanced");
     }
 }
 
@@ -2321,7 +2369,10 @@ fn named_tensor_entry_lowering_inputs(
         let pty = declared_param_tys
             .get(index)
             .cloned()
-            .or_else(|| param_host_type(param).map(|ty| expand_host_type_aliases(program, ty)))
+            .or_else(|| {
+                param_host_type(param, &program.invocation.type_subst.borrow())
+                    .map(|ty| expand_host_type_aliases(program, ty))
+            })
             .filter(|ty| !ty.is_unresolved())?;
         let tensor_ty = tensor_type_from_host_input(&pty)?;
         scope.push((pname, tensor_ty));
@@ -2556,10 +2607,9 @@ fn lower_host_program_with_execution(
     collect_execution: bool,
     collect_trace: bool,
 ) -> Result<(HostProgram, HostExecutionMetadata), crate::lower::LowerDiagnostic> {
-    // chelis#1158: specialization state is per-invocation; a fresh program
-    // lowering must rebuild every specialization (and must not inherit a
-    // failed run's partial memo).
-    MONO_SPECIALIZATIONS.with(|state| *state.borrow_mut() = MonoSpecializationState::default());
+    // Each invocation rebuilds its specializations, without clearing an outer
+    // invocation or retaining a failed run's partial memo.
+    let _invocation_guard = HostInvocationGuard::begin(program);
     let mut host = HostProgram::default();
     let mut global_tensor_helpers = TensorHelperSink::new(collect_execution, collect_trace);
     let mut function_execution = Vec::new();
@@ -2967,8 +3017,7 @@ fn lower_host_program_with_execution(
     // refinement fixpoint below so signature refinement and type
     // conformance treat them like any other definition, and the emitted C
     // therefore contains no reference to an omitted generic definition.
-    let monomorphized =
-        MONO_SPECIALIZATIONS.with(|state| std::mem::take(&mut state.borrow_mut().functions));
+    let monomorphized = std::mem::take(&mut program.invocation.mono.borrow_mut().functions);
     for lowered in monomorphized {
         host.functions.push(lowered.function);
         function_execution.push(lowered.products);
@@ -4276,8 +4325,10 @@ pub(crate) fn body_form_the_dag_cannot_carry(
     evaluation_dropout: bool,
 ) -> Option<String> {
     let defs = cached_program_defs(program);
+    let type_subst = program.invocation.type_subst.borrow();
     let mut walk = UncarriableWalk {
         defs: &defs,
+        type_subst: &type_subst,
         active: UnordSet::new(),
         completed: UnordMap::new(),
         cycle_cutoff: false,
@@ -4355,6 +4406,7 @@ fn contains_computed_callable_application(expr: &Expr) -> bool {
 /// concat input facts. Neither class evaluates arbitrary tensor expressions.
 struct UncarriableWalk<'a> {
     defs: &'a BTreeMap<String, Expr>,
+    type_subst: &'a UnordMap<String, HostTypeTerm>,
     active: UnordSet<String>,
     completed: UnordMap<String, Vec<CompletedAdmission>>,
     cycle_cutoff: bool,
@@ -4721,7 +4773,7 @@ impl UncarriableWalk<'_> {
                         .first()
                         .and_then(stamped_parts)
                         .and_then(|(_, _, params)| params.get(index))
-                        .and_then(param_host_type)
+                        .and_then(|param| param_host_type(param, self.type_subst))
                         .map(|ty| ConcatInputFact::from_type(&ty))
                         .unwrap_or(ConcatInputFact::Unknown),
                 };
@@ -5061,7 +5113,7 @@ fn def_body_decision_impl(
     {
         return Ok(DefBodyDecision::TensorVar(name.to_string(), expected));
     }
-    if tensor_helper_preflight_rejects(body_expr) {
+    if tensor_helper_preflight_rejects(body_expr, program) {
         record_host_work(|profile| {
             profile.tensor_helper_fallbacks += 1;
             profile.tensor_helper_preflight_rejections += 1;
@@ -5496,7 +5548,7 @@ fn host_def_signature(
                     .cloned()
                     .filter(|ty| !ty.is_unresolved())
                     .or_else(|| {
-                        param_host_type(param)
+                        param_host_type(param, &program.invocation.type_subst.borrow())
                             .map(|ty| expand_host_type_aliases(program, ty))
                             .filter(|ty| !ty.is_unresolved())
                     })
@@ -5722,7 +5774,7 @@ fn try_lower_tensor_helper_call_inner(
         )));
     }
     let _preflight_guard = TensorHelperPreflightGuard::begin_if_uncovered(expr, program);
-    if tensor_helper_preflight_rejects(expr) {
+    if tensor_helper_preflight_rejects(expr, program) {
         record_host_work(|profile| {
             profile.tensor_helper_fallbacks += 1;
             profile.tensor_helper_preflight_rejections += 1;
@@ -9546,7 +9598,7 @@ fn lower_match_host_expr(
                             continue;
                         };
                         let ty = field_ty
-                            .or_else(|| expr_type(subpat))
+                            .or_else(|| expr_type(subpat, &program.invocation.type_subst.borrow()))
                             .unwrap_or_else(fresh_host_inference);
                         scoped.insert(name.to_string(), ty.clone());
                         bindings.push(HostPatternBinding {
@@ -10124,7 +10176,7 @@ fn resolve_scalar_def<'a>(
     let mut param_tys = Vec::new();
     for param in children(params_list) {
         let pname = param_name(param)?;
-        let pty = param_host_type(param)
+        let pty = param_host_type(param, &program.invocation.type_subst.borrow())
             .or_else(|| {
                 lookup_declared_fn_type(program, name).and_then(|(tys, _)| tys.first().cloned())
             })
@@ -10716,7 +10768,7 @@ fn try_lower_general_list_grad_app(
     let mut rewritten_elements = list.elements.clone();
     let mut parameter_plans = UnordMap::new();
     for (param_index, param) in params.iter().enumerate() {
-        let Some(param_ty) = param_host_type(param) else {
+        let Some(param_ty) = param_host_type(param, &program.invocation.type_subst.borrow()) else {
             return Ok(None);
         };
         let actual_index = param_index + 1;
@@ -11422,7 +11474,7 @@ fn lower_app_host_expr(
     if callee_is_nullary_generic_constructor_wrapper
         && let Some(specialized) = inline_top_level_host_call(app_expr, program)
     {
-        let pushed = push_inlining(&name);
+        let inlining_guard = InliningGuard::begin(&name, program);
         let definitions = adt_constructor_definitions(program);
         let specialized_ty =
             canonicalize_representation_erased_adt_args(explicit_ty.clone(), &definitions);
@@ -11440,9 +11492,7 @@ fn lower_app_host_expr(
                 force_host_expr_type(body, specialized_ty.clone())
             }
         });
-        if pushed {
-            pop_inlining(&name);
-        }
+        drop(inlining_guard);
         return lowered;
     }
     if active_compiler_name == Some("Cons") && kids.len() == 3 {
@@ -11713,12 +11763,10 @@ fn lower_app_host_expr(
         && !should_keep_tensor_expr_in_host_lane(app_expr)
         && let Some(specialized) = inline_top_level_host_call(app_expr, program)
     {
-        let pushed = push_inlining(&name);
+        let inlining_guard = InliningGuard::begin(&name, program);
         let lowered =
             try_lower_tensor_helper_call(&specialized, program, scope, tensor_helpers, tensor_ty);
-        if pushed {
-            pop_inlining(&name);
-        }
+        drop(inlining_guard);
         if let Some(tensor_call) = lowered {
             return Ok(tensor_call);
         }
@@ -11746,7 +11794,7 @@ fn lower_app_host_expr(
     if (callee_is_polymorphic_precision || callee_is_polymorphic_rank)
         && let Some(specialized) = inline_top_level_host_call(app_expr, program)
     {
-        let pushed = push_inlining(&name);
+        let inlining_guard = InliningGuard::begin(&name, program);
         let definitions = adt_constructor_definitions(program);
         let specialized_ty =
             canonicalize_representation_erased_adt_args(explicit_ty.clone(), &definitions);
@@ -11757,9 +11805,7 @@ fn lower_app_host_expr(
             tensor_helpers,
             (!specialized_ty.is_unresolved()).then_some(&specialized_ty),
         );
-        if pushed {
-            pop_inlining(&name);
-        }
+        drop(inlining_guard);
         return lowered;
     }
     if has_callable_params
@@ -11776,7 +11822,7 @@ fn lower_app_host_expr(
     }
     if has_callable_params && let Some(specialized) = inline_top_level_host_call(app_expr, program)
     {
-        let pushed = push_inlining(&name);
+        let inlining_guard = InliningGuard::begin(&name, program);
         // PR #1215 review: thread the call's checked result type through the
         // inlined body exactly as the precision/rank inline path above does.
         // Plain lowering dropped it, so a generic ADT constructor in a
@@ -11793,9 +11839,7 @@ fn lower_app_host_expr(
             tensor_helpers,
             (!specialized_ty.is_unresolved()).then_some(&specialized_ty),
         );
-        if pushed {
-            pop_inlining(&name);
-        }
+        drop(inlining_guard);
         return lowered;
     }
     // chelis#1158: a recursive ordinary-generic function has no standalone
@@ -12301,7 +12345,7 @@ fn lower_inline_host_invocation(
         };
         // The authored annotation is the obligation. Actualized expression
         // metadata supplies only parameters whose annotation is absent.
-        let ty = param_host_type(declaration)
+        let ty = param_host_type(declaration, &program.invocation.type_subst.borrow())
             .or_else(|| {
                 inferred
                     .as_ref()
@@ -12332,7 +12376,7 @@ fn lower_guarded_host_invocation(
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
 ) -> Result<Option<HostExpr>, crate::lower::LowerDiagnostic> {
-    if is_inlining(name) {
+    if is_inlining(name, program) {
         return Ok(None);
     }
     let Some((canonical, body)) = find_top_level_def_named(program.exprs(), name) else {
@@ -12488,7 +12532,9 @@ fn lower_retained_host_invocation(
     let expected = expected.map(|expected| {
         canonicalize_representation_erased_adt_args(expected.clone(), &definitions)
     });
-    let pushed = invocation.name.is_some_and(push_inlining);
+    let inlining_guard = invocation
+        .name
+        .map(|name| InliningGuard::begin(name, program));
     let lowered = lower_host_expr_with_expected(
         &specialized,
         program,
@@ -12496,9 +12542,7 @@ fn lower_retained_host_invocation(
         tensor_helpers,
         expected.as_ref().filter(|ty| !ty.is_unresolved()),
     );
-    if pushed {
-        pop_inlining(invocation.name.expect("named invocation"));
-    }
+    drop(inlining_guard);
     let body = lowered?;
     let ty = host_expr_type(&body);
     Ok(HostExpr::new(HostExprKind::Let {
@@ -12521,7 +12565,7 @@ fn inline_top_level_host_call(expr: &Expr, program: &HostLoweringSession<'_>) ->
         .and_then(as_list)
         .filter(|callee| tag(callee) == Some(DeepTag::Var))
         .and_then(|callee| children(callee).first().and_then(symbol_name))?;
-    if is_inlining(callee_name) {
+    if is_inlining(callee_name, program) {
         return None;
     }
     let defs = cached_program_defs(program);
@@ -12609,7 +12653,7 @@ fn lower_recursive_generic_call(
         // whole application. A stamp that is still unresolved after erasure
         // is genuinely underconstrained and is left to the residue.
         if ty.is_unresolved()
-            && let Some(stamped) = expr_type(arg)
+            && let Some(stamped) = expr_type(arg, &program.invocation.type_subst.borrow())
         {
             let stamped = canonicalize_representation_erased_adt_args(stamped, &definitions);
             if !stamped.is_unresolved() {
@@ -12635,15 +12679,15 @@ fn lower_recursive_generic_call(
     // then goes through the ordinary memo, never a blind whole-vector
     // reuse, so a permuted orbit member still gets its own symbol.
     if param_tys.iter().any(HostTypeTerm::is_unresolved) || ret_ty.is_unresolved() {
-        let in_progress = MONO_SPECIALIZATIONS.with(|state| {
-            state
-                .borrow()
-                .in_progress
-                .iter()
-                .rev()
-                .find(|spec| spec.def_name == canonical_name && spec.param_tys.len() == args.len())
-                .cloned()
-        });
+        let in_progress = program
+            .invocation
+            .mono
+            .borrow()
+            .in_progress
+            .iter()
+            .rev()
+            .find(|spec| spec.def_name == canonical_name && spec.param_tys.len() == args.len())
+            .cloned();
         if let Some(spec) = in_progress {
             for (slot, param_ty) in param_tys.iter_mut().enumerate() {
                 if param_ty.is_unresolved() {
@@ -12763,10 +12807,10 @@ fn lower_recursive_generic_call(
     // inlining stack bounds recursion — a recursive body re-entering here
     // finds its own name, `inline_top_level_host_call` returns `None`, and
     // the edge falls through to the residue.
-    let specializing = MONO_SPECIALIZATIONS.with(|state| !state.borrow().in_progress.is_empty());
+    let specializing = !program.invocation.mono.borrow().in_progress.is_empty();
     if !specializing && let Some(specialized) = inline_top_level_host_call(app_expr, program) {
-        let pushed_canonical = push_inlining(&canonical_name);
-        let pushed_spelled = name != canonical_name && push_inlining(name);
+        let canonical_guard = InliningGuard::begin(&canonical_name, program);
+        let spelled_guard = (name != canonical_name).then(|| InliningGuard::begin(name, program));
         let lowered = lower_host_expr_with_expected(
             &specialized,
             program,
@@ -12774,12 +12818,8 @@ fn lower_recursive_generic_call(
             tensor_helpers,
             (!ret_ty.is_unresolved()).then_some(&ret_ty),
         );
-        if pushed_spelled {
-            pop_inlining(name);
-        }
-        if pushed_canonical {
-            pop_inlining(&canonical_name);
-        }
+        drop(spelled_guard);
+        drop(canonical_guard);
         return lowered;
     }
 
@@ -13019,14 +13059,22 @@ fn ensure_mono_specialization(
     tensor_helpers: &TensorHelperSink,
 ) -> Result<String, crate::lower::LowerDiagnostic> {
     let canonical_key = mono_specialization_key(name, param_tys, ret_ty);
-    if let Some(symbol) =
-        MONO_SPECIALIZATIONS.with(|state| state.borrow().memo.get(&canonical_key).cloned())
+    if let Some(symbol) = program
+        .invocation
+        .mono
+        .borrow()
+        .memo
+        .get(&canonical_key)
+        .cloned()
     {
         return Ok(symbol);
     }
     let symbol = mono_specialization_symbol(name, &canonical_key);
-    let collision = MONO_SPECIALIZATIONS
-        .with(|state| register_mono_symbol_key(&mut state.borrow_mut(), &symbol, &canonical_key));
+    let collision = register_mono_symbol_key(
+        &mut program.invocation.mono.borrow_mut(),
+        &symbol,
+        &canonical_key,
+    );
     if let Err(existing_key) = collision {
         return Err(host_expr_lowering_error(
             app_expr,
@@ -13088,15 +13136,15 @@ fn ensure_mono_specialization(
         });
     }
 
-    MONO_SPECIALIZATIONS.with(|state| {
-        let mut state = state.borrow_mut();
+    {
+        let mut state = program.invocation.mono.borrow_mut();
         state.memo.insert(canonical_key, symbol.clone());
         state.in_progress.push(InProgressMonoSpecialization {
             def_name: name.to_string(),
             param_tys: param_tys.to_vec(),
             ret_ty: ret_ty.clone(),
         });
-    });
+    }
     let lowered = lower_mono_specialized_function(MonoSpecializedFunctionInput {
         symbol: &symbol,
         declaration_name: name,
@@ -13109,11 +13157,14 @@ fn ensure_mono_specialization(
         collect_execution: tensor_helpers.collect_execution,
         collect_trace: tensor_helpers.collect_trace,
     });
-    MONO_SPECIALIZATIONS.with(|state| {
-        state.borrow_mut().in_progress.pop();
-    });
+    program.invocation.mono.borrow_mut().in_progress.pop();
     let function = lowered?;
-    MONO_SPECIALIZATIONS.with(|state| state.borrow_mut().functions.push(function));
+    program
+        .invocation
+        .mono
+        .borrow_mut()
+        .functions
+        .push(function);
     Ok(symbol)
 }
 
@@ -13166,7 +13217,7 @@ fn lower_mono_specialized_function(
         }
         solve_host_type_vars(&generic_ret, ret_ty, &mut subst);
     }
-    let _subst_guard = ActiveTypeSubstGuard::push(subst);
+    let _subst_guard = ActiveTypeSubstGuard::push(subst, program);
     let mut host_body = lower_host_expr_with_expected(
         &body_expr,
         program,
@@ -13976,7 +14027,7 @@ fn top_level_fn_helper_summary_rejects(
     // Guard against unbounded re-entry: while we are already inlining
     // `name` we must not recursively re-lower it to probe its
     // rejections.
-    if is_inlining(name) {
+    if is_inlining(name, program) {
         return Ok(false);
     }
     if let Some(cached) = program
@@ -14018,18 +14069,16 @@ fn top_level_fn_helper_summary_rejects(
             counted + 1
         });
     });
-    let pushed = push_inlining(name);
+    let inlining_guard = InliningGuard::begin(name, program);
     // This lowering is a probe: its result is inspected and discarded, so
     // it must leave no trace on specialization state
     // (harden-bounded-monomorphization D1).
-    let probe_guard = MonoProbeGuard::begin();
+    let probe_guard = MonoProbeGuard::begin(program);
     let lowered = crate::lower::catch_lowering_external(|| {
         lower_host_function(name, body, None, program, false, false)
     });
     drop(probe_guard);
-    if pushed {
-        pop_inlining(name);
-    }
+    drop(inlining_guard);
     // A fatal tensor-helper rejection can unwind from lower_host_function
     // (#1922). Return that diagnostic only after restoring the probe state
     // and inlining marker, and never cache it as "no summary rejection".
@@ -14533,7 +14582,7 @@ fn lower_host_callback(
                     .get(index)
                     .cloned()
                     .filter(|ty| !ty.is_unresolved())
-                    .or_else(|| param_host_type(param))
+                    .or_else(|| param_host_type(param, &program.invocation.type_subst.borrow()))
                     .unwrap_or_else(fresh_host_inference);
                 callback_scope.insert(name.clone(), ty.clone());
                 params.push(HostParam { name, ty });
@@ -14547,9 +14596,10 @@ fn lower_host_callback(
             let plan =
                 SignatureEntryPlan::new(children(params_list).iter().zip(&params).filter_map(
                     |(declaration, param)| {
-                        let declared = param_host_type(declaration)
-                            .filter(|ty| matches!(ty, HostTypeTerm::Tensor(_)))
-                            .unwrap_or_else(|| param.ty.clone());
+                        let declared =
+                            param_host_type(declaration, &program.invocation.type_subst.borrow())
+                                .filter(|ty| matches!(ty, HostTypeTerm::Tensor(_)))
+                                .unwrap_or_else(|| param.ty.clone());
                         let HostTypeTerm::Tensor(ty) = declared else {
                             return None;
                         };
@@ -16063,23 +16113,21 @@ fn expr_reaches_dynamic_to_tensor(expr: &Expr, program: &HostLoweringSession<'_>
     analyze_tensor_helper_preflight(expr, &summaries, &mut facts).reaches_dynamic_to_tensor
 }
 
-fn tensor_helper_preflight_rejects(expr: &Expr) -> bool {
+fn tensor_helper_preflight_rejects(expr: &Expr, program: &HostLoweringSession<'_>) -> bool {
     let key = expr as *const Expr as usize;
-    TENSOR_HELPER_PREFLIGHT_STACK.with(|stack| {
-        let stack = stack.borrow();
-        let facts = stack
-            .iter()
-            .rev()
-            .find_map(|facts| facts.get(&key).copied());
-        record_host_work(|profile| {
-            if facts.is_some() {
-                profile.tensor_helper_preflight_lookup_hits += 1;
-            } else {
-                profile.tensor_helper_preflight_lookup_misses += 1;
-            }
-        });
-        facts.is_some_and(|facts| facts.reaches_dynamic_to_tensor && !facts.contains_grad_like)
-    })
+    let stack = program.invocation.preflight.borrow();
+    let facts = stack
+        .iter()
+        .rev()
+        .find_map(|facts| facts.get(&key).copied());
+    record_host_work(|profile| {
+        if facts.is_some() {
+            profile.tensor_helper_preflight_lookup_hits += 1;
+        } else {
+            profile.tensor_helper_preflight_lookup_misses += 1;
+        }
+    });
+    facts.is_some_and(|facts| facts.reaches_dynamic_to_tensor && !facts.contains_grad_like)
 }
 
 fn collect_program_defs(exprs: &[Expr]) -> BTreeMap<String, Expr> {
@@ -16174,11 +16222,13 @@ pub(crate) fn expr_host_type(
     scope: &UnordMap<String, HostTypeTerm>,
 ) -> HostTypeTerm {
     let raw = expr_host_type_raw(expr, program, scope);
-    let subst = active_type_subst();
-    let specialized = if subst.is_empty() {
-        raw
-    } else {
-        apply_host_type_subst(&raw, &subst)
+    let specialized = {
+        let subst = program.invocation.type_subst.borrow();
+        if subst.is_empty() {
+            raw
+        } else {
+            apply_host_type_subst(&raw, &subst)
+        }
     };
     expand_host_type_aliases(program, specialized)
 }
@@ -16370,7 +16420,7 @@ fn expr_host_type_raw(
                 .and_then(|(_, _, kids)| kids.first())
                 .and_then(symbol_name)
                 .and_then(|name| {
-                    expr_type(expr)
+                    expr_type(expr, &program.invocation.type_subst.borrow())
                         .filter(|ty| !ty.is_unresolved())
                         .or_else(|| {
                             scope
@@ -16382,7 +16432,8 @@ fn expr_host_type_raw(
                 .unwrap_or_else(fresh_host_inference)
         }
         Expr::List(_, _) | Expr::Node(_, _) if expr.tag() == Some(DeepTag::App) => {
-            let explicit = expr_type(expr).unwrap_or_else(fresh_host_inference);
+            let explicit = expr_type(expr, &program.invocation.type_subst.borrow())
+                .unwrap_or_else(fresh_host_inference);
             if app_expr_needs_inferred_type(&explicit) {
                 let inferred = infer_app_expr_host_type(expr, program, scope)
                     .unwrap_or_else(fresh_host_inference);
@@ -16397,7 +16448,8 @@ fn expr_host_type_raw(
                 explicit
             }
         }
-        _ => expr_type(expr).unwrap_or_else(fresh_host_inference),
+        _ => expr_type(expr, &program.invocation.type_subst.borrow())
+            .unwrap_or_else(fresh_host_inference),
     }
 }
 
@@ -16914,7 +16966,7 @@ fn expr_tensor_type(
     }
 }
 
-fn expr_type(expr: &Expr) -> Option<HostTypeTerm> {
+fn expr_type(expr: &Expr, subst: &UnordMap<String, HostTypeTerm>) -> Option<HostTypeTerm> {
     // Parameter binders are untagged list carriers `(name {type: ...})`,
     // not Deep vocabulary nodes. Preserve their source-authored metadata
     // while reading stamped vocabulary nodes directly; routing all Lists
@@ -16934,7 +16986,7 @@ fn expr_type(expr: &Expr) -> Option<HostTypeTerm> {
     };
     meta.ty()
         .map(|ty| ty.expression())
-        .map(|value| decode_host_type_or_raise(value, &active_type_subst()))
+        .map(|value| decode_host_type_or_raise(value, subst))
 }
 
 fn expr_fn_type(expr: &Expr) -> Option<(Vec<HostTypeTerm>, HostTypeTerm)> {
@@ -19147,61 +19199,38 @@ fn param_name(expr: &Expr) -> Option<String> {
     }
 }
 
-fn param_host_type(expr: &Expr) -> Option<HostTypeTerm> {
+fn param_host_type(expr: &Expr, subst: &UnordMap<String, HostTypeTerm>) -> Option<HostTypeTerm> {
     match expr {
-        Expr::MetaExpr(meta, _) => expr_type(expr)
+        Expr::MetaExpr(meta, _) => expr_type(expr, subst)
             .filter(|ty| !ty.is_unresolved())
-            .or_else(|| param_host_type(&meta.expr)),
-        Expr::List(_, _) | Expr::BareList(_, _) => expr_type(expr).filter(|ty| !ty.is_unresolved()),
+            .or_else(|| param_host_type(&meta.expr, subst)),
+        Expr::List(_, _) | Expr::BareList(_, _) => {
+            expr_type(expr, subst).filter(|ty| !ty.is_unresolved())
+        }
         _ => None,
     }
 }
 
-thread_local! {
-    /// Type-variable bindings in force while a monomorphized body is being
-    /// lowered (chelis#1201). A stack, because specializing one body can
-    /// specialize another nested inside it.
-    ///
-    /// A specialized body's nodes still carry the GENERIC checked types the
-    /// checker recorded (`Hamt[a]`), so every generic-ADT construction inside
-    /// it reads as unresolved even though the specialization pinned `a` at
-    /// its call site. Threading a substitution parameter would touch ~130
-    /// call sites across this file; scoping it here matches the idiom
-    /// `MONO_SPECIALIZATIONS` and `INLINING_STACK` already use,
-    /// and applies at the single point that decodes a node's checked type.
-    static ACTIVE_TYPE_SUBST: RefCell<Vec<UnordMap<String, HostTypeTerm>>> =
-        const { RefCell::new(Vec::new()) };
+/// The innermost specialization's bindings replace, rather than extend, the
+/// caller's substitution. Guard-owned previous maps implement the scope stack
+/// without cloning a map on each checked-type decode.
+struct ActiveTypeSubstGuard<'a> {
+    state: &'a RefCell<UnordMap<String, HostTypeTerm>>,
+    previous: UnordMap<String, HostTypeTerm>,
 }
 
-/// The substitution in force for the innermost specialization, if any.
-///
-/// Outside every specialization the answer is an empty substitution, and
-/// that is a real answer rather than a missing one: no type variable is
-/// bound there, so applying it is the identity. Spelled as an explicit
-/// branch instead of a default so the empty map is visibly the stated
-/// outcome (spec/design/loud_unsupported.md C4.3).
-fn active_type_subst() -> UnordMap<String, HostTypeTerm> {
-    ACTIVE_TYPE_SUBST.with(|stack| match stack.borrow().last() {
-        Some(subst) => subst.clone(),
-        None => UnordMap::new(),
-    })
-}
-
-/// RAII scope for a specialization's type bindings (chelis#1201).
-struct ActiveTypeSubstGuard;
-
-impl ActiveTypeSubstGuard {
-    fn push(subst: UnordMap<String, HostTypeTerm>) -> Self {
-        ACTIVE_TYPE_SUBST.with(|stack| stack.borrow_mut().push(subst));
-        ActiveTypeSubstGuard
+impl<'a> ActiveTypeSubstGuard<'a> {
+    fn push(subst: UnordMap<String, HostTypeTerm>, program: &'a HostLoweringSession<'_>) -> Self {
+        Self {
+            state: &program.invocation.type_subst,
+            previous: program.invocation.type_subst.replace(subst),
+        }
     }
 }
 
-impl Drop for ActiveTypeSubstGuard {
+impl Drop for ActiveTypeSubstGuard<'_> {
     fn drop(&mut self) {
-        ACTIVE_TYPE_SUBST.with(|stack| {
-            stack.borrow_mut().pop();
-        });
+        std::mem::swap(&mut *self.state.borrow_mut(), &mut self.previous);
     }
 }
 
@@ -19429,6 +19458,7 @@ mod tests {
             };
             let mut walk = UncarriableWalk {
                 defs: &defs,
+                type_subst: &UnordMap::new(),
                 active: UnordSet::new(),
                 completed: UnordMap::new(),
                 cycle_cutoff: false,
@@ -19465,6 +19495,7 @@ mod tests {
         let defs = BTreeMap::new();
         let mut walk = UncarriableWalk {
             defs: &defs,
+            type_subst: &UnordMap::new(),
             active: UnordSet::new(),
             completed: UnordMap::new(),
             cycle_cutoff: false,
@@ -19496,34 +19527,34 @@ mod tests {
             let source = include_str!("../tests/fixtures/core/src/host/concat_shadowing.deep")
                 .replace("(d-name {} xwidth)", x_width)
                 .replace("(d-name {} ywidth)", y_width);
-            let program = deep_check(&source);
-            let defs = cached_program_defs(&HostLoweringSession::new(&program));
+            let checked = deep_check(&source);
+            let session = HostLoweringSession::new(&checked);
+            let program = &session;
+            let defs = cached_program_defs(program);
             let (_, _, run) = stamped_parts(&defs["run"]).unwrap();
             let (_, _, params) = stamped_parts(&run[0]).unwrap();
             let params: Vec<_> = params
                 .iter()
                 .map(|param| HostParam {
                     name: param_name(param).unwrap(),
-                    ty: param_host_type(param).unwrap(),
+                    ty: param_host_type(param, &program.invocation.type_subst.borrow()).unwrap(),
                 })
                 .collect();
             assert_eq!(
-                body_form_the_dag_cannot_carry(
-                    &HostLoweringSession::new(&program),
-                    &run[1],
-                    &params,
-                    false
-                )
-                .is_some(),
+                body_form_the_dag_cannot_carry(program, &run[1], &params, false).is_some(),
                 host,
                 "{source}"
             );
         }
     }
 
-    fn admission_test_walk(defs: &BTreeMap<String, Expr>) -> UncarriableWalk<'_> {
+    fn admission_test_walk<'a>(
+        defs: &'a BTreeMap<String, Expr>,
+        type_subst: &'a UnordMap<String, HostTypeTerm>,
+    ) -> UncarriableWalk<'a> {
         UncarriableWalk {
             defs,
+            type_subst,
             active: UnordSet::new(),
             completed: UnordMap::new(),
             cycle_cutoff: false,
@@ -19562,7 +19593,8 @@ mod tests {
         source.push_str(&deep_fanout_def("run", ty, &body));
         let program = deep_check(&source);
         let defs = cached_program_defs(&HostLoweringSession::new(&program));
-        let mut walk = admission_test_walk(&defs);
+        let type_subst = UnordMap::new();
+        let mut walk = admission_test_walk(&defs, &type_subst);
         assert!(
             walk.def("run", &defs["run"], None)
                 .unwrap()
@@ -19585,8 +19617,9 @@ mod tests {
             dims: vec![DimInfo::Lit(2), DimInfo::Named("width".to_string(), None)],
             precision: Prim::F32,
         });
+        let type_subst = UnordMap::new();
         for order in [[false, true, false, true], [true, false, true, false]] {
-            let mut walk = admission_test_walk(&defs);
+            let mut walk = admission_test_walk(&defs, &type_subst);
             for host in order {
                 let actuals = if host {
                     vec![fixed.clone(), dynamic.clone()]
@@ -19611,7 +19644,8 @@ mod tests {
             "../tests/fixtures/core/src/host/concat_admission_completed_callee_does_not_capture_caller_bindings.deep"
         ));
         let defs = cached_program_defs(&HostLoweringSession::new(&program));
-        let mut walk = admission_test_walk(&defs);
+        let type_subst = UnordMap::new();
+        let mut walk = admission_test_walk(&defs, &type_subst);
         // A free callee name resolves against program definitions, not a
         // same-spelled caller alias, including its constructor classification.
         for constructor in [false, true] {
@@ -19648,7 +19682,8 @@ mod tests {
                 parse_one_expr("(fn {} (params {}) (app {} (var {} a)))"),
             ),
         ]);
-        let mut walk = admission_test_walk(&defs);
+        let type_subst = UnordMap::new();
+        let mut walk = admission_test_walk(&defs, &type_subst);
         for name in ["a", "b", "a", "b"] {
             assert!(
                 walk.def(name, &defs[name], Some(Vec::new()))
@@ -19844,74 +19879,201 @@ mod tests {
         assert_eq!(collision, Err("key-a".to_string()));
     }
 
-    /// A speculative lowering error reports no summary rejection and restores
-    /// every field in the specialization state. The same error must surface
-    /// when the function lowers outside the probe.
+    /// Probes and failed nested invocations cannot discard, duplicate, or reorder
+    /// the specializations their caller will emit. A deferred error still
+    /// surfaces with its callee-body attribution in whole-program lowering.
     #[test]
     fn failed_mono_probe_restores_state_and_defers_the_real_error() {
-        let checked = deep_check(include_str!(
+        let mut source = include_str!(
             "../tests/fixtures/core/src/host/failed_mono_probe_restores_state_and_defers_the_real_error.deep"
-        ));
-        let i32 = HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int32));
-        let seeded = MonoSpecializationState {
-            memo: UnordMap::from([("seed-key".to_string(), "seed-symbol".to_string())]),
-            symbol_keys: UnordMap::from([("seed-symbol".to_string(), "seed-key".to_string())]),
-            functions: vec![LoweredHostFunction {
-                function: HostFunction {
-                    helper_result_claim_axes: Vec::new(),
-                    name: "seeded__mono_0123456789abcdef".to_string(),
-                    params: Vec::new(),
-                    ret_ty: HostTypeTerm::Unit,
-                    body: HostExpr::new(HostExprKind::Unit),
-                    tensor_helpers: Vec::new(),
-                    origin: HostFunctionOrigin::Monomorphized,
-                    specialization: None,
-                    summary_rejections: Vec::new(),
-                },
-                products: Vec::new(),
-            }],
-            in_progress: vec![InProgressMonoSpecialization {
-                def_name: "seeded".to_string(),
-                param_tys: vec![i32.clone()],
-                ret_ty: i32,
-            }],
+        ).to_owned();
+        source.push_str(
+            r#"
+            (defsig {} good_probe (t-fn {} (t-prim {} bool)))
+            (def {} good_probe
+              (fn {} (params {})
+                (app {} (var {} bad)
+                  (record {} Full (kv {} value (lit {type: (t-prim {} bool)} true))))))
+        "#,
+        );
+        let checked = deep_check(&source);
+        let session = HostLoweringSession::new(&checked);
+        let body = find_top_level_def_expr(checked.exprs(), "bad").unwrap();
+        let helpers = TensorHelperSink::new(false, false);
+        let specialize = |prim| {
+            ensure_mono_specialization(
+                body,
+                "bad",
+                body,
+                &[HostTypeTerm::Adt(
+                    "Box".into(),
+                    vec![HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(prim))],
+                )],
+                &HostTypeTerm::Bool,
+                &session,
+                &helpers,
+            )
+            .expect("the concrete recursive specialization must lower")
         };
-        MONO_SPECIALIZATIONS.with(|state| *state.borrow_mut() = seeded.clone());
-
+        let first = specialize(Prim::Int32);
         assert_eq!(
-            top_level_fn_helper_summary_rejects(&HostLoweringSession::new(&checked), "bad_wrap"),
+            top_level_fn_helper_summary_rejects(&session, "bad_wrap"),
             Ok(false),
             "a speculative lowering error is not a summary rejection"
         );
-        MONO_SPECIALIZATIONS.with(|state| {
-            let restored = state.borrow();
-            assert_eq!(restored.memo, seeded.memo);
-            assert_eq!(restored.symbol_keys, seeded.symbol_keys);
-            assert_eq!(
-                format!("{:#?}", restored.functions),
-                format!("{:#?}", seeded.functions),
-                "the complete emitted-function state must be restored"
-            );
-            assert_eq!(restored.in_progress.len(), seeded.in_progress.len());
-            for (restored, expected) in restored.in_progress.iter().zip(&seeded.in_progress) {
-                assert_eq!(restored.def_name, expected.def_name);
-                assert_eq!(restored.param_tys, expected.param_tys);
-                assert_eq!(restored.ret_ty, expected.ret_ty);
-            }
-        });
+        assert_eq!(
+            top_level_fn_helper_summary_rejects(&session, "good_probe"),
+            Ok(false)
+        );
+        let error = lower_host_program(&session, &BTreeMap::new())
+            .expect_err("real lowering must report the genuine bad call");
+        assert_eq!(error.span_id.as_deref(), Some("surf:119..200"));
 
-        let body = find_top_level_def_expr(checked.exprs(), "bad_wrap")
-            .expect("the checked program contains bad_wrap");
-        lower_host_function(
-            "bad_wrap",
-            body,
+        // Request a new signature before reusing the old one: clearing the
+        // outer memo would now emit [second, first], not [first, second].
+        let second = specialize(Prim::F32);
+        assert_eq!(specialize(Prim::Int32), first);
+        let emitted = std::mem::take(&mut session.invocation.mono.borrow_mut().functions);
+        assert_eq!(
+            emitted
+                .iter()
+                .map(|lowered| lowered.function.name.as_str())
+                .collect::<Vec<_>>(),
+            [first.as_str(), second.as_str()]
+        );
+        for lowered in emitted {
+            let HostExprKind::MatchAdt { arms, .. } = &lowered.function.body.kind else {
+                panic!("the specialization must retain its recursive match");
+            };
+            assert!(
+                arms.iter().any(|arm| matches!(
+                    &arm.expr.kind,
+                    HostExprKind::Call { function, .. } if function == &lowered.function.name
+                )),
+                "the recursive edge must still call its emitted specialization"
+            );
+        }
+    }
+
+    #[test]
+    fn host_type_substitution_is_nested_session_local_and_unwind_safe() {
+        let checked = deep_check("(lit {type: (t-prim {} i64)} 0)");
+        let session = HostLoweringSession::new(&checked);
+        let other = HostLoweringSession::new(&checked);
+        let a = parse_one_expr("(lit {type: (t-var {} a)} 1)");
+        let b = parse_one_expr("(lit {type: (t-var {} b)} 1)");
+        let scope = UnordMap::new();
+        let unbound_a = HostTypeTerm::TypeVariable("a".into());
+        let unbound_b = HostTypeTerm::TypeVariable("b".into());
+        let outer = ActiveTypeSubstGuard::push(
+            UnordMap::from([
+                ("a".into(), HostTypeTerm::Int64),
+                ("b".into(), HostTypeTerm::Bool),
+            ]),
+            &session,
+        );
+        assert_eq!(expr_host_type(&a, &session, &scope), HostTypeTerm::Int64);
+        assert_eq!(expr_host_type(&a, &other, &scope), unbound_a);
+        let diagnostic = crate::lower::LowerDiagnostic::new(
+            "substitution scope unwind",
             None,
-            &HostLoweringSession::new(&checked),
-            false,
-            false,
+            Some("scope:a".into()),
         )
-        .expect_err("real lowering must report the genuine bad call");
-        MONO_SPECIALIZATIONS.with(|state| *state.borrow_mut() = MonoSpecializationState::default());
+        .fatal();
+        let caught: Result<(), _> = crate::lower::catch_lowering_external(|| {
+            let _inner = ActiveTypeSubstGuard::push(
+                UnordMap::from([("a".into(), HostTypeTerm::Float32)]),
+                &session,
+            );
+            assert_eq!(expr_host_type(&a, &session, &scope), HostTypeTerm::Float32);
+            assert_eq!(expr_host_type(&b, &session, &scope), unbound_b);
+            crate::lower::raise_fatal_lowering_diagnostic(diagnostic.clone());
+        });
+        assert_eq!(caught, Err(diagnostic));
+        assert_eq!(expr_host_type(&a, &session, &scope), HostTypeTerm::Int64);
+        assert_eq!(expr_host_type(&b, &session, &scope), HostTypeTerm::Bool);
+        {
+            let _invocation = HostInvocationGuard::begin(&session);
+            assert_eq!(expr_host_type(&a, &session, &scope), unbound_a);
+        }
+        assert_eq!(expr_host_type(&a, &session, &scope), HostTypeTerm::Int64);
+        drop(outer);
+        assert_eq!(expr_host_type(&a, &session, &scope), unbound_a);
+    }
+
+    #[test]
+    fn host_inlining_scope_retains_outer_owner_and_recovers_after_unwind() {
+        let checked = deep_check(
+            r#"
+            (defsig {} id (t-fn {} (t-prim {} i64) (t-prim {} i64)))
+            (def {} id (fn {} (params {} (x {type: (t-prim {} i64)})) (var {} x)))
+        "#,
+        );
+        let session = HostLoweringSession::new(&checked);
+        let other = HostLoweringSession::new(&checked);
+        let call = parse_one_expr("(app {} (var {} id) (lit {type: (t-prim {} i64)} 7))");
+        let assert_value = |program: &HostLoweringSession<'_>| {
+            let expanded = inline_top_level_host_call(&call, program).expect("fresh inline scope");
+            let lowered = lower_host_expr(
+                &expanded,
+                program,
+                &UnordMap::new(),
+                &mut TensorHelperSink::new(false, false),
+            )
+            .unwrap();
+            assert!(matches!(lowered.kind, HostExprKind::Int(7)));
+        };
+        let diagnostic = crate::lower::LowerDiagnostic::new(
+            "inlining scope unwind",
+            None,
+            Some("scope:id".into()),
+        )
+        .fatal();
+        let caught: Result<(), _> = crate::lower::catch_lowering_external(|| {
+            let _outer = InliningGuard::begin("id", &session);
+            {
+                let _duplicate = InliningGuard::begin("id", &session);
+                assert!(inline_top_level_host_call(&call, &session).is_none());
+            }
+            assert!(inline_top_level_host_call(&call, &session).is_none());
+            assert_value(&other);
+            crate::lower::raise_fatal_lowering_diagnostic(diagnostic.clone());
+        });
+        assert_eq!(caught, Err(diagnostic));
+        assert_value(&session);
+    }
+
+    #[test]
+    fn host_preflight_scopes_do_not_share_pointer_facts_between_sessions() {
+        let dynamic = deep_check(include_str!(
+            "../tests/fixtures/core/src/host/issue_1205_callable_scope_restore_semantics.deep"
+        ));
+        let scalar = deep_check(
+            r#"
+            (def {} bc (fn {} (params {} (c {type: (t-prim {} f32)})) (var {} c)))
+        "#,
+        );
+        let outer = HostLoweringSession::new(&dynamic);
+        let inner = HostLoweringSession::new(&scalar);
+        let call = parse_one_expr("(app {} (var {} bc) (lit {type: (t-prim {} f32)} 1.0))");
+        let guard = TensorHelperPreflightGuard::begin(&call, &outer);
+        assert!(tensor_helper_preflight_rejects(&call, &outer));
+        let diagnostic = crate::lower::LowerDiagnostic::new(
+            "preflight scope unwind",
+            None,
+            Some("scope:bc".into()),
+        )
+        .fatal();
+        let caught: Result<(), _> = crate::lower::catch_lowering_external(|| {
+            let _inner = TensorHelperPreflightGuard::begin_if_uncovered(&call, &inner);
+            assert!(!tensor_helper_preflight_rejects(&call, &inner));
+            assert!(tensor_helper_preflight_rejects(&call, &outer));
+            crate::lower::raise_fatal_lowering_diagnostic(diagnostic.clone());
+        });
+        assert_eq!(caught, Err(diagnostic));
+        assert!(tensor_helper_preflight_rejects(&call, &outer));
+        drop(guard);
+        assert!(!tensor_helper_preflight_rejects(&call, &outer));
     }
 
     /// A nested probe's already-returned error retains the existing deferral.
@@ -19935,14 +20097,6 @@ mod tests {
         let checked = chelis_types::check_ir_program(&deep)
             .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors));
         let session = HostLoweringSession::new(&checked);
-        let _restore = MonoProbeGuard::begin();
-        MONO_SPECIALIZATIONS.with(|state| {
-            state
-                .borrow_mut()
-                .memo
-                .insert("seed-key".into(), "seed-symbol".into());
-        });
-        let seeded = MONO_SPECIALIZATIONS.with(|state| state.borrow().clone());
         for _ in 0..2 {
             let caught =
                 std::panic::catch_unwind(|| top_level_fn_helper_summary_rejects(&session, name));
@@ -19964,27 +20118,6 @@ mod tests {
                     "preserve already-returned error deferral"
                 );
             }
-            assert!(!is_inlining("sink_output"));
-            assert!(!is_inlining("causal_sdpa_with_sink"));
-            assert_eq!(
-                session
-                    .facts
-                    .helper_summary_rejects
-                    .borrow()
-                    .get(name)
-                    .copied(),
-                if raises_here { None } else { Some(false) }
-            );
-            MONO_SPECIALIZATIONS.with(|state| {
-                let restored = state.borrow();
-                assert_eq!(restored.memo, seeded.memo);
-                assert_eq!(restored.symbol_keys, seeded.symbol_keys);
-                assert_eq!(
-                    format!("{:#?}", restored.functions),
-                    format!("{:#?}", seeded.functions)
-                );
-                assert_eq!(restored.in_progress.len(), seeded.in_progress.len());
-            });
         }
     }
 
