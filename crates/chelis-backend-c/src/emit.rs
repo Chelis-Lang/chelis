@@ -116,6 +116,9 @@ pub struct CEmitter {
     /// while the generated kernel fills and consumes its private storage.
     /// All leases are ended before any descriptor is returned or released.
     write_nodes: chelis_unord::UnordSet<usize>,
+    /// Whether this function receives the host's private `__chelis_rng`
+    /// frame. Only such a helper can take an inherited draw key.
+    private_random_context: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -558,6 +561,7 @@ impl CEmitter {
                 .and_then(|id| dag.get(*id))
                 .map(|node| node.output_type.dims.len()),
             write_nodes: chelis_unord::UnordSet::new(),
+            private_random_context,
         };
 
         e.line("#include \"chelis_runtime.h\"");
@@ -750,6 +754,7 @@ impl CEmitter {
         }
 
         e.emit_input_shape_preamble(dag, &input_slots, func_name);
+        e.emit_scoped_random_counters(dag)?;
 
         let inherits_random = execution.is_some_and(|execution| {
             dag.nodes().iter().any(|node| {
@@ -1801,6 +1806,14 @@ impl CEmitter {
                     "dropout requires a sealed source execution plan",
                 ));
             }
+            RiscOp::DrawKey {
+                handler,
+                draw,
+                dtype,
+            } => self.emit_draw_key(node, *handler, *draw, *dtype, dag)?,
+            RiscOp::Dropout | RiscOp::DropoutReplay => self.emit_keyed_dropout(node, dag),
+            RiscOp::UniformLike => self.emit_keyed_uniform_like(node, dag),
+            RiscOp::UniformBoundAdjoint { bound } => self.emit_uniform_bound_adjoint(node, *bound),
             RiscOp::Copy => self.emit_realize(id, &node.inputs, &node.output_type),
             RiscOp::Drop => {
                 let action = dag.action_for_node(node.id).ok_or_else(|| {
@@ -2180,6 +2193,8 @@ impl CEmitter {
                 | Prim::Int16
                 | Prim::Int32
                 | Prim::Int64 => {}
+                // A key is a C local of its draw node, never a tensor.
+                Prim::Key if matches!(node.op, RiscOp::DrawKey { .. }) => {}
                 other => panic!(
                     "C backend does not yet support {} tensors, found at node {}",
                     other.name(),
@@ -3008,6 +3023,10 @@ impl CEmitter {
                         "no C constant representation exists for this dtype: the \
                          exhaustive target capability table has no C string storage cell \
                          (spec/04-type-system.md section 1.1)"
+                    ),
+                    Prim::Key => chelis_types::deliberate_rejection!(
+                        "[05-RNG-1]",
+                        "a random key has no literal carrier; every key is produced by a draw node"
                     ),
                     Prim::F32
                     | Prim::F64
@@ -4662,6 +4681,358 @@ impl CEmitter {
         }
     }
 
+    /// Declare one zero-based counter per scoped handler region whose draw
+    /// keys this function takes (`spec/design/randomness_counter_stream.md`
+    /// §2). An inherited draw needs the host's private Random frame, which a
+    /// public tensor entry does not receive.
+    fn emit_scoped_random_counters(&mut self, dag: VerifiedDagView<'_>) -> Result<(), Unsupported> {
+        let mut instances = BTreeSet::new();
+        for node in dag.nodes() {
+            match node.op {
+                RiscOp::DrawKey {
+                    handler: chelis_ir::dag::RandomHandler::Scoped { instance },
+                    ..
+                } => {
+                    instances.insert(instance);
+                }
+                RiscOp::DrawKey {
+                    handler: chelis_ir::dag::RandomHandler::Inherited,
+                    ..
+                } if !self.private_random_context => {
+                    return Err(unsupported_fixed_execution(
+                        "public tensor entry cannot receive inherited Random",
+                    ));
+                }
+                _ => {}
+            }
+        }
+        for instance in instances {
+            self.line(&format!(
+                "uint64_t __chelis_scoped_counter_{instance} = 0ULL;"
+            ));
+        }
+        Ok(())
+    }
+
+    /// A rank-0 float input at its exact arithmetic reading: f16 and bf16
+    /// widen to `float`, f32 is `float`, f64 is `double`.
+    fn rank0_float_expr(dag: VerifiedDagView<'_>, input: NodeId) -> String {
+        let prim = dag
+            .get(input)
+            .expect("verified random control")
+            .output_type
+            .precision;
+        let id = input.0;
+        match prim {
+            Prim::F64 => format!("((const double*)t{id}_data)[0]"),
+            Prim::F32 => format!("((const float*)t{id}_data)[0]"),
+            Prim::F16 | Prim::Bf16 => format!(
+                "{}(((const uint16_t*)t{id}_data)[0])",
+                Self::reduced_to_f32_fn(prim)
+            ),
+            other => panic!("random control of non-float dtype `{}`", other.name()),
+        }
+    }
+
+    fn rank0_bool_expr(input: Option<&NodeId>) -> String {
+        match input {
+            Some(input) => format!("(((const uint8_t*)t{}_data)[0] != 0)", input.0),
+            None => "1".to_string(),
+        }
+    }
+
+    /// The counter-stream bridge: when active, validate the draw's controls
+    /// for its dtype and only then take the handler's next key; when
+    /// inactive, neither. The key lives in `t{id}_key`.
+    fn emit_draw_key(
+        &mut self,
+        node: &DagNode,
+        handler: chelis_ir::dag::RandomHandler,
+        draw: chelis_ir::dag::RandomDraw,
+        dtype: Prim,
+        dag: VerifiedDagView<'_>,
+    ) -> Result<(), Unsupported> {
+        let id = node.id.0;
+        let seed_slots = usize::from(matches!(
+            handler,
+            chelis_ir::dag::RandomHandler::Scoped { .. }
+        ));
+        let active = Self::rank0_bool_expr(node.inputs.get(seed_slots + draw.control_count()));
+        self.line(&format!("int t{id}_active = {active};"));
+        self.line(&format!("uint64_t t{id}_key = 0ULL;"));
+        self.line(&format!("if (t{id}_active) {{"));
+        self.indent += 1;
+        match draw {
+            chelis_ir::dag::RandomDraw::Dropout => {
+                let trap = NumericTrap::Domain {
+                    op: "dropout",
+                    prim: dtype,
+                }
+                .to_string();
+                let rate = Self::rank0_float_expr(dag, node.inputs[seed_slots]);
+                self.line(&format!("double t{id}_rate = (double)({rate});"));
+                self.line(&format!(
+                    "if (!(t{id}_rate >= 0.0 && t{id}_rate < 1.0)) chelis_numeric_trap({trap:?});"
+                ));
+            }
+            chelis_ir::dag::RandomDraw::UniformLike => {
+                let trap = NumericTrap::Domain {
+                    op: "uniform_like",
+                    prim: dtype,
+                }
+                .to_string();
+                let low = Self::rank0_float_expr(dag, node.inputs[seed_slots]);
+                let high = Self::rank0_float_expr(dag, node.inputs[seed_slots + 1]);
+                self.line(&format!(
+                    "double t{id}_low = (double)({low}), t{id}_high = (double)({high});"
+                ));
+                if dtype == Prim::F64 {
+                    self.line(&format!("double t{id}_span = t{id}_high - t{id}_low;"));
+                } else {
+                    self.line(&format!(
+                        "float t{id}_span = (float)t{id}_high - (float)t{id}_low;"
+                    ));
+                }
+                self.line(&format!(
+                    "if (!(isfinite(t{id}_low) && isfinite(t{id}_high) && t{id}_low <= t{id}_high && isfinite(t{id}_span))) chelis_numeric_trap({trap:?});"
+                ));
+            }
+        }
+        match handler {
+            chelis_ir::dag::RandomHandler::Inherited => {
+                self.line("if (__chelis_rng == NULL || !__chelis_rng->active) {");
+                self.indent += 1;
+                self.line(
+                    "fprintf(stderr, \"inherited Random requires an active host RNG scope\\n\");",
+                );
+                self.line("abort();");
+                self.indent -= 1;
+                self.line("}");
+                self.line(&format!(
+                    "t{id}_key = chelis_random_key(__chelis_rng->seed, __chelis_rng->counter++);"
+                ));
+            }
+            chelis_ir::dag::RandomHandler::Scoped { instance } => {
+                let seed = dag
+                    .get(node.inputs[0])
+                    .and_then(|seed| match &seed.op {
+                        RiscOp::Const { value } => value.as_i64_exact(),
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        unsupported_fixed_execution("a scoped draw key requires its literal seed")
+                    })?;
+                self.line(&format!(
+                    "t{id}_key = chelis_random_key(UINT64_C(0x{:016x}), __chelis_scoped_counter_{instance}++);",
+                    seed as u64
+                ));
+            }
+        }
+        self.indent -= 1;
+        self.line("}");
+        Ok(())
+    }
+
+    /// Fill `t{id}` with positive zeros: an inactive draw's discarded value.
+    fn emit_random_zero_fill(&mut self, id: usize, ty: &TensorType) {
+        let storage = Self::elem_type(ty);
+        self.line("#pragma omp parallel for");
+        self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
+        self.indent += 1;
+        self.line(&format!("(({storage}*)t{id}_data)[i] = ({storage})0;"));
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// [05-OP-37] over an operand rate and a key, and its pathwise replay
+    /// over a cotangent: drop where the arithmetic-width unit is below the
+    /// rate, else the finalized `div(x, sub(1p, rate))`.
+    fn emit_keyed_dropout(&mut self, node: &DagNode, dag: VerifiedDagView<'_>) {
+        let id = node.id.0;
+        let ty = &node.output_type;
+        let prim = ty.precision;
+        let data = node.inputs[0].0;
+        let key = node.inputs[2].0;
+        let rate = Self::rank0_float_expr(dag, node.inputs[1]);
+        let active = Self::rank0_bool_expr(node.inputs.get(3));
+        self.emit_slot_wrapper(id, ty);
+        self.line(&format!("if ({active}) {{"));
+        self.indent += 1;
+        match prim {
+            Prim::F64 => {
+                self.line(&format!("double t{id}_rate = {rate};"));
+                self.line(&format!("double t{id}_denom = 1.0 - t{id}_rate;"));
+                self.line("#pragma omp parallel for");
+                self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
+                self.indent += 1;
+                self.line(&format!(
+                    "((double*)t{id}_data)[i] = chelis_random_unit(t{key}_key, (uint64_t)i) < t{id}_rate ? 0.0 : ((const double*)t{data}_data)[i] / t{id}_denom;"
+                ));
+            }
+            Prim::F32 => {
+                self.line(&format!("float t{id}_rate = {rate};"));
+                self.line(&format!("float t{id}_denom = 1.0f - t{id}_rate;"));
+                self.line("#pragma omp parallel for");
+                self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
+                self.indent += 1;
+                self.line(&format!(
+                    "((float*)t{id}_data)[i] = (float)chelis_random_unit(t{key}_key, (uint64_t)i) < t{id}_rate ? 0.0f : ((const float*)t{data}_data)[i] / t{id}_denom;"
+                ));
+            }
+            Prim::F16 | Prim::Bf16 => {
+                let widen = Self::reduced_to_f32_fn(prim);
+                let narrow = Self::f32_to_reduced_fn(prim);
+                self.line(&format!("float t{id}_rate = {rate};"));
+                self.line(&format!(
+                    "float t{id}_denom = {widen}({narrow}(1.0f - t{id}_rate));"
+                ));
+                self.line("#pragma omp parallel for");
+                self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
+                self.indent += 1;
+                self.line(&format!(
+                    "((uint16_t*)t{id}_data)[i] = (float)chelis_random_unit(t{key}_key, (uint64_t)i) < t{id}_rate ? {narrow}(0.0f) : {narrow}({widen}(((const uint16_t*)t{data}_data)[i]) / t{id}_denom);"
+                ));
+            }
+            other => panic!("dropout of non-float dtype `{}`", other.name()),
+        }
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("} else {");
+        self.indent += 1;
+        self.emit_random_zero_fill(id, ty);
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// [05-OP-8] over operand bounds and a key, with the same samplers the
+    /// baked node uses.
+    fn emit_keyed_uniform_like(&mut self, node: &DagNode, dag: VerifiedDagView<'_>) {
+        let id = node.id.0;
+        let ty = &node.output_type;
+        let key = node.inputs[3].0;
+        let low = Self::rank0_float_expr(dag, node.inputs[1]);
+        let high = Self::rank0_float_expr(dag, node.inputs[2]);
+        let active = Self::rank0_bool_expr(node.inputs.get(4));
+        self.emit_slot_wrapper(id, ty);
+        self.line(&format!("if ({active}) {{"));
+        self.indent += 1;
+        let (wide, sampler) = if ty.precision == Prim::F64 {
+            ("double", "chelis_uniform_sample_f64")
+        } else {
+            ("float", "chelis_uniform_sample_f32")
+        };
+        self.line(&format!(
+            "{wide} t{id}_low = ({wide})({low}), t{id}_high = ({wide})({high});"
+        ));
+        self.line("#pragma omp parallel for");
+        self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
+        self.indent += 1;
+        let sample = format!("{sampler}(t{key}_key, (uint64_t)i, t{id}_low, t{id}_high)");
+        match ty.precision {
+            Prim::F64 => self.line(&format!("((double*)t{id}_data)[i] = {sample};")),
+            Prim::F32 => self.line(&format!("((float*)t{id}_data)[i] = {sample};")),
+            Prim::F16 | Prim::Bf16 => self.line(&format!(
+                "((uint16_t*)t{id}_data)[i] = {}({sample});",
+                Self::f32_to_reduced_fn(ty.precision)
+            )),
+            other => panic!("uniform_like of non-float dtype `{}`", other.name()),
+        }
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("} else {");
+        self.indent += 1;
+        self.emit_random_zero_fill(id, ty);
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// [05-OP-8]'s bound adjoint: contributions `g_i * (1 - u_i)` or
+    /// `g_i * u_i` in row-major order at the arithmetic width, combined by
+    /// the canonical adjacent-pair tree and narrowed once to `p`.
+    fn emit_uniform_bound_adjoint(&mut self, node: &DagNode, bound: chelis_ir::dag::UniformBound) {
+        let id = node.id.0;
+        let ty = &node.output_type;
+        let prim = ty.precision;
+        let cotangent = node.inputs[1].0;
+        let key = node.inputs[2].0;
+        let active = Self::rank0_bool_expr(node.inputs.get(3));
+        let (arithmetic, arithmetic_dtype) = if prim == Prim::F64 {
+            ("double", "CHELIS_DTYPE_F64")
+        } else {
+            ("float", "CHELIS_DTYPE_F32")
+        };
+        let load_g = match prim {
+            Prim::F64 => format!("((const double*)t{cotangent}_data)[i]"),
+            Prim::F32 => format!("((const float*)t{cotangent}_data)[i]"),
+            Prim::F16 | Prim::Bf16 => format!(
+                "{}(((const uint16_t*)t{cotangent}_data)[i])",
+                Self::reduced_to_f32_fn(prim)
+            ),
+            other => panic!(
+                "uniform bound adjoint of non-float dtype `{}`",
+                other.name()
+            ),
+        };
+        let weight = match bound {
+            chelis_ir::dag::UniformBound::Low => format!("(({arithmetic})1 - u)"),
+            chelis_ir::dag::UniformBound::High => "u".to_string(),
+        };
+        self.emit_slot_wrapper(id, ty);
+        self.line(&format!("{arithmetic} t{id}_sum = ({arithmetic})0;"));
+        self.line(&format!("if (({active}) && t{cotangent}_size > 0) {{"));
+        self.indent += 1;
+        self.line(&format!("int64_t t{id}_n = t{cotangent}_size;"));
+        self.line(&format!(
+            "chelis_tensor *t{id}_leaves_tensor = chelis_alloc(1, &t{id}_n, {arithmetic_dtype});"
+        ));
+        self.line(&format!(
+            "chelis_tensor_write *t{id}_leaves_guard = chelis_tensor_begin_write(t{id}_leaves_tensor);"
+        ));
+        self.line(&format!(
+            "{arithmetic} *t{id}_leaves = ({arithmetic}*)chelis_tensor_write_view(t{id}_leaves_guard).data;"
+        ));
+        self.line(&format!("for (int64_t i = 0; i < t{id}_n; i++) {{"));
+        self.indent += 1;
+        self.line(&format!(
+            "{arithmetic} u = ({arithmetic})chelis_random_unit(t{key}_key, (uint64_t)i);"
+        ));
+        self.line(&format!(
+            "t{id}_leaves[i] = ({arithmetic})({load_g}) * {weight};"
+        ));
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!("while (t{id}_n > 1) {{"));
+        self.indent += 1;
+        self.line(&format!("int64_t next_n = t{id}_n / 2 + t{id}_n % 2;"));
+        self.line("for (int64_t pair = 0; pair < next_n; pair++) {");
+        self.indent += 1;
+        self.line("int64_t left = 2 * pair;");
+        self.line("int64_t right = left + 1;");
+        self.line(&format!(
+            "t{id}_leaves[pair] = right < t{id}_n ? t{id}_leaves[left] + t{id}_leaves[right] : t{id}_leaves[left];"
+        ));
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!("t{id}_n = next_n;"));
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!("t{id}_sum = t{id}_leaves[0];"));
+        self.line(&format!("chelis_tensor_end_write(t{id}_leaves_guard);"));
+        self.line(&format!("chelis_tensor_release(t{id}_leaves_tensor);"));
+        self.indent -= 1;
+        self.line("}");
+        match prim {
+            Prim::F64 => self.line(&format!("((double*)t{id}_data)[0] = t{id}_sum;")),
+            Prim::F32 => self.line(&format!("((float*)t{id}_data)[0] = t{id}_sum;")),
+            _ => self.line(&format!(
+                "((uint16_t*)t{id}_data)[0] = {}(t{id}_sum);",
+                Self::f32_to_reduced_fn(prim)
+            )),
+        }
+    }
+
     fn emit_uniform_like(
         &mut self,
         id: usize,
@@ -5084,6 +5455,10 @@ impl CEmitter {
                 Prim::String => chelis_types::unimplemented_rejection!(
                     729,
                     "the exhaustive target capability table has no C fused-chain string cell"
+                ),
+                Prim::Key => chelis_types::deliberate_rejection!(
+                    "[05-RNG-1]",
+                    "a random key has no arithmetic and never joins a fused chain"
                 ),
                 Prim::F32 | Prim::F64 => unreachable!("supported fused precision"),
             };

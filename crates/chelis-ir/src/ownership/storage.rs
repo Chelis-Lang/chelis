@@ -640,6 +640,9 @@ fn classify_nodes(
                         },
                     }
                 }
+                // A key is one word that the emitter keeps in a local, never
+                // tensor storage with a slot and a lifetime.
+                RiscOp::DrawKey { .. } => StoragePlacement::Skipped,
                 RiscOp::Drop => StoragePlacement::TerminalDrop {
                     source: node.inputs[0],
                 },
@@ -689,6 +692,10 @@ fn classify_nodes(
                 | RiscOp::Round
                 | RiscOp::BakedUniformLike { .. }
                 | RiscOp::BakedDropout { .. }
+                | RiscOp::UniformLike
+                | RiscOp::Dropout
+                | RiscOp::DropoutReplay
+                | RiscOp::UniformBoundAdjoint { .. }
                 | RiscOp::Copy
                 | RiscOp::Sum { .. }
                 | RiscOp::Count { .. }

@@ -107,7 +107,9 @@ fn prim_census_class(prim: Prim) -> PrimCensusClass {
         // reserved dtype becomes a silent seam on the day it activates.
         Prim::F32 | Prim::F64 | Prim::F16 | Prim::Bf16 | Prim::F8e4m3 => PrimCensusClass::Float,
         Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64 => PrimCensusClass::Integer,
-        Prim::Bool | Prim::String => PrimCensusClass::NonNumeric,
+        // A random key (chelis#2413) is an opaque word with no arithmetic,
+        // cast, or literal carrier: structurally non-numeric.
+        Prim::Bool | Prim::String | Prim::Key => PrimCensusClass::NonNumeric,
     }
 }
 
@@ -126,6 +128,7 @@ const ALL_PRIMS: &[Prim] = &[
     Prim::Int64,
     Prim::Bool,
     Prim::String,
+    Prim::Key,
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

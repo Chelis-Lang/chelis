@@ -2123,7 +2123,7 @@ impl<'plan> Emitter<'plan> {
                 )
                 .to_string());
             }
-            Prim::String => {
+            Prim::String | Prim::Key => {
                 return Err(Unsupported::new(
                     UnsupportedKind::Dtype(prec.name().to_string()),
                     "a Metal pad-fill host scalar literal",

@@ -310,7 +310,10 @@ fn dead_code_eliminate_impl(
         }
     }
     for node in dag.nodes() {
-        if implicit_observations && matches!(node.op, RiscOp::Store { .. }) {
+        // A draw key is effectful: it advances its handler even when its key
+        // is never read, so it is an observation like a Store.
+        if implicit_observations && matches!(node.op, RiscOp::Store { .. } | RiscOp::DrawKey { .. })
+        {
             live[node.id.0] = true;
         }
     }
@@ -519,6 +522,7 @@ pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
                     | RiscOp::CheckedUnitAxis { .. }
             )
             && !(matches!(node.op, RiscOp::BakedUniformLike { .. }) && node.inputs.len() == 2)
+            && !matches!(node.op, RiscOp::DrawKey { .. })
             && let Some(&existing) = seen.get(&cse_key)
         {
             // Duplicate: its full provenance (canonical + merged) folds

@@ -7019,6 +7019,17 @@ fn wire_op(op: &RiscOp, precision: Prim) -> WireResult<WireRiscOp> {
             rate: wire_float_parameter(*rate, precision)?,
             seed: *seed,
         },
+        RiscOp::UniformLike
+        | RiscOp::Dropout
+        | RiscOp::DropoutReplay
+        | RiscOp::UniformBoundAdjoint { .. }
+        | RiscOp::DrawKey { .. } => {
+            return Err(format!(
+                "`{}` has no WireDag spelling in schema version {}",
+                chelis_ir::grad::risc_op_name(op),
+                crate::schema::WIRE_DAG_SCHEMA_VERSION
+            ));
+        }
         RiscOp::Sum { axis, accumulator } => WireRiscOp::Sum {
             axis: wire_axis(*axis)?,
             accumulator: accumulator.name().to_string(),

@@ -206,7 +206,7 @@ impl CheckedCastPlan {
                 CheckedCastFamily::SignedInteger
             }
             Prim::Bool => CheckedCastFamily::Bool,
-            Prim::F8e4m3 | Prim::String => {
+            Prim::F8e4m3 | Prim::String | Prim::Key => {
                 return Err(CheckedCastPlanError::UnsupportedSource(source));
             }
         };
@@ -216,7 +216,7 @@ impl CheckedCastPlan {
                 CheckedCastFamily::SignedInteger
             }
             Prim::Bool => CheckedCastFamily::Bool,
-            Prim::F8e4m3 | Prim::String => {
+            Prim::F8e4m3 | Prim::String | Prim::Key => {
                 return Err(CheckedCastPlanError::UnsupportedTarget(target));
             }
         };
@@ -310,7 +310,7 @@ impl CheckedCastPlan {
                 | Prim::Bf16,
                 _,
             ) => false,
-            (Prim::F8e4m3 | Prim::String, _) => {
+            (Prim::F8e4m3 | Prim::String | Prim::Key, _) => {
                 unreachable!("unsupported source cannot construct a checked-cast plan")
             }
         };
@@ -2299,7 +2299,7 @@ fn reduction_arithmetic_prim(prim: Prim) -> Option<Prim> {
     match prim {
         Prim::F16 | Prim::Bf16 => Some(Prim::F32),
         Prim::F32 | Prim::F64 | Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64 => Some(prim),
-        Prim::Bool | Prim::String | Prim::F8e4m3 => None,
+        Prim::Bool | Prim::String | Prim::Key | Prim::F8e4m3 => None,
     }
 }
 
@@ -3095,7 +3095,8 @@ pub fn finalize_scalar(
                 | Prim::Bf16
                 | Prim::F8e4m3
                 | Prim::Bool
-                | Prim::String => unreachable!("outer match binds an integer prim"),
+                | Prim::String
+                | Prim::Key => unreachable!("outer match binds an integer prim"),
             }
         }
         Prim::Bool => {
@@ -3116,6 +3117,10 @@ pub fn finalize_scalar(
         ),
         Prim::String => panic!(
             "finalize_scalar: string is not a numeric dtype and has no \
+             finalize semantics (op {op})"
+        ),
+        Prim::Key => panic!(
+            "finalize_scalar: a random key is not a numeric dtype and has no \
              finalize semantics (op {op})"
         ),
     };
@@ -3173,7 +3178,8 @@ pub fn integer_is_exactly_representable(value: i64, prim: Prim) -> bool {
         | Prim::Int8
         | Prim::Bool
         | Prim::F8e4m3
-        | Prim::String => return false,
+        | Prim::String
+        | Prim::Key => return false,
     };
     let magnitude = value.unsigned_abs();
     if magnitude == 0 {
@@ -3485,6 +3491,72 @@ impl PreparedUniformLike {
     }
 }
 
+/// Which `[05-OP-8]` bound a pathwise adjoint belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UniformBound {
+    Low,
+    High,
+}
+
+/// The `[05-OP-8]` pathwise adjoint of one bound under the forward draw keyed
+/// by `key`, for the output cotangent `cotangent` of dtype `p`.
+///
+/// In increasing row-major order element `i` contributes `g_i * (1 - u_i)` to
+/// `low` and `g_i * u_i` to `high`, where `u_i` is the forward draw's unit at
+/// the arithmetic width (the exact unit for `p = f64`, `round_f32(u)`
+/// otherwise). Every primitive executes at that arithmetic width (f64 for
+/// `p = f64`, f32 otherwise, the width `[05-OP-8]`'s forward affine uses), the
+/// contributions combine by the canonical adjacent-pair balanced tree, and
+/// the sum narrows once to `p`. An empty cotangent contributes positive zero.
+pub fn uniform_like_bound_adjoint(
+    cotangent: &TensorStorage,
+    key: RandomKey,
+    bound: UniformBound,
+) -> Result<ScalarValue, NumericKernelError> {
+    let prim = cotangent.prim();
+    if !prim.is_float() {
+        return Err(NumericKernelError::WrongFamily {
+            op: "uniform_like",
+            expected: NumericFamily::Float,
+            actual: prim,
+        });
+    }
+    let value = if prim == Prim::F64 {
+        let leaves = (0..cotangent.len())
+            .map(|index| {
+                let unit = random_unit(key.bits, index as u64);
+                let weight = match bound {
+                    UniformBound::Low => 1.0 - unit,
+                    UniformBound::High => unit,
+                };
+                cotangent.scalar_at(index).as_f64_lossy() * weight
+            })
+            .collect::<Vec<_>>();
+        checked_adjacent_pair_fold(leaves, |left, right| {
+            Ok::<_, NumericKernelError>(left + right)
+        })?
+        .unwrap_or(0.0)
+    } else {
+        let leaves = (0..cotangent.len())
+            .map(|index| {
+                let unit = random_unit(key.bits, index as u64) as f32;
+                let weight = match bound {
+                    UniformBound::Low => 1.0f32 - unit,
+                    UniformBound::High => unit,
+                };
+                (cotangent.scalar_at(index).as_f64_lossy() as f32) * weight
+            })
+            .collect::<Vec<_>>();
+        f64::from(
+            checked_adjacent_pair_fold(leaves, |left, right| {
+                Ok::<_, NumericKernelError>(left + right)
+            })?
+            .unwrap_or(0.0),
+        )
+    };
+    scalar_from_f64("uniform_like", prim, value).map_err(Into::into)
+}
+
 // [05-RNG-1]'s `splitmix64`: add the golden gamma, xor-shift 30 and
 // multiply, xor-shift 27 and multiply, then xor-shift 31, all modulo 2^64.
 fn random_splitmix64(mut value: u64) -> u64 {
@@ -3667,6 +3739,7 @@ fn assert_integer_trunc_target(op: &'static str, dst: Prim) {
             dst.name()
         ),
         Prim::String => panic!("cast_trunc: string is not a numeric dtype (op {op})"),
+        Prim::Key => panic!("cast_trunc: a random key is not a numeric dtype (op {op})"),
     }
 }
 
@@ -3680,7 +3753,8 @@ fn assert_float_trunc_source(op: &'static str, src: Prim) {
         | Prim::Int64
         | Prim::Bool
         | Prim::F8e4m3
-        | Prim::String => panic!(
+        | Prim::String
+        | Prim::Key => panic!(
             "cast_trunc: `{}` is not a float source; [05-OP-6] is \
              float-to-integer only and the checker rejects every other \
              source (op {op})",
@@ -3747,6 +3821,10 @@ pub fn finalize_tensor(
         ),
         Prim::String => panic!(
             "finalize_tensor: string is not a numeric dtype and has no \
+             finalize semantics (op {op})"
+        ),
+        Prim::Key => panic!(
+            "finalize_tensor: a random key is not a numeric dtype and has no \
              finalize semantics (op {op})"
         ),
     };
@@ -3947,6 +4025,10 @@ pub fn tensor_from_scalars(prim: Prim, values: &[ScalarValue]) -> TensorStorage 
         ),
         Prim::String => panic!(
             "tensor_from_scalars: string is not a numeric dtype and has no \
+             tensor storage"
+        ),
+        Prim::Key => panic!(
+            "tensor_from_scalars: a random key is not a numeric dtype and has no \
              tensor storage"
         ),
     };
@@ -4343,6 +4425,89 @@ mod tests {
                 }
             }
         }
+    }
+
+    // [05-OP-8]'s bound adjoint, transcribed from the atom: contributions in
+    // row-major order at the arithmetic width, combined level by level in
+    // adjacent pairs with an odd trailing element carried up unchanged, then
+    // narrowed once to `p`.
+    fn spec_bound_adjoint(
+        prim: Prim,
+        cotangent: &[f64],
+        seed_bits: u64,
+        ordinal: u64,
+        high: bool,
+    ) -> f64 {
+        fn tree<T: Copy + std::ops::Add<Output = T>>(mut level: Vec<T>, zero: T) -> T {
+            if level.is_empty() {
+                return zero;
+            }
+            while level.len() > 1 {
+                level = (0..level.len().div_ceil(2))
+                    .map(|pair| match level.get(2 * pair + 1) {
+                        Some(right) => level[2 * pair] + *right,
+                        None => level[2 * pair],
+                    })
+                    .collect();
+            }
+            level[0]
+        }
+        if prim == Prim::F64 {
+            let leaves = cotangent
+                .iter()
+                .enumerate()
+                .map(|(i, g)| {
+                    let u = spec_unit(seed_bits, ordinal, i as u64);
+                    g * if high { u } else { 1.0 - u }
+                })
+                .collect();
+            tree(leaves, 0.0)
+        } else {
+            let leaves = cotangent
+                .iter()
+                .enumerate()
+                .map(|(i, g)| {
+                    let u = spec_unit(seed_bits, ordinal, i as u64) as f32;
+                    (*g as f32) * if high { u } else { 1.0 - u }
+                })
+                .collect();
+            let wide = f64::from(tree(leaves, 0.0f32));
+            scalar_from_f64("test", prim, wide).unwrap().as_f64_lossy()
+        }
+    }
+
+    #[test]
+    fn uniform_bound_adjoint_is_the_05_op_8_pathwise_transcription() {
+        for prim in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
+            for len in [0_usize, 1, 2, 3, 7, 16, 33] {
+                let values = (0..len)
+                    .map(|i| (i as f64 - 3.0) * 0.625 + 0.1)
+                    .collect::<Vec<_>>();
+                let cotangent =
+                    finalize_tensor("test", prim, RawTensor::Float(values.clone())).unwrap();
+                let stored = (0..len)
+                    .map(|i| cotangent.scalar_at(i).as_f64_lossy())
+                    .collect::<Vec<_>>();
+                for (seed_bits, ordinal) in [(42_u64, 0_u64), ((-1_i64) as u64, 5)] {
+                    let key = RandomKey::from_counter(seed_bits, ordinal);
+                    for (bound, high) in [(UniformBound::Low, false), (UniformBound::High, true)] {
+                        let actual = uniform_like_bound_adjoint(&cotangent, key, bound).unwrap();
+                        assert_eq!(actual.prim(), prim);
+                        let expected = spec_bound_adjoint(prim, &stored, seed_bits, ordinal, high);
+                        assert_eq!(
+                            actual.as_f64_lossy().to_bits(),
+                            expected.to_bits(),
+                            "{prim:?} len {len} {bound:?} seed {seed_bits:#x} ordinal {ordinal}"
+                        );
+                    }
+                }
+            }
+        }
+        let integer = finalize_tensor("test", Prim::Int32, RawTensor::Int(vec![1])).unwrap();
+        assert!(matches!(
+            uniform_like_bound_adjoint(&integer, RandomKey::from_counter(0, 0), UniformBound::Low),
+            Err(NumericKernelError::WrongFamily { .. })
+        ));
     }
 
     // [05-OP-8]: the bounds are validated before any draw, at the arithmetic

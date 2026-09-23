@@ -1330,7 +1330,8 @@ pub(crate) fn checked_cast_c_expr(plan: CheckedCastPlan, value: &str) -> String 
             | Prim::Int32
             | Prim::Int64
             | Prim::Bool
-            | Prim::String => unreachable!("ExactToFloat plan has a float target"),
+            | Prim::String
+            | Prim::Key => unreachable!("ExactToFloat plan has a float target"),
         },
         CheckedCastKind::FloatToFloat => match target {
             Prim::F64 => cast_float_as_double(plan.source(), value),
@@ -1349,7 +1350,8 @@ pub(crate) fn checked_cast_c_expr(plan: CheckedCastPlan, value: &str) -> String 
             | Prim::Int32
             | Prim::Int64
             | Prim::Bool
-            | Prim::String => unreachable!("FloatToFloat plan has a float target"),
+            | Prim::String
+            | Prim::Key => unreachable!("FloatToFloat plan has a float target"),
         },
         CheckedCastKind::ExactToBool => {
             let domain = NumericTrap::Domain {
@@ -1458,7 +1460,8 @@ fn cast_float_as_double(source: Prim, value: &str) -> String {
         | Prim::Int32
         | Prim::Int64
         | Prim::Bool
-        | Prim::String => unreachable!("float checked-cast action has a float source"),
+        | Prim::String
+        | Prim::Key => unreachable!("float checked-cast action has a float source"),
     }
 }
 
@@ -1474,7 +1477,8 @@ fn cast_integer_width(target: Prim) -> i64 {
         | Prim::Bf16
         | Prim::F8e4m3
         | Prim::Bool
-        | Prim::String => unreachable!("integer checked-cast action has an integer target"),
+        | Prim::String
+        | Prim::Key => unreachable!("integer checked-cast action has an integer target"),
     }
 }
 
@@ -1490,7 +1494,8 @@ fn cast_integer_bounds(target: Prim) -> (&'static str, &'static str) {
         | Prim::Bf16
         | Prim::F8e4m3
         | Prim::Bool
-        | Prim::String => unreachable!("integer checked-cast action has an integer target"),
+        | Prim::String
+        | Prim::Key => unreachable!("integer checked-cast action has an integer target"),
     }
 }
 
@@ -1504,7 +1509,7 @@ fn cast_prim_c_type(prim: Prim) -> &'static str {
         Prim::Int32 => "int32_t",
         Prim::Int64 => "int64_t",
         Prim::Bool => "bool",
-        Prim::F8e4m3 | Prim::String => {
+        Prim::F8e4m3 | Prim::String | Prim::Key => {
             unreachable!("unsupported Prim cannot enter checked C cast emission")
         }
     }

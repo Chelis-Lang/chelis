@@ -481,6 +481,46 @@ pub enum ExtremaOperand {
     Right,
 }
 
+/// Which `[05-OP-8]` bound a [`RiscOp::UniformBoundAdjoint`] materializes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum UniformBound {
+    Low,
+    High,
+}
+
+/// The handler whose stream a [`RiscOp::DrawKey`] reads.
+///
+/// `Inherited` is the stream the graph's caller holds when it runs the graph.
+/// `Scoped` is a `with seed` handler lowered inside the graph: its literal
+/// seed is the node's first input and its ordinal counts from zero. `instance`
+/// is an opaque identity for one lowered handler region, so two regions with
+/// equal seeds keep separate counters even after their seed constants merge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RandomHandler {
+    Inherited,
+    Scoped { instance: u32 },
+}
+
+/// The random primitive whose controls a [`RiscOp::DrawKey`] validates before
+/// it advances its handler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RandomDraw {
+    /// `[05-OP-37]`: one rate control.
+    Dropout,
+    /// `[05-OP-8]`: low and high bound controls.
+    UniformLike,
+}
+
+impl RandomDraw {
+    /// The number of control inputs the primitive and its key both carry.
+    pub const fn control_count(self) -> usize {
+        match self {
+            Self::Dropout => 1,
+            Self::UniformLike => 2,
+        }
+    }
+}
+
 impl ReduceWindowKind {
     /// Canonical Surf builtin name. Used by [`crate::grad::risc_op_name`]
     /// and by the AD rejection error so error messages reference the
@@ -689,6 +729,49 @@ pub enum RiscOp {
     BakedDropout {
         rate: f64,
         seed: u64,
+    },
+    /// `[05-OP-8]` with operand controls. Inputs are `[template, low, high,
+    /// key]`, optionally followed by one rank-0 Bool activation. The template
+    /// supplies only the shape and dtype `p`; `low` and `high` are rank-0
+    /// floats of dtype `p`, or f32 while the checker's bound signature is f32
+    /// (chelis#1295); `key` is this draw's `Prim::Key`, consumed here. An
+    /// inactive draw validates nothing and produces positive zeros. Its
+    /// serialized name stays distinct from the baked node's until that node
+    /// is deleted.
+    #[serde(rename = "KeyedUniformLike")]
+    UniformLike,
+    /// `[05-OP-37]` with an operand rate. Inputs are `[x, rate, key]`,
+    /// optionally followed by one rank-0 Bool activation; `rate` is a rank-0
+    /// value of `x`'s dtype and `key` is consumed here. An inactive draw
+    /// validates nothing and produces positive zeros. Its serialized name
+    /// stays distinct from the baked node's until that node is deleted.
+    #[serde(rename = "KeyedDropout")]
+    Dropout,
+    /// AD-only `[05-OP-37]` pathwise input adjoint. Inputs are `[g, rate,
+    /// key]`, optionally followed by the forward draw's activation. It reads
+    /// its forward `Dropout`'s key and rate without consuming the key, and
+    /// applies the same saved mask and finalized sub/div to the cotangent.
+    DropoutReplay,
+    /// AD-only `[05-OP-8]` bound adjoint. Inputs are `[template, g, key]`,
+    /// optionally followed by the forward draw's activation; the result is a
+    /// rank-0 value of the template's dtype. It reads its forward
+    /// `UniformLike`'s key without consuming it.
+    UniformBoundAdjoint {
+        bound: UniformBound,
+    },
+    /// The counter-stream bridge (`spec/design/randomness_counter_stream.md`
+    /// §2): the key of `handler`'s next `[05-RNG-1]` ordinal,
+    /// `RandomKey::from_counter(seed, ordinal)`. Inputs are the literal seed
+    /// (a rank-0 i64 `Const`) when the handler is scoped, then `draw`'s
+    /// controls, then optionally one rank-0 Bool activation. When active it
+    /// validates the controls for a draw of dtype `dtype` and only then
+    /// advances its handler; when inactive it neither validates nor advances.
+    /// It is effectful: a dead-code root that is never merged, folded or
+    /// recomputed, executed in node order.
+    DrawKey {
+        handler: RandomHandler,
+        draw: RandomDraw,
+        dtype: Prim,
     },
 
     // --- Reduction ---
@@ -1066,6 +1149,8 @@ pub enum RiscAtomIdentity {
     Recip,
     UniformLike,
     Dropout,
+    DropoutReplay,
+    UniformBoundAdjoint,
     Sum,
     MaxReduce,
     MinReduce,
@@ -1135,6 +1220,8 @@ impl RiscAtomIdentity {
         Self::Recip,
         Self::UniformLike,
         Self::Dropout,
+        Self::DropoutReplay,
+        Self::UniformBoundAdjoint,
         Self::Sum,
         Self::MaxReduce,
         Self::MinReduce,
@@ -1204,6 +1291,8 @@ impl RiscAtomIdentity {
             Self::Recip => "recip",
             Self::UniformLike => "uniform_like",
             Self::Dropout => "dropout",
+            Self::DropoutReplay => "DropoutReplay",
+            Self::UniformBoundAdjoint => "UniformBoundAdjoint",
             Self::Sum => "sum",
             Self::MaxReduce => "max_reduce",
             Self::MinReduce => "min_reduce",
@@ -1291,8 +1380,13 @@ impl RiscOp {
             Self::Ceil => Semantic(Id::Ceil),
             Self::Round => Semantic(Id::Round),
             Self::Recip => Semantic(Id::Recip),
-            Self::BakedUniformLike { .. } => Semantic(Id::UniformLike),
-            Self::BakedDropout { .. } => Semantic(Id::Dropout),
+            Self::BakedUniformLike { .. } | Self::UniformLike => Semantic(Id::UniformLike),
+            Self::BakedDropout { .. } | Self::Dropout => Semantic(Id::Dropout),
+            Self::DropoutReplay => Semantic(Id::DropoutReplay),
+            Self::UniformBoundAdjoint { .. } => Semantic(Id::UniformBoundAdjoint),
+            // The counter-stream bridge supplies a key; it is not a Table-A
+            // operation and the explicit-key switch deletes it.
+            Self::DrawKey { .. } => Structural,
             Self::Sum { .. } => Semantic(Id::Sum),
             Self::MaxReduce { .. } => Semantic(Id::MaxReduce),
             Self::MinReduce { .. } => Semantic(Id::MinReduce),
@@ -1434,7 +1528,7 @@ impl RiscOp {
                      active numeric primitive set"
                     .to_string());
             }
-            Prim::Bool | Prim::String => {
+            Prim::Bool | Prim::String | Prim::Key => {
                 return Err(format!(
                     "matmul is not defined for operand dtype `{}`",
                     operand.name()
@@ -1650,7 +1744,13 @@ impl RiscOp {
             RiscOp::Logical(_) | RiscOp::Where => false,
 
             // Stochastic ops have no deterministic value to bound.
-            RiscOp::BakedUniformLike { .. } | RiscOp::BakedDropout { .. } => false,
+            RiscOp::BakedUniformLike { .. }
+            | RiscOp::BakedDropout { .. }
+            | RiscOp::UniformLike
+            | RiscOp::Dropout
+            | RiscOp::DropoutReplay
+            | RiscOp::UniformBoundAdjoint { .. }
+            | RiscOp::DrawKey { .. } => false,
 
             // Argmax/argmin return discrete indices, not a numeric
             // envelope over the reals; outside the forward-bound story.
@@ -1785,7 +1885,7 @@ fn prim_width_rank(p: Prim) -> u32 {
             "f8e4m3 is deferred per spec/04-type-system.md §1.1.1 and \
              should have been rejected upstream"
         ),
-        Prim::String => 0,
+        Prim::String | Prim::Key => 0,
     }
 }
 
@@ -2397,7 +2497,10 @@ fn shape_source_for_axis(dag: &Dag, id: NodeId, axis: usize) -> Option<(String, 
         | RiscOp::Round
         | RiscOp::Relu
         | RiscOp::BakedUniformLike { .. }
-        | RiscOp::BakedDropout { .. } => shape_source_for_axis(dag, *node.inputs.first()?, axis),
+        | RiscOp::BakedDropout { .. }
+        | RiscOp::UniformLike
+        | RiscOp::Dropout
+        | RiscOp::DropoutReplay => shape_source_for_axis(dag, *node.inputs.first()?, axis),
         RiscOp::Copy
         | RiscOp::Drop
         | RiscOp::Realize
@@ -3382,6 +3485,17 @@ mod tests {
                 seed: 7,
             },
             RiscOp::BakedDropout { rate: 0.5, seed: 7 },
+            RiscOp::UniformLike,
+            RiscOp::Dropout,
+            RiscOp::DropoutReplay,
+            RiscOp::UniformBoundAdjoint {
+                bound: UniformBound::High,
+            },
+            RiscOp::DrawKey {
+                handler: RandomHandler::Inherited,
+                draw: RandomDraw::Dropout,
+                dtype: Prim::F32,
+            },
             RiscOp::Sum {
                 axis: 0,
                 accumulator: Prim::F32,
@@ -3465,8 +3579,8 @@ mod tests {
         // identities so they cannot inherit a verifier disposition.
         assert_eq!(
             all.len(),
-            59,
-            "one_of_every_risc_op must list all 59 classified samples"
+            64,
+            "one_of_every_risc_op must list all 64 classified samples"
         );
 
         // The classifier returns a definite bool for every variant (no
@@ -3477,7 +3591,8 @@ mod tests {
         // Pinned partition per beacon_plan.md §3.1: the elementwise math
         // (5 binary/cmp + 13 unary, including `round`), 5 reductions, 6
         // movement, 4 memory/blas value nodes (Const, ConstTensor, Load,
-        // BlasMatmul), and Cast are targetable (34); stochastic (2),
+        // BlasMatmul), and Cast are targetable (34); stochastic (2, plus the
+        // key-operand draws, their two AD replays and the draw key: 7),
         // arg-reductions (2), integer floor/trunc division and remainder (3),
         // `cast_trunc` (1, chelis#759), one_hot (1), the `Shape` metadata read
         // (1), sparse gather/scatter (4, including element-wise
@@ -3487,13 +3602,14 @@ mod tests {
         // own transformers. chelis#1464 adds the [05-OP-68] guarded abort to
         // the excluded side (+1 = 25): an abort is a control effect, not an
         // output envelope, and relaxing it to its fallback's envelope would
-        // drop the trap.
+        // drop the trap. The chelis#2413 key-operand IR adds five more
+        // stochastic nodes (+5 = 30).
         assert_eq!(
             targetable, 34,
             "targetable op count drifted from the pinned WI-2 subset"
         );
         assert_eq!(
-            excluded, 25,
+            excluded, 30,
             "excluded op count drifted from the pinned WI-2 subset"
         );
 
@@ -3602,6 +3718,7 @@ mod tests {
                     | RiscOp::Drop
                     | RiscOp::Realize
                     | RiscOp::FusedElem { .. }
+                    | RiscOp::DrawKey { .. }
             );
             assert_eq!(
                 matches!(op.atom_disposition(), RiscAtomDisposition::Structural),

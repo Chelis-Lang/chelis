@@ -1409,7 +1409,13 @@ impl HipEmitter {
                 "kernel_uniform_like_{}",
                 kind_for_node(node)?.suffix()
             )),
-            RiscOp::BakedDropout { .. } | RiscOp::Drop => None,
+            RiscOp::BakedDropout { .. }
+            | RiscOp::Drop
+            | RiscOp::UniformLike
+            | RiscOp::Dropout
+            | RiscOp::DropoutReplay
+            | RiscOp::UniformBoundAdjoint { .. }
+            | RiscOp::DrawKey { .. } => None,
             RiscOp::Copy => Some(Self::cast_kernel_name(node, dag)?),
             // WS-A4: bind `accumulator` instead of `..` per the
             // destructure-`..` memory rule. The kernel name encodes
@@ -2301,6 +2307,22 @@ impl HipEmitter {
             }
             RiscOp::BakedDropout { .. } => {
                 unreachable!("dropout should be rejected before HIP code generation")
+            }
+            RiscOp::UniformLike
+            | RiscOp::Dropout
+            | RiscOp::DropoutReplay
+            | RiscOp::UniformBoundAdjoint { .. }
+            | RiscOp::DrawKey { .. } => {
+                return Err(Unsupported::new(
+                    UnsupportedKind::Op(chelis_ir::grad::risc_op_name(&node.op).to_string()),
+                    "a key-operand random node in the HIP DAG emitter",
+                    Stage::Codegen("hip"),
+                    chelis_types::unimplemented_rejection!(
+                        1192,
+                        "the HIP lane has no port of the key-operand random kernels or the \
+                         draw key yet; compiled dropout on every target is phase 6 of chelis#2413"
+                    ),
+                ));
             }
             RiscOp::Copy => self.emit_unary_launch(
                 id,
@@ -4660,6 +4682,11 @@ impl HipEmitter {
             | RiscOp::Round
             | RiscOp::BakedUniformLike { .. }
             | RiscOp::BakedDropout { .. }
+            | RiscOp::UniformLike
+            | RiscOp::Dropout
+            | RiscOp::DropoutReplay
+            | RiscOp::UniformBoundAdjoint { .. }
+            | RiscOp::DrawKey { .. }
             | RiscOp::Copy
             | RiscOp::Drop
             | RiscOp::Sum { .. }
@@ -4959,7 +4986,8 @@ impl HipEmitter {
             | Prim::Int16
             | Prim::Int32
             | Prim::Int64
-            | Prim::String => {
+            | Prim::String
+            | Prim::Key => {
                 return Err(Unsupported::new(
                     UnsupportedKind::Dtype(ty.precision.name().to_string()),
                     "a HIP kernel family with f32/f64 variants only",
@@ -5212,7 +5240,8 @@ mod tests {
                 | Prim::F16
                 | Prim::Bf16
                 | Prim::F8e4m3
-                | Prim::String => {}
+                | Prim::String
+                | Prim::Key => {}
             }
             let runtime_width = prim
                 .runtime_dtype()

@@ -1322,10 +1322,12 @@ fn insert_drop_nodes_for_unconsumed_values(mut dag: Dag) -> Dag {
         .iter()
         .filter(|node| !roots.contains(&node.id))
         .filter(|node| !consumed.contains(&node.id))
+        // A key is a word with no storage to release; a Drop would also be a
+        // key reaching an operation other than a random primitive.
         .filter(|node| {
             !matches!(
                 node.op,
-                RiscOp::Load { .. } | RiscOp::Drop | RiscOp::Store { .. }
+                RiscOp::Load { .. } | RiscOp::Drop | RiscOp::Store { .. } | RiscOp::DrawKey { .. }
             )
         })
         .map(|node| {
@@ -4732,6 +4734,9 @@ fn ty_expr_to_deep(ty: &TensorType) -> Expr {
         chelis_types::types::Prim::Int64 => "i64",
         chelis_types::types::Prim::Bool => "bool",
         chelis_types::types::Prim::String => "string",
+        chelis_types::types::Prim::Key => {
+            panic!("a random key has no Deep type spelling; no lowered def returns one")
+        }
     };
     // Decode-once (chelis#731 Phase 3): this is a PROGRAMMATIC producer
     // running in the lowerer, downstream of the stamper and the desugarer,
@@ -6887,6 +6892,7 @@ fn prim_ordinal(prim: Prim) -> u8 {
         Prim::Bool => 8,
         Prim::F8e4m3 => 9,
         Prim::String => 10,
+        Prim::Key => 11,
     }
 }
 
@@ -18960,6 +18966,10 @@ impl<'program> LowerCtx<'program> {
                 "this numeric unary family accepts active float and signed-integer \
                  dtypes only in the executable IR today; the string cell is owned by \
                  the target capability table"
+            ),
+            Prim::Key => chelis_types::deliberate_rejection!(
+                "[05-RNG-1]",
+                "a random key has no arithmetic; numeric unary ops on keys are rejected"
             ),
             Prim::F32
             | Prim::F64

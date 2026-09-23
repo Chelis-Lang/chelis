@@ -392,7 +392,8 @@ pub fn compare_rendered_elements(
             | Prim::Int32
             | Prim::Int64
             | Prim::Bool
-            | Prim::String => unreachable!("only active floats reach ULP comparison"),
+            | Prim::String
+            | Prim::Key => unreachable!("only active floats reach ULP comparison"),
         },
         ArithmeticWidthStatus::ReducedFloatPreFinal {
             eval_bits,
@@ -555,7 +556,8 @@ fn parse_canonical_float(
         | Prim::Int32
         | Prim::Int64
         | Prim::Bool
-        | Prim::String => unreachable!("only active floats reach float parsing"),
+        | Prim::String
+        | Prim::Key => unreachable!("only active floats reach float parsing"),
     };
     let canonical = format_element(prim, element);
     if canonical != text {

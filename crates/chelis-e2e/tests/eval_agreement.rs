@@ -168,7 +168,7 @@ fn c_render_result(prim: Prim) -> &'static str {
              chelis_string text = chelis_string_from_scalar(scalar); \
              chelis_print_string(text); chelis_string_release(text);"
         }
-        Prim::F8e4m3 | Prim::String => {
+        Prim::F8e4m3 | Prim::String | Prim::Key => {
             panic!("eval agreement has no C renderer for {}", prim.name())
         }
     }
@@ -341,6 +341,13 @@ fn agreement_op_for_risc(op: &RiscOp) -> AgreementOp {
         | RiscOp::Recip
         | RiscOp::BakedUniformLike { .. }
         | RiscOp::BakedDropout { .. }
+        // [05-RNG-1] makes every random result bit-identical across lanes,
+        // and a draw key is a word no lane observes as a result.
+        | RiscOp::UniformLike
+        | RiscOp::Dropout
+        | RiscOp::DropoutReplay
+        | RiscOp::UniformBoundAdjoint { .. }
+        | RiscOp::DrawKey { .. }
         | RiscOp::Sum { .. }
         | RiscOp::Count { .. }
         | RiscOp::MaxReduce { .. }

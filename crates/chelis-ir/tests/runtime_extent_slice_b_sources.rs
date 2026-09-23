@@ -7,7 +7,8 @@ use chelis_ir::axis_sources::{
 };
 use chelis_ir::dag::{
     ComparisonKind, Dag, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStep,
-    FusedStepOp, LogicalKind, NodeId, ReduceWindowKind, RiscOp, RtAxis, RtDim, TensorType,
+    FusedStepOp, LogicalKind, NodeId, RandomDraw, RandomHandler, ReduceWindowKind, RiscOp, RtAxis,
+    RtDim, TensorType, UniformBound,
 };
 use chelis_types::types::Prim;
 use chelis_types::unsupported::Stage;
@@ -618,7 +619,7 @@ fn unsupported_but_well_typed_mapping_yields_the_registered_receipt_not_an_ice()
 
 /// The number of `RiscOp` variants the table below must construct. Bumping
 /// it without adding a row makes the coverage assertion fail.
-const RISC_OP_VARIANTS: usize = 65;
+const RISC_OP_VARIANTS: usize = 70;
 
 /// Adding a `RiscOp` variant breaks this match, which is what forces the
 /// table in `every_risc_op_yields_exactly_one_source_per_output_axis` to
@@ -692,7 +693,12 @@ fn variant_index(op: &RiscOp) -> usize {
         RiscOp::Mod => 62,
         RiscOp::Logical(_) => 63,
         RiscOp::Where => 64,
-        RiscOp::GuardedFail { .. } => 65,
+        RiscOp::UniformLike => 65,
+        RiscOp::Dropout => 66,
+        RiscOp::DropoutReplay => 67,
+        RiscOp::UniformBoundAdjoint { .. } => 68,
+        RiscOp::DrawKey { .. } => 69,
+        RiscOp::GuardedFail { .. } => 70,
     }
 }
 
@@ -1112,6 +1118,65 @@ fn every_risc_op_yields_exactly_one_source_per_output_axis() {
         RiscOp::ScatterElements { axis: 1 },
         vec![f, cell_indices, g],
         f32_23(),
+    ));
+    let rate = add(
+        &mut dag,
+        RiscOp::synth_const(Prim::F32, 0.5),
+        vec![],
+        scalar(Prim::F32),
+    );
+    let seed = add(
+        &mut dag,
+        RiscOp::synth_const(Prim::Int64, 7.0),
+        vec![],
+        scalar(Prim::Int64),
+    );
+    let dropout_key = add(
+        &mut dag,
+        RiscOp::DrawKey {
+            handler: RandomHandler::Scoped { instance: 0 },
+            draw: RandomDraw::Dropout,
+            dtype: Prim::F32,
+        },
+        vec![seed, rate],
+        scalar(Prim::Key),
+    );
+    nodes.push(dropout_key);
+    nodes.push(add(
+        &mut dag,
+        RiscOp::Dropout,
+        vec![f, rate, dropout_key],
+        f32_23(),
+    ));
+    nodes.push(add(
+        &mut dag,
+        RiscOp::DropoutReplay,
+        vec![g, rate, dropout_key],
+        f32_23(),
+    ));
+    let uniform_key = add(
+        &mut dag,
+        RiscOp::DrawKey {
+            handler: RandomHandler::Scoped { instance: 1 },
+            draw: RandomDraw::UniformLike,
+            dtype: Prim::F32,
+        },
+        vec![seed, rate, rate],
+        scalar(Prim::Key),
+    );
+    nodes.push(add(
+        &mut dag,
+        RiscOp::UniformLike,
+        vec![f, rate, rate, uniform_key],
+        f32_23(),
+    ));
+    nodes.push(add(
+        &mut dag,
+        RiscOp::UniformBoundAdjoint {
+            bound: UniformBound::Low,
+        },
+        vec![f, g, uniform_key],
+        scalar(Prim::F32),
     ));
 
     let mut covered = vec![0usize; RISC_OP_VARIANTS];

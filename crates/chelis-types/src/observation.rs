@@ -205,6 +205,10 @@ pub fn format_element(prim: Prim, value: ElementRef) -> String {
             "format_element formats numeric/bool element payloads; string \
              values render as themselves at their exits and never arrive here"
         ),
+        Prim::Key => panic!(
+            "format_element formats numeric/bool element payloads; a random key \
+             has no element carrier"
+        ),
     }
 }
 

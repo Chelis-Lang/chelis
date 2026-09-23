@@ -58,6 +58,12 @@ pub enum AdRejectionReason {
     /// adjoint is `Gather`) when an accumulating semantic is
     /// acceptable.
     NonDeterministicAtDuplicateIndices,
+    /// A differentiated parameter reaches a `dropout` rate through operand
+    /// slots that all have an adjoint contract. The rate selects which
+    /// elements the mask keeps, and the language does not differentiate that
+    /// selection ([05-OP-37], chelis#2421). `stop_gradient(rate)` treats such
+    /// a rate as a constant.
+    RandomSelectionParameter,
     /// The forward DAG was empty or the output node did not exist.
     EmptyOrMissingOutput,
     /// The output node's type is not a scalar float — reverse-mode AD
@@ -131,6 +137,12 @@ impl fmt::Display for AdError {
                      indices -- last-write-wins forward semantics has no well-defined \
                      adjoint); use scatter_add (whose adjoint is gather) or wrap \
                      {op} in a stop-gradient"
+                ),
+                AdRejectionReason::RandomSelectionParameter => write!(
+                    f,
+                    "grad: a differentiated parameter reaches the rate of {op}, which selects \
+                     the kept elements and is not differentiable ([05-OP-37]); wrap the rate \
+                     in stop_gradient to treat it as a constant"
                 ),
                 AdRejectionReason::EmptyOrMissingOutput => write!(
                     f,
@@ -238,6 +250,27 @@ fn grad_dag_checked_impl(
                         live[template.0] = true;
                     }
                 }
+                // Key-operand draws: the key and activation are discrete
+                // controls, and a dropout rate is a selection whose only
+                // question is the rejection below. A uniform draw's template
+                // stays live as the baked node's does, and its bounds carry
+                // their reparameterisation adjoints.
+                RiscOp::Dropout | RiscOp::DropoutReplay => {
+                    if let Some(data) = node.inputs.first() {
+                        live[data.0] = true;
+                    }
+                }
+                RiscOp::UniformLike => {
+                    for bound in node.inputs.iter().take(3) {
+                        live[bound.0] = true;
+                    }
+                }
+                RiscOp::UniformBoundAdjoint { .. } => {
+                    if let Some(cotangent) = node.inputs.get(1) {
+                        live[cotangent.0] = true;
+                    }
+                }
+                RiscOp::DrawKey { .. } => {}
                 // chelis#1464 / [05-OP-68]: input 0 is the guard's firing
                 // predicate, a control edge, and input 1 is the value the
                 // result carries. Only the fallback is on the gradient path.
@@ -264,6 +297,7 @@ fn grad_dag_checked_impl(
             }
         }
     }
+    reject_random_selection_parameters(forward, &live, wrt)?;
     for node in forward.nodes() {
         if !live[node.id.0] {
             continue;
@@ -397,6 +431,75 @@ fn grad_dag_checked_impl(
     })
 }
 
+/// [05-OP-37]'s rate rejection. A parameter reaches a node when the node is
+/// the parameter, or the node has a float output and one of its operand
+/// slots that carries an adjoint contract reads a reached node. Zero-cotangent
+/// slots (a uniform template, the random controls, a comparison operand) and
+/// non-float values break the path, as a `stop_gradient` barrier would. A
+/// live dropout, or dropout replay, whose rate is reached is rejected.
+fn reject_random_selection_parameters(
+    forward: &Dag,
+    live: &[bool],
+    wrt: &[NodeId],
+) -> Result<(), AdError> {
+    if !forward
+        .nodes()
+        .iter()
+        .any(|node| matches!(node.op, RiscOp::Dropout | RiscOp::DropoutReplay))
+    {
+        return Ok(());
+    }
+    let mut reached = vec![false; forward.len()];
+    for parameter in wrt {
+        if let Some(slot) = reached.get_mut(parameter.0) {
+            *slot = true;
+        }
+    }
+    for node in forward.nodes() {
+        if reached[node.id.0] || !node.output_type.precision.is_float() {
+            continue;
+        }
+        let carrying: &[NodeId] = match &node.op {
+            RiscOp::Shrink { .. }
+            | RiscOp::Stride { .. }
+            | RiscOp::Pad { .. }
+            | RiscOp::Reshape { .. }
+            | RiscOp::Gather { .. }
+            | RiscOp::Dropout
+            | RiscOp::DropoutReplay => &node.inputs[..node.inputs.len().min(1)],
+            RiscOp::ScatterAdd { .. } => {
+                reached[node.id.0] = [0, 2]
+                    .iter()
+                    .filter_map(|slot| node.inputs.get(*slot))
+                    .any(|input| reached[input.0]);
+                continue;
+            }
+            RiscOp::UniformLike => &node.inputs[1..3],
+            RiscOp::UniformBoundAdjoint { .. } => &node.inputs[1..2],
+            RiscOp::GuardedFail { .. } => &node.inputs[1..2],
+            RiscOp::Where => &node.inputs[1..],
+            RiscOp::BakedUniformLike { .. }
+            | RiscOp::Compare(_)
+            | RiscOp::Shape { .. }
+            | RiscOp::DrawKey { .. } => &[],
+            _ => &node.inputs,
+        };
+        reached[node.id.0] = carrying.iter().any(|input| reached[input.0]);
+    }
+    for node in forward.nodes() {
+        if live[node.id.0]
+            && matches!(node.op, RiscOp::Dropout | RiscOp::DropoutReplay)
+            && node.inputs.get(1).is_some_and(|rate| reached[rate.0])
+        {
+            return Err(AdError::NotSupported {
+                op: risc_op_name(&node.op),
+                reason: AdRejectionReason::RandomSelectionParameter,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Canonical snake-case name for a `RiscOp` for use in `AdError`'s
 /// `op` field. Mirrors the user-facing Surf builtin name where one
 /// exists.
@@ -431,8 +534,11 @@ pub fn risc_op_name(op: &RiscOp) -> &'static str {
         RiscOp::Floor => "floor",
         RiscOp::Ceil => "ceil",
         RiscOp::Round => "round",
-        RiscOp::BakedUniformLike { .. } => "uniform_like",
-        RiscOp::BakedDropout { .. } => "dropout",
+        RiscOp::BakedUniformLike { .. } | RiscOp::UniformLike => "uniform_like",
+        RiscOp::BakedDropout { .. } | RiscOp::Dropout => "dropout",
+        RiscOp::DropoutReplay => "dropout_replay",
+        RiscOp::UniformBoundAdjoint { .. } => "uniform_bound_adjoint",
+        RiscOp::DrawKey { .. } => "draw_key",
         RiscOp::Sum { .. } => "sum",
         RiscOp::Count { .. } => "count",
         RiscOp::MaxReduce { .. } => "max_reduce",
@@ -769,7 +875,9 @@ fn prune_to_requested_outputs(
         live[root.0] = true;
     }
     for node in dag.nodes() {
-        if matches!(node.op, RiscOp::Store { .. }) {
+        // A forward draw key advances its handler whether or not the pruned
+        // gradient reads its key.
+        if matches!(node.op, RiscOp::Store { .. } | RiscOp::DrawKey { .. }) {
             live[node.id.0] = true;
         }
     }
@@ -1239,6 +1347,72 @@ fn compute_adjoints(
             let zero = dag.add_node(RiscOp::synth_const(ty.precision, 0.0), vec![], ty, None);
             Some(vec![(x, zero)])
         }
+        // [05-OP-37]: the input's pathwise adjoint replays the forward mask
+        // through the key edge. The key and activation are discrete and the
+        // rate's exact zero cotangent is omitted, as `GuardedFail` omits its
+        // predicate: queuing a zero would walk the rate's producers.
+        RiscOp::Dropout | RiscOp::DropoutReplay => {
+            let data = node.inputs[0];
+            let mut inputs = vec![g, node.inputs[1], node.inputs[2]];
+            inputs.extend(node.inputs.get(3).copied());
+            let replay = dag.add_node(
+                RiscOp::DropoutReplay,
+                inputs,
+                node.output_type.clone(),
+                None,
+            );
+            Some(vec![(data, replay)])
+        }
+        // [05-OP-8]: zero to the template and the reparameterisation adjoint
+        // to each bound, read from the forward key. A bound stored at f32
+        // under a narrower or wider template (chelis#1295) takes the checked
+        // cast of the template-dtype adjoint.
+        RiscOp::UniformLike => {
+            let template = node.inputs[0];
+            let template_ty = forward.get(template).unwrap().output_type.clone();
+            let zero = dag.add_node(
+                RiscOp::synth_const(template_ty.precision, 0.0),
+                vec![],
+                template_ty,
+                None,
+            );
+            let mut contributions = vec![(template, zero)];
+            for (slot, bound) in [
+                (1, crate::dag::UniformBound::Low),
+                (2, crate::dag::UniformBound::High),
+            ] {
+                let mut inputs = vec![template, g, node.inputs[3]];
+                inputs.extend(node.inputs.get(4).copied());
+                let adjoint = dag.add_node(
+                    RiscOp::UniformBoundAdjoint { bound },
+                    inputs,
+                    TensorType {
+                        dims: vec![],
+                        precision: node.output_type.precision,
+                    },
+                    None,
+                );
+                let bound_ty = forward.get(node.inputs[slot]).unwrap().output_type.clone();
+                let adjoint = if bound_ty.precision == node.output_type.precision {
+                    adjoint
+                } else {
+                    dag.add_node(
+                        RiscOp::Cast {
+                            new_precision: bound_ty.precision,
+                        },
+                        vec![adjoint],
+                        bound_ty,
+                        None,
+                    )
+                };
+                contributions.push((node.inputs[slot], adjoint));
+            }
+            Some(contributions)
+        }
+        // No higher-order adjoint is defined for the bound adjoint yet.
+        RiscOp::UniformBoundAdjoint { .. } => None,
+        // A key receives no cotangent, so no contribution ever reaches it.
+        RiscOp::DrawKey { .. } => Some(Vec::new()),
         RiscOp::BakedDropout { rate, seed } => {
             let x = node.inputs[0];
             // Replay owns the forward mask's exact layout. A checked reshape

@@ -286,6 +286,9 @@ pub fn is_same_shape_result_op(op: &RiscOp) -> bool {
             | RiscOp::Recip
             | RiscOp::BakedUniformLike { .. }
             | RiscOp::BakedDropout { .. }
+            | RiscOp::UniformLike
+            | RiscOp::Dropout
+            | RiscOp::DropoutReplay
             | RiscOp::Cast { .. }
             | RiscOp::CastTrunc { .. }
             | RiscOp::FusedElem { .. }
@@ -437,6 +440,9 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
         | RiscOp::Recip
         | RiscOp::BakedUniformLike { .. }
         | RiscOp::BakedDropout { .. }
+        | RiscOp::UniformLike
+        | RiscOp::Dropout
+        | RiscOp::DropoutReplay
         | RiscOp::Copy
         | RiscOp::Drop
         | RiscOp::Realize
@@ -444,6 +450,10 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
         | RiscOp::CastTrunc { .. }
         | RiscOp::FusedElem { .. }
         | RiscOp::Store { .. } => shape_preserving(dag, node),
+
+        // Rank-0 results: a bound adjoint is a scalar sum and a draw key is
+        // a key word; neither has an axis.
+        RiscOp::UniformBoundAdjoint { .. } | RiscOp::DrawKey { .. } => op_computed(id, rank),
 
         // chelis#1464 / [05-OP-68]: the result IS the fallback, so every
         // output axis comes from input slot 1.

@@ -1500,6 +1500,7 @@ pub(super) fn make_var_with_type(name: &str, ty: &TensorType, span: Span) -> Exp
         Prim::Int64 => "i64",
         Prim::Bool => "bool",
         Prim::String => "string",
+        Prim::Key => panic!("a random key has no Deep type spelling and never binds a variable"),
     };
     let prim_node = empty_node(
         DeepTag::TPrim,

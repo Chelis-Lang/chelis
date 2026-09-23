@@ -112,7 +112,8 @@ fn classify_prim(prim: Prim) -> ValueClass {
         | Prim::Int16
         | Prim::Int32
         | Prim::Int64
-        | Prim::Bool => ValueClass::NonHeap(NonHeapKind::Scalar(prim)),
+        | Prim::Bool
+        | Prim::Key => ValueClass::NonHeap(NonHeapKind::Scalar(prim)),
     }
 }
 
