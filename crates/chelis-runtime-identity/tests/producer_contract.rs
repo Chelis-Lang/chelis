@@ -86,7 +86,7 @@ fn retained_record_controls(runtime: &Product) {
     assert_eq!(decode_archive(&missing), Err(RecordError::Missing));
     let object = object_bytes.unwrap();
     let mut duplicate = runtime.bytes.clone();
-    if duplicate.len() % 2 != 0 {
+    if !duplicate.len().is_multiple_of(2) {
         duplicate.push(b'\n');
     }
     duplicate.extend_from_slice(

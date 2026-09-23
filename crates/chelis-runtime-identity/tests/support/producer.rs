@@ -73,10 +73,8 @@ fn require(output: Output, command: &str) -> Output {
 
 impl Fixture {
     pub fn new() -> Self {
-        assert!(
-            cfg!(any(target_os = "linux", target_os = "macos")),
-            "native producer suite requires Linux or macOS"
-        );
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        panic!("native producer suite requires Linux or macOS");
         let temporary = tempfile::Builder::new()
             .prefix("chelis-identity-contract-")
             .tempdir()
