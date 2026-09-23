@@ -1027,14 +1027,17 @@ compile-time-only alias.
 > Under the fixed handled stream, the pathwise adjoint reuses the exact saved
 > mask. A dropped input receives positive zero. A kept input receives its
 > output cotangent through the exact graph `denom = sub(1p, rate)` then
-> `div(g_i, denom)`. The scalar rate receives, for every kept element in
-> increasing row-major order, the exact graph `denom = sub(1p, rate)`,
-> `denom_sq = mul(denom, denom)`, `numerator = mul(g_i, input[i])`, then
-> `div(numerator, denom_sq)`; `1p` is the exact integer one represented at `p`
-> and every named primitive finalizes before its consumer under [04-NUM-8].
-> Dropped elements contribute positive zero and the contributions combine by
-> the canonical adjacent-pair balanced tree. The mask comparison itself has
-> zero cotangent. The operation has no accumulator parameter.
+> `div(g_i, denom)`; `1p` is the exact integer one represented at `p` and
+> both primitives finalize before their consumer under [04-NUM-8]. The rate
+> selects which elements the mask keeps, and the language does not
+> differentiate that selection. When a differentiated parameter reaches the
+> rate through a data-flow path on which every operand slot has an adjoint
+> contract (a path through a zero-cotangent slot or a [05-OP-42]
+> `stop_gradient` does not count), `grad` rejects with
+> `AdRejectionReason::RandomSelectionParameter`; otherwise the rate receives
+> the exact zero cotangent. The mask comparison itself has zero cotangent.
+> The operation has no accumulator parameter. (The typed rejection is not yet
+> implemented; chelis#2421.)
 
 > **[05-RNG-1]** Every conforming evaluation of a `with seed(N)` program
 > produces byte-identical random results for the same seed, dynamic
@@ -1054,6 +1057,17 @@ compile-time-only alias.
 > that precedes Random consumption consumes none. Two different accepted
 > seeds define different source streams. The RNG is deterministic, not
 > cryptographic.
+>
+> The ordinal counts the random primitives entered under the innermost active
+> `with seed` handler, in execution order, from zero at the handler's entry.
+> Calls made inside the handler share its ordinal. Leaving a handler restores
+> the enclosing handler's seed and next ordinal. An `if` or `match` enters only
+> its selected arm, whatever representation an implementation chooses for the
+> condition, so the random primitives of an arm that is not selected consume
+> no ordinal. `vmap(f)(x)` assigns ordinals as its definition `stack([f(x[i]) ...])`
+> would when the rows are evaluated in increasing index order, and `par`
+> assigns them as sequential evaluation of its branches in source order
+> would. (Not every lane meets this rule yet; chelis#2413 tracks the gaps.)
 
 ---
 
@@ -4115,6 +4129,9 @@ float-to-bool default casts use that same structural reason. Float-to-float
 default casts use [04-NUM-14]'s exact backward cast. `cast_trunc`,
 `cast_saturate`, `cast_wrap`, `and`, `or`, `not`,
 `count`, `argmax_reduce`, and `argmin_reduce` likewise reject `grad` under their atoms.
+[05-OP-37]'s rate rejects `grad` with
+`AdRejectionReason::RandomSelectionParameter` when a differentiated parameter
+reaches it as that atom states, while its data input keeps its exact adjoint.
 The `wrap_*` operations and integer reduction/unary forms are forward-only
 because integer values do not carry cotangents. Integer `floor`, `ceil`, and
 `round` are exact identities and may be erased before AD. The `Diff` effect

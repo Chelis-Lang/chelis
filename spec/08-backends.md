@@ -103,9 +103,8 @@ Current design points:
 - pattern-match BLAS-friendly subgraphs such as matrix multiplication
 - manage temporary buffers with explicit lifetime-aware memory planning
 - ship `chelis_runtime.h` plus a Rust static runtime library alongside generated code
-- preserve `with seed(...)` for generated host code with a handler-scoped RNG state;
-  direct DAG random operations use their baked seed, while host fallback functions can
-  draw from the active handler when stdlib/user calls contain nested `uniform_like`
+- preserve `with seed(...)` and [05-RNG-1]'s ordinal assignment in generated code
+  through a handler-scoped random state
 - tuple-returning host exports use the stable runtime tuple ABI:
   generated headers surface `chelis_tuple*`, drivers construct tuples with
   `chelis_tuple_from_values(...)`, and typed extraction goes through the
@@ -114,9 +113,8 @@ Current design points:
 This backend is the correctness oracle for future GPU and interoperability backends.
 
 Generated host Random state belongs to one public entry invocation. Internal calls
-inherit that invocation's active handler, and leaving a nested seed handler restores
-the enclosing seed and ordinal. Reentrant and concurrent public invocations do not
-share mutable Random state. Private context transport does not change authored public
+inherit that invocation's active handler as [05-RNG-1] requires. Reentrant and
+concurrent public invocations do not share mutable Random state. Private context transport does not change authored public
 function declarations or the four-argument public tensor ABI.
 
 ## 3. Phase 1: HIP Backend
@@ -295,8 +293,6 @@ The first shipped effect surface interacts with backend selection in two explici
   rejected before artifact emission as specified by
   `spec/04-type-system.md` [04-EFF-2]
 - `chelis build --target hip` rejects incompatible non-GPU resource regions
-- `chelis build` for either target currently rejects lowered `dropout`; seeded dropout
-  is implemented on the evaluator path, not yet on emitted C/HIP code
 
 ## 4. Phase M: Metal Backend (macOS GPU peer)
 
