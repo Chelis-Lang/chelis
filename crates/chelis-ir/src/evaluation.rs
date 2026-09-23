@@ -864,7 +864,7 @@ impl ExecutionFrame<'_> {
             PreparedDropout::new(input.storage(), rate).map_err(|error| error.to_string())?;
         let key = self.enter(node, seed)?;
         let output = prepared
-            .apply(key.seed, key.ordinal)
+            .apply(chelis_types::RandomKey::from_counter(key.seed, key.ordinal))
             .map_err(|error| error.to_string())?;
         Ok(TensorValue::from_storage(input.shape.clone(), output))
     }

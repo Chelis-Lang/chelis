@@ -13468,10 +13468,11 @@ impl<'program> LowerCtx<'program> {
                             // An ungated legacy draw's ordinal is fixed here,
                             // so the node carries its [05-RNG-1] draw key
                             // rather than the handler seed (chelis#2408).
-                            let key = chelis_types::random_draw_key(
+                            let key = chelis_types::RandomKey::from_counter(
                                 self.random_seed.unwrap_or(0),
                                 self.random_counter,
-                            );
+                            )
+                            .bits();
                             self.random_counter = self.random_counter.saturating_add(1);
                             (key, None)
                         }

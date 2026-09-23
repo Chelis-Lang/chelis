@@ -30,9 +30,10 @@ use chelis_types::dtype_semantics::{
     count_tensor_groups, finalize_tensor, float_extrema_adjoint, float_relu, float_relu_adjoint,
     float_tensor_binop, float_tensor_unop, int_tensor_binop, int_tensor_unop,
     integer_is_exactly_representable, reduce_tensor_groups, reduce_window_grad_tensor_groups,
-    tensor_from_scalars, uniform_sample,
+    tensor_from_scalars,
 };
 use chelis_types::types::Prim;
+use chelis_types::{PreparedUniformLike, RandomKey, scalar_from_f64};
 
 /// Public evaluator entry points that do not inherit an enclosing handler
 /// still evaluate a path-sensitive DAG from the beginning of its stream.
@@ -395,19 +396,19 @@ fn uniform_like(
     shape: &[usize],
     low: f64,
     high: f64,
-    key: u64,
+    key: RandomKey,
     prim: Prim,
 ) -> Result<TensorValue, String> {
-    let low_f = low as f32;
-    let high_f = high as f32;
-    let values = (0..numel(shape))
-        .map(|index| uniform_sample(prim, low_f, high_f, key, index as u64))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|err| err.to_string())?;
-    Ok(TensorValue::from_storage(
-        shape.to_vec(),
-        tensor_from_scalars(prim, &values),
-    ))
+    let bound = |value| scalar_from_f64("uniform_like", Prim::F32, value);
+    let prepared = PreparedUniformLike::new(
+        prim,
+        numel(shape),
+        bound(low).map_err(|trap| trap.to_string())?,
+        bound(high).map_err(|trap| trap.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    let storage = prepared.apply(key).map_err(|error| error.to_string())?;
+    Ok(TensorValue::from_storage(shape.to_vec(), storage))
 }
 
 /// Closed elementwise binary vocabulary for the IR evaluator. The enum is
@@ -3287,9 +3288,10 @@ where
                 // and take their ordinal at execution; an ungated legacy node
                 // carries the [05-RNG-1] draw key its lowering fixed. An
                 // inactive gated draw's values are discarded by its blend.
-                let draw_key = key.map_or(*seed, |(raw_seed, ordinal)| {
-                    chelis_types::random_draw_key(raw_seed, ordinal)
-                });
+                let draw_key = key.map_or(
+                    RandomKey::from_derived_bits(*seed),
+                    |(raw_seed, ordinal)| RandomKey::from_counter(raw_seed, ordinal),
+                );
                 if execution.is_none() && key.is_some() {
                     path_random_counter = path_random_counter.saturating_add(1);
                 }
@@ -4509,7 +4511,8 @@ mod tests {
             )
         };
         assert_eq!(values[&executed], expected(7));
-        let skipped_expected = uniform_like(&[2], 0.0, 1.0, 17, Prim::F32).unwrap();
+        let skipped_expected =
+            uniform_like(&[2], 0.0, 1.0, RandomKey::from_derived_bits(17), Prim::F32).unwrap();
         assert_eq!(values[&skipped], skipped_expected);
 
         let (values, next) =
@@ -5749,7 +5752,14 @@ mod tests {
         // sampler `chelis_uniform_sample_f32`. Seed 42, ordinal 0, shape [8],
         // [2,5); the bits are exact-rational evaluations of [05-RNG-1] and
         // [05-OP-8] (`rng_ref.py uniform 42 0 8 2 5 f32`, chelis#2408).
-        let out = uniform_like(&[8], 2.0, 5.0, spec_uniform_key(42, 0), Prim::F32).unwrap();
+        let out = uniform_like(
+            &[8],
+            2.0,
+            5.0,
+            RandomKey::from_derived_bits(spec_uniform_key(42, 0)),
+            Prim::F32,
+        )
+        .unwrap();
         let bits = |index: usize| (out.to_f64_lossy_vec()[index] as f32).to_bits();
         // elem[6]: where an f64 affine rounded to f32 lands 1 ULP away.
         assert_eq!(bits(6), 0x4068_3468);
@@ -5767,7 +5777,14 @@ mod tests {
     #[test]
     fn uniform_like_f32_affine_negative_range_is_f32() {
         // chelis#770: negative range, seed 42, ordinal 0, index 3, [-3, -1).
-        let out = uniform_like(&[8], -3.0, -1.0, spec_uniform_key(42, 0), Prim::F32).unwrap();
+        let out = uniform_like(
+            &[8],
+            -3.0,
+            -1.0,
+            RandomKey::from_derived_bits(spec_uniform_key(42, 0)),
+            Prim::F32,
+        )
+        .unwrap();
         assert_eq!(
             out.to_f64_lossy_vec()[3].to_bits(),
             (f32::from_bits(0xc03b_a886) as f64).to_bits(),
@@ -5776,7 +5793,14 @@ mod tests {
 
     #[test]
     fn uniform_like_f64_uses_the_f64_affine() {
-        let out = uniform_like(&[8], 2.0, 5.0, spec_uniform_key(42, 0), Prim::F64).unwrap();
+        let out = uniform_like(
+            &[8],
+            2.0,
+            5.0,
+            RandomKey::from_derived_bits(spec_uniform_key(42, 0)),
+            Prim::F64,
+        )
+        .unwrap();
         let expected = (5.0f64 - 2.0).mul_add(spec_uniform_unit(42, 0, 4), 2.0);
         assert_eq!(expected.to_bits(), 0x4000_bff3_3038_5719);
         assert_eq!(out.to_f64_lossy_vec()[4].to_bits(), expected.to_bits());

@@ -565,17 +565,21 @@ behavior and is exactly what the atom forbids.
 | C emitted helpers (print, dtype switches) | GENERATED from `format_element` / exhaustive matches | [#716], [#723], [#728] |
 | Metal / HIP | capability table only (already honestly typed / cleanly rejecting) | - |
 
-The fixed-control dropout evaluator uses the sealed
-`dtype_semantics::PreparedDropout` boundary. `new(&TensorStorage, ScalarValue)`
-checks the input family, same-dtype rate and [05-OP-37] domain without allocating
-or consuming Random. After actual source-plan forward/replay entry,
-`apply(seed: u64, ordinal: u64)` computes [05-RNG-1]'s unit, arithmetic-width
-comparison, positive dropped zero, and finalized sub/div into `TensorStorage`.
-The numerical owner has no ambient stream or replay authority. Its private
-fields prevent bypassing preparation; the execution plan retains invocation
-keys, source order and failure-prefix accounting. Both exact compiler-kernel
-callables are registered to [05-OP-37] in C6's off-leg semantic registry, with
-presence/authority controls; that stopgap is not a complete Rust API census.
+Every dropout evaluator uses the sealed `dtype_semantics::PreparedDropout`
+boundary. `new(&TensorStorage, ScalarValue)` checks the input family, same-dtype
+rate and [05-OP-37] domain without allocating or consuming Random. After the
+draw's key is taken, `apply(key: RandomKey)` computes [05-RNG-1]'s unit,
+arithmetic-width comparison, positive dropped zero, and finalized sub/div into
+`TensorStorage`. `PreparedUniformLike` is the same split for [05-OP-8]: `new`
+validates the bounds at the arithmetic width, and `apply(key)` fills the
+template's element count. `RandomKey` is an opaque, structurally non-numeric
+carrier; under the counter stream its only constructor is
+`RandomKey::from_counter(seed, ordinal)`. The numerical owners have no ambient
+stream or replay authority. Their private fields prevent bypassing preparation;
+the lane supplying the key owns source order and failure-prefix accounting. The
+four exact compiler-kernel callables are registered to [05-OP-37] and [05-OP-8]
+in C6's off-leg semantic registry, with presence/authority controls; that
+stopgap is not a complete Rust API census.
 
 **Performance contract:** finalize is per-buffer monomorphized loops (or
 direct element-type compute once storage is per-dtype), never per-element

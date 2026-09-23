@@ -10,8 +10,9 @@ use chelis_types::{
     compare_tensors, float_binop, float_scalar_tensor_binop, float_tensor_binop,
     float_tensor_scalar_binop, float_tensor_unop, float_unop, int_binop, int_scalar_tensor_binop,
     int_tensor_binop, int_tensor_scalar_binop, int_tensor_unop, int_unop, reduce_tensor_groups,
-    scalar_from_f64, scalar_from_i64, tensor_from_scalars, types::Prim, uniform_sample,
+    scalar_from_f64, scalar_from_i64, tensor_from_scalars, types::Prim,
 };
+use chelis_types::{PreparedUniformLike, RandomKey};
 
 use super::transforms::*;
 use super::*;
@@ -3159,26 +3160,37 @@ pub(super) fn builtin_name(expr: &Expr) -> Option<&str> {
     BUILTIN_NAMES.contains(&name).then_some(name)
 }
 
-/// Fill `template`'s shape and dtype with the `[05-OP-8]` draw keyed by `key`
-/// (`chelis_types::random_draw_key`).
-pub(super) fn uniform_like_value(
+/// Validate `[05-OP-8]`'s bounds for `template` before the caller takes a
+/// draw key, so a failed validation consumes no ordinal. The bounds reach the
+/// host lane as the checker's f32 scalars (chelis#1295).
+pub(super) fn prepare_uniform_like(
     template: &RuntimeTensorValue,
     low: f64,
     high: f64,
-    key: u64,
-) -> RuntimeTensorValue {
-    let low = low as f32;
-    let high = high as f32;
-    let values = (0..template.value.len())
-        .map(|index| {
-            uniform_sample(template.precision, low, high, key, index as u64)
-                .expect("uniform_like checker admits only active float dtypes")
-        })
-        .collect::<Vec<_>>();
-    RuntimeTensorValue::new(IrTensorValue::from_storage(
+) -> Result<PreparedUniformLike, String> {
+    let bound =
+        |value| scalar_from_f64("uniform_like", Prim::F32, value).map_err(|trap| trap.to_string());
+    PreparedUniformLike::new(
+        template.precision,
+        template.value.len(),
+        bound(low)?,
+        bound(high)?,
+    )
+    .map_err(|error| error.to_string())
+}
+
+/// Fill `template`'s shape and dtype with the prepared `[05-OP-8]` draw keyed
+/// by `key`.
+pub(super) fn uniform_like_value(
+    template: &RuntimeTensorValue,
+    prepared: &PreparedUniformLike,
+    key: RandomKey,
+) -> Result<RuntimeTensorValue, String> {
+    let storage = prepared.apply(key).map_err(|error| error.to_string())?;
+    Ok(RuntimeTensorValue::new(IrTensorValue::from_storage(
         template.value.shape.clone(),
-        tensor_from_scalars(template.precision, &values),
-    ))
+        storage,
+    )))
 }
 
 #[cfg(test)]
@@ -3204,6 +3216,11 @@ mod uniform_like_affine_tests {
         seed ^ splitmix64(ordinal).rotate_left(17)
     }
 
+    fn draw(template: &RuntimeTensorValue, low: f64, high: f64) -> RuntimeTensorValue {
+        let prepared = prepare_uniform_like(template, low, high).unwrap();
+        uniform_like_value(template, &prepared, RandomKey::from_counter(42, 0)).unwrap()
+    }
+
     fn unit(seed: u64, ordinal: u64, index: u64) -> f64 {
         let word = splitmix64(key(seed, ordinal) ^ splitmix64(index).rotate_left(41));
         (word >> 11) as f64 / (1_u64 << 53) as f64
@@ -3225,7 +3242,7 @@ mod uniform_like_affine_tests {
 
     #[test]
     fn affine_mirrors_c_f32_sampler_positive_range() {
-        let out = uniform_like_value(&template_f32(8), 2.0, 5.0, key(42, 0));
+        let out = draw(&template_f32(8), 2.0, 5.0);
         // elem[6]: the single-rounding FMA gives 0x40683468 where the old f64
         // affine rounded to the adjacent f32.
         assert_eq!(f32_bits(&out, 6), 0x4068_3468);
@@ -3242,13 +3259,13 @@ mod uniform_like_affine_tests {
 
     #[test]
     fn affine_is_f32_for_negative_range() {
-        let out = uniform_like_value(&template_f32(8), -3.0, -1.0, key(42, 0));
+        let out = draw(&template_f32(8), -3.0, -1.0);
         assert_eq!(f32_bits(&out, 3), 0xc03b_a886);
     }
 
     #[test]
     fn affine_uses_f64_storage_and_f64_arithmetic_for_f64_template() {
-        let out = uniform_like_value(&template_f64(8), 2.0, 5.0, key(42, 0));
+        let out = draw(&template_f64(8), 2.0, 5.0);
         assert_eq!(out.precision, Prim::F64);
         let expected = (5.0f64 - 2.0).mul_add(unit(42, 0, 4), 2.0);
         assert_eq!(expected.to_bits(), 0x4000_bff3_3038_5719);

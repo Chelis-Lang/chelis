@@ -3001,15 +3001,17 @@ impl<'a> EvalContext<'a> {
                 let template = expect_tensor_arg(args, 0)?;
                 let low = expect_float_arg(args, 1)?;
                 let high = expect_float_arg(args, 2)?;
+                // [05-OP-8]: the bounds validate before the draw consumes
+                // its ordinal.
+                let prepared = prepare_uniform_like(&template, low, high)?;
                 let seed = self.random_seed.unwrap_or(0);
                 let counter = self.random_counter;
                 self.random_counter = self.random_counter.saturating_add(1);
                 Ok(RuntimeValue::Tensor(uniform_like_value(
                     &template,
-                    low,
-                    high,
-                    chelis_types::random_draw_key(seed, counter),
-                )))
+                    &prepared,
+                    chelis_types::RandomKey::from_counter(seed, counter),
+                )?))
             }
             // Logical ops dispatch on the actual argument shape: scalar
             // bool args (already wired) keep the `bool_binop` /
@@ -4950,12 +4952,15 @@ mod legacy_capture_order_tests {
         let RuntimeValue::Tensor(template) = zeros() else {
             unreachable!()
         };
-        RuntimeValue::Tensor(uniform_like_value(
-            &template,
-            0.0,
-            1.0,
-            chelis_types::random_draw_key(seed, counter),
-        ))
+        let prepared = prepare_uniform_like(&template, 0.0, 1.0).unwrap();
+        RuntimeValue::Tensor(
+            uniform_like_value(
+                &template,
+                &prepared,
+                chelis_types::RandomKey::from_counter(seed, counter),
+            )
+            .unwrap(),
+        )
     }
 
     fn admitted_call(ctx: &mut EvalContext<'_>, name: &str) -> Result<RuntimeValue, String> {

@@ -3233,12 +3233,68 @@ impl DropoutParameters {
     }
 }
 
+/// The key of one random draw: an opaque, structurally non-numeric carrier
+/// that a random kernel receives in place of any ambient stream.
+///
+/// A key has no arithmetic, comparison, or cast. Under the counter stream of
+/// `[05-RNG-1]` the only constructor is [`RandomKey::from_counter`], which a
+/// lane calls with its handler's seed and the draw's call ordinal; the
+/// explicit-key design (`spec/design/randomness_explicit_keys.md`) adds its
+/// derivations beside it. [`RandomKey::bits`] exists so that native backends
+/// can port the kernels bit for bit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RandomKey {
+    bits: u64,
+}
+
+impl RandomKey {
+    /// The counter stream's key for one entered random primitive:
+    /// `seed_bits XOR rotl64(splitmix64(ordinal), 17)`, where `seed_bits` is
+    /// the handled i64 seed's two's-complement bits and `ordinal` is the
+    /// zero-based call ordinal of `[05-RNG-1]`. This is LaCaDiLE's
+    /// `Key.ofDrawKey(seed, c)`.
+    pub fn from_counter(seed_bits: u64, ordinal: u64) -> Self {
+        Self {
+            bits: random_draw_key(seed_bits, ordinal),
+        }
+    }
+
+    /// Rebuild a key from the bits of a key a lane already derived through
+    /// [`RandomKey::from_counter`]. The legacy lowering bakes such bits into
+    /// its uniform node; nothing else may invent key bits.
+    pub fn from_derived_bits(bits: u64) -> Self {
+        Self { bits }
+    }
+
+    /// The key word, for native ports of the kernels below.
+    pub fn bits(self) -> u64 {
+        self.bits
+    }
+}
+
 /// Validated, borrowed input to the pure `[05-OP-37]` dropout value kernel.
 ///
 /// Preparation performs every dtype/rate guard without drawing or allocating.
-/// The caller enters its source-owned forward/replay site only after `new`
-/// succeeds, then supplies that site's raw seed and ordinal to `apply`.
-/// This kernel owns no ambient random state and grants no replay provenance.
+/// The caller takes its draw's key only after `new` succeeds, then supplies
+/// that key to `apply`. This kernel owns no ambient random state and grants no
+/// replay provenance.
+///
+/// ```
+/// use chelis_types::dtype_semantics::{PreparedDropout, RandomKey};
+/// fn draw(prepared: &PreparedDropout<'_>) {
+///     let _ = prepared.apply(RandomKey::from_counter(42, 0));
+/// }
+/// ```
+///
+/// The kernel no longer takes a seed and an ordinal: its key is the only
+/// thing it knows about the stream it draws from.
+///
+/// ```compile_fail
+/// use chelis_types::dtype_semantics::PreparedDropout;
+/// fn draw(prepared: &PreparedDropout<'_>) {
+///     let _ = prepared.apply(42, 0);
+/// }
+/// ```
 ///
 /// ```compile_fail
 /// use chelis_types::dtype_semantics::{DropoutParameters, PreparedDropout};
@@ -3271,16 +3327,15 @@ impl<'a> PreparedDropout<'a> {
 
     /// Evaluate the finalized sub/div graph with a pure keyed mask. A second
     /// application with the same key is suitable for pathwise input replay;
-    /// the source execution plan, not this numerical function, authorizes it.
-    pub fn apply(&self, seed: u64, ordinal: u64) -> Result<TensorStorage, NumericKernelError> {
+    /// the graph's key edge, not this numerical function, authorizes it.
+    pub fn apply(&self, key: RandomKey) -> Result<TensorStorage, NumericKernelError> {
         let prim = self.input.prim();
         let wide_rate = self.parameters.rate().as_f64_lossy();
         let zero = cast_raw("dropout", RawScalar::Int(0), prim)?;
         let denominator = self.parameters.denominator()?;
-        let key = random_draw_key(seed, ordinal);
         let mut output = Vec::with_capacity(self.input.len());
         for index in 0..self.input.len() {
-            let exact_unit = random_unit(key, index as u64);
+            let exact_unit = random_unit(key.bits, index as u64);
             let arithmetic_unit = if prim == Prim::F64 {
                 exact_unit
             } else {
@@ -3296,6 +3351,140 @@ impl<'a> PreparedDropout<'a> {
     }
 }
 
+/// Validated `[05-OP-8]` controls: the output dtype `p` and its two bounds.
+///
+/// Construction performs the atom's checks before any draw: `p` is an active
+/// float dtype, both bounds share one dtype that widens exactly into `p`'s
+/// arithmetic width (f64 for `p = f64`, f32 otherwise), both are finite,
+/// `low <= high`, and `high - low` is finite at that width. The bounds'
+/// dtype is `p` or f32; f32 is the checker's current bound signature for
+/// every `p` (chelis#1295), which the atom's `p`-dtype bounds replace.
+#[derive(Debug, Clone, Copy)]
+pub struct UniformLikeParameters {
+    prim: Prim,
+    low: ScalarValue,
+    high: ScalarValue,
+}
+
+impl UniformLikeParameters {
+    pub fn new(
+        prim: Prim,
+        low: ScalarValue,
+        high: ScalarValue,
+    ) -> Result<Self, NumericKernelError> {
+        if !prim.is_float() {
+            return Err(NumericKernelError::WrongFamily {
+                op: "uniform_like",
+                expected: NumericFamily::Float,
+                actual: prim,
+            });
+        }
+        if low.prim() != high.prim() {
+            return Err(NumericKernelError::DtypeMismatch {
+                op: "uniform_like",
+                lhs: low.prim(),
+                rhs: high.prim(),
+            });
+        }
+        if low.prim() != prim && low.prim() != Prim::F32 {
+            return Err(NumericKernelError::DtypeMismatch {
+                op: "uniform_like",
+                lhs: prim,
+                rhs: low.prim(),
+            });
+        }
+        let parameters = Self { prim, low, high };
+        let (low, high) = (low.as_f64_lossy(), high.as_f64_lossy());
+        let finite_difference = if prim == Prim::F64 {
+            (high - low).is_finite()
+        } else {
+            ((high as f32) - (low as f32)).is_finite()
+        };
+        if !low.is_finite() || !high.is_finite() || low > high || !finite_difference {
+            return Err(NumericTrap::Domain {
+                op: "uniform_like",
+                prim,
+            }
+            .into());
+        }
+        Ok(parameters)
+    }
+
+    pub fn prim(self) -> Prim {
+        self.prim
+    }
+
+    pub fn low(self) -> ScalarValue {
+        self.low
+    }
+
+    pub fn high(self) -> ScalarValue {
+        self.high
+    }
+
+    /// The `[05-OP-8]` sample of flat element `index` of the draw keyed by
+    /// `key`, stored at `p`. f64 computes the one f64 fused multiply-add from
+    /// the bounds' exact f64 images; every other `p` computes the one f32
+    /// fused multiply-add from their exact f32 images and `round_f32(u)`,
+    /// then finalizes once to `p`.
+    fn sample(self, key: RandomKey, index: u64) -> Result<ScalarValue, NumericKernelError> {
+        let unit = random_unit(key.bits, index);
+        let (low, high) = (self.low.as_f64_lossy(), self.high.as_f64_lossy());
+        let value = if self.prim == Prim::F64 {
+            (high - low).mul_add(unit, low)
+        } else {
+            let (low, high) = (low as f32, high as f32);
+            f64::from((high - low).mul_add(unit as f32, low))
+        };
+        scalar_from_f64("uniform_like", self.prim, value).map_err(Into::into)
+    }
+}
+
+/// Validated input to the pure `[05-OP-8]` sampler for a template of `len`
+/// elements. The template's element values are never observed.
+///
+/// ```
+/// use chelis_types::dtype_semantics::{PreparedUniformLike, RandomKey};
+/// fn draw(prepared: &PreparedUniformLike) {
+///     let _ = prepared.apply(RandomKey::from_counter(42, 0));
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use chelis_types::dtype_semantics::uniform_sample;
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct PreparedUniformLike {
+    len: usize,
+    parameters: UniformLikeParameters,
+}
+
+impl PreparedUniformLike {
+    pub fn new(
+        prim: Prim,
+        len: usize,
+        low: ScalarValue,
+        high: ScalarValue,
+    ) -> Result<Self, NumericKernelError> {
+        Ok(Self {
+            len,
+            parameters: UniformLikeParameters::new(prim, low, high)?,
+        })
+    }
+
+    pub fn parameters(&self) -> UniformLikeParameters {
+        self.parameters
+    }
+
+    /// Fill the template's element count with the draw keyed by `key`.
+    pub fn apply(&self, key: RandomKey) -> Result<TensorStorage, NumericKernelError> {
+        let values = (0..self.len)
+            .map(|index| self.parameters.sample(key, index as u64))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(tensor_from_scalars(self.parameters.prim, &values))
+    }
+}
+
 // [05-RNG-1]'s `splitmix64`: add the golden gamma, xor-shift 30 and
 // multiply, xor-shift 27 and multiply, then xor-shift 31, all modulo 2^64.
 fn random_splitmix64(mut value: u64) -> u64 {
@@ -3305,16 +3494,13 @@ fn random_splitmix64(mut value: u64) -> u64 {
     value ^ (value >> 31)
 }
 
-/// The counter stream's key for one entered random primitive:
-/// `seed_bits XOR rotl64(splitmix64(ordinal), 17)`, where `seed_bits` is the
-/// handled i64 seed's two's-complement bits and `ordinal` is the zero-based
-/// call ordinal of `[05-RNG-1]`.
+/// The bits of [`RandomKey::from_counter`].
 ///
 /// This and [`random_word`] are the one kernel boundary of the Random effect
 /// (chelis#2408): every Rust lane derives a draw's element words from its key
 /// here, and the emitted C and HIP samplers are ports of the same two
 /// functions. A key is all a sampler knows about the stream it draws from.
-pub fn random_draw_key(seed_bits: u64, ordinal: u64) -> u64 {
+fn random_draw_key(seed_bits: u64, ordinal: u64) -> u64 {
     seed_bits ^ random_splitmix64(ordinal).rotate_left(17)
 }
 
@@ -3330,35 +3516,6 @@ fn random_word(key: u64, index: u64) -> u64 {
 /// represents exactly.
 fn random_unit(key: u64, index: u64) -> f64 {
     ((random_word(key, index) >> 11) as f64) / ((1u64 << 53) as f64)
-}
-
-/// Deterministic `[05-OP-8]` sample of flat element `index` of the draw keyed
-/// by `key` (see [`random_draw_key`]), at the requested float width.
-///
-/// The bounds already carry their required f32 dtype. f64 computes the
-/// affine transform in f64 from the exact f32 images; f32 computes it at
-/// f32 width; f16/bf16 compute once in f32 and finalize once to storage.
-pub fn uniform_sample(
-    prim: Prim,
-    low: f32,
-    high: f32,
-    key: u64,
-    index: u64,
-) -> Result<ScalarValue, NumericKernelError> {
-    if !prim.is_float() {
-        return Err(NumericKernelError::WrongFamily {
-            op: "uniform_like",
-            expected: NumericFamily::Float,
-            actual: prim,
-        });
-    }
-    let unit = random_unit(key, index);
-    let value = if prim == Prim::F64 {
-        (f64::from(high) - f64::from(low)).mul_add(unit, f64::from(low))
-    } else {
-        (high - low).mul_add(unit as f32, low) as f64
-    };
-    scalar_from_f64("uniform_like", prim, value).map_err(Into::into)
 }
 
 /// THE authored cast ladder (the chelis#759 one-rule-per-direction
@@ -3940,7 +4097,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            prepared.apply(42, 0).unwrap().scalar_at(0).as_f64_lossy(),
+            prepared
+                .apply(RandomKey::from_counter(42, 0))
+                .unwrap()
+                .scalar_at(0)
+                .as_f64_lossy(),
             f64::from(1.0f32 / (1.0f32 - rate))
         );
         let input = finalize_tensor(
@@ -3951,7 +4112,11 @@ mod tests {
         .unwrap();
         let prepared =
             PreparedDropout::new(&input, scalar_from_f64("test", Prim::F32, 0.1).unwrap()).unwrap();
-        let result = prepared.apply(42, 0).unwrap().scalar_at(0).as_f64_lossy() as f32;
+        let result = prepared
+            .apply(RandomKey::from_counter(42, 0))
+            .unwrap()
+            .scalar_at(0)
+            .as_f64_lossy() as f32;
         assert_eq!(result.to_bits(), 0x3f8e_38e9);
         assert_ne!(result.to_bits(), 0x3f8e_38ea, "reciprocal-multiply mutant");
     }
@@ -3962,8 +4127,11 @@ mod tests {
             let rate = scalar_from_f64("test", prim, 0.5).unwrap();
             let input = finalize_tensor("test", prim, RawTensor::Float(vec![-0.0; 2])).unwrap();
             let prepared = PreparedDropout::new(&input, rate).unwrap();
-            let first = prepared.apply(42, 0).unwrap();
-            assert_eq!(first, prepared.apply(42, 0).unwrap());
+            let first = prepared.apply(RandomKey::from_counter(42, 0)).unwrap();
+            assert_eq!(
+                first,
+                prepared.apply(RandomKey::from_counter(42, 0)).unwrap()
+            );
             assert_eq!(first.scalar_at(0).as_f64_lossy().to_bits(), 0);
             assert_eq!(
                 first.scalar_at(1).as_f64_lossy().to_bits(),
@@ -3977,7 +4145,7 @@ mod tests {
             assert!(
                 PreparedDropout::new(&empty, rate)
                     .unwrap()
-                    .apply(u64::MAX, u64::MAX)
+                    .apply(RandomKey::from_counter(u64::MAX, u64::MAX))
                     .unwrap()
                     .is_empty()
             );
@@ -4002,10 +4170,10 @@ mod tests {
     fn the_draw_key_and_word_are_the_05_rng_1_word() {
         for seed_bits in [0, 42, (-1_i64) as u64, i64::MIN as u64] {
             for ordinal in [0, 1, 2, 17, u64::MAX] {
-                let key = random_draw_key(seed_bits, ordinal);
+                let key = RandomKey::from_counter(seed_bits, ordinal);
                 for index in [0, 1, 5, 1 << 40, u64::MAX] {
                     assert_eq!(
-                        random_unit(key, index).to_bits(),
+                        random_unit(key.bits(), index).to_bits(),
                         spec_unit(seed_bits, ordinal, index).to_bits(),
                         "seed {seed_bits:#x} ordinal {ordinal} index {index}"
                     );
@@ -4021,7 +4189,9 @@ mod tests {
     fn draw_c_element_i_is_not_draw_i_element_c() {
         const N: u64 = 32;
         for seed_bits in [42, (-1_i64) as u64] {
-            let unit = |c: u64, i: u64| random_unit(random_draw_key(seed_bits, c), i).to_bits();
+            let unit = |c: u64, i: u64| {
+                random_unit(RandomKey::from_counter(seed_bits, c).bits(), i).to_bits()
+            };
             for c in 0..N {
                 for i in (c + 1)..N {
                     assert_ne!(unit(c, i), unit(i, c), "seed {seed_bits:#x} ({c}, {i})");
@@ -4032,10 +4202,23 @@ mod tests {
         }
     }
 
+    fn f32_scalar(value: f32) -> ScalarValue {
+        scalar_from_f64("test", Prim::F32, f64::from(value)).unwrap()
+    }
+
+    fn uniform_element(prim: Prim, low: f32, high: f32, key: RandomKey, index: usize) -> f64 {
+        PreparedUniformLike::new(prim, index + 1, f32_scalar(low), f32_scalar(high))
+            .unwrap()
+            .apply(key)
+            .unwrap()
+            .scalar_at(index)
+            .as_f64_lossy()
+    }
+
     #[test]
     fn uniform_sampler_is_the_05_op_8_affine_of_the_spec_unit() {
         for (seed_bits, ordinal) in [(42, 0), ((-1_i64) as u64, 3)] {
-            let key = random_draw_key(seed_bits, ordinal);
+            let key = RandomKey::from_counter(seed_bits, ordinal);
             for (low, high) in [(2.0f32, 5.0f32), (-1.0, 3.0), (0.0, 1.0)] {
                 for index in 0..16 {
                     let unit = spec_unit(seed_bits, ordinal, index);
@@ -4047,10 +4230,9 @@ mod tests {
                         (Prim::F16, f64::from(half::f16::from_f32(narrow))),
                         (Prim::Bf16, f64::from(half::bf16::from_f32(narrow))),
                     ] {
-                        let value = uniform_sample(prim, low, high, key, index).unwrap();
-                        assert_eq!(value.prim(), prim);
+                        let value = uniform_element(prim, low, high, key, index as usize);
                         assert_eq!(
-                            value.as_f64_lossy().to_bits(),
+                            value.to_bits(),
                             expected.to_bits(),
                             "{prim:?} [{low}, {high}) seed {seed_bits:#x} ordinal {ordinal} index {index}"
                         );
@@ -4064,26 +4246,167 @@ mod tests {
     fn uniform_sampler_dispatches_at_the_output_dtype_width() {
         let low = 2.0f32;
         let high = 7.0f32;
-        let seed = random_draw_key(42, 0);
+        let key = RandomKey::from_counter(42, 0);
         let index = 4;
-        let f32_value = uniform_sample(Prim::F32, low, high, seed, index).unwrap();
-        let f64_value = uniform_sample(Prim::F64, low, high, seed, index).unwrap();
-        assert_eq!(f32_value.prim(), Prim::F32);
-        assert_eq!(f64_value.prim(), Prim::F64);
+        let f32_value = uniform_element(Prim::F32, low, high, key, index);
+        let f64_value = uniform_element(Prim::F64, low, high, key, index);
         assert_ne!(
-            f32_value.as_f64_lossy().to_bits(),
-            f64_value.as_f64_lossy().to_bits(),
+            f32_value.to_bits(),
+            f64_value.to_bits(),
             "the two widths must not share a post-hoc f32 sampler"
         );
         for prim in [Prim::F16, Prim::Bf16] {
-            let value = uniform_sample(prim, low, high, seed, index).unwrap();
-            assert_eq!(value.prim(), prim);
-            assert!((low as f64..high as f64).contains(&value.as_f64_lossy()));
+            let storage = PreparedUniformLike::new(prim, 5, f32_scalar(low), f32_scalar(high))
+                .unwrap()
+                .apply(key)
+                .unwrap();
+            assert_eq!(storage.prim(), prim);
+            assert!((low as f64..high as f64).contains(&storage.scalar_at(index).as_f64_lossy()));
         }
         assert!(matches!(
-            uniform_sample(Prim::Int32, low, high, seed, index),
+            PreparedUniformLike::new(Prim::Int32, 1, f32_scalar(low), f32_scalar(high)),
             Err(NumericKernelError::WrongFamily { .. })
         ));
+    }
+
+    // Phase 3 of chelis#2413: the kernels take a key and nothing else about
+    // the stream. The dropout and uniform values of `from_counter(s, c)` are
+    // the atoms' values at seed `s` and ordinal `c`, recomputed here from the
+    // spec text (`spec_unit` above) rather than from any kernel helper.
+    #[test]
+    fn kernels_under_a_counter_key_reproduce_the_spec_stream() {
+        let seeds = [0_u64, 42, (-1_i64) as u64, i64::MIN as u64, 7];
+        for seed_bits in seeds {
+            for ordinal in [0_u64, 1, 2, 9, u64::MAX] {
+                let key = RandomKey::from_counter(seed_bits, ordinal);
+                for prim in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
+                    let values = (0..24)
+                        .map(|i| 1.0 + f64::from(i) / 8.0)
+                        .collect::<Vec<_>>();
+                    let input = finalize_tensor("test", prim, RawTensor::Float(values)).unwrap();
+                    let rate = scalar_from_f64("test", prim, 0.375).unwrap();
+                    let output = PreparedDropout::new(&input, rate)
+                        .unwrap()
+                        .apply(key)
+                        .unwrap();
+                    let denominator = float_binop(
+                        FloatBinOp::Sub,
+                        scalar_from_f64("test", prim, 1.0).unwrap(),
+                        rate,
+                    )
+                    .unwrap();
+                    for index in 0..input.len() {
+                        let unit = spec_unit(seed_bits, ordinal, index as u64);
+                        let unit = if prim == Prim::F64 {
+                            unit
+                        } else {
+                            f64::from(unit as f32)
+                        };
+                        let expected = if unit < 0.375 {
+                            0.0
+                        } else {
+                            float_binop(FloatBinOp::Div, input.scalar_at(index), denominator)
+                                .unwrap()
+                                .as_f64_lossy()
+                        };
+                        assert_eq!(
+                            output.scalar_at(index).as_f64_lossy().to_bits(),
+                            expected.to_bits(),
+                            "dropout {prim:?} seed {seed_bits:#x} ordinal {ordinal} index {index}"
+                        );
+                    }
+                    let (low, high) = (-1.5f32, 2.25f32);
+                    let sampled =
+                        PreparedUniformLike::new(prim, 24, f32_scalar(low), f32_scalar(high))
+                            .unwrap()
+                            .apply(key)
+                            .unwrap();
+                    for index in 0..24 {
+                        let unit = spec_unit(seed_bits, ordinal, index);
+                        let expected = if prim == Prim::F64 {
+                            (f64::from(high) - f64::from(low)).mul_add(unit, f64::from(low))
+                        } else {
+                            scalar_from_f64(
+                                "test",
+                                prim,
+                                f64::from((high - low).mul_add(unit as f32, low)),
+                            )
+                            .unwrap()
+                            .as_f64_lossy()
+                        };
+                        assert_eq!(
+                            sampled.scalar_at(index as usize).as_f64_lossy().to_bits(),
+                            expected.to_bits(),
+                            "uniform {prim:?} seed {seed_bits:#x} ordinal {ordinal} index {index}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // [05-OP-8]: the bounds are validated before any draw, at the arithmetic
+    // width, with equal bounds admitted; the bounds carry `p` or the checker's
+    // current f32 signature (chelis#1295) and nothing else.
+    #[test]
+    fn uniform_parameters_validate_the_bounds_at_the_arithmetic_width() {
+        let domain = |prim| {
+            Err::<(), _>(NumericKernelError::Trap(NumericTrap::Domain {
+                op: "uniform_like",
+                prim,
+            }))
+        };
+        for prim in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
+            for (low, high) in [
+                (1.0f32, 0.5f32),
+                (f32::NAN, 1.0),
+                (0.0, f32::INFINITY),
+                (f32::NEG_INFINITY, 0.0),
+            ] {
+                assert_eq!(
+                    UniformLikeParameters::new(prim, f32_scalar(low), f32_scalar(high)).map(|_| ()),
+                    domain(prim),
+                    "{prim:?} [{low}, {high})"
+                );
+            }
+            let equal = PreparedUniformLike::new(prim, 3, f32_scalar(0.5), f32_scalar(0.5))
+                .unwrap()
+                .apply(RandomKey::from_counter(42, 0))
+                .unwrap();
+            for index in 0..3 {
+                assert_eq!(equal.scalar_at(index).as_f64_lossy(), 0.5);
+            }
+        }
+        // Finite f32 bounds whose difference overflows f32 but not f64: the
+        // f64 draw computes in f64 and is valid; every narrower `p` computes
+        // in f32 and traps.
+        let (low, high) = (f32_scalar(-3.0e38), f32_scalar(3.0e38));
+        assert!(UniformLikeParameters::new(Prim::F64, low, high).is_ok());
+        for prim in [Prim::F16, Prim::Bf16, Prim::F32] {
+            assert_eq!(
+                UniformLikeParameters::new(prim, low, high).map(|_| ()),
+                domain(prim)
+            );
+        }
+        let f64_bound = scalar_from_f64("test", Prim::F64, 0.5).unwrap();
+        let f16_bound = scalar_from_f64("test", Prim::F16, 0.5).unwrap();
+        assert!(UniformLikeParameters::new(Prim::F64, f64_bound, f64_bound).is_ok());
+        assert!(UniformLikeParameters::new(Prim::F16, f16_bound, f16_bound).is_ok());
+        for (prim, low, high) in [
+            (Prim::F32, f64_bound, f64_bound),
+            (Prim::Bf16, f16_bound, f16_bound),
+            (Prim::F64, f32_scalar(0.5), f64_bound),
+        ] {
+            assert!(
+                matches!(
+                    UniformLikeParameters::new(prim, low, high),
+                    Err(NumericKernelError::DtypeMismatch { .. })
+                ),
+                "{prim:?} {:?} {:?}",
+                low.prim(),
+                high.prim()
+            );
+        }
     }
 
     // ---- chelis#1116: exact insertion from already-finalized scalars ----

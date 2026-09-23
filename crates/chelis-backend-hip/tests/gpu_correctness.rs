@@ -1200,7 +1200,7 @@ fn uniform_like_fma_gpu_bit_exact_matches_eval_and_c() {
         RiscOp::UniformLike {
             low: 2.0,
             high: 5.0,
-            seed: chelis_types::random_draw_key(42, 0),
+            seed: chelis_types::RandomKey::from_counter(42, 0).bits(),
         },
         vec![template],
         vec_f32(8),
@@ -1233,12 +1233,12 @@ fn issue_937_uniform_like_f64_gpu_bit_exact_matches_shared_sampler() {
         vec_f64(8),
         None,
     );
-    let key = chelis_types::random_draw_key(42, 0);
+    let key = chelis_types::RandomKey::from_counter(42, 0);
     let out = dag.add_node(
         RiscOp::UniformLike {
             low: 2.0,
             high: 5.0,
-            seed: key,
+            seed: key.bits(),
         },
         vec![template],
         vec_f64(8),
@@ -1247,13 +1247,13 @@ fn issue_937_uniform_like_f64_gpu_bit_exact_matches_shared_sampler() {
     dag.add_root(out);
 
     let actual = compile_and_run_output_f64_bits(&dag, "uniform_like_f64");
+    let bound = |value| chelis_types::scalar_from_f64("test", Prim::F32, value).unwrap();
+    let sampled = chelis_types::PreparedUniformLike::new(Prim::F64, 8, bound(2.0), bound(5.0))
+        .unwrap()
+        .apply(key)
+        .unwrap();
     let expected = (0..8)
-        .map(|index| {
-            chelis_types::uniform_sample(Prim::F64, 2.0, 5.0, key, index)
-                .unwrap()
-                .as_f64_lossy()
-                .to_bits()
-        })
+        .map(|index| sampled.scalar_at(index).as_f64_lossy().to_bits())
         .collect::<Vec<_>>();
     assert_eq!(actual, expected);
 }

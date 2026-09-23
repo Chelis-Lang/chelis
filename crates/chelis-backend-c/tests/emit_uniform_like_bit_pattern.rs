@@ -407,16 +407,14 @@ int main(void) {
     let Some(output) = compile_and_run("uniform_like_f64", src, harness) else {
         panic!("emitted f64 C did not compile/run");
     };
+    let bound = |value| chelis_types::scalar_from_f64("test", Prim::F32, value).unwrap();
+    // The node bakes key word 42 itself, so the reference draws under that key.
+    let sampled = chelis_types::PreparedUniformLike::new(Prim::F64, 4, bound(2.0), bound(5.0))
+        .unwrap()
+        .apply(chelis_types::RandomKey::from_derived_bits(42))
+        .unwrap();
     let expected = (0..4)
-        .map(|index| {
-            format!(
-                "{:016x}",
-                chelis_types::uniform_sample(Prim::F64, 2.0, 5.0, 42, index)
-                    .unwrap()
-                    .as_f64_lossy()
-                    .to_bits()
-            )
-        })
+        .map(|index| format!("{:016x}", sampled.scalar_at(index).as_f64_lossy().to_bits()))
         .collect::<Vec<_>>()
         .join(" ");
     assert_eq!(output.trim(), expected, "emitted source:\n{src}");

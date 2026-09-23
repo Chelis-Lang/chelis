@@ -1862,22 +1862,24 @@ fn staged_sources_preserve_handled_random_progress() {
                 let expected = if n == 2 {
                     // Reference the numeric sampler directly, independently of
                     // either compiler lane's staging, seed and draw scheduling.
-                    let key = chelis_types::random_draw_key(seed, draw);
+                    let key = chelis_types::RandomKey::from_counter(seed, draw);
+                    let bound = |value| {
+                        chelis_types::scalar_from_f64("test", chelis_types::types::Prim::F32, value)
+                            .unwrap()
+                    };
+                    let sampled = chelis_types::PreparedUniformLike::new(
+                        chelis_types::types::Prim::F32,
+                        4,
+                        bound(2.0),
+                        bound(5.0),
+                    )
+                    .unwrap()
+                    .apply(key)
+                    .unwrap();
                     Expected::TensorF32Bits(
                         vec![2, 2],
                         (0..4)
-                            .map(|index| {
-                                (chelis_types::uniform_sample(
-                                    chelis_types::types::Prim::F32,
-                                    2.0,
-                                    5.0,
-                                    key,
-                                    index,
-                                )
-                                .unwrap()
-                                .as_f64_lossy() as f32)
-                                    .to_bits()
-                            })
+                            .map(|index| (sampled.scalar_at(index).as_f64_lossy() as f32).to_bits())
                             .collect(),
                     )
                 } else {
