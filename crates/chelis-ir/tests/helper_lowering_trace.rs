@@ -251,7 +251,7 @@ def derivative(x: tensor[32, f32]) -> tensor[32, f32] = grad(loss)(x)
             .dag_for_inspection()
             .nodes()
             .iter()
-            .filter(|node| matches!(node.op, RiscOp::Dropout { .. }))
+            .filter(|node| matches!(node.op, RiscOp::BakedDropout { .. }))
             .count(),
         1
     );
@@ -261,7 +261,7 @@ def derivative(x: tensor[32, f32]) -> tensor[32, f32] = grad(loss)(x)
             .dag_for_inspection()
             .nodes()
             .iter()
-            .filter(|node| matches!(node.op, RiscOp::Dropout { .. }))
+            .filter(|node| matches!(node.op, RiscOp::BakedDropout { .. }))
             .count(),
         2,
         "post-AD capture includes the actual backward replay"
@@ -385,7 +385,7 @@ def derivative(x: tensor[4, f32]) -> tensor[4, f32] = grad(loss)(x)
             .dag_for_inspection()
             .nodes()
             .iter()
-            .filter(|node| matches!(node.op, RiscOp::Dropout { .. }))
+            .filter(|node| matches!(node.op, RiscOp::BakedDropout { .. }))
             .count(),
         2,
         "backward replay adds a node but no source occurrence"

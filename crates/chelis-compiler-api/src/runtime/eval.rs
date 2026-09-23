@@ -927,10 +927,9 @@ impl<'a> EvalContext<'a> {
             })
             .collect::<Result<Vec<_>, String>>()?;
         let draws_random = kernel_draws_random(kernel);
-        let path_sensitive_random =
-            kernel.dag.nodes().iter().any(|node| {
-                matches!(node.op, RiscOp::UniformLike { .. }) && node.inputs.len() == 2
-            });
+        let path_sensitive_random = kernel.dag.nodes().iter().any(|node| {
+            matches!(node.op, RiscOp::BakedUniformLike { .. }) && node.inputs.len() == 2
+        });
         let starting_counter = self.random_counter;
         let tensor_bindings = self.tensor_bindings;
         let host_bindings = &self.declaration_values;
@@ -4729,11 +4728,12 @@ fn runtime_values_equal(lhs: &RuntimeValue, rhs: &RuntimeValue) -> Result<bool, 
 /// Whether a kernel's DAG draws from the Random stream; such a kernel is
 /// lowered per application and advances `random_counter` when applied.
 fn kernel_draws_random(kernel: &HostDefKernel) -> bool {
-    kernel
-        .dag
-        .nodes()
-        .iter()
-        .any(|node| matches!(node.op, RiscOp::UniformLike { .. } | RiscOp::Dropout { .. }))
+    kernel.dag.nodes().iter().any(|node| {
+        matches!(
+            node.op,
+            RiscOp::BakedUniformLike { .. } | RiscOp::BakedDropout { .. }
+        )
+    })
 }
 
 /// One evaluated argument as the kernel `Load` its declared parameter names.
@@ -4989,7 +4989,7 @@ mod legacy_capture_order_tests {
             .dag
             .nodes()
             .iter()
-            .filter(|node| matches!(node.op, RiscOp::UniformLike { .. }))
+            .filter(|node| matches!(node.op, RiscOp::BakedUniformLike { .. }))
             .collect();
         assert_eq!(draws.len(), 1);
         assert_eq!(

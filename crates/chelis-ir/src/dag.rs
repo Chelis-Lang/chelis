@@ -670,7 +670,10 @@ pub enum RiscOp {
     /// that would NaN on non-positive inputs. Backends emit
     /// `1.0f / x` (or the f64 / mixed-precision analog).
     Recip,
-    UniformLike {
+    /// The pre-key-operand `[05-OP-8]` node: bounds and seed are fixed
+    /// payload rather than operands. It keeps its serialized name.
+    #[serde(rename = "UniformLike")]
+    BakedUniformLike {
         low: f64,
         high: f64,
         /// The handler seed's bits when the draw takes its ordinal at
@@ -680,7 +683,10 @@ pub enum RiscOp {
         /// from the handler seed and a lowering-time ordinal.
         seed: u64,
     },
-    Dropout {
+    /// The pre-key-operand `[05-OP-37]` node, a fixed rate and seed payload.
+    /// It keeps its serialized name.
+    #[serde(rename = "Dropout")]
+    BakedDropout {
         rate: f64,
         seed: u64,
     },
@@ -1285,8 +1291,8 @@ impl RiscOp {
             Self::Ceil => Semantic(Id::Ceil),
             Self::Round => Semantic(Id::Round),
             Self::Recip => Semantic(Id::Recip),
-            Self::UniformLike { .. } => Semantic(Id::UniformLike),
-            Self::Dropout { .. } => Semantic(Id::Dropout),
+            Self::BakedUniformLike { .. } => Semantic(Id::UniformLike),
+            Self::BakedDropout { .. } => Semantic(Id::Dropout),
             Self::Sum { .. } => Semantic(Id::Sum),
             Self::MaxReduce { .. } => Semantic(Id::MaxReduce),
             Self::MinReduce { .. } => Semantic(Id::MinReduce),
@@ -1644,7 +1650,7 @@ impl RiscOp {
             RiscOp::Logical(_) | RiscOp::Where => false,
 
             // Stochastic ops have no deterministic value to bound.
-            RiscOp::UniformLike { .. } | RiscOp::Dropout { .. } => false,
+            RiscOp::BakedUniformLike { .. } | RiscOp::BakedDropout { .. } => false,
 
             // Argmax/argmin return discrete indices, not a numeric
             // envelope over the reals; outside the forward-bound story.
@@ -2390,8 +2396,8 @@ fn shape_source_for_axis(dag: &Dag, id: NodeId, axis: usize) -> Option<(String, 
         | RiscOp::Ceil
         | RiscOp::Round
         | RiscOp::Relu
-        | RiscOp::UniformLike { .. }
-        | RiscOp::Dropout { .. } => shape_source_for_axis(dag, *node.inputs.first()?, axis),
+        | RiscOp::BakedUniformLike { .. }
+        | RiscOp::BakedDropout { .. } => shape_source_for_axis(dag, *node.inputs.first()?, axis),
         RiscOp::Copy
         | RiscOp::Drop
         | RiscOp::Realize
@@ -3370,12 +3376,12 @@ mod tests {
             RiscOp::Ceil,
             RiscOp::Round,
             RiscOp::Recip,
-            RiscOp::UniformLike {
+            RiscOp::BakedUniformLike {
                 low: 0.0,
                 high: 1.0,
                 seed: 7,
             },
-            RiscOp::Dropout { rate: 0.5, seed: 7 },
+            RiscOp::BakedDropout { rate: 0.5, seed: 7 },
             RiscOp::Sum {
                 axis: 0,
                 accumulator: Prim::F32,
@@ -3507,7 +3513,7 @@ mod tests {
             "Cast is real-valued-first targetable (beacon_plan.md §6)"
         );
         assert!(
-            !RiscOp::Dropout { rate: 0.5, seed: 0 }.is_verifier_targetable(),
+            !RiscOp::BakedDropout { rate: 0.5, seed: 0 }.is_verifier_targetable(),
             "stochastic ops have no deterministic envelope to bound"
         );
         assert!(

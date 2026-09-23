@@ -1405,11 +1405,11 @@ impl HipEmitter {
             RiscOp::Floor => Some(format!("kernel_floor_{}", kind_for_node(node)?.suffix())),
             RiscOp::Ceil => Some(format!("kernel_ceil_{}", kind_for_node(node)?.suffix())),
             RiscOp::Round => Some(format!("kernel_round_{}", kind_for_node(node)?.suffix())),
-            RiscOp::UniformLike { .. } => Some(format!(
+            RiscOp::BakedUniformLike { .. } => Some(format!(
                 "kernel_uniform_like_{}",
                 kind_for_node(node)?.suffix()
             )),
-            RiscOp::Dropout { .. } | RiscOp::Drop => None,
+            RiscOp::BakedDropout { .. } | RiscOp::Drop => None,
             RiscOp::Copy => Some(Self::cast_kernel_name(node, dag)?),
             // WS-A4: bind `accumulator` instead of `..` per the
             // destructure-`..` memory rule. The kernel name encodes
@@ -1821,7 +1821,7 @@ impl HipEmitter {
             RiscOp::Round => {
                 kernels::unary_func(self.kernel_rank, name, "rintf", elem_for_unary()?)
             }
-            RiscOp::UniformLike { .. } => {
+            RiscOp::BakedUniformLike { .. } => {
                 kernels::uniform_like(self.kernel_rank, name, elem_for_unary()?)
             }
             // WS-A4: bind `accumulator` instead of `..`. The fused
@@ -2296,10 +2296,10 @@ impl HipEmitter {
                 &node.inputs,
                 &node.output_type,
             ),
-            RiscOp::UniformLike { low, high, seed } => {
+            RiscOp::BakedUniformLike { low, high, seed } => {
                 self.emit_uniform_like_launch(id, *low, *high, *seed, &node.output_type)?
             }
-            RiscOp::Dropout { .. } => {
+            RiscOp::BakedDropout { .. } => {
                 unreachable!("dropout should be rejected before HIP code generation")
             }
             RiscOp::Copy => self.emit_unary_launch(
@@ -4658,8 +4658,8 @@ impl HipEmitter {
             | RiscOp::Floor
             | RiscOp::Ceil
             | RiscOp::Round
-            | RiscOp::UniformLike { .. }
-            | RiscOp::Dropout { .. }
+            | RiscOp::BakedUniformLike { .. }
+            | RiscOp::BakedDropout { .. }
             | RiscOp::Copy
             | RiscOp::Drop
             | RiscOp::Sum { .. }
@@ -5613,7 +5613,7 @@ mod tests {
             None,
         );
         let u = dag.add_node(
-            RiscOp::UniformLike { low, high, seed: 7 },
+            RiscOp::BakedUniformLike { low, high, seed: 7 },
             vec![like],
             vec_f32(8),
             None,
@@ -5661,7 +5661,7 @@ mod tests {
             None,
         );
         let u = dag.add_node(
-            RiscOp::UniformLike {
+            RiscOp::BakedUniformLike {
                 low,
                 high,
                 seed: 17,

@@ -233,7 +233,7 @@ fn grad_dag_checked_impl(
                 // Its adjoint routes zero only to the numeric template, so
                 // the control edge must not pull logical predicate producers
                 // into structural rejection analysis.
-                RiscOp::UniformLike { .. } => {
+                RiscOp::BakedUniformLike { .. } => {
                     if let Some(template) = node.inputs.first() {
                         live[template.0] = true;
                     }
@@ -431,8 +431,8 @@ pub fn risc_op_name(op: &RiscOp) -> &'static str {
         RiscOp::Floor => "floor",
         RiscOp::Ceil => "ceil",
         RiscOp::Round => "round",
-        RiscOp::UniformLike { .. } => "uniform_like",
-        RiscOp::Dropout { .. } => "dropout",
+        RiscOp::BakedUniformLike { .. } => "uniform_like",
+        RiscOp::BakedDropout { .. } => "dropout",
         RiscOp::Sum { .. } => "sum",
         RiscOp::Count { .. } => "count",
         RiscOp::MaxReduce { .. } => "max_reduce",
@@ -1233,13 +1233,13 @@ fn compute_adjoints(
             let zb = dag.add_node(RiscOp::synth_const(ty_b.precision, 0.0), vec![], ty_b, None);
             Some(vec![(a, za), (b, zb)])
         }
-        RiscOp::UniformLike { .. } => {
+        RiscOp::BakedUniformLike { .. } => {
             let x = node.inputs[0];
             let ty = forward.get(x).unwrap().output_type.clone();
             let zero = dag.add_node(RiscOp::synth_const(ty.precision, 0.0), vec![], ty, None);
             Some(vec![(x, zero)])
         }
-        RiscOp::Dropout { rate, seed } => {
+        RiscOp::BakedDropout { rate, seed } => {
             let x = node.inputs[0];
             // Replay owns the forward mask's exact layout. A checked reshape
             // can retain a computed input axis while dropout's result carries
@@ -1247,7 +1247,7 @@ fn compute_adjoints(
             // would change the replay contract despite identical shapes.
             let ty = node.output_type.clone();
             let dx = dag.add_node(
-                RiscOp::Dropout {
+                RiscOp::BakedDropout {
                     rate: *rate,
                     seed: *seed,
                 },

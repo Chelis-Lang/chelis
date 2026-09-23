@@ -2136,7 +2136,7 @@ fn execution_artifact_from_compiled_observed(
                     .dag
                     .nodes()
                     .iter()
-                    .any(|node| matches!(node.op, RiscOp::Dropout { .. }))
+                    .any(|node| matches!(node.op, RiscOp::BakedDropout { .. }))
                 && !(strictness == EntryStrictness::Legacy
                     && (entry_name.is_some_and(|name| {
                         !compiled
@@ -5173,7 +5173,7 @@ pub fn reject_unsupported_effect_ops(
     target: BuildTarget,
 ) -> std::result::Result<(), CompilerError> {
     for node in dag.nodes() {
-        if matches!(&node.op, RiscOp::Dropout { .. }) {
+        if matches!(&node.op, RiscOp::BakedDropout { .. }) {
             return Err(unsupported_gate_error(
                 format!("compiled `dropout` op at lowered node {}", node.id.0),
                 target.as_str(),
@@ -7010,12 +7010,12 @@ fn wire_op(op: &RiscOp, precision: Prim) -> WireResult<WireRiscOp> {
         RiscOp::Floor => WireRiscOp::Floor,
         RiscOp::Ceil => WireRiscOp::Ceil,
         RiscOp::Round => WireRiscOp::Round,
-        RiscOp::UniformLike { low, high, seed } => WireRiscOp::UniformLike {
+        RiscOp::BakedUniformLike { low, high, seed } => WireRiscOp::UniformLike {
             low: wire_float_parameter(*low, precision)?,
             high: wire_float_parameter(*high, precision)?,
             seed: *seed,
         },
-        RiscOp::Dropout { rate, seed } => WireRiscOp::Dropout {
+        RiscOp::BakedDropout { rate, seed } => WireRiscOp::Dropout {
             rate: wire_float_parameter(*rate, precision)?,
             seed: *seed,
         },

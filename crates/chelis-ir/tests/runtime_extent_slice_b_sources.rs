@@ -650,8 +650,8 @@ fn variant_index(op: &RiscOp) -> usize {
         RiscOp::Ceil => 20,
         RiscOp::Round => 21,
         RiscOp::Recip => 22,
-        RiscOp::UniformLike { .. } => 23,
-        RiscOp::Dropout { .. } => 24,
+        RiscOp::BakedUniformLike { .. } => 23,
+        RiscOp::BakedDropout { .. } => 24,
         RiscOp::Sum { .. } => 25,
         RiscOp::Count { .. } => 26,
         RiscOp::MaxReduce { .. } => 27,
@@ -839,12 +839,12 @@ fn every_risc_op_yields_exactly_one_source_per_output_axis() {
         RiscOp::Copy,
         RiscOp::Drop,
         RiscOp::Realize,
-        RiscOp::UniformLike {
+        RiscOp::BakedUniformLike {
             low: 0.0,
             high: 1.0,
             seed: 7,
         },
-        RiscOp::Dropout {
+        RiscOp::BakedDropout {
             rate: 0.5,
             seed: 11,
         },
@@ -1404,7 +1404,7 @@ fn a_shape_preserving_axis_over_a_literal_operand_resolves_to_the_literal() {
         None,
     );
     let noised = dag.add_node(
-        RiscOp::UniformLike {
+        RiscOp::BakedUniformLike {
             low: 0.0,
             high: 1.0,
             seed: 42,

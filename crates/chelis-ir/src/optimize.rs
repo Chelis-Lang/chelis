@@ -518,7 +518,7 @@ pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
                     | RiscOp::CheckedReshapeExtent { .. }
                     | RiscOp::CheckedUnitAxis { .. }
             )
-            && !(matches!(node.op, RiscOp::UniformLike { .. }) && node.inputs.len() == 2)
+            && !(matches!(node.op, RiscOp::BakedUniformLike { .. }) && node.inputs.len() == 2)
             && let Some(&existing) = seen.get(&cse_key)
         {
             // Duplicate: its full provenance (canonical + merged) folds
@@ -1355,7 +1355,7 @@ mod tests {
         );
         for _ in 0..2 {
             let draw = dag.add_node(
-                RiscOp::UniformLike {
+                RiscOp::BakedUniformLike {
                     low: 2.0,
                     high: 5.0,
                     seed: 42,

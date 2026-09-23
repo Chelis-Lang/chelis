@@ -3252,7 +3252,7 @@ where
             // backend's `rintf` under the default rounding mode. NOT
             // `f64::round`, which rounds half away from zero.
             RiscOp::Round => unary_elementwise(ElementwiseUnOp::Round, &values[&node.inputs[0]])?,
-            RiscOp::UniformLike { low, high, seed } => {
+            RiscOp::BakedUniformLike { low, high, seed } => {
                 let key = if let Some(frame) = execution.as_deref_mut() {
                     let active = match node.inputs.get(1) {
                         Some(activation) => match values[activation].storage().to_raw() {
@@ -3303,7 +3303,7 @@ where
                     out_prim,
                 )?
             }
-            RiscOp::Dropout { rate, seed } => match execution.as_deref_mut() {
+            RiscOp::BakedDropout { rate, seed } => match execution.as_deref_mut() {
                 Some(frame) => frame.dropout(node.id, &values[&node.inputs[0]], *rate, *seed)?,
                 None => return Err(plan_less_dropout(node.id)),
             },
@@ -4473,7 +4473,7 @@ mod tests {
             None,
         );
         let skipped = dag.add_node(
-            RiscOp::UniformLike {
+            RiscOp::BakedUniformLike {
                 low: 0.0,
                 high: 1.0,
                 seed: 17,
@@ -4483,7 +4483,7 @@ mod tests {
             None,
         );
         let executed = dag.add_node(
-            RiscOp::UniformLike {
+            RiscOp::BakedUniformLike {
                 low: 0.0,
                 high: 1.0,
                 seed: 17,
@@ -5715,7 +5715,7 @@ mod tests {
         assert!(
             dag.nodes()
                 .iter()
-                .any(|node| matches!(node.op, RiscOp::Dropout { .. }))
+                .any(|node| matches!(node.op, RiscOp::BakedDropout { .. }))
         );
         let error = eval_tensor(&dag, &UnordMap::new()).unwrap_err();
         assert!(

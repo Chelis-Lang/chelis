@@ -1788,7 +1788,7 @@ impl CEmitter {
             // which defaults to ties-to-even — matching the evaluator's
             // `f64::round_ties_even`. (`roundf` would be ties-away-from-zero.)
             RiscOp::Round => self.emit_unary_func(id, "rintf", &node.inputs, &node.output_type),
-            RiscOp::UniformLike { low, high, seed } => self.emit_uniform_like(
+            RiscOp::BakedUniformLike { low, high, seed } => self.emit_uniform_like(
                 id,
                 *low,
                 *high,
@@ -1796,7 +1796,7 @@ impl CEmitter {
                 &node.inputs,
                 &node.output_type,
             ),
-            RiscOp::Dropout { .. } => {
+            RiscOp::BakedDropout { .. } => {
                 return Err(unsupported_fixed_execution(
                     "dropout requires a sealed source execution plan",
                 ));
@@ -4605,7 +4605,7 @@ impl CEmitter {
         dag: VerifiedDagView<'_>,
         execution: EvaluationEmissionView<'_>,
     ) -> Result<(), Unsupported> {
-        let parameters = if let RiscOp::Dropout { rate, .. } = node.op {
+        let parameters = if let RiscOp::BakedDropout { rate, .. } = node.op {
             let rate = chelis_types::scalar_from_f64("dropout", node.output_type.precision, rate)
                 .map_err(|error| unsupported_fixed_execution(error.to_string()))?;
             Some(
@@ -4621,7 +4621,7 @@ impl CEmitter {
             None => None,
         };
         match node.op {
-            RiscOp::Dropout { .. } => {
+            RiscOp::BakedDropout { .. } => {
                 let draw =
                     draw.ok_or_else(|| unsupported_fixed_execution("dropout has no source key"))?;
                 let parameters = parameters.expect("validated dropout parameters");
@@ -4640,7 +4640,7 @@ impl CEmitter {
                 );
                 Ok(())
             }
-            RiscOp::UniformLike { low, high, .. } => {
+            RiscOp::BakedUniformLike { low, high, .. } => {
                 if node.inputs.len() != 1 {
                     return Err(unsupported_fixed_execution(
                         "fixed-control Uniform cannot carry a dynamic activation",
@@ -9124,7 +9124,7 @@ mod tests {
             None,
         );
         dag.add_node(
-            RiscOp::UniformLike {
+            RiscOp::BakedUniformLike {
                 low: 0.0,
                 high: 1.0,
                 seed: 11,

@@ -2484,7 +2484,7 @@ mod tests {
             None,
         );
         let draw = dag.add_node(
-            RiscOp::UniformLike {
+            RiscOp::BakedUniformLike {
                 low: 0.0,
                 high: 1.0,
                 seed: 7,

@@ -1197,7 +1197,7 @@ fn uniform_like_fma_gpu_bit_exact_matches_eval_and_c() {
     );
     // An ungated node carries its [05-RNG-1] draw key: seed 42, ordinal 0.
     let out = dag.add_node(
-        RiscOp::UniformLike {
+        RiscOp::BakedUniformLike {
             low: 2.0,
             high: 5.0,
             seed: chelis_types::RandomKey::from_counter(42, 0).bits(),
@@ -1235,7 +1235,7 @@ fn issue_937_uniform_like_f64_gpu_bit_exact_matches_shared_sampler() {
     );
     let key = chelis_types::RandomKey::from_counter(42, 0);
     let out = dag.add_node(
-        RiscOp::UniformLike {
+        RiscOp::BakedUniformLike {
             low: 2.0,
             high: 5.0,
             seed: key.bits(),

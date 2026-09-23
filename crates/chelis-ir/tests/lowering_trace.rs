@@ -106,7 +106,7 @@ def derivative(x: tensor[32, f32]) -> tensor[32, f32] = grad(loss)(x)
             .dag_for_inspection()
             .nodes()
             .iter()
-            .filter(|node| matches!(node.op, RiscOp::Dropout { .. }))
+            .filter(|node| matches!(node.op, RiscOp::BakedDropout { .. }))
             .count(),
         2
     );

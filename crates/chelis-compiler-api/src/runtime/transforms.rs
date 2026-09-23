@@ -524,7 +524,8 @@ impl<'a> EvalContext<'a> {
         };
         let starting_random_counter = self.random_counter;
         let path_sensitive_random = dag.nodes().iter().any(|node| {
-            matches!(node.op, chelis_ir::dag::RiscOp::UniformLike { .. }) && node.inputs.len() == 2
+            matches!(node.op, chelis_ir::dag::RiscOp::BakedUniformLike { .. })
+                && node.inputs.len() == 2
         });
         let baked_random_progress = execution_plan.is_none() && !path_sensitive_random;
 

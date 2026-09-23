@@ -10483,7 +10483,7 @@ mod expression_dispatch_tests {
             None,
         );
         let draw = dag.add_node(
-            chelis_ir::dag::RiscOp::UniformLike {
+            chelis_ir::dag::RiscOp::BakedUniformLike {
                 low: 0.0,
                 high: 1.0,
                 seed: 7,

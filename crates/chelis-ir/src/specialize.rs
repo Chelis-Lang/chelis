@@ -797,8 +797,8 @@ fn node_has_contiguous_matrix_slices(dag: &Dag, id: NodeId, matrix_rank: usize) 
         | RiscOp::Floor
         | RiscOp::Ceil
         | RiscOp::Round
-        | RiscOp::UniformLike { .. }
-        | RiscOp::Dropout { .. }
+        | RiscOp::BakedUniformLike { .. }
+        | RiscOp::BakedDropout { .. }
         | RiscOp::Copy
         | RiscOp::Drop
         | RiscOp::Sum { .. }

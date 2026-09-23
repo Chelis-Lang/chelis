@@ -305,7 +305,7 @@ fn native_replay_nested_restore_and_next_uniform_follow_source_steps() {
             plan.dag_for_inspection()
                 .nodes()
                 .iter()
-                .filter(|node| matches!(node.op, chelis_ir::dag::RiscOp::Dropout { .. }))
+                .filter(|node| matches!(node.op, chelis_ir::dag::RiscOp::BakedDropout { .. }))
                 .count()
                 >= 2
         );

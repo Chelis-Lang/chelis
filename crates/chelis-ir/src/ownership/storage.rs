@@ -687,8 +687,8 @@ fn classify_nodes(
                 | RiscOp::Floor
                 | RiscOp::Ceil
                 | RiscOp::Round
-                | RiscOp::UniformLike { .. }
-                | RiscOp::Dropout { .. }
+                | RiscOp::BakedUniformLike { .. }
+                | RiscOp::BakedDropout { .. }
                 | RiscOp::Copy
                 | RiscOp::Sum { .. }
                 | RiscOp::Count { .. }

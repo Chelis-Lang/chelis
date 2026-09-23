@@ -13494,7 +13494,7 @@ impl<'program> LowerCtx<'program> {
                     .unwrap_or_else(|| ty.clone());
                 let resolved_ty = inferred_ty;
                 let node = self.dag.add_node(
-                    RiscOp::UniformLike { low, high, seed },
+                    RiscOp::BakedUniformLike { low, high, seed },
                     activation.map_or_else(|| vec![template], |active| vec![template, active]),
                     resolved_ty,
                     self.current_span_id.clone(),
@@ -13540,7 +13540,7 @@ impl<'program> LowerCtx<'program> {
                     (rate, seed)
                 };
                 let node = self.dag.add_node(
-                    RiscOp::Dropout { rate, seed },
+                    RiscOp::BakedDropout { rate, seed },
                     vec![x],
                     resolved_ty,
                     self.current_span_id.clone(),
@@ -24378,7 +24378,7 @@ mod tests {
             .nodes()
             .iter()
             .find_map(|node| match node.op {
-                RiscOp::UniformLike { seed, .. } => Some(seed),
+                RiscOp::BakedUniformLike { seed, .. } => Some(seed),
                 _ => None,
             })
             .expect("handled body contains a uniform_like node");
@@ -25998,7 +25998,7 @@ mod regression_tests {
         dag.nodes()
             .iter()
             .find_map(|node| match node.op {
-                RiscOp::UniformLike { low, high, .. } => Some((low, high)),
+                RiscOp::BakedUniformLike { low, high, .. } => Some((low, high)),
                 _ => None,
             })
             .expect("expected a UniformLike node in the lowered DAG")
@@ -26089,7 +26089,7 @@ mod regression_tests {
         dag.nodes()
             .iter()
             .find_map(|node| match node.op {
-                RiscOp::Dropout { rate, .. } => Some(rate),
+                RiscOp::BakedDropout { rate, .. } => Some(rate),
                 _ => None,
             })
             .expect("expected a Dropout node in the lowered DAG")

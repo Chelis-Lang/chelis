@@ -339,8 +339,8 @@ fn agreement_op_for_risc(op: &RiscOp) -> AgreementOp {
         | RiscOp::Ceil
         | RiscOp::Round
         | RiscOp::Recip
-        | RiscOp::UniformLike { .. }
-        | RiscOp::Dropout { .. }
+        | RiscOp::BakedUniformLike { .. }
+        | RiscOp::BakedDropout { .. }
         | RiscOp::Sum { .. }
         | RiscOp::Count { .. }
         | RiscOp::MaxReduce { .. }

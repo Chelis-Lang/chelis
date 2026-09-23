@@ -1467,7 +1467,7 @@ fn logical_random_activation_is_control_only_during_grad() {
         None,
     );
     let output = dag.add_node(
-        RiscOp::UniformLike {
+        RiscOp::BakedUniformLike {
             low: -1.0,
             high: 1.0,
             seed: 17,

@@ -720,7 +720,7 @@ impl HostExecutionPlan {
                 .dag
                 .nodes()
                 .iter()
-                .any(|node| matches!(node.op, crate::dag::RiscOp::Dropout { .. }))
+                .any(|node| matches!(node.op, crate::dag::RiscOp::BakedDropout { .. }))
         }
         self.program
             .global_tensor_helpers
@@ -16090,7 +16090,8 @@ fn remap_tensor_helper_dim_symbols(
                         output
                     })
                     .unwrap_or_else(|| expected_output.clone()),
-                crate::dag::RiscOp::UniformLike { .. } | crate::dag::RiscOp::Dropout { .. } => root
+                crate::dag::RiscOp::BakedUniformLike { .. }
+                | crate::dag::RiscOp::BakedDropout { .. } => root
                     .inputs
                     .first()
                     .and_then(|id| dag.get(*id))
@@ -16641,8 +16642,8 @@ fn actualize_tensor_helper_types(
             | crate::dag::RiscOp::Ceil
             | crate::dag::RiscOp::Round
             | crate::dag::RiscOp::Recip
-            | crate::dag::RiscOp::UniformLike { .. }
-            | crate::dag::RiscOp::Dropout { .. }
+            | crate::dag::RiscOp::BakedUniformLike { .. }
+            | crate::dag::RiscOp::BakedDropout { .. }
             | crate::dag::RiscOp::Copy
             | crate::dag::RiscOp::Drop
             | crate::dag::RiscOp::Realize

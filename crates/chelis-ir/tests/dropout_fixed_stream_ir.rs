@@ -212,7 +212,7 @@ fn typed_static_rate_preserves_source_width_and_distinct_call_bindings() {
         .nodes()
         .iter()
         .filter_map(|node| {
-            if let RiscOp::Dropout { rate, .. } = node.op {
+            if let RiscOp::BakedDropout { rate, .. } = node.op {
                 Some(rate)
             } else {
                 None
@@ -235,7 +235,7 @@ fn typed_static_rate_does_not_duplicate_arguments() {
         .nodes()
         .iter()
         .filter_map(|node| {
-            if let RiscOp::Dropout { rate, .. } = node.op {
+            if let RiscOp::BakedDropout { rate, .. } = node.op {
                 Some(rate)
             } else {
                 None
@@ -631,7 +631,7 @@ fn lowering_does_not_relabel_a_call_key_as_the_raw_seed() {
         .nodes()
         .iter()
         .filter_map(|node| match node.op {
-            RiscOp::Dropout { seed, .. } => Some(seed),
+            RiscOp::BakedDropout { seed, .. } => Some(seed),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -754,7 +754,7 @@ fn explicit_drop_in_gradient_retains_draws_and_verified_terminal_ownership() {
     assert_eq!(
         dag.nodes()
             .iter()
-            .filter(|node| matches!(node.op, RiscOp::Dropout { .. }))
+            .filter(|node| matches!(node.op, RiscOp::BakedDropout { .. }))
             .count(),
         3,
         "two actual forwards and one live backward replay"

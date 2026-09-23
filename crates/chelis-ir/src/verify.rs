@@ -1325,7 +1325,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             | RiscOp::Floor
             | RiscOp::Ceil
             | RiscOp::Round
-            | RiscOp::Dropout { .. }
+            | RiscOp::BakedDropout { .. }
             | RiscOp::Copy
             | RiscOp::Drop
             | RiscOp::Realize
@@ -1396,7 +1396,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                     ));
                 }
             }
-            RiscOp::UniformLike { .. } => {
+            RiscOp::BakedUniformLike { .. } => {
                 if !matches!(arity, 1 | 2) {
                     errors.push(format!(
                         "op {:?} at node {} expects 1 or 2 inputs, got {}",
@@ -2091,7 +2091,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                     ));
                 }
             }
-            RiscOp::UniformLike { .. } => {
+            RiscOp::BakedUniformLike { .. } => {
                 if matches!(arity, 1 | 2)
                     && let Some(input) = dag.get(node.inputs[0])
                 {
@@ -4426,7 +4426,7 @@ mod tests {
             None,
         );
         dag.add_node(
-            RiscOp::UniformLike {
+            RiscOp::BakedUniformLike {
                 low: 0.0,
                 high: 1.0,
                 seed: 7,
@@ -4466,7 +4466,7 @@ mod tests {
             None,
         );
         dag.add_node(
-            RiscOp::UniformLike {
+            RiscOp::BakedUniformLike {
                 low: 0.0,
                 high: 1.0,
                 seed: 7,

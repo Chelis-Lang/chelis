@@ -550,7 +550,10 @@ impl EvaluationPlan {
                     id.0
                 ));
             }
-            let random = matches!(node.op, RiscOp::Dropout { .. } | RiscOp::UniformLike { .. });
+            let random = matches!(
+                node.op,
+                RiscOp::BakedDropout { .. } | RiscOp::BakedUniformLike { .. }
+            );
             match (random, self.metadata.sites.get(&id)) {
                 (true, Some(RandomSite::Forward { draw, scope })) => {
                     let expected = source.next().ok_or("execution has an extra source draw")?;
@@ -577,7 +580,7 @@ impl EvaluationPlan {
                     *entered = Some(node);
                 }
                 (true, Some(RandomSite::Replay { draw }))
-                    if matches!(node.op, RiscOp::Dropout { .. }) =>
+                    if matches!(node.op, RiscOp::BakedDropout { .. }) =>
                 {
                     let forward = draws
                         .get(draw.0)
@@ -586,11 +589,11 @@ impl EvaluationPlan {
                         .ok_or("evaluation plan replay precedes its forward draw")?;
                     match (&forward.op, &node.op) {
                         (
-                            RiscOp::Dropout {
+                            RiscOp::BakedDropout {
                                 rate: forward_rate,
                                 seed: forward_seed,
                             },
-                            RiscOp::Dropout { rate, seed },
+                            RiscOp::BakedDropout { rate, seed },
                         ) if rate.to_bits() == forward_rate.to_bits()
                             && seed == forward_seed
                             && node.output_type == forward.output_type => {}
@@ -1092,7 +1095,7 @@ mod input_preparation_tests {
         let mut metadata = ExecutionMetadata::new(Some(42));
         let x = NodeId(0);
         let out = dag.add_node(
-            RiscOp::Dropout {
+            RiscOp::BakedDropout {
                 rate: 0.5,
                 seed: 42,
             },
@@ -1764,7 +1767,7 @@ mod tests {
         let mut root = x;
         for (index, &rate) in rates.iter().enumerate() {
             root = dag.add_node(
-                RiscOp::Dropout { rate, seed: 42 },
+                RiscOp::BakedDropout { rate, seed: 42 },
                 vec![x],
                 ty.clone(),
                 None,
@@ -1796,7 +1799,7 @@ mod tests {
         let root = if draw {
             let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
             let root = dag.add_node(
-                RiscOp::Dropout {
+                RiscOp::BakedDropout {
                     rate: 0.5,
                     seed: 42,
                 },
@@ -1914,7 +1917,7 @@ mod tests {
         );
         let input = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
         let draw = dag.add_node(
-            RiscOp::Dropout {
+            RiscOp::BakedDropout {
                 rate: 0.5,
                 seed: 42,
             },
@@ -2003,7 +2006,7 @@ mod tests {
                 None,
             );
             let draw = dag.add_node(
-                RiscOp::Dropout {
+                RiscOp::BakedDropout {
                     rate: 0.5,
                     seed: 42,
                 },
@@ -2617,7 +2620,7 @@ mod tests {
                             match *step {
                                 Step::Control { control, .. } => frame.control(control).unwrap(),
                                 Step::Node(node) => {
-                                    let RiscOp::Dropout { rate, seed } =
+                                    let RiscOp::BakedDropout { rate, seed } =
                                         plan.dag.get(node).unwrap().op
                                     else {
                                         continue;
@@ -2720,7 +2723,7 @@ mod tests {
                 .contains("metadata")
         );
         let mut plan = fixture(&[0.5, 0.5], 1, true);
-        plan.dag.node_mut(replay).unwrap().op = RiscOp::Dropout {
+        plan.dag.node_mut(replay).unwrap().op = RiscOp::BakedDropout {
             rate: 0.25,
             seed: 42,
         };
@@ -3057,7 +3060,7 @@ mod tests {
             plan.dag
                 .nodes()
                 .iter()
-                .filter(|node| matches!(node.op, RiscOp::Dropout { .. }))
+                .filter(|node| matches!(node.op, RiscOp::BakedDropout { .. }))
                 .count(),
             3
         );

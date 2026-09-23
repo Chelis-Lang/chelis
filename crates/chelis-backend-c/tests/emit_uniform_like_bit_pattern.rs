@@ -47,7 +47,7 @@ fn build_uniform_like_dag_for(precision: Prim, low: f64, high: f64, seed: u64) -
         None,
     );
     dag.add_node(
-        RiscOp::UniformLike { low, high, seed },
+        RiscOp::BakedUniformLike { low, high, seed },
         vec![template],
         tensor(precision, 4),
         None,

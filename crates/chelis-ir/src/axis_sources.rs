@@ -284,8 +284,8 @@ pub fn is_same_shape_result_op(op: &RiscOp) -> bool {
             | RiscOp::Ceil
             | RiscOp::Round
             | RiscOp::Recip
-            | RiscOp::UniformLike { .. }
-            | RiscOp::Dropout { .. }
+            | RiscOp::BakedUniformLike { .. }
+            | RiscOp::BakedDropout { .. }
             | RiscOp::Cast { .. }
             | RiscOp::CastTrunc { .. }
             | RiscOp::FusedElem { .. }
@@ -435,8 +435,8 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
         | RiscOp::Ceil
         | RiscOp::Round
         | RiscOp::Recip
-        | RiscOp::UniformLike { .. }
-        | RiscOp::Dropout { .. }
+        | RiscOp::BakedUniformLike { .. }
+        | RiscOp::BakedDropout { .. }
         | RiscOp::Copy
         | RiscOp::Drop
         | RiscOp::Realize
