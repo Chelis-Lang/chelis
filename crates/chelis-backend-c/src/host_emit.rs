@@ -10329,7 +10329,9 @@ fn uniform_bound_f32_expr(
         return Ok(format!("chelis_f32_from_bits(UINT32_C(0x{bits:08x}))"));
     }
     match var {
-        Some((name, HostType::Float32)) => Ok(format!("((float)({name}))")),
+        Some((name, HostType::Float32)) => {
+            Ok(format!("(({})({name}))", cast_prim_c_type(Prim::F32)))
+        }
         _ => Err(Unsupported::new(
             UnsupportedKind::Builtin("uniform_like".to_string()),
             "`chelis build` host emission",

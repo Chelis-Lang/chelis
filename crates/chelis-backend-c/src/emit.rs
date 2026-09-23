@@ -137,6 +137,13 @@ impl UnaryEmission {
     }
 }
 
+/// The C carrier of a [05-RNG-1] draw key, of the seed and counter words a
+/// key is taken from, and of the element index a key is read at. A key is
+/// never a tensor element, so no element type spells it. `unsigned long long`
+/// holds at least 64 bits, so every such word converts exactly to and from
+/// the `uint64_t` parameters and results of the runtime's key helpers.
+const RANDOM_WORD_C_TYPE: &str = "unsigned long long";
+
 /// A draw key the emitter cannot take.
 fn unsupported_random_emission(detail: impl Into<String>) -> Unsupported {
     Unsupported::new(
@@ -2457,6 +2464,15 @@ impl CEmitter {
         matches!(ty.precision, Prim::Bf16 | Prim::F16)
     }
 
+    /// The C type of a rank-0 value of `prim`, from the element-type
+    /// authority `elem_type`.
+    fn prim_elem_type(prim: Prim) -> &'static str {
+        Self::elem_type(&TensorType {
+            dims: vec![],
+            precision: prim,
+        })
+    }
+
     /// Runtime helper name used to load one element of a reduced-float
     /// tensor (`Bf16` / `F16`) into an `f32`. Caller is responsible
     /// for asserting the precision is reduced; panics otherwise to
@@ -4329,7 +4345,7 @@ impl CEmitter {
         }
         for instance in instances {
             self.line(&format!(
-                "uint64_t __chelis_scoped_counter_{instance} = 0ULL;"
+                "{RANDOM_WORD_C_TYPE} __chelis_scoped_counter_{instance} = 0ULL;"
             ));
         }
         Ok(())
@@ -4338,26 +4354,32 @@ impl CEmitter {
     /// A rank-0 float input at its exact arithmetic reading: f16 and bf16
     /// widen to `float`, f32 is `float`, f64 is `double`.
     fn rank0_float_expr(dag: VerifiedDagView<'_>, input: NodeId) -> String {
-        let prim = dag
-            .get(input)
-            .expect("verified random control")
-            .output_type
-            .precision;
-        let id = input.0;
-        match prim {
-            Prim::F64 => format!("((const double*)t{id}_data)[0]"),
-            Prim::F32 => format!("((const float*)t{id}_data)[0]"),
-            Prim::F16 | Prim::Bf16 => format!(
-                "{}(((const uint16_t*)t{id}_data)[0])",
-                Self::reduced_to_f32_fn(prim)
+        let ty = &dag.get(input).expect("verified random control").output_type;
+        let prim = ty.precision;
+        let widen = match prim {
+            Prim::F64 | Prim::F32 => None,
+            Prim::F16 | Prim::Bf16 => Some(Self::reduced_to_f32_fn(prim)),
+            other => panic!(
+                "random control of dtype `{}` is not f16, bf16, f32 or f64",
+                other.name()
             ),
-            other => panic!("random control of non-float dtype `{}`", other.name()),
+        };
+        let stored = format!("((const {}*)t{}_data)[0]", Self::elem_type(ty), input.0);
+        match widen {
+            Some(widen) => format!("{widen}({stored})"),
+            None => stored,
         }
     }
 
+    /// A random node's optional activation, read as its stored Bool byte; the
+    /// verifier admits only a rank-0 Bool there. No activation is active.
     fn rank0_bool_expr(input: Option<&NodeId>) -> String {
         match input {
-            Some(input) => format!("(((const uint8_t*)t{}_data)[0] != 0)", input.0),
+            Some(input) => format!(
+                "(((const {}*)t{}_data)[0] != 0)",
+                Self::prim_elem_type(Prim::Bool),
+                input.0
+            ),
             None => "1".to_string(),
         }
     }
@@ -4380,18 +4402,20 @@ impl CEmitter {
         ));
         let active = Self::rank0_bool_expr(node.inputs.get(seed_slots + draw.control_count()));
         self.line(&format!("int t{id}_active = {active};"));
-        self.line(&format!("uint64_t t{id}_key = 0ULL;"));
+        self.line(&format!("{RANDOM_WORD_C_TYPE} t{id}_key = 0ULL;"));
         // The observer reports the seed and ordinal a key was taken from.
         #[cfg(feature = "native-random-observer")]
         let observed = self.private_random_context;
         #[cfg(feature = "native-random-observer")]
         if observed {
             self.line(&format!(
-                "uint64_t t{id}_seed = 0ULL, t{id}_ordinal = 0ULL;"
+                "{RANDOM_WORD_C_TYPE} t{id}_seed = 0ULL, t{id}_ordinal = 0ULL;"
             ));
         }
         self.line(&format!("if (t{id}_active) {{"));
         self.indent += 1;
+        // Controls are validated at binary64; a non-f64 span at binary32.
+        let binary64 = Self::prim_elem_type(Prim::F64);
         match draw {
             chelis_ir::dag::RandomDraw::Dropout => {
                 let trap = NumericTrap::Domain {
@@ -4400,7 +4424,7 @@ impl CEmitter {
                 }
                 .to_string();
                 let rate = Self::rank0_float_expr(dag, node.inputs[seed_slots]);
-                self.line(&format!("double t{id}_rate = (double)({rate});"));
+                self.line(&format!("{binary64} t{id}_rate = ({binary64})({rate});"));
                 self.line(&format!(
                     "if (!(t{id}_rate >= 0.0 && t{id}_rate < 1.0)) chelis_numeric_trap({trap:?});"
                 ));
@@ -4414,13 +4438,14 @@ impl CEmitter {
                 let low = Self::rank0_float_expr(dag, node.inputs[seed_slots]);
                 let high = Self::rank0_float_expr(dag, node.inputs[seed_slots + 1]);
                 self.line(&format!(
-                    "double t{id}_low = (double)({low}), t{id}_high = (double)({high});"
+                    "{binary64} t{id}_low = ({binary64})({low}), t{id}_high = ({binary64})({high});"
                 ));
                 if dtype == Prim::F64 {
-                    self.line(&format!("double t{id}_span = t{id}_high - t{id}_low;"));
+                    self.line(&format!("{binary64} t{id}_span = t{id}_high - t{id}_low;"));
                 } else {
+                    let binary32 = Self::prim_elem_type(Prim::F32);
                     self.line(&format!(
-                        "float t{id}_span = (float)t{id}_high - (float)t{id}_low;"
+                        "{binary32} t{id}_span = ({binary32})t{id}_high - ({binary32})t{id}_low;"
                     ));
                 }
                 self.line(&format!(
@@ -4543,8 +4568,9 @@ impl CEmitter {
     /// Fill `t{id}` with positive zeros: an inactive draw's discarded value.
     fn emit_random_zero_fill(&mut self, id: usize, ty: &TensorType) {
         let storage = Self::elem_type(ty);
+        let index = Self::prim_elem_type(Prim::Int64);
         self.line("#pragma omp parallel for");
-        self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
+        self.line(&format!("for ({index} i = 0; i < t{id}_size; i++) {{"));
         self.indent += 1;
         self.line(&format!("(({storage}*)t{id}_data)[i] = ({storage})0;"));
         self.indent -= 1;
@@ -4562,45 +4588,54 @@ impl CEmitter {
         let key = node.inputs[2].0;
         let rate = Self::rank0_float_expr(dag, node.inputs[1]);
         let active = Self::rank0_bool_expr(node.inputs.get(3));
+        let index = Self::prim_elem_type(Prim::Int64);
+        let unit = format!("chelis_random_unit(t{key}_key, ({RANDOM_WORD_C_TYPE})i)");
         self.emit_slot_wrapper(id, ty);
         self.line(&format!("if ({active}) {{"));
         self.indent += 1;
         match prim {
             Prim::F64 => {
-                self.line(&format!("double t{id}_rate = {rate};"));
-                self.line(&format!("double t{id}_denom = 1.0 - t{id}_rate;"));
+                let binary64 = Self::elem_type(ty);
+                self.line(&format!("{binary64} t{id}_rate = {rate};"));
+                self.line(&format!("{binary64} t{id}_denom = 1.0 - t{id}_rate;"));
                 self.line("#pragma omp parallel for");
-                self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
+                self.line(&format!("for ({index} i = 0; i < t{id}_size; i++) {{"));
                 self.indent += 1;
                 self.line(&format!(
-                    "((double*)t{id}_data)[i] = chelis_random_unit(t{key}_key, (uint64_t)i) < t{id}_rate ? 0.0 : ((const double*)t{data}_data)[i] / t{id}_denom;"
+                    "(({binary64}*)t{id}_data)[i] = {unit} < t{id}_rate ? 0.0 : ((const {binary64}*)t{data}_data)[i] / t{id}_denom;"
                 ));
             }
             Prim::F32 => {
-                self.line(&format!("float t{id}_rate = {rate};"));
-                self.line(&format!("float t{id}_denom = 1.0f - t{id}_rate;"));
+                let binary32 = Self::elem_type(ty);
+                self.line(&format!("{binary32} t{id}_rate = {rate};"));
+                self.line(&format!("{binary32} t{id}_denom = 1.0f - t{id}_rate;"));
                 self.line("#pragma omp parallel for");
-                self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
+                self.line(&format!("for ({index} i = 0; i < t{id}_size; i++) {{"));
                 self.indent += 1;
                 self.line(&format!(
-                    "((float*)t{id}_data)[i] = (float)chelis_random_unit(t{key}_key, (uint64_t)i) < t{id}_rate ? 0.0f : ((const float*)t{data}_data)[i] / t{id}_denom;"
+                    "(({binary32}*)t{id}_data)[i] = ({binary32}){unit} < t{id}_rate ? 0.0f : ((const {binary32}*)t{data}_data)[i] / t{id}_denom;"
                 ));
             }
             Prim::F16 | Prim::Bf16 => {
                 let widen = Self::reduced_to_f32_fn(prim);
                 let narrow = Self::f32_to_reduced_fn(prim);
-                self.line(&format!("float t{id}_rate = {rate};"));
+                let binary32 = Self::prim_elem_type(Prim::F32);
+                let storage = Self::elem_type(ty);
+                self.line(&format!("{binary32} t{id}_rate = {rate};"));
                 self.line(&format!(
-                    "float t{id}_denom = {widen}({narrow}(1.0f - t{id}_rate));"
+                    "{binary32} t{id}_denom = {widen}({narrow}(1.0f - t{id}_rate));"
                 ));
                 self.line("#pragma omp parallel for");
-                self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
+                self.line(&format!("for ({index} i = 0; i < t{id}_size; i++) {{"));
                 self.indent += 1;
                 self.line(&format!(
-                    "((uint16_t*)t{id}_data)[i] = (float)chelis_random_unit(t{key}_key, (uint64_t)i) < t{id}_rate ? {narrow}(0.0f) : {narrow}({widen}(((const uint16_t*)t{data}_data)[i]) / t{id}_denom);"
+                    "(({storage}*)t{id}_data)[i] = ({binary32}){unit} < t{id}_rate ? {narrow}(0.0f) : {narrow}({widen}(((const {storage}*)t{data}_data)[i]) / t{id}_denom);"
                 ));
             }
-            other => panic!("dropout of non-float dtype `{}`", other.name()),
+            other => panic!(
+                "dropout of dtype `{}` is not f16, bf16, f32 or f64",
+                other.name()
+            ),
         }
         self.indent -= 1;
         self.line("}");
@@ -4621,29 +4656,37 @@ impl CEmitter {
         let low = Self::rank0_float_expr(dag, node.inputs[1]);
         let high = Self::rank0_float_expr(dag, node.inputs[2]);
         let active = Self::rank0_bool_expr(node.inputs.get(4));
+        let index = Self::prim_elem_type(Prim::Int64);
         self.emit_slot_wrapper(id, ty);
         self.line(&format!("if ({active}) {{"));
         self.indent += 1;
         let (wide, sampler) = if ty.precision == Prim::F64 {
-            ("double", "chelis_uniform_sample_f64")
+            (Self::prim_elem_type(Prim::F64), "chelis_uniform_sample_f64")
         } else {
-            ("float", "chelis_uniform_sample_f32")
+            (Self::prim_elem_type(Prim::F32), "chelis_uniform_sample_f32")
         };
         self.line(&format!(
             "{wide} t{id}_low = ({wide})({low}), t{id}_high = ({wide})({high});"
         ));
         self.line("#pragma omp parallel for");
-        self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
+        self.line(&format!("for ({index} i = 0; i < t{id}_size; i++) {{"));
         self.indent += 1;
-        let sample = format!("{sampler}(t{key}_key, (uint64_t)i, t{id}_low, t{id}_high)");
+        let sample =
+            format!("{sampler}(t{key}_key, ({RANDOM_WORD_C_TYPE})i, t{id}_low, t{id}_high)");
         match ty.precision {
-            Prim::F64 => self.line(&format!("((double*)t{id}_data)[i] = {sample};")),
-            Prim::F32 => self.line(&format!("((float*)t{id}_data)[i] = {sample};")),
+            Prim::F64 | Prim::F32 => self.line(&format!(
+                "(({}*)t{id}_data)[i] = {sample};",
+                Self::elem_type(ty)
+            )),
             Prim::F16 | Prim::Bf16 => self.line(&format!(
-                "((uint16_t*)t{id}_data)[i] = {}({sample});",
+                "(({}*)t{id}_data)[i] = {}({sample});",
+                Self::elem_type(ty),
                 Self::f32_to_reduced_fn(ty.precision)
             )),
-            other => panic!("uniform_like of non-float dtype `{}`", other.name()),
+            other => panic!(
+                "uniform_like of dtype `{}` is not f16, bf16, f32 or f64",
+                other.name()
+            ),
         }
         self.indent -= 1;
         self.line("}");
@@ -4665,20 +4708,28 @@ impl CEmitter {
         let cotangent = node.inputs[1].0;
         let key = node.inputs[2].0;
         let active = Self::rank0_bool_expr(node.inputs.get(3));
-        let (arithmetic, arithmetic_dtype) = if prim == Prim::F64 {
-            ("double", "CHELIS_DTYPE_F64")
-        } else {
-            ("float", "CHELIS_DTYPE_F32")
+        let arithmetic_ty = TensorType {
+            dims: vec![],
+            precision: if prim == Prim::F64 {
+                Prim::F64
+            } else {
+                Prim::F32
+            },
         };
+        let arithmetic = Self::elem_type(&arithmetic_ty);
+        let arithmetic_dtype = Self::dtype_macro(&arithmetic_ty);
+        let index = Self::prim_elem_type(Prim::Int64);
         let load_g = match prim {
-            Prim::F64 => format!("((const double*)t{cotangent}_data)[i]"),
-            Prim::F32 => format!("((const float*)t{cotangent}_data)[i]"),
+            Prim::F64 | Prim::F32 => {
+                format!("((const {}*)t{cotangent}_data)[i]", Self::elem_type(ty))
+            }
             Prim::F16 | Prim::Bf16 => format!(
-                "{}(((const uint16_t*)t{cotangent}_data)[i])",
-                Self::reduced_to_f32_fn(prim)
+                "{}(((const {}*)t{cotangent}_data)[i])",
+                Self::reduced_to_f32_fn(prim),
+                Self::elem_type(ty)
             ),
             other => panic!(
-                "uniform bound adjoint of non-float dtype `{}`",
+                "uniform bound adjoint of dtype `{}` is not f16, bf16, f32 or f64",
                 other.name()
             ),
         };
@@ -4690,7 +4741,7 @@ impl CEmitter {
         self.line(&format!("{arithmetic} t{id}_sum = ({arithmetic})0;"));
         self.line(&format!("if (({active}) && t{cotangent}_size > 0) {{"));
         self.indent += 1;
-        self.line(&format!("int64_t t{id}_n = t{cotangent}_size;"));
+        self.line(&format!("{index} t{id}_n = t{cotangent}_size;"));
         self.line(&format!(
             "chelis_tensor *t{id}_leaves_tensor = chelis_alloc(1, &t{id}_n, {arithmetic_dtype});"
         ));
@@ -4700,10 +4751,10 @@ impl CEmitter {
         self.line(&format!(
             "{arithmetic} *t{id}_leaves = ({arithmetic}*)chelis_tensor_write_view(t{id}_leaves_guard).data;"
         ));
-        self.line(&format!("for (int64_t i = 0; i < t{id}_n; i++) {{"));
+        self.line(&format!("for ({index} i = 0; i < t{id}_n; i++) {{"));
         self.indent += 1;
         self.line(&format!(
-            "{arithmetic} u = ({arithmetic})chelis_random_unit(t{key}_key, (uint64_t)i);"
+            "{arithmetic} u = ({arithmetic})chelis_random_unit(t{key}_key, ({RANDOM_WORD_C_TYPE})i);"
         ));
         self.line(&format!(
             "t{id}_leaves[i] = ({arithmetic})({load_g}) * {weight};"
@@ -4712,11 +4763,11 @@ impl CEmitter {
         self.line("}");
         self.line(&format!("while (t{id}_n > 1) {{"));
         self.indent += 1;
-        self.line(&format!("int64_t next_n = t{id}_n / 2 + t{id}_n % 2;"));
-        self.line("for (int64_t pair = 0; pair < next_n; pair++) {");
+        self.line(&format!("{index} next_n = t{id}_n / 2 + t{id}_n % 2;"));
+        self.line(&format!("for ({index} pair = 0; pair < next_n; pair++) {{"));
         self.indent += 1;
-        self.line("int64_t left = 2 * pair;");
-        self.line("int64_t right = left + 1;");
+        self.line(&format!("{index} left = 2 * pair;"));
+        self.line(&format!("{index} right = left + 1;"));
         self.line(&format!(
             "t{id}_leaves[pair] = right < t{id}_n ? t{id}_leaves[left] + t{id}_leaves[right] : t{id}_leaves[left];"
         ));
@@ -4730,11 +4781,13 @@ impl CEmitter {
         self.line(&format!("chelis_tensor_release(t{id}_leaves_tensor);"));
         self.indent -= 1;
         self.line("}");
+        let storage = Self::elem_type(ty);
         match prim {
-            Prim::F64 => self.line(&format!("((double*)t{id}_data)[0] = t{id}_sum;")),
-            Prim::F32 => self.line(&format!("((float*)t{id}_data)[0] = t{id}_sum;")),
+            Prim::F64 | Prim::F32 => {
+                self.line(&format!("(({storage}*)t{id}_data)[0] = t{id}_sum;"));
+            }
             _ => self.line(&format!(
-                "((uint16_t*)t{id}_data)[0] = {}(t{id}_sum);",
+                "(({storage}*)t{id}_data)[0] = {}(t{id}_sum);",
                 Self::f32_to_reduced_fn(prim)
             )),
         }
