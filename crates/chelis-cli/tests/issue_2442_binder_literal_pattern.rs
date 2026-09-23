@@ -7,11 +7,12 @@
 // spec/04-type-system.md [04-PAT-1] makes a literal pattern a typing
 // constraint, [04-LIT-2] binds it at the scrutinee's primitive, and [04-INF-6]
 // makes the binder denote every admissible instantiation. These tests drive
-// the real CLI through `check` and `eval --file`: each rejected program must
-// not score 1 and must not evaluate, and the repair its diagnostic names must,
-// once spliced into the program, check clean and evaluate to the value
-// "the scrutinee equals the literal" at float and integer instantiations.
-// That second half is what proves the repair is not advice that fails. A
+// the real CLI through `check`, `eval --file`, and `build` for the C lane:
+// each rejected program must not score 1 and must not evaluate, and the
+// repair its diagnostic names must, once spliced into the program, check
+// clean and evaluate to the value "the scrutinee equals the literal" at float
+// and integer instantiations in both lanes. That second half is what proves
+// the repair is not advice that fails. A
 // comparison repair is an `if` ahead of the match rather than a guard,
 // because the eval and C lanes ignore a guard at run time (chelis#2445).
 //
@@ -23,6 +24,7 @@ use assert_cmd::Command;
 use serde_json::Value;
 use std::fs;
 use std::path::Path;
+use std::process::Command as StdCommand;
 use tempfile::tempdir;
 
 fn check(path: &Path) -> Value {
@@ -66,7 +68,13 @@ const REJECTED: &[Case] = &[
         binders: "[p: Int]",
         pattern: "300",
         needles: &["`p: Int`", "at `i8`"],
-        calls: &[("44i8", 0), ("300i32", 1), ("300i64", 1), ("-5i16", 0)],
+        calls: &[
+            ("44i8", 0),
+            ("300i32", 1),
+            ("300i64", 1),
+            ("-5i16", 0),
+            ("44i64", 0),
+        ],
     },
     Case {
         label: "issue program: infinite at f16",
@@ -85,7 +93,13 @@ const REJECTED: &[Case] = &[
         binders: "[p: Numeric]",
         pattern: "0",
         needles: &["`p: Numeric`", "at `f32`"],
-        calls: &[("0.0f32", 1), ("0i64", 1), ("3i32", 0), ("2.5f64", 0)],
+        calls: &[
+            ("0.0f32", 1),
+            ("0i64", 1),
+            ("3i32", 0),
+            ("2.5f64", 0),
+            ("3i64", 0),
+        ],
     },
     Case {
         label: "integer pattern under Float",
@@ -99,14 +113,20 @@ const REJECTED: &[Case] = &[
         binders: "[p: Int]",
         pattern: "1.0",
         needles: &["`p: Int`", "at `i8`"],
-        calls: &[("1i8", 1), ("2i32", 0)],
+        calls: &[("1i8", 1), ("2i32", 0), ("1i64", 1), ("2i64", 0)],
     },
     Case {
         label: "integral float pattern under Numeric",
         binders: "[p: Numeric]",
         pattern: "-1.0",
         needles: &["`p: Numeric`", "at `i8`"],
-        calls: &[("-1i8", 1), ("-1.0f64", 1), ("1i32", 0)],
+        calls: &[
+            ("-1i8", 1),
+            ("-1.0f64", 1),
+            ("1i32", 0),
+            ("-1i64", 1),
+            ("1i64", 0),
+        ],
     },
     Case {
         label: "integer pattern bf16 rounds, under Float",
@@ -124,35 +144,41 @@ const REJECTED: &[Case] = &[
         binders: "[p: Numeric]",
         pattern: "300",
         needles: &["`p: Numeric`", "at `i8`"],
-        calls: &[("300i32", 1), ("300.0f32", 1), ("44i8", 0)],
+        calls: &[
+            ("300i32", 1),
+            ("300.0f32", 1),
+            ("44i8", 0),
+            ("300i64", 1),
+            ("44i64", 0),
+        ],
     },
     Case {
         label: "fractional pattern under Numeric",
         binders: "[p: Numeric]",
         pattern: "0.5",
         needles: &["`p: Numeric`", "at `i8`"],
-        calls: &[("0.5f32", 1), ("0.5f64", 1), ("3i32", 0)],
+        calls: &[("0.5f32", 1), ("0.5f64", 1), ("3i32", 0), ("3i64", 0)],
     },
     Case {
         label: "fractional pattern under Int matches nothing",
         binders: "[p: Int]",
         pattern: "0.5",
         needles: &["`p: Int`", "at `i8`"],
-        calls: &[("0i32", 0), ("1i8", 0)],
+        calls: &[("0i32", 0), ("1i8", 0), ("0i64", 0)],
     },
     Case {
         label: "unbounded binder",
         binders: "[p]",
         pattern: "1",
         needles: &["`p` declares no dtype-family bound"],
-        calls: &[("1i32", 1), ("5i64", 0)],
+        calls: &[("1i32", 1), ("5i64", 0), ("1i64", 1)],
     },
     Case {
         label: "unbounded binder, out of range once bounded",
         binders: "[p]",
         pattern: "300",
         needles: &["`p` declares no dtype-family bound"],
-        calls: &[("300i32", 1), ("44i8", 0)],
+        calls: &[("300i32", 1), ("44i8", 0), ("300i64", 1), ("44i64", 0)],
     },
 ];
 
@@ -181,7 +207,7 @@ fn spellings(repair: &str) -> impl Iterator<Item = &str> {
 /// other arm `| _ => 0`: a deleted arm, a declared bound, a replacement
 /// pattern, or a comparison in an `if` ahead of the match, each applied when
 /// the repair names it.
-fn apply_repair(case: &Case, repair: &str) -> String {
+fn apply_repair(case: &Case, repair: &str, calls: &[(&str, i32)]) -> String {
     let binders = match repair.split_once("Declare `p: ") {
         Some((_, rest)) => {
             let family = rest.split('`').next().expect("a family name");
@@ -204,7 +230,88 @@ fn apply_repair(case: &Case, repair: &str) -> String {
     } else {
         (String::new(), literal_arm(case.pattern))
     };
-    program(&binders, &before_match, &arm, case.calls)
+    program(&binders, &before_match, &arm, calls)
+}
+
+/// Whether the C lane can lower a `match` over this argument's dtype. Host
+/// lowering rejects a `match` over a narrower integer or float scrutinee
+/// loudly today (chelis#2446), so the C leg runs the `i64`, `f32`, and `f64`
+/// calls.
+fn c_lane_lowers(argument: &str) -> bool {
+    ["i64", "f32", "f64"]
+        .iter()
+        .any(|suffix| argument.ends_with(suffix))
+}
+
+/// Build `source` for the C lane, compile it, and return what it prints.
+fn run_c_lane(dir: &Path, source: &str) -> String {
+    let path = dir.join("lane.ch");
+    fs::write(&path, source).expect("write");
+    let out_dir = dir.join("lane-c");
+    let build = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "-o",
+            out_dir.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run chelis build");
+    assert!(
+        build.status.success(),
+        "chelis build failed:\n{source}\nstderr={}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let binary = out_dir.join("lane-bin");
+    let compile = StdCommand::new("cc")
+        .args([
+            "-std=c11",
+            "-I",
+            out_dir.to_str().unwrap(),
+            out_dir.join("lane.c").to_str().unwrap(),
+            out_dir.join("libchelis_runtime.a").to_str().unwrap(),
+            "-lm",
+            "-lpthread",
+            "-o",
+            binary.to_str().unwrap(),
+        ])
+        .output()
+        .expect("compile emitted C");
+    assert!(
+        compile.status.success(),
+        "C compilation failed:\n{source}\nstderr={}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let run = StdCommand::new(&binary).output().expect("run compiled C");
+    assert!(
+        run.status.success(),
+        "the compiled program failed:\n{source}\nstderr={}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    String::from_utf8_lossy(&run.stdout).into_owned()
+}
+
+/// Assert that `stdout` prints `rK = expected` for every call.
+fn assert_results(
+    lane: &str,
+    label: &str,
+    repair: &str,
+    source: &str,
+    stdout: &str,
+    calls: &[(&str, i32)],
+) {
+    for (index, (argument, expected)) in calls.iter().enumerate() {
+        assert!(
+            stdout
+                .lines()
+                .any(|line| line == format!("r{index} = {expected}")),
+            "{label} ({lane}): after the repair `{repair}`, f({argument}) must be \
+             {expected}:\n{source}\nstdout={stdout}"
+        );
+    }
 }
 
 /// REGRESSION TEST. Every case scored 1 before the fix, and the issue's
@@ -248,9 +355,10 @@ fn a_binder_scrutinee_pattern_is_refused_before_any_lane_runs() {
     }
 }
 
-/// The repair each rejection names checks clean once applied, and evaluates to
-/// "the scrutinee equals the literal" at every call, including a float and an
-/// integer instantiation where the family has both.
+/// The repair each rejection names checks clean once applied, and in both the
+/// eval and C lanes evaluates to "the scrutinee equals the literal" at every
+/// call, including a float and an integer instantiation where the family has
+/// both.
 #[test]
 fn the_named_repair_checks_and_evaluates_correctly() {
     for case in REJECTED {
@@ -276,7 +384,7 @@ fn the_named_repair_checks_and_evaluates_correctly() {
             .to_string();
 
         let repaired = dir.path().join("repaired.ch");
-        let source = apply_repair(case, &repair);
+        let source = apply_repair(case, &repair, case.calls);
         fs::write(&repaired, &source).expect("write");
         let report = check(&repaired);
         assert_eq!(
@@ -294,16 +402,22 @@ fn the_named_repair_checks_and_evaluates_correctly() {
             case.label,
             String::from_utf8_lossy(&output.stderr)
         );
-        for (index, (argument, expected)) in case.calls.iter().enumerate() {
-            assert!(
-                stdout
-                    .lines()
-                    .any(|line| line == format!("r{index} = {expected}")),
-                "{}: after the repair `{repair}`, f({argument}) must be {expected}:\n\
-                 {source}\nstdout={stdout}",
-                case.label
-            );
-        }
+        assert_results("eval", case.label, &repair, &source, &stdout, case.calls);
+
+        let c_calls: Vec<(&str, i32)> = case
+            .calls
+            .iter()
+            .copied()
+            .filter(|(argument, _)| c_lane_lowers(argument))
+            .collect();
+        assert!(
+            !c_calls.is_empty(),
+            "{}: the C leg needs a call it can lower",
+            case.label
+        );
+        let c_source = apply_repair(case, &repair, &c_calls);
+        let c_stdout = run_c_lane(dir.path(), &c_source);
+        assert_results("C", case.label, &repair, &c_source, &c_stdout, &c_calls);
     }
 }
 
