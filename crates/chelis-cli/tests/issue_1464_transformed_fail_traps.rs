@@ -660,6 +660,11 @@ fn a_guard_whose_value_is_discarded_still_aborts() {
 fn a_guarded_if_whose_value_is_discarded_still_aborts() {
     // The issue's own reproducer: the guard is a whole `if` whose result is
     // bound and never used.
+    //
+    // Both lanes deliberately. The compiled lane was broken in the same way
+    // and is fixed by the same change -- the generated C now emits the guard
+    // loop and its `chelis_fail` -- so an eval-only assertion would leave a
+    // real regression surface unwatched, against this file's own contract.
     let source = "module Repro.DiscardedGuardedIf\n\
          def loss(x: tensor[1, f32]) -> tensor[f32] = {\n\
            unused = if gt(tensor_to_scalar(sum(&x, cast(0, i32))), cast(0.5, f32)) \
@@ -667,20 +672,20 @@ fn a_guarded_if_whose_value_is_discarded_still_aborts() {
            sum(x, cast(0, i32))\n\
          }\n\
          out = grad(loss)(to_tensor([cast(3.0, f32)]))\n";
-    let evaluated = eval(source, "discarded_guarded_if");
-    let stderr = String::from_utf8_lossy(&evaluated.stderr).into_owned();
-    assert!(
-        !evaluated.status.success(),
-        "stdout={}",
-        String::from_utf8_lossy(&evaluated.stdout)
-    );
-    assert!(stderr.contains("discarded guard fired"), "got: {stderr}");
+    assert_taken_in_both_lanes(source, "discarded_guarded_if", "discarded guard fired");
 }
 
 #[test]
 fn a_discarded_guard_that_does_not_fire_leaves_the_value_alone() {
-    // The negative control. Keeping the guard alive must not change the
+    // The negative control: keeping the guard alive must not change the
     // answer when its condition is false.
+    //
+    // Note what this does and does not prove. Keeping an untaken guard alive
+    // DOES change behaviour when its fallback can trap on its own, because
+    // [05-OP-68] makes the fallback an ordinary operand evaluated under the
+    // usual rules -- `a_discarded_untaken_guard_still_evaluates_its_fallback`
+    // pins that. This control uses a fallback that cannot trap, so it
+    // isolates the property it names: no change to a well-defined result.
     let source = "module Repro.DiscardedUntaken\n\
          def loss(x: tensor[1, f32]) -> tensor[f32] = {\n\
            unused = if gt(tensor_to_scalar(sum(&x, cast(0, i32))), cast(99.0, f32)) \
@@ -698,6 +703,41 @@ fn a_discarded_guard_that_does_not_fire_leaves_the_value_alone() {
     assert!(
         stdout.contains("data=[1.0]"),
         "grad of sum(x) is 1; got: {stdout}"
+    );
+}
+
+/// chelis#2368, collateral and intended: an untaken discarded guard now
+/// evaluates its fallback, so a fallback that traps on its own does trap.
+///
+/// [05-OP-68] is explicit that "the fallback is an ordinary operand and is
+/// evaluated under the usual rules", so this follows from keeping the guard
+/// alive. It is pinned because it is a real behaviour change for programs
+/// with no FIRING guard at all, and the negative control above deliberately
+/// cannot see it.
+#[test]
+fn a_discarded_untaken_guard_still_evaluates_its_fallback() {
+    let source = "module Repro.DiscardedTrappingFallback\n\
+         def loss(x: tensor[1, f32]) -> tensor[f32] = {\n\
+           unused = if gt(tensor_to_scalar(sum(&x, cast(0, i32))), cast(99.0, f32)) \
+           then fail(\"never fires\") \
+           else cast(to_tensor([cast(1.0e30, f32)]), i32)\n\
+           sum(x, cast(0, i32))\n\
+         }\n\
+         out = grad(loss)(to_tensor([cast(3.0, f32)]))\n";
+    let evaluated = eval(source, "discarded_trapping_fallback");
+    let stdout = String::from_utf8_lossy(&evaluated.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&evaluated.stderr).into_owned();
+    assert!(
+        !evaluated.status.success(),
+        "the fallback's own trap must fire: stdout={stdout}"
+    );
+    assert!(
+        stderr.contains("numeric trap"),
+        "the fallback traps on its own terms, not via the guard; got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("never fires"),
+        "the guard itself must NOT fire -- its condition is false; got: {stderr}"
     );
 }
 
