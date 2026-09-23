@@ -159,6 +159,7 @@ jobs:
           path: |
             chelis-*-linux-x86_64.tar.gz
             chelis-*-linux-x86_64.tar.gz.sha256
+          retention-days: 7
 
   build-linux-x86_64-glibc231:
     name: Build chelis (linux-x86_64, glibc 2.31)
@@ -319,6 +320,7 @@ jobs:
             chelisup-linux-x86_64
             chelisup-linux-x86_64.sha256
             chelisup.sh
+          retention-days: 7
 
   build-darwin-arm64:
     name: Build chelis (darwin-arm64)
@@ -445,6 +447,7 @@ jobs:
             chelis-*-darwin-arm64.tar.gz.sha256
             chelisup-darwin-arm64
             chelisup-darwin-arm64.sha256
+          retention-days: 7
 
   installed-artifact-canary:
     name: Installed C callable (${{ matrix.slug }})
@@ -491,6 +494,7 @@ jobs:
           name: installed-callable-${{ matrix.slug }}
           path: installed-canary-evidence
           if-no-files-found: error
+          retention-days: 14
 
   publish-release:
     name: Publish GitHub Release
