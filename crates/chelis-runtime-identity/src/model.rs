@@ -34,7 +34,7 @@ impl FromStr for ContentDigest {
             return Err(InputError::InvalidDigest);
         }
         let mut bytes = [0; 32];
-        for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        for (index, pair) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
             fn nibble(byte: u8) -> u8 {
                 if byte <= b'9' {
                     byte - b'0'

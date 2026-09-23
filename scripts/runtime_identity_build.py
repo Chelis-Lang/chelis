@@ -167,8 +167,11 @@ def run(cargo, arguments):
     if len(helpers) != 1:
         raise observer.ObservationError("bootstrap did not report one exact host helper executable")
     helper = Path(helpers.pop())
-    if environment.get("RUSTC_WORKSPACE_WRAPPER"):
-        raise observer.ObservationError("RUSTC_WORKSPACE_WRAPPER cannot be silently hidden; unset it for managed identity production")
+    workspace_wrapper = environment.pop("RUSTC_WORKSPACE_WRAPPER", None)
+    environment.pop("CHELIS_IDENTITY_WORKSPACE_WRAPPER", None)
+    if workspace_wrapper:
+        observed = observer.workspace_compiler_wrapper(workspace_wrapper)
+        environment["CHELIS_IDENTITY_WORKSPACE_WRAPPER"] = observed["path"]
     if environment.get("RUSTC_WRAPPER") and environment["RUSTC_WRAPPER"] != environment.get("CHELIS_IDENTITY_HELPER"):
         environment["CHELIS_IDENTITY_INNER_WRAPPER"] = observer.transparent_wrapper(environment["RUSTC_WRAPPER"])
     environment.update({"RUSTC_WRAPPER": str(helper), "CHELIS_IDENTITY_HELPER": str(helper), "CHELIS_IDENTITY_PROTOCOL": "1", "CHELIS_IDENTITY_BACKEND": "cargo", "CHELIS_IDENTITY_WORKSPACE": str(workspace), "CHELIS_IDENTITY_STATE": str(state)})

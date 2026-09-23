@@ -110,6 +110,73 @@ def transparent_wrapper(wrapper):
     raise ObservationError("CHELIS_IDENTITY_UNOBSERVABLE_WRAPPER: only the transparent Kache compiler cache is supported; arbitrary compiler wrappers can change unobserved arguments or inputs")
 
 
+def workspace_compiler_wrapper(wrapper):
+    """Admit Cargo's Clippy workspace compiler without hiding its identity."""
+    if not wrapper:
+        return None
+    executable = shutil.which(wrapper)
+    if executable and Path(executable).name == "clippy-driver":
+        with open(executable, "rb") as stream:
+            magic = stream.read(4)
+        native = magic == b"\x7fELF" or magic in {
+            b"\xcf\xfa\xed\xfe",
+            b"\xfe\xed\xfa\xcf",
+            b"\xca\xfe\xba\xbe",
+        }
+        if native:
+            version = probe([executable, "--version"]).strip()
+            if version.startswith("clippy "):
+                return {
+                    "path": executable,
+                    "identity": version
+                    + "\nsha256:"
+                    + digest(Path(executable).read_bytes()),
+                }
+    raise ObservationError(
+        "CHELIS_IDENTITY_UNOBSERVABLE_WRAPPER: only Cargo's native "
+        "clippy-driver workspace compiler is supported"
+    )
+
+
+def workspace_compiler_applies():
+    """Mirror Cargo's RUSTC_WORKSPACE_WRAPPER membership boundary."""
+    if not os.environ.get("CHELIS_IDENTITY_WORKSPACE_WRAPPER"):
+        return False
+    metadata_path = os.environ.get("CHELIS_IDENTITY_METADATA")
+    manifest_dir = os.environ.get("CARGO_MANIFEST_DIR")
+    if not metadata_path or not manifest_dir:
+        return False
+    metadata = load(metadata_path)
+    manifest = Path(manifest_dir).absolute() / "Cargo.toml"
+    matches = [
+        package
+        for package in metadata["packages"]
+        if Path(package["manifest_path"]).absolute() == manifest
+    ]
+    if len(matches) != 1:
+        raise ObservationError(f"no unique Cargo package for {manifest.parent}")
+    return matches[0]["id"] in set(metadata["workspace_members"])
+
+
+def rustc_command(real_rustc, args):
+    """Compose the original cache/workspace wrappers in Cargo's order."""
+    inner = transparent_wrapper(os.environ.get("CHELIS_IDENTITY_INNER_WRAPPER"))
+    workspace = (
+        workspace_compiler_wrapper(
+            os.environ.get("CHELIS_IDENTITY_WORKSPACE_WRAPPER")
+        )
+        if workspace_compiler_applies()
+        else None
+    )
+    command = ([inner] if inner else []) + (
+        [workspace["path"]] if workspace else []
+    ) + [real_rustc, *args]
+    return command, workspace
+
+
+_UNSPECIFIED_WORKSPACE_WRAPPER = object()
+
+
 def values(args, flag):
     result = []
     for index, arg in enumerate(args):
@@ -482,7 +549,17 @@ def target_codegen(real_rustc, args):
     return facts
 
 
-def collect_unit(real_rustc, args):
+def collect_unit(
+    real_rustc, args, workspace_wrapper=_UNSPECIFIED_WORKSPACE_WRAPPER
+):
+    if workspace_wrapper is _UNSPECIFIED_WORKSPACE_WRAPPER:
+        workspace_wrapper = (
+            workspace_compiler_wrapper(
+                os.environ.get("CHELIS_IDENTITY_WORKSPACE_WRAPPER")
+            )
+            if workspace_compiler_applies()
+            else None
+        )
     identity, manifest_dir, manifest, prefix = package_facts()
     compiler = probe([real_rustc, "-vV"])
     cfg = probe([real_rustc, *clean_probe_args(args), "--print=cfg"]).splitlines()
@@ -597,13 +674,20 @@ def collect_unit(real_rustc, args):
     if out:
         mappings.insert(0, (out, prefix + "/generated"))
     tools = []
+    if workspace_wrapper:
+        tools.append(
+            {
+                "name": "workspace-compiler",
+                "identity": workspace_wrapper["identity"],
+            }
+        )
     crate_types = ",".join(values(args, "--crate-type")).split(",")
     if kind in {"build_script", "proc_macro"} or any(item in {"bin", "cdylib", "dylib"} for item in crate_types):
         linker = options.get("linker", "cc")
         tools.append({"name": "linker", "identity": probe([linker, "--version"])})
         if Path(linker).is_absolute():
             mappings.insert(0, (str(Path(linker).parent), "toolchain/linker"))
-        tools[0]["identity"] = normalize_values([tools[0]["identity"]], mappings)[0]
+        tools[-1]["identity"] = normalize_values([tools[-1]["identity"]], mappings)[0]
     unit = {"package": identity, "target_name": one(args, "--crate-name"), "kind": kind,
             "target": {"triple": triple, **target_codegen(real_rustc, args), "features": sorted(value.split('"')[1] for value in cfg if value.startswith('target_feature="')), "specification": target_spec},
             "features": features, "configuration": {"opt_level": options.get("opt-level", "0"), "debuginfo": options.get("debuginfo", "0"), "debug_assertions": "debug_assertions" in cfg, "panic": next((v.split('"')[1] for v in cfg if v.startswith('panic="')), "unwind"), "rustflags": normalized_flags(args, mappings), "cfg": cfg},
@@ -761,15 +845,14 @@ def output_paths(real_rustc, args):
 
 
 def observe_rustc(real_rustc, args):
-    inner = transparent_wrapper(os.environ.get("CHELIS_IDENTITY_INNER_WRAPPER"))
-    command = ([inner] if inner else []) + [real_rustc, *args]
+    command, workspace_wrapper = rustc_command(real_rustc, args)
     if not one(args, "--crate-name") or any(arg == "-" for arg in args) or any(arg.startswith("--print") for arg in args) or "--test" in args:
         return subprocess.call(command, close_fds=False)
     import_dependencies()
     outputs = output_paths(real_rustc, args)
     errors = []
     try:
-        receipt = collect_unit(real_rustc, args)
+        receipt = collect_unit(real_rustc, args, workspace_wrapper)
     except (OSError, KeyError, ValueError, ObservationError) as error:
         errors.append(str(error))
         # Unrelated native CLI dependencies must not impose identity requirements.

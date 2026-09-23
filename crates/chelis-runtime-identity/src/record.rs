@@ -26,7 +26,7 @@ pub fn encode_record(
     bytes[16..18].copy_from_slice(&descriptor.schema_version.to_le_bytes());
     bytes[18] = kind_byte(kind);
     bytes[20..24].copy_from_slice(&224u32.to_le_bytes());
-    for (chunk, digest) in bytes[24..].chunks_exact_mut(32).zip([
+    for (chunk, digest) in bytes[24..].as_chunks_mut::<32>().0.iter_mut().zip([
         descriptor.recipe,
         descriptor.source,
         descriptor.interface,
@@ -125,12 +125,12 @@ impl NativeRecords {
     fn provenance(self) -> Result<BuildProvenance, RecordError> {
         let identity = self.identity.ok_or(RecordError::Missing)?;
         let provenance = self.provenance.ok_or(RecordError::Missing)?;
-        if let BuildProvenance::SealedDistribution { source_closure } = &provenance {
-            if *source_closure != identity.source {
-                return Err(RecordError::Malformed {
-                    reason: "sealed provenance does not bind the retained source closure".into(),
-                });
-            }
+        if let BuildProvenance::SealedDistribution { source_closure } = &provenance
+            && *source_closure != identity.source
+        {
+            return Err(RecordError::Malformed {
+                reason: "sealed provenance does not bind the retained source closure".into(),
+            });
         }
         Ok(provenance)
     }
@@ -189,7 +189,10 @@ fn native_bounds(bytes: &[u8], macho: bool, minimum: usize) -> Result<(), Record
                 });
             }
             let command_size = integer(bytes, offset + 4, 4, little) as usize;
-            if command_size < 8 || command_size % alignment != 0 || command_size > end - offset {
+            if command_size < 8
+                || !command_size.is_multiple_of(alignment)
+                || command_size > end - offset
+            {
                 return Err(RecordError::Malformed {
                     reason: "invalid Mach-O load command extent".into(),
                 });
@@ -354,10 +357,11 @@ fn native_record(
         }
         let data = section.data().map_err(object_error)?;
         if identity {
-            if data.len() > RECORD_LENGTH
-                && data.len() % RECORD_LENGTH == 0
-                && data
-                    .chunks_exact(RECORD_LENGTH)
+            let (records, trailing) = data.as_chunks::<RECORD_LENGTH>();
+            if records.len() > 1
+                && trailing.is_empty()
+                && records
+                    .iter()
                     .all(|record| decode_record(record, kind).is_ok())
             {
                 return Err(RecordError::Duplicate);

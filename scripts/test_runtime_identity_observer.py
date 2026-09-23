@@ -223,6 +223,64 @@ class ObservationFailureTests(unittest.TestCase):
         with self.assertRaisesRegex(observer.ObservationError, "cannot target itself"):
             driver.install_cargo_launcher(destination, real_cargo=destination / "cargo", python="/usr/bin/python3")
 
+    def test_clippy_workspace_compiler_is_observed_only_for_workspace_members(self):
+        member = self.root / "member"
+        dependency = self.root / "dependency"
+        member.mkdir()
+        dependency.mkdir()
+        for directory in (member, dependency):
+            (directory / "Cargo.toml").write_text("[package]\nname='probe'\nversion='0.0.0'\n")
+        metadata = self.root / "metadata.json"
+        metadata.write_text(
+            json.dumps(
+                {
+                    "workspace_members": ["member 0.0.0"],
+                    "packages": [
+                        {
+                            "id": "member 0.0.0",
+                            "manifest_path": str(member / "Cargo.toml"),
+                        },
+                        {
+                            "id": "dependency 0.0.0",
+                            "manifest_path": str(dependency / "Cargo.toml"),
+                        },
+                    ],
+                }
+            )
+        )
+        clippy = self.root / "clippy-driver"
+        clippy.symlink_to(sys.executable)
+        os.environ.update(
+            {
+                "CHELIS_IDENTITY_METADATA": str(metadata),
+                "CHELIS_IDENTITY_WORKSPACE_WRAPPER": str(clippy),
+                "CHELIS_IDENTITY_INNER_WRAPPER": "kache",
+                "CARGO_MANIFEST_DIR": str(member),
+            }
+        )
+        arguments = ["--crate-name", "probe"]
+        with (
+            patch.object(observer, "probe", return_value="clippy 0.1.98\n"),
+            patch.object(
+                observer, "transparent_wrapper", return_value="/tool/kache"
+            ),
+        ):
+            command, workspace = observer.rustc_command("/tool/rustc", arguments)
+            self.assertEqual(
+                command,
+                ["/tool/kache", str(clippy), "/tool/rustc", *arguments],
+            )
+            self.assertEqual(workspace["path"], str(clippy))
+            self.assertTrue(
+                workspace["identity"].endswith(
+                    observer.digest(Path(sys.executable).read_bytes())
+                )
+            )
+            os.environ["CARGO_MANIFEST_DIR"] = str(dependency)
+            command, workspace = observer.rustc_command("/tool/rustc", arguments)
+            self.assertEqual(command, ["/tool/kache", "/tool/rustc", *arguments])
+            self.assertIsNone(workspace)
+
 
     def test_build_script_uplift_binds_exact_compiler_bytes(self):
         directory = self.root / "build"
