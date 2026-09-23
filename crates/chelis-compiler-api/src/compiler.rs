@@ -5924,6 +5924,22 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
         })
         .collect();
 
+    // A draw key has no device storage. The emitter computes a `DrawKey`'s
+    // key at emission time and passes it to the draw that consumes it, so
+    // only that node carries the `key` precision here.
+    let key_admissible: UnordSet<NodeId> = dag
+        .nodes()
+        .iter()
+        .filter(|node| matches!(node.op, RiscOp::DrawKey { .. }))
+        .filter(|node| {
+            dag.nodes().iter().any(|consumer| {
+                matches!(consumer.op, RiscOp::Dropout | RiscOp::UniformLike)
+                    && consumer.inputs.contains(&node.id)
+            })
+        })
+        .map(|node| node.id)
+        .collect();
+
     for node in dag.nodes() {
         match node.output_type.precision {
             chelis_types::types::Prim::F32
@@ -5933,6 +5949,7 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
             | chelis_types::types::Prim::Int16
             | chelis_types::types::Prim::Int32
             | chelis_types::types::Prim::Int64 => {}
+            chelis_types::types::Prim::Key if key_admissible.contains(&node.id) => {}
             chelis_types::types::Prim::Bf16 | chelis_types::types::Prim::F16 => {
                 if !narrow_float_admissible.contains(&node.id) {
                     return Err(unsupported_gate_error(

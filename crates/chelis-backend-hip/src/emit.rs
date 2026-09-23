@@ -123,7 +123,8 @@ pub struct HipEmitter {
     /// Shared specialization for every kernel and its launch arguments.
     kernel_rank: usize,
     /// The next ordinal of each scoped Random handler region, advanced in
-    /// node order as each of its draw keys is emitted.
+    /// node order as each of its draw keys is emitted. One entry point's walk
+    /// is one activation, so [`Self::begin_activation`] resets it per entry.
     scoped_draws: BTreeMap<u32, u64>,
     /// The emission-time key of each emitted draw key, by node.
     draw_keys: BTreeMap<NodeId, u64>,
@@ -521,6 +522,7 @@ impl HipEmitter {
         }
 
         // Walk DAG in topological order
+        e.begin_activation();
         for node in dag.nodes() {
             // Skip FusedElem nodes inlined into a trailing reduction.
             if e.reduction_inlined.contains(&node.id.0) {
@@ -637,6 +639,14 @@ impl HipEmitter {
         Ok((e.lines.join("\n"), breakdown))
     }
 
+    /// Start one entry point's walk. Each entry runs the graph as its own
+    /// activation, so every scoped region's ordinals count from zero again
+    /// (`spec/design/randomness_counter_stream.md` §2).
+    fn begin_activation(&mut self) {
+        self.scoped_draws.clear();
+        self.draw_keys.clear();
+    }
+
     fn emit_device_entrypoint(
         &mut self,
         dag: VerifiedDagView<'_>,
@@ -699,6 +709,7 @@ impl HipEmitter {
             self.line("");
         }
 
+        self.begin_activation();
         for node in dag.nodes() {
             if self.reduction_inlined.contains(&node.id.0) {
                 continue;
@@ -5830,6 +5841,56 @@ mod tests {
             !hip.contains(&format!("float t{}_low = 0.00000000f;", u.0)),
             "uniform_like must not emit a lossy `{{:.8}}f` literal:\n{hip}"
         );
+    }
+
+    /// [05-RNG-1]: each generated entry point runs the graph as its own
+    /// activation, so a `with seed` region's two draws take ordinals 0 and 1
+    /// in the host entry and again in its device twin. The expected keys are
+    /// transcribed from the spec, not from `RandomKey`.
+    ///
+    /// Evidentiary status: REGRESSION TEST. At 3b5f029d8 the region counter
+    /// was set once per emitter, so the device entry took ordinals 2 and 3.
+    #[test]
+    fn each_entry_point_keys_its_scoped_draws_from_ordinal_zero() {
+        fn splitmix64(mut value: u64) -> u64 {
+            value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            value ^ (value >> 31)
+        }
+        let key = |ordinal: u64| 7 ^ splitmix64(ordinal).rotate_left(17);
+        let mut dag = Dag::new();
+        let like = dag.add_node(
+            RiscOp::Load {
+                name: "like".into(),
+            },
+            vec![],
+            vec_f32(8),
+            None,
+        );
+        let first = scoped_uniform(&mut dag, like, vec_f32(8), (0.0, 1.0), 7);
+        let second = scoped_uniform(&mut dag, first, vec_f32(8), (-1.0, 1.0), 7);
+        dag.add_root(second);
+        let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
+        let entry_keys = |signature: &str| {
+            let body = hip
+                .split_once(signature)
+                .unwrap_or_else(|| panic!("no `{signature}` in:\n{hip}"))
+                .1;
+            let body = body.split("\nextern \"C\"").next().unwrap();
+            body.lines()
+                .filter_map(|line| {
+                    let (name, value) = line.trim().split_once(" = ")?;
+                    name.strip_prefix("unsigned long long t")?
+                        .strip_suffix("_key")?;
+                    value.strip_suffix("ULL;")?.parse::<u64>().ok()
+                })
+                .collect::<Vec<_>>()
+        };
+        let expected = vec![key(0), key(1)];
+        assert_ne!(expected[0], expected[1]);
+        assert_eq!(entry_keys("extern \"C\" void test_fn("), expected);
+        assert_eq!(entry_keys("extern \"C\" void test_fn_device("), expected);
     }
 
     #[test]

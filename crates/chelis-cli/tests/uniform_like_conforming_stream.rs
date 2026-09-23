@@ -459,3 +459,69 @@ fn draw_c_element_i_is_not_draw_i_element_c() {
         }
     }
 }
+
+/// [05-RNG-1]'s draw key for ordinal `c` of a handler seeded `seed`: the
+/// word's seed-and-ordinal half, which the HIP lane passes to its kernel.
+fn spec_key(seed: i64, c: u64) -> u64 {
+    (seed as u64) ^ splitmix64(c).rotate_left(17)
+}
+
+/// The HIP lane computes a `with seed` region's draw key at emission and
+/// passes it to its device kernel. A tensor entry whose own handler draws
+/// takes the HIP DAG path, and both generated entry points, the host entry
+/// and its device twin, pass the key of the region's ordinal 0. The build
+/// emits source only, so no GPU or HIP compiler is needed. The per-entry
+/// ordinal reset for a region with several draws is the HIP emitter's
+/// `each_entry_point_keys_its_scoped_draws_from_ordinal_zero`.
+///
+/// Evidentiary status: REGRESSION TEST. At 3b5f029d8 the build refused every
+/// draw ("DAG path does not support tensor precision `key`").
+#[test]
+fn a_hip_tensor_entry_passes_its_handlers_draw_key_to_both_entry_points() {
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("noisy.ch");
+    std::fs::write(
+        &source,
+        "def noisy(x: tensor[8, f32]) -> tensor[8, f32] = with seed(7i64) { add(x, uniform_like(copy(x), 0.0f32, 1.0f32)) }\n",
+    )
+    .unwrap();
+    let out = dir.path().join("out");
+    succeeded(
+        cli(&[
+            "build",
+            source.to_str().unwrap(),
+            "--target",
+            "hip",
+            "--output",
+            out.to_str().unwrap(),
+        ]),
+        "HIP build",
+    );
+    let emitted = std::fs::read_to_string(out.join("noisy_hip.cpp")).unwrap();
+    let entry_keys = |signature: &str| {
+        let body = emitted
+            .split_once(signature)
+            .unwrap_or_else(|| panic!("no `{signature}` in:\n{emitted}"))
+            .1;
+        let body = body.split("\nextern \"C\"").next().unwrap();
+        body.lines()
+            .filter_map(|line| {
+                let (name, value) = line.trim().split_once(" = ")?;
+                name.strip_prefix("unsigned long long t")?
+                    .strip_suffix("_key")?;
+                value.strip_suffix("ULL;")?.parse::<u64>().ok()
+            })
+            .collect::<Vec<_>>()
+    };
+    let expected = vec![spec_key(7, 0)];
+    assert_eq!(
+        entry_keys("extern \"C\" void noisy("),
+        expected,
+        "host entry"
+    );
+    assert_eq!(
+        entry_keys("extern \"C\" void noisy_device("),
+        expected,
+        "device entry"
+    );
+}
