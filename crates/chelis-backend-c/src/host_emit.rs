@@ -8196,7 +8196,11 @@ impl<'a> HostEmitter<'a> {
         // the scrutinee. Keep the verified owner attached to this
         // compiler-generated temporary so an arm-completion drop cannot be
         // redirected to a same-spelled scalar or another payload binding.
-        self.owner_vars
+        // The temporary is declared in the enclosing C block, so the alias
+        // ends with the match: a sibling branch that releases the same owner
+        // must name the variable its own block can see.
+        let aliased_owner = self
+            .owner_vars
             .insert(scrutinee_owner, scrutinee_var.clone());
         let tag_var = self.next_temp("adt_tag");
         self.lines.push(format!(
@@ -8276,6 +8280,10 @@ impl<'a> HostEmitter<'a> {
         self.lines.push(format!("{}}}", self.indent));
         self.lines
             .push(format!("{}chelis_string_release({tag_var});", self.indent));
+        match aliased_owner {
+            Some(name) => self.owner_vars.insert(scrutinee_owner, name),
+            None => self.owner_vars.remove(&scrutinee_owner),
+        };
         Ok(())
     }
 
