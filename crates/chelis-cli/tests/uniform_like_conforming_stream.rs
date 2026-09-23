@@ -259,7 +259,6 @@ fn sample_body(checked: &chelis_types::CheckedProgram) -> chelis_deep::Expr {
     fn children(expr: &chelis_deep::Expr) -> &[chelis_deep::Expr] {
         match expr {
             chelis_deep::Expr::Node(node, _) => node.children_slice(),
-            chelis_deep::Expr::List(list, _) => &list.elements[2..],
             _ => panic!("tagged checked expression"),
         }
     }
