@@ -398,8 +398,8 @@ mod tests {
                 ),
             }
         }
-        // Most rows are admitted by the constructor, so the API's own
-        // rejection stays exercised.
-        assert!(admitted >= 9, "only {admitted} rows reached the API");
+        // Only the three arity violations are refused by the constructor, so
+        // the API's own rejection stays exercised on every other row.
+        assert_eq!(admitted, 10, "rows that reached the API");
     }
 }
