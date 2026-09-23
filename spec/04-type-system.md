@@ -463,7 +463,8 @@ A top-level irrefutable arm covers the match: a bare variable pattern
 (`| x =>`) or an as-pattern whose inner pattern is irrefutable
 (`| q @ x =>`, `| q @ _ =>`). The coverage applies at the arm level
 only; a variable pattern NESTED inside a constructor or record pattern
-does not cover the other variants.
+does not cover the other variants. An arm with a guard covers nothing,
+because its guard can be `false` ([04-PAT-2]).
 
 Coverage is a separate question from whether a pattern is admissible at the
 scrutinee type at all.
@@ -1086,7 +1087,7 @@ guard.
     For each (arm {} pᵢ gᵢ bᵢ):
         Γ, bindings(pᵢ, τₛ) ⊢ gᵢ : bool      when gᵢ is not ()
         Γ, bindings(pᵢ, τₛ) ⊢ bᵢ : τᵣ
-    patterns {pᵢ} are exhaustive over τₛ
+    patterns {pᵢ | gᵢ is ()} are exhaustive over τₛ
     ──────────────────────────────────────
     Γ ⊢ (match {} e arm₁ ... armₙ) : τᵣ
 ```

@@ -55,6 +55,20 @@ pub(super) fn infer_match(
             if arm_kids.len() >= 3 {
                 let mut arm_env = env.clone();
                 let pat = &arm_kids[0];
+                let guard = &arm_kids[1];
+                let empty_guard = match guard.carrier() {
+                    deep::ExprCarrier::StructuralList(elements) => elements.is_empty(),
+                    deep::ExprCarrier::DecodedNode(_, _, _)
+                    | deep::ExprCarrier::UndecodableHead(_, _, _)
+                    | deep::ExprCarrier::Atom(_)
+                    | deep::ExprCarrier::MetadataMap(_)
+                    | deep::ExprCarrier::MetadataExpression(_) => false,
+                };
+                // [04-PAT-2]: a guard can be `false`, so a guarded arm covers
+                // nothing. Its pattern is still checked and binds for the
+                // guard and body; only its coverage is discarded.
+                let mut arm_covered = Vec::new();
+                let mut arm_wildcard = false;
                 // RFC D-CHECK exhaustiveness fix (RT-0 verified false
                 // positives): a TOP-LEVEL irrefutable arm covers the
                 // match -- a bare `pat-var`, or a `pat-as` whose
@@ -62,7 +76,7 @@ pub(super) fn infer_match(
                 // keeps not-covering so exhaustiveness is not
                 // weakened on ordinary ADTs.
                 if top_level_arm_is_irrefutable(pat) {
-                    has_wildcard = true;
+                    arm_wildcard = true;
                 }
                 pattern_bindings(
                     pat,
@@ -74,20 +88,13 @@ pub(super) fn infer_match(
                     adt_reg,
                     errors,
                     product,
-                    &mut covered_variants,
-                    &mut has_wildcard,
+                    &mut arm_covered,
+                    &mut arm_wildcard,
                 );
-
-                let guard = &arm_kids[1];
-                let empty_guard = match guard.carrier() {
-                    deep::ExprCarrier::StructuralList(elements) => elements.is_empty(),
-                    deep::ExprCarrier::DecodedNode(_, _, _)
-                    | deep::ExprCarrier::UndecodableHead(_, _, _)
-                    | deep::ExprCarrier::Atom(_)
-                    | deep::ExprCarrier::MetadataMap(_)
-                    | deep::ExprCarrier::MetadataExpression(_) => false,
-                };
-                if !empty_guard {
+                if empty_guard {
+                    covered_variants.extend(arm_covered);
+                    has_wildcard |= arm_wildcard;
+                } else {
                     let guard_ty =
                         infer_expr(guard, &mut arm_env, vg, subst, adt_reg, errors, product);
                     super::expr_function::require_bool_condition(
