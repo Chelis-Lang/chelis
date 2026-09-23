@@ -408,23 +408,20 @@ fn collect_deep_refs(
     module_names: &std::collections::BTreeSet<String>,
     out: &mut std::collections::BTreeSet<String>,
 ) {
-    match expr {
-        DeepExpr::Node(node, _) => {
-            let tag = node.tag();
-            if tag == DeepTag::Var {
-                if let Some(name) = node.children_slice().first().and_then(symbol_text)
-                    && !params.contains(name)
-                    && module_names.contains(name)
-                {
-                    out.insert(name.to_string());
-                }
-            } else {
-                for child in node.children_slice() {
-                    collect_deep_refs(child, params, module_names, out);
-                }
-            }
+    let DeepExpr::Node(node, _) = expr else {
+        return;
+    };
+    if node.tag() == DeepTag::Var {
+        if let Some(name) = node.children_slice().first().and_then(symbol_text)
+            && !params.contains(name)
+            && module_names.contains(name)
+        {
+            out.insert(name.to_string());
         }
-        _ => {}
+    } else {
+        for child in node.children_slice() {
+            collect_deep_refs(child, params, module_names, out);
+        }
     }
 }
 
@@ -2189,59 +2186,56 @@ fn discover_deep_properties_expr(
     only: Option<&str>,
     out: &mut Vec<DeepProperty>,
 ) -> Result<(), String> {
-    match expr {
-        DeepExpr::Node(node, _) => {
-            if node.tag() == DeepTag::Def {
-                let name = node.binder_names().next().unwrap_or("");
-                let meta = node.meta();
-                if let Some(source_kind) = property_source_kind(meta, name)? {
-                    let fn_expr = node
-                        .children_slice()
-                        .get(1)
-                        .ok_or_else(|| format!("property `{name}` def is missing a fn body"))?;
-                    let fn_params = deep_fn_params(fn_expr).ok_or_else(|| {
-                        format!("property `{name}` def body must be a callable `fn`")
-                    })?;
-                    let params = if let Some(params) = deep_property_params(meta) {
-                        if !params_match(&params, &fn_params) {
-                            return Err(format!(
-                                "property `{name}` property_quantifiers must match fn parameters"
-                            ));
-                        }
-                        params
-                    } else if has_chelis_property_role(meta) {
-                        return Err(format!(
-                            "property `{name}` metadata must include `property_quantifiers`"
-                        ));
-                    } else {
-                        fn_params
-                    };
-                    if matches_filter(name, only) {
-                        out.push(DeepProperty {
-                            name: name.to_string(),
-                            source: path.to_path_buf(),
-                            source_kind,
-                            source_id: meta
-                                .property_source_id()
-                                .map(|value| value.value().as_str())
-                                .map(ToString::to_string),
-                            params,
-                            preconditions: deep_property_preconditions(meta).unwrap_or_default(),
-                            body: deep_fn_body(fn_expr).cloned().ok_or_else(|| {
-                                format!("property `{name}` def body must be a callable `fn`")
-                            })?,
-                            samples: deep_int_meta(meta.property_samples()),
-                            seed: deep_int_meta(meta.property_seed()).map(|value| value as u64),
-                        });
-                    }
+    let DeepExpr::Node(node, _) = expr else {
+        return Ok(());
+    };
+    if node.tag() == DeepTag::Def {
+        let name = node.binder_names().next().unwrap_or("");
+        let meta = node.meta();
+        if let Some(source_kind) = property_source_kind(meta, name)? {
+            let fn_expr = node
+                .children_slice()
+                .get(1)
+                .ok_or_else(|| format!("property `{name}` def is missing a fn body"))?;
+            let fn_params = deep_fn_params(fn_expr)
+                .ok_or_else(|| format!("property `{name}` def body must be a callable `fn`"))?;
+            let params = if let Some(params) = deep_property_params(meta) {
+                if !params_match(&params, &fn_params) {
+                    return Err(format!(
+                        "property `{name}` property_quantifiers must match fn parameters"
+                    ));
                 }
-            }
-            // Recurse into children for nested modules
-            for child in node.children_slice() {
-                discover_deep_properties_expr(path, child, only, out)?;
+                params
+            } else if has_chelis_property_role(meta) {
+                return Err(format!(
+                    "property `{name}` metadata must include `property_quantifiers`"
+                ));
+            } else {
+                fn_params
+            };
+            if matches_filter(name, only) {
+                out.push(DeepProperty {
+                    name: name.to_string(),
+                    source: path.to_path_buf(),
+                    source_kind,
+                    source_id: meta
+                        .property_source_id()
+                        .map(|value| value.value().as_str())
+                        .map(ToString::to_string),
+                    params,
+                    preconditions: deep_property_preconditions(meta).unwrap_or_default(),
+                    body: deep_fn_body(fn_expr).cloned().ok_or_else(|| {
+                        format!("property `{name}` def body must be a callable `fn`")
+                    })?,
+                    samples: deep_int_meta(meta.property_samples()),
+                    seed: deep_int_meta(meta.property_seed()).map(|value| value as u64),
+                });
             }
         }
-        _ => {}
+    }
+    // Recurse into children for nested modules
+    for child in node.children_slice() {
+        discover_deep_properties_expr(path, child, only, out)?;
     }
     Ok(())
 }
