@@ -299,29 +299,6 @@ fn deeppath_body_resolves_function_body() {
 }
 
 #[test]
-fn deeppath_resolve_mut_rejects_stamped_node_borrow() {
-    let mut module = parse(GROWTH);
-    let decl_index = resolve_function(&module, "economoist.growth.gordon_pv")
-        .unwrap()
-        .decl_index;
-    let def = match &mut module[0] {
-        Expr::Node(module, _) => {
-            // The path API itself must refuse a mutable borrow before any
-            // successor child can be reached.
-            let mut children = module.children_slice().to_vec();
-            children.remove(1 + decl_index)
-        }
-        _ => panic!("expected stamped module"),
-    };
-    let mut def = def;
-
-    assert!(matches!(
-        DeepPath::body().resolve_mut(&mut def),
-        Err(chelis_deep::PathError::StampedNodeNeedsTransactionalRewrite { depth: 0 })
-    ));
-}
-
-#[test]
 fn splice_rejects_invalid_successor_body_transactionally() {
     let module = parse(GROWTH);
     let invalid = Expr::Atom(Atom::Name("lit".to_string()), chelis_deep::Span::new(0, 0));

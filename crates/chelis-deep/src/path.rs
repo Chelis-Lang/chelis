@@ -109,20 +109,6 @@ impl DeepPath {
         }
         Ok(current)
     }
-
-    /// Resolve this path to a mutable reference.
-    ///
-    /// Only the empty path resolves: stamped [`Expr::Node`] values reject
-    /// mutable borrowing, because a node must be rewritten through a
-    /// transactional API that revalidates the complete candidate before
-    /// commit.
-    pub fn resolve_mut<'a>(&self, def: &'a mut Expr) -> Result<&'a mut Expr, PathError> {
-        let mut current = def;
-        for (depth, segment) in self.segments.iter().enumerate() {
-            current = step_mut(current, segment, depth)?;
-        }
-        Ok(current)
-    }
 }
 
 fn step<'a>(node: &'a Expr, segment: &PathSegment, depth: usize) -> Result<&'a Expr, PathError> {
@@ -150,25 +136,6 @@ fn step<'a>(node: &'a Expr, segment: &PathSegment, depth: usize) -> Result<&'a E
     }
 }
 
-fn step_mut<'a>(
-    node: &'a mut Expr,
-    segment: &PathSegment,
-    depth: usize,
-) -> Result<&'a mut Expr, PathError> {
-    match segment {
-        PathSegment::Body => {
-            if !is_tagged(node, DeepTag::Def) {
-                return Err(PathError::NotAtDef { depth });
-            }
-            Err(PathError::StampedNodeNeedsTransactionalRewrite { depth })
-        }
-        PathSegment::Child(_) => match node {
-            Expr::Node(..) => Err(PathError::StampedNodeNeedsTransactionalRewrite { depth }),
-            _ => Err(PathError::NotAList { depth }),
-        },
-    }
-}
-
 /// An error resolving a [`DeepPath`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PathError {
@@ -191,11 +158,6 @@ pub enum PathError {
     /// A computed element index was out of bounds at the given path depth.
     #[error("path step {depth}: child index {index} is out of bounds")]
     OutOfBounds { depth: usize, index: usize },
-
-    /// Mutable references into a validated successor Node would bypass its
-    /// constructor invariant.
-    #[error("path step {depth}: stamped nodes require a transactional rewrite")]
-    StampedNodeNeedsTransactionalRewrite { depth: usize },
 }
 
 /// A located function definition within a module.

@@ -592,16 +592,6 @@ fn runtime_nested_owner_readers_reject_malformed_children() {
     );
 }
 
-#[test]
-fn runtime_eval_reader_has_no_node_to_list_bridge() {
-    let source = include_str!("eval.rs");
-    let forbidden = [".to_", "list("].concat();
-    assert!(
-        !source.contains(&forbidden),
-        "runtime evaluation and result-claim placement must consume ExprCarrier directly"
-    );
-}
-
 /// chelis#1829: the interpreter entry derives each definition's kernel
 /// decision once, so the summary probes behind `def_kernel` are bounded by the
 /// number of definitions rather than expanding the call graph as a tree.

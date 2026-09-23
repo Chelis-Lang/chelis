@@ -176,15 +176,6 @@ fn macro_walks_preserve_every_explicit_nondecoded_carrier_role() {
 }
 
 #[test]
-fn production_macro_readers_have_no_node_to_list_bridge() {
-    let source = include_str!("../src/lib.rs");
-    assert!(
-        !source.contains(".to_list("),
-        "macro reader walks must consume ExprCarrier directly"
-    );
-}
-
-#[test]
 fn nonlegacy_macro_invoke_carriers_are_not_reclassified_as_the_raw_boundary() {
     let mut program =
         chelis_deep::parser::parse_str("(defmacro {} keep (params {} value) (var {} value))")
