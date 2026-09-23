@@ -1195,11 +1195,12 @@ fn uniform_like_fma_gpu_bit_exact_matches_eval_and_c() {
         vec_f32(8),
         None,
     );
+    // An ungated node carries its [05-RNG-1] draw key: seed 42, ordinal 0.
     let out = dag.add_node(
         RiscOp::UniformLike {
             low: 2.0,
             high: 5.0,
-            seed: 42,
+            seed: chelis_types::random_draw_key(42, 0),
         },
         vec![template],
         vec_f32(8),
@@ -1208,12 +1209,13 @@ fn uniform_like_fma_gpu_bit_exact_matches_eval_and_c() {
     dag.add_root(out);
 
     let actual = compile_and_run_output_f32_bits(&dag, "uniform_like_fma");
-    // seed 42, [2,5), shape [8]. Bit-identical to the host evaluator and the C
-    // lane (measured; elem[4] is the #735-sweep divergence, elem[6]/[7] are the
-    // FMA-vs-two-rounding tell).
+    // Seed 42, ordinal 0, [2,5), shape [8]: exact-rational evaluations of
+    // [05-RNG-1] and [05-OP-8] (`rng_ref.py uniform 42 0 8 2 5 f32`,
+    // chelis#2408). elem[6] is where an f64 affine lands 1 ULP away and
+    // elem[2] is the FMA-vs-two-rounding tell.
     let expected: Vec<u32> = vec![
-        0x407d8370, 0x408730b3, 0x4091855a, 0x4047de4a, 0x404215aa, 0x402ba9ac, 0x408f5273,
-        0x403ec1e7,
+        0x401d600b, 0x406ddbc6, 0x401cb39d, 0x40068337, 0x4005ff9a, 0x4044062f, 0x40683468,
+        0x401bf5fc,
     ];
     assert_eq!(
         actual, expected,
@@ -1231,11 +1233,12 @@ fn issue_937_uniform_like_f64_gpu_bit_exact_matches_shared_sampler() {
         vec_f64(8),
         None,
     );
+    let key = chelis_types::random_draw_key(42, 0);
     let out = dag.add_node(
         RiscOp::UniformLike {
             low: 2.0,
             high: 5.0,
-            seed: 42,
+            seed: key,
         },
         vec![template],
         vec_f64(8),
@@ -1246,7 +1249,7 @@ fn issue_937_uniform_like_f64_gpu_bit_exact_matches_shared_sampler() {
     let actual = compile_and_run_output_f64_bits(&dag, "uniform_like_f64");
     let expected = (0..8)
         .map(|index| {
-            chelis_types::uniform_sample(Prim::F64, 2.0, 5.0, 42, index)
+            chelis_types::uniform_sample(Prim::F64, 2.0, 5.0, key, index)
                 .unwrap()
                 .as_f64_lossy()
                 .to_bits()

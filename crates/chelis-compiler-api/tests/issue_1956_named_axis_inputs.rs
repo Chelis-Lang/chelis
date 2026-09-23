@@ -57,22 +57,9 @@ fn spread_rank_library_formal_does_not_initialize_same_named_declaration() {
             .iter()
             .find(|root| root.name.as_deref() == Some("out.1"))
             .unwrap();
-        let seed = 42u64 ^ 5u64.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-        let expected = chelis_types::tensor_from_scalars(
-            chelis_types::types::Prim::F32,
-            &(0..2)
-                .map(|index| {
-                    chelis_types::uniform_sample(
-                        chelis_types::types::Prim::F32,
-                        0.0,
-                        1.0,
-                        seed,
-                        index,
-                    )
-                    .unwrap()
-                })
-                .collect::<Vec<_>>(),
-        );
+        // [05-RNG-1]/[05-OP-8] for seed 42, ordinal 5 (after five discarded
+        // draws), [0, 1), f32: `rng_ref.py uniform 42 5 2 0 1 f32`.
+        let expected = json!({"dtype":"f32","bits":["3f5b1b74","3daedee7"]});
         assert_eq!(
             serde_json::to_value(&next.value).unwrap(),
             json!({"type":"tensor","value":{"shape":[2],"data":expected}})
@@ -115,7 +102,7 @@ fn assert_capture(body: &str, second: &str, transcript: &[&str]) {
             .unwrap();
         assert_eq!(
             serde_json::to_value(&next.value).unwrap(),
-            json!({"type":"tensor","value":{"shape":[2],"data":{"dtype":"f32","bits":["3e68de41","3f38fdad"]}}})
+            json!({"type":"tensor","value":{"shape":[2],"data":{"dtype":"f32","bits":["3f5b1b74","3daedee7"]}}})
         );
         assert_eq!(result.transcript, transcript);
     }

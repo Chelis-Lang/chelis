@@ -31,7 +31,10 @@
 //!
 //! * `[2, 5)` — the primary fix case. Pre-fix, host elem[4] cast to f32 was
 //!   `0x404215a9` while C was `0x404215aa` (measured on origin/main before
-//!   the fix); this asserts they now agree bit-for-bit at every element.
+//!   the fix, under the retired pre-[05-RNG-1] mixing); this asserts they now
+//!   agree bit-for-bit at every element. Under the [05-RNG-1] stream
+//!   (chelis#2408) the element where an f64 affine lands 1 ULP away is
+//!   elem[6], and a two-rounding f32 affine differs at elem[2].
 //! * `[0, 1)` — also a FIXED case, not a control: per this PR's Finding B the
 //!   pre-fix host lane held the raw f64 `unit` while C held `(float)unit`, so
 //!   the raw-f64 values differed; they only ever agreed at the f32-bit level
@@ -213,22 +216,24 @@ fn uniform_like_affine_parity_positive_range() {
     let src = program("2.0", "5.0", 42);
     let eval = eval_sampled(&src);
     let c = c_sampled(&src, "affine_2_5");
-    // Pre-fix this failed at elem[4] (eval f32 0x404215a9 vs C 0x404215aa).
     assert_f32_bit_parity(&eval, &c, "[2,5)");
-    // Nail the specific element the #735 sweep flagged.
+    // Nail the element where an f64 affine rounds to the adjacent f32
+    // (0x40683467). The bits are the exact-rational [05-RNG-1]/[05-OP-8]
+    // value for seed 42, ordinal 0 (`rng_ref.py uniform 42 0 8 2 5 f32`).
     assert_eq!(
-        (eval[4] as f32).to_bits(),
-        0x404215aa,
-        "elem[4] must be the C f32 sampler value after the fix",
+        (eval[6] as f32).to_bits(),
+        0x40683468,
+        "elem[6] must be the single-rounding f32 FMA value",
     );
 }
 
 /// Flag-independence / RNG-determinism lock: with the C sampler's explicit
 /// `fmaf`, the compiled [2,5) output is bit-identical to eval even when FP
-/// contraction is disabled. Pre-fix, `-ffp-contract=off` diverged at elem[6]
-/// (0x408f5274 vs the contracted 0x408f5273) — i.e. the same source produced
-/// different "random" bytes under different compile flags. This asserts that
-/// hole is closed.
+/// contraction is disabled. Pre-fix, `-ffp-contract=off` diverged at one
+/// element (elem[6] under the retired mixing, elem[2] under [05-RNG-1]: a
+/// two-rounding affine gives 0x401cb39c where the FMA gives 0x401cb39d) —
+/// i.e. the same source produced different "random" bytes under different
+/// compile flags. This asserts that hole is closed.
 #[test]
 fn uniform_like_affine_parity_positive_range_no_fp_contract() {
     if !gcc_available() {

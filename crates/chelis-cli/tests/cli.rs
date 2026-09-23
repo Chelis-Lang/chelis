@@ -9262,14 +9262,26 @@ fn build_c_with_seed_uniform_like_succeeds() {
         c_src.contains(&format!("{seed} = 7;"))
             && c_src.contains(&format!("*__chelis_rng = {frame};"))
     });
+    // Baked operands are ordinal 0's [05-RNG-1] draw key,
+    // `seed ^ rotl64(splitmix64(0), 17)` with `splitmix64(0)` the standard
+    // SplitMix64 constant 0xe220a8397b1dcdaf: seed 7's when the handler is
+    // baked, and the seed-0 placeholder that the active host handler
+    // replaces when the helper is lowered outside it.
+    let ordinal_zero_key = |seed: u64| seed ^ 0xe220_a839_7b1d_cdaf_u64.rotate_left(17);
     let active_host_seed = installs_seed_seven
         && c_src.contains(
-            "#define CHELIS_EFFECTIVE_UNIFORM_SEED(seed) chelis_effective_uniform_seed(__chelis_rng, seed)",
+            "#define CHELIS_EFFECTIVE_UNIFORM_KEY(key) chelis_effective_uniform_key(__chelis_rng, key)",
         )
-        && c_src.contains("CHELIS_EFFECTIVE_UNIFORM_SEED(0ULL");
+        && c_src.contains(&format!(
+            "CHELIS_EFFECTIVE_UNIFORM_KEY({}ULL",
+            ordinal_zero_key(0)
+        ));
     assert!(
-        c_src.contains("CHELIS_EFFECTIVE_UNIFORM_SEED(7ULL") || active_host_seed,
-        "expected baked seed 7 or an installed seed-7 host handler at the effective seed wrapper; got:\n{c_src}"
+        c_src.contains(&format!(
+            "CHELIS_EFFECTIVE_UNIFORM_KEY({}ULL",
+            ordinal_zero_key(7)
+        )) || active_host_seed,
+        "expected baked seed 7's draw key or an installed seed-7 host handler at the effective key wrapper; got:\n{c_src}"
     );
     assert!(
         !c_src.contains("chelis_uniform_sample_f32(0ULL"),
