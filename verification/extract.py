@@ -20,18 +20,7 @@ def run(command: list[str], root: Path, *, capture: bool = False) -> str:
     return result.stdout if capture else ""
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--entry",
-        help="Diagnostic slice, e.g. chelis_ir::grad::grad_dag_checked; default: whole pipeline core",
-    )
-    parser.add_argument(
-        "--mir",
-        choices=("built", "promoted", "elaborated", "optimized"),
-        default="promoted",
-    )
-    args = parser.parse_args()
+def generate_model(*, entry: str | None = None, mir: str = "promoted") -> Path:
     root = Path(__file__).resolve().parent.parent
     metadata = json.loads(
         run(["cargo", "metadata", "--format-version", "1", "--no-deps", "--locked"], root, capture=True)
@@ -42,9 +31,9 @@ def main() -> None:
         for package in metadata["packages"]
         if package["id"] in members
     }
-    crate = args.entry.split("::", 1)[0] if args.entry else "chelis_pipeline_core"
+    crate = entry.split("::", 1)[0] if entry else "chelis_pipeline_core"
     if crate not in crates:
-        parser.error("entry must belong to a retained workspace crate")
+        raise ValueError("entry must belong to a retained workspace crate")
 
     target = root / "target" / "agents" / "aeneas-charon"
     host = next(
@@ -63,7 +52,7 @@ def main() -> None:
     output = Path(tempfile.mkdtemp(prefix=f"{crate}-", dir=output_root))
     llbc = output / f"{crate}.llbc"
     command = [
-        "charon", "cargo", "--preset=aeneas", f"--mir={args.mir}",
+        "charon", "cargo", "--preset=aeneas", f"--mir={mir}",
         "--monomorphize-mut=except-types", "--remove-adt-clauses",
         "--lift-associated-types=*",
         "--error-on-warnings", "--abort-on-error",
@@ -99,13 +88,13 @@ def main() -> None:
         command.extend(["--include", family])
     for member in sorted(crates):
         command.extend(["--include", member])
-    if args.entry:
-        command.extend(["--start-from", args.entry])
+    if entry:
+        command.extend(["--start-from", entry])
     command.extend([
         "--dest-file", str(llbc), "--", "--package", crates[crate],
         "--lib", "--jobs", "2", "--locked", "--target-dir", str(target),
     ])
-    print(f"Extraction scope: {args.entry or 'whole chelis_pipeline_core'}", flush=True)
+    print(f"Extraction scope: {entry or 'whole chelis_pipeline_core'}", flush=True)
     print(f"Artifacts: {output}", flush=True)
     run(command, root)
     if not llbc.is_file() or llbc.stat().st_size == 0:
@@ -120,6 +109,25 @@ def main() -> None:
     if not any(lean.rglob("*.lean")):
         raise RuntimeError("Aeneas returned without a Lean model")
     print(f"Generated model: {lean}. Correspondence and Lean acceptance remain separate obligations.")
+    return lean
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--entry",
+        help="Diagnostic slice, e.g. chelis_ir::grad::grad_dag_checked; default: whole pipeline core",
+    )
+    parser.add_argument(
+        "--mir",
+        choices=("built", "promoted", "elaborated", "optimized"),
+        default="promoted",
+    )
+    args = parser.parse_args()
+    try:
+        generate_model(entry=args.entry, mir=args.mir)
+    except ValueError as error:
+        parser.error(str(error))
 
 
 if __name__ == "__main__":

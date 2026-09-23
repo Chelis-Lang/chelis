@@ -293,6 +293,37 @@ Outputs are isolated per invocation under `.work/aeneas-verification/extracted/`
 The command performs Charon/Aeneas model generation only. It is not a correspondence
 proof or Lean acceptance gate.
 
+### Production AD acceptance
+
+Use a writable Lean library from the pinned patched source. If one has not already
+been prepared, this one-time setup copies the source, preserves its pinned Lake
+manifest/toolchain, and builds it. The destination must not already exist:
+
+```sh
+nix develop --command python verification/prepare_aeneas_lean.py \
+  --source "$(nix build --no-link --print-out-paths .#aeneas-source)" \
+  --destination .work/aeneas-verification/aeneas/backends/lean
+```
+
+Run the production gate with that library:
+
+```sh
+nix develop --command python verification/check_production_ad.py \
+  --aeneas-lean-dir .work/aeneas-verification/aeneas/backends/lean
+```
+
+The gate builds the library using Lake's existing cache, freshly extracts the fixed
+`chelis_ir::grad::grad_dag_checked` root with promoted MIR, and compiles the unmodified
+`ChelisIr.lean` to `ChelisIr.olean`. It shares the strict extraction implementation
+with `extract.py`; there is no alternate root, old-model reuse, or checks-disabled mode.
+Library-build, Charon, Aeneas and Lean failures return a nonzero status, including
+unsupported collector dictionaries. Missing or empty AD artifacts also fail.
+
+Only after successful compilation does the command print `Production AD accepted`
+and the compiled artifact path. Each invocation retains its own LLBC, generated Lean
+and compiled model under `.work/aeneas-verification/extracted/`. This acceptance is
+not full-core extraction, a backend axiom audit, or a correspondence theorem.
+
 ### Verification status and remaining boundaries
 
 The packaged compiler passes the 25-model native/Lean matrix and all 16 unsupported
@@ -305,8 +336,10 @@ The production AD slice `chelis_ir::grad::grad_dag_checked` passes both extracti
 and Lean compilation. Its promoted-MIR LLBC translates with interpreter checks,
 strict joins, abort-on-error, and warnings-as-errors enabled. The unmodified
 generated `ChelisIr.lean` compiles to `ChelisIr.olean` against the patched Lean
-library, without extra command-line stack overrides. The acceptance run reports
-only a naming-style warning for `__build_unimplemented_rejection`.
+library, without extra command-line stack overrides. The generated module reports
+only a naming-style warning for `__build_unimplemented_rejection`. The library build
+also reports existing proof-admission (`sorry`) and linter warnings; the gate leaves
+these visible rather than treating compilation as proof completion.
 This acceptance includes the fail-closed collector gate and the concrete production
 AD/verifier refactors; the public generic `UnordMap::FromIterator` is unchanged.
 

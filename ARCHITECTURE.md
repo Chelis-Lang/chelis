@@ -267,6 +267,14 @@ make unknown externals fail in strict-warning mode and normalize function-return
 loop continuations without joining uninitialized return slots. Independent branches
 remain joined. Exact revisions and patches are recorded in `verification/toolchain.json`.
 
+`verification/check_production_ad.py` is the separate production AD acceptance gate.
+It builds the supplied pinned patched Lean library, invokes the same extraction
+implementation for the fixed `grad_dag_checked` root, and compiles the fresh,
+unmodified generated module. Build/translation/compilation failures are fatal;
+old generated artifacts are never reused. Dependency `sorry` and linter warnings
+remain visible. This gate checks extraction and compilation, not correspondence
+proofs or the absence of backend axioms.
+
 The AD closure now has explicit models for slice windows/chunks, ordered B-tree
 iteration/entries, recursive trait dictionaries, formatting and floating operations.
 The ordered `shape_source_for_axis` search avoids the former recursive
