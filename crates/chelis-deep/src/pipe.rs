@@ -128,11 +128,10 @@ thread_local! {
     static FOLD_COPIED_NODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// Copy `expr` for the fold's result, recording the nodes copied.
-fn copied(expr: &Expr) -> Expr {
+/// Record one expression node of the fold's result.
+fn count_copied_node() {
     #[cfg(test)]
-    FOLD_COPIED_NODES.with(|nodes| nodes.set(nodes.get() + expr_nodes(expr)));
-    expr.clone()
+    FOLD_COPIED_NODES.with(|nodes| nodes.set(nodes.get() + 1));
 }
 
 /// Expression nodes in `expr`, every carrier included; metadata is not
@@ -168,76 +167,93 @@ pub(crate) fn reset_fold_copied_nodes() {
 /// would survive a top-down pass and reach a consumer that no longer has an
 /// arm for it.
 ///
-/// A subtree with no pipe in it is returned unchanged.
-pub fn fold_pipes(expr: &Expr) -> Expr {
-    fold_changed(expr).unwrap_or_else(|| copied(expr))
-}
-
-/// Fold every `Pipe` below `expr`, reporting movement instead of detecting
-/// it: `Some(rebuilt)` when a pipe was folded somewhere in the subtree, `None`
-/// when the subtree is unchanged (chelis#2207).
+/// The walk is an explicit heap worklist, not native recursion. The checker
+/// folds its input before any of its stack-guarded walkers runs, and the fold
+/// has no diagnostic channel of its own, so a recursive fold would abort the
+/// process on the same deep input those walkers reject with a typed
+/// diagnostic. Every expression node of the result is built exactly once,
+/// from its already-folded children, so the work is linear in the size of the
+/// tree (chelis#2207); a subtree with no pipe in it comes back equal to the
+/// input.
 ///
-/// An unchanged subtree is neither copied nor compared. The fold used to
-/// clone every child, deep-compare the clones against the originals, and
-/// clone the unchanged subtree again at every stamped node, which made a
-/// pipe-free program cost O(size x depth); the movement flag makes it
-/// linear, and the one copy the public API owes is made once at the root.
-fn fold_changed(expr: &Expr) -> Option<Expr> {
-    // The non-stamped carriers hold children too, and a pipe can sit inside
-    // one: a typed pipe-stage parameter arrives as a `MetaExpr` wrapper, and
-    // a stage body can reach the fold through a `BareList` or an
-    // `UnknownForm`. Declining to descend leaves that pipe for the
-    // fail-closed raise, which is a real program failing rather than a
-    // malformed tree, so every carrier is walked.
-    match expr {
-        Expr::MetaExpr(meta_expr, span) => {
-            let inner = fold_changed(&meta_expr.expr)?;
-            return Some(Expr::MetaExpr(
-                crate::ast::MetaExpr {
-                    metadata: meta_expr.metadata.clone(),
-                    expr: Box::new(inner),
-                },
-                *span,
-            ));
-        }
-        Expr::BareList(items, span) => {
-            return Some(Expr::BareList(fold_children(items)?, *span));
-        }
-        Expr::UnknownForm(data) => {
-            let children = fold_children(&data.children)?;
-            return Some(Expr::UnknownForm(Box::new(crate::ast::UnknownFormData {
-                head: data.head.clone(),
-                meta: data.meta.clone(),
-                children,
-                span: data.span,
-            })));
-        }
-        _ => {}
+/// Every carrier is walked, because a pipe can sit inside any of them: a
+/// typed pipe-stage parameter arrives as a `MetaExpr` wrapper, and a stage
+/// body can reach the fold through a `BareList` or an `UnknownForm`.
+/// Declining to descend would leave that pipe for the fail-closed raise, a
+/// real program failing rather than a malformed tree. Metadata values are
+/// copied as written.
+pub fn fold_pipes(expr: &Expr) -> Expr {
+    enum Step<'a> {
+        Enter(&'a Expr),
+        Exit(&'a Expr, usize),
     }
-    let (tag, meta, kids) = stamped(expr)?;
-    let folded = fold_children(kids);
-    if tag != DeepTag::Pipe {
-        return folded.map(|children| rebuild(expr, tag, meta, children));
+    let mut steps = vec![Step::Enter(expr)];
+    let mut values: Vec<Expr> = Vec::new();
+    while let Some(step) = steps.pop() {
+        match step {
+            Step::Enter(expr) => {
+                let children: &[Expr] = match expr {
+                    Expr::Atom(..) | Expr::Map(..) => {
+                        count_copied_node();
+                        values.push(expr.clone());
+                        continue;
+                    }
+                    Expr::MetaExpr(meta_expr, _) => std::slice::from_ref(meta_expr.expr.as_ref()),
+                    Expr::Node(node, _) => node.children_slice(),
+                    Expr::BareList(items, _) => items,
+                    Expr::UnknownForm(data) => &data.children,
+                };
+                steps.push(Step::Exit(expr, children.len()));
+                steps.extend(children.iter().rev().map(Step::Enter));
+            }
+            Step::Exit(expr, child_count) => {
+                let start = values
+                    .len()
+                    .checked_sub(child_count)
+                    .expect("the fold's step and value stacks stay balanced");
+                let children = values.split_off(start);
+                count_copied_node();
+                values.push(rebuild_folded(expr, children));
+            }
+        }
     }
-    let children = folded.unwrap_or_else(|| kids.iter().map(copied).collect());
-    let rebuilt = rebuild(expr, tag, meta, children);
-    Some(fold_one(&rebuilt).unwrap_or(rebuilt))
+    let folded = values.pop().expect("the fold produces its root");
+    debug_assert!(values.is_empty(), "the fold produces exactly one root");
+    folded
 }
 
-/// Fold each of `kids`. `Some(children)` when at least one moved, with the
-/// unchanged siblings copied beside the rebuilt ones; `None` when none did.
-fn fold_children(kids: &[Expr]) -> Option<Vec<Expr>> {
-    let folded: Vec<Option<Expr>> = kids.iter().map(fold_changed).collect();
-    if folded.iter().all(Option::is_none) {
-        return None;
+/// Rebuild `expr` over its folded `children`, folding it too when it is a
+/// `Pipe`.
+fn rebuild_folded(expr: &Expr, mut children: Vec<Expr>) -> Expr {
+    match expr {
+        Expr::MetaExpr(meta_expr, span) => Expr::MetaExpr(
+            crate::ast::MetaExpr {
+                metadata: meta_expr.metadata.clone(),
+                expr: Box::new(
+                    children
+                        .pop()
+                        .expect("a metadata wrapper has one expression"),
+                ),
+            },
+            *span,
+        ),
+        Expr::BareList(_, span) => Expr::BareList(children, *span),
+        Expr::UnknownForm(data) => Expr::UnknownForm(Box::new(crate::ast::UnknownFormData {
+            head: data.head.clone(),
+            meta: data.meta.clone(),
+            children,
+            span: data.span,
+        })),
+        Expr::Node(node, _) => {
+            let rebuilt = rebuild(expr, node.tag(), node.meta(), children);
+            if node.tag() == DeepTag::Pipe {
+                fold_one(&rebuilt).unwrap_or(rebuilt)
+            } else {
+                rebuilt
+            }
+        }
+        Expr::Atom(..) | Expr::Map(..) => unreachable!("leaves are copied on entry"),
     }
-    Some(
-        folded
-            .into_iter()
-            .zip(kids)
-            .map(|(new, old)| new.unwrap_or_else(|| copied(old)))
-            .collect(),
-    )
 }
 
 /// Rebuild the stamped node `expr` with new children.
@@ -422,6 +438,65 @@ mod tests {
             "#2207: doubling the chain depth must at most triple the nodes the fold copies; \
              depth 64 copied {small} and depth 128 copied {large}, a factor of {}",
             large / small.max(1)
+        );
+    }
+
+    /// The fold runs before the checker's stack-guarded walkers and has no
+    /// diagnostic channel, so it must not recurse on the native stack: a
+    /// 5000-deep `app` chain with a pipe at its bottom folds on a 256 KiB
+    /// thread. Building, comparing and dropping the trees recurse, so they run
+    /// on a large-stack thread; only the fold runs on the small stack.
+    #[test]
+    fn a_deep_chain_folds_on_a_small_stack() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(fold_a_deep_chain_on_a_small_stack)
+            .expect("spawn the large-stack harness")
+            .join()
+            .expect("the large-stack harness must not abort");
+    }
+
+    fn fold_a_deep_chain_on_a_small_stack() {
+        const DEPTH: usize = 5000;
+        let span = crate::span::Span::new(0, 0);
+        let var = |name: &str| {
+            Expr::node(
+                DeepTag::Var,
+                Metadata::default(),
+                vec![Expr::Atom(Atom::Name(name.to_string()), span)],
+                span,
+            )
+        };
+        let app = |callee: Expr, argument: Expr| {
+            Expr::node(
+                DeepTag::App,
+                Metadata::default(),
+                vec![callee, argument],
+                span,
+            )
+        };
+        let mut input = Expr::node(
+            DeepTag::Pipe,
+            Metadata::default(),
+            vec![var("x"), var("f")],
+            span,
+        );
+        let mut expected = app(var("f"), var("x"));
+        for _ in 0..DEPTH {
+            input = app(var("g"), input);
+            expected = app(var("g"), expected);
+        }
+        let input = std::sync::Arc::new(input);
+        let worker_input = std::sync::Arc::clone(&input);
+        let folded = std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(move || fold_pipes(&worker_input))
+            .expect("spawn the small-stack fold")
+            .join()
+            .expect("the fold must not exhaust a small native stack");
+        assert!(
+            folded == expected,
+            "the bottom pipe folds and the chain is kept"
         );
     }
 
