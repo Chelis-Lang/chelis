@@ -385,13 +385,15 @@ fn issue_1316_each_public_driver_builds_one_shared_plan() {
     let program = generated_program(32, GraphShape::BoundedDag);
 
     reset_function_plan_profile();
-    check_typed_program(&program).expect("primary driver accepts generated DAG");
+    check_typed_program(&program, crate::ProgramOrigin::Unlinked)
+        .expect("primary driver accepts generated DAG");
     let primary_profile = take_function_plan_profile();
     assert_eq!(primary_profile.plan_builds, 1);
     assert_eq!(primary_profile.reference_graph_builds, 1);
 
     reset_function_plan_profile();
-    check_ir_program(&program).expect("IR driver accepts generated DAG");
+    check_ir_program(&program, crate::ProgramOrigin::Unlinked)
+        .expect("IR driver accepts generated DAG");
     let ir_profile = take_function_plan_profile();
     assert_eq!(ir_profile.plan_builds, 1);
     assert_eq!(ir_profile.reference_graph_builds, 1);
@@ -409,8 +411,8 @@ fn issue_1316_malformed_group_rejects_in_both_drivers() {
             ),
         ],
     )];
-    assert!(check_typed_program(&malformed).is_err());
-    assert!(check_ir_program(&malformed).is_err());
+    assert!(check_typed_program(&malformed, ProgramOrigin::Unlinked).is_err());
+    assert!(check_ir_program(&malformed, ProgramOrigin::Unlinked).is_err());
 }
 
 #[test]
@@ -429,8 +431,11 @@ fn issue_1316_unknown_call_diagnostic_order_is_stable_across_drivers() {
             .map(|error| error.message)
             .collect::<Vec<_>>()
     };
-    let primary = messages(check_typed_program(&program));
-    let ir = messages(check_ir_program(&program));
+    let primary = messages(check_typed_program(
+        &program,
+        crate::ProgramOrigin::Unlinked,
+    ));
+    let ir = messages(check_ir_program(&program, crate::ProgramOrigin::Unlinked));
     assert_eq!(primary, ir);
     assert_eq!(primary.len(), 2);
     assert!(primary[0].contains("missing_first"));

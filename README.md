@@ -347,12 +347,25 @@ The [patch dependency audit and source proposal](ARCHITECTURE.md#production-ad-p
 record remaining dependencies and the limits of that audit. The
 [explicit-state runtime cutover](ARCHITECTURE.md#explicit-state-cutover) now gives
 `HostLoweringSession` ownership of specialization, inlining, preflight, and scoped
-type-substitution state. `DiagnosticSink` now owns scoped checker opacity policy;
-both inference drivers retain module attribution and cached library exports without
-ambient opacity TLS. Native regressions cover session isolation, nested scopes,
-unwind restoration, and retention of authoritative diagnostics. Recursive-group and
-linker-provenance state, plus the panic/cancellation shell, remain native. These
-ownership changes are not checker/host-lowering extraction or wrapper correspondence
+type-substitution state. `DiagnosticSink` owns scoped checker opacity policy and
+recursive inference frames, without ambient opacity or recursive-group TLS.
+Generalization now takes explicit borrowed recursive pins in both its level-based
+and sweep algorithms. Native regressions cover independent sessions, nested return
+and unwind, caller attribution, ordered diagnostics, and mid-SCC cancellation.
+The API smoke also covers serialized and layered generic library contexts, reuse,
+and concurrent checks. Persisted `TypeEnv` metadata is unchanged.
+
+Link provenance is also explicit: type-inference and fitness APIs take
+`ProgramOrigin::{Unlinked, Linked}`, and `PreparedProgram::from_expanded_deep` requires
+it alongside the expanded AST. There is no linked-program TLS, install guard, or
+implicit default. `Linked` is a trusted native linker assertion, not a checked proof;
+names, metadata, and cached libraries cannot authorize a new source unit. Origin is
+not serialized. Native checks cover rejection boundaries and linked/contextual
+checking through lowering and evaluation, including cancellation/reuse and concurrency.
+
+Explicit inputs and ownership are progress toward FCIS, not purity: cancellation,
+global IDs, counters, stack growth, and panic handling remain native boundaries.
+These changes are not checker/host-lowering extraction or wrapper correspondence
 proofs.
 
 Whole `chelis_pipeline_core` extraction is still blocked before LLBC generation:

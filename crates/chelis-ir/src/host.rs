@@ -20094,7 +20094,7 @@ mod tests {
         let deep: Vec<Expr> =
             serde_json::from_str(include_str!("../tests/fixtures/helper_summary_fatal.json"))
                 .expect("original helper-summary AST");
-        let checked = chelis_types::check_ir_program(&deep)
+        let checked = chelis_types::check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
             .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors));
         let session = HostLoweringSession::new(&checked);
         for _ in 0..2 {
@@ -20249,7 +20249,7 @@ mod tests {
 
     fn parse_and_check(src: &str) -> CheckedProgram {
         let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
-        let checked = chelis_types::check_ir_program(&exprs)
+        let checked = chelis_types::check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked)
             .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors));
         let checked = chelis_effects::check_program(&checked)
             .unwrap_or_else(|errors| panic!("effect check failed: {errors:?}"));
@@ -20259,7 +20259,7 @@ mod tests {
 
     fn deep_check(src: &str) -> CheckedProgram {
         let deep = chelis_deep::parser::parse_str(src).expect("Deep fixture parse failed");
-        chelis_types::check_ir_program(&deep)
+        chelis_types::check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
             .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors))
     }
 

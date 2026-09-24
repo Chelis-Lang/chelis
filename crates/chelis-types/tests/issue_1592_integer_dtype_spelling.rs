@@ -5,7 +5,7 @@ use chelis_types::check_ir_program;
 use chelis_types::types::{Prim, Type};
 
 fn error_messages(program: &[chelis_deep::Expr]) -> Vec<String> {
-    match check_ir_program(program) {
+    match check_ir_program(program, chelis_types::ProgramOrigin::Unlinked) {
         Ok(_) => Vec::new(),
         Err(report) => report
             .errors

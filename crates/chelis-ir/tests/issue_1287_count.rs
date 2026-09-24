@@ -103,7 +103,8 @@ fn verifier_rejects_noncanonical_axes_wrong_dtype_and_wrong_shape() {
 fn lower_deep(source: &str) -> Result<Dag, String> {
     let exprs =
         chelis_deep::parser::parse_and_stamp(source).map_err(|e| format!("parse: {e:?}"))?;
-    let checked = check_typed_program(&exprs).map_err(|r| format!("check: {:#?}", r.errors))?;
+    let checked = check_typed_program(&exprs, chelis_types::ProgramOrigin::Unlinked)
+        .map_err(|r| format!("check: {:#?}", r.errors))?;
     let checked = chelis_effects::check_program(&checked).map_err(|e| format!("effects: {e:?}"))?;
     let checked =
         chelis_types::check_linearity(&checked).map_err(|e| format!("linearity: {e:?}"))?;

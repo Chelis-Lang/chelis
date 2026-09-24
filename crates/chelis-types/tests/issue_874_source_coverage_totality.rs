@@ -80,7 +80,7 @@ fn stamped(source: &str) -> Vec<Expr> {
 /// Diagnostics from the ingress `chelis check` runs.
 fn diagnostics(body: &str) -> Vec<CheckError> {
     let source = program(body);
-    match check_ir_program(&stamped(&source)) {
+    match check_ir_program(&stamped(&source), chelis_types::ProgramOrigin::Unlinked) {
         Ok(_) => Vec::new(),
         Err(result) => result.errors,
     }
@@ -734,7 +734,7 @@ fn import_name_lists_are_not_slot_reads() {
   (import {} m.qual ())
   (import-all {} m.every)
   (def {} q1 (lit {type: (t-prim {} f32)} 1.0)))\n";
-    let errors = match check_ir_program(&stamped(source)) {
+    let errors = match check_ir_program(&stamped(source), chelis_types::ProgramOrigin::Unlinked) {
         Ok(_) => Vec::new(),
         Err(result) => result.errors,
     };

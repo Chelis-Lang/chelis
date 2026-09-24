@@ -2433,7 +2433,9 @@ mod tests {
                 prim = prim.name(),
             );
             let expressions = chelis_deep::parser::parse_str(&source).unwrap();
-            let checked = chelis_types::check_ir_program(&expressions).unwrap();
+            let checked =
+                chelis_types::check_ir_program(&expressions, chelis_types::ProgramOrigin::Unlinked)
+                    .unwrap();
             let session = crate::host::HostLoweringSession::new(&checked);
             let plan = |name| {
                 crate::host::host_def_evaluation_plan(&session, name, &context())

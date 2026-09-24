@@ -27,7 +27,7 @@ fn check_library_with_linearity(library_src: &str) -> chelis_types::CheckedProgr
     // Library leg: full IR check check, then linearity. Mirrors what the
     // production pipeline does before stashing a CompiledContext.
     let library_deep = parse_core_fixture(library_src);
-    let checked = check_ir_program(&library_deep)
+    let checked = check_ir_program(&library_deep, chelis_types::ProgramOrigin::Unlinked)
         .unwrap_or_else(|e| panic!("library IR check check failed: {:?}", e.errors));
     check_linearity(&checked).expect("library linearity must be clean")
 }
@@ -37,10 +37,13 @@ fn check_new_with_context(
     new_src: &str,
 ) -> Result<(), Vec<chelis_types::errors::CheckError>> {
     let library_program = check_library_with_linearity(library_src);
-    let ctx = build_type_env_from_library(&parse_core_fixture(library_src))
-        .expect("library context build OK");
+    let ctx = build_type_env_from_library(
+        &parse_core_fixture(library_src),
+        chelis_types::ProgramOrigin::Unlinked,
+    )
+    .expect("library context build OK");
     let new_deep = parse_core_fixture(new_src);
-    let new_checked = check_ir_with_context(&ctx, &new_deep)
+    let new_checked = check_ir_with_context(&ctx, &new_deep, chelis_types::ProgramOrigin::Unlinked)
         .unwrap_or_else(|e| panic!("with-context IR check failed: {:?}", e.errors));
     check_linearity_with_context(&library_program, &new_checked).map(|_| ())
 }
@@ -51,7 +54,7 @@ fn check_monolithic_combined(
 ) -> Result<(), Vec<chelis_types::errors::CheckError>> {
     let combined_src = format!("{library_src}\n{new_src}");
     let combined_deep = parse_core_fixture(&combined_src);
-    let checked = check_typed_program(&combined_deep)
+    let checked = check_typed_program(&combined_deep, chelis_types::ProgramOrigin::Unlinked)
         .unwrap_or_else(|e| panic!("monolithic IR check failed: {:?}", e.errors));
     check_linearity(&checked).map(|_| ())
 }
@@ -144,14 +147,16 @@ fn no_leak_between_snippets_against_same_library() {
     let lib_deep = parse_core_fixture(include_str!(
         "fixtures/core/tests/linearity_with_context/no_leak_between_snippets_against_same_library_157.deep"
     ));
-    let ctx = build_type_env_from_library(&lib_deep).expect("ctx OK");
+    let ctx = build_type_env_from_library(&lib_deep, chelis_types::ProgramOrigin::Unlinked)
+        .expect("ctx OK");
 
     // Snippet A: consuming fan-out — accepted and handled later by Copy
     // insertion during lowering.
     let bad_deep = parse_core_fixture(include_str!(
         "fixtures/core/tests/linearity_with_context/no_leak_between_snippets_against_same_library_163.deep"
     ));
-    let bad_checked = check_ir_with_context(&ctx, &bad_deep).expect("IR check clean");
+    let bad_checked = check_ir_with_context(&ctx, &bad_deep, chelis_types::ProgramOrigin::Unlinked)
+        .expect("IR check clean");
     let fanout_res = check_linearity_with_context(&library_program, &bad_checked);
     assert!(
         fanout_res.is_ok(),
@@ -163,7 +168,9 @@ fn no_leak_between_snippets_against_same_library() {
     let good_deep = parse_core_fixture(include_str!(
         "fixtures/core/tests/linearity_with_context/no_leak_between_snippets_against_same_library_180.deep"
     ));
-    let good_checked = check_ir_with_context(&ctx, &good_deep).expect("IR check clean");
+    let good_checked =
+        check_ir_with_context(&ctx, &good_deep, chelis_types::ProgramOrigin::Unlinked)
+            .expect("IR check clean");
     let good_res = check_linearity_with_context(&library_program, &good_checked);
     assert!(
         good_res.is_ok(),
@@ -545,7 +552,9 @@ fn empty_library_matches_monolithic() {
         "fixtures/core/tests/linearity_with_context/empty_library_matches_monolithic_631.deep"
     ));
     let ctx_empty = chelis_types::TypeEnv::empty();
-    let new_checked = check_ir_with_context(&ctx_empty, &new_deep).expect("IR check clean");
+    let new_checked =
+        check_ir_with_context(&ctx_empty, &new_deep, chelis_types::ProgramOrigin::Unlinked)
+            .expect("IR check clean");
     let res = check_linearity_with_context(&empty_lib_program, &new_checked);
     assert!(
         res.is_ok(),

@@ -3,9 +3,9 @@ use chelis_types::{CheckedProgram, check_ir_program, check_typed_program};
 
 fn checked_ingresses(source: &str) -> (CheckedProgram, CheckedProgram) {
     let stamped = chelis_deep::parse_and_stamp_file(source).expect("fixture must parse and stamp");
-    let typed = check_typed_program(&stamped)
+    let typed = check_typed_program(&stamped, chelis_types::ProgramOrigin::Unlinked)
         .unwrap_or_else(|errors| panic!("typed ingress must check: {:?}", errors.errors));
-    let ir = check_ir_program(&stamped)
+    let ir = check_ir_program(&stamped, chelis_types::ProgramOrigin::Unlinked)
         .unwrap_or_else(|errors| panic!("IR ingress must check: {:?}", errors.errors));
     (typed, ir)
 }

@@ -9,7 +9,8 @@ fn checked_program() -> CheckedProgram {
                 (app {} (var {} relu) (var {} x))))"#,
     )
     .expect("fixture parses");
-    let typed = check_ir_program(&exprs).expect("fixture type-checks");
+    let typed = check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked)
+        .expect("fixture type-checks");
     check_linearity(&typed).expect("fixture passes linearity")
 }
 

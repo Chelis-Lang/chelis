@@ -126,7 +126,7 @@ fn check_deep_on_bounded_stack(
             if let Some(bytes) = grow_segment_bytes {
                 chelis_types::set_grow_segment_bytes_for_test(bytes);
             }
-            let messages = match check_ir_program(&program) {
+            let messages = match check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked) {
                 Ok(_) => Vec::new(),
                 Err(result) => result
                     .errors

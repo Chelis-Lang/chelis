@@ -31,7 +31,8 @@ use chelis_types::{check_linearity, check_typed_program};
 
 fn linearity_errors(source: &str) -> Vec<chelis_types::errors::CheckError> {
     let deep = chelis_deep::parse_and_stamp_file(source).expect("Deep fixture");
-    let checked = check_typed_program(&deep).expect("type check should succeed");
+    let checked = check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked)
+        .expect("type check should succeed");
     check_linearity(&checked).expect_err("linearity check must error")
 }
 

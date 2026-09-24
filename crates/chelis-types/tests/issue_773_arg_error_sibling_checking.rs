@@ -47,7 +47,7 @@ fn messages(rep: &InferResult) -> Vec<String> {
 /// diagnostic messages for exact-count / exact-content assertions.
 fn reject_messages(source: &str, label: &str) -> Vec<String> {
     let deep = core_fixture(source);
-    let rep = check_ir_program(&deep)
+    let rep = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
         .err()
         .unwrap_or_else(|| panic!("{label}: expected a check rejection, but it passed"));
     messages(&rep)
@@ -142,5 +142,6 @@ fn separate_sig_sdpa_checks_clean() {
     let deep = core_fixture(include_str!(
         "fixtures/core/tests/issue_773_arg_error_sibling_checking/separate_sig_sdpa_checks_clean.deep"
     ));
-    check_ir_program(&deep).expect("separate-sig SDPA must check clean");
+    check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
+        .expect("separate-sig SDPA must check clean");
 }

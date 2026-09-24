@@ -64,8 +64,8 @@ fn issue259_mean_nonliteral_axis_reports_axis_cause_not_borrow() {
         "fixtures/core/tests/issue_259_nonliteral_axis_diagnostic/issue259_mean_nonliteral_axis_reports_axis_cause_not_borrow.deep"
     );
     let deep = core_fixture(src);
-    let rep =
-        check_ir_program(&deep).expect_err("non-literal reduction axis must be rejected at infer");
+    let rep = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
+        .expect_err("non-literal reduction axis must be rejected at infer");
     let msgs = messages(&rep);
 
     // The root-cause diagnostic fires at the reduction site, exactly
@@ -112,7 +112,7 @@ fn issue259_reduction_family_nonliteral_axis_all_report_axis_cause() {
         )
         .replace(" sum)", &format!(" {name})"));
         let deep = core_fixture(&source);
-        let rep = check_ir_program(&deep)
+        let rep = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
             .err()
             .unwrap_or_else(|| panic!("{name} non-literal axis must be rejected"));
         let msgs = messages(&rep);
@@ -141,8 +141,8 @@ fn issue259_expand_nonliteral_axis_reports_axis_cause_not_borrow() {
         "fixtures/core/tests/issue_259_nonliteral_axis_diagnostic/issue259_expand_nonliteral_axis_reports_axis_cause_not_borrow.deep"
     );
     let deep = core_fixture(src);
-    let rep =
-        check_ir_program(&deep).expect_err("non-literal expand axis must be rejected at infer");
+    let rep = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
+        .expect_err("non-literal expand axis must be rejected at infer");
     let msgs = messages(&rep);
     assert!(
         msgs.iter().any(|m| m.contains("insert")
@@ -176,7 +176,7 @@ fn issue259_mean_literal_axis_still_typechecks() {
         "fixtures/core/tests/issue_259_nonliteral_axis_diagnostic/issue259_mean_literal_axis_still_typechecks.deep"
     );
     let deep = core_fixture(src);
-    if let Err(rep) = check_ir_program(&deep) {
+    if let Err(rep) = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked) {
         panic!(
             "literal-axis reduction must still type-check, got {:?}",
             messages(&rep)
@@ -194,7 +194,7 @@ fn issue259_mean_cast_wrapped_literal_axis_still_typechecks() {
         "fixtures/core/tests/issue_259_nonliteral_axis_diagnostic/issue259_mean_cast_wrapped_literal_axis_still_typechecks.deep"
     );
     let deep = core_fixture(src);
-    if let Err(rep) = check_ir_program(&deep) {
+    if let Err(rep) = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked) {
         panic!(
             "cast-wrapped literal-axis reduction must still type-check, got {:?}",
             messages(&rep)
@@ -212,7 +212,7 @@ fn issue259_expand_literal_axis_symbolic_size_still_typechecks() {
         "fixtures/core/tests/issue_259_nonliteral_axis_diagnostic/issue259_expand_literal_axis_symbolic_size_still_typechecks.deep"
     );
     let deep = core_fixture(src);
-    if let Err(rep) = check_ir_program(&deep) {
+    if let Err(rep) = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked) {
         panic!(
             "literal-axis expand must still type-check, got {:?}",
             messages(&rep)
@@ -235,7 +235,8 @@ fn issue259_oob_literal_axis_still_reports_out_of_bounds() {
         "fixtures/core/tests/issue_259_nonliteral_axis_diagnostic/issue259_oob_literal_axis_still_reports_out_of_bounds.deep"
     );
     let deep = core_fixture(src);
-    let rep = check_ir_program(&deep).expect_err("out-of-bounds literal axis must be rejected");
+    let rep = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
+        .expect_err("out-of-bounds literal axis must be rejected");
     let msgs = messages(&rep);
     assert!(
         msgs.iter()
@@ -258,7 +259,8 @@ fn issue259_non_tensor_borrow_still_rejected() {
         "fixtures/core/tests/issue_259_nonliteral_axis_diagnostic/issue259_non_tensor_borrow_still_rejected.deep"
     );
     let deep = core_fixture(src);
-    let rep = check_ir_program(&deep).expect_err("borrow of i32 against &tensor must be rejected");
+    let rep = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
+        .expect_err("borrow of i32 against &tensor must be rejected");
     assert!(
         !rep.errors.is_empty(),
         "borrow of a non-tensor must surface at least one error"

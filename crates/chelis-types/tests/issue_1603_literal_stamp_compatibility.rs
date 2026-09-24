@@ -85,11 +85,11 @@ fn messages(errors: &[CheckError]) -> Vec<String> {
 /// is checked for every cell including the recorded-only ones.
 fn both_ingresses(source: &str) -> Vec<String> {
     let exprs = stamped(source);
-    let typed = match check_typed_program(&exprs) {
+    let typed = match check_typed_program(&exprs, chelis_types::ProgramOrigin::Unlinked) {
         Ok(_) => Vec::new(),
         Err(result) => messages(&result.errors),
     };
-    let ir = match check_ir_program(&exprs) {
+    let ir = match check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked) {
         Ok(_) => Vec::new(),
         Err(result) => messages(&result.errors),
     };
@@ -234,10 +234,13 @@ fn an_explicit_axis_adds_one_real_inference_visit() {
     ));
     let explicit = stamped(&vmap_program(INT32_0));
     for (without_axis, with_axis) in [
-        (check_ir_program(&omitted), check_ir_program(&explicit)),
         (
-            check_typed_program(&omitted),
-            check_typed_program(&explicit),
+            check_ir_program(&omitted, chelis_types::ProgramOrigin::Unlinked),
+            check_ir_program(&explicit, chelis_types::ProgramOrigin::Unlinked),
+        ),
+        (
+            check_typed_program(&omitted, chelis_types::ProgramOrigin::Unlinked),
+            check_typed_program(&explicit, chelis_types::ProgramOrigin::Unlinked),
         ),
     ] {
         let without_axis = without_axis.expect("the default axis remains accepted");

@@ -49,7 +49,8 @@ use chelis_types::{check_linearity, check_typed_program};
 fn check_core(source: &str) -> Result<(), Vec<chelis_types::errors::CheckError>> {
     let decls = parse_str(source).expect("Deep fixture parse should succeed");
     let deep = decls;
-    let checked = check_typed_program(&deep).expect("type check should succeed");
+    let checked = check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked)
+        .expect("type check should succeed");
     check_linearity(&checked).map(|_| ())
 }
 

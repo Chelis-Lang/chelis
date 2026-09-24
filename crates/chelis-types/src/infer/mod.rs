@@ -35,6 +35,20 @@ use crate::session::{DeclarationDiagnosticOwner, DeclarationTypeDiagnosticClass,
 use crate::types::*;
 use crate::unify::*;
 
+/// Provenance asserted by the native caller for one unit entering inference.
+///
+/// This is an input authority, not a checked-program or library proof. Only the
+/// trusted linker boundary may assert `Linked`, after validating authored units
+/// and rewriting their names. Names, AST metadata, and cached contexts cannot
+/// establish that authority for another unit. This input is never serialized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgramOrigin {
+    /// Raw or expanded input that has not passed through the trusted linker.
+    Unlinked,
+    /// Output attested by the trusted native linker, including dependency interfaces.
+    Linked,
+}
+
 trait DiagnosticOutput {
     fn push(&mut self, error: CheckError);
 

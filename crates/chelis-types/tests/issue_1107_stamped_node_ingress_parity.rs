@@ -50,14 +50,14 @@ fn messages(errors: &[CheckError]) -> Vec<String> {
 }
 
 fn typed_errors(exprs: &[Expr]) -> Vec<String> {
-    match check_typed_program(exprs) {
+    match check_typed_program(exprs, chelis_types::ProgramOrigin::Unlinked) {
         Ok(_) => Vec::new(),
         Err(result) => messages(&result.errors),
     }
 }
 
 fn ir_errors(exprs: &[Expr]) -> Vec<String> {
-    match check_ir_program(exprs) {
+    match check_ir_program(exprs, chelis_types::ProgramOrigin::Unlinked) {
         Ok(_) => Vec::new(),
         Err(result) => messages(&result.errors),
     }

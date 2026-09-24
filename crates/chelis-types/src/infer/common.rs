@@ -1191,6 +1191,7 @@ fn note_eager_value_ordinals(items: &[(Option<String>, &deep::Expr)], env: &mut 
 /// [`Env::top_level_value_visibility`] at each reference, not by withholding
 /// or replaying bindings along the inference schedule: the schedule reorders
 /// function bodies, so a binding timeline cannot express source order.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn collect_all_declarations(
     items: &[(Option<String>, &deep::Expr)],
     declaration_diagnostic_owners: &[Option<DeclarationDiagnosticOwner>],
@@ -1198,6 +1199,7 @@ pub(super) fn collect_all_declarations(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &mut AdtRegistry,
+    origin: ProgramOrigin,
     errors: &mut DiagnosticSink<'_>,
 ) {
     debug_assert_eq!(items.len(), declaration_diagnostic_owners.len());
@@ -1207,7 +1209,7 @@ pub(super) fn collect_all_declarations(
     let bare_items: Vec<&deep::Expr> = items.iter().map(|(_, expr)| *expr).collect();
     report_duplicate_defs(&bare_items, errors);
     report_duplicate_defsigs(&bare_items, errors);
-    report_orphan_defsigs(items, errors);
+    report_orphan_defsigs(items, origin, errors);
     report_builtin_shadowing(&bare_items, errors);
     note_eager_value_ordinals(items, env);
     let resolution_env = precollect_type_resolution_env(items, adt_reg);
@@ -1699,13 +1701,14 @@ pub(super) fn report_duplicate_defsigs(items: &[&deep::Expr], errors: &mut Diagn
 /// makes `check` accept a symbol that no lowering lane can define (#850).
 pub(super) fn report_orphan_defsigs(
     items: &[(Option<String>, &deep::Expr)],
+    origin: ProgramOrigin,
     errors: &mut DiagnosticSink<'_>,
 ) {
     // Linked dependency interfaces intentionally contain signature-only rows:
     // their bodies live in the supplying package artifact. Reef validates
-    // every authored source module and synthetic entry before installing the
-    // linked-program guard. The exemption therefore requires both that
-    // in-process provenance and the linker's reserved mangled-name format;
+    // every authored source module and synthetic entry before asserting
+    // ProgramOrigin::Linked. The exemption requires both that explicit
+    // provenance and the linker's reserved mangled-name format;
     // neither fact alone can exempt an authored orphan. Raw Deep/Surf units
     // and persistent checker contexts still take the same-unit check below.
     let mut defs: UnordSet<(Option<&str>, &str)> = UnordSet::new();
@@ -1725,7 +1728,7 @@ pub(super) fn report_orphan_defsigs(
         let Some(name) = kids.first().and_then(symbol_name) else {
             continue;
         };
-        if crate::opacity::linked_program() && crate::opacity::is_linker_format_name(name) {
+        if origin == ProgramOrigin::Linked && crate::opacity::is_linker_format_name(name) {
             continue;
         }
         if !defs.contains(&(module.as_deref(), name)) {
@@ -1933,7 +1936,11 @@ pub(super) fn collect_declarations(
                 subst.leave_level(signature_level, vg);
                 match (resolved, installed) {
                     (Ok(resolved), Ok(())) => {
-                        let scheme = env.generalize(&resolved.ty, subst);
+                        let scheme = env.generalize(
+                            &resolved.ty,
+                            subst,
+                            errors.recursive_state().pinned_vars(),
+                        );
                         env.bind(name.to_string(), scheme);
                         env.record_declared_binder_identities(name, resolved.binder_identities);
                     }
@@ -1942,11 +1949,21 @@ pub(super) fn collect_declarations(
                             resolved.ty,
                             witness,
                         );
-                        env.bind_rejected_signature(name.to_string(), recovery, subst);
+                        env.bind_rejected_signature(
+                            name.to_string(),
+                            recovery,
+                            subst,
+                            errors.recursive_state().pinned_vars(),
+                        );
                         env.record_declared_binder_identities(name, resolved.binder_identities);
                     }
                     (Err(rejected), _) => {
-                        env.bind_rejected_signature(name.to_string(), rejected.recovery, subst);
+                        env.bind_rejected_signature(
+                            name.to_string(),
+                            rejected.recovery,
+                            subst,
+                            errors.recursive_state().pinned_vars(),
+                        );
                         env.record_declared_binder_identities(name, rejected.binder_identities);
                     }
                 }
@@ -2431,7 +2448,7 @@ pub(super) fn infer_top_level(
         let recursion::DeclaredMemberSetup {
             ty: declared_ty,
             binder_identities: declared_binder_identities,
-            caller_guard: _recursion_caller_guard,
+            caller: recursive_caller,
         } = recursive_expected.prepare_declared_member(
             recursion::DeclaredMemberRequest::new(
                 &name,
@@ -2442,7 +2459,10 @@ pub(super) fn infer_top_level(
             env,
             vg,
             subst,
+            errors.recursive_state(),
         );
+        let mut caller_scope = errors.enter_recursive_caller(recursive_caller);
+        let errors = caller_scope.sink();
         let declared_dim_names = declared_binder_identities.dim_names();
         let declared_type_names = declared_binder_identities.type_names();
         let declared_rank_names = declared_binder_identities.rank_names();
@@ -2818,8 +2838,12 @@ pub(super) fn infer_top_level(
             ))
         } else {
             let owned_contracts = subst.collection_contract_ids_since(collection_contract_mark);
-            let scheme =
-                env.generalize_with_collection_contracts(&scheme_body, subst, &owned_contracts);
+            let scheme = env.generalize_with_collection_contracts(
+                &scheme_body,
+                subst,
+                &owned_contracts,
+                errors.recursive_state().pinned_vars(),
+            );
             env.bind(name, scheme);
             None
         }

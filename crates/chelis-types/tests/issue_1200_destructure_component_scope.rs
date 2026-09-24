@@ -48,14 +48,16 @@ use chelis_types::{check_linearity, check_typed_program};
 fn linearity_errors(source: &str) -> Vec<chelis_types::errors::CheckError> {
     let decls = parse_str(source).expect("Deep fixture parse should succeed");
     let deep = decls;
-    let checked = check_typed_program(&deep).expect("type check should succeed");
+    let checked = check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked)
+        .expect("type check should succeed");
     check_linearity(&checked).expect_err("linearity check must error")
 }
 
 fn assert_linearity_clean(source: &str) {
     let decls = parse_str(source).expect("Deep fixture parse should succeed");
     let deep = decls;
-    let checked = check_typed_program(&deep).expect("type check should succeed");
+    let checked = check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked)
+        .expect("type check should succeed");
     if let Err(errors) = check_linearity(&checked) {
         panic!("linearity check should not error; got {errors:?}");
     }

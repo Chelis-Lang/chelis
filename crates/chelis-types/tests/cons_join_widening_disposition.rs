@@ -35,7 +35,7 @@ use chelis_types::errors::CheckError;
 fn check(source: &str) -> Result<(), Vec<CheckError>> {
     let decls = parse_core(source).expect("Deep fixture parse should succeed");
     let deep = decls;
-    match check_typed_program(&deep) {
+    match check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked) {
         Ok(_) => Ok(()),
         Err(report) => Err(report.errors),
     }

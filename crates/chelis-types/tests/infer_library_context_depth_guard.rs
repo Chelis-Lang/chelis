@@ -104,9 +104,11 @@ fn library_context_on_bounded_stack(library: Vec<Expr>, stack_mib: usize) -> Vec
     std::thread::Builder::new()
         .name("infer-library-depth-guard-test".to_string())
         .stack_size(stack_mib * 1024 * 1024)
-        .spawn(move || match build_compiled_library_context(&library) {
-            Ok(_) => Vec::new(),
-            Err(result) => result.errors.iter().map(|e| e.message.clone()).collect(),
+        .spawn(move || {
+            match build_compiled_library_context(&library, chelis_types::ProgramOrigin::Unlinked) {
+                Ok(_) => Vec::new(),
+                Err(result) => result.errors.iter().map(|e| e.message.clone()).collect(),
+            }
         })
         .expect("spawn library-context worker thread")
         .join()
@@ -120,7 +122,11 @@ fn library_context_with_base_on_bounded_stack(library: Vec<Expr>, stack_mib: usi
         .stack_size(stack_mib * 1024 * 1024)
         .spawn(move || {
             let base = TypeEnv::empty();
-            match build_compiled_library_context_with_base(&base, &library) {
+            match build_compiled_library_context_with_base(
+                &base,
+                &library,
+                chelis_types::ProgramOrigin::Unlinked,
+            ) {
                 Ok(_) => Vec::new(),
                 Err(result) => result.errors.iter().map(|e| e.message.clone()).collect(),
             }

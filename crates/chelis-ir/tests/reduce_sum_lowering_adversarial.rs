@@ -16,7 +16,7 @@ use chelis_types::check_ir_program;
 
 fn lower_deep(src: &str) -> Result<chelis_ir::dag::Dag, String> {
     let exprs = chelis_deep::parser::parse_str(src).expect("parse Deep fixture");
-    let checked = check_ir_program(&exprs).map_err(|r| {
+    let checked = check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked).map_err(|r| {
         format!(
             "check: {:?}",
             r.errors

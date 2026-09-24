@@ -40,8 +40,14 @@ fn diagnostics(program: &[chelis_deep::Expr]) -> (Diagnostics, Diagnostics) {
             .collect(),
     };
     (
-        summarize(check_ir_program(program)),
-        summarize(check_typed_program(program)),
+        summarize(check_ir_program(
+            program,
+            chelis_types::ProgramOrigin::Unlinked,
+        )),
+        summarize(check_typed_program(
+            program,
+            chelis_types::ProgramOrigin::Unlinked,
+        )),
     )
 }
 
@@ -501,14 +507,15 @@ fn a_separated_defsig_does_not_publish_a_future_eager_value() {
 #[test]
 fn a_separated_defsig_preserves_a_prior_context_binding_until_its_def() {
     let library = deep_program("(def {} value (lit {type: (t-prim {} f32)} 1.0))\n");
-    let context = build_type_env_from_library(&library).expect("library context checks cleanly");
+    let context = build_type_env_from_library(&library, chelis_types::ProgramOrigin::Unlinked)
+        .expect("library context checks cleanly");
     let program = deep_program(
         "(defsig {} value (t-prim {} i32))\n\n\
          (defsig {} capture (t-prim {} f32))\n\n\
          (def {} capture (var {} value))\n\n\
          (def {} value (lit {type: (t-prim {} i32)} 7))\n",
     );
-    check_ir_with_context(&context, &program)
+    check_ir_with_context(&context, &program, chelis_types::ProgramOrigin::Unlinked)
         .expect("the prior f32 binding must remain visible until the new value def");
 }
 
@@ -523,8 +530,12 @@ fn context_check_cannot_prebind_a_later_external_input_globally() {
         ),
     ] {
         let program = legacy_program(source);
-        let result = check_ir_with_context(&TypeEnv::empty(), &program)
-            .expect_err("later external input must remain unavailable in context checks");
+        let result = check_ir_with_context(
+            &TypeEnv::empty(),
+            &program,
+            chelis_types::ProgramOrigin::Unlinked,
+        )
+        .expect_err("later external input must remain unavailable in context checks");
         assert!(
             result.errors.iter().any(|error| matches!(
                 error.kind,

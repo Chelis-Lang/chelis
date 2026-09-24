@@ -6,7 +6,7 @@ fn core_fixture(source: &str) -> Vec<chelis_deep::Expr> {
 }
 
 fn assert_checks(source: &str) {
-    let result = check_ir_program(&core_fixture(source));
+    let result = check_ir_program(&core_fixture(source), chelis_types::ProgramOrigin::Unlinked);
     assert!(result.is_ok(), "known recursion must check: {result:?}");
 }
 
@@ -36,11 +36,12 @@ fn context_check_prebinds_new_cycle_and_keeps_library_names_visible() {
     let library = core_fixture(include_str!(
         "fixtures/core/tests/rt800_append_only_cycle_resolution/case_004.deep"
     ));
-    let context = build_type_env_from_library(&library).expect("library checks");
+    let context = build_type_env_from_library(&library, chelis_types::ProgramOrigin::Unlinked)
+        .expect("library checks");
     let new_code = core_fixture(include_str!(
         "fixtures/core/tests/rt800_append_only_cycle_resolution/case_005.deep"
     ));
-    let result = check_ir_with_context(&context, &new_code);
+    let result = check_ir_with_context(&context, &new_code, chelis_types::ProgramOrigin::Unlinked);
     assert!(result.is_ok(), "context recursion must check: {result:?}");
 }
 
@@ -51,6 +52,7 @@ fn genuinely_unknown_callable_still_reports_exactly_once() {
         &core_fixture(include_str!(
             "fixtures/core/tests/rt800_append_only_cycle_resolution/case_006.deep"
         )),
+        chelis_types::ProgramOrigin::Unlinked,
     )
     .expect_err("unknown call must reject");
     let unbound = result
@@ -93,8 +95,8 @@ fn bare_acyclic_later_helper_remains_textually_unavailable() {
 "#,
     )
     .expect("Deep fixture parses");
-    let result =
-        check_ir_program(&deep).expect_err("bare forward helpers retain textual semantics");
+    let result = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
+        .expect_err("bare forward helpers retain textual semantics");
     let unbound = result
         .errors
         .iter()

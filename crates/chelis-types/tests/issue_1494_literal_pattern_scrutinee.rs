@@ -44,11 +44,12 @@ fn rendered(errors: &[CheckError]) -> Vec<String> {
 /// ingress (`check_typed_program`) and the normalizing ingress
 /// (`check_ir_program`) agree on it.
 fn agreed_diagnostics(source: &str, label: &str) -> Vec<String> {
-    let typed = match check_typed_program(&parse_core(source)) {
-        Ok(_) => Vec::new(),
-        Err(result) => rendered(&result.errors),
-    };
-    let ir = match check_ir_program(&parse_core(source)) {
+    let typed =
+        match check_typed_program(&parse_core(source), chelis_types::ProgramOrigin::Unlinked) {
+            Ok(_) => Vec::new(),
+            Err(result) => rendered(&result.errors),
+        };
+    let ir = match check_ir_program(&parse_core(source), chelis_types::ProgramOrigin::Unlinked) {
         Ok(_) => Vec::new(),
         Err(result) => rendered(&result.errors),
     };
@@ -633,9 +634,12 @@ fn a_failed_scrutinee_does_not_cascade_a_pattern_rejection() {
 /// message. Pinned so the diagnostic contract cannot quietly degrade.
 #[test]
 fn the_rejection_carries_its_kind_and_a_suggestion() {
-    let Err(result) = check_ir_program(&parse_core(include_str!(
-        "fixtures/core/tests/issue_1494_literal_pattern_scrutinee/the_rejection_carries_its_kind_and_a_suggestion.0.deep"
-    ))) else {
+    let Err(result) = check_ir_program(
+        &parse_core(include_str!(
+            "fixtures/core/tests/issue_1494_literal_pattern_scrutinee/the_rejection_carries_its_kind_and_a_suggestion.0.deep"
+        )),
+        chelis_types::ProgramOrigin::Unlinked,
+    ) else {
         panic!("the issue program must be rejected");
     };
     let [error] = result.errors.as_slice() else {

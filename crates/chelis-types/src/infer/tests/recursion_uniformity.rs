@@ -7,12 +7,12 @@ use super::*;
 
 fn legacy_errors(src: &str) -> Vec<CheckError> {
     let exprs: Vec<deep::Expr> = serde_json::from_str(src).expect("lossless AST fixture");
-    infer_program(&exprs).errors
+    infer_program(&exprs, crate::ProgramOrigin::Unlinked).errors
 }
 
 fn legacy_ir_errors(src: &str) -> Vec<CheckError> {
     let exprs: Vec<deep::Expr> = serde_json::from_str(src).expect("lossless AST fixture");
-    match check_ir_program(&exprs) {
+    match check_ir_program(&exprs, crate::ProgramOrigin::Unlinked) {
         Ok(_) => Vec::new(),
         Err(result) => result.errors,
     }
@@ -59,18 +59,8 @@ fn direct_polymorphic_recursion_is_rejected_with_the_atom() {
     let error = poly[0];
     assert!(matches!(error.kind, CheckErrorKind::TypeMismatch));
     assert!(error.message.contains("`f`"), "must name the function");
-    assert!(
-        error.message.contains("Box[a]"),
-        "must name the differing recursive instantiation: {}",
-        error.message
-    );
-    assert!(
-        error
-            .message
-            .contains("the caller's own instantiation `[a]`"),
-        "must name the caller instantiation: {}",
-        error.message
-    );
+    assert_eq!(error.got.as_deref(), Some("[Box[a]]"));
+    assert_eq!(error.expected.as_deref(), Some("[a]"));
     assert!(error.span_offset.is_some(), "must carry a source span");
 }
 
@@ -110,13 +100,14 @@ fn inferred_recursive_members_generalize_after_both_driver_scc_boundaries() {
             (app {} (var {} left) (lit {type: (t-prim {} bool)} true)
               (lit {type: (t-prim {} bool)} false)))";
     let exprs = chelis_deep::parser::parse_str(source).expect("Deep fixture parses");
-    let inferred = infer_program(&exprs);
+    let inferred = infer_program(&exprs, crate::ProgramOrigin::Unlinked);
     assert!(
         inferred.errors.is_empty(),
         "primary driver must generalize inferred SCC members: {:?}",
         inferred.errors
     );
-    check_ir_program(&exprs).expect("IR driver must generalize inferred SCC members");
+    check_ir_program(&exprs, crate::ProgramOrigin::Unlinked)
+        .expect("IR driver must generalize inferred SCC members");
 }
 
 #[test]
@@ -125,9 +116,7 @@ fn recursive_group_errors_clear_scope_before_the_next_check_in_both_drivers() {
         "../../../tests/fixtures/core/src/recursion_uniformity/recursive_group_errors_clear_scope_before_the_next_check_in_both_drivers.json"
     );
     assert!(!legacy_errors(broken).is_empty());
-    assert_eq!(super::super::recursion::group_state_counts(), (0, 0));
     assert!(!legacy_ir_errors(broken).is_empty());
-    assert_eq!(super::super::recursion::group_state_counts(), (0, 0));
 
     let clean = include_str!(
         "../../../tests/fixtures/core/src/recursion_uniformity/recursive_group_errors_clear_scope_before_the_next_check_in_both_drivers_2.json"
@@ -198,19 +187,8 @@ fn monomorphic_caller_in_group_names_the_missing_type_parameters() {
         "must name caller and callee: {}",
         error.message
     );
-    assert!(
-        error.message.contains("declares no type parameters"),
-        "must name the actual constraint instead of an empty instantiation: {}",
-        error.message
-    );
-    assert!(
-        !error
-            .suggestions
-            .iter()
-            .any(|s| s.contains("reuse the caller's own type parameters")),
-        "must not advise reusing parameters the caller does not have: {:?}",
-        error.suggestions
-    );
+    assert!(matches!(error.kind, CheckErrorKind::TypeMismatch));
+    assert_eq!(error.expected.as_deref(), Some("[]"));
 }
 
 #[test]

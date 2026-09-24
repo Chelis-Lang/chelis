@@ -19,10 +19,6 @@ struct ComponentLevelScope {
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RecursiveAbortObservation {
-    current_level: u32,
-    group_state_counts: (usize, usize),
-    member_count: usize,
-    prior_binding_count: usize,
     all_prior_bindings_restored: bool,
     all_temporary_bindings_removed: bool,
 }
@@ -137,10 +133,16 @@ impl ComponentLevelScope {
         subst.leave_level(self.level, var_gen);
     }
 
-    fn abort(mut self, env: &mut Env, var_gen: &VarGen, subst: &mut Subst) {
+    fn abort(
+        mut self,
+        env: &mut Env,
+        var_gen: &VarGen,
+        subst: &mut Subst,
+        recursive: &mut recursion::RecursiveState,
+    ) {
         #[cfg(test)]
         let prior_members = self.members.clone();
-        super::recursion::abort_group();
+        recursive.abort_group();
         self.remove_temporary_bindings(env);
         for (name, prior) in self.members {
             if let Some(scheme) = prior {
@@ -152,10 +154,6 @@ impl ComponentLevelScope {
         subst.leave_level(self.level, var_gen);
         #[cfg(test)]
         RECURSIVE_ABORT_OBSERVATION.with(|observation| {
-            let prior_binding_count = prior_members
-                .iter()
-                .filter(|(_, prior)| prior.is_some())
-                .count();
             let all_prior_bindings_restored = prior_members.iter().all(|(name, prior)| {
                 prior.as_ref().is_none_or(|prior| {
                     env.lookup(name)
@@ -167,10 +165,6 @@ impl ComponentLevelScope {
                 .filter(|(_, prior)| prior.is_none())
                 .all(|(name, _)| env.lookup(name).is_none());
             *observation.borrow_mut() = Some(RecursiveAbortObservation {
-                current_level: subst.current_level(),
-                group_state_counts: super::recursion::group_state_counts(),
-                member_count: prior_members.len(),
-                prior_binding_count,
                 all_prior_bindings_restored,
                 all_temporary_bindings_removed,
             });
@@ -244,7 +238,7 @@ fn sweep_recursive_collection_contracts(
             var_gen,
             subst,
         );
-        super::recursion::begin_group(
+        errors.recursive_state_mut().begin_group(
             members.iter().map(|(_, name)| {
                 let authored = declared_signatures
                     .get(name)
@@ -261,7 +255,7 @@ fn sweep_recursive_collection_contracts(
 
         for (declaration_index, name) in &members {
             if crate::cancel::cancellation_requested() {
-                component_scope.abort(env, var_gen, subst);
+                component_scope.abort(env, var_gen, subst, errors.recursive_state_mut());
                 return;
             }
             let (module, expr) = &items[*declaration_index];
@@ -306,20 +300,25 @@ fn sweep_recursive_collection_contracts(
         }
 
         if diagnosed || deferred_bindings.len() != members.len() {
-            component_scope.abort(env, var_gen, subst);
+            component_scope.abort(env, var_gen, subst, errors.recursive_state_mut());
             return;
         }
 
-        super::recursion::finish_group(subst, errors);
+        errors.finish_recursive_group(subst);
         if errors.iter_since(sweep_checkpoint).next().is_some() {
-            component_scope.abort(env, var_gen, subst);
+            component_scope.abort(env, var_gen, subst, errors.recursive_state_mut());
             return;
         }
         component_scope.complete(env, var_gen, subst);
         let schemes = deferred_bindings
             .into_iter()
             .map(|(name, ty, owned_contracts)| {
-                let scheme = env.generalize_with_collection_contracts(&ty, subst, &owned_contracts);
+                let scheme = env.generalize_with_collection_contracts(
+                    &ty,
+                    subst,
+                    &owned_contracts,
+                    errors.recursive_state().pinned_vars(),
+                );
                 (name, scheme)
             })
             .collect::<Vec<_>>();
@@ -412,25 +411,29 @@ fn cancellation_gate(errors: &mut DiagnosticSink<'_>) -> bool {
 }
 
 /// Run type inference on a list of top-level Deep expressions.
-pub fn infer_program(exprs: &[deep::Expr]) -> InferResult {
+pub fn infer_program(exprs: &[deep::Expr], origin: ProgramOrigin) -> InferResult {
     // WI-1 follow-up: run the whole pipeline on a grown stack so a deeply
     // nested but finite program checks end-to-end instead of tripping a
     // per-site `stack_guard!` partway through one of the recursive passes.
-    crate::session::infer_program(exprs)
+    crate::session::infer_program(exprs, origin)
 }
 
 pub(crate) fn infer_program_in_session(
     exprs: &[deep::Expr],
+    origin: ProgramOrigin,
     errors: &mut DiagnosticSink<'_>,
 ) -> InferStats {
     let normalized = normalize_program_input(exprs);
-    infer_program_with_product_in_session(&normalized, errors).stats()
+    infer_program_with_product_in_session(&normalized, origin, errors).stats()
 }
 
 pub(super) fn infer_program_with_product_in_session(
     exprs: &[deep::Expr],
+    origin: ProgramOrigin,
     errors: &mut DiagnosticSink<'_>,
 ) -> InferenceProduct {
+    let mut recursive_scope = errors.enter_recursive_inference();
+    let errors = recursive_scope.sink();
     // Reset the stack-exhaustion flag for this check unit; `drain` below
     // turns any walker stack bail into a hard located error so deep input
     // can never produce a silent green / partial result.
@@ -446,7 +449,7 @@ pub(super) fn infer_program_with_product_in_session(
     detect_module_reopens(exprs, errors);
     // RFC v5 (RT-1 F2 bypass): reject the reef linker's reserved
     // internal-name format in programs not produced by the linker.
-    detect_forged_linker_names(exprs, errors);
+    detect_forged_linker_names(exprs, origin, errors);
 
     // First pass: collect deftype and defsig declarations. Descend through
     // `(module {} name ...)` wrappers so declarations in every idiomatic
@@ -460,6 +463,7 @@ pub(super) fn infer_program_with_product_in_session(
         &mut vg,
         &mut subst,
         &mut adt_reg,
+        origin,
         errors,
     );
     product.type_headers = adt_reg.resolution_env().clone();
@@ -506,7 +510,6 @@ pub(super) fn infer_program_with_product_in_session(
     // leak its pins, temporary bindings, and child level.
     let cancel = crate::cancel::current_cancel_token();
     let cancelled = || cancel.as_ref().is_some_and(CancelToken::is_cancelled);
-    super::recursion::reset();
     'schedule: for group in inference_groups {
         if cancelled() {
             break;
@@ -549,7 +552,7 @@ pub(super) fn infer_program_with_product_in_session(
         // function-plan projection. A mixed reference cycle alone must not
         // activate it.
         if recursion_active {
-            super::recursion::begin_group(
+            errors.recursive_state_mut().begin_group(
                 group
                     .recursive_function_indices
                     .iter()
@@ -568,7 +571,7 @@ pub(super) fn infer_program_with_product_in_session(
         for &declaration_index in &group.indices {
             if cancelled() {
                 if let Some(scope) = component_scope.take() {
-                    scope.abort(&mut env, &vg, &mut subst);
+                    scope.abort(&mut env, &vg, &mut subst, errors.recursive_state_mut());
                 }
                 break 'schedule;
             }
@@ -642,7 +645,7 @@ pub(super) fn infer_program_with_product_in_session(
         }
         if cancelled() {
             if let Some(scope) = component_scope.take() {
-                scope.abort(&mut env, &vg, &mut subst);
+                scope.abort(&mut env, &vg, &mut subst, errors.recursive_state_mut());
             }
             break 'schedule;
         }
@@ -650,7 +653,7 @@ pub(super) fn infer_program_with_product_in_session(
             // Function-recursion validation, when independently active, must
             // clear its pins before component-wide generalization.
             if recursion_active {
-                super::recursion::finish_group(&subst, errors);
+                errors.finish_recursive_group(&subst);
             }
             component_scope
                 .take()
@@ -659,8 +662,12 @@ pub(super) fn infer_program_with_product_in_session(
             let schemes = deferred_bindings
                 .into_iter()
                 .map(|(name, ty, owned_contracts)| {
-                    let scheme =
-                        env.generalize_with_collection_contracts(&ty, &subst, &owned_contracts);
+                    let scheme = env.generalize_with_collection_contracts(
+                        &ty,
+                        &subst,
+                        &owned_contracts,
+                        errors.recursive_state().pinned_vars(),
+                    );
                     (name, scheme)
                 })
                 .collect::<Vec<_>>();
@@ -724,10 +731,13 @@ pub(super) fn infer_program_with_product_in_session(
     product
 }
 
-pub fn check_ir_program(exprs: &[deep::Expr]) -> Result<CheckedProgram, InferResult> {
+pub fn check_ir_program(
+    exprs: &[deep::Expr],
+    origin: ProgramOrigin,
+) -> Result<CheckedProgram, InferResult> {
     // Compose: empty outer scope, then check exprs as new code against it.
     // This keeps a single source of truth for the IR check pipeline.
-    check_ir_with_context(&TypeEnv::empty(), exprs)
+    check_ir_with_context(&TypeEnv::empty(), exprs, origin)
 }
 
 /// Build a stacked outer-scope context from a library decl list. The
@@ -739,12 +749,16 @@ pub fn check_ir_program(exprs: &[deep::Expr]) -> Result<CheckedProgram, InferRes
 /// many separate "new code" snippets via
 /// [`check_ir_with_context`]. The library state is `Arc`-shared and
 /// never mutated, so concurrent reads are cheap.
-pub fn build_type_env_from_library(library_exprs: &[deep::Expr]) -> Result<TypeEnv, InferResult> {
-    crate::session::build_type_env_from_library(library_exprs)
+pub fn build_type_env_from_library(
+    library_exprs: &[deep::Expr],
+    origin: ProgramOrigin,
+) -> Result<TypeEnv, InferResult> {
+    crate::session::build_type_env_from_library(library_exprs, origin)
 }
 
 pub(crate) fn build_type_env_from_library_in_session(
     library_exprs: &[deep::Expr],
+    origin: ProgramOrigin,
     errors: &mut DiagnosticSink<'_>,
 ) -> Result<TypeEnv, InferStats> {
     // Normalize Node → List while preserving BareList structural role
@@ -776,7 +790,7 @@ pub(crate) fn build_type_env_from_library_in_session(
     let library_ir = build_ir_type_env(library_exprs);
     log_sub("build_ir_type_env_initial", &mut sub_t);
 
-    let product = infer_ir_program_with_state(library_exprs, &mut state, errors);
+    let product = infer_ir_program_with_state(library_exprs, &mut state, origin, errors);
     let stats = product.stats();
     log_sub("infer_ir_program_with_state", &mut sub_t);
     // chelis#930: inference may have abandoned its schedule. Stop before the
@@ -862,22 +876,22 @@ pub(crate) fn build_type_env_from_library_in_session(
 /// Combined library-build helper: run the IR pipeline ONCE over the
 /// library and return both the [`TypeEnv`] (for downstream `_with_context`
 /// calls) and a [`CheckedProgram`] equivalent to what
-/// `check_ir_with_context(&TypeEnv::empty(), library_exprs)` would
+/// `check_ir_with_context(&TypeEnv::empty(), library_exprs, origin)` would
 /// return.
 ///
 /// This avoids the duplicated work that occurs when callers run
 /// [`build_type_env_from_library`] followed by
-/// `check_ir_with_context(empty, library)` — both paths separately
+/// `check_ir_with_context(empty, library, origin)` — both paths separately
 /// run a full HM inference + annotation pass over the same library
 /// exprs. Per `docs/archive/perf/perf_baseline_investigation.md`, the unified path
 /// saves ~16s of duplicated inference + annotation on Coral.
 ///
 /// Behavior contract:
-/// - The returned `TypeEnv` is identical (modulo non-determinism in
-///   `UnordMap` iteration) to `build_type_env_from_library(library_exprs)`.
+/// - The returned `TypeEnv` carries the same library inference facts as
+///   `build_type_env_from_library(library_exprs, origin)`.
 /// - The returned `CheckedProgram` has the same `annotated_exprs()` and
 ///   `type_env()` shapes that
-///   `check_ir_with_context(&TypeEnv::empty(), library_exprs)`
+///   `check_ir_with_context(&TypeEnv::empty(), library_exprs, origin)`
 ///   produces — namely, annotated library exprs in source order plus a
 ///   `ir_types` map keyed on every library def.
 /// - On any error the same `Err(InferResult)` is returned that the
@@ -895,12 +909,14 @@ pub(crate) fn build_type_env_from_library_in_session(
 ///    `library_ir_annotated`.
 pub fn build_compiled_library_context(
     library_exprs: &[deep::Expr],
+    origin: ProgramOrigin,
 ) -> Result<(TypeEnv, CheckedProgram), InferResult> {
-    crate::session::build_compiled_library_context(library_exprs)
+    crate::session::build_compiled_library_context(library_exprs, origin)
 }
 
 pub(crate) fn build_compiled_library_context_in_session(
     library_exprs: &[deep::Expr],
+    origin: ProgramOrigin,
     errors: &mut DiagnosticSink<'_>,
 ) -> Result<(TypeEnv, CheckedProgram), InferStats> {
     // Reset the stack-exhaustion flag for this check unit; drained into the
@@ -925,7 +941,7 @@ pub(crate) fn build_compiled_library_context_in_session(
 
     let library_ir = build_ir_type_env(library_exprs);
 
-    let product = infer_ir_program_with_state(library_exprs, &mut state, errors);
+    let product = infer_ir_program_with_state(library_exprs, &mut state, origin, errors);
     let stats = product.stats();
     // chelis#930: see `build_type_env_from_library_in_session` — stop before
     // the validators if inference abandoned its schedule.
@@ -1044,17 +1060,19 @@ pub(crate) fn build_compiled_library_context_in_session(
 ///   `LoweredLibrary` via the `_with_context` variants, exactly as the
 ///   monolithic-vs-layered split requires.
 /// - On any error the same `Err(InferResult)` is returned that
-///   `check_ir_with_context(base, library_exprs)` would return.
+///   `check_ir_with_context(base, library_exprs, origin)` would return.
 pub fn build_compiled_library_context_with_base(
     base: &TypeEnv,
     library_exprs: &[deep::Expr],
+    origin: ProgramOrigin,
 ) -> Result<(TypeEnv, CheckedProgram), InferResult> {
-    crate::session::build_compiled_library_context_with_base(base, library_exprs)
+    crate::session::build_compiled_library_context_with_base(base, library_exprs, origin)
 }
 
 pub(crate) fn build_compiled_library_context_with_base_in_session(
     base: &TypeEnv,
     library_exprs: &[deep::Expr],
+    origin: ProgramOrigin,
     errors: &mut DiagnosticSink<'_>,
 ) -> Result<(TypeEnv, CheckedProgram), InferStats> {
     // Reset the stack-exhaustion flag for this check unit; drained into the
@@ -1090,7 +1108,7 @@ pub(crate) fn build_compiled_library_context_with_base_in_session(
     // `library_exprs`' own declared types (base schemes are already in
     // `state.env`); the combined IR env is supplied to the validators so
     // `(var basefoo)` references resolve to the base's declared type.
-    let product = infer_ir_program_with_state(library_exprs, &mut state, errors);
+    let product = infer_ir_program_with_state(library_exprs, &mut state, origin, errors);
     let stats = product.stats();
     // chelis#930: see `build_type_env_from_library_in_session` — stop before
     // the validators if inference abandoned its schedule.
@@ -1223,17 +1241,28 @@ pub(crate) fn build_compiled_library_context_with_base_in_session(
 pub fn check_ir_with_context(
     context: &TypeEnv,
     new_exprs: &[deep::Expr],
+    origin: ProgramOrigin,
 ) -> Result<CheckedProgram, InferResult> {
-    check_ir_with_signature_context(context, &SignatureInferenceMetadata::default(), new_exprs)
+    check_ir_with_signature_context(
+        context,
+        &SignatureInferenceMetadata::default(),
+        new_exprs,
+        origin,
+    )
 }
 
 pub fn check_ir_with_signature_context(
     context: &TypeEnv,
     signature_context: &SignatureInferenceMetadata,
     new_exprs: &[deep::Expr],
+    origin: ProgramOrigin,
 ) -> Result<CheckedProgram, InferResult> {
-    let mut checked =
-        crate::session::check_ir_with_signature_context(context, signature_context, new_exprs)?;
+    let mut checked = crate::session::check_ir_with_signature_context(
+        context,
+        signature_context,
+        new_exprs,
+        origin,
+    )?;
     checked.bind_context_library_proof(context.library_proof_id());
     Ok(checked)
 }
@@ -1242,6 +1271,7 @@ pub(crate) fn check_ir_with_signature_context_in_session(
     context: &TypeEnv,
     signature_context: &SignatureInferenceMetadata,
     new_exprs: &[deep::Expr],
+    origin: ProgramOrigin,
     errors: &mut DiagnosticSink<'_>,
 ) -> Result<CheckedProgram, InferStats> {
     // Normalize Node → List while preserving BareList structural role
@@ -1281,7 +1311,7 @@ pub(crate) fn check_ir_with_signature_context_in_session(
     // Library is already validated; only run validate / inference on
     // new exprs. Inference's canonical collector binds the new-code's
     // own declared types (library schemes are already in state.env).
-    let mut product = infer_ir_program_with_state(new_exprs, &mut state, errors);
+    let mut product = infer_ir_program_with_state(new_exprs, &mut state, origin, errors);
     let stats = product.stats();
     log_sub("infer_ir_program_with_state", &mut sub_t);
     // chelis#930: see `build_type_env_from_library_in_session` — stop before
@@ -1354,12 +1384,16 @@ pub(crate) fn check_ir_with_signature_context_in_session(
     Ok(checked)
 }
 
-pub fn check_typed_program(exprs: &[deep::Expr]) -> Result<CheckedProgram, InferResult> {
-    crate::session::check_typed_program(exprs)
+pub fn check_typed_program(
+    exprs: &[deep::Expr],
+    origin: ProgramOrigin,
+) -> Result<CheckedProgram, InferResult> {
+    crate::session::check_typed_program(exprs, origin)
 }
 
 pub(crate) fn check_typed_program_in_session(
     exprs: &[deep::Expr],
+    origin: ProgramOrigin,
     errors: &mut DiagnosticSink<'_>,
 ) -> Result<CheckedProgram, InferStats> {
     // Outermost scope covers both inference (which has its own inner scope)
@@ -1371,7 +1405,7 @@ pub(crate) fn check_typed_program_in_session(
     // stamped through the checker's output, and this entry deliberately
     // passes its input through untouched otherwise.
     let exprs = &chelis_deep::pipe::fold_program_pipes(exprs)[..];
-    let product = infer_program_with_product_in_session(exprs, errors);
+    let product = infer_program_with_product_in_session(exprs, origin, errors);
     let stats = product.stats();
     if errors.is_empty() {
         let annotated_exprs = annotate_ir_program(exprs, &product, errors);
@@ -1414,12 +1448,13 @@ pub(crate) fn check_typed_program_in_session(
     }
 }
 
-pub fn infer_ir_program(exprs: &[deep::Expr]) -> InferResult {
-    crate::session::infer_ir_program(exprs)
+pub fn infer_ir_program(exprs: &[deep::Expr], origin: ProgramOrigin) -> InferResult {
+    crate::session::infer_ir_program(exprs, origin)
 }
 
 pub(crate) fn infer_ir_program_in_session(
     exprs: &[deep::Expr],
+    origin: ProgramOrigin,
     errors: &mut DiagnosticSink<'_>,
 ) -> InferStats {
     // Normalize Node → List while preserving BareList structural role
@@ -1428,7 +1463,7 @@ pub(crate) fn infer_ir_program_in_session(
     let exprs = &normalized;
     let stack_scope = StackExhaustionScope::enter();
     let type_env = build_ir_type_env(exprs);
-    let product = infer_ir_program_with_env(exprs, &type_env, errors);
+    let product = infer_ir_program_with_env(exprs, &type_env, origin, errors);
     let stats = product.stats();
     // chelis#930 review: this was the one `*_in_session` entry with no gate.
     // Without it, a tripped token let every pass below stop early and the
@@ -1456,13 +1491,14 @@ pub(crate) fn infer_ir_program_in_session(
 pub(super) fn infer_ir_program_with_env(
     exprs: &[deep::Expr],
     _type_env: &IrTypeEnv,
+    origin: ProgramOrigin,
     errors: &mut DiagnosticSink<'_>,
 ) -> InferenceProduct {
     // Backwards-compat wrapper. Public callers run the shared semantic pass
     // protocol after this driver returns.
     let empty_inner = crate::context::TypeEnv::empty();
     let mut state = empty_inner.inner().clone();
-    let mut product = infer_ir_program_with_state(exprs, &mut state, errors);
+    let mut product = infer_ir_program_with_state(exprs, &mut state, origin, errors);
     product.resolve_owner_types(&state.subst);
     product
 }
@@ -1479,8 +1515,11 @@ pub(super) fn infer_ir_program_with_env(
 pub(super) fn infer_ir_program_with_state(
     exprs: &[deep::Expr],
     state: &mut TypeEnvInner,
+    origin: ProgramOrigin,
     errors: &mut DiagnosticSink<'_>,
 ) -> InferenceProduct {
+    let mut recursive_scope = errors.enter_recursive_inference();
+    let errors = recursive_scope.sink();
     let mut product = InferenceProduct::default();
 
     // RFC v4b (RT-1 F2): reject a named module opened by more than one
@@ -1489,7 +1528,7 @@ pub(super) fn infer_ir_program_with_state(
     detect_module_reopens(exprs, errors);
     // RFC v5 (RT-1 F2 bypass): reject the reef linker's reserved
     // internal-name format in programs not produced by the linker.
-    detect_forged_linker_names(exprs, errors);
+    detect_forged_linker_names(exprs, origin, errors);
 
     // Descend through `(module {} name ...)` wrappers: every idiomatic
     // Surf source wraps its declarations in `module X`, and without
@@ -1503,6 +1542,7 @@ pub(super) fn infer_ir_program_with_state(
         &mut state.var_gen,
         &mut state.subst,
         &mut state.adt_reg,
+        origin,
         errors,
     );
     product.type_headers = state.adt_reg.resolution_env().clone();
@@ -1562,7 +1602,6 @@ pub(super) fn infer_ir_program_with_state(
     // many orders of magnitude more often — untouched.
     let cancel = crate::cancel::current_cancel_token();
     let cancelled = || cancel.as_ref().is_some_and(CancelToken::is_cancelled);
-    super::recursion::reset();
     'schedule: for group in inference_groups {
         let component_diagnostic_checkpoint = errors.checkpoint();
         let cyclic = group.cyclic;
@@ -1602,7 +1641,7 @@ pub(super) fn infer_ir_program_with_state(
         // function-plan projection. A mixed reference cycle alone must not
         // activate it.
         if recursion_active {
-            super::recursion::begin_group(
+            errors.recursive_state_mut().begin_group(
                 group
                     .recursive_function_indices
                     .iter()
@@ -1621,7 +1660,12 @@ pub(super) fn infer_ir_program_with_state(
         for &declaration_index in &group.indices {
             if cancelled() {
                 if let Some(scope) = component_scope.take() {
-                    scope.abort(&mut state.env, &state.var_gen, &mut state.subst);
+                    scope.abort(
+                        &mut state.env,
+                        &state.var_gen,
+                        &mut state.subst,
+                        errors.recursive_state_mut(),
+                    );
                 }
                 break 'schedule;
             }
@@ -1712,7 +1756,12 @@ pub(super) fn infer_ir_program_with_state(
         }
         if cancelled() {
             if let Some(scope) = component_scope.take() {
-                scope.abort(&mut state.env, &state.var_gen, &mut state.subst);
+                scope.abort(
+                    &mut state.env,
+                    &state.var_gen,
+                    &mut state.subst,
+                    errors.recursive_state_mut(),
+                );
             }
             break 'schedule;
         }
@@ -1720,7 +1769,7 @@ pub(super) fn infer_ir_program_with_state(
             // Function-recursion validation, when independently active, must
             // clear its pins before component-wide generalization.
             if recursion_active {
-                super::recursion::finish_group(&state.subst, errors);
+                errors.finish_recursive_group(&state.subst);
             }
             component_scope
                 .take()
@@ -1733,6 +1782,7 @@ pub(super) fn infer_ir_program_with_state(
                         &ty,
                         &state.subst,
                         &owned_contracts,
+                        errors.recursive_state().pinned_vars(),
                     );
                     (name, scheme)
                 })
@@ -2343,7 +2393,7 @@ fn prebind_defsig_less_function_body_types(
         subst.leave_level(metadata_level, vg);
         match resolved {
             Ok(ty) => {
-                let scheme = env.generalize(&ty, subst);
+                let scheme = env.generalize(&ty, subst, errors.recursive_state().pinned_vars());
                 env.bind(name, scheme);
             }
             Err(witness) => {
@@ -2390,7 +2440,7 @@ fn prebind_literal_external_input_for_declaration(
     subst.leave_level(metadata_level, vg);
     match resolved {
         Ok(ty) => {
-            let scheme = env.generalize(&ty, subst);
+            let scheme = env.generalize(&ty, subst, errors.recursive_state().pinned_vars());
             env.bind(name.to_string(), scheme);
             None
         }
@@ -2644,7 +2694,8 @@ pub(crate) fn builtin_selection_probe(
     errors: &mut DiagnosticSink<'_>,
 ) -> Vec<crate::builtin_discovery::BuiltinCaseSelection> {
     let normalized = normalize_program_input(exprs);
-    infer_program_with_product_in_session(&normalized, errors).builtin_selections
+    infer_program_with_product_in_session(&normalized, ProgramOrigin::Unlinked, errors)
+        .builtin_selections
 }
 
 #[cfg(test)]
@@ -2789,7 +2840,6 @@ mod component_level_scope_tests {
             env.top_level_value_visibility("outside"),
             TopLevelValueVisibility::Visible
         ));
-        assert_eq!(super::super::recursion::group_state_counts(), (0, 0));
     }
 
     #[test]
@@ -2798,14 +2848,14 @@ mod component_level_scope_tests {
         let items = top_level_decl_items_with_modules(&exprs);
         let indices = vec![0, 1];
         let mut env = Env::new();
-        let prior = Scheme::mono(Type::Prim(Prim::Bool));
-        env.bind("left".to_string(), prior.clone());
+        env.bind("left".to_string(), Scheme::mono(Type::Prim(Prim::Bool)));
         env.bind(
             "precedence".to_string(),
             Scheme::mono(Type::Prim(Prim::Int64)),
         );
         let mut var_gen = VarGen::default();
         let mut subst = Subst::new();
+        let mut recursive = recursion::RecursiveState::default();
         env.note_top_level_value_ordinal("right".to_string(), 1, None);
         env.note_top_level_value_ordinal("outside".to_string(), 2, None);
         env.note_top_level_value_ordinal("precedence".to_string(), 3, None);
@@ -2832,30 +2882,28 @@ mod component_level_scope_tests {
             &mut env,
             &mut var_gen,
         );
-        super::super::recursion::begin_group(
+        recursive.begin_group(
             ["left", "right"].into_iter().map(|name| (name, false)),
             &env,
         );
         let pinned = var_gen.fresh_tvar();
-        let _caller = super::super::recursion::begin_caller("left", None, &[]);
-        super::super::recursion::record_occurrence(
-            "right",
-            &[(pinned, Type::Var(pinned))],
-            None,
-            None,
-        );
-        assert_eq!(super::super::recursion::group_state_counts(), (2, 1));
+        let caller = recursive.prepare_caller("left", None, &[]);
+        let _previous_caller = recursive.replace_caller(caller);
+        recursive.record_occurrence("right", &[(pinned, Type::Var(pinned))], None, None);
 
-        scope.abort(&mut env, &var_gen, &mut subst);
-        assert_eq!(subst.current_level(), 0);
-        assert_eq!(super::super::recursion::group_state_counts(), (0, 0));
-        assert!(!super::super::recursion::tvar_pinned(pinned));
+        scope.abort(&mut env, &var_gen, &mut subst, &mut recursive);
+        // A variable born inside the component can now be independently
+        // instantiated: both its inference level and recursive pin were released.
+        let released = env.generalize(&Type::Var(pinned), &subst, recursive.pinned_vars());
+        let first = env.instantiate(&released, &mut var_gen, &subst);
+        let second = env.instantiate(&released, &mut var_gen, &subst);
+        unify(&first, &Type::Prim(Prim::Int32), &mut subst).expect("first use is integral");
+        unify(&second, &Type::Prim(Prim::Bool), &mut subst).expect("second use is independent");
         let restored = env.lookup("left").expect("shadowed prior binding restored");
-        assert_eq!(restored.tvars, prior.tvars);
-        assert_eq!(restored.tvar_restrictions, prior.tvar_restrictions);
-        assert_eq!(restored.dvars, prior.dvars);
-        assert_eq!(restored.rvars, prior.rvars);
-        assert_eq!(restored.body, prior.body);
+        assert_eq!(
+            env.instantiate(restored, &mut var_gen, &subst),
+            Type::Prim(Prim::Bool),
+        );
         assert!(env.lookup("right").is_none());
         assert_eq!(
             env.lookup("precedence").map(|scheme| &scheme.body),
@@ -2878,6 +2926,7 @@ mod component_level_scope_tests {
         let follow_up = infer_program(
             &chelis_deep::parser::parse_str("(def {} clean (fn {} (params {} x) (var {} x)))")
                 .expect("follow-up parses"),
+            crate::ProgramOrigin::Unlinked,
         );
         assert!(follow_up.errors.is_empty());
     }
@@ -2896,7 +2945,7 @@ mod component_level_scope_tests {
             let token = crate::cancel::CancelToken::new();
             let _cancel_guard = crate::cancel::install_cancel_token(token);
             let _hook_guard = cancel_primary_recursive_after_members(1);
-            let result = infer_program(&exprs);
+            let result = infer_program(&exprs, crate::ProgramOrigin::Unlinked);
             assert!(
                 result
                     .errors
@@ -2909,16 +2958,17 @@ mod component_level_scope_tests {
                 .expect("the primary driver must abort the incomplete recursive scope")
         };
 
-        assert_eq!(observation.current_level, 0);
-        assert_eq!(observation.group_state_counts, (0, 0));
-        assert_eq!(observation.member_count, 2);
-        assert_eq!(observation.prior_binding_count, 2);
         assert!(observation.all_prior_bindings_restored);
         assert!(observation.all_temporary_bindings_removed);
 
         let follow_up = infer_program(
-            &chelis_deep::parser::parse_str("(def {} clean (fn {} (params {} x) (var {} x)))")
-                .expect("follow-up parses"),
+            &chelis_deep::parser::parse_str(
+                "(def {} clean (fn {} (params {} x) (var {} x)))
+             (def {} int_use (app {} (var {} clean) (lit {type: (t-prim {} i32)} 1)))
+             (def {} bool_use (app {} (var {} clean) (lit {type: (t-prim {} bool)} true)))",
+            )
+            .expect("follow-up parses"),
+            crate::ProgramOrigin::Unlinked,
         );
         assert!(
             follow_up.errors.is_empty(),

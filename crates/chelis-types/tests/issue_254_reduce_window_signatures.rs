@@ -19,7 +19,7 @@ use chelis_types::check_ir_program;
 
 fn check_core(source: &str) -> Result<Vec<String>, Vec<String>> {
     let exprs = chelis_deep::parse_and_stamp_file(source).expect("Deep fixture");
-    match check_ir_program(&exprs) {
+    match check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked) {
         Ok(_) => Ok(Vec::new()),
         Err(r) => Err(r.errors.iter().map(|e| e.message.clone()).collect()),
     }

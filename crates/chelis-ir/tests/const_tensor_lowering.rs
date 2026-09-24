@@ -10,7 +10,7 @@ use chelis_types::{check_linearity, check_typed_program};
 fn deep_to_dag(source: &str) -> Result<Dag, String> {
     let deep =
         chelis_deep::parser::parse_and_stamp(source).map_err(|e| format!("deep parse: {e:?}"))?;
-    let checked = check_typed_program(&deep)
+    let checked = check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked)
         .map_err(|errs| format!("typecheck failed: {:?}", errs.errors))?;
     let checked = chelis_effects::check_program(&checked)
         .map_err(|errs| format!("effects failed: {errs:?}"))?;

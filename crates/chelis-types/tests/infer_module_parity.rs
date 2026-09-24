@@ -147,7 +147,7 @@ fn assert_matches_baseline(name: &str, actual: &str) {
 /// A program that must type-check cleanly, compared on its whole output.
 fn assert_accepted_parity(name: &str, source: &str) {
     let deep = parse_core(source, name);
-    match check_ir_program(&deep) {
+    match check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked) {
         Ok(checked) => assert_matches_baseline(name, &accepted_snapshot(&checked)),
         Err(report) => {
             let msgs: Vec<&str> = report.errors.iter().map(|e| e.message.as_str()).collect();
@@ -160,7 +160,7 @@ fn assert_accepted_parity(name: &str, source: &str) {
 /// list.
 fn assert_rejected_parity(name: &str, source: &str) {
     let deep = parse_core(source, name);
-    match check_ir_program(&deep) {
+    match check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked) {
         Ok(_) => panic!("{name}: fixture is supposed to be rejected, but it type-checked"),
         Err(report) => {
             assert!(

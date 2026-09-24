@@ -95,15 +95,17 @@ fn tuple_fold_program() -> Vec<Expr> {
 #[test]
 fn polymorphic_tuple_fold_has_one_owner_across_both_public_checks() {
     let program = tuple_fold_program();
-    check_typed_program(&program).expect("typed annotation must consume owner inference");
-    check_ir_program(&program).expect("IR annotation must consume owner inference");
+    check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked)
+        .expect("typed annotation must consume owner inference");
+    check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked)
+        .expect("IR annotation must consume owner inference");
 }
 
 #[test]
 fn sequential_let_and_generic_closure_keep_owner_stamps() {
     let checked = check_ir_program(&core_program(
         include_str!("fixtures/core/tests/rt800_annotation_owner_stamps/sequential_let_and_generic_closure_keep_owner_stamps_1.json"),
-    ))
+    ), chelis_types::ProgramOrigin::Unlinked)
     .expect("let/match/closure annotation must consume the owning types");
 
     for wanted in ["fn", "app"] {
@@ -125,7 +127,8 @@ fn owner_stamps_are_isolated_across_context_and_parallel_sessions() {
         "fixtures/core/tests/rt800_annotation_owner_stamps/owner_stamps_are_isolated_across_context_and_parallel_sessions_1.json"
     ));
     let context = Arc::new(
-        build_type_env_from_library(&library).expect("generic library context should build"),
+        build_type_env_from_library(&library, chelis_types::ProgramOrigin::Unlinked)
+            .expect("generic library context should build"),
     );
     let snippets = [
         include_str!(
@@ -142,7 +145,7 @@ fn owner_stamps_are_isolated_across_context_and_parallel_sessions() {
             let context = Arc::clone(&context);
             let program = core_program(source);
             std::thread::spawn(move || {
-                check_ir_with_context(&context, &program)
+                check_ir_with_context(&context, &program, chelis_types::ProgramOrigin::Unlinked)
                     .expect("parallel annotation session must remain isolated")
             })
         })
@@ -201,7 +204,7 @@ fn structural_child_roles_do_not_require_runtime_owner_stamps() {
 
     for (label, source) in fixtures {
         let program = chelis_deep::parser::parse_str(source).expect("valid Deep fixture");
-        check_ir_program(&program).unwrap_or_else(|result| {
+        check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked).unwrap_or_else(|result| {
             panic!(
                 "{label} must classify structural children outside runtime ownership: {result:?}"
             )
@@ -214,12 +217,14 @@ fn concat_reuses_nested_runtime_child_types_without_reinference() {
     let valid = core_program(include_str!(
         "fixtures/core/tests/rt800_annotation_owner_stamps/concat_reuses_nested_runtime_child_types_without_reinference_1.json"
     ));
-    check_ir_program(&valid).expect("nested tuple/list children retain canonical runtime types");
+    check_ir_program(&valid, chelis_types::ProgramOrigin::Unlinked)
+        .expect("nested tuple/list children retain canonical runtime types");
 
     let malformed = core_program(include_str!(
         "fixtures/core/tests/rt800_annotation_owner_stamps/concat_reuses_nested_runtime_child_types_without_reinference_2.json"
     ));
-    let result = check_ir_program(&malformed).expect_err("mixed tensor/scalar list must reject");
+    let result = check_ir_program(&malformed, chelis_types::ProgramOrigin::Unlinked)
+        .expect_err("mixed tensor/scalar list must reject");
     assert!(
         result.errors.iter().any(|error| {
             matches!(
@@ -252,7 +257,8 @@ fn module_helper_dependency_orders_keep_body_owner_stamps() {
         ),
     ] {
         let checked =
-            check_ir_program(&core_program(source)).expect("module dependency order checks");
+            check_ir_program(&core_program(source), chelis_types::ProgramOrigin::Unlinked)
+                .expect("module dependency order checks");
         let mut stamps = Vec::new();
         for expr in checked.annotated_exprs() {
             collect_tag_stamp_state(expr, "app", &mut stamps);
@@ -274,7 +280,7 @@ fn raw_top_level_def_and_cast_keep_primary_owner_stamps() {
                 (t-prim {} i64)))"#,
     )
     .expect("raw Deep owner fixture must parse");
-    let checked = check_ir_program(&program)
+    let checked = check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked)
         .unwrap_or_else(|result| panic!("raw def/cast owners must check: {:?}", result.errors));
 
     for wanted in ["def", "cast", "lit"] {
@@ -306,7 +312,7 @@ fn guarded_match_arm_records_the_guard_owner_before_annotation() {
                   (lit {type: (t-prim {} i32)} 2))))"#,
     )
     .expect("guarded-arm owner fixture must parse");
-    let checked = check_ir_program(&program)
+    let checked = check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked)
         .unwrap_or_else(|result| panic!("guarded arm must check: {:?}", result.errors));
 
     let mut lit_stamps = Vec::new();
@@ -329,7 +335,7 @@ fn guarded_match_arm_records_the_guard_owner_before_annotation() {
                   (lit {type: (t-prim {} i32)} 2))))"#,
     )
     .expect("non-boolean guard fixture must parse");
-    let errors = check_ir_program(&invalid)
+    let errors = check_ir_program(&invalid, chelis_types::ProgramOrigin::Unlinked)
         .expect_err("a non-boolean match guard must reject")
         .errors;
     assert_eq!(
@@ -351,7 +357,7 @@ fn guarded_match_arm_records_the_guard_owner_before_annotation() {
 fn nominal_header_scope_reaches_generated_metadata_finalization() {
     let checked = check_ir_program(&expanded_core_program(
         include_str!("fixtures/core/tests/rt800_annotation_owner_stamps/nominal_header_scope_reaches_generated_metadata_finalization_1.json"),
-    ))
+    ), chelis_types::ProgramOrigin::Unlinked)
     .unwrap_or_else(|result| {
         panic!(
             "precollected nominal headers must reach generated metadata: {:?}",

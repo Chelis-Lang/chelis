@@ -21,7 +21,7 @@ fn literal_2_pow_31_rejected_with_spec_5_3_range_diagnostic() {
         "fixtures/core/tests/int_literal_overflow/literal_2_pow_31_rejected_with_spec_5_3_range_diagnostic.deep"
     );
     let deep = core_fixture(src);
-    let res = check_ir_program(&deep);
+    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
     res.expect_err("an out-of-range default i32 literal must be rejected");
 }
 
@@ -33,7 +33,7 @@ fn literal_i32_max_does_not_trip_d1_range_diagnostic() {
         "fixtures/core/tests/int_literal_overflow/literal_i32_max_does_not_trip_d1_range_diagnostic.deep"
     );
     let deep = core_fixture(src);
-    let res = check_ir_program(&deep);
+    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
     assert!(
         res.is_ok(),
         "i32::MAX (2147483647) must type-check cleanly; got: {:?}",
@@ -54,7 +54,7 @@ fn cast_wrapped_out_of_i32_range_literal_checks_cleanly() {
         "fixtures/core/tests/int_literal_overflow/cast_wrapped_out_of_i32_range_literal_checks_cleanly.deep"
     );
     let deep = core_fixture(src);
-    let res = check_ir_program(&deep);
+    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
     assert!(
         res.is_ok(),
         "spec §5.3 + §5.6: cast(2147483648, i64) is the documented \
@@ -73,7 +73,7 @@ fn cast_to_int32_of_out_of_range_literal_still_rejected() {
         "fixtures/core/tests/int_literal_overflow/cast_to_int32_of_out_of_range_literal_still_rejected.deep"
     );
     let deep = core_fixture(src);
-    let res = check_ir_program(&deep);
+    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
     assert!(
         res.is_err(),
         "cast(2147483648, i32) must still be diagnosed: the literal \
@@ -96,7 +96,7 @@ fn literal_i32_min_minus_one_overflows_with_spec_5_3_diagnostic() {
         "fixtures/core/tests/int_literal_overflow/literal_i32_min_minus_one_overflows_with_spec_5_3_diagnostic.deep"
     );
     let deep = core_fixture(src);
-    let res = check_ir_program(&deep);
+    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
     // The negation path may parse as `(neg LIT)` where LIT is the
     // positive 2147483649; the D1 diagnostic on the inner literal is
     // the spec-correct outcome (still cites §5.3, still suggests

@@ -40,7 +40,7 @@ use chelis_types::types::Prim;
 /// Returns the lowered DAG or a stage-tagged error.
 fn lower_deep(src: &str) -> Result<chelis_ir::dag::Dag, String> {
     let exprs = chelis_deep::parser::parse_str(src).expect("Deep fixture");
-    let checked = check_ir_program(&exprs).map_err(|r| {
+    let checked = check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked).map_err(|r| {
         format!(
             "check: {:?}",
             r.errors
@@ -60,7 +60,7 @@ fn lower_deep(src: &str) -> Result<chelis_ir::dag::Dag, String> {
 /// pinned to agree.
 fn check_deep(src: &str) -> Result<(), Vec<String>> {
     let exprs = chelis_deep::parser::parse_str(src).expect("Deep fixture");
-    check_ir_program(&exprs)
+    check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked)
         .map(|_| ())
         .map_err(|r| r.errors.iter().map(|e| e.message.clone()).collect())
 }

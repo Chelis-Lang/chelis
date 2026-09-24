@@ -1073,7 +1073,8 @@ fn s3_oracle_lowering_then_optimization_passes() {
         "fixture must carry many spans; got {input_spans:?}"
     );
 
-    let checked = check_ir_program(&exprs).expect("IR check");
+    let checked =
+        check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked).expect("IR check");
     let checked = chelis_effects::check_program(&checked).expect("effects");
     let checked = check_linearity(&checked).expect("linearity");
 

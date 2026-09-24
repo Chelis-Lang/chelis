@@ -15,8 +15,9 @@ Expanded Deep / original-equivalent AST
 
 `chelis-pipeline-core` owns the stage transitions. Source parsing/desugaring/expansion
 policy and dynamic compiler-facade goals are not part of this workspace. A caller of
-`PreparedProgram::from_expanded_deep` supplies an already expanded AST; a Deep parse by
-itself does not promise expansion or semantic acceptance.
+`PreparedProgram::from_expanded_deep` supplies an already expanded AST and explicit
+`ProgramOrigin`. A Deep parse by itself promises neither expansion nor link provenance
+nor semantic acceptance.
 
 - `analyze_prepared` returns a rejected fitness report or one accepted analysis.
 - `complete_checks` creates `CheckedCompilation` only after semantic checks accept.
@@ -179,9 +180,9 @@ Full-core extraction must model a thread-indexed TLS store, shared cancellation 
 process-global state, and exit outcomes separately from graph values. At minimum:
 
 - `CancelTokenGuard` restores the previous per-thread token on normal return and
-  unwinding, as does the linked-program guard. `OpacityScope` instead restores
-  policy owned by its checker session. A TLS read cannot be replaced by a fresh
-  unrelated global value.
+  unwinding. Checker opacity and recursive scopes restore state owned by their
+  session. Link provenance instead arrives as immutable input, with no ambient
+  state to restore. A TLS read cannot be replaced by a fresh unrelated global value.
 - Cancellation uses shared `Arc<AtomicBool>` identity and relaxed atomic accesses;
   a concurrent model must account for permitted observations, not assume an immediately
   synchronized ordinary Boolean.
@@ -244,6 +245,54 @@ producer access, cancellation followed by reuse, and four concurrent checks.
 This removes one checker TLS family; it does not establish extracted checker
 semantics or a relation for scope destruction and the native runtime shell.
 
+Recursive inference now owns `RecursiveState` on the same `DiagnosticSink`, replacing
+`GROUP_CTX` TLS. Each whole-program inference driver enters a fresh frame before
+collecting declarations. `RecursiveInferenceScope` moves aside the enclosing frame
+and restores it on return or unwind, without discarding authoritative diagnostics.
+`RecursiveCallerScope` restores caller attribution within a group while retaining
+the group's recorded occurrences. An aborted invocation drops its unfinished
+evidence; completing a group takes its evidence and releases pins before validation.
+
+`Env::generalize`, collection-contract generalization, and rejected-signature recovery
+now require an explicit borrowed pin set. Both level-based generalization and its
+sweep oracle consume that input; neither reads ambient recursive state. Standalone
+callers supply an empty set. The frame is plain owned data, not another `RefCell` or
+shared-state handle, and is not part of persisted `TypeEnv` metadata.
+
+Native regressions cover two live sessions, nested checks through both drivers,
+return/unwind restoration, caller attribution and diagnostic order, and mid-SCC
+cancellation followed by independent instantiation. The public-API smoke checks seven
+recursive fixtures through both drivers, ordered diagnostic parity, serialized and
+layered generic libraries used at `i32` and `bool`, cancellation/reuse, and four
+concurrent invocations.
+
+Link provenance is now an immutable `ProgramOrigin::{Unlinked, Linked}` input,
+replacing `LINKED_PROGRAM` TLS and its install guard. Every public type-inference
+and fitness entry requires the origin of its current unit. `PreparedProgram` pairs
+that origin with its owned expanded AST; monolithic, library, contextual, and layered
+semantic transitions pass it to the same production checker.
+
+The two consumers take the input directly: reserved-name rejection and the narrowly
+scoped orphan-signature exemption. `Linked` is a trusted native caller assertion
+after source validation and linker rewriting, not a checker-produced link proof.
+An internal-looking name, source metadata, or previously checked library cannot
+grant that authority to new code. Ordinary orphan names still reject for linked
+input. Origin has no default or serialization; neither `DiagnosticSink` nor
+persisted `TypeEnv` stores it, and the checked-program/library seals are unchanged.
+
+Regressions cover all four inference ingresses, structured ordered rejections,
+linked opacity enforcement, forged metadata, and a serialized linked context used
+to check a new unlinked unit. Pipeline regressions cover each semantic transition.
+The native pipeline smoke takes linked and unlinked inputs through checking,
+lowering, and evaluation; observes `7` and a contextual `7 * 3 = 21`; and exercises
+layered composition, cancellation/reuse, and four concurrent invocations. These
+checks exercise the retained core, not the removed native linker implementation.
+
+These are steps toward FCIS, not evidence of a pure functional core. Explicit ownership
+removes hidden dependencies in these subsystems; it does not remove cancellation,
+global ID allocation, counters, stack growth, or panic effects from the remaining
+native boundary. Local mutation of invocation-owned data is not that boundary.
+
 Keep one production implementation: no `_for_lean` checker, global-to-constant
 substitution, or opaque successful fallback.
 
@@ -256,7 +305,8 @@ remain inputs with their existing seals; an invocation state must not mint them.
 | State family | Owner or remaining target | Required behavior |
 | --- | --- | --- |
 | Former `OPACITY_CONTEXT` | `DiagnosticSink::opacity` and `OpacityScope` (implemented) | Restore the enclosing policy on return/unwind; keep diagnostics and witnesses in the same sink. Independent sessions never inherit another session's policy. |
-| `GROUP_CTX`, linked-program provenance | Checker invocation frames (remaining) | Preserve recursive-group pins and cleanup; isolate reentrant checks. Keep provenance construction at the trusted link boundary and restore the previous link scope. |
+| Former `GROUP_CTX` | `DiagnosticSink::recursive`, `RecursiveInferenceScope`, and `RecursiveCallerScope` (implemented) | Generalization borrows explicit pins. Restore enclosing invocation/caller state on return or unwind; retain completed diagnostics and recorded caller evidence. Abort discards unfinished group evidence and releases pins. |
+| Former `LINKED_PROGRAM` | Immutable `ProgramOrigin` input, retained by `PreparedProgram` (implemented) | Only the trusted native linker asserts `Linked`. Each unit supplies its own origin; names, metadata, cached contexts, and other active invocations grant no authority. No mutable scope or restoration guard remains. |
 | Former `INLINING_STACK`, tensor-helper preflight stack, `ACTIVE_TYPE_SUBST` | `HostLoweringSession::invocation` and scoped guards (implemented) | Preserve scope order and the current specialization's bindings. Nested sessions do not share mutable frames. |
 | Former `MONO_SPECIALIZATIONS` and `MonoProbeGuard` | Host invocation state plus scoped probe snapshot (implemented) | Preserve entry initialization, completion order, and rollback of speculative definitions and in-progress entries. Rollback restores the outer snapshot; it does not clear it. |
 | Panic-suppression flags | Explicit per-thread shell state | Preserve clear-to-false behavior and the explicit re-enable in `raise_fatal_lowering_diagnostic`; do not apply a uniform restore-previous rule. |
@@ -288,8 +338,9 @@ Remaining runtime migration and verification:
    full-core extraction.
 
 Acceptance for the complete runtime cutover additionally requires identical ordered
-roots, values and diagnostics on success/rejection; nested cancellation/link/opacity restoration; suppression
-clear/re-enable behavior across nested catches; speculative monomorphization rollback
+roots, values and diagnostics on success/rejection; explicit per-unit link authority;
+nested cancellation/opacity/recursive restoration; suppression clear/re-enable behavior
+across nested catches; speculative monomorphization rollback
 without leaked definitions; cancellation during a run and isolation across threads;
 unchanged panic-hook/finalizer order and first stack-bail receipt. Existing native
 checks are the baseline, not permission to erase runtime observations.

@@ -7,10 +7,10 @@
 //! slow eval abandonable, the eval lanes have to be able to notice a
 //! cancellation request and unwind on their own.
 //!
-//! The token is installed per-thread with a restore-on-drop guard, the same
-//! shape as [`crate::install_linked_program_guard`] in `opacity.rs`: the
-//! evaluation entry points do not need a new parameter, and nested or
-//! re-entrant evals cannot leak a token into an outer scope.
+//! The token remains a per-thread native runtime service with a
+//! restore-on-drop guard: nested or re-entrant evaluations cannot leak a
+//! token into an outer scope. Unlike immutable [`crate::ProgramOrigin`],
+//! cancellation can change while a check is running.
 //!
 //! chelis#930 extended the same token to the **front end**. Parse, desugar,
 //! type-check and lowering have no node visit to poll at, so they poll at

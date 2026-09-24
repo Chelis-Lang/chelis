@@ -5,7 +5,7 @@ use chelis_deep::Expr as DeepExpr;
 use chelis_ir::Dag;
 use chelis_ir::dag::NodeId;
 use chelis_ir::lower::LowerDiagnostic;
-use chelis_types::{CheckedProgram, FitnessReport, InferResult, TypeEnv};
+use chelis_types::{CheckedProgram, FitnessReport, InferResult, ProgramOrigin, TypeEnv};
 
 /// A closed policy for nonfatal lowering failures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,16 +29,27 @@ pub(crate) enum RootBindingMode {
 #[derive(Debug, Clone)]
 pub struct PreparedProgram {
     pub(crate) expanded_deep: Vec<DeepExpr>,
+    origin: ProgramOrigin,
 }
 
 impl PreparedProgram {
     /// Construct the core carrier after an upper layer completes expansion.
-    pub fn from_expanded_deep(expanded_deep: Vec<DeepExpr>) -> Self {
-        Self { expanded_deep }
+    ///
+    /// `origin` describes this source unit only; a checked library cannot grant
+    /// linker provenance to new code. It is an input assertion, not a checked proof.
+    pub fn from_expanded_deep(expanded_deep: Vec<DeepExpr>, origin: ProgramOrigin) -> Self {
+        Self {
+            expanded_deep,
+            origin,
+        }
     }
 
     pub fn expanded_deep(&self) -> &[DeepExpr] {
         &self.expanded_deep
+    }
+
+    pub fn origin(&self) -> ProgramOrigin {
+        self.origin
     }
 
     pub fn into_expanded_deep(self) -> Vec<DeepExpr> {

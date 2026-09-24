@@ -466,8 +466,9 @@ impl Env {
         name: String,
         recovery: crate::deep_type::RejectedSignatureType,
         subst: &mut Subst,
+        pinned: &UnordSet<TypeVar>,
     ) {
-        let scheme = self.generalize(&recovery.ty, subst);
+        let scheme = self.generalize(&recovery.ty, subst, pinned);
         self.bind(
             name.clone(),
             Scheme::mono(crate::errors::propagate(&recovery.witness)),
@@ -854,9 +855,11 @@ impl Env {
         result
     }
 
-    /// Generalize a type over variables not free in the environment.
-    pub fn generalize(&self, ty: &Type, subst: &Subst) -> Scheme {
-        self.generalize_owned(ty, subst, None)
+    /// Generalize variables not free in the environment or pinned by the
+    /// current recursive inference group. Callers supply the invocation's
+    /// pin set explicitly; standalone generalization supplies an empty set.
+    pub fn generalize(&self, ty: &Type, subst: &Subst, pinned: &UnordSet<TypeVar>) -> Scheme {
+        self.generalize_owned(ty, subst, None, pinned)
     }
 
     /// Generalize one deferred declaration using only the contract instances
@@ -870,8 +873,9 @@ impl Env {
         ty: &Type,
         subst: &Subst,
         owned_contracts: &[crate::unify::CollectionContractId],
+        pinned: &UnordSet<TypeVar>,
     ) -> Scheme {
-        self.generalize_owned(ty, subst, Some(owned_contracts))
+        self.generalize_owned(ty, subst, Some(owned_contracts), pinned)
     }
 
     fn generalize_owned(
@@ -879,12 +883,14 @@ impl Env {
         ty: &Type,
         subst: &Subst,
         owned_contracts: Option<&[crate::unify::CollectionContractId]>,
+        pinned: &UnordSet<TypeVar>,
     ) -> Scheme {
-        let (level_scheme, ledger_removals) = self.generalize_by_levels(ty, subst, owned_contracts);
+        let (level_scheme, ledger_removals) =
+            self.generalize_by_levels(ty, subst, owned_contracts, pinned);
         #[cfg(feature = "generalize-sweep-oracle")]
         GENERALIZE_SWEEP_ORACLE_ENABLED.with(|enabled| {
             if enabled.get() {
-                let (sweep_scheme, _) = self.generalize_by_sweep(ty, subst, owned_contracts);
+                let (sweep_scheme, _) = self.generalize_by_sweep(ty, subst, owned_contracts, pinned);
                 assert_eq!(
                     level_scheme.constraints, sweep_scheme.constraints,
                     "level-based collection obligations diverged from the reference environment sweep"
@@ -990,6 +996,7 @@ impl Env {
         ty: &Type,
         subst: &Subst,
         owned_contracts: Option<&[crate::unify::CollectionContractId]>,
+        pinned: &UnordSet<TypeVar>,
     ) -> (Scheme, Vec<crate::unify::CollectionContractId>) {
         let ty = subst.apply(ty);
         let ty_tvars = free_tvars(&ty);
@@ -1006,9 +1013,7 @@ impl Env {
         // let-bound alias of a group member cannot smuggle in polymorphic
         // recursion.
         let generalizable = |v: TypeVar| {
-            subst.level_of_tvar(v) > level
-                && !crate::infer::recursion::tvar_pinned(v)
-                && !pending_t.contains(&v)
+            subst.level_of_tvar(v) > level && !pinned.contains(&v) && !pending_t.contains(&v)
         };
         let mut tvars = ty_tvars
             .iter()
@@ -1071,7 +1076,7 @@ impl Env {
     /// It is a reference for *which variables the environment leaves free*, not
     /// for which of those may be quantified. Two exclusions are therefore
     /// mirrored here deliberately rather than inherited: a recursive group's
-    /// instantiation variables (`tvar_pinned`) and, since chelis#1489, a
+    /// explicitly supplied instantiation pins and, since chelis#1489, a
     /// pending operand gate's result variables. Both are properties of the
     /// inference state that no environment sweep can observe, so omitting
     /// either here would make the oracle disagree with a correct production
@@ -1082,6 +1087,7 @@ impl Env {
         ty: &Type,
         subst: &Subst,
         owned_contracts: Option<&[crate::unify::CollectionContractId]>,
+        pinned: &UnordSet<TypeVar>,
     ) -> (Scheme, Vec<crate::unify::CollectionContractId>) {
         let ty = subst.apply(ty);
         let mut env_tvars = self.free_tvars(subst);
@@ -1115,11 +1121,8 @@ impl Env {
         // chelis#1489: the same exclusion as `generalize_by_levels`, so the
         // parity assertion in `generalize` keeps comparing like with like.
         let (pending_t, pending_d, pending_r) = subst.pending_gate_result_vars();
-        let generalizable = |v: TypeVar| {
-            !env_tvars.contains(&v)
-                && !crate::infer::recursion::tvar_pinned(v)
-                && !pending_t.contains(&v)
-        };
+        let generalizable =
+            |v: TypeVar| !env_tvars.contains(&v) && !pinned.contains(&v) && !pending_t.contains(&v);
         let ty_tvars = free_tvars(&ty);
         let mut tvars = ty_tvars
             .iter()
@@ -1322,7 +1325,12 @@ mod module_scope_tests {
         let second_ids = subst.collection_contract_ids_since(second_mark);
         subst.leave_level(component, &var_gen);
 
-        let first = env.generalize_with_collection_contracts(&first_ty, &subst, &first_ids);
+        let first = env.generalize_with_collection_contracts(
+            &first_ty,
+            &subst,
+            &first_ids,
+            &UnordSet::new(),
+        );
         assert_eq!(first.constraints, vec![constraint.clone()]);
         assert_eq!(
             subst.pending_collection_contracts().len(),
@@ -1330,7 +1338,12 @@ mod module_scope_tests {
             "generalizing one recursive sibling must not absorb the other's contract"
         );
 
-        let second = env.generalize_with_collection_contracts(&second_ty, &subst, &second_ids);
+        let second = env.generalize_with_collection_contracts(
+            &second_ty,
+            &subst,
+            &second_ids,
+            &UnordSet::new(),
+        );
         assert_eq!(second.constraints, vec![constraint]);
         assert!(
             subst.pending_collection_contracts().is_empty(),
@@ -1528,14 +1541,14 @@ mod tests {
 
         // Neither a signature nor a parameter binding carries these roots.
         // Only the RHS-local variable is fresh at each use of the nested let.
-        let nested = body_env.generalize(&rhs, &subst);
+        let nested = body_env.generalize(&rhs, &subst, &UnordSet::new());
         assert_eq!(nested.tvars, vec![local]);
         assert!(nested.dvars.is_empty());
         assert!(nested.rvars.is_empty());
 
         // The declaration's lexical roots must not pin its published scheme.
         subst.leave_level(declaration_level, &vg);
-        let published = env.generalize(&rhs, &subst);
+        let published = env.generalize(&rhs, &subst, &UnordSet::new());
         assert_eq!(published.tvars, vec![precision, local]);
         assert_eq!(published.dvars, vec![type_dim, dim_alias, rank_dim]);
         assert_eq!(published.rvars, vec![type_rank]);

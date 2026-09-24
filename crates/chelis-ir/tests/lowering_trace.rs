@@ -19,7 +19,8 @@ const SQUARE: &str = include_str!("fixtures/core/tests/lowering_trace/square_0.d
 #[cfg(feature = "lowering-trace")]
 fn checked(source: &str) -> CheckedProgram {
     let deep = parse_str(source).expect("parse fixture");
-    let program = check_typed_program(&deep).expect("check fixture types");
+    let program = check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked)
+        .expect("check fixture types");
     let program = chelis_effects::check_program(&program).expect("check fixture effects");
     chelis_types::check_linearity(&program).expect("check fixture linearity")
 }
@@ -217,7 +218,9 @@ fn context_composition_retains_declared_controls_without_confusing_local_aliases
         "fixtures/core/tests/lowering_trace/context_composition_retains_declared_controls_without_confusing_local_aliases_5.dp"
     );
     let deep = parse_str(source).unwrap();
-    let env = chelis_types::build_type_env_from_library(&deep).unwrap();
+    let env =
+        chelis_types::build_type_env_from_library(&deep, chelis_types::ProgramOrigin::Unlinked)
+            .unwrap();
     let library =
         chelis_ir::lower::try_lower_program_to_evaluation_library(&checked(source)).unwrap();
     let original = bincode::serialize(library.library_for_inspection()).unwrap();
@@ -236,7 +239,9 @@ fn context_composition_retains_declared_controls_without_confusing_local_aliases
         ),
     ] {
         let deep = parse_str(body).unwrap();
-        let program = chelis_types::check_ir_with_context(&env, &deep).unwrap();
+        let program =
+            chelis_types::check_ir_with_context(&env, &deep, chelis_types::ProgramOrigin::Unlinked)
+                .unwrap();
         let program = chelis_effects::check_program(&program).unwrap();
         let program = chelis_types::check_linearity(&program).unwrap();
         let composed =

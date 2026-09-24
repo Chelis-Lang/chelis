@@ -12,15 +12,16 @@ use chelis_types::types::Prim;
 
 fn lower(source: &str) -> chelis_ir::Dag {
     let decls = parse_str(source).expect("Deep fixture");
-    let checked = check_ir_program(&decls).unwrap_or_else(|report| {
-        panic!("type check failed: {:?}", report.errors);
-    });
+    let checked =
+        check_ir_program(&decls, chelis_types::ProgramOrigin::Unlinked).unwrap_or_else(|report| {
+            panic!("type check failed: {:?}", report.errors);
+        });
     chelis_ir::host::lower_named_tensor_entry_dag(&checked, "f").expect("named tensor entry lowers")
 }
 
 fn checked(source: &str) -> chelis_types::CheckedProgram {
     let decls = parse_str(source).expect("Deep fixture");
-    check_ir_program(&decls).unwrap_or_else(|report| {
+    check_ir_program(&decls, chelis_types::ProgramOrigin::Unlinked).unwrap_or_else(|report| {
         panic!("type check failed: {:?}", report.errors);
     })
 }

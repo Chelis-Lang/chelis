@@ -25,7 +25,7 @@ use chelis_types::check_ir_program;
 
 fn errors_for(deep_src: &str) -> Vec<String> {
     let exprs = parse_str(deep_src).expect("deep parse");
-    match check_ir_program(&exprs) {
+    match check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked) {
         Ok(_) => Vec::new(),
         Err(rep) => rep.errors.iter().map(|e| e.message.clone()).collect(),
     }

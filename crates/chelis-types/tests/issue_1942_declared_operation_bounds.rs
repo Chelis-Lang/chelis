@@ -22,11 +22,17 @@ fn diagnostics(name: &str, args: &[&str], both: bool) -> Vec<String> {
             .map(|e| format!("{:?}", e.kind))
             .collect::<Vec<_>>(),
     };
-    let mut typed = kinds(check_typed_program(&program));
+    let mut typed = kinds(check_typed_program(
+        &program,
+        chelis_types::ProgramOrigin::Unlinked,
+    ));
     typed.sort();
     if both {
         let expanded = template(&format!("{name}_expanded"), args);
-        let mut ir = kinds(check_ir_program(&expanded));
+        let mut ir = kinds(check_ir_program(
+            &expanded,
+            chelis_types::ProgramOrigin::Unlinked,
+        ));
         ir.sort();
         assert_eq!(typed, ir, "checker ingress disagreement: {name}, {args:?}");
     }

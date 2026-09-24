@@ -2218,10 +2218,11 @@ impl CheckedProgram {
     }
 
     /// Compose a `library` checked program with a `new_code` checked
-    /// program into a single whole-program `CheckedProgram`, equivalent
-    /// to what `check_ir_program(library_exprs ++ new_code_exprs)` plus
-    /// effects + linearity would produce — provided `new_code` was
-    /// produced by the `_with_context` variants stacked on `library`.
+    /// program into a single whole-program `CheckedProgram`, equivalent to
+    /// monolithic type, effect, and linearity checking of the accepted declarations.
+    /// `new_code` must come from the `_with_context` variants stacked on `library`.
+    /// Each unit was admitted with its own origin; composition grants no authority
+    /// to fresh source.
     ///
     /// This is the seam the cross-process chelis-std typecheck cache's
     /// `chelis build` path uses: `library` is the cached chelis-std

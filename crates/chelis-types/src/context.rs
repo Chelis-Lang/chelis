@@ -198,9 +198,9 @@ pub(crate) struct TypeEnvInner {
 
 impl TypeEnv {
     /// Empty outer scope — the result of building a context from `&[]`.
-    /// `check_ir_with_context(&TypeEnv::empty(), exprs)` is
-    /// behaviorally equivalent to [`crate::check_ir_program(exprs)`]
-    /// on the same `exprs`.
+    /// `check_ir_with_context(&TypeEnv::empty(), exprs, origin)` is
+    /// behaviorally equivalent to [`crate::check_ir_program`] on the same
+    /// `exprs` and explicit program origin.
     pub fn empty() -> Self {
         let (env, var_gen) = builtins::builtin_env();
         let mut adt_reg = AdtRegistry::new();
@@ -366,9 +366,10 @@ mod tests {
         let mut resumed = decoded.resume_for_new_check();
         assert_eq!(resumed.subst.level_of_tvar(child_tvar), 0);
         assert_eq!(resumed.subst.level_metadata_counts(), (1, 0, 0, 0));
-        let imported = resumed
-            .env
-            .generalize(&Type::Var(child_tvar), &resumed.subst);
+        let imported =
+            resumed
+                .env
+                .generalize(&Type::Var(child_tvar), &resumed.subst, &UnordSet::new());
         assert!(imported.tvars.is_empty());
 
         for cycle in 0..4 {
@@ -385,7 +386,10 @@ mod tests {
             resumed = decoded.resume_for_new_check();
             assert_eq!(resumed.subst.level_of_tvar(fresh), 0);
             assert_eq!(resumed.subst.level_metadata_counts(), (1, 0, 0, 0));
-            let imported = resumed.env.generalize(&Type::Var(fresh), &resumed.subst);
+            let imported =
+                resumed
+                    .env
+                    .generalize(&Type::Var(fresh), &resumed.subst, &UnordSet::new());
             assert!(imported.tvars.is_empty());
         }
     }

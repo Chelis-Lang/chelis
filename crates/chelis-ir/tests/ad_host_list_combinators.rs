@@ -5,16 +5,17 @@ use chelis_unord::UnordMap;
 
 fn checked_deep(src: &str) -> chelis_types::CheckedProgram {
     let exprs = chelis_deep::parser::parse_and_stamp(src).expect("Deep fixture");
-    let checked = chelis_types::check_ir_program(&exprs).unwrap_or_else(|report| {
-        panic!(
-            "type check failed: {:?}",
-            report
-                .errors
-                .iter()
-                .map(|error| error.message.clone())
-                .collect::<Vec<_>>()
-        )
-    });
+    let checked = chelis_types::check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked)
+        .unwrap_or_else(|report| {
+            panic!(
+                "type check failed: {:?}",
+                report
+                    .errors
+                    .iter()
+                    .map(|error| error.message.clone())
+                    .collect::<Vec<_>>()
+            )
+        });
     let checked = chelis_effects::check_program(&checked).expect("effects");
     chelis_types::check_linearity(&checked).expect("linearity")
 }

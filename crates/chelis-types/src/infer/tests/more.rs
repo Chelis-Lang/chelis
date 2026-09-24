@@ -248,7 +248,7 @@ fn fix6b_pat_as_binds_name() {
 #[test]
 fn fix7_fitness_unresolved_names() {
     let exprs = chelis_deep::parser::parse_str("(def {} x (var {} unknown))").unwrap();
-    let result = crate::infer::infer_program(&exprs);
+    let result = crate::infer::infer_program(&exprs, crate::ProgramOrigin::Unlinked);
     let report = crate::fitness::FitnessReport::from_infer_result(&result);
     assert!(
         report.unresolved_names.contains(&"unknown".to_string()),
@@ -262,7 +262,7 @@ fn fix7_fitness_unresolved_names() {
 #[test]
 fn fitness_uses_the_structured_identifier_instead_of_rendered_prose() {
     let exprs = chelis_deep::parser::parse_str("(def {} x (var {} unknown))").unwrap();
-    let mut result = crate::infer::infer_program(&exprs);
+    let mut result = crate::infer::infer_program(&exprs, crate::ProgramOrigin::Unlinked);
     let error = result
         .errors
         .iter_mut()
@@ -297,7 +297,7 @@ fn ir_literal_dimension_mismatch_deepaces_error() {
     ))
     .expect("Deep fixture parses");
 
-    let result = infer_ir_program(&exprs);
+    let result = infer_ir_program(&exprs, crate::ProgramOrigin::Unlinked);
     assert!(
         result
             .errors
@@ -323,7 +323,7 @@ fn ir_rejects_polymorphic_dims_pinned_by_body() {
     ))
     .expect("Deep fixture parses");
 
-    let result = infer_ir_program(&exprs);
+    let result = infer_ir_program(&exprs, crate::ProgramOrigin::Unlinked);
     assert!(
         result
             .errors
@@ -349,7 +349,7 @@ fn ir_preserves_unresolved_name_errors() {
     ))
     .expect("Deep fixture parses");
 
-    let result = infer_ir_program(&exprs);
+    let result = infer_ir_program(&exprs, crate::ProgramOrigin::Unlinked);
     assert!(
         result
             .errors
@@ -359,7 +359,7 @@ fn ir_preserves_unresolved_name_errors() {
         result.errors
     );
 
-    let report = crate::fitness::check_ir_program(&exprs);
+    let report = crate::fitness::check_ir_program(&exprs, crate::ProgramOrigin::Unlinked);
     assert!(
         report.unresolved_names.contains(&"frobnicate".to_string()),
         "expected ir fitness report to include unresolved frobnicate, got {:?}",
@@ -383,7 +383,7 @@ fn ir_resolves_consistently_mangled_constructor_names() {
     )
     .expect("Deep fixture parses");
 
-    let result = infer_ir_program(&exprs);
+    let result = infer_ir_program(&exprs, crate::ProgramOrigin::Unlinked);
     assert!(
         !result.errors.iter().any(|error| matches!(
             error.kind,
@@ -407,7 +407,7 @@ fn ir_rejects_out_of_scope_terminal_constructor_name() {
     )
     .expect("Deep fixture parses");
 
-    let result = infer_ir_program(&exprs);
+    let result = infer_ir_program(&exprs, crate::ProgramOrigin::Unlinked);
     assert!(
         result.errors.iter().any(|error| matches!(
             error.kind,
@@ -537,7 +537,7 @@ fn fix12_structure_score_measured() {
     // check_program runs tag validator — structure should be 1.0 for valid programs
     let exprs =
         chelis_deep::parser::parse_str("(def {} x (lit {type: (t-prim {} i32)} 42))").unwrap();
-    let report = crate::fitness::check_program(&exprs);
+    let report = crate::fitness::check_program(&exprs, crate::ProgramOrigin::Unlinked);
     assert!(
         (report.components.structure - 1.0).abs() < 0.01,
         "valid program structure should be ~1.0, got {}",
@@ -551,7 +551,8 @@ fn checked_program_annotates_fn_bodies() {
         "(def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x)))",
     )
     .unwrap();
-    let checked = check_ir_program(&exprs).expect("checked program");
+    let checked =
+        check_ir_program(&exprs, crate::ProgramOrigin::Unlinked).expect("checked program");
     let (_, _, declaration) = stamped_parts(&checked.annotated_exprs()[0]).unwrap();
     let (tag, metadata, _) = stamped_parts(&declaration[1]).unwrap();
     assert_eq!(tag, DeepTag::Fn);
@@ -574,7 +575,8 @@ fn checked_program_annotates_apps_and_updates_type_env() {
          (def {} c (app {} (var {} add) (var {} a) (var {} b)))",
     )
     .unwrap();
-    let checked = check_ir_program(&exprs).expect("checked program");
+    let checked =
+        check_ir_program(&exprs, crate::ProgramOrigin::Unlinked).expect("checked program");
     let (_, _, declaration) = stamped_parts(&checked.annotated_exprs()[2]).unwrap();
     let (tag, metadata, _) = stamped_parts(&declaration[1]).unwrap();
     assert_eq!(tag, DeepTag::App);
@@ -600,7 +602,7 @@ fn ir_accepts_symbolic_normalized_axis_for_layer_norm() {
          (def {} y (app {} (var {} layer_norm) (var {} x) (var {} gamma) (var {} beta) (lit {type: (t-prim {} f32)} 0.00001)))",
     )
     .unwrap();
-    check_ir_program(&exprs)
+    check_ir_program(&exprs, crate::ProgramOrigin::Unlinked)
         .expect("symbolic normalized-axis metadata is legal at the language checker");
 }
 
@@ -673,7 +675,7 @@ fn pad_sequences_to_literal_width_matches_declared_shape() {
     )
     .expect("Deep fixture parses");
 
-    let result = infer_ir_program(&exprs);
+    let result = infer_ir_program(&exprs, crate::ProgramOrigin::Unlinked);
     assert!(
         result.errors.is_empty(),
         "literal pad width 4 should match declared tensor[1, 4, f32], got {:?}",
@@ -688,7 +690,7 @@ fn pad_sequences_to_wrong_literal_width_is_rejected() {
     )
     .expect("Deep fixture parses");
 
-    let result = infer_ir_program(&exprs);
+    let result = infer_ir_program(&exprs, crate::ProgramOrigin::Unlinked);
     assert!(
         !result.errors.is_empty(),
         "pad width 4 declared as tensor[1, 5, f32] should be a type error"
@@ -705,7 +707,7 @@ fn pad_sequences_to_mismatched_width_through_shared_sig_dim_is_rejected() {
     )
     .expect("Deep fixture parses");
 
-    let result = infer_ir_program(&exprs);
+    let result = infer_ir_program(&exprs, crate::ProgramOrigin::Unlinked);
     assert!(
         result
             .errors
@@ -1049,6 +1051,7 @@ fn deep_einsum_rejects_ellipsis_in_3h() {
             "../../../tests/fixtures/core/src/more/deep_einsum_rejects_ellipsis_in_3h.deep"
         ))
         .expect("Deep fixture parses"),
+        crate::ProgramOrigin::Unlinked,
     );
     let err = result.expect_err("ellipsis should be rejected in 3h einsum");
     assert!(
@@ -1066,7 +1069,7 @@ fn deep_where_rejects_non_bool_condition_tensor() {
     let result = check_ir_program(&chelis_deep::parser::parse_str(
             include_str!("../../../tests/fixtures/core/src/more/deep_where_rejects_non_bool_condition_tensor.deep"),
         )
-        .expect("Deep fixture parses"));
+        .expect("Deep fixture parses"), crate::ProgramOrigin::Unlinked);
     let err = result.expect_err("where should reject non-bool condition tensors");
     assert!(
         err.errors
@@ -1084,6 +1087,7 @@ fn deep_scatter_replace_rejects_unknown_mode() {
             "../../../tests/fixtures/core/src/more/deep_scatter_replace_rejects_unknown_mode.deep"
         ))
         .expect("Deep fixture parses"),
+        crate::ProgramOrigin::Unlinked,
     );
     let err = result.expect_err("scatter should reject unsupported mode");
     assert!(
@@ -1104,6 +1108,7 @@ fn deep_einsum_rejects_static_extent_mismatch() {
             "../../../tests/fixtures/core/src/more/deep_einsum_rejects_static_extent_mismatch.deep"
         ))
         .expect("Deep fixture parses"),
+        crate::ProgramOrigin::Unlinked,
     );
     let err = result.expect_err("static einsum extent mismatch should be rejected");
     assert!(
@@ -1120,7 +1125,7 @@ fn deep_scatter_replace_accepts_static_duplicate_indices() {
     let result = check_ir_program(&chelis_deep::parser::parse_str(
             include_str!("../../../tests/fixtures/core/src/more/deep_scatter_replace_accepts_static_duplicate_indices.deep"),
         )
-        .expect("Deep fixture parses"));
+        .expect("Deep fixture parses"), crate::ProgramOrigin::Unlinked);
     result.expect("static scatter duplicate indices follow deterministic last-write-wins");
 }
 
@@ -1139,6 +1144,7 @@ fn deep_append_rejects_wrong_element_type() {
             "../../../tests/fixtures/core/src/more/deep_append_rejects_wrong_element_type.deep"
         ))
         .expect("Deep fixture parses"),
+        crate::ProgramOrigin::Unlinked,
     );
     let err = result.expect_err("append should reject mismatched element type");
     assert!(
@@ -1157,6 +1163,7 @@ fn deep_filter_rejects_non_bool_callback() {
             "../../../tests/fixtures/core/src/more/deep_filter_rejects_non_bool_callback.deep"
         ))
         .expect("Deep fixture parses"),
+        crate::ProgramOrigin::Unlinked,
     );
     let err = result.expect_err("filter should reject non-bool callback");
     assert!(
@@ -1177,6 +1184,7 @@ fn deep_dict_entries_rejects_non_dict_input() {
             "../../../tests/fixtures/core/src/more/deep_dict_entries_rejects_non_dict_input.deep"
         ))
         .expect("Deep fixture parses"),
+        crate::ProgramOrigin::Unlinked,
     );
     let err = result.expect_err("dict_entries should reject non-dict input");
     assert!(
@@ -1195,6 +1203,7 @@ fn deep_to_list_rejects_rank2_tensor() {
             "../../../tests/fixtures/core/src/more/deep_to_list_rejects_rank2_tensor.deep"
         ))
         .expect("Deep fixture parses"),
+        crate::ProgramOrigin::Unlinked,
     );
     let err = result.expect_err("to_list should reject rank-2 tensor input");
     assert!(
@@ -1213,6 +1222,7 @@ fn deep_fold_rejects_accumulator_mismatch() {
             "../../../tests/fixtures/core/src/more/deep_fold_rejects_accumulator_mismatch.deep"
         ))
         .expect("Deep fixture parses"),
+        crate::ProgramOrigin::Unlinked,
     );
     let err = result.expect_err("fold should reject mismatched accumulator type");
     assert!(
@@ -1234,7 +1244,10 @@ fn deep_tuple_fold_tensor_slot_program() -> Vec<deep::Expr> {
 
 #[test]
 fn deep_polymorphic_tuple_fold_with_tensor_slot_infers_ir() {
-    let result = infer_ir_program(&deep_tuple_fold_tensor_slot_program());
+    let result = infer_ir_program(
+        &deep_tuple_fold_tensor_slot_program(),
+        crate::ProgramOrigin::Unlinked,
+    );
     assert!(
         result.errors.is_empty(),
         "ir inference should succeed without overflowing: {:?}",
@@ -1245,12 +1258,16 @@ fn deep_polymorphic_tuple_fold_with_tensor_slot_infers_ir() {
 #[test]
 fn deep_polymorphic_tuple_fold_with_tensor_slot_annotates_ir() {
     let program = deep_tuple_fold_tensor_slot_program();
-    check_typed_program(&program).expect("annotation should succeed without overflowing");
+    check_typed_program(&program, crate::ProgramOrigin::Unlinked)
+        .expect("annotation should succeed without overflowing");
 }
 
 #[test]
 fn deep_polymorphic_tuple_fold_with_tensor_slot_type_checks() {
-    let result = check_ir_program(&deep_tuple_fold_tensor_slot_program());
+    let result = check_ir_program(
+        &deep_tuple_fold_tensor_slot_program(),
+        crate::ProgramOrigin::Unlinked,
+    );
     result.expect("polymorphic tuple fold should type check without overflowing");
 }
 
@@ -1261,6 +1278,7 @@ fn deep_collection_helper_builtins_type_check() {
             "../../../tests/fixtures/core/src/more/deep_collection_helper_builtins_type_check.deep"
         ))
         .expect("Deep fixture parses"),
+        crate::ProgramOrigin::Unlinked,
     );
     result.expect("collection helper builtins should type check");
 }
@@ -1272,6 +1290,7 @@ fn deep_take_rejects_non_integer_count() {
             "../../../tests/fixtures/core/src/more/deep_take_rejects_non_integer_count.deep"
         ))
         .expect("Deep fixture parses"),
+        crate::ProgramOrigin::Unlinked,
     );
     let err = result.expect_err("take should reject non-integer count");
     assert!(
@@ -1288,7 +1307,7 @@ fn deep_dict_insert_rejects_value_type_mismatch() {
     let result = check_ir_program(&chelis_deep::parser::parse_str(
             include_str!("../../../tests/fixtures/core/src/more/deep_dict_insert_rejects_value_type_mismatch.deep"),
         )
-        .expect("Deep fixture parses"));
+        .expect("Deep fixture parses"), crate::ProgramOrigin::Unlinked);
     let err = result.expect_err("dict_insert should reject mismatched value type");
     assert!(
         err.errors
@@ -1306,7 +1325,7 @@ fn deep_dict_merge_rejects_mismatched_dict_value_types() {
     let result = check_ir_program(&chelis_deep::parser::parse_str(
             include_str!("../../../tests/fixtures/core/src/more/deep_dict_merge_rejects_mismatched_dict_value_types.deep"),
         )
-        .expect("Deep fixture parses"));
+        .expect("Deep fixture parses"), crate::ProgramOrigin::Unlinked);
     let err = result.expect_err("dict_merge should reject mismatched dict value types");
     assert!(
         err.errors
@@ -1327,6 +1346,7 @@ fn deep_scan_rejects_accumulator_mismatch() {
             "../../../tests/fixtures/core/src/more/deep_scan_rejects_accumulator_mismatch.deep"
         ))
         .expect("Deep fixture parses"),
+        crate::ProgramOrigin::Unlinked,
     );
     let err = result.expect_err("scan should reject mismatched accumulator type");
     assert!(
@@ -1346,6 +1366,7 @@ fn deep_partition_rejects_non_bool_callback() {
             "../../../tests/fixtures/core/src/more/deep_partition_rejects_non_bool_callback.deep"
         ))
         .expect("Deep fixture parses"),
+        crate::ProgramOrigin::Unlinked,
     );
     let err = result.expect_err("partition should reject non-bool callback");
     assert!(
@@ -1366,6 +1387,7 @@ fn deep_flat_map_rejects_non_list_callback() {
             "../../../tests/fixtures/core/src/more/deep_flat_map_rejects_non_list_callback.deep"
         ))
         .expect("Deep fixture parses"),
+        crate::ProgramOrigin::Unlinked,
     );
     let err = result.expect_err("flat_map should reject non-list callback");
     assert!(
@@ -1384,6 +1406,7 @@ fn deep_flatten_rejects_non_nested_list_input() {
             "../../../tests/fixtures/core/src/more/deep_flatten_rejects_non_nested_list_input.deep"
         ))
         .expect("Deep fixture parses"),
+        crate::ProgramOrigin::Unlinked,
     );
     let err = result.expect_err("flatten should reject non-nested list input");
     assert!(
@@ -1400,7 +1423,7 @@ fn deep_dict_remove_rejects_mismatched_key_type() {
     let result = check_ir_program(&chelis_deep::parser::parse_str(
             include_str!("../../../tests/fixtures/core/src/more/deep_dict_remove_rejects_mismatched_key_type.deep"),
         )
-        .expect("Deep fixture parses"));
+        .expect("Deep fixture parses"), crate::ProgramOrigin::Unlinked);
     let err = result.expect_err("dict_remove should reject mismatched key type");
     assert!(
         err.errors.iter().any(|error| {
@@ -1419,6 +1442,7 @@ fn deep_chunk_rejects_non_integer_size() {
             "../../../tests/fixtures/core/src/more/deep_chunk_rejects_non_integer_size.deep"
         ))
         .expect("Deep fixture parses"),
+        crate::ProgramOrigin::Unlinked,
     );
     let err = result.expect_err("chunk should reject non-integer size");
     assert!(
@@ -1436,7 +1460,7 @@ fn deep_chunk_rejects_non_integer_size() {
 
 fn ir_errors_from_deep(src: &str) -> Vec<CheckError> {
     let exprs = chelis_deep::parser::parse_str(src).expect("Deep fixture parses");
-    infer_ir_program(&exprs).errors
+    infer_ir_program(&exprs, crate::ProgramOrigin::Unlinked).errors
 }
 
 #[test]

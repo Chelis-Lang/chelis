@@ -20,16 +20,18 @@ fn messages(errors: &[CheckError]) -> Vec<String> {
 }
 
 fn checked_pair(source: &str) -> (CheckedProgram, CheckedProgram) {
-    let ir = check_ir_program(&legacy(source)).expect("legacy ingress accepts fixture");
-    let typed = check_typed_program(&stamped(source)).expect("stamped ingress accepts fixture");
+    let ir = check_ir_program(&legacy(source), chelis_types::ProgramOrigin::Unlinked)
+        .expect("legacy ingress accepts fixture");
+    let typed = check_typed_program(&stamped(source), chelis_types::ProgramOrigin::Unlinked)
+        .expect("stamped ingress accepts fixture");
     (ir, typed)
 }
 
 fn rejection_pair(source: &str) -> (Vec<String>, Vec<String>) {
-    let ir = check_ir_program(&legacy(source))
+    let ir = check_ir_program(&legacy(source), chelis_types::ProgramOrigin::Unlinked)
         .expect_err("legacy ingress rejects fixture")
         .errors;
-    let typed = check_typed_program(&stamped(source))
+    let typed = check_typed_program(&stamped(source), chelis_types::ProgramOrigin::Unlinked)
         .expect_err("stamped ingress rejects fixture")
         .errors;
     (messages(&ir), messages(&typed))
@@ -285,12 +287,13 @@ fn present_structural_match_guards_reject_on_both_ingresses() {
         ],
     )];
 
-    let legacy_errors = check_ir_program(&legacy_program)
+    let legacy_errors = check_ir_program(&legacy_program, chelis_types::ProgramOrigin::Unlinked)
         .expect_err("a present malformed legacy guard must reject")
         .errors;
-    let stamped_errors = check_typed_program(&stamped_program)
-        .expect_err("a present structural guard must reject")
-        .errors;
+    let stamped_errors =
+        check_typed_program(&stamped_program, chelis_types::ProgramOrigin::Unlinked)
+            .expect_err("a present structural guard must reject")
+            .errors;
     assert!(!legacy_errors.is_empty());
     assert!(!stamped_errors.is_empty());
 }

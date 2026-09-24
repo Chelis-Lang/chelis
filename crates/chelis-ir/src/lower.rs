@@ -19602,7 +19602,11 @@ mod fused_zero_tests {
                     "#
                 );
                 let expressions = chelis_deep::parser::parse_str(&source).unwrap();
-                let checked = chelis_types::check_typed_program(&expressions).unwrap();
+                let checked = chelis_types::check_typed_program(
+                    &expressions,
+                    chelis_types::ProgramOrigin::Unlinked,
+                )
+                .unwrap();
                 let checked = chelis_effects::check_program(&checked).unwrap();
                 let checked = chelis_types::check_linearity(&checked).unwrap();
                 let library = try_lower_program_to_library(&checked).unwrap();
@@ -19716,7 +19720,9 @@ mod fused_zero_tests {
             "../tests/fixtures/core/src/lower/shared_coefficient.deep"
         ))
         .unwrap();
-        let checked = chelis_types::check_typed_program(&expressions).unwrap();
+        let checked =
+            chelis_types::check_typed_program(&expressions, chelis_types::ProgramOrigin::Unlinked)
+                .unwrap();
         let mut ctx = LowerCtx::new(
             BTreeMap::new(),
             collect_top_level_defs(checked.exprs()),
@@ -20760,8 +20766,9 @@ mod tests {
             "../tests/fixtures/core/src/lower/local_ascription.json"
         ))
         .expect("lossless local-ascription fixture");
-        let checked = chelis_types::check_ir_program(&expressions)
-            .unwrap_or_else(|report| panic!("fixture type check failed: {:?}", report.errors));
+        let checked =
+            chelis_types::check_ir_program(&expressions, chelis_types::ProgramOrigin::Unlinked)
+                .unwrap_or_else(|report| panic!("fixture type check failed: {:?}", report.errors));
         let ascription = checked
             .local_tensor_ascriptions()
             .first()
@@ -21015,7 +21022,7 @@ mod tests {
 
     fn parse_and_check(src: &str) -> chelis_types::CheckedProgram {
         let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
-        let checked = chelis_types::check_ir_program(&exprs)
+        let checked = chelis_types::check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked)
             .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors));
         let checked = chelis_effects::check_program(&checked)
             .unwrap_or_else(|errors| panic!("effect check failed: {errors:?}"));
@@ -22201,8 +22208,11 @@ mod tests {
             "#,
         )
         .expect("parse library");
-        let (type_env, library_checked) =
-            chelis_types::build_compiled_library_context(&library_exprs).expect("library checks");
+        let (type_env, library_checked) = chelis_types::build_compiled_library_context(
+            &library_exprs,
+            chelis_types::ProgramOrigin::Unlinked,
+        )
+        .expect("library checks");
         let library_checked =
             chelis_effects::check_program(&library_checked).expect("library effects");
         let library_checked =
@@ -22223,8 +22233,12 @@ mod tests {
             "#,
         )
         .expect("parse new code");
-        let new_checked =
-            chelis_types::check_ir_with_context(&type_env, &new_exprs).expect("new code checks");
+        let new_checked = chelis_types::check_ir_with_context(
+            &type_env,
+            &new_exprs,
+            chelis_types::ProgramOrigin::Unlinked,
+        )
+        .expect("new code checks");
         let new_checked =
             chelis_effects::check_effects_with_context(&library_checked, &new_checked)
                 .expect("new code effects");
@@ -24563,7 +24577,7 @@ mod regression_tests {
 
     fn parse_and_lower(src: &str) -> Dag {
         let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
-        let checked = chelis_types::check_ir_program(&exprs)
+        let checked = chelis_types::check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked)
             .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors));
         let checked = chelis_effects::check_program(&checked)
             .unwrap_or_else(|errors| panic!("effect check failed: {errors:?}"));

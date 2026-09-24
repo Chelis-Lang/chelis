@@ -24,7 +24,7 @@ use chelis_types::{check_ir_program, check_typed_program};
 /// The ordered `(kind, message)` diagnostic set for the IR ingress.
 fn ir_diagnostics(source: &str) -> Vec<String> {
     let exprs = parse_and_stamp(source).expect("fixture must parse and stamp");
-    match check_ir_program(&exprs) {
+    match check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked) {
         Ok(_) => Vec::new(),
         Err(result) => result
             .errors
@@ -37,7 +37,7 @@ fn ir_diagnostics(source: &str) -> Vec<String> {
 /// The ordered `(kind, message)` diagnostic set for the typed ingress.
 fn typed_diagnostics(source: &str) -> Vec<String> {
     let exprs = parse_and_stamp(source).expect("fixture must parse and stamp");
-    match check_typed_program(&exprs) {
+    match check_typed_program(&exprs, chelis_types::ProgramOrigin::Unlinked) {
         Ok(_) => Vec::new(),
         Err(result) => result
             .errors

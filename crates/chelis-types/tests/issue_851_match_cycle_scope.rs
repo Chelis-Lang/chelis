@@ -5,7 +5,7 @@ use chelis_types::check_typed_program;
 fn diagnostics(source: &str) -> Vec<String> {
     let deep: Vec<chelis_deep::Expr> =
         chelis_deep::parse_and_stamp_file(source).expect("valid core fixture");
-    match check_typed_program(&deep) {
+    match check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked) {
         Ok(_) => Vec::new(),
         Err(result) => result
             .errors
@@ -38,11 +38,12 @@ fn genuine_top_level_cycle_still_rejects() {
     );
     let deep: Vec<chelis_deep::Expr> =
         chelis_deep::parse_and_stamp_file(source).expect("valid core fixture");
-    let errors: Vec<_> = chelis_types::infer_ir_program(&deep)
-        .errors
-        .into_iter()
-        .map(|error| error.message)
-        .collect();
+    let errors: Vec<_> =
+        chelis_types::infer_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
+            .errors
+            .into_iter()
+            .map(|error| error.message)
+            .collect();
     assert!(
         errors.iter().any(|error| error.contains("binding cycle")),
         "a genuine cycle must still reject: {errors:#?}"

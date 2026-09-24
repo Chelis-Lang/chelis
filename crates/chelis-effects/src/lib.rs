@@ -1423,7 +1423,8 @@ mod tests {
 
     fn checked(src: &str) -> CheckedProgram {
         let exprs = parse_str(src).unwrap();
-        let checked = chelis_types::check_ir_program(&exprs).unwrap();
+        let checked =
+            chelis_types::check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked).unwrap();
         check_program(&checked).unwrap()
     }
 
@@ -1480,7 +1481,8 @@ mod tests {
                 let source = issue_1205_source(operations, flat);
                 let deep = parse_str(&source).expect("#1205 Deep fixture parses");
                 let typed =
-                    chelis_types::check_ir_program(&deep).expect("#1205 fixture type checks");
+                    chelis_types::check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
+                        .expect("#1205 fixture type checks");
                 reset_effect_work_profile();
                 check_program(&typed).expect("#1205 fixture passes effect checking");
                 take_effect_work_profile()
@@ -1527,7 +1529,8 @@ mod tests {
     #[test]
     fn effect_annotation_reconstruction_preserves_type_context() {
         let deep = parse_str(include_str!("../tests/fixtures/core/src/lib/effect_annotation_reconstruction_preserves_type_context.deep")).expect("Deep fixture");
-        let typed = chelis_types::check_ir_program(&deep).expect("type check");
+        let typed = chelis_types::check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
+            .expect("type check");
         let expected_type_env = typed.type_env().clone();
         let expected_signatures = typed.signature_inference().clone();
 
@@ -1540,7 +1543,8 @@ mod tests {
     fn stamped_effect_annotation_preserves_the_checked_node_carrier() {
         let deep = chelis_deep::parse_and_stamp("(def {} answer (fn {} (params {}) (lit {} 1)))")
             .expect("canonical Deep fixture stamps");
-        let typed = chelis_types::check_typed_program(&deep).expect("type check");
+        let typed = chelis_types::check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked)
+            .expect("type check");
 
         let reconstructed = check_program(&typed).expect("effect check");
 
@@ -1566,7 +1570,8 @@ mod tests {
                    (app {} (var {} dropout) (var {} x) (lit {} 0.5))))"#,
         )
         .expect("canonical Deep fixture stamps");
-        let typed = chelis_types::check_typed_program(&deep).expect("type check");
+        let typed = chelis_types::check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked)
+            .expect("type check");
 
         let errors = check_program(&typed).expect_err("declared-pure Random body must reject");
 
@@ -2369,7 +2374,8 @@ mod tests {
                      (app {} (var {} step) (var {} x)))))"#,
         )
         .expect("canonical Deep fixture stamps");
-        let typed = chelis_types::check_typed_program(&deep).expect("type check");
+        let typed = chelis_types::check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked)
+            .expect("type check");
 
         let errors =
             check_program(&typed).expect_err("declared-pure local Random closure must reject");
@@ -2395,7 +2401,9 @@ mod tests {
                      (lit {type: (t-prim {} i32)} 1)))"#,
         ] {
             let deep = parse_str(source).expect("Deep handler fixture parses");
-            let typed = chelis_types::check_ir_program(&deep).expect("type boundary accepts");
+            let typed =
+                chelis_types::check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
+                    .expect("type boundary accepts");
             check_program(&typed).expect("effects boundary accepts literal handler");
         }
     }
@@ -2412,7 +2420,9 @@ mod tests {
                 "(def {{}} value (handle-effect {{effect: random}} {seed} (lit {{type: (t-prim {{}} f32)}} 1.0)))"
             );
             let deep = parse_str(&source).unwrap();
-            let typed = chelis_types::check_ir_program(&deep).expect("signed i64 constant");
+            let typed =
+                chelis_types::check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
+                    .expect("signed i64 constant");
             check_program(&typed).unwrap_or_else(|errors| panic!("{seed}: {errors:?}"));
         }
     }
@@ -2439,7 +2449,9 @@ mod tests {
                 "(def {{}} value (handle-effect {{effect: random}} {seed} (lit {{type: (t-prim {{}} f32)}} 1.0)))"
             );
             let deep = parse_str(&source).unwrap();
-            if let Ok(typed) = chelis_types::check_ir_program(&deep) {
+            if let Ok(typed) =
+                chelis_types::check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
+            {
                 let errors = check_program(&typed).expect_err(seed);
                 assert_eq!(errors.len(), 1, "{seed}: {errors:?}");
                 assert_eq!(errors[0].kind, EffectErrorKind::InvalidHandler, "{seed}");
@@ -2455,8 +2467,9 @@ mod tests {
                  (var {{}} computed_handler) (lit {{type: (t-prim {{}} i32)}} 1)))"
             );
             let deep = parse_str(&source).expect("Deep handler fixture parses");
-            let typed = chelis_types::check_ir_program(&deep)
-                .expect("handler payload is owned by the effects gate");
+            let typed =
+                chelis_types::check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
+                    .expect("handler payload is owned by the effects gate");
             let errors = check_program(&typed).expect_err("nonliteral handler must reject");
             assert_eq!(errors.len(), 1, "one effects owner diagnostic: {errors:?}");
             assert_eq!(errors[0].kind, EffectErrorKind::InvalidHandler);
@@ -2507,7 +2520,8 @@ mod tests {
              (def {} y (app {} (var {} dropout) (var {} x) (lit {type: (t-prim {} f32)} 0.5)))",
         )
         .unwrap();
-        let checked = chelis_types::check_ir_program(&exprs).unwrap();
+        let checked =
+            chelis_types::check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked).unwrap();
         let errors = check_program(&checked).unwrap_err();
         assert!(
             errors
@@ -2682,7 +2696,8 @@ mod tests {
         ))
         .expect("Deep fixture");
 
-        let checked = chelis_types::check_ir_program(&deep).expect("type check");
+        let checked = chelis_types::check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
+            .expect("type check");
         let errors = check_program(&checked).expect_err("partition should propagate Random effect");
         assert!(
             errors
@@ -2716,7 +2731,8 @@ mod tests {
         ))
         .expect("Deep fixture");
 
-        let checked = chelis_types::check_ir_program(&deep).expect("type check");
+        let checked = chelis_types::check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
+            .expect("type check");
         let errors = check_program(&checked).expect_err("map should propagate Random effect");
         assert!(
             errors
@@ -2862,7 +2878,8 @@ mod tests {
         ))
         .expect("Deep fixture");
 
-        let checked = chelis_types::check_ir_program(&deep).expect("type check");
+        let checked = chelis_types::check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
+            .expect("type check");
         let errors = check_program(&checked)
             .expect_err("def with `! {}` that calls test_assert must be rejected");
         assert!(
@@ -2882,7 +2899,8 @@ mod tests {
         ))
         .expect("Deep fixture");
 
-        let checked = chelis_types::check_ir_program(&deep).expect("type check");
+        let checked = chelis_types::check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
+            .expect("type check");
         let errors =
             check_program(&checked).expect_err("transitive caller with `! {}` must be rejected");
         assert!(
@@ -2903,7 +2921,8 @@ mod tests {
         ))
         .expect("Deep fixture");
 
-        let checked = chelis_types::check_ir_program(&deep).expect("type check");
+        let checked = chelis_types::check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
+            .expect("type check");
         check_program(&checked).expect("declared Test should accept test_assert caller");
     }
 
@@ -2914,7 +2933,8 @@ mod tests {
         // systems are orthogonal axes of the effect row.
         let deep = parse_str(include_str!("../tests/fixtures/core/src/lib/declared_io_effect_still_rejects_test_effect_leakage.deep")).expect("Deep fixture");
 
-        let checked = chelis_types::check_ir_program(&deep).expect("type check");
+        let checked = chelis_types::check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
+            .expect("type check");
         let errors =
             check_program(&checked).expect_err("IO-declared fn must not silently acquire Test");
         assert!(
@@ -2938,7 +2958,8 @@ mod tests {
     fn typed_module(src: &str) -> CheckedProgram {
         let deep = parse_str(src).expect("Deep fixture");
 
-        chelis_types::check_typed_program(&deep).expect("type check")
+        chelis_types::check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked)
+            .expect("type check")
     }
 
     #[test]

@@ -31,8 +31,14 @@ fn diagnostics(
 
 fn ingress_diagnostics(source: &str) -> Vec<String> {
     let program = stamped(source);
-    let typed = diagnostics(check_typed_program(&program));
-    let ir = diagnostics(check_ir_program(&program));
+    let typed = diagnostics(check_typed_program(
+        &program,
+        chelis_types::ProgramOrigin::Unlinked,
+    ));
+    let ir = diagnostics(check_ir_program(
+        &program,
+        chelis_types::ProgramOrigin::Unlinked,
+    ));
     assert_eq!(
         typed, ir,
         "stamped and normalizing ingresses must report the same defects"

@@ -29,7 +29,8 @@ use chelis_types::{check_ir_program, check_linearity};
 /// resulting `CheckedProgram` is exactly what `lower_program` expects.
 fn check(source: &str) -> chelis_types::CheckedProgram {
     let exprs = chelis_deep::parser::parse_str(source).expect("deep parse");
-    let checked = check_ir_program(&exprs).expect("IR check clean");
+    let checked =
+        check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked).expect("IR check clean");
     let checked = chelis_effects::check_program(&checked).expect("effects clean");
     check_linearity(&checked).expect("linearity clean")
 }

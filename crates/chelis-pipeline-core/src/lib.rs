@@ -6,9 +6,11 @@
 //!
 //! ```compile_fail
 //! use chelis_pipeline_core::PreparedProgram;
+//! use chelis_types::ProgramOrigin;
 //!
 //! let _prepared = PreparedProgram {
 //!     expanded_deep: Vec::new(),
+//!     origin: ProgramOrigin::Unlinked,
 //! };
 //! ```
 //!
@@ -115,11 +117,19 @@ pub use semantic::{
 
 #[cfg(test)]
 mod tests {
+    use chelis_types::ProgramOrigin;
+    use chelis_types::errors::CheckErrorKind;
+
     use super::*;
 
     fn prepared(source: &str) -> PreparedProgram {
+        prepared_with_origin(source, ProgramOrigin::Unlinked)
+    }
+
+    fn prepared_with_origin(source: &str, origin: ProgramOrigin) -> PreparedProgram {
         PreparedProgram::from_expanded_deep(
             chelis_deep::parser::parse_str(source).expect("the test Deep must parse"),
+            origin,
         )
     }
 
@@ -151,6 +161,110 @@ mod tests {
             analyze_prepared_with_library(prepared(CONTEXT_EXTENSION), library).unwrap(),
         )
         .unwrap()
+    }
+
+    const LINKED_INTERFACE: &str =
+        "(defsig {} pkg__dep__Api__external (t-fn {} (t-prim {} string)))";
+    const LINKED_LIBRARY: &str = "(def {} pkg__dep__Api__value (lit {type: (t-prim {} i32)} 7))";
+    const LINKED_EXTENSION: &str = "(def {} pkg__app__Api__value (var {} pkg__dep__Api__value))";
+    const UNLINKED_EXTENSION: &str = "(def {} answer (var {} pkg__dep__Api__value))";
+
+    #[test]
+    fn monolithic_origin_distinguishes_linked_interfaces_from_forged_source() {
+        assert!(matches!(
+            analyze_prepared(prepared_with_origin(
+                LINKED_INTERFACE,
+                ProgramOrigin::Linked
+            )),
+            PreparedTypeAnalysisOutcome::Accepted(_)
+        ));
+        let PreparedTypeAnalysisOutcome::Rejected { fitness } =
+            analyze_prepared(prepared(LINKED_INTERFACE))
+        else {
+            panic!("identical unlinked input must not gain dependency-interface authority");
+        };
+        assert!(
+            fitness
+                .errors
+                .iter()
+                .any(|error| matches!(error.kind, CheckErrorKind::ReservedLinkerName))
+        );
+        assert!(fitness.errors.iter().any(|error| matches!(
+            &error.kind,
+            CheckErrorKind::UnboundVariable { identifier }
+                if identifier == "pkg__dep__Api__external"
+        )));
+    }
+
+    #[test]
+    fn library_origin_distinguishes_linked_declarations_from_forged_source() {
+        check_prepared_library(prepared_with_origin(LINKED_LIBRARY, ProgramOrigin::Linked))
+            .expect("trusted linked declarations must pass the library semantic entry point");
+        let LibraryRejection::Type { report } = check_prepared_library(prepared(LINKED_LIBRARY))
+            .expect_err("identical unlinked declarations must be rejected")
+        else {
+            panic!("forged linker names must be rejected during type analysis");
+        };
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| matches!(error.kind, CheckErrorKind::ReservedLinkerName))
+        );
+    }
+
+    #[test]
+    fn contextual_origin_is_not_inherited_from_a_linked_library() {
+        let library =
+            check_prepared_library(prepared_with_origin(LINKED_LIBRARY, ProgramOrigin::Linked))
+                .unwrap();
+        let linked = analyze_prepared_with_library(
+            prepared_with_origin(LINKED_EXTENSION, ProgramOrigin::Linked),
+            &library,
+        )
+        .expect("a separately trusted linked extension must type-check");
+        complete_context_checks(linked).expect("linked extension must pass semantic checks");
+
+        let rejection = analyze_prepared_with_library(prepared(LINKED_EXTENSION), &library)
+            .expect_err("a linked base must not authorize new unlinked declarations");
+        assert!(
+            rejection
+                .errors
+                .iter()
+                .any(|error| matches!(error.kind, CheckErrorKind::ReservedLinkerName))
+        );
+
+        let unlinked = analyze_prepared_with_library(prepared(UNLINKED_EXTENSION), &library)
+            .expect("unlinked code may reference already-checked linked declarations");
+        complete_context_checks(unlinked).expect("ordinary unlinked extension must remain valid");
+    }
+
+    #[test]
+    fn layered_origin_is_not_inherited_from_a_linked_library() {
+        let library =
+            check_prepared_library(prepared_with_origin(LINKED_LIBRARY, ProgramOrigin::Linked))
+                .unwrap();
+        let linked = analyze_prepared_library_with_base(
+            prepared_with_origin(LINKED_EXTENSION, ProgramOrigin::Linked),
+            &library,
+        )
+        .expect("a separately trusted linked library layer must type-check");
+        complete_context_library_checks(linked)
+            .expect("linked library layer must compose with its checked base");
+
+        let rejection = analyze_prepared_library_with_base(prepared(LINKED_EXTENSION), &library)
+            .expect_err("a linked base must not authorize an unlinked library layer");
+        assert!(
+            rejection
+                .errors
+                .iter()
+                .any(|error| matches!(error.kind, CheckErrorKind::ReservedLinkerName))
+        );
+
+        let unlinked = analyze_prepared_library_with_base(prepared(UNLINKED_EXTENSION), &library)
+            .expect("an unlinked layer may reference already-checked linked declarations");
+        complete_context_library_checks(unlinked)
+            .expect("ordinary unlinked layer must compose with its checked base");
     }
 
     fn manifest(checked: &CheckedCompilation) -> chelis_types::manifest::RootManifest {

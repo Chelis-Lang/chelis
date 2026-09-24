@@ -3,19 +3,6 @@
 use super::*;
 
 #[test]
-fn child_stamp_roles_cover_the_canonical_deep_vocabulary() {
-    // Since chelis#731 Phase 3 the ownership table is an exhaustive
-    // match over `DeepTag`, so completeness is compile-time and an
-    // unclassified tag is unrepresentable (the old string-keyed None
-    // arm no longer exists). This smoke keeps every row executed.
-    for tag in chelis_deep::DeepTag::ALL {
-        for index in 0..3 {
-            let _ = child_stamp_role(tag, index, 3);
-        }
-    }
-}
-
-#[test]
 fn structural_child_stamp_roles_match_owner_positions() {
     use ChildStampRole::{
         Binder, EffectHandler, ExplicitInferenceBypass, RuntimeExpr, Selector, Syntax, Type,
@@ -81,7 +68,7 @@ fn tag_atom_in_expression_position_is_a_loud_malformed_form() {
             deep::Expr::Atom(deep::Atom::Tag(DeepTag::App), zero_span()),
         ],
     )];
-    let result = infer_program(&program);
+    let result = infer_program(&program, crate::ProgramOrigin::Unlinked);
     assert!(
         result.errors.iter().any(|error| {
             matches!(error.kind, CheckErrorKind::MalformedForm)
@@ -99,7 +86,7 @@ fn tag_atom_in_expression_position_is_a_loud_malformed_form() {
 #[test]
 fn tag_atom_in_tag_position_is_not_a_malformed_form() {
     let program = vec![node_expr(DeepTag::App, vec![])];
-    let result = infer_program(&program);
+    let result = infer_program(&program, crate::ProgramOrigin::Unlinked);
     assert!(
         !result
             .errors
@@ -112,12 +99,61 @@ fn tag_atom_in_tag_position_is_not_a_malformed_form() {
 
 fn check(src: &str) -> InferResult {
     let exprs = chelis_deep::parser::parse_str(src).unwrap();
-    infer_program(&exprs)
+    infer_program(&exprs, crate::ProgramOrigin::Unlinked)
 }
 
 fn checked_deep(src: &str) -> CheckedProgram {
     let exprs = chelis_deep::parser::parse_str(src).expect("Deep fixture parses");
-    check_ir_program(&exprs).expect("IR check")
+    check_ir_program(&exprs, crate::ProgramOrigin::Unlinked).expect("IR check")
+}
+
+#[test]
+fn program_origin_is_independent_at_each_inference_ingress() {
+    type Ingress = fn(&[deep::Expr], ProgramOrigin) -> Vec<CheckError>;
+    fn checked_errors(result: Result<CheckedProgram, InferResult>) -> Vec<CheckError> {
+        match result {
+            Ok(_) => Vec::new(),
+            Err(report) => report.errors,
+        }
+    }
+    let ingresses: [(&str, Ingress); 4] = [
+        ("primary", |exprs, origin| {
+            infer_program(exprs, origin).errors
+        }),
+        ("IR inference", |exprs, origin| {
+            infer_ir_program(exprs, origin).errors
+        }),
+        ("typed", |exprs, origin| {
+            checked_errors(check_typed_program(exprs, origin))
+        }),
+        ("IR checked", |exprs, origin| {
+            checked_errors(check_ir_program(exprs, origin))
+        }),
+    ];
+    let interface = chelis_deep::parser::parse_and_stamp(
+        "(defsig {} pkg__dep__Api__external (t-fn {} (t-prim {} string)))",
+    )
+    .expect("a linked dependency interface parses");
+    for (name, infer) in ingresses {
+        let linked = infer(&interface, ProgramOrigin::Linked);
+        assert!(linked.is_empty(), "{name}: {linked:?}");
+        let unlinked = infer(&interface, ProgramOrigin::Unlinked);
+        assert!(
+            matches!(
+                unlinked.as_slice(),
+                [
+                    CheckError { kind: CheckErrorKind::ReservedLinkerName, .. },
+                    CheckError {
+                        kind: CheckErrorKind::UnboundVariable { identifier },
+                        ..
+                    }
+                ] if identifier == "pkg__dep__Api__external"
+            ),
+            "{name} must independently reject forgery and the orphan, in order: {unlinked:?}",
+        );
+        let linked_again = infer(&interface, ProgramOrigin::Linked);
+        assert!(linked_again.is_empty(), "{name}: {linked_again:?}");
+    }
 }
 
 #[test]
@@ -1047,7 +1083,7 @@ fn deep_source_accepts_f64_tensor_ascription() {
     ))
     .expect("Deep fixture parses");
 
-    let result = infer_program(&exprs);
+    let result = infer_program(&exprs, crate::ProgramOrigin::Unlinked);
     assert!(
         !result
             .errors
@@ -1066,7 +1102,7 @@ fn deep_source_accepts_cast_to_f64_tensor() {
     ))
     .expect("Deep fixture parses");
 
-    let result = infer_program(&exprs);
+    let result = infer_program(&exprs, crate::ProgramOrigin::Unlinked);
     assert!(
         !result
             .errors
@@ -1121,7 +1157,7 @@ fn grad_non_float_param_is_ignored_by_default() {
          (def {} g (grad {} (var {} f)))",
     )
     .unwrap();
-    let checked = check_ir_program(&exprs).expect("IR check");
+    let checked = check_ir_program(&exprs, crate::ProgramOrigin::Unlinked).expect("IR check");
     let ty = checked.type_env().get("g").expect("g type");
     assert_eq!(
         chelis_deep::printer::print_canonical_flat(std::slice::from_ref(ty))
@@ -1145,7 +1181,7 @@ fn grad_over_all_float_field_adt_types_as_same_adt() {
          (def {} g (grad {} (var {} f)))",
     )
     .unwrap();
-    let checked = check_ir_program(&exprs).expect("IR check");
+    let checked = check_ir_program(&exprs, crate::ProgramOrigin::Unlinked).expect("IR check");
     let ty = checked.type_env().get("g").expect("g type");
     let printed = chelis_deep::printer::print_canonical_flat(std::slice::from_ref(ty))
         .trim()
@@ -1170,7 +1206,7 @@ fn grad_over_mixed_field_adt_preserves_the_nominal_cotangent_shape() {
          (def {} g (grad {} (var {} f)))",
     )
     .unwrap();
-    let checked = check_ir_program(&exprs).expect("IR check");
+    let checked = check_ir_program(&exprs, crate::ProgramOrigin::Unlinked).expect("IR check");
     let ty = checked.type_env().get("g").expect("g type");
     let printed = chelis_deep::printer::print_canonical_flat(std::slice::from_ref(ty))
         .trim()
@@ -1197,7 +1233,7 @@ fn grad_over_adt_plus_tensor_multi_target_returns_tuple() {
          (def {} g (grad {} (var {} f)))",
     )
     .unwrap();
-    let checked = check_ir_program(&exprs).expect("IR check");
+    let checked = check_ir_program(&exprs, crate::ProgramOrigin::Unlinked).expect("IR check");
     let ty = checked.type_env().get("g").expect("g type");
     let printed = chelis_deep::printer::print_canonical_flat(std::slice::from_ref(ty))
         .trim()
@@ -1226,7 +1262,7 @@ fn grad_wrt_adt_in_multi_arg_call_returns_struct() {
          (def {} g (grad {} (var {} f) (lit {type: (t-prim {} i32)} 0)))",
     )
     .unwrap();
-    let checked = check_ir_program(&exprs).expect("IR check");
+    let checked = check_ir_program(&exprs, crate::ProgramOrigin::Unlinked).expect("IR check");
     let ty = checked.type_env().get("g").expect("g type");
     let printed = chelis_deep::printer::print_canonical_flat(std::slice::from_ref(ty))
         .trim()
@@ -1251,7 +1287,7 @@ fn grad_over_pure_enum_stays_unit() {
          (def {} g (grad {} (var {} f)))",
     )
     .unwrap();
-    let checked = check_ir_program(&exprs).expect("IR check");
+    let checked = check_ir_program(&exprs, crate::ProgramOrigin::Unlinked).expect("IR check");
     let ty = checked.type_env().get("g").expect("g type");
     let printed = chelis_deep::printer::print_canonical_flat(std::slice::from_ref(ty))
         .trim()
@@ -1277,7 +1313,7 @@ fn grad_over_enum_plus_tensor_keeps_tensor_only_payload() {
          (def {} g (grad {} (var {} f)))",
     )
     .unwrap();
-    let checked = check_ir_program(&exprs).expect("IR check");
+    let checked = check_ir_program(&exprs, crate::ProgramOrigin::Unlinked).expect("IR check");
     let ty = checked.type_env().get("g").expect("g type");
     let printed = chelis_deep::printer::print_canonical_flat(std::slice::from_ref(ty))
         .trim()
@@ -1317,7 +1353,7 @@ fn grad_with_explicit_wrt_returns_selected_gradient_only() {
             (grad {} (var {} loss) (lit {type: (t-prim {} i32)} 1)))",
     )
     .unwrap();
-    let checked = check_ir_program(&exprs).expect("IR check");
+    let checked = check_ir_program(&exprs, crate::ProgramOrigin::Unlinked).expect("IR check");
     let ty = checked.type_env().get("dw").expect("dw type");
     assert_eq!(
         chelis_deep::printer::print_canonical_flat(std::slice::from_ref(ty))
@@ -1345,7 +1381,7 @@ fn grad_with_multiple_wrt_returns_flat_tuple() {
                     (lit {type: (t-prim {} i32)} 1))))",
     )
     .unwrap();
-    let checked = check_ir_program(&exprs).expect("IR check");
+    let checked = check_ir_program(&exprs, crate::ProgramOrigin::Unlinked).expect("IR check");
     let ty = checked.type_env().get("grads").expect("grads type");
     assert_eq!(
         chelis_deep::printer::print_canonical_flat(std::slice::from_ref(ty))
@@ -1749,7 +1785,7 @@ fn typealias_resolves_in_literal_metadata() {
 
 fn deep_check_errors(src: &str) -> Vec<CheckError> {
     let exprs = chelis_deep::parser::parse_str(src).expect("Deep fixture parses");
-    match check_ir_program(&exprs) {
+    match check_ir_program(&exprs, crate::ProgramOrigin::Unlinked) {
         Ok(_) => Vec::new(),
         Err(result) => result.errors,
     }

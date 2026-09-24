@@ -50,7 +50,7 @@ fn issue230_argmax_reduce_f32_input_yields_int64() {
         "fixtures/core/tests/issue_230_argmax_reduce_output_dtype/issue230_argmax_reduce_f32_input_yields_int64.0.deep"
     );
     let deep = parse_core(src);
-    let res = check_ir_program(&deep);
+    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
     if let Err(rep) = res {
         for err in &rep.errors {
             eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
@@ -71,7 +71,7 @@ fn issue230_argmax_reduce_int32_input_yields_int64() {
         "fixtures/core/tests/issue_230_argmax_reduce_output_dtype/issue230_argmax_reduce_int32_input_yields_int64.0.deep"
     );
     let deep = parse_core(src);
-    let res = check_ir_program(&deep);
+    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
     if let Err(rep) = res {
         for err in &rep.errors {
             eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
@@ -90,7 +90,7 @@ fn issue230_argmin_reduce_f32_input_yields_int64() {
         "fixtures/core/tests/issue_230_argmax_reduce_output_dtype/issue230_argmin_reduce_f32_input_yields_int64.0.deep"
     );
     let deep = parse_core(src);
-    let res = check_ir_program(&deep);
+    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
     if let Err(rep) = res {
         for err in &rep.errors {
             eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
@@ -111,7 +111,7 @@ fn issue230_argmin_reduce_int64_input_yields_int64() {
         "fixtures/core/tests/issue_230_argmax_reduce_output_dtype/issue230_argmin_reduce_int64_input_yields_int64.0.deep"
     );
     let deep = parse_core(src);
-    let res = check_ir_program(&deep);
+    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
     if let Err(rep) = res {
         for err in &rep.errors {
             eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
@@ -141,7 +141,7 @@ fn issue230_argmax_reduce_wrong_output_dtype_f32_rejected() {
         "fixtures/core/tests/issue_230_argmax_reduce_output_dtype/issue230_argmax_reduce_wrong_output_dtype_f32_rejected.0.deep"
     );
     let deep = parse_core(src);
-    let res = check_ir_program(&deep);
+    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
     let rep = res.expect_err("expected check failure for argmax_reduce -> f32");
     assert!(
         rep.errors
@@ -167,7 +167,7 @@ fn issue230_argmin_reduce_wrong_output_dtype_int32_rejected() {
         "fixtures/core/tests/issue_230_argmax_reduce_output_dtype/issue230_argmin_reduce_wrong_output_dtype_int32_rejected.0.deep"
     );
     let deep = parse_core(src);
-    let res = check_ir_program(&deep);
+    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
     let rep = res.expect_err("expected check failure for argmin_reduce -> i32");
     assert!(
         rep.errors
@@ -198,7 +198,7 @@ fn issue230_sibling_sweep_max_reduce_preserves_input_dtype() {
         "fixtures/core/tests/issue_230_argmax_reduce_output_dtype/issue230_sibling_sweep_max_reduce_preserves_input_dtype.0.deep"
     );
     let deep = parse_core(src);
-    let res = check_ir_program(&deep);
+    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
     if let Err(rep) = res {
         for err in &rep.errors {
             eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
@@ -218,7 +218,7 @@ fn issue230_sibling_sweep_min_reduce_preserves_input_dtype() {
         "fixtures/core/tests/issue_230_argmax_reduce_output_dtype/issue230_sibling_sweep_min_reduce_preserves_input_dtype.0.deep"
     );
     let deep = parse_core(src);
-    let res = check_ir_program(&deep);
+    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
     if let Err(rep) = res {
         for err in &rep.errors {
             eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
@@ -238,7 +238,7 @@ fn issue230_sibling_sweep_prod_reduce_preserves_input_dtype() {
         "fixtures/core/tests/issue_230_argmax_reduce_output_dtype/issue230_sibling_sweep_prod_reduce_preserves_input_dtype.0.deep"
     );
     let deep = parse_core(src);
-    let res = check_ir_program(&deep);
+    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
     if let Err(rep) = res {
         for err in &rep.errors {
             eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
@@ -258,7 +258,7 @@ fn issue230_sibling_sweep_mean_preserves_input_dtype() {
         "fixtures/core/tests/issue_230_argmax_reduce_output_dtype/issue230_sibling_sweep_mean_preserves_input_dtype.0.deep"
     );
     let deep = parse_core(src);
-    let res = check_ir_program(&deep);
+    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
     if let Err(rep) = res {
         for err in &rep.errors {
             eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
@@ -279,7 +279,7 @@ fn issue230_sibling_sweep_sum_f32_preserves_input_dtype() {
         "fixtures/core/tests/issue_230_argmax_reduce_output_dtype/issue230_sibling_sweep_sum_f32_preserves_input_dtype.0.deep"
     );
     let deep = parse_core(src);
-    let res = check_ir_program(&deep);
+    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
     if let Err(rep) = res {
         for err in &rep.errors {
             eprintln!("unexpected error: {:?}: {}", err.kind, err.message);

@@ -29,7 +29,7 @@ fn parse_core(source: &str) -> Vec<Expr> {
 
 fn reject_messages(source: &str, label: &str) -> Vec<String> {
     let deep = parse_core(source);
-    let rep: InferResult = check_ir_program(&deep)
+    let rep: InferResult = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
         .err()
         .unwrap_or_else(|| panic!("{label}: expected a check rejection, but it passed"));
     assert!(
@@ -41,7 +41,7 @@ fn reject_messages(source: &str, label: &str) -> Vec<String> {
 
 fn accept(source: &str, label: &str) {
     let deep = parse_core(source);
-    if let Err(rep) = check_ir_program(&deep) {
+    if let Err(rep) = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked) {
         let msgs: Vec<String> = rep.errors.iter().map(|e| e.message.clone()).collect();
         panic!("{label}: expected a clean check, got errors: {msgs:?}");
     }

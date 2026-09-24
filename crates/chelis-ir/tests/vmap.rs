@@ -509,7 +509,7 @@ const VMAP_CONST_AXIS_DEEP: &str = r#"
 
 fn check_effects_linearity_deep(deep_src: &str) -> chelis_types::CheckedProgram {
     let exprs = chelis_deep::parser::parse_str(deep_src).expect("deep parse");
-    let checked = check_ir_program(&exprs)
+    let checked = check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked)
         .unwrap_or_else(|r| panic!("deep program must check clean: {:?}", r.errors));
     let checked = chelis_effects::check_program(&checked).expect("effects");
     chelis_types::check_linearity(&checked).expect("linearity")
@@ -517,7 +517,7 @@ fn check_effects_linearity_deep(deep_src: &str) -> chelis_types::CheckedProgram 
 
 fn lower_deep_program(src: &str) -> Result<Dag, chelis_ir::lower::LowerDiagnostic> {
     let exprs = chelis_deep::parser::parse_str(src).expect("Deep fixture");
-    let checked = check_ir_program(&exprs)
+    let checked = check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked)
         .unwrap_or_else(|r| panic!("Deep program must check clean: {:?}", r.errors));
     let checked = chelis_effects::check_program(&checked).expect("effects");
     let checked = chelis_types::check_linearity(&checked).expect("linearity");
@@ -571,7 +571,7 @@ fn lower_deep_program(src: &str) -> Result<Dag, chelis_ir::lower::LowerDiagnosti
 #[test]
 fn issue524_runtime_vmap_axis_is_rejected_at_check_time() {
     let exprs = chelis_deep::parser::parse_str(VMAP_RUNTIME_AXIS_DEEP).expect("deep parse");
-    let Err(result) = check_ir_program(&exprs) else {
+    let Err(result) = check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked) else {
         panic!("a runtime vmap axis must REJECT at check, not check clean and default to 0");
     };
     let malformed: Vec<&chelis_types::errors::CheckError> = result
@@ -758,7 +758,7 @@ fn vmap_grad_records_the_batched_forward_activation_as_a_shape_dep() {
     );
 
     let exprs = chelis_deep::parser::parse_str(source).expect("Deep fixture");
-    let checked = check_ir_program(&exprs).expect("check");
+    let checked = check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked).expect("check");
     let checked = chelis_effects::check_program(&checked).expect("effects");
     let checked = chelis_types::check_linearity(&checked).expect("linearity");
     let dag = chelis_ir::lower::try_lower_program(&checked).expect("lower vmap(grad(h))");

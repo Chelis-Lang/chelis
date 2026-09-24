@@ -31,7 +31,7 @@ fn check(source: &str) -> Result<(), Vec<CheckError>> {
     } else {
         parse_str(source).expect("Deep fixture must parse")
     };
-    match check_typed_program(&exprs) {
+    match check_typed_program(&exprs, chelis_types::ProgramOrigin::Unlinked) {
         Ok(_) => Ok(()),
         Err(report) => Err(report.errors),
     }

@@ -124,7 +124,8 @@ fn conv_error_operand_does_not_clobber_concrete_annotation() {
     let exprs = parse_str(CONV2D_SRC).expect("parse deep");
     // Program is well-typed: the clobber was a SILENT writeback degradation,
     // not a surfaced type error, so `check_ir_program` must succeed.
-    let checked = check_ir_program(&exprs).expect("conv program should check clean");
+    let checked = check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked)
+        .expect("conv program should check clean");
 
     let mut conv_types: Vec<Expr> = Vec::new();
     for expr in checked.exprs() {

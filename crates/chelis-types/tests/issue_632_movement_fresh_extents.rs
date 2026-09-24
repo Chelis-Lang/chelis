@@ -27,7 +27,7 @@ fn parse_core_fixture(source: &str) -> Vec<Expr> {
 
 fn expect_clean(src: &str, what: &str) -> Vec<Expr> {
     let deep = parse_core_fixture(src);
-    match check_ir_program(&deep) {
+    match check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked) {
         Ok(checked) => checked.annotated_exprs().to_vec(),
         Err(rep) => {
             for err in &rep.errors {

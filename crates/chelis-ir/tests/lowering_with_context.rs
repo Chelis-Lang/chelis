@@ -28,13 +28,15 @@ fn parse(src: &str) -> Vec<Expr> {
 
 fn check_lib(library_src: &str) -> (Vec<Expr>, TypeEnv, CheckedProgram) {
     let library_exprs = parse(library_src);
-    let env = build_type_env_from_library(&library_exprs).expect("library type-checks clean");
+    let env = build_type_env_from_library(&library_exprs, chelis_types::ProgramOrigin::Unlinked)
+        .expect("library type-checks clean");
 
     // Build a CheckedProgram for the library by running the standard
     // monolithic IR check check on the library source itself, then the
     // effect + linearity passes — this is the same pipeline `lower_program`
     // expects.
-    let checked = check_ir_program(&library_exprs).expect("library IR check clean");
+    let checked = check_ir_program(&library_exprs, chelis_types::ProgramOrigin::Unlinked)
+        .expect("library IR check clean");
     let checked = chelis_effects::check_program(&checked).expect("library effect clean");
     let checked = check_linearity(&checked).expect("library linearity clean");
     (library_exprs, env, checked)
@@ -42,14 +44,16 @@ fn check_lib(library_src: &str) -> (Vec<Expr>, TypeEnv, CheckedProgram) {
 
 fn check_with_ctx(ctx: &TypeEnv, new_src: &str) -> CheckedProgram {
     let new_exprs = parse(new_src);
-    let checked = check_ir_with_context(ctx, &new_exprs).expect("new-code IR check clean");
+    let checked = check_ir_with_context(ctx, &new_exprs, chelis_types::ProgramOrigin::Unlinked)
+        .expect("new-code IR check clean");
     let checked = chelis_effects::check_program(&checked).expect("new-code effect clean");
     check_linearity(&checked).expect("new-code linearity clean")
 }
 
 fn check_monolithic(combined_src: &str) -> CheckedProgram {
     let exprs = parse(combined_src);
-    let checked = check_ir_program(&exprs).expect("monolithic IR check clean");
+    let checked = check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked)
+        .expect("monolithic IR check clean");
     let checked = chelis_effects::check_program(&checked).expect("monolithic effect clean");
     check_linearity(&checked).expect("monolithic linearity clean")
 }
@@ -474,6 +478,7 @@ fn shadowed_host_value_lowers_and_references_follow_source_order() {
         check_ir_with_context(
             &ctx,
             &parse("(def {} value (lit {type: (t-prim {} i32)} 2))"),
+            chelis_types::ProgramOrigin::Unlinked,
         )
         .is_err()
     );

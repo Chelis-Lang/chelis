@@ -10,8 +10,8 @@
 //!
 //! Rejections preserve opacity ownership and do not cascade into unrelated errors.
 
-use chelis_types::errors::CheckError;
-use chelis_types::{infer_ir_program, infer_program};
+use chelis_types::errors::{CheckError, CheckErrorKind};
+use chelis_types::{ProgramOrigin, infer_ir_program, infer_program};
 
 // ── Harness ──────────────────────────────────────────────────────
 
@@ -30,14 +30,14 @@ fn deep_of_dp(source: &str) -> Vec<chelis_deep::Expr> {
 /// Errors from the executable check pipeline (the path `chelis check`
 /// uses for `.dp` ingestion and the fitness scorer).
 fn errors_ir(exprs: &[chelis_deep::Expr]) -> Vec<CheckError> {
-    infer_ir_program(exprs).errors
+    infer_ir_program(exprs, ProgramOrigin::Unlinked).errors
 }
 
 /// Errors from the plain program driver. D-CHECK installs the
 /// `OpacityContext` in BOTH drivers; the parity tests below exercise
 /// this one explicitly.
 fn errors_plain(exprs: &[chelis_deep::Expr]) -> Vec<CheckError> {
-    infer_program(exprs).errors
+    infer_program(exprs, ProgramOrigin::Unlinked).errors
 }
 
 fn kind_name(err: &CheckError) -> String {
@@ -47,7 +47,7 @@ fn kind_name(err: &CheckError) -> String {
 fn opaque_violations(errors: &[CheckError]) -> Vec<&CheckError> {
     errors
         .iter()
-        .filter(|e| kind_name(e) == "OpaqueTypeViolation")
+        .filter(|e| matches!(e.kind, CheckErrorKind::OpaqueTypeViolation))
         .collect()
 }
 
@@ -716,7 +716,7 @@ fn module_reopen_reported_once_per_name() {
 fn reserved_name_violations(errors: &[CheckError]) -> Vec<&CheckError> {
     errors
         .iter()
-        .filter(|e| kind_name(e) == "ReservedLinkerName")
+        .filter(|e| matches!(e.kind, CheckErrorKind::ReservedLinkerName))
         .collect()
 }
 
@@ -787,8 +787,8 @@ fn stem_with_lexical_wrapper_collision_rejected() {
 
 #[test]
 fn stem_collision_belt_fires_even_when_linker_name_check_is_off() {
-    // Belt-and-suspenders independence (RFC v5): with the linked
-    // provenance flag forced TRUE (simulating linker output, where the
+    // Belt-and-suspenders independence (RFC v5): with explicit Linked
+    // provenance (simulating linker output, where the
     // reserved-name check is off), the stem-vs-lexical collision still
     // fires as DuplicateModule. Genuine linker output never has lexical
     // wrappers, so this never false-fires on it; here a lexical
@@ -806,24 +806,24 @@ fn stem_collision_belt_fires_even_when_linker_name_check_is_off() {
       (record {} Pkg__foo__bar__Secret (kv {} value (var {} x))))))
 "#;
     let exprs = deep_of_dp(program);
-    let _linked = chelis_types::install_linked_program_guard();
-    let errors = errors_ir(&exprs);
+    let errors = infer_ir_program(&exprs, ProgramOrigin::Linked).errors;
     assert!(
         reserved_name_violations(&errors).is_empty(),
-        "with the linked flag on, the reserved-name check is off: {errors:?}"
+        "with Linked origin, the reserved-name check is off: {errors:?}"
     );
     assert!(
-        errors.iter().any(|e| kind_name(e) == "DuplicateModule"),
+        errors
+            .iter()
+            .any(|e| matches!(e.kind, CheckErrorKind::DuplicateModule)),
         "the stem-vs-lexical collision must still fire as DuplicateModule: {errors:?}"
     );
 }
 
 #[test]
-fn mangled_names_accepted_when_linked_flag_is_set() {
-    // No-regression unit: the SAME flat mangled program is accepted
-    // (no ReservedLinkerName) when the linked-program provenance flag
-    // is set -- this is what keeps the reef linker's own output
-    // checking clean.
+fn linked_acceptance_is_per_input_and_preserves_opacity() {
+    // The native linker may assert provenance for its own output, but that
+    // assertion neither authorizes later raw inputs nor grants access to an
+    // opaque type owned by a different linked module.
     let program = r#"(deftype {opaque: true}
   Pkg__foo__Secret
   ()
@@ -836,12 +836,24 @@ fn mangled_names_accepted_when_linked_flag_is_set() {
     (record {} Pkg__foo__Secret (kv {} value (var {} x)))))
 "#;
     let exprs = deep_of_dp(program);
-    let _linked = chelis_types::install_linked_program_guard();
-    let errors = errors_ir(&exprs);
-    assert!(
-        reserved_name_violations(&errors).is_empty(),
-        "linker output must check clean under the linked flag: {errors:?}"
-    );
+    assert_clean(&infer_ir_program(&exprs, ProgramOrigin::Linked).errors);
+    assert_clean(&infer_program(&exprs, ProgramOrigin::Linked).errors);
+
+    for errors in [errors_ir(&exprs), errors_plain(&exprs)] {
+        assert!(
+            !reserved_name_violations(&errors).is_empty(),
+            "a later raw input must still reject linker-reserved names: {errors:?}"
+        );
+    }
+
+    let outside = deep_of_dp(&format!(
+        "{program}\n\
+         (def {{}} pkg__bar__forge \
+           (fn {{}} (params {{}} (x {{type: (t-prim {{}} f32)}})) \
+             (record {{}} Pkg__foo__Secret (kv {{}} value (var {{}} x)))))"
+    ));
+    assert_single_violation(&infer_ir_program(&outside, ProgramOrigin::Linked).errors);
+    assert_single_violation(&infer_program(&outside, ProgramOrigin::Linked).errors);
 }
 
 // ── Exhaustiveness over opaque scrutinees ────────────────────────

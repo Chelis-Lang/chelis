@@ -177,12 +177,16 @@ pub(super) fn detect_module_reopens(exprs: &[deep::Expr], errors: &mut Diagnosti
 /// (raw `.ch` or raw `.dp`) that uses it forges module identity
 /// through the reef-stem channel, so any top-level declaration whose
 /// binding name matches the format is a declaration error. Skipped
-/// entirely when the linked-program provenance flag is set (the
-/// linker's own output is accepted). The linker also re-mangles every
+/// entirely for explicit `ProgramOrigin::Linked` input (the linker's
+/// own output is accepted). The linker also re-mangles every
 /// user source name, so user code inside a real package cannot smuggle
 /// a clean mangled name into linked output.
-pub(super) fn detect_forged_linker_names(exprs: &[deep::Expr], errors: &mut DiagnosticSink<'_>) {
-    if crate::opacity::linked_program() {
+pub(super) fn detect_forged_linker_names(
+    exprs: &[deep::Expr],
+    origin: ProgramOrigin,
+    errors: &mut DiagnosticSink<'_>,
+) {
+    if origin == ProgramOrigin::Linked {
         return;
     }
     for expr in top_level_decl_items(exprs) {
@@ -2618,7 +2622,8 @@ mod top_level_reference_graph_tests {
         let exprs = deep_program(include_str!(
             "../../tests/fixtures/core/src/declarations/direct_wins.deep"
         ));
-        let report = crate::check_ir_program(&exprs).expect_err("direct read must reject");
+        let report = crate::check_ir_program(&exprs, crate::ProgramOrigin::Unlinked)
+            .expect_err("direct read must reject");
         let matching = report
             .errors
             .iter()
@@ -2642,7 +2647,8 @@ mod top_level_reference_graph_tests {
         let exprs = deep_program(include_str!(
             "../../tests/fixtures/core/src/declarations/pure_direct.deep"
         ));
-        let report = crate::check_ir_program(&exprs).expect_err("direct read must reject");
+        let report = crate::check_ir_program(&exprs, crate::ProgramOrigin::Unlinked)
+            .expect_err("direct read must reject");
         let matching = report
             .errors
             .iter()
@@ -2665,13 +2671,14 @@ mod top_level_reference_graph_tests {
         let library = deep_program(include_str!(
             "../../tests/fixtures/core/src/declarations/prior.deep"
         ));
-        let context = crate::build_type_env_from_library(&library)
+        let context = crate::build_type_env_from_library(&library, crate::ProgramOrigin::Unlinked)
             .expect("the prior i32 binding builds a reusable context");
         let current = deep_program(include_str!(
             "../../tests/fixtures/core/src/declarations/current.deep"
         ));
-        let report = crate::check_ir_with_context(&context, &current)
-            .expect_err("the indirect dependency on current-unit later must reject");
+        let report =
+            crate::check_ir_with_context(&context, &current, crate::ProgramOrigin::Unlinked)
+                .expect_err("the indirect dependency on current-unit later must reject");
         let matching = report
             .errors
             .iter()
@@ -2693,7 +2700,7 @@ mod top_level_reference_graph_tests {
         let exprs = deep_program(include_str!(
             "../../tests/fixtures/core/src/declarations/unrelated_direct.deep"
         ));
-        let report = crate::check_ir_program(&exprs)
+        let report = crate::check_ir_program(&exprs, crate::ProgramOrigin::Unlinked)
             .expect_err("both roots' distinct initialization errors must reject");
         let direct = report
             .errors
@@ -2727,7 +2734,7 @@ mod top_level_reference_graph_tests {
         let exprs = deep_program(include_str!(
             "../../tests/fixtures/core/src/declarations/separate_cycle.deep"
         ));
-        let report = crate::check_ir_program(&exprs)
+        let report = crate::check_ir_program(&exprs, crate::ProgramOrigin::Unlinked)
             .expect_err("both the eager cycle and indirect later dependency must reject");
         assert!(
             report
@@ -2809,7 +2816,8 @@ mod top_level_reference_graph_tests {
             "../../tests/fixtures/core/src/declarations/indirect_later_diagnostic.deep"
         );
         let exprs = deep_program(source);
-        let report = crate::check_ir_program(&exprs).expect_err("[04-INF-8] must reject");
+        let report = crate::check_ir_program(&exprs, crate::ProgramOrigin::Unlinked)
+            .expect_err("[04-INF-8] must reject");
         let matching = report
             .errors
             .iter()
@@ -2833,7 +2841,7 @@ mod top_level_reference_graph_tests {
         let token = CancelToken::new();
         let _cancel_guard = crate::cancel::install_cancel_token(token.clone());
         let _reachability_hook = cancel_later_dependency_after_edges_for_test(1, token);
-        let report = crate::check_ir_program(&exprs)
+        let report = crate::check_ir_program(&exprs, crate::ProgramOrigin::Unlinked)
             .expect_err("cancelled initialization analysis must reject");
         assert_eq!(report.errors.len(), 1, "{:#?}", report.errors);
         assert!(
@@ -2854,7 +2862,7 @@ mod top_level_reference_graph_tests {
         let token = CancelToken::new();
         let _cancel_guard = crate::cancel::install_cancel_token(token.clone());
         let _reachability_hook = cancel_later_dependency_after_edges_for_test(1, token);
-        let report = crate::check_ir_program(&exprs)
+        let report = crate::check_ir_program(&exprs, crate::ProgramOrigin::Unlinked)
             .expect_err("source failure plus cancelled initialization analysis must reject");
         assert!(
             report.errors.iter().any(|error| matches!(

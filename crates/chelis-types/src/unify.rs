@@ -4132,7 +4132,7 @@ mod tests {
         );
         subst.leave_level(level, &vg);
         // generalize-sweep-oracle executes and compares the reference algorithm.
-        let scheme = crate::env::Env::new().generalize(&result, &subst);
+        let scheme = crate::env::Env::new().generalize(&result, &subst, &UnordSet::new());
         assert!(scheme.dvars.is_empty());
         assert!(scheme.rvars.is_empty());
         assert!(scheme.tvars.is_empty());
@@ -4278,7 +4278,7 @@ mod tests {
         assert_eq!(subst.level_of_dvar(younger_d), 0);
         assert_eq!(subst.level_of_rvar(younger_r), 0);
         subst.leave_level(inner, &vg);
-        let escaped = env.generalize(&composite, &subst);
+        let escaped = env.generalize(&composite, &subst, &UnordSet::new());
         assert!(escaped.tvars.is_empty());
         assert!(escaped.dvars.is_empty());
         assert!(escaped.rvars.is_empty());
@@ -4339,6 +4339,7 @@ mod tests {
                 Type::Tensor(vec![Dim::Rank(younger_r)], TensorPrec::Concrete(Prim::F32)),
             ]),
             &subst,
+            &UnordSet::new(),
         );
         assert!(escaped.dvars.is_empty());
         assert!(escaped.rvars.is_empty());
@@ -4390,6 +4391,7 @@ mod tests {
                 Type::Tensor(vec![], TensorPrec::Var(younger_precision)),
             ]),
             &subst,
+            &UnordSet::new(),
         );
         assert!(escaped.tvars.is_empty());
         assert!(escaped.dvars.is_empty());
@@ -4410,8 +4412,11 @@ mod tests {
         .expect("precision variables link");
         subst.leave_level(boundary, &vg);
 
-        let scheme = crate::env::Env::new()
-            .generalize(&Type::Tensor(vec![], TensorPrec::Var(precision)), &subst);
+        let scheme = crate::env::Env::new().generalize(
+            &Type::Tensor(vec![], TensorPrec::Var(precision)),
+            &subst,
+            &UnordSet::new(),
+        );
         assert_eq!(scheme.tvars, vec![linked]);
 
         let instantiated = crate::env::Env::new().instantiate(&scheme, &mut vg, &subst);
@@ -4509,7 +4514,7 @@ mod tests {
             .expect("restriction must flow through an ordinary type-variable alias");
         subst.leave_level(boundary, &vg);
 
-        let scheme = crate::env::Env::new().generalize(&Type::Var(alias), &subst);
+        let scheme = crate::env::Env::new().generalize(&Type::Var(alias), &subst, &UnordSet::new());
         assert_eq!(scheme.tvars.len(), 1);
         assert_eq!(
             scheme.tvar_restrictions,
@@ -4849,6 +4854,7 @@ mod tests {
         let scheme = env.generalize(
             &Type::Tuple(vec![Type::Var(pp1_var), Type::Var(sibling_var)]),
             &subst,
+            &UnordSet::new(),
         );
         assert_eq!(scheme.tvars, vec![sibling_var]);
     }

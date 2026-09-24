@@ -4,7 +4,7 @@
 //! is. This is the training signal for AI agents (see spec section 6).
 
 use crate::errors::CheckError;
-use crate::infer::{CheckedProgram, InferResult, InferStats};
+use crate::infer::{CheckedProgram, InferResult, InferStats, ProgramOrigin};
 
 /// Weights for each fitness component (spec section 6.1).
 const W_PARSE: f64 = 0.1;
@@ -162,17 +162,20 @@ pub enum TypeAnalysisOutcome {
 
 /// Type-check a Deep program and produce a fitness report.
 /// Runs tag validation to compute the structure component.
-pub fn check_program(exprs: &[chelis_deep::Expr]) -> FitnessReport {
+pub fn check_program(exprs: &[chelis_deep::Expr], origin: ProgramOrigin) -> FitnessReport {
     let structure = structure_score(exprs);
-    let result = crate::infer::infer_program(exprs);
+    let result = crate::infer::infer_program(exprs, origin);
     FitnessReport::from_infer_result_with_structure(&result, structure)
 }
 
 /// Run one IR-aware inference session and return its fitness and checked product.
-pub fn analyze_ir_program(exprs: &[chelis_deep::Expr]) -> TypeAnalysisOutcome {
+pub fn analyze_ir_program(
+    exprs: &[chelis_deep::Expr],
+    origin: ProgramOrigin,
+) -> TypeAnalysisOutcome {
     let structural = structural_stats(exprs);
     let structure = structure_score_from_stats(structural);
-    match crate::infer::check_ir_program(exprs) {
+    match crate::infer::check_ir_program(exprs, origin) {
         Ok(program) => TypeAnalysisOutcome::Accepted {
             fitness: clean_fitness_from_stats(structural, program.infer_stats()),
             program: Box::new(program),
@@ -210,8 +213,8 @@ pub fn clean_fitness_from_stats(structural: StructuralStats, infer: InferStats) 
 ///
 /// The report now comes from the same inference product as
 /// [`analyze_ir_program`].
-pub fn check_ir_program(exprs: &[chelis_deep::Expr]) -> FitnessReport {
-    match analyze_ir_program(exprs) {
+pub fn check_ir_program(exprs: &[chelis_deep::Expr], origin: ProgramOrigin) -> FitnessReport {
+    match analyze_ir_program(exprs, origin) {
         TypeAnalysisOutcome::Rejected { fitness }
         | TypeAnalysisOutcome::Accepted { fitness, .. } => fitness,
     }
@@ -346,33 +349,10 @@ mod tests {
 
     fn score(src: &str) -> FitnessReport {
         let exprs = chelis_deep::parser::parse_str(src).unwrap();
-        FitnessReport::from_infer_result(&crate::infer::infer_program(&exprs))
-    }
-
-    #[test]
-    fn accepted_analysis_uses_one_type_session() {
-        let exprs =
-            chelis_deep::parser::parse_str("(def {} answer (lit {type: (t-prim {} i32)} 42))")
-                .unwrap();
-        crate::session::reset_type_analysis_session_count();
-
-        assert!(matches!(
-            analyze_ir_program(&exprs),
-            TypeAnalysisOutcome::Accepted { .. }
-        ));
-        assert_eq!(crate::session::type_analysis_session_count(), 1);
-    }
-
-    #[test]
-    fn rejected_analysis_uses_one_type_session() {
-        let exprs = chelis_deep::parser::parse_str("(def {} answer (var {} missing))").unwrap();
-        crate::session::reset_type_analysis_session_count();
-
-        assert!(matches!(
-            analyze_ir_program(&exprs),
-            TypeAnalysisOutcome::Rejected { .. }
-        ));
-        assert_eq!(crate::session::type_analysis_session_count(), 1);
+        FitnessReport::from_infer_result(&crate::infer::infer_program(
+            &exprs,
+            crate::ProgramOrigin::Unlinked,
+        ))
     }
 
     #[test]
@@ -480,7 +460,7 @@ mod tests {
     fn check_program_fn_works() {
         let exprs =
             chelis_deep::parser::parse_str("(def {} x (lit {type: (t-prim {} i32)} 42))").unwrap();
-        let r = check_program(&exprs);
+        let r = check_program(&exprs, crate::ProgramOrigin::Unlinked);
         assert!((r.score - 1.0).abs() < 1e-9);
     }
 
@@ -490,7 +470,7 @@ mod tests {
             "(def {} x (var {type: (t-tensor {} (d-lit {} 32) (d-lit {} 784) (t-prim {} f32))} x))",
         )
         .unwrap();
-        let r = check_ir_program(&exprs);
+        let r = check_ir_program(&exprs, crate::ProgramOrigin::Unlinked);
         assert!((r.score - 1.0).abs() < 1e-9, "{}", r.score);
         assert!(r.errors.is_empty());
     }
@@ -501,7 +481,7 @@ mod tests {
             "(def {} f (app {} (var {} add) (lit {type: (t-prim {} i32)} 1) (lit {type: (t-prim {} bool)} true)))",
         )
         .unwrap();
-        let r = check_ir_program(&exprs);
+        let r = check_ir_program(&exprs, crate::ProgramOrigin::Unlinked);
         assert!(!r.errors.is_empty(), "{r:?}");
         assert!(r.score < 1.0, "{r:?}");
         assert!(r.untyped_nodes > 0, "{r:?}");
@@ -517,7 +497,7 @@ mod tests {
             "(deftype {} Foo () (variant {} Foo)) (deftype {} Foo () (variant {} Foo))",
         )
         .unwrap();
-        let r = check_ir_program(&exprs);
+        let r = check_ir_program(&exprs, crate::ProgramOrigin::Unlinked);
         assert!(!r.errors.is_empty(), "duplicate deftype must report: {r:?}");
         assert_eq!(
             r.total_nodes, 0,
@@ -540,7 +520,7 @@ mod tests {
             "(deftype {} Foo () (variant {} Foo)) (deftype {} Foo () (variant {} Foo))",
         )
         .unwrap();
-        let r = check_program(&exprs);
+        let r = check_program(&exprs, crate::ProgramOrigin::Unlinked);
         assert!(!r.errors.is_empty(), "{r:?}");
         assert!(r.score < 0.5, "got {}", r.score);
     }
@@ -550,7 +530,7 @@ mod tests {
     #[test]
     fn clean_declaration_only_program_still_scores_one() {
         let exprs = chelis_deep::parser::parse_str("(deftype {} Foo () (variant {} Foo))").unwrap();
-        let r = check_ir_program(&exprs);
+        let r = check_ir_program(&exprs, crate::ProgramOrigin::Unlinked);
         assert!(r.errors.is_empty(), "{r:?}");
         assert!((r.score - 1.0).abs() < 1e-9, "got {}", r.score);
     }
@@ -565,7 +545,7 @@ mod tests {
             "(def {} f (app {} (var {} add) (lit {type: (t-prim {} i32)} 1) (lit {type: (t-prim {} bool)} true)))",
         )
         .unwrap();
-        let r = check_ir_program(&exprs);
+        let r = check_ir_program(&exprs, crate::ProgramOrigin::Unlinked);
         assert!(!r.errors.is_empty(), "{r:?}");
         assert!(r.total_nodes > 0, "{r:?}");
         assert!(

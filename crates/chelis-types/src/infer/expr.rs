@@ -1096,14 +1096,17 @@ pub(super) fn infer_var(
             // which of THIS call's fresh dimension variables denote a
             // runtime extent they met (spec/04-type-system.md section 3.2).
             product.record_instantiation_dvars(instantiated.dvars.iter().map(|(_, fresh)| *fresh));
-            if super::recursion::should_record_occurrence(name, &scheme) {
+            if errors
+                .recursive_state()
+                .should_record_occurrence(name, &scheme)
+            {
                 // spec/04 section 3.1.1: inside a recursive binding group,
                 // record the instantiation minted for an in-group reference
                 // so the group can be validated for uniform recursive
                 // instantiation.
                 let span_id = list_span_id(list).map(str::to_string);
                 let span_offset = span_id.as_deref().and_then(parse_span_offset);
-                super::recursion::record_occurrence(
+                errors.recursive_state_mut().record_occurrence(
                     name,
                     &instantiated.tvars,
                     span_id,

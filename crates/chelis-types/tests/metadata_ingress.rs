@@ -8,34 +8,39 @@ fn verdicts(source: &str) -> Vec<Vec<chelis_types::errors::CheckError>> {
 fn verdicts_for(exprs: &[chelis_deep::Expr]) -> Vec<Vec<chelis_types::errors::CheckError>> {
     use chelis_types::*;
     let library = chelis_deep::parser::parse_str("(def {} library_value (lit {} 1))").unwrap();
-    let context = build_type_env_from_library(&library).unwrap();
+    let context =
+        build_type_env_from_library(&library, chelis_types::ProgramOrigin::Unlinked).unwrap();
     vec![
-        check_ir_program(exprs)
+        check_ir_program(exprs, chelis_types::ProgramOrigin::Unlinked)
             .err()
             .map(|e| e.errors)
             .unwrap_or_default(),
-        check_typed_program(exprs)
+        check_typed_program(exprs, chelis_types::ProgramOrigin::Unlinked)
             .err()
             .map(|e| e.errors)
             .unwrap_or_default(),
-        build_type_env_from_library(exprs)
+        build_type_env_from_library(exprs, chelis_types::ProgramOrigin::Unlinked)
             .err()
             .map(|e| e.errors)
             .unwrap_or_default(),
-        build_compiled_library_context(exprs)
+        build_compiled_library_context(exprs, chelis_types::ProgramOrigin::Unlinked)
             .err()
             .map(|e| e.errors)
             .unwrap_or_default(),
-        build_compiled_library_context_with_base(&context, exprs)
+        build_compiled_library_context_with_base(
+            &context,
+            exprs,
+            chelis_types::ProgramOrigin::Unlinked,
+        )
+        .err()
+        .map(|e| e.errors)
+        .unwrap_or_default(),
+        check_ir_with_context(&context, exprs, chelis_types::ProgramOrigin::Unlinked)
             .err()
             .map(|e| e.errors)
             .unwrap_or_default(),
-        check_ir_with_context(&context, exprs)
-            .err()
-            .map(|e| e.errors)
-            .unwrap_or_default(),
-        infer_ir_program(exprs).errors,
-        infer_program(exprs).errors,
+        infer_ir_program(exprs, chelis_types::ProgramOrigin::Unlinked).errors,
+        infer_program(exprs, chelis_types::ProgramOrigin::Unlinked).errors,
     ]
 }
 
@@ -44,7 +49,8 @@ fn checked_effect_replacement_also_checks_metadata_before_publication() {
     let original =
         chelis_deep::parser::parse_str("(def {doc: \"keep\"} f (fn {} (params {}) (lit {} 1)))")
             .unwrap();
-    let checked = chelis_types::check_ir_program(&original).unwrap();
+    let checked =
+        chelis_types::check_ir_program(&original, chelis_types::ProgramOrigin::Unlinked).unwrap();
     checked
         .try_with_effect_annotations(checked.exprs().to_vec())
         .unwrap();
@@ -114,6 +120,22 @@ fn metadata_admission_precedes_inference_on_every_checker_session() {
 fn valid_metadata_remains_admissible_on_every_checker_session() {
     for errors in verdicts("(def {span: \"producer_id\", doc: \"example\"} f (lit {} 1))") {
         assert!(errors.is_empty(), "{errors:?}");
+    }
+}
+
+#[test]
+fn source_metadata_cannot_assert_linked_origin() {
+    for errors in verdicts(
+        "(def {span: \"reef:linked\", doc: \"ProgramOrigin::Linked\", \
+           origin: \"Linked\", linked: true} pkg__dep__Api__forged (lit {} 1))",
+    ) {
+        assert!(
+            errors.iter().any(|error| matches!(
+                error.kind,
+                chelis_types::errors::CheckErrorKind::ReservedLinkerName
+            )),
+            "source annotations must not authorize a linker-reserved declaration: {errors:?}"
+        );
     }
 }
 

@@ -16,7 +16,7 @@ use chelis_types::errors::{CheckError, CheckErrorKind};
 
 fn typecheck_core(source: &str) -> Vec<CheckError> {
     let deep = chelis_deep::parse_and_stamp_file(source).expect("Deep fixture");
-    match check_typed_program(&deep) {
+    match check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked) {
         Ok(_) => Vec::new(),
         Err(prog_errors) => prog_errors.errors,
     }

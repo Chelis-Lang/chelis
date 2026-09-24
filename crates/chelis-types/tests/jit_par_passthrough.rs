@@ -28,7 +28,7 @@ fn jit_wrapping_a_value_type_checks_and_carries_inner_type() {
          (def {} f_jit (jit {} (var {} y)))",
     );
 
-    let res = check_ir_program(&exprs);
+    let res = check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked);
     assert!(
         res.is_ok(),
         "jit({{value}}) should type-check (spec §2.7: compilation trigger, no-op at eval). errors={:?}",
@@ -47,7 +47,7 @@ fn par_sequential_body_type_checks_and_yields_last_type() {
          (def {} f_par (par {} (var {} a) (var {} b)))",
     );
 
-    let res = check_ir_program(&exprs);
+    let res = check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked);
     assert!(
         res.is_ok(),
         "par({{a; b}}) should type-check (spec §2.3: v1 sequential). errors={:?}",

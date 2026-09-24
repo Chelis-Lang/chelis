@@ -6,14 +6,14 @@
 use chelis_ir::axis_sources::{EntryExtentGuard, entry_extent_guards};
 use chelis_ir::dag::{RiscOp, RtAxis};
 use chelis_ir::eval::{TensorValue, eval_tensor_with};
+use chelis_types::ProgramOrigin;
 
 type NamedAxis = (String, usize);
 type CallerNamedClaim = (String, NamedAxis, NamedAxis);
 
-fn checked_deep(source: &str) -> chelis_types::CheckedProgram {
-    let _linked = chelis_types::install_linked_program_guard();
+fn checked_deep(source: &str, origin: ProgramOrigin) -> chelis_types::CheckedProgram {
     let expanded = chelis_deep::parser::parse_and_stamp(source).expect("Deep fixture");
-    let checked = chelis_types::check_ir_program(&expanded).unwrap_or_else(|report| {
+    let checked = chelis_types::check_ir_program(&expanded, origin).unwrap_or_else(|report| {
         panic!(
             "type check failed: {:?}",
             report
@@ -28,12 +28,15 @@ fn checked_deep(source: &str) -> chelis_types::CheckedProgram {
 }
 
 fn named_entry(source: &str, name: &str) -> chelis_ir::Dag {
-    chelis_ir::host::lower_named_tensor_entry_dag(&checked_deep(source), name)
-        .expect("named tensor entry lowers")
+    chelis_ir::host::lower_named_tensor_entry_dag(
+        &checked_deep(source, ProgramOrigin::Unlinked),
+        name,
+    )
+    .expect("named tensor entry lowers")
 }
 
-fn compiled_dags(source: &str) -> Vec<chelis_ir::Dag> {
-    let compiled = chelis_ir::host::try_lower_compiled_program(&checked_deep(source))
+fn compiled_dags(source: &str, origin: ProgramOrigin) -> Vec<chelis_ir::Dag> {
+    let compiled = chelis_ir::host::try_lower_compiled_program(&checked_deep(source, origin))
         .expect("compiled host program lowers");
     let mut dags = compiled.dag.into_iter().collect::<Vec<_>>();
     if let Some(host) = compiled.host {
@@ -253,9 +256,12 @@ fn rank_polymorphic_result_label_does_not_merge_distinct_argument_axes() {
 
 #[test]
 fn merged_root_does_not_join_a_checked_label_to_the_helpers_sibling_binder() {
-    let dags = compiled_dags(include_str!(
-        "fixtures/core/tests/issue_1889_result_label_regressions/merged_root_does_not_join_a_checked_label_to_the_helpers_sibling_binder.deep"
-    ));
+    let dags = compiled_dags(
+        include_str!(
+            "fixtures/core/tests/issue_1889_result_label_regressions/merged_root_does_not_join_a_checked_label_to_the_helpers_sibling_binder.deep"
+        ),
+        ProgramOrigin::Linked,
+    );
     for dag in &dags {
         let claims = caller_named_claims(dag);
         assert!(
@@ -302,9 +308,12 @@ fn merged_root_does_not_join_a_checked_label_to_the_helpers_sibling_binder() {
 
 #[test]
 fn merged_rank_polymorphic_root_keeps_batch_and_seq_in_distinct_classes() {
-    let dags = compiled_dags(include_str!(
-        "fixtures/core/tests/issue_1889_result_label_regressions/merged_rank_polymorphic_root_keeps_batch_and_seq_in_distinct_classes.deep"
-    ));
+    let dags = compiled_dags(
+        include_str!(
+            "fixtures/core/tests/issue_1889_result_label_regressions/merged_rank_polymorphic_root_keeps_batch_and_seq_in_distinct_classes.deep"
+        ),
+        ProgramOrigin::Unlinked,
+    );
     for dag in &dags {
         let claims = caller_named_claims(dag);
         assert!(

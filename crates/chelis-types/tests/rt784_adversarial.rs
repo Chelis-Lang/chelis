@@ -114,7 +114,8 @@ fn visit<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
 /// app node whose callee is `callee`.
 fn writeback_type_tags(src: &str, callee: &str) -> Vec<String> {
     let exprs = parse_str(src).expect("parse deep");
-    let checked = check_ir_program(&exprs).expect("program should check clean");
+    let checked = check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked)
+        .expect("program should check clean");
     let mut tags = Vec::new();
     for expr in checked.exprs() {
         visit(expr, &mut |node| {
@@ -197,9 +198,11 @@ fn messages(rep: &InferResult) -> Vec<String> {
 /// The program MUST be rejected; returns its diagnostic messages.
 fn reject_messages(source: &str, label: &str) -> Vec<String> {
     let deep = parse_core_fixture(source);
-    let rep = check_ir_program(&deep).err().unwrap_or_else(|| {
-        panic!("{label}: expected a check rejection, but it PASSED (silent accept)")
-    });
+    let rep = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
+        .err()
+        .unwrap_or_else(|| {
+            panic!("{label}: expected a check rejection, but it PASSED (silent accept)")
+        });
     messages(&rep)
 }
 

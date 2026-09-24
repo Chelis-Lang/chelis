@@ -1285,7 +1285,8 @@ mod tests {
 
     fn check_program_from_deep(source: &str) -> CheckedProgram {
         let deep = chelis_deep::parser::parse_str(source).expect("Deep fixture");
-        let checked = chelis_types::check_ir_program(&deep).expect("typecheck");
+        let checked = chelis_types::check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
+            .expect("typecheck");
         crate::check_program(&checked).expect("effects")
     }
 

@@ -4,14 +4,15 @@ use chelis_types::{check_linearity, check_typed_program};
 fn check_core(source: &str) -> Result<(), Vec<chelis_types::errors::CheckError>> {
     let deep: Vec<chelis_deep::Expr> =
         chelis_deep::parse_and_stamp_file(source).expect("valid core fixture");
-    let checked = check_typed_program(&deep).expect("type check should succeed");
+    let checked = check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked)
+        .expect("type check should succeed");
     check_linearity(&checked).map(|_| ())
 }
 
 fn typecheck_core(source: &str) -> Result<(), Vec<chelis_types::errors::CheckError>> {
     let deep: Vec<chelis_deep::Expr> =
         chelis_deep::parse_and_stamp_file(source).expect("valid core fixture");
-    check_typed_program(&deep)
+    check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked)
         .map(|_| ())
         .map_err(|result| result.errors)
 }

@@ -24,10 +24,12 @@ fn parse_deep(src: &str) -> Vec<Expr> {
 /// Build (library_typeenv, library_checked_with_effects) from library Deep.
 fn build_library_pair(library_src: &str) -> (TypeEnv, CheckedProgram) {
     let lib_deep = parse_deep(library_src);
-    let typeenv = build_type_env_from_library(&lib_deep).expect("library type-checks");
+    let typeenv = build_type_env_from_library(&lib_deep, chelis_types::ProgramOrigin::Unlinked)
+        .expect("library type-checks");
     // Run the FULL effects pipeline on the library — same way Phase D's
     // contract requires (the library's effect rows are already validated).
-    let lib_checked = check_ir_program(&lib_deep).expect("library IR check");
+    let lib_checked = check_ir_program(&lib_deep, chelis_types::ProgramOrigin::Unlinked)
+        .expect("library IR check");
     let lib_with_effects = check_program(&lib_checked).expect("library effects clean");
     (typeenv, lib_with_effects)
 }
@@ -36,7 +38,8 @@ fn build_library_pair(library_src: &str) -> (TypeEnv, CheckedProgram) {
 /// then return it. New-code's `annotated_exprs()` carry only new defs.
 fn build_new_code_checked(typeenv: &TypeEnv, new_src: &str) -> CheckedProgram {
     let new_deep = parse_deep(new_src);
-    check_ir_with_context(typeenv, &new_deep).expect("new code type-checks")
+    check_ir_with_context(typeenv, &new_deep, chelis_types::ProgramOrigin::Unlinked)
+        .expect("new code type-checks")
 }
 
 // ── Parity tests (5 library+snippet pairs) ───────────────────────────────
@@ -58,7 +61,8 @@ fn parity_pure_library_pure_snippet() {
 
     // Monolithic equivalent:
     let combined = parse_deep(&format!("{library}\n{snippet}"));
-    let combined_checked = check_ir_program(&combined).unwrap();
+    let combined_checked =
+        check_ir_program(&combined, chelis_types::ProgramOrigin::Unlinked).unwrap();
     check_program(&combined_checked).expect("monolithic must also pass");
 }
 
@@ -100,7 +104,8 @@ fn parity_library_io_helper_called_from_snippet() {
 
     // Monolithic parity:
     let combined = parse_deep(&format!("{library}\n{snippet}"));
-    let combined_checked = check_ir_program(&combined).unwrap();
+    let combined_checked =
+        check_ir_program(&combined, chelis_types::ProgramOrigin::Unlinked).unwrap();
     check_program(&combined_checked).expect("monolithic must also pass");
 }
 
@@ -127,7 +132,8 @@ fn parity_library_test_helper_called_from_snippet() {
     );
 
     let combined = parse_deep(&format!("{library}\n{snippet}"));
-    let combined_checked = check_ir_program(&combined).unwrap();
+    let combined_checked =
+        check_ir_program(&combined, chelis_types::ProgramOrigin::Unlinked).unwrap();
     check_program(&combined_checked).expect("monolithic must also pass");
 }
 
@@ -155,7 +161,8 @@ fn parity_declared_empty_eff_snippet_rejects_test_effect_from_library() {
 
     // Monolithic parity:
     let combined = parse_deep(&format!("{library}\n{snippet}"));
-    let combined_checked = check_ir_program(&combined).unwrap();
+    let combined_checked =
+        check_ir_program(&combined, chelis_types::ProgramOrigin::Unlinked).unwrap();
     let mono_errors = check_program(&combined_checked)
         .expect_err("monolithic must also reject !{} that calls Test helper");
     assert_eq!(
@@ -206,7 +213,8 @@ fn parity_random_lib_helper_under_test_context_composes_both_effects() {
 
     // Monolithic parity (negative case): same rejection.
     let combined = parse_deep(&format!("{library}\n{snippet_bad}"));
-    let combined_checked = check_ir_program(&combined).unwrap();
+    let combined_checked =
+        check_ir_program(&combined, chelis_types::ProgramOrigin::Unlinked).unwrap();
     let mono_errors = check_program(&combined_checked).expect_err("monolithic must also reject");
     assert!(
         mono_errors
@@ -450,7 +458,8 @@ fn legacy_check_program_still_works() {
     let combined = parse_deep(include_str!(
         "fixtures/core/tests/effects_with_context/legacy_check_program_still_works.deep"
     ));
-    let checked = check_ir_program(&combined).expect("IR check");
+    let checked =
+        check_ir_program(&combined, chelis_types::ProgramOrigin::Unlinked).expect("IR check");
     let with_effects = check_program(&checked).expect("legacy check_program clean");
     let text = chelis_deep::printer::print_canonical(with_effects.annotated_exprs());
     assert!(

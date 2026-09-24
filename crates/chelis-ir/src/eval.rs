@@ -5045,7 +5045,7 @@ mod tests {
 
     fn lower_library(src: &str) -> LoweredLibrary {
         let exprs = parse_str(src).expect("parse failed");
-        let checked = chelis_types::check_ir_program(&exprs)
+        let checked = chelis_types::check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked)
             .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors));
         let checked = chelis_effects::check_program(&checked)
             .unwrap_or_else(|errors| panic!("effect check failed: {errors:?}"));

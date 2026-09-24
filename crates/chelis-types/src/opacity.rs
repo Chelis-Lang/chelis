@@ -101,45 +101,6 @@ impl OpacityContextData {
     }
 }
 
-thread_local! {
-    /// RT-1 F2-bypass / RFC v5: in-process provenance flag, TRUE only
-    /// while checking decls produced by the reef LINKER (which is the
-    /// sole legitimate producer of the `Pkg__`/`pkg__` internal-name
-    /// format). FALSE by default, so raw `.ch`/`.dp` ingestion rejects
-    /// the linker name format as a forged module identity. Set by an
-    /// install-guard at the link boundary; the linker feeds linked
-    /// Deep to the checker in-process, so the flag is never lost to
-    /// serialization.
-    static LINKED_PROGRAM: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// Install the linked-program provenance flag for the duration of the
-/// returned guard (RFC v5). Call this at the reef link boundary before
-/// running the checker over linker-mangled decls; nested installs are
-/// saved and restored. See [`linked_program`].
-pub fn install_linked_program_guard() -> LinkedProgramGuard {
-    let previous = LINKED_PROGRAM.with(|cell| cell.replace(true));
-    LinkedProgramGuard { previous }
-}
-
-pub struct LinkedProgramGuard {
-    previous: bool,
-}
-
-impl Drop for LinkedProgramGuard {
-    fn drop(&mut self) {
-        let previous = self.previous;
-        LINKED_PROGRAM.with(|cell| cell.set(previous));
-    }
-}
-
-/// Whether the current check is running over reef-linked decls
-/// (RFC v5). When FALSE, the linker name format is rejected as a
-/// forged declaration; when TRUE, the linker's own output is accepted.
-pub(crate) fn linked_program() -> bool {
-    LINKED_PROGRAM.with(std::cell::Cell::get)
-}
-
 // ── Inference hooks (RFC D-CHECK rejection set) ──────────────────
 
 /// Core rejection: `adt_name` was constructed/inspected via `action`
@@ -882,20 +843,5 @@ mod tests {
         assert!(!is_linker_format_name("forge"));
         assert!(!is_linker_format_name("my_pkg_thing"));
         assert!(!is_linker_format_name("pkg_count"));
-    }
-
-    #[test]
-    fn linked_program_flag_defaults_false_and_guard_scopes() {
-        assert!(!linked_program(), "default provenance is not-linked");
-        {
-            let _guard = install_linked_program_guard();
-            assert!(linked_program(), "guard sets the linked flag");
-            {
-                let _nested = install_linked_program_guard();
-                assert!(linked_program());
-            }
-            assert!(linked_program(), "nested guard restores TRUE on drop");
-        }
-        assert!(!linked_program(), "guard restores FALSE on drop");
     }
 }

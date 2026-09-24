@@ -18,8 +18,14 @@ fn diagnostics(program: &[Expr]) -> (Vec<String>, Vec<String>) {
             .collect(),
     };
     (
-        render(check_ir_program(program)),
-        render(check_typed_program(program)),
+        render(check_ir_program(
+            program,
+            chelis_types::ProgramOrigin::Unlinked,
+        )),
+        render(check_typed_program(
+            program,
+            chelis_types::ProgramOrigin::Unlinked,
+        )),
     )
 }
 

@@ -116,8 +116,14 @@ fn assert_api_diagnostic_counts(
     use chelis_types::errors::CheckErrorKind;
 
     for (entry, result) in [
-        ("ir", check_ir_program(program)),
-        ("typed", check_typed_program(program)),
+        (
+            "ir",
+            check_ir_program(program, chelis_types::ProgramOrigin::Unlinked),
+        ),
+        (
+            "typed",
+            check_typed_program(program, chelis_types::ProgramOrigin::Unlinked),
+        ),
     ] {
         let report = result.expect_err("the adversarial property must reject");
         assert_eq!(
@@ -239,8 +245,14 @@ fn assert_rejected(fixture: &str, position: &str) {
         let stamped = chelis_deep::parse_and_stamp_file(&text).expect("stamp canonical Deep");
         for (carrier, exprs) in [("legacy", legacy), ("stamped", stamped)] {
             for (entry, result) in [
-                ("ir", check_ir_program(&exprs)),
-                ("typed", check_typed_program(&exprs)),
+                (
+                    "ir",
+                    check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked),
+                ),
+                (
+                    "typed",
+                    check_typed_program(&exprs, chelis_types::ProgramOrigin::Unlinked),
+                ),
             ] {
                 let report = result.expect_err("reserved primitive must reject");
                 assert!(
@@ -261,8 +273,14 @@ fn assert_rejected(fixture: &str, position: &str) {
 /// The expected sequence names one declaration-owned diagnostic per spelling.
 fn assert_one_report_per_site(program: Vec<chelis_deep::Expr>, expected: &[(&str, usize)]) {
     for (entry, result) in [
-        ("ir", check_ir_program(&program)),
-        ("typed", check_typed_program(&program)),
+        (
+            "ir",
+            check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked),
+        ),
+        (
+            "typed",
+            check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked),
+        ),
     ] {
         let report = result.expect_err("reserved dtype sites must reject");
         assert_eq!(
@@ -340,7 +358,10 @@ fn no_clause_inline_tensor_precision_is_rejected_as_undeclared() {
         "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/undeclared_precision.json"
     );
     let program = core_fixture(source);
-    for result in [check_ir_program(&program), check_typed_program(&program)] {
+    for result in [
+        check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked),
+        check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked),
+    ] {
         let report = result.expect_err("an unlisted precision name is not a binder");
         assert!(
             report
@@ -355,14 +376,20 @@ fn no_clause_inline_tensor_precision_is_rejected_as_undeclared() {
     let explicit = core_fixture(include_str!(
         "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/explicit_precision.json"
     ));
-    for result in [check_ir_program(&explicit), check_typed_program(&explicit)] {
+    for result in [
+        check_ir_program(&explicit, chelis_types::ProgramOrigin::Unlinked),
+        check_typed_program(&explicit, chelis_types::ProgramOrigin::Unlinked),
+    ] {
         result.expect("an explicit matching clause remains valid");
     }
 
     let excluded = core_fixture(include_str!(
         "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/excluded_precision.json"
     ));
-    for result in [check_ir_program(&excluded), check_typed_program(&excluded)] {
+    for result in [
+        check_ir_program(&excluded, chelis_types::ProgramOrigin::Unlinked),
+        check_typed_program(&excluded, chelis_types::ProgramOrigin::Unlinked),
+    ] {
         let report = result.expect_err("an explicit clause is authoritative over `p`");
         assert!(
             report
@@ -401,8 +428,14 @@ fn property_quantifier_reserved_types_have_one_semantic_diagnostic_owner() {
 fn hand_authored_property_parameter_contract_remains_independent_from_defsig() {
     let program = hand_authored_deep_property("f64", "f32");
     for (entry, result) in [
-        ("ir", check_ir_program(&program)),
-        ("typed", check_typed_program(&program)),
+        (
+            "ir",
+            check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked),
+        ),
+        (
+            "typed",
+            check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked),
+        ),
     ] {
         let report = result.expect_err("the authored f32 parameter must conflict with defsig f64");
         assert_eq!(report.errors.len(), 1, "{entry}: {:?}", report.errors);
@@ -426,8 +459,14 @@ fn hand_authored_property_parameter_contract_remains_independent_from_defsig() {
 fn matching_hand_authored_property_parameter_contract_remains_valid() {
     let program = hand_authored_deep_property("f32", "f32");
     for (entry, result) in [
-        ("ir", check_ir_program(&program)),
-        ("typed", check_typed_program(&program)),
+        (
+            "ir",
+            check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked),
+        ),
+        (
+            "typed",
+            check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked),
+        ),
     ] {
         result.unwrap_or_else(|report| {
             panic!("{entry}: matching authored property contracts must pass: {report:?}")
@@ -468,8 +507,14 @@ fn property_copy_ownership_uses_spanless_semantic_type_syntax() {
                 .replace("span_end: 13", "span_end: 130");
             let program = hand_authored_deep_property_types(&signature, &ty);
             for (entry, result) in [
-                ("ir", check_ir_program(&program)),
-                ("typed", check_typed_program(&program)),
+                (
+                    "ir",
+                    check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked),
+                ),
+                (
+                    "typed",
+                    check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked),
+                ),
             ] {
                 let report = result.expect_err("the reserved dtype must reject");
                 assert_eq!(report.errors.len(), 1, "{entry}/{name}/{ty}: {report:?}");
@@ -512,8 +557,14 @@ fn property_copy_ownership_ignores_nonsemantic_metadata_differences() {
         ] {
             let program = hand_authored_deep_property_types(&signature, &parameter);
             for (entry, result) in [
-                ("ir", check_ir_program(&program)),
-                ("typed", check_typed_program(&program)),
+                (
+                    "ir",
+                    check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked),
+                ),
+                (
+                    "typed",
+                    check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked),
+                ),
             ] {
                 let report = result.expect_err("the declaration-owned reserved spelling rejects");
                 assert_eq!(
@@ -619,8 +670,14 @@ fn property_copy_ownership_fails_closed_per_invalid_or_noncanonical_slot() {
             "(lit {} true)",
         );
         for (entry, result) in [
-            ("ir", check_ir_program(&invalid)),
-            ("typed", check_typed_program(&invalid)),
+            (
+                "ir",
+                check_ir_program(&invalid, chelis_types::ProgramOrigin::Unlinked),
+            ),
+            (
+                "typed",
+                check_typed_program(&invalid, chelis_types::ProgramOrigin::Unlinked),
+            ),
         ] {
             let report = result.expect_err("the invalid neighboring slot must reject");
             assert_eq!(
@@ -652,8 +709,14 @@ fn property_copy_ownership_fails_closed_per_invalid_or_noncanonical_slot() {
             "(lit {} true)",
         ));
         for (entry, result) in [
-            ("ir", check_ir_program(&noncanonical)),
-            ("typed", check_typed_program(&noncanonical)),
+            (
+                "ir",
+                check_ir_program(&noncanonical, chelis_types::ProgramOrigin::Unlinked),
+            ),
+            (
+                "typed",
+                check_typed_program(&noncanonical, chelis_types::ProgramOrigin::Unlinked),
+            ),
         ] {
             let report = result.expect_err("a noncanonical params carrier must fail closed");
             assert_eq!(
@@ -749,8 +812,14 @@ fn property_copy_ownership_accepts_the_transitional_list_type_carrier() {
             let program =
                 defsig_parameter_as_legacy_list(hand_authored_deep_property_types(&ty, &ty));
             for (entry, result) in [
-                ("ir", check_ir_program(&program)),
-                ("typed", check_typed_program(&program)),
+                (
+                    "ir",
+                    check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked),
+                ),
+                (
+                    "typed",
+                    check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked),
+                ),
             ] {
                 let report = result.expect_err("the reserved dtype must reject");
                 assert_eq!(report.errors.len(), 1, "{entry}/{name}/{ty}: {report:?}");
@@ -773,7 +842,10 @@ fn property_quantifier_recovery_keeps_an_independent_body_error() {
     let program = core_fixture(include_str!(
         "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/property_body_error.json"
     ));
-    for result in [check_ir_program(&program), check_typed_program(&program)] {
+    for result in [
+        check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked),
+        check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked),
+    ] {
         let report = result.expect_err("the binder and non-bool body must both reject");
         assert_eq!(report.errors.len(), 2, "{:?}", report.errors);
         assert_eq!(
@@ -802,8 +874,14 @@ fn legacy_unknown_tensor_precision_spans_do_not_inherit_the_tensor_span() {
     for name in ["f8e4m3", "f8e5m2"] {
         let program = legacy_tensor_precision(name);
         for (entry, result) in [
-            ("ir", check_ir_program(&program)),
-            ("typed", check_typed_program(&program)),
+            (
+                "ir",
+                check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked),
+            ),
+            (
+                "typed",
+                check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked),
+            ),
         ] {
             let report = result.expect_err("legacy reserved precision must reject");
             assert_eq!(
@@ -913,7 +991,10 @@ fn a_failed_signature_does_not_hide_an_independent_body_site() {
     let source =
         include_str!("fixtures/core/tests/issue_1606_f8e4m3_scalar_position/body_cast.json");
     let program = core_fixture(source);
-    for result in [check_ir_program(&program), check_typed_program(&program)] {
+    for result in [
+        check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked),
+        check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked),
+    ] {
         let report = result.expect_err("both reserved sites must reject");
         assert_eq!(report.errors.len(), 2, "{:?}", report.errors);
         for (error, name) in report.errors.iter().zip(["f8e4m3", "f8e5m2"]) {
@@ -940,7 +1021,10 @@ fn declaration_ownership_does_not_absorb_a_same_spelling_cast_failure() {
         "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/same_spelling_cast.json"
     );
     let program = core_fixture(source);
-    for result in [check_ir_program(&program), check_typed_program(&program)] {
+    for result in [
+        check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked),
+        check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked),
+    ] {
         let report = result.expect_err("the declaration and cast sites must both reject");
         assert_eq!(report.errors.len(), 2, "{:?}", report.errors);
         assert!(
@@ -974,8 +1058,14 @@ fn a_rejected_tensor_precision_preserves_dimensions_for_the_body() {
         let span = format!("source:{offset}..{}", offset + name.len());
 
         for (entry, result) in [
-            ("ir", check_ir_program(&program)),
-            ("typed", check_typed_program(&program)),
+            (
+                "ir",
+                check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked),
+            ),
+            (
+                "typed",
+                check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked),
+            ),
         ] {
             let report = result.expect_err("the reserved dtype and invalid axis must reject");
             assert_eq!(
@@ -1068,7 +1158,10 @@ fn valid_parts_of_a_failed_signature_still_constrain_the_body() {
         ),
     ] {
         let program = core_fixture(source);
-        for result in [check_ir_program(&program), check_typed_program(&program)] {
+        for result in [
+            check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked),
+            check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked),
+        ] {
             let report = result.expect_err("reserved type and independent mismatch must reject");
             assert_eq!(report.errors.len(), 2, "{source}: {:?}", report.errors);
             assert!(matches!(
@@ -1109,7 +1202,10 @@ fn matching_deep_signature_and_annotation_share_a_declaration_owner() {
              (def {{}} classify (fn {{}} (params {{}} (x {{type: (t-prim {{span: \"{display_span}\"}} f8e4m3)}})) (lit {{type: (t-prim {{}} i32)}} 0)))"
         );
         let program = chelis_deep::parse_and_stamp_file(&source).expect("parse two authored sites");
-        for result in [check_ir_program(&program), check_typed_program(&program)] {
+        for result in [
+            check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked),
+            check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked),
+        ] {
             let report = result.expect_err("the declaration-owned annotation must reject");
             assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
             assert!(
@@ -1137,7 +1233,10 @@ fn a_bad_cast_target_is_checked_even_when_its_operand_already_failed() {
     let program = core_fixture(include_str!(
         "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/failed_operand_cast.json"
     ));
-    for result in [check_ir_program(&program), check_typed_program(&program)] {
+    for result in [
+        check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked),
+        check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked),
+    ] {
         let report = result.expect_err("both reserved sites must reject");
         assert_eq!(report.errors.len(), 2, "{:?}", report.errors);
         assert!(report.errors[0].message.contains("f8e4m3"));
@@ -1152,7 +1251,10 @@ fn an_arity_mismatch_does_not_recheck_parameter_annotations() {
             "(defsig {{}} classify (t-fn {{}} (t-prim {{}} f8e4m3) (t-prim {{}} i32)))\n\
              (def {{}} classify (fn {{}} (params {{}} (x {{type: (t-prim {{}} f8e5m2)}}){extra}) (lit {{type: (t-prim {{}} i32)}} 0)))"
         )).expect("parse independent annotations");
-        for result in [check_ir_program(&program), check_typed_program(&program)] {
+        for result in [
+            check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked),
+            check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked),
+        ] {
             let report = result.expect_err("both reserved sites reject");
             let reserved: Vec<_> = report
                 .errors
@@ -1194,7 +1296,10 @@ fn checked_parameters_receive_their_actual_declared_types() {
         ),
     ] {
         let program = core_fixture(fixture);
-        for result in [check_ir_program(&program), check_typed_program(&program)] {
+        for result in [
+            check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked),
+            check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked),
+        ] {
             let checked = result.expect("valid declared parameter");
             let signature = checked
                 .signature_inference()
@@ -1214,7 +1319,7 @@ fn a_canonical_parameter_hole_does_not_erase_declared_shape_evidence() {
     let text = chelis_deep::printer::print_canonical_flat(&desugared);
     let stamped = chelis_deep::parse_and_stamp_file(&text).expect("stamp canonical Deep");
     for (carrier, expressions) in [("desugared", desugared), ("stamped", stamped)] {
-        let report = check_ir_program(&expressions)
+        let report = check_ir_program(&expressions, chelis_types::ProgramOrigin::Unlinked)
             .expect_err("the zero-stride validator must retain declared tensor shapes");
         assert_eq!(report.errors.len(), 1, "{carrier}: {:?}", report.errors);
         assert!(
@@ -1239,8 +1344,8 @@ fn source_annotation_presence_and_read_only_inference_survive_transport() {
     let decoded: Vec<chelis_deep::Expr> = serde_json::from_slice(&encoded).expect("decode input");
     for expressions in [&program, &printed, &decoded] {
         for result in [
-            check_ir_program(expressions),
-            check_typed_program(expressions),
+            check_ir_program(expressions, chelis_types::ProgramOrigin::Unlinked),
+            check_typed_program(expressions, chelis_types::ProgramOrigin::Unlinked),
         ] {
             let checked = result.expect("read-only inference stays valid");
             let function = checked
@@ -1268,7 +1373,10 @@ fn a_parameter_hole_does_not_erase_an_independent_body_mismatch() {
              (def {{}} classify (fn {{}} (params {{}} (x {{type: (t-var {{}} _)}})) {body}))"
         ))
         .expect("parameter-hole Deep fixture");
-        for result in [check_ir_program(&program), check_typed_program(&program)] {
+        for result in [
+            check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked),
+            check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked),
+        ] {
             if accepted {
                 result.expect("the body agrees with the declared result");
             } else {
@@ -1320,8 +1428,8 @@ fn multiple_reserved_sites_survive_printing_and_serialization() {
             serde_json::from_slice(&encoded).expect("decode input");
         for expressions in [&program, &printed, &decoded] {
             for result in [
-                check_ir_program(expressions),
-                check_typed_program(expressions),
+                check_ir_program(expressions, chelis_types::ProgramOrigin::Unlinked),
+                check_typed_program(expressions, chelis_types::ProgramOrigin::Unlinked),
             ] {
                 let report = result.expect_err("all authored reserved sites reject");
                 assert_eq!(
@@ -1370,7 +1478,10 @@ fn signature_ownership_requires_explicit_authority() {
         ),
     ] {
         let program = core_fixture(fixture);
-        for result in [check_ir_program(&program), check_typed_program(&program)] {
+        for result in [
+            check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked),
+            check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked),
+        ] {
             if accepted {
                 result.expect("the applicable precision binder remains valid");
             } else {
@@ -1406,8 +1517,8 @@ fn a_printed_program_preserves_its_diagnostic_count() {
         ("decoded", &decoded),
     ] {
         for result in [
-            check_ir_program(expressions),
-            check_typed_program(expressions),
+            check_ir_program(expressions, chelis_types::ProgramOrigin::Unlinked),
+            check_typed_program(expressions, chelis_types::ProgramOrigin::Unlinked),
         ] {
             let report = result.expect_err("the reserved type must reject on every carrier");
             counts.push((carrier, report.errors.len()));
@@ -1431,7 +1542,10 @@ fn a_divergent_binder_lowering_does_not_duplicate_the_reserved_site() {
     let program = core_fixture(include_str!(
         "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/divergent_binder.json"
     ));
-    for result in [check_ir_program(&program), check_typed_program(&program)] {
+    for result in [
+        check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked),
+        check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked),
+    ] {
         let report = result.expect_err("the reserved site must reject");
         let reserved = report
             .errors
@@ -1450,7 +1564,10 @@ fn handwritten_deep_cannot_bypass_the_type_resolver() {
              (def {{}} f (fn {{}} (params {{}} x) (var {{}} x)))"
         );
         let exprs = chelis_deep::parse_and_stamp_file(&source).expect("stamp Deep fixture");
-        for result in [check_ir_program(&exprs), check_typed_program(&exprs)] {
+        for result in [
+            check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked),
+            check_typed_program(&exprs, chelis_types::ProgramOrigin::Unlinked),
+        ] {
             let report = result.expect_err("reserved primitive must reject");
             assert!(
                 report.errors.iter().any(|error| {
@@ -1474,7 +1591,10 @@ fn handwritten_reserved_type_variable_cannot_bypass_the_resolver() {
              (def {{}} f (fn {{}} (params {{}} x) (var {{}} x)))"
         );
         let exprs = chelis_deep::parse_and_stamp_file(&source).expect("stamp Deep fixture");
-        for result in [check_ir_program(&exprs), check_typed_program(&exprs)] {
+        for result in [
+            check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked),
+            check_typed_program(&exprs, chelis_types::ProgramOrigin::Unlinked),
+        ] {
             let report = result.expect_err("reserved type variable must reject");
             assert!(
                 report
@@ -1509,7 +1629,10 @@ fn assert_accepted(source: &str) {
     let text = chelis_deep::printer::print_canonical_flat(&desugared);
     let stamped = chelis_deep::parse_and_stamp_file(&text).expect("stamp canonical Deep");
     for exprs in [&desugared, &stamped] {
-        for result in [check_ir_program(exprs), check_typed_program(exprs)] {
+        for result in [
+            check_ir_program(exprs, chelis_types::ProgramOrigin::Unlinked),
+            check_typed_program(exprs, chelis_types::ProgramOrigin::Unlinked),
+        ] {
             assert!(result.is_ok(), "{source}: {result:?}");
         }
     }
@@ -1594,7 +1717,10 @@ fn every_active_float_is_still_accepted() {
         let stamped =
             chelis_deep::parse_and_stamp_file(&text).expect("stamp active primitive fixture");
         for program in [&legacy, &stamped] {
-            for result in [check_ir_program(program), check_typed_program(program)] {
+            for result in [
+                check_ir_program(program, chelis_types::ProgramOrigin::Unlinked),
+                check_typed_program(program, chelis_types::ProgramOrigin::Unlinked),
+            ] {
                 result.expect("active float remains admissible");
             }
         }

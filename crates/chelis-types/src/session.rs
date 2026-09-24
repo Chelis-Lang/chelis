@@ -8,29 +8,12 @@
 
 use crate::context::TypeEnv;
 use crate::errors::{CheckError, ErrorWitness};
-use crate::infer::{CheckedProgram, InferResult, InferStats, SignatureInferenceMetadata};
+use crate::infer::recursion::{Caller, RecursiveState};
+use crate::infer::{
+    CheckedProgram, InferResult, InferStats, ProgramOrigin, SignatureInferenceMetadata,
+};
 use crate::opacity::OpacityContextData;
 use chelis_unord::UnordMap;
-
-#[cfg(test)]
-thread_local! {
-    static TYPE_ANALYSIS_SESSION_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-pub(crate) fn reset_type_analysis_session_count() {
-    TYPE_ANALYSIS_SESSION_COUNT.with(|count| count.set(0));
-}
-
-#[cfg(test)]
-pub(crate) fn type_analysis_session_count() -> usize {
-    TYPE_ANALYSIS_SESSION_COUNT.with(std::cell::Cell::get)
-}
-
-#[cfg(test)]
-fn record_type_analysis_session() {
-    TYPE_ANALYSIS_SESSION_COUNT.with(|count| count.set(count.get() + 1));
-}
 
 /// A sink-issued boundary for later diagnostic iteration.
 #[derive(Debug, Clone, Copy)]
@@ -94,9 +77,51 @@ pub struct DiagnosticSink<'session> {
     errors: &'session mut Vec<CheckError>,
     type_resolution_witnesses: UnordMap<(TypeResolutionDiagnosticOwner, String), ErrorWitness>,
     opacity: Option<OpacityContextData>,
+    recursive: RecursiveState,
 }
 
 impl<'session> DiagnosticSink<'session> {
+    /// A checking pass starts with no active group, including declaration
+    /// collection. Reentrant passes move the enclosing frame into the scope.
+    pub(crate) fn enter_recursive_inference(&mut self) -> RecursiveInferenceScope<'_, 'session> {
+        let previous = std::mem::take(&mut self.recursive);
+        RecursiveInferenceScope {
+            sink: self,
+            previous,
+        }
+    }
+
+    pub(crate) fn recursive_state(&self) -> &RecursiveState {
+        &self.recursive
+    }
+
+    pub(crate) fn recursive_state_mut(&mut self) -> &mut RecursiveState {
+        &mut self.recursive
+    }
+
+    pub(crate) fn enter_recursive_caller(
+        &mut self,
+        caller: Option<Caller>,
+    ) -> RecursiveCallerScope<'_, 'session> {
+        let active = caller.is_some();
+        let previous = if active {
+            self.recursive.replace_caller(caller)
+        } else {
+            None
+        };
+        RecursiveCallerScope {
+            sink: self,
+            previous,
+            active,
+        }
+    }
+
+    pub(crate) fn finish_recursive_group(&mut self, subst: &crate::unify::Subst) {
+        if let Some(group) = self.recursive.take_group() {
+            group.finish(subst, self);
+        }
+    }
+
     /// Install this inference pass's policy without opening another diagnostic
     /// destination. The scope restores the enclosing pass on return or unwind.
     pub(crate) fn install_opacity_context(
@@ -262,6 +287,45 @@ impl Drop for OpacityScope<'_, '_> {
     }
 }
 
+#[must_use = "the enclosing recursive frame is restored when this scope drops"]
+pub(crate) struct RecursiveInferenceScope<'sink, 'session> {
+    sink: &'sink mut DiagnosticSink<'session>,
+    previous: RecursiveState,
+}
+
+impl<'session> RecursiveInferenceScope<'_, 'session> {
+    pub(crate) fn sink(&mut self) -> &mut DiagnosticSink<'session> {
+        self.sink
+    }
+}
+
+impl Drop for RecursiveInferenceScope<'_, '_> {
+    fn drop(&mut self) {
+        std::mem::swap(&mut self.sink.recursive, &mut self.previous);
+    }
+}
+
+#[must_use = "the enclosing recursive caller is restored when this scope drops"]
+pub(crate) struct RecursiveCallerScope<'sink, 'session> {
+    sink: &'sink mut DiagnosticSink<'session>,
+    previous: Option<Caller>,
+    active: bool,
+}
+
+impl<'session> RecursiveCallerScope<'_, 'session> {
+    pub(crate) fn sink(&mut self) -> &mut DiagnosticSink<'session> {
+        self.sink
+    }
+}
+
+impl Drop for RecursiveCallerScope<'_, '_> {
+    fn drop(&mut self) {
+        if self.active {
+            let _finished_caller = self.sink.recursive.replace_caller(self.previous.take());
+        }
+    }
+}
+
 #[cfg(test)]
 mod diagnostic_checkpoint_tests {
     use super::*;
@@ -278,6 +342,7 @@ mod diagnostic_checkpoint_tests {
             errors: &mut errors,
             type_resolution_witnesses: UnordMap::new(),
             opacity: None,
+            recursive: RecursiveState::default(),
         };
         let checkpoint = sink.checkpoint();
         sink.push(diagnostic("first new diagnostic"));
@@ -297,6 +362,7 @@ mod diagnostic_checkpoint_tests {
             errors: &mut errors,
             type_resolution_witnesses: UnordMap::new(),
             opacity: None,
+            recursive: RecursiveState::default(),
         };
         sink.push(diagnostic("earlier diagnostic"));
         let checkpoint = sink.checkpoint();
@@ -311,6 +377,299 @@ mod diagnostic_checkpoint_tests {
 }
 
 #[cfg(test)]
+mod recursive_scope_tests {
+    use super::*;
+    use crate::env::Env;
+    use crate::errors::CheckErrorKind;
+    use crate::types::{Prim, Type, VarGen};
+    use crate::unify::{Subst, unify};
+    use chelis_unord::UnordSet;
+
+    struct NestedAbort;
+
+    fn fixture() -> (Env, VarGen, Subst) {
+        let mut env = Env::new();
+        let mut variables = VarGen::default();
+        let mut subst = Subst::new();
+        for name in ["left", "right"] {
+            let level = subst.enter_level(&variables);
+            let parameter = variables.fresh_tvar();
+            let ty = Type::Fn(vec![Type::Var(parameter)], Box::new(Type::Var(parameter)));
+            subst.leave_level(level, &variables);
+            let scheme = env.generalize(&ty, &subst, &UnordSet::new());
+            env.bind(name.to_string(), scheme);
+        }
+        (env, variables, subst)
+    }
+
+    fn begin_group(sink: &mut DiagnosticSink<'_>, env: &Env) {
+        sink.recursive_state_mut()
+            .begin_group([("left", true), ("right", true)].into_iter(), env);
+    }
+
+    fn caller(
+        sink: &DiagnosticSink<'_>,
+        env: &Env,
+        variables: &mut VarGen,
+        subst: &mut Subst,
+        name: &str,
+        binder: &str,
+    ) -> Caller {
+        let own = env.instantiate_scheme(env.lookup(name).unwrap(), variables, subst);
+        let binders = [binder.to_string()].into_iter().collect();
+        sink.recursive_state()
+            .prepare_caller(name, Some(&binders), &own.tvars)
+            .expect("the caller belongs to the active group")
+    }
+
+    fn reference(
+        sink: &mut DiagnosticSink<'_>,
+        env: &Env,
+        variables: &mut VarGen,
+        subst: &mut Subst,
+        name: &str,
+        offset: usize,
+    ) -> Type {
+        let scheme = env.lookup(name).unwrap();
+        let level = subst.enter_level(variables);
+        let instantiated = env.instantiate_scheme(scheme, variables, subst);
+        assert!(
+            sink.recursive_state()
+                .should_record_occurrence(name, scheme)
+        );
+        sink.recursive_state_mut().record_occurrence(
+            name,
+            &instantiated.tvars,
+            Some(format!("surf:{offset}..{}", offset + 1)),
+            Some(offset),
+        );
+        subst.leave_level(level, variables);
+        instantiated.ty
+    }
+
+    fn identity_type(primitive: Prim) -> Type {
+        Type::Fn(vec![Type::Prim(primitive)], Box::new(Type::Prim(primitive)))
+    }
+
+    fn admits_independent_uses(
+        sink: &DiagnosticSink<'_>,
+        env: &Env,
+        variables: &mut VarGen,
+        subst: &Subst,
+        ty: &Type,
+    ) -> bool {
+        let alias = env.generalize(ty, subst, sink.recursive_state().pinned_vars());
+        let mut probe = subst.clone();
+        let first = env.instantiate(&alias, variables, &probe);
+        let second = env.instantiate(&alias, variables, &probe);
+        unify(&first, &identity_type(Prim::Int32), &mut probe).expect("first alias use");
+        unify(&second, &identity_type(Prim::Bool), &mut probe).is_ok()
+    }
+
+    #[test]
+    fn recursive_pins_are_inputs_of_one_session_not_ambient_generalization() {
+        let (env, mut variables, mut subst) = fixture();
+        run_result(|outer| {
+            begin_group(outer, &env);
+            let current = caller(outer, &env, &mut variables, &mut subst, "left", "a");
+            let mut outer_scope = outer.enter_recursive_caller(Some(current));
+            let outer = outer_scope.sink();
+            let outer_reference = reference(outer, &env, &mut variables, &mut subst, "right", 10);
+            assert!(!admits_independent_uses(
+                outer,
+                &env,
+                &mut variables,
+                &subst,
+                &outer_reference,
+            ));
+
+            run_result(|inner| {
+                begin_group(inner, &env);
+                let current = caller(inner, &env, &mut variables, &mut subst, "right", "b");
+                let mut inner_scope = inner.enter_recursive_caller(Some(current));
+                let inner = inner_scope.sink();
+                let inner_reference =
+                    reference(inner, &env, &mut variables, &mut subst, "left", 20);
+                assert!(admits_independent_uses(
+                    inner,
+                    &env,
+                    &mut variables,
+                    &subst,
+                    &outer_reference,
+                ));
+                assert!(admits_independent_uses(
+                    outer,
+                    &env,
+                    &mut variables,
+                    &subst,
+                    &inner_reference,
+                ));
+                assert!(!admits_independent_uses(
+                    inner,
+                    &env,
+                    &mut variables,
+                    &subst,
+                    &inner_reference,
+                ));
+                Ok(())
+            })
+            .expect("the independent session has no rejected occurrence");
+            assert!(!admits_independent_uses(
+                outer,
+                &env,
+                &mut variables,
+                &subst,
+                &outer_reference,
+            ));
+            Ok(())
+        })
+        .expect("unbound recursive instantiations have no diagnostic");
+    }
+
+    #[test]
+    fn recursive_invocations_restore_pending_evidence_on_return_and_unwind() {
+        let nested: Vec<chelis_deep::Expr> = serde_json::from_str(include_str!(
+            "../tests/fixtures/core/src/recursion_uniformity/direct_polymorphic_recursion_is_rejected_with_the_atom.json"
+        ))
+        .unwrap();
+        for driver in [
+            crate::infer::infer_program_in_session,
+            crate::infer::infer_ir_program_in_session,
+        ] {
+            let (env, mut variables, mut subst) = fixture();
+            let report = run_result(|sink| {
+                begin_group(sink, &env);
+                let current = caller(sink, &env, &mut variables, &mut subst, "left", "a");
+                {
+                    let mut outer_scope = sink.enter_recursive_caller(Some(current));
+                    let outer = outer_scope.sink();
+                    let first =
+                        reference(outer, &env, &mut variables, &mut subst, "right", 1_000_000);
+                    driver(&nested, ProgramOrigin::Unlinked, outer);
+                    assert!(!admits_independent_uses(
+                        outer,
+                        &env,
+                        &mut variables,
+                        &subst,
+                        &first,
+                    ));
+
+                    let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let mut invocation = outer.enter_recursive_inference();
+                        let inner = invocation.sink();
+                        begin_group(inner, &env);
+                        let current = caller(inner, &env, &mut variables, &mut subst, "right", "b");
+                        let mut member = inner.enter_recursive_caller(Some(current));
+                        let abandoned = reference(
+                            member.sink(),
+                            &env,
+                            &mut variables,
+                            &mut subst,
+                            "left",
+                            1_000_001,
+                        );
+                        unify(&abandoned, &identity_type(Prim::Int32), &mut subst).unwrap();
+                        std::panic::panic_any(NestedAbort);
+                    }));
+                    assert!(
+                        unwind
+                            .expect_err("nested check unwinds")
+                            .is::<NestedAbort>()
+                    );
+                    assert!(!admits_independent_uses(
+                        outer,
+                        &env,
+                        &mut variables,
+                        &subst,
+                        &first,
+                    ));
+                    let last =
+                        reference(outer, &env, &mut variables, &mut subst, "right", 1_000_002);
+                    unify(&first, &identity_type(Prim::Int32), &mut subst).unwrap();
+                    unify(&last, &identity_type(Prim::Int32), &mut subst).unwrap();
+                }
+                sink.finish_recursive_group(&subst);
+                Ok(())
+            })
+            .expect_err("completed groups report their nonuniform instantiations");
+
+            assert_eq!(report.errors.len(), 3, "{:?}", report.errors);
+            assert!(
+                report
+                    .errors
+                    .iter()
+                    .all(|error| matches!(error.kind, CheckErrorKind::TypeMismatch,))
+            );
+            assert_eq!(report.errors[0].got.as_deref(), Some("[Box[a]]"));
+            assert_eq!(
+                report.errors[1..]
+                    .iter()
+                    .map(|error| error.span_offset)
+                    .collect::<Vec<_>>(),
+                [Some(1_000_000), Some(1_000_002)],
+            );
+        }
+    }
+
+    #[test]
+    fn recursive_caller_scopes_restore_attribution_and_retain_recorded_occurrences() {
+        let (env, mut variables, mut subst) = fixture();
+        let report = run_result(|sink| {
+            begin_group(sink, &env);
+            let current = caller(sink, &env, &mut variables, &mut subst, "left", "a");
+            {
+                let mut outer_scope = sink.enter_recursive_caller(Some(current));
+                let outer = outer_scope.sink();
+                let first = reference(outer, &env, &mut variables, &mut subst, "right", 10);
+                unify(&first, &identity_type(Prim::Int32), &mut subst).unwrap();
+                {
+                    let current = caller(outer, &env, &mut variables, &mut subst, "right", "b");
+                    let mut inner = outer.enter_recursive_caller(Some(current));
+                    let second =
+                        reference(inner.sink(), &env, &mut variables, &mut subst, "left", 20);
+                    unify(&second, &identity_type(Prim::Int32), &mut subst).unwrap();
+                }
+                let third = reference(outer, &env, &mut variables, &mut subst, "right", 30);
+                unify(&third, &identity_type(Prim::Int32), &mut subst).unwrap();
+                let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let current = caller(outer, &env, &mut variables, &mut subst, "right", "b");
+                    let mut inner = outer.enter_recursive_caller(Some(current));
+                    let fourth =
+                        reference(inner.sink(), &env, &mut variables, &mut subst, "left", 40);
+                    unify(&fourth, &identity_type(Prim::Int32), &mut subst).unwrap();
+                    std::panic::panic_any(NestedAbort);
+                }));
+                assert!(
+                    unwind
+                        .expect_err("nested caller unwinds")
+                        .is::<NestedAbort>()
+                );
+                let fifth = reference(outer, &env, &mut variables, &mut subst, "right", 50);
+                unify(&fifth, &identity_type(Prim::Int32), &mut subst).unwrap();
+            }
+            sink.finish_recursive_group(&subst);
+            Ok(())
+        })
+        .expect_err("every completed group's recorded occurrence remains authoritative");
+
+        assert_eq!(
+            report
+                .errors
+                .iter()
+                .map(|error| (error.span_offset, error.expected.as_deref()))
+                .collect::<Vec<_>>(),
+            [
+                (Some(10), Some("[a]")),
+                (Some(20), Some("[b]")),
+                (Some(30), Some("[a]")),
+                (Some(40), Some("[b]")),
+                (Some(50), Some("[a]")),
+            ],
+        );
+    }
+}
+
+#[cfg(test)]
 mod opacity_scope_tests {
     use super::*;
     use crate::errors::CheckErrorKind;
@@ -321,7 +680,8 @@ mod opacity_scope_tests {
             "../tests/fixtures/core/tests/opaque_types/shared_104.deep"
         ))
         .expect("opaque library parses");
-        crate::build_type_env_from_library(&program).expect("opaque library checks")
+        crate::build_type_env_from_library(&program, crate::ProgramOrigin::Unlinked)
+            .expect("opaque library checks")
     }
 
     fn policy(library: &TypeEnv, module: &str) -> OpacityContextData {
@@ -448,6 +808,7 @@ mod rejected_signature_resolution_tests {
                 errors: &mut errors,
                 type_resolution_witnesses: UnordMap::new(),
                 opacity: None,
+                recursive: RecursiveState::default(),
             };
             let mut resolver = DeepTypeResolver::new(
                 TypeUseSite::Defsig,
@@ -527,7 +888,7 @@ mod rejected_signature_resolution_tests {
     }
 }
 
-pub(crate) fn infer_program(exprs: &[chelis_deep::Expr]) -> InferResult {
+pub(crate) fn infer_program(exprs: &[chelis_deep::Expr], origin: ProgramOrigin) -> InferResult {
     crate::infer::run_on_grown_stack(|| {
         let mut errors = Vec::new();
         let stats = {
@@ -535,9 +896,10 @@ pub(crate) fn infer_program(exprs: &[chelis_deep::Expr]) -> InferResult {
                 errors: &mut errors,
                 type_resolution_witnesses: UnordMap::new(),
                 opacity: None,
+                recursive: RecursiveState::default(),
             };
             match admit_metadata(exprs, &mut sink) {
-                Ok(()) => crate::infer::infer_program_in_session(exprs, &mut sink),
+                Ok(()) => crate::infer::infer_program_in_session(exprs, origin, &mut sink),
                 Err(stats) => stats,
             }
         };
@@ -561,6 +923,7 @@ mod authoritative_type_stamp_tests {
                 errors: &mut errors,
                 type_resolution_witnesses: UnordMap::new(),
                 opacity: None,
+                recursive: RecursiveState::default(),
             };
             run_type_stamp_mutation_case(case, &mut sink)
         };
@@ -646,6 +1009,7 @@ mod unresolved_operand_reconcile_tests {
                 errors: &mut errors,
                 type_resolution_witnesses: UnordMap::new(),
                 opacity: None,
+                recursive: RecursiveState::default(),
             };
             run_reconcile_mutation_case(case, &mut sink)
         };
@@ -723,6 +1087,7 @@ mod annotated_totality_finalization_tests {
                 errors: &mut errors,
                 type_resolution_witnesses: UnordMap::new(),
                 opacity: None,
+                recursive: RecursiveState::default(),
             };
             run_finalization_mutation_case(case, &mut sink);
         }
@@ -782,6 +1147,7 @@ fn run_result<T>(
             errors: &mut errors,
             type_resolution_witnesses: UnordMap::new(),
             opacity: None,
+            recursive: RecursiveState::default(),
         };
         run(&mut sink)
     };
@@ -837,10 +1203,11 @@ fn run_with_metadata<T>(
 
 pub(crate) fn build_type_env_from_library(
     exprs: &[chelis_deep::Expr],
+    origin: ProgramOrigin,
 ) -> Result<TypeEnv, InferResult> {
     crate::infer::run_on_grown_stack(|| {
         run_with_metadata(exprs, |sink| {
-            crate::infer::build_type_env_from_library_in_session(exprs, sink)
+            crate::infer::build_type_env_from_library_in_session(exprs, origin, sink)
         })
     })
 }
@@ -857,18 +1224,20 @@ pub(crate) fn resolve_declared_surface(
 
 pub(crate) fn build_compiled_library_context(
     exprs: &[chelis_deep::Expr],
+    origin: ProgramOrigin,
 ) -> Result<(TypeEnv, CheckedProgram), InferResult> {
     run_with_metadata(exprs, |sink| {
-        crate::infer::build_compiled_library_context_in_session(exprs, sink)
+        crate::infer::build_compiled_library_context_in_session(exprs, origin, sink)
     })
 }
 
 pub(crate) fn build_compiled_library_context_with_base(
     base: &TypeEnv,
     exprs: &[chelis_deep::Expr],
+    origin: ProgramOrigin,
 ) -> Result<(TypeEnv, CheckedProgram), InferResult> {
     run_with_metadata(exprs, |sink| {
-        crate::infer::build_compiled_library_context_with_base_in_session(base, exprs, sink)
+        crate::infer::build_compiled_library_context_with_base_in_session(base, exprs, origin, sink)
     })
 }
 
@@ -876,15 +1245,15 @@ pub(crate) fn check_ir_with_signature_context(
     context: &TypeEnv,
     signature_context: &SignatureInferenceMetadata,
     exprs: &[chelis_deep::Expr],
+    origin: ProgramOrigin,
 ) -> Result<CheckedProgram, InferResult> {
-    #[cfg(test)]
-    record_type_analysis_session();
     crate::infer::run_on_grown_stack(|| {
         run_with_metadata(exprs, |sink| {
             crate::infer::check_ir_with_signature_context_in_session(
                 context,
                 signature_context,
                 exprs,
+                origin,
                 sink,
             )
         })
@@ -893,15 +1262,16 @@ pub(crate) fn check_ir_with_signature_context(
 
 pub(crate) fn check_typed_program(
     exprs: &[chelis_deep::Expr],
+    origin: ProgramOrigin,
 ) -> Result<CheckedProgram, InferResult> {
     crate::infer::run_on_grown_stack(|| {
         run_with_metadata(exprs, |sink| {
-            crate::infer::check_typed_program_in_session(exprs, sink)
+            crate::infer::check_typed_program_in_session(exprs, origin, sink)
         })
     })
 }
 
-pub(crate) fn infer_ir_program(exprs: &[chelis_deep::Expr]) -> InferResult {
+pub(crate) fn infer_ir_program(exprs: &[chelis_deep::Expr], origin: ProgramOrigin) -> InferResult {
     crate::infer::run_on_grown_stack(|| {
         let mut errors = Vec::new();
         let stats = {
@@ -909,9 +1279,10 @@ pub(crate) fn infer_ir_program(exprs: &[chelis_deep::Expr]) -> InferResult {
                 errors: &mut errors,
                 type_resolution_witnesses: UnordMap::new(),
                 opacity: None,
+                recursive: RecursiveState::default(),
             };
             match admit_metadata(exprs, &mut sink) {
-                Ok(()) => crate::infer::infer_ir_program_in_session(exprs, &mut sink),
+                Ok(()) => crate::infer::infer_ir_program_in_session(exprs, origin, &mut sink),
                 Err(stats) => stats,
             }
         };

@@ -59,7 +59,9 @@ fn lowering_scalar_helpers_keeps_scope_snapshot_allocations_bounded() {
             }
             // Original scalar input ascription and helper15 call with 32 args.
             deep.extend(fragments);
-            let checked = chelis_types::check_typed_program(&deep).unwrap();
+            let checked =
+                chelis_types::check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked)
+                    .unwrap();
             let checked = chelis_effects::check_program(&checked).unwrap();
             let checked = chelis_types::check_linearity(&checked).unwrap();
             let before = BYTES.load(Ordering::Relaxed);

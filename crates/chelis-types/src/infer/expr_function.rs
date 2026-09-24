@@ -653,7 +653,7 @@ pub(super) fn infer_let(
                     subst.lower_type_to_current(&final_ty);
                     Scheme::mono(subst.apply(&final_ty))
                 } else {
-                    let_env.generalize(&final_ty, subst)
+                    let_env.generalize(&final_ty, subst, errors.recursive_state().pinned_vars())
                 };
                 // chelis#397/#469: record the size provenance of this binding
                 // BEFORE binding it (so `classify_expand_size` resolves it

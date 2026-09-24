@@ -25,7 +25,8 @@ use chelis_types::{check_linearity, check_typed_program};
 /// `CheckErrorKind::UseAfterConsume` and message content.
 fn linearity_errors(source: &str) -> Vec<chelis_types::errors::CheckError> {
     let deep = chelis_deep::parser::parse_str(source).expect("Deep fixture");
-    let checked = check_typed_program(&deep).expect("type check should succeed");
+    let checked = check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked)
+        .expect("type check should succeed");
     check_linearity(&checked).expect_err("linearity check must error on use-after-consume")
 }
 

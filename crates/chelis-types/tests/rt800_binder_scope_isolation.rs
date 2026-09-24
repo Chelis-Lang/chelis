@@ -30,7 +30,7 @@ fn parse_fixture(source: &str) -> Vec<chelis_deep::Expr> {
 
 fn assert_legal() {
     let exprs = parse(LEGAL);
-    check_ir_program(&exprs)
+    check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked)
         .unwrap_or_else(|result| panic!("legal explicit binder must check: {:?}", result.errors));
 }
 
@@ -54,13 +54,19 @@ fn assert_rogue_rejected(result: Result<chelis_types::CheckedProgram, chelis_typ
 #[test]
 fn sibling_definition_does_not_inherit_binders() {
     let exprs = parse(&format!("{LEGAL}\n{ROGUE}"));
-    assert_rogue_rejected(check_ir_program(&exprs));
+    assert_rogue_rejected(check_ir_program(
+        &exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+    ));
 }
 
 #[test]
 fn sequential_checks_do_not_inherit_binders() {
     assert_legal();
-    assert_rogue_rejected(check_ir_program(&parse(ROGUE)));
+    assert_rogue_rejected(check_ir_program(
+        &parse(ROGUE),
+        chelis_types::ProgramOrigin::Unlinked,
+    ));
     assert_legal();
 }
 
@@ -73,7 +79,10 @@ fn parallel_checks_keep_binders_thread_local_by_construction() {
     });
     let rogue = std::thread::spawn(|| {
         for _ in 0..8 {
-            assert_rogue_rejected(check_ir_program(&parse(ROGUE)));
+            assert_rogue_rejected(check_ir_program(
+                &parse(ROGUE),
+                chelis_types::ProgramOrigin::Unlinked,
+            ));
         }
     });
     legal.join().expect("legal checker worker panicked");
@@ -82,17 +91,27 @@ fn parallel_checks_keep_binders_thread_local_by_construction() {
 
 #[test]
 fn stacked_context_does_not_export_a_body_binder() {
-    let context = build_type_env_from_library(&parse(LEGAL)).expect("legal library must check");
-    assert_rogue_rejected(check_ir_with_context(&context, &parse(ROGUE)));
+    let context = build_type_env_from_library(&parse(LEGAL), chelis_types::ProgramOrigin::Unlinked)
+        .expect("legal library must check");
+    assert_rogue_rejected(check_ir_with_context(
+        &context,
+        &parse(ROGUE),
+        chelis_types::ProgramOrigin::Unlinked,
+    ));
 }
 
 #[test]
 fn serialized_context_drops_transient_binder_scope() {
-    let context = build_type_env_from_library(&parse(LEGAL)).expect("legal library must check");
+    let context = build_type_env_from_library(&parse(LEGAL), chelis_types::ProgramOrigin::Unlinked)
+        .expect("legal library must check");
     let bytes = bincode::serialize(&context).expect("TypeEnv cache serialization must succeed");
     let restored: TypeEnv =
         bincode::deserialize(&bytes).expect("TypeEnv cache deserialization must succeed");
-    assert_rogue_rejected(check_ir_with_context(&restored, &parse(ROGUE)));
+    assert_rogue_rejected(check_ir_with_context(
+        &restored,
+        &parse(ROGUE),
+        chelis_types::ProgramOrigin::Unlinked,
+    ));
 }
 
 #[test]
@@ -111,7 +130,7 @@ fn explicit_signature_binders_reach_generated_annotation_finalization() {
     let exprs = parse_fixture(include_str!(
         "fixtures/core/tests/rt800_binder_scope_isolation/explicit_signature_binders_reach_generated_annotation_finalization.0.deep"
     ));
-    check_ir_program(&exprs).unwrap_or_else(|result| {
+    check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked).unwrap_or_else(|result| {
         panic!(
             "the declaration-owned `piece`/`classes`/`p` scope must survive finalization: {:?}",
             result.errors
@@ -125,7 +144,7 @@ fn unknown_nominal_metadata_reports_once_without_finalizer_duplication() {
         "(def {} bad
            (fn {} (params {} (x {type: (t-adt {} Missing)})) (var {} x)))",
     );
-    let errors = check_ir_program(&exprs)
+    let errors = check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked)
         .expect_err("unknown nominal metadata must reject")
         .errors;
     assert_eq!(

@@ -30,7 +30,7 @@ fn parse_deep(source: &str) -> Vec<Expr> {
 /// produce, so a negative cannot pass on an unrelated or extra error.
 fn sole_error(source: &str, what: &str) -> CheckErrorKind {
     let deep = parse_deep(source);
-    let Err(report) = check_ir_program(&deep) else {
+    let Err(report) = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked) else {
         panic!("{what} must be rejected");
     };
     let [error] = report.errors.as_slice() else {
@@ -53,7 +53,7 @@ fn sole_dimension_mismatch(source: &str, what: &str) {
 
 fn accepts(source: &str, what: &str) {
     let deep = parse_deep(source);
-    if let Err(report) = check_ir_program(&deep) {
+    if let Err(report) = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked) {
         panic!("{what} must type-check, got {:?}", report.errors);
     }
 }

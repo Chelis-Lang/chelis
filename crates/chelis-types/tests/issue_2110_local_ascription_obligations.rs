@@ -8,7 +8,7 @@ use chelis_types::{
 
 fn check_core(source: &str) -> Result<CheckedProgram, chelis_types::InferResult> {
     let decls = parse_str(source).expect("Deep fixture parse");
-    check_ir_program(&decls)
+    check_ir_program(&decls, chelis_types::ProgramOrigin::Unlinked)
 }
 
 fn checked_core(source: &str) -> CheckedProgram {
@@ -17,7 +17,7 @@ fn checked_core(source: &str) -> CheckedProgram {
 
 fn check_deep(source: &str) -> Result<CheckedProgram, chelis_types::InferResult> {
     let program = chelis_deep::parser::parse_str(source).expect("Deep parse");
-    check_ir_program(&program)
+    check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked)
 }
 
 #[test]
@@ -312,14 +312,19 @@ fn checked_library_composition_preserves_both_identity_domains() {
     )
     .expect("library Deep fixture parse");
     let (context, library_checked) =
-        build_compiled_library_context(&library_decls).expect("library type check");
+        build_compiled_library_context(&library_decls, chelis_types::ProgramOrigin::Unlinked)
+            .expect("library type check");
 
     let application_decls = parse_str(
         include_str!("fixtures/core/tests/issue_2110_local_ascription_obligations/checked_library_composition_preserves_both_identity_domains_374.deep"),
     )
     .expect("application Deep fixture parse");
-    let application_checked =
-        check_ir_with_context(&context, &application_decls).expect("application type check");
+    let application_checked = check_ir_with_context(
+        &context,
+        &application_decls,
+        chelis_types::ProgramOrigin::Unlinked,
+    )
+    .expect("application type check");
     let composed = CheckedProgram::compose(&library_checked, &application_checked)
         .expect("proof-bound checked programs compose");
 

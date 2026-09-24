@@ -79,7 +79,7 @@ pub use fitness::{
 pub use infer::{
     CheckedLocalTensorAscription, CheckedProgram, DeclaredSignature, DeclaredTypeSurface,
     InferResult, InferStats, LocalAscriptionAxisClaim, LocalAscriptionId,
-    LocalTensorAscriptionOrigin, build_compiled_library_context,
+    LocalTensorAscriptionOrigin, ProgramOrigin, build_compiled_library_context,
     build_compiled_library_context_with_base, build_type_env_from_library, check_ir_program,
     check_ir_with_context, check_ir_with_signature_context, check_typed_program,
     compose_local_tensor_ascriptions, fold_static_int_expr, infer_ir_program, infer_program,
@@ -88,6 +88,4 @@ pub use infer::{
 };
 pub use linearity::{LinearityInfo, check_linearity, check_linearity_with_context};
 pub use observation::{ElementRef, format_element};
-pub use opacity::{
-    LinkedProgramGuard, demangle_ident, install_linked_program_guard, is_linker_format_name,
-};
+pub use opacity::{demangle_ident, is_linker_format_name};

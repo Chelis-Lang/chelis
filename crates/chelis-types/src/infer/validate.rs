@@ -2593,7 +2593,7 @@ mod core_transform_fragment_tests {
                       (var {} v))) \
                   (vmap {} (var {} reduce))))))";
         let program = chelis_deep::parser::parse_str(source).expect("canonical module program");
-        let result = crate::infer_program(&program);
+        let result = crate::infer_program(&program, crate::ProgramOrigin::Unlinked);
         assert!(
             result
                 .errors
@@ -2792,7 +2792,7 @@ mod core_transform_fragment_tests {
             "../../tests/fixtures/core/src/validate/undeclared_type.deep"
         ))
         .expect("core undeclared type fixture");
-        let result = crate::infer_program(&program);
+        let result = crate::infer_program(&program, crate::ProgramOrigin::Unlinked);
         assert!(
             result.errors.iter().any(|error| {
                 matches!(error.kind, CheckErrorKind::TypeMismatch)
@@ -2876,16 +2876,25 @@ mod cancellation_tests {
         let exprs = validation_only_failure_fixture();
         let entries: [(&str, Entry); 4] = [
             ("check_ir_program", |exprs| {
-                observe_check(crate::check_ir_program(exprs))
+                observe_check(crate::check_ir_program(
+                    exprs,
+                    crate::ProgramOrigin::Unlinked,
+                ))
             }),
             ("check_typed_program", |exprs| {
-                observe_check(crate::check_typed_program(exprs))
+                observe_check(crate::check_typed_program(
+                    exprs,
+                    crate::ProgramOrigin::Unlinked,
+                ))
             }),
             ("infer_ir_program", |exprs| {
-                observe_infer(crate::infer_ir_program(exprs))
+                observe_infer(crate::infer_ir_program(
+                    exprs,
+                    crate::ProgramOrigin::Unlinked,
+                ))
             }),
             ("infer_program", |exprs| {
-                observe_infer(crate::infer_program(exprs))
+                observe_infer(crate::infer_program(exprs, crate::ProgramOrigin::Unlinked))
             }),
         ];
 

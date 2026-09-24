@@ -20,21 +20,21 @@ use chelis_types::{check_ir_program, check_typed_program};
 
 fn typecheck(source: &str) -> Vec<CheckError> {
     let deep: Vec<chelis_deep::Expr> = serde_json::from_str(source).expect("lossless core fixture");
-    match check_typed_program(&deep) {
+    match check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked) {
         Ok(_) => Vec::new(),
         Err(errors) => errors.errors,
     }
 }
 
 fn typecheck_ir(exprs: &[chelis_deep::Expr]) -> Vec<CheckError> {
-    match check_ir_program(exprs) {
+    match check_ir_program(exprs, chelis_types::ProgramOrigin::Unlinked) {
         Ok(_) => Vec::new(),
         Err(errors) => errors.errors,
     }
 }
 
 fn typecheck_stamped(exprs: &[chelis_deep::Expr]) -> Vec<CheckError> {
-    match check_typed_program(exprs) {
+    match check_typed_program(exprs, chelis_types::ProgramOrigin::Unlinked) {
         Ok(_) => Vec::new(),
         Err(errors) => errors.errors,
     }
@@ -51,7 +51,8 @@ fn summary(errors: &[CheckError]) -> String {
 #[test]
 fn otherwise_unconsumed_expand_materializes_its_context_free_default() {
     let deep: Vec<chelis_deep::Expr> = serde_json::from_str(include_str!("fixtures/core/tests/issue_942_inferred_tensor_cast/otherwise_unconsumed_expand_materializes_its_context_free_default_1.json")).expect("lossless legacy fixture");
-    let checked = check_typed_program(&deep).expect("bare expand binding should typecheck");
+    let checked = check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked)
+        .expect("bare expand binding should typecheck");
     let rendered = chelis_deep::printer::print_canonical(checked.annotated_exprs());
     assert!(
         !rendered.contains("(t-var"),

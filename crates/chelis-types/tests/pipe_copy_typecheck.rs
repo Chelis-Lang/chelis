@@ -19,7 +19,7 @@ use chelis_types::check_typed_program;
 
 fn typecheck_core(source: &str) -> Result<(), Vec<chelis_types::errors::CheckError>> {
     let deep = chelis_deep::parse_and_stamp_file(source).expect("Deep fixture");
-    check_typed_program(&deep)
+    check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked)
         .map(|_| ())
         .map_err(|result| result.errors)
 }

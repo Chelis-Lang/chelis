@@ -42,7 +42,7 @@ fn ws_b2_int8_context_accepts_out_of_range_literal_silent_overflow() {
     // to prevent.
     let src = include_str!("fixtures/core/tests/numeric_dtype_buildout_adversarial/case_001.deep");
     let deep = core_fixture(src);
-    let res = check_ir_program(&deep);
+    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
     let errs = match res {
         Ok(_) => Vec::<String>::new(),
         Err(rep) => err_messages(&rep),
@@ -64,7 +64,7 @@ fn ws_b2_int8_context_accepts_out_of_range_literal_silent_overflow() {
 fn ws_b2_int16_context_accepts_out_of_range_literal_silent_overflow() {
     let src = include_str!("fixtures/core/tests/numeric_dtype_buildout_adversarial/case_002.deep");
     let deep = core_fixture(src);
-    let res = check_ir_program(&deep);
+    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
     let errs = match res {
         Ok(_) => Vec::<String>::new(),
         Err(rep) => err_messages(&rep),
@@ -86,7 +86,7 @@ fn ws_b2_int8_context_negative_out_of_range_literal_silent_overflow() {
     // i8 range is [-128, 127]. -200 is out of range.
     let src = include_str!("fixtures/core/tests/numeric_dtype_buildout_adversarial/case_003.deep");
     let deep = core_fixture(src);
-    let res = check_ir_program(&deep);
+    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
     let errs = match res {
         Ok(_) => Vec::<String>::new(),
         Err(rep) => err_messages(&rep),
@@ -103,7 +103,7 @@ fn ws_b2_int8_context_at_boundary_accepted() {
     // i8 range is [-128, 127]. 127 is the boundary.
     let src = include_str!("fixtures/core/tests/numeric_dtype_buildout_adversarial/case_004.deep");
     let deep = core_fixture(src);
-    let res = check_ir_program(&deep);
+    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
     assert!(res.is_ok(), "i8 boundary 127 must type-check cleanly");
 }
 
@@ -115,7 +115,7 @@ fn ws_b2_int8_context_at_boundary_negative_accepted() {
     // Pin the actual behavior.
     let src = include_str!("fixtures/core/tests/numeric_dtype_buildout_adversarial/case_005.deep");
     let deep = core_fixture(src);
-    let res = check_ir_program(&deep);
+    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
     let errs = match &res {
         Ok(_) => Vec::<String>::new(),
         Err(rep) => err_messages(rep),
@@ -153,7 +153,7 @@ fn ws_b2_int8_context_at_boundary_negative_accepted() {
 fn ws_a4_matmul_int8_must_be_rejected_with_spec_5_7_2_diagnostic() {
     let src = include_str!("fixtures/core/tests/numeric_dtype_buildout_adversarial/case_006.deep");
     let deep = core_fixture(src);
-    let res = check_ir_program(&deep);
+    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
     let errs = match res {
         Ok(_) => Vec::<String>::new(),
         Err(rep) => err_messages(&rep),
@@ -176,7 +176,7 @@ fn ws_a4_matmul_int8_must_be_rejected_with_spec_5_7_2_diagnostic() {
 fn ws_a4_matmul_int32_must_be_rejected_with_spec_5_7_2_diagnostic() {
     let src = include_str!("fixtures/core/tests/numeric_dtype_buildout_adversarial/case_007.deep");
     let deep = core_fixture(src);
-    let res = check_ir_program(&deep);
+    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
     let errs = match res {
         Ok(_) => Vec::<String>::new(),
         Err(rep) => err_messages(&rep),
@@ -213,7 +213,7 @@ fn ws_b2_reduce_sum_int8_result_precision_must_be_int32_per_spec_5_7_1() {
     // tensor[..., i32], not tensor[..., i8].
     let src = include_str!("fixtures/core/tests/numeric_dtype_buildout_adversarial/case_008.deep");
     let deep = core_fixture(src);
-    let res = check_ir_program(&deep);
+    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
     let errs = match res {
         Ok(_) => Vec::<String>::new(),
         Err(rep) => err_messages(&rep),
@@ -231,7 +231,7 @@ fn ws_b2_reduce_sum_int8_result_must_not_be_int8_per_spec_5_7_1() {
     // must error per spec §5.7.1 (result precision = accumulator = i32).
     let src = include_str!("fixtures/core/tests/numeric_dtype_buildout_adversarial/case_009.deep");
     let deep = core_fixture(src);
-    let res = check_ir_program(&deep);
+    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
     let errs = match res {
         Ok(_) => Vec::<String>::new(),
         Err(rep) => err_messages(&rep),
@@ -248,7 +248,7 @@ fn ws_b2_reduce_sum_int8_result_must_not_be_int8_per_spec_5_7_1() {
 fn ws_b2_reduce_sum_int16_result_must_not_be_int16_per_spec_5_7_1() {
     let src = include_str!("fixtures/core/tests/numeric_dtype_buildout_adversarial/case_010.deep");
     let deep = core_fixture(src);
-    let res = check_ir_program(&deep);
+    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
     let errs = match res {
         Ok(_) => Vec::<String>::new(),
         Err(rep) => err_messages(&rep),
@@ -270,7 +270,7 @@ fn ws_b2_reduce_sum_int16_result_must_not_be_int16_per_spec_5_7_1() {
 fn ws_b1_decimal_suffix_mixed_precision_addition_rejected_per_spec_5_4() {
     let src = include_str!("fixtures/core/tests/numeric_dtype_buildout_adversarial/case_011.deep");
     let deep = core_fixture(src);
-    let res = check_ir_program(&deep);
+    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
     assert!(
         res.is_err(),
         "spec §5.4: arithmetic requires same precision; \
@@ -286,7 +286,7 @@ fn ws_b1_decimal_suffix_mixed_precision_addition_rejected_per_spec_5_4() {
 fn ws_b1_mixed_float_suffix_addition_rejected_per_spec_5_4() {
     let src = include_str!("fixtures/core/tests/numeric_dtype_buildout_adversarial/case_012.deep");
     let deep = core_fixture(src);
-    let res = check_ir_program(&deep);
+    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
     assert!(
         res.is_err(),
         "spec §5.4: f32 + f64 must error; got: {:?}",
@@ -298,7 +298,7 @@ fn ws_b1_mixed_float_suffix_addition_rejected_per_spec_5_4() {
 fn ws_b1_mixed_int_suffix_addition_rejected_per_spec_5_4() {
     let src = include_str!("fixtures/core/tests/numeric_dtype_buildout_adversarial/case_013.deep");
     let deep = core_fixture(src);
-    let res = check_ir_program(&deep);
+    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
     assert!(
         res.is_err(),
         "spec §5.4: i8 + i32 must error; got: {:?}",
@@ -315,7 +315,7 @@ fn ws_b1_mixed_int_suffix_addition_rejected_per_spec_5_4() {
 fn ws_a0_f8e4m3_in_contextual_tensor_position_rejected() {
     let src = include_str!("fixtures/core/tests/numeric_dtype_buildout_adversarial/case_014.deep");
     let deep = core_fixture(src);
-    let res = check_ir_program(&deep);
+    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
     let rep = res.expect_err("spec §1.1.1: f8e4m3 tensor element type must be rejected");
     let messages: Vec<&str> = rep.errors.iter().map(|e| e.message.as_str()).collect();
     assert!(

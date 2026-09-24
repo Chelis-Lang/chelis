@@ -79,7 +79,8 @@ fn the_fold_never_mutates_the_callers_program() {
         program_contains_pipe(&deep),
         "the fixture must actually carry a pipe before the check"
     );
-    let checked = check_ir_program(&deep).expect("the piped program checks");
+    let checked = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
+        .expect("the piped program checks");
     assert!(
         program_contains_pipe(&deep),
         "the caller's desugared program still carries its pipe after checking"
@@ -116,35 +117,51 @@ fn every_public_checker_entry_folds_its_input() {
 
     assert_folded(
         "check_ir_program",
-        &check_ir_program(&deep).expect("check_ir_program"),
+        &check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked).expect("check_ir_program"),
     );
     assert_folded(
         "check_ir_with_context",
-        &check_ir_with_context(&empty, &deep).expect("check_ir_with_context"),
+        &check_ir_with_context(&empty, &deep, chelis_types::ProgramOrigin::Unlinked)
+            .expect("check_ir_with_context"),
     );
     assert_folded(
         "check_ir_with_signature_context",
-        &check_ir_with_signature_context(&empty, &SignatureInferenceMetadata::default(), &deep)
-            .expect("check_ir_with_signature_context"),
+        &check_ir_with_signature_context(
+            &empty,
+            &SignatureInferenceMetadata::default(),
+            &deep,
+            chelis_types::ProgramOrigin::Unlinked,
+        )
+        .expect("check_ir_with_signature_context"),
     );
     assert_folded(
         "check_typed_program",
-        &check_typed_program(&deep).expect("check_typed_program"),
+        &check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked)
+            .expect("check_typed_program"),
     );
-    let (_, library) =
-        build_compiled_library_context(&deep).expect("build_compiled_library_context");
+    let (_, library) = build_compiled_library_context(&deep, chelis_types::ProgramOrigin::Unlinked)
+        .expect("build_compiled_library_context");
     assert_folded("build_compiled_library_context", &library);
-    let (_, layered) = build_compiled_library_context_with_base(&empty, &deep)
-        .expect("build_compiled_library_context_with_base");
+    let (_, layered) = build_compiled_library_context_with_base(
+        &empty,
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+    )
+    .expect("build_compiled_library_context_with_base");
     assert_folded("build_compiled_library_context_with_base", &layered);
 
-    build_type_env_from_library(&deep).expect("build_type_env_from_library accepts the pipe");
+    build_type_env_from_library(&deep, chelis_types::ProgramOrigin::Unlinked)
+        .expect("build_type_env_from_library accepts the pipe");
     assert!(
-        infer_program(&deep).errors.is_empty(),
+        infer_program(&deep, chelis_types::ProgramOrigin::Unlinked)
+            .errors
+            .is_empty(),
         "infer_program accepts the pipe"
     );
     assert!(
-        infer_ir_program(&deep).errors.is_empty(),
+        infer_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
+            .errors
+            .is_empty(),
         "infer_ir_program accepts the pipe"
     );
 }

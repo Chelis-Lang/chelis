@@ -73,7 +73,8 @@ fn resolved_owner_preserves_equivalent_concrete_annotation() {
       (var {} matmul) (var {} a) (var {} good))))
 "#;
     let exprs = parse_and_stamp(source).expect("fixture must parse and stamp");
-    let checked = check_ir_program(&exprs).expect("fully resolved fixture must check");
+    let checked = check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked)
+        .expect("fully resolved fixture must check");
     let stamped = find_matmul_type(&checked.exprs()[0]).expect("checked matmul metadata");
     assert_eq!(
         concrete_tensor_metadata(&stamped),

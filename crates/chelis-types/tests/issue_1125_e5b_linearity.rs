@@ -52,9 +52,11 @@ fn checked_program(source: &str, legacy: bool) -> CheckedProgram {
         chelis_deep::parse_and_stamp_file(source).expect("valid core fixture");
     if legacy {
         let legacy = successor.iter().map(legacy_expr).collect::<Vec<_>>();
-        check_ir_program(&legacy).expect("legacy fixture type-checks")
+        check_ir_program(&legacy, chelis_types::ProgramOrigin::Unlinked)
+            .expect("legacy fixture type-checks")
     } else {
-        check_typed_program(&successor).expect("successor fixture type-checks")
+        check_typed_program(&successor, chelis_types::ProgramOrigin::Unlinked)
+            .expect("successor fixture type-checks")
     }
 }
 

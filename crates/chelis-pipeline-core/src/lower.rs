@@ -391,7 +391,8 @@ mod tests {
 
     fn checked_compilation(source: &str) -> CheckedCompilation {
         let expressions = chelis_deep::parser::parse_str(source).expect("test Deep must parse");
-        let prepared = PreparedProgram::from_expanded_deep(expressions);
+        let prepared =
+            PreparedProgram::from_expanded_deep(expressions, chelis_types::ProgramOrigin::Unlinked);
         let analysis = match analyze_prepared(prepared) {
             PreparedTypeAnalysisOutcome::Accepted(analysis) => *analysis,
             PreparedTypeAnalysisOutcome::Rejected { fitness } => {

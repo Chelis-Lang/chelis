@@ -8,7 +8,9 @@ fn deep(source: &str) -> Vec<chelis_deep::Expr> {
 fn accepted_analysis_carries_fitness_and_the_checked_program() {
     let exprs = deep("(def {} answer (lit {type: (t-prim {} i32)} 42))");
 
-    let TypeAnalysisOutcome::Accepted { fitness, program } = analyze_ir_program(&exprs) else {
+    let TypeAnalysisOutcome::Accepted { fitness, program } =
+        analyze_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked)
+    else {
         panic!("valid Deep must produce an accepted type analysis");
     };
 
@@ -21,7 +23,9 @@ fn accepted_analysis_carries_fitness_and_the_checked_program() {
 fn rejected_analysis_carries_fitness_without_a_checked_program() {
     let exprs = deep("(def {} answer (var {} missing))");
 
-    let TypeAnalysisOutcome::Rejected { fitness } = analyze_ir_program(&exprs) else {
+    let TypeAnalysisOutcome::Rejected { fitness } =
+        analyze_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked)
+    else {
         panic!("an unbound name must reject type analysis");
     };
 
@@ -36,7 +40,9 @@ fn analysis_rejects_a_top_level_binding_cycle() {
         "fixtures/core/tests/type_analysis_outcome/case_001.deep"
     ));
 
-    let TypeAnalysisOutcome::Rejected { fitness } = analyze_ir_program(&exprs) else {
+    let TypeAnalysisOutcome::Rejected { fitness } =
+        analyze_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked)
+    else {
         panic!("a top-level binding cycle must reject type analysis");
     };
 
@@ -57,7 +63,7 @@ fn analysis_accepts_finite_recursive_functions() {
     ));
 
     assert!(matches!(
-        analyze_ir_program(&exprs),
+        analyze_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked),
         TypeAnalysisOutcome::Accepted { .. }
     ));
 }
@@ -72,7 +78,7 @@ fn analysis_accepts_recursion_without_a_base_case() {
     // an unsupported recursive lowering under chelis#730, but that capability
     // boundary is not a type-analysis rejection.
     assert!(matches!(
-        analyze_ir_program(&exprs),
+        analyze_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked),
         TypeAnalysisOutcome::Accepted { .. }
     ));
 }
@@ -88,7 +94,7 @@ fn analysis_accepts_a_deep_finite_expression() {
     let exprs = deep(&source);
 
     assert!(matches!(
-        analyze_ir_program(&exprs),
+        analyze_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked),
         TypeAnalysisOutcome::Accepted { .. }
     ));
 }

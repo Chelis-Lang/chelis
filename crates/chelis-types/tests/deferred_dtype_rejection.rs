@@ -31,7 +31,8 @@ fn parse_core(source: &str) -> Vec<chelis_deep::Expr> {
 
 fn assert_deferred_rejection(src: &str, dtype_name: &str) {
     let deep = parse_core(src);
-    let report = check_ir_program(&deep).expect_err("a deferred dtype must reject");
+    let report = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
+        .expect_err("a deferred dtype must reject");
     assert!(
         report.errors.iter().any(|error| matches!(
             error.kind,
@@ -142,7 +143,7 @@ fn sig_precision_explicit_ordinary_tvar_still_quantifies() {
         "fixtures/core/tests/deferred_dtype_rejection/sig_precision_explicit_ordinary_tvar_still_quantifies.0.deep"
     );
     let deep = parse_core(src);
-    let res = check_ir_program(&deep);
+    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
     assert!(
         res.is_ok(),
         "an ordinary lowercase precision name must still quantify; got: {:?}",
@@ -170,7 +171,7 @@ fn active_dtypes_do_not_match_deferred_family() {
         ),
     ] {
         let deep = parse_core(src);
-        let res = check_ir_program(&deep);
+        let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
         assert!(
             res.is_ok(),
             "`{what}` must NOT match the deferred family; got: {:?}",

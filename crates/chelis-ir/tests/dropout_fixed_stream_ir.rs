@@ -16,7 +16,8 @@ fn typed_rate_plan(source: &str) -> Result<EvaluationPlan, String> {
 }
 
 fn typed_rate_plan_from_ir(expressions: &[chelis_deep::Expr]) -> Result<EvaluationPlan, String> {
-    let checked = chelis_types::check_ir_program(expressions).unwrap();
+    let checked =
+        chelis_types::check_ir_program(expressions, chelis_types::ProgramOrigin::Unlinked).unwrap();
     let context = RandomExecutionContext::new(RandomLoweringState {
         seed: Some(42),
         counter: 0,
@@ -269,7 +270,9 @@ fn staged_claim_failure_commits_the_preceding_draw_and_reuse_keeps_live_ordinals
         "fixtures/core/tests/dropout_fixed_stream_ir/staged_claim_failure_commits_the_preceding_draw_and_reuse_keeps_live_ordinals.deep"
     );
     let expressions = chelis_deep::parser::parse_and_stamp(source).unwrap();
-    let checked = chelis_types::check_ir_program(&expressions).unwrap();
+    let checked =
+        chelis_types::check_ir_program(&expressions, chelis_types::ProgramOrigin::Unlinked)
+            .unwrap();
     let mut context = RandomExecutionContext::new(RandomLoweringState {
         seed: Some(42),
         counter: 5,
@@ -591,7 +594,9 @@ fn valid_uniform_like_occupies_one_shared_ordinal_between_dropout_calls() {
 #[test]
 fn local_movement_failure_occurs_after_the_earlier_entered_draw() {
     let expressions = chelis_deep::parser::parse_and_stamp(include_str!("fixtures/core/tests/dropout_fixed_stream_ir/local_movement_failure_occurs_after_the_earlier_entered_draw.deep")).unwrap();
-    let checked = chelis_types::check_ir_program(&expressions).unwrap();
+    let checked =
+        chelis_types::check_ir_program(&expressions, chelis_types::ProgramOrigin::Unlinked)
+            .unwrap();
     let mut context = RandomExecutionContext::new(RandomLoweringState {
         seed: Some(42),
         counter: 5,
@@ -624,7 +629,9 @@ fn explicit_drop_in_gradient_retains_draws_and_verified_terminal_ownership() {
         "fixtures/core/tests/dropout_fixed_stream_ir/explicit_drop_in_gradient_retains_draws_and_verified_terminal_ownership.deep"
     );
     let expressions = chelis_deep::parser::parse_and_stamp(source).unwrap();
-    let checked = chelis_types::check_ir_program(&expressions).unwrap();
+    let checked =
+        chelis_types::check_ir_program(&expressions, chelis_types::ProgramOrigin::Unlinked)
+            .unwrap();
     let mut context = RandomExecutionContext::new(RandomLoweringState {
         seed: Some(42),
         counter: 0,

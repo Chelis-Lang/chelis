@@ -23,8 +23,14 @@ fn check(name: &str, args: &[&str], expected: Option<CheckErrorKind>) {
             .map(|e| format!("{:?}", e.kind))
             .collect::<Vec<_>>(),
     };
-    let ir = kinds(check_ir_program(&program));
-    let typed = kinds(check_typed_program(&program));
+    let ir = kinds(check_ir_program(
+        &program,
+        chelis_types::ProgramOrigin::Unlinked,
+    ));
+    let typed = kinds(check_typed_program(
+        &program,
+        chelis_types::ProgramOrigin::Unlinked,
+    ));
     assert_eq!(ir, typed, "ingress parity: {name}, {args:?}");
     match expected {
         None => assert!(ir.is_empty(), "{name}, {args:?}: {ir:?}"),

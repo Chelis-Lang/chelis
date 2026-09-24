@@ -124,16 +124,25 @@ enum Route {
 
 fn check(library: &str, consumer: &str, route: Route) -> Result<CheckedProgram, InferResult> {
     if matches!(route, Route::Whole) {
-        return check_ir_program(&parse(&format!("{library}\n{consumer}")));
+        return check_ir_program(
+            &parse(&format!("{library}\n{consumer}")),
+            chelis_types::ProgramOrigin::Unlinked,
+        );
     }
-    let (context, _) = build_compiled_library_context(&parse(library)).expect("library accepted");
+    let (context, _) =
+        build_compiled_library_context(&parse(library), chelis_types::ProgramOrigin::Unlinked)
+            .expect("library accepted");
     let context = if matches!(route, Route::Decoded) {
         let bytes = bincode::serialize(&context).unwrap();
         bincode::deserialize::<TypeEnv>(&bytes).unwrap()
     } else {
         context
     };
-    check_ir_with_context(&context, &parse(consumer))
+    check_ir_with_context(
+        &context,
+        &parse(consumer),
+        chelis_types::ProgramOrigin::Unlinked,
+    )
 }
 
 fn direct_control(result: &str, reversed: bool, adt: bool) -> String {
@@ -162,7 +171,7 @@ fn direct_and_adt_bad_results_reject_both_orders() {
         for reversed in [false, true] {
             let source = direct_control(SEVENTEEN, reversed, adt);
             failures.extend(verdict_error(
-                check_ir_program(&parse(&source)),
+                check_ir_program(&parse(&source), chelis_types::ProgramOrigin::Unlinked),
                 false,
                 &source,
             ));
@@ -174,16 +183,23 @@ fn direct_and_adt_bad_results_reject_both_orders() {
 #[test]
 fn direct_and_adt_matching_results_accept_both_orders() {
     assert_verdict(
-        check_ir_program(&parse(include_str!(
-            "fixtures/core/tests/issue_1875_protected_dimension_identity/representative.deep"
-        ))),
+        check_ir_program(
+            &parse(include_str!(
+                "fixtures/core/tests/issue_1875_protected_dimension_identity/representative.deep"
+            )),
+            chelis_types::ProgramOrigin::Unlinked,
+        ),
         true,
         "representative Deep program",
     );
     for adt in [false, true] {
         for reversed in [false, true] {
             let source = direct_control(D, reversed, adt);
-            assert_verdict(check_ir_program(&parse(&source)), true, &source);
+            assert_verdict(
+                check_ir_program(&parse(&source), chelis_types::ProgramOrigin::Unlinked),
+                true,
+                &source,
+            );
         }
     }
 }
@@ -194,7 +210,7 @@ fn insertion_bad_results_reject_both_orders() {
     for reversed in [false, true] {
         let source = insertion_control(SEVENTEEN, reversed);
         failures.extend(verdict_error(
-            check_ir_program(&parse(&source)),
+            check_ir_program(&parse(&source), chelis_types::ProgramOrigin::Unlinked),
             false,
             &source,
         ));
@@ -206,7 +222,11 @@ fn insertion_bad_results_reject_both_orders() {
 fn insertion_matching_results_accept_both_orders() {
     for reversed in [false, true] {
         let source = insertion_control(D, reversed);
-        assert_verdict(check_ir_program(&parse(&source)), true, &source);
+        assert_verdict(
+            check_ir_program(&parse(&source), chelis_types::ProgramOrigin::Unlinked),
+            true,
+            &source,
+        );
     }
 }
 
@@ -319,6 +339,10 @@ fn return_only_and_distinctness_boundaries() {
             false,
         ),
     ] {
-        assert_verdict(check_ir_program(&parse(source)), accepts, source);
+        assert_verdict(
+            check_ir_program(&parse(source), chelis_types::ProgramOrigin::Unlinked),
+            accepts,
+            source,
+        );
     }
 }

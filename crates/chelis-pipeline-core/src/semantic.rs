@@ -13,7 +13,7 @@ use crate::{
 
 /// Analyze prepared Deep through one monolithic IR type session.
 pub fn analyze_prepared(prepared: PreparedProgram) -> PreparedTypeAnalysisOutcome {
-    match analyze_ir_program(prepared.expanded_deep()) {
+    match analyze_ir_program(prepared.expanded_deep(), prepared.origin()) {
         TypeAnalysisOutcome::Rejected { fitness } => {
             PreparedTypeAnalysisOutcome::Rejected { fitness }
         }
@@ -32,7 +32,7 @@ pub fn analyze_prepared_library(
     prepared: PreparedProgram,
 ) -> Result<PreparedLibraryAnalysis, LibraryRejection> {
     let (type_env, program) =
-        chelis_types::build_compiled_library_context(prepared.expanded_deep())
+        chelis_types::build_compiled_library_context(prepared.expanded_deep(), prepared.origin())
             .map_err(|report| LibraryRejection::Type { report })?;
     let analysis = prepared_analysis_from_checked(prepared, program);
     Ok(PreparedLibraryAnalysis { type_env, analysis })
@@ -103,6 +103,7 @@ fn analyze_prepared_with_context(
         type_env,
         signature_context,
         prepared.expanded_deep(),
+        prepared.origin(),
     )?;
     Ok(prepared_analysis_from_checked(prepared, program))
 }
@@ -128,6 +129,7 @@ pub fn analyze_prepared_library_with_base<'library>(
     let (type_env, program) = chelis_types::build_compiled_library_context_with_base(
         library.type_env(),
         prepared.expanded_deep(),
+        prepared.origin(),
     )?;
     let analysis = prepared_analysis_from_checked(prepared, program);
     Ok(ContextualLibraryTypeAnalysis {

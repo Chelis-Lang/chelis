@@ -102,7 +102,8 @@ fn accepted_stamped_program_stays_stamped_through_checker_output() {
     let program =
         parse_and_stamp("(def {} answer (lit {} 1))").expect("canonical Deep program must stamp");
 
-    let checked = check_typed_program(&program).expect("stamped program must type-check");
+    let checked = check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked)
+        .expect("stamped program must type-check");
 
     assert!(
         matches!(checked.annotated_exprs().first(), Some(Expr::Node(..))),
@@ -123,7 +124,7 @@ fn stamped_comparison_keeps_its_boolean_result_contract() {
     )
     .expect("canonical comparison program must stamp");
 
-    let checked = check_typed_program(&program)
+    let checked = check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked)
         .expect("stamped application dispatch must preserve comparison semantics");
     assert!(
         checked
@@ -138,11 +139,13 @@ fn stamped_comparison_keeps_its_boolean_result_contract() {
 fn stamped_let_bindings_enter_scope_and_unbound_names_still_reject() {
     let accepted = parse_and_stamp("(def {} answer (let {} (bind {} x (lit {} 1)) (var {} x)))")
         .expect("canonical let program must stamp");
-    check_typed_program(&accepted).expect("stamped bind child must introduce x into let scope");
+    check_typed_program(&accepted, chelis_types::ProgramOrigin::Unlinked)
+        .expect("stamped bind child must introduce x into let scope");
 
     let rejected = parse_and_stamp("(def {} answer (let {} (bind {}) (var {} missing)))")
         .expect("canonical negative let program must stamp");
-    let errors = check_typed_program(&rejected).expect_err("unbound let body name must reject");
+    let errors = check_typed_program(&rejected, chelis_types::ProgramOrigin::Unlinked)
+        .expect_err("unbound let body name must reject");
     assert!(
         errors
             .errors
@@ -166,7 +169,8 @@ fn stamped_linearity_preserves_positive_and_negative_tensor_ownership() {
                (var {} x)))"#,
     )
     .expect("positive linearity fixture must stamp");
-    let accepted = check_typed_program(&accepted).expect("positive fixture type-checks");
+    let accepted = check_typed_program(&accepted, chelis_types::ProgramOrigin::Unlinked)
+        .expect("positive fixture type-checks");
     check_linearity(&accepted).expect("single tensor consume must pass linearity");
 
     let rejected = parse_and_stamp(
@@ -182,7 +186,8 @@ fn stamped_linearity_preserves_positive_and_negative_tensor_ownership() {
                  (app {} (var {} add) (var {} x) (var {} y)))))"#,
     )
     .expect("negative linearity fixture must stamp");
-    let rejected = check_typed_program(&rejected).expect("negative fixture type-checks first");
+    let rejected = check_typed_program(&rejected, chelis_types::ProgramOrigin::Unlinked)
+        .expect("negative fixture type-checks first");
     check_linearity(&rejected).expect_err("use after tensor consumption must reject");
 }
 
@@ -190,7 +195,8 @@ fn stamped_linearity_preserves_positive_and_negative_tensor_ownership() {
 fn effects_only_reannotation_accepts_stamped_nodes_and_rejects_other_metadata() {
     let program = parse_and_stamp("(def {} answer (fn {} (params {}) (lit {} 1)))")
         .expect("canonical Deep program must stamp");
-    let checked = check_typed_program(&program).expect("stamped program must type-check");
+    let checked = check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked)
+        .expect("stamped program must type-check");
 
     let mut effects_only = checked.annotated_exprs().to_vec();
     let effect_row = Metadata::from(chelis_deep::annotations::MetadataValue::Effects(
@@ -241,7 +247,8 @@ fn unknown_stamped_form_is_rejected_at_checker_boundary() {
     let program = parse_and_stamp("(def {} answer (apl {} (lit {} 1)))")
         .expect("lenient unknown runtime form must stamp as UnknownForm");
 
-    let errors = check_typed_program(&program).expect_err("unknown form must not type-check");
+    let errors = check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked)
+        .expect_err("unknown form must not type-check");
 
     assert!(
         errors
