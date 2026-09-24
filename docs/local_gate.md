@@ -135,8 +135,12 @@ see before chelis#2250. It reports every unrouted path rather than the first
 and prints the same sentence CI prints. It needs cargo on PATH, because it
 reads the workspace package roots from `cargo metadata --no-deps --locked`,
 and it costs a fraction of a second (see the measured figures in
-[`ci_validation.md`](ci_validation.md)). It derives its set when it runs and
-matches the planner's rename handling, classifying both sides of a move. It
+[`ci_validation.md`](ci_validation.md)). It derives its set when it runs, as
+the branch's diff from its merge base with `origin/main` plus uncommitted
+tracked changes, so a branch behind `main` is not charged with paths `main`
+changed after the fork; a missing `origin/main` or unrelated histories fail
+the check. It matches the planner's rename handling, classifying both sides of
+a move. It
 classifies a path once git knows about it: untracked work is excluded, because
 CI never sees it and nothing can route a scratch file. A modified artifact is
 therefore classified in the run that changed it, and one a writer has just
