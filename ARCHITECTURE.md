@@ -190,11 +190,17 @@ process-global state, and exit outcomes separately from graph values. At minimum
   them to false; they do not generally restore an outer Boolean.
   `raise_fatal_lowering_diagnostic` explicitly re-enables output suppression after
   an inner catch. A uniform restore-previous model would be wrong.
-- `LoweringRuntime::catch_lowering` catches unwind payloads after the closure's
-  finalizers run on the grown stack. Its output-suppression guard remains live
+- Lowering rejection is an explicit `LowerResult<T>` carrying a `LoweringFailure`
+  (`Unrepresentable` or a structured `Diagnostic`). Each raise first runs the native
+  hook through the `observe_raise` primitive (raise-and-catch in `lowering_runtime`),
+  so the hook sees the same flags and payload before any finalizer; finalizers then
+  run in unwinding order on the `Err` return path. `catch_lowering` maps a failure
+  through `LoweringFailure::into_diagnostic` and keeps `catch_unwind` on the grown
+  stack only for unexpected panics. Its output-suppression guard remains live
   through payload conversion and destruction, then clears before returning.
-  Successful values, returned diagnostics, unwinding and non-unwinding aborts
-  are distinct outcomes. Panic-hook observations also need a relation.
+  Public entries that cannot return the failure re-raise it with `resume_unwind`,
+  which does not run the hook again. Successful values, returned diagnostics,
+  unwinding and non-unwinding aborts are distinct outcomes.
 
 Charon currently rejects `mir::Rvalue::ThreadLocalRef`. Aeneas's default
 `drop_as_no_op` and symbolic panic handling do not supply TLS restoration,
@@ -305,15 +311,19 @@ rejections. Pure type analysis, cached-library validation, and immutable context
 construction remain runtime-free. No second classifier or error policy was added.
 
 Only the native adapter and process-global panic hook select thread-local
-suppression state. The hook observes it before unwinding. `catch_lowering`
-retains the 512 MiB stack boundary and existing payload conversion; fatal
-re-raise, speculative markers, and clear-to-false scope destruction are unchanged.
-This isolates a native dependency rather than replacing control panics with
-`Result` or proving the native shell pure.
+suppression state. Lowering rejection travels as `LowerResult`; the native
+primitives `observe_raise`, `resume_native_unwind`, and `catch_native_unwind` are
+the only lowering code that panics, resumes an unwind, or catches one. The hook
+observes each raise exactly once, before finalizers. `catch_lowering` retains the
+512 MiB stack boundary and maps failures to the same diagnostics as the former
+payload conversion; fatal re-raise, speculative markers, and clear-to-false scope
+destruction are unchanged. No lowering destructor inspects `thread::panicking()`,
+so returning a failure instead of unwinding is not observable to finalizers.
 
 The process-isolated native regression observes returning and unwinding nested
 catches, speculative payload selection, fatal re-raise, hook/finalizer order,
-payload-destruction coverage, nested acquisition, and cross-thread isolation.
+single hook observation across a boundary re-raise, payload-destruction coverage,
+nested acquisition, and cross-thread isolation.
 The production API smoke exercises checking, strict and sealed contextual lowering,
 evaluation of `7 * 3 = 21`, live-input fatal AD rejection through DAG and host paths,
 reuse, and four concurrent threads.
@@ -350,7 +360,7 @@ remain inputs with their existing seals; an invocation state must not mint them.
 | Former `LINKED_PROGRAM` | Immutable `ProgramOrigin` input, retained by `PreparedProgram` (implemented) | Only the trusted native linker asserts `Linked`. Each unit supplies its own origin; names, metadata, cached contexts, and other active invocations grant no authority. No mutable scope or restoration guard remains. |
 | Former `INLINING_STACK`, tensor-helper preflight stack, `ACTIVE_TYPE_SUBST` | `HostLoweringSession::invocation` and scoped guards (implemented) | Preserve scope order and the current specialization's bindings. Nested sessions do not share mutable frames. |
 | Former `MONO_SPECIALIZATIONS` and `MonoProbeGuard` | Host invocation state plus scoped probe snapshot (implemented) | Preserve entry initialization, completion order, and rollback of speculative definitions and in-progress entries. Rollback restores the outer snapshot; it does not clear it. |
-| Former lowering-module panic-suppression flags | Explicit borrowed `LoweringRuntime`; per-thread storage and hook bridge confined to `lowering_runtime` (implemented) | Preserve shared thread state, clear-to-false behavior, and explicit fatal re-enable. Native hook/unwind semantics still require a wrapper relation. |
+| Former lowering-module panic-suppression flags | Explicit borrowed `LoweringRuntime`; per-thread storage and hook bridge confined to `lowering_runtime` (implemented). Rejection returns `LowerResult` (implemented) | Preserve shared thread state, clear-to-false behavior, and explicit fatal re-enable. The hook observes each raise once before finalizers. Native hook/unwind primitives still require a wrapper relation. |
 | Cancellation token identity and relaxed loads | Native runtime services | Keep shared token identity and the original polling points. A frozen entry Boolean is not equivalent to cancellation arriving during a check. |
 | Atomic host-inference IDs, persistent thread counters, panic hook | Native runtime services | Preserve allocation/observation order and lifetime across invocations, including native ID wrapping or an explicit no-wrap bound. Resetting a global ID supply per run can invalidate identity comparisons. |
 | Stack growth, depth guards, first stack-bail record | Native resource boundary | Preserve the first reported site/span and normal-versus-abort behavior. Arbitrary Lean fuel is not a replacement for native stack availability. |
@@ -362,18 +372,19 @@ Remaining runtime migration and verification:
    belongs to the invocation; immutable checked-program facts can remain borrowed.
    Do not clone the entire program or runtime state at every recursive call.
 2. Make scope entry and exit explicit, with separate restore, clear, and rollback
-   operations matching the table. First preserve the existing panic boundary.
-   Converting a control panic into `Result` is a separate behavioral change:
-   hooks and destructors can distinguish normal return from unwinding.
+   operations matching the table. Lowering rejection already returns `Result`: its
+   hook observation happens at the raise, before destructors, and no destructor
+   distinguishes normal return from unwinding.
 3. Relate native runtime events to the stateful core: cancellation loads at the same
    sites, ID-allocation events, stack checks, diagnostics, and exits. Concurrent atomic
    observations must satisfy the native memory model, not an arbitrary Boolean
    stream or an assumed immediately synchronized flag.
 4. Keep successful return, semantic rejection, unsupported DAG lowering, unwinding,
-   and non-unwinding abort distinct. The panic hook observes state before stack
-   unwinding; finalizers then run in order; `catch_lowering` maps the payload only
-   after unwinding. Preserve `panic_payload_to_lower_diagnostic` at the wrapper
-   boundary. Unknown panics must not become a successful result or host fallback.
+   and non-unwinding abort distinct. The panic hook observes state at the raise,
+   before finalizers; finalizers then run in order; `catch_lowering` maps the
+   failure only after they ran. Preserve `panic_payload_to_lower_diagnostic` for
+   unexpected panics at the wrapper boundary. Unknown panics must not become a
+   successful result or host fallback.
 5. Extract and relate the stateful inner fragment. A separate wrapper relation is
    still required for the public entry point; retaining a native shell is not
    full-core extraction.
