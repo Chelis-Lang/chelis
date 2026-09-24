@@ -2817,8 +2817,9 @@ fn live_mask_entering(
 /// its handler's ordinal even when an unselected root also consumes it.
 /// [`activation_live_mask`]'s seed takes every `DrawKey`, `Inherited`
 /// included, and consults no `entered` at all — it is safe only while every
-/// caller of it selects the whole of `dag.roots()`, which they do today. A
-/// caller that passes a subset would need that seed scoped too.
+/// PRODUCTION caller of it selects the whole of `dag.roots()`, which they do
+/// today (tests do pass subsets). A production caller that passed a subset
+/// would need that seed scoped too.
 fn unselected_root_region(dag: &Dag, roots: &[NodeId]) -> Vec<bool> {
     if roots.is_empty() || dag.roots().is_empty() {
         return vec![false; dag.len()];
@@ -5807,12 +5808,19 @@ mod tests {
         );
     }
 
-    /// `reachable_from` must follow the same edges `live_mask_from`
-    /// propagates over. If it followed fewer, a node the SELECTED root
-    /// reaches only through a `shape_dep` or a `result_claim_dep` would be
-    /// misfiled as owned by an unselected root — and if it is an abort, the
-    /// scoping would suppress a seed inside the activation being run, which
-    /// is the one thing it may never do.
+    /// `reachable_from` must follow every BACKWARD edge `live_mask_from`
+    /// propagates over — `inputs`, `shape_deps` and `result_claim_deps`.
+    /// Walking fewer misfiles a node the SELECTED root reaches only through
+    /// a dependency edge as owned by an unselected root.
+    ///
+    /// That is a coherence defect in the helper rather than a reachable
+    /// behaviour defect: `live_mask_from` starts its walk from `roots` and
+    /// follows those same edges, so anything the selection reaches is live
+    /// whether or not its seed was suppressed. The one asymmetry left is
+    /// deliberate — `live_mask_from` also expands through
+    /// `unlive_scoped_draw_peers`, which `reachable_from` does not, and by
+    /// the same argument that cannot be made observable. Keeping the helper
+    /// honest is cheap; growing it to chase an unobservable case is not.
     #[test]
     fn ownership_follows_every_edge_liveness_propagates_over() {
         for edge in ["shape_dep", "result_claim_dep"] {
@@ -5875,7 +5883,7 @@ mod tests {
             );
             assert!(
                 live_mask_for_roots(&dag, &[main])[abort.0],
-                "{edge}: and it must still be seeded"
+                "{edge}: and it must still execute"
             );
             assert!(
                 owned[only_unselected.0],
@@ -5901,10 +5909,10 @@ mod tests {
             // `g(z)`: an uncalled declaration whose body aborts.
             let z = dag.add_node(RiscOp::Load { name: "z".into() }, vec![], ty.clone(), None);
             let cond = dag.add_node(
-                RiscOp::synth_const(Prim::Bool, 1.0),
-                vec![z],
+                RiscOp::Compare(crate::dag::ComparisonKind::Gt),
+                vec![z, z],
                 TensorType {
-                    dims: vec![],
+                    dims: vec![DimInfo::Lit(3)],
                     precision: Prim::Bool,
                 },
                 None,
@@ -5968,10 +5976,10 @@ mod tests {
         let ty = vec3_f32();
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
         let cond = dag.add_node(
-            RiscOp::synth_const(Prim::Bool, 1.0),
-            vec![x],
+            RiscOp::Compare(crate::dag::ComparisonKind::Gt),
+            vec![x, x],
             TensorType {
-                dims: vec![],
+                dims: vec![DimInfo::Lit(3)],
                 precision: Prim::Bool,
             },
             None,
