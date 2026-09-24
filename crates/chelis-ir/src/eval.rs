@@ -2301,6 +2301,7 @@ where
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn eval_tensor_internal_with_result_claims<F>(
     dag: &Dag,
     live: Option<&[bool]>,

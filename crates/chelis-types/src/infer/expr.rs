@@ -218,6 +218,7 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 fn infer_expr_with_type_metadata_ownership_frame(
     expr: &deep::Expr,
     env: &mut Env,

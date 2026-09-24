@@ -79,6 +79,7 @@ const _CHECK_IR_WITH_CONTEXT: fn(
     &mut NativeServices,
 ) -> Result<CheckedProgram, InferResult> = check_ir_with_context;
 
+#[allow(clippy::type_complexity)]
 const _CHECK_IR_WITH_SIGNATURE_CONTEXT: fn(
     &TypeEnv,
     &SignatureInferenceMetadata,

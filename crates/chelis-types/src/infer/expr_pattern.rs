@@ -236,6 +236,7 @@ pub(super) fn pattern_bindings(
     errors.exit_frame();
 }
 
+#[allow(clippy::too_many_arguments)]
 fn pattern_bindings_frame(
     pat: &deep::Expr,
     scrutinee_ty: &Type,
