@@ -16,5 +16,6 @@ A compiled entry also compares every input axis that a named dimension sizes
 with that name's one binding, and traps `numeric trap: domain in load at i64`
 on a mismatch. Previously a name bound through an operation that forwards
 another input's axis, such as a `neg` from `[n]` to `[m]`, was never compared
-with an input declaring `m`, and the entry indexed one input past its end.
+at entry with an input declaring `m`; the mismatch trapped only later, inside
+an element-wise kernel.
 See [#2512](https://github.com/Chelis-Lang/chelis/issues/2512).
