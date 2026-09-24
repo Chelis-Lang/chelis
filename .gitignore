@@ -22,3 +22,6 @@ __pycache__/
 *.swp
 *.swo
 .DS_Store
+
+# Local pointer to a generated extraction model (passed as -K model=...).
+/verification/lean/model
