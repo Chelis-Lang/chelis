@@ -715,6 +715,10 @@ LOCAL_DYNAMIC_NOTE = (
 # and would defeat cross-worktree serialization.
 REPORT_DIR_ENV = "CHELIS_GATE_REPORT_DIR"
 LEASE_DIR_ENV = "CHELIS_GATE_LEASE_DIR"
+# Set only on the re-exec into this checkout's own interpreter, and consumed at
+# once: a second arrival still not owned means that interpreter does not start
+# as this checkout's environment, and the gate stops rather than loop.
+OWNED_REEXEC_ENV = "CHELIS_GATE_OWNED_REEXEC"
 LEASE_FILE_NAME = "gate.lock"
 LEASE_POLL_SECONDS = 10.0
 LEASE_HEARTBEAT_SECONDS = 60.0
@@ -828,12 +832,25 @@ def ensure_managed_runtime(
     current_prefix = Path(sys.prefix) if prefix is None else prefix
     current_base = Path(sys.base_prefix) if base_prefix is None else base_prefix
     error = sys.stderr if error_stream is None else error_stream
+    reexecuted = environment.pop(OWNED_REEXEC_ENV, None) is not None
+    if environ is None:
+        os.environ.pop(OWNED_REEXEC_ENV, None)
 
     if not environment.get("PYO3_PYTHON"):
         if owns_interpreter(environment, current_prefix, repo_root):
             return None
         owned = owned_interpreter(environment, repo_root)
         if owned is not None:
+            if reexecuted:
+                print(
+                    f"gate: {owned} does not start as this checkout's own "
+                    f"environment: it reports sys.prefix {current_prefix}. "
+                    "Recreate it with `uv venv --python 3.11`, or set "
+                    "PYO3_PYTHON to the interpreter the gate should use.",
+                    file=error,
+                )
+                return EXIT_ENVIRONMENT
+            environment[OWNED_REEXEC_ENV] = "1"
             execvpe(
                 str(owned),
                 [str(owned), str(Path(__file__).resolve()), *argv],

@@ -7,6 +7,7 @@ import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -217,6 +218,7 @@ class OwnedInterpreterTests(unittest.TestCase):
 
         def fake_execvpe(program, argv, environment):
             calls.append((program, argv))
+            self.reexec_environment = environment
             raise RuntimeError("exec intercepted")
 
         def no_uv(_):
@@ -246,6 +248,55 @@ class OwnedInterpreterTests(unittest.TestCase):
             calls,
             [(str(owned), [str(owned), str(Path(gate.__file__).resolve()), "--validation"])],
         )
+        self.assertEqual(self.reexec_environment[gate.OWNED_REEXEC_ENV], "1")
+
+    def test_a_second_unowned_arrival_stops_instead_of_looping(self):
+        """The re-exec target was chosen because it exists; if it still does
+        not start as this checkout's environment, the gate must stop."""
+        self.fake_venv(self.foreign)
+        owned = self.fake_venv(self.root / ".venv")
+        error = io.StringIO()
+        result = gate.ensure_managed_runtime(
+            ["--validation"],
+            environ={gate.OWNED_REEXEC_ENV: "1"},
+            executable=self.foreign / "bin" / "python",
+            prefix=self.foreign,
+            base_prefix=Path("/uv/python"),
+            repo_root=self.root,
+            find_uv=lambda _: self.fail("must not route through uv"),
+            execvpe=lambda *_: self.fail("must not re-exec again"),
+            error_stream=error,
+        )
+        self.assertEqual(result, gate.EXIT_ENVIRONMENT)
+        self.assertIn(str(owned), error.getvalue())
+        self.assertIn("uv venv --python 3.11", error.getvalue())
+
+    def test_a_malformed_owned_venv_fails_loudly_when_really_executed(self):
+        """Execute the bootstrap for real: a `.venv/bin/python` that starts
+        the base interpreter, not the venv, must end in one clear failure."""
+        checkout = self.base / "malformed"
+        scripts = checkout / "scripts"
+        scripts.mkdir(parents=True)
+        here = Path(__file__).resolve().parent
+        for name in ("gate.py", "unrepresentable_domain_oracle.py"):
+            shutil.copy2(here / name, scripts / name)
+        wrapper = checkout / ".venv" / "bin" / "python"
+        wrapper.parent.mkdir(parents=True)
+        base = Path(sys.base_prefix) / "bin" / f"python{sys.version_info[0]}"
+        wrapper.write_text(f'#!/bin/sh\nexec "{base}" "$@"\n', encoding="utf-8")
+        wrapper.chmod(0o755)
+        environment = {
+            key: value
+            for key, value in os.environ.items()
+            if key not in {"PYO3_PYTHON", "DEVENV_STATE", gate.OWNED_REEXEC_ENV}
+        }
+        result = subprocess.run(
+            [sys.executable, str(scripts / "gate.py"), "--list"],
+            cwd=checkout, env=environment, capture_output=True, text=True,
+            timeout=60,
+        )
+        self.assertEqual(result.returncode, gate.EXIT_ENVIRONMENT, result.stderr)
+        self.assertIn("does not start as this checkout's own environment", result.stderr)
 
     def test_owned_venv_proceeds_without_any_reexec(self):
         self.fake_venv(self.root / ".venv")
