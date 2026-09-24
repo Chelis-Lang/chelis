@@ -90,6 +90,27 @@ class ObservationFailureTests(unittest.TestCase):
             driver.event_receipt(event, self.root / "state")
         self.assertIsNone(driver.event_receipt({"filenames": [str(symbols)]}, self.root / "state"))
 
+    def test_unobserved_test_harness_events_bind_no_receipt(self):
+        # A checked binary and its checked test harness both leave empty
+        # metadata; only the binary was observed, in two feature sets here.
+        state = self.root / "state"
+        for features in ("default", "gpu"):
+            output = self.root / f"libbench-{features}.rmeta"
+            output.write_bytes(b"")
+            receipt = state / "receipts" / f"{features}.json"
+            digest = observer.digest(b"")
+            observer.atomic(receipt, {"protocol": 1, "errors": [], "unit": {"target_name": "bench"},
+                                      "outputs": [{"path": str(output), "digest": digest}]})
+            observer.atomic(observer.binding(output), {"artifact": str(output), "observation": str(receipt)})
+            observer.atomic(state / "output-digests" / digest / (observer.key(receipt) + ".json"), {"observation": str(receipt)})
+        harness = self.root / "libbench-test.rmeta"
+        harness.write_bytes(b"")
+        event = {"filenames": [str(harness)], "target": {"kind": ["bench"], "name": "bench"}}
+        self.assertIsNone(driver.event_receipt({**event, "profile": {"test": True}}, state))
+        # Without the test profile the same bytes stay an ambiguous uplift.
+        with self.assertRaisesRegex(observer.ObservationError, "ambiguous"):
+            driver.event_receipt({**event, "profile": {"test": False}}, state)
+
     def test_missing_output_is_not_a_cache_hit(self):
         receipt = {"protocol": 1, "errors": [], "outputs": [{"path": str(self.root / "missing.rlib"), "digest": "0" * 64}]}
         with self.assertRaises(FileNotFoundError):

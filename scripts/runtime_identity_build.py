@@ -127,6 +127,11 @@ def canonical_target(arguments, configured):
 
 
 def event_receipt(event, state):
+    if event.get("profile", {}).get("test"):
+        # The observer passes `--test` compilations through, so no receipt
+        # describes them. Their bytes can equal another unit's: a checked test
+        # harness and a checked binary both leave empty metadata.
+        return None
     found = None
     for filename in observer.cargo_output_files(event):
         actual = observer.digest(Path(filename).read_bytes())
@@ -170,7 +175,9 @@ def event_receipt(event, state):
     if found is None:
         return None
     if len(found) != 1:
-        raise observer.ObservationError("Cargo artifact bytes have ambiguous compilation observations")
+        raise observer.ObservationError(
+            "Cargo artifact bytes have ambiguous compilation observations: "
+            f"{event.get('package_id')} {observer.cargo_output_files(event)} matches {sorted(found)}")
     return next(iter(found))
 
 
